@@ -8,13 +8,13 @@ Design a local database engine that executes user query libraries compiled in th
 
 This is primarily an operational database: optimize for short transactions, point/range access, concurrent small writes, and predictable durable commit latency. Analytical queries are supported over the same authorized MVCC data, with scan-resistant caching and bounded analytical CPU/I/O/history budgets. See [workload profile](workload-profile.md) for the explicit SQL analytics roadmap; the first parser slice remains intentionally small.
 
-Use the [row-oriented 16 KiB page format](storage-format.md), B-tree indexes, and [Rust buffer/private-transaction model](memory-storage.md). [WAL v1](wal-recovery.md) logs full-page after-images before publication; its initial write amplification is a measured optimization target. [io_uring](disk-io.md) is the preferred storage I/O backend with a declared blocking fallback and identical durability semantics. Borrow buffers internally; copy only authorized values into executor output. No raw storage-page sharing is permitted.
+Use [redb](redb-storage.md) for embedded persistence, physical B+trees, MVCC read snapshots, atomic commits, allocation, and recovery. The Rust engine retains logical SQL indexes, value codecs, authorization, private invocation overlays, and commit validation. It does not implement a second WAL/page store or access redb internals. Borrow values only inside trusted storage; copy only authorized values into executor output.
 
 ## Security Invariant
 
 An executor can obtain only data authorized for its invocation context, regardless of the instructions it executes or the protocol messages it sends. Once a value is delivered, assume the worker can disclose it through permitted output.
 
-The host kernel, client gateway, supervisor, storage manager, trusted policy evaluator, and storage-owned statistics service form the security boundary. The gateway handles plaintext credentials/results but has no database-file or executor-launch authority. Treat the executor, submitted query library, and bundled SDK as compromised from launch. Treat optimizer output as untrusted for authorization purposes. An optimizer may still affect result correctness and disclose any statistics it receives.
+The host kernel, client gateway, supervisor, storage manager, trusted policy evaluator, and storage-owned statistics service form the security boundary. The gateway handles plaintext credentials/results but has no database-file or executor-launch authority. redb is a library inside storage, not a separately exposed service. Treat the executor, submitted query library, and bundled SDK as compromised from launch. Treat optimizer output as untrusted for authorization purposes. An optimizer may still affect result correctness and disclose any statistics it receives.
 
 ## Components
 
@@ -31,7 +31,7 @@ flowchart TD
     Planner -->|Bounded estimation requests| Stats
     Stats -->|Authorized metadata and scoped estimates| Planner
     Worker <-->|Scoped IPC; authorized batches| Storage
-    Storage --> Files[Database files and policies]
+    Storage --> Redb[redb embedded database]
     Worker --> Output[Bounded local result channel]
     Output --> Relay[Supervisor result relay]
     Relay -->|Provisional data and storage-confirmed terminal outcome| Gateway
@@ -66,13 +66,13 @@ The client submission SDK provides a separate authenticated control-mode gateway
 
 Tables have mandatory default-deny row and cell policies in addition to object/column grants. Owners administer definitions but have no automatic data bypass. Initial schema support includes tables, scalar types, primary/unique/foreign-key/check constraints, B-tree indexes, and bounded alterations. Global constraint outcomes can reveal hidden key existence; this is an explicit limitation alongside timing inference.
 
-Catalog changes participate in MVCC/durable ordering. DDL fences affected write commits while preserving pinned reader schemas; long builds do not hold the global commit gate. Identity, grant, and policy changes affect admission and write-commit epoch checks. See the DDL specs for scope and examples.
+Catalog changes participate in MVCC/durable ordering. DDL fences affected write commits while preserving pinned reader schemas; long builds do not hold the serialized redb writer. Identity, grant, and policy changes affect admission and write-commit epoch checks. See the DDL specs for scope and examples.
 
 ## Data Dictionary and Metadata
 
 The storage-owned [data dictionary](data-dictionary.md) defines versioned logical objects, identities, grants, policies, dependencies, and cache validity. [Metadata discovery](metadata-discovery.md) exposes bounded authorized projections through IPC and built-in `information_schema` relations; raw catalogs are never executor tables.
 
-[Catalog lifecycle](catalog-lifecycle.md) specifies bootstrap without SQL, validated startup, independent format versions, and offline upgrades. [Physical metadata](physical-metadata.md) owns roots, allocation, logging/checkpoints, reclamation, and durable outcomes. [Operational metadata](operational-metadata.md) exposes authenticated live status outside invocation MVCC snapshots. These classes intentionally have distinct consistency and disclosure rules.
+[Catalog lifecycle](catalog-lifecycle.md) specifies bootstrap without SQL, validated startup, independent format versions, and offline upgrades. [Physical metadata](physical-metadata.md) describes redb ownership and engine durable outcomes. [Operational metadata](operational-metadata.md) exposes authenticated live status outside invocation MVCC snapshots. These classes intentionally have distinct consistency and disclosure rules.
 
 ## Statistics Boundary
 
@@ -100,4 +100,4 @@ Validate isolation and authorization for client-built libraries before expanding
 - Supported Linux kernel features and deployment privilege requirements.
 - Result-correctness guarantees for optimizer plans, SDK execution, and arbitrary user query libraries.
 - Policy expression implementation, dependency validation, and immediate read revocation.
-- Format payload fixtures, synchronization primitives, io_uring platform profile, and exact analytical SQL semantics.
+- Exact redb release/durable mode/platform profile, engine codec fixtures, and exact analytical SQL semantics.

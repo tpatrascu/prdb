@@ -1,47 +1,36 @@
 # In-Memory Storage and Copy Boundaries
 
-## Trusted Buffer Pool
+## redb Ownership
 
-Use a bounded Rust buffer pool keyed by database/file/page identity and allocation generation. A frame owns a 16 KiB aligned allocation, state (`EMPTY`, `READING`, `CLEAN`, `DIRTY`, `WRITING`, `FAILED`), immutable published page image, page LSN, dirty recLSN, pin/reference counts, and I/O generation. Alignment satisfies the selected I/O profile; a stable allocation is required for every outstanding kernel operation.
+redb owns database page caches, copy-on-write page versions, read-transaction pins, and physical reclamation. The engine does not add a second page buffer pool. It may maintain bounded decoded-schema/policy caches and invocation-local write overlays, each with explicit validity and eviction rules. Cache entries never grant authority.
 
-Deduplicate concurrent misses through a page-directory entry and wake waiters only after checksum/identity validation. Never expose a partially read page. Scans get bounded prefetch and a low-priority/scan admission class; protect operational hot pages and reserve capacity for WAL/commit/recovery.
+A redb read transaction anchors the invocation's committed snapshot. Its guards/borrows stay inside trusted storage and must not outlive the transaction. Copy and decode values into engine-owned typed representations only as needed; never pass guards, mapped bytes, redb handles, or database pointers to the gateway, executor, or optimizer.
 
-Committed page images are immutable while borrowed or submitted for I/O. Updates build a private replacement image and atomically replace the directory's current image at publication. Old borrowed images remain alive until pins drain. Distinguish image memory lifetime from MVCC version lifetime: future readers may find old row versions inside a newer page image.
+## Transaction Memory
 
-## Private Transactions and Decoding
+Each active invocation owns a bounded private overlay keyed by table/row identity: insert, field patch, or delete plus the expected base row version, schema/policy dependencies, and write generation. Copy validated IPC input into this overlay; do not retain pointers into client or executor buffers. Sequential SQL statements read the snapshot plus the invocation's own successful overlay.
 
-Maintain a transaction-local arena with changed-row patches/new values, expected base-version identities, private row-directory overlay, dependency epochs, and a write generation. Never mutate published page bytes through a borrowed Rust slice. Read-your-own-writes resolves the overlay before the committed snapshot. Updates preserve hidden unchanged fields entirely inside storage.
+At commit, merge patches into current rows inside the serialized redb write transaction after conflict and authorization revalidation. Do not replace a current row with a stale snapshot copy: concurrent edits to different fields or rows must not be lost. The overlay is discarded on abort. Bound bytes, rows, and age before allocation.
 
-Decode validated page records into borrowed byte slices and small scalar values, not one heap allocation per cell. Use explicit endian readers and checked arithmetic; on-disk alignment does not justify casting arbitrary bytes to Rust references. Borrowed views cannot outlive frame/version pins. Policy evaluation can borrow hidden fields but cannot send their backing page to the executor.
+## Safe Copy Reduction
 
-A field patch is copied/owned once on validated IPC ingress; do not retain pointers into mutable executor memory. Coalesce repeated updates in the private write set. At finalization, prepare one copy-on-write image per changed page, including row/index/catalog changes; reuse unchanged overflow storage where safe. Admission bounds private pages, value buffers, WAL bytes, and pinned history before allocating them.
-
-## Explicit Copy Budget
-
-| Boundary | Initial behavior | Safe reduction |
+| Boundary | Baseline | Constraint |
 | --- | --- | --- |
-| Disk to buffer pool | Read directly into the owned frame; buffered I/O may still copy through the kernel page cache | Registered buffers/direct I/O after profile validation |
-| Page to trusted evaluation | Borrow validated field slices under pins | Avoid intermediate row/object materialization |
-| Committed page to changed page | One private image copy per touched page | Later validated deltas/layout changes; no in-place mutation of borrowed images |
-| Page to executor batch | Gather only authorized values once into a compact owned buffer | Write directly into final sanitized output; never share raw pages |
-| WAL encoding | Own bounded headers plus immutable page image slices | Vectored writes avoid concatenating page payloads into another large buffer |
-| Executor batch to SDK operators | Borrow immutable batch buffers until release | Explicit lifetime APIs; no per-cell copies |
-| Executor write to storage | Copy/validate framed input into private owned state | Later sealed immutable ingress requires separate review |
+| redb value to storage evaluation | Borrow through redb access guards when lifetime permits | Guard stays within trusted process and pinned read transaction |
+| Executor input to private overlay | Validate and copy once | Executor memory is hostile and mutable |
+| Overlay to redb | Encode final values in the commit path | All row/index/catalog/outcome changes share one atomic redb transaction |
+| Stored row to result batch | Gather authorized cells directly into final bounded response | Never expose raw redb values or hidden lengths |
+| Supervisor output to gateway | Bounded owned buffers may be relayed | Untrusted worker bytes are provisional application output |
+| Gateway to client | Frame and stream under backpressure limits | Socket progress is not transaction success |
 
-“Low copy” is an objective measured in bytes, allocations, and retained-memory time; it is not an unconditional zero-copy promise. Checksumming, serialization headers, page replacement, and authorization compaction remain necessary work.
+redb documents a zero-copy, thread-safe key/value API, but that does not mean network output can share stored values. Authorization compaction, typed serialization, and process isolation require a sanitized representation. Measure allocations and copied bytes before optimizing.
 
-## Authorized Batches
+## Pressure and Lifetimes
 
-Use column-oriented transport batches even though disk storage is row-oriented. Each batch has a bounded row count, column type descriptors, scoped row handles, per-cell VALUE/NULL/REDACTED states, and value offsets/lengths relative to the batch. All offsets are checked; null/redacted entries carry zero length and no source offset. Payloads contain only authorized bytes, with initialized padding. Do not expose hidden string lengths through sparse gaps or reusable buffer capacity.
+Long read transactions retain historical copy-on-write pages and can delay redb reclamation. Bound concurrent snapshots, invocation age, analytical scans, and outstanding response bytes. Slow clients must not hold redb guards or storage latches. On pressure, reject admission or cancel according to policy; never silently replace a snapshot.
 
-The initial transport remains copied Unix-socket frames. Serialize directly into the final sanitized buffer and use bounded vectored sends where useful; retain buffers until send completion. A disconnect/slow consumer cannot pin the whole database cache: output buffers own their copied values and are independently budgeted.
+Canceling an asynchronous storage task cannot release a guard still used by work or IPC. Drain in-flight tasks before ending the read transaction and releasing overlay/results. Test large readers, process cancellation, memory growth, and compaction/reclamation with the pinned redb release.
 
-An optional later transport may use a fresh memfd containing only one invocation's sanitized batch. After populating and unmapping writable views, require write/grow/shrink seals and seal-set finalization before passing its descriptor; the worker maps read-only. Never reuse a shared object for future secrets because a hostile worker can retain its descriptor. Acknowledgement is not proof it unmapped the object. Budget outstanding objects and process lifetime, validate seals, and keep raw database descriptors forbidden. See [Linux memfd documentation](https://man7.org/linux/man-pages/man2/memfd_create.2.html).
+## Optional Shared Results
 
-Writable shared memory between worker and storage is outside the baseline: it creates validation/use races. Shared batch transport requires an explicit capability-negotiated descriptor type, sandbox update, and adversarial tests before enabling it; unsupported hosts keep copied IPC.
-
-## Concurrency and Failure
-
-Use short page-directory latches, documented lock order, and I/O references independent of task futures. Dropping/cancelling a Rust future cannot free kernel-owned memory. Per-page writes are serialized by physical address/generation so an older image cannot finish after and overwrite a newer one. Dirty state clears only when the completed write covers the required image/LSN; later changes remain dirty.
-
-Release pinned versions only after all readers, encoders, and I/O operations finish. Evict clean unpinned frames; flush eligible committed dirty frames only after their WAL is durable. Pressure causes bounded wait/admission failure or explicit invocation abort, never unsound lifetime shortcuts. Fault tests must cover cancellation during reads/writes, stale CQEs, frame reuse, slow output, and retained shared descriptors.
+The baseline uses copied local IPC and TCP frames. A later sealed memfd may contain only sanitized invocation output and needs separate sandbox/capability review. It must not expose redb pages or become a generic database mapping.

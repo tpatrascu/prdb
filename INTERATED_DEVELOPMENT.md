@@ -8,7 +8,7 @@ Start with [AGENTS.md](AGENTS.md), the [specification index](specs/README.md), a
 
 ## Workload and Storage Priorities
 
-Build an operational database first, with analytical queries as an explicit supported roadmap. Follow the [workload profile](specs/workload-profile.md), [disk format](specs/storage-format.md), [memory model](specs/memory-storage.md), [WAL](specs/wal-recovery.md), and [I/O backend](specs/disk-io.md). Add golden format tests and short/reordered I/O fault injection before optimizing copies or introducing optional direct/shared-memory paths. Compare io_uring with the reference backend using identical recovery tests; never equate a write completion with fsync.
+Build an operational database first, with analytical queries as an explicit supported roadmap. Follow the [workload profile](specs/workload-profile.md), [redb backend](specs/redb-storage.md), and [memory model](specs/memory-storage.md). Add engine codec fixtures, then test redb transaction atomicity, durable reopen, snapshot pressure, and the selected platform profile. Do not build a parallel page store/WAL or claim io_uring unless redb supplies a reviewed backend.
 
 ## Preserve the Established Design
 
@@ -79,14 +79,14 @@ These milestones are dependency guides, not permission to defer correctness unti
 | 1. Reproducible toolchain | Pinned Rust/Cargo and TinyCC profile, minimal workspace, C archive build, test runner | Clean builds and maintained C/Rust smoke tests; record exact target and versions. Compile shared fixtures without loading them until confinement exists. |
 | 2. Boundary and confinement harness | Rust launcher, fail-closed sandbox, versioned host ABI, bounded IPC | A TinyCC library loads only in confinement; constructor attacks, missing features, ABI mismatch, crashes, and forged frames fail safely. |
 | 3. Identity and authorized data access | Real admission, minimal catalog, grants/policies, scoped connections, reference scans | Two authenticated users receive different cell views; forged handles and SDK bypass attempts cannot widen access. Test helper fixtures do not replace control-path tests. |
-| 4. First writable storage slice | MVCC private versions, concurrent writers, commit gate, WAL/recovery, cleanup | Own-write visibility, conflict abort, multi-row atomicity, policy revalidation, crash recovery, and retained-version safety. Stages 3–4 form the first usable data milestone, not a read-only release. |
+| 4. First writable storage slice | redb snapshots, private overlays, serialized writer validation/commit, cleanup | Own-write visibility, conflict abort, multi-row atomicity, policy revalidation, durable reopen, and retained-reader safety. Stages 3–4 form the first usable data milestone, not a read-only release. |
 | 5. Client-to-commit path | TCP gateway/client framing, C SDK SQL calls, Rust optimizer, supervisor result relay | A real TinyCC-built invocation uploads/seals/starts over TCP, runs sequential reads/writes, commits durably, and reconciles lost outcomes after client/gateway failure. Errors abort all writes; no test-only authorization bypass. |
 | 6. Initial DDL and constraints | User/role lifecycle, supported table/index/constraint DDL, policy administration | Real control-channel tests, role changes, unique/FK races, index publication, old readers versus DDL, and stale-writer aborts. Full initial scope is not complete before this stage. |
 | 7. Complete initial planning and hardening | Scoped statistics, bounded queues, supported SQL/type coverage, fuzz/property suites | Feature-to-spec coverage, fallback behavior, cancellation, fair progress, pressure handling, and repeatable performance measurements. |
 
 After the operational baseline, complete the required analytical SQL operators with bounded-memory tests and mixed-workload operational tail-latency measurements. The small initial SQL subset alone does not complete analytical support.
 
-Include the data-dictionary record/index contracts, filtered metadata APIs, bootstrap interruption recovery, checkpoint/root validation, and operational status disclosure in the relevant stages. Offline upgrade fixtures must preserve permissions and reject unsupported formats; live telemetry must not be tested as a repeatable MVCC snapshot.
+Include the data-dictionary record/index contracts, filtered metadata APIs, bootstrap interruption recovery, redb open/recovery validation, and operational status disclosure in the relevant stages. Offline upgrade fixtures must preserve permissions and reject unsupported formats; live telemetry must not be tested as a repeatable MVCC snapshot.
 
 Build the minimal catalog/control functions needed for early slices, then complete DDL coverage; do not hard-code the demonstration users or table into production logic. Begin durability work with the first write set, not as a later replacement for acknowledged in-memory commits.
 

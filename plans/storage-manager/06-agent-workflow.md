@@ -11,7 +11,7 @@ Choose the earliest uncompleted dependency and one observable behavior within it
 1. Establish the minimal Rust workspace and toolchain checks; report setup failures separately from behavior failures.
 2. Clarify one required format decision and add a hand-checked valid/invalid physical-reference fixture.
 3. Observe the intended decoder test fail, implement bounded decoding, and run the focused checks.
-4. Add one page-header checksum/identity behavior and its negative case.
+4. Add one versioned engine key/value codec and its negative case.
 5. Continue P1 in dependency order; introduce the I/O fault model before making durable-commit claims.
 
 These are starting tasks, not instructions to skip inspection or to implement all codec families before testing anything.
@@ -36,7 +36,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
-During TDD run the actual selected package/test target rather than repeatedly running every suite. Add documented commands for fuzzing, fault scenarios, io_uring profiles, C fixtures, and benchmarks when those targets exist. Do not invent executable command names in handoff notes.
+During TDD run the actual selected package/test target rather than repeatedly running every suite. Add documented commands for fuzzing, fault scenarios, redb durability profiles, C fixtures, and benchmarks when those targets exist. Do not invent executable command names in handoff notes.
 
 TinyCC is required for real C SDK/query acceptance; GCC/Clang or Rust-only mocks are not replacements. Never use `tcc -run` or a trusted-process loader for hostile query libraries. Missing sandbox support is a failed/unverified integration gate, not a reason to relax confinement.
 

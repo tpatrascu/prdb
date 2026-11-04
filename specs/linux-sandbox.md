@@ -10,7 +10,7 @@ Contain arbitrary native worker code using Linux OS mechanisms without a VM. The
 - No external network access or unauthorized IPC.
 - No tracing, memory access, or signaling of trusted/unrelated processes.
 - No privilege escalation; drop capabilities and establish `no_new_privs`.
-- No worker io_uring access: deny setup/register/enter and pass no rings, registered buffers, or database descriptors. Disk I/O belongs to trusted storage.
+- No worker access to the redb database file or storage backend handles/descriptors. Disk I/O belongs to trusted storage.
 - Only explicitly provisioned descriptors and approved runtime resources.
 - Bounded CPU, memory, process count, output, and wall time.
 

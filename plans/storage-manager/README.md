@@ -1,45 +1,23 @@
-# Storage Manager Implementation Plan
+# Storage Manager Implementation Plan with redb
 
-## Purpose and Status
+## Purpose
 
-This plan guides a future agent implementing the trusted Rust storage manager. It is a dependency-ordered backlog, not evidence of completed implementation. At plan creation the repository contains specifications and no Cargo workspace or runtime harness. Inspect the checkout before acting; do not assume this remains true.
+Implement the trusted Rust storage manager on the pinned [redb backend](../../specs/redb-storage.md). redb owns physical pages, B+trees, allocation, MVCC read snapshots, atomic persistence, and recovery. The engine owns relational values, catalogs, SQL indexes, authorization, invocation overlays, conflict policy, durable outcomes, and the protocol boundaries.
 
-Follow [repository instructions](../../AGENTS.md) and the [TDD development guide](../../INTERATED_DEVELOPMENT.md). Normative behavior belongs in [specs](../../specs/README.md); these documents describe implementation sequence and acceptance evidence. Resolve contradictions by refining the affected specs explicitly, not by silently changing behavior in this plan.
+Read [AGENTS.md](../../AGENTS.md), the [development guide](../../INTERATED_DEVELOPMENT.md), [redb storage](../../specs/redb-storage.md), [concurrency](../../specs/concurrency-mvcc.md), and [authorization](../../specs/authorization.md). This plan supersedes the earlier custom page/WAL implementation sequence in phase documents 01–05; those documents are retained as history and must not guide implementation.
 
-## Reading Order
+## Sequence
 
-1. [Boundaries and prerequisite decisions](01-boundaries-and-decisions.md): modules, interfaces, ownership, and unresolved contracts.
-2. [Storage foundation](02-storage-foundation.md): P0–P3, toolchain, codecs, reference I/O, WAL, pages, and minimal catalog.
-3. [Transactions and authorized access](03-transactions-and-access.md): P4–P6, MVCC, commit, policy evaluation, and IPC.
-4. [Catalog, recovery maintenance, and I/O](04-catalog-and-operations.md): P7–P10, DDL, checkpoints, io_uring, and scoped statistics.
-5. [Acceptance and integration](05-validation-and-integration.md): P11, fault matrix, boundary tests, and performance evidence.
-6. [Agent execution and handoff](06-agent-workflow.md): task selection, progress records, and completion rules.
+1. **Pin and evaluate redb.** Choose exact crate version, durable commit mode, supported Rust/platform profile, licensing/upgrade policy, API value/key limits, transaction and guard lifetimes. Run independent API experiments in a disposable harness. Do not add other database-file code.
+2. **Define engine codecs and table schema.** Freeze named redb table definitions and versioned row/catalog/index/outcome/audit value encodings. Keep catalog payloads and SQL logical index keys; remove assumptions about custom pages, physical B-tree separators and 16 KiB allocation.
+3. **Implement read snapshots and overlay.** Admission retains a bounded redb read transaction with identity/schema/policy context. Implement own-write overlay and authorized scans. Prove repeatable committed reads, own-write visibility, and no cross-invocation leakage.
+4. **Implement final write path.** At finalization open one redb write transaction; re-read current versions; validate row conflicts, permission epochs and constraints; merge patches against current values; atomically update row, index, catalog, required audit, and outcome tables; commit durably. Test competing transactions, write skew, abort, ambiguous outcome and restart.
+5. **Implement complete catalog and controls.** Bootstrap, DDL, users/roles, policies, metadata, audit, and recovery validation operate as logical records in redb, never in its private physical tables.
+6. **Integrate processes and protocols.** Exercise storage only through supervisor-bound IPC and gateway admission/result flow. Run hostile artifacts only inside the sandbox. Add status lookup after lost network or supervisor replies.
+7. **Measure and harden.** Test retained-reader pressure, operational transactions during analytical scans, redb compaction/reclamation, selected durability mode, filesystem behavior, copy costs, and version upgrade/rejection. Reassess performance on the target Linux profile; do not assume upstream benchmarks transfer.
 
-## Dependency Order
+Run small TDD increments within each stage. Record actual red failures, exact redb version/profile, tests/commands, spec decisions, and remaining evidence. A mock redb adapter is useful for unit faults but cannot establish persistence or recovery.
 
-```text
-P0 contracts/toolchain -> P1 codecs -> P2 reference I/O/WAL
-                                      -> P3 pages/catalog primitives
-                                      -> P4 durable concurrent transactions
-                                      -> P5 authorization/control bootstrap
-                                      -> P6 role-bound IPC
-                                      -> P7 complete initial DDL
-                                      -> P8 checkpoints/reclamation/lifecycle
-                                      -> P9 io_uring conformance
-                                      -> P10 estimates/observability/scheduling
-                                      -> P11 integrated acceptance
-```
+## Exit Conditions
 
-The order is a conservative implementation path. Add checkpoint primitives required for bootstrap in P3–P5; P8 completes concurrent checkpointing and retention. Begin io_uring ownership design in P0/P2, with the real backend in P9. Add tests and quotas throughout, not only in P11. P4 allows concurrent staging/readers with serialized commit; it is not a single-writer execution model.
-
-P1–P4 are internal development increments with no normal query listener. The first usable data milestone requires P4–P6 together: real authorization, concurrent writes, durability, and process-bound admission. Complete initial storage-manager support additionally requires P7–P11. A reference backend is useful development infrastructure but does not complete the selected io_uring work.
-
-## Scope and Integration Dependencies
-
-Storage owns row-oriented pages, B-trees, MVCC, WAL, recovery, dictionary, policies, transaction outcomes, trusted estimates, and administrative operations. Operational latency is primary; bounded analytical scans share the same permissions and snapshots.
-
-The gateway/client network protocol, supervisor, sandbox, TinyCC SDK, SQL library, and optimizer are adjacent components. Define and test their storage contracts here, but do not implement whole adjacent components merely to finish a storage unit test. Final integration requires their real implementations; test adapters cannot substitute for confinement or authentication.
-
-Required analytical SQL joins/grouping/sorting remain a project follow-on under the [workload profile](../../specs/workload-profile.md). Storage completion supplies bounded authorized batches and estimates; it does not claim those SQL operators exist.
-
-Optional direct I/O, sealed shared batches, group commit, delta WAL, serializable isolation, concurrent statements within one invocation, and online schema rewrites are outside this baseline. Measure copying and WAL amplification without introducing those features prematurely.
+The storage slice is complete only when real redb-backed tests show atomic rows/indexes/catalog/outcomes, concurrent snapshots and staged writers, correct authorization, durable commit/reopen behavior, bounded long-reader pressure, and no executor access to redb. Gateway/sandbox end-to-end evidence is required for the integrated service. Do not claim io_uring support unless the selected redb backend explicitly supplies and passes it.

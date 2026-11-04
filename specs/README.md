@@ -6,19 +6,20 @@ These documents capture the current research design for an operational database 
 
 - [Toolchain decision](toolchain.md): TinyCC/C SDK, Rust engine, ABI, packaging, and validation implications.
 - [Workload profile](workload-profile.md): operational priorities, analytical scope, and mixed-workload scheduling.
-- [Storage format v1](storage-format.md): row pages, MVCC records, overflow values, and B-tree layouts.
+- [Storage format decision](storage-format.md): physical layout is delegated to redb.
+- [redb storage backend](redb-storage.md): embedded database responsibilities and engine transaction boundary.
 - [Catalog payload encoding v1](catalog-payloads.md): canonical envelopes, field tags, family keys, and bootstrap mappings.
-- [Checkpoint format v1](checkpoint-format.md): manifest sections, checkpoint WAL payloads, and root binding.
+- [Checkpoint format decision](checkpoint-format.md): physical checkpointing is delegated to redb.
 - [Index-key encoding v1](index-key-encoding.md): exact ordered tuple bytes, version suffixes, and examples.
 - [In-memory storage](memory-storage.md): buffer/transaction lifetimes and security-constrained copy reduction.
-- [WAL and recovery v1](wal-recovery.md): record framing, durable decisions, redo, and checkpoints.
-- [Disk I/O](disk-io.md): preferred io_uring backend, ordering, fallback, and direct-I/O evaluation.
+- [Transaction durability](wal-recovery.md): redb-backed atomic commits and recovery ownership.
+- [Disk I/O decision](disk-io.md): redb owns database-file I/O; no engine io_uring path.
 - [Architecture](architecture.md): goals, trust boundaries, execution flow, and milestones.
 - [Concurrency and MVCC](concurrency-mvcc.md): snapshot isolation, concurrent writes, commit/recovery, and reclamation.
 - [Data dictionary](data-dictionary.md): catalog records, IDs, indexes, dependencies, and caches.
 - [Metadata discovery](metadata-discovery.md): filtered APIs and built-in `information_schema` relations.
 - [Catalog lifecycle](catalog-lifecycle.md): bootstrap, startup validation, format versions, and offline upgrades.
-- [Physical metadata](physical-metadata.md): allocation, roots, WAL, checkpoints, and durable outcomes.
+- [Physical metadata](physical-metadata.md): redb owns physical state; engine owns logical outcomes and audit.
 - [Operational metadata](operational-metadata.md): live registries, monitoring, cancellation, and audit.
 - [Schema DDL](ddl-schema.md): schemas, tables, types, constraints, indexes, and concurrent catalog changes.
 - [Users and roles](ddl-identity.md): database identities, membership, credentials, and admission.

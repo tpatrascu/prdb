@@ -4,7 +4,7 @@
 
 This is an operational database: prioritize short transactions, point lookups, small range reads, frequent inserts/updates/deletes, predictable commit latency, and recovery correctness. Analytical queries are supported on the same authorized MVCC data, but do not drive the primary storage layout or receive permission exemptions.
 
-Use a row-oriented heap with B-tree access paths, bounded buffer management, and WAL. Do not introduce a mandatory column store, warehouse ingestion pipeline, materialized analytics replica, or distributed execution layer. Those require separate future decisions.
+Use redb key/value tables and logical indexes under the operational scheduler. Do not build a custom heap, buffer manager, or WAL. Do not introduce a mandatory column store, warehouse ingestion pipeline, materialized analytics replica, or distributed execution layer. Those require separate future decisions.
 
 ## Analytical Scope
 
@@ -16,12 +16,12 @@ Execute analytical operators in the untrusted executor over sanitized batches. S
 
 The supervisor admits an invocation into an operational or analytical resource class, bounded by the caller's configured allowance. A client label cannot obtain unlimited priority or override budgets. Both classes retain snapshot isolation and the same permission model; read-only analytical grants are the default, not a mechanism to prohibit explicitly authorized writes.
 
-Reserve queue capacity and progress for commits, WAL flush, point reads, cancellation, and reclamation. Limit analytical queue depth, prefetch, CPU, output bytes, and snapshot age. Use scan-resistant cache admission so sequential scans do not evict the entire operational working set. Permit larger analytical budgets only through bounded admission configuration; never silently refresh their snapshots to relieve history pressure.
+Reserve queue capacity and progress for commits, redb commits, point reads, cancellation, and reclamation. Limit analytical queue depth, prefetch, CPU, output bytes, and snapshot age. Use scan-resistant cache admission so sequential scans do not evict the entire operational working set. Permit larger analytical budgets only through bounded admission configuration; never silently refresh their snapshots to relieve history pressure.
 
-DDL/index builds and checkpoints are separately budgeted maintenance work. Long analytical readers can retain old versions and schema definitions, so history retention and admission limits are part of performance policy, not optional cleanup.
+DDL/index builds and redb compaction/maintenance are separately budgeted maintenance work. Long analytical readers can retain old versions and schema definitions, so history retention and admission limits are part of performance policy, not optional cleanup.
 
 ## Performance Evidence
 
-Measure point/range latency, update throughput, conflict rate, commit p50/p95/p99, WAL bytes per transaction, cache misses, retained history, and memory-copy bytes. Add mixed workloads that measure operational latency while scans, joins, or maintenance run. No quantitative performance target is established until a repeatable benchmark and hardware/profile are recorded.
+Measure point/range latency, update throughput, conflict rate, commit p50/p95/p99, redb bytes/commit, point-read latency, retained history, and memory-copy bytes. Add mixed workloads that measure operational latency while scans, joins, or maintenance run. No quantitative performance target is established until a repeatable benchmark and hardware/profile are recorded.
 
-The initial full-page WAL design favors a simple recoverable implementation and has significant small-write amplification. Measure it explicitly; page-delta WAL, compact tuple encodings, and group commit are optimization work with separate format/protocol validation, not reasons to remove durability or authorization checks.
+redb supplies the physical commit/recovery path. Measure its transaction/write amplification on representative operational workloads before considering another backend; never weaken durability or authorization checks for throughput.

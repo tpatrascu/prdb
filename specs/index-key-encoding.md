@@ -35,13 +35,13 @@ Decimal scale is fixed by the indexed column. Coerce to that declared scale usin
 
 **SQL secondary indexes, including primary/unique backing indexes:** key is the SQL tuple followed by raw row UUID (16 bytes), then begin-commit sequence as unsigned big-endian u64 (8 bytes). Leaf value is the 40-byte reference to that row version. The suffix is always present, including for unique indexes. A live physical key therefore uniquely identifies a version; reject duplicate complete keys rather than silently overwriting another version.
 
-The maximum complete key is 2,048 bytes, including the 24-byte suffix. Thus a SQL tuple may occupy at most 2,024 bytes. Variable-width escaping counts toward that limit. Do not truncate or hash an oversized key. Reject the affected write/index build according to [DDL](ddl-schema.md).
+The former 2,048-byte limit and 24-byte suffix came from the retired custom B-tree format and do not apply. Set a logical maximum compatible with the pinned redb Key/value API before implementation; reject oversized values atomically.
 
 Historical entries remain until MVCC reclamation permits removal. Reconstruct their tuple from the referenced version, never from a newer row. Validate visibility, row/cell policies, and private overlays after candidate lookup. Updating only an unindexed column still creates the new version's index entry under this baseline.
 
-Uniqueness compares the decoded user tuple, excluding the suffix, against relevant current committed rows and the final private write set. Any null component exempts a UNIQUE tuple from conflict; PRIMARY KEY rejects null first. Old/dead versions do not conflict merely because their encoded prefix matches. The commit gate serializes the final constraint check.
+Uniqueness compares the decoded user tuple, excluding the suffix, against relevant current committed rows and the final private write set. Any null component exempts a UNIQUE tuple from conflict; PRIMARY KEY rejects null first. Old/dead versions do not conflict merely because their encoded prefix matches. The engine performs the final constraint check inside the serialized redb write transaction.
 
-**Catalog indexes:** [catalog payloads](catalog-payloads.md) defines canonical logical key bytes. The catalog primary lookup key is those bytes followed by the same raw record-row UUID and begin-commit suffix. Catalog secondary lookups use typed non-null components and the same suffix; their definition fixes component types. Catalog component unsigned u16/u32/u64 values use marker `01` plus fixed-width unsigned big-endian bytes. These unsigned component types are internal, not additional SQL types. The protected catalog-directory index is a separate fixed two-byte-key format defined in catalog payloads.
+**Catalog indexes:** [catalog payloads](catalog-payloads.md) defines canonical logical key bytes. Catalog keys are the family prefix and canonical logical key; redb read transactions provide snapshot visibility. Catalog secondary lookups use typed components defined by their table schema. Catalog component unsigned u16/u32/u64 values use marker `01` plus fixed-width unsigned big-endian bytes. These unsigned component types are internal, not additional SQL types. No custom physical catalog-directory tree is defined.
 
 ## Routing and Search Bounds
 

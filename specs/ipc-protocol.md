@@ -77,7 +77,7 @@ Version IPC independently of the native host ABI and structured query/plan forma
 
 Errors should distinguish invalid requests, denied operations, expired contexts, cancellation, and resource limits without exposing hidden values or invisible row identities. Precise error equivalence and inference behavior require further design.
 
-Define cursor advancement and retry behavior explicitly; the prototype fails the invocation on a required channel disconnect instead of supporting transparent replay. Statement success closes its resources and leaves the transaction active; any statement error aborts the whole transaction. Cancellation accepted before WAL COMMIT submission invalidates all handles and discards private writes; after submission, report pending/terminal outcome rather than promising rollback; reclaim resources only after in-flight tasks release their pins. After a durable commit, cancellation cannot roll back data. Invocation-wide budget exhaustion is terminal before commit.
+Define cursor advancement and retry behavior explicitly; the prototype fails the invocation on a required channel disconnect instead of supporting transparent replay. Statement success closes its resources and leaves the transaction active; any statement error aborts the whole transaction. Cancellation accepted before redb commit begins invalidates all handles and discards private writes; after redb commit begins, report pending/terminal outcome rather than promising rollback; reclaim resources only after in-flight tasks release their pins. After a durable commit, cancellation cannot roll back data. Invocation-wide budget exhaustion is terminal before commit.
 
 ## Validation and Future Work
 

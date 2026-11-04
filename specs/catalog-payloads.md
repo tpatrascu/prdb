@@ -2,11 +2,11 @@
 
 ## Scope and Physical Container
 
-This is catalog payload version 1 for every logical family in the [dictionary](data-dictionary.md). It is a protected storage format, not an SDK ABI or ordinary SQL table. Use the standard MVCC `ROW1` container with exactly one non-null BYTEA field containing the envelope below; its built-in schema version is 1. Normal inline/overflow rules apply. Maximum envelope size is 1 MiB. The record's row UUID is a private storage identity, distinct from a named object's ID.
+This is the engine-owned catalog value version 1 for every logical family in the [dictionary](data-dictionary.md). Values are stored in the catalog_v1 redb table defined by [redb storage](redb-storage.md); this is a protected logical encoding, not an on-disk page format or SDK ABI. Maximum envelope size is 1 MiB. redb owns the physical key/value container.
 
-The logical key is stable across versions. Updates retain the record-row UUID and link previous versions through ROW1. Tombstones use ROW1's no-fields form; retained catalog index entries and version chains preserve key resolution. Recreating a dropped named object uses a new object ID. A composite-key record reintroduced after deletion uses a fresh record-row UUID; at most one version is live per logical key at a snapshot.
+The logical key is stable for a catalog identity. redb read transactions provide old snapshots and atomic replacement at commit; catalog values carry no custom ROW1 version chain. Recreating a dropped named object uses a new object ID. Catalog deletion and dependency retention are engine-level logical operations.
 
-All integers here are little-endian except logical key components defined by [key encoding](index-key-encoding.md). All reserved bytes are zero. Page CRC32C protects the envelope; no second payload checksum is stored.
+All integers here are little-endian except logical key components defined by [key encoding](index-key-encoding.md). All reserved bytes are zero. redb owns physical checksumming; this envelope validates its own structure and version.
 
 ## Envelope and TLVs
 
@@ -93,9 +93,9 @@ Policy kind row=1/cell=2; operation SELECT=1/INSERT=2/UPDATE=3/DELETE=4; composi
 
 ## Bootstrap Mapping and Validation
 
-The database builtins field is `count u32`, then sorted entries `(code u16, reserved u16=0, ID[16])`, maximum 256 entries. Required codes: system schema=1, information_schema=2, database_admin role=3; primitive type codes are `100 + builtin_kind`; catalog family storage-object codes are `200 + family_code`. IDs are database-local opaque generated values persisted at initialization; reserved meaning is determined by code, not UUID bits. Engine descriptors know the codes/record schema before reading SQL metadata. The checkpoint catalog-directory root locates family roots without depending on this field to find its own decoder.
+The database builtins field is `count u32`, then sorted entries `(code u16, reserved u16=0, ID[16])`, maximum 256 entries. Required codes: system schema=1, information_schema=2, database_admin role=3; primitive type codes are `100 + builtin_kind`; catalog family storage-object codes are `200 + family_code`. IDs are database-local opaque generated values persisted at initialization; reserved meaning is determined by code, not UUID bits. Engine descriptors know the codes/record schema before reading SQL metadata. The redb table names and built-in descriptor locate logical catalog records without relying on SQL queries.
 
-The protected catalog-directory B-tree uses raw unsigned big-endian u16 family keys, without tuple markers or version suffixes, and 56-byte leaf values: family storage object ID[16] followed by root page reference[40]. Its internal separators use these same two-byte keys. It has exactly the family keys 1–16. It tracks current physical roots through WAL/root publication, not user-visible MVCC definitions; catalog records themselves remain versioned. On each family-root change, update the directory and root map in the same transaction. Checkpoint CATALOG_FAMILIES entries are the captured directory contents, not an independently writable catalog.
+redb holds catalog records in the catalog_v1 logical table. The engine may add secondary logical indexes as redb tables and must update them in the same redb transaction. It has no catalog-directory B-tree of physical roots; lookup keys are family prefix plus the canonical logical key.
 
 Validate required mappings, uniqueness, ownership, named-object lifetimes, graph references/cycles, policy targets, epoch coherence, and current schema compatibility before publication/startup. DDL rejection is atomic. Dropping a required built-in is forbidden. Verifier bytes and expression/policy bodies never pass through ordinary metadata discovery.
 

@@ -31,7 +31,7 @@ Use a fresh worker per user-library invocation in the prototype. Sequential SDK 
 
 Bound CPU, memory, process count, wall time, output bytes, and storage work attributable to the whole invocation, including all sequential SQL and direct storage calls. Worker limits alone do not bound expensive requests handled by storage. Bound planning and statistics estimation independently; user compilation occurs in the client. Cancellation closes planning channels and pending estimates as well as worker resources; private background statistics maintenance has separate admission and budgets.
 
-Reject execution if required sandbox features cannot be established. Worker crashes must fail only that execution; disconnects and supervisor cancellation must trigger storage cleanup. Before irreversible WAL COMMIT submission, required channel loss, cancellation, expired deadlines, and invocation-wide resource exhaustion abort the transaction; they cannot be converted into heuristic planning or a fresh context by user code.
+Reject execution if required sandbox features cannot be established. Worker crashes must fail only that execution; disconnects and supervisor cancellation must trigger storage cleanup. Before redb write-transaction commit begins, required channel loss, cancellation, expired deadlines, and invocation-wide resource exhaustion abort the transaction; they cannot be converted into heuristic planning or a fresh context by user code.
 
 ## Workload Admission
 
@@ -51,7 +51,7 @@ Expose own-invocation status and administrator-only runtime inspection through [
 
 Admit multiple invocations concurrently with global and per-principal limits, bounded queues, and fairness between scans, writes, and planning. Bound transaction age and retained history; abort rather than silently refreshing old snapshots. Do not hold storage locks while waiting on worker output.
 
-Cancellation accepted before WAL COMMIT submission aborts; after submission it may be too late and requires outcome reconciliation. Durable commits cannot be undone. Never report rollback merely because a reply or supervisor connection was lost. Use the state machine and recovery/status contract in [concurrency and MVCC](concurrency-mvcc.md). No automatic replay of arbitrary user code is permitted.
+Cancellation accepted before redb commit begins aborts; after commit begins it may be too late and requires outcome reconciliation. Durable commits cannot be undone. Never report rollback merely because a reply or supervisor connection was lost. Use the state machine and recovery/status contract in [concurrency and MVCC](concurrency-mvcc.md). No automatic replay of arbitrary user code is permitted.
 
 ## Validation and Open Questions
 

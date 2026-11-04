@@ -59,7 +59,7 @@ Maintain separate schema/write, authority, and statistics validity domains. Admi
 
 Cache immutable decoded definitions by database UUID, object ID, and definition version. Cache authorization/filtered metadata additionally by principal, effective grant, role/policy snapshot, and visibility dependencies. Plan/estimate caches include schema versions and transaction-local write generation where needed. A cache entry is never an authorization capability.
 
-Commit notifications may evict entries proactively, but correctness cannot depend on receiving a notification. Check validity against the pinned context on lookup and current epochs at write/admin commit. Old pinned snapshots may continue using old definitions; epoch changes do not rewrite their view. Bound memory and hold version pins for in-flight work. Reclaim definitions only when relevant snapshots/tasks drain and no retained stored row version needs that schema to decode its fields or resolve an add-column default. See [storage format](storage-format.md).
+Commit notifications may evict entries proactively, but correctness cannot depend on receiving a notification. Check validity against the pinned context on lookup and current epochs at write/admin commit. Old pinned snapshots may continue using old definitions; epoch changes do not rewrite their view. Bound memory and hold version pins for in-flight work. Reclaim definitions only when relevant snapshots/tasks drain and no retained stored row version needs that schema to decode its fields or resolve an add-column default. See [redb storage](redb-storage.md).
 
 ## Acceptance Tests
 

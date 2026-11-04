@@ -12,23 +12,23 @@ Storage allocates a transaction identity and a snapshot of the fully published c
 
 Conceptually, a committed row version has a stable logical row ID and visibility interval `[begin_commit, end_commit)`. A snapshot at `S` sees versions with `begin_commit <= S < end_commit`, excluding deletion tombstones. Updates create new versions, deletes publish tombstones, and inserts create fresh identities. [Storage format v1](storage-format.md) defines row records, version references, and page publication; [memory storage](memory-storage.md) defines pinned buffer/private-write ownership.
 
-Each transaction owns a private write set. Reads overlay its latest successful writes on the committed snapshot; no other transaction sees those writes before commit. Index lookups, scans, row handles, policy evaluation, and SQL execution must all respect version visibility. A row handle never means “read the latest committed row.”
+Each invocation owns a redb read-transaction snapshot and a private engine write overlay. Reads overlay its latest successful writes; no other invocation sees those writes before commit. Index lookups, scans, row handles, policy evaluation, and SQL execution respect the pinned snapshot. A row handle never means “read the latest committed row.” redb owns physical MVCC page retention; the engine enforces invocation policy and row-level conflicts.
 
 Capture each statement's input view before it stages mutations, preventing an update scan from revisiting its own output. Initially materialize a bounded list of mutation targets and values, close the input scan, then stage changes. Exceeding the materialization budget aborts rather than partially committing. Disallow mutation while a previous cursor/result stream remains active. Closing the stream permits the next statement to observe successful writes.
 
 ## Commit Protocol
 
-Transactions can scan, compute, and stage writes concurrently. Initially serialize only final validation and publication through a storage-owned commit gate:
+Transactions can scan, compute, and stage writes concurrently. redb serializes its write transactions; the engine validates and publishes through one redb transaction:
 
 1. On successful library return, the supervisor stops new requests and asks storage to finalize the invocation. Executors cannot commit early through a raw protocol request.
 2. Storage drains admitted work and verifies that statements completed successfully before freezing the private write set. Unfinished mutation streams or cancelled/failed work abort the transaction; finalization must not silently drop pending writes and commit a prefix.
-3. Under the commit gate, confirm the transaction is active and within limits. Validate every updated/deleted row against its recorded base version: a concurrent committed change causes a conflict and aborts the whole transaction. Validate supported constraints, grant/policy validity, and authorization dependencies.
-4. Allocate a commit sequence, durably record the complete transaction and commit decision, then atomically publish all row/index changes and the new committed frontier. No snapshot can observe partial publication.
-5. Release the gate and report committed success. Abort discards every private write, never just a conflicting row.
+3. Acquire the writer coordinator and begin a redb write transaction. Validate every updated/deleted row against its recorded base version: a concurrent committed change causes a conflict and aborts the whole transaction. Validate constraints, grants/policies, schema and authority dependencies against latest committed state.
+4. Merge patches into current values. In the same redb transaction update all rows/indexes/catalog/audit/outcome data and the engine commit sequence. Commit using the selected durable mode; redb makes the state atomically visible.
+5. Release the coordinator and report committed success only when the durable result is established. Abort discards every private write, never just a conflicting row.
 
-The gate is a simple initial correctness mechanism, not a claim of lock-free operation. Keep validation bounded; perform expensive preparation before the gate and verify its dependencies inside it. No latch or commit gate may be held while waiting for executor input, IPC output, or arbitrary user code.
+The writer coordinator is a simple initial correctness mechanism. Keep validation bounded; prepare expensive work before opening the redb write transaction and verify dependencies inside it. Do not hold the writer while waiting for executor input, IPC output, or arbitrary user code.
 
-Initial constraints follow [schema DDL](ddl-schema.md): generated or user-supplied primary keys, UNIQUE, NOT NULL, bounded row-local CHECK, and non-cascading foreign keys. Validate unique keys and both directions of foreign-key changes against the latest committed state plus final private changes under the commit gate; abort on conflict/violation. Supporting these declared constraints does not eliminate arbitrary write skew. Generated identities remain opaque, and constraint outcomes can disclose hidden key existence. Deferrable constraints and native constraint callbacks are unsupported.
+Initial constraints follow [schema DDL](ddl-schema.md): generated or user-supplied primary keys, UNIQUE, NOT NULL, bounded row-local CHECK, and non-cascading foreign keys. Validate unique keys and both directions of foreign-key changes against the latest committed state plus final private changes inside the redb write transaction; abort on conflict/violation. Supporting these declared constraints does not eliminate arbitrary write skew. Generated identities remain opaque, and constraint outcomes can disclose hidden key existence. Deferrable constraints and native constraint callbacks are unsupported.
 
 ## Authorization Under Concurrent Writes
 
@@ -46,15 +46,15 @@ Administrative schema and permission transactions use the same durable publicati
 
 ## Errors, Cancellation, and Retry
 
-Use `ACTIVE -> COMMITTING -> COMMITTED` or `ACTIVE/COMMITTING -> ABORTED` before irreversible COMMIT submission, with an internal submission barrier inside COMMITTING. For the baseline, any SQL/storage statement error aborts the entire invocation transaction; no savepoints or partial recovery are supported. User code cannot catch an error and later commit prior writes.
+Use `ACTIVE -> COMMITTING -> COMMITTED` or `ACTIVE/COMMITTING -> ABORTED` before redb commit begins, with an internal submission barrier inside COMMITTING. For the baseline, any SQL/storage statement error aborts the entire invocation transaction; no savepoints or partial recovery are supported. User code cannot catch an error and later commit prior writes.
 
-Cancellation and finalization race through a synchronized storage state transition. Cancellation accepted before WAL COMMIT submission prevents commit. Once submission begins, cancellation is pending/too-late rather than a promised abort; the durable outcome must be resolved. After commit, data cannot be rolled back. An uncertain failure during logging/publication is resolved through recovery, never reported as a definite abort without evidence. Executor crashes before finalization abort; supervisor failure during commit may leave a committed transaction whose reply was lost.
+Cancellation and finalization race through a synchronized storage state transition. Cancellation accepted before redb write-transaction commit begins prevents commit. Once commit begins, cancellation is pending/too-late rather than a promised abort; the durable outcome must be resolved. After commit, data cannot be rolled back. An uncertain failure during logging/publication is resolved through recovery, never reported as a definite abort without evidence. Executor crashes before finalization abort; supervisor failure during commit may leave a committed transaction whose reply was lost.
 
 Return an opaque invocation ID at admission and provide an authenticated status lookup to reconcile lost commit replies. A committed transaction stays committed even if result delivery fails. Provisional output is not a commit receipt. Never automatically rerun arbitrary user libraries; clients may explicitly retry the whole invocation with a fresh snapshot after a known abort. Unknown outcome requires status reconciliation first. [Physical metadata](physical-metadata.md) defines retained durable outcomes and UNKNOWN/EXPIRED behavior; the concrete retention interval still requires configuration. Submission deduplication is not promised, and outcome lookup does not authorize automatic replay.
 
 ## Durability and Recovery
 
-Use the [WAL v1 redo-only full-page protocol](wal-recovery.md) from the writable milestone. A successful commit acknowledgement requires its durable commit record. Recovery replays complete committed transactions and discards incomplete/uncommitted work, restoring indexes and transaction outcomes consistently. WAL framing, page layout, and checkpoint ordering are specified; remaining payload fixtures and later flush batching must preserve those contracts. io_uring write completion alone does not prove durability.
+Use redb durable write transactions from the writable milestone. A successful acknowledgement requires commit under the selected redb durability mode. Recovery is redb-owned; logical rows, indexes, catalog, required audit and outcome must be written atomically. An ambiguous commit result requires recovery/status reconciliation.
 
 ## Metadata Consistency Domains
 
@@ -87,4 +87,4 @@ Bound invocation age, private write-set bytes, pinned history, cursor buffers, a
 
 [PostgreSQL's MVCC overview](https://www.postgresql.org/docs/18/mvcc-intro.html) describes versioned reads, and its [isolation documentation](https://www.postgresql.org/docs/18/transaction-iso.html) distinguishes snapshot isolation from serializability. These are background, not a requirement to copy its storage layout.
 
-Open implementation choices include remaining versioned payload fixtures, synchronization primitives, retention accounting, and concrete outcome-retention intervals. Page/row/WAL formats now have v1 specifications. Serializable isolation, finer write conflicts, savepoints, concurrent statements within one invocation, and online schema rewrites are future work. Initial administrative DDL is specified separately.
+Open choices include the pinned redb release/durable mode, engine value fixtures, synchronization primitives, retention accounting, and outcome interval. redb serializes writes; the external contract remains snapshot isolation with engine row conflicts. Serializable isolation, finer write conflicts, savepoints, concurrent statements within one invocation, and online schema rewrites are future work. Initial administrative DDL is specified separately.
