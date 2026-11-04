@@ -9,10 +9,10 @@ Choose the earliest uncompleted dependency and one observable behavior within it
 ## Suggested First Tasks
 
 1. Establish the minimal Rust workspace and toolchain checks; report setup failures separately from behavior failures.
-2. Clarify one required format decision and add a hand-checked valid/invalid physical-reference fixture.
+2. Clarify one required redb table/key/value mapping decision and add a hand-checked valid/invalid logical codec fixture.
 3. Observe the intended decoder test fail, implement bounded decoding, and run the focused checks.
 4. Add one versioned engine key/value codec and its negative case.
-5. Continue P1 in dependency order; introduce the I/O fault model before making durable-commit claims.
+5. Continue the foundation phase in dependency order; introduce the selected redb durability/fault model before making durable-commit claims.
 
 These are starting tasks, not instructions to skip inspection or to implement all codec families before testing anything.
 

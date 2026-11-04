@@ -57,4 +57,4 @@ Record decisions consistently across affected documents. Keep unresolved securit
 
 Follow the [iterated development guide](../INTERATED_DEVELOPMENT.md) to implement these contracts through small TDD cycles while refining the specs.
 
-The [storage-manager implementation plan](../plans/storage-manager/README.md) breaks that component into dependency-ordered tasks, prerequisite decisions, and acceptance gates for future implementation agents.
+The [implementation plan index](../plans/README.md) maps every component and specification to dependency-ordered tasks, prerequisite decisions, and acceptance gates. It includes the [storage-manager plan](../plans/storage-manager/README.md), shared integration milestones, and per-increment evidence requirements for future implementation work.
