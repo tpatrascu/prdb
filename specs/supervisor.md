@@ -1,0 +1,60 @@
+# Supervisor
+
+## Responsibilities and Trust
+
+Implement the supervisor in Rust. Client network connections terminate in the separate [gateway](client-gateway.md); the supervisor exposes bounded private admission/result IPC, not a public listener. It is trusted to establish execution identity, arrange confinement, provision scoped channels, and manage process lifetimes. It may initially run alongside the storage manager. It must not execute user native code or load client-built query libraries, including for inspection.
+
+## Execution Context
+
+Arrange a storage-managed context containing:
+
+- Authenticated principal and invocation-specific grant.
+- MVCC data/schema snapshot, private write set, and policy version/context, including policy inputs.
+- Opaque invocation/transaction ID for authenticated outcome lookup.
+- Deadline, resource budgets, and cancellation state.
+- Connection identity and lifecycle ownership.
+
+Identity comes from a trusted admission path, never a worker-supplied user ID. Initial client authentication uses database-issued revocable tokens through the [plaintext TCP gateway](client-protocol.md), with loopback binding by default; bootstrap remains on a restricted local setup socket. Storage validates token state. Gateway-provided principal IDs are not proof of authentication. See [users and roles](ddl-identity.md). Credentials never enter executor parameters or artifacts. Verify login/token state at each admission and record the identity/credential epochs for write-commit validation. Creating a context must not permit authority greater than the admitted caller's permissions.
+
+## Lifecycle
+
+1. Authenticate staging through gateway-service IPC and accept bounded client-built artifact, manifest, and parameter bytes into supervisor-owned storage. Reserve an invocation ID before execution; upload alone creates no MVCC snapshot. Check compatibility, lengths/digests, and seal immutable artifact bytes without loading the library. On explicit START, revalidate authentication and authority before admission.
+2. Allocate an invocation context, pinned MVCC snapshot and private write set, effective grant, deadline, and cumulative budgets. Provision separate executor-storage and optimizer-storage channels; the latter has the estimation role.
+3. Provision a context-bound executor-to-optimizer submission channel and bounded output channel. The SDK's published definitions do not grant roles or widen the invocation grant.
+4. Launch the executor using the Linux sandbox specification before loading query.so or any dependencies. Invoke the user entry point; SDK SQL calls submit structured queries to the optimizer and execute returned plans.
+5. Monitor planning, execution, and bounded result output. Relay executor bytes as provisional data to the gateway; only supervisor envelopes backed by storage decisions carry terminal outcomes. No executor output buffer connects directly to the client.
+6. On successful library return, stop new worker requests and request atomic commit through the supervisor-only storage control channel. On any statement/execution error, request abort. Finalize resources after storage resolves the transaction and in-flight tasks drain. Report success only after durable commit; partial output is provisional, and a lost reply requires authenticated outcome lookup. Success does not attest to result correctness.
+
+Use a fresh worker per user-library invocation in the prototype. Sequential SDK calls share its MVCC snapshot, private writes, and cumulative budgets; a statement error aborts the whole transaction. Avoid cross-principal process reuse and inherited storage memory. Sandbox establishment must finish before any untrusted executable, library constructor, or entry point runs.
+
+## Budgets and Failures
+
+Bound CPU, memory, process count, wall time, output bytes, and storage work attributable to the whole invocation, including all sequential SQL and direct storage calls. Worker limits alone do not bound expensive requests handled by storage. Bound planning and statistics estimation independently; user compilation occurs in the client. Cancellation closes planning channels and pending estimates as well as worker resources; private background statistics maintenance has separate admission and budgets.
+
+Reject execution if required sandbox features cannot be established. Worker crashes must fail only that execution; disconnects and supervisor cancellation must trigger storage cleanup. Before irreversible WAL COMMIT submission, required channel loss, cancellation, expired deadlines, and invocation-wide resource exhaustion abort the transaction; they cannot be converted into heuristic planning or a fresh context by user code.
+
+## Workload Admission
+
+Assign bounded operational/analytical resource classes under the caller's allowance. Reserve progress for WAL/commit, point reads, cancellation, and reclamation; limit analytical prefetch, cache pollution, snapshot age, and output. Client labels cannot bypass quotas. Follow [workload profile](workload-profile.md) and keep I/O-backend capability fallback separate from fail-closed sandbox requirements.
+
+## Administrative Admission
+
+Route DDL and credential operations from a separate authenticated gateway control-mode connection over the supervisor's administrative service, separate from executor channels. The gateway service role cannot finalize transactions or bypass actor validation. Authorize schema, user/role, and permission actions independently; storage rechecks administrative actor authority at commit. Database role names are not IPC service-role assignments. Support bootstrap, token rotation/revocation, user disable, and protected outcome lookup as defined in identity DDL.
+
+## Startup and Operational Metadata
+
+Do not admit invocations before storage completes [bootstrap/recovery validation](catalog-lifecycle.md) and publishes READY. Coordinate offline upgrade admission/drain requirements without loading user code during migration.
+
+Expose own-invocation status and administrator-only runtime inspection through [operational metadata](operational-metadata.md). Reconcile lost replies against [durable outcome records](physical-metadata.md); absence of a live executor does not prove rollback. Required administrative audit records/outbox entries commit with their state changes, while optional telemetry cannot reverse a durable data commit.
+
+## Concurrency and Outcome Races
+
+Admit multiple invocations concurrently with global and per-principal limits, bounded queues, and fairness between scans, writes, and planning. Bound transaction age and retained history; abort rather than silently refreshing old snapshots. Do not hold storage locks while waiting on worker output.
+
+Cancellation accepted before WAL COMMIT submission aborts; after submission it may be too late and requires outcome reconciliation. Durable commits cannot be undone. Never report rollback merely because a reply or supervisor connection was lost. Use the state machine and recovery/status contract in [concurrency and MVCC](concurrency-mvcc.md). No automatic replay of arbitrary user code is permitted.
+
+## Validation and Open Questions
+
+Test launch failures, timeout, client/gateway disconnect, slow network output, forged worker terminal messages, upload revocation before START, worker descendants, cancellation during an outstanding read, output flooding, and cleanup after planner failure.
+
+Open choices: authentication wire/cryptographic details, deployment privileges, resource-limit mechanism, process supervision API, and whether supervisor/storage separation is needed after the prototype.

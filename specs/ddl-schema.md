@@ -1,0 +1,111 @@
+# Schema Definition Language
+
+## Scope and Execution
+
+This document defines proposed SQL-like schema DDL, not an implemented parser or PostgreSQL compatibility promise. Users and roles are defined in [identity DDL](ddl-identity.md); row/cell rules are defined in [permission DDL](ddl-permissions.md).
+
+DDL runs through a separately authenticated administrative SDK/control channel. The client may parse text, but storage independently parses or validates a bounded structured definition and checks administrative privileges. Query executors cannot call this channel or execute DDL inside their invocation transaction. Definitions in the SDK confer no authority.
+
+Each administrative submission contains one statement or an explicit atomic batch of DDL statements; it cannot mix user native execution or DML. Catalog changes, identity changes, and permissions share storage's durable commit ordering. Administrative requests have IDs, budgets, cancellation, and outcome lookup, just like transaction finalization.
+
+## Names, Schemas, and Types
+
+Initially one database per storage-manager instance, containing named schemas. `CREATE DATABASE`, federation, and cross-database references are future extensions.
+
+```sql
+CREATE SCHEMA app AUTHORIZATION app_owner;
+ALTER SCHEMA app RENAME TO application;
+ALTER SCHEMA application OWNER TO app_owner;
+DROP SCHEMA application RESTRICT;
+```
+
+Unquoted identifiers fold to lowercase; double-quoted identifiers preserve case. Require schema-qualified names in administrative definitions and stored dependencies. Resolve client unqualified names against an explicit admitted default schema, never an uncontrolled search path. Catalog record layouts, indexes, and dependencies are defined in [data dictionary](data-dictionary.md). Object and column identities are stable catalog IDs; renames do not retarget dependencies. New objects never reuse a dropped object's identity.
+
+Initial scalar types: `BOOLEAN`, `SMALLINT`, `INTEGER`, `BIGINT`, `DECIMAL(p,s)` with `1 <= p <= 38` and `0 <= s <= p`, `TEXT`, `VARCHAR(n)`, `BYTEA`, `UUID`, `DATE`, and `TIMESTAMP WITH TIME ZONE`. Integers are signed with checked overflow. Decimal is exact; implicit lossy conversions fail. Text is valid UTF-8 with a deterministic binary collation initially; `VARCHAR(n)` limits Unicode scalar count. Timestamps normalize to UTC at microsecond precision. Wire encodings and numeric/date range details must be fixed before implementation. Arrays, JSON, enums, custom types, and locale collations are deferred.
+
+## Tables, Defaults, and Constraints
+
+```sql
+CREATE TABLE app.employees (
+    id UUID GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    department_id UUID NOT NULL,
+    manager_id UUID NOT NULL,
+    name TEXT NOT NULL,
+    salary DECIMAL(12,2),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    CONSTRAINT salary_nonnegative CHECK (salary >= 0)
+);
+```
+
+`UUID GENERATED ALWAYS AS IDENTITY` is this engine's extension: storage allocates an opaque non-sequential ID, rejects explicit overrides, and checks collisions. Every table has a stable internal identity even when its SQL primary key is user-supplied. No global sequence values are exposed by default.
+
+Supported constraints:
+
+| Definition | Semantics |
+| --- | --- |
+| `NOT NULL` | Reject a null value. |
+| `PRIMARY KEY (a, b)` | At most one per table; all fields non-null and the tuple unique. |
+| `UNIQUE (a, b)` | Enforce tuple uniqueness; rows with any null key field do not conflict initially. |
+| `CHECK (expression)` | Bounded deterministic row-local expression; false fails, true or SQL unknown passes. Use `NOT NULL` separately. |
+| `FOREIGN KEY (...) REFERENCES schema.table (...)` | Referenced fields must have a compatible primary/unique key. `MATCH SIMPLE`: any null referencing field exempts that row. |
+
+Constraints operate on full storage values, not redacted projections. Only built-in typed expressions are allowed; no native functions, subqueries, or external callbacks. Defaults are typed literals or fixed trusted built-ins, initially generated identity and `CURRENT_PRINCIPAL_ID()`. Defaults are applied before creation policies and constraints, but do not bypass field/row permissions. `CURRENT_PRINCIPAL_ID()` is a server value, never a parameter chosen by the query.
+
+Primary, unique, and foreign-key constraints are part of the initial schema design. Defining a foreign key requires source-table ALTER/creation authority and REFERENCES authority on the target key. Foreign keys initially support only `ON UPDATE RESTRICT` and `ON DELETE RESTRICT`; cascading actions and deferrable constraints are deferred. User-defined native constraints remain forbidden.
+
+Stage-time checks can reject obvious failures early. Before committing, storage validates uniqueness and referential integrity against the latest committed state plus the transaction's final private changes under commit serialization. Validate both child insert/update and parent delete/key-change directions, including concurrent transactions. Abort the whole invocation on violation. This protects these declared constraints but does not make general snapshot-isolated transactions serializable.
+
+Constraint outcomes can reveal that a hidden conflicting/referenced key exists. Do not return protected values or row identities in diagnostics; nevertheless this logical inference is an explicit limitation of exposing globally constrained writes. Definitions and grants must be reviewed with that implication; redaction cannot eliminate it.
+
+## Alter and Drop
+
+```sql
+ALTER TABLE app.employees ADD COLUMN title TEXT;
+ALTER TABLE app.employees RENAME COLUMN title TO job_title;
+ALTER TABLE app.employees ALTER COLUMN active SET DEFAULT TRUE;
+ALTER TABLE app.employees ALTER COLUMN salary SET NOT NULL;
+ALTER TABLE app.employees ADD CONSTRAINT employee_name UNIQUE (department_id, name);
+ALTER TABLE app.employees DROP CONSTRAINT employee_name;
+ALTER TABLE app.employees DROP COLUMN job_title RESTRICT;
+ALTER TABLE app.employees RENAME TO staff;
+ALTER TABLE app.staff OWNER TO app_owner;
+DROP TABLE app.staff RESTRICT;
+```
+
+Support nullable column addition, typed literal defaults, rename, default changes, `SET/DROP NOT NULL`, `SET/DROP DEFAULT`, constraint add/drop, ownership transfer, and restricted column/table drop. Adding a non-null field requires a valid literal default and validating existing rows. Existing rows acquire the add-column default as of that DDL change; later default changes affect future inserts only. Context-dependent defaults are not allowed for backfilling existing rows. Type-changing rewrites, computed columns, partitioning, temporary tables, user-created views, triggers, stored procedures, explicit sequences, and `TRUNCATE` are deferred.
+
+Default drop mode is `RESTRICT`: dependencies prevent removing an object still referenced elsewhere. Dropping a column is blocked by its policies, constraints, and indexes. Dropping a table removes its owned column/index/constraint/policy definitions atomically, but is blocked by external references such as another table's foreign key. Dropping a schema requires it to be empty. No implicit cross-object cascade is supported. `IF EXISTS`/`IF NOT EXISTS` may suppress existence errors only after checking authority; they never reconcile incompatible definitions. Adding a column grants no field privileges automatically.
+
+## Indexes
+
+```sql
+CREATE INDEX employees_department ON app.employees USING BTREE (department_id, name);
+CREATE UNIQUE INDEX employees_unique_name ON app.employees (department_id, name);
+DROP INDEX app.employees_department RESTRICT;
+```
+
+Index names live in the table's schema. Initial indexes are B-trees on one or more plain columns, ascending with nulls last. A unique index uses the same null/commit-validation semantics as `UNIQUE`. Primary/unique constraints own backing indexes; their indexes cannot be dropped independently while required. Expression, partial, covering, full-text, custom access methods, and `CREATE INDEX CONCURRENTLY` are deferred.
+
+An index is an internal access path, not an authorization boundary or raw data API. Entries must resolve to MVCC-visible row versions and be subject to identical row/cell checks as scans. An index-only read is allowed only if storage can enforce those checks and snapshot visibility. Index definitions/size/statistics are disclosed only through authorized catalog/optimizer surfaces.
+
+## DDL Concurrency and Recovery
+
+Use per-table/schema DDL fences plus the commit gate. Initial table alterations, constraint validation, and index builds block affected-table write commits while building/validating; unrelated tables and pinned readers can continue. Do not hold the global commit gate during a long scan. Acquire multiple DDL fences in a deterministic object-ID order and apply deadlines to waits.
+
+After taking a fence, capture the latest committed table version, build/validate privately, then atomically publish the catalog and physical changes. Foreign-key creation fences both referencing and referenced tables during validation/publication. Transactions based on an older affected-table schema/write epoch must abort rather than commit incompatible writes after the fence is released. Uncommitted private writes are not included in the build. An index becomes usable only after durable complete publication; failed builds leave no usable partial index. Already-admitted transactions never acquire the new index just because it exists physically; catalog snapshot visibility still applies.
+
+Old read snapshots retain compatible catalog definitions and physical versions until their pins drain, including after rename/drop. Stored row versions also retain the schema definitions and add-column defaults needed for decoding until rewritten/reclaimed. New snapshots see the new schema; plans/handles are never silently rebound. Retain retired tables/indexes until no snapshot can use them, or explicitly abort an invocation under retention pressure. Initially use a conservative table schema/write epoch for any relevant DDL change.
+
+Apply the [storage format v1 limits](storage-format.md): at most 256 columns, 16 MiB per scalar, and 2,048 bytes per complete encoded index key, including its 24-byte version suffix (2,024 bytes for the SQL tuple). Exact comparison bytes follow [key encoding v1](index-key-encoding.md). Validate definitions where size is statically known and values otherwise. Index creation over an oversized existing key fails atomically; DML producing an oversized key aborts its invocation. Report bounded errors without exposing hidden values.
+
+Policy and membership changes need epoch publication and write revalidation, not full-table scans. A policy change taking a policy-driving field into use also freezes that field for future query updates. Durable recovery must restore the catalog, constraints, index validity, and data at one committed state.
+
+## Discovery and Format Evolution
+
+Built-in `information_schema` relations are fixed filtered storage interfaces defined in [metadata discovery](metadata-discovery.md), not user-created views. Reserve system namespaces against user DDL. Catalog bootstrap and storage-format upgrades are not ordinary ALTER statements; follow [catalog lifecycle](catalog-lifecycle.md). Diagnostic operational state is exposed separately from snapshot catalog discovery.
+
+## Validation and References
+
+Test duplicate definitions, dependency rejection, default/null semantics, simultaneous duplicate keys, both directions of foreign-key races, failed constraint validation, DDL versus pending writers, old snapshots after drop, crash during index publication, and inaccessible catalog diagnostics.
+
+Conventional syntax references: [PostgreSQL CREATE TABLE](https://www.postgresql.org/docs/current/sql-createtable.html) and [CREATE INDEX](https://www.postgresql.org/docs/current/sql-createindex.html). Engine-specific authorization and concurrency semantics above take precedence.

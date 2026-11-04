@@ -1,0 +1,51 @@
+# Linux Sandbox
+
+## Objective and Threat Model
+
+Contain arbitrary native worker code using Linux OS mechanisms without a VM. The kernel and trusted launcher remain in the trusted computing base. A separate process alone is insufficient, and seccomp alone is not a complete sandbox.
+
+## Required Properties
+
+- No access to database files, user home directories, credentials, or unrelated application resources.
+- No external network access or unauthorized IPC.
+- No tracing, memory access, or signaling of trusted/unrelated processes.
+- No privilege escalation; drop capabilities and establish `no_new_privs`.
+- No worker io_uring access: deny setup/register/enter and pass no rings, registered buffers, or database descriptors. Disk I/O belongs to trusted storage.
+- Only explicitly provisioned descriptors and approved runtime resources.
+- Bounded CPU, memory, process count, output, and wall time.
+
+Use namespaces, filesystem restrictions, and a narrow seccomp allowlist as complementary mechanisms. Evaluate Landlock as an additional layer. Resource controls may combine cgroups, resource limits, and supervisor enforcement; exact mechanisms and required privileges remain to be selected.
+
+## Launch Ordering
+
+1. A trusted launch path creates the execution environment and scoped channels.
+2. Establish filesystem/process/network isolation and resource controls.
+3. Remove inherited descriptors, environment secrets, capabilities, and unwanted access.
+4. Apply required restrictions before transferring control to any untrusted code.
+5. In the clean executor host, load the admitted immutable query.so and supported dependencies only inside that confinement, then invoke its entry point.
+
+Implementation must resolve loader/runtime syscall needs without an unconstrained startup window. Library constructors count as untrusted execution. Do not fork a worker from a secret-bearing storage address space and execute user code in the inherited image; use a clean execution image before user code runs.
+
+## Artifact and Runtime Profile
+
+The baseline executes client-built shared libraries linked with prebuilt SDK code; it does not run a compiler in the executor. Provision only the admitted artifact and declared supported dependencies. Constrain dynamic-loader search paths and remove loader-related environment overrides; neither the manifest nor SDK provenance grants filesystem access. A later standalone executable adapter must satisfy the same boundary but is outside the initial path. An optional sealed sanitized-batch memfd is a separate negotiated capability defined in [memory storage](memory-storage.md); it must not become generic descriptor or writable-shared-memory access.
+
+The TinyCC-produced C library, prebuilt C SDK, libc dependencies, and Rust executor host must fit the chosen syscall, threading, memory, and dependency profile. Faster compilation is not grounds for weakening confinement. Native constructors and dependency initialization are part of untrusted execution, not an exemption from the sandbox.
+
+## Capability Detection and Failure
+
+Specify a minimum supported feature profile and verify it at launch. Fail closed when required restrictions are unavailable; never silently run with weaker isolation. Rootless deployment feasibility and cgroup delegation depend on the host configuration and require explicit validation.
+
+The supervisor must clean up descendants and resources after crashes or timeouts and request transaction abort before commit. Killing a process does not undo a durable commit. Storage retains version pins until its own in-flight tasks drain. Sandbox limits do not replace storage-side request, write-set, and history-retention budgets.
+
+## Validation and Limits
+
+Use malicious client-built query libraries to attempt filesystem reads, network access, descriptor discovery, process inspection, privilege changes, spawning, memory exhaustion, and unbounded output. Exercise constructor-time attacks and every supported deployment profile.
+
+Kernel vulnerabilities and comprehensive microarchitectural/timing side-channel protection are outside the initial guarantee. Review exposed kernel interfaces and record residual inference risks as the design develops.
+
+## References
+
+- [Chromium Linux sandbox](https://chromium.googlesource.com/chromium/src/+/master/sandbox/linux)
+- [Linux seccomp documentation](https://kernel.org/doc/html/latest/userspace-api/seccomp_filter.html)
+- [Linux Landlock documentation](https://docs.kernel.org/userspace-api/landlock.html)

@@ -1,0 +1,106 @@
+# Catalog Payload Encoding v1
+
+## Scope and Physical Container
+
+This is catalog payload version 1 for every logical family in the [dictionary](data-dictionary.md). It is a protected storage format, not an SDK ABI or ordinary SQL table. Use the standard MVCC `ROW1` container with exactly one non-null BYTEA field containing the envelope below; its built-in schema version is 1. Normal inline/overflow rules apply. Maximum envelope size is 1 MiB. The record's row UUID is a private storage identity, distinct from a named object's ID.
+
+The logical key is stable across versions. Updates retain the record-row UUID and link previous versions through ROW1. Tombstones use ROW1's no-fields form; retained catalog index entries and version chains preserve key resolution. Recreating a dropped named object uses a new object ID. A composite-key record reintroduced after deletion uses a fresh record-row UUID; at most one version is live per logical key at a snapshot.
+
+All integers here are little-endian except logical key components defined by [key encoding](index-key-encoding.md). All reserved bytes are zero. Page CRC32C protects the envelope; no second payload checksum is stored.
+
+## Envelope and TLVs
+
+| Offset | Bytes | Field |
+| --- | --- | --- |
+| 0 | 4 | ASCII `CAT1` |
+| 4 | 2 | Envelope version=1 |
+| 6 | 2 | Family code |
+| 8 | 4 | Total envelope bytes |
+| 12 | 4 | Logical key byte length |
+| 16 | 4 | Field count |
+| 20 | 4 | Flags=0 |
+| 24 | 8 | Reserved |
+
+The 32-byte header is followed by logical key bytes and then TLVs, with no alignment padding between any items. Each TLV header is `tag u16, wire_type u8, flags u8=0, payload_length u32`, followed by exactly that many bytes. Tags are strictly increasing, unique, and scoped to the family. Reject trailing bytes, missing required tags, unknown tags/types, noncanonical widths, or inconsistent lengths. v1 defines no skippable optional extensions: adding fields requires a catalog payload version change.
+
+Wire types: `U16=1` (2 bytes), `U32=2` (4), `U64=3` (8), `I64=4` (8), `BOOL=5` (one byte 0/1), `ID=6` (16), `TEXT=7` (UTF-8 bytes, no terminator), `BYTES=8`, `IDS=9` (u32 count then exactly count × 16 bytes). IDs are nonzero. Optional fields are omitted, not encoded as a zero ID or null TLV. No field repeats; lists preserve declared order, while sets must be sorted by raw ID bytes and deduplicated.
+
+Bound TEXT to 4,096 bytes (identifier limits may be stricter), IDS to 256 entries unless a lower limit is stated, and individual BYTES to 256 KiB. Larger relationships use child records. Envelope/field counts and arithmetic are checked before allocation; at most 64 fields. Times are signed UTC microseconds since 1970-01-01, not wall-clock strings.
+
+## Family Registry and Canonical Keys
+
+Logical key bytes start with the family code as raw unsigned big-endian u16, followed by the components below using the non-null component encodings in key version 1. ID components use UUID encoding; numeric components use the internal unsigned encodings. Family prefix is not itself a tuple component.
+
+| Code | Family | Key components |
+| --- | --- | --- |
+| 1 | database | database ID |
+| 2 | objects | object ID |
+| 3 | schemas | schema ID |
+| 4 | types | type ID |
+| 5 | tables | table ID |
+| 6 | columns | column ID |
+| 7 | expressions | expression ID |
+| 8 | constraints | constraint ID |
+| 9 | indexes | index ID |
+| 10 | principals | principal ID |
+| 11 | memberships | member ID, role ID |
+| 12 | grants | grantee ID, object ID, privilege u16, target-scope u16, target ID |
+| 13 | policies | policy ID |
+| 14 | policy_targets | policy ID, target-kind u16, target ID |
+| 15 | dependencies | dependent ID, referenced ID, edge-kind u16 |
+| 16 | credential_verifiers | token ID |
+
+Grant target-scope is object=1 or column=2; object scope repeats object ID as target ID. A grant is one direct edge, not one edge per grantor. Regrant updates provenance on that edge. Fields duplicating key components must agree exactly. Key length excludes the physical index's 24-byte version suffix; the complete key must still fit 2,048 bytes.
+
+## Field Registry
+
+Notation `tag:name TYPE`; `?` means optional, all other fields are required. IDs embedded only in the key need not be repeated as TLVs. Epochs and schema versions are nonzero u64 values advanced under commit serialization. Semantic constraints from DDL remain mandatory in addition to byte validation.
+
+| Family | Tags |
+| --- | --- |
+| database | 1:name TEXT; 2:catalog_version U32; 3:builtins BYTES; 4:configuration_id ID?; 5:expression_version U32; 6:builtin_semantics_version U32 |
+| objects | 1:kind U16; 2:parent_id ID?; 3:normalized_name TEXT; 4:owner_id ID; 5:definition_epoch U64; 6:state U16 |
+| schemas | 1:search_path IDS |
+| types | 1:builtin_kind U16; 2:parameter_rule U16; 3:scalar_encoding U32; 4:comparison_version U32; 5:default_mask U32; 6:cast_profile U32 |
+| tables | 1:schema_id ID; 2:schema_version U64; 3:write_epoch U64; 4:storage_object_id ID; 5:row_identity_mode U16 |
+| columns | 1:table_id ID; 2:ordinal U32; 3:normalized_name TEXT; 4:type_id ID; 5:type_parameters BYTES; 6:nullable BOOL; 7:default_expression_id ID?; 8:generation_mode U16; 9:introduced_schema_version U64; 10:add_column_default_id ID? |
+| expressions | 1:purpose U16; 2:ir_version U32; 3:result_type_id ID; 4:result_parameters BYTES; 5:ir BYTES; 6:dependency_ids IDS |
+| constraints | 1:table_id ID; 2:kind U16; 3:source_columns IDS; 4:expression_id ID?; 5:referenced_constraint_id ID?; 6:referenced_columns IDS; 7:update_action U16; 8:delete_action U16; 9:match_rule U16; 10:state U16; 11:backing_index_id ID? |
+| indexes | 1:table_id ID; 2:columns IDS; 3:method U16; 4:unique BOOL; 5:null_rule U16; 6:owning_constraint_id ID?; 7:storage_object_id ID; 8:state U16; 9:key_version U32; 10:table_schema_version U64 |
+| principals | 1:kind U16; 2:normalized_name TEXT; 3:login_enabled BOOL; 4:authority_epoch U64 |
+| memberships | 1:grantor_id ID; 2:membership_epoch U64 |
+| grants | 1:grantor_id ID; 2:authority_epoch U64 |
+| policies | 1:table_id ID; 2:kind U16; 3:operation U16; 4:composition U16; 5:using_expression_id ID?; 6:check_expression_id ID?; 7:authority_epoch U64 |
+| policy_targets | No TLVs; key is the entire definition |
+| dependencies | No TLVs; key is the entire definition |
+| credential_verifiers | 1:user_id ID; 2:algorithm U16; 3:algorithm_version U16; 4:verifier BYTES; 5:issued_at I64; 6:expires_at I64; 7:revoked BOOL; 8:revoked_at I64?; 9:label TEXT; 10:authority_epoch U64 |
+
+## Enum Values and Structured Fields
+
+Object kinds: schema=1, type=2, table=3, column=4, expression=5, constraint=6, index=7, user=8, role=9, policy=10. Object state is LIVE=1; deletion uses tombstones. Other unknown values fail closed. Principal kind user=1/role=2; roles must have login_enabled=false. Names/owners agree with their objects record. The database record has no parent objects row.
+
+Built-in types: BOOLEAN=1, SMALLINT=2, INTEGER=3, BIGINT=4, DECIMAL=5, TEXT=6, VARCHAR=7, BYTEA=8, UUID=9, DATE=10, TIMESTAMPTZ=11. Type parameter-rule codes: none=0, decimal=1, varchar=2. `type_parameters` and `result_parameters` are exactly eight bytes: precision u16, scale u16, maximum character count u32. Unused fields are zero. Validate decimal p/s and nonzero VARCHAR count against DDL. Scalar encoding, comparison, and cast profile are 1. Cast profile 1 permits only the exact conversions supported by the typed SQL contract; the field does not authorize additional conversions.
+
+Type default_mask bits: literal=bit0, generated-UUID=bit1, current-principal=bit2; no other bits. All initial types permit literal defaults, only UUID permits bits1/2. Column generation mode none=0/generated UUID=1; table row_identity_mode=1 (opaque UUID). Ordinals are zero-based positions in the identified table schema; old definitions remain accessible by schema version. `add_column_default_id` is immutable after introduction and refers to a literal; absence means null for an absent old-record field. Current insert defaults may change independently.
+
+Expression purpose: default=1, check=2, policy_using=3, policy_check=4. The catalog fixes the IR field's exact byte envelope, but **does not define executable expression opcodes**. `ir_version` selects a separately supported bounded typed IR decoder; unsupported versions reject startup/DDL, never execute opaque bytes. Freeze that IR grammar and literal encoding before implementing expressions. The same restriction applies to credential algorithm/version: no algorithm codes are assigned here; a separate authentication profile must assign a verified encoding/length before issuing tokens. BYTES is not permission to accept arbitrary verifier algorithms.
+
+Constraint kinds: not_null=1, primary_key=2, unique=3, check=4, foreign_key=5. State VALID=1; BUILDING is private and never a committed usable definition. PK/unique require nonempty source columns and backing index; FK requires matching ordered source/referenced columns and referenced PK/unique constraint; CHECK requires expression and an empty source list (expression dependencies hold its columns); NOT NULL has exactly one source column. Irrelevant optional IDs are absent and irrelevant lists empty. Actions none=0/RESTRICT=1; match none=0/SIMPLE=1; FK uses 1 for all three, other constraints use 0. Index method BTREE=1, null_rule=NULLS_DISTINCT=1, state VALID=1, key_version=1. Index columns are nonempty, ordered, and distinct.
+
+Privileges: USAGE=1, SELECT=2, INSERT=3, UPDATE=4, DELETE=5, REFERENCES=6, CREATE=7, ALTER=8, INDEX=9, MANAGE_POLICIES=10, MANAGE_GRANTS=11, MANAGE_USERS=12, MANAGE_ROLES=13, CREATE_SCHEMA=14. Grant expansion and allowable object/column scopes follow permission DDL; no ALL or grant-option bit exists.
+
+Policy kind row=1/cell=2; operation SELECT=1/INSERT=2/UPDATE=3/DELETE=4; composition ALLOW=1/RESTRICT=2. Clause requirements follow permission DDL. Target kind recipient-user=1/recipient-role=2/column=3. Every policy requires recipients; cell policies require column targets, row policies forbid them. Dependencies: owned-child=1, expression-reference=2, foreign-key-target=3, backing-index=4, authority=5. The edge goes from dependent to referenced; owned-child points child to parent. One generic ID may appear under different edge kinds.
+
+## Bootstrap Mapping and Validation
+
+The database builtins field is `count u32`, then sorted entries `(code u16, reserved u16=0, ID[16])`, maximum 256 entries. Required codes: system schema=1, information_schema=2, database_admin role=3; primitive type codes are `100 + builtin_kind`; catalog family storage-object codes are `200 + family_code`. IDs are database-local opaque generated values persisted at initialization; reserved meaning is determined by code, not UUID bits. Engine descriptors know the codes/record schema before reading SQL metadata. The checkpoint catalog-directory root locates family roots without depending on this field to find its own decoder.
+
+The protected catalog-directory B-tree uses raw unsigned big-endian u16 family keys, without tuple markers or version suffixes, and 56-byte leaf values: family storage object ID[16] followed by root page reference[40]. Its internal separators use these same two-byte keys. It has exactly the family keys 1–16. It tracks current physical roots through WAL/root publication, not user-visible MVCC definitions; catalog records themselves remain versioned. On each family-root change, update the directory and root map in the same transaction. Checkpoint CATALOG_FAMILIES entries are the captured directory contents, not an independently writable catalog.
+
+Validate required mappings, uniqueness, ownership, named-object lifetimes, graph references/cycles, policy targets, epoch coherence, and current schema compatibility before publication/startup. DDL rejection is atomic. Dropping a required built-in is forbidden. Verifier bytes and expression/policy bodies never pass through ordinary metadata discovery.
+
+## Fixtures and Remaining Boundaries
+
+A policy_targets record with recipient-user target has family 14, key length 39 (`00 0e`, UUID component 17, U16 component 3, UUID component 17), field count 0, total length 71. Its header begins `43 41 54 31 01 00 0e 00 47 00 00 00 27 00 00 00`, followed by sixteen zero bytes and then the key. A BOOL TLV with tag 6 and true is `06 00 05 00 01 00 00 00 01`.
+
+Create binary fixtures for every family, absent optional fields, empty ordered lists, unknown tags, duplicate/out-of-order fields, corrupted graph references, tombstones, and old-schema decoding. Physical allocation, outcome/audit payloads, executable expression IR, and credential algorithms are separate contracts; this specification does not claim they are now implemented or fully specified.
