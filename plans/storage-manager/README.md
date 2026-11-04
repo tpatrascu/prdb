@@ -20,4 +20,4 @@ Run small TDD increments within each stage. Record actual red failures, exact re
 
 ## Exit Conditions
 
-The storage slice is complete only when real redb-backed tests show atomic rows/indexes/catalog/outcomes, concurrent snapshots and staged writers, correct authorization, durable commit/reopen behavior, bounded long-reader pressure, and no executor access to redb. Gateway/sandbox end-to-end evidence is required for the integrated service. Do not claim io_uring support unless the selected redb backend explicitly supplies and passes it.
+The storage slice is complete only when real redb-backed tests show atomic rows/indexes/catalog/outcomes, concurrent snapshots and staged writers, correct authorization, durable commit/reopen behavior, bounded long-reader pressure, and no executor access to redb. Gateway/sandbox end-to-end evidence is required for the integrated service.

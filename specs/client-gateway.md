@@ -15,7 +15,7 @@ No additional intermediary process is required: the gateway is the network inter
 | Storage | Credential/authority validation, snapshots, permissions, transaction decisions, durable outcomes |
 | Executor | Untrusted query execution and provisional output on its assigned local channel |
 
-The gateway must not load query libraries, launch executors, open database files, own storage io_uring resources, or access arbitrary storage operations. Its service channel can request admission and authorized client operations, but cannot impersonate the supervisor's commit role. Do not hand network connections or session credentials to executors.
+The gateway must not load query libraries, launch executors, open database files, own storage I/O resources, or access arbitrary storage operations. Its service channel can request admission and authorized client operations, but cannot impersonate the supervisor's commit role. Do not hand network connections or session credentials to executors.
 
 The gateway handles bearer credentials and plaintext results and therefore remains within the confidentiality boundary. A compromised gateway can steal credentials and alter client-visible traffic. Separation reduces access to storage/process-control capabilities; it is not an end-to-end confidentiality guarantee against gateway compromise.
 

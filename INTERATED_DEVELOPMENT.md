@@ -8,7 +8,7 @@ Start with [AGENTS.md](AGENTS.md), the [specification index](specs/README.md), a
 
 ## Workload and Storage Priorities
 
-Build an operational database first, with analytical queries as an explicit supported roadmap. Follow the [workload profile](specs/workload-profile.md), [redb backend](specs/redb-storage.md), and [memory model](specs/memory-storage.md). Add engine codec fixtures, then test redb transaction atomicity, durable reopen, snapshot pressure, and the selected platform profile. Do not build a parallel page store/WAL or claim io_uring unless redb supplies a reviewed backend.
+Build an operational database first, with analytical queries as an explicit supported roadmap. Follow the [workload profile](specs/workload-profile.md), [redb backend](specs/redb-storage.md), and [memory model](specs/memory-storage.md). Add engine codec fixtures, then test redb transaction atomicity, durable reopen, snapshot pressure, and the selected platform profile. Do not build a parallel page store/WAL.
 
 ## Preserve the Established Design
 

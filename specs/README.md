@@ -13,7 +13,7 @@ These documents capture the current research design for an operational database 
 - [Index-key encoding v1](index-key-encoding.md): exact ordered tuple bytes, version suffixes, and examples.
 - [In-memory storage](memory-storage.md): buffer/transaction lifetimes and security-constrained copy reduction.
 - [Transaction durability](wal-recovery.md): redb-backed atomic commits and recovery ownership.
-- [Disk I/O decision](disk-io.md): redb owns database-file I/O; no engine io_uring path.
+- [Disk I/O decision](disk-io.md): redb owns database-file I/O.
 - [Architecture](architecture.md): goals, trust boundaries, execution flow, and milestones.
 - [Concurrency and MVCC](concurrency-mvcc.md): snapshot isolation, concurrent writes, commit/recovery, and reclamation.
 - [Data dictionary](data-dictionary.md): catalog records, IDs, indexes, dependencies, and caches.
