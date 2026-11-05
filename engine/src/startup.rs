@@ -7,7 +7,7 @@ use crate::catalog::{
     validate_builtin_type_profile, validate_owned_child_graph,
 };
 use crate::expression::decode_catalog_expression_record;
-use crate::index_key::{DerivedIndexKey, derive_index_key};
+use crate::index_key::{DerivedIndexKey, derive_index_key, encode_sql_tuple};
 use crate::index_locator::IndexLocator;
 use crate::metadata::{EngineMetadata, Lifecycle};
 use crate::outcome::{InvocationOutcome, OutcomeStatus};
@@ -19,6 +19,8 @@ use std::collections::{HashMap, HashSet};
 
 const METADATA_KEY: &[u8] = b"format";
 const MAX_CATALOG_RECORDS_PER_FAMILY: usize = 65_536;
+const MAX_FOREIGN_KEYS_PER_DATABASE: usize = 256;
+const MAX_FOREIGN_KEY_ROW_VISITS_PER_STARTUP: usize = 65_536;
 type IndexDefinitions = HashMap<[u8; 16], [u8; 16]>;
 type IndexColumns = HashMap<[u8; 16], Vec<[u8; 16]>>;
 type UniqueIndexIds = HashSet<[u8; 16]>;
@@ -42,12 +44,21 @@ struct PersistedColumnSchema {
 
 type PersistedTableSchemas = HashMap<[u8; 16], PersistedTableSchema>;
 
+#[derive(Clone, Debug)]
+struct PersistedForeignKey {
+    source_table_id: [u8; 16],
+    source_ordinals: Vec<usize>,
+    target_index_id: [u8; 16],
+    comparison_columns: Vec<ColumnSchema>,
+}
+
 struct PersistedCatalog {
     record_count: usize,
     index_definitions: IndexDefinitions,
     index_columns: IndexColumns,
     unique_index_ids: UniqueIndexIds,
     table_schemas: PersistedTableSchemas,
+    foreign_keys: Vec<PersistedForeignKey>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -70,6 +81,8 @@ pub enum StartupError {
     CatalogLimit,
     InvalidCatalog,
     InvalidRow,
+    InvalidForeignKey,
+    ForeignKeyValidationLimitExceeded,
     SequenceAhead,
     InvalidIndex,
     InvalidOutcome,
@@ -111,6 +124,7 @@ pub fn validate_persisted_records(
         &catalog.unique_index_ids,
         &catalog.table_schemas,
     )?;
+    validate_foreign_key_rows(&read, &catalog.foreign_keys, &catalog.table_schemas)?;
     let outcomes = validate_outcomes(&read, metadata.commit_sequence)?;
     let audit_events = validate_audit(&read)?;
 
@@ -455,6 +469,21 @@ fn validate_catalog(
             let kind = field_u16(&record, 2)?;
             let table_id = field_id(&record, 1)?;
             let source_columns = field_ids(&record, 3)?;
+            if kind == 5 {
+                let referenced_columns = field_ids(&record, 6)?;
+                if source_columns.is_empty()
+                    || referenced_columns.is_empty()
+                    || referenced_columns.len() != source_columns.len()
+                    || field_optional_id(&record, 4)?.is_some()
+                    || field_optional_id(&record, 11)?.is_some()
+                    || field_u16(&record, 7)? != 1
+                    || field_u16(&record, 8)? != 1
+                    || field_u16(&record, 9)? != 1
+                    || field_u16(&record, 10)? != 1
+                {
+                    return Err(StartupError::InvalidCatalog);
+                }
+            }
             if !matches!(kind, 1..=5) || constraint_kinds.insert(constraint_id, kind).is_some() {
                 return Err(StartupError::InvalidCatalog);
             }
@@ -972,12 +1001,84 @@ fn validate_catalog(
             return Err(StartupError::InvalidCatalog);
         }
     }
+    if foreign_key_targets.len() > MAX_FOREIGN_KEYS_PER_DATABASE {
+        return Err(StartupError::InvalidCatalog);
+    }
+    let mut foreign_keys = Vec::with_capacity(foreign_key_targets.len());
+    for (foreign_key_id, target_constraint_id) in &foreign_key_targets {
+        let source_table_id = *constraint_tables
+            .get(foreign_key_id)
+            .ok_or(StartupError::InvalidCatalog)?;
+        let target_table_id = *constraint_tables
+            .get(target_constraint_id)
+            .ok_or(StartupError::InvalidCatalog)?;
+        let source_column_ids = constraint_source_columns
+            .get(foreign_key_id)
+            .ok_or(StartupError::InvalidCatalog)?;
+        let target_column_ids = constraint_referenced_columns
+            .get(foreign_key_id)
+            .ok_or(StartupError::InvalidCatalog)?;
+        let source_schema = table_schemas
+            .get(&source_table_id)
+            .ok_or(StartupError::InvalidCatalog)?;
+        let target_schema = table_schemas
+            .get(&target_table_id)
+            .ok_or(StartupError::InvalidCatalog)?;
+        let source_ordinals = source_column_ids
+            .iter()
+            .map(|column_id| {
+                source_schema
+                    .column_ids
+                    .iter()
+                    .position(|candidate| candidate == column_id)
+                    .ok_or(StartupError::InvalidCatalog)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let target_ordinals = target_column_ids
+            .iter()
+            .map(|column_id| {
+                target_schema
+                    .column_ids
+                    .iter()
+                    .position(|candidate| candidate == column_id)
+                    .ok_or(StartupError::InvalidCatalog)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut comparison_columns = Vec::with_capacity(target_ordinals.len());
+        for (source_ordinal, target_ordinal) in source_ordinals.iter().zip(&target_ordinals) {
+            let source_column = source_schema
+                .columns
+                .get(*source_ordinal)
+                .ok_or(StartupError::InvalidCatalog)?;
+            let target_column = target_schema
+                .columns
+                .get(*target_ordinal)
+                .ok_or(StartupError::InvalidCatalog)?;
+            if source_column.scalar_type != target_column.scalar_type {
+                return Err(StartupError::InvalidCatalog);
+            }
+            comparison_columns.push(ColumnSchema {
+                scalar_type: target_column.scalar_type,
+                nullable: true,
+            });
+        }
+        let target_index_id = *backing_index_targets
+            .get(target_constraint_id)
+            .ok_or(StartupError::InvalidCatalog)?;
+        foreign_keys.push(PersistedForeignKey {
+            source_table_id,
+            source_ordinals,
+            target_index_id,
+            comparison_columns,
+        });
+    }
     Ok(PersistedCatalog {
         record_count: count,
         index_definitions,
         index_columns,
         unique_index_ids,
         table_schemas,
+        foreign_keys,
     })
 }
 
@@ -1216,6 +1317,77 @@ fn validate_rows(
         count = count.checked_add(1).ok_or(StartupError::CountOverflow)?;
     }
     Ok(count)
+}
+
+fn validate_foreign_key_rows(
+    read: &ReadTransaction,
+    foreign_keys: &[PersistedForeignKey],
+    table_schemas: &PersistedTableSchemas,
+) -> Result<(), StartupError> {
+    let rows = read.open_table(ROWS).map_err(storage_error)?;
+    let indexes = read.open_table(INDEXES).map_err(storage_error)?;
+    let mut row_visits = 0usize;
+    for foreign_key in foreign_keys {
+        let source_schema = table_schemas
+            .get(&foreign_key.source_table_id)
+            .ok_or(StartupError::InvalidCatalog)?;
+        let mut start = [0; 32];
+        start[..16].copy_from_slice(&foreign_key.source_table_id);
+        let mut end = [u8::MAX; 32];
+        end[..16].copy_from_slice(&foreign_key.source_table_id);
+        for entry in rows
+            .range(start.as_slice()..=end.as_slice())
+            .map_err(storage_error)?
+        {
+            let (key, value) = entry.map_err(storage_error)?;
+            if key.value().len() != 32 || key.value()[..16] != foreign_key.source_table_id {
+                return Err(StartupError::InvalidRow);
+            }
+            row_visits = row_visits
+                .checked_add(1)
+                .ok_or(StartupError::ForeignKeyValidationLimitExceeded)?;
+            if row_visits > MAX_FOREIGN_KEY_ROW_VISITS_PER_STARTUP {
+                return Err(StartupError::ForeignKeyValidationLimitExceeded);
+            }
+            let row = RowRecord::decode(value.value()).map_err(|_| StartupError::InvalidRow)?;
+            let tuple = decode_tuple(
+                &source_schema.columns,
+                source_schema.schema_version,
+                &row.payload,
+            )
+            .map_err(|_| StartupError::InvalidRow)?;
+            let projected = foreign_key
+                .source_ordinals
+                .iter()
+                .map(|ordinal| {
+                    tuple
+                        .values
+                        .get(*ordinal)
+                        .cloned()
+                        .ok_or(StartupError::InvalidCatalog)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if projected.iter().any(Option::is_none) {
+                continue;
+            }
+            let encoded_tuple = encode_sql_tuple(&foreign_key.comparison_columns, &projected)
+                .map_err(|_| StartupError::InvalidRow)?;
+            let mut index_prefix = Vec::with_capacity(16 + encoded_tuple.len());
+            index_prefix.extend_from_slice(&foreign_key.target_index_id);
+            index_prefix.extend_from_slice(&encoded_tuple);
+            let mut matching = indexes
+                .range(index_prefix.as_slice()..)
+                .map_err(storage_error)?;
+            let Some(entry) = matching.next() else {
+                return Err(StartupError::InvalidForeignKey);
+            };
+            let (candidate, _) = entry.map_err(storage_error)?;
+            if !candidate.value().starts_with(&index_prefix) {
+                return Err(StartupError::InvalidForeignKey);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_indexes(

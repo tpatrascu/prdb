@@ -356,4 +356,13 @@
 - Real-redb regressions cover dangling child rejection, matching child insert, NULL exemption, restricted parent delete, atomic child-plus-parent delete, a barrier-synchronized child-insert/parent-delete race, and exceeding the row-visit budget with an ABORTED outcome and no row publication.
 - Verification: with Rust/Cargo 1.95.0, rustfmt 1.9.0, Clippy 0.1.95, and TinyCC 0.9.27-unstable-2025-01-06 in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and all 183 integration tests across 17 targets passed. Changed Markdown local links and `git diff --check` pass.
 - The change includes Rust implementation/tests and updates to [schema DDL](../../specs/ddl-schema.md) and [concurrency/MVCC](../../specs/concurrency-mvcc.md).
-- Remaining: authenticated service admission, catalog DDL creation/fencing for foreign keys, startup validation of persisted foreign-key integrity, and an indexed validation path for larger tables remain open.
+- Remaining: authenticated service admission, catalog DDL creation/fencing for foreign keys, and an indexed validation path for larger commit-time scans remain open.
+
+## SM-5 dependency: persisted foreign-key startup validation — in progress
+
+- Startup now validates FK action/match/state fields, the referenced unique backing index, ordered source/target columns, and exact built-in scalar types and parameters. It accepts at most 256 FK constraints.
+- After validating index membership, startup checks each non-NULL child tuple against the referenced unique index; NULL values pass under MATCH SIMPLE. Combined child-row visits are bounded at 65,536, and exceeding the bound rejects startup.
+- Real-redb startup coverage accepts matching child/parent rows, rejects a dangling child, accepts NULL under MATCH SIMPLE, rejects mismatched source/target types, and rejects a database over the row-visit limit.
+- Verification: with Rust/Cargo 1.95.0, rustfmt 1.9.0, and Clippy 0.1.95 in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and all 183 integration tests across 17 targets passed. Changed Markdown local links and `git diff --check` pass.
+- The implementation uses the existing unique backing index to validate references without materializing the full parent key set.
+- Remaining: foreign-key DDL creation/fencing, authenticated service admission, and memory bounding for commit-time reference scans remain open.

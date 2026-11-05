@@ -2,6 +2,7 @@ use prdb_engine::audit::{AuditAction, AuditEvent, AuditResult};
 use prdb_engine::authorization::Expr;
 use prdb_engine::catalog::{CatalogField, WireType, encode_envelope, family_schema};
 use prdb_engine::expression::encode_expression;
+use prdb_engine::index_key::derive_index_key;
 use prdb_engine::index_locator::IndexLocator;
 use prdb_engine::metadata::{EngineMetadata, Lifecycle};
 use prdb_engine::outcome::{InvocationOutcome, OutcomeStatus};
@@ -837,6 +838,39 @@ fn column_record_with_schema_at_ordinal(
     add_column_default_id: Option<[u8; 16]>,
     nullable: bool,
 ) -> (Vec<u8>, Vec<u8>) {
+    column_record_with_type_at_ordinal(
+        id,
+        table_id,
+        name,
+        ordinal,
+        builtin_id(108),
+        default_expression_id,
+        add_column_default_id,
+        nullable,
+    )
+}
+
+fn column_record_for_table_with_type(
+    id: [u8; 16],
+    table_id: [u8; 16],
+    name: &str,
+    type_id: [u8; 16],
+    nullable: bool,
+) -> (Vec<u8>, Vec<u8>) {
+    column_record_with_type_at_ordinal(id, table_id, name, 0, type_id, None, None, nullable)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn column_record_with_type_at_ordinal(
+    id: [u8; 16],
+    table_id: [u8; 16],
+    name: &str,
+    ordinal: u32,
+    type_id: [u8; 16],
+    default_expression_id: Option<[u8; 16]>,
+    add_column_default_id: Option<[u8; 16]>,
+    nullable: bool,
+) -> (Vec<u8>, Vec<u8>) {
     let mut key = 6u16.to_be_bytes().to_vec();
     key.push(1);
     key.extend_from_slice(&id);
@@ -859,7 +893,7 @@ fn column_record_with_schema_at_ordinal(
         CatalogField {
             tag: 4,
             wire_type: WireType::Id,
-            payload: builtin_id(108).to_vec(),
+            payload: type_id.to_vec(),
         },
         CatalogField {
             tag: 5,
@@ -1615,7 +1649,8 @@ fn rejects_dependency_edges_with_missing_catalog_objects() {
 }
 
 #[test]
-fn validates_foreign_key_target_edges_against_constraint_records() {
+fn validates_foreign_key_target_edges_against_constraint_records()
+-> Result<(), Box<dyn std::error::Error>> {
     let populate = |database: &Database,
                     edge_target: Option<[u8; 16]>,
                     add_alternate_target: bool,
@@ -1720,6 +1755,139 @@ fn validates_foreign_key_target_edges_against_constraint_records() {
     populate(&valid_edge_database, Some([91; 16]), false, &[[102; 16]]);
     assert!(validate_persisted_records(&valid_edge_database).is_ok());
 
+    let matching_fixture = Fixture::new();
+    let matching_database = matching_fixture.database(1);
+    populate(&matching_database, Some([91; 16]), false, &[[102; 16]]);
+    let target_row_id = [0x51; 16];
+    let source_row_id = [0x52; 16];
+    let target_column = ColumnSchema {
+        scalar_type: ScalarType::Bytea,
+        nullable: false,
+    };
+    let target_columns = [
+        target_column.clone(),
+        ColumnSchema {
+            scalar_type: ScalarType::Bytea,
+            nullable: true,
+        },
+    ];
+    let target_payload = encode_tuple(
+        &target_columns,
+        1,
+        &[Some(ScalarValue::Bytea(b"parent".to_vec())), None],
+    )?;
+    let target_index_key = derive_index_key(
+        [94; 16],
+        target_row_id,
+        1,
+        &[[102; 16], [104; 16]],
+        &target_columns,
+        &target_payload,
+        &[[102; 16]],
+    )?
+    .key;
+    let target_row_key = row_key([100; 16], target_row_id);
+    let source_row_key = row_key([101; 16], source_row_id);
+    let target_record = RowRecord {
+        row_version: 1,
+        payload: target_payload.clone(),
+    }
+    .encode()?;
+    let source_record = RowRecord {
+        row_version: 1,
+        payload: encode_tuple(
+            std::slice::from_ref(&target_column),
+            1,
+            &[Some(ScalarValue::Bytea(b"parent".to_vec()))],
+        )?,
+    }
+    .encode()?;
+    let locator = IndexLocator {
+        row_id: target_row_id,
+        row_version: 1,
+    }
+    .encode();
+    let reverse_key = reverse_index_key(&target_row_key, &target_index_key);
+    let write = matching_database.begin_write()?;
+    write
+        .open_table(ROWS)?
+        .insert(&target_row_key[..], &target_record[..])?;
+    write
+        .open_table(INDEXES)?
+        .insert(target_index_key.as_slice(), locator.as_slice())?;
+    write
+        .open_table(ROW_INDEXES)?
+        .insert(reverse_key.as_slice(), &[][..])?;
+    write.commit()?;
+    let target_result = validate_persisted_records(&matching_database);
+    assert!(target_result.is_ok(), "target row: {target_result:?}");
+    let write = matching_database.begin_write()?;
+    write
+        .open_table(ROWS)?
+        .insert(&source_row_key[..], &source_record[..])?;
+    write.commit()?;
+    let matching_result = validate_persisted_records(&matching_database);
+    assert!(matching_result.is_ok(), "{matching_result:?}");
+
+    let dangling_fixture = Fixture::new();
+    let dangling_database = dangling_fixture.database(1);
+    populate(&dangling_database, Some([91; 16]), false, &[[102; 16]]);
+    let dangling_payload = encode_tuple(
+        std::slice::from_ref(&target_column),
+        1,
+        &[Some(ScalarValue::Bytea(b"missing".to_vec()))],
+    )?;
+    insert_row_payload(
+        &dangling_database,
+        &row_key([101; 16], [0x53; 16]),
+        1,
+        &dangling_payload,
+    );
+    assert_eq!(
+        validate_persisted_records(&dangling_database),
+        Err(StartupError::InvalidForeignKey)
+    );
+
+    let null_fixture = Fixture::new();
+    let null_database = null_fixture.database(1);
+    populate(&null_database, Some([91; 16]), false, &[[102; 16]]);
+    let (source_column_key, source_column) =
+        column_record_for_table_with_nullability([103; 16], [101; 16], "object_103", true);
+    put_catalog(&null_database, &source_column_key, &source_column);
+    let nullable_source_column = ColumnSchema {
+        scalar_type: ScalarType::Bytea,
+        nullable: true,
+    };
+    let null_payload = encode_tuple(std::slice::from_ref(&nullable_source_column), 1, &[None])?;
+    insert_row_payload(
+        &null_database,
+        &row_key([101; 16], [0x54; 16]),
+        1,
+        &null_payload,
+    );
+    assert!(validate_persisted_records(&null_database).is_ok());
+
+    let mismatched_types_fixture = Fixture::new();
+    let mismatched_types_database = mismatched_types_fixture.database(0);
+    populate(
+        &mismatched_types_database,
+        Some([91; 16]),
+        false,
+        &[[102; 16]],
+    );
+    let (source_type_key, source_type) = column_record_for_table_with_type(
+        [103; 16],
+        [101; 16],
+        "object_103",
+        builtin_id(109),
+        false,
+    );
+    put_catalog(&mismatched_types_database, &source_type_key, &source_type);
+    assert_eq!(
+        validate_persisted_records(&mismatched_types_database),
+        Err(StartupError::InvalidCatalog)
+    );
+
     let mismatched_columns_fixture = Fixture::new();
     let mismatched_columns_database = mismatched_columns_fixture.database(0);
     populate(
@@ -1732,6 +1900,41 @@ fn validates_foreign_key_target_edges_against_constraint_records() {
         validate_persisted_records(&mismatched_columns_database),
         Err(StartupError::InvalidCatalog),
     );
+
+    let bounded_fixture = Fixture::new();
+    let bounded_database = bounded_fixture.database(1);
+    populate(&bounded_database, Some([91; 16]), false, &[[102; 16]]);
+    let (source_column_key, source_column) =
+        column_record_for_table_with_nullability([103; 16], [101; 16], "object_103", true);
+    put_catalog(&bounded_database, &source_column_key, &source_column);
+    let null_payload = encode_tuple(
+        &[ColumnSchema {
+            scalar_type: ScalarType::Bytea,
+            nullable: true,
+        }],
+        1,
+        &[None],
+    )?;
+    let null_row = RowRecord {
+        row_version: 1,
+        payload: null_payload,
+    }
+    .encode()?;
+    let write = bounded_database.begin_write()?;
+    let mut rows = write.open_table(ROWS)?;
+    for row_number in 0..65_537u64 {
+        let mut row_id = [0; 16];
+        row_id[8..].copy_from_slice(&row_number.to_be_bytes());
+        let key = row_key([101; 16], row_id);
+        rows.insert(&key[..], &null_row[..])?;
+    }
+    drop(rows);
+    write.commit()?;
+    assert_eq!(
+        validate_persisted_records(&bounded_database),
+        Err(StartupError::ForeignKeyValidationLimitExceeded)
+    );
+    Ok(())
 }
 
 #[test]
