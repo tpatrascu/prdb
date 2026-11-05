@@ -472,15 +472,17 @@ fn initialize(path: &std::path::Path) -> Result<Database, Box<dyn std::error::Er
     schema::create_tables(&write)?;
     {
         let mut catalog = write.open_table(CATALOG)?;
+        let table_id = [0x10; 16];
+        let column_id = [0x66; 16];
         for index_id in [[0x55; 16], [1; 16], [2; 16]] {
             let key = catalog_id_key(9, index_id);
             let mut columns = 1u32.to_le_bytes().to_vec();
-            columns.extend_from_slice(&[0x66; 16]);
+            columns.extend_from_slice(&column_id);
             let fields = [
                 CatalogField {
                     tag: 1,
                     wire_type: WireType::Id,
-                    payload: [0x10; 16].to_vec(),
+                    payload: table_id.to_vec(),
                 },
                 CatalogField {
                     tag: 2,
@@ -524,6 +526,95 @@ fn initialize(path: &std::path::Path) -> Result<Database, Box<dyn std::error::Er
                 },
             ];
             let payload = catalog_record_payload(9, &key, &fields)?;
+            catalog.insert(&key[..], &payload[..])?;
+        }
+        let table_key = catalog_id_key(5, table_id);
+        let table_payload = catalog_record_payload(
+            5,
+            &table_key,
+            &[
+                CatalogField {
+                    tag: 1,
+                    wire_type: WireType::Id,
+                    payload: table_id.to_vec(),
+                },
+                CatalogField {
+                    tag: 2,
+                    wire_type: WireType::U64,
+                    payload: 1u64.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 3,
+                    wire_type: WireType::U64,
+                    payload: 1u64.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 4,
+                    wire_type: WireType::Id,
+                    payload: [145; 16].to_vec(),
+                },
+                CatalogField {
+                    tag: 5,
+                    wire_type: WireType::U16,
+                    payload: 1u16.to_le_bytes().to_vec(),
+                },
+            ],
+        )?;
+        let column_key = catalog_id_key(6, column_id);
+        let column_payload = catalog_record_payload(
+            6,
+            &column_key,
+            &[
+                CatalogField {
+                    tag: 1,
+                    wire_type: WireType::Id,
+                    payload: table_id.to_vec(),
+                },
+                CatalogField {
+                    tag: 2,
+                    wire_type: WireType::U32,
+                    payload: 0u32.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 3,
+                    wire_type: WireType::Text,
+                    payload: b"object_102".to_vec(),
+                },
+                CatalogField {
+                    tag: 4,
+                    wire_type: WireType::Id,
+                    payload: [0x40; 16].to_vec(),
+                },
+                CatalogField {
+                    tag: 5,
+                    wire_type: WireType::Bytes,
+                    payload: vec![0; 8],
+                },
+                CatalogField {
+                    tag: 6,
+                    wire_type: WireType::Bool,
+                    payload: vec![1],
+                },
+                CatalogField {
+                    tag: 8,
+                    wire_type: WireType::U16,
+                    payload: 0u16.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 9,
+                    wire_type: WireType::U64,
+                    payload: 1u64.to_le_bytes().to_vec(),
+                },
+            ],
+        )?;
+        let (table_object_key, table_object_payload) = object_catalog_record_for(table_id, 3);
+        let (column_object_key, column_object_payload) = object_catalog_record_for(column_id, 4);
+        for (key, payload) in [
+            (table_key, table_payload),
+            (column_key, column_payload),
+            (table_object_key, table_object_payload),
+            (column_object_key, column_object_payload),
+        ] {
             catalog.insert(&key[..], &payload[..])?;
         }
         let owner_id = builtin_owner_id();
@@ -2027,7 +2118,7 @@ fn authorized_insert_materializes_defaults_before_policy_and_check_validation()
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
     let row_id = id(110);
-    let column_id = [112; 16];
+    let column_id = [0x66; 16];
     let table = AccessTarget::Table(row_id.table);
     let schema = AccessTarget::Schema(row_id.table);
     let column = AccessTarget::Column {
@@ -2168,37 +2259,41 @@ fn authorized_insert_materializes_defaults_before_policy_and_check_validation()
             },
         ],
     )?;
-    let table_payload = catalog_record_payload(
-        5,
-        &table_key,
-        &[
-            CatalogField {
-                tag: 1,
-                wire_type: WireType::Id,
-                payload: schema_id.to_vec(),
-            },
-            CatalogField {
-                tag: 2,
-                wire_type: WireType::U64,
-                payload: 1u64.to_le_bytes().to_vec(),
-            },
-            CatalogField {
-                tag: 3,
-                wire_type: WireType::U64,
-                payload: 1u64.to_le_bytes().to_vec(),
-            },
-            CatalogField {
-                tag: 4,
-                wire_type: WireType::Id,
-                payload: storage_id.to_vec(),
-            },
-            CatalogField {
-                tag: 5,
-                wire_type: WireType::U16,
-                payload: 1u16.to_le_bytes().to_vec(),
-            },
-        ],
-    )?;
+    let table_payload = |schema_version: u64| {
+        catalog_record_payload(
+            5,
+            &table_key,
+            &[
+                CatalogField {
+                    tag: 1,
+                    wire_type: WireType::Id,
+                    payload: schema_id.to_vec(),
+                },
+                CatalogField {
+                    tag: 2,
+                    wire_type: WireType::U64,
+                    payload: schema_version.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 3,
+                    wire_type: WireType::U64,
+                    payload: 1u64.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 4,
+                    wire_type: WireType::Id,
+                    payload: storage_id.to_vec(),
+                },
+                CatalogField {
+                    tag: 5,
+                    wire_type: WireType::U16,
+                    payload: 1u16.to_le_bytes().to_vec(),
+                },
+            ],
+        )
+    };
+    let initial_table_payload = table_payload(1u64)?;
+    let updated_table_payload = table_payload(2u64)?;
     let column_payload = catalog_record_payload(
         6,
         &column_key,
@@ -2237,6 +2332,52 @@ fn authorized_insert_materializes_defaults_before_policy_and_check_validation()
                 tag: 7,
                 wire_type: WireType::Id,
                 payload: default_expression_id.to_vec(),
+            },
+            CatalogField {
+                tag: 8,
+                wire_type: WireType::U16,
+                payload: 0u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 9,
+                wire_type: WireType::U64,
+                payload: 1u64.to_le_bytes().to_vec(),
+            },
+        ],
+    )?;
+    let initial_column_payload = catalog_record_payload(
+        6,
+        &column_key,
+        &[
+            CatalogField {
+                tag: 1,
+                wire_type: WireType::Id,
+                payload: row_id.table.to_vec(),
+            },
+            CatalogField {
+                tag: 2,
+                wire_type: WireType::U32,
+                payload: 0u32.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 3,
+                wire_type: WireType::Text,
+                payload: format!("object_{}", column_id[0]).into_bytes(),
+            },
+            CatalogField {
+                tag: 4,
+                wire_type: WireType::Id,
+                payload: [0x40; 16].to_vec(),
+            },
+            CatalogField {
+                tag: 5,
+                wire_type: WireType::Bytes,
+                payload: vec![0; 8],
+            },
+            CatalogField {
+                tag: 6,
+                wire_type: WireType::Bool,
+                payload: vec![1],
             },
             CatalogField {
                 tag: 8,
@@ -2296,19 +2437,17 @@ fn authorized_insert_materializes_defaults_before_policy_and_check_validation()
             },
             CatalogWrite {
                 key: table_key,
-                expected_value: None,
-                payload: Some(table_payload),
+                expected_value: Some(initial_table_payload),
+                payload: Some(updated_table_payload),
             },
             CatalogWrite {
                 key: column_key,
-                expected_value: None,
+                expected_value: Some(initial_column_payload),
                 payload: Some(column_payload),
             },
             object_catalog_write_for(default_expression_id, 5),
             object_catalog_write_for(check_expression_id, 5),
             object_catalog_write_for(type_id, 2),
-            object_catalog_write_for(row_id.table, 3),
-            object_catalog_write_for(column_id, 4),
             dependency_catalog_write(column_id, default_expression_id, 2)?,
             dependency_catalog_write(check_expression_id, column_id, 2)?,
         ],
@@ -2328,7 +2467,7 @@ fn authorized_insert_materializes_defaults_before_policy_and_check_validation()
     let catalog_projection = AuthorizedProjection {
         columns: &columns,
         column_ids: &column_ids,
-        schema_version: 1,
+        schema_version: catalog_schema.schema_version,
         schema_id: row_id.table,
         context: &context,
         grants: &grants,
@@ -2353,7 +2492,7 @@ fn authorized_insert_materializes_defaults_before_policy_and_check_validation()
             .value(),
     )?;
     assert_eq!(
-        decode_tuple(&columns, 1, &record.payload)?.values,
+        decode_tuple(&columns, catalog_schema.schema_version, &record.payload)?.values,
         [Some(ScalarValue::Uuid([9; 16]))]
     );
     assert!(read.open_table(ROWS)?.get(&key(id(116))[..])?.is_none());

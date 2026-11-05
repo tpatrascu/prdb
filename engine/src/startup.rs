@@ -153,6 +153,7 @@ fn validate_catalog(
     let mut typed_object_kinds = HashMap::<[u8; 16], u16>::new();
     let mut column_tables = HashMap::<[u8; 16], [u8; 16]>::new();
     let mut column_nullable = HashMap::<[u8; 16], bool>::new();
+    let mut index_columns = HashMap::<[u8; 16], Vec<[u8; 16]>>::new();
     let mut policy_tables = HashMap::<[u8; 16], [u8; 16]>::new();
     let mut policy_kinds = HashMap::<[u8; 16], u16>::new();
     let mut expression_reference_edges = std::collections::HashSet::<([u8; 16], [u8; 16])>::new();
@@ -306,7 +307,17 @@ fn validate_catalog(
                 .try_into()
                 .map_err(|_| StartupError::InvalidCatalog)?;
             let table_id = field_id(&record, 1)?;
+            let columns = field_ids(&record, 2)?;
+            let mut unique_columns = std::collections::HashSet::new();
             if index_definitions.insert(index_id, table_id).is_some() {
+                return Err(StartupError::InvalidCatalog);
+            }
+            if columns.is_empty()
+                || columns
+                    .iter()
+                    .any(|column_id| !unique_columns.insert(*column_id))
+                || index_columns.insert(index_id, columns).is_some()
+            {
                 return Err(StartupError::InvalidCatalog);
             }
             if let Some(field) = record.fields.iter().find(|field| field.tag == 6) {
@@ -652,6 +663,22 @@ fn validate_catalog(
                 || column_nullable.get(&source_columns[0]) != Some(&false))
         {
             return Err(StartupError::InvalidCatalog);
+        }
+    }
+    for (index_id, table_id) in &index_definitions {
+        if object_kinds.get(table_id) != Some(&3) || typed_object_kinds.get(table_id) != Some(&3) {
+            return Err(StartupError::InvalidCatalog);
+        }
+        let columns = index_columns
+            .get(index_id)
+            .ok_or(StartupError::InvalidCatalog)?;
+        for column_id in columns {
+            if object_kinds.get(column_id) != Some(&4)
+                || typed_object_kinds.get(column_id) != Some(&4)
+                || column_tables.get(column_id) != Some(table_id)
+            {
+                return Err(StartupError::InvalidCatalog);
+            }
         }
     }
     if typed_object_kinds

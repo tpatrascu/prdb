@@ -442,12 +442,19 @@ fn insert_row(database: &Database, key: &[u8; 32], version: u64) {
 }
 
 fn index_definition(index_id: [u8; 16], table_id: [u8; 16]) -> (Vec<u8>, Vec<u8>) {
+    index_record_for_columns(index_id, table_id, &[[0x66; 16]])
+}
+
+fn index_record_for_columns(
+    index_id: [u8; 16],
+    table_id: [u8; 16],
+    column_ids: &[[u8; 16]],
+) -> (Vec<u8>, Vec<u8>) {
     let schema = family_schema(9).unwrap();
     let mut key = 9u16.to_be_bytes().to_vec();
     key.push(1);
     key.extend_from_slice(&index_id);
-    let mut columns = 1u32.to_le_bytes().to_vec();
-    columns.extend_from_slice(&[0x66; 16]);
+    let columns = id_list(column_ids);
     let fields = [
         CatalogField {
             tag: 1,
@@ -896,10 +903,7 @@ fn put_table_and_column(
     column_id: [u8; 16],
     nullable: bool,
 ) {
-    let table_object = object_record(table_id, 3);
-    put_catalog(database, &table_object.0, &table_object.1);
-    let table = table_record(table_id);
-    put_catalog(database, &table.0, &table.1);
+    put_table(database, table_id);
     let column_object = object_record(column_id, 4);
     put_catalog(database, &column_object.0, &column_object.1);
     let column = column_record_for_table_with_nullability(
@@ -911,6 +915,13 @@ fn put_table_and_column(
     put_catalog(database, &column.0, &column.1);
 }
 
+fn put_table(database: &Database, table_id: [u8; 16]) {
+    let table_object = object_record(table_id, 3);
+    put_catalog(database, &table_object.0, &table_object.1);
+    let table = table_record(table_id);
+    put_catalog(database, &table.0, &table.1);
+}
+
 #[test]
 fn validates_ready_image_records_and_references() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
@@ -919,6 +930,7 @@ fn validates_ready_image_records_and_references() -> Result<(), Box<dyn std::err
     let row_id = [0x33; 16];
     let key = row_key(table_id, row_id);
     insert_row(&database, &key, 2);
+    put_table_and_column(&database, table_id, [0x66; 16], false);
 
     let (catalog_key, catalog_value) = index_definition([0x44; 16], table_id);
     let index_object = object_record([0x44; 16], 7);
@@ -971,7 +983,7 @@ fn validates_ready_image_records_and_references() -> Result<(), Box<dyn std::err
     assert_eq!(report.metadata.commit_sequence, 3);
     assert_eq!(report.rows, 1);
     assert_eq!(report.index_entries, 1);
-    assert_eq!(report.catalog_records, 5);
+    assert_eq!(report.catalog_records, 9);
     assert_eq!(report.outcomes, 1);
     assert_eq!(report.audit_events, 1);
     Ok(())
@@ -1572,6 +1584,7 @@ fn rejects_index_without_its_referenced_row() {
     let database = fixture.database(1);
     let table_id = [0x22; 16];
     let row_id = [0x33; 16];
+    put_table_and_column(&database, table_id, [0x66; 16], false);
     let (catalog_key, catalog_value) = index_definition([0x44; 16], table_id);
     put_catalog(&database, &catalog_key, &catalog_value);
     let index_object = object_record([0x44; 16], 7);
@@ -1613,6 +1626,7 @@ fn rejects_a_locator_whose_version_differs_from_its_row() {
     let row_id = [0x33; 16];
     let key = row_key(table_id, row_id);
     insert_row(&database, &key, 2);
+    put_table_and_column(&database, table_id, [0x66; 16], false);
     let (catalog_key, catalog_value) = index_definition([0x44; 16], table_id);
     put_catalog(&database, &catalog_key, &catalog_value);
     let index_object = object_record([0x44; 16], 7);
@@ -2033,6 +2047,58 @@ fn constraints_resolve_to_source_columns_on_their_table() -> Result<(), Box<dyn 
     let fixture = Fixture::new();
     let database = fixture.database(0);
     seed(&database, [150; 16], Some([150; 16]), true);
+    assert_eq!(
+        validate_persisted_records(&database),
+        Err(StartupError::InvalidCatalog),
+    );
+    Ok(())
+}
+
+#[test]
+fn indexes_resolve_to_columns_on_their_table() -> Result<(), Box<dyn std::error::Error>> {
+    let seed = |database: &Database, index_table: [u8; 16], column_table: Option<[u8; 16]>| {
+        let table_id = [160; 16];
+        let other_table_id = [161; 16];
+        let index_id = [162; 16];
+        let column_id = [163; 16];
+        put_table(database, table_id);
+        put_table(database, other_table_id);
+        if let Some(column_table) = column_table {
+            let column_object = object_record(column_id, 4);
+            put_catalog(database, &column_object.0, &column_object.1);
+            let column = column_record_for_table(column_id, column_table, "object_163");
+            put_catalog(database, &column.0, &column.1);
+        }
+        let index_object = object_record(index_id, 7);
+        put_catalog(database, &index_object.0, &index_object.1);
+        let index = index_record_for_columns(index_id, index_table, &[column_id]);
+        put_catalog(database, &index.0, &index.1);
+    };
+
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    seed(&database, [160; 16], Some([160; 16]));
+    assert!(validate_persisted_records(&database).is_ok());
+
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    seed(&database, [160; 16], None);
+    assert_eq!(
+        validate_persisted_records(&database),
+        Err(StartupError::InvalidCatalog),
+    );
+
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    seed(&database, [160; 16], Some([161; 16]));
+    assert_eq!(
+        validate_persisted_records(&database),
+        Err(StartupError::InvalidCatalog),
+    );
+
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    seed(&database, [164; 16], Some([160; 16]));
     assert_eq!(
         validate_persisted_records(&database),
         Err(StartupError::InvalidCatalog),

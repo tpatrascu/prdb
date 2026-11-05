@@ -59,11 +59,19 @@ fn builtin_owner_id() -> [u8; 16] {
 }
 
 fn index_definition(index_id: [u8; 16], table_id: [u8; 16]) -> (Vec<u8>, Vec<u8>) {
+    index_definition_with_columns(index_id, table_id, &[[0x66; 16]])
+}
+
+fn index_definition_with_columns(
+    index_id: [u8; 16],
+    table_id: [u8; 16],
+    column_ids: &[[u8; 16]],
+) -> (Vec<u8>, Vec<u8>) {
     let mut key = 9u16.to_be_bytes().to_vec();
     key.push(1);
     key.extend_from_slice(&index_id);
-    let mut columns = 1u32.to_le_bytes().to_vec();
-    columns.extend_from_slice(&[0x66; 16]);
+    let mut columns = (column_ids.len() as u32).to_le_bytes().to_vec();
+    columns.extend(column_ids.iter().flatten());
     let fields = [
         CatalogField {
             tag: 1,
@@ -171,6 +179,10 @@ fn initialize(path: &std::path::Path) -> Result<Database, Box<dyn std::error::Er
     let (index_key, index_payload) = index_definition([0x44; 16], [0x10; 16]);
     let (database_key, database_payload) = bootstrap_database_record([0x33; 16]);
     let index_object = object_write([0x44; 16], 7);
+    let table_object = object_write(id(16), 3);
+    let table = table_write(id(16), id(20));
+    let column_object = object_write(id(0x66), 4);
+    let column = column_write(id(0x66), id(16), "object_102");
     transaction
         .open_table(CATALOG)?
         .insert(&database_key[..], &database_payload[..])?;
@@ -181,6 +193,11 @@ fn initialize(path: &std::path::Path) -> Result<Database, Box<dyn std::error::Er
     transaction
         .open_table(CATALOG)?
         .insert(&index_key[..], &index_payload[..])?;
+    for record in [table_object, table, column_object, column] {
+        transaction
+            .open_table(CATALOG)?
+            .insert(&record.key[..], record.payload.as_ref().unwrap().as_slice())?;
+    }
     let owner_id = builtin_owner_id();
     let owner_principal = principal_write(owner_id, 2);
     let owner_object = principal_object_write(owner_id, 2);
@@ -1019,8 +1036,8 @@ fn catalog_commit_checks_dependency_endpoints_in_the_final_catalog()
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
     let table_object = object_write(id(101), 3);
-    let column_object = object_write_with_parent(id(102), 4, Some(id(101)));
-    let edge = dependency_write(id(102), id(101), 1);
+    let column_object = object_write_with_parent(id(104), 4, Some(id(101)));
+    let edge = dependency_write(id(104), id(101), 1);
     assert_eq!(
         commit_catalog_and_audit(
             &database,
@@ -1484,7 +1501,7 @@ fn catalog_commit_requires_index_object_identity_and_kind() -> Result<(), Box<dy
 {
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
-    let (missing_key, missing_payload) = index_definition(id(55), id(10));
+    let (missing_key, missing_payload) = index_definition(id(55), id(16));
     let missing_index = CatalogWrite {
         key: missing_key,
         expected_value: None,
@@ -1502,7 +1519,7 @@ fn catalog_commit_requires_index_object_identity_and_kind() -> Result<(), Box<dy
         Err(CommitError::InvalidCatalog),
     );
 
-    let (index_key, index_payload) = index_definition(id(56), id(10));
+    let (index_key, index_payload) = index_definition(id(56), id(16));
     let index = CatalogWrite {
         key: index_key,
         expected_value: None,
@@ -1538,7 +1555,7 @@ fn catalog_commit_requires_index_object_identity_and_kind() -> Result<(), Box<dy
         Err(CommitError::InvalidCatalog),
     );
 
-    let (wrong_key, wrong_payload) = index_definition(id(57), id(10));
+    let (wrong_key, wrong_payload) = index_definition(id(57), id(16));
     let wrong_index = CatalogWrite {
         key: wrong_key,
         expected_value: None,
@@ -1557,6 +1574,85 @@ fn catalog_commit_requires_index_object_identity_and_kind() -> Result<(), Box<dy
         Err(CommitError::InvalidCatalog),
     );
     assert_eq!(commit_sequence(&database)?, 1);
+    Ok(())
+}
+
+#[test]
+fn catalog_commit_rejects_indexes_with_missing_or_mistabled_columns()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+
+    let missing_column_id = id(90);
+    let (missing_key, missing_payload) =
+        index_definition_with_columns(id(89), id(16), &[missing_column_id]);
+    let missing_index = CatalogWrite {
+        key: missing_key,
+        expected_value: None,
+        payload: Some(missing_payload),
+    };
+    let missing_index_object = object_write(id(89), 7);
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(90),
+            id(9),
+            9_999,
+            &[missing_index, missing_index_object],
+            &[audit_event(90)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+
+    let other_table_id = id(92);
+    let other_column_id = id(93);
+    let (mismatched_key, mismatched_payload) =
+        index_definition_with_columns(id(94), id(16), &[other_column_id]);
+    let mismatched_index = CatalogWrite {
+        key: mismatched_key,
+        expected_value: None,
+        payload: Some(mismatched_payload),
+    };
+    let other_column = column_write(other_column_id, other_table_id, "object_93");
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(91),
+            id(9),
+            9_999,
+            &[
+                mismatched_index,
+                object_write(id(94), 7),
+                object_write(other_table_id, 3),
+                table_write(other_table_id, id(95)),
+                object_write(other_column_id, 4),
+                other_column,
+            ],
+            &[audit_event(91)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+    assert_eq!(commit_sequence(&database)?, 0);
+
+    let (valid_key, valid_payload) = index_definition_with_columns(id(96), id(16), &[id(0x66)]);
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(92),
+            id(9),
+            9_999,
+            &[
+                CatalogWrite {
+                    key: valid_key,
+                    expected_value: None,
+                    payload: Some(valid_payload),
+                },
+                object_write(id(96), 7),
+            ],
+            &[audit_event(92)],
+        )?,
+        1,
+    );
     Ok(())
 }
 
@@ -2285,7 +2381,7 @@ fn membership_limit_applies_to_final_graph_independent_of_write_order()
     let catalog = read.open_table(prdb_engine::schema::CATALOG)?;
     assert!(catalog.get(old.key.as_slice())?.is_none());
     assert!(catalog.get(new.key.as_slice())?.is_some());
-    assert_eq!(catalog.len()?, 263 + 8192);
+    assert_eq!(catalog.len()?, 267 + 8192);
     drop(catalog);
     drop(read);
     let mut advance = principal_write_with_epoch(member, 2, 3);

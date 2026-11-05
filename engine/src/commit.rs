@@ -555,6 +555,8 @@ struct DependencyCatalogGraph {
     object_kinds: HashMap<[u8; 16], u16>,
     typed_object_kinds: HashMap<[u8; 16], u16>,
     column_tables: HashMap<[u8; 16], [u8; 16]>,
+    index_tables: HashMap<[u8; 16], [u8; 16]>,
+    index_columns: HashMap<[u8; 16], Vec<[u8; 16]>>,
     policy_tables: HashMap<[u8; 16], [u8; 16]>,
     policy_kinds: HashMap<[u8; 16], u16>,
     constraint_kinds: HashMap<[u8; 16], u16>,
@@ -623,7 +625,9 @@ fn validate_final_dependency_edges(
         object_parents,
         object_kinds,
         typed_object_kinds,
-        column_tables: _,
+        column_tables,
+        index_tables,
+        index_columns,
         policy_tables: _,
         policy_kinds: _,
         constraint_kinds,
@@ -648,6 +652,21 @@ fn validate_final_dependency_edges(
                         || *kind == 5 && Some(*referenced_id) == *database_id)
             })
     {
+        return Err(CommitError::InvalidCatalog);
+    }
+    if index_tables.iter().any(|(index_id, table_id)| {
+        let Some(columns) = index_columns.get(index_id) else {
+            return true;
+        };
+        object_kinds.get(table_id) != Some(&3)
+            || typed_object_kinds.get(table_id) != Some(&3)
+            || columns.is_empty()
+            || columns.iter().any(|column_id| {
+                object_kinds.get(column_id) != Some(&4)
+                    || typed_object_kinds.get(column_id) != Some(&4)
+                    || column_tables.get(column_id) != Some(table_id)
+            })
+    }) {
         return Err(CommitError::InvalidCatalog);
     }
     let actual_expression_reference_edges = dependencies
@@ -1159,7 +1178,22 @@ fn collect_dependency_catalog_record(
             let index_id = key[3..19]
                 .try_into()
                 .map_err(|_| CommitError::InvalidCatalog)?;
+            let table_id: [u8; 16] = catalog_field_bytes(key, bytes, 9, 1)?
+                .as_slice()
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?;
+            let columns = catalog_id_list_field(key, bytes, 9, 2)?;
+            let mut unique_columns = HashSet::new();
             if graph.typed_object_kinds.insert(index_id, 7).is_some() {
+                return Err(CommitError::InvalidCatalog);
+            }
+            if columns.is_empty()
+                || columns
+                    .iter()
+                    .any(|column_id| !unique_columns.insert(*column_id))
+                || graph.index_tables.insert(index_id, table_id).is_some()
+                || graph.index_columns.insert(index_id, columns).is_some()
+            {
                 return Err(CommitError::InvalidCatalog);
             }
             if let Some(field) = record.fields.iter().find(|field| field.tag == 6)
