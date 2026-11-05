@@ -225,6 +225,86 @@ fn dependency_record(
     (key, payload)
 }
 
+fn id_list(ids: &[[u8; 16]]) -> Vec<u8> {
+    let mut encoded = (ids.len() as u32).to_le_bytes().to_vec();
+    encoded.extend(ids.iter().flatten());
+    encoded
+}
+
+fn constraint_record(
+    id: [u8; 16],
+    table_id: [u8; 16],
+    kind: u16,
+    source_columns: &[[u8; 16]],
+    referenced_constraint_id: Option<[u8; 16]>,
+    referenced_columns: &[[u8; 16]],
+    backing_index_id: Option<[u8; 16]>,
+) -> (Vec<u8>, Vec<u8>) {
+    let mut key = 8u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&id);
+    let mut fields = vec![
+        CatalogField {
+            tag: 1,
+            wire_type: WireType::Id,
+            payload: table_id.to_vec(),
+        },
+        CatalogField {
+            tag: 2,
+            wire_type: WireType::U16,
+            payload: kind.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 3,
+            wire_type: WireType::Ids,
+            payload: id_list(source_columns),
+        },
+    ];
+    if let Some(referenced_constraint_id) = referenced_constraint_id {
+        fields.push(CatalogField {
+            tag: 5,
+            wire_type: WireType::Id,
+            payload: referenced_constraint_id.to_vec(),
+        });
+    }
+    fields.extend([
+        CatalogField {
+            tag: 6,
+            wire_type: WireType::Ids,
+            payload: id_list(referenced_columns),
+        },
+        CatalogField {
+            tag: 7,
+            wire_type: WireType::U16,
+            payload: u16::from(kind == 5).to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 8,
+            wire_type: WireType::U16,
+            payload: u16::from(kind == 5).to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 9,
+            wire_type: WireType::U16,
+            payload: u16::from(kind == 5).to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 10,
+            wire_type: WireType::U16,
+            payload: 1u16.to_le_bytes().to_vec(),
+        },
+    ]);
+    if let Some(backing_index_id) = backing_index_id {
+        fields.push(CatalogField {
+            tag: 11,
+            wire_type: WireType::Id,
+            payload: backing_index_id.to_vec(),
+        });
+    }
+    let payload = encode_envelope(&family_schema(8).unwrap(), &key, &fields).unwrap();
+    (key, payload)
+}
+
 fn reverse_index_key(row_key: &[u8; 32], index_key: &[u8]) -> Vec<u8> {
     let mut key = row_key.to_vec();
     key.extend_from_slice(&index_key[..index_key.len() - 16]);
@@ -613,6 +693,81 @@ fn rejects_dependency_edges_with_missing_catalog_objects() {
 }
 
 #[test]
+fn validates_foreign_key_target_edges_against_constraint_records() {
+    let populate =
+        |database: &Database, edge_target: Option<[u8; 16]>, add_alternate_target: bool| {
+            let fk_id = [90; 16];
+            let target_id = [91; 16];
+            let alternate_id = [95; 16];
+            let (fk_key, fk_value) = object_record(fk_id, 6);
+            let (target_key, target_value) = object_record(target_id, 6);
+            put_catalog(database, &fk_key, &fk_value);
+            put_catalog(database, &target_key, &target_value);
+            if add_alternate_target {
+                let (key, value) = object_record(alternate_id, 6);
+                put_catalog(database, &key, &value);
+            }
+            let (fk_key, fk_value) = constraint_record(
+                fk_id,
+                [101; 16],
+                5,
+                &[[103; 16]],
+                Some(target_id),
+                &[[102; 16]],
+                None,
+            );
+            let (target_key, target_value) = constraint_record(
+                target_id,
+                [100; 16],
+                2,
+                &[[102; 16]],
+                None,
+                &[],
+                Some([94; 16]),
+            );
+            put_catalog(database, &fk_key, &fk_value);
+            put_catalog(database, &target_key, &target_value);
+            if add_alternate_target {
+                let (key, value) = constraint_record(
+                    alternate_id,
+                    [100; 16],
+                    3,
+                    &[[102; 16]],
+                    None,
+                    &[],
+                    Some([96; 16]),
+                );
+                put_catalog(database, &key, &value);
+            }
+            if let Some(edge_target) = edge_target {
+                let (key, value) = dependency_record(fk_id, edge_target, 3);
+                put_catalog(database, &key, &value);
+            }
+        };
+
+    let missing_edge_fixture = Fixture::new();
+    let missing_edge_database = missing_edge_fixture.database(0);
+    populate(&missing_edge_database, None, false);
+    assert_eq!(
+        validate_persisted_records(&missing_edge_database),
+        Err(StartupError::InvalidCatalog),
+    );
+
+    let mismatched_edge_fixture = Fixture::new();
+    let mismatched_edge_database = mismatched_edge_fixture.database(0);
+    populate(&mismatched_edge_database, Some([95; 16]), true);
+    assert_eq!(
+        validate_persisted_records(&mismatched_edge_database),
+        Err(StartupError::InvalidCatalog),
+    );
+
+    let valid_edge_fixture = Fixture::new();
+    let valid_edge_database = valid_edge_fixture.database(0);
+    populate(&valid_edge_database, Some([91; 16]), false);
+    assert!(validate_persisted_records(&valid_edge_database).is_ok());
+}
+
+#[test]
 fn rejects_objects_with_missing_owner_principals() {
     let fixture = Fixture::new();
     let database = fixture.database(0);
@@ -625,8 +780,8 @@ fn rejects_objects_with_missing_owner_principals() {
 }
 
 #[test]
-fn accepts_dependency_edges_with_catalog_object_endpoints() -> Result<(), Box<dyn std::error::Error>>
-{
+fn accepts_owned_child_dependency_with_catalog_object_endpoints()
+-> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
     let database = fixture.database(0);
     for record in [
@@ -635,12 +790,10 @@ fn accepts_dependency_edges_with_catalog_object_endpoints() -> Result<(), Box<dy
     ] {
         put_catalog(&database, &record.0, &record.1);
     }
-    for kind in 1..=5 {
-        let (key, value) = dependency_record([0x22; 16], [0x21; 16], kind);
-        put_catalog(&database, &key, &value);
-    }
+    let (key, value) = dependency_record([0x22; 16], [0x21; 16], 1);
+    put_catalog(&database, &key, &value);
     let report = validate_persisted_records(&database)?;
-    assert_eq!(report.catalog_records, 10);
+    assert_eq!(report.catalog_records, 6);
     Ok(())
 }
 

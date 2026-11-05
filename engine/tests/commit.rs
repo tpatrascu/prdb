@@ -45,6 +45,13 @@ fn id(n: u8) -> [u8; 16] {
     [n; 16]
 }
 
+fn id_catalog_key(family: u16, object_id: [u8; 16]) -> Vec<u8> {
+    let mut key = family.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&object_id);
+    key
+}
+
 fn builtin_owner_id() -> [u8; 16] {
     let mut id = [0x80; 16];
     id[15] = 3;
@@ -533,6 +540,154 @@ fn column_write(column_id: [u8; 16], table_id: [u8; 16], name: &str) -> CatalogW
     }
 }
 
+fn constraint_write(
+    constraint_id: [u8; 16],
+    table_id: [u8; 16],
+    kind: u16,
+    source_columns: &[[u8; 16]],
+    referenced_constraint_id: Option<[u8; 16]>,
+    referenced_columns: &[[u8; 16]],
+    backing_index_id: Option<[u8; 16]>,
+) -> CatalogWrite {
+    let key = id_catalog_key(8, constraint_id);
+    let id_list = |ids: &[[u8; 16]]| {
+        let mut encoded = (ids.len() as u32).to_le_bytes().to_vec();
+        encoded.extend(ids.iter().flatten());
+        encoded
+    };
+    let mut fields = vec![
+        CatalogField {
+            tag: 1,
+            wire_type: WireType::Id,
+            payload: table_id.to_vec(),
+        },
+        CatalogField {
+            tag: 2,
+            wire_type: WireType::U16,
+            payload: kind.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 3,
+            wire_type: WireType::Ids,
+            payload: id_list(source_columns),
+        },
+    ];
+    if let Some(referenced_constraint_id) = referenced_constraint_id {
+        fields.push(CatalogField {
+            tag: 5,
+            wire_type: WireType::Id,
+            payload: referenced_constraint_id.to_vec(),
+        });
+    }
+    fields.extend([
+        CatalogField {
+            tag: 6,
+            wire_type: WireType::Ids,
+            payload: id_list(referenced_columns),
+        },
+        CatalogField {
+            tag: 7,
+            wire_type: WireType::U16,
+            payload: u16::from(kind == 5).to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 8,
+            wire_type: WireType::U16,
+            payload: u16::from(kind == 5).to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 9,
+            wire_type: WireType::U16,
+            payload: u16::from(kind == 5).to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 10,
+            wire_type: WireType::U16,
+            payload: 1u16.to_le_bytes().to_vec(),
+        },
+    ]);
+    if let Some(backing_index_id) = backing_index_id {
+        fields.push(CatalogField {
+            tag: 11,
+            wire_type: WireType::Id,
+            payload: backing_index_id.to_vec(),
+        });
+    }
+    CatalogWrite {
+        payload: Some(encode_envelope(&family_schema(8).unwrap(), &key, &fields).unwrap()),
+        key,
+        expected_value: None,
+    }
+}
+
+fn primary_index_write(
+    index_id: [u8; 16],
+    table_id: [u8; 16],
+    column_id: [u8; 16],
+    constraint_id: [u8; 16],
+) -> CatalogWrite {
+    let key = id_catalog_key(9, index_id);
+    let mut columns = 1u32.to_le_bytes().to_vec();
+    columns.extend_from_slice(&column_id);
+    let fields = [
+        CatalogField {
+            tag: 1,
+            wire_type: WireType::Id,
+            payload: table_id.to_vec(),
+        },
+        CatalogField {
+            tag: 2,
+            wire_type: WireType::Ids,
+            payload: columns,
+        },
+        CatalogField {
+            tag: 3,
+            wire_type: WireType::U16,
+            payload: 1u16.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 4,
+            wire_type: WireType::Bool,
+            payload: vec![1],
+        },
+        CatalogField {
+            tag: 5,
+            wire_type: WireType::U16,
+            payload: 1u16.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 6,
+            wire_type: WireType::Id,
+            payload: constraint_id.to_vec(),
+        },
+        CatalogField {
+            tag: 7,
+            wire_type: WireType::Id,
+            payload: index_id.to_vec(),
+        },
+        CatalogField {
+            tag: 8,
+            wire_type: WireType::U16,
+            payload: 1u16.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 9,
+            wire_type: WireType::U32,
+            payload: 1u32.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 10,
+            wire_type: WireType::U64,
+            payload: 1u64.to_le_bytes().to_vec(),
+        },
+    ];
+    CatalogWrite {
+        payload: Some(encode_envelope(&family_schema(9).unwrap(), &key, &fields).unwrap()),
+        key,
+        expected_value: None,
+    }
+}
+
 fn malformed_foreign_key_write() -> CatalogWrite {
     let constraint_id = id(81);
     let table_id = id(82);
@@ -890,6 +1045,92 @@ fn catalog_commit_requires_owned_child_parent_edge_consistency()
         2
     );
     assert_eq!(commit_sequence(&database)?, 2);
+    Ok(())
+}
+
+fn foreign_key_catalog_writes(with_target_edge: bool) -> Vec<CatalogWrite> {
+    let schema_id = id(80);
+    let target_table_id = id(81);
+    let source_table_id = id(82);
+    let target_column_id = id(83);
+    let source_column_id = id(84);
+    let target_constraint_id = id(85);
+    let foreign_key_id = id(86);
+    let backing_index_id = id(87);
+    let mut writes = vec![
+        schema_write(schema_id),
+        table_write(target_table_id, schema_id),
+        table_write(source_table_id, schema_id),
+        column_write(target_column_id, target_table_id, "object_83"),
+        column_write(source_column_id, source_table_id, "object_84"),
+        constraint_write(
+            target_constraint_id,
+            target_table_id,
+            2,
+            &[target_column_id],
+            None,
+            &[],
+            Some(backing_index_id),
+        ),
+        constraint_write(
+            foreign_key_id,
+            source_table_id,
+            5,
+            &[source_column_id],
+            Some(target_constraint_id),
+            &[target_column_id],
+            None,
+        ),
+        primary_index_write(
+            backing_index_id,
+            target_table_id,
+            target_column_id,
+            target_constraint_id,
+        ),
+        object_write(schema_id, 1),
+        object_write(target_table_id, 3),
+        object_write(source_table_id, 3),
+        object_write(target_column_id, 4),
+        object_write(source_column_id, 4),
+        object_write(target_constraint_id, 6),
+        object_write(foreign_key_id, 6),
+        object_write(backing_index_id, 7),
+    ];
+    if with_target_edge {
+        writes.push(dependency_write(foreign_key_id, target_constraint_id, 3));
+    }
+    writes
+}
+
+#[test]
+fn catalog_commit_requires_foreign_key_target_dependency_edges()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(88),
+            id(9),
+            9_999,
+            &foreign_key_catalog_writes(false),
+            &[audit_event(88)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+    assert_eq!(commit_sequence(&database)?, 0);
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(89),
+            id(9),
+            9_999,
+            &foreign_key_catalog_writes(true),
+            &[audit_event(89)],
+        )?,
+        1
+    );
+    assert_eq!(commit_sequence(&database)?, 1);
     Ok(())
 }
 

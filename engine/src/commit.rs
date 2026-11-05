@@ -555,15 +555,19 @@ fn validate_final_dependency_edges(
     catalog_writes: &[CatalogWrite],
 ) -> Result<(), CommitError> {
     if !catalog_writes.iter().any(|write| {
-        write.key.len() >= 2 && matches!(u16::from_be_bytes([write.key[0], write.key[1]]), 2 | 15)
+        write.key.len() >= 2
+            && matches!(u16::from_be_bytes([write.key[0], write.key[1]]), 2 | 8 | 15)
     }) {
         return Ok(());
     }
 
     let table = transaction.open_table(CATALOG).map_err(storage_error)?;
     let mut object_parents = HashMap::<[u8; 16], Option<[u8; 16]>>::new();
+    let mut object_kinds = HashMap::<[u8; 16], u16>::new();
+    let mut constraint_kinds = HashMap::<[u8; 16], u16>::new();
+    let mut foreign_key_targets = HashMap::<[u8; 16], [u8; 16]>::new();
     let mut dependencies = Vec::<([u8; 16], [u8; 16], u16)>::new();
-    for family_code in [2u16, 15] {
+    for family_code in [2u16, 8, 15] {
         let prefix = family_code.to_be_bytes();
         let mut family_count = 0usize;
         for entry in table.range(prefix.as_slice()..).map_err(storage_error)? {
@@ -583,6 +587,9 @@ fn validate_final_dependency_edges(
                 key,
                 value.value(),
                 &mut object_parents,
+                &mut object_kinds,
+                &mut constraint_kinds,
+                &mut foreign_key_targets,
                 &mut dependencies,
             )?;
         }
@@ -599,6 +606,9 @@ fn validate_final_dependency_edges(
                     &write.key,
                     bytes,
                     &mut object_parents,
+                    &mut object_kinds,
+                    &mut constraint_kinds,
+                    &mut foreign_key_targets,
                     &mut dependencies,
                 )?;
             }
@@ -611,6 +621,27 @@ fn validate_final_dependency_edges(
         return Err(CommitError::InvalidCatalog);
     }
     if !crate::catalog::validate_owned_child_graph(&object_parents, &dependencies) {
+        return Err(CommitError::InvalidCatalog);
+    }
+    let foreign_key_edges = dependencies
+        .iter()
+        .filter(|(_, _, kind)| *kind == 3)
+        .map(|(dependent_id, referenced_id, _)| (*dependent_id, *referenced_id))
+        .collect::<HashSet<_>>();
+    if dependencies.iter().filter(|(_, _, kind)| *kind == 3).any(
+        |(dependent_id, referenced_id, _)| {
+            object_kinds.get(dependent_id) != Some(&6)
+                || object_kinds.get(referenced_id) != Some(&6)
+                || constraint_kinds.get(dependent_id) != Some(&5)
+                || !matches!(constraint_kinds.get(referenced_id), Some(2 | 3))
+                || foreign_key_targets.get(dependent_id) != Some(referenced_id)
+        },
+    ) || foreign_key_targets
+        .iter()
+        .any(|(dependent_id, referenced_id)| {
+            !foreign_key_edges.contains(&(*dependent_id, *referenced_id))
+        })
+    {
         return Err(CommitError::InvalidCatalog);
     }
     Ok(())
@@ -822,6 +853,9 @@ fn collect_dependency_catalog_record(
     key: &[u8],
     bytes: &[u8],
     object_parents: &mut HashMap<[u8; 16], Option<[u8; 16]>>,
+    object_kinds: &mut HashMap<[u8; 16], u16>,
+    constraint_kinds: &mut HashMap<[u8; 16], u16>,
+    foreign_key_targets: &mut HashMap<[u8; 16], [u8; 16]>,
     dependencies: &mut Vec<([u8; 16], [u8; 16], u16)>,
 ) -> Result<(), CommitError> {
     let record = decode_catalog_record(key, bytes)?;
@@ -845,7 +879,46 @@ fn collect_dependency_catalog_record(
                         .map_err(|_| CommitError::InvalidCatalog)
                 })
                 .transpose()?;
-            if object_parents.insert(object_id, parent_id).is_some() {
+            let object_kind = u16::from_le_bytes(
+                catalog_field_bytes(key, bytes, 2, 1)?
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| CommitError::InvalidCatalog)?,
+            );
+            if !(1..=10).contains(&object_kind)
+                || object_parents.insert(object_id, parent_id).is_some()
+                || object_kinds.insert(object_id, object_kind).is_some()
+            {
+                return Err(CommitError::InvalidCatalog);
+            }
+        }
+        8 => {
+            if key.len() != 19 {
+                return Err(CommitError::InvalidCatalog);
+            }
+            let constraint_id = key[3..19]
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?;
+            let kind = u16::from_le_bytes(
+                catalog_field_bytes(key, bytes, 8, 2)?
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| CommitError::InvalidCatalog)?,
+            );
+            if !matches!(kind, 1..=5) || constraint_kinds.insert(constraint_id, kind).is_some() {
+                return Err(CommitError::InvalidCatalog);
+            }
+            if kind == 5
+                && foreign_key_targets
+                    .insert(
+                        constraint_id,
+                        catalog_field_bytes(key, bytes, 8, 5)?
+                            .as_slice()
+                            .try_into()
+                            .map_err(|_| CommitError::InvalidCatalog)?,
+                    )
+                    .is_some()
+            {
                 return Err(CommitError::InvalidCatalog);
             }
         }

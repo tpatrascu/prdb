@@ -128,6 +128,8 @@ fn validate_catalog(
     let mut object_owners = Vec::<[u8; 16]>::new();
     let mut typed_object_kinds = HashMap::<[u8; 16], u16>::new();
     let mut typed_name_records = Vec::<(u16, [u8; 16])>::new();
+    let mut constraint_kinds = HashMap::<[u8; 16], u16>::new();
+    let mut foreign_key_targets = HashMap::<[u8; 16], [u8; 16]>::new();
     let mut memberships = Vec::<Membership>::new();
     let mut membership_grantors = Vec::<[u8; 16]>::new();
     let mut object_parents = HashMap::<[u8; 16], Option<[u8; 16]>>::new();
@@ -217,6 +219,25 @@ fn validate_catalog(
                 return Err(StartupError::InvalidCatalog);
             }
         }
+        if record.family_code == 8 {
+            if key.len() != 19 {
+                return Err(StartupError::InvalidCatalog);
+            }
+            let constraint_id: [u8; 16] = key[3..19]
+                .try_into()
+                .map_err(|_| StartupError::InvalidCatalog)?;
+            let kind = field_u16(&record, 2)?;
+            if !matches!(kind, 1..=5) || constraint_kinds.insert(constraint_id, kind).is_some() {
+                return Err(StartupError::InvalidCatalog);
+            }
+            if kind == 5
+                && foreign_key_targets
+                    .insert(constraint_id, field_id(&record, 5)?)
+                    .is_some()
+            {
+                return Err(StartupError::InvalidCatalog);
+            }
+        }
         if record.family_code == 10 {
             let principal_id: [u8; 16] = key
                 .get(3..19)
@@ -277,6 +298,27 @@ fn validate_catalog(
     if dependencies.iter().any(|(dependent_id, referenced_id, _)| {
         !object_parents.contains_key(dependent_id) || !object_parents.contains_key(referenced_id)
     }) {
+        return Err(StartupError::InvalidCatalog);
+    }
+    let foreign_key_edges = dependencies
+        .iter()
+        .filter(|(_, _, kind)| *kind == 3)
+        .map(|(dependent_id, referenced_id, _)| (*dependent_id, *referenced_id))
+        .collect::<std::collections::HashSet<_>>();
+    if dependencies.iter().filter(|(_, _, kind)| *kind == 3).any(
+        |(dependent_id, referenced_id, _)| {
+            object_kinds.get(dependent_id) != Some(&6)
+                || object_kinds.get(referenced_id) != Some(&6)
+                || constraint_kinds.get(dependent_id) != Some(&5)
+                || !matches!(constraint_kinds.get(referenced_id), Some(2 | 3))
+                || foreign_key_targets.get(dependent_id) != Some(referenced_id)
+        },
+    ) || foreign_key_targets
+        .iter()
+        .any(|(dependent_id, referenced_id)| {
+            !foreign_key_edges.contains(&(*dependent_id, *referenced_id))
+        })
+    {
         return Err(StartupError::InvalidCatalog);
     }
     if !validate_owned_child_graph(&object_parents, &dependencies) {
