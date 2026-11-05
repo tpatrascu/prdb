@@ -324,3 +324,11 @@
 - Real-redb regressions cover missing index coverage and a locator/reverse entry attached to the wrong typed key; a valid persisted row/index image still passes.
 - Verification: `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and all 173 integration tests across 17 targets passed in the prescribed Nix shell. `git diff --check` passed.
 - Remaining: startup validation still needs uniqueness checking for persisted unique-index duplicates and authenticated service admission.
+
+## SM-5 dependency: persisted unique-index integrity — in progress
+
+- Red evidence: startup accepted two rows with the same non-NULL tuple in a catalog-defined unique index, even though invocation commits enforce uniqueness.
+- Startup now validates the catalog uniqueness flag, tracks derived tuple prefixes for unique indexes, and rejects duplicate non-NULL keys. NULL values follow the catalog's NULLS DISTINCT rule and do not collide.
+- Real-redb coverage rejects duplicate persisted non-NULL keys and accepts repeated NULL keys under a unique index.
+- Verification: `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and all 175 integration tests across 17 targets passed in the prescribed Nix shell. `git diff --check` and changed Markdown link checks passed.
+- Remaining: authenticated service admission and unique/FK constraint lifecycle integration remain open.

@@ -7,7 +7,7 @@ use crate::catalog::{
     validate_builtin_type_profile, validate_owned_child_graph,
 };
 use crate::expression::decode_catalog_expression_record;
-use crate::index_key::derive_index_key;
+use crate::index_key::{DerivedIndexKey, derive_index_key};
 use crate::index_locator::IndexLocator;
 use crate::metadata::{EngineMetadata, Lifecycle};
 use crate::outcome::{InvocationOutcome, OutcomeStatus};
@@ -15,12 +15,13 @@ use crate::row_record::RowRecord;
 use crate::schema::{AUDIT, CATALOG, ENGINE_META, INDEXES, OUTCOMES, ROW_INDEXES, ROWS, STATS};
 use crate::tuple::{ColumnSchema, decode_tuple};
 use redb::{Database, ReadTransaction, ReadableDatabase, ReadableTable};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const METADATA_KEY: &[u8] = b"format";
 const MAX_CATALOG_RECORDS_PER_FAMILY: usize = 65_536;
 type IndexDefinitions = HashMap<[u8; 16], [u8; 16]>;
 type IndexColumns = HashMap<[u8; 16], Vec<[u8; 16]>>;
+type UniqueIndexIds = HashSet<[u8; 16]>;
 
 #[derive(Clone, Debug)]
 struct PersistedTableSchema {
@@ -45,6 +46,7 @@ struct PersistedCatalog {
     record_count: usize,
     index_definitions: IndexDefinitions,
     index_columns: IndexColumns,
+    unique_index_ids: UniqueIndexIds,
     table_schemas: PersistedTableSchemas,
 }
 
@@ -106,6 +108,7 @@ pub fn validate_persisted_records(
         metadata.commit_sequence,
         &catalog.index_definitions,
         &catalog.index_columns,
+        &catalog.unique_index_ids,
         &catalog.table_schemas,
     )?;
     let outcomes = validate_outcomes(&read, metadata.commit_sequence)?;
@@ -199,6 +202,7 @@ fn validate_catalog(
     let mut column_tables = HashMap::<[u8; 16], [u8; 16]>::new();
     let mut column_nullable = HashMap::<[u8; 16], bool>::new();
     let mut index_columns = HashMap::<[u8; 16], Vec<[u8; 16]>>::new();
+    let mut unique_index_ids = HashSet::new();
     let mut policy_tables = HashMap::<[u8; 16], [u8; 16]>::new();
     let mut policy_kinds = HashMap::<[u8; 16], u16>::new();
     let mut expression_reference_edges = std::collections::HashSet::<([u8; 16], [u8; 16])>::new();
@@ -400,9 +404,27 @@ fn validate_catalog(
                 .map_err(|_| StartupError::InvalidCatalog)?;
             let table_id = field_id(&record, 1)?;
             let columns = field_ids(&record, 2)?;
+            let unique = field_bool(&record, 4)?;
+            let schema_version = table_schema_versions
+                .get(&table_id)
+                .copied()
+                .ok_or(StartupError::InvalidCatalog)?;
             let mut unique_columns = std::collections::HashSet::new();
-            if index_definitions.insert(index_id, table_id).is_some() {
+            if index_id == [0; 16]
+                || table_id == [0; 16]
+                || field_u16(&record, 3)? != 1
+                || field_u16(&record, 5)? != 1
+                || field_optional_id(&record, 6)?.is_some_and(|id| id == [0; 16])
+                || field_id(&record, 7)? == [0; 16]
+                || field_u16(&record, 8)? != 1
+                || field_u32(&record, 9)? != 1
+                || field_u64(&record, 10)? != schema_version
+                || index_definitions.insert(index_id, table_id).is_some()
+            {
                 return Err(StartupError::InvalidCatalog);
+            }
+            if unique {
+                unique_index_ids.insert(index_id);
             }
             if columns.is_empty()
                 || columns
@@ -938,6 +960,7 @@ fn validate_catalog(
         record_count: count,
         index_definitions,
         index_columns,
+        unique_index_ids,
         table_schemas,
     })
 }
@@ -1045,6 +1068,21 @@ fn field_id(record: &CatalogRecord, tag: u16) -> Result<[u8; 16], StartupError> 
         .as_slice()
         .try_into()
         .map_err(|_| StartupError::InvalidCatalog)
+}
+
+fn field_optional_id(record: &CatalogRecord, tag: u16) -> Result<Option<[u8; 16]>, StartupError> {
+    record
+        .fields
+        .iter()
+        .find(|field| field.tag == tag)
+        .map(|field| {
+            field
+                .payload
+                .as_slice()
+                .try_into()
+                .map_err(|_| StartupError::InvalidCatalog)
+        })
+        .transpose()
 }
 
 fn field_ids(record: &CatalogRecord, tag: u16) -> Result<Vec<[u8; 16]>, StartupError> {
@@ -1169,6 +1207,7 @@ fn validate_indexes(
     commit_sequence: u64,
     index_definitions: &IndexDefinitions,
     index_columns: &IndexColumns,
+    unique_index_ids: &UniqueIndexIds,
     table_schemas: &PersistedTableSchemas,
 ) -> Result<usize, StartupError> {
     let indexes = read.open_table(INDEXES).map_err(storage_error)?;
@@ -1215,7 +1254,7 @@ fn validate_indexes(
             index_columns,
             table_schemas,
         )?;
-        if locator.row_version != row.row_version || expected_key.as_slice() != key {
+        if locator.row_version != row.row_version || expected_key.key.as_slice() != key {
             return Err(StartupError::InvalidIndex);
         }
         let mut reverse_key = row_key.to_vec();
@@ -1227,6 +1266,7 @@ fn validate_indexes(
         count = count.checked_add(1).ok_or(StartupError::CountOverflow)?;
     }
     let mut expected_count = 0usize;
+    let mut unique_keys = HashSet::<Vec<u8>>::new();
     for entry in rows.iter().map_err(storage_error)? {
         let (key, value) = entry.map_err(storage_error)?;
         let row_key: [u8; 32] = key
@@ -1239,7 +1279,7 @@ fn validate_indexes(
         let row = RowRecord::decode(value.value()).map_err(|_| StartupError::InvalidRow)?;
         if let Some(index_ids) = indexes_by_table.get(&table_id) {
             for index_id in index_ids {
-                let index_key = derive_persisted_index_key(
+                let derived = derive_persisted_index_key(
                     *index_id,
                     row_key[16..]
                         .try_into()
@@ -1249,6 +1289,13 @@ fn validate_indexes(
                     index_columns,
                     table_schemas,
                 )?;
+                if unique_index_ids.contains(index_id) && !derived.has_null {
+                    let unique_key = derived.key[..derived.key.len() - 16].to_vec();
+                    if !unique_keys.insert(unique_key) {
+                        return Err(StartupError::InvalidIndex);
+                    }
+                }
+                let index_key = derived.key;
                 let locator = indexes
                     .get(index_key.as_slice())
                     .map_err(storage_error)?
@@ -1325,7 +1372,7 @@ fn derive_persisted_index_key(
     payload: &[u8],
     index_columns: &IndexColumns,
     table_schemas: &PersistedTableSchemas,
-) -> Result<Vec<u8>, StartupError> {
+) -> Result<DerivedIndexKey, StartupError> {
     let schema = table_schemas
         .get(&table_id)
         .ok_or(StartupError::InvalidCatalog)?;
@@ -1341,7 +1388,6 @@ fn derive_persisted_index_key(
         payload,
         index_column_ids,
     )
-    .map(|derived| derived.key)
     .map_err(|_| StartupError::InvalidIndex)
 }
 

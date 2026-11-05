@@ -537,6 +537,15 @@ fn index_record_for_columns(
     table_id: [u8; 16],
     column_ids: &[[u8; 16]],
 ) -> (Vec<u8>, Vec<u8>) {
+    index_record_for_columns_with_unique(index_id, table_id, column_ids, false)
+}
+
+fn index_record_for_columns_with_unique(
+    index_id: [u8; 16],
+    table_id: [u8; 16],
+    column_ids: &[[u8; 16]],
+    unique: bool,
+) -> (Vec<u8>, Vec<u8>) {
     let schema = family_schema(9).unwrap();
     let mut key = 9u16.to_be_bytes().to_vec();
     key.push(1);
@@ -561,7 +570,7 @@ fn index_record_for_columns(
         CatalogField {
             tag: 4,
             wire_type: WireType::Bool,
-            payload: vec![0],
+            payload: vec![u8::from(unique)],
         },
         CatalogField {
             tag: 5,
@@ -1274,6 +1283,99 @@ fn rejects_index_key_that_does_not_match_its_row_tuple() {
         validate_persisted_records(&database),
         Err(StartupError::InvalidIndex)
     );
+}
+
+#[test]
+fn rejects_duplicate_non_null_keys_in_persisted_unique_indexes() {
+    let fixture = Fixture::new();
+    let database = fixture.database(1);
+    let table_id = [0x22; 16];
+    let row_ids = [[0x33; 16], [0x34; 16]];
+    for row_id in row_ids {
+        insert_row(&database, &row_key(table_id, row_id), 1);
+    }
+    put_table_and_column(&database, table_id, [0x66; 16], false);
+    let (catalog_key, catalog_value) =
+        index_record_for_columns_with_unique([0x44; 16], table_id, &[[0x66; 16]], true);
+    put_catalog(&database, &catalog_key, &catalog_value);
+    let index_object = object_record([0x44; 16], 7);
+    put_catalog(&database, &index_object.0, &index_object.1);
+
+    let write = database.begin_write().unwrap();
+    {
+        let mut indexes = write.open_table(INDEXES).unwrap();
+        let mut reverse = write.open_table(ROW_INDEXES).unwrap();
+        for row_id in row_ids {
+            let row_key = row_key(table_id, row_id);
+            let mut index_key = [0x44; 16].to_vec();
+            index_key.extend_from_slice(&prdb_engine::index_key::encode_bytes(b"tuple-fixture"));
+            index_key.extend_from_slice(&row_id);
+            let locator = IndexLocator {
+                row_id,
+                row_version: 1,
+            }
+            .encode();
+            indexes.insert(&index_key[..], &locator[..]).unwrap();
+            reverse
+                .insert(&reverse_index_key(&row_key, &index_key)[..], &b""[..])
+                .unwrap();
+        }
+    }
+    write.commit().unwrap();
+
+    assert_eq!(
+        validate_persisted_records(&database),
+        Err(StartupError::InvalidIndex)
+    );
+}
+
+#[test]
+fn accepts_repeated_null_keys_in_persisted_unique_indexes() -> Result<(), Box<dyn std::error::Error>>
+{
+    let fixture = Fixture::new();
+    let database = fixture.database(1);
+    let table_id = [0x22; 16];
+    let row_ids = [[0x33; 16], [0x34; 16]];
+    let payload = encode_tuple(
+        &[ColumnSchema {
+            scalar_type: ScalarType::Bytea,
+            nullable: true,
+        }],
+        1,
+        &[None],
+    )?;
+    for row_id in row_ids {
+        insert_row_payload(&database, &row_key(table_id, row_id), 1, &payload);
+    }
+    put_table_and_column(&database, table_id, [0x66; 16], true);
+    let (catalog_key, catalog_value) =
+        index_record_for_columns_with_unique([0x44; 16], table_id, &[[0x66; 16]], true);
+    put_catalog(&database, &catalog_key, &catalog_value);
+    let index_object = object_record([0x44; 16], 7);
+    put_catalog(&database, &index_object.0, &index_object.1);
+
+    let write = database.begin_write().unwrap();
+    {
+        let mut indexes = write.open_table(INDEXES).unwrap();
+        let mut reverse = write.open_table(ROW_INDEXES).unwrap();
+        for row_id in row_ids {
+            let row_key = row_key(table_id, row_id);
+            let index_key = prdb_engine::index_key::compose_key([0x44; 16], &[0xff], row_id);
+            let locator = IndexLocator {
+                row_id,
+                row_version: 1,
+            }
+            .encode();
+            indexes.insert(&index_key[..], &locator[..]).unwrap();
+            reverse
+                .insert(&reverse_index_key(&row_key, &index_key)[..], &b""[..])
+                .unwrap();
+        }
+    }
+    write.commit().unwrap();
+
+    assert_eq!(validate_persisted_records(&database)?.rows, 2);
+    Ok(())
 }
 
 #[test]
