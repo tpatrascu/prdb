@@ -826,6 +826,22 @@ fn validate_catalog(
         {
             return Err(StartupError::InvalidCatalog);
         }
+        if matches!(constraint_kinds.get(constraint_id), Some(2 | 3)) {
+            let index_id = backing_index_targets
+                .get(constraint_id)
+                .ok_or(StartupError::InvalidCatalog)?;
+            if source_columns.is_empty()
+                || index_columns.get(index_id) != Some(source_columns)
+                || index_owners.get(index_id) != Some(constraint_id)
+                || !unique_index_ids.contains(index_id)
+                || (constraint_kinds.get(constraint_id) == Some(&2)
+                    && source_columns
+                        .iter()
+                        .any(|column_id| column_nullable.get(column_id) != Some(&false)))
+            {
+                return Err(StartupError::InvalidCatalog);
+            }
+        }
     }
     for (constraint_id, target_id) in &foreign_key_targets {
         let source_columns = constraint_source_columns

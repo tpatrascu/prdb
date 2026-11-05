@@ -1805,6 +1805,9 @@ fn validate_constraint_references(
         if column_table_id(&column_key, &column_bytes)? != table_id {
             return Err(CommitError::InvalidCatalog);
         }
+        if kind == 2 && catalog_field_bytes(&column_key, &column_bytes, 6, 6)? != [0] {
+            return Err(CommitError::InvalidCatalog);
+        }
     }
     if kind == 1 {
         let column_key = id_catalog_key(6, source_columns[0]);

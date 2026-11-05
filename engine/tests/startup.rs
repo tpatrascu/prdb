@@ -2677,6 +2677,44 @@ fn constraints_resolve_to_source_columns_on_their_table() -> Result<(), Box<dyn 
 }
 
 #[test]
+fn rejects_nullable_primary_key_columns_at_startup() {
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    let table_id = [0x31; 16];
+    let column_id = [0x32; 16];
+    let constraint_id = [0x33; 16];
+    let index_id = [0x34; 16];
+    put_table_and_column(&database, table_id, column_id, true);
+    let constraint = constraint_record(
+        constraint_id,
+        table_id,
+        2,
+        &[column_id],
+        None,
+        &[],
+        Some(index_id),
+    );
+    let index = owned_index_record(index_id, table_id, column_id, constraint_id);
+    let constraint_object = object_record(constraint_id, 6);
+    let index_object = object_record(index_id, 7);
+    let dependency = dependency_record(constraint_id, index_id, 4);
+    for (key, value) in [
+        constraint,
+        index,
+        constraint_object,
+        index_object,
+        dependency,
+    ] {
+        put_catalog(&database, &key, &value);
+    }
+
+    assert_eq!(
+        validate_persisted_records(&database),
+        Err(StartupError::InvalidCatalog)
+    );
+}
+
+#[test]
 fn indexes_resolve_to_columns_on_their_table() -> Result<(), Box<dyn std::error::Error>> {
     let seed = |database: &Database, index_table: [u8; 16], column_table: Option<[u8; 16]>| {
         let table_id = [160; 16];

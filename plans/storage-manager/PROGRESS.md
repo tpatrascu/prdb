@@ -340,3 +340,11 @@
 - A real-redb regression loads a catalog UNIQUE constraint and its owned unique index, stages duplicate tuples, and confirms the whole invocation aborts without publishing either row.
 - Verification: `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and all 176 integration tests across 17 targets passed in the prescribed Nix shell. `git diff --check` and changed Markdown link checks passed.
 - Remaining: foreign-key runtime enforcement and authenticated service admission remain open.
+
+## SM-5 dependency: primary-key catalog integrity — in progress
+
+- Red evidence: catalog commit and READY startup accepted a PRIMARY KEY on a nullable source column despite its valid owned unique backing index.
+- Catalog commit and startup validation now reject nullable PRIMARY KEY columns. Startup also verifies that each PRIMARY KEY/UNIQUE backing index is unique and matches the ordered source columns.
+- Real-redb regressions construct coherent catalog object, constraint, dependency, and backing-index records, then reject the invalid primary key at commit and startup.
+- Verification: `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and all 178 integration tests across 17 targets passed in the prescribed Nix shell. `git diff --check` and changed Markdown link checks passed.
+- Remaining: foreign-key runtime enforcement and authenticated service admission remain open.

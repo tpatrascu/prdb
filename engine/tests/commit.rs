@@ -142,6 +142,73 @@ fn index_definition_with_columns(
     (key, payload)
 }
 
+fn owned_unique_index_definition(
+    index_id: [u8; 16],
+    table_id: [u8; 16],
+    column_ids: &[[u8; 16]],
+    constraint_id: [u8; 16],
+) -> (Vec<u8>, Vec<u8>) {
+    let mut key = 9u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&index_id);
+    let mut columns = (column_ids.len() as u32).to_le_bytes().to_vec();
+    columns.extend(column_ids.iter().flatten());
+    let fields = [
+        CatalogField {
+            tag: 1,
+            wire_type: WireType::Id,
+            payload: table_id.to_vec(),
+        },
+        CatalogField {
+            tag: 2,
+            wire_type: WireType::Ids,
+            payload: columns,
+        },
+        CatalogField {
+            tag: 3,
+            wire_type: WireType::U16,
+            payload: 1u16.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 4,
+            wire_type: WireType::Bool,
+            payload: vec![1],
+        },
+        CatalogField {
+            tag: 5,
+            wire_type: WireType::U16,
+            payload: 1u16.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 6,
+            wire_type: WireType::Id,
+            payload: constraint_id.to_vec(),
+        },
+        CatalogField {
+            tag: 7,
+            wire_type: WireType::Id,
+            payload: [0x77; 16].to_vec(),
+        },
+        CatalogField {
+            tag: 8,
+            wire_type: WireType::U16,
+            payload: 1u16.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 9,
+            wire_type: WireType::U32,
+            payload: 1u32.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 10,
+            wire_type: WireType::U64,
+            payload: 1u64.to_le_bytes().to_vec(),
+        },
+    ];
+    let payload = encode_envelope(&family_schema(9).unwrap(), &key, &fields).unwrap();
+    (key, payload)
+}
+
 fn bootstrap_database_record(database_id: [u8; 16]) -> (Vec<u8>, Vec<u8>) {
     let mut key = 1u16.to_be_bytes().to_vec();
     key.push(1);
@@ -675,10 +742,32 @@ fn column_write(column_id: [u8; 16], table_id: [u8; 16], name: &str) -> CatalogW
     column_write_with_defaults(column_id, table_id, name, None, None)
 }
 
+fn column_write_not_null(column_id: [u8; 16], table_id: [u8; 16], name: &str) -> CatalogWrite {
+    column_write_with_nullability_and_defaults(column_id, table_id, name, false, None, None)
+}
+
 fn column_write_with_defaults(
     column_id: [u8; 16],
     table_id: [u8; 16],
     name: &str,
+    default_expression_id: Option<[u8; 16]>,
+    add_column_default_id: Option<[u8; 16]>,
+) -> CatalogWrite {
+    column_write_with_nullability_and_defaults(
+        column_id,
+        table_id,
+        name,
+        true,
+        default_expression_id,
+        add_column_default_id,
+    )
+}
+
+fn column_write_with_nullability_and_defaults(
+    column_id: [u8; 16],
+    table_id: [u8; 16],
+    name: &str,
+    nullable: bool,
     default_expression_id: Option<[u8; 16]>,
     add_column_default_id: Option<[u8; 16]>,
 ) -> CatalogWrite {
@@ -714,7 +803,7 @@ fn column_write_with_defaults(
         CatalogField {
             tag: 6,
             wire_type: WireType::Bool,
-            payload: vec![1],
+            payload: vec![u8::from(nullable)],
         },
     ];
     if let Some(expression_id) = default_expression_id {
@@ -1106,6 +1195,61 @@ fn catalog_commit_rejects_malformed_constraint_semantics() -> Result<(), Box<dyn
 }
 
 #[test]
+fn catalog_commit_rejects_nullable_primary_key_columns() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let table_id = id(16);
+    let column_id = id(0x66);
+    let index_id = id(0x44);
+    let constraint_id = id(0x70);
+    let (index_key, index_payload) =
+        owned_unique_index_definition(index_id, table_id, &[column_id], constraint_id);
+    let (old_index_key, _) = index_definition(index_id, table_id);
+    assert_eq!(index_key, old_index_key);
+    let (table_key, table_payload, old_index_payload) = {
+        let read = database.begin_read()?;
+        let catalog = read.open_table(CATALOG)?;
+        let table_key = id_catalog_key(5, table_id);
+        let table_payload = catalog.get(table_key.as_slice())?.unwrap().value().to_vec();
+        let index_payload = catalog.get(index_key.as_slice())?.unwrap().value().to_vec();
+        (table_key, table_payload, index_payload)
+    };
+    let mut table_update = table_write_with_versions(table_id, id(20), 1, 2);
+    table_update.key = table_key;
+    table_update.expected_value = Some(table_payload);
+    let index_update = CatalogWrite {
+        key: index_key,
+        expected_value: Some(old_index_payload),
+        payload: Some(index_payload),
+    };
+    let constraint = constraint_write(
+        constraint_id,
+        table_id,
+        2,
+        &[column_id],
+        None,
+        &[],
+        Some(index_id),
+    );
+    let object = object_write(constraint_id, 6);
+    let dependency = dependency_write(constraint_id, index_id, 4);
+
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(91),
+            id(9),
+            9_999,
+            &[table_update, index_update, constraint, object, dependency],
+            &[audit_event(91)],
+        ),
+        Err(CommitError::InvalidCatalog)
+    );
+    assert_eq!(commit_sequence(&database)?, 0);
+    Ok(())
+}
+
+#[test]
 fn catalog_commit_rejects_constraints_for_missing_tables() -> Result<(), Box<dyn std::error::Error>>
 {
     let fixture = Fixture::new();
@@ -1355,7 +1499,7 @@ fn foreign_key_catalog_writes(
         schema_write(schema_id),
         table_write(target_table_id, schema_id),
         table_write(source_table_id, schema_id),
-        column_write(target_column_id, target_table_id, "object_83"),
+        column_write_not_null(target_column_id, target_table_id, "object_83"),
         column_write(source_column_id, source_table_id, "object_84"),
         constraint_write(
             target_constraint_id,
