@@ -45,6 +45,12 @@ fn id(n: u8) -> [u8; 16] {
     [n; 16]
 }
 
+fn builtin_owner_id() -> [u8; 16] {
+    let mut id = [0x80; 16];
+    id[15] = 3;
+    id
+}
+
 fn index_definition(index_id: [u8; 16], table_id: [u8; 16]) -> (Vec<u8>, Vec<u8>) {
     let mut key = 9u16.to_be_bytes().to_vec();
     key.push(1);
@@ -168,6 +174,17 @@ fn initialize(path: &std::path::Path) -> Result<Database, Box<dyn std::error::Er
     transaction
         .open_table(CATALOG)?
         .insert(&index_key[..], &index_payload[..])?;
+    let owner_id = builtin_owner_id();
+    let owner_principal = principal_write(owner_id, 2);
+    let owner_object = principal_object_write(owner_id, 2);
+    transaction.open_table(CATALOG)?.insert(
+        &owner_principal.key[..],
+        owner_principal.payload.as_ref().unwrap().as_slice(),
+    )?;
+    transaction.open_table(CATALOG)?.insert(
+        &owner_object.key[..],
+        owner_object.payload.as_ref().unwrap().as_slice(),
+    )?;
     let metadata = EngineMetadata {
         database_id: [0x33; 16],
         catalog_version: 1,
@@ -267,6 +284,19 @@ fn object_write_with_parent(
     kind: u16,
     parent_id: Option<[u8; 16]>,
 ) -> CatalogWrite {
+    object_write_with_parent_and_owner(object_id, kind, parent_id, builtin_owner_id())
+}
+
+fn object_write_with_owner(object_id: [u8; 16], kind: u16, owner_id: [u8; 16]) -> CatalogWrite {
+    object_write_with_parent_and_owner(object_id, kind, None, owner_id)
+}
+
+fn object_write_with_parent_and_owner(
+    object_id: [u8; 16],
+    kind: u16,
+    parent_id: Option<[u8; 16]>,
+    owner_id: [u8; 16],
+) -> CatalogWrite {
     let mut key = 2u16.to_be_bytes().to_vec();
     key.push(1);
     key.extend_from_slice(&object_id);
@@ -291,7 +321,7 @@ fn object_write_with_parent(
         CatalogField {
             tag: 4,
             wire_type: WireType::Id,
-            payload: id(9).to_vec(),
+            payload: owner_id.to_vec(),
         },
         CatalogField {
             tag: 5,
@@ -742,6 +772,64 @@ fn catalog_commit_rejects_unknown_dependency_edge_kinds() -> Result<(), Box<dyn 
         Err(CommitError::InvalidCatalog),
     );
     assert_eq!(commit_sequence(&database)?, 0);
+    Ok(())
+}
+
+#[test]
+fn catalog_commit_requires_object_owner_principals() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let owner_id = id(71);
+    let object = object_write_with_owner(id(70), 3, owner_id);
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(66),
+            id(9),
+            9_999,
+            std::slice::from_ref(&object),
+            &[audit_event(66)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+
+    let principal = principal_write(owner_id, 1);
+    let principal_object = principal_object_write(owner_id, 1);
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(67),
+            id(9),
+            9_999,
+            &[object.clone(), principal.clone(), principal_object.clone()],
+            &[audit_event(67)],
+        )?,
+        1
+    );
+
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(68),
+            id(9),
+            9_999,
+            &[
+                CatalogWrite {
+                    key: principal.key,
+                    expected_value: principal.payload,
+                    payload: None,
+                },
+                CatalogWrite {
+                    key: principal_object.key,
+                    expected_value: principal_object.payload,
+                    payload: None,
+                },
+            ],
+            &[audit_event(68)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+    assert_eq!(commit_sequence(&database)?, 1);
     Ok(())
 }
 
@@ -1197,7 +1285,7 @@ fn membership_limit_applies_to_final_graph_independent_of_write_order()
     let catalog = read.open_table(prdb_engine::schema::CATALOG)?;
     assert!(catalog.get(old.key.as_slice())?.is_none());
     assert!(catalog.get(new.key.as_slice())?.is_some());
-    assert_eq!(catalog.len()?, 261 + 4096);
+    assert_eq!(catalog.len()?, 263 + 4096);
     drop(catalog);
     drop(read);
     let mut advance = principal_write_with_epoch(member, 2, 3);

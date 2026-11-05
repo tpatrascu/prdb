@@ -13,6 +13,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
+fn builtin_owner_id() -> [u8; 16] {
+    let mut id = [0x80; 16];
+    id[15] = 3;
+    id
+}
+
 struct Fixture(std::path::PathBuf);
 
 impl Fixture {
@@ -46,6 +52,20 @@ impl Fixture {
             .open_table(CATALOG)
             .unwrap()
             .insert(&database_key[..], &database_value[..])
+            .unwrap();
+        let owner_id = builtin_owner_id();
+        let (principal_key, principal_value) = principal_record(owner_id, 2, false, 1);
+        let (owner_object_key, owner_object_value) =
+            object_record_with_owner(owner_id, 9, owner_id);
+        write
+            .open_table(CATALOG)
+            .unwrap()
+            .insert(&principal_key[..], &principal_value[..])
+            .unwrap();
+        write
+            .open_table(CATALOG)
+            .unwrap()
+            .insert(&owner_object_key[..], &owner_object_value[..])
             .unwrap();
         write
             .open_table(ENGINE_META)
@@ -135,6 +155,19 @@ fn object_record_with_parent(
     kind: u16,
     parent_id: Option<[u8; 16]>,
 ) -> (Vec<u8>, Vec<u8>) {
+    object_record_with_parent_and_owner(id, kind, parent_id, builtin_owner_id())
+}
+
+fn object_record_with_owner(id: [u8; 16], kind: u16, owner_id: [u8; 16]) -> (Vec<u8>, Vec<u8>) {
+    object_record_with_parent_and_owner(id, kind, None, owner_id)
+}
+
+fn object_record_with_parent_and_owner(
+    id: [u8; 16],
+    kind: u16,
+    parent_id: Option<[u8; 16]>,
+    owner_id: [u8; 16],
+) -> (Vec<u8>, Vec<u8>) {
     let mut key = 2u16.to_be_bytes().to_vec();
     key.push(1);
     key.extend_from_slice(&id);
@@ -159,7 +192,7 @@ fn object_record_with_parent(
         CatalogField {
             tag: 4,
             wire_type: WireType::Id,
-            payload: [0xfe; 16].to_vec(),
+            payload: owner_id.to_vec(),
         },
         CatalogField {
             tag: 5,
@@ -406,7 +439,7 @@ fn validates_ready_image_records_and_references() -> Result<(), Box<dyn std::err
     assert_eq!(report.metadata.commit_sequence, 3);
     assert_eq!(report.rows, 1);
     assert_eq!(report.index_entries, 1);
-    assert_eq!(report.catalog_records, 3);
+    assert_eq!(report.catalog_records, 5);
     assert_eq!(report.outcomes, 1);
     assert_eq!(report.audit_events, 1);
     Ok(())
@@ -520,6 +553,18 @@ fn rejects_dependency_edges_with_missing_catalog_objects() {
 }
 
 #[test]
+fn rejects_objects_with_missing_owner_principals() {
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    let (key, value) = object_record_with_owner([0x51; 16], 3, [0x52; 16]);
+    put_catalog(&database, &key, &value);
+    assert!(matches!(
+        validate_persisted_records(&database),
+        Err(StartupError::InvalidCatalog)
+    ));
+}
+
+#[test]
 fn accepts_dependency_edges_with_catalog_object_endpoints() -> Result<(), Box<dyn std::error::Error>>
 {
     let fixture = Fixture::new();
@@ -535,7 +580,7 @@ fn accepts_dependency_edges_with_catalog_object_endpoints() -> Result<(), Box<dy
         put_catalog(&database, &key, &value);
     }
     let report = validate_persisted_records(&database)?;
-    assert_eq!(report.catalog_records, 8);
+    assert_eq!(report.catalog_records, 10);
     Ok(())
 }
 
@@ -879,7 +924,7 @@ fn accepts_pinned_acyclic_membership_graph() -> Result<(), Box<dyn std::error::E
         put_catalog(&database, &object.0, &object.1);
     }
     let report = validate_persisted_records(&database)?;
-    assert_eq!(report.catalog_records, 9);
+    assert_eq!(report.catalog_records, 11);
     Ok(())
 }
 

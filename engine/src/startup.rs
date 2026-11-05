@@ -125,6 +125,7 @@ fn validate_catalog(
     let mut index_definitions = HashMap::new();
     let mut principal_kinds = HashMap::<[u8; 16], u16>::new();
     let mut object_kinds = HashMap::<[u8; 16], u16>::new();
+    let mut object_owners = Vec::<[u8; 16]>::new();
     let mut typed_object_kinds = HashMap::<[u8; 16], u16>::new();
     let mut memberships = Vec::<Membership>::new();
     let mut membership_grantors = Vec::<[u8; 16]>::new();
@@ -186,6 +187,7 @@ fn validate_catalog(
             {
                 return Err(StartupError::InvalidCatalog);
             }
+            object_owners.push(field_id(&record, 4)?);
         }
         if let Some(object_kind) = typed_family_object_kind(&record)? {
             let object_id: [u8; 16] = key
@@ -279,6 +281,12 @@ fn validate_catalog(
     if typed_object_kinds
         .iter()
         .any(|(object_id, expected_kind)| object_kinds.get(object_id) != Some(expected_kind))
+    {
+        return Err(StartupError::InvalidCatalog);
+    }
+    if object_owners
+        .iter()
+        .any(|owner_id| !principal_kinds.contains_key(owner_id))
     {
         return Err(StartupError::InvalidCatalog);
     }

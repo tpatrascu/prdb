@@ -51,6 +51,12 @@ fn id(row: u8) -> prdb_engine::overlay::RowId {
     }
 }
 
+fn builtin_owner_id() -> [u8; 16] {
+    let mut id = [0x80; 16];
+    id[15] = 3;
+    id
+}
+
 fn key(id: prdb_engine::overlay::RowId) -> [u8; 32] {
     let mut key = [0; 32];
     key[..16].copy_from_slice(&id.table);
@@ -209,7 +215,7 @@ fn object_catalog_record_for(object_id: [u8; 16], object_kind: u16) -> (Vec<u8>,
         CatalogField {
             tag: 4,
             wire_type: WireType::Id,
-            payload: [9; 16].to_vec(),
+            payload: builtin_owner_id().to_vec(),
         },
         CatalogField {
             tag: 5,
@@ -500,6 +506,12 @@ fn initialize(path: &std::path::Path) -> Result<Database, Box<dyn std::error::Er
             let payload = catalog_record_payload(9, &key, &fields)?;
             catalog.insert(&key[..], &payload[..])?;
         }
+        let owner_id = builtin_owner_id();
+        let (principal_key, principal_value) =
+            principal_catalog_record_for(owner_id, 2, b"database_admin", false, 1);
+        let (owner_object_key, owner_object_value) = principal_object_record_for(owner_id, 2);
+        catalog.insert(&principal_key[..], &principal_value[..])?;
+        catalog.insert(&owner_object_key[..], &owner_object_value[..])?;
     }
     let metadata = EngineMetadata {
         database_id: [0x33; 16],

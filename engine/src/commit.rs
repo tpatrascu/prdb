@@ -616,6 +616,114 @@ fn validate_final_dependency_edges(
     Ok(())
 }
 
+/// Require every object owner to resolve to a user or role in the final
+/// catalog, including when a principal is changed or removed.
+fn validate_final_object_owners(
+    transaction: &WriteTransaction,
+    catalog_writes: &[CatalogWrite],
+) -> Result<(), CommitError> {
+    let is_relevant_family =
+        |key: &[u8]| key.len() >= 2 && matches!(u16::from_be_bytes([key[0], key[1]]), 2 | 10);
+    if !catalog_writes
+        .iter()
+        .any(|write| is_relevant_family(&write.key))
+    {
+        return Ok(());
+    }
+
+    let table = transaction.open_table(CATALOG).map_err(storage_error)?;
+    let mut owner_ids = Vec::<[u8; 16]>::new();
+    let mut principal_ids = HashSet::<[u8; 16]>::new();
+    for family_code in [2u16, 10] {
+        let prefix = family_code.to_be_bytes();
+        let mut family_count = 0usize;
+        for entry in table.range(prefix.as_slice()..).map_err(storage_error)? {
+            let (key, value) = entry.map_err(storage_error)?;
+            let key = key.value();
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            if catalog_writes.iter().any(|write| write.key == key) {
+                continue;
+            }
+            family_count += 1;
+            if family_count > crate::snapshot::MAX_CATALOG_FAMILY_SCAN {
+                return Err(CommitError::InvalidCatalog);
+            }
+            collect_owner_catalog_record(
+                family_code,
+                key,
+                value.value(),
+                &mut owner_ids,
+                &mut principal_ids,
+            )?;
+        }
+        for write in catalog_writes
+            .iter()
+            .filter(|write| write.key.starts_with(&prefix))
+        {
+            if let Some(bytes) = &write.payload {
+                family_count += 1;
+                if family_count > crate::snapshot::MAX_CATALOG_FAMILY_SCAN {
+                    return Err(CommitError::InvalidCatalog);
+                }
+                collect_owner_catalog_record(
+                    family_code,
+                    &write.key,
+                    bytes,
+                    &mut owner_ids,
+                    &mut principal_ids,
+                )?;
+            }
+        }
+    }
+    if owner_ids
+        .iter()
+        .any(|owner_id| !principal_ids.contains(owner_id))
+    {
+        return Err(CommitError::InvalidCatalog);
+    }
+    Ok(())
+}
+
+fn collect_owner_catalog_record(
+    family_code: u16,
+    key: &[u8],
+    bytes: &[u8],
+    owner_ids: &mut Vec<[u8; 16]>,
+    principal_ids: &mut HashSet<[u8; 16]>,
+) -> Result<(), CommitError> {
+    let record = decode_catalog_record(key, bytes)?;
+    if key.len() != 19 || record.family_code != family_code {
+        return Err(CommitError::InvalidCatalog);
+    }
+    let object_id = key[3..19]
+        .try_into()
+        .map_err(|_| CommitError::InvalidCatalog)?;
+    match family_code {
+        2 => {
+            let owner_id = catalog_field_bytes(key, bytes, 2, 4)?
+                .as_slice()
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?;
+            owner_ids.push(owner_id);
+        }
+        10 => {
+            let kind = u16::from_le_bytes(
+                catalog_field_bytes(key, bytes, 10, 1)?
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| CommitError::InvalidCatalog)?,
+            );
+            if !matches!(kind, 1 | 2) || !principal_ids.insert(object_id) {
+                return Err(CommitError::InvalidCatalog);
+            }
+        }
+        _ => return Err(CommitError::InvalidCatalog),
+    }
+    Ok(())
+}
+
 /// Require every surviving typed catalog row affected by a batch to retain a
 /// same-ID object row of the kind specified by its family.
 fn validate_final_typed_object_mappings(
@@ -1814,6 +1922,15 @@ pub fn commit_storage_changes(
         Err(error) => return Err(error),
     }
     match validate_final_dependency_edges(&transaction, catalog_writes) {
+        Ok(()) => {}
+        Err(CommitError::InvalidCatalog) => {
+            transaction.abort().map_err(storage_error)?;
+            record_aborted_outcome(database, invocation_id, principal_id, retention_deadline_us)?;
+            return Err(CommitError::InvalidCatalog);
+        }
+        Err(error) => return Err(error),
+    }
+    match validate_final_object_owners(&transaction, catalog_writes) {
         Ok(()) => {}
         Err(CommitError::InvalidCatalog) => {
             transaction.abort().map_err(storage_error)?;

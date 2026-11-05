@@ -12,6 +12,8 @@ Use opaque 128-bit object IDs, scoped to a persistent database UUID. IDs do not 
 
 Each catalog record has a record-format tag, logical key, and typed payload. redb supplies snapshot visibility for prior values; catalog payloads do not encode begin/end commit visibility. Private administrative changes remain invisible until commit, and an old snapshot can still resolve definitions removed from the current catalog. Object lifecycle and non-reuse rules apply independently of redb's physical deletion. Persistent encoding uses explicit field tags/lengths, never Rust memory layouts; [catalog payload v1](catalog-payloads.md) fixes the envelope, family codes, typed fields, and canonical keys.
 
+Every `objects.owner_id` identifies an existing family 10 user or role. Ownership records provenance and DDL authority; it does not grant query access or bypass grants and policies.
+
 ## Logical Catalog Relations
 
 The following names describe internal record sets, not supported SQL tables. Listed keys are logical keys; redb provides snapshot visibility without an engine MVCC version suffix.
@@ -44,6 +46,8 @@ Store policy recipient lists, ordered constraint/index columns, and expanded gra
 Provide version-aware lookups by object ID; `(namespace, kind/name-domain, normalized name)`; `(table ID, column name/ordinal)`; principal name; direct membership in both directions; grants by grantee/object; policies by table/operation; and dependency edges in both directions. Enforce the SQL naming domains, including shared user/role names and schema-local relation/index names. Built-in namespace reservations are enforced before user object creation.
 
 Resolve each lookup at the invocation's catalog snapshot, not the latest catalog version. Validate referential integrity at catalog commit: no dangling owners/types/columns, duplicate live names, cycles in membership, invalid constraint references, or half-published table/index definitions. Default expressions and policies bind IDs, not names to be re-resolved later.
+
+Startup validates every object's owner against the persisted principal set. A catalog commit that changes a family 2 object or family 10 principal validates all surviving owner references against the final catalog, so principal deletion cannot strand owned objects and an owner and object can be created together.
 
 The storage engine can resolve a table's ordered schema by reading the pinned table record, scanning bounded column records for that table, sorting by ordinal, and resolving each referenced type record. Each column's own type parameters must be decoded and validated even when it shares a type ID with another column. It rejects gaps, duplicates, unsupported type profiles, invalid type parameters, and columns introduced after the table's schema version. This initial family scan is capped at 65,536 catalog records; exceeding the cap fails closed. The loader guards the table, matching column records, and referenced type records at final commit. DDL that adds, drops, or changes a column must also advance the table schema version atomically so a concurrent schema load cannot miss a new column.
 
