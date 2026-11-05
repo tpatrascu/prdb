@@ -400,3 +400,12 @@
 - Added `StorageManager` entry points that route invocation commits through shared table fences and catalog commits through exclusive fences derived from changed tables, constraints, indexes, columns, policies, and expression dependents. Fence timeouts durably record an ABORTED outcome. Raw writer helpers remain unfenced trusted primitives.
 - Verification after coordinated entry-point integration: with Rust/Cargo 1.95.0, rustfmt 1.9.0, Clippy 0.1.95, and TinyCC 0.9.27-unstable-2025-01-06 in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and all 191 integration tests across 18 targets passed. `git diff --check` and changed Markdown link checks passed.
 - Remaining: production service admission must use `StorageManager` consistently; online validation/backfill and authenticated service admission remain open.
+
+## SM-5 dependency: bounded active invocation snapshots — in progress
+
+- Behavior: reject new runtime admissions once a configured per-manager snapshot cap is reached, including admissions through cloned `StorageManager` handles; release capacity when the transaction/snapshot is dropped. This protects redb from unbounded retained read snapshots.
+- Red evidence: the new real-redb regression initially failed because a second snapshot was admitted while the configured limit was one.
+- Implementation: `StorageManagerConfig` exposes the DDL-fence timeout and positive active-invocation cap (default 128); atomic admission permits are shared across manager clones and retained by each managed invocation transaction. Failed transaction construction releases its reserved permit through RAII. A zero cap is rejected at configuration time. Low-level transaction constructors remain explicitly outside manager admission.
+- Tests: `engine/tests/commit.rs` verifies zero-limit rejection, cross-clone capacity enforcement, permit release after dropping an aborted transaction, and subsequent admission.
+- Verification: with Rust/Cargo 1.95.0, rustfmt 1.9.0, Clippy 0.1.95, and TinyCC 0.9.27-unstable-2025-01-06 in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and all 192 integration tests across 18 targets passed. `git diff --check` and changed Markdown local-link checks passed.
+- Remaining: transaction-age cancellation and bounds for scans, response bytes, and total work still require service lifecycle integration.

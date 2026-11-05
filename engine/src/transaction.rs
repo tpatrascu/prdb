@@ -22,6 +22,7 @@ use crate::overlay::{Overlay, OverlayError, ResolvedRow, RowId, StagedRow};
 use crate::row_record::{RowRecord, RowRecordError};
 use crate::schema::{ENGINE_META, OUTCOMES};
 use crate::snapshot::{MAX_CATALOG_FAMILY_SCAN, RowSnapshot};
+use crate::storage_manager::InvocationAdmissionPermit;
 use crate::tuple::{
     ColumnSchema, FieldPatch, ScalarType, TupleError, apply_patch, decode_tuple, encode_tuple,
 };
@@ -44,6 +45,7 @@ pub enum TransactionError {
     NotReady,
     UnsupportedFormat,
     DuplicateInvocation,
+    AdmissionLimitExceeded,
     IndexRowNotStaged,
     RowAlreadyExists,
     GeneratedIdentityUnsupported,
@@ -133,9 +135,40 @@ pub struct InvocationTransaction<'db> {
     invocation_id: [u8; 16],
     principal_id: [u8; 16],
     retention_deadline_us: i64,
-    ddl_fences: Option<DdlFenceCoordinator>,
+    coordination: InvocationCoordination,
     aborted: bool,
     outcome_recorded: bool,
+}
+
+pub(crate) struct InvocationCoordination {
+    ddl_fences: Option<DdlFenceCoordinator>,
+    _admission_permit: Option<InvocationAdmissionPermit>,
+}
+
+impl InvocationCoordination {
+    fn uncoordinated() -> Self {
+        Self {
+            ddl_fences: None,
+            _admission_permit: None,
+        }
+    }
+
+    fn fenced(ddl_fences: DdlFenceCoordinator) -> Self {
+        Self {
+            ddl_fences: Some(ddl_fences),
+            _admission_permit: None,
+        }
+    }
+
+    pub(crate) fn managed(
+        ddl_fences: DdlFenceCoordinator,
+        admission_permit: InvocationAdmissionPermit,
+    ) -> Self {
+        Self {
+            ddl_fences: Some(ddl_fences),
+            _admission_permit: Some(admission_permit),
+        }
+    }
 }
 
 impl<'db> InvocationTransaction<'db> {
@@ -152,7 +185,7 @@ impl<'db> InvocationTransaction<'db> {
     ) -> Result<Self, TransactionError> {
         Self::begin_inner(
             database,
-            None,
+            InvocationCoordination::uncoordinated(),
             invocation_id,
             principal_id,
             retention_deadline_us,
@@ -174,7 +207,7 @@ impl<'db> InvocationTransaction<'db> {
     ) -> Result<Self, TransactionError> {
         Self::begin_inner(
             database,
-            Some(ddl_fences),
+            InvocationCoordination::fenced(ddl_fences),
             invocation_id,
             principal_id,
             retention_deadline_us,
@@ -183,9 +216,9 @@ impl<'db> InvocationTransaction<'db> {
         )
     }
 
-    fn begin_inner(
+    pub(crate) fn begin_inner(
         database: &'db Database,
-        ddl_fences: Option<DdlFenceCoordinator>,
+        coordination: InvocationCoordination,
         invocation_id: [u8; 16],
         principal_id: [u8; 16],
         retention_deadline_us: i64,
@@ -245,7 +278,7 @@ impl<'db> InvocationTransaction<'db> {
             invocation_id,
             principal_id,
             retention_deadline_us,
-            ddl_fences,
+            coordination,
             aborted: false,
             outcome_recorded: false,
         })
@@ -2140,7 +2173,7 @@ impl<'db> InvocationTransaction<'db> {
             }
             return Err(TransactionError::Aborted);
         }
-        let ddl_fences = self.ddl_fences.clone();
+        let ddl_fences = self.coordination.ddl_fences.clone();
         let entries = self.overlay.into_entries()?;
         let mut writes = Vec::with_capacity(entries.len());
         for (id, payload) in entries {

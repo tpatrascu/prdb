@@ -24,7 +24,7 @@ The engine owns the [data dictionary](data-dictionary.md), [catalog payloads](ca
 
 ## Resource and Process Boundaries
 
-Bound active redb snapshots, transaction age, private overlay bytes, scans, output, and finalization work. A long analytical reader can retain redb pages and delay reclamation; scheduling must protect operational transactions. Do not hold redb guards while waiting for network or executor output.
+Bound active redb snapshots, transaction age, private overlay bytes, scans, output, and finalization work. `StorageManager` requires a positive configured active-invocation limit and shares that cap across cloned handles; admission reserves a slot before pinning the redb snapshot and keeps it until the invocation transaction is dropped. A long analytical reader can retain redb pages and delay reclamation; scheduling must protect operational transactions. Do not hold redb guards while waiting for network or executor output.
 
 Only the gateway handles client TCP. Only the supervisor launches and owns executor processes. The executor receives local scoped IPC and sanitized values, never redb handles/descriptors. The optimizer receives authorized schema and scoped estimates, never raw database tables.
 

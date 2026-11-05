@@ -3,9 +3,42 @@
 use crate::audit::AuditEvent;
 use crate::commit::{CatalogWrite, CommitError, commit_catalog_and_audit_with_fences};
 use crate::ddl_fence::{DdlFenceCoordinator, DdlFenceManager};
-use crate::transaction::{InvocationTransaction, TransactionError};
+use crate::transaction::{InvocationCoordination, InvocationTransaction, TransactionError};
 use redb::Database;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+
+/// Admission and coordination limits for one storage-manager handle.
+///
+/// The default allows at most 128 simultaneous invocation snapshots.
+#[derive(Clone, Copy, Debug)]
+pub struct StorageManagerConfig {
+    pub ddl_fence_timeout: Duration,
+    pub max_active_invocations: usize,
+}
+
+impl Default for StorageManagerConfig {
+    fn default() -> Self {
+        Self {
+            ddl_fence_timeout: Duration::from_secs(5),
+            max_active_invocations: 128,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StorageManagerConfigError {
+    ZeroActiveInvocationLimit,
+}
+
+impl std::fmt::Display for StorageManagerConfigError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "invalid storage manager configuration: {self:?}")
+    }
+}
+
+impl std::error::Error for StorageManagerConfigError {}
 
 /// Shares one per-table DDL fence manager across row and catalog operations for
 /// a database handle.
@@ -13,16 +46,87 @@ use std::time::Duration;
 pub struct StorageManager<'db> {
     database: &'db Database,
     ddl_fences: DdlFenceCoordinator,
+    max_active_invocations: usize,
+    admissions: Arc<InvocationAdmissionState>,
+}
+
+struct InvocationAdmissionState {
+    active: AtomicUsize,
+    limit: usize,
+}
+
+pub(crate) struct InvocationAdmissionPermit {
+    state: Arc<InvocationAdmissionState>,
+}
+
+impl InvocationAdmissionState {
+    fn acquire(self: &Arc<Self>) -> Option<InvocationAdmissionPermit> {
+        let mut active = self.active.load(Ordering::Acquire);
+        loop {
+            if active >= self.limit {
+                return None;
+            }
+            match self.active.compare_exchange_weak(
+                active,
+                active + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Some(InvocationAdmissionPermit {
+                        state: Arc::clone(self),
+                    });
+                }
+                Err(actual) => active = actual,
+            }
+        }
+    }
+}
+
+impl Drop for InvocationAdmissionPermit {
+    fn drop(&mut self) {
+        self.state.active.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl<'db> StorageManager<'db> {
+    /// Use the default snapshot limit and the supplied DDL-fence timeout.
     pub fn new(database: &'db Database, ddl_fence_timeout: Duration) -> Self {
-        Self {
+        Self::with_config(
             database,
-            ddl_fences: DdlFenceCoordinator::new(DdlFenceManager::new(), ddl_fence_timeout),
-        }
+            StorageManagerConfig {
+                ddl_fence_timeout,
+                ..StorageManagerConfig::default()
+            },
+        )
+        .expect("default storage-manager limits are valid")
     }
 
+    pub fn with_config(
+        database: &'db Database,
+        config: StorageManagerConfig,
+    ) -> Result<Self, StorageManagerConfigError> {
+        if config.max_active_invocations == 0 {
+            return Err(StorageManagerConfigError::ZeroActiveInvocationLimit);
+        }
+        Ok(Self {
+            database,
+            ddl_fences: DdlFenceCoordinator::new(DdlFenceManager::new(), config.ddl_fence_timeout),
+            max_active_invocations: config.max_active_invocations,
+            admissions: Arc::new(InvocationAdmissionState {
+                active: AtomicUsize::new(0),
+                limit: config.max_active_invocations,
+            }),
+        })
+    }
+
+    /// The configured hard cap shared by clones of this manager.
+    pub fn max_active_invocations(&self) -> usize {
+        self.max_active_invocations
+    }
+
+    /// Reserve an invocation slot before opening its pinned redb snapshot.
+    /// The slot remains held until the transaction and its snapshot are dropped.
     pub fn begin_invocation(
         &self,
         invocation_id: [u8; 16],
@@ -31,9 +135,13 @@ impl<'db> StorageManager<'db> {
         max_rows: usize,
         max_bytes: usize,
     ) -> Result<InvocationTransaction<'db>, TransactionError> {
-        InvocationTransaction::begin_with_fences(
+        let admission_permit = self
+            .admissions
+            .acquire()
+            .ok_or(TransactionError::AdmissionLimitExceeded)?;
+        InvocationTransaction::begin_inner(
             self.database,
-            self.ddl_fences.clone(),
+            InvocationCoordination::managed(self.ddl_fences.clone(), admission_permit),
             invocation_id,
             principal_id,
             retention_deadline_us,

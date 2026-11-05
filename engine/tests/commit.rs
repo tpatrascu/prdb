@@ -11,7 +11,7 @@ use prdb_engine::metadata::{EngineMetadata, Lifecycle};
 use prdb_engine::outcome::{InvocationOutcome, OutcomeStatus, lookup_outcome};
 use prdb_engine::row_record::RowRecord;
 use prdb_engine::schema::{self, CATALOG, ENGINE_META, ROWS};
-use prdb_engine::storage_manager::StorageManager;
+use prdb_engine::storage_manager::{StorageManager, StorageManagerConfig};
 use prdb_engine::tuple::{ColumnSchema, ScalarType, ScalarValue, encode_tuple};
 use redb::{Database, ReadableDatabase, ReadableTableMetadata};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1848,6 +1848,43 @@ fn storage_manager_routes_invocations_and_catalog_commits_through_shared_fences(
             .payload,
         b"coordinated"
     );
+    Ok(())
+}
+
+#[test]
+fn storage_manager_bounds_active_invocation_snapshots_across_clones()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    assert_eq!(
+        StorageManager::with_config(
+            &database,
+            StorageManagerConfig {
+                ddl_fence_timeout: Duration::from_millis(100),
+                max_active_invocations: 0,
+            },
+        )
+        .err(),
+        Some(prdb_engine::storage_manager::StorageManagerConfigError::ZeroActiveInvocationLimit)
+    );
+    let storage = StorageManager::with_config(
+        &database,
+        StorageManagerConfig {
+            ddl_fence_timeout: Duration::from_millis(100),
+            max_active_invocations: 1,
+        },
+    )?;
+    let mut first = storage.begin_invocation(id(192), id(9), 9_999, 2, 64)?;
+    let cloned_storage = storage.clone();
+    assert!(matches!(
+        cloned_storage.begin_invocation(id(193), id(9), 9_999, 2, 64),
+        Err(prdb_engine::transaction::TransactionError::AdmissionLimitExceeded)
+    ));
+
+    first.abort()?;
+    drop(first);
+    let next = cloned_storage.begin_invocation(id(194), id(9), 9_999, 2, 64)?;
+    drop(next);
     Ok(())
 }
 
