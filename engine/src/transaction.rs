@@ -14,6 +14,7 @@ use crate::expression::{
     CatalogExpression, ExpressionPurpose, decode_catalog_expression_record,
     validate_expression_binding,
 };
+use crate::index_key::{DeriveIndexKeyError, derive_index_key};
 use crate::metadata::{EngineMetadata, Lifecycle};
 use crate::outcome::{InvocationOutcome, OutcomeStatus};
 use crate::overlay::{Overlay, OverlayError, ResolvedRow, RowId, StagedRow};
@@ -118,6 +119,8 @@ pub struct InvocationTransaction<'db> {
     overlay: Overlay,
     base_versions: HashMap<RowId, Option<u64>>,
     index_writes: HashMap<Vec<u8>, StagedIndexChange>,
+    loaded_schemas: HashMap<[u8; 16], CatalogTableSchema>,
+    loaded_indexes: HashMap<[u8; 16], Vec<CatalogIndexDefinition>>,
     catalog_guards: HashMap<Vec<u8>, Option<Vec<u8>>>,
     max_index_changes: usize,
     max_index_bytes: usize,
@@ -181,6 +184,8 @@ impl<'db> InvocationTransaction<'db> {
             overlay: Overlay::new(max_rows, max_bytes),
             base_versions: HashMap::new(),
             index_writes: HashMap::new(),
+            loaded_schemas: HashMap::new(),
+            loaded_indexes: HashMap::new(),
             catalog_guards: HashMap::new(),
             max_index_changes: max_rows.saturating_mul(MAX_INDEX_CHANGES_PER_ROW),
             max_index_bytes: max_bytes,
@@ -415,7 +420,10 @@ impl<'db> InvocationTransaction<'db> {
             })
         })();
         match result {
-            Ok(schema) => Ok(schema),
+            Ok(schema) => {
+                self.loaded_schemas.insert(schema.table_id, schema.clone());
+                Ok(schema)
+            }
             Err(error) => {
                 if !self.aborted {
                     self.abort()?;
@@ -497,7 +505,11 @@ impl<'db> InvocationTransaction<'db> {
             Ok(indexes)
         })();
         match result {
-            Ok(indexes) => Ok(indexes),
+            Ok(indexes) => {
+                self.loaded_schemas.insert(schema.table_id, schema.clone());
+                self.loaded_indexes.insert(schema.table_id, indexes.clone());
+                Ok(indexes)
+            }
             Err(error) => {
                 if !self.aborted {
                     self.abort()?;
@@ -1809,6 +1821,8 @@ impl<'db> InvocationTransaction<'db> {
         self.overlay.abort();
         self.base_versions.clear();
         self.index_writes.clear();
+        self.loaded_schemas.clear();
+        self.loaded_indexes.clear();
         self.index_bytes = 0;
         self.catalog_guards.clear();
         self.aborted = true;
@@ -1847,6 +1861,13 @@ impl<'db> InvocationTransaction<'db> {
                 payload,
             });
         }
+        let index_validation = validate_catalog_index_deltas(
+            &self.snapshot,
+            &self.loaded_schemas,
+            &self.loaded_indexes,
+            &self.index_writes,
+            &writes,
+        );
         let index_writes = self
             .index_writes
             .into_iter()
@@ -1867,19 +1888,21 @@ impl<'db> InvocationTransaction<'db> {
                 expected_value,
             })
             .collect::<Vec<_>>();
-        let result = commit_storage_changes(
-            self.database,
-            CommitRequest {
-                invocation_id: self.invocation_id,
-                principal_id: self.principal_id,
-                retention_deadline_us: self.retention_deadline_us,
-                rows: &writes,
-                indexes: &index_writes,
-                catalog_guards: &catalog_guards,
-                catalog: &[],
-                audit: &[],
-            },
-        );
+        let result = index_validation.and_then(|()| {
+            commit_storage_changes(
+                self.database,
+                CommitRequest {
+                    invocation_id: self.invocation_id,
+                    principal_id: self.principal_id,
+                    retention_deadline_us: self.retention_deadline_us,
+                    rows: &writes,
+                    indexes: &index_writes,
+                    catalog_guards: &catalog_guards,
+                    catalog: &[],
+                    audit: &[],
+                },
+            )
+        });
         match result {
             Ok(sequence) => Ok(sequence),
             Err(
@@ -1961,6 +1984,158 @@ impl<'db> InvocationTransaction<'db> {
         }
         Ok(())
     }
+}
+
+fn derive_catalog_index_key(
+    schema: &CatalogTableSchema,
+    index: &CatalogIndexDefinition,
+    row_id: [u8; 16],
+    payload: &[u8],
+) -> Result<crate::index_key::DerivedIndexKey, CommitError> {
+    derive_index_key(
+        index.index_id,
+        row_id,
+        schema.schema_version,
+        &schema.column_ids,
+        &schema.columns,
+        payload,
+        &index.column_ids,
+    )
+    .map_err(|error| match error {
+        DeriveIndexKeyError::InvalidDefinition => CommitError::InvalidCatalog,
+        DeriveIndexKeyError::Tuple(_) => CommitError::InvalidRow,
+    })
+}
+
+fn validate_catalog_index_deltas(
+    snapshot: &RowSnapshot,
+    loaded_schemas: &HashMap<[u8; 16], CatalogTableSchema>,
+    loaded_indexes: &HashMap<[u8; 16], Vec<CatalogIndexDefinition>>,
+    staged_indexes: &HashMap<Vec<u8>, StagedIndexChange>,
+    row_writes: &[RowWrite],
+) -> Result<(), CommitError> {
+    for row_write in row_writes {
+        let table_id: [u8; 16] = row_write.key[..16]
+            .try_into()
+            .map_err(|_| CommitError::InvalidWrite)?;
+        if loaded_schemas.contains_key(&table_id) && !loaded_indexes.contains_key(&table_id) {
+            return Err(CommitError::InvalidIndex);
+        }
+    }
+    if loaded_indexes.is_empty() {
+        return Ok(());
+    }
+    let tracked_tables = loaded_indexes.keys().copied().collect::<HashSet<_>>();
+    let mut expected = HashMap::<Vec<u8>, IndexWrite>::new();
+
+    for row_write in row_writes {
+        let table_id: [u8; 16] = row_write.key[..16]
+            .try_into()
+            .map_err(|_| CommitError::InvalidWrite)?;
+        let Some(indexes) = loaded_indexes.get(&table_id) else {
+            continue;
+        };
+        let schema = loaded_schemas
+            .get(&table_id)
+            .ok_or(CommitError::InvalidCatalog)?;
+        let row_id: [u8; 16] = row_write.key[16..]
+            .try_into()
+            .map_err(|_| CommitError::InvalidWrite)?;
+        let previous = snapshot
+            .get(&row_write.key)
+            .map_err(|error| CommitError::Storage(error.to_string()))?
+            .map(|bytes| RowRecord::decode(&bytes).map_err(|_| CommitError::InvalidRow))
+            .transpose()?;
+        if previous.as_ref().map(|record| record.row_version) != row_write.expected_version {
+            return Err(CommitError::Conflict);
+        }
+
+        for index in indexes {
+            if index.table_id != table_id {
+                return Err(CommitError::InvalidCatalog);
+            }
+            let old = previous
+                .as_ref()
+                .map(|record| derive_catalog_index_key(schema, index, row_id, &record.payload))
+                .transpose()?;
+            let new = row_write
+                .payload
+                .as_deref()
+                .map(|payload| derive_catalog_index_key(schema, index, row_id, payload))
+                .transpose()?;
+            if old.as_ref().map(|derived| &derived.key) == new.as_ref().map(|derived| &derived.key)
+            {
+                if let Some(record) = &previous {
+                    let version = snapshot
+                        .get_index_version(&old.as_ref().ok_or(CommitError::InvalidIndex)?.key)
+                        .map_err(|error| CommitError::Storage(error.to_string()))?;
+                    if version != Some(record.row_version) {
+                        return Err(CommitError::InvalidIndex);
+                    }
+                }
+                continue;
+            }
+
+            if let (Some(record), Some(derived)) = (&previous, &old) {
+                let version = snapshot
+                    .get_index_version(&derived.key)
+                    .map_err(|error| CommitError::Storage(error.to_string()))?;
+                if version != Some(record.row_version) {
+                    return Err(CommitError::InvalidIndex);
+                }
+                let write = IndexWrite {
+                    key: derived.key.clone(),
+                    row_key: row_write.key,
+                    expected_version: version,
+                    present: false,
+                    unique: index.unique,
+                    null_exempt: index.unique && derived.has_null,
+                };
+                if expected.insert(write.key.clone(), write).is_some() {
+                    return Err(CommitError::InvalidIndex);
+                }
+            }
+            if let Some(derived) = &new {
+                let version = snapshot
+                    .get_index_version(&derived.key)
+                    .map_err(|error| CommitError::Storage(error.to_string()))?;
+                if version.is_some() {
+                    return Err(CommitError::InvalidIndex);
+                }
+                let write = IndexWrite {
+                    key: derived.key.clone(),
+                    row_key: row_write.key,
+                    expected_version: None,
+                    present: true,
+                    unique: index.unique,
+                    null_exempt: index.unique && derived.has_null,
+                };
+                if expected.insert(write.key.clone(), write).is_some() {
+                    return Err(CommitError::InvalidIndex);
+                }
+            }
+        }
+    }
+
+    let mut actual = HashMap::<Vec<u8>, IndexWrite>::new();
+    for (key, staged) in staged_indexes {
+        if !tracked_tables.contains(&staged.row_id.table) {
+            continue;
+        }
+        let write = IndexWrite {
+            key: key.clone(),
+            row_key: row_key(staged.row_id),
+            expected_version: staged.expected_version,
+            present: staged.present,
+            unique: staged.unique,
+            null_exempt: staged.null_exempt,
+        };
+        actual.insert(key.clone(), write);
+    }
+    if actual != expected {
+        return Err(CommitError::InvalidIndex);
+    }
+    Ok(())
 }
 
 fn catalog_field(record: &CatalogRecord, tag: u16) -> Result<&[u8], TransactionError> {
