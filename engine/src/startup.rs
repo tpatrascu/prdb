@@ -1,0 +1,324 @@
+//! Read-only integrity checks for a recovered redb image.
+
+use crate::audit::AuditEvent;
+use crate::catalog::{CatalogRecord, decode_registered_envelope};
+use crate::expression::decode_catalog_expression_record;
+use crate::index_locator::IndexLocator;
+use crate::metadata::{EngineMetadata, Lifecycle};
+use crate::outcome::{InvocationOutcome, OutcomeStatus};
+use crate::row_record::RowRecord;
+use crate::schema::{AUDIT, CATALOG, ENGINE_META, INDEXES, OUTCOMES, ROW_INDEXES, ROWS, STATS};
+use redb::{Database, ReadTransaction, ReadableDatabase, ReadableTable};
+use std::collections::HashMap;
+
+const METADATA_KEY: &[u8] = b"format";
+const MAX_CATALOG_RECORDS_PER_FAMILY: usize = 65_536;
+type IndexDefinitions = HashMap<[u8; 16], [u8; 16]>;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StorageHealthReport {
+    pub metadata: EngineMetadata,
+    pub catalog_records: usize,
+    pub rows: usize,
+    pub index_entries: usize,
+    pub outcomes: usize,
+    pub audit_events: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StartupError {
+    Storage,
+    InvalidMetadata,
+    UnsupportedFormat,
+    NotReady,
+    UnexpectedMetadataKey,
+    CatalogLimit,
+    InvalidCatalog,
+    InvalidRow,
+    SequenceAhead,
+    InvalidIndex,
+    InvalidOutcome,
+    InvalidAudit,
+    CountOverflow,
+}
+
+impl std::fmt::Display for StartupError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "storage startup validation failed: {self:?}")
+    }
+}
+
+impl std::error::Error for StartupError {}
+
+/// Validate the recovered image's table set, version state, record envelopes,
+/// and references against one pinned redb snapshot. This record-level check
+/// does not certify bootstrap completeness or authenticated service admission.
+pub fn validate_persisted_records(
+    database: &Database,
+) -> Result<StorageHealthReport, StartupError> {
+    let read = database.begin_read().map_err(storage_error)?;
+    validate_tables(&read)?;
+    let metadata = read_metadata(&read)?;
+    if !metadata.supports_current_formats() {
+        return Err(StartupError::UnsupportedFormat);
+    }
+    if metadata.lifecycle != Lifecycle::Ready {
+        return Err(StartupError::NotReady);
+    }
+
+    let (catalog_records, index_definitions) = validate_catalog(&read)?;
+    let rows = validate_rows(&read, metadata.commit_sequence)?;
+    let index_entries = validate_indexes(&read, metadata.commit_sequence, &index_definitions)?;
+    let outcomes = validate_outcomes(&read, metadata.commit_sequence)?;
+    let audit_events = validate_audit(&read)?;
+
+    Ok(StorageHealthReport {
+        metadata,
+        catalog_records,
+        rows,
+        index_entries,
+        outcomes,
+        audit_events,
+    })
+}
+
+fn storage_error(_error: impl std::fmt::Display) -> StartupError {
+    StartupError::Storage
+}
+
+fn validate_tables(read: &ReadTransaction) -> Result<(), StartupError> {
+    drop(read.open_table(ENGINE_META).map_err(storage_error)?);
+    drop(read.open_table(ROWS).map_err(storage_error)?);
+    drop(read.open_table(INDEXES).map_err(storage_error)?);
+    drop(read.open_table(ROW_INDEXES).map_err(storage_error)?);
+    drop(read.open_table(CATALOG).map_err(storage_error)?);
+    drop(read.open_table(OUTCOMES).map_err(storage_error)?);
+    drop(read.open_table(AUDIT).map_err(storage_error)?);
+    drop(read.open_table(STATS).map_err(storage_error)?);
+    Ok(())
+}
+
+fn read_metadata(read: &ReadTransaction) -> Result<EngineMetadata, StartupError> {
+    let table = read.open_table(ENGINE_META).map_err(storage_error)?;
+    let mut metadata_bytes = None;
+    for entry in table.iter().map_err(storage_error)? {
+        let (key, value) = entry.map_err(storage_error)?;
+        if key.value() != METADATA_KEY {
+            return Err(StartupError::UnexpectedMetadataKey);
+        }
+        if metadata_bytes.replace(value.value().to_vec()).is_some() {
+            return Err(StartupError::InvalidMetadata);
+        }
+    }
+    let bytes = metadata_bytes.ok_or(StartupError::InvalidMetadata)?;
+    EngineMetadata::decode(&bytes).map_err(|_| StartupError::InvalidMetadata)
+}
+
+fn validate_catalog(read: &ReadTransaction) -> Result<(usize, IndexDefinitions), StartupError> {
+    let table = read.open_table(CATALOG).map_err(storage_error)?;
+    let mut family_counts = [0usize; 17];
+    let mut count = 0usize;
+    let mut index_definitions = HashMap::new();
+    for entry in table.iter().map_err(storage_error)? {
+        let (key, value) = entry.map_err(storage_error)?;
+        let key = key.value();
+        if key.len() < 2 {
+            return Err(StartupError::InvalidCatalog);
+        }
+        let family_code = u16::from_be_bytes([key[0], key[1]]) as usize;
+        if !(1..=16).contains(&family_code) {
+            return Err(StartupError::InvalidCatalog);
+        }
+        family_counts[family_code] = family_counts[family_code]
+            .checked_add(1)
+            .ok_or(StartupError::CountOverflow)?;
+        if family_counts[family_code] > MAX_CATALOG_RECORDS_PER_FAMILY {
+            return Err(StartupError::CatalogLimit);
+        }
+        count = count.checked_add(1).ok_or(StartupError::CountOverflow)?;
+
+        let record =
+            decode_registered_envelope(value.value()).map_err(|_| StartupError::InvalidCatalog)?;
+        if record.logical_key != key || record.family_code as usize != family_code {
+            return Err(StartupError::InvalidCatalog);
+        }
+        if record.family_code == 7 {
+            decode_catalog_expression_record(&record).map_err(|_| StartupError::InvalidCatalog)?;
+        }
+        if record.family_code == 9 {
+            let index_id: [u8; 16] = key
+                .get(3..19)
+                .ok_or(StartupError::InvalidCatalog)?
+                .try_into()
+                .map_err(|_| StartupError::InvalidCatalog)?;
+            let table_id = field_id(&record, 1)?;
+            if index_definitions.insert(index_id, table_id).is_some() {
+                return Err(StartupError::InvalidCatalog);
+            }
+        }
+    }
+    Ok((count, index_definitions))
+}
+
+fn field_id(record: &CatalogRecord, tag: u16) -> Result<[u8; 16], StartupError> {
+    record
+        .fields
+        .iter()
+        .find(|field| field.tag == tag)
+        .ok_or(StartupError::InvalidCatalog)?
+        .payload
+        .as_slice()
+        .try_into()
+        .map_err(|_| StartupError::InvalidCatalog)
+}
+
+fn validate_rows(read: &ReadTransaction, commit_sequence: u64) -> Result<usize, StartupError> {
+    let table = read.open_table(ROWS).map_err(storage_error)?;
+    let mut count = 0usize;
+    for entry in table.iter().map_err(storage_error)? {
+        let (key, value) = entry.map_err(storage_error)?;
+        let key = key.value();
+        if key.len() != 32 || key[..16] == [0; 16] {
+            return Err(StartupError::InvalidRow);
+        }
+        let record = RowRecord::decode(value.value()).map_err(|_| StartupError::InvalidRow)?;
+        if record.row_version > commit_sequence {
+            return Err(StartupError::SequenceAhead);
+        }
+        count = count.checked_add(1).ok_or(StartupError::CountOverflow)?;
+    }
+    Ok(count)
+}
+
+fn validate_indexes(
+    read: &ReadTransaction,
+    commit_sequence: u64,
+    index_definitions: &IndexDefinitions,
+) -> Result<usize, StartupError> {
+    let indexes = read.open_table(INDEXES).map_err(storage_error)?;
+    let rows = read.open_table(ROWS).map_err(storage_error)?;
+    let reverse = read.open_table(ROW_INDEXES).map_err(storage_error)?;
+    let mut count = 0usize;
+    for entry in indexes.iter().map_err(storage_error)? {
+        let (key, value) = entry.map_err(storage_error)?;
+        let key = key.value();
+        if key.len() < 33 {
+            return Err(StartupError::InvalidIndex);
+        }
+        let index_id: [u8; 16] = key[..16]
+            .try_into()
+            .map_err(|_| StartupError::InvalidIndex)?;
+        let table_id = index_definitions
+            .get(&index_id)
+            .ok_or(StartupError::InvalidIndex)?;
+        let locator = IndexLocator::decode_for_key(key, value.value())
+            .map_err(|_| StartupError::InvalidIndex)?;
+        if locator.row_version > commit_sequence {
+            return Err(StartupError::SequenceAhead);
+        }
+        let mut row_key = [0; 32];
+        row_key[..16].copy_from_slice(table_id);
+        row_key[16..].copy_from_slice(&locator.row_id);
+        let row = rows
+            .get(&row_key[..])
+            .map_err(storage_error)?
+            .ok_or(StartupError::InvalidIndex)?;
+        let row = RowRecord::decode(row.value()).map_err(|_| StartupError::InvalidIndex)?;
+        if locator.row_version != row.row_version {
+            return Err(StartupError::InvalidIndex);
+        }
+        let mut reverse_key = row_key.to_vec();
+        reverse_key.extend_from_slice(&key[..key.len() - 16]);
+        let reverse_value = reverse.get(&reverse_key[..]).map_err(storage_error)?;
+        if reverse_value.is_none_or(|value| !value.value().is_empty()) {
+            return Err(StartupError::InvalidIndex);
+        }
+        count = count.checked_add(1).ok_or(StartupError::CountOverflow)?;
+    }
+    let mut reverse_count = 0usize;
+    for entry in reverse.iter().map_err(storage_error)? {
+        let (key, value) = entry.map_err(storage_error)?;
+        let key = key.value();
+        if key.len() < 49 || !value.value().is_empty() {
+            return Err(StartupError::InvalidIndex);
+        }
+        let row_key: [u8; 32] = key[..32]
+            .try_into()
+            .map_err(|_| StartupError::InvalidIndex)?;
+        let index_id: [u8; 16] = key[32..48]
+            .try_into()
+            .map_err(|_| StartupError::InvalidIndex)?;
+        if row_key[..16] == [0; 16] {
+            return Err(StartupError::InvalidIndex);
+        }
+        let table_id = index_definitions
+            .get(&index_id)
+            .ok_or(StartupError::InvalidIndex)?;
+        if table_id.as_slice() != &row_key[..16] {
+            return Err(StartupError::InvalidIndex);
+        }
+        let mut index_key = key[32..].to_vec();
+        index_key.extend_from_slice(&row_key[16..]);
+        let locator = indexes
+            .get(&index_key[..])
+            .map_err(storage_error)?
+            .ok_or(StartupError::InvalidIndex)?;
+        let locator = IndexLocator::decode_for_key(&index_key, locator.value())
+            .map_err(|_| StartupError::InvalidIndex)?;
+        let row = rows
+            .get(&row_key[..])
+            .map_err(storage_error)?
+            .ok_or(StartupError::InvalidIndex)?;
+        let row = RowRecord::decode(row.value()).map_err(|_| StartupError::InvalidIndex)?;
+        if locator.row_version != row.row_version {
+            return Err(StartupError::InvalidIndex);
+        }
+        reverse_count = reverse_count
+            .checked_add(1)
+            .ok_or(StartupError::CountOverflow)?;
+    }
+    if reverse_count != count {
+        return Err(StartupError::InvalidIndex);
+    }
+    Ok(count)
+}
+
+fn validate_outcomes(read: &ReadTransaction, commit_sequence: u64) -> Result<usize, StartupError> {
+    let table = read.open_table(OUTCOMES).map_err(storage_error)?;
+    let mut count = 0usize;
+    for entry in table.iter().map_err(storage_error)? {
+        let (key, value) = entry.map_err(storage_error)?;
+        let key: [u8; 16] = key
+            .value()
+            .try_into()
+            .map_err(|_| StartupError::InvalidOutcome)?;
+        let outcome =
+            InvocationOutcome::decode(value.value()).map_err(|_| StartupError::InvalidOutcome)?;
+        if outcome.invocation_id != key
+            || (outcome.status == OutcomeStatus::Committed
+                && outcome.commit_sequence > commit_sequence)
+        {
+            return Err(StartupError::InvalidOutcome);
+        }
+        count = count.checked_add(1).ok_or(StartupError::CountOverflow)?;
+    }
+    Ok(count)
+}
+
+fn validate_audit(read: &ReadTransaction) -> Result<usize, StartupError> {
+    let table = read.open_table(AUDIT).map_err(storage_error)?;
+    let mut count = 0usize;
+    for entry in table.iter().map_err(storage_error)? {
+        let (key, value) = entry.map_err(storage_error)?;
+        let key: [u8; 16] = key
+            .value()
+            .try_into()
+            .map_err(|_| StartupError::InvalidAudit)?;
+        let event = AuditEvent::decode(value.value()).map_err(|_| StartupError::InvalidAudit)?;
+        if event.event_id != key {
+            return Err(StartupError::InvalidAudit);
+        }
+        count = count.checked_add(1).ok_or(StartupError::CountOverflow)?;
+    }
+    Ok(count)
+}

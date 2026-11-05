@@ -390,6 +390,63 @@ fn initialize(path: &std::path::Path) -> Result<Database, Box<dyn std::error::Er
     write.set_durability(redb::Durability::Immediate)?;
     write.set_two_phase_commit(true);
     schema::create_tables(&write)?;
+    {
+        let mut catalog = write.open_table(CATALOG)?;
+        for index_id in [[0x55; 16], [1; 16], [2; 16]] {
+            let key = catalog_id_key(9, index_id);
+            let mut columns = 1u32.to_le_bytes().to_vec();
+            columns.extend_from_slice(&[0x66; 16]);
+            let fields = [
+                CatalogField {
+                    tag: 1,
+                    wire_type: WireType::Id,
+                    payload: [0x10; 16].to_vec(),
+                },
+                CatalogField {
+                    tag: 2,
+                    wire_type: WireType::Ids,
+                    payload: columns,
+                },
+                CatalogField {
+                    tag: 3,
+                    wire_type: WireType::U16,
+                    payload: 1u16.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 4,
+                    wire_type: WireType::Bool,
+                    payload: vec![0],
+                },
+                CatalogField {
+                    tag: 5,
+                    wire_type: WireType::U16,
+                    payload: 1u16.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 7,
+                    wire_type: WireType::Id,
+                    payload: index_id.to_vec(),
+                },
+                CatalogField {
+                    tag: 8,
+                    wire_type: WireType::U16,
+                    payload: 1u16.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 9,
+                    wire_type: WireType::U32,
+                    payload: 1u32.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 10,
+                    wire_type: WireType::U64,
+                    payload: 1u64.to_le_bytes().to_vec(),
+                },
+            ];
+            let payload = catalog_record_payload(9, &key, &fields)?;
+            catalog.insert(&key[..], &payload[..])?;
+        }
+    }
     let metadata = EngineMetadata {
         database_id: [0x33; 16],
         catalog_version: 1,

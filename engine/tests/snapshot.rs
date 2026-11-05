@@ -30,13 +30,13 @@ impl Drop for Fixture {
 
 fn id(row: u8) -> RowId {
     RowId {
-        table: [0; 16],
+        table: [0x10; 16],
         row: [row; 16],
     }
 }
 
 fn row_key(row: u8) -> [u8; 32] {
-    let mut key = [0; 32];
+    let mut key = [0x10; 32];
     key[16..].fill(row);
     key
 }

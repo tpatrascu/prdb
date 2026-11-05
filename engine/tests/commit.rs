@@ -8,7 +8,7 @@ use prdb_engine::index_locator::IndexLocator;
 use prdb_engine::metadata::{EngineMetadata, Lifecycle};
 use prdb_engine::outcome::{InvocationOutcome, OutcomeStatus, lookup_outcome};
 use prdb_engine::row_record::RowRecord;
-use prdb_engine::schema::{self, ENGINE_META, ROWS};
+use prdb_engine::schema::{self, CATALOG, ENGINE_META, ROWS};
 use redb::{Database, ReadableDatabase, ReadableTableMetadata};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
@@ -36,7 +36,7 @@ impl Drop for Fixture {
 }
 
 fn key(n: u8) -> [u8; 32] {
-    let mut key = [0; 32];
+    let mut key = [0x10; 32];
     key[31] = n;
     key
 }
@@ -45,12 +45,73 @@ fn id(n: u8) -> [u8; 16] {
     [n; 16]
 }
 
+fn index_definition(index_id: [u8; 16], table_id: [u8; 16]) -> (Vec<u8>, Vec<u8>) {
+    let mut key = 9u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&index_id);
+    let mut columns = 1u32.to_le_bytes().to_vec();
+    columns.extend_from_slice(&[0x66; 16]);
+    let fields = [
+        CatalogField {
+            tag: 1,
+            wire_type: WireType::Id,
+            payload: table_id.to_vec(),
+        },
+        CatalogField {
+            tag: 2,
+            wire_type: WireType::Ids,
+            payload: columns,
+        },
+        CatalogField {
+            tag: 3,
+            wire_type: WireType::U16,
+            payload: 1u16.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 4,
+            wire_type: WireType::Bool,
+            payload: vec![0],
+        },
+        CatalogField {
+            tag: 5,
+            wire_type: WireType::U16,
+            payload: 1u16.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 7,
+            wire_type: WireType::Id,
+            payload: [0x77; 16].to_vec(),
+        },
+        CatalogField {
+            tag: 8,
+            wire_type: WireType::U16,
+            payload: 1u16.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 9,
+            wire_type: WireType::U32,
+            payload: 1u32.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 10,
+            wire_type: WireType::U64,
+            payload: 1u64.to_le_bytes().to_vec(),
+        },
+    ];
+    let payload = encode_envelope(&family_schema(9).unwrap(), &key, &fields).unwrap();
+    (key, payload)
+}
+
 fn initialize(path: &std::path::Path) -> Result<Database, Box<dyn std::error::Error>> {
     let database = Database::create(path)?;
     let mut transaction = database.begin_write()?;
     transaction.set_durability(redb::Durability::Immediate)?;
     transaction.set_two_phase_commit(true);
     schema::create_tables(&transaction)?;
+    let (index_key, index_payload) = index_definition([0x44; 16], [0x10; 16]);
+    transaction
+        .open_table(CATALOG)?
+        .insert(&index_key[..], &index_payload[..])?;
     let metadata = EngineMetadata {
         database_id: [0x33; 16],
         catalog_version: 1,
@@ -569,7 +630,7 @@ fn membership_limit_applies_to_final_graph_independent_of_write_order()
     let catalog = read.open_table(prdb_engine::schema::CATALOG)?;
     assert!(catalog.get(old.key.as_slice())?.is_none());
     assert!(catalog.get(new.key.as_slice())?.is_some());
-    assert_eq!(catalog.len()?, 129 + 4096);
+    assert_eq!(catalog.len()?, 130 + 4096);
     drop(catalog);
     drop(read);
     let mut advance = principal_write_with_epoch(member, 2, 3);
@@ -1006,6 +1067,92 @@ fn one_redb_commit_can_publish_rows_indexes_catalog_audit_and_outcome()
         .status,
         OutcomeStatus::Aborted
     );
+    Ok(())
+}
+
+#[test]
+fn row_updates_refresh_retained_index_locator_versions() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let mut row_key = [0x10; 32];
+    row_key[16..].fill(0x31);
+    let index_key = index_key(&row_key);
+    commit_rows_and_indexes(
+        &database,
+        id(40),
+        id(9),
+        9_999,
+        &[RowWrite {
+            key: row_key,
+            expected_version: None,
+            payload: Some(b"first".to_vec()),
+        }],
+        &[IndexWrite {
+            key: index_key.clone(),
+            row_key,
+            expected_version: None,
+            present: true,
+            unique: false,
+            null_exempt: false,
+        }],
+    )?;
+
+    assert_eq!(
+        commit_rows(
+            &database,
+            id(41),
+            id(9),
+            9_999,
+            &[RowWrite {
+                key: row_key,
+                expected_version: Some(1),
+                payload: Some(b"second".to_vec()),
+            }],
+        )?,
+        2
+    );
+    let read = database.begin_read()?;
+    let locator = read
+        .open_table(prdb_engine::schema::INDEXES)?
+        .get(&index_key[..])?
+        .unwrap()
+        .value()
+        .to_vec();
+    assert_eq!(
+        IndexLocator::decode_for_key(&index_key, &locator)?.row_version,
+        2
+    );
+    drop(read);
+
+    assert_eq!(
+        commit_rows(
+            &database,
+            id(42),
+            id(9),
+            9_999,
+            &[RowWrite {
+                key: row_key,
+                expected_version: Some(2),
+                payload: None,
+            }],
+        )?,
+        3
+    );
+    let mut reverse_key = row_key.to_vec();
+    reverse_key.extend_from_slice(&index_key[..index_key.len() - 16]);
+    let read = database.begin_read()?;
+    assert!(
+        read.open_table(prdb_engine::schema::INDEXES)?
+            .get(&index_key[..])?
+            .is_none()
+    );
+    assert!(
+        read.open_table(prdb_engine::schema::ROW_INDEXES)?
+            .get(&reverse_key[..])?
+            .is_none()
+    );
+    assert!(row(&database, &row_key)?.is_none());
+    prdb_engine::startup::validate_persisted_records(&database)?;
     Ok(())
 }
 

@@ -1,5 +1,7 @@
 use prdb_engine::metadata::{EngineMetadata, Lifecycle};
-use prdb_engine::schema::{self, AUDIT, CATALOG, ENGINE_META, INDEXES, OUTCOMES, ROWS, STATS};
+use prdb_engine::schema::{
+    self, AUDIT, CATALOG, ENGINE_META, INDEXES, OUTCOMES, ROW_INDEXES, ROWS, STATS,
+};
 use redb::{Database, ReadableDatabase};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -68,6 +70,7 @@ fn creates_and_reopens_all_versioned_engine_tables() -> Result<(), Box<dyn std::
     );
     drop(read.open_table(ROWS)?);
     drop(read.open_table(INDEXES)?);
+    drop(read.open_table(ROW_INDEXES)?);
     drop(read.open_table(CATALOG)?);
     drop(read.open_table(OUTCOMES)?);
     drop(read.open_table(AUDIT)?);

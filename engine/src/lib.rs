@@ -13,5 +13,6 @@ pub mod overlay;
 pub mod row_record;
 pub mod schema;
 pub mod snapshot;
+pub mod startup;
 pub mod transaction;
 pub mod tuple;

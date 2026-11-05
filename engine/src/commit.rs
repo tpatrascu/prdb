@@ -7,9 +7,11 @@ use crate::index_locator::IndexLocator;
 use crate::metadata::{EngineMetadata, Lifecycle};
 use crate::outcome::{InvocationOutcome, OutcomeStatus};
 use crate::row_record::RowRecord;
-use crate::schema::{AUDIT, CATALOG, ENGINE_META, INDEXES, OUTCOMES, ROWS};
+use crate::schema::{AUDIT, CATALOG, ENGINE_META, INDEXES, OUTCOMES, ROW_INDEXES, ROWS};
 use redb::{Database, ReadableTable, WriteTransaction};
 use std::collections::{HashMap, HashSet};
+
+type IndexTableMap = HashMap<[u8; 16], [u8; 16]>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RowWrite {
@@ -50,6 +52,13 @@ pub struct CatalogGuard {
     pub key: Vec<u8>,
     /// Exact CAT1 bytes read by the invocation for schema/authority validation.
     pub expected_value: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug)]
+struct RetainedIndexMutation {
+    index_key: Vec<u8>,
+    row_index_key: Vec<u8>,
+    locator: Option<[u8; crate::index_locator::LOCATOR_LENGTH]>,
 }
 
 pub struct CommitRequest<'a> {
@@ -1095,9 +1104,159 @@ fn principal_authority_epoch(key: &[u8], bytes: &[u8]) -> Result<u64, CommitErro
     Ok(epoch)
 }
 
-/// Validate and atomically publish one row write set and its new commit sequence.
-/// Authorization, secondary-index maintenance, and required audit updates must be added
-/// before executor use.
+fn decode_index_definition(key: &[u8], bytes: &[u8]) -> Result<([u8; 16], [u8; 16]), CommitError> {
+    let record = decode_catalog_record(key, bytes)?;
+    if record.family_code != 9 || key.len() != 19 {
+        return Err(CommitError::InvalidCatalog);
+    }
+    let index_id = key[3..19]
+        .try_into()
+        .map_err(|_| CommitError::InvalidCatalog)?;
+    let table_id = record
+        .fields
+        .iter()
+        .find(|field| field.tag == 1)
+        .ok_or(CommitError::InvalidCatalog)?
+        .payload
+        .as_slice()
+        .try_into()
+        .map_err(|_| CommitError::InvalidCatalog)?;
+    Ok((index_id, table_id))
+}
+
+fn load_index_definitions(
+    transaction: &WriteTransaction,
+    catalog_writes: &[CatalogWrite],
+) -> Result<(IndexTableMap, IndexTableMap), CommitError> {
+    let prefix = 9u16.to_be_bytes();
+    let table = transaction.open_table(CATALOG).map_err(storage_error)?;
+    let mut current = HashMap::new();
+    for entry in table.iter().map_err(storage_error)? {
+        let (key, value) = entry.map_err(storage_error)?;
+        let key = key.value().to_vec();
+        if !key.starts_with(&prefix) {
+            continue;
+        }
+        let (index_id, table_id) = decode_index_definition(&key, value.value())?;
+        if current.insert(index_id, table_id).is_some() {
+            return Err(CommitError::InvalidCatalog);
+        }
+    }
+    let mut final_definitions = current.clone();
+    for write in catalog_writes
+        .iter()
+        .filter(|write| write.key.starts_with(&prefix))
+    {
+        let index_id: [u8; 16] = write
+            .key
+            .get(3..19)
+            .ok_or(CommitError::InvalidCatalog)?
+            .try_into()
+            .map_err(|_| CommitError::InvalidCatalog)?;
+        match &write.payload {
+            Some(payload) => {
+                let (_, table_id) = decode_index_definition(&write.key, payload)?;
+                final_definitions.insert(index_id, table_id);
+            }
+            None => {
+                final_definitions.remove(&index_id);
+            }
+        }
+    }
+    Ok((current, final_definitions))
+}
+
+fn reverse_index_key(row_key: &[u8; 32], index_key: &[u8]) -> Vec<u8> {
+    let mut key = row_key.to_vec();
+    key.extend_from_slice(&index_key[..index_key.len() - 16]);
+    key
+}
+
+fn retained_index_mutations(
+    transaction: &WriteTransaction,
+    row_writes: &[RowWrite],
+    explicit_index_writes: &[IndexWrite],
+    current_definitions: &HashMap<[u8; 16], [u8; 16]>,
+    final_definitions: &HashMap<[u8; 16], [u8; 16]>,
+    next_sequence: u64,
+) -> Result<Vec<RetainedIndexMutation>, CommitError> {
+    let row_writes = row_writes
+        .iter()
+        .map(|write| (write.key, write))
+        .collect::<HashMap<_, _>>();
+    let explicit_keys = explicit_index_writes
+        .iter()
+        .map(|write| write.key.as_slice())
+        .collect::<HashSet<_>>();
+    let reverse = transaction.open_table(ROW_INDEXES).map_err(storage_error)?;
+    let indexes = transaction.open_table(INDEXES).map_err(storage_error)?;
+    let rows = transaction.open_table(ROWS).map_err(storage_error)?;
+    let mut mutations = Vec::new();
+
+    for (row_key, row_write) in &row_writes {
+        for entry in reverse.range(row_key.as_slice()..).map_err(storage_error)? {
+            let (stored_reverse_key, marker) = entry.map_err(storage_error)?;
+            let stored_reverse_key = stored_reverse_key.value().to_vec();
+            if !stored_reverse_key.starts_with(&row_key[..]) {
+                break;
+            }
+            if stored_reverse_key.len() < 49 || !marker.value().is_empty() {
+                return Err(CommitError::InvalidIndex);
+            }
+            let mut index_key = stored_reverse_key[32..].to_vec();
+            index_key.extend_from_slice(&row_key[16..]);
+            let index_id: [u8; 16] = index_key[..16]
+                .try_into()
+                .map_err(|_| CommitError::InvalidIndex)?;
+            let table_id = current_definitions
+                .get(&index_id)
+                .ok_or(CommitError::InvalidIndex)?;
+            if table_id != &row_key[..16] {
+                return Err(CommitError::InvalidIndex);
+            }
+            let row = rows
+                .get(&row_key[..])
+                .map_err(storage_error)?
+                .ok_or(CommitError::InvalidIndex)?;
+            let row = RowRecord::decode(row.value()).map_err(|_| CommitError::InvalidRow)?;
+            if row_write.expected_version != Some(row.row_version) {
+                return Err(CommitError::InvalidIndex);
+            }
+            let locator = indexes
+                .get(&index_key[..])
+                .map_err(storage_error)?
+                .ok_or(CommitError::InvalidIndex)?;
+            let locator = IndexLocator::decode_for_key(&index_key, locator.value())
+                .map_err(|_| CommitError::InvalidIndex)?;
+            if locator.row_version != row.row_version {
+                return Err(CommitError::InvalidIndex);
+            }
+            if explicit_keys.contains(index_key.as_slice()) {
+                continue;
+            }
+
+            let remove =
+                row_write.payload.is_none() || final_definitions.get(&index_id) != Some(table_id);
+            let next_locator = (!remove).then(|| {
+                IndexLocator {
+                    row_id: locator.row_id,
+                    row_version: next_sequence,
+                }
+                .encode()
+            });
+            mutations.push(RetainedIndexMutation {
+                index_key,
+                row_index_key: stored_reverse_key,
+                locator: next_locator,
+            });
+        }
+    }
+    Ok(mutations)
+}
+
+/// Atomically publish a row write set and commit sequence without index deltas.
+/// This low-level helper does not derive index changes from typed row values or
+/// enforce authorization; it is not an executor-facing write path.
 pub fn commit_rows(
     database: &Database,
     invocation_id: [u8; 16],
@@ -1120,9 +1279,11 @@ pub fn commit_rows(
     )
 }
 
-/// Atomically publish rows and the caller-supplied complete set of logical
-/// index key mutations. Index definitions, authorization, uniqueness, and
-/// required audit must still be checked by trusted storage before executor use.
+/// Atomically publish rows and explicit logical index-key mutations. The writer
+/// validates index/table mapping and uniqueness, maintains reverse membership,
+/// and refreshes retained locator versions. It does not derive a complete index
+/// delta from typed row values or enforce authorization, so it is not an
+/// executor-facing write path.
 pub fn commit_rows_and_indexes(
     database: &Database,
     invocation_id: [u8; 16],
@@ -1164,6 +1325,9 @@ pub fn commit_storage_changes(
     } = request;
     let mut unique = HashSet::with_capacity(writes.len());
     for write in writes {
+        if write.key[..16] == [0; 16] {
+            return Err(CommitError::InvalidWrite);
+        }
         if !unique.insert(write.key) {
             return Err(CommitError::DuplicateKey);
         }
@@ -1176,8 +1340,7 @@ pub fn commit_storage_changes(
     let mut unique_indexes = HashSet::with_capacity(index_writes.len());
     for index_write in index_writes {
         let row_write = rows_by_key.get(&index_write.row_key);
-        if index_write.key.len() < 32
-            || (index_write.unique && index_write.key.len() == 32)
+        if index_write.key.len() < 33
             || index_write.key[index_write.key.len() - 16..] != index_write.row_key[16..]
             || row_write.is_none()
             || !unique_indexes.insert(index_write.key.as_slice())
@@ -1312,6 +1475,7 @@ pub fn commit_storage_changes(
     let mut index_conflict = false;
     {
         let table = transaction.open_table(INDEXES).map_err(storage_error)?;
+        let reverse_table = transaction.open_table(ROW_INDEXES).map_err(storage_error)?;
         for write in index_writes {
             let current = table
                 .get(&write.key[..])
@@ -1325,6 +1489,14 @@ pub fn commit_storage_changes(
             if current != write.expected_version {
                 index_conflict = true;
                 break;
+            }
+            let reverse_key = reverse_index_key(&write.row_key, &write.key);
+            let reverse_exists = reverse_table
+                .get(&reverse_key[..])
+                .map_err(storage_error)?
+                .is_some();
+            if current.is_some() != reverse_exists {
+                return Err(CommitError::InvalidIndex);
             }
         }
     }
@@ -1436,6 +1608,32 @@ pub fn commit_storage_changes(
         }
         Err(error) => return Err(error),
     }
+    let (current_index_definitions, final_index_definitions) =
+        load_index_definitions(&transaction, catalog_writes)?;
+    for write in index_writes {
+        let index_id: [u8; 16] = write.key[..16]
+            .try_into()
+            .map_err(|_| CommitError::InvalidIndex)?;
+        let definitions = if write.present {
+            &final_index_definitions
+        } else {
+            &current_index_definitions
+        };
+        let table_id: [u8; 16] = write.row_key[..16]
+            .try_into()
+            .map_err(|_| CommitError::InvalidIndex)?;
+        if definitions.get(&index_id) != Some(&table_id) {
+            return Err(CommitError::InvalidIndex);
+        }
+    }
+    let retained_index_mutations = retained_index_mutations(
+        &transaction,
+        writes,
+        index_writes,
+        &current_index_definitions,
+        &final_index_definitions,
+        next_sequence,
+    )?;
     {
         let table = transaction.open_table(AUDIT).map_err(storage_error)?;
         for (event_id, _) in &encoded_audit {
@@ -1468,6 +1666,24 @@ pub fn commit_storage_changes(
     }
     {
         let mut table = transaction.open_table(INDEXES).map_err(storage_error)?;
+        let mut reverse_table = transaction.open_table(ROW_INDEXES).map_err(storage_error)?;
+        for mutation in &retained_index_mutations {
+            match &mutation.locator {
+                Some(locator) => {
+                    table
+                        .insert(&mutation.index_key[..], &locator[..])
+                        .map_err(storage_error)?;
+                }
+                None => {
+                    table
+                        .remove(&mutation.index_key[..])
+                        .map_err(storage_error)?;
+                    reverse_table
+                        .remove(&mutation.row_index_key[..])
+                        .map_err(storage_error)?;
+                }
+            }
+        }
         for write in index_writes {
             if write.present {
                 let locator = IndexLocator {
@@ -1478,8 +1694,16 @@ pub fn commit_storage_changes(
                 table
                     .insert(&write.key[..], &locator[..])
                     .map_err(storage_error)?;
+                let reverse_key = reverse_index_key(&write.row_key, &write.key);
+                reverse_table
+                    .insert(&reverse_key[..], &b""[..])
+                    .map_err(storage_error)?;
             } else {
                 table.remove(&write.key[..]).map_err(storage_error)?;
+                let reverse_key = reverse_index_key(&write.row_key, &write.key);
+                reverse_table
+                    .remove(&reverse_key[..])
+                    .map_err(storage_error)?;
             }
         }
     }
