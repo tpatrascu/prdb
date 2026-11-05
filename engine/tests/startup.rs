@@ -628,7 +628,16 @@ fn column_record(id: [u8; 16], name: &str) -> (Vec<u8>, Vec<u8>) {
 }
 
 fn column_record_for_table(id: [u8; 16], table_id: [u8; 16], name: &str) -> (Vec<u8>, Vec<u8>) {
-    column_record_with_schema(id, table_id, name, None, None)
+    column_record_with_schema(id, table_id, name, None, None, true)
+}
+
+fn column_record_for_table_with_nullability(
+    id: [u8; 16],
+    table_id: [u8; 16],
+    name: &str,
+    nullable: bool,
+) -> (Vec<u8>, Vec<u8>) {
+    column_record_with_schema(id, table_id, name, None, None, nullable)
 }
 
 fn column_record_with_defaults(
@@ -643,6 +652,7 @@ fn column_record_with_defaults(
         name,
         default_expression_id,
         add_column_default_id,
+        true,
     )
 }
 
@@ -652,6 +662,7 @@ fn column_record_with_schema(
     name: &str,
     default_expression_id: Option<[u8; 16]>,
     add_column_default_id: Option<[u8; 16]>,
+    nullable: bool,
 ) -> (Vec<u8>, Vec<u8>) {
     let mut key = 6u16.to_be_bytes().to_vec();
     key.push(1);
@@ -685,7 +696,7 @@ fn column_record_with_schema(
         CatalogField {
             tag: 6,
             wire_type: WireType::Bool,
-            payload: vec![1],
+            payload: vec![u8::from(nullable)],
         },
     ];
     if let Some(expression_id) = default_expression_id {
@@ -879,6 +890,27 @@ fn table_record(id: [u8; 16]) -> (Vec<u8>, Vec<u8>) {
     (key, payload)
 }
 
+fn put_table_and_column(
+    database: &Database,
+    table_id: [u8; 16],
+    column_id: [u8; 16],
+    nullable: bool,
+) {
+    let table_object = object_record(table_id, 3);
+    put_catalog(database, &table_object.0, &table_object.1);
+    let table = table_record(table_id);
+    put_catalog(database, &table.0, &table.1);
+    let column_object = object_record(column_id, 4);
+    put_catalog(database, &column_object.0, &column_object.1);
+    let column = column_record_for_table_with_nullability(
+        column_id,
+        table_id,
+        &format!("object_{}", column_id[0]),
+        nullable,
+    );
+    put_catalog(database, &column.0, &column.1);
+}
+
 #[test]
 fn validates_ready_image_records_and_references() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
@@ -1059,6 +1091,8 @@ fn validates_foreign_key_target_edges_against_constraint_records() {
             let fk_id = [90; 16];
             let target_id = [91; 16];
             let alternate_id = [95; 16];
+            put_table_and_column(database, [100; 16], [102; 16], false);
+            put_table_and_column(database, [101; 16], [103; 16], false);
             let (fk_key, fk_value) = object_record(fk_id, 6);
             let (target_key, target_value) = object_record(target_id, 6);
             put_catalog(database, &fk_key, &fk_value);
@@ -1150,6 +1184,7 @@ fn validates_backing_index_edges_against_constraint_and_index_records() {
         let index_id = [111; 16];
         let alternate_constraint_id = [112; 16];
         let alternate_index_id = [113; 16];
+        put_table_and_column(database, [100; 16], [102; 16], false);
         let (constraint_object_key, constraint_object_value) = object_record(constraint_id, 6);
         let (index_object_key, index_object_value) = object_record(index_id, 7);
         put_catalog(database, &constraint_object_key, &constraint_object_value);
@@ -1245,6 +1280,10 @@ fn validates_expression_reference_edges_against_typed_catalog_records() {
         }
         let (key, value) = object_record(check_constraint_id, 6);
         put_catalog(database, &key, &value);
+        let table = object_record([130; 16], 3);
+        put_catalog(database, &table.0, &table.1);
+        let table = table_record([130; 16]);
+        put_catalog(database, &table.0, &table.1);
         let (key, value) = object_record(policy_id, 10);
         put_catalog(database, &key, &value);
         let (key, value) = column_record_with_defaults(
@@ -1912,6 +1951,88 @@ fn policy_column_targets_resolve_to_cell_policy_table_columns()
     let fixture = Fixture::new();
     let database = fixture.database(0);
     seed(&database, 1, Some([140; 16]));
+    assert_eq!(
+        validate_persisted_records(&database),
+        Err(StartupError::InvalidCatalog),
+    );
+    Ok(())
+}
+
+#[test]
+fn constraints_resolve_to_source_columns_on_their_table() -> Result<(), Box<dyn std::error::Error>>
+{
+    let seed = |database: &Database,
+                constraint_table: [u8; 16],
+                column_table: Option<[u8; 16]>,
+                column_nullable: bool| {
+        let table_id = [150; 16];
+        let other_table_id = [151; 16];
+        let column_id = [152; 16];
+        let constraint_id = [153; 16];
+
+        for table_id_to_add in [table_id, other_table_id] {
+            let object = object_record(table_id_to_add, 3);
+            put_catalog(database, &object.0, &object.1);
+            let table = table_record(table_id_to_add);
+            put_catalog(database, &table.0, &table.1);
+        }
+        let column_object = object_record(column_id, 4);
+        put_catalog(database, &column_object.0, &column_object.1);
+        if let Some(column_table) = column_table {
+            let column = column_record_for_table_with_nullability(
+                column_id,
+                column_table,
+                "object_152",
+                column_nullable,
+            );
+            put_catalog(database, &column.0, &column.1);
+        }
+        let constraint_object = object_record(constraint_id, 6);
+        put_catalog(database, &constraint_object.0, &constraint_object.1);
+        let constraint = constraint_record(
+            constraint_id,
+            constraint_table,
+            1,
+            &[[152; 16]],
+            None,
+            &[],
+            None,
+        );
+        put_catalog(database, &constraint.0, &constraint.1);
+    };
+
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    seed(&database, [150; 16], Some([150; 16]), false);
+    assert!(validate_persisted_records(&database).is_ok());
+
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    seed(&database, [150; 16], None, false);
+    assert_eq!(
+        validate_persisted_records(&database),
+        Err(StartupError::InvalidCatalog),
+    );
+
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    seed(&database, [150; 16], Some([151; 16]), false);
+    assert_eq!(
+        validate_persisted_records(&database),
+        Err(StartupError::InvalidCatalog),
+    );
+
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    seed(&database, [154; 16], Some([150; 16]), false);
+    assert_eq!(
+        validate_persisted_records(&database),
+        Err(StartupError::InvalidCatalog),
+    );
+
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    seed(&database, [150; 16], Some([150; 16]), true);
     assert_eq!(
         validate_persisted_records(&database),
         Err(StartupError::InvalidCatalog),

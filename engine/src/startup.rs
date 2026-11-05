@@ -152,11 +152,14 @@ fn validate_catalog(
     let mut object_owners = Vec::<[u8; 16]>::new();
     let mut typed_object_kinds = HashMap::<[u8; 16], u16>::new();
     let mut column_tables = HashMap::<[u8; 16], [u8; 16]>::new();
+    let mut column_nullable = HashMap::<[u8; 16], bool>::new();
     let mut policy_tables = HashMap::<[u8; 16], [u8; 16]>::new();
     let mut policy_kinds = HashMap::<[u8; 16], u16>::new();
     let mut expression_reference_edges = std::collections::HashSet::<([u8; 16], [u8; 16])>::new();
     let mut typed_name_records = Vec::<(u16, [u8; 16])>::new();
     let mut constraint_kinds = HashMap::<[u8; 16], u16>::new();
+    let mut constraint_tables = HashMap::<[u8; 16], [u8; 16]>::new();
+    let mut constraint_source_columns = HashMap::<[u8; 16], Vec<[u8; 16]>>::new();
     let mut foreign_key_targets = HashMap::<[u8; 16], [u8; 16]>::new();
     let mut backing_index_targets = HashMap::<[u8; 16], [u8; 16]>::new();
     let mut index_owners = HashMap::<[u8; 16], [u8; 16]>::new();
@@ -253,6 +256,12 @@ fn validate_catalog(
             if column_tables.insert(column_id, table_id).is_some() {
                 return Err(StartupError::InvalidCatalog);
             }
+            if column_nullable
+                .insert(column_id, field_bool(&record, 6)?)
+                .is_some()
+            {
+                return Err(StartupError::InvalidCatalog);
+            }
         }
         if record.family_code == 7 {
             let expression = decode_catalog_expression_record(&record)
@@ -319,7 +328,16 @@ fn validate_catalog(
                 .try_into()
                 .map_err(|_| StartupError::InvalidCatalog)?;
             let kind = field_u16(&record, 2)?;
+            let table_id = field_id(&record, 1)?;
+            let source_columns = field_ids(&record, 3)?;
             if !matches!(kind, 1..=5) || constraint_kinds.insert(constraint_id, kind).is_some() {
+                return Err(StartupError::InvalidCatalog);
+            }
+            if constraint_tables.insert(constraint_id, table_id).is_some()
+                || constraint_source_columns
+                    .insert(constraint_id, source_columns)
+                    .is_some()
+            {
                 return Err(StartupError::InvalidCatalog);
             }
             if kind == 5
@@ -612,6 +630,30 @@ fn validate_catalog(
     if !validate_owned_child_graph(&object_parents, &dependencies) {
         return Err(StartupError::InvalidCatalog);
     }
+    for (constraint_id, table_id) in &constraint_tables {
+        let source_columns = constraint_source_columns
+            .get(constraint_id)
+            .ok_or(StartupError::InvalidCatalog)?;
+        if object_kinds.get(table_id) != Some(&3) || typed_object_kinds.get(table_id) != Some(&3) {
+            return Err(StartupError::InvalidCatalog);
+        }
+        let mut unique_source_columns = std::collections::HashSet::new();
+        for column_id in source_columns {
+            if !unique_source_columns.insert(*column_id)
+                || object_kinds.get(column_id) != Some(&4)
+                || typed_object_kinds.get(column_id) != Some(&4)
+                || column_tables.get(column_id) != Some(table_id)
+            {
+                return Err(StartupError::InvalidCatalog);
+            }
+        }
+        if constraint_kinds.get(constraint_id) == Some(&1)
+            && (source_columns.len() != 1
+                || column_nullable.get(&source_columns[0]) != Some(&false))
+        {
+            return Err(StartupError::InvalidCatalog);
+        }
+    }
     if typed_object_kinds
         .iter()
         .any(|(object_id, expected_kind)| object_kinds.get(object_id) != Some(expected_kind))
@@ -767,6 +809,25 @@ fn field_id(record: &CatalogRecord, tag: u16) -> Result<[u8; 16], StartupError> 
         .as_slice()
         .try_into()
         .map_err(|_| StartupError::InvalidCatalog)
+}
+
+fn field_ids(record: &CatalogRecord, tag: u16) -> Result<Vec<[u8; 16]>, StartupError> {
+    let payload = field_payload(record, tag)?;
+    if payload.len() < 4 {
+        return Err(StartupError::InvalidCatalog);
+    }
+    let count = u32::from_le_bytes(
+        payload[..4]
+            .try_into()
+            .map_err(|_| StartupError::InvalidCatalog)?,
+    ) as usize;
+    if count > 256 || payload.len() != 4 + count * 16 {
+        return Err(StartupError::InvalidCatalog);
+    }
+    payload[4..]
+        .chunks_exact(16)
+        .map(|bytes| bytes.try_into().map_err(|_| StartupError::InvalidCatalog))
+        .collect()
 }
 
 fn field_payload(record: &CatalogRecord, tag: u16) -> Result<&[u8], StartupError> {
