@@ -662,6 +662,65 @@ fn validate_final_index_object_mappings(
     Ok(())
 }
 
+/// Require changed principal rows to retain an object row with the matching
+/// USER or ROLE kind in the transaction's final catalog.
+fn validate_final_principal_object_mappings(
+    transaction: &WriteTransaction,
+    catalog_writes: &[CatalogWrite],
+) -> Result<(), CommitError> {
+    if !catalog_writes.iter().any(|write| {
+        write.key.len() >= 2 && matches!(u16::from_be_bytes([write.key[0], write.key[1]]), 2 | 10)
+    }) {
+        return Ok(());
+    }
+    let table = transaction.open_table(CATALOG).map_err(storage_error)?;
+    let mut changed_ids = HashSet::<[u8; 16]>::new();
+    for write in catalog_writes.iter().filter(|write| {
+        write.key.len() >= 2 && matches!(u16::from_be_bytes([write.key[0], write.key[1]]), 2 | 10)
+    }) {
+        if write.key.len() != 19 {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let principal_id = write.key[3..19]
+            .try_into()
+            .map_err(|_| CommitError::InvalidCatalog)?;
+        changed_ids.insert(principal_id);
+    }
+
+    for principal_id in changed_ids {
+        let principal_key = id_catalog_key(10, principal_id);
+        let Some(principal_bytes) = final_catalog_value(&table, catalog_writes, &principal_key)?
+        else {
+            continue;
+        };
+        let principal_kind = u16::from_le_bytes(
+            catalog_field_bytes(&principal_key, &principal_bytes, 10, 1)?
+                .as_slice()
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?,
+        );
+        let object_kind = match principal_kind {
+            1 => 8,
+            2 => 9,
+            _ => return Err(CommitError::InvalidCatalog),
+        };
+        let object_key = id_catalog_key(2, principal_id);
+        let Some(object_bytes) = final_catalog_value(&table, catalog_writes, &object_key)? else {
+            return Err(CommitError::InvalidCatalog);
+        };
+        let actual_object_kind = u16::from_le_bytes(
+            catalog_field_bytes(&object_key, &object_bytes, 2, 1)?
+                .as_slice()
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?,
+        );
+        if actual_object_kind != object_kind {
+            return Err(CommitError::InvalidCatalog);
+        }
+    }
+    Ok(())
+}
+
 fn collect_dependency_catalog_record(
     key: &[u8],
     bytes: &[u8],
@@ -1766,6 +1825,15 @@ pub fn commit_storage_changes(
         Err(error) => return Err(error),
     }
     match validate_final_index_object_mappings(&transaction, catalog_writes) {
+        Ok(()) => {}
+        Err(CommitError::InvalidCatalog) => {
+            transaction.abort().map_err(storage_error)?;
+            record_aborted_outcome(database, invocation_id, principal_id, retention_deadline_us)?;
+            return Err(CommitError::InvalidCatalog);
+        }
+        Err(error) => return Err(error),
+    }
+    match validate_final_principal_object_mappings(&transaction, catalog_writes) {
         Ok(()) => {}
         Err(CommitError::InvalidCatalog) => {
             transaction.abort().map_err(storage_error)?;

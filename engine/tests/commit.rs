@@ -301,6 +301,15 @@ fn object_write(object_id: [u8; 16], kind: u16) -> CatalogWrite {
     }
 }
 
+fn principal_object_write(principal_id: [u8; 16], principal_kind: u16) -> CatalogWrite {
+    let object_kind = match principal_kind {
+        1 => 8,
+        2 => 9,
+        _ => panic!("unsupported test principal kind"),
+    };
+    object_write(principal_id, object_kind)
+}
+
 fn dependency_write(dependent_id: [u8; 16], referenced_id: [u8; 16], kind: u16) -> CatalogWrite {
     let mut key = 15u16.to_be_bytes().to_vec();
     key.push(1);
@@ -661,6 +670,58 @@ fn catalog_commit_requires_index_object_identity_and_kind() -> Result<(), Box<dy
     Ok(())
 }
 
+#[test]
+fn catalog_commit_requires_principal_object_identity_and_kind()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let principal = principal_write(id(70), 1);
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(70),
+            id(9),
+            9_999,
+            std::slice::from_ref(&principal),
+            &[audit_event(70)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+
+    let object = object_write(id(70), 8);
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(71),
+            id(9),
+            9_999,
+            &[principal, object.clone()],
+            &[audit_event(71)],
+        )?,
+        1
+    );
+
+    let wrong_kind = object_write(id(70), 9);
+    let wrong_kind_update = CatalogWrite {
+        key: wrong_kind.key,
+        expected_value: object.payload.clone(),
+        payload: wrong_kind.payload,
+    };
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(72),
+            id(9),
+            9_999,
+            &[wrong_kind_update],
+            &[audit_event(72)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+    assert_eq!(commit_sequence(&database)?, 1);
+    Ok(())
+}
+
 fn principal_write_with_epoch(principal_id: [u8; 16], kind: u16, epoch: u64) -> CatalogWrite {
     let mut key = 10u16.to_be_bytes().to_vec();
     key.push(1);
@@ -870,9 +931,14 @@ fn membership_limit_applies_to_final_graph_independent_of_write_order()
             let mut catalog = transaction.open_table(prdb_engine::schema::CATALOG)?;
             for n in (1..=64).chain(100..=164) {
                 let principal = principal_write(node(n), 2);
+                let object = principal_object_write(node(n), 2);
                 catalog.insert(
                     principal.key.as_slice(),
                     principal.payload.as_ref().unwrap().as_slice(),
+                )?;
+                catalog.insert(
+                    object.key.as_slice(),
+                    object.payload.as_ref().unwrap().as_slice(),
                 )?;
             }
             for member_number in 1..=64 {
@@ -913,7 +979,7 @@ fn membership_limit_applies_to_final_graph_independent_of_write_order()
     let catalog = read.open_table(prdb_engine::schema::CATALOG)?;
     assert!(catalog.get(old.key.as_slice())?.is_none());
     assert!(catalog.get(new.key.as_slice())?.is_some());
-    assert_eq!(catalog.len()?, 132 + 4096);
+    assert_eq!(catalog.len()?, 261 + 4096);
     drop(catalog);
     drop(read);
     let mut advance = principal_write_with_epoch(member, 2, 3);
@@ -963,6 +1029,8 @@ fn membership_catalog_commits_reject_cycles_and_record_aborted_outcomes()
             &[
                 principal_write(id(1), 2),
                 principal_write(id(2), 2),
+                principal_object_write(id(1), 2),
+                principal_object_write(id(2), 2),
                 membership_write(id(1), id(2)),
             ],
             &[audit_event(40)],
@@ -975,7 +1043,11 @@ fn membership_catalog_commits_reject_cycles_and_record_aborted_outcomes()
             id(44),
             id(9),
             9_999,
-            &[principal_write(id(4), 2), membership_write(id(1), id(4))],
+            &[
+                principal_write(id(4), 2),
+                principal_object_write(id(4), 2),
+                membership_write(id(1), id(4)),
+            ],
             &[audit_event(44)],
         ),
         Err(CommitError::InvalidCatalog)
@@ -986,7 +1058,11 @@ fn membership_catalog_commits_reject_cycles_and_record_aborted_outcomes()
             id(42),
             id(9),
             9_999,
-            &[principal_write(id(3), 1), membership_write(id(1), id(3)),],
+            &[
+                principal_write(id(3), 1),
+                principal_object_write(id(3), 1),
+                membership_write(id(1), id(3)),
+            ],
             &[audit_event(42)],
         ),
         Err(CommitError::InvalidCatalog)
@@ -1073,7 +1149,12 @@ fn concurrent_membership_commits_cannot_publish_a_cycle() -> Result<(), Box<dyn 
         id(50),
         id(9),
         9_999,
-        &[principal_write(id(1), 2), principal_write(id(2), 2)],
+        &[
+            principal_write(id(1), 2),
+            principal_write(id(2), 2),
+            principal_object_write(id(1), 2),
+            principal_object_write(id(2), 2),
+        ],
         &[audit_event(50)],
     )?;
     let barrier = Arc::new(Barrier::new(3));

@@ -184,6 +184,47 @@ fn principal_catalog_record_for(
     )
 }
 
+fn principal_object_record_for(principal_id: [u8; 16], principal_kind: u16) -> (Vec<u8>, Vec<u8>) {
+    let object_kind: u16 = match principal_kind {
+        1 => 8,
+        2 => 9,
+        _ => panic!("unsupported test principal kind"),
+    };
+    let key = catalog_id_key(2, principal_id);
+    let fields = [
+        CatalogField {
+            tag: 1,
+            wire_type: WireType::U16,
+            payload: object_kind.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 3,
+            wire_type: WireType::Text,
+            payload: format!("object_{}", principal_id[0]).into_bytes(),
+        },
+        CatalogField {
+            tag: 4,
+            wire_type: WireType::Id,
+            payload: [9; 16].to_vec(),
+        },
+        CatalogField {
+            tag: 5,
+            wire_type: WireType::U64,
+            payload: 1u64.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 6,
+            wire_type: WireType::U16,
+            payload: 1u16.to_le_bytes().to_vec(),
+        },
+    ];
+    let schema = family_schema(2).unwrap();
+    (
+        key.clone(),
+        encode_envelope(&schema, &key, &fields).unwrap(),
+    )
+}
+
 fn membership_catalog_record(
     member_id: [u8; 16],
     role_id: [u8; 16],
@@ -814,10 +855,14 @@ fn latest_catalog_authority_change_blocks_a_stale_invocation_commit()
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
     let (principal_key, principal_v1) = principal_catalog_record(1);
+    let (object_key, object_value) = principal_object_record_for([7; 16], 1);
     let write = database.begin_write()?;
     write
         .open_table(CATALOG)?
         .insert(&principal_key[..], &principal_v1[..])?;
+    write
+        .open_table(CATALOG)?
+        .insert(&object_key[..], &object_value[..])?;
     write.commit()?;
 
     let mut invocation = InvocationTransaction::begin(&database, [18; 16], [9; 16], 9_999, 2, 64)?;
@@ -892,11 +937,21 @@ fn catalog_absence_guard_blocks_a_phantom_authority_record()
         [25; 16],
         [9; 16],
         9_999,
-        &[CatalogWrite {
-            key: principal_key,
-            expected_value: None,
-            payload: Some(principal_v1),
-        }],
+        &[
+            CatalogWrite {
+                key: principal_key,
+                expected_value: None,
+                payload: Some(principal_v1),
+            },
+            {
+                let (key, payload) = principal_object_record_for([7; 16], 1);
+                CatalogWrite {
+                    key,
+                    expected_value: None,
+                    payload: Some(payload),
+                }
+            },
+        ],
         &[authority_change],
     )?;
 
@@ -2848,12 +2903,25 @@ fn invocation_loads_and_guards_catalog_table_schema() -> Result<(), Box<dyn std:
         expected_value: None,
         payload: Some(principal_payload),
     });
+    let (principal_object_key, principal_object_payload) =
+        principal_object_record_for(principal_id, 1);
+    writes.push(CatalogWrite {
+        key: principal_object_key,
+        expected_value: None,
+        payload: Some(principal_object_payload),
+    });
     let (role_key, role_payload) =
         principal_catalog_record_for(role_id, 2, b"reader_role", false, 1);
     writes.push(CatalogWrite {
         key: role_key,
         expected_value: None,
         payload: Some(role_payload),
+    });
+    let (role_object_key, role_object_payload) = principal_object_record_for(role_id, 2);
+    writes.push(CatalogWrite {
+        key: role_object_key,
+        expected_value: None,
+        payload: Some(role_object_payload),
     });
     let (membership_key, membership_payload) =
         membership_catalog_record(principal_id, role_id, principal_id, 1);
@@ -3530,6 +3598,10 @@ fn catalog_authority_rejects_disabled_or_role_invocation_principals()
             for (key, value) in &records {
                 catalog.insert(key.as_slice(), value.as_slice())?;
             }
+            for (principal_id, kind) in [([219; 16], 1), ([220; 16], 2), ([221; 16], 1)] {
+                let (key, value) = principal_object_record_for(principal_id, kind);
+                catalog.insert(key.as_slice(), value.as_slice())?;
+            }
         }
         write.commit()?;
     }
@@ -3744,6 +3816,10 @@ fn new_membership_cannot_be_hidden_by_restoring_principal_epoch()
             for (key, value) in [&old, &role_record] {
                 catalog.insert(key.as_slice(), value.as_slice())?;
             }
+            for (principal_id, kind) in [(user, 1), (role, 2)] {
+                let (key, value) = principal_object_record_for(principal_id, kind);
+                catalog.insert(key.as_slice(), value.as_slice())?;
+            }
         }
         write.commit()?;
     }
@@ -3831,6 +3907,14 @@ fn invocation_loads_and_guards_transitive_catalog_role_closure()
             key: key.clone(),
             expected_value: None,
             payload: Some(payload.clone()),
+        });
+    }
+    for (principal_id, kind) in [(user_id, 1), (first_role, 2), (second_role, 2)] {
+        let (key, payload) = principal_object_record_for(principal_id, kind);
+        writes.push(CatalogWrite {
+            key,
+            expected_value: None,
+            payload: Some(payload),
         });
     }
     let audit = AuditEvent {
@@ -4104,10 +4188,14 @@ fn authorized_write_revalidates_projection_catalog_dependencies()
         }],
     )?;
     let (principal_key, principal_v1) = principal_catalog_record(1);
+    let (object_key, object_value) = principal_object_record_for([7; 16], 1);
     let write = database.begin_write()?;
     write
         .open_table(CATALOG)?
         .insert(&principal_key[..], &principal_v1[..])?;
+    write
+        .open_table(CATALOG)?
+        .insert(&object_key[..], &object_value[..])?;
     write.commit()?;
 
     let table = AccessTarget::Table(row_id.table);
