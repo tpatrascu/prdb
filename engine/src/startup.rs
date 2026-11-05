@@ -124,6 +124,8 @@ fn validate_catalog(
     let mut count = 0usize;
     let mut index_definitions = HashMap::new();
     let mut principal_kinds = HashMap::<[u8; 16], u16>::new();
+    let mut object_kinds = HashMap::<[u8; 16], u16>::new();
+    let mut typed_object_kinds = HashMap::<[u8; 16], u16>::new();
     let mut memberships = Vec::<Membership>::new();
     let mut membership_grantors = Vec::<[u8; 16]>::new();
     let mut object_ids = HashSet::<[u8; 16]>::new();
@@ -162,7 +164,21 @@ fn validate_catalog(
                 .ok_or(StartupError::InvalidCatalog)?
                 .try_into()
                 .map_err(|_| StartupError::InvalidCatalog)?;
-            if !object_ids.insert(object_id) {
+            let kind = field_u16(&record, 1)?;
+            if !matches!(kind, 1..=10)
+                || !object_ids.insert(object_id)
+                || object_kinds.insert(object_id, kind).is_some()
+            {
+                return Err(StartupError::InvalidCatalog);
+            }
+        }
+        if let Some(object_kind) = typed_family_object_kind(&record)? {
+            let object_id: [u8; 16] = key
+                .get(3..19)
+                .ok_or(StartupError::InvalidCatalog)?
+                .try_into()
+                .map_err(|_| StartupError::InvalidCatalog)?;
+            if typed_object_kinds.insert(object_id, object_kind).is_some() {
                 return Err(StartupError::InvalidCatalog);
             }
         }
@@ -234,6 +250,12 @@ fn validate_catalog(
     }) {
         return Err(StartupError::InvalidCatalog);
     }
+    if typed_object_kinds
+        .iter()
+        .any(|(object_id, expected_kind)| object_kinds.get(object_id) != Some(expected_kind))
+    {
+        return Err(StartupError::InvalidCatalog);
+    }
     if membership_grantors
         .iter()
         .any(|grantor_id| !principal_kinds.contains_key(grantor_id))
@@ -249,6 +271,26 @@ fn validate_catalog(
     }
     validate_membership_graph(&memberships).map_err(|_| StartupError::InvalidCatalog)?;
     Ok((count, index_definitions))
+}
+
+fn typed_family_object_kind(record: &CatalogRecord) -> Result<Option<u16>, StartupError> {
+    let kind = match record.family_code {
+        3 => Some(1),
+        4 => Some(2),
+        5 => Some(3),
+        6 => Some(4),
+        7 => Some(5),
+        8 => Some(6),
+        9 => Some(7),
+        10 => match field_u16(record, 1)? {
+            1 => Some(8),
+            2 => Some(9),
+            _ => return Err(StartupError::InvalidCatalog),
+        },
+        13 => Some(10),
+        _ => None,
+    };
+    Ok(kind)
 }
 
 fn validate_database_record(

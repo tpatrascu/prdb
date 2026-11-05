@@ -341,6 +341,8 @@ fn validates_ready_image_records_and_references() -> Result<(), Box<dyn std::err
     insert_row(&database, &key, 2);
 
     let (catalog_key, catalog_value) = index_definition([0x44; 16], table_id);
+    let index_object = object_record([0x44; 16], 7);
+    put_catalog(&database, &index_object.0, &index_object.1);
     let mut index_key = [0x44; 16].to_vec();
     index_key.extend_from_slice(&[1, 0x80, 0, 0, 1]);
     index_key.extend_from_slice(&row_id);
@@ -389,7 +391,7 @@ fn validates_ready_image_records_and_references() -> Result<(), Box<dyn std::err
     assert_eq!(report.metadata.commit_sequence, 3);
     assert_eq!(report.rows, 1);
     assert_eq!(report.index_entries, 1);
-    assert_eq!(report.catalog_records, 2);
+    assert_eq!(report.catalog_records, 3);
     assert_eq!(report.outcomes, 1);
     assert_eq!(report.audit_events, 1);
     Ok(())
@@ -520,6 +522,50 @@ fn accepts_dependency_edges_with_catalog_object_endpoints() -> Result<(), Box<dy
 }
 
 #[test]
+fn rejects_typed_catalog_records_without_a_matching_object_record() {
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    let (key, value) = index_definition([0x44; 16], [0x22; 16]);
+    put_catalog(&database, &key, &value);
+    assert!(matches!(
+        validate_persisted_records(&database),
+        Err(StartupError::InvalidCatalog)
+    ));
+}
+
+#[test]
+fn rejects_typed_catalog_records_with_a_different_object_kind() {
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    let index = index_definition([0x44; 16], [0x22; 16]);
+    let object = object_record([0x44; 16], 3);
+    put_catalog(&database, &index.0, &index.1);
+    put_catalog(&database, &object.0, &object.1);
+    assert!(matches!(
+        validate_persisted_records(&database),
+        Err(StartupError::InvalidCatalog)
+    ));
+}
+
+#[test]
+fn rejects_principal_records_with_missing_or_mismatched_objects() {
+    for object_kind in [None, Some(9)] {
+        let fixture = Fixture::new();
+        let database = fixture.database(0);
+        let principal = principal_record([0x31; 16], 1, true, 1);
+        put_catalog(&database, &principal.0, &principal.1);
+        if let Some(kind) = object_kind {
+            let object = object_record([0x31; 16], kind);
+            put_catalog(&database, &object.0, &object.1);
+        }
+        assert!(matches!(
+            validate_persisted_records(&database),
+            Err(StartupError::InvalidCatalog)
+        ));
+    }
+}
+
+#[test]
 fn rejects_row_versions_beyond_the_commit_frontier() {
     let fixture = Fixture::new();
     let database = fixture.database(1);
@@ -575,6 +621,8 @@ fn rejects_index_without_its_referenced_row() {
     let row_id = [0x33; 16];
     let (catalog_key, catalog_value) = index_definition([0x44; 16], table_id);
     put_catalog(&database, &catalog_key, &catalog_value);
+    let index_object = object_record([0x44; 16], 7);
+    put_catalog(&database, &index_object.0, &index_object.1);
     let mut index_key = [0x44; 16].to_vec();
     index_key.extend_from_slice(&[1, 0x80, 0, 0, 1]);
     index_key.extend_from_slice(&row_id);
@@ -614,6 +662,8 @@ fn rejects_a_locator_whose_version_differs_from_its_row() {
     insert_row(&database, &key, 2);
     let (catalog_key, catalog_value) = index_definition([0x44; 16], table_id);
     put_catalog(&database, &catalog_key, &catalog_value);
+    let index_object = object_record([0x44; 16], 7);
+    put_catalog(&database, &index_object.0, &index_object.1);
     let mut index_key = [0x44; 16].to_vec();
     index_key.extend_from_slice(&[1, 0x80, 0, 0, 1]);
     index_key.extend_from_slice(&row_id);
@@ -746,8 +796,12 @@ fn accepts_pinned_acyclic_membership_graph() -> Result<(), Box<dyn std::error::E
     ] {
         put_catalog(&database, &record.0, &record.1);
     }
+    for (principal_id, kind) in [([1; 16], 8), ([2; 16], 9), ([3; 16], 9)] {
+        let object = object_record(principal_id, kind);
+        put_catalog(&database, &object.0, &object.1);
+    }
     let report = validate_persisted_records(&database)?;
-    assert_eq!(report.catalog_records, 6);
+    assert_eq!(report.catalog_records, 9);
     Ok(())
 }
 
@@ -764,6 +818,10 @@ fn rejects_cycles_and_invalid_membership_endpoints_at_startup() {
     ] {
         put_catalog(&database, &record.0, &record.1);
     }
+    for (principal_id, kind) in [([1; 16], 8), ([2; 16], 9), ([3; 16], 9)] {
+        let object = object_record(principal_id, kind);
+        put_catalog(&database, &object.0, &object.1);
+    }
     assert!(matches!(
         validate_persisted_records(&database),
         Err(StartupError::InvalidCatalog)
@@ -777,6 +835,10 @@ fn rejects_cycles_and_invalid_membership_endpoints_at_startup() {
         membership_record([1; 16], [2; 16], [1; 16], 1),
     ] {
         put_catalog(&database, &record.0, &record.1);
+    }
+    for principal_id in [[1; 16], [2; 16]] {
+        let object = object_record(principal_id, 8);
+        put_catalog(&database, &object.0, &object.1);
     }
     assert!(matches!(
         validate_persisted_records(&database),

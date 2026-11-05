@@ -157,9 +157,14 @@ fn initialize(path: &std::path::Path) -> Result<Database, Box<dyn std::error::Er
     schema::create_tables(&transaction)?;
     let (index_key, index_payload) = index_definition([0x44; 16], [0x10; 16]);
     let (database_key, database_payload) = bootstrap_database_record([0x33; 16]);
+    let index_object = object_write([0x44; 16], 7);
     transaction
         .open_table(CATALOG)?
         .insert(&database_key[..], &database_payload[..])?;
+    transaction.open_table(CATALOG)?.insert(
+        &index_object.key[..],
+        index_object.payload.as_ref().unwrap().as_slice(),
+    )?;
     transaction
         .open_table(CATALOG)?
         .insert(&index_key[..], &index_payload[..])?;
@@ -827,7 +832,7 @@ fn membership_limit_applies_to_final_graph_independent_of_write_order()
     let catalog = read.open_table(prdb_engine::schema::CATALOG)?;
     assert!(catalog.get(old.key.as_slice())?.is_none());
     assert!(catalog.get(new.key.as_slice())?.is_some());
-    assert_eq!(catalog.len()?, 131 + 4096);
+    assert_eq!(catalog.len()?, 132 + 4096);
     drop(catalog);
     drop(read);
     let mut advance = principal_write_with_epoch(member, 2, 3);
