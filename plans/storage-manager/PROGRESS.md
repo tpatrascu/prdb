@@ -331,4 +331,12 @@
 - Startup now validates the catalog uniqueness flag, tracks derived tuple prefixes for unique indexes, and rejects duplicate non-NULL keys. NULL values follow the catalog's NULLS DISTINCT rule and do not collide.
 - Real-redb coverage rejects duplicate persisted non-NULL keys and accepts repeated NULL keys under a unique index.
 - Verification: `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and all 175 integration tests across 17 targets passed in the prescribed Nix shell. `git diff --check` and changed Markdown link checks passed.
-- Remaining: authenticated service admission and unique/FK constraint lifecycle integration remain open.
+- Remaining: authenticated service admission and foreign-key constraint lifecycle integration remain open.
+
+## SM-5 dependency: PRIMARY KEY and UNIQUE write enforcement — in progress
+
+- Red evidence: catalog-backed invocation loading rejected every PRIMARY KEY/UNIQUE constraint as an unsupported kind, although commit already enforces uniqueness through the corresponding unique index.
+- Invocation constraint loading now validates each key constraint's ordered source columns and owned backing index, including table, key shape, owner, uniqueness flag, state, and schema version. PRIMARY KEY columns must also be non-nullable. CHECK expressions load the BOOLEAN profile only when needed.
+- A real-redb regression loads a catalog UNIQUE constraint and its owned unique index, stages duplicate tuples, and confirms the whole invocation aborts without publishing either row.
+- Verification: `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and all 176 integration tests across 17 targets passed in the prescribed Nix shell. `git diff --check` and changed Markdown link checks passed.
+- Remaining: foreign-key runtime enforcement and authenticated service admission remain open.

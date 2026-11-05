@@ -178,11 +178,91 @@ fn index_catalog_record(
     column_id: [u8; 16],
     schema_version: u64,
 ) -> Result<(Vec<u8>, Vec<u8>), Box<dyn std::error::Error>> {
+    index_catalog_record_with_constraint(index_id, table_id, column_id, schema_version, false, None)
+}
+
+fn index_catalog_record_with_constraint(
+    index_id: [u8; 16],
+    table_id: [u8; 16],
+    column_id: [u8; 16],
+    schema_version: u64,
+    unique: bool,
+    owning_constraint_id: Option<[u8; 16]>,
+) -> Result<(Vec<u8>, Vec<u8>), Box<dyn std::error::Error>> {
     let key = catalog_id_key(9, index_id);
     let mut columns = 1u32.to_le_bytes().to_vec();
     columns.extend_from_slice(&column_id);
+    let mut fields = vec![
+        CatalogField {
+            tag: 1,
+            wire_type: WireType::Id,
+            payload: table_id.to_vec(),
+        },
+        CatalogField {
+            tag: 2,
+            wire_type: WireType::Ids,
+            payload: columns,
+        },
+        CatalogField {
+            tag: 3,
+            wire_type: WireType::U16,
+            payload: 1u16.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 4,
+            wire_type: WireType::Bool,
+            payload: vec![u8::from(unique)],
+        },
+        CatalogField {
+            tag: 5,
+            wire_type: WireType::U16,
+            payload: 1u16.to_le_bytes().to_vec(),
+        },
+    ];
+    if let Some(owning_constraint_id) = owning_constraint_id {
+        fields.push(CatalogField {
+            tag: 6,
+            wire_type: WireType::Id,
+            payload: owning_constraint_id.to_vec(),
+        });
+    }
+    fields.extend([
+        CatalogField {
+            tag: 7,
+            wire_type: WireType::Id,
+            payload: index_id.to_vec(),
+        },
+        CatalogField {
+            tag: 8,
+            wire_type: WireType::U16,
+            payload: 1u16.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 9,
+            wire_type: WireType::U32,
+            payload: 1u32.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 10,
+            wire_type: WireType::U64,
+            payload: schema_version.to_le_bytes().to_vec(),
+        },
+    ]);
+    let payload = catalog_record_payload(9, &key, &fields)?;
+    Ok((key, payload))
+}
+
+fn unique_constraint_catalog_record(
+    constraint_id: [u8; 16],
+    table_id: [u8; 16],
+    column_id: [u8; 16],
+    backing_index_id: [u8; 16],
+) -> Result<(Vec<u8>, Vec<u8>), Box<dyn std::error::Error>> {
+    let key = catalog_id_key(8, constraint_id);
+    let mut source_columns = 1u32.to_le_bytes().to_vec();
+    source_columns.extend_from_slice(&column_id);
     let payload = catalog_record_payload(
-        9,
+        8,
         &key,
         &[
             CatalogField {
@@ -192,43 +272,43 @@ fn index_catalog_record(
             },
             CatalogField {
                 tag: 2,
-                wire_type: WireType::Ids,
-                payload: columns,
+                wire_type: WireType::U16,
+                payload: 3u16.to_le_bytes().to_vec(),
             },
             CatalogField {
                 tag: 3,
-                wire_type: WireType::U16,
-                payload: 1u16.to_le_bytes().to_vec(),
+                wire_type: WireType::Ids,
+                payload: source_columns,
             },
             CatalogField {
-                tag: 4,
-                wire_type: WireType::Bool,
-                payload: vec![0],
-            },
-            CatalogField {
-                tag: 5,
-                wire_type: WireType::U16,
-                payload: 1u16.to_le_bytes().to_vec(),
+                tag: 6,
+                wire_type: WireType::Ids,
+                payload: 0u32.to_le_bytes().to_vec(),
             },
             CatalogField {
                 tag: 7,
-                wire_type: WireType::Id,
-                payload: index_id.to_vec(),
+                wire_type: WireType::U16,
+                payload: 0u16.to_le_bytes().to_vec(),
             },
             CatalogField {
                 tag: 8,
                 wire_type: WireType::U16,
-                payload: 1u16.to_le_bytes().to_vec(),
+                payload: 0u16.to_le_bytes().to_vec(),
             },
             CatalogField {
                 tag: 9,
-                wire_type: WireType::U32,
-                payload: 1u32.to_le_bytes().to_vec(),
+                wire_type: WireType::U16,
+                payload: 0u16.to_le_bytes().to_vec(),
             },
             CatalogField {
                 tag: 10,
-                wire_type: WireType::U64,
-                payload: schema_version.to_le_bytes().to_vec(),
+                wire_type: WireType::U16,
+                payload: 1u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 11,
+                wire_type: WireType::Id,
+                payload: backing_index_id.to_vec(),
             },
         ],
     )?;
@@ -1512,6 +1592,72 @@ fn invocation_auto_indexes_row_writes() -> Result<(), Box<dyn std::error::Error>
     for index_key in &updated_index_keys {
         assert!(indexes.get(index_key.as_slice())?.is_none());
     }
+    Ok(())
+}
+
+#[test]
+fn unique_constraint_uses_its_backing_index_for_invocation_writes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let table_id = [0x10; 16];
+    let column_id = [0x66; 16];
+    let index_id = [0x55; 16];
+    let constraint_id = [0x77; 16];
+    let (index_key, index_value) = index_catalog_record_with_constraint(
+        index_id,
+        table_id,
+        column_id,
+        1,
+        true,
+        Some(constraint_id),
+    )?;
+    let (constraint_key, constraint_value) =
+        unique_constraint_catalog_record(constraint_id, table_id, column_id, index_id)?;
+    {
+        let write = database.begin_write()?;
+        let mut catalog = write.open_table(CATALOG)?;
+        catalog.insert(index_key.as_slice(), index_value.as_slice())?;
+        catalog.insert(constraint_key.as_slice(), constraint_value.as_slice())?;
+        drop(catalog);
+        write.commit()?;
+    }
+
+    let mut invocation =
+        InvocationTransaction::begin(&database, [242; 16], [9; 16], 9_999, 8, 512)?;
+    let schema = invocation.load_catalog_table_schema(table_id)?;
+    assert!(
+        invocation
+            .load_catalog_check_constraints(&schema)?
+            .is_empty()
+    );
+    let indexes = invocation.load_catalog_indexes(&schema)?;
+    assert!(
+        indexes
+            .iter()
+            .any(|index| index.index_id == index_id && index.unique)
+    );
+    let payload = encode_tuple(
+        &schema.columns,
+        schema.schema_version,
+        &[Some(ScalarValue::Bytea(b"duplicate".to_vec()))],
+    )?;
+    invocation.stage_put(id(243), &payload)?;
+    invocation.stage_put(id(244), &payload)?;
+    assert!(matches!(
+        invocation.commit(),
+        Err(TransactionError::Commit(CommitError::UniqueViolation))
+    ));
+
+    let read = database.begin_read()?;
+    assert!(read.open_table(ROWS)?.get(&key(id(243))[..])?.is_none());
+    assert!(read.open_table(ROWS)?.get(&key(id(244))[..])?.is_none());
+    assert_eq!(
+        prdb_engine::outcome::lookup_outcome(&database, [242; 16], [9; 16], 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Aborted
+    );
     Ok(())
 }
 

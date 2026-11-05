@@ -981,9 +981,9 @@ impl<'db> InvocationTransaction<'db> {
         }
     }
 
-    /// Load the table's pinned CHECK constraints and bind each expression to
-    /// the catalog BOOLEAN type. Unsupported declared constraint kinds fail
-    /// closed so they cannot be silently bypassed by a query write.
+    /// Load the table's pinned row constraints. CHECK expressions are bound to
+    /// the catalog BOOLEAN type, and PRIMARY KEY/UNIQUE constraints are checked
+    /// against their backing unique index. Unsupported kinds fail closed.
     pub fn load_catalog_check_constraints(
         &mut self,
         schema: &CatalogTableSchema,
@@ -993,7 +993,6 @@ impl<'db> InvocationTransaction<'db> {
                 .snapshot
                 .scan_catalog_family(8, MAX_CATALOG_FAMILY_SCAN)
                 .map_err(|error| TransactionError::Storage(error.to_string()))?;
-            let boolean_type_id = self.load_catalog_builtin_type_id(1)?;
             let mut checks = Vec::new();
             for record in records {
                 if catalog_id(&record, 1)? != schema.table_id {
@@ -1013,6 +1012,12 @@ impl<'db> InvocationTransaction<'db> {
                 let source_columns = catalog_id_list(&record, 3)?;
                 let referenced_columns = catalog_id_list(&record, 6)?;
                 let expression_id = catalog_optional_id(&record, 4)?;
+                let constraint_id: [u8; 16] = key[3..19]
+                    .try_into()
+                    .map_err(|_| TransactionError::CorruptCatalog)?;
+                if constraint_id == [0; 16] {
+                    return Err(TransactionError::CorruptCatalog);
+                }
                 if kind == 1 {
                     if source_columns.len() != 1
                         || expression_id.is_some()
@@ -1038,6 +1043,60 @@ impl<'db> InvocationTransaction<'db> {
                     }
                     continue;
                 }
+                if matches!(kind, 2 | 3) {
+                    let backing_index_id = catalog_optional_id(&record, 11)?
+                        .ok_or(TransactionError::CorruptCatalog)?;
+                    let mut seen_columns = HashSet::new();
+                    if source_columns.is_empty()
+                        || source_columns.len() > crate::tuple::MAX_COLUMNS
+                        || source_columns.iter().any(|column_id| {
+                            *column_id == [0; 16]
+                                || !seen_columns.insert(*column_id)
+                                || !schema.column_ids.contains(column_id)
+                        })
+                        || expression_id.is_some()
+                        || catalog_optional_id(&record, 5)?.is_some()
+                        || !referenced_columns.is_empty()
+                        || catalog_u16(&record, 7)? != 0
+                        || catalog_u16(&record, 8)? != 0
+                        || catalog_u16(&record, 9)? != 0
+                        || catalog_u16(&record, 10)? != 1
+                        || backing_index_id == [0; 16]
+                    {
+                        return Err(TransactionError::CorruptCatalog);
+                    }
+                    if kind == 2
+                        && source_columns.iter().any(|column_id| {
+                            let ordinal = schema
+                                .column_ids
+                                .iter()
+                                .position(|schema_column_id| schema_column_id == column_id);
+                            ordinal.is_none_or(|ordinal| schema.columns[ordinal].nullable)
+                        })
+                    {
+                        return Err(TransactionError::CorruptCatalog);
+                    }
+
+                    let backing_index = self
+                        .read_catalog_record(&catalog_id_key(9, backing_index_id))?
+                        .ok_or(TransactionError::CorruptCatalog)?;
+                    let index_columns = catalog_id_list(&backing_index, 2)?;
+                    if backing_index.family_code != 9
+                        || catalog_id(&backing_index, 1)? != schema.table_id
+                        || index_columns != source_columns
+                        || catalog_u16(&backing_index, 3)? != 1
+                        || catalog_field(&backing_index, 4)? != [1]
+                        || catalog_u16(&backing_index, 5)? != 1
+                        || catalog_optional_id(&backing_index, 6)? != Some(constraint_id)
+                        || catalog_id(&backing_index, 7)? == [0; 16]
+                        || catalog_u16(&backing_index, 8)? != 1
+                        || catalog_u32(&backing_index, 9)? != 1
+                        || catalog_u64(&backing_index, 10)? != schema.schema_version
+                    {
+                        return Err(TransactionError::CorruptCatalog);
+                    }
+                    continue;
+                }
                 if kind != 4 {
                     return Err(TransactionError::CorruptCatalog);
                 }
@@ -1053,6 +1112,7 @@ impl<'db> InvocationTransaction<'db> {
                 {
                     return Err(TransactionError::CorruptCatalog);
                 }
+                let boolean_type_id = self.load_catalog_builtin_type_id(1)?;
                 checks.push(self.read_bound_policy_expression(
                     expression_id,
                     ExpressionPurpose::Check,
