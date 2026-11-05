@@ -171,7 +171,7 @@ fn catalog_index_key_projects_typed_row_in_definition_order() {
             nullable: true,
         },
     ];
-    let schema_ids = [101, 205, 309];
+    let schema_ids = [[0x10; 16], [0x20; 16], [0x30; 16]];
     let values = [
         Some(ScalarValue::Text("a\0b".into())),
         Some(ScalarValue::Integer(-7)),
@@ -185,7 +185,7 @@ fn catalog_index_key_projects_typed_row_in_definition_order() {
         &schema_ids,
         &schema_columns,
         &payload,
-        &[309, 205],
+        &[[0x30; 16], [0x20; 16]],
     )
     .unwrap();
 
@@ -209,7 +209,7 @@ fn catalog_index_key_reports_nulls_and_rejects_invalid_definitions_or_rows() {
             nullable: true,
         },
     ];
-    let schema_ids = [101, 309];
+    let schema_ids = [[0x10; 16], [0x30; 16]];
     let payload = encode_tuple(&schema_columns, 4, &[Some(ScalarValue::Integer(8)), None]).unwrap();
     let args = (
         [0x22; 16],
@@ -219,24 +219,57 @@ fn catalog_index_key_reports_nulls_and_rejects_invalid_definitions_or_rows() {
         &schema_columns[..],
         &payload[..],
     );
-    let derived = derive_index_key(args.0, args.1, args.2, args.3, args.4, args.5, &[309]).unwrap();
+    let derived = derive_index_key(
+        args.0,
+        args.1,
+        args.2,
+        args.3,
+        args.4,
+        args.5,
+        &[[0x30; 16]],
+    )
+    .unwrap();
     assert!(derived.has_null);
     assert_eq!(derived.key, compose_key([0x22; 16], &[0xff], [0x33; 16]));
 
     assert_eq!(
-        derive_index_key(args.0, args.1, args.2, &[101, 101], args.4, args.5, &[101]),
+        derive_index_key(
+            args.0,
+            args.1,
+            args.2,
+            &[[0x10; 16], [0x10; 16]],
+            args.4,
+            args.5,
+            &[[0x10; 16]],
+        ),
         Err(DeriveIndexKeyError::InvalidDefinition)
     );
     assert_eq!(
-        derive_index_key(args.0, args.1, args.2, args.3, args.4, args.5, &[101, 101]),
+        derive_index_key(
+            args.0,
+            args.1,
+            args.2,
+            args.3,
+            args.4,
+            args.5,
+            &[[0x10; 16], [0x10; 16]],
+        ),
         Err(DeriveIndexKeyError::InvalidDefinition)
     );
     assert_eq!(
-        derive_index_key(args.0, args.1, args.2, args.3, args.4, args.5, &[999]),
+        derive_index_key(
+            args.0,
+            args.1,
+            args.2,
+            args.3,
+            args.4,
+            args.5,
+            &[[0x99; 16]],
+        ),
         Err(DeriveIndexKeyError::InvalidDefinition)
     );
     assert_eq!(
-        derive_index_key(args.0, args.1, args.2, args.3, args.4, args.5, &[0]),
+        derive_index_key(args.0, args.1, args.2, args.3, args.4, args.5, &[[0; 16]],),
         Err(DeriveIndexKeyError::InvalidDefinition)
     );
     assert_eq!(
@@ -247,12 +280,12 @@ fn catalog_index_key_reports_nulls_and_rejects_invalid_definitions_or_rows() {
             args.3,
             args.4,
             &payload[..payload.len() - 1],
-            &[101]
+            &[[0x10; 16]]
         ),
         Err(DeriveIndexKeyError::Tuple(TupleError::InvalidLength))
     );
     assert_eq!(
-        derive_index_key(args.0, args.1, 5, args.3, args.4, args.5, &[101]),
+        derive_index_key(args.0, args.1, 5, args.3, args.4, args.5, &[[0x10; 16]]),
         Err(DeriveIndexKeyError::Tuple(
             TupleError::SchemaVersionMismatch
         ))

@@ -85,10 +85,10 @@ pub fn derive_index_key(
     index_id: [u8; 16],
     row_id: [u8; 16],
     schema_version: u64,
-    schema_column_ids: &[u64],
+    schema_column_ids: &[[u8; 16]],
     schema_columns: &[ColumnSchema],
     tuple_payload: &[u8],
-    index_column_ids: &[u64],
+    index_column_ids: &[[u8; 16]],
 ) -> Result<DerivedIndexKey, DeriveIndexKeyError> {
     if schema_column_ids.is_empty()
         || schema_column_ids.len() != schema_columns.len()
@@ -99,7 +99,7 @@ pub fn derive_index_key(
 
     let mut schema_ordinals = HashMap::with_capacity(schema_column_ids.len());
     for (ordinal, &column_id) in schema_column_ids.iter().enumerate() {
-        if column_id == 0 || schema_ordinals.insert(column_id, ordinal).is_some() {
+        if column_id == [0; 16] || schema_ordinals.insert(column_id, ordinal).is_some() {
             return Err(DeriveIndexKeyError::InvalidDefinition);
         }
     }
@@ -108,7 +108,7 @@ pub fn derive_index_key(
     let mut projection_columns = Vec::with_capacity(index_column_ids.len());
     let mut projection_ordinals = Vec::with_capacity(index_column_ids.len());
     for &column_id in index_column_ids {
-        if column_id == 0 || !seen_index_columns.insert(column_id) {
+        if column_id == [0; 16] || !seen_index_columns.insert(column_id) {
             return Err(DeriveIndexKeyError::InvalidDefinition);
         }
         let Some(&ordinal) = schema_ordinals.get(&column_id) else {
