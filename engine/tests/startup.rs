@@ -126,6 +126,57 @@ fn database_record(
     (key, payload)
 }
 
+fn object_record(id: [u8; 16], kind: u16) -> (Vec<u8>, Vec<u8>) {
+    let mut key = 2u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&id);
+    let fields = [
+        CatalogField {
+            tag: 1,
+            wire_type: WireType::U16,
+            payload: kind.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 3,
+            wire_type: WireType::Text,
+            payload: format!("object_{}", id[0]).into_bytes(),
+        },
+        CatalogField {
+            tag: 4,
+            wire_type: WireType::Id,
+            payload: [0xfe; 16].to_vec(),
+        },
+        CatalogField {
+            tag: 5,
+            wire_type: WireType::U64,
+            payload: 1u64.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 6,
+            wire_type: WireType::U16,
+            payload: 1u16.to_le_bytes().to_vec(),
+        },
+    ];
+    let payload = encode_envelope(&family_schema(2).unwrap(), &key, &fields).unwrap();
+    (key, payload)
+}
+
+fn dependency_record(
+    dependent_id: [u8; 16],
+    referenced_id: [u8; 16],
+    kind: u16,
+) -> (Vec<u8>, Vec<u8>) {
+    let mut key = 15u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&dependent_id);
+    key.push(1);
+    key.extend_from_slice(&referenced_id);
+    key.push(1);
+    key.extend_from_slice(&kind.to_be_bytes());
+    let payload = encode_envelope(&family_schema(15).unwrap(), &key, &[]).unwrap();
+    (key, payload)
+}
+
 fn reverse_index_key(row_key: &[u8; 32], index_key: &[u8]) -> Vec<u8> {
     let mut key = row_key.to_vec();
     key.extend_from_slice(&index_key[..index_key.len() - 16]);
@@ -427,6 +478,45 @@ fn rejects_noncanonical_bootstrap_mappings() {
             "corrupt mapping case: {corrupt}"
         );
     }
+}
+
+#[test]
+fn rejects_dependency_edges_with_missing_catalog_objects() {
+    for present_ids in [[true, false], [false, true]] {
+        let fixture = Fixture::new();
+        let database = fixture.database(0);
+        if present_ids[0] {
+            let (key, value) = object_record([0x21; 16], 3);
+            put_catalog(&database, &key, &value);
+        }
+        if present_ids[1] {
+            let (key, value) = object_record([0x22; 16], 4);
+            put_catalog(&database, &key, &value);
+        }
+        let (key, value) = dependency_record([0x21; 16], [0x22; 16], 1);
+        put_catalog(&database, &key, &value);
+        assert!(matches!(
+            validate_persisted_records(&database),
+            Err(StartupError::InvalidCatalog)
+        ));
+    }
+}
+
+#[test]
+fn accepts_dependency_edges_with_catalog_object_endpoints() -> Result<(), Box<dyn std::error::Error>>
+{
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    for record in [object_record([0x21; 16], 3), object_record([0x22; 16], 4)] {
+        put_catalog(&database, &record.0, &record.1);
+    }
+    for kind in 1..=5 {
+        let (key, value) = dependency_record([0x21; 16], [0x22; 16], kind);
+        put_catalog(&database, &key, &value);
+    }
+    let report = validate_persisted_records(&database)?;
+    assert_eq!(report.catalog_records, 8);
+    Ok(())
 }
 
 #[test]

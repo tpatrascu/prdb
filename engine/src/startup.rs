@@ -10,7 +10,7 @@ use crate::outcome::{InvocationOutcome, OutcomeStatus};
 use crate::row_record::RowRecord;
 use crate::schema::{AUDIT, CATALOG, ENGINE_META, INDEXES, OUTCOMES, ROW_INDEXES, ROWS, STATS};
 use redb::{Database, ReadTransaction, ReadableDatabase, ReadableTable};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const METADATA_KEY: &[u8] = b"format";
 const MAX_CATALOG_RECORDS_PER_FAMILY: usize = 65_536;
@@ -126,6 +126,8 @@ fn validate_catalog(
     let mut principal_kinds = HashMap::<[u8; 16], u16>::new();
     let mut memberships = Vec::<Membership>::new();
     let mut membership_grantors = Vec::<[u8; 16]>::new();
+    let mut object_ids = HashSet::<[u8; 16]>::new();
+    let mut dependencies = Vec::<([u8; 16], [u8; 16])>::new();
     let mut database_records = 0usize;
     for entry in table.iter().map_err(storage_error)? {
         let (key, value) = entry.map_err(storage_error)?;
@@ -153,6 +155,16 @@ fn validate_catalog(
         if record.family_code == 1 {
             database_records += 1;
             validate_database_record(&record, metadata)?;
+        }
+        if record.family_code == 2 {
+            let object_id: [u8; 16] = key
+                .get(3..19)
+                .ok_or(StartupError::InvalidCatalog)?
+                .try_into()
+                .map_err(|_| StartupError::InvalidCatalog)?;
+            if !object_ids.insert(object_id) {
+                return Err(StartupError::InvalidCatalog);
+            }
         }
         if record.family_code == 7 {
             decode_catalog_expression_record(&record).map_err(|_| StartupError::InvalidCatalog)?;
@@ -201,8 +213,25 @@ fn validate_catalog(
             memberships.push(Membership { member_id, role_id });
             membership_grantors.push(grantor_id);
         }
+        if record.family_code == 15 {
+            if key.len() != 39 {
+                return Err(StartupError::InvalidCatalog);
+            }
+            let dependent_id: [u8; 16] = key[3..19]
+                .try_into()
+                .map_err(|_| StartupError::InvalidCatalog)?;
+            let referenced_id: [u8; 16] = key[20..36]
+                .try_into()
+                .map_err(|_| StartupError::InvalidCatalog)?;
+            dependencies.push((dependent_id, referenced_id));
+        }
     }
     if database_records != 1 {
+        return Err(StartupError::InvalidCatalog);
+    }
+    if dependencies.iter().any(|(dependent_id, referenced_id)| {
+        !object_ids.contains(dependent_id) || !object_ids.contains(referenced_id)
+    }) {
         return Err(StartupError::InvalidCatalog);
     }
     if membership_grantors

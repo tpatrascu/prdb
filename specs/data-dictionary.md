@@ -65,6 +65,8 @@ Bootstrap catalog indexes use trusted built-in definitions and the same storage 
 
 Record dependencies during definition validation, in the same administrative transaction as the object. Drop/alter traverses reverse edges using a bounded deterministic walk. Recheck the traversed definitions and epochs at commit so concurrent DDL cannot introduce an unseen dependency. Large graphs can fail with an explicit work-limit error; never proceed with an incomplete dependency check.
 
+At startup, every persisted dependency record must resolve both its dependent and referenced ID to an existing `objects` record. Edge-kind-specific endpoint agreement and consistency between dependency edges and records that imply ownership or references remain part of complete catalog graph validation.
+
 Ownership edges identify objects removed with a parent, such as a table's own indexes/policies. Reference edges block RESTRICT drops, such as another table's foreign key. Column removal is blocked by applicable policies, expressions, and keys. Role/user removal checks ownership, grants, memberships, and policy recipients. Follow [schema DDL](ddl-schema.md) for exact drop behavior.
 
 ## Snapshots and Cache Invalidation
