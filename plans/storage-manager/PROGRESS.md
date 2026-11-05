@@ -292,3 +292,11 @@
 - Verification: prescribed Nix-shell workspace build, formatting check, Clippy with warnings denied, and all 170 integration tests across 17 targets passed. Changed Markdown relative links and `git diff --check` pass.
 - Limitation: callers still stage the exact derived `IndexWrite`s after loading schema/index definitions. Index membership is not yet synthesized automatically from the row overlay. Low-level explicit-write commit helpers and projection-only test paths remain trusted scaffolding, not executor-facing paths.
 - Next: synthesize index deltas during invocation finalization and make catalog-backed row mutation APIs independent of caller-supplied index writes.
+
+## SM-5 dependency: automatic catalog index maintenance — in progress
+
+- Invocation finalization now synthesizes index additions and removals from the pinned catalog schema/index definitions and the prior/final typed row. Optional caller-staged index writes are accepted only when they exactly match the derived mutations; omitted changes are generated automatically. Unchanged indexed values continue to receive refreshed locators in the serialized storage commit.
+- Generated writes are checked against the invocation's index-change and key-byte budgets. A budget failure aborts the invocation without publishing the row.
+- Real-redb coverage exercises automatic insert, indexed-value update, and delete maintenance, verifies locators, rejects missing index definitions and forged writes, and checks atomic rejection when synthesized writes exceed the budget.
+- Verification: `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and all 170 integration tests across 17 targets passed in the prescribed Nix shell. `git diff --check` passed.
+- Remaining: the low-level explicit-write API and projection-only helpers remain trusted scaffolding. Index-definition DDL/rebuild behavior, uniqueness validation beyond the current commit path, and service integration remain open.

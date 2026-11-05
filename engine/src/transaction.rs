@@ -109,7 +109,10 @@ impl From<OverlayError> for TransactionError {
 
 impl From<CommitError> for TransactionError {
     fn from(error: CommitError) -> Self {
-        Self::Commit(error)
+        match error {
+            CommitError::IndexOverlayLimitExceeded => Self::IndexOverlayLimitExceeded,
+            error => Self::Commit(error),
+        }
     }
 }
 
@@ -1861,25 +1864,18 @@ impl<'db> InvocationTransaction<'db> {
                 payload,
             });
         }
-        let index_validation = validate_catalog_index_deltas(
+        let (index_validation, index_writes) = match validate_catalog_index_deltas(
             &self.snapshot,
             &self.loaded_schemas,
             &self.loaded_indexes,
             &self.index_writes,
             &writes,
-        );
-        let index_writes = self
-            .index_writes
-            .into_iter()
-            .map(|(key, write)| IndexWrite {
-                key,
-                row_key: row_key(write.row_id),
-                expected_version: write.expected_version,
-                present: write.present,
-                unique: write.unique,
-                null_exempt: write.null_exempt,
-            })
-            .collect::<Vec<_>>();
+            self.max_index_changes,
+            self.max_index_bytes,
+        ) {
+            Ok(index_writes) => (Ok(()), index_writes),
+            Err(error) => (Err(error), Vec::new()),
+        };
         let catalog_guards = self
             .catalog_guards
             .into_iter()
@@ -2013,7 +2009,9 @@ fn validate_catalog_index_deltas(
     loaded_indexes: &HashMap<[u8; 16], Vec<CatalogIndexDefinition>>,
     staged_indexes: &HashMap<Vec<u8>, StagedIndexChange>,
     row_writes: &[RowWrite],
-) -> Result<(), CommitError> {
+    max_index_changes: usize,
+    max_index_bytes: usize,
+) -> Result<Vec<IndexWrite>, CommitError> {
     for row_write in row_writes {
         let table_id: [u8; 16] = row_write.key[..16]
             .try_into()
@@ -2021,9 +2019,6 @@ fn validate_catalog_index_deltas(
         if loaded_schemas.contains_key(&table_id) && !loaded_indexes.contains_key(&table_id) {
             return Err(CommitError::InvalidIndex);
         }
-    }
-    if loaded_indexes.is_empty() {
-        return Ok(());
     }
     let tracked_tables = loaded_indexes.keys().copied().collect::<HashSet<_>>();
     let mut expected = HashMap::<Vec<u8>, IndexWrite>::new();
@@ -2117,9 +2112,17 @@ fn validate_catalog_index_deltas(
         }
     }
 
-    let mut actual = HashMap::<Vec<u8>, IndexWrite>::new();
+    let mut untracked_writes = Vec::new();
     for (key, staged) in staged_indexes {
         if !tracked_tables.contains(&staged.row_id.table) {
+            untracked_writes.push(IndexWrite {
+                key: key.clone(),
+                row_key: row_key(staged.row_id),
+                expected_version: staged.expected_version,
+                present: staged.present,
+                unique: staged.unique,
+                null_exempt: staged.null_exempt,
+            });
             continue;
         }
         let write = IndexWrite {
@@ -2130,12 +2133,19 @@ fn validate_catalog_index_deltas(
             unique: staged.unique,
             null_exempt: staged.null_exempt,
         };
-        actual.insert(key.clone(), write);
+        if expected.get(key) != Some(&write) {
+            return Err(CommitError::InvalidIndex);
+        }
     }
-    if actual != expected {
-        return Err(CommitError::InvalidIndex);
+    let mut writes = expected.into_values().collect::<Vec<_>>();
+    writes.extend(untracked_writes);
+    let total_bytes = writes
+        .iter()
+        .try_fold(0usize, |total, write| total.checked_add(write.key.len()));
+    if writes.len() > max_index_changes || total_bytes.is_none_or(|bytes| bytes > max_index_bytes) {
+        return Err(CommitError::IndexOverlayLimitExceeded);
     }
-    Ok(())
+    Ok(writes)
 }
 
 fn catalog_field(record: &CatalogRecord, tag: u16) -> Result<&[u8], TransactionError> {

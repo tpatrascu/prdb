@@ -1366,8 +1366,7 @@ fn invocation_sees_own_writes_and_commits_against_its_pinned_snapshot()
 }
 
 #[test]
-fn invocation_stages_index_membership_with_its_row_write() -> Result<(), Box<dyn std::error::Error>>
-{
+fn invocation_auto_indexes_row_writes() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
     let row_id = id(5);
@@ -1382,15 +1381,35 @@ fn invocation_stages_index_membership_with_its_row_write() -> Result<(), Box<dyn
 
     let mut missing = InvocationTransaction::begin(&database, [5; 16], [9; 16], 9_999, 4, 2_048)?;
     let schema = missing.load_catalog_table_schema(row_id.table)?;
-    assert_eq!(missing.load_catalog_indexes(&schema)?.len(), 3);
+    let indexes = missing.load_catalog_indexes(&schema)?;
+    assert_eq!(indexes.len(), 3);
     missing.stage_put(row_id, &payload)?;
-    assert!(matches!(
-        missing.commit(),
-        Err(TransactionError::Commit(CommitError::InvalidIndex))
-    ));
+    let mut index_keys = Vec::new();
+    for index in &indexes {
+        index_keys.push(
+            derive_index_key(
+                index.index_id,
+                row_id.row,
+                schema.schema_version,
+                &schema.column_ids,
+                &schema.columns,
+                &payload,
+                &index.column_ids,
+            )?
+            .key,
+        );
+    }
+    assert_eq!(missing.commit()?, 1);
     {
         let read = database.begin_read()?;
-        assert!(read.open_table(ROWS)?.get(&key(row_id)[..])?.is_none());
+        let indexes = read.open_table(prdb_engine::schema::INDEXES)?;
+        for index_key in &index_keys {
+            let locator = indexes.get(index_key.as_slice())?.unwrap().value().to_vec();
+            assert_eq!(
+                IndexLocator::decode_for_key(index_key, &locator)?.row_version,
+                1
+            );
+        }
     }
 
     let mut without_index_load =
@@ -1416,44 +1435,31 @@ fn invocation_stages_index_membership_with_its_row_write() -> Result<(), Box<dyn
         Err(TransactionError::Commit(CommitError::InvalidIndex))
     ));
 
-    let mut insert = InvocationTransaction::begin(&database, [6; 16], [9; 16], 9_999, 4, 2_048)?;
-    let schema = insert.load_catalog_table_schema(row_id.table)?;
-    let indexes = insert.load_catalog_indexes(&schema)?;
-    insert.stage_put(row_id, &payload)?;
-    let mut index_keys = Vec::new();
-    for index in &indexes {
-        let derived = derive_index_key(
-            index.index_id,
-            row_id.row,
-            schema.schema_version,
-            &schema.column_ids,
-            &schema.columns,
-            &payload,
-            &index.column_ids,
-        )
-        .unwrap();
-        insert.stage_index_membership_with_semantics(
-            row_id,
-            derived.key.clone(),
-            true,
-            index.unique,
-            index.unique && derived.has_null,
-        )?;
-        index_keys.push(derived.key);
-    }
-    assert_eq!(insert.commit()?, 1);
+    let small_row_id = id(13);
+    let small_payload = encode_tuple(
+        &[ColumnSchema {
+            scalar_type: ScalarType::Bytea,
+            nullable: true,
+        }],
+        1,
+        &[Some(ScalarValue::Bytea(b"x".to_vec()))],
+    )?;
+    let mut bounded = InvocationTransaction::begin(&database, [13; 16], [9; 16], 9_999, 256, 40)?;
+    let schema = bounded.load_catalog_table_schema(small_row_id.table)?;
+    bounded.load_catalog_indexes(&schema)?;
+    bounded.stage_put(small_row_id, &small_payload)?;
+    assert!(matches!(
+        bounded.commit(),
+        Err(TransactionError::IndexOverlayLimitExceeded)
+    ));
     {
         let read = database.begin_read()?;
-        let indexes = read.open_table(prdb_engine::schema::INDEXES)?;
-        for index_key in &index_keys {
-            let locator = indexes.get(index_key.as_slice())?.unwrap().value().to_vec();
-            assert_eq!(
-                IndexLocator::decode_for_key(index_key, &locator)?.row_version,
-                1
-            );
-        }
+        assert!(
+            read.open_table(ROWS)?
+                .get(&key(small_row_id)[..])?
+                .is_none()
+        );
     }
-
     let updated_payload = encode_tuple(
         &[ColumnSchema {
             scalar_type: ScalarType::Bytea,
@@ -1468,16 +1474,6 @@ fn invocation_stages_index_membership_with_its_row_write() -> Result<(), Box<dyn
     update.stage_put(row_id, &updated_payload)?;
     let mut updated_index_keys = Vec::new();
     for index in &indexes_for_update {
-        let old = derive_index_key(
-            index.index_id,
-            row_id.row,
-            schema.schema_version,
-            &schema.column_ids,
-            &schema.columns,
-            &payload,
-            &index.column_ids,
-        )
-        .unwrap();
         let new = derive_index_key(
             index.index_id,
             row_id.row,
@@ -1488,20 +1484,6 @@ fn invocation_stages_index_membership_with_its_row_write() -> Result<(), Box<dyn
             &index.column_ids,
         )
         .unwrap();
-        update.stage_index_membership_with_semantics(
-            row_id,
-            old.key,
-            false,
-            index.unique,
-            index.unique && old.has_null,
-        )?;
-        update.stage_index_membership_with_semantics(
-            row_id,
-            new.key.clone(),
-            true,
-            index.unique,
-            index.unique && new.has_null,
-        )?;
         updated_index_keys.push(new.key);
     }
     assert_eq!(update.commit()?, 2);
@@ -1522,27 +1504,8 @@ fn invocation_stages_index_membership_with_its_row_write() -> Result<(), Box<dyn
 
     let mut delete = InvocationTransaction::begin(&database, [9; 16], [9; 16], 9_999, 4, 2_048)?;
     let schema = delete.load_catalog_table_schema(row_id.table)?;
-    let indexes_for_delete = delete.load_catalog_indexes(&schema)?;
+    delete.load_catalog_indexes(&schema)?;
     delete.stage_delete(row_id)?;
-    for index in &indexes_for_delete {
-        let derived = derive_index_key(
-            index.index_id,
-            row_id.row,
-            schema.schema_version,
-            &schema.column_ids,
-            &schema.columns,
-            &updated_payload,
-            &index.column_ids,
-        )
-        .unwrap();
-        delete.stage_index_membership_with_semantics(
-            row_id,
-            derived.key,
-            false,
-            index.unique,
-            index.unique && derived.has_null,
-        )?;
-    }
     assert_eq!(delete.commit()?, 3);
     let read = database.begin_read()?;
     let indexes = read.open_table(prdb_engine::schema::INDEXES)?;
@@ -2732,7 +2695,7 @@ fn authorized_insert_materializes_defaults_before_policy_and_check_validation()
     let mut invocation =
         InvocationTransaction::begin(&database, [113; 16], [9; 16], 9_999, 1, 512)?;
     let catalog_schema = invocation.load_catalog_table_schema(row_id.table)?;
-    let catalog_indexes = invocation.load_catalog_indexes(&catalog_schema)?;
+    invocation.load_catalog_indexes(&catalog_schema)?;
     let catalog_checks = invocation.read_catalog_bound_expressions(
         &[check_expression_id],
         prdb_engine::expression::ExpressionPurpose::Check,
@@ -2759,30 +2722,6 @@ fn authorized_insert_materializes_defaults_before_policy_and_check_validation()
         &[InsertInput::Default],
         &catalog_schema,
     )?;
-    let inserted_payload = encode_tuple(
-        &catalog_schema.columns,
-        catalog_schema.schema_version,
-        &[Some(ScalarValue::Uuid([9; 16]))],
-    )?;
-    for index in &catalog_indexes {
-        let derived = derive_index_key(
-            index.index_id,
-            row_id.row,
-            catalog_schema.schema_version,
-            &catalog_schema.column_ids,
-            &catalog_schema.columns,
-            &inserted_payload,
-            &index.column_ids,
-        )
-        .unwrap();
-        invocation.stage_index_membership_with_semantics(
-            row_id,
-            derived.key,
-            true,
-            index.unique,
-            index.unique && derived.has_null,
-        )?;
-    }
     invocation.commit()?;
 
     let read = database.begin_read()?;

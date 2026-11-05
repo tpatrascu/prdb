@@ -83,6 +83,7 @@ pub enum CommitError {
     InvalidMetadata,
     InvalidRow,
     InvalidIndex,
+    IndexOverlayLimitExceeded,
     UniqueViolation,
     InvalidCatalog,
     InvalidAudit,
