@@ -102,6 +102,53 @@ fn index_definition(index_id: [u8; 16], table_id: [u8; 16]) -> (Vec<u8>, Vec<u8>
     (key, payload)
 }
 
+fn bootstrap_database_record(database_id: [u8; 16]) -> (Vec<u8>, Vec<u8>) {
+    let mut key = 1u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&database_id);
+    let mut builtins = 30u32.to_le_bytes().to_vec();
+    for code in [1u16, 2, 3]
+        .into_iter()
+        .chain(101u16..=111)
+        .chain(201u16..=216)
+    {
+        builtins.extend_from_slice(&code.to_le_bytes());
+        builtins.extend_from_slice(&0u16.to_le_bytes());
+        let mut id = [0x80; 16];
+        id[15] = code as u8;
+        builtins.extend_from_slice(&id);
+    }
+    let fields = [
+        CatalogField {
+            tag: 1,
+            wire_type: WireType::Text,
+            payload: b"test_database".to_vec(),
+        },
+        CatalogField {
+            tag: 2,
+            wire_type: WireType::U32,
+            payload: 1u32.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 3,
+            wire_type: WireType::Bytes,
+            payload: builtins,
+        },
+        CatalogField {
+            tag: 5,
+            wire_type: WireType::U32,
+            payload: 1u32.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 6,
+            wire_type: WireType::U32,
+            payload: 1u32.to_le_bytes().to_vec(),
+        },
+    ];
+    let payload = encode_envelope(&family_schema(1).unwrap(), &key, &fields).unwrap();
+    (key, payload)
+}
+
 fn initialize(path: &std::path::Path) -> Result<Database, Box<dyn std::error::Error>> {
     let database = Database::create(path)?;
     let mut transaction = database.begin_write()?;
@@ -109,6 +156,10 @@ fn initialize(path: &std::path::Path) -> Result<Database, Box<dyn std::error::Er
     transaction.set_two_phase_commit(true);
     schema::create_tables(&transaction)?;
     let (index_key, index_payload) = index_definition([0x44; 16], [0x10; 16]);
+    let (database_key, database_payload) = bootstrap_database_record([0x33; 16]);
+    transaction
+        .open_table(CATALOG)?
+        .insert(&database_key[..], &database_payload[..])?;
     transaction
         .open_table(CATALOG)?
         .insert(&index_key[..], &index_payload[..])?;
@@ -630,7 +681,7 @@ fn membership_limit_applies_to_final_graph_independent_of_write_order()
     let catalog = read.open_table(prdb_engine::schema::CATALOG)?;
     assert!(catalog.get(old.key.as_slice())?.is_none());
     assert!(catalog.get(new.key.as_slice())?.is_some());
-    assert_eq!(catalog.len()?, 130 + 4096);
+    assert_eq!(catalog.len()?, 131 + 4096);
     drop(catalog);
     drop(read);
     let mut advance = principal_write_with_epoch(member, 2, 3);

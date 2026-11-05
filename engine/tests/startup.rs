@@ -41,6 +41,12 @@ impl Fixture {
         }
         .encode()
         .unwrap();
+        let (database_key, database_value) = database_record([0x11; 16], 1, 1, 1);
+        write
+            .open_table(CATALOG)
+            .unwrap()
+            .insert(&database_key[..], &database_value[..])
+            .unwrap();
         write
             .open_table(ENGINE_META)
             .unwrap()
@@ -62,6 +68,62 @@ fn row_key(table_id: [u8; 16], row_id: [u8; 16]) -> [u8; 32] {
     key[..16].copy_from_slice(&table_id);
     key[16..].copy_from_slice(&row_id);
     key
+}
+
+fn builtin_mapping() -> Vec<u8> {
+    let codes = [1u16, 2, 3]
+        .into_iter()
+        .chain(101u16..=111)
+        .chain(201u16..=216);
+    let mut mapping = 30u32.to_le_bytes().to_vec();
+    for code in codes {
+        mapping.extend_from_slice(&code.to_le_bytes());
+        mapping.extend_from_slice(&0u16.to_le_bytes());
+        let mut id = [0x80; 16];
+        id[15] = code as u8;
+        mapping.extend_from_slice(&id);
+    }
+    mapping
+}
+
+fn database_record(
+    database_id: [u8; 16],
+    catalog_version: u32,
+    expression_version: u32,
+    builtin_semantics_version: u32,
+) -> (Vec<u8>, Vec<u8>) {
+    let mut key = 1u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&database_id);
+    let fields = [
+        CatalogField {
+            tag: 1,
+            wire_type: WireType::Text,
+            payload: b"test_database".to_vec(),
+        },
+        CatalogField {
+            tag: 2,
+            wire_type: WireType::U32,
+            payload: catalog_version.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 3,
+            wire_type: WireType::Bytes,
+            payload: builtin_mapping(),
+        },
+        CatalogField {
+            tag: 5,
+            wire_type: WireType::U32,
+            payload: expression_version.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 6,
+            wire_type: WireType::U32,
+            payload: builtin_semantics_version.to_le_bytes().to_vec(),
+        },
+    ];
+    let payload = encode_envelope(&family_schema(1).unwrap(), &key, &fields).unwrap();
+    (key, payload)
 }
 
 fn reverse_index_key(row_key: &[u8; 32], index_key: &[u8]) -> Vec<u8> {
@@ -276,10 +338,95 @@ fn validates_ready_image_records_and_references() -> Result<(), Box<dyn std::err
     assert_eq!(report.metadata.commit_sequence, 3);
     assert_eq!(report.rows, 1);
     assert_eq!(report.index_entries, 1);
-    assert_eq!(report.catalog_records, 1);
+    assert_eq!(report.catalog_records, 2);
     assert_eq!(report.outcomes, 1);
     assert_eq!(report.audit_events, 1);
     Ok(())
+}
+
+#[test]
+fn rejects_ready_image_without_database_bootstrap_record() {
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    let (key, _) = database_record([0x11; 16], 1, 1, 1);
+    let write = database.begin_write().unwrap();
+    write.open_table(CATALOG).unwrap().remove(&key[..]).unwrap();
+    write.commit().unwrap();
+    assert!(matches!(
+        validate_persisted_records(&database),
+        Err(StartupError::InvalidCatalog)
+    ));
+}
+
+#[test]
+fn rejects_bootstrap_versions_that_disagree_with_engine_metadata() {
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    let (key, value) = database_record([0x11; 16], 2, 1, 1);
+    put_catalog(&database, &key, &value);
+    assert!(matches!(
+        validate_persisted_records(&database),
+        Err(StartupError::InvalidCatalog)
+    ));
+}
+
+#[test]
+fn rejects_noncanonical_bootstrap_mappings() {
+    for corrupt in ["missing", "unsorted", "reserved", "duplicate_id"] {
+        let fixture = Fixture::new();
+        let database = fixture.database(0);
+        let (key, _) = database_record([0x11; 16], 1, 1, 1);
+        let mut mapping = builtin_mapping();
+        match corrupt {
+            "missing" => {
+                mapping[..4].copy_from_slice(&29u32.to_le_bytes());
+                mapping.truncate(mapping.len() - 20);
+            }
+            "unsorted" => mapping[24..26].copy_from_slice(&1u16.to_le_bytes()),
+            "reserved" => mapping[6..8].copy_from_slice(&1u16.to_le_bytes()),
+            "duplicate_id" => {
+                let first_id = mapping[8..24].to_vec();
+                mapping[28..44].copy_from_slice(&first_id);
+            }
+            _ => unreachable!(),
+        }
+        let fields = [
+            CatalogField {
+                tag: 1,
+                wire_type: WireType::Text,
+                payload: b"test_database".to_vec(),
+            },
+            CatalogField {
+                tag: 2,
+                wire_type: WireType::U32,
+                payload: 1u32.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 3,
+                wire_type: WireType::Bytes,
+                payload: mapping,
+            },
+            CatalogField {
+                tag: 5,
+                wire_type: WireType::U32,
+                payload: 1u32.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 6,
+                wire_type: WireType::U32,
+                payload: 1u32.to_le_bytes().to_vec(),
+            },
+        ];
+        let payload = encode_envelope(&family_schema(1).unwrap(), &key, &fields).unwrap();
+        put_catalog(&database, &key, &payload);
+        assert!(
+            matches!(
+                validate_persisted_records(&database),
+                Err(StartupError::InvalidCatalog)
+            ),
+            "corrupt mapping case: {corrupt}"
+        );
+    }
 }
 
 #[test]
@@ -510,7 +657,7 @@ fn accepts_pinned_acyclic_membership_graph() -> Result<(), Box<dyn std::error::E
         put_catalog(&database, &record.0, &record.1);
     }
     let report = validate_persisted_records(&database)?;
-    assert_eq!(report.catalog_records, 5);
+    assert_eq!(report.catalog_records, 6);
     Ok(())
 }
 

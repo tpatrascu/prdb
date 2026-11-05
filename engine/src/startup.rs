@@ -51,9 +51,9 @@ impl std::fmt::Display for StartupError {
 
 impl std::error::Error for StartupError {}
 
-/// Validate the recovered image's table set, version state, record envelopes,
-/// and references against one pinned redb snapshot. This record-level check
-/// does not certify bootstrap completeness or authenticated service admission.
+/// Validate the recovered image's table set, version state, bootstrap mapping,
+/// record envelopes, and implemented references against one pinned redb
+/// snapshot. This check does not certify authenticated service admission.
 pub fn validate_persisted_records(
     database: &Database,
 ) -> Result<StorageHealthReport, StartupError> {
@@ -67,7 +67,7 @@ pub fn validate_persisted_records(
         return Err(StartupError::NotReady);
     }
 
-    let (catalog_records, index_definitions) = validate_catalog(&read)?;
+    let (catalog_records, index_definitions) = validate_catalog(&read, &metadata)?;
     let rows = validate_rows(&read, metadata.commit_sequence)?;
     let index_entries = validate_indexes(&read, metadata.commit_sequence, &index_definitions)?;
     let outcomes = validate_outcomes(&read, metadata.commit_sequence)?;
@@ -115,7 +115,10 @@ fn read_metadata(read: &ReadTransaction) -> Result<EngineMetadata, StartupError>
     EngineMetadata::decode(&bytes).map_err(|_| StartupError::InvalidMetadata)
 }
 
-fn validate_catalog(read: &ReadTransaction) -> Result<(usize, IndexDefinitions), StartupError> {
+fn validate_catalog(
+    read: &ReadTransaction,
+    metadata: &EngineMetadata,
+) -> Result<(usize, IndexDefinitions), StartupError> {
     let table = read.open_table(CATALOG).map_err(storage_error)?;
     let mut family_counts = [0usize; 17];
     let mut count = 0usize;
@@ -123,6 +126,7 @@ fn validate_catalog(read: &ReadTransaction) -> Result<(usize, IndexDefinitions),
     let mut principal_kinds = HashMap::<[u8; 16], u16>::new();
     let mut memberships = Vec::<Membership>::new();
     let mut membership_grantors = Vec::<[u8; 16]>::new();
+    let mut database_records = 0usize;
     for entry in table.iter().map_err(storage_error)? {
         let (key, value) = entry.map_err(storage_error)?;
         let key = key.value();
@@ -145,6 +149,10 @@ fn validate_catalog(read: &ReadTransaction) -> Result<(usize, IndexDefinitions),
             decode_registered_envelope(value.value()).map_err(|_| StartupError::InvalidCatalog)?;
         if record.logical_key != key || record.family_code as usize != family_code {
             return Err(StartupError::InvalidCatalog);
+        }
+        if record.family_code == 1 {
+            database_records += 1;
+            validate_database_record(&record, metadata)?;
         }
         if record.family_code == 7 {
             decode_catalog_expression_record(&record).map_err(|_| StartupError::InvalidCatalog)?;
@@ -194,6 +202,9 @@ fn validate_catalog(read: &ReadTransaction) -> Result<(usize, IndexDefinitions),
             membership_grantors.push(grantor_id);
         }
     }
+    if database_records != 1 {
+        return Err(StartupError::InvalidCatalog);
+    }
     if membership_grantors
         .iter()
         .any(|grantor_id| !principal_kinds.contains_key(grantor_id))
@@ -209,6 +220,79 @@ fn validate_catalog(read: &ReadTransaction) -> Result<(usize, IndexDefinitions),
     }
     validate_membership_graph(&memberships).map_err(|_| StartupError::InvalidCatalog)?;
     Ok((count, index_definitions))
+}
+
+fn validate_database_record(
+    record: &CatalogRecord,
+    metadata: &EngineMetadata,
+) -> Result<(), StartupError> {
+    let key = &record.logical_key;
+    if key.len() != 19
+        || key[..3] != [0, 1, 1]
+        || key[3..] != metadata.database_id
+        || field_u32(record, 2)? != metadata.catalog_version
+        || field_u32(record, 5)? != metadata.expression_version
+        || field_u32(record, 6)? != metadata.builtin_semantics_version
+    {
+        return Err(StartupError::InvalidCatalog);
+    }
+
+    let encoded = record
+        .fields
+        .iter()
+        .find(|field| field.tag == 3)
+        .ok_or(StartupError::InvalidCatalog)?
+        .payload
+        .as_slice();
+    let count_bytes: [u8; 4] = encoded
+        .get(..4)
+        .ok_or(StartupError::InvalidCatalog)?
+        .try_into()
+        .map_err(|_| StartupError::InvalidCatalog)?;
+    let count = u32::from_le_bytes(count_bytes) as usize;
+    if count != 30 {
+        return Err(StartupError::InvalidCatalog);
+    }
+    let expected_len = count
+        .checked_mul(20)
+        .and_then(|entries| entries.checked_add(4))
+        .ok_or(StartupError::InvalidCatalog)?;
+    if encoded.len() != expected_len {
+        return Err(StartupError::InvalidCatalog);
+    }
+
+    let mut mappings = HashMap::<u16, [u8; 16]>::with_capacity(count);
+    let mut ids = HashMap::<[u8; 16], ()>::with_capacity(count);
+    let mut previous_code = None;
+    for entry in encoded[4..].chunks_exact(20) {
+        let code = u16::from_le_bytes([entry[0], entry[1]]);
+        let reserved = u16::from_le_bytes([entry[2], entry[3]]);
+        let id: [u8; 16] = entry[4..]
+            .try_into()
+            .map_err(|_| StartupError::InvalidCatalog)?;
+        if previous_code.is_some_and(|previous| code <= previous)
+            || !is_required_bootstrap_code(code)
+            || reserved != 0
+            || id == [0; 16]
+            || mappings.insert(code, id).is_some()
+            || ids.insert(id, ()).is_some()
+        {
+            return Err(StartupError::InvalidCatalog);
+        }
+        previous_code = Some(code);
+    }
+    if required_bootstrap_codes().any(|code| !mappings.contains_key(&code)) {
+        return Err(StartupError::InvalidCatalog);
+    }
+    Ok(())
+}
+
+fn required_bootstrap_codes() -> impl Iterator<Item = u16> {
+    [1, 2, 3].into_iter().chain(101..=111).chain(201..=216)
+}
+
+fn is_required_bootstrap_code(code: u16) -> bool {
+    required_bootstrap_codes().any(|required| required == code)
 }
 
 fn field_id(record: &CatalogRecord, tag: u16) -> Result<[u8; 16], StartupError> {
@@ -233,6 +317,19 @@ fn field_u16(record: &CatalogRecord, tag: u16) -> Result<u16, StartupError> {
         .as_slice()
         .try_into()
         .map(u16::from_le_bytes)
+        .map_err(|_| StartupError::InvalidCatalog)
+}
+
+fn field_u32(record: &CatalogRecord, tag: u16) -> Result<u32, StartupError> {
+    record
+        .fields
+        .iter()
+        .find(|field| field.tag == tag)
+        .ok_or(StartupError::InvalidCatalog)?
+        .payload
+        .as_slice()
+        .try_into()
+        .map(u32::from_le_bytes)
         .map_err(|_| StartupError::InvalidCatalog)
 }
 
