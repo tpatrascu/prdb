@@ -1952,6 +1952,54 @@ fn storage_manager_expires_idle_invocations_and_releases_the_snapshot()
 }
 
 #[test]
+fn storage_manager_resolves_only_retained_outcomes_for_the_authenticated_owner()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+
+    let mut aborted = storage.begin_invocation(id(199), id(9), 9_999, 2, 64)?;
+    aborted.abort()?;
+    assert_eq!(
+        storage
+            .lookup_invocation_outcome(id(199), id(9), 9_998)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Aborted
+    );
+
+    let mut committed = storage.begin_invocation(id(200), id(9), 9_999, 2, 64)?;
+    committed.stage_put(
+        prdb_engine::overlay::RowId {
+            table: id(16),
+            row: id(201),
+        },
+        b"status lookup",
+    )?;
+    committed.commit()?;
+    assert_eq!(
+        storage
+            .lookup_invocation_outcome(id(200), id(9), 9_998)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Committed
+    );
+    assert_eq!(
+        storage.lookup_invocation_outcome(id(200), id(10), 9_998)?,
+        None
+    );
+    assert_eq!(
+        storage.lookup_invocation_outcome(id(200), id(9), 9_999)?,
+        None
+    );
+    assert_eq!(
+        storage.lookup_invocation_outcome(id(202), id(9), 9_998)?,
+        None
+    );
+    Ok(())
+}
+
+#[test]
 fn storage_manager_rejects_invalid_recovered_images_before_admission()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();

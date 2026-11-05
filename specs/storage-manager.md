@@ -20,7 +20,7 @@ Any statement error aborts the whole invocation. Cancellation accepted before re
 
 ## Catalog and Metadata
 
-The engine owns the [data dictionary](data-dictionary.md), [catalog payloads](catalog-payloads.md), DDL, users, roles, grants, and true row-dependent cell policies. These logical records live in redb tables, not redb's inaccessible physical system tables. Public metadata and planning estimates remain permission-filtered. Required administrative audit records commit atomically with changes.
+The engine owns the [data dictionary](data-dictionary.md), [catalog payloads](catalog-payloads.md), DDL, users, roles, grants, and true row-dependent cell policies. These logical records live in redb tables, not redb's inaccessible physical system tables. Public metadata and planning estimates remain permission-filtered. Required administrative audit records commit atomically with changes. After service authentication, owner-scoped durable outcome lookup is provided by `StorageManager::lookup_invocation_outcome` for lost-reply reconciliation.
 
 ## Resource and Process Boundaries
 

@@ -3,6 +3,7 @@
 use crate::audit::AuditEvent;
 use crate::commit::{CatalogWrite, CommitError, commit_catalog_and_audit_with_fences};
 use crate::ddl_fence::{DdlFenceCoordinator, DdlFenceManager};
+use crate::outcome::{InvocationOutcome, lookup_outcome};
 use crate::startup::{StartupError, validate_persisted_records};
 use crate::transaction::{InvocationCoordination, InvocationTransaction, TransactionError};
 use redb::Database;
@@ -209,7 +210,19 @@ impl<'db> StorageManager<'db> {
         )
     }
 
-    pub fn database(&self) -> &Database {
-        self.database
+    /// Resolve a retained terminal outcome for an already authenticated owner.
+    /// Unknown, mismatched, and expired records all return `None`.
+    pub fn lookup_invocation_outcome(
+        &self,
+        invocation_id: [u8; 16],
+        authenticated_principal_id: [u8; 16],
+        now_us: i64,
+    ) -> Result<Option<InvocationOutcome>, Box<dyn std::error::Error>> {
+        lookup_outcome(
+            self.database,
+            invocation_id,
+            authenticated_principal_id,
+            now_us,
+        )
     }
 }

@@ -427,3 +427,11 @@
 - Tests: `engine/tests/commit.rs` checks idle polling expiry, the durable ABORTED outcome, immediate snapshot-slot reuse while the expired transaction object remains alive, and commit-time expiry.
 - Verification: with Rust/Cargo 1.95.0, rustfmt 1.9.0, and Clippy 0.1.95 in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and all 194 integration tests across 18 targets passed. `git diff --check` and changed Markdown local-link checks passed.
 - Remaining: no supervisor exists yet to poll idle transactions automatically; scan, result, and total-work budgets also remain service lifecycle work.
+
+## SM-5 dependency: owner-scoped outcome lookup — in progress
+
+- Behavior: provide the trusted service layer a durable outcome query for resolving lost commit replies, exposing only unexpired outcomes belonging to the already authenticated owner.
+- Implementation: `StorageManager::lookup_invocation_outcome` delegates to the canonical outcome reader, which maps unknown IDs, owner mismatches, and expired records to absence. The method accepts an authenticated principal ID from its trusted caller; it does not authenticate network clients or grant administrator visibility. The manager no longer exposes a raw redb handle accessor.
+- Test: `engine/tests/commit.rs` verifies ABORTED and COMMITTED lookup, owner isolation, expiry, and unknown invocation behavior through `StorageManager`.
+- Verification: with Rust/Cargo 1.95.0, rustfmt 1.9.0, and Clippy 0.1.95 in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and all 195 integration tests across 18 targets passed. `git diff --check` and changed Markdown local-link checks passed.
+- Remaining: the supervisor/gateway authentication path is not implemented; administrator outcome visibility remains separate.
