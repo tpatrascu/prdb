@@ -13,7 +13,7 @@ use prdb_engine::row_record::RowRecord;
 use prdb_engine::schema::{self, CATALOG, ENGINE_META, ROWS};
 use prdb_engine::storage_manager::{StorageManager, StorageManagerConfig, StorageManagerInitError};
 use prdb_engine::tuple::{ColumnSchema, ScalarType, ScalarValue, encode_tuple};
-use redb::{Database, ReadableDatabase, ReadableTableMetadata};
+use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
@@ -97,6 +97,15 @@ fn index_definition_with_columns(
     table_id: [u8; 16],
     column_ids: &[[u8; 16]],
 ) -> (Vec<u8>, Vec<u8>) {
+    index_definition_with_options(index_id, table_id, column_ids, false)
+}
+
+fn index_definition_with_options(
+    index_id: [u8; 16],
+    table_id: [u8; 16],
+    column_ids: &[[u8; 16]],
+    unique: bool,
+) -> (Vec<u8>, Vec<u8>) {
     let mut key = 9u16.to_be_bytes().to_vec();
     key.push(1);
     key.extend_from_slice(&index_id);
@@ -121,7 +130,7 @@ fn index_definition_with_columns(
         CatalogField {
             tag: 4,
             wire_type: WireType::Bool,
-            payload: vec![0],
+            payload: vec![u8::from(unique)],
         },
         CatalogField {
             tag: 5,
@@ -151,6 +160,26 @@ fn index_definition_with_columns(
     ];
     let payload = encode_envelope(&family_schema(9).unwrap(), &key, &fields).unwrap();
     (key, payload)
+}
+
+fn typed_bytea_index_key(
+    index_id: [u8; 16],
+    row_key: &[u8; 32],
+    payload: &[u8],
+) -> prdb_engine::index_key::DerivedIndexKey {
+    prdb_engine::index_key::derive_index_key(
+        index_id,
+        row_key[16..].try_into().unwrap(),
+        1,
+        &[id(0x66)],
+        &[ColumnSchema {
+            scalar_type: ScalarType::Bytea,
+            nullable: true,
+        }],
+        payload,
+        &[id(0x66)],
+    )
+    .unwrap()
 }
 
 fn owned_unique_index_definition(
@@ -2471,6 +2500,229 @@ fn catalog_index_changes_reject_tables_with_existing_rows() -> Result<(), Box<dy
     assert!(
         read.open_table(schema::AUDIT)?
             .get(&[77; 16][..])?
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
+fn storage_manager_backfills_new_indexes_over_existing_rows_atomically()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let row_key = table_row_key(id(16), id(77));
+    let payload = bytea_tuple(b"existing row");
+    let previous_index = typed_bytea_index_key(id(0x44), &row_key, &payload);
+    commit_rows_and_indexes(
+        &database,
+        id(76),
+        id(9),
+        9_999,
+        &[RowWrite {
+            key: row_key,
+            expected_version: None,
+            payload: Some(payload.clone()),
+        }],
+        &[IndexWrite {
+            key: previous_index.key,
+            row_key,
+            expected_version: None,
+            present: true,
+            unique: false,
+            null_exempt: false,
+        }],
+    )?;
+
+    let (new_index_key, new_index_payload) = index_definition(id(0x88), id(16));
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    assert_eq!(
+        storage.commit_catalog_and_audit(
+            id(77),
+            id(9),
+            9_999,
+            &[
+                CatalogWrite {
+                    key: new_index_key.clone(),
+                    expected_value: None,
+                    payload: Some(new_index_payload),
+                },
+                object_write(id(0x88), 7),
+            ],
+            &[audit_event(77)],
+        )?,
+        2
+    );
+
+    let expected = typed_bytea_index_key(id(0x88), &row_key, &payload);
+    let read = database.begin_read()?;
+    let indexes = read.open_table(schema::INDEXES)?;
+    let locator = indexes.get(expected.key.as_slice())?.unwrap();
+    assert_eq!(
+        IndexLocator::decode_for_key(&expected.key, locator.value())?.row_version,
+        1
+    );
+    let mut reverse_key = row_key.to_vec();
+    reverse_key.extend_from_slice(&expected.key[..expected.key.len() - 16]);
+    assert!(
+        read.open_table(schema::ROW_INDEXES)?
+            .get(reverse_key.as_slice())?
+            .is_some()
+    );
+    let catalog = read.open_table(CATALOG)?;
+    assert!(catalog.get(new_index_key.as_slice())?.is_some());
+    assert!(
+        catalog
+            .get(id_catalog_key(2, id(0x88)).as_slice())?
+            .is_some()
+    );
+    assert!(
+        read.open_table(schema::AUDIT)?
+            .get(&[77; 16][..])?
+            .is_some()
+    );
+    assert_eq!(
+        lookup_outcome(&database, id(77), id(9), 1)?.unwrap().status,
+        OutcomeStatus::Committed
+    );
+    drop(read);
+    StorageManager::new(&database, Duration::from_millis(100))?;
+    Ok(())
+}
+
+#[test]
+fn storage_manager_rejects_unique_index_backfill_with_duplicate_values()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let payload = bytea_tuple(b"duplicate");
+    let row_keys = [table_row_key(id(16), id(71)), table_row_key(id(16), id(72))];
+    let old_indexes = row_keys
+        .iter()
+        .map(|row_key| {
+            let derived = typed_bytea_index_key(id(0x44), row_key, &payload);
+            IndexWrite {
+                key: derived.key,
+                row_key: *row_key,
+                expected_version: None,
+                present: true,
+                unique: false,
+                null_exempt: false,
+            }
+        })
+        .collect::<Vec<_>>();
+    commit_rows_and_indexes(
+        &database,
+        id(78),
+        id(9),
+        9_999,
+        &row_keys
+            .iter()
+            .map(|row_key| RowWrite {
+                key: *row_key,
+                expected_version: None,
+                payload: Some(payload.clone()),
+            })
+            .collect::<Vec<_>>(),
+        &old_indexes,
+    )?;
+
+    let (unique_key, unique_payload) =
+        index_definition_with_options(id(0x89), id(16), &[id(0x66)], true);
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    assert_eq!(
+        storage.commit_catalog_and_audit(
+            id(79),
+            id(9),
+            9_999,
+            &[
+                CatalogWrite {
+                    key: unique_key.clone(),
+                    expected_value: None,
+                    payload: Some(unique_payload),
+                },
+                object_write(id(0x89), 7),
+            ],
+            &[audit_event(79)],
+        ),
+        Err(CommitError::UniqueViolation)
+    );
+    assert_eq!(commit_sequence(&database)?, 1);
+    assert_eq!(
+        lookup_outcome(&database, id(79), id(9), 1)?.unwrap().status,
+        OutcomeStatus::Aborted
+    );
+    let read = database.begin_read()?;
+    assert!(
+        read.open_table(CATALOG)?
+            .get(unique_key.as_slice())?
+            .is_none()
+    );
+    assert!(
+        read.open_table(schema::AUDIT)?
+            .get(&[79; 16][..])?
+            .is_none()
+    );
+    assert!(
+        read.open_table(schema::INDEXES)?.iter()?.all(|entry| !entry
+            .unwrap()
+            .0
+            .value()
+            .starts_with(&id(0x89)))
+    );
+    Ok(())
+}
+
+#[test]
+fn catalog_index_backfill_limit_fails_without_publishing_catalog()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let payload = bytea_tuple(b"bounded");
+    let rows = (1u64..=65_537)
+        .map(|row_id| {
+            let mut row_suffix = [0; 16];
+            row_suffix[8..].copy_from_slice(&row_id.to_be_bytes());
+            RowWrite {
+                key: table_row_key(id(16), row_suffix),
+                expected_version: None,
+                payload: Some(payload.clone()),
+            }
+        })
+        .collect::<Vec<_>>();
+    commit_rows(&database, id(80), id(9), 9_999, &rows)?;
+
+    let (index_key, index_payload) = index_definition(id(0x8a), id(16));
+    let ddl_fences = DdlFenceManager::new();
+    let coordinator = DdlFenceCoordinator::new(ddl_fences, Duration::from_secs(1));
+    assert_eq!(
+        commit_catalog_and_audit_with_fences(
+            &database,
+            &coordinator,
+            id(81),
+            id(9),
+            9_999,
+            &[
+                CatalogWrite {
+                    key: index_key.clone(),
+                    expected_value: None,
+                    payload: Some(index_payload),
+                },
+                object_write(id(0x8a), 7),
+            ],
+            &[audit_event(81)],
+        ),
+        Err(CommitError::IndexBackfillLimitExceeded)
+    );
+    assert_eq!(commit_sequence(&database)?, 1);
+    assert_eq!(
+        lookup_outcome(&database, id(81), id(9), 1)?.unwrap().status,
+        OutcomeStatus::Aborted
+    );
+    assert!(
+        database
+            .begin_read()?
+            .open_table(CATALOG)?
+            .get(index_key.as_slice())?
             .is_none()
     );
     Ok(())

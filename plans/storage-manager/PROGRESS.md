@@ -435,3 +435,12 @@
 - Test: `engine/tests/commit.rs` verifies ABORTED and COMMITTED lookup, owner isolation, expiry, and unknown invocation behavior through `StorageManager`.
 - Verification: with Rust/Cargo 1.95.0, rustfmt 1.9.0, and Clippy 0.1.95 in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and all 195 integration tests across 18 targets passed. `git diff --check` and changed Markdown local-link checks passed.
 - Remaining: the supervisor/gateway authentication path is not implemented; administrator outcome visibility remains separate.
+
+## SM-5 dependency: bounded existing-row index creation — in progress
+
+- Coordinated catalog DDL now builds new index memberships from a pinned redb read snapshot while holding the table's exclusive DDL fence, without holding the serialized writer during the scan. It rechecks all scanned row keys and versions in the write transaction, then publishes forward/reverse memberships, catalog definition, audit, sequence, and outcome atomically.
+- Builds are limited to 65,536 rows, 65,536 generated memberships, and 64 MiB combined stored-row and generated-key bytes per commit. Unique conflicts, malformed rows, stale snapshots, and limit failures leave no catalog or index publication. Populated-index rebuild/drop and combining a populated-table schema change with index creation remain rejected. Trusted unfenced catalog helpers still fail closed for populated-table index changes.
+- Real-redb regressions cover successful backfill, atomic rejection of duplicate values for a new unique index, and failure above the row cap; the low-level rejection regression remains.
+- Verification: in the prescribed Nix shell, `cargo build --workspace --locked`, `cargo fmt --all -- --check`, Clippy with warnings denied, and all 198 integration tests across 18 targets passed. `git diff --check` and changed Markdown link checks passed.
+- Contract updates: [schema DDL](../../specs/ddl-schema.md) and [redb storage](../../specs/redb-storage.md).
+- Remaining: online index rebuild/drop, authenticated DDL authorization, and service admission remain open.
