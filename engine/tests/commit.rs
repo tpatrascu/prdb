@@ -52,6 +52,12 @@ fn id_catalog_key(family: u16, object_id: [u8; 16]) -> Vec<u8> {
     key
 }
 
+fn builtin_id(code: u16) -> [u8; 16] {
+    let mut id = [0x80; 16];
+    id[15] = code as u8;
+    id
+}
+
 fn builtin_owner_id() -> [u8; 16] {
     let mut id = [0x80; 16];
     id[15] = 3;
@@ -135,9 +141,7 @@ fn bootstrap_database_record(database_id: [u8; 16]) -> (Vec<u8>, Vec<u8>) {
     {
         builtins.extend_from_slice(&code.to_le_bytes());
         builtins.extend_from_slice(&0u16.to_le_bytes());
-        let mut id = [0x80; 16];
-        id[15] = code as u8;
-        builtins.extend_from_slice(&id);
+        builtins.extend_from_slice(&builtin_id(code));
     }
     let fields = [
         CatalogField {
@@ -199,7 +203,7 @@ fn initialize(path: &std::path::Path) -> Result<Database, Box<dyn std::error::Er
             .insert(&record.key[..], record.payload.as_ref().unwrap().as_slice())?;
     }
     let owner_id = builtin_owner_id();
-    let owner_principal = principal_write(owner_id, 2);
+    let owner_principal = principal_write_with_name(owner_id, 2, 1, "database_admin");
     let owner_object = principal_object_write(owner_id, 2);
     transaction.open_table(CATALOG)?.insert(
         &owner_principal.key[..],
@@ -209,6 +213,26 @@ fn initialize(path: &std::path::Path) -> Result<Database, Box<dyn std::error::Er
         &owner_object.key[..],
         owner_object.payload.as_ref().unwrap().as_slice(),
     )?;
+    for code in [1u16, 2] {
+        let schema_id = builtin_id(code);
+        let schema = schema_write(schema_id);
+        let object = object_write(schema_id, 1);
+        for record in [schema, object] {
+            transaction
+                .open_table(CATALOG)?
+                .insert(&record.key[..], record.payload.as_ref().unwrap().as_slice())?;
+        }
+    }
+    for builtin_kind in 1u16..=11 {
+        let type_id = builtin_id(100 + builtin_kind);
+        let ty = builtin_type_write(type_id, builtin_kind);
+        let object = object_write(type_id, 2);
+        for record in [ty, object] {
+            transaction
+                .open_table(CATALOG)?
+                .insert(&record.key[..], record.payload.as_ref().unwrap().as_slice())?;
+        }
+    }
     let metadata = EngineMetadata {
         database_id: [0x33; 16],
         catalog_version: 1,
@@ -364,6 +388,25 @@ fn object_write_with_parent_and_owner(
     parent_id: Option<[u8; 16]>,
     owner_id: [u8; 16],
 ) -> CatalogWrite {
+    let name = if object_id == builtin_owner_id() && kind == 9 {
+        "database_admin".to_owned()
+    } else {
+        format!("object_{}", object_id[0])
+    };
+    object_write_with_parent_and_owner_and_name(object_id, kind, parent_id, owner_id, &name)
+}
+
+fn object_write_with_name(object_id: [u8; 16], kind: u16, name: &str) -> CatalogWrite {
+    object_write_with_parent_and_owner_and_name(object_id, kind, None, builtin_owner_id(), name)
+}
+
+fn object_write_with_parent_and_owner_and_name(
+    object_id: [u8; 16],
+    kind: u16,
+    parent_id: Option<[u8; 16]>,
+    owner_id: [u8; 16],
+    name: &str,
+) -> CatalogWrite {
     let mut key = 2u16.to_be_bytes().to_vec();
     key.push(1);
     key.extend_from_slice(&object_id);
@@ -383,7 +426,7 @@ fn object_write_with_parent_and_owner(
         CatalogField {
             tag: 3,
             wire_type: WireType::Text,
-            payload: format!("object_{}", object_id[0]).into_bytes(),
+            payload: name.as_bytes().to_vec(),
         },
         CatalogField {
             tag: 4,
@@ -430,6 +473,52 @@ fn schema_write(schema_id: [u8; 16]) -> CatalogWrite {
             wire_type: WireType::Ids,
             payload: 0u32.to_le_bytes().to_vec(),
         }],
+    )
+    .unwrap();
+    CatalogWrite {
+        key,
+        expected_value: None,
+        payload: Some(payload),
+    }
+}
+
+fn builtin_type_write(type_id: [u8; 16], builtin_kind: u16) -> CatalogWrite {
+    let key = id_catalog_key(4, type_id);
+    let payload = encode_envelope(
+        &family_schema(4).unwrap(),
+        &key,
+        &[
+            CatalogField {
+                tag: 1,
+                wire_type: WireType::U16,
+                payload: builtin_kind.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 2,
+                wire_type: WireType::U16,
+                payload: 0u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 3,
+                wire_type: WireType::U32,
+                payload: 1u32.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 4,
+                wire_type: WireType::U32,
+                payload: 1u32.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 5,
+                wire_type: WireType::U32,
+                payload: 7u32.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 6,
+                wire_type: WireType::U32,
+                payload: 1u32.to_le_bytes().to_vec(),
+            },
+        ],
     )
     .unwrap();
     CatalogWrite {
@@ -1657,6 +1746,112 @@ fn catalog_commit_rejects_indexes_with_missing_or_mistabled_columns()
 }
 
 #[test]
+fn catalog_commit_rejects_removing_a_mapped_builtin_type() -> Result<(), Box<dyn std::error::Error>>
+{
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let type_key = id_catalog_key(4, builtin_id(101));
+    let expected_value = database
+        .begin_read()?
+        .open_table(CATALOG)?
+        .get(type_key.as_slice())?
+        .ok_or("missing bootstrap type fixture")?
+        .value()
+        .to_vec();
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(97),
+            id(9),
+            9_999,
+            &[CatalogWrite {
+                key: type_key,
+                expected_value: Some(expected_value),
+                payload: None,
+            }],
+            &[audit_event(97)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+    assert_eq!(commit_sequence(&database)?, 0);
+    Ok(())
+}
+
+#[test]
+fn catalog_commit_rejects_removing_the_bootstrap_descriptor()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let database_key = id_catalog_key(1, [0x33; 16]);
+    let expected_value = database
+        .begin_read()?
+        .open_table(CATALOG)?
+        .get(database_key.as_slice())?
+        .ok_or("missing bootstrap database fixture")?
+        .value()
+        .to_vec();
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(99),
+            id(9),
+            10_001,
+            &[CatalogWrite {
+                key: database_key,
+                expected_value: Some(expected_value),
+                payload: None,
+            }],
+            &[audit_event(99)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+    assert_eq!(commit_sequence(&database)?, 0);
+    Ok(())
+}
+
+#[test]
+fn catalog_commit_rejects_renaming_the_mapped_admin_role() -> Result<(), Box<dyn std::error::Error>>
+{
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let admin_id = builtin_owner_id();
+    let principal_key = id_catalog_key(10, admin_id);
+    let object_key = id_catalog_key(2, admin_id);
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    let principal_value = catalog
+        .get(principal_key.as_slice())?
+        .ok_or("missing bootstrap principal fixture")?
+        .value()
+        .to_vec();
+    let object_value = catalog
+        .get(object_key.as_slice())?
+        .ok_or("missing bootstrap object fixture")?
+        .value()
+        .to_vec();
+    drop(catalog);
+    drop(read);
+
+    let mut principal = principal_write_with_name(admin_id, 2, 1, "other_role");
+    principal.expected_value = Some(principal_value);
+    let mut object = object_write_with_name(admin_id, 9, "other_role");
+    object.expected_value = Some(object_value);
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(98),
+            id(9),
+            10_000,
+            &[principal, object],
+            &[audit_event(98)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+    assert_eq!(commit_sequence(&database)?, 0);
+    Ok(())
+}
+
+#[test]
 fn catalog_commit_rejects_credential_verifiers_without_a_supported_profile()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
@@ -2457,7 +2652,7 @@ fn membership_limit_applies_to_final_graph_independent_of_write_order()
     let catalog = read.open_table(prdb_engine::schema::CATALOG)?;
     assert!(catalog.get(old.key.as_slice())?.is_none());
     assert!(catalog.get(new.key.as_slice())?.is_some());
-    assert_eq!(catalog.len()?, 267 + 8192);
+    assert_eq!(catalog.len()?, 293 + 8192);
     drop(catalog);
     drop(read);
     let mut advance = principal_write_with_epoch(member, 2, 3);

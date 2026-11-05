@@ -968,6 +968,99 @@ fn validate_final_typed_object_mappings(
     Ok(())
 }
 
+/// Keep the object and typed rows named by the database bootstrap descriptor
+/// valid in the final catalog view.
+fn validate_final_bootstrap_builtin_targets(
+    transaction: &WriteTransaction,
+    writes: &[CatalogWrite],
+    database_uuid: [u8; 16],
+) -> Result<(), CommitError> {
+    let catalog = transaction.open_table(CATALOG).map_err(storage_error)?;
+    let database_key = id_catalog_key(1, database_uuid);
+    let Some(database_bytes) = final_catalog_value(&catalog, writes, &database_key)? else {
+        return Ok(());
+    };
+    let encoded = catalog_field_bytes(&database_key, &database_bytes, 1, 3)?;
+    let count_bytes: [u8; 4] = encoded
+        .get(..4)
+        .ok_or(CommitError::InvalidCatalog)?
+        .try_into()
+        .map_err(|_| CommitError::InvalidCatalog)?;
+    let count = u32::from_le_bytes(count_bytes) as usize;
+    if count != 30 || encoded.len() != 4 + count * 20 {
+        return Err(CommitError::InvalidCatalog);
+    }
+    let expected_codes = [1u16, 2, 3].into_iter().chain(101..=111).chain(201..=216);
+    let mut mappings = HashMap::<u16, [u8; 16]>::new();
+    let mut ids = HashSet::<[u8; 16]>::new();
+    for (entry, expected_code) in encoded[4..].chunks_exact(20).zip(expected_codes) {
+        let code = u16::from_le_bytes([entry[0], entry[1]]);
+        let reserved = u16::from_le_bytes([entry[2], entry[3]]);
+        let id: [u8; 16] = entry[4..]
+            .try_into()
+            .map_err(|_| CommitError::InvalidCatalog)?;
+        if code != expected_code
+            || reserved != 0
+            || id == [0; 16]
+            || mappings.insert(code, id).is_some()
+            || !ids.insert(id)
+        {
+            return Err(CommitError::InvalidCatalog);
+        }
+    }
+    for code in [1u16, 2] {
+        let schema_id = mappings.get(&code).ok_or(CommitError::InvalidCatalog)?;
+        validate_final_builtin_typed_object(&catalog, writes, *schema_id, 3, 1)?;
+    }
+    let admin_role_id = mappings.get(&3).ok_or(CommitError::InvalidCatalog)?;
+    validate_final_builtin_typed_object(&catalog, writes, *admin_role_id, 10, 9)?;
+    let principal_key = id_catalog_key(10, *admin_role_id);
+    let principal_bytes = final_catalog_value(&catalog, writes, &principal_key)?
+        .ok_or(CommitError::InvalidCatalog)?;
+    if catalog_field_bytes(&principal_key, &principal_bytes, 10, 1)? != 2u16.to_le_bytes()
+        || catalog_field_bytes(&principal_key, &principal_bytes, 10, 2)? != b"database_admin"
+    {
+        return Err(CommitError::InvalidCatalog);
+    }
+    let object_key = id_catalog_key(2, *admin_role_id);
+    let object_bytes =
+        final_catalog_value(&catalog, writes, &object_key)?.ok_or(CommitError::InvalidCatalog)?;
+    if catalog_field_bytes(&object_key, &object_bytes, 2, 3)? != b"database_admin" {
+        return Err(CommitError::InvalidCatalog);
+    }
+    for code in 101u16..=111 {
+        let type_id = mappings.get(&code).ok_or(CommitError::InvalidCatalog)?;
+        validate_final_builtin_typed_object(&catalog, writes, *type_id, 4, 2)?;
+        let type_key = id_catalog_key(4, *type_id);
+        let type_bytes =
+            final_catalog_value(&catalog, writes, &type_key)?.ok_or(CommitError::InvalidCatalog)?;
+        if catalog_field_bytes(&type_key, &type_bytes, 4, 1)? != (code - 100).to_le_bytes() {
+            return Err(CommitError::InvalidCatalog);
+        }
+    }
+    Ok(())
+}
+
+fn validate_final_builtin_typed_object(
+    catalog: &redb::Table<'_, &[u8], &[u8]>,
+    writes: &[CatalogWrite],
+    object_id: [u8; 16],
+    family: u16,
+    object_kind: u16,
+) -> Result<(), CommitError> {
+    let typed_key = id_catalog_key(family, object_id);
+    let typed_bytes =
+        final_catalog_value(catalog, writes, &typed_key)?.ok_or(CommitError::InvalidCatalog)?;
+    decode_catalog_record(&typed_key, &typed_bytes)?;
+    let object_key = id_catalog_key(2, object_id);
+    let object_bytes =
+        final_catalog_value(catalog, writes, &object_key)?.ok_or(CommitError::InvalidCatalog)?;
+    if catalog_field_bytes(&object_key, &object_bytes, 2, 1)? != object_kind.to_le_bytes() {
+        return Err(CommitError::InvalidCatalog);
+    }
+    Ok(())
+}
+
 fn insert_expression_reference_edge(
     edges: &mut HashSet<([u8; 16], [u8; 16])>,
     dependent_id: [u8; 16],
@@ -2493,6 +2586,19 @@ pub fn commit_storage_changes(
         Err(error) => return Err(error),
     }
     match validate_final_typed_object_mappings(&transaction, catalog_writes) {
+        Ok(()) => {}
+        Err(CommitError::InvalidCatalog) => {
+            transaction.abort().map_err(storage_error)?;
+            record_aborted_outcome(database, invocation_id, principal_id, retention_deadline_us)?;
+            return Err(CommitError::InvalidCatalog);
+        }
+        Err(error) => return Err(error),
+    }
+    match validate_final_bootstrap_builtin_targets(
+        &transaction,
+        catalog_writes,
+        current_metadata.database_id,
+    ) {
         Ok(()) => {}
         Err(CommitError::InvalidCatalog) => {
             transaction.abort().map_err(storage_error)?;

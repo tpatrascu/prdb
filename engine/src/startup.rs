@@ -147,10 +147,14 @@ fn validate_catalog(
     let mut family_counts = [0usize; 17];
     let mut count = 0usize;
     let mut index_definitions = HashMap::new();
+    let mut builtin_mappings = None;
     let mut principal_kinds = HashMap::<[u8; 16], u16>::new();
+    let mut principal_names = HashMap::<[u8; 16], Vec<u8>>::new();
     let mut object_kinds = HashMap::<[u8; 16], u16>::new();
     let mut object_owners = Vec::<[u8; 16]>::new();
     let mut typed_object_kinds = HashMap::<[u8; 16], u16>::new();
+    let mut builtin_type_kinds = HashMap::<[u8; 16], u16>::new();
+    let mut builtin_type_ids = HashMap::<u16, [u8; 16]>::new();
     let mut column_tables = HashMap::<[u8; 16], [u8; 16]>::new();
     let mut column_nullable = HashMap::<[u8; 16], bool>::new();
     let mut index_columns = HashMap::<[u8; 16], Vec<[u8; 16]>>::new();
@@ -208,7 +212,7 @@ fn validate_catalog(
                 return Err(StartupError::InvalidCatalog);
             }
             database_records += 1;
-            validate_database_record(&record, metadata)?;
+            builtin_mappings = Some(validate_database_record(&record, metadata)?);
         }
         if record.family_code == 2 {
             if key.len() != 19 {
@@ -251,6 +255,18 @@ fn validate_catalog(
             }
             if matches!(record.family_code, 6 | 10) {
                 typed_name_records.push((record.family_code, object_id));
+            }
+        }
+        if record.family_code == 4 {
+            let type_id: [u8; 16] = key[3..19]
+                .try_into()
+                .map_err(|_| StartupError::InvalidCatalog)?;
+            let builtin_kind = field_u16(&record, 1)?;
+            if !(1..=11).contains(&builtin_kind)
+                || builtin_type_kinds.insert(type_id, builtin_kind).is_some()
+                || builtin_type_ids.insert(builtin_kind, type_id).is_some()
+            {
+                return Err(StartupError::InvalidCatalog);
             }
         }
         if record.family_code == 6 {
@@ -426,6 +442,18 @@ fn validate_catalog(
                 || (kind == 2 && login_enabled)
                 || field_u64(&record, 4)? == 0
                 || principal_kinds.insert(principal_id, kind).is_some()
+                || principal_names
+                    .insert(
+                        principal_id,
+                        record
+                            .fields
+                            .iter()
+                            .find(|field| field.tag == 2)
+                            .ok_or(StartupError::InvalidCatalog)?
+                            .payload
+                            .clone(),
+                    )
+                    .is_some()
             {
                 return Err(StartupError::InvalidCatalog);
             }
@@ -556,6 +584,39 @@ fn validate_catalog(
             })
     {
         return Err(StartupError::InvalidCatalog);
+    }
+    let builtin_mappings = builtin_mappings.ok_or(StartupError::InvalidCatalog)?;
+    for schema_code in [1u16, 2] {
+        let schema_id = builtin_mappings
+            .get(&schema_code)
+            .ok_or(StartupError::InvalidCatalog)?;
+        if object_kinds.get(schema_id) != Some(&1) || typed_object_kinds.get(schema_id) != Some(&1)
+        {
+            return Err(StartupError::InvalidCatalog);
+        }
+    }
+    let admin_role_id = builtin_mappings
+        .get(&3)
+        .ok_or(StartupError::InvalidCatalog)?;
+    if principal_kinds.get(admin_role_id) != Some(&2)
+        || object_kinds.get(admin_role_id) != Some(&9)
+        || typed_object_kinds.get(admin_role_id) != Some(&9)
+        || principal_names
+            .get(admin_role_id)
+            .is_none_or(|name| name.as_slice() != b"database_admin")
+    {
+        return Err(StartupError::InvalidCatalog);
+    }
+    for code in 101u16..=111 {
+        let type_id = builtin_mappings
+            .get(&code)
+            .ok_or(StartupError::InvalidCatalog)?;
+        if builtin_type_kinds.get(type_id) != Some(&(code - 100))
+            || object_kinds.get(type_id) != Some(&2)
+            || typed_object_kinds.get(type_id) != Some(&2)
+        {
+            return Err(StartupError::InvalidCatalog);
+        }
     }
     let actual_expression_reference_edges = dependencies
         .iter()
@@ -781,7 +842,7 @@ fn typed_family_object_kind(record: &CatalogRecord) -> Result<Option<u16>, Start
 fn validate_database_record(
     record: &CatalogRecord,
     metadata: &EngineMetadata,
-) -> Result<(), StartupError> {
+) -> Result<HashMap<u16, [u8; 16]>, StartupError> {
     let key = &record.logical_key;
     if key.len() != 19
         || key[..3] != [0, 1, 1]
@@ -840,7 +901,7 @@ fn validate_database_record(
     if required_bootstrap_codes().any(|code| !mappings.contains_key(&code)) {
         return Err(StartupError::InvalidCatalog);
     }
-    Ok(())
+    Ok(mappings)
 }
 
 fn required_bootstrap_codes() -> impl Iterator<Item = u16> {

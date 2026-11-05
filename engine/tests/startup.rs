@@ -16,8 +16,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 fn builtin_owner_id() -> [u8; 16] {
+    builtin_id(3)
+}
+
+fn builtin_id(code: u16) -> [u8; 16] {
     let mut id = [0x80; 16];
-    id[15] = 3;
+    id[15] = code as u8;
     id
 }
 
@@ -56,9 +60,10 @@ impl Fixture {
             .insert(&database_key[..], &database_value[..])
             .unwrap();
         let owner_id = builtin_owner_id();
-        let (principal_key, principal_value) = principal_record(owner_id, 2, false, 1);
+        let (principal_key, principal_value) =
+            principal_record_with_name(owner_id, 2, false, 1, "database_admin");
         let (owner_object_key, owner_object_value) =
-            object_record_with_owner(owner_id, 9, owner_id);
+            object_record_named(owner_id, 9, owner_id, "database_admin");
         write
             .open_table(CATALOG)
             .unwrap()
@@ -69,6 +74,36 @@ impl Fixture {
             .unwrap()
             .insert(&owner_object_key[..], &owner_object_value[..])
             .unwrap();
+        for code in [1u16, 2] {
+            let schema_id = builtin_id(code);
+            let (schema_key, schema_value) = schema_record(schema_id);
+            let (object_key, object_value) = object_record(schema_id, 1);
+            write
+                .open_table(CATALOG)
+                .unwrap()
+                .insert(&schema_key[..], &schema_value[..])
+                .unwrap();
+            write
+                .open_table(CATALOG)
+                .unwrap()
+                .insert(&object_key[..], &object_value[..])
+                .unwrap();
+        }
+        for builtin_kind in 1u16..=11 {
+            let type_id = builtin_id(100 + builtin_kind);
+            let (type_key, type_value) = builtin_type_record(type_id, builtin_kind);
+            let (object_key, object_value) = object_record(type_id, 2);
+            write
+                .open_table(CATALOG)
+                .unwrap()
+                .insert(&type_key[..], &type_value[..])
+                .unwrap();
+            write
+                .open_table(CATALOG)
+                .unwrap()
+                .insert(&object_key[..], &object_value[..])
+                .unwrap();
+        }
         write
             .open_table(ENGINE_META)
             .unwrap()
@@ -101,9 +136,7 @@ fn builtin_mapping() -> Vec<u8> {
     for code in codes {
         mapping.extend_from_slice(&code.to_le_bytes());
         mapping.extend_from_slice(&0u16.to_le_bytes());
-        let mut id = [0x80; 16];
-        id[15] = code as u8;
-        mapping.extend_from_slice(&id);
+        mapping.extend_from_slice(&builtin_id(code));
     }
     mapping
 }
@@ -207,6 +240,46 @@ fn object_record_with_parent_and_owner(
             payload: 1u16.to_le_bytes().to_vec(),
         },
     ]);
+    let payload = encode_envelope(&family_schema(2).unwrap(), &key, &fields).unwrap();
+    (key, payload)
+}
+
+fn object_record_named(
+    id: [u8; 16],
+    kind: u16,
+    owner_id: [u8; 16],
+    name: &str,
+) -> (Vec<u8>, Vec<u8>) {
+    let mut key = 2u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&id);
+    let fields = [
+        CatalogField {
+            tag: 1,
+            wire_type: WireType::U16,
+            payload: kind.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 3,
+            wire_type: WireType::Text,
+            payload: name.as_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 4,
+            wire_type: WireType::Id,
+            payload: owner_id.to_vec(),
+        },
+        CatalogField {
+            tag: 5,
+            wire_type: WireType::U64,
+            payload: 1u64.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 6,
+            wire_type: WireType::U16,
+            payload: 1u16.to_le_bytes().to_vec(),
+        },
+    ];
     let payload = encode_envelope(&family_schema(2).unwrap(), &key, &fields).unwrap();
     (key, payload)
 }
@@ -954,6 +1027,59 @@ fn table_record(id: [u8; 16]) -> (Vec<u8>, Vec<u8>) {
     (key, payload)
 }
 
+fn schema_record(id: [u8; 16]) -> (Vec<u8>, Vec<u8>) {
+    let mut key = 3u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&id);
+    let fields = [CatalogField {
+        tag: 1,
+        wire_type: WireType::Ids,
+        payload: id_list(&[]),
+    }];
+    let payload = encode_envelope(&family_schema(3).unwrap(), &key, &fields).unwrap();
+    (key, payload)
+}
+
+fn builtin_type_record(id: [u8; 16], builtin_kind: u16) -> (Vec<u8>, Vec<u8>) {
+    let mut key = 4u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&id);
+    let fields = [
+        CatalogField {
+            tag: 1,
+            wire_type: WireType::U16,
+            payload: builtin_kind.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 2,
+            wire_type: WireType::U16,
+            payload: 0u16.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 3,
+            wire_type: WireType::U32,
+            payload: 1u32.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 4,
+            wire_type: WireType::U32,
+            payload: 1u32.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 5,
+            wire_type: WireType::U32,
+            payload: 7u32.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 6,
+            wire_type: WireType::U32,
+            payload: 1u32.to_le_bytes().to_vec(),
+        },
+    ];
+    let payload = encode_envelope(&family_schema(4).unwrap(), &key, &fields).unwrap();
+    (key, payload)
+}
+
 fn put_table_and_column(
     database: &Database,
     table_id: [u8; 16],
@@ -1040,7 +1166,7 @@ fn validates_ready_image_records_and_references() -> Result<(), Box<dyn std::err
     assert_eq!(report.metadata.commit_sequence, 3);
     assert_eq!(report.rows, 1);
     assert_eq!(report.index_entries, 1);
-    assert_eq!(report.catalog_records, 9);
+    assert_eq!(report.catalog_records, 35);
     assert_eq!(report.outcomes, 1);
     assert_eq!(report.audit_events, 1);
     Ok(())
@@ -1150,6 +1276,59 @@ fn rejects_credential_verifiers_without_a_supported_profile() {
         validate_persisted_records(&database),
         Err(StartupError::InvalidCatalog),
     );
+}
+
+#[test]
+fn mapped_builtin_ids_resolve_to_their_expected_typed_records()
+-> Result<(), Box<dyn std::error::Error>> {
+    let valid_fixture = Fixture::new();
+    let valid_database = valid_fixture.database(0);
+    assert!(validate_persisted_records(&valid_database).is_ok());
+
+    let missing_fixture = Fixture::new();
+    let missing_database = missing_fixture.database(0);
+    let type_key = 4u16
+        .to_be_bytes()
+        .into_iter()
+        .chain([1])
+        .chain(builtin_id(101))
+        .collect::<Vec<_>>();
+    let write = missing_database.begin_write()?;
+    assert!(
+        write
+            .open_table(CATALOG)?
+            .remove(type_key.as_slice())?
+            .is_some()
+    );
+    write.commit()?;
+    assert_eq!(
+        validate_persisted_records(&missing_database),
+        Err(StartupError::InvalidCatalog),
+    );
+
+    let mistyped_fixture = Fixture::new();
+    let mistyped_database = mistyped_fixture.database(0);
+    let (type_key, type_value) = builtin_type_record(builtin_id(101), 2);
+    put_catalog(&mistyped_database, &type_key, &type_value);
+    assert_eq!(
+        validate_persisted_records(&mistyped_database),
+        Err(StartupError::InvalidCatalog),
+    );
+
+    let misnamed_fixture = Fixture::new();
+    let misnamed_database = misnamed_fixture.database(0);
+    let admin_role_id = builtin_id(3);
+    let (principal_key, principal_value) =
+        principal_record_with_name(admin_role_id, 2, false, 1, "other_role");
+    let (object_key, object_value) =
+        object_record_named(admin_role_id, 9, admin_role_id, "other_role");
+    put_catalog(&misnamed_database, &principal_key, &principal_value);
+    put_catalog(&misnamed_database, &object_key, &object_value);
+    assert_eq!(
+        validate_persisted_records(&misnamed_database),
+        Err(StartupError::InvalidCatalog),
+    );
+    Ok(())
 }
 
 #[test]
@@ -1503,7 +1682,7 @@ fn accepts_owned_child_dependency_with_catalog_object_endpoints()
     let (key, value) = dependency_record([0x22; 16], [0x21; 16], 1);
     put_catalog(&database, &key, &value);
     let report = validate_persisted_records(&database)?;
-    assert_eq!(report.catalog_records, 6);
+    assert_eq!(report.catalog_records, 32);
     Ok(())
 }
 
@@ -1877,7 +2056,7 @@ fn accepts_pinned_acyclic_membership_graph() -> Result<(), Box<dyn std::error::E
         put_catalog(&database, &object.0, &object.1);
     }
     let report = validate_persisted_records(&database)?;
-    assert_eq!(report.catalog_records, 13);
+    assert_eq!(report.catalog_records, 39);
     Ok(())
 }
 
