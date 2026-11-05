@@ -60,4 +60,4 @@ Test ABI layout/ownership, malformed inputs, cell permissions, sandbox confineme
 ## Commits and Pull Requests
 
 After completing each feature implementation, create a git commit for that feature.
-Use imperative subjects, such as `Define SDK build profile`. Describe the change, validation performed, and unresolved assumptions; link relevant issues. Never report template commands as executed tests.
+Use an imperative subject that names the change, such as `Define SDK build profile`. Keep commit messages to the subject line; do not add validation summaries or unresolved-assumption text in commit bodies. Report validation separately in the handoff. Never report template commands as executed tests.
