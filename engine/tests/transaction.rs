@@ -137,6 +137,25 @@ fn catalog_id_key(family: u16, id: [u8; 16]) -> Vec<u8> {
     key
 }
 
+fn dependency_catalog_write(
+    dependent_id: [u8; 16],
+    referenced_id: [u8; 16],
+    kind: u16,
+) -> Result<CatalogWrite, Box<dyn std::error::Error>> {
+    let mut key = 15u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&dependent_id);
+    key.push(1);
+    key.extend_from_slice(&referenced_id);
+    key.push(1);
+    key.extend_from_slice(&kind.to_be_bytes());
+    Ok(CatalogWrite {
+        payload: Some(catalog_record_payload(15, &key, &[])?),
+        key,
+        expected_value: None,
+    })
+}
+
 fn catalog_record_payload(
     family: u16,
     key: &[u8],
@@ -2290,6 +2309,8 @@ fn authorized_insert_materializes_defaults_before_policy_and_check_validation()
             object_catalog_write_for(type_id, 2),
             object_catalog_write_for(row_id.table, 3),
             object_catalog_write_for(column_id, 4),
+            dependency_catalog_write(column_id, default_expression_id, 2)?,
+            dependency_catalog_write(check_expression_id, column_id, 2)?,
         ],
         &[default_audit],
     )?;
@@ -2637,6 +2658,7 @@ fn catalog_rejects_deleting_expression_used_by_existing_check()
     )?;
     let (constraint_key, constraint_payload) =
         check_constraint_catalog_record([185; 16], table_id, expression_id);
+    let expression_dependency = dependency_catalog_write([185; 16], expression_id, 2)?;
     let audit = |n| AuditEvent {
         event_id: [n; 16],
         actor_id: Some([9; 16]),
@@ -2665,6 +2687,7 @@ fn catalog_rejects_deleting_expression_used_by_existing_check()
         object_catalog_write_for(table_id, 3),
         object_catalog_write_for(expression_id, 5),
         object_catalog_write_for([185; 16], 6),
+        expression_dependency.clone(),
     ];
     commit_catalog_and_audit(&database, [186; 16], [9; 16], 9_999, &writes, &[audit(187)])?;
     assert_eq!(
@@ -2752,6 +2775,11 @@ fn catalog_rejects_deleting_expression_used_by_existing_check()
         CatalogWrite {
             key: constraint_key,
             expected_value: Some(constraint_payload),
+            payload: None,
+        },
+        CatalogWrite {
+            key: expression_dependency.key,
+            expected_value: expression_dependency.payload,
             payload: None,
         },
     ];
@@ -3252,6 +3280,17 @@ fn invocation_loads_and_guards_catalog_table_schema() -> Result<(), Box<dyn std:
     ] {
         writes.push(object_catalog_write_for(object_id, object_kind));
     }
+    for (dependent_id, referenced_id) in [
+        (policy_expression_id, column_uuid_id),
+        (cell_policy_expression_id, column_uuid_id),
+        (check_expression_id, column_uuid_id),
+        (policy_id, policy_expression_id),
+        (cell_policy_id, cell_policy_expression_id),
+        (check_constraint_id, check_expression_id),
+        (cell_allow_policy_id, cell_allow_expression_id),
+    ] {
+        writes.push(dependency_catalog_write(dependent_id, referenced_id, 2)?);
+    }
     let audit = AuditEvent {
         event_id: [138; 16],
         actor_id: Some([9; 16]),
@@ -3362,6 +3401,8 @@ fn invocation_loads_and_guards_catalog_table_schema() -> Result<(), Box<dyn std:
 
     let (unbumped_constraint_key, unbumped_constraint_payload) =
         check_constraint_catalog_record([175; 16], table_id, check_expression_id);
+    let unbumped_constraint_dependency =
+        dependency_catalog_write([175; 16], check_expression_id, 2)?;
     let audit = AuditEvent {
         event_id: [176; 16],
         actor_id: Some(principal_id),
@@ -3377,11 +3418,15 @@ fn invocation_loads_and_guards_catalog_table_schema() -> Result<(), Box<dyn std:
             [178; 16],
             principal_id,
             9_999,
-            &[CatalogWrite {
-                key: unbumped_constraint_key,
-                expected_value: None,
-                payload: Some(unbumped_constraint_payload),
-            }],
+            &[
+                CatalogWrite {
+                    key: unbumped_constraint_key,
+                    expected_value: None,
+                    payload: Some(unbumped_constraint_payload),
+                },
+                object_catalog_write_for([175; 16], 6),
+                unbumped_constraint_dependency,
+            ],
             &[audit],
         ),
         Err(CommitError::InvalidCatalog)

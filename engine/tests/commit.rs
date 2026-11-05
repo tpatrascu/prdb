@@ -483,52 +483,128 @@ fn table_write(table_id: [u8; 16], schema_id: [u8; 16]) -> CatalogWrite {
 }
 
 fn column_write(column_id: [u8; 16], table_id: [u8; 16], name: &str) -> CatalogWrite {
+    column_write_with_defaults(column_id, table_id, name, None, None)
+}
+
+fn column_write_with_defaults(
+    column_id: [u8; 16],
+    table_id: [u8; 16],
+    name: &str,
+    default_expression_id: Option<[u8; 16]>,
+    add_column_default_id: Option<[u8; 16]>,
+) -> CatalogWrite {
     let mut key = 6u16.to_be_bytes().to_vec();
     key.push(1);
     key.extend_from_slice(&column_id);
+    let mut fields = vec![
+        CatalogField {
+            tag: 1,
+            wire_type: WireType::Id,
+            payload: table_id.to_vec(),
+        },
+        CatalogField {
+            tag: 2,
+            wire_type: WireType::U32,
+            payload: 0u32.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 3,
+            wire_type: WireType::Text,
+            payload: name.as_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 4,
+            wire_type: WireType::Id,
+            payload: id(50).to_vec(),
+        },
+        CatalogField {
+            tag: 5,
+            wire_type: WireType::Bytes,
+            payload: vec![0; 8],
+        },
+        CatalogField {
+            tag: 6,
+            wire_type: WireType::Bool,
+            payload: vec![1],
+        },
+    ];
+    if let Some(expression_id) = default_expression_id {
+        fields.push(CatalogField {
+            tag: 7,
+            wire_type: WireType::Id,
+            payload: expression_id.to_vec(),
+        });
+    }
+    fields.extend([
+        CatalogField {
+            tag: 8,
+            wire_type: WireType::U16,
+            payload: 0u16.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 9,
+            wire_type: WireType::U64,
+            payload: 1u64.to_le_bytes().to_vec(),
+        },
+    ]);
+    if let Some(expression_id) = add_column_default_id {
+        fields.push(CatalogField {
+            tag: 10,
+            wire_type: WireType::Id,
+            payload: expression_id.to_vec(),
+        });
+    }
+    let payload = encode_envelope(&family_schema(6).unwrap(), &key, &fields).unwrap();
+    CatalogWrite {
+        key,
+        expected_value: None,
+        payload: Some(payload),
+    }
+}
+
+fn expression_write(
+    expression_id: [u8; 16],
+    purpose: u16,
+    dependencies: &[[u8; 16]],
+    expression: &prdb_engine::authorization::Expr,
+) -> CatalogWrite {
+    let key = id_catalog_key(7, expression_id);
+    let mut dependency_list = (dependencies.len() as u32).to_le_bytes().to_vec();
+    dependency_list.extend(dependencies.iter().flatten());
+    let ir = prdb_engine::expression::encode_expression(expression).unwrap();
     let payload = encode_envelope(
-        &family_schema(6).unwrap(),
+        &family_schema(7).unwrap(),
         &key,
         &[
             CatalogField {
                 tag: 1,
-                wire_type: WireType::Id,
-                payload: table_id.to_vec(),
+                wire_type: WireType::U16,
+                payload: purpose.to_le_bytes().to_vec(),
             },
             CatalogField {
                 tag: 2,
                 wire_type: WireType::U32,
-                payload: 0u32.to_le_bytes().to_vec(),
+                payload: 1u32.to_le_bytes().to_vec(),
             },
             CatalogField {
                 tag: 3,
-                wire_type: WireType::Text,
-                payload: name.as_bytes().to_vec(),
+                wire_type: WireType::Id,
+                payload: id(51).to_vec(),
             },
             CatalogField {
                 tag: 4,
-                wire_type: WireType::Id,
-                payload: id(50).to_vec(),
-            },
-            CatalogField {
-                tag: 5,
                 wire_type: WireType::Bytes,
                 payload: vec![0; 8],
             },
             CatalogField {
+                tag: 5,
+                wire_type: WireType::Bytes,
+                payload: ir,
+            },
+            CatalogField {
                 tag: 6,
-                wire_type: WireType::Bool,
-                payload: vec![1],
-            },
-            CatalogField {
-                tag: 8,
-                wire_type: WireType::U16,
-                payload: 0u16.to_le_bytes().to_vec(),
-            },
-            CatalogField {
-                tag: 9,
-                wire_type: WireType::U64,
-                payload: 1u64.to_le_bytes().to_vec(),
+                wire_type: WireType::Ids,
+                payload: dependency_list,
             },
         ],
     )
@@ -1173,6 +1249,113 @@ fn catalog_commit_requires_backing_index_dependency_edges() -> Result<(), Box<dy
 }
 
 #[test]
+fn catalog_commit_requires_expression_reference_dependency_edges()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::authorization::Expr;
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let column_id = id(120);
+    let default_expression_id = id(121);
+    let field_expression_id = id(122);
+    let add_column_default_id = id(128);
+    let policy_id = id(126);
+    let policy_expression_id = id(127);
+    let policy_key = id_catalog_key(13, policy_id);
+    let policy_payload = encode_envelope(
+        &family_schema(13).unwrap(),
+        &policy_key,
+        &[
+            CatalogField {
+                tag: 1,
+                wire_type: WireType::Id,
+                payload: id(123).to_vec(),
+            },
+            CatalogField {
+                tag: 2,
+                wire_type: WireType::U16,
+                payload: 1u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 3,
+                wire_type: WireType::U16,
+                payload: 1u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 4,
+                wire_type: WireType::U16,
+                payload: 1u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 5,
+                wire_type: WireType::Id,
+                payload: policy_expression_id.to_vec(),
+            },
+            CatalogField {
+                tag: 7,
+                wire_type: WireType::U64,
+                payload: 1u64.to_le_bytes().to_vec(),
+            },
+        ],
+    )?;
+    let base_writes = vec![
+        column_write_with_defaults(
+            column_id,
+            id(123),
+            "object_120",
+            Some(default_expression_id),
+            Some(add_column_default_id),
+        ),
+        expression_write(default_expression_id, 1, &[], &Expr::CurrentPrincipalId),
+        expression_write(field_expression_id, 2, &[column_id], &Expr::Field(0)),
+        expression_write(add_column_default_id, 1, &[], &Expr::Literal(None)),
+        expression_write(policy_expression_id, 3, &[], &Expr::CurrentPrincipalId),
+        CatalogWrite {
+            key: policy_key,
+            expected_value: None,
+            payload: Some(policy_payload),
+        },
+        object_write(column_id, 4),
+        object_write(default_expression_id, 5),
+        object_write(field_expression_id, 5),
+        object_write(add_column_default_id, 5),
+        object_write(policy_id, 10),
+        object_write(policy_expression_id, 5),
+    ];
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(124),
+            id(9),
+            9_999,
+            &base_writes,
+            &[audit_event(124)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+    assert_eq!(commit_sequence(&database)?, 0);
+
+    let mut complete_writes = base_writes;
+    complete_writes.push(dependency_write(column_id, default_expression_id, 2));
+    complete_writes.push(dependency_write(column_id, add_column_default_id, 2));
+    complete_writes.push(dependency_write(field_expression_id, column_id, 2));
+    complete_writes.push(dependency_write(policy_id, policy_expression_id, 2));
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(125),
+            id(9),
+            9_999,
+            &complete_writes,
+            &[audit_event(125)],
+        )?,
+        1
+    );
+    assert_eq!(commit_sequence(&database)?, 1);
+    Ok(())
+}
+
+#[test]
 fn catalog_commit_rejects_unknown_dependency_edge_kinds() -> Result<(), Box<dyn std::error::Error>>
 {
     let fixture = Fixture::new();
@@ -1595,6 +1778,7 @@ fn policy_target_limit_checks_final_set_and_allows_replacements()
         .unwrap()
     };
     let policy_key = key(13, policy_id);
+    let expression_id = id(81);
     let policy_payload = |epoch: u64| {
         encode_envelope(
             &family_schema(13).unwrap(),
@@ -1604,7 +1788,7 @@ fn policy_target_limit_checks_final_set_and_allows_replacements()
                 field(2, WireType::U16, 2u16.to_le_bytes().to_vec()),
                 field(3, WireType::U16, 1u16.to_le_bytes().to_vec()),
                 field(4, WireType::U16, 1u16.to_le_bytes().to_vec()),
-                field(5, WireType::Id, id(81).to_vec()),
+                field(5, WireType::Id, expression_id.to_vec()),
                 field(7, WireType::U64, epoch.to_le_bytes().to_vec()),
             ],
         )
@@ -1633,6 +1817,20 @@ fn policy_target_limit_checks_final_set_and_allows_replacements()
                 catalog.insert(
                     object.key.as_slice(),
                     object.payload.as_ref().unwrap().as_slice(),
+                )?;
+            }
+            let expression = expression_write(
+                expression_id,
+                3,
+                &[],
+                &prdb_engine::authorization::Expr::CurrentPrincipalId,
+            );
+            let expression_object = object_write(expression_id, 5);
+            let expression_edge = dependency_write(policy_id, expression_id, 2);
+            for record in [expression, expression_object, expression_edge] {
+                catalog.insert(
+                    record.key.as_slice(),
+                    record.payload.as_ref().unwrap().as_slice(),
                 )?;
             }
             let recipient = target(1, id(9));
@@ -2035,7 +2233,7 @@ fn concurrent_membership_commits_cannot_publish_a_cycle() -> Result<(), Box<dyn 
 fn catalog_audit_metadata_and_outcome_commit_together() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
-    let (catalog_key, catalog_payload) = dependency_record([1; 16], [2; 16], 2);
+    let (catalog_key, catalog_payload) = dependency_record([1; 16], [2; 16], 5);
     let write = CatalogWrite {
         key: catalog_key.clone(),
         expected_value: None,
@@ -2106,7 +2304,7 @@ fn one_redb_commit_can_publish_rows_indexes_catalog_audit_and_outcome()
     let database = initialize(&fixture.path())?;
     let row_key = key(7);
     let index_key = index_key(&row_key);
-    let (catalog_key, catalog_payload) = dependency_record([6; 16], [7; 16], 2);
+    let (catalog_key, catalog_payload) = dependency_record([6; 16], [7; 16], 5);
 
     assert_eq!(
         commit_storage_changes(

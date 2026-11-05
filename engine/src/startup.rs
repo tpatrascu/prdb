@@ -87,6 +87,18 @@ fn storage_error(_error: impl std::fmt::Display) -> StartupError {
     StartupError::Storage
 }
 
+fn insert_expression_reference_edge(
+    edges: &mut std::collections::HashSet<([u8; 16], [u8; 16])>,
+    dependent_id: [u8; 16],
+    referenced_id: [u8; 16],
+) -> Result<(), StartupError> {
+    edges.insert((dependent_id, referenced_id));
+    if edges.len() > MAX_CATALOG_RECORDS_PER_FAMILY {
+        return Err(StartupError::InvalidCatalog);
+    }
+    Ok(())
+}
+
 fn validate_tables(read: &ReadTransaction) -> Result<(), StartupError> {
     drop(read.open_table(ENGINE_META).map_err(storage_error)?);
     drop(read.open_table(ROWS).map_err(storage_error)?);
@@ -127,6 +139,7 @@ fn validate_catalog(
     let mut object_kinds = HashMap::<[u8; 16], u16>::new();
     let mut object_owners = Vec::<[u8; 16]>::new();
     let mut typed_object_kinds = HashMap::<[u8; 16], u16>::new();
+    let mut expression_reference_edges = std::collections::HashSet::<([u8; 16], [u8; 16])>::new();
     let mut typed_name_records = Vec::<(u16, [u8; 16])>::new();
     let mut constraint_kinds = HashMap::<[u8; 16], u16>::new();
     let mut foreign_key_targets = HashMap::<[u8; 16], [u8; 16]>::new();
@@ -208,7 +221,40 @@ fn validate_catalog(
             }
         }
         if record.family_code == 7 {
-            decode_catalog_expression_record(&record).map_err(|_| StartupError::InvalidCatalog)?;
+            let expression = decode_catalog_expression_record(&record)
+                .map_err(|_| StartupError::InvalidCatalog)?;
+            let mut unique_dependencies = std::collections::HashSet::new();
+            for dependency_id in expression.dependencies {
+                if dependency_id == [0; 16] || !unique_dependencies.insert(dependency_id) {
+                    return Err(StartupError::InvalidCatalog);
+                }
+                insert_expression_reference_edge(
+                    &mut expression_reference_edges,
+                    expression.expression_id,
+                    dependency_id,
+                )?;
+            }
+        }
+        if record.family_code == 6 {
+            let column_id: [u8; 16] = key
+                .get(3..19)
+                .ok_or(StartupError::InvalidCatalog)?
+                .try_into()
+                .map_err(|_| StartupError::InvalidCatalog)?;
+            for tag in [7, 10] {
+                if let Some(field) = record.fields.iter().find(|field| field.tag == tag) {
+                    let expression_id: [u8; 16] = field
+                        .payload
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| StartupError::InvalidCatalog)?;
+                    insert_expression_reference_edge(
+                        &mut expression_reference_edges,
+                        column_id,
+                        expression_id,
+                    )?;
+                }
+            }
         }
         if record.family_code == 9 {
             let index_id: [u8; 16] = key
@@ -255,6 +301,36 @@ fn validate_catalog(
                     .is_some()
             {
                 return Err(StartupError::InvalidCatalog);
+            }
+            if kind == 4 {
+                insert_expression_reference_edge(
+                    &mut expression_reference_edges,
+                    constraint_id,
+                    field_id(&record, 4)?,
+                )?;
+            } else if record.fields.iter().any(|field| field.tag == 4) {
+                return Err(StartupError::InvalidCatalog);
+            }
+        }
+        if record.family_code == 13 {
+            let policy_id: [u8; 16] = key
+                .get(3..19)
+                .ok_or(StartupError::InvalidCatalog)?
+                .try_into()
+                .map_err(|_| StartupError::InvalidCatalog)?;
+            for tag in [5, 6] {
+                if let Some(field) = record.fields.iter().find(|field| field.tag == tag) {
+                    let expression_id: [u8; 16] = field
+                        .payload
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| StartupError::InvalidCatalog)?;
+                    insert_expression_reference_edge(
+                        &mut expression_reference_edges,
+                        policy_id,
+                        expression_id,
+                    )?;
+                }
             }
         }
         if record.family_code == 10 {
@@ -317,6 +393,33 @@ fn validate_catalog(
     if dependencies.iter().any(|(dependent_id, referenced_id, _)| {
         !object_parents.contains_key(dependent_id) || !object_parents.contains_key(referenced_id)
     }) {
+        return Err(StartupError::InvalidCatalog);
+    }
+    let actual_expression_reference_edges = dependencies
+        .iter()
+        .filter(|(_, _, kind)| *kind == 2)
+        .map(|(dependent_id, referenced_id, _)| (*dependent_id, *referenced_id))
+        .collect::<std::collections::HashSet<_>>();
+    if actual_expression_reference_edges != expression_reference_edges
+        || expression_reference_edges
+            .iter()
+            .any(|(dependent_id, referenced_id)| {
+                let endpoint_kinds = (
+                    object_kinds.get(dependent_id),
+                    object_kinds.get(referenced_id),
+                    typed_object_kinds.get(dependent_id),
+                    typed_object_kinds.get(referenced_id),
+                );
+                !matches!(
+                    endpoint_kinds,
+                    (Some(4), Some(5), Some(4), Some(5))
+                        | (Some(6), Some(5), Some(6), Some(5))
+                        | (Some(10), Some(5), Some(10), Some(5))
+                        | (Some(5), Some(4), Some(5), Some(4))
+                        | (Some(5), Some(9), Some(5), Some(9))
+                )
+            })
+    {
         return Err(StartupError::InvalidCatalog);
     }
     let foreign_key_edges = dependencies

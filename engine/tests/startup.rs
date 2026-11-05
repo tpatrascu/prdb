@@ -1,5 +1,7 @@
 use prdb_engine::audit::{AuditAction, AuditEvent, AuditResult};
+use prdb_engine::authorization::Expr;
 use prdb_engine::catalog::{CatalogField, WireType, encode_envelope, family_schema};
+use prdb_engine::expression::encode_expression;
 use prdb_engine::index_locator::IndexLocator;
 use prdb_engine::metadata::{EngineMetadata, Lifecycle};
 use prdb_engine::outcome::{InvocationOutcome, OutcomeStatus};
@@ -305,6 +307,109 @@ fn constraint_record(
     (key, payload)
 }
 
+fn check_constraint_record(
+    id: [u8; 16],
+    table_id: [u8; 16],
+    expression_id: [u8; 16],
+) -> (Vec<u8>, Vec<u8>) {
+    let mut key = 8u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&id);
+    let fields = [
+        CatalogField {
+            tag: 1,
+            wire_type: WireType::Id,
+            payload: table_id.to_vec(),
+        },
+        CatalogField {
+            tag: 2,
+            wire_type: WireType::U16,
+            payload: 4u16.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 3,
+            wire_type: WireType::Ids,
+            payload: id_list(&[]),
+        },
+        CatalogField {
+            tag: 4,
+            wire_type: WireType::Id,
+            payload: expression_id.to_vec(),
+        },
+        CatalogField {
+            tag: 6,
+            wire_type: WireType::Ids,
+            payload: id_list(&[]),
+        },
+        CatalogField {
+            tag: 7,
+            wire_type: WireType::U16,
+            payload: 0u16.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 8,
+            wire_type: WireType::U16,
+            payload: 0u16.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 9,
+            wire_type: WireType::U16,
+            payload: 0u16.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 10,
+            wire_type: WireType::U16,
+            payload: 1u16.to_le_bytes().to_vec(),
+        },
+    ];
+    let payload = encode_envelope(&family_schema(8).unwrap(), &key, &fields).unwrap();
+    (key, payload)
+}
+
+fn policy_record(
+    id: [u8; 16],
+    table_id: [u8; 16],
+    using_expression_id: [u8; 16],
+) -> (Vec<u8>, Vec<u8>) {
+    let mut key = 13u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&id);
+    let fields = [
+        CatalogField {
+            tag: 1,
+            wire_type: WireType::Id,
+            payload: table_id.to_vec(),
+        },
+        CatalogField {
+            tag: 2,
+            wire_type: WireType::U16,
+            payload: 1u16.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 3,
+            wire_type: WireType::U16,
+            payload: 1u16.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 4,
+            wire_type: WireType::U16,
+            payload: 1u16.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 5,
+            wire_type: WireType::Id,
+            payload: using_expression_id.to_vec(),
+        },
+        CatalogField {
+            tag: 7,
+            wire_type: WireType::U64,
+            payload: 1u64.to_le_bytes().to_vec(),
+        },
+    ];
+    let payload = encode_envelope(&family_schema(13).unwrap(), &key, &fields).unwrap();
+    (key, payload)
+}
+
 fn reverse_index_key(row_key: &[u8; 32], index_key: &[u8]) -> Vec<u8> {
     let mut key = row_key.to_vec();
     key.extend_from_slice(&index_key[..index_key.len() - 16]);
@@ -510,10 +615,19 @@ fn principal_record_with_name(
 }
 
 fn column_record(id: [u8; 16], name: &str) -> (Vec<u8>, Vec<u8>) {
+    column_record_with_defaults(id, name, None, None)
+}
+
+fn column_record_with_defaults(
+    id: [u8; 16],
+    name: &str,
+    default_expression_id: Option<[u8; 16]>,
+    add_column_default_id: Option<[u8; 16]>,
+) -> (Vec<u8>, Vec<u8>) {
     let mut key = 6u16.to_be_bytes().to_vec();
     key.push(1);
     key.extend_from_slice(&id);
-    let fields = [
+    let mut fields = vec![
         CatalogField {
             tag: 1,
             wire_type: WireType::Id,
@@ -544,6 +658,15 @@ fn column_record(id: [u8; 16], name: &str) -> (Vec<u8>, Vec<u8>) {
             wire_type: WireType::Bool,
             payload: vec![1],
         },
+    ];
+    if let Some(expression_id) = default_expression_id {
+        fields.push(CatalogField {
+            tag: 7,
+            wire_type: WireType::Id,
+            payload: expression_id.to_vec(),
+        });
+    }
+    fields.extend([
         CatalogField {
             tag: 8,
             wire_type: WireType::U16,
@@ -554,8 +677,63 @@ fn column_record(id: [u8; 16], name: &str) -> (Vec<u8>, Vec<u8>) {
             wire_type: WireType::U64,
             payload: 1u64.to_le_bytes().to_vec(),
         },
-    ];
+    ]);
+    if let Some(expression_id) = add_column_default_id {
+        fields.push(CatalogField {
+            tag: 10,
+            wire_type: WireType::Id,
+            payload: expression_id.to_vec(),
+        });
+    }
     let payload = encode_envelope(&family_schema(6).unwrap(), &key, &fields).unwrap();
+    (key, payload)
+}
+
+fn expression_record(
+    id: [u8; 16],
+    purpose: u16,
+    dependencies: &[[u8; 16]],
+    expression: &Expr,
+) -> (Vec<u8>, Vec<u8>) {
+    let mut key = 7u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&id);
+    let mut dependency_list = (dependencies.len() as u32).to_le_bytes().to_vec();
+    dependency_list.extend(dependencies.iter().flatten());
+    let ir = encode_expression(expression).unwrap();
+    let fields = [
+        CatalogField {
+            tag: 1,
+            wire_type: WireType::U16,
+            payload: purpose.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 2,
+            wire_type: WireType::U32,
+            payload: 1u32.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 3,
+            wire_type: WireType::Id,
+            payload: [0x66; 16].to_vec(),
+        },
+        CatalogField {
+            tag: 4,
+            wire_type: WireType::Bytes,
+            payload: vec![0; 8],
+        },
+        CatalogField {
+            tag: 5,
+            wire_type: WireType::Bytes,
+            payload: ir,
+        },
+        CatalogField {
+            tag: 6,
+            wire_type: WireType::Ids,
+            payload: dependency_list,
+        },
+    ];
+    let payload = encode_envelope(&family_schema(7).unwrap(), &key, &fields).unwrap();
     (key, payload)
 }
 
@@ -924,6 +1102,105 @@ fn validates_backing_index_edges_against_constraint_and_index_records() {
     let valid_edge_fixture = Fixture::new();
     let valid_edge_database = valid_edge_fixture.database(0);
     populate(&valid_edge_database, Some([111; 16]), false);
+    assert!(validate_persisted_records(&valid_edge_database).is_ok());
+}
+
+#[test]
+fn validates_expression_reference_edges_against_typed_catalog_records() {
+    let populate = |database: &Database, edges: &[([u8; 16], [u8; 16])]| {
+        let column_id = [120; 16];
+        let default_expression_id = [121; 16];
+        let field_expression_id = [122; 16];
+        let check_constraint_id = [123; 16];
+        let check_expression_id = [124; 16];
+        let policy_id = [125; 16];
+        let policy_expression_id = [126; 16];
+        let add_column_default_id = [127; 16];
+        let (key, value) = object_record(column_id, 4);
+        put_catalog(database, &key, &value);
+        for expression_id in [
+            default_expression_id,
+            field_expression_id,
+            check_expression_id,
+            policy_expression_id,
+            add_column_default_id,
+        ] {
+            let (key, value) = object_record(expression_id, 5);
+            put_catalog(database, &key, &value);
+        }
+        let (key, value) = object_record(check_constraint_id, 6);
+        put_catalog(database, &key, &value);
+        let (key, value) = object_record(policy_id, 10);
+        put_catalog(database, &key, &value);
+        let (key, value) = column_record_with_defaults(
+            column_id,
+            "object_120",
+            Some(default_expression_id),
+            Some(add_column_default_id),
+        );
+        put_catalog(database, &key, &value);
+        let (key, value) =
+            expression_record(default_expression_id, 1, &[], &Expr::CurrentPrincipalId);
+        put_catalog(database, &key, &value);
+        let (key, value) = expression_record(field_expression_id, 2, &[column_id], &Expr::Field(0));
+        put_catalog(database, &key, &value);
+        let (key, value) =
+            expression_record(check_expression_id, 2, &[], &Expr::CurrentPrincipalId);
+        put_catalog(database, &key, &value);
+        let (key, value) =
+            expression_record(policy_expression_id, 3, &[], &Expr::CurrentPrincipalId);
+        put_catalog(database, &key, &value);
+        let (key, value) = expression_record(add_column_default_id, 1, &[], &Expr::Literal(None));
+        put_catalog(database, &key, &value);
+        let (key, value) =
+            check_constraint_record(check_constraint_id, [130; 16], check_expression_id);
+        put_catalog(database, &key, &value);
+        let (key, value) = policy_record(policy_id, [130; 16], policy_expression_id);
+        put_catalog(database, &key, &value);
+        for (dependent_id, referenced_id) in edges {
+            let (key, value) = dependency_record(*dependent_id, *referenced_id, 2);
+            put_catalog(database, &key, &value);
+        }
+    };
+
+    let missing_edge_fixture = Fixture::new();
+    let missing_edge_database = missing_edge_fixture.database(0);
+    populate(&missing_edge_database, &[([122; 16], [120; 16])]);
+    assert_eq!(
+        validate_persisted_records(&missing_edge_database),
+        Err(StartupError::InvalidCatalog),
+    );
+
+    let mismatched_edge_fixture = Fixture::new();
+    let mismatched_edge_database = mismatched_edge_fixture.database(0);
+    populate(
+        &mismatched_edge_database,
+        &[
+            ([120; 16], [121; 16]),
+            ([120; 16], [127; 16]),
+            ([120; 16], [122; 16]),
+            ([122; 16], [120; 16]),
+            ([123; 16], [124; 16]),
+            ([125; 16], [126; 16]),
+        ],
+    );
+    assert_eq!(
+        validate_persisted_records(&mismatched_edge_database),
+        Err(StartupError::InvalidCatalog),
+    );
+
+    let valid_edge_fixture = Fixture::new();
+    let valid_edge_database = valid_edge_fixture.database(0);
+    populate(
+        &valid_edge_database,
+        &[
+            ([120; 16], [121; 16]),
+            ([120; 16], [127; 16]),
+            ([122; 16], [120; 16]),
+            ([123; 16], [124; 16]),
+            ([125; 16], [126; 16]),
+        ],
+    );
     assert!(validate_persisted_records(&valid_edge_database).is_ok());
 }
 
