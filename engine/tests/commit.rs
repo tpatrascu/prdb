@@ -4225,6 +4225,83 @@ fn foreign_key_row_visit_limit_aborts_the_whole_commit() -> Result<(), Box<dyn s
 }
 
 #[test]
+fn foreign_key_comparison_key_budget_aborts_large_keys_atomically()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let source_table_id = [0x55; 16];
+    let target_table_id = [0x66; 16];
+    let column = ColumnSchema {
+        scalar_type: ScalarType::Bytea,
+        nullable: false,
+    };
+    let mut initial_rows = Vec::with_capacity(256);
+    let mut updated_child_key = [0; 32];
+    let mut updated_child_payload = Vec::new();
+    for row_number in 0..128u8 {
+        let mut value = vec![row_number.wrapping_add(1); 70 * 1024];
+        value[..8].copy_from_slice(&(row_number as u64).to_be_bytes());
+        let payload = encode_tuple(
+            std::slice::from_ref(&column),
+            1,
+            &[Some(ScalarValue::Bytea(value))],
+        )?;
+        let parent_key = table_row_key(target_table_id, [row_number; 16]);
+        let child_key = table_row_key(source_table_id, [row_number; 16]);
+        if row_number == 0 {
+            updated_child_key = child_key;
+            updated_child_payload = payload.clone();
+        }
+        initial_rows.push(RowWrite {
+            key: parent_key,
+            expected_version: None,
+            payload: Some(payload.clone()),
+        });
+        initial_rows.push(RowWrite {
+            key: child_key,
+            expected_version: None,
+            payload: Some(payload),
+        });
+    }
+    commit_rows(&database, id(112), id(9), 9_999, &initial_rows)?;
+
+    let foreign_key = ForeignKeyCheck {
+        source_table_id,
+        source_schema_version: 1,
+        source_schema: vec![column.clone()],
+        source_ordinals: vec![0],
+        target_table_id,
+        target_schema_version: 1,
+        target_schema: vec![column],
+        target_ordinals: vec![0],
+    };
+    assert_eq!(
+        commit_storage_changes(
+            &database,
+            CommitRequest {
+                invocation_id: id(113),
+                principal_id: id(9),
+                retention_deadline_us: 9_999,
+                rows: &[RowWrite {
+                    key: updated_child_key,
+                    expected_version: Some(1),
+                    payload: Some(updated_child_payload),
+                }],
+                indexes: &[],
+                foreign_keys: std::slice::from_ref(&foreign_key),
+                catalog_guards: &[],
+                catalog: &[],
+                audit: &[],
+            },
+        ),
+        Err(CommitError::ForeignKeyValidationLimitExceeded)
+    );
+    assert_eq!(commit_sequence(&database)?, 1);
+    assert_eq!(row(&database, &updated_child_key)?.unwrap().row_version, 1);
+    Ok(())
+}
+
+#[test]
 fn concurrent_foreign_key_insert_and_parent_delete_cannot_both_commit()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();

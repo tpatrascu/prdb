@@ -365,4 +365,11 @@
 - Real-redb startup coverage accepts matching child/parent rows, rejects a dangling child, accepts NULL under MATCH SIMPLE, rejects mismatched source/target types, and rejects a database over the row-visit limit.
 - Verification: with Rust/Cargo 1.95.0, rustfmt 1.9.0, and Clippy 0.1.95 in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and all 183 integration tests across 17 targets passed. Changed Markdown local links and `git diff --check` pass.
 - The implementation uses the existing unique backing index to validate references without materializing the full parent key set.
-- Remaining: foreign-key DDL creation/fencing, authenticated service admission, and memory bounding for commit-time reference scans remain open.
+- Remaining: foreign-key DDL creation/fencing and authenticated service admission remain open.
+
+## SM-5 dependency: bounded foreign-key comparison memory — in progress
+
+- The commit-time validator now caps the distinct encoded comparison keys retained for each FK check at 16 MiB, in addition to the 65,536 combined row-visit limit. The transaction aborts with the same generic FK validation limit error before publication when either limit is exceeded.
+- A real-redb regression with 128 distinct 70 KiB parent/child keys exceeds the comparison-key budget and confirms the child row version and commit sequence remain unchanged.
+- Verification: with Rust/Cargo 1.95.0, rustfmt 1.9.0, and Clippy 0.1.95 in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and all 184 integration tests across 17 targets passed. Changed Markdown local links and `git diff --check` pass.
+- Remaining: FK DDL creation/fencing and authenticated service admission remain open.

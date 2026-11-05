@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 
 type IndexTableMap = HashMap<[u8; 16], [u8; 16]>;
 const MAX_FOREIGN_KEY_ROW_VISITS_PER_COMMIT: usize = 65_536;
+const MAX_FOREIGN_KEY_COMPARISON_KEY_BYTES_PER_COMMIT: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RowWrite {
@@ -235,6 +236,7 @@ fn validate_foreign_key_constraints(
             continue;
         }
         validate_foreign_key_definition(foreign_key)?;
+        let mut comparison_key_bytes = 0usize;
         let target_keys = collect_final_foreign_key_keys(
             transaction,
             writes,
@@ -245,6 +247,7 @@ fn validate_foreign_key_constraints(
             &foreign_key.target_ordinals,
             &foreign_key.target_schema,
             &mut row_visits,
+            &mut comparison_key_bytes,
             &write_keys,
         )?;
         let source_keys = collect_final_foreign_key_keys(
@@ -257,6 +260,7 @@ fn validate_foreign_key_constraints(
             &foreign_key.target_ordinals,
             &foreign_key.target_schema,
             &mut row_visits,
+            &mut comparison_key_bytes,
             &write_keys,
         )?;
         if source_keys.iter().any(|key| !target_keys.contains(key)) {
@@ -318,6 +322,7 @@ fn collect_final_foreign_key_keys(
     comparison_ordinals: &[usize],
     comparison_schema: &[ColumnSchema],
     row_visits: &mut usize,
+    comparison_key_bytes: &mut usize,
     write_keys: &HashSet<[u8; 32]>,
 ) -> Result<HashSet<Vec<u8>>, CommitError> {
     let comparison_columns = comparison_ordinals
@@ -360,7 +365,7 @@ fn collect_final_foreign_key_keys(
         let tuple = decode_tuple(schema, schema_version, &row.payload)
             .map_err(|_| CommitError::InvalidRow)?;
         if let Some(key) = foreign_key_tuple_key(&tuple.values, ordinals, &comparison_columns)? {
-            keys.insert(key);
+            remember_foreign_key_key(&mut keys, key, comparison_key_bytes)?;
         }
     }
     drop(table);
@@ -378,10 +383,27 @@ fn collect_final_foreign_key_keys(
         let tuple =
             decode_tuple(schema, schema_version, payload).map_err(|_| CommitError::InvalidRow)?;
         if let Some(key) = foreign_key_tuple_key(&tuple.values, ordinals, &comparison_columns)? {
-            keys.insert(key);
+            remember_foreign_key_key(&mut keys, key, comparison_key_bytes)?;
         }
     }
     Ok(keys)
+}
+
+fn remember_foreign_key_key(
+    keys: &mut HashSet<Vec<u8>>,
+    key: Vec<u8>,
+    comparison_key_bytes: &mut usize,
+) -> Result<(), CommitError> {
+    if keys.contains(&key) {
+        return Ok(());
+    }
+    let next_bytes = comparison_key_bytes
+        .checked_add(key.len())
+        .filter(|bytes| *bytes <= MAX_FOREIGN_KEY_COMPARISON_KEY_BYTES_PER_COMMIT)
+        .ok_or(CommitError::ForeignKeyValidationLimitExceeded)?;
+    keys.insert(key);
+    *comparison_key_bytes = next_bytes;
+    Ok(())
 }
 
 fn foreign_key_tuple_key(
