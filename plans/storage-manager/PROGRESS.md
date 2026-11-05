@@ -403,12 +403,12 @@
 
 ## SM-5 dependency: bounded active invocation snapshots — in progress
 
-- Behavior: reject new runtime admissions once a configured per-manager snapshot cap is reached, including admissions through cloned `StorageManager` handles; release capacity when the transaction/snapshot is dropped. This protects redb from unbounded retained read snapshots.
+- Behavior: reject new runtime admissions once a configured per-manager snapshot cap is reached, including admissions through cloned `StorageManager` handles; release capacity when the transaction drops or ends its snapshot through commit, abort, or expiry. This protects redb from unbounded retained read snapshots.
 - Red evidence: the new real-redb regression initially failed because a second snapshot was admitted while the configured limit was one.
 - Implementation: `StorageManagerConfig` exposes the DDL-fence timeout and positive active-invocation cap (default 128); atomic admission permits are shared across manager clones and retained by each managed invocation transaction. Failed transaction construction releases its reserved permit through RAII. A zero cap is rejected at configuration time. Low-level transaction constructors remain explicitly outside manager admission.
-- Tests: `engine/tests/commit.rs` verifies zero-limit rejection, cross-clone capacity enforcement, permit release after dropping an aborted transaction, and subsequent admission.
+- Tests: `engine/tests/commit.rs` verifies zero-limit rejection, cross-clone capacity enforcement, permit release immediately after abort while the transaction object remains alive, and subsequent admission.
 - Verification: with Rust/Cargo 1.95.0, rustfmt 1.9.0, Clippy 0.1.95, and TinyCC 0.9.27-unstable-2025-01-06 in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and all 192 integration tests across 18 targets passed. `git diff --check` and changed Markdown local-link checks passed.
-- Remaining: transaction-age cancellation and bounds for scans, response bytes, and total work still require service lifecycle integration.
+- Remaining: bounds for scans, response bytes, and total work still require service lifecycle integration.
 
 ## SM-5 dependency: validated StorageManager startup — in progress
 
@@ -418,3 +418,12 @@
 - Test: `engine/tests/commit.rs` verifies invalid row persistence rejects manager construction with `StartupError::InvalidRow`; the existing manager routing test verifies a valid recovered image is accepted.
 - Verification: with Rust/Cargo 1.95.0, rustfmt 1.9.0, and Clippy 0.1.95 in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and all 193 integration tests across 18 targets passed. `git diff --check` and changed Markdown local-link checks passed.
 - Remaining: authenticated service admission and lifecycle cancellation remain separate service work.
+
+## SM-5 dependency: managed invocation age limits — in progress
+
+- Behavior: bound managed invocation lifetime at snapshot reads, staged-write checks, and commit; allow the supervisor/service to poll idle invocations and cancel expired work.
+- Red evidence: with the deadline check temporarily disabled, the real-redb expiry regression failed because `check_deadline()` returned success after the configured maximum age.
+- Implementation: configuration defaults to a 15-minute maximum age and rejects zero. A managed invocation checks age when it uses its pinned snapshot, when it stages against a cached base version, and before and after waiting for a shared DDL fence. Expiry durably records ABORTED, drops the retained redb snapshot, and releases the admission slot immediately. `InvocationTransaction::check_deadline` supports service-side polling during idle periods.
+- Tests: `engine/tests/commit.rs` checks idle polling expiry, the durable ABORTED outcome, immediate snapshot-slot reuse while the expired transaction object remains alive, and commit-time expiry.
+- Verification: with Rust/Cargo 1.95.0, rustfmt 1.9.0, and Clippy 0.1.95 in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and all 194 integration tests across 18 targets passed. `git diff --check` and changed Markdown local-link checks passed.
+- Remaining: no supervisor exists yet to poll idle transactions automatically; scan, result, and total-work budgets also remain service lifecycle work.

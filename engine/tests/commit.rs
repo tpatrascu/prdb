@@ -1862,6 +1862,7 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
             StorageManagerConfig {
                 ddl_fence_timeout: Duration::from_millis(100),
                 max_active_invocations: 0,
+                max_invocation_age: Duration::from_secs(30),
             },
         )
         .err(),
@@ -1869,11 +1870,26 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
             prdb_engine::storage_manager::StorageManagerConfigError::ZeroActiveInvocationLimit,
         ))
     );
+    assert_eq!(
+        StorageManager::with_config(
+            &database,
+            StorageManagerConfig {
+                ddl_fence_timeout: Duration::from_millis(100),
+                max_active_invocations: 1,
+                max_invocation_age: Duration::ZERO,
+            },
+        )
+        .err(),
+        Some(StorageManagerInitError::Config(
+            prdb_engine::storage_manager::StorageManagerConfigError::ZeroInvocationAge,
+        ))
+    );
     let storage = StorageManager::with_config(
         &database,
         StorageManagerConfig {
             ddl_fence_timeout: Duration::from_millis(100),
             max_active_invocations: 1,
+            max_invocation_age: Duration::from_secs(30),
         },
     )?;
     let mut first = storage.begin_invocation(id(192), id(9), 9_999, 2, 64)?;
@@ -1884,9 +1900,54 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
     ));
 
     first.abort()?;
-    drop(first);
     let next = cloned_storage.begin_invocation(id(194), id(9), 9_999, 2, 64)?;
     drop(next);
+    drop(first);
+    Ok(())
+}
+
+#[test]
+fn storage_manager_expires_idle_invocations_and_releases_the_snapshot()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::with_config(
+        &database,
+        StorageManagerConfig {
+            ddl_fence_timeout: Duration::from_millis(100),
+            max_active_invocations: 1,
+            max_invocation_age: Duration::from_millis(1),
+        },
+    )?;
+    let mut expired = storage.begin_invocation(id(196), id(9), 9_999, 2, 64)?;
+    std::thread::sleep(Duration::from_millis(10));
+    assert!(matches!(
+        expired.check_deadline(),
+        Err(prdb_engine::transaction::TransactionError::Expired)
+    ));
+    assert_eq!(
+        lookup_outcome(&database, id(196), id(9), 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Aborted
+    );
+
+    let next = storage.begin_invocation(id(197), id(9), 9_999, 2, 64)?;
+    drop(next);
+    drop(expired);
+
+    let expired_commit = storage.begin_invocation(id(198), id(9), 9_999, 2, 64)?;
+    std::thread::sleep(Duration::from_millis(10));
+    assert!(matches!(
+        expired_commit.commit(),
+        Err(prdb_engine::transaction::TransactionError::Expired)
+    ));
+    assert_eq!(
+        lookup_outcome(&database, id(198), id(9), 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Aborted
+    );
     Ok(())
 }
 

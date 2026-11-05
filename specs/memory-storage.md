@@ -31,7 +31,7 @@ redb documents a zero-copy, thread-safe key/value API, but that does not mean ne
 
 ## Pressure and Lifetimes
 
-Long read transactions retain historical copy-on-write pages and can delay redb reclamation. Bound concurrent snapshots, invocation age, analytical scans, and outstanding response bytes. `StorageManager` reserves from a shared per-handle active invocation cap before opening a snapshot; cloned handles share the cap, and the reservation follows the transaction through its snapshot lifetime. Slow clients must not hold redb guards or storage latches. On pressure, reject admission or cancel according to policy; never silently replace a snapshot.
+Long read transactions retain historical copy-on-write pages and can delay redb reclamation. Bound concurrent snapshots, invocation age, analytical scans, and outstanding response bytes. `StorageManager` reserves from a shared per-handle active invocation cap before opening a snapshot; cloned handles share the cap, and the reservation follows the transaction through its snapshot lifetime. Managed transactions enforce their configured age at storage boundaries, and the service must poll the transaction deadline while it is idle. Slow clients must not hold redb guards or storage latches. On pressure, reject admission or cancel according to policy; never silently replace a snapshot.
 
 Canceling an asynchronous storage task cannot release a guard still used by work or IPC. Drain in-flight tasks before ending the read transaction and releasing overlay/results. Test large readers, process cancellation, memory growth, and compaction/reclamation with the pinned redb release.
 

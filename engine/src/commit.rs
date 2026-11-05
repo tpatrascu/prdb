@@ -116,6 +116,7 @@ pub enum CommitError {
     ForeignKeyViolation,
     ForeignKeyValidationLimitExceeded,
     DdlFenceUnavailable,
+    InvocationExpired,
     InvalidCatalog,
     InvalidAudit,
     AuditAlreadyExists,

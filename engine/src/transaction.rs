@@ -28,6 +28,7 @@ use crate::tuple::{
 };
 use redb::{Database, ReadableDatabase};
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 const MAX_INDEX_CHANGES_PER_ROW: usize = 256;
 
@@ -46,6 +47,7 @@ pub enum TransactionError {
     UnsupportedFormat,
     DuplicateInvocation,
     AdmissionLimitExceeded,
+    Expired,
     IndexRowNotStaged,
     RowAlreadyExists,
     GeneratedIdentityUnsupported,
@@ -114,6 +116,7 @@ impl From<CommitError> for TransactionError {
     fn from(error: CommitError) -> Self {
         match error {
             CommitError::IndexOverlayLimitExceeded => Self::IndexOverlayLimitExceeded,
+            CommitError::InvocationExpired => Self::Expired,
             error => Self::Commit(error),
         }
     }
@@ -121,7 +124,7 @@ impl From<CommitError> for TransactionError {
 
 pub struct InvocationTransaction<'db> {
     database: &'db Database,
-    snapshot: RowSnapshot,
+    snapshot: Option<RowSnapshot>,
     overlay: Overlay,
     base_versions: HashMap<RowId, Option<u64>>,
     index_writes: HashMap<Vec<u8>, StagedIndexChange>,
@@ -143,6 +146,7 @@ pub struct InvocationTransaction<'db> {
 pub(crate) struct InvocationCoordination {
     ddl_fences: Option<DdlFenceCoordinator>,
     _admission_permit: Option<InvocationAdmissionPermit>,
+    max_age: Option<(Instant, Duration)>,
 }
 
 impl InvocationCoordination {
@@ -150,6 +154,7 @@ impl InvocationCoordination {
         Self {
             ddl_fences: None,
             _admission_permit: None,
+            max_age: None,
         }
     }
 
@@ -157,17 +162,25 @@ impl InvocationCoordination {
         Self {
             ddl_fences: Some(ddl_fences),
             _admission_permit: None,
+            max_age: None,
         }
     }
 
     pub(crate) fn managed(
         ddl_fences: DdlFenceCoordinator,
         admission_permit: InvocationAdmissionPermit,
+        max_age: Duration,
     ) -> Self {
         Self {
             ddl_fences: Some(ddl_fences),
             _admission_permit: Some(admission_permit),
+            max_age: Some((Instant::now(), max_age)),
         }
+    }
+
+    fn is_expired(&self) -> bool {
+        self.max_age
+            .is_some_and(|(admitted_at, max_age)| admitted_at.elapsed() >= max_age)
     }
 }
 
@@ -264,7 +277,7 @@ impl<'db> InvocationTransaction<'db> {
         }
         Ok(Self {
             database,
-            snapshot: RowSnapshot::new(transaction),
+            snapshot: Some(RowSnapshot::new(transaction)),
             overlay: Overlay::new(max_rows, max_bytes),
             base_versions: HashMap::new(),
             index_writes: HashMap::new(),
@@ -282,6 +295,27 @@ impl<'db> InvocationTransaction<'db> {
             aborted: false,
             outcome_recorded: false,
         })
+    }
+
+    /// Check the managed invocation's age. Runtime services should call this
+    /// while an executor is idle so expired work releases its retained snapshot.
+    pub fn check_deadline(&mut self) -> Result<(), TransactionError> {
+        if self.aborted {
+            return Err(TransactionError::Aborted);
+        }
+        if self.coordination.is_expired() {
+            self.abort()?;
+            return Err(TransactionError::Expired);
+        }
+        Ok(())
+    }
+
+    fn pinned_snapshot(&mut self) -> Result<&RowSnapshot, TransactionError> {
+        if self.coordination.is_expired() {
+            self.abort()?;
+            return Err(TransactionError::Expired);
+        }
+        self.snapshot.as_ref().ok_or(TransactionError::Aborted)
     }
 
     pub fn read(&mut self, id: RowId) -> Result<Option<Vec<u8>>, TransactionError> {
@@ -339,7 +373,7 @@ impl<'db> InvocationTransaction<'db> {
         if self.aborted {
             return Err(TransactionError::Aborted);
         }
-        let bytes = match self.snapshot.get_catalog_value(key) {
+        let bytes = match self.pinned_snapshot()?.get_catalog_value(key) {
             Ok(bytes) => bytes,
             Err(error) => {
                 self.abort()?;
@@ -393,7 +427,7 @@ impl<'db> InvocationTransaction<'db> {
             }
 
             let records = self
-                .snapshot
+                .pinned_snapshot()?
                 .scan_catalog_family(6, MAX_CATALOG_FAMILY_SCAN)
                 .map_err(|error| TransactionError::Storage(error.to_string()))?;
             let mut columns = Vec::new();
@@ -532,7 +566,7 @@ impl<'db> InvocationTransaction<'db> {
                 return Err(TransactionError::InvalidContext);
             }
             let records = self
-                .snapshot
+                .pinned_snapshot()?
                 .scan_catalog_family(9, MAX_CATALOG_FAMILY_SCAN)
                 .map_err(|error| TransactionError::Storage(error.to_string()))?;
             let mut indexes = Vec::new();
@@ -611,7 +645,7 @@ impl<'db> InvocationTransaction<'db> {
         schema: &CatalogTableSchema,
     ) -> Result<(), TransactionError> {
         let records = self
-            .snapshot
+            .pinned_snapshot()?
             .scan_catalog_family(8, MAX_CATALOG_FAMILY_SCAN)
             .map_err(|error| TransactionError::Storage(error.to_string()))?;
         for record in records {
@@ -632,7 +666,7 @@ impl<'db> InvocationTransaction<'db> {
             }
             let target_constraint_key = catalog_id_key(8, target_constraint_id);
             let target_snapshot_record = self
-                .snapshot
+                .pinned_snapshot()?
                 .get_catalog_record(&target_constraint_key)
                 .map_err(|error| TransactionError::Storage(error.to_string()))?
                 .ok_or(TransactionError::CorruptCatalog)?;
@@ -788,7 +822,7 @@ impl<'db> InvocationTransaction<'db> {
                 return Err(TransactionError::InvalidContext);
             }
             let records = self
-                .snapshot
+                .pinned_snapshot()?
                 .scan_catalog_family(11, MAX_CATALOG_FAMILY_SCAN)
                 .map_err(|error| TransactionError::Storage(error.to_string()))?;
             if records.len() > crate::authorization::MAX_MEMBERSHIP_EDGES {
@@ -871,7 +905,7 @@ impl<'db> InvocationTransaction<'db> {
             let mut grantees = roles.clone();
             grantees.insert(principal_id);
             let records = self
-                .snapshot
+                .pinned_snapshot()?
                 .scan_catalog_family(12, MAX_CATALOG_FAMILY_SCAN)
                 .map_err(|error| TransactionError::Storage(error.to_string()))?;
             let mut grants = Vec::new();
@@ -990,7 +1024,7 @@ impl<'db> InvocationTransaction<'db> {
                 return Err(TransactionError::InvalidContext);
             }
             let records = self
-                .snapshot
+                .pinned_snapshot()?
                 .scan_catalog_family(4, MAX_CATALOG_FAMILY_SCAN)
                 .map_err(|error| TransactionError::Storage(error.to_string()))?;
             let mut matched = None;
@@ -1053,11 +1087,11 @@ impl<'db> InvocationTransaction<'db> {
             }
             let roles = self.load_catalog_role_closure(principal_id)?;
             let policies = self
-                .snapshot
+                .pinned_snapshot()?
                 .scan_catalog_family(13, MAX_CATALOG_FAMILY_SCAN)
                 .map_err(|error| TransactionError::Storage(error.to_string()))?;
             let targets = self
-                .snapshot
+                .pinned_snapshot()?
                 .scan_catalog_family(14, MAX_CATALOG_FAMILY_SCAN)
                 .map_err(|error| TransactionError::Storage(error.to_string()))?;
             if policies.len() > crate::authorization::MAX_AUTHORIZATION_INPUTS {
@@ -1245,7 +1279,7 @@ impl<'db> InvocationTransaction<'db> {
         let result = (|| {
             self.load_catalog_foreign_keys_for_table(schema)?;
             let records = self
-                .snapshot
+                .pinned_snapshot()?
                 .scan_catalog_family(8, MAX_CATALOG_FAMILY_SCAN)
                 .map_err(|error| TransactionError::Storage(error.to_string()))?;
             let mut checks = Vec::new();
@@ -1563,12 +1597,12 @@ impl<'db> InvocationTransaction<'db> {
         }
     }
 
-    fn read_inner(&self, id: RowId) -> Result<Option<Vec<u8>>, TransactionError> {
+    fn read_inner(&mut self, id: RowId) -> Result<Option<Vec<u8>>, TransactionError> {
         if self.aborted {
             return Err(TransactionError::Aborted);
         }
         let snapshot_row = self
-            .snapshot
+            .pinned_snapshot()?
             .get(&row_key(id))
             .map_err(|error| TransactionError::Storage(error.to_string()))?
             .map(|bytes| RowRecord::decode(&bytes))
@@ -1892,7 +1926,7 @@ impl<'db> InvocationTransaction<'db> {
             return Err(TransactionError::Commit(CommitError::InvalidIndex));
         }
         let expected_version = self
-            .snapshot
+            .pinned_snapshot()?
             .get_index_version(&key)
             .map_err(|error| TransactionError::Storage(error.to_string()))?;
         if !present && expected_version.is_none() {
@@ -2148,6 +2182,8 @@ impl<'db> InvocationTransaction<'db> {
         self.index_bytes = 0;
         self.catalog_guards.clear();
         self.aborted = true;
+        self.snapshot.take();
+        self.coordination._admission_permit.take();
         if !self.outcome_recorded {
             record_aborted_outcome(
                 self.database,
@@ -2161,7 +2197,7 @@ impl<'db> InvocationTransaction<'db> {
     }
 
     /// Commit rows, engine sequence, and durable COMMITTED outcome in one redb write transaction.
-    pub fn commit(self) -> Result<u64, TransactionError> {
+    pub fn commit(mut self) -> Result<u64, TransactionError> {
         if self.aborted {
             if !self.outcome_recorded {
                 record_aborted_outcome(
@@ -2173,6 +2209,7 @@ impl<'db> InvocationTransaction<'db> {
             }
             return Err(TransactionError::Aborted);
         }
+        self.check_deadline()?;
         let ddl_fences = self.coordination.ddl_fences.clone();
         let entries = self.overlay.into_entries()?;
         let mut writes = Vec::with_capacity(entries.len());
@@ -2185,7 +2222,7 @@ impl<'db> InvocationTransaction<'db> {
             });
         }
         let (index_validation, index_writes) = match validate_catalog_index_deltas(
-            &self.snapshot,
+            self.snapshot.as_ref().ok_or(TransactionError::Aborted)?,
             &self.loaded_schemas,
             &self.loaded_indexes,
             &self.index_writes,
@@ -2214,6 +2251,9 @@ impl<'db> InvocationTransaction<'db> {
             })
             .collect::<Vec<[u8; 16]>>();
         let result = index_validation.and_then(|()| {
+            if self.coordination.is_expired() {
+                return Err(CommitError::InvocationExpired);
+            }
             let _fence_guard = if let Some(ddl_fences) = &ddl_fences {
                 Some(
                     ddl_fences
@@ -2223,6 +2263,9 @@ impl<'db> InvocationTransaction<'db> {
             } else {
                 None
             };
+            if self.coordination.is_expired() {
+                return Err(CommitError::InvocationExpired);
+            }
             commit_storage_changes(
                 self.database,
                 CommitRequest {
@@ -2262,14 +2305,12 @@ impl<'db> InvocationTransaction<'db> {
     }
 
     fn capture_base_version(&mut self, id: RowId) -> Result<Option<u64>, TransactionError> {
-        if self.aborted {
-            return Err(TransactionError::Aborted);
-        }
+        self.check_deadline()?;
         if let Some(version) = self.base_versions.get(&id) {
             return Ok(*version);
         }
         let version = self
-            .snapshot
+            .pinned_snapshot()?
             .get(&row_key(id))
             .map_err(|error| TransactionError::Storage(error.to_string()))?
             .map(|bytes| RowRecord::decode(&bytes).map(|record| record.row_version))
@@ -2294,7 +2335,7 @@ impl<'db> InvocationTransaction<'db> {
         }
         for dependency in dependencies {
             let snapshot_value = self
-                .snapshot
+                .pinned_snapshot()?
                 .get_catalog_value(&dependency.key)
                 .map_err(|error| TransactionError::Storage(error.to_string()))?;
             if snapshot_value != dependency.expected_value {

@@ -12,11 +12,13 @@ use std::time::Duration;
 
 /// Admission and coordination limits for one storage-manager handle.
 ///
-/// The default allows at most 128 simultaneous invocation snapshots.
+/// Defaults allow at most 128 simultaneous invocation snapshots and a
+/// 15-minute lifetime for each managed invocation.
 #[derive(Clone, Copy, Debug)]
 pub struct StorageManagerConfig {
     pub ddl_fence_timeout: Duration,
     pub max_active_invocations: usize,
+    pub max_invocation_age: Duration,
 }
 
 impl Default for StorageManagerConfig {
@@ -24,6 +26,7 @@ impl Default for StorageManagerConfig {
         Self {
             ddl_fence_timeout: Duration::from_secs(5),
             max_active_invocations: 128,
+            max_invocation_age: Duration::from_secs(15 * 60),
         }
     }
 }
@@ -31,6 +34,7 @@ impl Default for StorageManagerConfig {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StorageManagerConfigError {
     ZeroActiveInvocationLimit,
+    ZeroInvocationAge,
 }
 
 impl std::fmt::Display for StorageManagerConfigError {
@@ -63,6 +67,7 @@ pub struct StorageManager<'db> {
     ddl_fences: DdlFenceCoordinator,
     max_active_invocations: usize,
     admissions: Arc<InvocationAdmissionState>,
+    max_invocation_age: Duration,
 }
 
 struct InvocationAdmissionState {
@@ -129,6 +134,11 @@ impl<'db> StorageManager<'db> {
                 StorageManagerConfigError::ZeroActiveInvocationLimit,
             ));
         }
+        if config.max_invocation_age.is_zero() {
+            return Err(StorageManagerInitError::Config(
+                StorageManagerConfigError::ZeroInvocationAge,
+            ));
+        }
         validate_persisted_records(database).map_err(StorageManagerInitError::Startup)?;
         Ok(Self {
             database,
@@ -138,6 +148,7 @@ impl<'db> StorageManager<'db> {
                 active: AtomicUsize::new(0),
                 limit: config.max_active_invocations,
             }),
+            max_invocation_age: config.max_invocation_age,
         })
     }
 
@@ -146,8 +157,12 @@ impl<'db> StorageManager<'db> {
         self.max_active_invocations
     }
 
+    pub fn max_invocation_age(&self) -> Duration {
+        self.max_invocation_age
+    }
+
     /// Reserve an invocation slot before opening its pinned redb snapshot.
-    /// The slot remains held until the transaction and its snapshot are dropped.
+    /// The slot remains held until commit, abort, expiry, or transaction drop.
     pub fn begin_invocation(
         &self,
         invocation_id: [u8; 16],
@@ -162,7 +177,11 @@ impl<'db> StorageManager<'db> {
             .ok_or(TransactionError::AdmissionLimitExceeded)?;
         InvocationTransaction::begin_inner(
             self.database,
-            InvocationCoordination::managed(self.ddl_fences.clone(), admission_permit),
+            InvocationCoordination::managed(
+                self.ddl_fences.clone(),
+                admission_permit,
+                self.max_invocation_age,
+            ),
             invocation_id,
             principal_id,
             retention_deadline_us,
