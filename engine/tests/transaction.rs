@@ -1662,6 +1662,326 @@ fn unique_constraint_uses_its_backing_index_for_invocation_writes()
 }
 
 #[test]
+fn catalog_foreign_keys_check_child_and_parent_mutations() -> Result<(), Box<dyn std::error::Error>>
+{
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let source_table_id = [0x10; 16];
+    let source_column_id = [0x66; 16];
+    let target_table_id = [0x21; 16];
+    let target_column_id = [0x22; 16];
+    let target_constraint_id = [0x23; 16];
+    let target_index_id = [0x24; 16];
+    let foreign_key_id = [0x25; 16];
+    {
+        let target_table_key = catalog_id_key(5, target_table_id);
+        let target_table = catalog_record_payload(
+            5,
+            &target_table_key,
+            &[
+                CatalogField {
+                    tag: 1,
+                    wire_type: WireType::Id,
+                    payload: source_table_id.to_vec(),
+                },
+                CatalogField {
+                    tag: 2,
+                    wire_type: WireType::U64,
+                    payload: 1u64.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 3,
+                    wire_type: WireType::U64,
+                    payload: 1u64.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 4,
+                    wire_type: WireType::Id,
+                    payload: target_table_id.to_vec(),
+                },
+                CatalogField {
+                    tag: 5,
+                    wire_type: WireType::U16,
+                    payload: 1u16.to_le_bytes().to_vec(),
+                },
+            ],
+        )?;
+        let target_column_key = catalog_id_key(6, target_column_id);
+        let target_column = catalog_record_payload(
+            6,
+            &target_column_key,
+            &[
+                CatalogField {
+                    tag: 1,
+                    wire_type: WireType::Id,
+                    payload: target_table_id.to_vec(),
+                },
+                CatalogField {
+                    tag: 2,
+                    wire_type: WireType::U32,
+                    payload: 0u32.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 3,
+                    wire_type: WireType::Text,
+                    payload: format!("object_{}", target_column_id[0]).into_bytes(),
+                },
+                CatalogField {
+                    tag: 4,
+                    wire_type: WireType::Id,
+                    payload: [0x40; 16].to_vec(),
+                },
+                CatalogField {
+                    tag: 5,
+                    wire_type: WireType::Bytes,
+                    payload: vec![0; 8],
+                },
+                CatalogField {
+                    tag: 6,
+                    wire_type: WireType::Bool,
+                    payload: vec![0],
+                },
+                CatalogField {
+                    tag: 8,
+                    wire_type: WireType::U16,
+                    payload: 0u16.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 9,
+                    wire_type: WireType::U64,
+                    payload: 1u64.to_le_bytes().to_vec(),
+                },
+            ],
+        )?;
+        let (target_constraint_key, target_constraint) = unique_constraint_catalog_record(
+            target_constraint_id,
+            target_table_id,
+            target_column_id,
+            target_index_id,
+        )?;
+        let (target_index_key, target_index) = index_catalog_record_with_constraint(
+            target_index_id,
+            target_table_id,
+            target_column_id,
+            1,
+            true,
+            Some(target_constraint_id),
+        )?;
+        let foreign_key_key = catalog_id_key(8, foreign_key_id);
+        let foreign_key_columns = |ids: &[[u8; 16]]| {
+            let mut payload = (ids.len() as u32).to_le_bytes().to_vec();
+            payload.extend(ids.iter().flatten());
+            payload
+        };
+        let foreign_key = catalog_record_payload(
+            8,
+            &foreign_key_key,
+            &[
+                CatalogField {
+                    tag: 1,
+                    wire_type: WireType::Id,
+                    payload: source_table_id.to_vec(),
+                },
+                CatalogField {
+                    tag: 2,
+                    wire_type: WireType::U16,
+                    payload: 5u16.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 3,
+                    wire_type: WireType::Ids,
+                    payload: foreign_key_columns(&[source_column_id]),
+                },
+                CatalogField {
+                    tag: 5,
+                    wire_type: WireType::Id,
+                    payload: target_constraint_id.to_vec(),
+                },
+                CatalogField {
+                    tag: 6,
+                    wire_type: WireType::Ids,
+                    payload: foreign_key_columns(&[target_column_id]),
+                },
+                CatalogField {
+                    tag: 7,
+                    wire_type: WireType::U16,
+                    payload: 1u16.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 8,
+                    wire_type: WireType::U16,
+                    payload: 1u16.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 9,
+                    wire_type: WireType::U16,
+                    payload: 1u16.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 10,
+                    wire_type: WireType::U16,
+                    payload: 1u16.to_le_bytes().to_vec(),
+                },
+            ],
+        )?;
+        let target_objects = [
+            object_catalog_record_for(target_table_id, 3),
+            object_catalog_record_for(target_column_id, 4),
+            object_catalog_record_for(target_constraint_id, 6),
+            object_catalog_record_for(target_index_id, 7),
+            object_catalog_record_for(foreign_key_id, 6),
+        ];
+        let target_index_edge = dependency_catalog_write(target_constraint_id, target_index_id, 4)?;
+        let foreign_key_edge = dependency_catalog_write(foreign_key_id, target_constraint_id, 3)?;
+        let write = database.begin_write()?;
+        let mut catalog = write.open_table(CATALOG)?;
+        for (key, value) in [
+            (target_table_key, target_table),
+            (target_column_key, target_column),
+            (target_constraint_key, target_constraint),
+            (target_index_key, target_index),
+            (foreign_key_key, foreign_key),
+        ]
+        .into_iter()
+        .chain(target_objects)
+        .chain([
+            (target_index_edge.key, target_index_edge.payload.unwrap()),
+            (foreign_key_edge.key, foreign_key_edge.payload.unwrap()),
+        ]) {
+            catalog.insert(key.as_slice(), value.as_slice())?;
+        }
+        drop(catalog);
+        write.commit()?;
+    }
+
+    let parent_row_id = prdb_engine::overlay::RowId {
+        table: target_table_id,
+        row: [1; 16],
+    };
+    let parent_payload = encode_tuple(
+        &[ColumnSchema {
+            scalar_type: ScalarType::Bytea,
+            nullable: false,
+        }],
+        1,
+        &[Some(ScalarValue::Bytea(b"parent".to_vec()))],
+    )?;
+    let mut parent = InvocationTransaction::begin(&database, [31; 16], [9; 16], 9_999, 8, 512)?;
+    let parent_schema = parent.load_catalog_table_schema(target_table_id)?;
+    parent.load_catalog_check_constraints(&parent_schema)?;
+    parent.load_catalog_indexes(&parent_schema)?;
+    parent.stage_put(parent_row_id, &parent_payload)?;
+    assert_eq!(parent.commit()?, 1);
+
+    let child_row_id = id(32);
+    let missing_payload = encode_tuple(
+        &[ColumnSchema {
+            scalar_type: ScalarType::Bytea,
+            nullable: true,
+        }],
+        1,
+        &[Some(ScalarValue::Bytea(b"missing".to_vec()))],
+    )?;
+    let mut child = InvocationTransaction::begin(&database, [32; 16], [9; 16], 9_999, 8, 512)?;
+    let child_schema = child.load_catalog_table_schema(source_table_id)?;
+    child.load_catalog_check_constraints(&child_schema)?;
+    child.load_catalog_indexes(&child_schema)?;
+    child.stage_put(child_row_id, &missing_payload)?;
+    assert!(matches!(
+        child.commit(),
+        Err(TransactionError::Commit(CommitError::ForeignKeyViolation))
+    ));
+    {
+        let read = database.begin_read()?;
+        assert!(
+            read.open_table(ROWS)?
+                .get(&key(child_row_id)[..])?
+                .is_none()
+        );
+    }
+
+    let valid_payload = encode_tuple(
+        &[ColumnSchema {
+            scalar_type: ScalarType::Bytea,
+            nullable: true,
+        }],
+        1,
+        &[Some(ScalarValue::Bytea(b"parent".to_vec()))],
+    )?;
+    let mut child = InvocationTransaction::begin(&database, [33; 16], [9; 16], 9_999, 8, 512)?;
+    let child_schema = child.load_catalog_table_schema(source_table_id)?;
+    child.load_catalog_check_constraints(&child_schema)?;
+    child.load_catalog_indexes(&child_schema)?;
+    child.stage_put(child_row_id, &valid_payload)?;
+    assert_eq!(child.commit()?, 2);
+
+    let null_child_row_id = id(36);
+    let null_payload = encode_tuple(
+        &[ColumnSchema {
+            scalar_type: ScalarType::Bytea,
+            nullable: true,
+        }],
+        1,
+        &[None],
+    )?;
+    let mut null_child = InvocationTransaction::begin(&database, [36; 16], [9; 16], 9_999, 8, 512)?;
+    let child_schema = null_child.load_catalog_table_schema(source_table_id)?;
+    null_child.load_catalog_check_constraints(&child_schema)?;
+    null_child.load_catalog_indexes(&child_schema)?;
+    null_child.stage_put(null_child_row_id, &null_payload)?;
+    assert_eq!(null_child.commit()?, 3);
+
+    let mut delete_parent =
+        InvocationTransaction::begin(&database, [34; 16], [9; 16], 9_999, 8, 512)?;
+    let parent_schema = delete_parent.load_catalog_table_schema(target_table_id)?;
+    delete_parent.load_catalog_check_constraints(&parent_schema)?;
+    delete_parent.load_catalog_indexes(&parent_schema)?;
+    delete_parent.stage_delete(parent_row_id)?;
+    assert!(matches!(
+        delete_parent.commit(),
+        Err(TransactionError::Commit(CommitError::ForeignKeyViolation))
+    ));
+    {
+        let read = database.begin_read()?;
+        assert!(
+            read.open_table(ROWS)?
+                .get(&key(parent_row_id)[..])?
+                .is_some()
+        );
+    }
+
+    let mut delete_both =
+        InvocationTransaction::begin(&database, [35; 16], [9; 16], 9_999, 8, 512)?;
+    let child_schema = delete_both.load_catalog_table_schema(source_table_id)?;
+    delete_both.load_catalog_check_constraints(&child_schema)?;
+    delete_both.load_catalog_indexes(&child_schema)?;
+    let parent_schema = delete_both.load_catalog_table_schema(target_table_id)?;
+    delete_both.load_catalog_check_constraints(&parent_schema)?;
+    delete_both.load_catalog_indexes(&parent_schema)?;
+    delete_both.stage_delete(child_row_id)?;
+    delete_both.stage_delete(null_child_row_id)?;
+    delete_both.stage_delete(parent_row_id)?;
+    assert_eq!(delete_both.commit()?, 4);
+    let read = database.begin_read()?;
+    assert!(
+        read.open_table(ROWS)?
+            .get(&key(child_row_id)[..])?
+            .is_none()
+    );
+    assert!(
+        read.open_table(ROWS)?
+            .get(&key(parent_row_id)[..])?
+            .is_none()
+    );
+    assert!(
+        read.open_table(ROWS)?
+            .get(&key(null_child_row_id)[..])?
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
 fn catalog_schema_validates_rows_without_secondary_indexes()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();

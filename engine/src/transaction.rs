@@ -7,8 +7,8 @@ use crate::authorization::{
 };
 use crate::catalog::{CatalogRecord, decode_builtin_scalar_type, decode_registered_envelope};
 use crate::commit::{
-    CatalogGuard, CommitError, CommitRequest, IndexWrite, RowWrite, commit_storage_changes,
-    record_aborted_outcome,
+    CatalogGuard, CommitError, CommitRequest, ForeignKeyCheck, IndexWrite, RowWrite,
+    commit_storage_changes, record_aborted_outcome,
 };
 use crate::expression::{
     CatalogExpression, ExpressionPurpose, decode_catalog_expression_record,
@@ -124,6 +124,7 @@ pub struct InvocationTransaction<'db> {
     index_writes: HashMap<Vec<u8>, StagedIndexChange>,
     loaded_schemas: HashMap<[u8; 16], CatalogTableSchema>,
     loaded_indexes: HashMap<[u8; 16], Vec<CatalogIndexDefinition>>,
+    loaded_foreign_keys: HashMap<[u8; 16], ForeignKeyCheck>,
     catalog_guards: HashMap<Vec<u8>, Option<Vec<u8>>>,
     max_index_changes: usize,
     max_index_bytes: usize,
@@ -189,6 +190,7 @@ impl<'db> InvocationTransaction<'db> {
             index_writes: HashMap::new(),
             loaded_schemas: HashMap::new(),
             loaded_indexes: HashMap::new(),
+            loaded_foreign_keys: HashMap::new(),
             catalog_guards: HashMap::new(),
             max_index_changes: max_rows.saturating_mul(MAX_INDEX_CHANGES_PER_ROW),
             max_index_bytes: max_bytes,
@@ -505,6 +507,7 @@ impl<'db> InvocationTransaction<'db> {
                 });
             }
             indexes.sort_by_key(|index| index.index_id);
+            self.load_catalog_foreign_keys_for_table(schema)?;
             Ok(indexes)
         })();
         match result {
@@ -520,6 +523,176 @@ impl<'db> InvocationTransaction<'db> {
                 Err(error)
             }
         }
+    }
+
+    fn load_catalog_foreign_keys_for_table(
+        &mut self,
+        schema: &CatalogTableSchema,
+    ) -> Result<(), TransactionError> {
+        let records = self
+            .snapshot
+            .scan_catalog_family(8, MAX_CATALOG_FAMILY_SCAN)
+            .map_err(|error| TransactionError::Storage(error.to_string()))?;
+        for record in records {
+            if record.family_code != 8 || record.logical_key.len() != 19 {
+                return Err(TransactionError::CorruptCatalog);
+            }
+            if catalog_u16(&record, 2)? != 5 {
+                continue;
+            }
+            let constraint_id: [u8; 16] = record.logical_key[3..19]
+                .try_into()
+                .map_err(|_| TransactionError::CorruptCatalog)?;
+            let source_table_id = catalog_id(&record, 1)?;
+            let target_constraint_id =
+                catalog_optional_id(&record, 5)?.ok_or(TransactionError::CorruptCatalog)?;
+            if constraint_id == [0; 16] || target_constraint_id == [0; 16] {
+                return Err(TransactionError::CorruptCatalog);
+            }
+            let target_constraint_key = catalog_id_key(8, target_constraint_id);
+            let target_snapshot_record = self
+                .snapshot
+                .get_catalog_record(&target_constraint_key)
+                .map_err(|error| TransactionError::Storage(error.to_string()))?
+                .ok_or(TransactionError::CorruptCatalog)?;
+            if target_snapshot_record.family_code != 8 {
+                return Err(TransactionError::CorruptCatalog);
+            }
+            let target_table_id = catalog_id(&target_snapshot_record, 1)?;
+            if source_table_id != schema.table_id && target_table_id != schema.table_id {
+                continue;
+            }
+
+            let guarded_foreign_key = self
+                .read_catalog_record(&record.logical_key)?
+                .ok_or(TransactionError::CorruptCatalog)?;
+            let guarded_target = self
+                .read_catalog_record(&target_constraint_key)?
+                .ok_or(TransactionError::CorruptCatalog)?;
+            if guarded_foreign_key != record || guarded_target != target_snapshot_record {
+                return Err(TransactionError::CorruptCatalog);
+            }
+            let target_kind = catalog_u16(&guarded_target, 2)?;
+            let source_column_ids = catalog_id_list(&guarded_foreign_key, 3)?;
+            let target_column_ids = catalog_id_list(&guarded_target, 3)?;
+            let referenced_column_ids = catalog_id_list(&guarded_foreign_key, 6)?;
+            let target_index_id = catalog_optional_id(&guarded_target, 11)?
+                .ok_or(TransactionError::CorruptCatalog)?;
+            if !matches!(target_kind, 2 | 3)
+                || catalog_id(&guarded_target, 1)? != target_table_id
+                || source_column_ids.is_empty()
+                || source_column_ids.len() != referenced_column_ids.len()
+                || referenced_column_ids != target_column_ids
+                || source_column_ids.contains(&[0; 16])
+                || referenced_column_ids.contains(&[0; 16])
+                || source_column_ids.iter().collect::<HashSet<_>>().len() != source_column_ids.len()
+                || referenced_column_ids.iter().collect::<HashSet<_>>().len()
+                    != referenced_column_ids.len()
+                || catalog_optional_id(&guarded_foreign_key, 4)?.is_some()
+                || catalog_optional_id(&guarded_foreign_key, 11)?.is_some()
+                || catalog_u16(&guarded_foreign_key, 7)? != 1
+                || catalog_u16(&guarded_foreign_key, 8)? != 1
+                || catalog_u16(&guarded_foreign_key, 9)? != 1
+                || catalog_u16(&guarded_foreign_key, 10)? != 1
+                || catalog_optional_id(&guarded_target, 5)?.is_some()
+                || !catalog_id_list(&guarded_target, 6)?.is_empty()
+                || catalog_u16(&guarded_target, 7)? != 0
+                || catalog_u16(&guarded_target, 8)? != 0
+                || catalog_u16(&guarded_target, 9)? != 0
+                || catalog_u16(&guarded_target, 10)? != 1
+                || target_index_id == [0; 16]
+            {
+                return Err(TransactionError::CorruptCatalog);
+            }
+
+            let source_schema = if source_table_id == schema.table_id {
+                schema.clone()
+            } else {
+                self.load_catalog_table_schema(source_table_id)?
+            };
+            let target_schema = if target_table_id == schema.table_id {
+                schema.clone()
+            } else {
+                self.load_catalog_table_schema(target_table_id)?
+            };
+            let source_ordinals = source_column_ids
+                .iter()
+                .map(|id| {
+                    source_schema
+                        .column_ids
+                        .iter()
+                        .position(|column_id| column_id == id)
+                        .ok_or(TransactionError::CorruptCatalog)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let target_ordinals = referenced_column_ids
+                .iter()
+                .map(|id| {
+                    target_schema
+                        .column_ids
+                        .iter()
+                        .position(|column_id| column_id == id)
+                        .ok_or(TransactionError::CorruptCatalog)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if source_ordinals
+                .iter()
+                .zip(&target_ordinals)
+                .any(|(source, target)| {
+                    source_schema.columns[*source].scalar_type
+                        != target_schema.columns[*target].scalar_type
+                })
+            {
+                return Err(TransactionError::CorruptCatalog);
+            }
+            if target_kind == 2
+                && target_ordinals
+                    .iter()
+                    .any(|ordinal| target_schema.columns[*ordinal].nullable)
+            {
+                return Err(TransactionError::CorruptCatalog);
+            }
+
+            let target_index = self
+                .read_catalog_record(&catalog_id_key(9, target_index_id))?
+                .ok_or(TransactionError::CorruptCatalog)?;
+            if target_index.family_code != 9
+                || catalog_id(&target_index, 1)? != target_table_id
+                || catalog_id_list(&target_index, 2)? != target_column_ids
+                || catalog_u16(&target_index, 3)? != 1
+                || catalog_field(&target_index, 4)? != [1]
+                || catalog_u16(&target_index, 5)? != 1
+                || catalog_optional_id(&target_index, 6)? != Some(target_constraint_id)
+                || catalog_id(&target_index, 7)? == [0; 16]
+                || catalog_u16(&target_index, 8)? != 1
+                || catalog_u32(&target_index, 9)? != 1
+                || catalog_u64(&target_index, 10)? != target_schema.schema_version
+            {
+                return Err(TransactionError::CorruptCatalog);
+            }
+
+            let check = ForeignKeyCheck {
+                source_table_id,
+                source_schema_version: source_schema.schema_version,
+                source_schema: source_schema.columns,
+                source_ordinals,
+                target_table_id,
+                target_schema_version: target_schema.schema_version,
+                target_schema: target_schema.columns,
+                target_ordinals,
+            };
+            if let Some(existing) = self.loaded_foreign_keys.get(&constraint_id) {
+                if existing != &check {
+                    return Err(TransactionError::CorruptCatalog);
+                }
+            } else {
+                self.loaded_foreign_keys.insert(constraint_id, check);
+            }
+            if self.loaded_foreign_keys.len() > 256 {
+                return Err(TransactionError::CorruptCatalog);
+            }
+        }
+        Ok(())
     }
 
     /// Load the pinned membership graph, validate every live endpoint, and
@@ -989,6 +1162,7 @@ impl<'db> InvocationTransaction<'db> {
         schema: &CatalogTableSchema,
     ) -> Result<Vec<Expr>, TransactionError> {
         let result = (|| {
+            self.load_catalog_foreign_keys_for_table(schema)?;
             let records = self
                 .snapshot
                 .scan_catalog_family(8, MAX_CATALOG_FAMILY_SCAN)
@@ -1098,6 +1272,9 @@ impl<'db> InvocationTransaction<'db> {
                     continue;
                 }
                 if kind != 4 {
+                    if kind == 5 {
+                        continue;
+                    }
                     return Err(TransactionError::CorruptCatalog);
                 }
                 let expression_id = expression_id.ok_or(TransactionError::CorruptCatalog)?;
@@ -1886,6 +2063,7 @@ impl<'db> InvocationTransaction<'db> {
         self.index_writes.clear();
         self.loaded_schemas.clear();
         self.loaded_indexes.clear();
+        self.loaded_foreign_keys.clear();
         self.index_bytes = 0;
         self.catalog_guards.clear();
         self.aborted = true;
@@ -1944,6 +2122,7 @@ impl<'db> InvocationTransaction<'db> {
                 expected_value,
             })
             .collect::<Vec<_>>();
+        let foreign_keys = self.loaded_foreign_keys.into_values().collect::<Vec<_>>();
         let result = index_validation.and_then(|()| {
             commit_storage_changes(
                 self.database,
@@ -1953,6 +2132,7 @@ impl<'db> InvocationTransaction<'db> {
                     retention_deadline_us: self.retention_deadline_us,
                     rows: &writes,
                     indexes: &index_writes,
+                    foreign_keys: &foreign_keys,
                     catalog_guards: &catalog_guards,
                     catalog: &[],
                     audit: &[],

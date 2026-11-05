@@ -49,7 +49,7 @@ Supported constraints:
 | `PRIMARY KEY (a, b)` | At most one per table; all fields non-null and the tuple unique. |
 | `UNIQUE (a, b)` | Enforce tuple uniqueness; rows with any null key field do not conflict initially. |
 | `CHECK (expression)` | Bounded deterministic row-local expression; false fails, true or SQL unknown passes. Use `NOT NULL` separately. |
-| `FOREIGN KEY (...) REFERENCES schema.table (...)` | Referenced fields must have a compatible primary/unique key. `MATCH SIMPLE`: any null referencing field exempts that row. |
+| `FOREIGN KEY (...) REFERENCES schema.table (...)` | Referenced fields must name a primary/unique key in the same order and have identical built-in scalar types, including declared parameters. `MATCH SIMPLE`: any null referencing field exempts that row. |
 
 Constraints operate on full storage values, not redacted projections. Only built-in typed expressions are allowed; no native functions, subqueries, or external callbacks. Defaults are typed literals or fixed trusted built-ins, initially generated identity and `CURRENT_PRINCIPAL_ID()`. Defaults are applied before creation policies and constraints, but do not bypass field/row permissions. `CURRENT_PRINCIPAL_ID()` is a server value, never a parameter chosen by the query.
 
@@ -58,6 +58,8 @@ For `CHECK`, evaluate the trusted, schema-bound expression over the complete pro
 Primary, unique, and foreign-key constraints are part of the initial schema design. Defining a foreign key requires source-table ALTER/creation authority and REFERENCES authority on the target key. Foreign keys initially support only `ON UPDATE RESTRICT` and `ON DELETE RESTRICT`; cascading actions and deferrable constraints are deferred. User-defined native constraints remain forbidden.
 
 Stage-time checks can reject obvious failures early. Before committing, storage validates uniqueness and referential integrity against the latest committed state plus the transaction's final private changes under commit serialization. Validate both child insert/update and parent delete/key-change directions, including concurrent transactions. Abort the whole invocation on violation. This protects these declared constraints but does not make general snapshot-isolated transactions serializable.
+
+The initial reference-scan implementation bounds combined persisted and staged row visits across foreign-key validation to 65,536 per commit. Exceeding the limit aborts the whole invocation; implementations must not skip validation or partially commit to satisfy the budget. An indexed validation strategy may replace the reference scans while preserving the same final-state and concurrency guarantees.
 
 Constraint outcomes can reveal that a hidden conflicting/referenced key exists. Do not return protected values or row identities in diagnostics; nevertheless this logical inference is an explicit limitation of exposing globally constrained writes. Definitions and grants must be reviewed with that implication; redaction cannot eliminate it.
 

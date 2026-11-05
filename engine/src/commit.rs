@@ -8,10 +8,12 @@ use crate::metadata::{EngineMetadata, Lifecycle};
 use crate::outcome::{InvocationOutcome, OutcomeStatus};
 use crate::row_record::RowRecord;
 use crate::schema::{AUDIT, CATALOG, ENGINE_META, INDEXES, OUTCOMES, ROW_INDEXES, ROWS};
+use crate::tuple::{ColumnSchema, decode_tuple, encode_tuple};
 use redb::{Database, ReadableTable, WriteTransaction};
 use std::collections::{HashMap, HashSet};
 
 type IndexTableMap = HashMap<[u8; 16], [u8; 16]>;
+const MAX_FOREIGN_KEY_ROW_VISITS_PER_COMMIT: usize = 65_536;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RowWrite {
@@ -61,12 +63,27 @@ struct RetainedIndexMutation {
     locator: Option<[u8; crate::index_locator::LOCATOR_LENGTH]>,
 }
 
+/// A catalog-validated FK relationship and the typed column projections
+/// needed to check its final state inside the serialized redb commit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForeignKeyCheck {
+    pub source_table_id: [u8; 16],
+    pub source_schema_version: u64,
+    pub source_schema: Vec<ColumnSchema>,
+    pub source_ordinals: Vec<usize>,
+    pub target_table_id: [u8; 16],
+    pub target_schema_version: u64,
+    pub target_schema: Vec<ColumnSchema>,
+    pub target_ordinals: Vec<usize>,
+}
+
 pub struct CommitRequest<'a> {
     pub invocation_id: [u8; 16],
     pub principal_id: [u8; 16],
     pub retention_deadline_us: i64,
     pub rows: &'a [RowWrite],
     pub indexes: &'a [IndexWrite],
+    pub foreign_keys: &'a [ForeignKeyCheck],
     pub catalog_guards: &'a [CatalogGuard],
     pub catalog: &'a [CatalogWrite],
     pub audit: &'a [AuditEvent],
@@ -85,6 +102,8 @@ pub enum CommitError {
     InvalidIndex,
     IndexOverlayLimitExceeded,
     UniqueViolation,
+    ForeignKeyViolation,
+    ForeignKeyValidationLimitExceeded,
     InvalidCatalog,
     InvalidAudit,
     AuditAlreadyExists,
@@ -196,6 +215,195 @@ fn final_principal_kind(
         .value()
         .to_vec();
     decode_principal_kind(&key, &bytes)
+}
+
+fn validate_foreign_key_constraints(
+    transaction: &WriteTransaction,
+    writes: &[RowWrite],
+    foreign_keys: &[ForeignKeyCheck],
+) -> Result<(), CommitError> {
+    let mut row_visits = 0usize;
+    let write_keys = writes.iter().map(|write| write.key).collect::<HashSet<_>>();
+    for foreign_key in foreign_keys {
+        let source_touched = writes
+            .iter()
+            .any(|write| write.key[..16] == foreign_key.source_table_id);
+        let target_touched = writes
+            .iter()
+            .any(|write| write.key[..16] == foreign_key.target_table_id);
+        if !source_touched && !target_touched {
+            continue;
+        }
+        validate_foreign_key_definition(foreign_key)?;
+        let target_keys = collect_final_foreign_key_keys(
+            transaction,
+            writes,
+            foreign_key.target_table_id,
+            foreign_key.target_schema_version,
+            &foreign_key.target_schema,
+            &foreign_key.target_ordinals,
+            &foreign_key.target_ordinals,
+            &foreign_key.target_schema,
+            &mut row_visits,
+            &write_keys,
+        )?;
+        let source_keys = collect_final_foreign_key_keys(
+            transaction,
+            writes,
+            foreign_key.source_table_id,
+            foreign_key.source_schema_version,
+            &foreign_key.source_schema,
+            &foreign_key.source_ordinals,
+            &foreign_key.target_ordinals,
+            &foreign_key.target_schema,
+            &mut row_visits,
+            &write_keys,
+        )?;
+        if source_keys.iter().any(|key| !target_keys.contains(key)) {
+            return Err(CommitError::ForeignKeyViolation);
+        }
+    }
+    Ok(())
+}
+
+fn validate_foreign_key_definition(foreign_key: &ForeignKeyCheck) -> Result<(), CommitError> {
+    if foreign_key.source_table_id == [0; 16]
+        || foreign_key.target_table_id == [0; 16]
+        || foreign_key.source_schema_version == 0
+        || foreign_key.target_schema_version == 0
+        || foreign_key.source_ordinals.is_empty()
+        || foreign_key.source_ordinals.len() != foreign_key.target_ordinals.len()
+        || foreign_key
+            .source_ordinals
+            .iter()
+            .any(|ordinal| *ordinal >= foreign_key.source_schema.len())
+        || foreign_key
+            .target_ordinals
+            .iter()
+            .any(|ordinal| *ordinal >= foreign_key.target_schema.len())
+        || foreign_key
+            .source_ordinals
+            .iter()
+            .zip(&foreign_key.target_ordinals)
+            .any(|(source, target)| {
+                foreign_key.source_schema[*source].scalar_type
+                    != foreign_key.target_schema[*target].scalar_type
+            })
+        || foreign_key
+            .source_ordinals
+            .iter()
+            .collect::<HashSet<_>>()
+            .len()
+            != foreign_key.source_ordinals.len()
+        || foreign_key
+            .target_ordinals
+            .iter()
+            .collect::<HashSet<_>>()
+            .len()
+            != foreign_key.target_ordinals.len()
+    {
+        return Err(CommitError::InvalidCatalog);
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_final_foreign_key_keys(
+    transaction: &WriteTransaction,
+    writes: &[RowWrite],
+    table_id: [u8; 16],
+    schema_version: u64,
+    schema: &[ColumnSchema],
+    ordinals: &[usize],
+    comparison_ordinals: &[usize],
+    comparison_schema: &[ColumnSchema],
+    row_visits: &mut usize,
+    write_keys: &HashSet<[u8; 32]>,
+) -> Result<HashSet<Vec<u8>>, CommitError> {
+    let comparison_columns = comparison_ordinals
+        .iter()
+        .map(|ordinal| {
+            comparison_schema
+                .get(*ordinal)
+                .map(|column| ColumnSchema {
+                    scalar_type: column.scalar_type,
+                    nullable: true,
+                })
+                .ok_or(CommitError::InvalidCatalog)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut keys = HashSet::new();
+    let mut start = [0; 32];
+    start[..16].copy_from_slice(&table_id);
+    let mut end = [u8::MAX; 32];
+    end[..16].copy_from_slice(&table_id);
+    let table = transaction.open_table(ROWS).map_err(storage_error)?;
+    for entry in table
+        .range(start.as_slice()..=end.as_slice())
+        .map_err(storage_error)?
+    {
+        let (key, value) = entry.map_err(storage_error)?;
+        let row_key: [u8; 32] = key
+            .value()
+            .try_into()
+            .map_err(|_| CommitError::InvalidRow)?;
+        *row_visits = row_visits
+            .checked_add(1)
+            .ok_or(CommitError::ForeignKeyValidationLimitExceeded)?;
+        if *row_visits > MAX_FOREIGN_KEY_ROW_VISITS_PER_COMMIT {
+            return Err(CommitError::ForeignKeyValidationLimitExceeded);
+        }
+        if write_keys.contains(&row_key) {
+            continue;
+        }
+        let row = RowRecord::decode(value.value()).map_err(|_| CommitError::InvalidRow)?;
+        let tuple = decode_tuple(schema, schema_version, &row.payload)
+            .map_err(|_| CommitError::InvalidRow)?;
+        if let Some(key) = foreign_key_tuple_key(&tuple.values, ordinals, &comparison_columns)? {
+            keys.insert(key);
+        }
+    }
+    drop(table);
+
+    for write in writes.iter().filter(|write| write.key[..16] == table_id) {
+        *row_visits = row_visits
+            .checked_add(1)
+            .ok_or(CommitError::ForeignKeyValidationLimitExceeded)?;
+        if *row_visits > MAX_FOREIGN_KEY_ROW_VISITS_PER_COMMIT {
+            return Err(CommitError::ForeignKeyValidationLimitExceeded);
+        }
+        let Some(payload) = write.payload.as_deref() else {
+            continue;
+        };
+        let tuple =
+            decode_tuple(schema, schema_version, payload).map_err(|_| CommitError::InvalidRow)?;
+        if let Some(key) = foreign_key_tuple_key(&tuple.values, ordinals, &comparison_columns)? {
+            keys.insert(key);
+        }
+    }
+    Ok(keys)
+}
+
+fn foreign_key_tuple_key(
+    values: &[Option<crate::tuple::ScalarValue>],
+    ordinals: &[usize],
+    comparison_columns: &[ColumnSchema],
+) -> Result<Option<Vec<u8>>, CommitError> {
+    let projected = ordinals
+        .iter()
+        .map(|ordinal| {
+            values
+                .get(*ordinal)
+                .cloned()
+                .ok_or(CommitError::InvalidCatalog)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if projected.iter().any(Option::is_none) {
+        return Ok(None);
+    }
+    encode_tuple(comparison_columns, 1, &projected)
+        .map(Some)
+        .map_err(|_| CommitError::ForeignKeyViolation)
 }
 
 fn validate_final_membership_graph(
@@ -2382,6 +2590,7 @@ pub fn commit_rows(
             retention_deadline_us,
             rows: writes,
             indexes: &[],
+            foreign_keys: &[],
             catalog_guards: &[],
             catalog: &[],
             audit: &[],
@@ -2410,6 +2619,7 @@ pub fn commit_rows_and_indexes(
             retention_deadline_us,
             rows: writes,
             indexes: index_writes,
+            foreign_keys: &[],
             catalog_guards: &[],
             catalog: &[],
             audit: &[],
@@ -2429,6 +2639,7 @@ pub fn commit_storage_changes(
         retention_deadline_us,
         rows: writes,
         indexes: index_writes,
+        foreign_keys,
         catalog_guards,
         catalog: catalog_writes,
         audit: audit_events,
@@ -2712,6 +2923,20 @@ pub fn commit_storage_changes(
         record_aborted_outcome(database, invocation_id, principal_id, retention_deadline_us)?;
         return Err(CommitError::Conflict);
     }
+    match validate_foreign_key_constraints(&transaction, writes, foreign_keys) {
+        Ok(()) => {}
+        Err(
+            error @ (CommitError::InvalidCatalog
+            | CommitError::InvalidRow
+            | CommitError::ForeignKeyViolation
+            | CommitError::ForeignKeyValidationLimitExceeded),
+        ) => {
+            transaction.abort().map_err(storage_error)?;
+            record_aborted_outcome(database, invocation_id, principal_id, retention_deadline_us)?;
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    }
     match validate_final_membership_graph(&transaction, catalog_writes) {
         Ok(()) => {}
         Err(CommitError::InvalidCatalog) => {
@@ -2938,6 +3163,7 @@ pub fn commit_catalog_and_audit(
             retention_deadline_us,
             rows: &[],
             indexes: &[],
+            foreign_keys: &[],
             catalog_guards: &[],
             catalog: catalog_writes,
             audit: audit_events,

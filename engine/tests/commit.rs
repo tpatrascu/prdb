@@ -1,8 +1,8 @@
 use prdb_engine::audit::{AuditAction, AuditEvent, AuditResult};
 use prdb_engine::catalog::{CatalogField, WireType, encode_envelope, family_schema};
 use prdb_engine::commit::{
-    CatalogWrite, CommitError, CommitRequest, IndexWrite, RowWrite, commit_catalog_and_audit,
-    commit_rows, commit_rows_and_indexes, commit_storage_changes,
+    CatalogWrite, CommitError, CommitRequest, ForeignKeyCheck, IndexWrite, RowWrite,
+    commit_catalog_and_audit, commit_rows, commit_rows_and_indexes, commit_storage_changes,
 };
 use prdb_engine::index_locator::IndexLocator;
 use prdb_engine::metadata::{EngineMetadata, Lifecycle};
@@ -39,6 +39,13 @@ impl Drop for Fixture {
 fn key(n: u8) -> [u8; 32] {
     let mut key = [0x10; 32];
     key[31] = n;
+    key
+}
+
+fn table_row_key(table_id: [u8; 16], row_id: [u8; 16]) -> [u8; 32] {
+    let mut key = [0; 32];
+    key[..16].copy_from_slice(&table_id);
+    key[16..].copy_from_slice(&row_id);
     key
 }
 
@@ -3517,6 +3524,7 @@ fn one_redb_commit_can_publish_rows_indexes_catalog_audit_and_outcome()
                     unique: false,
                     null_exempt: false,
                 }],
+                foreign_keys: &[],
                 catalog_guards: &[],
                 catalog: &[
                     object_write_with_parent([6; 16], 4, Some([7; 16])),
@@ -3573,6 +3581,7 @@ fn one_redb_commit_can_publish_rows_indexes_catalog_audit_and_outcome()
                 unique: false,
                 null_exempt: false,
             }],
+            foreign_keys: &[],
             catalog_guards: &[],
             catalog: &[CatalogWrite {
                 key: catalog_key.clone(),
@@ -3952,6 +3961,372 @@ fn serialized_unique_index_check_rejects_duplicates_and_exempts_null_tuples()
         row(&database, &third_row)?.unwrap().payload,
         b"another-null-key"
     );
+    Ok(())
+}
+
+#[test]
+fn foreign_key_commit_checks_child_and_parent_changes_against_final_rows()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let source_table_id = [0x55; 16];
+    let target_table_id = [0x66; 16];
+    let source_key = table_row_key(source_table_id, [1; 16]);
+    let null_source_key = table_row_key(source_table_id, [3; 16]);
+    let target_key = table_row_key(target_table_id, [2; 16]);
+    let column = ColumnSchema {
+        scalar_type: ScalarType::Bytea,
+        nullable: true,
+    };
+    let foreign_key = ForeignKeyCheck {
+        source_table_id,
+        source_schema_version: 1,
+        source_schema: vec![column.clone()],
+        source_ordinals: vec![0],
+        target_table_id,
+        target_schema_version: 1,
+        target_schema: vec![column.clone()],
+        target_ordinals: vec![0],
+    };
+    let parent = encode_tuple(
+        std::slice::from_ref(&column),
+        1,
+        &[Some(ScalarValue::Bytea(b"parent".to_vec()))],
+    )?;
+    commit_rows(
+        &database,
+        id(101),
+        id(9),
+        9_999,
+        &[RowWrite {
+            key: target_key,
+            expected_version: None,
+            payload: Some(parent.clone()),
+        }],
+    )?;
+
+    let missing_parent = encode_tuple(
+        std::slice::from_ref(&column),
+        1,
+        &[Some(ScalarValue::Bytea(b"missing".to_vec()))],
+    )?;
+    assert_eq!(
+        commit_storage_changes(
+            &database,
+            CommitRequest {
+                invocation_id: id(102),
+                principal_id: id(9),
+                retention_deadline_us: 9_999,
+                rows: &[RowWrite {
+                    key: source_key,
+                    expected_version: None,
+                    payload: Some(missing_parent),
+                }],
+                indexes: &[],
+                foreign_keys: std::slice::from_ref(&foreign_key),
+                catalog_guards: &[],
+                catalog: &[],
+                audit: &[],
+            },
+        ),
+        Err(CommitError::ForeignKeyViolation)
+    );
+    assert!(row(&database, &source_key)?.is_none());
+    assert_eq!(commit_sequence(&database)?, 1);
+
+    let null_child = encode_tuple(std::slice::from_ref(&column), 1, &[None])?;
+    assert_eq!(
+        commit_storage_changes(
+            &database,
+            CommitRequest {
+                invocation_id: id(109),
+                principal_id: id(9),
+                retention_deadline_us: 9_999,
+                rows: &[RowWrite {
+                    key: null_source_key,
+                    expected_version: None,
+                    payload: Some(null_child),
+                }],
+                indexes: &[],
+                foreign_keys: std::slice::from_ref(&foreign_key),
+                catalog_guards: &[],
+                catalog: &[],
+                audit: &[],
+            },
+        )?,
+        2
+    );
+
+    let child = encode_tuple(
+        std::slice::from_ref(&column),
+        1,
+        &[Some(ScalarValue::Bytea(b"parent".to_vec()))],
+    )?;
+    assert_eq!(
+        commit_storage_changes(
+            &database,
+            CommitRequest {
+                invocation_id: id(103),
+                principal_id: id(9),
+                retention_deadline_us: 9_999,
+                rows: &[RowWrite {
+                    key: source_key,
+                    expected_version: None,
+                    payload: Some(child),
+                }],
+                indexes: &[],
+                foreign_keys: std::slice::from_ref(&foreign_key),
+                catalog_guards: &[],
+                catalog: &[],
+                audit: &[],
+            },
+        )?,
+        3
+    );
+
+    assert_eq!(
+        commit_storage_changes(
+            &database,
+            CommitRequest {
+                invocation_id: id(104),
+                principal_id: id(9),
+                retention_deadline_us: 9_999,
+                rows: &[RowWrite {
+                    key: target_key,
+                    expected_version: Some(1),
+                    payload: None,
+                }],
+                indexes: &[],
+                foreign_keys: std::slice::from_ref(&foreign_key),
+                catalog_guards: &[],
+                catalog: &[],
+                audit: &[],
+            },
+        ),
+        Err(CommitError::ForeignKeyViolation)
+    );
+    assert!(row(&database, &target_key)?.is_some());
+
+    assert_eq!(
+        commit_storage_changes(
+            &database,
+            CommitRequest {
+                invocation_id: id(105),
+                principal_id: id(9),
+                retention_deadline_us: 9_999,
+                rows: &[
+                    RowWrite {
+                        key: source_key,
+                        expected_version: Some(3),
+                        payload: None,
+                    },
+                    RowWrite {
+                        key: null_source_key,
+                        expected_version: Some(2),
+                        payload: None,
+                    },
+                    RowWrite {
+                        key: target_key,
+                        expected_version: Some(1),
+                        payload: None,
+                    },
+                ],
+                indexes: &[],
+                foreign_keys: std::slice::from_ref(&foreign_key),
+                catalog_guards: &[],
+                catalog: &[],
+                audit: &[],
+            },
+        )?,
+        4
+    );
+    assert!(row(&database, &source_key)?.is_none());
+    assert!(row(&database, &null_source_key)?.is_none());
+    assert!(row(&database, &target_key)?.is_none());
+    Ok(())
+}
+
+#[test]
+fn foreign_key_row_visit_limit_aborts_the_whole_commit() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let source_table_id = [0x55; 16];
+    let target_table_id = [0x66; 16];
+    let column = ColumnSchema {
+        scalar_type: ScalarType::Bytea,
+        nullable: true,
+    };
+    let parent = bytea_tuple(b"parent");
+    let mut initial_rows = Vec::with_capacity(256);
+    let mut updated_child_key = [0; 32];
+    for row_number in 0..128u8 {
+        let parent_key = table_row_key(target_table_id, [row_number; 16]);
+        let child_key = table_row_key(source_table_id, [row_number; 16]);
+        if row_number == 0 {
+            updated_child_key = child_key;
+        }
+        initial_rows.push(RowWrite {
+            key: parent_key,
+            expected_version: None,
+            payload: Some(parent.clone()),
+        });
+        initial_rows.push(RowWrite {
+            key: child_key,
+            expected_version: None,
+            payload: Some(parent.clone()),
+        });
+    }
+    commit_rows(&database, id(110), id(9), 9_999, &initial_rows)?;
+
+    let foreign_key = ForeignKeyCheck {
+        source_table_id,
+        source_schema_version: 1,
+        source_schema: vec![column.clone()],
+        source_ordinals: vec![0],
+        target_table_id,
+        target_schema_version: 1,
+        target_schema: vec![column],
+        target_ordinals: vec![0],
+    };
+    let foreign_keys = vec![foreign_key; 256];
+    let result = commit_storage_changes(
+        &database,
+        CommitRequest {
+            invocation_id: id(111),
+            principal_id: id(9),
+            retention_deadline_us: 9_999,
+            rows: &[RowWrite {
+                key: updated_child_key,
+                expected_version: Some(1),
+                payload: Some(parent),
+            }],
+            indexes: &[],
+            foreign_keys: &foreign_keys,
+            catalog_guards: &[],
+            catalog: &[],
+            audit: &[],
+        },
+    );
+    assert_eq!(result, Err(CommitError::ForeignKeyValidationLimitExceeded));
+    assert_eq!(commit_sequence(&database)?, 1);
+    assert_eq!(row(&database, &updated_child_key)?.unwrap().row_version, 1);
+    let read = database.begin_read()?;
+    let encoded_outcome = read
+        .open_table(prdb_engine::schema::OUTCOMES)?
+        .get(&id(111)[..])?
+        .unwrap()
+        .value()
+        .to_vec();
+    assert_eq!(
+        InvocationOutcome::decode(&encoded_outcome)?.status,
+        OutcomeStatus::Aborted
+    );
+    Ok(())
+}
+
+#[test]
+fn concurrent_foreign_key_insert_and_parent_delete_cannot_both_commit()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let source_table_id = [0x55; 16];
+    let target_table_id = [0x66; 16];
+    let source_key = table_row_key(source_table_id, [1; 16]);
+    let target_key = table_row_key(target_table_id, [2; 16]);
+    let column = ColumnSchema {
+        scalar_type: ScalarType::Bytea,
+        nullable: true,
+    };
+    let foreign_key = ForeignKeyCheck {
+        source_table_id,
+        source_schema_version: 1,
+        source_schema: vec![column.clone()],
+        source_ordinals: vec![0],
+        target_table_id,
+        target_schema_version: 1,
+        target_schema: vec![column.clone()],
+        target_ordinals: vec![0],
+    };
+    let value = encode_tuple(
+        std::slice::from_ref(&column),
+        1,
+        &[Some(ScalarValue::Bytea(b"parent".to_vec()))],
+    )?;
+    commit_rows(
+        &database,
+        id(106),
+        id(9),
+        9_999,
+        &[RowWrite {
+            key: target_key,
+            expected_version: None,
+            payload: Some(value.clone()),
+        }],
+    )?;
+    let source_write = RowWrite {
+        key: source_key,
+        expected_version: None,
+        payload: Some(value),
+    };
+    let target_write = RowWrite {
+        key: target_key,
+        expected_version: Some(1),
+        payload: None,
+    };
+    let barrier = Arc::new(Barrier::new(3));
+    let (child_result, parent_result) = std::thread::scope(|scope| {
+        let child_barrier = barrier.clone();
+        let child_fk = foreign_key.clone();
+        let child_database = &database;
+        let child = scope.spawn(move || {
+            child_barrier.wait();
+            commit_storage_changes(
+                child_database,
+                CommitRequest {
+                    invocation_id: id(107),
+                    principal_id: id(9),
+                    retention_deadline_us: 9_999,
+                    rows: std::slice::from_ref(&source_write),
+                    indexes: &[],
+                    foreign_keys: std::slice::from_ref(&child_fk),
+                    catalog_guards: &[],
+                    catalog: &[],
+                    audit: &[],
+                },
+            )
+        });
+        let parent_barrier = barrier.clone();
+        let parent_database = &database;
+        let parent = scope.spawn(move || {
+            parent_barrier.wait();
+            commit_storage_changes(
+                parent_database,
+                CommitRequest {
+                    invocation_id: id(108),
+                    principal_id: id(9),
+                    retention_deadline_us: 9_999,
+                    rows: std::slice::from_ref(&target_write),
+                    indexes: &[],
+                    foreign_keys: std::slice::from_ref(&foreign_key),
+                    catalog_guards: &[],
+                    catalog: &[],
+                    audit: &[],
+                },
+            )
+        });
+        barrier.wait();
+        (child.join().unwrap(), parent.join().unwrap())
+    });
+    assert_ne!(child_result.is_ok(), parent_result.is_ok());
+    assert!(matches!(
+        child_result.as_ref().err().or(parent_result.as_ref().err()),
+        Some(CommitError::ForeignKeyViolation)
+    ));
+    assert_eq!(commit_sequence(&database)?, 2);
+    let read = database.begin_read()?;
+    let child_exists = read.open_table(ROWS)?.get(&source_key[..])?.is_some();
+    let parent_exists = read.open_table(ROWS)?.get(&target_key[..])?.is_some();
+    assert_eq!(child_exists, parent_exists);
     Ok(())
 }
 

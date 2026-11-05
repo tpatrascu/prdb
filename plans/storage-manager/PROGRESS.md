@@ -348,3 +348,12 @@
 - Real-redb regressions construct coherent catalog object, constraint, dependency, and backing-index records, then reject the invalid primary key at commit and startup.
 - Verification: `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and all 178 integration tests across 17 targets passed in the prescribed Nix shell. `git diff --check` and changed Markdown link checks passed.
 - Remaining: foreign-key runtime enforcement and authenticated service admission remain open.
+
+## SM-5 dependency: catalog-backed foreign-key enforcement — in progress
+
+- Added invocation loading for valid catalog FOREIGN KEY definitions and their referenced PRIMARY KEY/UNIQUE constraints, backing indexes, source/target schemas, ordered columns, and exact built-in scalar types/parameters. All definitions used by the invocation are guarded for commit.
+- The serialized commit checks final source and target rows after applying the staged write set logically, enforcing MATCH SIMPLE, ON UPDATE RESTRICT, and ON DELETE RESTRICT. It checks both child and parent changes, so concurrent child insertion and parent deletion cannot both commit. Combined persisted and staged row visits are capped at 65,536 per commit; exceeding the cap aborts.
+- Real-redb regressions cover dangling child rejection, matching child insert, NULL exemption, restricted parent delete, atomic child-plus-parent delete, a barrier-synchronized child-insert/parent-delete race, and exceeding the row-visit budget with an ABORTED outcome and no row publication.
+- Verification: with Rust/Cargo 1.95.0, rustfmt 1.9.0, Clippy 0.1.95, and TinyCC 0.9.27-unstable-2025-01-06 in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and all 183 integration tests across 17 targets passed. Changed Markdown local links and `git diff --check` pass.
+- The change includes Rust implementation/tests and updates to [schema DDL](../../specs/ddl-schema.md) and [concurrency/MVCC](../../specs/concurrency-mvcc.md).
+- Remaining: authenticated service admission, catalog DDL creation/fencing for foreign keys, startup validation of persisted foreign-key integrity, and an indexed validation path for larger tables remain open.

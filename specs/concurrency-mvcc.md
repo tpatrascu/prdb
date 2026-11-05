@@ -30,7 +30,7 @@ Transactions can scan, compute, and stage writes concurrently. redb serializes i
 
 The writer coordinator is a simple initial correctness mechanism. Keep validation bounded; prepare expensive work before opening the redb write transaction and verify dependencies inside it. Do not hold the writer while waiting for executor input, IPC output, or arbitrary user code.
 
-Initial constraints follow [schema DDL](ddl-schema.md): generated or user-supplied primary keys, UNIQUE, NOT NULL, bounded row-local CHECK, and non-cascading foreign keys. Validate unique keys and both directions of foreign-key changes against the latest committed state plus final private changes inside the redb write transaction; abort on conflict/violation. Supporting these declared constraints does not eliminate arbitrary write skew. Generated identities remain opaque, and constraint outcomes can disclose hidden key existence. Deferrable constraints and native constraint callbacks are unsupported.
+Initial constraints follow [schema DDL](ddl-schema.md): generated or user-supplied primary keys, UNIQUE, NOT NULL, bounded row-local CHECK, and non-cascading foreign keys. Validate unique keys and both directions of foreign-key changes against the latest committed state plus final private changes inside the redb write transaction; abort on conflict/violation. The initial foreign-key reference scans visit at most 65,536 persisted and staged row records combined per commit; exceeding the bound aborts. Supporting these declared constraints does not eliminate arbitrary write skew. Generated identities remain opaque, and constraint outcomes can disclose hidden key existence. Deferrable constraints and native constraint callbacks are unsupported.
 
 ## Authorization Under Concurrent Writes
 
