@@ -17,9 +17,24 @@ pub enum DdlFenceError {
     TooManyWaiters,
 }
 
+impl std::fmt::Display for DdlFenceError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "DDL fence unavailable: {self:?}")
+    }
+}
+
+impl std::error::Error for DdlFenceError {}
+
 #[derive(Clone, Default)]
 pub struct DdlFenceManager {
     inner: Arc<DdlFenceInner>,
+}
+
+/// Shares one fence manager and timeout policy across coordinated commit paths.
+#[derive(Clone)]
+pub struct DdlFenceCoordinator {
+    manager: DdlFenceManager,
+    timeout: Duration,
 }
 
 #[derive(Debug, Default)]
@@ -165,6 +180,23 @@ impl DdlFenceManager {
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl DdlFenceCoordinator {
+    pub fn new(manager: DdlFenceManager, timeout: Duration) -> Self {
+        Self { manager, timeout }
+    }
+
+    pub fn acquire_shared(&self, table_ids: &[[u8; 16]]) -> Result<DdlFenceGuard, DdlFenceError> {
+        self.manager.acquire_shared(table_ids, self.timeout)
+    }
+
+    pub fn acquire_exclusive(
+        &self,
+        table_ids: &[[u8; 16]],
+    ) -> Result<DdlFenceGuard, DdlFenceError> {
+        self.manager.acquire_exclusive(table_ids, self.timeout)
     }
 }
 

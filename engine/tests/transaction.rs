@@ -7,6 +7,7 @@ use prdb_engine::catalog::{CatalogField, WireType, encode_envelope, family_schem
 use prdb_engine::commit::{
     CatalogWrite, CommitError, RowWrite, commit_catalog_and_audit, commit_rows,
 };
+use prdb_engine::ddl_fence::{DdlFenceCoordinator, DdlFenceManager};
 use prdb_engine::expression::encode_expression;
 use prdb_engine::index_key::{compose_key, derive_index_key};
 use prdb_engine::index_locator::IndexLocator;
@@ -21,6 +22,7 @@ use prdb_engine::tuple::{
 use redb::{Database, ReadableDatabase};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
+use std::time::Duration;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -2028,6 +2030,67 @@ fn failed_commit_validation_records_aborted_outcome() -> Result<(), Box<dyn std:
     ));
     let outcome = prdb_engine::outcome::lookup_outcome(&database, [43; 16], [9; 16], 1)?;
     assert_eq!(outcome.unwrap().status, OutcomeStatus::Aborted);
+    Ok(())
+}
+
+#[test]
+fn fenced_invocation_commit_waits_for_ddl_and_aborts_on_timeout()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let ddl_fences = DdlFenceManager::new();
+    let ddl_guard = ddl_fences.acquire_exclusive(&[[0x10; 16]], Duration::ZERO)?;
+    let blocked_coordinator =
+        DdlFenceCoordinator::new(ddl_fences.clone(), Duration::from_millis(10));
+    let mut blocked = InvocationTransaction::begin_with_fences(
+        &database,
+        blocked_coordinator,
+        [145; 16],
+        [9; 16],
+        9_999,
+        2,
+        64,
+    )?;
+    blocked.stage_put(id(1), b"blocked")?;
+    assert!(matches!(
+        blocked.commit(),
+        Err(TransactionError::Commit(CommitError::DdlFenceUnavailable))
+    ));
+    assert_eq!(commit_sequence(&database)?, 0);
+    assert_eq!(
+        prdb_engine::outcome::lookup_outcome(&database, [145; 16], [9; 16], 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Aborted
+    );
+    let blocked_key = {
+        let mut key = [0; 32];
+        key[..16].copy_from_slice(&id(1).table);
+        key[16..].copy_from_slice(&id(1).row);
+        key
+    };
+    assert!(
+        database
+            .begin_read()?
+            .open_table(ROWS)?
+            .get(&blocked_key[..])?
+            .is_none()
+    );
+
+    drop(ddl_guard);
+    let admitted_coordinator = DdlFenceCoordinator::new(ddl_fences, Duration::from_millis(100));
+    let mut admitted = InvocationTransaction::begin_with_fences(
+        &database,
+        admitted_coordinator,
+        [146; 16],
+        [9; 16],
+        9_999,
+        2,
+        64,
+    )?;
+    admitted.stage_put(id(2), b"after ddl")?;
+    admitted.commit()?;
+    assert_eq!(commit_sequence(&database)?, 1);
     Ok(())
 }
 

@@ -2,17 +2,21 @@ use prdb_engine::audit::{AuditAction, AuditEvent, AuditResult};
 use prdb_engine::catalog::{CatalogField, WireType, encode_envelope, family_schema};
 use prdb_engine::commit::{
     CatalogWrite, CommitError, CommitRequest, ForeignKeyCheck, IndexWrite, RowWrite,
-    commit_catalog_and_audit, commit_rows, commit_rows_and_indexes, commit_storage_changes,
+    commit_catalog_and_audit, commit_catalog_and_audit_with_fences, commit_rows,
+    commit_rows_and_indexes, commit_storage_changes,
 };
+use prdb_engine::ddl_fence::{DdlFenceCoordinator, DdlFenceManager};
 use prdb_engine::index_locator::IndexLocator;
 use prdb_engine::metadata::{EngineMetadata, Lifecycle};
 use prdb_engine::outcome::{InvocationOutcome, OutcomeStatus, lookup_outcome};
 use prdb_engine::row_record::RowRecord;
 use prdb_engine::schema::{self, CATALOG, ENGINE_META, ROWS};
+use prdb_engine::storage_manager::StorageManager;
 use prdb_engine::tuple::{ColumnSchema, ScalarType, ScalarValue, encode_tuple};
 use redb::{Database, ReadableDatabase, ReadableTableMetadata};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
+use std::time::Duration;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -1677,13 +1681,16 @@ fn adding_foreign_key_accepts_preexisting_matching_rows() -> Result<(), Box<dyn 
 {
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
+    let ddl_fences = DdlFenceManager::new();
+    let ddl_coordinator = DdlFenceCoordinator::new(ddl_fences.clone(), Duration::from_secs(1));
     let mut initial_catalog = foreign_key_catalog_writes(false, true);
     initial_catalog.retain(|write| {
         write.key != id_catalog_key(8, id(86)) && write.key != id_catalog_key(2, id(86))
     });
     assert_eq!(
-        commit_catalog_and_audit(
+        commit_catalog_and_audit_with_fences(
             &database,
+            &ddl_coordinator,
             id(117),
             id(9),
             9_999,
@@ -1784,18 +1791,63 @@ fn adding_foreign_key_accepts_preexisting_matching_rows() -> Result<(), Box<dyn 
         source_table,
         target_table,
     ];
+    let target_writer = ddl_fences
+        .acquire_shared(&[id(81)], Duration::ZERO)
+        .unwrap();
+    let no_wait_coordinator = DdlFenceCoordinator::new(ddl_fences.clone(), Duration::ZERO);
     assert_eq!(
-        commit_catalog_and_audit(
+        commit_catalog_and_audit_with_fences(
             &database,
+            &no_wait_coordinator,
             id(120),
             id(9),
             9_999,
             &new_foreign_key,
             &[audit_event(120)],
+        ),
+        Err(CommitError::DdlFenceUnavailable)
+    );
+    drop(target_writer);
+    assert_eq!(
+        commit_catalog_and_audit_with_fences(
+            &database,
+            &ddl_coordinator,
+            id(121),
+            id(9),
+            9_999,
+            &new_foreign_key,
+            &[audit_event(121)],
         )?,
         3
     );
     assert_eq!(commit_sequence(&database)?, 3);
+    Ok(())
+}
+
+#[test]
+fn storage_manager_routes_invocations_and_catalog_commits_through_shared_fences()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100));
+    assert_eq!(
+        storage.commit_catalog_and_audit(id(190), id(9), 9_999, &[], &[audit_event(190)],)?,
+        1
+    );
+
+    let mut invocation = storage.begin_invocation(id(191), id(9), 9_999, 2, 64)?;
+    let row_id = prdb_engine::overlay::RowId {
+        table: id(10),
+        row: id(11),
+    };
+    invocation.stage_put(row_id, b"coordinated")?;
+    assert_eq!(invocation.commit()?, 2);
+    assert_eq!(
+        row(&database, &table_row_key(id(10), id(11)))?
+            .unwrap()
+            .payload,
+        b"coordinated"
+    );
     Ok(())
 }
 

@@ -10,6 +10,7 @@ use crate::commit::{
     CatalogGuard, CommitError, CommitRequest, ForeignKeyCheck, IndexWrite, RowWrite,
     commit_storage_changes, record_aborted_outcome,
 };
+use crate::ddl_fence::DdlFenceCoordinator;
 use crate::expression::{
     CatalogExpression, ExpressionPurpose, decode_catalog_expression_record,
     validate_expression_binding,
@@ -132,13 +133,59 @@ pub struct InvocationTransaction<'db> {
     invocation_id: [u8; 16],
     principal_id: [u8; 16],
     retention_deadline_us: i64,
+    ddl_fences: Option<DdlFenceCoordinator>,
     aborted: bool,
     outcome_recorded: bool,
 }
 
 impl<'db> InvocationTransaction<'db> {
+    /// Begin an uncoordinated invocation for trusted low-level use. Runtime
+    /// callers should use `StorageManager::begin_invocation` so commits share
+    /// table fences with DDL.
     pub fn begin(
         database: &'db Database,
+        invocation_id: [u8; 16],
+        principal_id: [u8; 16],
+        retention_deadline_us: i64,
+        max_rows: usize,
+        max_bytes: usize,
+    ) -> Result<Self, TransactionError> {
+        Self::begin_inner(
+            database,
+            None,
+            invocation_id,
+            principal_id,
+            retention_deadline_us,
+            max_rows,
+            max_bytes,
+        )
+    }
+
+    /// Begin an invocation that acquires shared table fences for its staged
+    /// write set while publishing the final commit.
+    pub fn begin_with_fences(
+        database: &'db Database,
+        ddl_fences: DdlFenceCoordinator,
+        invocation_id: [u8; 16],
+        principal_id: [u8; 16],
+        retention_deadline_us: i64,
+        max_rows: usize,
+        max_bytes: usize,
+    ) -> Result<Self, TransactionError> {
+        Self::begin_inner(
+            database,
+            Some(ddl_fences),
+            invocation_id,
+            principal_id,
+            retention_deadline_us,
+            max_rows,
+            max_bytes,
+        )
+    }
+
+    fn begin_inner(
+        database: &'db Database,
+        ddl_fences: Option<DdlFenceCoordinator>,
         invocation_id: [u8; 16],
         principal_id: [u8; 16],
         retention_deadline_us: i64,
@@ -198,6 +245,7 @@ impl<'db> InvocationTransaction<'db> {
             invocation_id,
             principal_id,
             retention_deadline_us,
+            ddl_fences,
             aborted: false,
             outcome_recorded: false,
         })
@@ -2092,6 +2140,7 @@ impl<'db> InvocationTransaction<'db> {
             }
             return Err(TransactionError::Aborted);
         }
+        let ddl_fences = self.ddl_fences.clone();
         let entries = self.overlay.into_entries()?;
         let mut writes = Vec::with_capacity(entries.len());
         for (id, payload) in entries {
@@ -2123,7 +2172,24 @@ impl<'db> InvocationTransaction<'db> {
             })
             .collect::<Vec<_>>();
         let foreign_keys = self.loaded_foreign_keys.into_values().collect::<Vec<_>>();
+        let table_ids = writes
+            .iter()
+            .map(|write| {
+                write.key[..16]
+                    .try_into()
+                    .expect("row keys have fixed table ID width")
+            })
+            .collect::<Vec<[u8; 16]>>();
         let result = index_validation.and_then(|()| {
+            let _fence_guard = if let Some(ddl_fences) = &ddl_fences {
+                Some(
+                    ddl_fences
+                        .acquire_shared(&table_ids)
+                        .map_err(|_| CommitError::DdlFenceUnavailable)?,
+                )
+            } else {
+                None
+            };
             commit_storage_changes(
                 self.database,
                 CommitRequest {

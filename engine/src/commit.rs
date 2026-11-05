@@ -4,6 +4,7 @@ use crate::authorization::{MAX_MEMBERSHIP_EDGES, Membership, validate_membership
 use crate::catalog::{
     decode_builtin_scalar_type, decode_registered_envelope, validate_builtin_type_profile,
 };
+use crate::ddl_fence::DdlFenceCoordinator;
 use crate::expression::decode_catalog_expression_record;
 use crate::index_locator::IndexLocator;
 use crate::metadata::{EngineMetadata, Lifecycle};
@@ -11,7 +12,7 @@ use crate::outcome::{InvocationOutcome, OutcomeStatus};
 use crate::row_record::RowRecord;
 use crate::schema::{AUDIT, CATALOG, ENGINE_META, INDEXES, OUTCOMES, ROW_INDEXES, ROWS};
 use crate::tuple::{ColumnSchema, decode_tuple, encode_tuple};
-use redb::{Database, ReadableTable, WriteTransaction};
+use redb::{Database, ReadOnlyTable, ReadableDatabase, ReadableTable, WriteTransaction};
 use std::collections::{HashMap, HashSet};
 
 type IndexTableMap = HashMap<[u8; 16], [u8; 16]>;
@@ -114,6 +115,7 @@ pub enum CommitError {
     UniqueViolation,
     ForeignKeyViolation,
     ForeignKeyValidationLimitExceeded,
+    DdlFenceUnavailable,
     InvalidCatalog,
     InvalidAudit,
     AuditAlreadyExists,
@@ -2948,7 +2950,9 @@ pub fn commit_rows_and_indexes(
 }
 
 /// Publish every record family participating in one operation through one
-/// Immediate/two-phase redb transaction.
+/// Immediate/two-phase redb transaction. This low-level function does not
+/// acquire DDL fences; coordinated runtime paths hold the affected shared or
+/// exclusive guards before calling it.
 pub fn commit_storage_changes(
     database: &Database,
     request: CommitRequest<'_>,
@@ -3493,7 +3497,9 @@ pub fn commit_storage_changes(
 /// Atomically publish catalog changes and required audit events. Membership
 /// graphs, dependency endpoints, and changed constraint references are checked
 /// at commit. DDL authority checks still belong to the authenticated
-/// administrative access path.
+/// administrative access path. This low-level helper does not acquire DDL
+/// fences; coordinated control paths should use
+/// [`commit_catalog_and_audit_with_fences`].
 pub fn commit_catalog_and_audit(
     database: &Database,
     invocation_id: [u8; 16],
@@ -3516,6 +3522,278 @@ pub fn commit_catalog_and_audit(
             audit: audit_events,
         },
     )
+}
+
+/// Publish catalog changes while exclusively fencing every affected table.
+/// The same `DdlFenceCoordinator` must be passed to invocation commits through
+/// `InvocationTransaction::begin_with_fences`.
+pub fn commit_catalog_and_audit_with_fences(
+    database: &Database,
+    ddl_fences: &DdlFenceCoordinator,
+    invocation_id: [u8; 16],
+    principal_id: [u8; 16],
+    retention_deadline_us: i64,
+    catalog_writes: &[CatalogWrite],
+    audit_events: &[AuditEvent],
+) -> Result<u64, CommitError> {
+    let affected_tables = match affected_table_ids_for_catalog_writes(database, catalog_writes) {
+        Ok(tables) => tables,
+        Err(error) => {
+            if !matches!(error, CommitError::Storage(_)) {
+                record_aborted_outcome(
+                    database,
+                    invocation_id,
+                    principal_id,
+                    retention_deadline_us,
+                )?;
+            }
+            return Err(error);
+        }
+    };
+    let _fence_guard = match ddl_fences.acquire_exclusive(&affected_tables) {
+        Ok(guard) => guard,
+        Err(_) => {
+            record_aborted_outcome(database, invocation_id, principal_id, retention_deadline_us)?;
+            return Err(CommitError::DdlFenceUnavailable);
+        }
+    };
+    commit_catalog_and_audit(
+        database,
+        invocation_id,
+        principal_id,
+        retention_deadline_us,
+        catalog_writes,
+        audit_events,
+    )
+}
+
+fn affected_table_ids_for_catalog_writes(
+    database: &Database,
+    writes: &[CatalogWrite],
+) -> Result<Vec<[u8; 16]>, CommitError> {
+    let read = database.begin_read().map_err(storage_error)?;
+    let catalog = read.open_table(CATALOG).map_err(storage_error)?;
+    let mut affected = HashSet::new();
+    let mut changed_expressions = HashSet::new();
+    for write in writes {
+        let family = u16::from_be_bytes(
+            write
+                .key
+                .get(..2)
+                .ok_or(CommitError::InvalidCatalog)?
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?,
+        );
+        let current = catalog
+            .get(write.key.as_slice())
+            .map_err(storage_error)?
+            .map(|value| value.value().to_vec());
+        if current == write.payload {
+            continue;
+        }
+        match family {
+            5 => {
+                if write.key.len() != 19 {
+                    return Err(CommitError::InvalidCatalog);
+                }
+                affected.insert(
+                    write.key[3..19]
+                        .try_into()
+                        .map_err(|_| CommitError::InvalidCatalog)?,
+                );
+            }
+            6 => {
+                for bytes in [current.as_deref(), write.payload.as_deref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    affected.insert(column_table_id(&write.key, bytes)?);
+                }
+            }
+            8 => {
+                for bytes in [current.as_deref(), write.payload.as_deref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    affected.insert(constraint_table_id(&write.key, bytes)?);
+                    if u16::from_le_bytes(
+                        catalog_field_bytes(&write.key, bytes, 8, 2)?
+                            .try_into()
+                            .map_err(|_| CommitError::InvalidCatalog)?,
+                    ) == 5
+                    {
+                        let target_id: [u8; 16] = catalog_field_bytes(&write.key, bytes, 8, 5)?
+                            .try_into()
+                            .map_err(|_| CommitError::InvalidCatalog)?;
+                        let target_key = id_catalog_key(8, target_id);
+                        if let Some(target_bytes) =
+                            read_final_catalog_value(&catalog, writes, &target_key)?
+                        {
+                            affected.insert(constraint_table_id(&target_key, &target_bytes)?);
+                        }
+                    }
+                }
+            }
+            9 => {
+                for bytes in [current.as_deref(), write.payload.as_deref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    affected.insert(decode_index_definition(&write.key, bytes)?.1);
+                }
+            }
+            13 => {
+                for bytes in [current.as_deref(), write.payload.as_deref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    affected.insert(policy_table_id(&write.key, bytes)?);
+                }
+            }
+            14 => {
+                if write.key.len() != 39 {
+                    return Err(CommitError::InvalidCatalog);
+                }
+                let policy_id: [u8; 16] = write.key[3..19]
+                    .try_into()
+                    .map_err(|_| CommitError::InvalidCatalog)?;
+                let policy_key = id_catalog_key(13, policy_id);
+                if let Some(policy_bytes) = read_final_catalog_value(&catalog, writes, &policy_key)?
+                {
+                    affected.insert(policy_table_id(&policy_key, &policy_bytes)?);
+                }
+            }
+            7 => {
+                if write.key.len() != 19 {
+                    return Err(CommitError::InvalidCatalog);
+                }
+                changed_expressions.insert(
+                    write.key[3..19]
+                        .try_into()
+                        .map_err(|_| CommitError::InvalidCatalog)?,
+                );
+            }
+            _ => {}
+        }
+    }
+    if !changed_expressions.is_empty() {
+        add_expression_dependent_tables(&catalog, writes, &changed_expressions, &mut affected)?;
+    }
+    let mut affected = affected.into_iter().collect::<Vec<_>>();
+    affected.sort_unstable();
+    Ok(affected)
+}
+
+fn read_final_catalog_value(
+    catalog: &ReadOnlyTable<&[u8], &[u8]>,
+    writes: &[CatalogWrite],
+    key: &[u8],
+) -> Result<Option<Vec<u8>>, CommitError> {
+    if let Some(write) = writes.iter().find(|write| write.key == key) {
+        return Ok(write.payload.clone());
+    }
+    Ok(catalog
+        .get(key)
+        .map_err(storage_error)?
+        .map(|value| value.value().to_vec()))
+}
+
+fn add_expression_dependent_tables(
+    catalog: &ReadOnlyTable<&[u8], &[u8]>,
+    writes: &[CatalogWrite],
+    expression_ids: &HashSet<[u8; 16]>,
+    affected: &mut HashSet<[u8; 16]>,
+) -> Result<(), CommitError> {
+    for family in [6u16, 8, 13] {
+        let prefix = family.to_be_bytes();
+        let tags: &[u16] = match family {
+            6 => &[7, 10],
+            8 => &[4],
+            13 => &[5, 6],
+            _ => unreachable!(),
+        };
+        let mut count = 0usize;
+        for entry in catalog.range(prefix.as_slice()..).map_err(storage_error)? {
+            let (key, value) = entry.map_err(storage_error)?;
+            let key = key.value();
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            if writes.iter().any(|write| write.key == key) {
+                continue;
+            }
+            count += 1;
+            if count > crate::snapshot::MAX_CATALOG_FAMILY_SCAN {
+                return Err(CommitError::InvalidCatalog);
+            }
+            if catalog_record_references_expression(
+                key,
+                value.value(),
+                family,
+                tags,
+                expression_ids,
+            )? {
+                affected.insert(match family {
+                    6 => column_table_id(key, value.value())?,
+                    8 => constraint_table_id(key, value.value())?,
+                    13 => policy_table_id(key, value.value())?,
+                    _ => unreachable!(),
+                });
+            }
+        }
+        for write in writes.iter().filter(|write| write.key.starts_with(&prefix)) {
+            let Some(bytes) = write.payload.as_deref() else {
+                continue;
+            };
+            count += 1;
+            if count > crate::snapshot::MAX_CATALOG_FAMILY_SCAN {
+                return Err(CommitError::InvalidCatalog);
+            }
+            if catalog_record_references_expression(
+                &write.key,
+                bytes,
+                family,
+                tags,
+                expression_ids,
+            )? {
+                affected.insert(match family {
+                    6 => column_table_id(&write.key, bytes)?,
+                    8 => constraint_table_id(&write.key, bytes)?,
+                    13 => policy_table_id(&write.key, bytes)?,
+                    _ => unreachable!(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn catalog_record_references_expression(
+    key: &[u8],
+    bytes: &[u8],
+    family: u16,
+    tags: &[u16],
+    expression_ids: &HashSet<[u8; 16]>,
+) -> Result<bool, CommitError> {
+    let record = decode_registered_envelope(bytes).map_err(|_| CommitError::InvalidCatalog)?;
+    if record.family_code != family || record.logical_key != key {
+        return Err(CommitError::InvalidCatalog);
+    }
+    for field in record
+        .fields
+        .iter()
+        .filter(|field| tags.contains(&field.tag))
+    {
+        let id: [u8; 16] = field
+            .payload
+            .as_slice()
+            .try_into()
+            .map_err(|_| CommitError::InvalidCatalog)?;
+        if expression_ids.contains(&id) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub(crate) fn record_aborted_outcome(
