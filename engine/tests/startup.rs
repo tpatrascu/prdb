@@ -630,6 +630,63 @@ fn principal_record_with_name(
     (key, payload)
 }
 
+fn credential_verifier_record(token_id: [u8; 16], user_id: [u8; 16]) -> (Vec<u8>, Vec<u8>) {
+    let mut key = 16u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&token_id);
+    let fields = [
+        CatalogField {
+            tag: 1,
+            wire_type: WireType::Id,
+            payload: user_id.to_vec(),
+        },
+        CatalogField {
+            tag: 2,
+            wire_type: WireType::U16,
+            payload: 1u16.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 3,
+            wire_type: WireType::U16,
+            payload: 1u16.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 4,
+            wire_type: WireType::Bytes,
+            payload: b"synthetic-verifier".to_vec(),
+        },
+        CatalogField {
+            tag: 5,
+            wire_type: WireType::I64,
+            payload: 1i64.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 6,
+            wire_type: WireType::I64,
+            payload: 2i64.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 7,
+            wire_type: WireType::Bool,
+            payload: vec![0],
+        },
+        CatalogField {
+            tag: 9,
+            wire_type: WireType::Text,
+            payload: b"synthetic".to_vec(),
+        },
+        CatalogField {
+            tag: 10,
+            wire_type: WireType::U64,
+            payload: 1u64.to_le_bytes().to_vec(),
+        },
+    ];
+    (
+        key.clone(),
+        encode_envelope(&family_schema(16).unwrap(), &key, &fields).unwrap(),
+    )
+}
+
 fn column_record(id: [u8; 16], name: &str) -> (Vec<u8>, Vec<u8>) {
     column_record_for_table(id, [0x55; 16], name)
 }
@@ -1072,6 +1129,27 @@ fn rejects_noncanonical_bootstrap_mappings() {
             "corrupt mapping case: {corrupt}"
         );
     }
+}
+
+#[test]
+fn rejects_credential_verifiers_without_a_supported_profile() {
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    let user_id = [70; 16];
+    let (user_key, user_value) = principal_record(user_id, 1, true, 1);
+    let (object_key, object_value) = object_record(user_id, 8);
+    let (verifier_key, verifier_value) = credential_verifier_record([71; 16], user_id);
+    for (key, value) in [
+        (user_key, user_value),
+        (object_key, object_value),
+        (verifier_key, verifier_value),
+    ] {
+        put_catalog(&database, &key, &value);
+    }
+    assert_eq!(
+        validate_persisted_records(&database),
+        Err(StartupError::InvalidCatalog),
+    );
 }
 
 #[test]

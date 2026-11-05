@@ -2218,6 +2218,9 @@ pub fn commit_storage_changes(
     for write in catalog_writes {
         if !unique_catalog.insert(write.key.as_slice())
             || (write.expected_value.is_none() && write.payload.is_none())
+            || (write.payload.is_some()
+                && write.key.len() >= 2
+                && u16::from_be_bytes([write.key[0], write.key[1]]) == 16)
         {
             return Err(CommitError::InvalidCatalog);
         }

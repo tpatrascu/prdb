@@ -196,6 +196,9 @@ fn validate_catalog(
         if record.logical_key != key || record.family_code as usize != family_code {
             return Err(StartupError::InvalidCatalog);
         }
+        if record.family_code == 16 {
+            return Err(StartupError::InvalidCatalog);
+        }
         if record.family_code == 1 {
             if key.len() != 19
                 || database_id

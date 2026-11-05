@@ -1657,6 +1657,82 @@ fn catalog_commit_rejects_indexes_with_missing_or_mistabled_columns()
 }
 
 #[test]
+fn catalog_commit_rejects_credential_verifiers_without_a_supported_profile()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let key = id_catalog_key(16, id(71));
+    let payload = encode_envelope(
+        &family_schema(16).unwrap(),
+        &key,
+        &[
+            CatalogField {
+                tag: 1,
+                wire_type: WireType::Id,
+                payload: id(70).to_vec(),
+            },
+            CatalogField {
+                tag: 2,
+                wire_type: WireType::U16,
+                payload: 1u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 3,
+                wire_type: WireType::U16,
+                payload: 1u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 4,
+                wire_type: WireType::Bytes,
+                payload: b"synthetic-verifier".to_vec(),
+            },
+            CatalogField {
+                tag: 5,
+                wire_type: WireType::I64,
+                payload: 1i64.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 6,
+                wire_type: WireType::I64,
+                payload: 2i64.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 7,
+                wire_type: WireType::Bool,
+                payload: vec![0],
+            },
+            CatalogField {
+                tag: 9,
+                wire_type: WireType::Text,
+                payload: b"synthetic".to_vec(),
+            },
+            CatalogField {
+                tag: 10,
+                wire_type: WireType::U64,
+                payload: 1u64.to_le_bytes().to_vec(),
+            },
+        ],
+    )?;
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(72),
+            id(9),
+            9_999,
+            &[CatalogWrite {
+                key,
+                expected_value: None,
+                payload: Some(payload),
+            }],
+            &[audit_event(72)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+    assert_eq!(commit_sequence(&database)?, 0);
+    Ok(())
+}
+
+#[test]
 fn catalog_commit_requires_principal_object_identity_and_kind()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
