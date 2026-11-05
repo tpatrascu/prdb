@@ -613,20 +613,23 @@ fn validate_final_dependency_edges(
     Ok(())
 }
 
-/// Require each final index definition to have an object row of kind INDEX.
-fn validate_final_index_object_mappings(
+/// Require every surviving typed catalog row affected by a batch to retain a
+/// same-ID object row of the kind specified by its family.
+fn validate_final_typed_object_mappings(
     transaction: &WriteTransaction,
     catalog_writes: &[CatalogWrite],
 ) -> Result<(), CommitError> {
+    const TYPED_FAMILIES: [u16; 9] = [3, 4, 5, 6, 7, 8, 9, 10, 13];
+    let is_relevant_family = |family: u16| family == 2 || TYPED_FAMILIES.contains(&family);
     if !catalog_writes.iter().any(|write| {
-        write.key.len() >= 2 && matches!(u16::from_be_bytes([write.key[0], write.key[1]]), 2 | 9)
+        write.key.len() >= 2 && is_relevant_family(u16::from_be_bytes([write.key[0], write.key[1]]))
     }) {
         return Ok(());
     }
     let table = transaction.open_table(CATALOG).map_err(storage_error)?;
     let mut changed_ids = HashSet::<[u8; 16]>::new();
     for write in catalog_writes.iter().filter(|write| {
-        write.key.len() >= 2 && matches!(u16::from_be_bytes([write.key[0], write.key[1]]), 2 | 9)
+        write.key.len() >= 2 && is_relevant_family(u16::from_be_bytes([write.key[0], write.key[1]]))
     }) {
         if write.key.len() != 19 {
             return Err(CommitError::InvalidCatalog);
@@ -638,84 +641,54 @@ fn validate_final_index_object_mappings(
     }
 
     for object_id in changed_ids {
-        let index_key = id_catalog_key(9, object_id);
-        let Some(index_bytes) = final_catalog_value(&table, catalog_writes, &index_key)? else {
-            continue;
-        };
-        decode_catalog_record(&index_key, &index_bytes)?;
-
         let object_key = id_catalog_key(2, object_id);
-        let Some(object_bytes) = final_catalog_value(&table, catalog_writes, &object_key)? else {
-            return Err(CommitError::InvalidCatalog);
-        };
-        let kind_bytes = catalog_field_bytes(&object_key, &object_bytes, 2, 1)?;
-        let kind = u16::from_le_bytes(
-            kind_bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| CommitError::InvalidCatalog)?,
-        );
-        if kind != 7 {
-            return Err(CommitError::InvalidCatalog);
-        }
-    }
-    Ok(())
-}
+        let object_bytes = final_catalog_value(&table, catalog_writes, &object_key)?;
+        let object_kind = object_bytes
+            .as_deref()
+            .map(|bytes| catalog_field_bytes(&object_key, bytes, 2, 1))
+            .transpose()?
+            .map(|bytes| -> Result<u16, CommitError> {
+                let bytes = bytes
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| CommitError::InvalidCatalog)?;
+                Ok(u16::from_le_bytes(bytes))
+            })
+            .transpose()?;
 
-/// Require changed principal rows to retain an object row with the matching
-/// USER or ROLE kind in the transaction's final catalog.
-fn validate_final_principal_object_mappings(
-    transaction: &WriteTransaction,
-    catalog_writes: &[CatalogWrite],
-) -> Result<(), CommitError> {
-    if !catalog_writes.iter().any(|write| {
-        write.key.len() >= 2 && matches!(u16::from_be_bytes([write.key[0], write.key[1]]), 2 | 10)
-    }) {
-        return Ok(());
-    }
-    let table = transaction.open_table(CATALOG).map_err(storage_error)?;
-    let mut changed_ids = HashSet::<[u8; 16]>::new();
-    for write in catalog_writes.iter().filter(|write| {
-        write.key.len() >= 2 && matches!(u16::from_be_bytes([write.key[0], write.key[1]]), 2 | 10)
-    }) {
-        if write.key.len() != 19 {
-            return Err(CommitError::InvalidCatalog);
-        }
-        let principal_id = write.key[3..19]
-            .try_into()
-            .map_err(|_| CommitError::InvalidCatalog)?;
-        changed_ids.insert(principal_id);
-    }
-
-    for principal_id in changed_ids {
-        let principal_key = id_catalog_key(10, principal_id);
-        let Some(principal_bytes) = final_catalog_value(&table, catalog_writes, &principal_key)?
-        else {
-            continue;
-        };
-        let principal_kind = u16::from_le_bytes(
-            catalog_field_bytes(&principal_key, &principal_bytes, 10, 1)?
-                .as_slice()
-                .try_into()
-                .map_err(|_| CommitError::InvalidCatalog)?,
-        );
-        let object_kind = match principal_kind {
-            1 => 8,
-            2 => 9,
-            _ => return Err(CommitError::InvalidCatalog),
-        };
-        let object_key = id_catalog_key(2, principal_id);
-        let Some(object_bytes) = final_catalog_value(&table, catalog_writes, &object_key)? else {
-            return Err(CommitError::InvalidCatalog);
-        };
-        let actual_object_kind = u16::from_le_bytes(
-            catalog_field_bytes(&object_key, &object_bytes, 2, 1)?
-                .as_slice()
-                .try_into()
-                .map_err(|_| CommitError::InvalidCatalog)?,
-        );
-        if actual_object_kind != object_kind {
-            return Err(CommitError::InvalidCatalog);
+        for family in TYPED_FAMILIES {
+            let typed_key = id_catalog_key(family, object_id);
+            let Some(typed_bytes) = final_catalog_value(&table, catalog_writes, &typed_key)? else {
+                continue;
+            };
+            decode_catalog_record(&typed_key, &typed_bytes)?;
+            let expected_kind = match family {
+                3 => 1,
+                4 => 2,
+                5 => 3,
+                6 => 4,
+                7 => 5,
+                8 => 6,
+                9 => 7,
+                10 => {
+                    let principal_kind = u16::from_le_bytes(
+                        catalog_field_bytes(&typed_key, &typed_bytes, family, 1)?
+                            .as_slice()
+                            .try_into()
+                            .map_err(|_| CommitError::InvalidCatalog)?,
+                    );
+                    match principal_kind {
+                        1 => 8,
+                        2 => 9,
+                        _ => return Err(CommitError::InvalidCatalog),
+                    }
+                }
+                13 => 10,
+                _ => unreachable!(),
+            };
+            if object_kind != Some(expected_kind) {
+                return Err(CommitError::InvalidCatalog);
+            }
         }
     }
     Ok(())
@@ -1824,16 +1797,7 @@ pub fn commit_storage_changes(
         }
         Err(error) => return Err(error),
     }
-    match validate_final_index_object_mappings(&transaction, catalog_writes) {
-        Ok(()) => {}
-        Err(CommitError::InvalidCatalog) => {
-            transaction.abort().map_err(storage_error)?;
-            record_aborted_outcome(database, invocation_id, principal_id, retention_deadline_us)?;
-            return Err(CommitError::InvalidCatalog);
-        }
-        Err(error) => return Err(error),
-    }
-    match validate_final_principal_object_mappings(&transaction, catalog_writes) {
+    match validate_final_typed_object_mappings(&transaction, catalog_writes) {
         Ok(()) => {}
         Err(CommitError::InvalidCatalog) => {
             transaction.abort().map_err(storage_error)?;

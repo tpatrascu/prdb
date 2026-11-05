@@ -310,6 +310,27 @@ fn principal_object_write(principal_id: [u8; 16], principal_kind: u16) -> Catalo
     object_write(principal_id, object_kind)
 }
 
+fn schema_write(schema_id: [u8; 16]) -> CatalogWrite {
+    let mut key = 3u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&schema_id);
+    let payload = encode_envelope(
+        &family_schema(3).unwrap(),
+        &key,
+        &[CatalogField {
+            tag: 1,
+            wire_type: WireType::Ids,
+            payload: 0u32.to_le_bytes().to_vec(),
+        }],
+    )
+    .unwrap();
+    CatalogWrite {
+        key,
+        expected_value: None,
+        payload: Some(payload),
+    }
+}
+
 fn dependency_write(dependent_id: [u8; 16], referenced_id: [u8; 16], kind: u16) -> CatalogWrite {
     let mut key = 15u16.to_be_bytes().to_vec();
     key.push(1);
@@ -722,6 +743,58 @@ fn catalog_commit_requires_principal_object_identity_and_kind()
     Ok(())
 }
 
+#[test]
+fn catalog_commit_requires_schema_object_identity_and_kind()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let schema = schema_write(id(73));
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(73),
+            id(9),
+            9_999,
+            std::slice::from_ref(&schema),
+            &[audit_event(73)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+
+    let object = object_write(id(73), 1);
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(74),
+            id(9),
+            9_999,
+            &[schema.clone(), object.clone()],
+            &[audit_event(74)],
+        )?,
+        1
+    );
+
+    let wrong_kind = object_write(id(73), 2);
+    let wrong_kind_update = CatalogWrite {
+        key: wrong_kind.key,
+        expected_value: object.payload.clone(),
+        payload: wrong_kind.payload,
+    };
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(75),
+            id(9),
+            9_999,
+            &[wrong_kind_update],
+            &[audit_event(75)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+    assert_eq!(commit_sequence(&database)?, 1);
+    Ok(())
+}
+
 fn principal_write_with_epoch(principal_id: [u8; 16], kind: u16, epoch: u64) -> CatalogWrite {
     let mut key = 10u16.to_be_bytes().to_vec();
     key.push(1);
@@ -847,6 +920,12 @@ fn policy_target_limit_checks_final_set_and_allows_replacements()
             let mut catalog = write.open_table(prdb_engine::schema::CATALOG)?;
             catalog.insert(table_key.as_slice(), table_payload(1).as_slice())?;
             catalog.insert(policy_key.as_slice(), policy_payload(1).as_slice())?;
+            for object in [object_write(table_id, 3), object_write(policy_id, 10)] {
+                catalog.insert(
+                    object.key.as_slice(),
+                    object.payload.as_ref().unwrap().as_slice(),
+                )?;
+            }
             let recipient = target(1, id(9));
             catalog.insert(
                 recipient.key.as_slice(),

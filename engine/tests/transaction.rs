@@ -190,7 +190,11 @@ fn principal_object_record_for(principal_id: [u8; 16], principal_kind: u16) -> (
         2 => 9,
         _ => panic!("unsupported test principal kind"),
     };
-    let key = catalog_id_key(2, principal_id);
+    object_catalog_record_for(principal_id, object_kind)
+}
+
+fn object_catalog_record_for(object_id: [u8; 16], object_kind: u16) -> (Vec<u8>, Vec<u8>) {
+    let key = catalog_id_key(2, object_id);
     let fields = [
         CatalogField {
             tag: 1,
@@ -200,7 +204,7 @@ fn principal_object_record_for(principal_id: [u8; 16], principal_kind: u16) -> (
         CatalogField {
             tag: 3,
             wire_type: WireType::Text,
-            payload: format!("object_{}", principal_id[0]).into_bytes(),
+            payload: format!("object_{}", object_id[0]).into_bytes(),
         },
         CatalogField {
             tag: 4,
@@ -223,6 +227,15 @@ fn principal_object_record_for(principal_id: [u8; 16], principal_kind: u16) -> (
         key.clone(),
         encode_envelope(&schema, &key, &fields).unwrap(),
     )
+}
+
+fn object_catalog_write_for(object_id: [u8; 16], object_kind: u16) -> CatalogWrite {
+    let (key, payload) = object_catalog_record_for(object_id, object_kind);
+    CatalogWrite {
+        key,
+        expected_value: None,
+        payload: Some(payload),
+    }
 }
 
 fn membership_catalog_record(
@@ -989,6 +1002,7 @@ fn catalog_expression_reads_are_decoded_and_guarded_at_commit()
     };
     let original =
         expression_catalog_payload(expression_id, &Expr::Literal(Some(ScalarValue::Integer(1))))?;
+    let (object_key, object_payload) = object_catalog_record_for(expression_id, 5);
     let ddl_audit = |event_id, target_id| AuditEvent {
         event_id: [event_id; 16],
         actor_id: Some([9; 16]),
@@ -1003,11 +1017,18 @@ fn catalog_expression_reads_are_decoded_and_guarded_at_commit()
         [101; 16],
         [9; 16],
         9_999,
-        &[CatalogWrite {
-            key: expression_key.clone(),
-            expected_value: None,
-            payload: Some(original.clone()),
-        }],
+        &[
+            CatalogWrite {
+                key: expression_key.clone(),
+                expected_value: None,
+                payload: Some(original.clone()),
+            },
+            CatalogWrite {
+                key: object_key,
+                expected_value: None,
+                payload: Some(object_payload),
+            },
+        ],
         &[ddl_audit(102, 100)],
     )?;
 
@@ -2251,6 +2272,11 @@ fn authorized_insert_materializes_defaults_before_policy_and_check_validation()
                 expected_value: None,
                 payload: Some(column_payload),
             },
+            object_catalog_write_for(default_expression_id, 5),
+            object_catalog_write_for(check_expression_id, 5),
+            object_catalog_write_for(type_id, 2),
+            object_catalog_write_for(row_id.table, 3),
+            object_catalog_write_for(column_id, 4),
         ],
         &[default_audit],
     )?;
@@ -2623,6 +2649,9 @@ fn catalog_rejects_deleting_expression_used_by_existing_check()
             expected_value: None,
             payload: Some(constraint_payload.clone()),
         },
+        object_catalog_write_for(table_id, 3),
+        object_catalog_write_for(expression_id, 5),
+        object_catalog_write_for([185; 16], 6),
     ];
     commit_catalog_and_audit(&database, [186; 16], [9; 16], 9_999, &writes, &[audit(187)])?;
     assert_eq!(
@@ -3179,6 +3208,25 @@ fn invocation_loads_and_guards_catalog_table_schema() -> Result<(), Box<dyn std:
             payload: Some(payload),
         });
     }
+    for (object_id, object_kind) in [
+        (varchar_type_id, 2),
+        (uuid_type_id, 2),
+        (boolean_type_id, 2),
+        (table_id, 3),
+        (column_text_id, 4),
+        (column_uuid_id, 4),
+        (policy_expression_id, 5),
+        (cell_policy_expression_id, 5),
+        (check_expression_id, 5),
+        (cell_allow_expression_id, 5),
+        (check_constraint_id, 6),
+        ([180; 16], 6),
+        (policy_id, 10),
+        (cell_policy_id, 10),
+        (cell_allow_policy_id, 10),
+    ] {
+        writes.push(object_catalog_write_for(object_id, object_kind));
+    }
     let audit = AuditEvent {
         event_id: [138; 16],
         actor_id: Some([9; 16]),
@@ -3274,11 +3322,14 @@ fn invocation_loads_and_guards_catalog_table_schema() -> Result<(), Box<dyn std:
             [167; 16],
             principal_id,
             9_999,
-            &[CatalogWrite {
-                key: new_column_key,
-                expected_value: None,
-                payload: Some(new_column_payload),
-            }],
+            &[
+                CatalogWrite {
+                    key: new_column_key,
+                    expected_value: None,
+                    payload: Some(new_column_payload),
+                },
+                object_catalog_write_for(new_column_id, 4)
+            ],
             &[audit],
         ),
         Err(CommitError::InvalidCatalog)
@@ -3694,6 +3745,10 @@ fn table_epochs_cannot_move_back_after_catalog_changes() -> Result<(), Box<dyn s
             write
                 .open_table(CATALOG)?
                 .insert(table_key.as_slice(), initial.as_slice())?;
+            let (object_key, object_value) = object_catalog_record_for(table_id, 3);
+            write
+                .open_table(CATALOG)?
+                .insert(object_key.as_slice(), object_value.as_slice())?;
         }
         write.commit()?;
     }
@@ -3740,6 +3795,7 @@ fn table_epochs_cannot_move_back_after_catalog_changes() -> Result<(), Box<dyn s
                 expected_value: Some(initial.clone()),
                 payload: Some(schema_bumped.clone()),
             },
+            object_catalog_write_for([244; 16], 4),
         ],
         &[audit(247)],
     )?;

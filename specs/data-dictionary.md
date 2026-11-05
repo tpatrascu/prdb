@@ -69,9 +69,7 @@ At startup, every persisted dependency record must resolve both its dependent an
 
 Catalog commits apply the same endpoint rule to the final catalog view. A batch may create objects and their dependency edges together; deleting an object while a dependency still names it is rejected atomically and records an ABORTED outcome.
 
-When a family 9 index record or its family 2 object row changes, the final catalog must retain the same ID in both records and the object kind must be index=7. Creating both rows together is valid; deleting or retyping the object while the index record remains is rejected in that commit.
-
-When a family 10 principal record or its family 2 object row changes, the final catalog must retain the same ID in both records and map user principals to object kind 8 and roles to object kind 9. Creating both rows together is valid; deleting or retyping the object while the principal record remains is rejected in that commit.
+When a family 2 object row or a typed record in families 3–10 or 13 changes, the final catalog must retain a same-ID object row for every surviving typed record affected by that ID. The object kind must match its family: schema=1, type=2, table=3, column=4, expression=5, constraint=6, index=7, user=8, role=9, and policy=10. Creating the typed and object rows together is valid; deleting or retyping the object while an affected typed record remains is rejected atomically. This commit check does not establish inverse completeness for untouched object rows; startup validation checks every typed record.
 
 Ownership edges identify objects removed with a parent, such as a table's own indexes/policies. Reference edges block RESTRICT drops, such as another table's foreign key. Column removal is blocked by applicable policies, expressions, and keys. Role/user removal checks ownership, grants, memberships, and policy recipients. Follow [schema DDL](ddl-schema.md) for exact drop behavior.
 
