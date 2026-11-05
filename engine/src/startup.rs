@@ -1,6 +1,7 @@
 //! Read-only integrity checks for a recovered redb image.
 
 use crate::audit::AuditEvent;
+use crate::authorization::{MAX_MEMBERSHIP_EDGES, Membership, validate_membership_graph};
 use crate::catalog::{CatalogRecord, decode_registered_envelope};
 use crate::expression::decode_catalog_expression_record;
 use crate::index_locator::IndexLocator;
@@ -119,6 +120,9 @@ fn validate_catalog(read: &ReadTransaction) -> Result<(usize, IndexDefinitions),
     let mut family_counts = [0usize; 17];
     let mut count = 0usize;
     let mut index_definitions = HashMap::new();
+    let mut principal_kinds = HashMap::<[u8; 16], u16>::new();
+    let mut memberships = Vec::<Membership>::new();
+    let mut membership_grantors = Vec::<[u8; 16]>::new();
     for entry in table.iter().map_err(storage_error)? {
         let (key, value) = entry.map_err(storage_error)?;
         let key = key.value();
@@ -156,7 +160,54 @@ fn validate_catalog(read: &ReadTransaction) -> Result<(usize, IndexDefinitions),
                 return Err(StartupError::InvalidCatalog);
             }
         }
+        if record.family_code == 10 {
+            let principal_id: [u8; 16] = key
+                .get(3..19)
+                .ok_or(StartupError::InvalidCatalog)?
+                .try_into()
+                .map_err(|_| StartupError::InvalidCatalog)?;
+            let kind = field_u16(&record, 1)?;
+            let login_enabled = field_bool(&record, 3)?;
+            if !matches!(kind, 1 | 2)
+                || (kind == 2 && login_enabled)
+                || field_u64(&record, 4)? == 0
+                || principal_kinds.insert(principal_id, kind).is_some()
+            {
+                return Err(StartupError::InvalidCatalog);
+            }
+        }
+        if record.family_code == 11 {
+            if key.len() != 36 || memberships.len() == MAX_MEMBERSHIP_EDGES {
+                return Err(StartupError::InvalidCatalog);
+            }
+            let member_id: [u8; 16] = key[3..19]
+                .try_into()
+                .map_err(|_| StartupError::InvalidCatalog)?;
+            let role_id: [u8; 16] = key[20..36]
+                .try_into()
+                .map_err(|_| StartupError::InvalidCatalog)?;
+            let grantor_id = field_id(&record, 1)?;
+            if field_u64(&record, 2)? == 0 {
+                return Err(StartupError::InvalidCatalog);
+            }
+            memberships.push(Membership { member_id, role_id });
+            membership_grantors.push(grantor_id);
+        }
     }
+    if membership_grantors
+        .iter()
+        .any(|grantor_id| !principal_kinds.contains_key(grantor_id))
+    {
+        return Err(StartupError::InvalidCatalog);
+    }
+    for membership in &memberships {
+        if !principal_kinds.contains_key(&membership.member_id)
+            || principal_kinds.get(&membership.role_id) != Some(&2)
+        {
+            return Err(StartupError::InvalidCatalog);
+        }
+    }
+    validate_membership_graph(&memberships).map_err(|_| StartupError::InvalidCatalog)?;
     Ok((count, index_definitions))
 }
 
@@ -170,6 +221,47 @@ fn field_id(record: &CatalogRecord, tag: u16) -> Result<[u8; 16], StartupError> 
         .as_slice()
         .try_into()
         .map_err(|_| StartupError::InvalidCatalog)
+}
+
+fn field_u16(record: &CatalogRecord, tag: u16) -> Result<u16, StartupError> {
+    record
+        .fields
+        .iter()
+        .find(|field| field.tag == tag)
+        .ok_or(StartupError::InvalidCatalog)?
+        .payload
+        .as_slice()
+        .try_into()
+        .map(u16::from_le_bytes)
+        .map_err(|_| StartupError::InvalidCatalog)
+}
+
+fn field_u64(record: &CatalogRecord, tag: u16) -> Result<u64, StartupError> {
+    record
+        .fields
+        .iter()
+        .find(|field| field.tag == tag)
+        .ok_or(StartupError::InvalidCatalog)?
+        .payload
+        .as_slice()
+        .try_into()
+        .map(u64::from_le_bytes)
+        .map_err(|_| StartupError::InvalidCatalog)
+}
+
+fn field_bool(record: &CatalogRecord, tag: u16) -> Result<bool, StartupError> {
+    match record
+        .fields
+        .iter()
+        .find(|field| field.tag == tag)
+        .ok_or(StartupError::InvalidCatalog)?
+        .payload
+        .as_slice()
+    {
+        [0] => Ok(false),
+        [1] => Ok(true),
+        _ => Err(StartupError::InvalidCatalog),
+    }
 }
 
 fn validate_rows(read: &ReadTransaction, commit_sequence: u64) -> Result<usize, StartupError> {

@@ -156,6 +156,68 @@ fn put_catalog(database: &Database, key: &[u8], value: &[u8]) {
     write.commit().unwrap();
 }
 
+fn principal_record(
+    id: [u8; 16],
+    kind: u16,
+    login_enabled: bool,
+    epoch: u64,
+) -> (Vec<u8>, Vec<u8>) {
+    let mut key = 10u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&id);
+    let fields = [
+        CatalogField {
+            tag: 1,
+            wire_type: WireType::U16,
+            payload: kind.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 2,
+            wire_type: WireType::Text,
+            payload: format!("principal_{}", id[0]).into_bytes(),
+        },
+        CatalogField {
+            tag: 3,
+            wire_type: WireType::Bool,
+            payload: vec![u8::from(login_enabled)],
+        },
+        CatalogField {
+            tag: 4,
+            wire_type: WireType::U64,
+            payload: epoch.to_le_bytes().to_vec(),
+        },
+    ];
+    let payload = encode_envelope(&family_schema(10).unwrap(), &key, &fields).unwrap();
+    (key, payload)
+}
+
+fn membership_record(
+    member_id: [u8; 16],
+    role_id: [u8; 16],
+    grantor_id: [u8; 16],
+    epoch: u64,
+) -> (Vec<u8>, Vec<u8>) {
+    let mut key = 11u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&member_id);
+    key.push(1);
+    key.extend_from_slice(&role_id);
+    let fields = [
+        CatalogField {
+            tag: 1,
+            wire_type: WireType::Id,
+            payload: grantor_id.to_vec(),
+        },
+        CatalogField {
+            tag: 2,
+            wire_type: WireType::U64,
+            payload: epoch.to_le_bytes().to_vec(),
+        },
+    ];
+    let payload = encode_envelope(&family_schema(11).unwrap(), &key, &fields).unwrap();
+    (key, payload)
+}
+
 #[test]
 fn validates_ready_image_records_and_references() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
@@ -431,5 +493,56 @@ fn rejects_outcome_key_value_mismatch() {
     assert!(matches!(
         validate_persisted_records(&database),
         Err(StartupError::InvalidOutcome)
+    ));
+}
+
+#[test]
+fn accepts_pinned_acyclic_membership_graph() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    for record in [
+        principal_record([1; 16], 1, true, 1),
+        principal_record([2; 16], 2, false, 1),
+        principal_record([3; 16], 2, false, 1),
+        membership_record([1; 16], [2; 16], [1; 16], 1),
+        membership_record([2; 16], [3; 16], [1; 16], 1),
+    ] {
+        put_catalog(&database, &record.0, &record.1);
+    }
+    let report = validate_persisted_records(&database)?;
+    assert_eq!(report.catalog_records, 5);
+    Ok(())
+}
+
+#[test]
+fn rejects_cycles_and_invalid_membership_endpoints_at_startup() {
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    for record in [
+        principal_record([1; 16], 1, true, 1),
+        principal_record([2; 16], 2, false, 1),
+        principal_record([3; 16], 2, false, 1),
+        membership_record([2; 16], [3; 16], [1; 16], 1),
+        membership_record([3; 16], [2; 16], [1; 16], 1),
+    ] {
+        put_catalog(&database, &record.0, &record.1);
+    }
+    assert!(matches!(
+        validate_persisted_records(&database),
+        Err(StartupError::InvalidCatalog)
+    ));
+
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    for record in [
+        principal_record([1; 16], 1, true, 1),
+        principal_record([2; 16], 1, true, 1),
+        membership_record([1; 16], [2; 16], [1; 16], 1),
+    ] {
+        put_catalog(&database, &record.0, &record.1);
+    }
+    assert!(matches!(
+        validate_persisted_records(&database),
+        Err(StartupError::InvalidCatalog)
     ));
 }
