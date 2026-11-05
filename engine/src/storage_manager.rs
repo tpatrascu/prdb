@@ -3,6 +3,7 @@
 use crate::audit::AuditEvent;
 use crate::commit::{CatalogWrite, CommitError, commit_catalog_and_audit_with_fences};
 use crate::ddl_fence::{DdlFenceCoordinator, DdlFenceManager};
+use crate::startup::{StartupError, validate_persisted_records};
 use crate::transaction::{InvocationCoordination, InvocationTransaction, TransactionError};
 use redb::Database;
 use std::sync::Arc;
@@ -39,6 +40,20 @@ impl std::fmt::Display for StorageManagerConfigError {
 }
 
 impl std::error::Error for StorageManagerConfigError {}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StorageManagerInitError {
+    Config(StorageManagerConfigError),
+    Startup(StartupError),
+}
+
+impl std::fmt::Display for StorageManagerInitError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "storage manager initialization failed: {self:?}")
+    }
+}
+
+impl std::error::Error for StorageManagerInitError {}
 
 /// Shares one per-table DDL fence manager across row and catalog operations for
 /// a database handle.
@@ -90,8 +105,12 @@ impl Drop for InvocationAdmissionPermit {
 }
 
 impl<'db> StorageManager<'db> {
-    /// Use the default snapshot limit and the supplied DDL-fence timeout.
-    pub fn new(database: &'db Database, ddl_fence_timeout: Duration) -> Self {
+    /// Validate the recovered database, then use the default snapshot limit
+    /// and the supplied DDL-fence timeout.
+    pub fn new(
+        database: &'db Database,
+        ddl_fence_timeout: Duration,
+    ) -> Result<Self, StorageManagerInitError> {
         Self::with_config(
             database,
             StorageManagerConfig {
@@ -99,16 +118,18 @@ impl<'db> StorageManager<'db> {
                 ..StorageManagerConfig::default()
             },
         )
-        .expect("default storage-manager limits are valid")
     }
 
     pub fn with_config(
         database: &'db Database,
         config: StorageManagerConfig,
-    ) -> Result<Self, StorageManagerConfigError> {
+    ) -> Result<Self, StorageManagerInitError> {
         if config.max_active_invocations == 0 {
-            return Err(StorageManagerConfigError::ZeroActiveInvocationLimit);
+            return Err(StorageManagerInitError::Config(
+                StorageManagerConfigError::ZeroActiveInvocationLimit,
+            ));
         }
+        validate_persisted_records(database).map_err(StorageManagerInitError::Startup)?;
         Ok(Self {
             database,
             ddl_fences: DdlFenceCoordinator::new(DdlFenceManager::new(), config.ddl_fence_timeout),

@@ -43,7 +43,7 @@ Route DDL and credential operations from a separate authenticated gateway contro
 
 ## Startup and Operational Metadata
 
-Do not admit invocations before storage completes [bootstrap/recovery validation](catalog-lifecycle.md) and publishes READY. Coordinate offline upgrade admission/drain requirements without loading user code during migration.
+Do not admit invocations before storage completes [bootstrap/recovery validation](catalog-lifecycle.md) and publishes READY. Runtime construction through `StorageManager` repeats the recovered-image integrity validation before it opens an admission path. This integrity check is not client authentication. Coordinate offline upgrade admission/drain requirements without loading user code during migration.
 
 Expose own-invocation status and administrator-only runtime inspection through [operational metadata](operational-metadata.md). Reconcile lost replies against [durable outcome records](physical-metadata.md); absence of a live executor does not prove rollback. Required administrative audit records/outbox entries commit with their state changes, while optional telemetry cannot reverse a durable data commit.
 

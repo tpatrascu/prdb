@@ -409,3 +409,12 @@
 - Tests: `engine/tests/commit.rs` verifies zero-limit rejection, cross-clone capacity enforcement, permit release after dropping an aborted transaction, and subsequent admission.
 - Verification: with Rust/Cargo 1.95.0, rustfmt 1.9.0, Clippy 0.1.95, and TinyCC 0.9.27-unstable-2025-01-06 in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and all 192 integration tests across 18 targets passed. `git diff --check` and changed Markdown local-link checks passed.
 - Remaining: transaction-age cancellation and bounds for scans, response bytes, and total work still require service lifecycle integration.
+
+## SM-5 dependency: validated StorageManager startup — in progress
+
+- Behavior: do not expose invocation admission from a runtime manager until the recovered image passes the engine's full implemented startup integrity validation and is READY.
+- Red evidence: the new real-redb regression inserted a malformed row envelope into an otherwise READY database; initially, constructing a StorageManager still succeeded.
+- Implementation: `StorageManager::new` and `with_config` now return a typed initialization error and call `validate_persisted_records` before constructing fence/admission state. The check covers table definitions, bootstrap/catalog, typed rows, indexes, constraints, outcomes, and audit, but it is not client authentication or service identity validation.
+- Test: `engine/tests/commit.rs` verifies invalid row persistence rejects manager construction with `StartupError::InvalidRow`; the existing manager routing test verifies a valid recovered image is accepted.
+- Verification: with Rust/Cargo 1.95.0, rustfmt 1.9.0, and Clippy 0.1.95 in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and all 193 integration tests across 18 targets passed. `git diff --check` and changed Markdown local-link checks passed.
+- Remaining: authenticated service admission and lifecycle cancellation remain separate service work.

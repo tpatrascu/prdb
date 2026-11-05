@@ -11,7 +11,7 @@ use prdb_engine::metadata::{EngineMetadata, Lifecycle};
 use prdb_engine::outcome::{InvocationOutcome, OutcomeStatus, lookup_outcome};
 use prdb_engine::row_record::RowRecord;
 use prdb_engine::schema::{self, CATALOG, ENGINE_META, ROWS};
-use prdb_engine::storage_manager::{StorageManager, StorageManagerConfig};
+use prdb_engine::storage_manager::{StorageManager, StorageManagerConfig, StorageManagerInitError};
 use prdb_engine::tuple::{ColumnSchema, ScalarType, ScalarValue, encode_tuple};
 use redb::{Database, ReadableDatabase, ReadableTableMetadata};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1829,7 +1829,7 @@ fn storage_manager_routes_invocations_and_catalog_commits_through_shared_fences(
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
-    let storage = StorageManager::new(&database, Duration::from_millis(100));
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
     assert_eq!(
         storage.commit_catalog_and_audit(id(190), id(9), 9_999, &[], &[audit_event(190)],)?,
         1
@@ -1865,7 +1865,9 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
             },
         )
         .err(),
-        Some(prdb_engine::storage_manager::StorageManagerConfigError::ZeroActiveInvocationLimit)
+        Some(StorageManagerInitError::Config(
+            prdb_engine::storage_manager::StorageManagerConfigError::ZeroActiveInvocationLimit,
+        ))
     );
     let storage = StorageManager::with_config(
         &database,
@@ -1885,6 +1887,26 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
     drop(first);
     let next = cloned_storage.begin_invocation(id(194), id(9), 9_999, 2, 64)?;
     drop(next);
+    Ok(())
+}
+
+#[test]
+fn storage_manager_rejects_invalid_recovered_images_before_admission()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let write = database.begin_write()?;
+    write
+        .open_table(ROWS)?
+        .insert(&key(195)[..], &b"not a row record"[..])?;
+    write.commit()?;
+
+    assert!(matches!(
+        StorageManager::new(&database, Duration::from_millis(100)),
+        Err(StorageManagerInitError::Startup(
+            prdb_engine::startup::StartupError::InvalidRow
+        ))
+    ));
     Ok(())
 }
 
