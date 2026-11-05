@@ -1098,76 +1098,87 @@ fn rejects_dependency_edges_with_missing_catalog_objects() {
 
 #[test]
 fn validates_foreign_key_target_edges_against_constraint_records() {
-    let populate =
-        |database: &Database, edge_target: Option<[u8; 16]>, add_alternate_target: bool| {
-            let fk_id = [90; 16];
-            let target_id = [91; 16];
-            let alternate_id = [95; 16];
-            put_table_and_column(database, [100; 16], [102; 16], false);
-            put_table_and_column(database, [101; 16], [103; 16], false);
-            let (fk_key, fk_value) = object_record(fk_id, 6);
-            let (target_key, target_value) = object_record(target_id, 6);
-            put_catalog(database, &fk_key, &fk_value);
-            put_catalog(database, &target_key, &target_value);
-            if add_alternate_target {
-                let (key, value) = object_record(alternate_id, 6);
-                put_catalog(database, &key, &value);
-            }
-            let (fk_key, fk_value) = constraint_record(
-                fk_id,
-                [101; 16],
-                5,
-                &[[103; 16]],
-                Some(target_id),
-                &[[102; 16]],
-                None,
-            );
-            let (target_key, target_value) = constraint_record(
-                target_id,
+    let populate = |database: &Database,
+                    edge_target: Option<[u8; 16]>,
+                    add_alternate_target: bool,
+                    fk_referenced_columns: &[[u8; 16]]| {
+        let fk_id = [90; 16];
+        let target_id = [91; 16];
+        let alternate_id = [95; 16];
+        put_table_and_column(database, [100; 16], [102; 16], false);
+        put_table_and_column(database, [101; 16], [103; 16], false);
+        let (extra_column_object_key, extra_column_object_value) = object_record([104; 16], 4);
+        let (extra_column_key, extra_column_value) =
+            column_record_for_table([104; 16], [100; 16], "object_104");
+        put_catalog(
+            database,
+            &extra_column_object_key,
+            &extra_column_object_value,
+        );
+        put_catalog(database, &extra_column_key, &extra_column_value);
+        let (fk_key, fk_value) = object_record(fk_id, 6);
+        let (target_key, target_value) = object_record(target_id, 6);
+        put_catalog(database, &fk_key, &fk_value);
+        put_catalog(database, &target_key, &target_value);
+        if add_alternate_target {
+            let (key, value) = object_record(alternate_id, 6);
+            put_catalog(database, &key, &value);
+        }
+        let (fk_key, fk_value) = constraint_record(
+            fk_id,
+            [101; 16],
+            5,
+            &[[103; 16]],
+            Some(target_id),
+            fk_referenced_columns,
+            None,
+        );
+        let (target_key, target_value) = constraint_record(
+            target_id,
+            [100; 16],
+            2,
+            &[[102; 16]],
+            None,
+            &[],
+            Some([94; 16]),
+        );
+        put_catalog(database, &fk_key, &fk_value);
+        put_catalog(database, &target_key, &target_value);
+        let (target_object_key, target_object_value) = object_record([94; 16], 7);
+        let (target_index_key, target_index_value) =
+            owned_index_record([94; 16], [100; 16], [102; 16], target_id);
+        put_catalog(database, &target_object_key, &target_object_value);
+        put_catalog(database, &target_index_key, &target_index_value);
+        let (key, value) = dependency_record(target_id, [94; 16], 4);
+        put_catalog(database, &key, &value);
+        if add_alternate_target {
+            let (key, value) = constraint_record(
+                alternate_id,
                 [100; 16],
-                2,
+                3,
                 &[[102; 16]],
                 None,
                 &[],
-                Some([94; 16]),
+                Some([96; 16]),
             );
-            put_catalog(database, &fk_key, &fk_value);
-            put_catalog(database, &target_key, &target_value);
-            let (target_object_key, target_object_value) = object_record([94; 16], 7);
-            let (target_index_key, target_index_value) =
-                owned_index_record([94; 16], [100; 16], [102; 16], target_id);
-            put_catalog(database, &target_object_key, &target_object_value);
-            put_catalog(database, &target_index_key, &target_index_value);
-            let (key, value) = dependency_record(target_id, [94; 16], 4);
             put_catalog(database, &key, &value);
-            if add_alternate_target {
-                let (key, value) = constraint_record(
-                    alternate_id,
-                    [100; 16],
-                    3,
-                    &[[102; 16]],
-                    None,
-                    &[],
-                    Some([96; 16]),
-                );
-                put_catalog(database, &key, &value);
-                let (object_key, object_value) = object_record([96; 16], 7);
-                let (index_key, index_value) =
-                    owned_index_record([96; 16], [100; 16], [102; 16], alternate_id);
-                put_catalog(database, &object_key, &object_value);
-                put_catalog(database, &index_key, &index_value);
-                let (key, value) = dependency_record(alternate_id, [96; 16], 4);
-                put_catalog(database, &key, &value);
-            }
-            if let Some(edge_target) = edge_target {
-                let (key, value) = dependency_record(fk_id, edge_target, 3);
-                put_catalog(database, &key, &value);
-            }
-        };
+            let (object_key, object_value) = object_record([96; 16], 7);
+            let (index_key, index_value) =
+                owned_index_record([96; 16], [100; 16], [102; 16], alternate_id);
+            put_catalog(database, &object_key, &object_value);
+            put_catalog(database, &index_key, &index_value);
+            let (key, value) = dependency_record(alternate_id, [96; 16], 4);
+            put_catalog(database, &key, &value);
+        }
+        if let Some(edge_target) = edge_target {
+            let (key, value) = dependency_record(fk_id, edge_target, 3);
+            put_catalog(database, &key, &value);
+        }
+    };
 
     let missing_edge_fixture = Fixture::new();
     let missing_edge_database = missing_edge_fixture.database(0);
-    populate(&missing_edge_database, None, false);
+    populate(&missing_edge_database, None, false, &[[102; 16]]);
     assert_eq!(
         validate_persisted_records(&missing_edge_database),
         Err(StartupError::InvalidCatalog),
@@ -1175,7 +1186,12 @@ fn validates_foreign_key_target_edges_against_constraint_records() {
 
     let mismatched_edge_fixture = Fixture::new();
     let mismatched_edge_database = mismatched_edge_fixture.database(0);
-    populate(&mismatched_edge_database, Some([95; 16]), true);
+    populate(
+        &mismatched_edge_database,
+        Some([95; 16]),
+        true,
+        &[[102; 16]],
+    );
     assert_eq!(
         validate_persisted_records(&mismatched_edge_database),
         Err(StartupError::InvalidCatalog),
@@ -1183,8 +1199,21 @@ fn validates_foreign_key_target_edges_against_constraint_records() {
 
     let valid_edge_fixture = Fixture::new();
     let valid_edge_database = valid_edge_fixture.database(0);
-    populate(&valid_edge_database, Some([91; 16]), false);
+    populate(&valid_edge_database, Some([91; 16]), false, &[[102; 16]]);
     assert!(validate_persisted_records(&valid_edge_database).is_ok());
+
+    let mismatched_columns_fixture = Fixture::new();
+    let mismatched_columns_database = mismatched_columns_fixture.database(0);
+    populate(
+        &mismatched_columns_database,
+        Some([91; 16]),
+        false,
+        &[[104; 16]],
+    );
+    assert_eq!(
+        validate_persisted_records(&mismatched_columns_database),
+        Err(StartupError::InvalidCatalog),
+    );
 }
 
 #[test]

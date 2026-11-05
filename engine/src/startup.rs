@@ -161,6 +161,7 @@ fn validate_catalog(
     let mut constraint_kinds = HashMap::<[u8; 16], u16>::new();
     let mut constraint_tables = HashMap::<[u8; 16], [u8; 16]>::new();
     let mut constraint_source_columns = HashMap::<[u8; 16], Vec<[u8; 16]>>::new();
+    let mut constraint_referenced_columns = HashMap::<[u8; 16], Vec<[u8; 16]>>::new();
     let mut foreign_key_targets = HashMap::<[u8; 16], [u8; 16]>::new();
     let mut backing_index_targets = HashMap::<[u8; 16], [u8; 16]>::new();
     let mut index_owners = HashMap::<[u8; 16], [u8; 16]>::new();
@@ -352,9 +353,12 @@ fn validate_catalog(
                 return Err(StartupError::InvalidCatalog);
             }
             if kind == 5
-                && foreign_key_targets
+                && (foreign_key_targets
                     .insert(constraint_id, field_id(&record, 5)?)
                     .is_some()
+                    || constraint_referenced_columns
+                        .insert(constraint_id, field_ids(&record, 6)?)
+                        .is_some())
             {
                 return Err(StartupError::InvalidCatalog);
             }
@@ -661,6 +665,24 @@ fn validate_catalog(
         if constraint_kinds.get(constraint_id) == Some(&1)
             && (source_columns.len() != 1
                 || column_nullable.get(&source_columns[0]) != Some(&false))
+        {
+            return Err(StartupError::InvalidCatalog);
+        }
+    }
+    for (constraint_id, target_id) in &foreign_key_targets {
+        let source_columns = constraint_source_columns
+            .get(constraint_id)
+            .ok_or(StartupError::InvalidCatalog)?;
+        let referenced_columns = constraint_referenced_columns
+            .get(constraint_id)
+            .ok_or(StartupError::InvalidCatalog)?;
+        let target_columns = constraint_source_columns
+            .get(target_id)
+            .ok_or(StartupError::InvalidCatalog)?;
+        if !matches!(constraint_kinds.get(target_id), Some(2 | 3))
+            || source_columns.is_empty()
+            || referenced_columns.len() != source_columns.len()
+            || referenced_columns != target_columns
         {
             return Err(StartupError::InvalidCatalog);
         }
