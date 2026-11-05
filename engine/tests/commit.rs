@@ -1818,6 +1818,77 @@ fn catalog_commit_rejects_indexes_with_missing_or_mistabled_columns()
 }
 
 #[test]
+fn catalog_index_changes_reject_tables_with_existing_rows() -> Result<(), Box<dyn std::error::Error>>
+{
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let row_key = key(77);
+    let existing_index_key = index_key(&row_key);
+    commit_rows_and_indexes(
+        &database,
+        id(76),
+        id(9),
+        9_999,
+        &[RowWrite {
+            key: row_key,
+            expected_version: None,
+            payload: Some(bytea_tuple(b"existing row")),
+        }],
+        &[IndexWrite {
+            key: existing_index_key.clone(),
+            row_key,
+            expected_version: None,
+            present: true,
+            unique: false,
+            null_exempt: false,
+        }],
+    )?;
+
+    let (new_index_key, new_index_payload) = index_definition(id(0x88), id(16));
+    let new_index = CatalogWrite {
+        key: new_index_key.clone(),
+        expected_value: None,
+        payload: Some(new_index_payload),
+    };
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(77),
+            id(9),
+            9_999,
+            &[new_index, object_write(id(0x88), 7)],
+            &[audit_event(77)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+    assert_eq!(commit_sequence(&database)?, 1);
+    assert_eq!(
+        lookup_outcome(&database, id(77), id(9), 1)?.unwrap().status,
+        OutcomeStatus::Aborted
+    );
+
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    assert!(catalog.get(new_index_key.as_slice())?.is_none());
+    assert!(
+        catalog
+            .get(id_catalog_key(2, id(0x88)).as_slice())?
+            .is_none()
+    );
+    assert!(
+        read.open_table(schema::INDEXES)?
+            .get(existing_index_key.as_slice())?
+            .is_some()
+    );
+    assert!(
+        read.open_table(schema::AUDIT)?
+            .get(&[77; 16][..])?
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
 fn catalog_commit_rejects_removing_a_mapped_builtin_type() -> Result<(), Box<dyn std::error::Error>>
 {
     let fixture = Fixture::new();

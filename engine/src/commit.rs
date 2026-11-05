@@ -2200,6 +2200,79 @@ fn load_index_definitions(
     Ok((current, final_definitions))
 }
 
+fn validate_index_definition_changes(
+    transaction: &WriteTransaction,
+    catalog_writes: &[CatalogWrite],
+    row_writes: &[RowWrite],
+) -> Result<(), CommitError> {
+    let family_prefix = 9u16.to_be_bytes();
+    let catalog = transaction.open_table(CATALOG).map_err(storage_error)?;
+    let rows = transaction.open_table(ROWS).map_err(storage_error)?;
+    let indexes = transaction.open_table(INDEXES).map_err(storage_error)?;
+
+    for write in catalog_writes
+        .iter()
+        .filter(|write| write.key.starts_with(&family_prefix))
+    {
+        if write.key.len() != 19 {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let current = catalog
+            .get(write.key.as_slice())
+            .map_err(storage_error)?
+            .map(|value| value.value().to_vec());
+        if current.as_deref() == write.payload.as_deref() {
+            continue;
+        }
+
+        let index_id: [u8; 16] = write.key[3..19]
+            .try_into()
+            .map_err(|_| CommitError::InvalidCatalog)?;
+        let mut affected_tables = HashSet::new();
+        if let Some(current) = current.as_deref() {
+            affected_tables.insert(decode_index_definition(&write.key, current)?.1);
+        }
+        if let Some(next) = write.payload.as_deref() {
+            affected_tables.insert(decode_index_definition(&write.key, next)?.1);
+        }
+
+        for table_id in affected_tables {
+            if let Some(entry) = rows
+                .range(table_id.as_slice()..)
+                .map_err(storage_error)?
+                .next()
+            {
+                let (key, _) = entry.map_err(storage_error)?;
+                let key = key.value();
+                if key.starts_with(&table_id) {
+                    if key.len() != 32 {
+                        return Err(CommitError::InvalidRow);
+                    }
+                    return Err(CommitError::InvalidCatalog);
+                }
+            }
+            if row_writes
+                .iter()
+                .any(|row| row.key[..16] == table_id && row.payload.is_some())
+            {
+                return Err(CommitError::InvalidCatalog);
+            }
+        }
+
+        if let Some(entry) = indexes
+            .range(index_id.as_slice()..)
+            .map_err(storage_error)?
+            .next()
+        {
+            let (key, _) = entry.map_err(storage_error)?;
+            if key.value().starts_with(&index_id) {
+                return Err(CommitError::InvalidCatalog);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn reverse_index_key(row_key: &[u8; 32], index_key: &[u8]) -> Vec<u8> {
     let mut key = row_key.to_vec();
     key.extend_from_slice(&index_key[..index_key.len() - 16]);
@@ -2691,6 +2764,15 @@ pub fn commit_storage_changes(
     }
     let (current_index_definitions, final_index_definitions) =
         load_index_definitions(&transaction, catalog_writes)?;
+    match validate_index_definition_changes(&transaction, catalog_writes, writes) {
+        Ok(()) => {}
+        Err(error @ (CommitError::InvalidCatalog | CommitError::InvalidRow)) => {
+            transaction.abort().map_err(storage_error)?;
+            record_aborted_outcome(database, invocation_id, principal_id, retention_deadline_us)?;
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    }
     for write in index_writes {
         let index_id: [u8; 16] = write.key[..16]
             .try_into()

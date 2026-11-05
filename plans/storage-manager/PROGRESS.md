@@ -308,3 +308,11 @@
 - A real-redb regression removes the table's index definitions, loads its schema, stages a non-TUP1 payload, and verifies the row remains absent with a durable ABORTED outcome.
 - Verification: `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and all 171 integration tests across 17 targets passed in the prescribed Nix shell. `git diff --check` passed.
 - Remaining: the low-level direct row commit helpers still lack catalog-schema validation and remain trusted-only; historical tuple adaptation and service admission remain open.
+
+## SM-5 dependency: fail-closed index definition changes — in progress
+
+- Red evidence: catalog commit could publish a new index definition for a table that already had rows, without building the corresponding memberships. Startup would later find an index definition with incomplete stored coverage.
+- Catalog commit now rejects adding, changing, or dropping an index definition while its current/final table has persisted rows, the same commit inserts rows for the table, or the index has stored memberships. Changes remain allowed for empty tables until transactional backfill/rebuild exists.
+- A real-redb regression commits a row and its existing index membership, attempts to add a second index, and confirms the DDL aborts without changing the catalog, audit, or commit sequence.
+- Verification: `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and all 172 integration tests across 17 targets passed in the prescribed Nix shell. `git diff --check` passed.
+- Remaining: transactional index backfill/rebuild and online schema migration remain open.
