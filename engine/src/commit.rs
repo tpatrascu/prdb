@@ -561,8 +561,8 @@ fn validate_final_dependency_edges(
     }
 
     let table = transaction.open_table(CATALOG).map_err(storage_error)?;
-    let mut object_ids = HashSet::<[u8; 16]>::new();
-    let mut dependencies = Vec::<([u8; 16], [u8; 16])>::new();
+    let mut object_parents = HashMap::<[u8; 16], Option<[u8; 16]>>::new();
+    let mut dependencies = Vec::<([u8; 16], [u8; 16], u16)>::new();
     for family_code in [2u16, 15] {
         let prefix = family_code.to_be_bytes();
         let mut family_count = 0usize;
@@ -582,7 +582,7 @@ fn validate_final_dependency_edges(
             collect_dependency_catalog_record(
                 key,
                 value.value(),
-                &mut object_ids,
+                &mut object_parents,
                 &mut dependencies,
             )?;
         }
@@ -598,16 +598,19 @@ fn validate_final_dependency_edges(
                 collect_dependency_catalog_record(
                     &write.key,
                     bytes,
-                    &mut object_ids,
+                    &mut object_parents,
                     &mut dependencies,
                 )?;
             }
         }
     }
 
-    if dependencies.iter().any(|(dependent_id, referenced_id)| {
-        !object_ids.contains(dependent_id) || !object_ids.contains(referenced_id)
+    if dependencies.iter().any(|(dependent_id, referenced_id, _)| {
+        !object_parents.contains_key(dependent_id) || !object_parents.contains_key(referenced_id)
     }) {
+        return Err(CommitError::InvalidCatalog);
+    }
+    if !crate::catalog::validate_owned_child_graph(&object_parents, &dependencies) {
         return Err(CommitError::InvalidCatalog);
     }
     Ok(())
@@ -697,8 +700,8 @@ fn validate_final_typed_object_mappings(
 fn collect_dependency_catalog_record(
     key: &[u8],
     bytes: &[u8],
-    object_ids: &mut HashSet<[u8; 16]>,
-    dependencies: &mut Vec<([u8; 16], [u8; 16])>,
+    object_parents: &mut HashMap<[u8; 16], Option<[u8; 16]>>,
+    dependencies: &mut Vec<([u8; 16], [u8; 16], u16)>,
 ) -> Result<(), CommitError> {
     let record = decode_catalog_record(key, bytes)?;
     match record.family_code {
@@ -709,7 +712,21 @@ fn collect_dependency_catalog_record(
             let object_id = key[3..19]
                 .try_into()
                 .map_err(|_| CommitError::InvalidCatalog)?;
-            object_ids.insert(object_id);
+            let parent_id = record
+                .fields
+                .iter()
+                .find(|field| field.tag == 2)
+                .map(|field| {
+                    field
+                        .payload
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| CommitError::InvalidCatalog)
+                })
+                .transpose()?;
+            if object_parents.insert(object_id, parent_id).is_some() {
+                return Err(CommitError::InvalidCatalog);
+            }
         }
         15 => {
             if key.len() != 39 {
@@ -721,7 +738,15 @@ fn collect_dependency_catalog_record(
             let referenced_id = key[20..36]
                 .try_into()
                 .map_err(|_| CommitError::InvalidCatalog)?;
-            dependencies.push((dependent_id, referenced_id));
+            let kind = u16::from_be_bytes(
+                key[37..39]
+                    .try_into()
+                    .map_err(|_| CommitError::InvalidCatalog)?,
+            );
+            if !matches!(kind, 1..=5) {
+                return Err(CommitError::InvalidCatalog);
+            }
+            dependencies.push((dependent_id, referenced_id, kind));
         }
         _ => return Err(CommitError::InvalidCatalog),
     }

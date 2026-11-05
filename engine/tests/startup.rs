@@ -127,15 +127,30 @@ fn database_record(
 }
 
 fn object_record(id: [u8; 16], kind: u16) -> (Vec<u8>, Vec<u8>) {
+    object_record_with_parent(id, kind, None)
+}
+
+fn object_record_with_parent(
+    id: [u8; 16],
+    kind: u16,
+    parent_id: Option<[u8; 16]>,
+) -> (Vec<u8>, Vec<u8>) {
     let mut key = 2u16.to_be_bytes().to_vec();
     key.push(1);
     key.extend_from_slice(&id);
-    let fields = [
-        CatalogField {
-            tag: 1,
-            wire_type: WireType::U16,
-            payload: kind.to_le_bytes().to_vec(),
-        },
+    let mut fields = vec![CatalogField {
+        tag: 1,
+        wire_type: WireType::U16,
+        payload: kind.to_le_bytes().to_vec(),
+    }];
+    if let Some(parent_id) = parent_id {
+        fields.push(CatalogField {
+            tag: 2,
+            wire_type: WireType::Id,
+            payload: parent_id.to_vec(),
+        });
+    }
+    fields.extend([
         CatalogField {
             tag: 3,
             wire_type: WireType::Text,
@@ -156,7 +171,7 @@ fn object_record(id: [u8; 16], kind: u16) -> (Vec<u8>, Vec<u8>) {
             wire_type: WireType::U16,
             payload: 1u16.to_le_bytes().to_vec(),
         },
-    ];
+    ]);
     let payload = encode_envelope(&family_schema(2).unwrap(), &key, &fields).unwrap();
     (key, payload)
 }
@@ -509,16 +524,79 @@ fn accepts_dependency_edges_with_catalog_object_endpoints() -> Result<(), Box<dy
 {
     let fixture = Fixture::new();
     let database = fixture.database(0);
-    for record in [object_record([0x21; 16], 3), object_record([0x22; 16], 4)] {
+    for record in [
+        object_record([0x21; 16], 3),
+        object_record_with_parent([0x22; 16], 4, Some([0x21; 16])),
+    ] {
         put_catalog(&database, &record.0, &record.1);
     }
     for kind in 1..=5 {
-        let (key, value) = dependency_record([0x21; 16], [0x22; 16], kind);
+        let (key, value) = dependency_record([0x22; 16], [0x21; 16], kind);
         put_catalog(&database, &key, &value);
     }
     let report = validate_persisted_records(&database)?;
     assert_eq!(report.catalog_records, 8);
     Ok(())
+}
+
+#[test]
+fn rejects_owned_child_edges_that_disagree_with_object_parents() {
+    for edge_parent in [None, Some([0x23; 16])] {
+        let fixture = Fixture::new();
+        let database = fixture.database(0);
+        for (key, value) in [
+            object_record([0x21; 16], 3),
+            object_record([0x23; 16], 3),
+            object_record_with_parent([0x22; 16], 4, Some([0x21; 16])),
+        ] {
+            put_catalog(&database, &key, &value);
+        }
+        if let Some(parent_id) = edge_parent {
+            let (key, value) = dependency_record([0x22; 16], parent_id, 1);
+            put_catalog(&database, &key, &value);
+        }
+        assert!(matches!(
+            validate_persisted_records(&database),
+            Err(StartupError::InvalidCatalog)
+        ));
+    }
+}
+
+#[test]
+fn rejects_owned_child_parent_cycles() {
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    for (key, value) in [
+        object_record_with_parent([0x31; 16], 3, Some([0x32; 16])),
+        object_record_with_parent([0x32; 16], 4, Some([0x31; 16])),
+    ] {
+        put_catalog(&database, &key, &value);
+    }
+    for (dependent, parent) in [([0x31; 16], [0x32; 16]), ([0x32; 16], [0x31; 16])] {
+        let (key, value) = dependency_record(dependent, parent, 1);
+        put_catalog(&database, &key, &value);
+    }
+    assert!(matches!(
+        validate_persisted_records(&database),
+        Err(StartupError::InvalidCatalog)
+    ));
+}
+
+#[test]
+fn rejects_unknown_dependency_edge_kinds() {
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    for (key, value) in [object_record([0x41; 16], 3), object_record([0x42; 16], 4)] {
+        put_catalog(&database, &key, &value);
+    }
+    let (mut key, mut value) = dependency_record([0x41; 16], [0x42; 16], 5);
+    key[37..39].copy_from_slice(&6u16.to_be_bytes());
+    value[32 + 37..32 + 39].copy_from_slice(&6u16.to_be_bytes());
+    put_catalog(&database, &key, &value);
+    assert!(matches!(
+        validate_persisted_records(&database),
+        Err(StartupError::InvalidCatalog)
+    ));
 }
 
 #[test]

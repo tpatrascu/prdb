@@ -259,41 +259,52 @@ fn membership_write(member_id: [u8; 16], role_id: [u8; 16]) -> CatalogWrite {
 }
 
 fn object_write(object_id: [u8; 16], kind: u16) -> CatalogWrite {
+    object_write_with_parent(object_id, kind, None)
+}
+
+fn object_write_with_parent(
+    object_id: [u8; 16],
+    kind: u16,
+    parent_id: Option<[u8; 16]>,
+) -> CatalogWrite {
     let mut key = 2u16.to_be_bytes().to_vec();
     key.push(1);
     key.extend_from_slice(&object_id);
-    let payload = encode_envelope(
-        &family_schema(2).unwrap(),
-        &key,
-        &[
-            CatalogField {
-                tag: 1,
-                wire_type: WireType::U16,
-                payload: kind.to_le_bytes().to_vec(),
-            },
-            CatalogField {
-                tag: 3,
-                wire_type: WireType::Text,
-                payload: format!("object_{}", object_id[0]).into_bytes(),
-            },
-            CatalogField {
-                tag: 4,
-                wire_type: WireType::Id,
-                payload: id(9).to_vec(),
-            },
-            CatalogField {
-                tag: 5,
-                wire_type: WireType::U64,
-                payload: 1u64.to_le_bytes().to_vec(),
-            },
-            CatalogField {
-                tag: 6,
-                wire_type: WireType::U16,
-                payload: 1u16.to_le_bytes().to_vec(),
-            },
-        ],
-    )
-    .unwrap();
+    let mut fields = vec![CatalogField {
+        tag: 1,
+        wire_type: WireType::U16,
+        payload: kind.to_le_bytes().to_vec(),
+    }];
+    if let Some(parent_id) = parent_id {
+        fields.push(CatalogField {
+            tag: 2,
+            wire_type: WireType::Id,
+            payload: parent_id.to_vec(),
+        });
+    }
+    fields.extend([
+        CatalogField {
+            tag: 3,
+            wire_type: WireType::Text,
+            payload: format!("object_{}", object_id[0]).into_bytes(),
+        },
+        CatalogField {
+            tag: 4,
+            wire_type: WireType::Id,
+            payload: id(9).to_vec(),
+        },
+        CatalogField {
+            tag: 5,
+            wire_type: WireType::U64,
+            payload: 1u64.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 6,
+            wire_type: WireType::U16,
+            payload: 1u16.to_le_bytes().to_vec(),
+        },
+    ]);
+    let payload = encode_envelope(&family_schema(2).unwrap(), &key, &fields).unwrap();
     CatalogWrite {
         key,
         expected_value: None,
@@ -563,7 +574,7 @@ fn catalog_commit_checks_dependency_endpoints_in_the_final_catalog()
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
     let table_object = object_write(id(101), 3);
-    let column_object = object_write(id(102), 4);
+    let column_object = object_write_with_parent(id(102), 4, Some(id(101)));
     let edge = dependency_write(id(102), id(101), 1);
     assert_eq!(
         commit_catalog_and_audit(
@@ -607,6 +618,130 @@ fn catalog_commit_checks_dependency_endpoints_in_the_final_catalog()
             .get(&table_object.key[..])?
             .is_some()
     );
+    Ok(())
+}
+
+#[test]
+fn catalog_commit_requires_owned_child_parent_edge_consistency()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let parent_id = id(30);
+    let child_id = id(31);
+    let parent = object_write(parent_id, 1);
+    let child = object_write_with_parent(child_id, 4, Some(parent_id));
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(60),
+            id(9),
+            9_999,
+            &[parent.clone(), child.clone()],
+            &[audit_event(60)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+
+    let edge = dependency_write(child_id, parent_id, 1);
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(61),
+            id(9),
+            9_999,
+            &[parent.clone(), child.clone(), edge.clone()],
+            &[audit_event(61)],
+        )?,
+        1
+    );
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(62),
+            id(9),
+            9_999,
+            &[CatalogWrite {
+                key: edge.key.clone(),
+                expected_value: edge.payload.clone(),
+                payload: None,
+            }],
+            &[audit_event(62)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+
+    let cyclic_parent = object_write_with_parent(parent_id, 1, Some(child_id));
+    let cyclic_edge = dependency_write(parent_id, child_id, 1);
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(63),
+            id(9),
+            9_999,
+            &[
+                CatalogWrite {
+                    key: cyclic_parent.key,
+                    expected_value: parent.payload,
+                    payload: cyclic_parent.payload,
+                },
+                cyclic_edge,
+            ],
+            &[audit_event(63)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+    let next_parent_id = id(34);
+    let next_parent = object_write(next_parent_id, 1);
+    let reparented_child = object_write_with_parent(child_id, 4, Some(next_parent_id));
+    let next_edge = dependency_write(child_id, next_parent_id, 1);
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(65),
+            id(9),
+            9_999,
+            &[
+                CatalogWrite {
+                    key: child.key,
+                    expected_value: child.payload,
+                    payload: reparented_child.payload,
+                },
+                CatalogWrite {
+                    key: edge.key,
+                    expected_value: edge.payload,
+                    payload: None,
+                },
+                next_parent,
+                next_edge,
+            ],
+            &[audit_event(65)],
+        )?,
+        2
+    );
+    assert_eq!(commit_sequence(&database)?, 2);
+    Ok(())
+}
+
+#[test]
+fn catalog_commit_rejects_unknown_dependency_edge_kinds() -> Result<(), Box<dyn std::error::Error>>
+{
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let mut dependency = dependency_write(id(32), id(33), 5);
+    dependency.key[37..39].copy_from_slice(&6u16.to_be_bytes());
+    dependency.payload.as_mut().unwrap()[32 + 37..32 + 39].copy_from_slice(&6u16.to_be_bytes());
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(64),
+            id(9),
+            9_999,
+            &[object_write(id(32), 3), object_write(id(33), 4), dependency,],
+            &[audit_event(64)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+    assert_eq!(commit_sequence(&database)?, 0);
     Ok(())
 }
 
@@ -839,14 +974,18 @@ fn principal_epoch_update(principal_id: [u8; 16], kind: u16, epoch: u64) -> Cata
     write
 }
 
-fn dependency_record(dependent_id: [u8; 16], referenced_id: [u8; 16]) -> (Vec<u8>, Vec<u8>) {
+fn dependency_record(
+    dependent_id: [u8; 16],
+    referenced_id: [u8; 16],
+    kind: u16,
+) -> (Vec<u8>, Vec<u8>) {
     let mut key = 15u16.to_be_bytes().to_vec();
     key.push(1);
     key.extend_from_slice(&dependent_id);
     key.push(1);
     key.extend_from_slice(&referenced_id);
     key.push(1);
-    key.extend_from_slice(&1u16.to_be_bytes());
+    key.extend_from_slice(&kind.to_be_bytes());
     let payload = encode_envelope(&family_schema(15).unwrap(), &key, &[]).unwrap();
     (key, payload)
 }
@@ -1326,7 +1465,7 @@ fn concurrent_membership_commits_cannot_publish_a_cycle() -> Result<(), Box<dyn 
 fn catalog_audit_metadata_and_outcome_commit_together() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
-    let (catalog_key, catalog_payload) = dependency_record([1; 16], [2; 16]);
+    let (catalog_key, catalog_payload) = dependency_record([1; 16], [2; 16], 2);
     let write = CatalogWrite {
         key: catalog_key.clone(),
         expected_value: None,
@@ -1397,7 +1536,7 @@ fn one_redb_commit_can_publish_rows_indexes_catalog_audit_and_outcome()
     let database = initialize(&fixture.path())?;
     let row_key = key(7);
     let index_key = index_key(&row_key);
-    let (catalog_key, catalog_payload) = dependency_record([6; 16], [7; 16]);
+    let (catalog_key, catalog_payload) = dependency_record([6; 16], [7; 16], 2);
 
     assert_eq!(
         commit_storage_changes(

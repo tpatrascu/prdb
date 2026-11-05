@@ -1,8 +1,56 @@
 //! Canonical catalog payloads.
 
+use std::collections::HashMap;
+
 const CATALOG_HEADER_LEN: usize = 32;
 pub const MAX_CATALOG_ENVELOPE_BYTES: usize = 1_048_576;
 const MAX_CATALOG_FIELDS: usize = 64;
+
+/// Check that kind-1 dependency edges exactly represent object parent IDs and
+/// that following those parent links cannot revisit an object.
+pub(crate) fn validate_owned_child_graph(
+    object_parents: &HashMap<[u8; 16], Option<[u8; 16]>>,
+    dependencies: &[([u8; 16], [u8; 16], u16)],
+) -> bool {
+    let owned_edges = dependencies
+        .iter()
+        .filter(|(_, _, kind)| *kind == 1)
+        .map(|(dependent, referenced, _)| (*dependent, *referenced))
+        .collect::<std::collections::HashSet<_>>();
+
+    if dependencies.iter().any(|(dependent, referenced, kind)| {
+        *kind == 1
+            && (*dependent == *referenced
+                || object_parents.get(dependent) != Some(&Some(*referenced)))
+    }) || object_parents.iter().any(|(object_id, parent_id)| {
+        parent_id.is_some_and(|parent_id| !owned_edges.contains(&(*object_id, parent_id)))
+    }) {
+        return false;
+    }
+
+    let mut completed = std::collections::HashSet::<[u8; 16]>::new();
+    for start in object_parents.keys() {
+        let mut path = std::collections::HashSet::<[u8; 16]>::new();
+        let mut current = *start;
+        loop {
+            if completed.contains(&current) {
+                break;
+            }
+            if !path.insert(current) {
+                return false;
+            }
+            match object_parents.get(&current) {
+                Some(Some(parent_id)) if object_parents.contains_key(parent_id) => {
+                    current = *parent_id;
+                }
+                Some(None) => break,
+                _ => return false,
+            }
+        }
+        completed.extend(path);
+    }
+    true
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]

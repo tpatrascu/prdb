@@ -2,7 +2,7 @@
 
 use crate::audit::AuditEvent;
 use crate::authorization::{MAX_MEMBERSHIP_EDGES, Membership, validate_membership_graph};
-use crate::catalog::{CatalogRecord, decode_registered_envelope};
+use crate::catalog::{CatalogRecord, decode_registered_envelope, validate_owned_child_graph};
 use crate::expression::decode_catalog_expression_record;
 use crate::index_locator::IndexLocator;
 use crate::metadata::{EngineMetadata, Lifecycle};
@@ -10,7 +10,7 @@ use crate::outcome::{InvocationOutcome, OutcomeStatus};
 use crate::row_record::RowRecord;
 use crate::schema::{AUDIT, CATALOG, ENGINE_META, INDEXES, OUTCOMES, ROW_INDEXES, ROWS, STATS};
 use redb::{Database, ReadTransaction, ReadableDatabase, ReadableTable};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 const METADATA_KEY: &[u8] = b"format";
 const MAX_CATALOG_RECORDS_PER_FAMILY: usize = 65_536;
@@ -128,8 +128,8 @@ fn validate_catalog(
     let mut typed_object_kinds = HashMap::<[u8; 16], u16>::new();
     let mut memberships = Vec::<Membership>::new();
     let mut membership_grantors = Vec::<[u8; 16]>::new();
-    let mut object_ids = HashSet::<[u8; 16]>::new();
-    let mut dependencies = Vec::<([u8; 16], [u8; 16])>::new();
+    let mut object_parents = HashMap::<[u8; 16], Option<[u8; 16]>>::new();
+    let mut dependencies = Vec::<([u8; 16], [u8; 16], u16)>::new();
     let mut database_records = 0usize;
     for entry in table.iter().map_err(storage_error)? {
         let (key, value) = entry.map_err(storage_error)?;
@@ -159,14 +159,29 @@ fn validate_catalog(
             validate_database_record(&record, metadata)?;
         }
         if record.family_code == 2 {
+            if key.len() != 19 {
+                return Err(StartupError::InvalidCatalog);
+            }
             let object_id: [u8; 16] = key
                 .get(3..19)
                 .ok_or(StartupError::InvalidCatalog)?
                 .try_into()
                 .map_err(|_| StartupError::InvalidCatalog)?;
             let kind = field_u16(&record, 1)?;
+            let parent_id = record
+                .fields
+                .iter()
+                .find(|field| field.tag == 2)
+                .map(|field| {
+                    field
+                        .payload
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| StartupError::InvalidCatalog)
+                })
+                .transpose()?;
             if !matches!(kind, 1..=10)
-                || !object_ids.insert(object_id)
+                || object_parents.insert(object_id, parent_id).is_some()
                 || object_kinds.insert(object_id, kind).is_some()
             {
                 return Err(StartupError::InvalidCatalog);
@@ -239,15 +254,26 @@ fn validate_catalog(
             let referenced_id: [u8; 16] = key[20..36]
                 .try_into()
                 .map_err(|_| StartupError::InvalidCatalog)?;
-            dependencies.push((dependent_id, referenced_id));
+            let kind = u16::from_be_bytes(
+                key[37..39]
+                    .try_into()
+                    .map_err(|_| StartupError::InvalidCatalog)?,
+            );
+            if !matches!(kind, 1..=5) {
+                return Err(StartupError::InvalidCatalog);
+            }
+            dependencies.push((dependent_id, referenced_id, kind));
         }
     }
     if database_records != 1 {
         return Err(StartupError::InvalidCatalog);
     }
-    if dependencies.iter().any(|(dependent_id, referenced_id)| {
-        !object_ids.contains(dependent_id) || !object_ids.contains(referenced_id)
+    if dependencies.iter().any(|(dependent_id, referenced_id, _)| {
+        !object_parents.contains_key(dependent_id) || !object_parents.contains_key(referenced_id)
     }) {
+        return Err(StartupError::InvalidCatalog);
+    }
+    if !validate_owned_child_graph(&object_parents, &dependencies) {
         return Err(StartupError::InvalidCatalog);
     }
     if typed_object_kinds

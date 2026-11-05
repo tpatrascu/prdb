@@ -67,7 +67,11 @@ Record dependencies during definition validation, in the same administrative tra
 
 At startup, every persisted dependency record must resolve both its dependent and referenced ID to an existing `objects` record. Edge-kind-specific endpoint agreement and consistency between dependency edges and records that imply ownership or references remain part of complete catalog graph validation.
 
+An `owned-child` dependency (kind 1) is the object hierarchy recorded by `objects.parent_id`. For every object with a parent ID, exactly one kind 1 edge must point from that child ID to the parent ID; every kind 1 edge must agree with the child's `parent_id`. Self-parenting and parent cycles are invalid. The parent must exist. Kinds 2–5 identify expression-reference, foreign-key-target, backing-index, and authority relationships; their complete endpoint matrices and implied-record consistency rules must be specified before DDL can rely on them.
+
 Catalog commits apply the same endpoint rule to the final catalog view. A batch may create objects and their dependency edges together; deleting an object while a dependency still names it is rejected atomically and records an ABORTED outcome.
+
+Catalog commits apply the kind 1 parent/edge agreement and acyclic-parent rule to the final object and dependency sets whenever either family changes. A parent change must update its ownership edge in the same batch.
 
 When a family 2 object row or a typed record in families 3–10 or 13 changes, the final catalog must retain a same-ID object row for every surviving typed record affected by that ID. The object kind must match its family: schema=1, type=2, table=3, column=4, expression=5, constraint=6, index=7, user=8, role=9, and policy=10. Creating the typed and object rows together is valid; deleting or retyping the object while an affected typed record remains is rejected atomically. This commit check does not establish inverse completeness for untouched object rows; startup validation checks every typed record.
 
