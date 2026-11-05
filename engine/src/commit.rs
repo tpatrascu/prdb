@@ -92,8 +92,10 @@ struct FinalTableSchema {
 }
 
 #[derive(Clone, Debug)]
-struct IndexBackfillPlan {
+struct IndexDdlPlan {
     index_tables: HashMap<[u8; 16], [u8; 16]>,
+    created_indexes: HashSet<[u8; 16]>,
+    dropped_indexes: HashSet<[u8; 16]>,
     expected_rows: HashMap<[u8; 16], Vec<([u8; 32], u64)>>,
     row_versions: HashMap<[u8; 32], u64>,
     writes: Vec<IndexWrite>,
@@ -134,7 +136,7 @@ pub enum CommitError {
     UniqueViolation,
     ForeignKeyViolation,
     ForeignKeyValidationLimitExceeded,
-    IndexBackfillLimitExceeded,
+    IndexDdlLimitExceeded,
     DdlFenceUnavailable,
     InvocationExpired,
     InvalidCatalog,
@@ -2767,7 +2769,7 @@ fn validate_index_definition_changes(
     transaction: &WriteTransaction,
     catalog_writes: &[CatalogWrite],
     row_writes: &[RowWrite],
-    backfill: Option<&IndexBackfillPlan>,
+    backfill: Option<&IndexDdlPlan>,
 ) -> Result<(), CommitError> {
     let family_prefix = 9u16.to_be_bytes();
     let catalog = transaction.open_table(CATALOG).map_err(storage_error)?;
@@ -2792,6 +2794,12 @@ fn validate_index_definition_changes(
         let index_id: [u8; 16] = write.key[3..19]
             .try_into()
             .map_err(|_| CommitError::InvalidCatalog)?;
+        let planned_create = current.is_none()
+            && write.payload.is_some()
+            && backfill.is_some_and(|plan| plan.created_indexes.contains(&index_id));
+        let planned_drop = current.is_some()
+            && write.payload.is_none()
+            && backfill.is_some_and(|plan| plan.dropped_indexes.contains(&index_id));
         let mut affected_tables = HashSet::new();
         if let Some(current) = current.as_deref() {
             affected_tables.insert(decode_index_definition(&write.key, current)?.1);
@@ -2825,9 +2833,11 @@ fn validate_index_definition_changes(
             {
                 return Err(CommitError::InvalidCatalog);
             }
-            if has_persisted_rows
-                && backfill.is_none_or(|plan| plan.index_tables.get(&index_id) != Some(&table_id))
-            {
+            let planned_for_table = backfill.is_some_and(|plan| {
+                plan.index_tables.get(&index_id) == Some(&table_id)
+                    && (planned_create || planned_drop)
+            });
+            if has_persisted_rows && !planned_for_table {
                 return Err(CommitError::InvalidCatalog);
             }
         }
@@ -2838,7 +2848,10 @@ fn validate_index_definition_changes(
             .next()
         {
             let (key, _) = entry.map_err(storage_error)?;
-            if key.value().starts_with(&index_id) {
+            if key.value().starts_with(&index_id)
+                && !(planned_drop
+                    && backfill.is_some_and(|plan| plan.dropped_indexes.contains(&index_id)))
+            {
                 return Err(CommitError::InvalidCatalog);
             }
         }
@@ -2941,13 +2954,14 @@ fn validate_final_catalog_index_definitions(
     Ok(())
 }
 
-fn build_index_backfill_plan(
+fn build_index_ddl_plan(
     database: &Database,
     catalog_writes: &[CatalogWrite],
-) -> Result<IndexBackfillPlan, CommitError> {
+) -> Result<IndexDdlPlan, CommitError> {
     let read = database.begin_read().map_err(storage_error)?;
     let catalog = read.open_table(CATALOG).map_err(storage_error)?;
     let mut new_indexes = Vec::new();
+    let mut dropped_indexes = Vec::new();
     for write in catalog_writes
         .iter()
         .filter(|write| write.key.starts_with(&9u16.to_be_bytes()))
@@ -2964,6 +2978,9 @@ fn build_index_backfill_plan(
         {
             let (_, table_id) = decode_index_definition(&write.key, payload)?;
             new_indexes.push((write.key.clone(), payload.to_vec(), table_id));
+        } else if let (Some(current), None) = (current.as_deref(), write.payload.as_deref()) {
+            let (index_id, table_id) = decode_index_definition(&write.key, current)?;
+            dropped_indexes.push((index_id, table_id));
         }
     }
 
@@ -2974,8 +2991,10 @@ fn build_index_backfill_plan(
             .or_default()
             .push((key, payload));
     }
-    let mut plan = IndexBackfillPlan {
+    let mut plan = IndexDdlPlan {
         index_tables: HashMap::new(),
+        created_indexes: HashSet::new(),
+        dropped_indexes: HashSet::new(),
         expected_rows: HashMap::new(),
         row_versions: HashMap::new(),
         writes: Vec::new(),
@@ -2993,6 +3012,7 @@ fn build_index_backfill_plan(
                 return Err(CommitError::InvalidCatalog);
             }
             plan.index_tables.insert(index_id, definition_table);
+            plan.created_indexes.insert(index_id);
         }
         let mut persisted_rows = Vec::new();
         for entry in rows.range(table_id.as_slice()..).map_err(storage_error)? {
@@ -3006,16 +3026,16 @@ fn build_index_backfill_plan(
             }
             total_rows = total_rows
                 .checked_add(1)
-                .ok_or(CommitError::IndexBackfillLimitExceeded)?;
+                .ok_or(CommitError::IndexDdlLimitExceeded)?;
             if total_rows > MAX_INDEX_BACKFILL_ROWS_PER_COMMIT {
-                return Err(CommitError::IndexBackfillLimitExceeded);
+                return Err(CommitError::IndexDdlLimitExceeded);
             }
             let bytes = value.value().to_vec();
             total_bytes = total_bytes
                 .checked_add(bytes.len())
-                .ok_or(CommitError::IndexBackfillLimitExceeded)?;
+                .ok_or(CommitError::IndexDdlLimitExceeded)?;
             if total_bytes > MAX_INDEX_BACKFILL_BYTES_PER_COMMIT {
-                return Err(CommitError::IndexBackfillLimitExceeded);
+                return Err(CommitError::IndexDdlLimitExceeded);
             }
             let row = RowRecord::decode(&bytes).map_err(|_| CommitError::InvalidRow)?;
             let row_key: [u8; 32] = key.try_into().map_err(|_| CommitError::InvalidRow)?;
@@ -3067,9 +3087,9 @@ fn build_index_backfill_plan(
             for definition in &definitions {
                 total_entries = total_entries
                     .checked_add(1)
-                    .ok_or(CommitError::IndexBackfillLimitExceeded)?;
+                    .ok_or(CommitError::IndexDdlLimitExceeded)?;
                 if total_entries > MAX_INDEX_BACKFILL_ENTRIES_PER_COMMIT {
-                    return Err(CommitError::IndexBackfillLimitExceeded);
+                    return Err(CommitError::IndexDdlLimitExceeded);
                 }
                 let derived = crate::index_key::derive_index_key(
                     definition.index_id,
@@ -3088,9 +3108,9 @@ fn build_index_backfill_plan(
                 })?;
                 total_bytes = total_bytes
                     .checked_add(derived.key.len())
-                    .ok_or(CommitError::IndexBackfillLimitExceeded)?;
+                    .ok_or(CommitError::IndexDdlLimitExceeded)?;
                 if total_bytes > MAX_INDEX_BACKFILL_BYTES_PER_COMMIT {
-                    return Err(CommitError::IndexBackfillLimitExceeded);
+                    return Err(CommitError::IndexDdlLimitExceeded);
                 }
                 plan.writes.push(IndexWrite {
                     key: derived.key,
@@ -3106,12 +3126,83 @@ fn build_index_backfill_plan(
         }
         plan.expected_rows.insert(table_id, expected_rows);
     }
+
+    let indexes = read.open_table(INDEXES).map_err(storage_error)?;
+    let reverse_indexes = read.open_table(ROW_INDEXES).map_err(storage_error)?;
+    for (index_id, table_id) in dropped_indexes {
+        if !seen_index_ids.insert(index_id) {
+            return Err(CommitError::InvalidCatalog);
+        }
+        plan.index_tables.insert(index_id, table_id);
+        plan.dropped_indexes.insert(index_id);
+        for entry in indexes
+            .range(index_id.as_slice()..)
+            .map_err(storage_error)?
+        {
+            let (key, value) = entry.map_err(storage_error)?;
+            let key = key.value().to_vec();
+            if !key.starts_with(&index_id) {
+                break;
+            }
+            if key.len() < 33 {
+                return Err(CommitError::InvalidIndex);
+            }
+            total_entries = total_entries
+                .checked_add(1)
+                .ok_or(CommitError::IndexDdlLimitExceeded)?;
+            if total_entries > MAX_INDEX_BACKFILL_ENTRIES_PER_COMMIT {
+                return Err(CommitError::IndexDdlLimitExceeded);
+            }
+            let locator_bytes = value.value().to_vec();
+            total_bytes = total_bytes
+                .checked_add(key.len())
+                .and_then(|size| size.checked_add(locator_bytes.len()))
+                .ok_or(CommitError::IndexDdlLimitExceeded)?;
+            if total_bytes > MAX_INDEX_BACKFILL_BYTES_PER_COMMIT {
+                return Err(CommitError::IndexDdlLimitExceeded);
+            }
+            let locator = IndexLocator::decode_for_key(&key, &locator_bytes)
+                .map_err(|_| CommitError::InvalidIndex)?;
+            let mut row_key = [0; 32];
+            row_key[..16].copy_from_slice(&table_id);
+            row_key[16..].copy_from_slice(&locator.row_id);
+            let row = rows
+                .get(&row_key[..])
+                .map_err(storage_error)?
+                .ok_or(CommitError::InvalidIndex)?;
+            let row = RowRecord::decode(row.value()).map_err(|_| CommitError::InvalidRow)?;
+            if row.row_version != locator.row_version
+                || plan
+                    .row_versions
+                    .insert(row_key, row.row_version)
+                    .is_some_and(|version| version != row.row_version)
+            {
+                return Err(CommitError::InvalidIndex);
+            }
+            let reverse_key = reverse_index_key(&row_key, &key);
+            let reverse_marker = reverse_indexes
+                .get(&reverse_key[..])
+                .map_err(storage_error)?
+                .ok_or(CommitError::InvalidIndex)?;
+            if !reverse_marker.value().is_empty() {
+                return Err(CommitError::InvalidIndex);
+            }
+            plan.writes.push(IndexWrite {
+                key,
+                row_key,
+                expected_version: Some(locator.row_version),
+                present: false,
+                unique: false,
+                null_exempt: false,
+            });
+        }
+    }
     Ok(plan)
 }
 
-fn validate_index_backfill_snapshot(
+fn validate_index_ddl_snapshot(
     transaction: &WriteTransaction,
-    plan: &IndexBackfillPlan,
+    plan: &IndexDdlPlan,
 ) -> Result<(), CommitError> {
     let rows = transaction.open_table(ROWS).map_err(storage_error)?;
     let mut total_rows = 0usize;
@@ -3143,6 +3234,77 @@ fn validate_index_backfill_snapshot(
             ));
         }
         if &actual_rows != expected_rows {
+            return Err(CommitError::Conflict);
+        }
+    }
+    let indexes = transaction.open_table(INDEXES).map_err(storage_error)?;
+    let reverse_indexes = transaction.open_table(ROW_INDEXES).map_err(storage_error)?;
+    let mut total_entries = 0usize;
+    for index_id in &plan.dropped_indexes {
+        let mut expected_writes = plan
+            .writes
+            .iter()
+            .filter(|write| !write.present && write.key.get(..16) == Some(index_id.as_slice()));
+        let table_id = plan
+            .index_tables
+            .get(index_id)
+            .ok_or(CommitError::InvalidCatalog)?;
+        for entry in indexes
+            .range(index_id.as_slice()..)
+            .map_err(storage_error)?
+        {
+            let (key, value) = entry.map_err(storage_error)?;
+            let key = key.value().to_vec();
+            if !key.starts_with(index_id) {
+                break;
+            }
+            if key.len() < 33 {
+                return Err(CommitError::InvalidIndex);
+            }
+            let locator_bytes = value.value().to_vec();
+            total_entries = total_entries.checked_add(1).ok_or(CommitError::Conflict)?;
+            total_bytes = total_bytes
+                .checked_add(key.len())
+                .and_then(|bytes| bytes.checked_add(locator_bytes.len()))
+                .ok_or(CommitError::Conflict)?;
+            if total_entries > MAX_INDEX_BACKFILL_ENTRIES_PER_COMMIT
+                || total_bytes > MAX_INDEX_BACKFILL_BYTES_PER_COMMIT
+            {
+                return Err(CommitError::Conflict);
+            }
+            let locator = IndexLocator::decode_for_key(&key, &locator_bytes)
+                .map_err(|_| CommitError::InvalidIndex)?;
+            let Some(expected_write) = expected_writes.next() else {
+                return Err(CommitError::Conflict);
+            };
+            if expected_write.key != key
+                || expected_write.expected_version != Some(locator.row_version)
+            {
+                return Err(CommitError::Conflict);
+            }
+            let mut row_key = [0; 32];
+            row_key[..16].copy_from_slice(table_id);
+            row_key[16..].copy_from_slice(&locator.row_id);
+            let row = rows
+                .get(&row_key[..])
+                .map_err(storage_error)?
+                .ok_or(CommitError::InvalidIndex)?;
+            let row = RowRecord::decode(row.value()).map_err(|_| CommitError::InvalidRow)?;
+            if row.row_version != locator.row_version
+                || plan.row_versions.get(&row_key) != Some(&row.row_version)
+            {
+                return Err(CommitError::Conflict);
+            }
+            let reverse_key = reverse_index_key(&row_key, &key);
+            let marker = reverse_indexes
+                .get(&reverse_key[..])
+                .map_err(storage_error)?
+                .ok_or(CommitError::InvalidIndex)?;
+            if !marker.value().is_empty() {
+                return Err(CommitError::InvalidIndex);
+            }
+        }
+        if expected_writes.next().is_some() {
             return Err(CommitError::Conflict);
         }
     }
@@ -3303,10 +3465,10 @@ pub fn commit_storage_changes(
     commit_storage_changes_inner(database, request, None)
 }
 
-fn commit_storage_changes_with_backfill(
+fn commit_storage_changes_with_index_ddl(
     database: &Database,
     request: CommitRequest<'_>,
-    backfill: &IndexBackfillPlan,
+    backfill: &IndexDdlPlan,
 ) -> Result<u64, CommitError> {
     commit_storage_changes_inner(database, request, Some(backfill))
 }
@@ -3314,7 +3476,7 @@ fn commit_storage_changes_with_backfill(
 fn commit_storage_changes_inner(
     database: &Database,
     request: CommitRequest<'_>,
-    index_backfill: Option<&IndexBackfillPlan>,
+    index_ddl_plan: Option<&IndexDdlPlan>,
 ) -> Result<u64, CommitError> {
     let CommitRequest {
         invocation_id,
@@ -3344,21 +3506,26 @@ fn commit_storage_changes_inner(
     let mut unique_indexes = HashSet::with_capacity(index_writes.len());
     for index_write in index_writes {
         let row_write = rows_by_key.get(&index_write.row_key);
-        let is_backfill_write = index_backfill.is_some_and(|plan| {
+        let is_index_ddl_write = index_ddl_plan.is_some_and(|plan| {
             let index_id: Option<[u8; 16]> =
                 index_write.key.get(..16).and_then(|id| id.try_into().ok());
             index_id
-                .and_then(|id| plan.index_tables.get(&id).copied())
-                .is_some_and(|table_id| {
+                .and_then(|id| plan.index_tables.get(&id).copied().map(|table| (id, table)))
+                .is_some_and(|(index_id, table_id)| {
                     table_id == index_write.row_key[..16]
-                        && index_write.expected_version.is_none()
-                        && index_write.present
+                        && if index_write.present {
+                            index_write.expected_version.is_none()
+                                && plan.created_indexes.contains(&index_id)
+                        } else {
+                            index_write.expected_version.is_some()
+                                && plan.dropped_indexes.contains(&index_id)
+                        }
                         && plan.writes.contains(index_write)
                 })
         });
         if index_write.key.len() < 33
             || index_write.key[index_write.key.len() - 16..] != index_write.row_key[16..]
-            || (row_write.is_none() && !is_backfill_write)
+            || (row_write.is_none() && !is_index_ddl_write)
             || !unique_indexes.insert(index_write.key.as_slice())
             || (index_write.present && row_write.is_some_and(|write| write.payload.is_none()))
             || (!index_write.present && index_write.expected_version.is_none())
@@ -3491,8 +3658,8 @@ fn commit_storage_changes_inner(
         return Err(CommitError::Conflict);
     }
 
-    if let Some(plan) = index_backfill {
-        match validate_index_backfill_snapshot(&transaction, plan) {
+    if let Some(plan) = index_ddl_plan {
+        match validate_index_ddl_snapshot(&transaction, plan) {
             Ok(()) => {}
             Err(CommitError::Conflict) => {
                 transaction.abort().map_err(storage_error)?;
@@ -3504,7 +3671,12 @@ fn commit_storage_changes_inner(
                 )?;
                 return Err(CommitError::Conflict);
             }
-            Err(error @ (CommitError::InvalidRow | CommitError::Storage(_))) => {
+            Err(
+                error @ (CommitError::InvalidRow
+                | CommitError::InvalidIndex
+                | CommitError::InvalidCatalog
+                | CommitError::Storage(_)),
+            ) => {
                 transaction.abort().map_err(storage_error)?;
                 record_aborted_outcome(
                     database,
@@ -3730,7 +3902,7 @@ fn commit_storage_changes_inner(
         }
         Err(error) => return Err(error),
     }
-    match validate_index_definition_changes(&transaction, catalog_writes, writes, index_backfill) {
+    match validate_index_definition_changes(&transaction, catalog_writes, writes, index_ddl_plan) {
         Ok(()) => {}
         Err(error @ (CommitError::InvalidCatalog | CommitError::InvalidRow)) => {
             transaction.abort().map_err(storage_error)?;
@@ -3845,7 +4017,7 @@ fn commit_storage_changes_inner(
                 let row_version = if rows_by_key.contains_key(&write.row_key) {
                     next_sequence
                 } else {
-                    index_backfill
+                    index_ddl_plan
                         .and_then(|plan| plan.row_versions.get(&write.row_key).copied())
                         .ok_or(CommitError::InvalidIndex)?
                 };
@@ -3945,14 +4117,14 @@ pub fn commit_catalog_and_audit(
     )
 }
 
-fn commit_catalog_and_audit_with_backfill(
+fn commit_catalog_and_audit_with_index_ddl(
     database: &Database,
     invocation_id: [u8; 16],
     principal_id: [u8; 16],
     retention_deadline_us: i64,
     catalog_writes: &[CatalogWrite],
     audit_events: &[AuditEvent],
-    backfill: &IndexBackfillPlan,
+    backfill: &IndexDdlPlan,
 ) -> Result<u64, CommitError> {
     if backfill.index_tables.is_empty() {
         return commit_catalog_and_audit(
@@ -3964,7 +4136,7 @@ fn commit_catalog_and_audit_with_backfill(
             audit_events,
         );
     }
-    commit_storage_changes_with_backfill(
+    commit_storage_changes_with_index_ddl(
         database,
         CommitRequest {
             invocation_id,
@@ -4014,7 +4186,7 @@ pub fn commit_catalog_and_audit_with_fences(
             return Err(CommitError::DdlFenceUnavailable);
         }
     };
-    let backfill = match build_index_backfill_plan(database, catalog_writes) {
+    let backfill = match build_index_ddl_plan(database, catalog_writes) {
         Ok(plan) => plan,
         Err(error) => {
             if !matches!(error, CommitError::Storage(_)) {
@@ -4028,7 +4200,7 @@ pub fn commit_catalog_and_audit_with_fences(
             return Err(error);
         }
     };
-    commit_catalog_and_audit_with_backfill(
+    commit_catalog_and_audit_with_index_ddl(
         database,
         invocation_id,
         principal_id,

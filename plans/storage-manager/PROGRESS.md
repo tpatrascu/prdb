@@ -443,4 +443,12 @@
 - Real-redb regressions cover successful backfill, atomic rejection of duplicate values for a new unique index, and failure above the row cap; the low-level rejection regression remains.
 - Verification: in the prescribed Nix shell, `cargo build --workspace --locked`, `cargo fmt --all -- --check`, Clippy with warnings denied, and all 198 integration tests across 18 targets passed. `git diff --check` and changed Markdown link checks passed.
 - Contract updates: [schema DDL](../../specs/ddl-schema.md) and [redb storage](../../specs/redb-storage.md).
-- Remaining: online index rebuild/drop, authenticated DDL authorization, and service admission remain open.
+- Remaining: populated-index rebuild, authenticated DDL authorization, and service admission remain open.
+
+## SM-5 dependency: populated index drop — in progress
+
+- Coordinated DDL now scans a dropped index's physical memberships under the table's exclusive fence, validates each locator against its row version and matching reverse entry, and rechecks the complete index prefix before deletion. Forward/reverse memberships and catalog/object removal publish in one commit; pinned readers keep the pre-drop redb state.
+- Removal shares the 65,536-membership and 64 MiB index-key/locator work bounds. Unique/constraint-owned indexes remain subject to final catalog dependency checks. Unfenced low-level catalog commits still reject drops when rows or memberships remain.
+- The real-redb lifecycle regression creates an index over an existing row, proves the trusted low-level helper rejects dropping it, then drops it through `StorageManager`; the old snapshot still resolves the old membership and startup accepts the new image.
+- Verification: in the prescribed Nix shell, workspace build, format check, Clippy with warnings denied, and all 198 integration tests across 18 targets passed. `git diff --check` and changed Markdown link checks passed.
+- Remaining: populated-index rebuild, authenticated DDL authorization, and service admission remain open.

@@ -2506,7 +2506,7 @@ fn catalog_index_changes_reject_tables_with_existing_rows() -> Result<(), Box<dy
 }
 
 #[test]
-fn storage_manager_backfills_new_indexes_over_existing_rows_atomically()
+fn storage_manager_builds_and_drops_populated_indexes_atomically()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
@@ -2555,33 +2555,99 @@ fn storage_manager_backfills_new_indexes_over_existing_rows_atomically()
 
     let expected = typed_bytea_index_key(id(0x88), &row_key, &payload);
     let read = database.begin_read()?;
-    let indexes = read.open_table(schema::INDEXES)?;
-    let locator = indexes.get(expected.key.as_slice())?.unwrap();
-    assert_eq!(
-        IndexLocator::decode_for_key(&expected.key, locator.value())?.row_version,
-        1
-    );
     let mut reverse_key = row_key.to_vec();
     reverse_key.extend_from_slice(&expected.key[..expected.key.len() - 16]);
-    assert!(
-        read.open_table(schema::ROW_INDEXES)?
-            .get(reverse_key.as_slice())?
-            .is_some()
-    );
-    let catalog = read.open_table(CATALOG)?;
-    assert!(catalog.get(new_index_key.as_slice())?.is_some());
-    assert!(
-        catalog
-            .get(id_catalog_key(2, id(0x88)).as_slice())?
-            .is_some()
-    );
-    assert!(
-        read.open_table(schema::AUDIT)?
-            .get(&[77; 16][..])?
-            .is_some()
-    );
+    let (definition_bytes, object_bytes) = {
+        let indexes = read.open_table(schema::INDEXES)?;
+        let locator = indexes.get(expected.key.as_slice())?.unwrap();
+        assert_eq!(
+            IndexLocator::decode_for_key(&expected.key, locator.value())?.row_version,
+            1
+        );
+        assert!(
+            read.open_table(schema::ROW_INDEXES)?
+                .get(reverse_key.as_slice())?
+                .is_some()
+        );
+        let catalog = read.open_table(CATALOG)?;
+        let definition_bytes = catalog
+            .get(new_index_key.as_slice())?
+            .unwrap()
+            .value()
+            .to_vec();
+        let object_key = id_catalog_key(2, id(0x88));
+        let object_bytes = catalog
+            .get(object_key.as_slice())?
+            .unwrap()
+            .value()
+            .to_vec();
+        assert!(
+            read.open_table(schema::AUDIT)?
+                .get(&[77; 16][..])?
+                .is_some()
+        );
+        (definition_bytes, object_bytes)
+    };
     assert_eq!(
         lookup_outcome(&database, id(77), id(9), 1)?.unwrap().status,
+        OutcomeStatus::Committed
+    );
+
+    let mut object_delete = object_write(id(0x88), 7);
+    object_delete.expected_value = Some(object_bytes);
+    object_delete.payload = None;
+    let drop_writes = [
+        CatalogWrite {
+            key: new_index_key.clone(),
+            expected_value: Some(definition_bytes),
+            payload: None,
+        },
+        object_delete,
+    ];
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(203),
+            id(9),
+            9_999,
+            &drop_writes,
+            &[audit_event(203)],
+        ),
+        Err(CommitError::InvalidCatalog)
+    );
+    assert_eq!(
+        storage.commit_catalog_and_audit(
+            id(202),
+            id(9),
+            9_999,
+            &drop_writes,
+            &[audit_event(202)],
+        )?,
+        3
+    );
+    assert!(
+        read.open_table(schema::INDEXES)?
+            .get(expected.key.as_slice())?
+            .is_some()
+    );
+    assert!(
+        database
+            .begin_read()?
+            .open_table(schema::INDEXES)?
+            .get(expected.key.as_slice())?
+            .is_none()
+    );
+    assert!(
+        database
+            .begin_read()?
+            .open_table(schema::ROW_INDEXES)?
+            .get(reverse_key.as_slice())?
+            .is_none()
+    );
+    assert_eq!(
+        lookup_outcome(&database, id(202), id(9), 1)?
+            .unwrap()
+            .status,
         OutcomeStatus::Committed
     );
     drop(read);
@@ -2711,7 +2777,7 @@ fn catalog_index_backfill_limit_fails_without_publishing_catalog()
             ],
             &[audit_event(81)],
         ),
-        Err(CommitError::IndexBackfillLimitExceeded)
+        Err(CommitError::IndexDdlLimitExceeded)
     );
     assert_eq!(commit_sequence(&database)?, 1);
     assert_eq!(
