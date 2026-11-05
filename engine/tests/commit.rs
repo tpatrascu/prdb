@@ -1634,6 +1634,172 @@ fn catalog_commit_requires_foreign_key_target_dependency_edges()
 }
 
 #[test]
+fn adding_foreign_key_rejects_preexisting_orphan_rows() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let source_key = table_row_key(id(82), [1; 16]);
+    commit_rows(
+        &database,
+        id(115),
+        id(9),
+        9_999,
+        &[RowWrite {
+            key: source_key,
+            expected_version: None,
+            payload: Some(bytea_tuple(b"missing-parent")),
+        }],
+    )?;
+
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(116),
+            id(9),
+            9_999,
+            &foreign_key_catalog_writes(true, true),
+            &[audit_event(116)],
+        ),
+        Err(CommitError::ForeignKeyViolation)
+    );
+    assert_eq!(commit_sequence(&database)?, 1);
+    assert!(row(&database, &source_key)?.is_some());
+    let read = database.begin_read()?;
+    assert!(
+        read.open_table(prdb_engine::schema::CATALOG)?
+            .get(&id_catalog_key(8, id(86))[..])?
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
+fn adding_foreign_key_accepts_preexisting_matching_rows() -> Result<(), Box<dyn std::error::Error>>
+{
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let mut initial_catalog = foreign_key_catalog_writes(false, true);
+    initial_catalog.retain(|write| {
+        write.key != id_catalog_key(8, id(86)) && write.key != id_catalog_key(2, id(86))
+    });
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(117),
+            id(9),
+            9_999,
+            &initial_catalog,
+            &[audit_event(117)],
+        )?,
+        1
+    );
+
+    let source_key = table_row_key(id(82), [1; 16]);
+    let target_key = table_row_key(id(81), [2; 16]);
+    let source_payload = bytea_tuple(b"existing-parent");
+    let target_payload = bytea_tuple(b"existing-parent");
+    let target_schema = [ColumnSchema {
+        scalar_type: ScalarType::Bytea,
+        nullable: false,
+    }];
+    let target_index = prdb_engine::index_key::derive_index_key(
+        id(87),
+        target_key[16..].try_into().unwrap(),
+        1,
+        &[id(83)],
+        &target_schema,
+        &target_payload,
+        &[id(83)],
+    )?;
+    assert_eq!(
+        commit_rows_and_indexes(
+            &database,
+            id(118),
+            id(9),
+            9_999,
+            &[
+                RowWrite {
+                    key: target_key,
+                    expected_version: None,
+                    payload: Some(target_payload),
+                },
+                RowWrite {
+                    key: source_key,
+                    expected_version: None,
+                    payload: Some(source_payload),
+                },
+            ],
+            &[IndexWrite {
+                key: target_index.key,
+                row_key: target_key,
+                expected_version: None,
+                present: true,
+                unique: true,
+                null_exempt: target_index.has_null,
+            }],
+        )?,
+        2
+    );
+
+    let source_table_key = id_catalog_key(5, id(82));
+    let previous_source_table = initial_catalog
+        .iter()
+        .find(|write| write.key == source_table_key)
+        .unwrap()
+        .payload
+        .clone();
+    let mut source_table = table_write_with_versions(id(82), id(80), 1, 2);
+    source_table.expected_value = previous_source_table;
+    let new_foreign_key_without_target_fence = [
+        constraint_write(id(86), id(82), 5, &[id(84)], Some(id(85)), &[id(83)], None),
+        object_write(id(86), 6),
+        dependency_write(id(86), id(85), 3),
+        source_table.clone(),
+    ];
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(119),
+            id(9),
+            9_999,
+            &new_foreign_key_without_target_fence,
+            &[audit_event(119)],
+        ),
+        Err(CommitError::InvalidCatalog)
+    );
+    assert_eq!(commit_sequence(&database)?, 2);
+
+    let target_table_key = id_catalog_key(5, id(81));
+    let previous_target_table = initial_catalog
+        .iter()
+        .find(|write| write.key == target_table_key)
+        .unwrap()
+        .payload
+        .clone();
+    let mut target_table = table_write_with_versions(id(81), id(80), 1, 2);
+    target_table.expected_value = previous_target_table;
+    let new_foreign_key = [
+        new_foreign_key_without_target_fence[0].clone(),
+        new_foreign_key_without_target_fence[1].clone(),
+        new_foreign_key_without_target_fence[2].clone(),
+        source_table,
+        target_table,
+    ];
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(120),
+            id(9),
+            9_999,
+            &new_foreign_key,
+            &[audit_event(120)],
+        )?,
+        3
+    );
+    assert_eq!(commit_sequence(&database)?, 3);
+    Ok(())
+}
+
+#[test]
 fn catalog_commit_requires_backing_index_dependency_edges() -> Result<(), Box<dyn std::error::Error>>
 {
     let fixture = Fixture::new();

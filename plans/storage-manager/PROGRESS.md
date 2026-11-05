@@ -380,3 +380,12 @@
 - A real-redb regression submits otherwise coherent FK, PRIMARY KEY, UNIQUE index, and dependency records with mismatched source/target types; catalog commit rejects the change and leaves the commit sequence unchanged.
 - Verification: with Rust/Cargo 1.95.0, rustfmt 1.9.0, and Clippy 0.1.95 in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and all 184 integration tests across 17 targets passed.
 - Remaining: validating pre-existing child rows when creating an FK, FK DDL fencing/lifecycle, and authenticated service admission remain open.
+
+## SM-5 dependency: catalog-commit foreign-key creation validation — in progress
+
+- Catalog commits now load the final source and referenced table schemas for changed FK definitions and validate existing non-NULL child rows against the latest target rows plus any row changes in the same serialized commit. The existing 65,536 combined row-visit and 16 MiB per-FK comparison-key limits apply, and invalid data leaves the constraint unpublished with an ABORTED outcome.
+- FK definition changes on an existing table require write-epoch advances on both the referencing and referenced tables. Catalog commits also preserve the 256 live-FK limit enforced by invocation loading and startup.
+- Real-redb coverage rejects adding an FK over an orphan child, accepts matching pre-existing parent/child rows, and confirms missing the referenced-table epoch advance aborts publication.
+- Verification: with Rust/Cargo 1.95.0, rustfmt 1.9.0, Clippy 0.1.95, and TinyCC 0.9.27-unstable-2025-01-06 in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and all 186 integration tests across 17 targets passed. `git diff --check` and changed Markdown link checks passed.
+- Contract updates: [schema DDL](../../specs/ddl-schema.md) defines validation of existing rows on FK creation; [data dictionary](../../specs/data-dictionary.md) requires epoch publication for both related tables.
+- Remaining: a separate per-table DDL fence manager, online validation/backfill, and authenticated service admission remain open.

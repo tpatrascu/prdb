@@ -1,7 +1,9 @@
 //! Serialized row publication with optimistic row-version validation.
 use crate::audit::AuditEvent;
 use crate::authorization::{MAX_MEMBERSHIP_EDGES, Membership, validate_membership_graph};
-use crate::catalog::{decode_registered_envelope, validate_builtin_type_profile};
+use crate::catalog::{
+    decode_builtin_scalar_type, decode_registered_envelope, validate_builtin_type_profile,
+};
 use crate::expression::decode_catalog_expression_record;
 use crate::index_locator::IndexLocator;
 use crate::metadata::{EngineMetadata, Lifecycle};
@@ -76,6 +78,13 @@ pub struct ForeignKeyCheck {
     pub target_schema_version: u64,
     pub target_schema: Vec<ColumnSchema>,
     pub target_ordinals: Vec<usize>,
+}
+
+#[derive(Clone, Debug)]
+struct FinalTableSchema {
+    schema_version: u64,
+    column_ids: Vec<[u8; 16]>,
+    columns: Vec<ColumnSchema>,
 }
 
 pub struct CommitRequest<'a> {
@@ -222,6 +231,7 @@ fn validate_foreign_key_constraints(
     transaction: &WriteTransaction,
     writes: &[RowWrite],
     foreign_keys: &[ForeignKeyCheck],
+    force_validation: bool,
 ) -> Result<(), CommitError> {
     let mut row_visits = 0usize;
     let write_keys = writes.iter().map(|write| write.key).collect::<HashSet<_>>();
@@ -232,7 +242,7 @@ fn validate_foreign_key_constraints(
         let target_touched = writes
             .iter()
             .any(|write| write.key[..16] == foreign_key.target_table_id);
-        if !source_touched && !target_touched {
+        if !force_validation && !source_touched && !target_touched {
             continue;
         }
         validate_foreign_key_definition(foreign_key)?;
@@ -268,6 +278,254 @@ fn validate_foreign_key_constraints(
         }
     }
     Ok(())
+}
+
+fn load_final_table_schema(
+    catalog: &redb::Table<'_, &[u8], &[u8]>,
+    writes: &[CatalogWrite],
+    table_id: [u8; 16],
+) -> Result<FinalTableSchema, CommitError> {
+    let table_key = id_catalog_key(5, table_id);
+    let table_bytes =
+        final_catalog_value(catalog, writes, &table_key)?.ok_or(CommitError::InvalidCatalog)?;
+    let schema_version = u64::from_le_bytes(
+        catalog_field_bytes(&table_key, &table_bytes, 5, 2)?
+            .try_into()
+            .map_err(|_| CommitError::InvalidCatalog)?,
+    );
+    if schema_version == 0 {
+        return Err(CommitError::InvalidCatalog);
+    }
+
+    let prefix = 6u16.to_be_bytes();
+    let mut count = 0usize;
+    let mut columns = Vec::new();
+    for entry in catalog.range(prefix.as_slice()..).map_err(storage_error)? {
+        let (key, value) = entry.map_err(storage_error)?;
+        let key = key.value();
+        if !key.starts_with(&prefix) {
+            break;
+        }
+        if writes.iter().any(|write| write.key == key) {
+            continue;
+        }
+        count += 1;
+        if count > crate::snapshot::MAX_CATALOG_FAMILY_SCAN {
+            return Err(CommitError::InvalidCatalog);
+        }
+        if column_table_id(key, value.value())? == table_id {
+            columns.push(decode_final_column(catalog, writes, key, value.value())?);
+        }
+    }
+    for write in writes.iter().filter(|write| write.key.starts_with(&prefix)) {
+        let Some(bytes) = &write.payload else {
+            continue;
+        };
+        count += 1;
+        if count > crate::snapshot::MAX_CATALOG_FAMILY_SCAN {
+            return Err(CommitError::InvalidCatalog);
+        }
+        if column_table_id(&write.key, bytes)? == table_id {
+            columns.push(decode_final_column(catalog, writes, &write.key, bytes)?);
+        }
+    }
+    if columns.len() > crate::tuple::MAX_COLUMNS {
+        return Err(CommitError::InvalidCatalog);
+    }
+    columns.sort_by_key(|(ordinal, _, _)| *ordinal);
+    let mut column_ids = Vec::with_capacity(columns.len());
+    let mut schemas = Vec::with_capacity(columns.len());
+    for (expected_ordinal, (ordinal, column_id, schema)) in columns.into_iter().enumerate() {
+        if ordinal != expected_ordinal {
+            return Err(CommitError::InvalidCatalog);
+        }
+        column_ids.push(column_id);
+        schemas.push(schema);
+    }
+    Ok(FinalTableSchema {
+        schema_version,
+        column_ids,
+        columns: schemas,
+    })
+}
+
+fn decode_final_column(
+    catalog: &redb::Table<'_, &[u8], &[u8]>,
+    writes: &[CatalogWrite],
+    key: &[u8],
+    bytes: &[u8],
+) -> Result<(usize, [u8; 16], ColumnSchema), CommitError> {
+    let column_id: [u8; 16] = key
+        .get(3..19)
+        .ok_or(CommitError::InvalidCatalog)?
+        .try_into()
+        .map_err(|_| CommitError::InvalidCatalog)?;
+    if column_id == [0; 16] {
+        return Err(CommitError::InvalidCatalog);
+    }
+    let ordinal = u32::from_le_bytes(
+        catalog_field_bytes(key, bytes, 6, 2)?
+            .try_into()
+            .map_err(|_| CommitError::InvalidCatalog)?,
+    ) as usize;
+    let type_id: [u8; 16] = catalog_field_bytes(key, bytes, 6, 4)?
+        .try_into()
+        .map_err(|_| CommitError::InvalidCatalog)?;
+    let parameters = catalog_field_bytes(key, bytes, 6, 5)?;
+    let nullable = match catalog_field_bytes(key, bytes, 6, 6)?.as_slice() {
+        [0] => false,
+        [1] => true,
+        _ => return Err(CommitError::InvalidCatalog),
+    };
+    let introduced_schema_version = u64::from_le_bytes(
+        catalog_field_bytes(key, bytes, 6, 9)?
+            .try_into()
+            .map_err(|_| CommitError::InvalidCatalog)?,
+    );
+    let table_id = column_table_id(key, bytes)?;
+    let table_key = id_catalog_key(5, table_id);
+    let table_bytes =
+        final_catalog_value(catalog, writes, &table_key)?.ok_or(CommitError::InvalidCatalog)?;
+    let schema_version = u64::from_le_bytes(
+        catalog_field_bytes(&table_key, &table_bytes, 5, 2)?
+            .try_into()
+            .map_err(|_| CommitError::InvalidCatalog)?,
+    );
+    if introduced_schema_version == 0 || introduced_schema_version > schema_version {
+        return Err(CommitError::InvalidCatalog);
+    }
+    let type_key = id_catalog_key(4, type_id);
+    let type_bytes =
+        final_catalog_value(catalog, writes, &type_key)?.ok_or(CommitError::InvalidCatalog)?;
+    let type_record =
+        decode_registered_envelope(&type_bytes).map_err(|_| CommitError::InvalidCatalog)?;
+    if type_record.family_code != 4 || type_record.logical_key != type_key {
+        return Err(CommitError::InvalidCatalog);
+    }
+    let scalar_type = decode_builtin_scalar_type(&type_record, &parameters)
+        .map_err(|_| CommitError::InvalidCatalog)?;
+    Ok((
+        ordinal,
+        column_id,
+        ColumnSchema {
+            scalar_type,
+            nullable,
+        },
+    ))
+}
+
+fn load_new_foreign_key_checks(
+    catalog: &redb::Table<'_, &[u8], &[u8]>,
+    writes: &[CatalogWrite],
+) -> Result<Vec<ForeignKeyCheck>, CommitError> {
+    let prefix = 8u16.to_be_bytes();
+    if !writes.iter().any(|write| write.key.starts_with(&prefix)) {
+        return Ok(Vec::new());
+    }
+    let mut foreign_key_count = 0usize;
+    for entry in catalog.range(prefix.as_slice()..).map_err(storage_error)? {
+        let (key, value) = entry.map_err(storage_error)?;
+        let key = key.value();
+        if !key.starts_with(&prefix) {
+            break;
+        }
+        if writes.iter().any(|write| write.key == key) {
+            continue;
+        }
+        if u16::from_le_bytes(
+            catalog_field_bytes(key, value.value(), 8, 2)?
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?,
+        ) == 5
+        {
+            foreign_key_count += 1;
+            if foreign_key_count > 256 {
+                return Err(CommitError::InvalidCatalog);
+            }
+        }
+    }
+    let mut checks = Vec::new();
+    for write in writes.iter().filter(|write| write.key.starts_with(&prefix)) {
+        let Some(bytes) = write.payload.as_deref() else {
+            continue;
+        };
+        if u16::from_le_bytes(
+            catalog_field_bytes(&write.key, bytes, 8, 2)?
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?,
+        ) != 5
+        {
+            continue;
+        }
+        foreign_key_count += 1;
+        if foreign_key_count > 256 {
+            return Err(CommitError::InvalidCatalog);
+        }
+        if write.expected_value == write.payload {
+            continue;
+        }
+        let source_table_id: [u8; 16] = catalog_field_bytes(&write.key, bytes, 8, 1)?
+            .try_into()
+            .map_err(|_| CommitError::InvalidCatalog)?;
+        let source_column_ids = catalog_id_list_field(&write.key, bytes, 8, 3)?;
+        let target_constraint_id: [u8; 16] = catalog_field_bytes(&write.key, bytes, 8, 5)?
+            .try_into()
+            .map_err(|_| CommitError::InvalidCatalog)?;
+        let target_column_ids = catalog_id_list_field(&write.key, bytes, 8, 6)?;
+        let target_constraint_key = id_catalog_key(8, target_constraint_id);
+        let target_constraint_bytes = final_catalog_value(catalog, writes, &target_constraint_key)?
+            .ok_or(CommitError::InvalidCatalog)?;
+        let target_table_id: [u8; 16] =
+            catalog_field_bytes(&target_constraint_key, &target_constraint_bytes, 8, 1)?
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?;
+        if source_column_ids.is_empty() || source_column_ids.len() != target_column_ids.len() {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let source = load_final_table_schema(catalog, writes, source_table_id)?;
+        let target = load_final_table_schema(catalog, writes, target_table_id)?;
+        let source_ordinals = source_column_ids
+            .iter()
+            .map(|column_id| {
+                source
+                    .column_ids
+                    .iter()
+                    .position(|candidate| candidate == column_id)
+                    .ok_or(CommitError::InvalidCatalog)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let target_ordinals = target_column_ids
+            .iter()
+            .map(|column_id| {
+                target
+                    .column_ids
+                    .iter()
+                    .position(|candidate| candidate == column_id)
+                    .ok_or(CommitError::InvalidCatalog)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if source_ordinals
+            .iter()
+            .zip(&target_ordinals)
+            .any(|(source_ordinal, target_ordinal)| {
+                source.columns[*source_ordinal].scalar_type
+                    != target.columns[*target_ordinal].scalar_type
+            })
+        {
+            return Err(CommitError::InvalidCatalog);
+        }
+        checks.push(ForeignKeyCheck {
+            source_table_id,
+            source_schema_version: source.schema_version,
+            source_schema: source.columns,
+            source_ordinals,
+            target_table_id,
+            target_schema_version: target.schema_version,
+            target_schema: target.columns,
+            target_ordinals,
+        });
+    }
+    Ok(checks)
 }
 
 fn validate_foreign_key_definition(foreign_key: &ForeignKeyCheck) -> Result<(), CommitError> {
@@ -650,6 +908,31 @@ fn validate_final_membership_graph(
             }
             if let Some(table_id) = current_table.or(final_table) {
                 affected_tables.insert(table_id);
+                for constraint_bytes in [current.as_deref(), write.payload.as_deref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    if u16::from_le_bytes(
+                        catalog_field_bytes(&write.key, constraint_bytes, 8, 2)?
+                            .try_into()
+                            .map_err(|_| CommitError::InvalidCatalog)?,
+                    ) != 5
+                    {
+                        continue;
+                    }
+                    let target_constraint_id: [u8; 16] =
+                        catalog_field_bytes(&write.key, constraint_bytes, 8, 5)?
+                            .try_into()
+                            .map_err(|_| CommitError::InvalidCatalog)?;
+                    let target_key = id_catalog_key(8, target_constraint_id);
+                    let target_bytes = final_catalog_value(&table, catalog_writes, &target_key)?
+                        .or(table
+                            .get(&target_key[..])
+                            .map_err(storage_error)?
+                            .map(|value| value.value().to_vec()))
+                        .ok_or(CommitError::InvalidCatalog)?;
+                    affected_tables.insert(constraint_table_id(&target_key, &target_bytes)?);
+                }
             }
         } else if write.key.starts_with(&13u16.to_be_bytes()) {
             let policy_id: [u8; 16] = write
@@ -2960,7 +3243,7 @@ pub fn commit_storage_changes(
         record_aborted_outcome(database, invocation_id, principal_id, retention_deadline_us)?;
         return Err(CommitError::Conflict);
     }
-    match validate_foreign_key_constraints(&transaction, writes, foreign_keys) {
+    match validate_foreign_key_constraints(&transaction, writes, foreign_keys, false) {
         Ok(()) => {}
         Err(
             error @ (CommitError::InvalidCatalog
@@ -3032,6 +3315,33 @@ pub fn commit_storage_changes(
     match validate_index_definition_changes(&transaction, catalog_writes, writes) {
         Ok(()) => {}
         Err(error @ (CommitError::InvalidCatalog | CommitError::InvalidRow)) => {
+            transaction.abort().map_err(storage_error)?;
+            record_aborted_outcome(database, invocation_id, principal_id, retention_deadline_us)?;
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    }
+    let new_foreign_keys = {
+        let catalog = transaction.open_table(CATALOG).map_err(storage_error)?;
+        load_new_foreign_key_checks(&catalog, catalog_writes)
+    };
+    let new_foreign_keys = match new_foreign_keys {
+        Ok(checks) => checks,
+        Err(CommitError::InvalidCatalog) => {
+            transaction.abort().map_err(storage_error)?;
+            record_aborted_outcome(database, invocation_id, principal_id, retention_deadline_us)?;
+            return Err(CommitError::InvalidCatalog);
+        }
+        Err(error) => return Err(error),
+    };
+    match validate_foreign_key_constraints(&transaction, writes, &new_foreign_keys, true) {
+        Ok(()) => {}
+        Err(
+            error @ (CommitError::InvalidCatalog
+            | CommitError::InvalidRow
+            | CommitError::ForeignKeyViolation
+            | CommitError::ForeignKeyValidationLimitExceeded),
+        ) => {
             transaction.abort().map_err(storage_error)?;
             record_aborted_outcome(database, invocation_id, principal_id, retention_deadline_us)?;
             return Err(error);
