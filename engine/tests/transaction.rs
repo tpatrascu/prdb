@@ -2691,6 +2691,28 @@ fn schema_loader_uses_each_columns_type_parameters() -> Result<(), Box<dyn std::
     ] {
         records.push(column(column_id, ordinal, type_id, parameters)?);
     }
+    let index_id = [211; 16];
+    let index_key = catalog_id_key(9, index_id);
+    let mut index_columns = 1u32.to_le_bytes().to_vec();
+    index_columns.extend_from_slice(&[208; 16]);
+    records.push((
+        index_key.clone(),
+        catalog_record_payload(
+            9,
+            &index_key,
+            &[
+                field(1, WireType::Id, table_id.to_vec()),
+                field(2, WireType::Ids, index_columns),
+                field(3, WireType::U16, 1u16.to_le_bytes().to_vec()),
+                field(4, WireType::Bool, vec![1]),
+                field(5, WireType::U16, 1u16.to_le_bytes().to_vec()),
+                field(7, WireType::Id, vec![212; 16]),
+                field(8, WireType::U16, 1u16.to_le_bytes().to_vec()),
+                field(9, WireType::U32, 1u32.to_le_bytes().to_vec()),
+                field(10, WireType::U64, 1u64.to_le_bytes().to_vec()),
+            ],
+        )?,
+    ));
     {
         let write = database.begin_write()?;
         {
@@ -2704,6 +2726,15 @@ fn schema_loader_uses_each_columns_type_parameters() -> Result<(), Box<dyn std::
     let mut invocation =
         InvocationTransaction::begin(&database, [209; 16], [9; 16], 9_999, 4, 128)?;
     let schema = invocation.load_catalog_table_schema(table_id)?;
+    assert_eq!(
+        invocation.load_catalog_indexes(&schema)?,
+        [prdb_engine::transaction::CatalogIndexDefinition {
+            index_id,
+            table_id,
+            column_ids: vec![[208; 16]],
+            unique: true,
+        }]
+    );
     assert_eq!(
         schema
             .columns
@@ -2735,7 +2766,71 @@ fn schema_loader_uses_each_columns_type_parameters() -> Result<(), Box<dyn std::
         encode_tuple(&schema.columns, schema.schema_version, &oversized),
         Err(prdb_engine::tuple::TupleError::VarcharLengthExceeded)
     ));
-    drop(invocation);
+    let changed_index = catalog_record_payload(
+        9,
+        &index_key,
+        &[
+            field(1, WireType::Id, table_id.to_vec()),
+            {
+                let mut columns = 1u32.to_le_bytes().to_vec();
+                columns.extend_from_slice(&[208; 16]);
+                field(2, WireType::Ids, columns)
+            },
+            field(3, WireType::U16, 1u16.to_le_bytes().to_vec()),
+            field(4, WireType::Bool, vec![0]),
+            field(5, WireType::U16, 1u16.to_le_bytes().to_vec()),
+            field(7, WireType::Id, vec![212; 16]),
+            field(8, WireType::U16, 1u16.to_le_bytes().to_vec()),
+            field(9, WireType::U32, 1u32.to_le_bytes().to_vec()),
+            field(10, WireType::U64, 1u64.to_le_bytes().to_vec()),
+        ],
+    )?;
+    {
+        let write = database.begin_write()?;
+        write
+            .open_table(CATALOG)?
+            .insert(&index_key[..], &changed_index[..])?;
+        write.commit()?;
+    }
+    assert!(matches!(
+        invocation.commit(),
+        Err(TransactionError::Commit(CommitError::Conflict))
+    ));
+
+    let malformed_index_id = [213; 16];
+    let malformed_index_key = catalog_id_key(9, malformed_index_id);
+    let mut foreign_columns = 1u32.to_le_bytes().to_vec();
+    foreign_columns.extend_from_slice(&[255; 16]);
+    let malformed_index = catalog_record_payload(
+        9,
+        &malformed_index_key,
+        &[
+            field(1, WireType::Id, table_id.to_vec()),
+            field(2, WireType::Ids, foreign_columns),
+            field(3, WireType::U16, 1u16.to_le_bytes().to_vec()),
+            field(4, WireType::Bool, vec![0]),
+            field(5, WireType::U16, 1u16.to_le_bytes().to_vec()),
+            field(7, WireType::Id, vec![214; 16]),
+            field(8, WireType::U16, 1u16.to_le_bytes().to_vec()),
+            field(9, WireType::U32, 1u32.to_le_bytes().to_vec()),
+            field(10, WireType::U64, 1u64.to_le_bytes().to_vec()),
+        ],
+    )?;
+    {
+        let write = database.begin_write()?;
+        write
+            .open_table(CATALOG)?
+            .insert(&malformed_index_key[..], &malformed_index[..])?;
+        write.commit()?;
+    }
+    let mut invalid_index =
+        InvocationTransaction::begin(&database, [215; 16], [9; 16], 9_999, 4, 128)?;
+    let valid_schema = invalid_index.load_catalog_table_schema(table_id)?;
+    assert!(matches!(
+        invalid_index.load_catalog_indexes(&valid_schema),
+        Err(TransactionError::CorruptCatalog)
+    ));
+
     let (key, value) = column([206; 16], 1, [203; 16], varchar_params(0))?;
     {
         let write = database.begin_write()?;

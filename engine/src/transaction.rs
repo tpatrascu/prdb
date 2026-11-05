@@ -83,6 +83,15 @@ pub struct CatalogTableSchema {
     pub generation_modes: Vec<u16>,
 }
 
+/// A valid index definition resolved against one pinned table schema.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogIndexDefinition {
+    pub index_id: [u8; 16],
+    pub table_id: [u8; 16],
+    pub column_ids: Vec<[u8; 16]>,
+    pub unique: bool,
+}
+
 impl std::fmt::Display for TransactionError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "invocation transaction failed: {self:?}")
@@ -407,6 +416,88 @@ impl<'db> InvocationTransaction<'db> {
         })();
         match result {
             Ok(schema) => Ok(schema),
+            Err(error) => {
+                if !self.aborted {
+                    self.abort()?;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Load the table's ordered index definitions from the pinned catalog.
+    /// Each definition is checked against the catalog-derived schema, and its
+    /// exact bytes are guarded for final commit validation.
+    pub fn load_catalog_indexes(
+        &mut self,
+        schema: &CatalogTableSchema,
+    ) -> Result<Vec<CatalogIndexDefinition>, TransactionError> {
+        let result = (|| {
+            let trusted_schema = self.load_catalog_table_schema(schema.table_id)?;
+            if trusted_schema != *schema {
+                return Err(TransactionError::InvalidContext);
+            }
+            let records = self
+                .snapshot
+                .scan_catalog_family(9, MAX_CATALOG_FAMILY_SCAN)
+                .map_err(|error| TransactionError::Storage(error.to_string()))?;
+            let mut indexes = Vec::new();
+            let mut seen_index_ids = HashSet::new();
+            for record in records {
+                if record.logical_key.len() != 19 || record.family_code != 9 {
+                    return Err(TransactionError::CorruptCatalog);
+                }
+                let table_id = catalog_id(&record, 1)?;
+                if table_id != schema.table_id {
+                    continue;
+                }
+                let guarded = self
+                    .read_catalog_record(&record.logical_key)?
+                    .ok_or(TransactionError::CorruptCatalog)?;
+                if guarded != record {
+                    return Err(TransactionError::CorruptCatalog);
+                }
+                let index_id: [u8; 16] = record.logical_key[3..19]
+                    .try_into()
+                    .map_err(|_| TransactionError::CorruptCatalog)?;
+                let column_ids = catalog_id_list(&record, 2)?;
+                let mut seen_columns = HashSet::new();
+                let unique = match catalog_field(&record, 4)? {
+                    [0] => false,
+                    [1] => true,
+                    _ => return Err(TransactionError::CorruptCatalog),
+                };
+                if index_id == [0; 16]
+                    || !seen_index_ids.insert(index_id)
+                    || column_ids.is_empty()
+                    || column_ids.len() > 256
+                    || column_ids.iter().any(|column_id| {
+                        *column_id == [0; 16]
+                            || !seen_columns.insert(*column_id)
+                            || !schema.column_ids.contains(column_id)
+                    })
+                    || catalog_u16(&record, 3)? != 1
+                    || catalog_u16(&record, 5)? != 1
+                    || catalog_optional_id(&record, 6)?.is_some_and(|id| id == [0; 16])
+                    || catalog_id(&record, 7)? == [0; 16]
+                    || catalog_u16(&record, 8)? != 1
+                    || catalog_u32(&record, 9)? != 1
+                    || catalog_u64(&record, 10)? != schema.schema_version
+                {
+                    return Err(TransactionError::CorruptCatalog);
+                }
+                indexes.push(CatalogIndexDefinition {
+                    index_id,
+                    table_id,
+                    column_ids,
+                    unique,
+                });
+            }
+            indexes.sort_by_key(|index| index.index_id);
+            Ok(indexes)
+        })();
+        match result {
+            Ok(indexes) => Ok(indexes),
             Err(error) => {
                 if !self.aborted {
                     self.abort()?;

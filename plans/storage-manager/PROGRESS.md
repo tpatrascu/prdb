@@ -275,4 +275,11 @@
 - Verification: the prescribed Nix shell provided Rust/Cargo 1.95.0, rustfmt 1.9.0, Clippy 0.1.95, and TinyCC 0.9.27-unstable-2025-01-06. Workspace build, formatting check, Clippy with warnings denied, and all 170 integration tests across 17 targets passed.
 - Catalog-ID correction: switched the schema/index column-ID interface to opaque 16-byte IDs, matching catalog encoding. The focused `index_key` target (10 tests), formatting, and whitespace checks pass after that API correction.
 - Limits: this is a derivation primitive only. Transaction commit still accepts caller-supplied index deltas; it does not yet prove complete catalog-derived membership changes, enforce uniqueness against the final row set, or prevent index-definition changes from publishing inconsistent memberships.
-- Next: validate and derive complete index deltas from changed rows and final catalog definitions during the serialized commit.
+- Next: use the pinned schema/index definitions to derive and enforce complete index deltas for changed rows.
+
+## SM-5 dependency: pinned catalog index definitions — in progress
+
+- Added `load_catalog_indexes` to resolve family-9 indexes against a catalog-loaded table schema. It checks method, uniqueness encoding, NULLS DISTINCT rule, storage ID, VALID state, key version, schema version, and nonempty ordered distinct column IDs belonging to the same table. Each matching index record and the schema/type records are guarded for final commit.
+- The real-redb schema loader regression checks a valid unique index, verifies a foreign-table column fails closed, and changes the index record after loading to confirm the stale invocation conflicts.
+- Verification: workspace build, format check, Clippy with warnings denied, and all 170 integration tests across 17 targets passed in the prescribed Nix shell. The changed Markdown relative links and `git diff --check` pass.
+- Limitation: commit still accepts explicit index writes without deriving the full expected membership set. The next increment will connect the loader to row changes and compare actual index deltas before publication.
