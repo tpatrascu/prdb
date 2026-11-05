@@ -2,7 +2,7 @@
 
 ## Contract
 
-This document fixes key encoding version 1 for the [B-tree page format](storage-format.md). Compare keys by unsigned lexicographic byte order, shorter prefix first. There is no locale collation, descending direction, prefix compression, or floating-point key type in v1. Payload integers elsewhere remain little-endian; ordered key integers deliberately use big-endian.
+This document fixes logical key encoding version 1 for [redb](redb-storage.md). Compare keys by unsigned lexicographic byte order, shorter prefix first. There is no locale collation, descending direction, or floating-point key type in v1. Payload integers elsewhere remain little-endian; ordered key integers deliberately use big-endian.
 
 The index's pinned catalog definition determines component count, types, precision/scale, and comparison version. Keys contain no type tags or component count. Never compare keys from different definitions. Changing key semantics requires an explicit version/format migration and index rebuild, not reinterpretation of existing bytes.
 
@@ -31,13 +31,17 @@ Decimal scale is fixed by the indexed column. Coerce to that declared scale usin
 
 ## Complete Keys and Values
 
-**Internal row directory:** key is raw row UUID (16 bytes), with no component marker or suffix. Leaf value is the 40-byte latest-version reference. This directory is not a SQL primary-key index.
+**Rows:** the `rows_v1` key is the table ID followed by the raw row UUID, each 16 bytes. The value contains the current logical row and its engine version; the value encoding remains to be specified. This is not a SQL primary-key index.
 
-**SQL secondary indexes, including primary/unique backing indexes:** key is the SQL tuple followed by raw row UUID (16 bytes), then begin-commit sequence as unsigned big-endian u64 (8 bytes). Leaf value is the 40-byte reference to that row version. The suffix is always present, including for unique indexes. A live physical key therefore uniquely identifies a version; reject duplicate complete keys rather than silently overwriting another version.
+**SQL secondary indexes, including primary/unique backing indexes:** the `indexes_v1` key is the raw 16-byte index ID, SQL tuple, then raw 16-byte row UUID. The value is the fixed-width row UUID/version locator specified below. redb snapshots retain prior index states; no commit-sequence suffix or engine-owned physical version chain is used.
+
+The v1 locator value is exactly 32 bytes: ASCII `ILC1`, little-endian u16 format version `1`, two zero reserved bytes, the 16-byte row UUID, then a nonzero little-endian u64 row version. The duplicated row UUID must equal the final 16 bytes of the logical index key; reject a mismatch or malformed locator as corruption. A row version is the same engine commit sequence stored in its `RWR1` row record. Unknown format versions, nonzero reserved bytes, zero versions, and non-exact lengths fail closed. The storage commit primitive applies supplied index removals/additions atomically with rows and rewrites retained locators to the new row version. Schema-derived index deltas, uniqueness validation, and completeness of the supplied delta set remain required before executor use.
 
 The former 2,048-byte limit and 24-byte suffix came from the retired custom B-tree format and do not apply. Set a logical maximum compatible with the pinned redb Key/value API before implementation; reject oversized values atomically.
 
-Historical entries remain until MVCC reclamation permits removal. Reconstruct their tuple from the referenced version, never from a newer row. Validate visibility, row/cell policies, and private overlays after candidate lookup. Updating only an unindexed column still creates the new version's index entry under this baseline.
+An old snapshot sees its matching index and row states through redb. Validate row/cell policies and private overlays after candidate lookup. Update the index locator when its row version changes, including when only an unindexed column changes.
+
+An invocation may change an indexed value more than once before commit. The private index overlay tracks the net effect relative to its snapshot: removing a membership added by the same invocation cancels that addition and releases its overlay budget. A removal with neither a snapshot membership nor a staged addition is invalid and aborts the invocation.
 
 Uniqueness compares the decoded user tuple, excluding the suffix, against relevant current committed rows and the final private write set. Any null component exempts a UNIQUE tuple from conflict; PRIMARY KEY rejects null first. Old/dead versions do not conflict merely because their encoded prefix matches. The engine performs the final constraint check inside the serialized redb write transaction.
 
@@ -45,9 +49,7 @@ Uniqueness compares the decoded user tuple, excluding the suffix, against releva
 
 ## Routing and Search Bounds
 
-Internal-page separators are complete copies of the smallest key in their right child at the split. The leftmost reference covers keys below the first separator; each separator routes equality and greater keys to its right child until the next separator. No separator shortening or synthetic persisted key is permitted. Deletion may leave a conservative separator below the right child's new minimum only while its partition remains valid; merges/repartitioning must update separators atomically. Sibling links are not a substitute for validating the search path.
-
-Range bounds are search objects, not persisted keys. For a complete non-null/null tuple prefix P, equality probes cover all keys beginning with P, including their suffixes. Use a prefix-aware comparator or `[P, successor(P))`, where successor increments the last non-`ff` byte and drops following bytes. If no such byte exists, the upper bound is unbounded. Never decode the successor as a stored key. Composite-prefix ranges must end at a component boundary; SQL range/null semantics are applied separately.
+Range bounds are search objects, not persisted keys. For a complete non-null/null tuple prefix P, equality probes cover all keys beginning with the index ID followed by P, including their row UUID suffixes. Use a prefix-aware comparator or `[P, successor(P))` for that full prefix, where successor increments the last non-`ff` byte and drops following bytes. If no such byte exists, the upper bound is unbounded. Never decode the successor as a stored key. Composite-prefix ranges must end at a component boundary; SQL range/null semantics are applied separately.
 
 ## Normative Encoding Examples
 
@@ -64,8 +66,8 @@ Spaces separate bytes; these are component/tuple bytes before the secondary suff
 | TEXT `é` (U+00E9) | `01 c3 a9 00 00` |
 | Tuple (INTEGER 1, TEXT `A`, NULL) | `01 80 00 00 01 01 41 00 00 ff` |
 
-DECIMAL(5,2) 1.20 encodes as marker `01`, payload `80`, fourteen `00` bytes, then `78`. -1.20 encodes as marker `01`, payload `7f`, fourteen `ff` bytes, then `88`. DATE epoch day and timestamp epoch use their respective integer-zero encodings. A suffix with row UUID bytes `00` repeated fifteen times then `01`, and begin commit 2, is those 16 UUID bytes followed by `00 00 00 00 00 00 00 02`.
+DECIMAL(5,2) 1.20 encodes as marker `01`, payload `80`, fourteen `00` bytes, then `78`. -1.20 encodes as marker `01`, payload `7f`, fourteen `ff` bytes, then `88`. DATE epoch day and timestamp epoch use their respective integer-zero encodings.
 
 ## Required Evidence
 
-Create checked binary fixtures from the examples and independent typed-comparator properties. Cover extremes, embedded zero/ff, empty and prefix strings, Unicode byte order, nulls in each tuple position, decimal signs, suffix ordering, exact length limits, malformed escapes, truncated fixed-width components, invalid booleans, and trailing garbage. Compare index scans with reference scans for results and authorization errors, not only ordering. These examples specify expected bytes; no executable codec or passing runtime test is claimed here.
+Create checked binary fixtures from the examples and independent typed-comparator properties. Cover extremes, embedded zero/ff, empty and prefix strings, Unicode byte order, nulls in each tuple position, decimal signs, suffix ordering, exact length limits, malformed escapes, truncated fixed-width components, invalid booleans, and trailing garbage. Compare index scans with reference scans for results and authorization errors, not only ordering. The current encoder validates complete typed tuples, including nullability, and provides ordered scalar components and prefix bounds; broader independent fixtures and scan comparisons remain. See [progress](../plans/storage-manager/PROGRESS.md).

@@ -12,6 +12,10 @@ Each active invocation owns a bounded private overlay keyed by table/row identit
 
 At commit, merge patches into current rows inside the serialized redb write transaction after conflict and authorization revalidation. Do not replace a current row with a stale snapshot copy: concurrent edits to different fields or rows must not be lost. The overlay is discarded on abort. Bound bytes, rows, and age before allocation.
 
+For the initial bounded overlay primitive, account for the owned encoded value bytes of each staged row and count distinct row identities. Replacement of a staged value charges only the new total, and a staged deletion consumes one row slot and zero value bytes. These are overlay limits, not full invocation memory budgets: identity storage, patch metadata, snapshot age, and cumulative work require additional accounting. A limit or arithmetic failure aborts and clears the whole overlay; subsequent operations fail until the invocation ends. This primitive does not itself authenticate requests, validate row schemas, or authorize writes.
+
+Staged logical index mutations are also bounded: charge each distinct staged key against the invocation's configured byte budget, and allow at most 256 index-key changes per staged row. Replacing a staged membership for the same key charges it once. Exceeding either limit aborts and clears all staged rows and index changes.
+
 ## Safe Copy Reduction
 
 | Boundary | Baseline | Constraint |

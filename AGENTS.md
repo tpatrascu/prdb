@@ -2,15 +2,26 @@
 
 ## Project Structure & Scope
 
-This repository specifies an operational database with analytical query support and currently contains design documents, not an implementation. Start with `specs/README.md`; follow `specs/toolchain.md` for the TinyCC/C SDK and Rust engine boundary. Keep related specifications consistent. Source directories, manifests, and test harnesses have not been created.
+This repository specifies an operational database with analytical query support and contains an early Rust engine and tests. Start with `specs/README.md`; follow `specs/toolchain.md` for the TinyCC/C SDK and Rust engine boundary. Keep related specifications consistent. The SDK and sandbox integration harness do not yet exist.
 
 Follow [INTERATED_DEVELOPMENT.md](INTERATED_DEVELOPMENT.md) for incremental TDD, specification refinement, implementation milestones, and handoff evidence.
 
 ## Toolchain Setup
 
-Pin Rust in `rust-toolchain.toml` and commit `Cargo.lock` when introducing the Cargo workspace. Include `rustfmt` and `clippy`. Pin TinyCC's exact build, support files, and Linux target/libc profile in SDK packaging.
+Rust is pinned in `rust-toolchain.toml` and dependencies in `Cargo.lock`; include `rustfmt` and `clippy`. On this NixOS machine, if the tools are absent from PATH, enter a development shell from the repository root:
 
-Check tools with `rustc --version`, `cargo --version`, and `tcc -v`. Do not silently substitute GCC/Clang for TinyCC. No Rust or TinyCC installation is currently available on this checkout's PATH; install the selected versions before implementation checks.
+```sh
+nix-shell -p rustc cargo clippy rustfmt tinycc
+rustc --version
+cargo --version
+rustfmt --version
+cargo clippy --version
+tcc -v
+```
+
+The machine's Nix channel supplied Rust/Cargo 1.95.0, Clippy 0.1.95, rustfmt 1.9.0, and TinyCC 0.9.27-unstable-2025-01-06 on x86_64 Linux when checked. The shell also provides `cc`, which Rust needs for linking; that does not replace TinyCC for SDK/query compilation. Nix channels can change: verify Rust matches `rust-toolchain.toml` before checking, and use an appropriately pinned Nix package set or install the pinned Rust toolchain if it does not. Nix store paths are machine-specific and can be garbage-collected; do not rely on hard-coded paths. Pin TinyCC's exact build, support files, and Linux target/libc profile in SDK packaging before claiming SDK acceptance.
+
+If the toolkit is missing, broken, or inaccessible, actively diagnose and restore a working, version-matched environment before implementation checks: inspect PATH and Nix, enter or provision the development shell, and resolve missing linkers or dependencies. Use authorized sandbox escalation when Nix daemon access is blocked. Do not silently substitute GCC/Clang for TinyCC. If an external restriction still blocks repair, report the attempted repair and the exact blocker; never represent unrun checks as passing. Cargo may use `--offline` with `--locked` when all locked dependencies are cached; otherwise obtain the dependencies through the permitted network. Run Cargo operations that write the same target directory sequentially.
 
 ## Rust Build and Checks
 

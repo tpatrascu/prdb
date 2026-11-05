@@ -10,7 +10,7 @@ These documents capture the current research design for an operational database 
 - [redb storage backend](redb-storage.md): embedded database responsibilities and engine transaction boundary.
 - [Catalog payload encoding v1](catalog-payloads.md): canonical envelopes, field tags, family keys, and bootstrap mappings.
 - [Checkpoint format decision](checkpoint-format.md): physical checkpointing is delegated to redb.
-- [Index-key encoding v1](index-key-encoding.md): exact ordered tuple bytes, version suffixes, and examples.
+- [Index-key encoding v1](index-key-encoding.md): exact ordered tuple bytes, row suffixes, and examples.
 - [In-memory storage](memory-storage.md): buffer/transaction lifetimes and security-constrained copy reduction.
 - [Transaction durability](wal-recovery.md): redb-backed atomic commits and recovery ownership.
 - [Disk I/O decision](disk-io.md): redb owns database-file I/O.
@@ -51,7 +51,7 @@ The SDK's C ABI, IPC messages, structured plan format, and artifact manifest are
 
 ## Reading and Updating
 
-Start with the architecture and authorization documents. Component specifications describe responsibilities, interfaces, failures, validation, and open questions. Names and API examples are conceptual; wire formats and implementation module layout remain unspecified. TinyCC is the selected user compiler; exact versions and supported targets are not yet pinned.
+Start with the architecture and authorization documents. Component specifications describe responsibilities, interfaces, failures, validation, and open questions. Names and API examples are conceptual unless a specification defines a concrete contract; some encodings and Rust modules now exist, while other interfaces remain unspecified. TinyCC is the selected user compiler; its exact packaged build and supported targets are not yet pinned.
 
 Record decisions consistently across affected documents. Keep unresolved security assumptions explicit.
 

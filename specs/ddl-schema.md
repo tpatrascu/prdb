@@ -21,7 +21,7 @@ DROP SCHEMA application RESTRICT;
 
 Unquoted identifiers fold to lowercase; double-quoted identifiers preserve case. Require schema-qualified names in administrative definitions and stored dependencies. Resolve client unqualified names against an explicit admitted default schema, never an uncontrolled search path. Catalog record layouts, indexes, and dependencies are defined in [data dictionary](data-dictionary.md). Object and column identities are stable catalog IDs; renames do not retarget dependencies. New objects never reuse a dropped object's identity.
 
-Initial scalar types: `BOOLEAN`, `SMALLINT`, `INTEGER`, `BIGINT`, `DECIMAL(p,s)` with `1 <= p <= 38` and `0 <= s <= p`, `TEXT`, `VARCHAR(n)`, `BYTEA`, `UUID`, `DATE`, and `TIMESTAMP WITH TIME ZONE`. Integers are signed with checked overflow. Decimal is exact; implicit lossy conversions fail. Text is valid UTF-8 with a deterministic binary collation initially; `VARCHAR(n)` limits Unicode scalar count. Timestamps normalize to UTC at microsecond precision. Wire encodings and numeric/date range details must be fixed before implementation. Arrays, JSON, enums, custom types, and locale collations are deferred.
+Initial scalar types: `BOOLEAN`, `SMALLINT`, `INTEGER`, `BIGINT`, `DECIMAL(p,s)` with `1 <= p <= 38` and `0 <= s <= p`, `TEXT`, `VARCHAR(n)`, `BYTEA`, `UUID`, `DATE`, and `TIMESTAMP WITH TIME ZONE`. Integers are signed with checked overflow. Decimal is exact; implicit lossy conversions fail. Text is valid UTF-8 with a deterministic binary collation initially; `VARCHAR(n)` limits Unicode scalar count. Timestamps normalize to UTC at microsecond precision. [redb storage](redb-storage.md) defines storage scalar encodings and supported DATE/TIMESTAMPTZ ranges; SQL input parsing and coercion still must enforce these same ranges. Arrays, JSON, enums, custom types, and locale collations are deferred.
 
 ## Tables, Defaults, and Constraints
 
@@ -39,6 +39,8 @@ CREATE TABLE app.employees (
 
 `UUID GENERATED ALWAYS AS IDENTITY` is this engine's extension: storage allocates an opaque non-sequential ID, rejects explicit overrides, and checks collisions. Every table has a stable internal identity even when its SQL primary key is user-supplied. No global sequence values are exposed by default.
 
+The current catalog-default insert helper does not yet allocate or collision-check identities and rejects tables containing generated columns; it must not accept caller values as generated identities. The lower-level materialized-row helper accepts only trusted generated values and is not an executor-facing boundary. Catalog-aware update enforcement for generated columns is also outstanding.
+
 Supported constraints:
 
 | Definition | Semantics |
@@ -50,6 +52,8 @@ Supported constraints:
 | `FOREIGN KEY (...) REFERENCES schema.table (...)` | Referenced fields must have a compatible primary/unique key. `MATCH SIMPLE`: any null referencing field exempts that row. |
 
 Constraints operate on full storage values, not redacted projections. Only built-in typed expressions are allowed; no native functions, subqueries, or external callbacks. Defaults are typed literals or fixed trusted built-ins, initially generated identity and `CURRENT_PRINCIPAL_ID()`. Defaults are applied before creation policies and constraints, but do not bypass field/row permissions. `CURRENT_PRINCIPAL_ID()` is a server value, never a parameter chosen by the query.
+
+For `CHECK`, evaluate the trusted, schema-bound expression over the complete proposed tuple. Accept TRUE and SQL UNKNOWN; reject FALSE. Evaluation is bounded and type/runtime errors abort the invocation. A CHECK definition or any schema inputs used to bind it must be included in the transaction's guarded catalog dependencies.
 
 Primary, unique, and foreign-key constraints are part of the initial schema design. Defining a foreign key requires source-table ALTER/creation authority and REFERENCES authority on the target key. Foreign keys initially support only `ON UPDATE RESTRICT` and `ON DELETE RESTRICT`; cascading actions and deferrable constraints are deferred. User-defined native constraints remain forbidden.
 
