@@ -1048,7 +1048,10 @@ fn catalog_commit_requires_owned_child_parent_edge_consistency()
     Ok(())
 }
 
-fn foreign_key_catalog_writes(with_target_edge: bool) -> Vec<CatalogWrite> {
+fn foreign_key_catalog_writes(
+    with_target_edge: bool,
+    with_backing_edge: bool,
+) -> Vec<CatalogWrite> {
     let schema_id = id(80);
     let target_table_id = id(81);
     let source_table_id = id(82);
@@ -1099,6 +1102,9 @@ fn foreign_key_catalog_writes(with_target_edge: bool) -> Vec<CatalogWrite> {
     if with_target_edge {
         writes.push(dependency_write(foreign_key_id, target_constraint_id, 3));
     }
+    if with_backing_edge {
+        writes.push(dependency_write(target_constraint_id, backing_index_id, 4));
+    }
     writes
 }
 
@@ -1113,7 +1119,7 @@ fn catalog_commit_requires_foreign_key_target_dependency_edges()
             id(88),
             id(9),
             9_999,
-            &foreign_key_catalog_writes(false),
+            &foreign_key_catalog_writes(false, false),
             &[audit_event(88)],
         ),
         Err(CommitError::InvalidCatalog),
@@ -1125,8 +1131,40 @@ fn catalog_commit_requires_foreign_key_target_dependency_edges()
             id(89),
             id(9),
             9_999,
-            &foreign_key_catalog_writes(true),
+            &foreign_key_catalog_writes(true, true),
             &[audit_event(89)],
+        )?,
+        1
+    );
+    assert_eq!(commit_sequence(&database)?, 1);
+    Ok(())
+}
+
+#[test]
+fn catalog_commit_requires_backing_index_dependency_edges() -> Result<(), Box<dyn std::error::Error>>
+{
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(90),
+            id(9),
+            9_999,
+            &foreign_key_catalog_writes(true, false),
+            &[audit_event(90)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+    assert_eq!(commit_sequence(&database)?, 0);
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(91),
+            id(9),
+            9_999,
+            &foreign_key_catalog_writes(true, true),
+            &[audit_event(91)],
         )?,
         1
     );

@@ -548,6 +548,17 @@ fn validate_final_membership_graph(
     Ok(())
 }
 
+#[derive(Default)]
+struct DependencyCatalogGraph {
+    object_parents: HashMap<[u8; 16], Option<[u8; 16]>>,
+    object_kinds: HashMap<[u8; 16], u16>,
+    constraint_kinds: HashMap<[u8; 16], u16>,
+    foreign_key_targets: HashMap<[u8; 16], [u8; 16]>,
+    backing_index_targets: HashMap<[u8; 16], [u8; 16]>,
+    index_owners: HashMap<[u8; 16], [u8; 16]>,
+    dependencies: Vec<([u8; 16], [u8; 16], u16)>,
+}
+
 /// Keep dependency references valid over the final catalog produced by this
 /// transaction, including dependencies or endpoint objects created together.
 fn validate_final_dependency_edges(
@@ -556,18 +567,17 @@ fn validate_final_dependency_edges(
 ) -> Result<(), CommitError> {
     if !catalog_writes.iter().any(|write| {
         write.key.len() >= 2
-            && matches!(u16::from_be_bytes([write.key[0], write.key[1]]), 2 | 8 | 15)
+            && matches!(
+                u16::from_be_bytes([write.key[0], write.key[1]]),
+                2 | 8 | 9 | 15
+            )
     }) {
         return Ok(());
     }
 
     let table = transaction.open_table(CATALOG).map_err(storage_error)?;
-    let mut object_parents = HashMap::<[u8; 16], Option<[u8; 16]>>::new();
-    let mut object_kinds = HashMap::<[u8; 16], u16>::new();
-    let mut constraint_kinds = HashMap::<[u8; 16], u16>::new();
-    let mut foreign_key_targets = HashMap::<[u8; 16], [u8; 16]>::new();
-    let mut dependencies = Vec::<([u8; 16], [u8; 16], u16)>::new();
-    for family_code in [2u16, 8, 15] {
+    let mut graph = DependencyCatalogGraph::default();
+    for family_code in [2u16, 8, 9, 15] {
         let prefix = family_code.to_be_bytes();
         let mut family_count = 0usize;
         for entry in table.range(prefix.as_slice()..).map_err(storage_error)? {
@@ -583,15 +593,7 @@ fn validate_final_dependency_edges(
             if family_count > crate::snapshot::MAX_CATALOG_FAMILY_SCAN {
                 return Err(CommitError::InvalidCatalog);
             }
-            collect_dependency_catalog_record(
-                key,
-                value.value(),
-                &mut object_parents,
-                &mut object_kinds,
-                &mut constraint_kinds,
-                &mut foreign_key_targets,
-                &mut dependencies,
-            )?;
+            collect_dependency_catalog_record(key, value.value(), &mut graph)?;
         }
         for write in catalog_writes
             .iter()
@@ -602,25 +604,26 @@ fn validate_final_dependency_edges(
                 if family_count > crate::snapshot::MAX_CATALOG_FAMILY_SCAN {
                     return Err(CommitError::InvalidCatalog);
                 }
-                collect_dependency_catalog_record(
-                    &write.key,
-                    bytes,
-                    &mut object_parents,
-                    &mut object_kinds,
-                    &mut constraint_kinds,
-                    &mut foreign_key_targets,
-                    &mut dependencies,
-                )?;
+                collect_dependency_catalog_record(&write.key, bytes, &mut graph)?;
             }
         }
     }
 
+    let DependencyCatalogGraph {
+        object_parents,
+        object_kinds,
+        constraint_kinds,
+        foreign_key_targets,
+        backing_index_targets,
+        index_owners,
+        dependencies,
+    } = &graph;
     if dependencies.iter().any(|(dependent_id, referenced_id, _)| {
         !object_parents.contains_key(dependent_id) || !object_parents.contains_key(referenced_id)
     }) {
         return Err(CommitError::InvalidCatalog);
     }
-    if !crate::catalog::validate_owned_child_graph(&object_parents, &dependencies) {
+    if !crate::catalog::validate_owned_child_graph(object_parents, dependencies) {
         return Err(CommitError::InvalidCatalog);
     }
     let foreign_key_edges = dependencies
@@ -640,6 +643,30 @@ fn validate_final_dependency_edges(
         .iter()
         .any(|(dependent_id, referenced_id)| {
             !foreign_key_edges.contains(&(*dependent_id, *referenced_id))
+        })
+    {
+        return Err(CommitError::InvalidCatalog);
+    }
+    let backing_index_edges = dependencies
+        .iter()
+        .filter(|(_, _, kind)| *kind == 4)
+        .map(|(dependent_id, referenced_id, _)| (*dependent_id, *referenced_id))
+        .collect::<HashSet<_>>();
+    if dependencies.iter().filter(|(_, _, kind)| *kind == 4).any(
+        |(dependent_id, referenced_id, _)| {
+            object_kinds.get(dependent_id) != Some(&6)
+                || object_kinds.get(referenced_id) != Some(&7)
+                || !matches!(constraint_kinds.get(dependent_id), Some(2 | 3))
+                || backing_index_targets.get(dependent_id) != Some(referenced_id)
+                || index_owners.get(referenced_id) != Some(dependent_id)
+        },
+    ) || backing_index_targets
+        .iter()
+        .any(|(dependent_id, referenced_id)| {
+            !backing_index_edges.contains(&(*dependent_id, *referenced_id))
+        })
+        || index_owners.iter().any(|(referenced_id, dependent_id)| {
+            !backing_index_edges.contains(&(*dependent_id, *referenced_id))
         })
     {
         return Err(CommitError::InvalidCatalog);
@@ -852,11 +879,7 @@ fn validate_final_typed_object_mappings(
 fn collect_dependency_catalog_record(
     key: &[u8],
     bytes: &[u8],
-    object_parents: &mut HashMap<[u8; 16], Option<[u8; 16]>>,
-    object_kinds: &mut HashMap<[u8; 16], u16>,
-    constraint_kinds: &mut HashMap<[u8; 16], u16>,
-    foreign_key_targets: &mut HashMap<[u8; 16], [u8; 16]>,
-    dependencies: &mut Vec<([u8; 16], [u8; 16], u16)>,
+    graph: &mut DependencyCatalogGraph,
 ) -> Result<(), CommitError> {
     let record = decode_catalog_record(key, bytes)?;
     match record.family_code {
@@ -886,8 +909,8 @@ fn collect_dependency_catalog_record(
                     .map_err(|_| CommitError::InvalidCatalog)?,
             );
             if !(1..=10).contains(&object_kind)
-                || object_parents.insert(object_id, parent_id).is_some()
-                || object_kinds.insert(object_id, object_kind).is_some()
+                || graph.object_parents.insert(object_id, parent_id).is_some()
+                || graph.object_kinds.insert(object_id, object_kind).is_some()
             {
                 return Err(CommitError::InvalidCatalog);
             }
@@ -905,14 +928,54 @@ fn collect_dependency_catalog_record(
                     .try_into()
                     .map_err(|_| CommitError::InvalidCatalog)?,
             );
-            if !matches!(kind, 1..=5) || constraint_kinds.insert(constraint_id, kind).is_some() {
+            if !matches!(kind, 1..=5)
+                || graph.constraint_kinds.insert(constraint_id, kind).is_some()
+            {
                 return Err(CommitError::InvalidCatalog);
             }
             if kind == 5
-                && foreign_key_targets
+                && graph
+                    .foreign_key_targets
                     .insert(
                         constraint_id,
                         catalog_field_bytes(key, bytes, 8, 5)?
+                            .as_slice()
+                            .try_into()
+                            .map_err(|_| CommitError::InvalidCatalog)?,
+                    )
+                    .is_some()
+            {
+                return Err(CommitError::InvalidCatalog);
+            }
+            if matches!(kind, 2 | 3)
+                && graph
+                    .backing_index_targets
+                    .insert(
+                        constraint_id,
+                        catalog_field_bytes(key, bytes, 8, 11)?
+                            .as_slice()
+                            .try_into()
+                            .map_err(|_| CommitError::InvalidCatalog)?,
+                    )
+                    .is_some()
+            {
+                return Err(CommitError::InvalidCatalog);
+            }
+        }
+        9 => {
+            if key.len() != 19 {
+                return Err(CommitError::InvalidCatalog);
+            }
+            let index_id = key[3..19]
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?;
+            if let Some(field) = record.fields.iter().find(|field| field.tag == 6)
+                && graph
+                    .index_owners
+                    .insert(
+                        index_id,
+                        field
+                            .payload
                             .as_slice()
                             .try_into()
                             .map_err(|_| CommitError::InvalidCatalog)?,
@@ -940,7 +1003,7 @@ fn collect_dependency_catalog_record(
             if !matches!(kind, 1..=5) {
                 return Err(CommitError::InvalidCatalog);
             }
-            dependencies.push((dependent_id, referenced_id, kind));
+            graph.dependencies.push((dependent_id, referenced_id, kind));
         }
         _ => return Err(CommitError::InvalidCatalog),
     }

@@ -130,6 +130,8 @@ fn validate_catalog(
     let mut typed_name_records = Vec::<(u16, [u8; 16])>::new();
     let mut constraint_kinds = HashMap::<[u8; 16], u16>::new();
     let mut foreign_key_targets = HashMap::<[u8; 16], [u8; 16]>::new();
+    let mut backing_index_targets = HashMap::<[u8; 16], [u8; 16]>::new();
+    let mut index_owners = HashMap::<[u8; 16], [u8; 16]>::new();
     let mut memberships = Vec::<Membership>::new();
     let mut membership_grantors = Vec::<[u8; 16]>::new();
     let mut object_parents = HashMap::<[u8; 16], Option<[u8; 16]>>::new();
@@ -218,6 +220,16 @@ fn validate_catalog(
             if index_definitions.insert(index_id, table_id).is_some() {
                 return Err(StartupError::InvalidCatalog);
             }
+            if let Some(field) = record.fields.iter().find(|field| field.tag == 6) {
+                let owner_id = field
+                    .payload
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| StartupError::InvalidCatalog)?;
+                if index_owners.insert(index_id, owner_id).is_some() {
+                    return Err(StartupError::InvalidCatalog);
+                }
+            }
         }
         if record.family_code == 8 {
             if key.len() != 19 {
@@ -233,6 +245,13 @@ fn validate_catalog(
             if kind == 5
                 && foreign_key_targets
                     .insert(constraint_id, field_id(&record, 5)?)
+                    .is_some()
+            {
+                return Err(StartupError::InvalidCatalog);
+            }
+            if matches!(kind, 2 | 3)
+                && backing_index_targets
+                    .insert(constraint_id, field_id(&record, 11)?)
                     .is_some()
             {
                 return Err(StartupError::InvalidCatalog);
@@ -317,6 +336,30 @@ fn validate_catalog(
         .iter()
         .any(|(dependent_id, referenced_id)| {
             !foreign_key_edges.contains(&(*dependent_id, *referenced_id))
+        })
+    {
+        return Err(StartupError::InvalidCatalog);
+    }
+    let backing_index_edges = dependencies
+        .iter()
+        .filter(|(_, _, kind)| *kind == 4)
+        .map(|(dependent_id, referenced_id, _)| (*dependent_id, *referenced_id))
+        .collect::<std::collections::HashSet<_>>();
+    if dependencies.iter().filter(|(_, _, kind)| *kind == 4).any(
+        |(dependent_id, referenced_id, _)| {
+            object_kinds.get(dependent_id) != Some(&6)
+                || object_kinds.get(referenced_id) != Some(&7)
+                || !matches!(constraint_kinds.get(dependent_id), Some(2 | 3))
+                || backing_index_targets.get(dependent_id) != Some(referenced_id)
+                || index_owners.get(referenced_id) != Some(dependent_id)
+        },
+    ) || backing_index_targets
+        .iter()
+        .any(|(dependent_id, referenced_id)| {
+            !backing_index_edges.contains(&(*dependent_id, *referenced_id))
+        })
+        || index_owners.iter().any(|(referenced_id, dependent_id)| {
+            !backing_index_edges.contains(&(*dependent_id, *referenced_id))
         })
     {
         return Err(StartupError::InvalidCatalog);

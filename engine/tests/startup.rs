@@ -387,6 +387,73 @@ fn index_definition(index_id: [u8; 16], table_id: [u8; 16]) -> (Vec<u8>, Vec<u8>
     )
 }
 
+fn owned_index_record(
+    index_id: [u8; 16],
+    table_id: [u8; 16],
+    column_id: [u8; 16],
+    constraint_id: [u8; 16],
+) -> (Vec<u8>, Vec<u8>) {
+    let mut key = 9u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&index_id);
+    let mut columns = 1u32.to_le_bytes().to_vec();
+    columns.extend_from_slice(&column_id);
+    let fields = [
+        CatalogField {
+            tag: 1,
+            wire_type: WireType::Id,
+            payload: table_id.to_vec(),
+        },
+        CatalogField {
+            tag: 2,
+            wire_type: WireType::Ids,
+            payload: columns,
+        },
+        CatalogField {
+            tag: 3,
+            wire_type: WireType::U16,
+            payload: 1u16.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 4,
+            wire_type: WireType::Bool,
+            payload: vec![1],
+        },
+        CatalogField {
+            tag: 5,
+            wire_type: WireType::U16,
+            payload: 1u16.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 6,
+            wire_type: WireType::Id,
+            payload: constraint_id.to_vec(),
+        },
+        CatalogField {
+            tag: 7,
+            wire_type: WireType::Id,
+            payload: index_id.to_vec(),
+        },
+        CatalogField {
+            tag: 8,
+            wire_type: WireType::U16,
+            payload: 1u16.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 9,
+            wire_type: WireType::U32,
+            payload: 1u32.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 10,
+            wire_type: WireType::U64,
+            payload: 1u64.to_le_bytes().to_vec(),
+        },
+    ];
+    let payload = encode_envelope(&family_schema(9).unwrap(), &key, &fields).unwrap();
+    (key, payload)
+}
+
 fn put_catalog(database: &Database, key: &[u8], value: &[u8]) {
     let write = database.begin_write().unwrap();
     write
@@ -727,6 +794,13 @@ fn validates_foreign_key_target_edges_against_constraint_records() {
             );
             put_catalog(database, &fk_key, &fk_value);
             put_catalog(database, &target_key, &target_value);
+            let (target_object_key, target_object_value) = object_record([94; 16], 7);
+            let (target_index_key, target_index_value) =
+                owned_index_record([94; 16], [100; 16], [102; 16], target_id);
+            put_catalog(database, &target_object_key, &target_object_value);
+            put_catalog(database, &target_index_key, &target_index_value);
+            let (key, value) = dependency_record(target_id, [94; 16], 4);
+            put_catalog(database, &key, &value);
             if add_alternate_target {
                 let (key, value) = constraint_record(
                     alternate_id,
@@ -737,6 +811,13 @@ fn validates_foreign_key_target_edges_against_constraint_records() {
                     &[],
                     Some([96; 16]),
                 );
+                put_catalog(database, &key, &value);
+                let (object_key, object_value) = object_record([96; 16], 7);
+                let (index_key, index_value) =
+                    owned_index_record([96; 16], [100; 16], [102; 16], alternate_id);
+                put_catalog(database, &object_key, &object_value);
+                put_catalog(database, &index_key, &index_value);
+                let (key, value) = dependency_record(alternate_id, [96; 16], 4);
                 put_catalog(database, &key, &value);
             }
             if let Some(edge_target) = edge_target {
@@ -764,6 +845,85 @@ fn validates_foreign_key_target_edges_against_constraint_records() {
     let valid_edge_fixture = Fixture::new();
     let valid_edge_database = valid_edge_fixture.database(0);
     populate(&valid_edge_database, Some([91; 16]), false);
+    assert!(validate_persisted_records(&valid_edge_database).is_ok());
+}
+
+#[test]
+fn validates_backing_index_edges_against_constraint_and_index_records() {
+    let populate = |database: &Database,
+                    index_edge: Option<[u8; 16]>,
+                    add_alternate_index: bool| {
+        let constraint_id = [110; 16];
+        let index_id = [111; 16];
+        let alternate_constraint_id = [112; 16];
+        let alternate_index_id = [113; 16];
+        let (constraint_object_key, constraint_object_value) = object_record(constraint_id, 6);
+        let (index_object_key, index_object_value) = object_record(index_id, 7);
+        put_catalog(database, &constraint_object_key, &constraint_object_value);
+        put_catalog(database, &index_object_key, &index_object_value);
+        let (constraint_key, constraint_value) = constraint_record(
+            constraint_id,
+            [100; 16],
+            2,
+            &[[102; 16]],
+            None,
+            &[],
+            Some(index_id),
+        );
+        let (index_key, index_value) =
+            owned_index_record(index_id, [100; 16], [102; 16], constraint_id);
+        put_catalog(database, &constraint_key, &constraint_value);
+        put_catalog(database, &index_key, &index_value);
+        if add_alternate_index {
+            let (object_key, object_value) = object_record(alternate_constraint_id, 6);
+            put_catalog(database, &object_key, &object_value);
+            let (object_key, object_value) = object_record(alternate_index_id, 7);
+            put_catalog(database, &object_key, &object_value);
+            let (constraint_key, constraint_value) = constraint_record(
+                alternate_constraint_id,
+                [100; 16],
+                3,
+                &[[102; 16]],
+                None,
+                &[],
+                Some(alternate_index_id),
+            );
+            let (index_key, index_value) = owned_index_record(
+                alternate_index_id,
+                [100; 16],
+                [102; 16],
+                alternate_constraint_id,
+            );
+            put_catalog(database, &constraint_key, &constraint_value);
+            put_catalog(database, &index_key, &index_value);
+            let (key, value) = dependency_record(alternate_constraint_id, alternate_index_id, 4);
+            put_catalog(database, &key, &value);
+        }
+        if let Some(index_id) = index_edge {
+            let (key, value) = dependency_record(constraint_id, index_id, 4);
+            put_catalog(database, &key, &value);
+        }
+    };
+
+    let missing_edge_fixture = Fixture::new();
+    let missing_edge_database = missing_edge_fixture.database(0);
+    populate(&missing_edge_database, None, false);
+    assert_eq!(
+        validate_persisted_records(&missing_edge_database),
+        Err(StartupError::InvalidCatalog),
+    );
+
+    let mismatched_edge_fixture = Fixture::new();
+    let mismatched_edge_database = mismatched_edge_fixture.database(0);
+    populate(&mismatched_edge_database, Some([113; 16]), true);
+    assert_eq!(
+        validate_persisted_records(&mismatched_edge_database),
+        Err(StartupError::InvalidCatalog),
+    );
+
+    let valid_edge_fixture = Fixture::new();
+    let valid_edge_database = valid_edge_fixture.database(0);
+    populate(&valid_edge_database, Some([111; 16]), false);
     assert!(validate_persisted_records(&valid_edge_database).is_ok());
 }
 
