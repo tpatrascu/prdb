@@ -389,3 +389,12 @@
 - Verification: with Rust/Cargo 1.95.0, rustfmt 1.9.0, Clippy 0.1.95, and TinyCC 0.9.27-unstable-2025-01-06 in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and all 186 integration tests across 17 targets passed. `git diff --check` and changed Markdown link checks passed.
 - Contract updates: [schema DDL](../../specs/ddl-schema.md) defines validation of existing rows on FK creation; [data dictionary](../../specs/data-dictionary.md) requires epoch publication for both related tables.
 - Remaining: a separate per-table DDL fence manager, online validation/backfill, and authenticated service admission remain open.
+
+## SM-5 dependency: per-table DDL fence primitive — in progress
+
+- Added a clonable `DdlFenceManager` with shared guards for data writers and exclusive guards for DDL. Multi-table requests are sorted, deduplicated, and acquired all at once; waiting DDL blocks new writers on affected tables. Deadline failures release all waiter state, and RAII guards release acquired fences.
+- Red evidence: the first focused run had two failures because the placeholder admitted exclusive DDL alongside active writers; both exclusion regressions now pass.
+- Integration tests cover existing-writer exclusion, DDL-writer exclusion, multi-table timeout cleanup, duplicate IDs, shared-writer coexistence, zero-ID rejection, and empty fence sets.
+- Verification: with Rust/Cargo 1.95.0 and Clippy 0.1.95 in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and all 189 integration tests across 18 targets passed. `git diff --check` and changed Markdown link checks passed.
+- The implementation refines the locking decision in [schema DDL](../../specs/ddl-schema.md).
+- Remaining: commit and DDL entry points do not yet share or acquire a manager instance, so this primitive alone does not enforce the fence contract. Online validation/backfill and authenticated service admission remain open.

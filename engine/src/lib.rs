@@ -4,6 +4,7 @@ pub mod audit;
 pub mod authorization;
 pub mod catalog;
 pub mod commit;
+pub mod ddl_fence;
 pub mod expression;
 pub mod index_key;
 pub mod index_locator;
