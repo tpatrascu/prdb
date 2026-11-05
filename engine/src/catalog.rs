@@ -520,6 +520,66 @@ pub fn decode_registered_envelope(bytes: &[u8]) -> Result<CatalogRecord, Invalid
     decode_envelope(&schema, bytes)
 }
 
+/// Validate the fixed storage profile for one built-in family 4 type row.
+pub fn validate_builtin_type_profile(record: &CatalogRecord) -> Result<u16, InvalidCatalogRecord> {
+    if record.family_code != 4 || record.logical_key.len() != 19 {
+        return Err(InvalidCatalogRecord);
+    }
+    let builtin_kind = type_profile_u16(record, 1)?;
+    let expected_parameter_rule = match builtin_kind {
+        1..=4 | 6 | 8..=11 => 0,
+        5 => 1,
+        7 => 2,
+        _ => return Err(InvalidCatalogRecord),
+    };
+    let expected_default_mask = if builtin_kind == 9 { 7 } else { 1 };
+    if type_profile_u16(record, 2)? != expected_parameter_rule
+        || type_profile_u32(record, 3)? != 1
+        || type_profile_u32(record, 4)? != 1
+        || type_profile_u32(record, 5)? != expected_default_mask
+        || type_profile_u32(record, 6)? != 1
+    {
+        return Err(InvalidCatalogRecord);
+    }
+    Ok(builtin_kind)
+}
+
+fn type_profile_u16(record: &CatalogRecord, tag: u16) -> Result<u16, InvalidCatalogRecord> {
+    let field = record
+        .fields
+        .iter()
+        .find(|field| field.tag == tag)
+        .ok_or(InvalidCatalogRecord)?;
+    if field.wire_type != WireType::U16 || field.payload.len() != 2 {
+        return Err(InvalidCatalogRecord);
+    }
+    Ok(u16::from_le_bytes(
+        field
+            .payload
+            .as_slice()
+            .try_into()
+            .map_err(|_| InvalidCatalogRecord)?,
+    ))
+}
+
+fn type_profile_u32(record: &CatalogRecord, tag: u16) -> Result<u32, InvalidCatalogRecord> {
+    let field = record
+        .fields
+        .iter()
+        .find(|field| field.tag == tag)
+        .ok_or(InvalidCatalogRecord)?;
+    if field.wire_type != WireType::U32 || field.payload.len() != 4 {
+        return Err(InvalidCatalogRecord);
+    }
+    Ok(u32::from_le_bytes(
+        field
+            .payload
+            .as_slice()
+            .try_into()
+            .map_err(|_| InvalidCatalogRecord)?,
+    ))
+}
+
 /// Encode one v1 policy-target record, including its canonical logical key.
 pub fn encode_policy_target(record: &PolicyTarget) -> Result<Vec<u8>, InvalidCatalogRecord> {
     if record.policy_id == [0; 16] || record.target_id == [0; 16] || !(1..=3).contains(&record.kind)

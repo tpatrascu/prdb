@@ -1041,6 +1041,24 @@ fn schema_record(id: [u8; 16]) -> (Vec<u8>, Vec<u8>) {
 }
 
 fn builtin_type_record(id: [u8; 16], builtin_kind: u16) -> (Vec<u8>, Vec<u8>) {
+    let parameter_rule = match builtin_kind {
+        5 => 1,
+        7 => 2,
+        _ => 0,
+    };
+    let default_mask = if builtin_kind == 9 { 7 } else { 1 };
+    builtin_type_record_with_profile(id, builtin_kind, parameter_rule, 1, 1, default_mask, 1)
+}
+
+fn builtin_type_record_with_profile(
+    id: [u8; 16],
+    builtin_kind: u16,
+    parameter_rule: u16,
+    scalar_encoding: u32,
+    comparison_version: u32,
+    default_mask: u32,
+    cast_profile: u32,
+) -> (Vec<u8>, Vec<u8>) {
     let mut key = 4u16.to_be_bytes().to_vec();
     key.push(1);
     key.extend_from_slice(&id);
@@ -1053,27 +1071,27 @@ fn builtin_type_record(id: [u8; 16], builtin_kind: u16) -> (Vec<u8>, Vec<u8>) {
         CatalogField {
             tag: 2,
             wire_type: WireType::U16,
-            payload: 0u16.to_le_bytes().to_vec(),
+            payload: parameter_rule.to_le_bytes().to_vec(),
         },
         CatalogField {
             tag: 3,
             wire_type: WireType::U32,
-            payload: 1u32.to_le_bytes().to_vec(),
+            payload: scalar_encoding.to_le_bytes().to_vec(),
         },
         CatalogField {
             tag: 4,
             wire_type: WireType::U32,
-            payload: 1u32.to_le_bytes().to_vec(),
+            payload: comparison_version.to_le_bytes().to_vec(),
         },
         CatalogField {
             tag: 5,
             wire_type: WireType::U32,
-            payload: 7u32.to_le_bytes().to_vec(),
+            payload: default_mask.to_le_bytes().to_vec(),
         },
         CatalogField {
             tag: 6,
             wire_type: WireType::U32,
-            payload: 1u32.to_le_bytes().to_vec(),
+            payload: cast_profile.to_le_bytes().to_vec(),
         },
     ];
     let payload = encode_envelope(&family_schema(4).unwrap(), &key, &fields).unwrap();
@@ -1339,6 +1357,48 @@ fn rejects_objects_without_matching_typed_records() -> Result<(), Box<dyn std::e
     put_catalog(&database, &object_key, &object_value);
     assert_eq!(
         validate_persisted_records(&database),
+        Err(StartupError::InvalidCatalog),
+    );
+    Ok(())
+}
+
+#[test]
+fn rejects_builtin_type_records_with_unassigned_profiles() -> Result<(), Box<dyn std::error::Error>>
+{
+    let profiles = [
+        (1, 1, 1, 1, 1),
+        (0, 2, 1, 1, 1),
+        (0, 1, 2, 1, 1),
+        (0, 1, 1, 7, 1),
+        (0, 1, 1, 1, 2),
+    ];
+    for (parameter_rule, scalar_encoding, comparison_version, default_mask, cast_profile) in
+        profiles
+    {
+        let fixture = Fixture::new();
+        let database = fixture.database(0);
+        let (key, value) = builtin_type_record_with_profile(
+            builtin_id(101),
+            1,
+            parameter_rule,
+            scalar_encoding,
+            comparison_version,
+            default_mask,
+            cast_profile,
+        );
+        put_catalog(&database, &key, &value);
+        assert_eq!(
+            validate_persisted_records(&database),
+            Err(StartupError::InvalidCatalog),
+        );
+    }
+
+    let uuid_fixture = Fixture::new();
+    let uuid_database = uuid_fixture.database(0);
+    let (key, value) = builtin_type_record_with_profile(builtin_id(109), 9, 0, 1, 1, 1, 1);
+    put_catalog(&uuid_database, &key, &value);
+    assert_eq!(
+        validate_persisted_records(&uuid_database),
         Err(StartupError::InvalidCatalog),
     );
     Ok(())

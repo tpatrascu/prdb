@@ -52,8 +52,12 @@ fn id(row: u8) -> prdb_engine::overlay::RowId {
 }
 
 fn builtin_owner_id() -> [u8; 16] {
+    builtin_id(3)
+}
+
+fn builtin_id(code: u16) -> [u8; 16] {
     let mut id = [0x80; 16];
-    id[15] = 3;
+    id[15] = code as u8;
     id
 }
 
@@ -3481,6 +3485,27 @@ fn invocation_loads_and_guards_catalog_table_schema() -> Result<(), Box<dyn std:
     ] {
         writes.push(dependency_catalog_write(dependent_id, referenced_id, 2)?);
     }
+    let mut audit_targets = vec![
+        principal_id,
+        table_id,
+        schema_id,
+        storage_id,
+        varchar_type_id,
+        uuid_type_id,
+        column_text_id,
+        column_uuid_id,
+        boolean_type_id,
+        policy_id,
+        policy_expression_id,
+        role_id,
+        cell_policy_id,
+        cell_policy_expression_id,
+        cell_allow_policy_id,
+        cell_allow_expression_id,
+        check_constraint_id,
+        check_expression_id,
+    ];
+    audit_targets.sort_unstable();
     let audit = AuditEvent {
         event_id: [138; 16],
         actor_id: Some([9; 16]),
@@ -3488,26 +3513,7 @@ fn invocation_loads_and_guards_catalog_table_schema() -> Result<(), Box<dyn std:
         occurred_at_us: 1_700_000_000_000_000,
         action: AuditAction::Ddl,
         result: AuditResult::Succeeded,
-        target_ids: vec![
-            principal_id,
-            table_id,
-            schema_id,
-            storage_id,
-            varchar_type_id,
-            uuid_type_id,
-            column_text_id,
-            column_uuid_id,
-            boolean_type_id,
-            policy_id,
-            policy_expression_id,
-            role_id,
-            cell_policy_id,
-            cell_policy_expression_id,
-            cell_allow_policy_id,
-            cell_allow_expression_id,
-            check_constraint_id,
-            check_expression_id,
-        ],
+        target_ids: audit_targets,
     };
     commit_catalog_and_audit(&database, [140; 16], [9; 16], 9_999, &writes, &[audit])?;
 
@@ -3850,10 +3856,56 @@ fn invocation_loads_and_guards_catalog_table_schema() -> Result<(), Box<dyn std:
     );
     assert!(!loaded.columns[1].nullable);
 
-    let changed_type = catalog_record_payload(
-        4,
-        &catalog_id_key(4, varchar_type_id),
-        &type_fields(7, 2, 3),
+    let changed_column_key = catalog_id_key(6, column_text_id);
+    let changed_column = catalog_record_payload(
+        6,
+        &changed_column_key,
+        &[
+            CatalogField {
+                tag: 1,
+                wire_type: WireType::Id,
+                payload: table_id.to_vec(),
+            },
+            CatalogField {
+                tag: 2,
+                wire_type: WireType::U32,
+                payload: 1u32.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 3,
+                wire_type: WireType::Text,
+                payload: b"object_136".to_vec(),
+            },
+            CatalogField {
+                tag: 4,
+                wire_type: WireType::Id,
+                payload: varchar_type_id.to_vec(),
+            },
+            CatalogField {
+                tag: 5,
+                wire_type: WireType::Bytes,
+                payload: {
+                    let mut parameters = [0; 8];
+                    parameters[4..].copy_from_slice(&16u32.to_le_bytes());
+                    parameters.to_vec()
+                },
+            },
+            CatalogField {
+                tag: 6,
+                wire_type: WireType::Bool,
+                payload: vec![0],
+            },
+            CatalogField {
+                tag: 8,
+                wire_type: WireType::U16,
+                payload: 0u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 9,
+                wire_type: WireType::U64,
+                payload: 1u64.to_le_bytes().to_vec(),
+            },
+        ],
     )?;
     let audit = AuditEvent {
         event_id: [142; 16],
@@ -3862,13 +3914,20 @@ fn invocation_loads_and_guards_catalog_table_schema() -> Result<(), Box<dyn std:
         occurred_at_us: 1_700_000_000_000_001,
         action: AuditAction::Ddl,
         result: AuditResult::Succeeded,
-        target_ids: vec![varchar_type_id],
+        target_ids: vec![table_id, column_text_id],
     };
-    let key = catalog_id_key(4, varchar_type_id);
+    let key = changed_column_key;
     let current = database.begin_read()?;
     let previous = current
         .open_table(CATALOG)?
         .get(&key[..])?
+        .unwrap()
+        .value()
+        .to_vec();
+    let table_key = catalog_id_key(5, table_id);
+    let previous_table = current
+        .open_table(CATALOG)?
+        .get(&table_key[..])?
         .unwrap()
         .value()
         .to_vec();
@@ -3878,11 +3937,48 @@ fn invocation_loads_and_guards_catalog_table_schema() -> Result<(), Box<dyn std:
         [144; 16],
         [9; 16],
         9_999,
-        &[CatalogWrite {
-            key,
-            expected_value: Some(previous),
-            payload: Some(changed_type),
-        }],
+        &[
+            CatalogWrite {
+                key,
+                expected_value: Some(previous),
+                payload: Some(changed_column),
+            },
+            CatalogWrite {
+                key: table_key.clone(),
+                expected_value: Some(previous_table),
+                payload: Some(catalog_record_payload(
+                    5,
+                    &table_key,
+                    &[
+                        CatalogField {
+                            tag: 1,
+                            wire_type: WireType::Id,
+                            payload: schema_id.to_vec(),
+                        },
+                        CatalogField {
+                            tag: 2,
+                            wire_type: WireType::U64,
+                            payload: 3u64.to_le_bytes().to_vec(),
+                        },
+                        CatalogField {
+                            tag: 3,
+                            wire_type: WireType::U64,
+                            payload: 4u64.to_le_bytes().to_vec(),
+                        },
+                        CatalogField {
+                            tag: 4,
+                            wire_type: WireType::Id,
+                            payload: storage_id.to_vec(),
+                        },
+                        CatalogField {
+                            tag: 5,
+                            wire_type: WireType::U16,
+                            payload: 1u16.to_le_bytes().to_vec(),
+                        },
+                    ],
+                )?),
+            },
+        ],
         &[audit],
     )?;
     assert!(matches!(

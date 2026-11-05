@@ -483,6 +483,24 @@ fn schema_write(schema_id: [u8; 16]) -> CatalogWrite {
 }
 
 fn builtin_type_write(type_id: [u8; 16], builtin_kind: u16) -> CatalogWrite {
+    let parameter_rule = match builtin_kind {
+        5 => 1,
+        7 => 2,
+        _ => 0,
+    };
+    let default_mask = if builtin_kind == 9 { 7 } else { 1 };
+    builtin_type_write_with_profile(type_id, builtin_kind, parameter_rule, 1, 1, default_mask, 1)
+}
+
+fn builtin_type_write_with_profile(
+    type_id: [u8; 16],
+    builtin_kind: u16,
+    parameter_rule: u16,
+    scalar_encoding: u32,
+    comparison_version: u32,
+    default_mask: u32,
+    cast_profile: u32,
+) -> CatalogWrite {
     let key = id_catalog_key(4, type_id);
     let payload = encode_envelope(
         &family_schema(4).unwrap(),
@@ -496,27 +514,27 @@ fn builtin_type_write(type_id: [u8; 16], builtin_kind: u16) -> CatalogWrite {
             CatalogField {
                 tag: 2,
                 wire_type: WireType::U16,
-                payload: 0u16.to_le_bytes().to_vec(),
+                payload: parameter_rule.to_le_bytes().to_vec(),
             },
             CatalogField {
                 tag: 3,
                 wire_type: WireType::U32,
-                payload: 1u32.to_le_bytes().to_vec(),
+                payload: scalar_encoding.to_le_bytes().to_vec(),
             },
             CatalogField {
                 tag: 4,
                 wire_type: WireType::U32,
-                payload: 1u32.to_le_bytes().to_vec(),
+                payload: comparison_version.to_le_bytes().to_vec(),
             },
             CatalogField {
                 tag: 5,
                 wire_type: WireType::U32,
-                payload: 7u32.to_le_bytes().to_vec(),
+                payload: default_mask.to_le_bytes().to_vec(),
             },
             CatalogField {
                 tag: 6,
                 wire_type: WireType::U32,
-                payload: 1u32.to_le_bytes().to_vec(),
+                payload: cast_profile.to_le_bytes().to_vec(),
             },
         ],
     )
@@ -1811,6 +1829,55 @@ fn catalog_commit_rejects_removing_a_mapped_builtin_type() -> Result<(), Box<dyn
                 payload: None,
             }],
             &[audit_event(97)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+    assert_eq!(commit_sequence(&database)?, 0);
+    Ok(())
+}
+
+#[test]
+fn catalog_commit_rejects_unassigned_builtin_type_profiles()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let type_key = id_catalog_key(4, builtin_id(101));
+    let expected_value = database
+        .begin_read()?
+        .open_table(CATALOG)?
+        .get(type_key.as_slice())?
+        .ok_or("missing bootstrap type fixture")?
+        .value()
+        .to_vec();
+    let mut unsupported = builtin_type_write_with_profile(builtin_id(101), 1, 0, 1, 1, 1, 2);
+    unsupported.expected_value = Some(expected_value);
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(102),
+            id(9),
+            10_004,
+            &[unsupported],
+            &[audit_event(102)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+    assert_eq!(commit_sequence(&database)?, 0);
+    Ok(())
+}
+
+#[test]
+fn catalog_commit_rejects_duplicate_builtin_type_kinds() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(103),
+            id(9),
+            10_005,
+            &[builtin_type_write(id(90), 1), object_write(id(90), 2)],
+            &[audit_event(103)],
         ),
         Err(CommitError::InvalidCatalog),
     );

@@ -5,7 +5,7 @@ use crate::authorization::{
     Subject, authorize, check_constraint_passes, has_permission, materialize_default, project_row,
     resolve_role_closure, row_visible,
 };
-use crate::catalog::{CatalogRecord, decode_registered_envelope};
+use crate::catalog::{CatalogRecord, decode_registered_envelope, validate_builtin_type_profile};
 use crate::commit::{
     CatalogGuard, CommitError, CommitRequest, IndexWrite, RowWrite, commit_storage_changes,
     record_aborted_outcome,
@@ -1962,21 +1962,9 @@ fn decode_catalog_scalar_type_parameters(
     type_record: &CatalogRecord,
     parameters: &[u8],
 ) -> Result<ScalarType, TransactionError> {
-    if type_record.family_code != 4 || type_record.logical_key.len() != 19 {
-        return Err(TransactionError::CorruptCatalog);
-    }
-    let kind = catalog_u16(type_record, 1)?;
+    let kind =
+        validate_builtin_type_profile(type_record).map_err(|_| TransactionError::CorruptCatalog)?;
     let parameter_rule = catalog_u16(type_record, 2)?;
-    let default_mask = catalog_u32(type_record, 5)?;
-    if catalog_u32(type_record, 3)? != 1
-        || catalog_u32(type_record, 4)? != 1
-        || default_mask & !7 != 0
-        || default_mask & 1 == 0
-        || (kind != 9 && default_mask != 1)
-        || catalog_u32(type_record, 6)? != 1
-    {
-        return Err(TransactionError::CorruptCatalog);
-    }
     let parameters: [u8; 8] = parameters
         .try_into()
         .map_err(|_| TransactionError::CorruptCatalog)?;

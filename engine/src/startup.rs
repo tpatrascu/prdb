@@ -2,7 +2,10 @@
 
 use crate::audit::AuditEvent;
 use crate::authorization::{MAX_MEMBERSHIP_EDGES, Membership, validate_membership_graph};
-use crate::catalog::{CatalogRecord, decode_registered_envelope, validate_owned_child_graph};
+use crate::catalog::{
+    CatalogRecord, decode_registered_envelope, validate_builtin_type_profile,
+    validate_owned_child_graph,
+};
 use crate::expression::decode_catalog_expression_record;
 use crate::index_locator::IndexLocator;
 use crate::metadata::{EngineMetadata, Lifecycle};
@@ -261,7 +264,8 @@ fn validate_catalog(
             let type_id: [u8; 16] = key[3..19]
                 .try_into()
                 .map_err(|_| StartupError::InvalidCatalog)?;
-            let builtin_kind = field_u16(&record, 1)?;
+            let builtin_kind =
+                validate_builtin_type_profile(&record).map_err(|_| StartupError::InvalidCatalog)?;
             if !(1..=11).contains(&builtin_kind)
                 || builtin_type_kinds.insert(type_id, builtin_kind).is_some()
                 || builtin_type_ids.insert(builtin_kind, type_id).is_some()

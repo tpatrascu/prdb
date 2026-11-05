@@ -1,7 +1,7 @@
 //! Serialized row publication with optimistic row-version validation.
 use crate::audit::AuditEvent;
 use crate::authorization::{MAX_MEMBERSHIP_EDGES, Membership, validate_membership_graph};
-use crate::catalog::decode_registered_envelope;
+use crate::catalog::{decode_registered_envelope, validate_builtin_type_profile};
 use crate::expression::decode_catalog_expression_record;
 use crate::index_locator::IndexLocator;
 use crate::metadata::{EngineMetadata, Lifecycle};
@@ -888,6 +888,12 @@ fn validate_final_typed_object_mappings(
         return Ok(());
     }
     let table = transaction.open_table(CATALOG).map_err(storage_error)?;
+    if catalog_writes
+        .iter()
+        .any(|write| write.key.len() >= 2 && write.key[..2] == 4u16.to_be_bytes())
+    {
+        validate_final_builtin_type_catalog(&table, catalog_writes)?;
+    }
     let mut changed_ids = HashSet::<[u8; 16]>::new();
     for write in catalog_writes.iter().filter(|write| {
         write.key.len() >= 2 && is_relevant_family(u16::from_be_bytes([write.key[0], write.key[1]]))
@@ -1053,7 +1059,10 @@ fn validate_final_bootstrap_builtin_targets(
         let type_key = id_catalog_key(4, *type_id);
         let type_bytes =
             final_catalog_value(&catalog, writes, &type_key)?.ok_or(CommitError::InvalidCatalog)?;
-        if catalog_field_bytes(&type_key, &type_bytes, 4, 1)? != (code - 100).to_le_bytes() {
+        let type_record = decode_catalog_record(&type_key, &type_bytes)?;
+        if validate_builtin_type_profile(&type_record).map_err(|_| CommitError::InvalidCatalog)?
+            != code - 100
+        {
             return Err(CommitError::InvalidCatalog);
         }
     }
@@ -1070,7 +1079,10 @@ fn validate_final_builtin_typed_object(
     let typed_key = id_catalog_key(family, object_id);
     let typed_bytes =
         final_catalog_value(catalog, writes, &typed_key)?.ok_or(CommitError::InvalidCatalog)?;
-    decode_catalog_record(&typed_key, &typed_bytes)?;
+    let typed_record = decode_catalog_record(&typed_key, &typed_bytes)?;
+    if family == 4 && validate_builtin_type_profile(&typed_record).is_err() {
+        return Err(CommitError::InvalidCatalog);
+    }
     let object_key = id_catalog_key(2, object_id);
     let object_bytes =
         final_catalog_value(catalog, writes, &object_key)?.ok_or(CommitError::InvalidCatalog)?;
@@ -1100,6 +1112,56 @@ fn insert_authority_edge(
     edges.insert((dependent_id, referenced_id));
     if edges.len() > crate::snapshot::MAX_CATALOG_FAMILY_SCAN {
         return Err(CommitError::InvalidCatalog);
+    }
+    Ok(())
+}
+
+fn validate_final_builtin_type_catalog(
+    table: &redb::Table<'_, &[u8], &[u8]>,
+    catalog_writes: &[CatalogWrite],
+) -> Result<(), CommitError> {
+    let family_prefix = 4u16.to_be_bytes();
+    let mut seen_kinds = HashSet::new();
+    let mut family_count = 0usize;
+    for entry in table
+        .range(family_prefix.as_slice()..)
+        .map_err(storage_error)?
+    {
+        let (key, value) = entry.map_err(storage_error)?;
+        let key = key.value();
+        if !key.starts_with(&family_prefix) {
+            break;
+        }
+        if catalog_writes.iter().any(|write| write.key == key) {
+            continue;
+        }
+        family_count += 1;
+        if family_count > crate::snapshot::MAX_CATALOG_FAMILY_SCAN {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let record = decode_catalog_record(key, value.value())?;
+        let builtin_kind =
+            validate_builtin_type_profile(&record).map_err(|_| CommitError::InvalidCatalog)?;
+        if !seen_kinds.insert(builtin_kind) {
+            return Err(CommitError::InvalidCatalog);
+        }
+    }
+    for write in catalog_writes
+        .iter()
+        .filter(|write| write.key.starts_with(&family_prefix))
+    {
+        if let Some(bytes) = &write.payload {
+            family_count += 1;
+            if family_count > crate::snapshot::MAX_CATALOG_FAMILY_SCAN {
+                return Err(CommitError::InvalidCatalog);
+            }
+            let record = decode_catalog_record(&write.key, bytes)?;
+            let builtin_kind =
+                validate_builtin_type_profile(&record).map_err(|_| CommitError::InvalidCatalog)?;
+            if !seen_kinds.insert(builtin_kind) {
+                return Err(CommitError::InvalidCatalog);
+            }
+        }
     }
     Ok(())
 }
