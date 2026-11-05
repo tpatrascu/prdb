@@ -7,6 +7,7 @@ use crate::catalog::{
     validate_builtin_type_profile, validate_owned_child_graph,
 };
 use crate::expression::decode_catalog_expression_record;
+use crate::index_key::derive_index_key;
 use crate::index_locator::IndexLocator;
 use crate::metadata::{EngineMetadata, Lifecycle};
 use crate::outcome::{InvocationOutcome, OutcomeStatus};
@@ -19,15 +20,18 @@ use std::collections::HashMap;
 const METADATA_KEY: &[u8] = b"format";
 const MAX_CATALOG_RECORDS_PER_FAMILY: usize = 65_536;
 type IndexDefinitions = HashMap<[u8; 16], [u8; 16]>;
+type IndexColumns = HashMap<[u8; 16], Vec<[u8; 16]>>;
 
 #[derive(Clone, Debug)]
 struct PersistedTableSchema {
     schema_version: u64,
+    column_ids: Vec<[u8; 16]>,
     columns: Vec<ColumnSchema>,
 }
 
 #[derive(Clone, Debug)]
 struct PersistedColumnSchema {
+    column_id: [u8; 16],
     ordinal: u32,
     type_id: [u8; 16],
     parameters: Vec<u8>,
@@ -36,6 +40,13 @@ struct PersistedColumnSchema {
 }
 
 type PersistedTableSchemas = HashMap<[u8; 16], PersistedTableSchema>;
+
+struct PersistedCatalog {
+    record_count: usize,
+    index_definitions: IndexDefinitions,
+    index_columns: IndexColumns,
+    table_schemas: PersistedTableSchemas,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StorageHealthReport {
@@ -88,15 +99,21 @@ pub fn validate_persisted_records(
         return Err(StartupError::NotReady);
     }
 
-    let (catalog_records, index_definitions, table_schemas) = validate_catalog(&read, &metadata)?;
-    let rows = validate_rows(&read, metadata.commit_sequence, &table_schemas)?;
-    let index_entries = validate_indexes(&read, metadata.commit_sequence, &index_definitions)?;
+    let catalog = validate_catalog(&read, &metadata)?;
+    let rows = validate_rows(&read, metadata.commit_sequence, &catalog.table_schemas)?;
+    let index_entries = validate_indexes(
+        &read,
+        metadata.commit_sequence,
+        &catalog.index_definitions,
+        &catalog.index_columns,
+        &catalog.table_schemas,
+    )?;
     let outcomes = validate_outcomes(&read, metadata.commit_sequence)?;
     let audit_events = validate_audit(&read)?;
 
     Ok(StorageHealthReport {
         metadata,
-        catalog_records,
+        catalog_records: catalog.record_count,
         rows,
         index_entries,
         outcomes,
@@ -163,7 +180,7 @@ fn read_metadata(read: &ReadTransaction) -> Result<EngineMetadata, StartupError>
 fn validate_catalog(
     read: &ReadTransaction,
     metadata: &EngineMetadata,
-) -> Result<(usize, IndexDefinitions, PersistedTableSchemas), StartupError> {
+) -> Result<PersistedCatalog, StartupError> {
     let table = read.open_table(CATALOG).map_err(storage_error)?;
     let mut family_counts = [0usize; 17];
     let mut count = 0usize;
@@ -331,6 +348,7 @@ fn validate_catalog(
                 .entry(table_id)
                 .or_default()
                 .push(PersistedColumnSchema {
+                    column_id,
                     ordinal: field_u32(&record, 2)?,
                     type_id: field_id(&record, 4)?,
                     parameters: field_payload(&record, 5)?.to_vec(),
@@ -883,6 +901,7 @@ fn validate_catalog(
         }
         columns_by_ordinal.sort_by_key(|column| column.ordinal);
         let mut columns = Vec::with_capacity(columns_by_ordinal.len());
+        let mut column_ids = Vec::with_capacity(columns_by_ordinal.len());
         for (expected_ordinal, column) in columns_by_ordinal.into_iter().enumerate() {
             if column.ordinal as usize != expected_ordinal
                 || column.introduced_schema_version == 0
@@ -895,6 +914,7 @@ fn validate_catalog(
                 .ok_or(StartupError::InvalidCatalog)?;
             let scalar_type = decode_builtin_scalar_type(type_record, &column.parameters)
                 .map_err(|_| StartupError::InvalidCatalog)?;
+            column_ids.push(column.column_id);
             columns.push(ColumnSchema {
                 scalar_type,
                 nullable: column.nullable,
@@ -905,6 +925,7 @@ fn validate_catalog(
                 table_id,
                 PersistedTableSchema {
                     schema_version,
+                    column_ids,
                     columns,
                 },
             )
@@ -913,7 +934,12 @@ fn validate_catalog(
             return Err(StartupError::InvalidCatalog);
         }
     }
-    Ok((count, index_definitions, table_schemas))
+    Ok(PersistedCatalog {
+        record_count: count,
+        index_definitions,
+        index_columns,
+        table_schemas,
+    })
 }
 
 fn typed_family_object_kind(record: &CatalogRecord) -> Result<Option<u16>, StartupError> {
@@ -1142,10 +1168,19 @@ fn validate_indexes(
     read: &ReadTransaction,
     commit_sequence: u64,
     index_definitions: &IndexDefinitions,
+    index_columns: &IndexColumns,
+    table_schemas: &PersistedTableSchemas,
 ) -> Result<usize, StartupError> {
     let indexes = read.open_table(INDEXES).map_err(storage_error)?;
     let rows = read.open_table(ROWS).map_err(storage_error)?;
     let reverse = read.open_table(ROW_INDEXES).map_err(storage_error)?;
+    let mut indexes_by_table = HashMap::<[u8; 16], Vec<[u8; 16]>>::new();
+    for (index_id, table_id) in index_definitions {
+        indexes_by_table
+            .entry(*table_id)
+            .or_default()
+            .push(*index_id);
+    }
     let mut count = 0usize;
     for entry in indexes.iter().map_err(storage_error)? {
         let (key, value) = entry.map_err(storage_error)?;
@@ -1172,7 +1207,15 @@ fn validate_indexes(
             .map_err(storage_error)?
             .ok_or(StartupError::InvalidIndex)?;
         let row = RowRecord::decode(row.value()).map_err(|_| StartupError::InvalidIndex)?;
-        if locator.row_version != row.row_version {
+        let expected_key = derive_persisted_index_key(
+            index_id,
+            locator.row_id,
+            *table_id,
+            &row.payload,
+            index_columns,
+            table_schemas,
+        )?;
+        if locator.row_version != row.row_version || expected_key.as_slice() != key {
             return Err(StartupError::InvalidIndex);
         }
         let mut reverse_key = row_key.to_vec();
@@ -1182,6 +1225,50 @@ fn validate_indexes(
             return Err(StartupError::InvalidIndex);
         }
         count = count.checked_add(1).ok_or(StartupError::CountOverflow)?;
+    }
+    let mut expected_count = 0usize;
+    for entry in rows.iter().map_err(storage_error)? {
+        let (key, value) = entry.map_err(storage_error)?;
+        let row_key: [u8; 32] = key
+            .value()
+            .try_into()
+            .map_err(|_| StartupError::InvalidRow)?;
+        let table_id: [u8; 16] = row_key[..16]
+            .try_into()
+            .map_err(|_| StartupError::InvalidRow)?;
+        let row = RowRecord::decode(value.value()).map_err(|_| StartupError::InvalidRow)?;
+        if let Some(index_ids) = indexes_by_table.get(&table_id) {
+            for index_id in index_ids {
+                let index_key = derive_persisted_index_key(
+                    *index_id,
+                    row_key[16..]
+                        .try_into()
+                        .map_err(|_| StartupError::InvalidRow)?,
+                    table_id,
+                    &row.payload,
+                    index_columns,
+                    table_schemas,
+                )?;
+                let locator = indexes
+                    .get(index_key.as_slice())
+                    .map_err(storage_error)?
+                    .ok_or(StartupError::InvalidIndex)?;
+                let locator = IndexLocator::decode_for_key(&index_key, locator.value())
+                    .map_err(|_| StartupError::InvalidIndex)?;
+                if locator.row_version != row.row_version || locator.row_id != row_key[16..] {
+                    return Err(StartupError::InvalidIndex);
+                }
+                let mut reverse_key = row_key.to_vec();
+                reverse_key.extend_from_slice(&index_key[..index_key.len() - 16]);
+                let reverse_value = reverse.get(&reverse_key[..]).map_err(storage_error)?;
+                if reverse_value.is_none_or(|value| !value.value().is_empty()) {
+                    return Err(StartupError::InvalidIndex);
+                }
+                expected_count = expected_count
+                    .checked_add(1)
+                    .ok_or(StartupError::CountOverflow)?;
+            }
+        }
     }
     let mut reverse_count = 0usize;
     for entry in reverse.iter().map_err(storage_error)? {
@@ -1225,10 +1312,37 @@ fn validate_indexes(
             .checked_add(1)
             .ok_or(StartupError::CountOverflow)?;
     }
-    if reverse_count != count {
+    if reverse_count != count || expected_count != count {
         return Err(StartupError::InvalidIndex);
     }
     Ok(count)
+}
+
+fn derive_persisted_index_key(
+    index_id: [u8; 16],
+    row_id: [u8; 16],
+    table_id: [u8; 16],
+    payload: &[u8],
+    index_columns: &IndexColumns,
+    table_schemas: &PersistedTableSchemas,
+) -> Result<Vec<u8>, StartupError> {
+    let schema = table_schemas
+        .get(&table_id)
+        .ok_or(StartupError::InvalidCatalog)?;
+    let index_column_ids = index_columns
+        .get(&index_id)
+        .ok_or(StartupError::InvalidCatalog)?;
+    derive_index_key(
+        index_id,
+        row_id,
+        schema.schema_version,
+        &schema.column_ids,
+        &schema.columns,
+        payload,
+        index_column_ids,
+    )
+    .map(|derived| derived.key)
+    .map_err(|_| StartupError::InvalidIndex)
 }
 
 fn validate_outcomes(read: &ReadTransaction, commit_sequence: u64) -> Result<usize, StartupError> {

@@ -316,3 +316,11 @@
 - A real-redb regression commits a row and its existing index membership, attempts to add a second index, and confirms the DDL aborts without changing the catalog, audit, or commit sequence.
 - Verification: `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and all 172 integration tests across 17 targets passed in the prescribed Nix shell. `git diff --check` passed.
 - Remaining: transactional index backfill/rebuild and online schema migration remain open.
+
+## SM-5 dependency: startup index membership coverage — in progress
+
+- Red evidence: startup accepted a valid typed row with a catalog-defined index but no corresponding `indexes_v1` or `row_indexes_v1` membership; it also accepted a stored key whose tuple component disagreed with the row.
+- Startup now derives each persisted row's expected key for every catalog index, checks the locator and reverse membership, and verifies every stored index key equals the derivation. Missing memberships, mismatched keys, and extra entries fail with `InvalidIndex`.
+- Real-redb regressions cover missing index coverage and a locator/reverse entry attached to the wrong typed key; a valid persisted row/index image still passes.
+- Verification: `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and all 173 integration tests across 17 targets passed in the prescribed Nix shell. `git diff --check` passed.
+- Remaining: startup validation still needs uniqueness checking for persisted unique-index duplicates and authenticated service admission.

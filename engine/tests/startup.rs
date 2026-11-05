@@ -1164,7 +1164,7 @@ fn validates_ready_image_records_and_references() -> Result<(), Box<dyn std::err
     let index_object = object_record([0x44; 16], 7);
     put_catalog(&database, &index_object.0, &index_object.1);
     let mut index_key = [0x44; 16].to_vec();
-    index_key.extend_from_slice(&[1, 0x80, 0, 0, 1]);
+    index_key.extend_from_slice(&prdb_engine::index_key::encode_bytes(b"tuple-fixture"));
     index_key.extend_from_slice(&row_id);
     let locator = IndexLocator {
         row_id,
@@ -1215,6 +1215,65 @@ fn validates_ready_image_records_and_references() -> Result<(), Box<dyn std::err
     assert_eq!(report.outcomes, 1);
     assert_eq!(report.audit_events, 1);
     Ok(())
+}
+
+#[test]
+fn rejects_missing_membership_for_catalog_index() {
+    let fixture = Fixture::new();
+    let database = fixture.database(1);
+    let table_id = [0x22; 16];
+    let row_id = [0x33; 16];
+    insert_row(&database, &row_key(table_id, row_id), 1);
+    put_table_and_column(&database, table_id, [0x66; 16], false);
+    let (index_key, index_value) = index_definition([0x44; 16], table_id);
+    put_catalog(&database, &index_key, &index_value);
+    let index_object = object_record([0x44; 16], 7);
+    put_catalog(&database, &index_object.0, &index_object.1);
+
+    assert_eq!(
+        validate_persisted_records(&database),
+        Err(StartupError::InvalidIndex)
+    );
+}
+
+#[test]
+fn rejects_index_key_that_does_not_match_its_row_tuple() {
+    let fixture = Fixture::new();
+    let database = fixture.database(1);
+    let table_id = [0x22; 16];
+    let row_id = [0x33; 16];
+    let row_key = row_key(table_id, row_id);
+    insert_row(&database, &row_key, 1);
+    put_table_and_column(&database, table_id, [0x66; 16], false);
+    let (catalog_key, catalog_value) = index_definition([0x44; 16], table_id);
+    put_catalog(&database, &catalog_key, &catalog_value);
+    let index_object = object_record([0x44; 16], 7);
+    put_catalog(&database, &index_object.0, &index_object.1);
+    let mut index_key = [0x44; 16].to_vec();
+    index_key.extend_from_slice(&prdb_engine::index_key::encode_bytes(b"different value"));
+    index_key.extend_from_slice(&row_id);
+    let locator = IndexLocator {
+        row_id,
+        row_version: 1,
+    }
+    .encode();
+    let write = database.begin_write().unwrap();
+    write
+        .open_table(INDEXES)
+        .unwrap()
+        .insert(&index_key[..], &locator[..])
+        .unwrap();
+    write
+        .open_table(ROW_INDEXES)
+        .unwrap()
+        .insert(&reverse_index_key(&row_key, &index_key)[..], &b""[..])
+        .unwrap();
+    write.commit().unwrap();
+
+    assert_eq!(
+        validate_persisted_records(&database),
+        Err(StartupError::InvalidIndex)
+    );
 }
 
 #[test]
