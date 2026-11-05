@@ -392,6 +392,147 @@ fn principal_write(principal_id: [u8; 16], kind: u16) -> CatalogWrite {
     principal_write_with_epoch(principal_id, kind, 1)
 }
 
+fn principal_write_with_name(
+    principal_id: [u8; 16],
+    kind: u16,
+    epoch: u64,
+    name: &str,
+) -> CatalogWrite {
+    let mut write = principal_write_with_epoch(principal_id, kind, epoch);
+    let key = write.key.clone();
+    write.payload = Some(
+        encode_envelope(
+            &family_schema(10).unwrap(),
+            &key,
+            &[
+                CatalogField {
+                    tag: 1,
+                    wire_type: WireType::U16,
+                    payload: kind.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 2,
+                    wire_type: WireType::Text,
+                    payload: name.as_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 3,
+                    wire_type: WireType::Bool,
+                    payload: vec![u8::from(kind == 1)],
+                },
+                CatalogField {
+                    tag: 4,
+                    wire_type: WireType::U64,
+                    payload: epoch.to_le_bytes().to_vec(),
+                },
+            ],
+        )
+        .unwrap(),
+    );
+    write
+}
+
+fn table_write(table_id: [u8; 16], schema_id: [u8; 16]) -> CatalogWrite {
+    let mut key = 5u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&table_id);
+    let payload = encode_envelope(
+        &family_schema(5).unwrap(),
+        &key,
+        &[
+            CatalogField {
+                tag: 1,
+                wire_type: WireType::Id,
+                payload: schema_id.to_vec(),
+            },
+            CatalogField {
+                tag: 2,
+                wire_type: WireType::U64,
+                payload: 1u64.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 3,
+                wire_type: WireType::U64,
+                payload: 1u64.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 4,
+                wire_type: WireType::Id,
+                payload: table_id.to_vec(),
+            },
+            CatalogField {
+                tag: 5,
+                wire_type: WireType::U16,
+                payload: 1u16.to_le_bytes().to_vec(),
+            },
+        ],
+    )
+    .unwrap();
+    CatalogWrite {
+        key,
+        expected_value: None,
+        payload: Some(payload),
+    }
+}
+
+fn column_write(column_id: [u8; 16], table_id: [u8; 16], name: &str) -> CatalogWrite {
+    let mut key = 6u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&column_id);
+    let payload = encode_envelope(
+        &family_schema(6).unwrap(),
+        &key,
+        &[
+            CatalogField {
+                tag: 1,
+                wire_type: WireType::Id,
+                payload: table_id.to_vec(),
+            },
+            CatalogField {
+                tag: 2,
+                wire_type: WireType::U32,
+                payload: 0u32.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 3,
+                wire_type: WireType::Text,
+                payload: name.as_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 4,
+                wire_type: WireType::Id,
+                payload: id(50).to_vec(),
+            },
+            CatalogField {
+                tag: 5,
+                wire_type: WireType::Bytes,
+                payload: vec![0; 8],
+            },
+            CatalogField {
+                tag: 6,
+                wire_type: WireType::Bool,
+                payload: vec![1],
+            },
+            CatalogField {
+                tag: 8,
+                wire_type: WireType::U16,
+                payload: 0u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 9,
+                wire_type: WireType::U64,
+                payload: 1u64.to_le_bytes().to_vec(),
+            },
+        ],
+    )
+    .unwrap();
+    CatalogWrite {
+        key,
+        expected_value: None,
+        payload: Some(payload),
+    }
+}
+
 fn malformed_foreign_key_write() -> CatalogWrite {
     let constraint_id = id(81);
     let table_id = id(82);
@@ -967,6 +1108,68 @@ fn catalog_commit_requires_principal_object_identity_and_kind()
 }
 
 #[test]
+fn catalog_commit_requires_matching_column_and_principal_names()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let principal_id = id(76);
+    let mismatched_principal =
+        principal_write_with_name(principal_id, 1, 1, "different_principal_name");
+    let principal_object = principal_object_write(principal_id, 1);
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(76),
+            id(9),
+            9_999,
+            &[mismatched_principal, principal_object],
+            &[audit_event(76)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+    assert_eq!(commit_sequence(&database)?, 0);
+
+    let schema_id = id(77);
+    let table_id = id(78);
+    let column_id = id(79);
+    let make_column_batch = |column_name: &str| {
+        vec![
+            schema_write(schema_id),
+            table_write(table_id, schema_id),
+            column_write(column_id, table_id, column_name),
+            object_write(schema_id, 1),
+            object_write(table_id, 3),
+            object_write(column_id, 4),
+        ]
+    };
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(77),
+            id(9),
+            9_999,
+            &make_column_batch("different_column_name"),
+            &[audit_event(77)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+    assert_eq!(commit_sequence(&database)?, 0);
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(78),
+            id(9),
+            9_999,
+            &make_column_batch("object_79"),
+            &[audit_event(78)],
+        )?,
+        1
+    );
+    assert_eq!(commit_sequence(&database)?, 1);
+    Ok(())
+}
+
+#[test]
 fn catalog_commit_requires_schema_object_identity_and_kind()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
@@ -1034,7 +1237,7 @@ fn principal_write_with_epoch(principal_id: [u8; 16], kind: u16, epoch: u64) -> 
             CatalogField {
                 tag: 2,
                 wire_type: WireType::Text,
-                payload: format!("principal_{}", principal_id[0]).into_bytes(),
+                payload: format!("object_{}", principal_id[0]).into_bytes(),
             },
             CatalogField {
                 tag: 3,

@@ -156,11 +156,12 @@ fn principal_catalog_record(authority_epoch: u64) -> (Vec<u8>, Vec<u8>) {
 fn principal_catalog_record_for(
     principal_id: [u8; 16],
     kind: u16,
-    name: &[u8],
+    _name: &[u8],
     login_enabled: bool,
     authority_epoch: u64,
 ) -> (Vec<u8>, Vec<u8>) {
     let key = catalog_id_key(10, principal_id);
+    let name = format!("object_{}", principal_id[0]);
     let fields = [
         CatalogField {
             tag: 1,
@@ -170,7 +171,7 @@ fn principal_catalog_record_for(
         CatalogField {
             tag: 2,
             wire_type: WireType::Text,
-            payload: name.to_vec(),
+            payload: name.into_bytes(),
         },
         CatalogField {
             tag: 3,
@@ -2196,7 +2197,7 @@ fn authorized_insert_materializes_defaults_before_policy_and_check_validation()
             CatalogField {
                 tag: 3,
                 wire_type: WireType::Text,
-                payload: b"id".to_vec(),
+                payload: format!("object_{}", column_id[0]).into_bytes(),
             },
             CatalogField {
                 tag: 4,
@@ -2878,12 +2879,24 @@ fn invocation_loads_and_guards_catalog_table_schema() -> Result<(), Box<dyn std:
         )?),
     });
     for (column_id, name, ordinal, type_id, parameters) in [
-        (column_text_id, b"name".as_slice(), 1u32, varchar_type_id, {
-            let mut bytes = [0; 8];
-            bytes[4..].copy_from_slice(&32u32.to_le_bytes());
-            bytes
-        }),
-        (column_uuid_id, b"id".as_slice(), 0u32, uuid_type_id, [0; 8]),
+        (
+            column_text_id,
+            b"object_136".as_slice(),
+            1u32,
+            varchar_type_id,
+            {
+                let mut bytes = [0; 8];
+                bytes[4..].copy_from_slice(&32u32.to_le_bytes());
+                bytes
+            },
+        ),
+        (
+            column_uuid_id,
+            b"object_137".as_slice(),
+            0u32,
+            uuid_type_id,
+            [0; 8],
+        ),
     ] {
         let key = catalog_id_key(6, column_id);
         writes.push(CatalogWrite {
@@ -3290,7 +3303,7 @@ fn invocation_loads_and_guards_catalog_table_schema() -> Result<(), Box<dyn std:
             CatalogField {
                 tag: 3,
                 wire_type: WireType::Text,
-                payload: b"extra".to_vec(),
+                payload: format!("object_{}", new_column_id[0]).into_bytes(),
             },
             CatalogField {
                 tag: 4,
@@ -3774,7 +3787,7 @@ fn table_epochs_cannot_move_back_after_catalog_changes() -> Result<(), Box<dyn s
         &[
             field(1, WireType::Id, table_id.to_vec()),
             field(2, WireType::U32, 0u32.to_le_bytes().to_vec()),
-            field(3, WireType::Text, b"new".to_vec()),
+            field(3, WireType::Text, format!("object_{}", 244).into_bytes()),
             field(4, WireType::Id, vec![245; 16]),
             field(5, WireType::Bytes, vec![0; 8]),
             field(6, WireType::Bool, vec![1]),

@@ -127,6 +127,7 @@ fn validate_catalog(
     let mut object_kinds = HashMap::<[u8; 16], u16>::new();
     let mut object_owners = Vec::<[u8; 16]>::new();
     let mut typed_object_kinds = HashMap::<[u8; 16], u16>::new();
+    let mut typed_name_records = Vec::<(u16, [u8; 16])>::new();
     let mut memberships = Vec::<Membership>::new();
     let mut membership_grantors = Vec::<[u8; 16]>::new();
     let mut object_parents = HashMap::<[u8; 16], Option<[u8; 16]>>::new();
@@ -197,6 +198,9 @@ fn validate_catalog(
                 .map_err(|_| StartupError::InvalidCatalog)?;
             if typed_object_kinds.insert(object_id, object_kind).is_some() {
                 return Err(StartupError::InvalidCatalog);
+            }
+            if matches!(record.family_code, 6 | 10) {
+                typed_name_records.push((record.family_code, object_id));
             }
         }
         if record.family_code == 7 {
@@ -283,6 +287,26 @@ fn validate_catalog(
         .any(|(object_id, expected_kind)| object_kinds.get(object_id) != Some(expected_kind))
     {
         return Err(StartupError::InvalidCatalog);
+    }
+    for (family, object_id) in typed_name_records {
+        let typed_key = catalog_id_key(family, object_id);
+        let typed_value = table
+            .get(typed_key.as_slice())
+            .map_err(storage_error)?
+            .ok_or(StartupError::InvalidCatalog)?;
+        let typed_record = decode_registered_envelope(typed_value.value())
+            .map_err(|_| StartupError::InvalidCatalog)?;
+        let name_tag = if family == 6 { 3 } else { 2 };
+        let object_key = catalog_id_key(2, object_id);
+        let object_value = table
+            .get(object_key.as_slice())
+            .map_err(storage_error)?
+            .ok_or(StartupError::InvalidCatalog)?;
+        let object_record = decode_registered_envelope(object_value.value())
+            .map_err(|_| StartupError::InvalidCatalog)?;
+        if field_payload(&typed_record, name_tag)? != field_payload(&object_record, 3)? {
+            return Err(StartupError::InvalidCatalog);
+        }
     }
     if object_owners
         .iter()
@@ -410,6 +434,22 @@ fn field_id(record: &CatalogRecord, tag: u16) -> Result<[u8; 16], StartupError> 
         .as_slice()
         .try_into()
         .map_err(|_| StartupError::InvalidCatalog)
+}
+
+fn field_payload(record: &CatalogRecord, tag: u16) -> Result<&[u8], StartupError> {
+    record
+        .fields
+        .iter()
+        .find(|field| field.tag == tag)
+        .map(|field| field.payload.as_slice())
+        .ok_or(StartupError::InvalidCatalog)
+}
+
+fn catalog_id_key(family: u16, id: [u8; 16]) -> Vec<u8> {
+    let mut key = family.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&id);
+    key
 }
 
 fn field_u16(record: &CatalogRecord, tag: u16) -> Result<u16, StartupError> {

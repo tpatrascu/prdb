@@ -323,6 +323,16 @@ fn principal_record(
     login_enabled: bool,
     epoch: u64,
 ) -> (Vec<u8>, Vec<u8>) {
+    principal_record_with_name(id, kind, login_enabled, epoch, &format!("object_{}", id[0]))
+}
+
+fn principal_record_with_name(
+    id: [u8; 16],
+    kind: u16,
+    login_enabled: bool,
+    epoch: u64,
+    name: &str,
+) -> (Vec<u8>, Vec<u8>) {
     let mut key = 10u16.to_be_bytes().to_vec();
     key.push(1);
     key.extend_from_slice(&id);
@@ -335,7 +345,7 @@ fn principal_record(
         CatalogField {
             tag: 2,
             wire_type: WireType::Text,
-            payload: format!("principal_{}", id[0]).into_bytes(),
+            payload: name.as_bytes().to_vec(),
         },
         CatalogField {
             tag: 3,
@@ -349,6 +359,56 @@ fn principal_record(
         },
     ];
     let payload = encode_envelope(&family_schema(10).unwrap(), &key, &fields).unwrap();
+    (key, payload)
+}
+
+fn column_record(id: [u8; 16], name: &str) -> (Vec<u8>, Vec<u8>) {
+    let mut key = 6u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&id);
+    let fields = [
+        CatalogField {
+            tag: 1,
+            wire_type: WireType::Id,
+            payload: [0x55; 16].to_vec(),
+        },
+        CatalogField {
+            tag: 2,
+            wire_type: WireType::U32,
+            payload: 0u32.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 3,
+            wire_type: WireType::Text,
+            payload: name.as_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 4,
+            wire_type: WireType::Id,
+            payload: [0x66; 16].to_vec(),
+        },
+        CatalogField {
+            tag: 5,
+            wire_type: WireType::Bytes,
+            payload: vec![0; 8],
+        },
+        CatalogField {
+            tag: 6,
+            wire_type: WireType::Bool,
+            payload: vec![1],
+        },
+        CatalogField {
+            tag: 8,
+            wire_type: WireType::U16,
+            payload: 0u16.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 9,
+            wire_type: WireType::U64,
+            payload: 1u64.to_le_bytes().to_vec(),
+        },
+    ];
+    let payload = encode_envelope(&family_schema(6).unwrap(), &key, &fields).unwrap();
     (key, payload)
 }
 
@@ -686,6 +746,32 @@ fn rejects_principal_records_with_missing_or_mismatched_objects() {
             Err(StartupError::InvalidCatalog)
         ));
     }
+}
+
+#[test]
+fn rejects_column_and_principal_names_that_disagree_with_objects() {
+    let principal_fixture = Fixture::new();
+    let principal_database = principal_fixture.database(0);
+    let owner_id = builtin_owner_id();
+    let (principal_key, principal_value) =
+        principal_record_with_name(owner_id, 2, false, 1, "renamed_role");
+    put_catalog(&principal_database, &principal_key, &principal_value);
+    assert_eq!(
+        validate_persisted_records(&principal_database),
+        Err(StartupError::InvalidCatalog),
+    );
+
+    let column_fixture = Fixture::new();
+    let column_database = column_fixture.database(0);
+    let column_id = [75; 16];
+    let (column_key, column_value) = column_record(column_id, "different_column_name");
+    let (object_key, object_value) = object_record(column_id, 4);
+    put_catalog(&column_database, &column_key, &column_value);
+    put_catalog(&column_database, &object_key, &object_value);
+    assert_eq!(
+        validate_persisted_records(&column_database),
+        Err(StartupError::InvalidCatalog),
+    );
 }
 
 #[test]

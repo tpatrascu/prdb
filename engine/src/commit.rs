@@ -800,6 +800,19 @@ fn validate_final_typed_object_mappings(
             if object_kind != Some(expected_kind) {
                 return Err(CommitError::InvalidCatalog);
             }
+            let name_tag = match family {
+                6 => Some(3),
+                10 => Some(2),
+                _ => None,
+            };
+            if let Some(name_tag) = name_tag {
+                let object_bytes = object_bytes.as_deref().ok_or(CommitError::InvalidCatalog)?;
+                if catalog_field_bytes(&object_key, object_bytes, 2, 3)?
+                    != catalog_field_bytes(&typed_key, &typed_bytes, family, name_tag)?
+                {
+                    return Err(CommitError::InvalidCatalog);
+                }
+            }
         }
     }
     Ok(())
