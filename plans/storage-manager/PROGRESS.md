@@ -299,4 +299,12 @@
 - Generated writes are checked against the invocation's index-change and key-byte budgets. A budget failure aborts the invocation without publishing the row.
 - Real-redb coverage exercises automatic insert, indexed-value update, and delete maintenance, verifies locators, rejects missing index definitions and forged writes, and checks atomic rejection when synthesized writes exceed the budget.
 - Verification: `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and all 170 integration tests across 17 targets passed in the prescribed Nix shell. `git diff --check` passed.
-- Remaining: the low-level explicit-write API and projection-only helpers remain trusted scaffolding. Index-definition DDL/rebuild behavior, uniqueness validation beyond the current commit path, and service integration remain open.
+- Remaining: the low-level explicit-write API and projection-only helpers remain trusted scaffolding. Direct low-level row commit helpers do not yet enforce the catalog schema. Index-definition DDL/rebuild behavior, uniqueness validation beyond the current commit path, and service integration remain open.
+
+## SM-5 dependency: schema-loaded tuple commit validation — in progress
+
+- Red evidence: after removing all secondary index definitions from a fixture table, an invocation could load its schema and finalize an arbitrary byte payload because no index derivation decoded the row.
+- Finalization now decodes every inserted or updated row against the pinned catalog schema even when the table has zero secondary indexes. It also validates an existing row's tuple before using it as the prior image. Malformed tuples abort with `InvalidRow` and persist ABORTED without publishing the row.
+- A real-redb regression removes the table's index definitions, loads its schema, stages a non-TUP1 payload, and verifies the row remains absent with a durable ABORTED outcome.
+- Verification: `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and all 171 integration tests across 17 targets passed in the prescribed Nix shell. `git diff --check` passed.
+- Remaining: the low-level direct row commit helpers still lack catalog-schema validation and remain trusted-only; historical tuple adaptation and service admission remain open.

@@ -1516,6 +1516,39 @@ fn invocation_auto_indexes_row_writes() -> Result<(), Box<dyn std::error::Error>
 }
 
 #[test]
+fn catalog_schema_validates_rows_without_secondary_indexes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    {
+        let write = database.begin_write()?;
+        let mut catalog = write.open_table(CATALOG)?;
+        for index_id in [[0x55; 16], [1; 16], [2; 16]] {
+            let index_key = catalog_id_key(9, index_id);
+            catalog.remove(index_key.as_slice())?;
+        }
+        drop(catalog);
+        write.commit()?;
+    }
+
+    let row_id = id(50);
+    let mut invocation = InvocationTransaction::begin(&database, [50; 16], [9; 16], 9_999, 1, 128)?;
+    let schema = invocation.load_catalog_table_schema(row_id.table)?;
+    assert!(invocation.load_catalog_indexes(&schema)?.is_empty());
+    invocation.stage_put(row_id, b"not a TUP1 tuple")?;
+    assert!(matches!(
+        invocation.commit(),
+        Err(TransactionError::Commit(CommitError::InvalidRow))
+    ));
+
+    let read = database.begin_read()?;
+    assert!(read.open_table(ROWS)?.get(&key(row_id)[..])?.is_none());
+    let outcome = prdb_engine::outcome::lookup_outcome(&database, [50; 16], [9; 16], 1)?;
+    assert_eq!(outcome.unwrap().status, OutcomeStatus::Aborted);
+    Ok(())
+}
+
+#[test]
 fn failed_commit_validation_records_aborted_outcome() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;

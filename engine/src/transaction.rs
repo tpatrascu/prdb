@@ -2019,6 +2019,15 @@ fn validate_catalog_index_deltas(
         if loaded_schemas.contains_key(&table_id) && !loaded_indexes.contains_key(&table_id) {
             return Err(CommitError::InvalidIndex);
         }
+        if let Some(schema) = loaded_schemas.get(&table_id) {
+            if schema.table_id != table_id {
+                return Err(CommitError::InvalidCatalog);
+            }
+            if let Some(payload) = row_write.payload.as_deref() {
+                decode_tuple(&schema.columns, schema.schema_version, payload)
+                    .map_err(|_| CommitError::InvalidRow)?;
+            }
+        }
     }
     let tracked_tables = loaded_indexes.keys().copied().collect::<HashSet<_>>();
     let mut expected = HashMap::<Vec<u8>, IndexWrite>::new();
@@ -2043,6 +2052,10 @@ fn validate_catalog_index_deltas(
             .transpose()?;
         if previous.as_ref().map(|record| record.row_version) != row_write.expected_version {
             return Err(CommitError::Conflict);
+        }
+        if let Some(record) = &previous {
+            decode_tuple(&schema.columns, schema.schema_version, &record.payload)
+                .map_err(|_| CommitError::InvalidRow)?;
         }
 
         for index in indexes {
