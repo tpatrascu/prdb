@@ -2124,6 +2124,21 @@ fn validate_constraint_references(
                 return Err(CommitError::InvalidCatalog);
             }
         }
+        for (source_column_id, target_column_id) in source_columns.iter().zip(&referenced_columns) {
+            let source_column_key = id_catalog_key(6, *source_column_id);
+            let target_column_key = id_catalog_key(6, *target_column_id);
+            let source_column = final_catalog_value(catalog, writes, &source_column_key)?
+                .ok_or(CommitError::InvalidCatalog)?;
+            let target_column = final_catalog_value(catalog, writes, &target_column_key)?
+                .ok_or(CommitError::InvalidCatalog)?;
+            if catalog_field_bytes(&source_column_key, &source_column, 6, 4)?
+                != catalog_field_bytes(&target_column_key, &target_column, 6, 4)?
+                || catalog_field_bytes(&source_column_key, &source_column, 6, 5)?
+                    != catalog_field_bytes(&target_column_key, &target_column, 6, 5)?
+            {
+                return Err(CommitError::InvalidCatalog);
+            }
+        }
     }
     Ok(())
 }

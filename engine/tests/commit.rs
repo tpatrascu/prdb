@@ -778,6 +778,36 @@ fn column_write_with_nullability_and_defaults(
     default_expression_id: Option<[u8; 16]>,
     add_column_default_id: Option<[u8; 16]>,
 ) -> CatalogWrite {
+    column_write_with_type_and_nullability(
+        column_id,
+        table_id,
+        name,
+        nullable,
+        default_expression_id,
+        add_column_default_id,
+        builtin_id(108),
+    )
+}
+
+fn column_write_with_type(
+    column_id: [u8; 16],
+    table_id: [u8; 16],
+    name: &str,
+    type_id: [u8; 16],
+) -> CatalogWrite {
+    column_write_with_type_and_nullability(column_id, table_id, name, true, None, None, type_id)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn column_write_with_type_and_nullability(
+    column_id: [u8; 16],
+    table_id: [u8; 16],
+    name: &str,
+    nullable: bool,
+    default_expression_id: Option<[u8; 16]>,
+    add_column_default_id: Option<[u8; 16]>,
+    type_id: [u8; 16],
+) -> CatalogWrite {
     let mut key = 6u16.to_be_bytes().to_vec();
     key.push(1);
     key.extend_from_slice(&column_id);
@@ -800,7 +830,7 @@ fn column_write_with_nullability_and_defaults(
         CatalogField {
             tag: 4,
             wire_type: WireType::Id,
-            payload: builtin_id(108).to_vec(),
+            payload: type_id.to_vec(),
         },
         CatalogField {
             tag: 5,
@@ -1565,6 +1595,27 @@ fn catalog_commit_requires_foreign_key_target_dependency_edges()
             &[audit_event(88)],
         ),
         Err(CommitError::InvalidCatalog),
+    );
+    assert_eq!(commit_sequence(&database)?, 0);
+    let mut mismatched_types = foreign_key_catalog_writes(true, true);
+    let mismatched_source_column =
+        column_write_with_type(id(84), id(82), "object_84", builtin_id(109));
+    let source_column_key = mismatched_source_column.key.clone();
+    let source_column_write = mismatched_types
+        .iter_mut()
+        .find(|write| write.key == source_column_key)
+        .unwrap();
+    *source_column_write = mismatched_source_column;
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(114),
+            id(9),
+            9_999,
+            &mismatched_types,
+            &[audit_event(114)],
+        ),
+        Err(CommitError::InvalidCatalog)
     );
     assert_eq!(commit_sequence(&database)?, 0);
     assert_eq!(

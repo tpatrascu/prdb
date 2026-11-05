@@ -373,3 +373,10 @@
 - A real-redb regression with 128 distinct 70 KiB parent/child keys exceeds the comparison-key budget and confirms the child row version and commit sequence remain unchanged.
 - Verification: with Rust/Cargo 1.95.0, rustfmt 1.9.0, and Clippy 0.1.95 in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and all 184 integration tests across 17 targets passed. Changed Markdown local links and `git diff --check` pass.
 - Remaining: FK DDL creation/fencing and authenticated service admission remain open.
+
+## SM-5 dependency: catalog-commit foreign-key type compatibility — in progress
+
+- Final-catalog constraint validation now rejects an FK whose ordered source and referenced columns have different built-in type IDs or parameter bytes. It applies to catalog commits before publication, matching invocation loading and startup checks.
+- A real-redb regression submits otherwise coherent FK, PRIMARY KEY, UNIQUE index, and dependency records with mismatched source/target types; catalog commit rejects the change and leaves the commit sequence unchanged.
+- Verification: with Rust/Cargo 1.95.0, rustfmt 1.9.0, and Clippy 0.1.95 in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and all 184 integration tests across 17 targets passed.
+- Remaining: validating pre-existing child rows when creating an FK, FK DDL fencing/lifecycle, and authenticated service admission remain open.
