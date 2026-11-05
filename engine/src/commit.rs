@@ -613,6 +613,55 @@ fn validate_final_dependency_edges(
     Ok(())
 }
 
+/// Require each final index definition to have an object row of kind INDEX.
+fn validate_final_index_object_mappings(
+    transaction: &WriteTransaction,
+    catalog_writes: &[CatalogWrite],
+) -> Result<(), CommitError> {
+    if !catalog_writes.iter().any(|write| {
+        write.key.len() >= 2 && matches!(u16::from_be_bytes([write.key[0], write.key[1]]), 2 | 9)
+    }) {
+        return Ok(());
+    }
+    let table = transaction.open_table(CATALOG).map_err(storage_error)?;
+    let mut changed_ids = HashSet::<[u8; 16]>::new();
+    for write in catalog_writes.iter().filter(|write| {
+        write.key.len() >= 2 && matches!(u16::from_be_bytes([write.key[0], write.key[1]]), 2 | 9)
+    }) {
+        if write.key.len() != 19 {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let object_id = write.key[3..19]
+            .try_into()
+            .map_err(|_| CommitError::InvalidCatalog)?;
+        changed_ids.insert(object_id);
+    }
+
+    for object_id in changed_ids {
+        let index_key = id_catalog_key(9, object_id);
+        let Some(index_bytes) = final_catalog_value(&table, catalog_writes, &index_key)? else {
+            continue;
+        };
+        decode_catalog_record(&index_key, &index_bytes)?;
+
+        let object_key = id_catalog_key(2, object_id);
+        let Some(object_bytes) = final_catalog_value(&table, catalog_writes, &object_key)? else {
+            return Err(CommitError::InvalidCatalog);
+        };
+        let kind_bytes = catalog_field_bytes(&object_key, &object_bytes, 2, 1)?;
+        let kind = u16::from_le_bytes(
+            kind_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?,
+        );
+        if kind != 7 {
+            return Err(CommitError::InvalidCatalog);
+        }
+    }
+    Ok(())
+}
+
 fn collect_dependency_catalog_record(
     key: &[u8],
     bytes: &[u8],
@@ -1708,6 +1757,15 @@ pub fn commit_storage_changes(
         Err(error) => return Err(error),
     }
     match validate_final_dependency_edges(&transaction, catalog_writes) {
+        Ok(()) => {}
+        Err(CommitError::InvalidCatalog) => {
+            transaction.abort().map_err(storage_error)?;
+            record_aborted_outcome(database, invocation_id, principal_id, retention_deadline_us)?;
+            return Err(CommitError::InvalidCatalog);
+        }
+        Err(error) => return Err(error),
+    }
+    match validate_final_index_object_mappings(&transaction, catalog_writes) {
         Ok(()) => {}
         Err(CommitError::InvalidCatalog) => {
             transaction.abort().map_err(storage_error)?;

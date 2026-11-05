@@ -580,6 +580,87 @@ fn catalog_commit_checks_dependency_endpoints_in_the_final_catalog()
     Ok(())
 }
 
+#[test]
+fn catalog_commit_requires_index_object_identity_and_kind() -> Result<(), Box<dyn std::error::Error>>
+{
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let (missing_key, missing_payload) = index_definition(id(55), id(10));
+    let missing_index = CatalogWrite {
+        key: missing_key,
+        expected_value: None,
+        payload: Some(missing_payload),
+    };
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(60),
+            id(9),
+            9_999,
+            std::slice::from_ref(&missing_index),
+            &[audit_event(60)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+
+    let (index_key, index_payload) = index_definition(id(56), id(10));
+    let index = CatalogWrite {
+        key: index_key,
+        expected_value: None,
+        payload: Some(index_payload),
+    };
+    let index_object = object_write(id(56), 7);
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(61),
+            id(9),
+            9_999,
+            &[index, index_object.clone()],
+            &[audit_event(61)],
+        )?,
+        1
+    );
+
+    let delete_object = CatalogWrite {
+        key: index_object.key.clone(),
+        expected_value: index_object.payload,
+        payload: None,
+    };
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(62),
+            id(9),
+            9_999,
+            &[delete_object],
+            &[audit_event(62)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+
+    let (wrong_key, wrong_payload) = index_definition(id(57), id(10));
+    let wrong_index = CatalogWrite {
+        key: wrong_key,
+        expected_value: None,
+        payload: Some(wrong_payload),
+    };
+    let wrong_object = object_write(id(57), 6);
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(63),
+            id(9),
+            9_999,
+            &[wrong_index, wrong_object],
+            &[audit_event(63)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+    assert_eq!(commit_sequence(&database)?, 1);
+    Ok(())
+}
+
 fn principal_write_with_epoch(principal_id: [u8; 16], kind: u16, epoch: u64) -> CatalogWrite {
     let mut key = 10u16.to_be_bytes().to_vec();
     key.push(1);

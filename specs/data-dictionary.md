@@ -69,6 +69,8 @@ At startup, every persisted dependency record must resolve both its dependent an
 
 Catalog commits apply the same endpoint rule to the final catalog view. A batch may create objects and their dependency edges together; deleting an object while a dependency still names it is rejected atomically and records an ABORTED outcome.
 
+When a family 9 index record or its family 2 object row changes, the final catalog must retain the same ID in both records and the object kind must be index=7. Creating both rows together is valid; deleting or retyping the object while the index record remains is rejected in that commit.
+
 Ownership edges identify objects removed with a parent, such as a table's own indexes/policies. Reference edges block RESTRICT drops, such as another table's foreign key. Column removal is blocked by applicable policies, expressions, and keys. Role/user removal checks ownership, grants, memberships, and policy recipients. Follow [schema DDL](ddl-schema.md) for exact drop behavior.
 
 ## Snapshots and Cache Invalidation
