@@ -9,6 +9,7 @@ use prdb_engine::metadata::{EngineMetadata, Lifecycle};
 use prdb_engine::outcome::{InvocationOutcome, OutcomeStatus, lookup_outcome};
 use prdb_engine::row_record::RowRecord;
 use prdb_engine::schema::{self, CATALOG, ENGINE_META, ROWS};
+use prdb_engine::tuple::{ColumnSchema, ScalarType, ScalarValue, encode_tuple};
 use redb::{Database, ReadableDatabase, ReadableTableMetadata};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
@@ -62,6 +63,18 @@ fn builtin_owner_id() -> [u8; 16] {
     let mut id = [0x80; 16];
     id[15] = 3;
     id
+}
+
+fn bytea_tuple(value: &[u8]) -> Vec<u8> {
+    encode_tuple(
+        &[ColumnSchema {
+            scalar_type: ScalarType::Bytea,
+            nullable: true,
+        }],
+        1,
+        &[Some(ScalarValue::Bytea(value.to_vec()))],
+    )
+    .unwrap()
 }
 
 fn index_definition(index_id: [u8; 16], table_id: [u8; 16]) -> (Vec<u8>, Vec<u8>) {
@@ -691,7 +704,7 @@ fn column_write_with_defaults(
         CatalogField {
             tag: 4,
             wire_type: WireType::Id,
-            payload: id(50).to_vec(),
+            payload: builtin_id(108).to_vec(),
         },
         CatalogField {
             tag: 5,
@@ -3409,7 +3422,7 @@ fn row_updates_refresh_retained_index_locator_versions() -> Result<(), Box<dyn s
         &[RowWrite {
             key: row_key,
             expected_version: None,
-            payload: Some(b"first".to_vec()),
+            payload: Some(bytea_tuple(b"first")),
         }],
         &[IndexWrite {
             key: index_key.clone(),
@@ -3430,7 +3443,7 @@ fn row_updates_refresh_retained_index_locator_versions() -> Result<(), Box<dyn s
             &[RowWrite {
                 key: row_key,
                 expected_version: Some(1),
-                payload: Some(b"second".to_vec()),
+                payload: Some(bytea_tuple(b"second")),
             }],
         )?,
         2

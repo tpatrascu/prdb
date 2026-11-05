@@ -3,8 +3,8 @@
 use crate::audit::AuditEvent;
 use crate::authorization::{MAX_MEMBERSHIP_EDGES, Membership, validate_membership_graph};
 use crate::catalog::{
-    CatalogRecord, decode_registered_envelope, validate_builtin_type_profile,
-    validate_owned_child_graph,
+    CatalogRecord, decode_builtin_scalar_type, decode_registered_envelope,
+    validate_builtin_type_profile, validate_owned_child_graph,
 };
 use crate::expression::decode_catalog_expression_record;
 use crate::index_locator::IndexLocator;
@@ -12,12 +12,30 @@ use crate::metadata::{EngineMetadata, Lifecycle};
 use crate::outcome::{InvocationOutcome, OutcomeStatus};
 use crate::row_record::RowRecord;
 use crate::schema::{AUDIT, CATALOG, ENGINE_META, INDEXES, OUTCOMES, ROW_INDEXES, ROWS, STATS};
+use crate::tuple::{ColumnSchema, decode_tuple};
 use redb::{Database, ReadTransaction, ReadableDatabase, ReadableTable};
 use std::collections::HashMap;
 
 const METADATA_KEY: &[u8] = b"format";
 const MAX_CATALOG_RECORDS_PER_FAMILY: usize = 65_536;
 type IndexDefinitions = HashMap<[u8; 16], [u8; 16]>;
+
+#[derive(Clone, Debug)]
+struct PersistedTableSchema {
+    schema_version: u64,
+    columns: Vec<ColumnSchema>,
+}
+
+#[derive(Clone, Debug)]
+struct PersistedColumnSchema {
+    ordinal: u32,
+    type_id: [u8; 16],
+    parameters: Vec<u8>,
+    nullable: bool,
+    introduced_schema_version: u64,
+}
+
+type PersistedTableSchemas = HashMap<[u8; 16], PersistedTableSchema>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StorageHealthReport {
@@ -70,8 +88,8 @@ pub fn validate_persisted_records(
         return Err(StartupError::NotReady);
     }
 
-    let (catalog_records, index_definitions) = validate_catalog(&read, &metadata)?;
-    let rows = validate_rows(&read, metadata.commit_sequence)?;
+    let (catalog_records, index_definitions, table_schemas) = validate_catalog(&read, &metadata)?;
+    let rows = validate_rows(&read, metadata.commit_sequence, &table_schemas)?;
     let index_entries = validate_indexes(&read, metadata.commit_sequence, &index_definitions)?;
     let outcomes = validate_outcomes(&read, metadata.commit_sequence)?;
     let audit_events = validate_audit(&read)?;
@@ -145,7 +163,7 @@ fn read_metadata(read: &ReadTransaction) -> Result<EngineMetadata, StartupError>
 fn validate_catalog(
     read: &ReadTransaction,
     metadata: &EngineMetadata,
-) -> Result<(usize, IndexDefinitions), StartupError> {
+) -> Result<(usize, IndexDefinitions, PersistedTableSchemas), StartupError> {
     let table = read.open_table(CATALOG).map_err(storage_error)?;
     let mut family_counts = [0usize; 17];
     let mut count = 0usize;
@@ -158,6 +176,9 @@ fn validate_catalog(
     let mut typed_object_kinds = HashMap::<[u8; 16], u16>::new();
     let mut builtin_type_kinds = HashMap::<[u8; 16], u16>::new();
     let mut builtin_type_ids = HashMap::<u16, [u8; 16]>::new();
+    let mut type_records = HashMap::<[u8; 16], CatalogRecord>::new();
+    let mut table_schema_versions = HashMap::<[u8; 16], u64>::new();
+    let mut columns_by_table = HashMap::<[u8; 16], Vec<PersistedColumnSchema>>::new();
     let mut column_tables = HashMap::<[u8; 16], [u8; 16]>::new();
     let mut column_nullable = HashMap::<[u8; 16], bool>::new();
     let mut index_columns = HashMap::<[u8; 16], Vec<[u8; 16]>>::new();
@@ -272,6 +293,25 @@ fn validate_catalog(
             {
                 return Err(StartupError::InvalidCatalog);
             }
+            type_records.insert(type_id, record.clone());
+        }
+        if record.family_code == 5 {
+            let table_id: [u8; 16] = key
+                .get(3..19)
+                .ok_or(StartupError::InvalidCatalog)?
+                .try_into()
+                .map_err(|_| StartupError::InvalidCatalog)?;
+            let schema_version = field_u64(&record, 2)?;
+            if key.len() != 19
+                || schema_version == 0
+                || field_u64(&record, 3)? == 0
+                || field_u16(&record, 5)? != 1
+                || table_schema_versions
+                    .insert(table_id, schema_version)
+                    .is_some()
+            {
+                return Err(StartupError::InvalidCatalog);
+            }
         }
         if record.family_code == 6 {
             let column_id: [u8; 16] = key[3..19]
@@ -287,6 +327,16 @@ fn validate_catalog(
             {
                 return Err(StartupError::InvalidCatalog);
             }
+            columns_by_table
+                .entry(table_id)
+                .or_default()
+                .push(PersistedColumnSchema {
+                    ordinal: field_u32(&record, 2)?,
+                    type_id: field_id(&record, 4)?,
+                    parameters: field_payload(&record, 5)?.to_vec(),
+                    nullable: field_bool(&record, 6)?,
+                    introduced_schema_version: field_u64(&record, 9)?,
+                });
         }
         if record.family_code == 7 {
             let expression = decode_catalog_expression_record(&record)
@@ -823,7 +873,47 @@ fn validate_catalog(
         }
     }
     validate_membership_graph(&memberships).map_err(|_| StartupError::InvalidCatalog)?;
-    Ok((count, index_definitions))
+    let mut table_schemas = HashMap::with_capacity(columns_by_table.len());
+    for (table_id, mut columns_by_ordinal) in columns_by_table {
+        let schema_version = *table_schema_versions
+            .get(&table_id)
+            .ok_or(StartupError::InvalidCatalog)?;
+        if columns_by_ordinal.len() > crate::tuple::MAX_COLUMNS {
+            return Err(StartupError::InvalidCatalog);
+        }
+        columns_by_ordinal.sort_by_key(|column| column.ordinal);
+        let mut columns = Vec::with_capacity(columns_by_ordinal.len());
+        for (expected_ordinal, column) in columns_by_ordinal.into_iter().enumerate() {
+            if column.ordinal as usize != expected_ordinal
+                || column.introduced_schema_version == 0
+                || column.introduced_schema_version > schema_version
+            {
+                return Err(StartupError::InvalidCatalog);
+            }
+            let type_record = type_records
+                .get(&column.type_id)
+                .ok_or(StartupError::InvalidCatalog)?;
+            let scalar_type = decode_builtin_scalar_type(type_record, &column.parameters)
+                .map_err(|_| StartupError::InvalidCatalog)?;
+            columns.push(ColumnSchema {
+                scalar_type,
+                nullable: column.nullable,
+            });
+        }
+        if table_schemas
+            .insert(
+                table_id,
+                PersistedTableSchema {
+                    schema_version,
+                    columns,
+                },
+            )
+            .is_some()
+        {
+            return Err(StartupError::InvalidCatalog);
+        }
+    }
+    Ok((count, index_definitions, table_schemas))
 }
 
 fn typed_family_object_kind(record: &CatalogRecord) -> Result<Option<u16>, StartupError> {
@@ -1020,7 +1110,11 @@ fn field_bool(record: &CatalogRecord, tag: u16) -> Result<bool, StartupError> {
     }
 }
 
-fn validate_rows(read: &ReadTransaction, commit_sequence: u64) -> Result<usize, StartupError> {
+fn validate_rows(
+    read: &ReadTransaction,
+    commit_sequence: u64,
+    table_schemas: &PersistedTableSchemas,
+) -> Result<usize, StartupError> {
     let table = read.open_table(ROWS).map_err(storage_error)?;
     let mut count = 0usize;
     for entry in table.iter().map_err(storage_error)? {
@@ -1033,6 +1127,12 @@ fn validate_rows(read: &ReadTransaction, commit_sequence: u64) -> Result<usize, 
         if record.row_version > commit_sequence {
             return Err(StartupError::SequenceAhead);
         }
+        let table_id: [u8; 16] = key[..16].try_into().map_err(|_| StartupError::InvalidRow)?;
+        let schema = table_schemas
+            .get(&table_id)
+            .ok_or(StartupError::InvalidRow)?;
+        decode_tuple(&schema.columns, schema.schema_version, &record.payload)
+            .map_err(|_| StartupError::InvalidRow)?;
         count = count.checked_add(1).ok_or(StartupError::CountOverflow)?;
     }
     Ok(count)

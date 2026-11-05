@@ -5,7 +5,7 @@ use crate::authorization::{
     Subject, authorize, check_constraint_passes, has_permission, materialize_default, project_row,
     resolve_role_closure, row_visible,
 };
-use crate::catalog::{CatalogRecord, decode_registered_envelope, validate_builtin_type_profile};
+use crate::catalog::{CatalogRecord, decode_builtin_scalar_type, decode_registered_envelope};
 use crate::commit::{
     CatalogGuard, CommitError, CommitRequest, IndexWrite, RowWrite, commit_storage_changes,
     record_aborted_outcome,
@@ -1962,36 +1962,8 @@ fn decode_catalog_scalar_type_parameters(
     type_record: &CatalogRecord,
     parameters: &[u8],
 ) -> Result<ScalarType, TransactionError> {
-    let kind =
-        validate_builtin_type_profile(type_record).map_err(|_| TransactionError::CorruptCatalog)?;
-    let parameter_rule = catalog_u16(type_record, 2)?;
-    let parameters: [u8; 8] = parameters
-        .try_into()
-        .map_err(|_| TransactionError::CorruptCatalog)?;
-    let scalar_type = match (kind, parameter_rule) {
-        (1, 0) if parameters == [0; 8] => ScalarType::Boolean,
-        (2, 0) if parameters == [0; 8] => ScalarType::SmallInt,
-        (3, 0) if parameters == [0; 8] => ScalarType::Integer,
-        (4, 0) if parameters == [0; 8] => ScalarType::BigInt,
-        (5, 1) if parameters[4..] == [0; 4] => {
-            let precision = u16::from_le_bytes(parameters[..2].try_into().unwrap());
-            let scale = u16::from_le_bytes(parameters[2..4].try_into().unwrap());
-            ScalarType::Decimal {
-                precision: u8::try_from(precision).map_err(|_| TransactionError::CorruptCatalog)?,
-                scale: u8::try_from(scale).map_err(|_| TransactionError::CorruptCatalog)?,
-            }
-        }
-        (6, 0) if parameters == [0; 8] => ScalarType::Text,
-        (7, 2) if parameters[..4] == [0; 4] => ScalarType::Varchar {
-            max_chars: u32::from_le_bytes(parameters[4..].try_into().unwrap()),
-        },
-        (8, 0) if parameters == [0; 8] => ScalarType::Bytea,
-        (9, 0) if parameters == [0; 8] => ScalarType::Uuid,
-        (10, 0) if parameters == [0; 8] => ScalarType::Date,
-        (11, 0) if parameters == [0; 8] => ScalarType::TimestampTz,
-        _ => return Err(TransactionError::CorruptCatalog),
-    };
-    Ok(scalar_type)
+    decode_builtin_scalar_type(type_record, parameters)
+        .map_err(|_| TransactionError::CorruptCatalog)
 }
 
 fn validate_check_constraints(

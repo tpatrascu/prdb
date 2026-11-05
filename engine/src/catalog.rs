@@ -1,5 +1,6 @@
 //! Canonical catalog payloads.
 
+use crate::tuple::ScalarType;
 use std::collections::HashMap;
 
 const CATALOG_HEADER_LEN: usize = 32;
@@ -542,6 +543,48 @@ pub fn validate_builtin_type_profile(record: &CatalogRecord) -> Result<u16, Inva
         return Err(InvalidCatalogRecord);
     }
     Ok(builtin_kind)
+}
+
+/// Decode one column's fixed-width parameters against its built-in family 4 row.
+pub(crate) fn decode_builtin_scalar_type(
+    record: &CatalogRecord,
+    parameters: &[u8],
+) -> Result<ScalarType, InvalidCatalogRecord> {
+    let kind = validate_builtin_type_profile(record)?;
+    let parameter_rule = type_profile_u16(record, 2)?;
+    let parameters: [u8; 8] = parameters.try_into().map_err(|_| InvalidCatalogRecord)?;
+    let scalar_type = match (kind, parameter_rule) {
+        (1, 0) if parameters == [0; 8] => ScalarType::Boolean,
+        (2, 0) if parameters == [0; 8] => ScalarType::SmallInt,
+        (3, 0) if parameters == [0; 8] => ScalarType::Integer,
+        (4, 0) if parameters == [0; 8] => ScalarType::BigInt,
+        (5, 1) if parameters[4..] == [0; 4] => ScalarType::Decimal {
+            precision: u8::try_from(u16::from_le_bytes(parameters[..2].try_into().unwrap()))
+                .map_err(|_| InvalidCatalogRecord)?,
+            scale: u8::try_from(u16::from_le_bytes(parameters[2..4].try_into().unwrap()))
+                .map_err(|_| InvalidCatalogRecord)?,
+        },
+        (6, 0) if parameters == [0; 8] => ScalarType::Text,
+        (7, 2) if parameters[..4] == [0; 4] => ScalarType::Varchar {
+            max_chars: u32::from_le_bytes(parameters[4..].try_into().unwrap()),
+        },
+        (8, 0) if parameters == [0; 8] => ScalarType::Bytea,
+        (9, 0) if parameters == [0; 8] => ScalarType::Uuid,
+        (10, 0) if parameters == [0; 8] => ScalarType::Date,
+        (11, 0) if parameters == [0; 8] => ScalarType::TimestampTz,
+        _ => return Err(InvalidCatalogRecord),
+    };
+    let invalid_parameters = match scalar_type {
+        ScalarType::Decimal { precision, scale } => {
+            precision == 0 || precision > 38 || scale > precision
+        }
+        ScalarType::Varchar { max_chars } => max_chars == 0,
+        _ => false,
+    };
+    if invalid_parameters {
+        return Err(InvalidCatalogRecord);
+    }
+    Ok(scalar_type)
 }
 
 fn type_profile_u16(record: &CatalogRecord, tag: u16) -> Result<u16, InvalidCatalogRecord> {

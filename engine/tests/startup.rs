@@ -10,6 +10,7 @@ use prdb_engine::schema::{
     self, AUDIT, CATALOG, ENGINE_META, INDEXES, OUTCOMES, ROW_INDEXES, ROWS,
 };
 use prdb_engine::startup::{StartupError, validate_persisted_records};
+use prdb_engine::tuple::{ColumnSchema, ScalarType, ScalarValue, encode_tuple};
 use redb::Database;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -499,9 +500,22 @@ fn reverse_index_key(row_key: &[u8; 32], index_key: &[u8]) -> Vec<u8> {
 }
 
 fn insert_row(database: &Database, key: &[u8; 32], version: u64) {
+    let payload = encode_tuple(
+        &[ColumnSchema {
+            scalar_type: ScalarType::Bytea,
+            nullable: false,
+        }],
+        1,
+        &[Some(ScalarValue::Bytea(b"tuple-fixture".to_vec()))],
+    )
+    .unwrap();
+    insert_row_payload(database, key, version, &payload);
+}
+
+fn insert_row_payload(database: &Database, key: &[u8; 32], version: u64, payload: &[u8]) {
     let bytes = RowRecord {
         row_version: version,
-        payload: b"tuple-fixture".to_vec(),
+        payload: payload.to_vec(),
     }
     .encode()
     .unwrap();
@@ -768,6 +782,15 @@ fn column_record_for_table(id: [u8; 16], table_id: [u8; 16], name: &str) -> (Vec
     column_record_with_schema(id, table_id, name, None, None, true)
 }
 
+fn column_record_for_table_at_ordinal(
+    id: [u8; 16],
+    table_id: [u8; 16],
+    name: &str,
+    ordinal: u32,
+) -> (Vec<u8>, Vec<u8>) {
+    column_record_with_schema_at_ordinal(id, table_id, name, ordinal, None, None, true)
+}
+
 fn column_record_for_table_with_nullability(
     id: [u8; 16],
     table_id: [u8; 16],
@@ -777,26 +800,30 @@ fn column_record_for_table_with_nullability(
     column_record_with_schema(id, table_id, name, None, None, nullable)
 }
 
-fn column_record_with_defaults(
-    id: [u8; 16],
-    name: &str,
-    default_expression_id: Option<[u8; 16]>,
-    add_column_default_id: Option<[u8; 16]>,
-) -> (Vec<u8>, Vec<u8>) {
-    column_record_with_schema(
-        id,
-        [0x55; 16],
-        name,
-        default_expression_id,
-        add_column_default_id,
-        true,
-    )
-}
-
 fn column_record_with_schema(
     id: [u8; 16],
     table_id: [u8; 16],
     name: &str,
+    default_expression_id: Option<[u8; 16]>,
+    add_column_default_id: Option<[u8; 16]>,
+    nullable: bool,
+) -> (Vec<u8>, Vec<u8>) {
+    column_record_with_schema_at_ordinal(
+        id,
+        table_id,
+        name,
+        0,
+        default_expression_id,
+        add_column_default_id,
+        nullable,
+    )
+}
+
+fn column_record_with_schema_at_ordinal(
+    id: [u8; 16],
+    table_id: [u8; 16],
+    name: &str,
+    ordinal: u32,
     default_expression_id: Option<[u8; 16]>,
     add_column_default_id: Option<[u8; 16]>,
     nullable: bool,
@@ -813,7 +840,7 @@ fn column_record_with_schema(
         CatalogField {
             tag: 2,
             wire_type: WireType::U32,
-            payload: 0u32.to_le_bytes().to_vec(),
+            payload: ordinal.to_le_bytes().to_vec(),
         },
         CatalogField {
             tag: 3,
@@ -823,7 +850,7 @@ fn column_record_with_schema(
         CatalogField {
             tag: 4,
             wire_type: WireType::Id,
-            payload: [0x66; 16].to_vec(),
+            payload: builtin_id(108).to_vec(),
         },
         CatalogField {
             tag: 5,
@@ -1439,7 +1466,7 @@ fn validates_foreign_key_target_edges_against_constraint_records() {
         put_table_and_column(database, [101; 16], [103; 16], false);
         let (extra_column_object_key, extra_column_object_value) = object_record([104; 16], 4);
         let (extra_column_key, extra_column_value) =
-            column_record_for_table([104; 16], [100; 16], "object_104");
+            column_record_for_table_at_ordinal([104; 16], [100; 16], "object_104", 1);
         put_catalog(
             database,
             &extra_column_object_key,
@@ -1657,11 +1684,13 @@ fn validates_expression_reference_edges_against_typed_catalog_records() {
         put_catalog(database, &table.0, &table.1);
         let (key, value) = object_record(policy_id, 10);
         put_catalog(database, &key, &value);
-        let (key, value) = column_record_with_defaults(
+        let (key, value) = column_record_with_schema(
             column_id,
+            [130; 16],
             "object_120",
             Some(default_expression_id),
             Some(add_column_default_id),
+            true,
         );
         put_catalog(database, &key, &value);
         let (key, value) =
@@ -1900,6 +1929,75 @@ fn rejects_row_versions_beyond_the_commit_frontier() {
         validate_persisted_records(&database),
         Err(StartupError::SequenceAhead)
     ));
+}
+
+#[test]
+fn rejects_rows_with_invalid_or_mismatched_typed_payloads() {
+    let malformed = b"not a TUP1 tuple".to_vec();
+    let wrong_schema_version = encode_tuple(
+        &[ColumnSchema {
+            scalar_type: ScalarType::Bytea,
+            nullable: false,
+        }],
+        2,
+        &[Some(ScalarValue::Bytea(b"value".to_vec()))],
+    )
+    .unwrap();
+    let wrong_column_count = encode_tuple(
+        &[
+            ColumnSchema {
+                scalar_type: ScalarType::Bytea,
+                nullable: false,
+            },
+            ColumnSchema {
+                scalar_type: ScalarType::Bytea,
+                nullable: false,
+            },
+        ],
+        1,
+        &[
+            Some(ScalarValue::Bytea(b"first".to_vec())),
+            Some(ScalarValue::Bytea(b"second".to_vec())),
+        ],
+    )
+    .unwrap();
+    let null_in_nonnullable_column = encode_tuple(
+        &[ColumnSchema {
+            scalar_type: ScalarType::Bytea,
+            nullable: true,
+        }],
+        1,
+        &[None],
+    )
+    .unwrap();
+
+    for payload in [
+        malformed,
+        wrong_schema_version,
+        wrong_column_count,
+        null_in_nonnullable_column,
+    ] {
+        let fixture = Fixture::new();
+        let database = fixture.database(1);
+        let table_id = [0x22; 16];
+        put_table_and_column(&database, table_id, [0x66; 16], false);
+        insert_row_payload(&database, &row_key(table_id, [0x33; 16]), 1, &payload);
+        assert_eq!(
+            validate_persisted_records(&database),
+            Err(StartupError::InvalidRow)
+        );
+    }
+}
+
+#[test]
+fn rejects_rows_without_a_catalog_table_schema() {
+    let fixture = Fixture::new();
+    let database = fixture.database(1);
+    insert_row(&database, &row_key([0x22; 16], [0x33; 16]), 1);
+    assert_eq!(
+        validate_persisted_records(&database),
+        Err(StartupError::InvalidRow)
+    );
 }
 
 #[test]
