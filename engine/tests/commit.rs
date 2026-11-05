@@ -253,6 +253,65 @@ fn membership_write(member_id: [u8; 16], role_id: [u8; 16]) -> CatalogWrite {
     }
 }
 
+fn object_write(object_id: [u8; 16], kind: u16) -> CatalogWrite {
+    let mut key = 2u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&object_id);
+    let payload = encode_envelope(
+        &family_schema(2).unwrap(),
+        &key,
+        &[
+            CatalogField {
+                tag: 1,
+                wire_type: WireType::U16,
+                payload: kind.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 3,
+                wire_type: WireType::Text,
+                payload: format!("object_{}", object_id[0]).into_bytes(),
+            },
+            CatalogField {
+                tag: 4,
+                wire_type: WireType::Id,
+                payload: id(9).to_vec(),
+            },
+            CatalogField {
+                tag: 5,
+                wire_type: WireType::U64,
+                payload: 1u64.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 6,
+                wire_type: WireType::U16,
+                payload: 1u16.to_le_bytes().to_vec(),
+            },
+        ],
+    )
+    .unwrap();
+    CatalogWrite {
+        key,
+        expected_value: None,
+        payload: Some(payload),
+    }
+}
+
+fn dependency_write(dependent_id: [u8; 16], referenced_id: [u8; 16], kind: u16) -> CatalogWrite {
+    let mut key = 15u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&dependent_id);
+    key.push(1);
+    key.extend_from_slice(&referenced_id);
+    key.push(1);
+    key.extend_from_slice(&kind.to_be_bytes());
+    let payload = encode_envelope(&family_schema(15).unwrap(), &key, &[]).unwrap();
+    CatalogWrite {
+        key,
+        expected_value: None,
+        payload: Some(payload),
+    }
+}
+
 fn principal_write(principal_id: [u8; 16], kind: u16) -> CatalogWrite {
     principal_write_with_epoch(principal_id, kind, 1)
 }
@@ -426,6 +485,93 @@ fn catalog_commit_rejects_constraints_for_missing_tables() -> Result<(), Box<dyn
         Err(CommitError::InvalidCatalog),
     );
     assert_eq!(commit_sequence(&database)?, 0);
+    Ok(())
+}
+
+#[test]
+fn catalog_commit_rejects_dangling_dependency_edges_and_records_abort()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let edge = dependency_write(id(101), id(102), 1);
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(50),
+            id(9),
+            9_999,
+            std::slice::from_ref(&edge),
+            &[audit_event(50)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+    assert_eq!(commit_sequence(&database)?, 0);
+    assert_eq!(
+        lookup_outcome(&database, id(50), id(9), 9_998)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Aborted
+    );
+    let read = database.begin_read()?;
+    assert!(read.open_table(CATALOG)?.get(&edge.key[..])?.is_none());
+    assert!(
+        read.open_table(prdb_engine::schema::AUDIT)?
+            .get(&id(50)[..])?
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
+fn catalog_commit_checks_dependency_endpoints_in_the_final_catalog()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let table_object = object_write(id(101), 3);
+    let column_object = object_write(id(102), 4);
+    let edge = dependency_write(id(102), id(101), 1);
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(51),
+            id(9),
+            9_999,
+            &[edge.clone(), table_object.clone(), column_object],
+            &[audit_event(51)],
+        )?,
+        1
+    );
+
+    let delete_parent = CatalogWrite {
+        key: table_object.key.clone(),
+        expected_value: table_object.payload.clone(),
+        payload: None,
+    };
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(52),
+            id(9),
+            9_999,
+            &[delete_parent],
+            &[audit_event(52)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+    assert_eq!(commit_sequence(&database)?, 1);
+    assert_eq!(
+        lookup_outcome(&database, id(52), id(9), 9_998)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Aborted
+    );
+    let read = database.begin_read()?;
+    assert!(read.open_table(CATALOG)?.get(&edge.key[..])?.is_some());
+    assert!(
+        read.open_table(CATALOG)?
+            .get(&table_object.key[..])?
+            .is_some()
+    );
     Ok(())
 }
 
@@ -940,6 +1086,11 @@ fn catalog_audit_metadata_and_outcome_commit_together() -> Result<(), Box<dyn st
         expected_value: None,
         payload: Some(catalog_payload.clone()),
     };
+    let catalog_writes = [
+        object_write([1; 16], 4),
+        object_write([2; 16], 3),
+        write.clone(),
+    ];
 
     assert_eq!(
         commit_catalog_and_audit(
@@ -947,7 +1098,7 @@ fn catalog_audit_metadata_and_outcome_commit_together() -> Result<(), Box<dyn st
             id(1),
             id(9),
             9_999,
-            std::slice::from_ref(&write),
+            &catalog_writes,
             &[audit_event(10)],
         )?,
         1
@@ -1023,11 +1174,15 @@ fn one_redb_commit_can_publish_rows_indexes_catalog_audit_and_outcome()
                     null_exempt: false,
                 }],
                 catalog_guards: &[],
-                catalog: &[CatalogWrite {
-                    key: catalog_key.clone(),
-                    expected_value: None,
-                    payload: Some(catalog_payload.clone()),
-                }],
+                catalog: &[
+                    object_write([6; 16], 4),
+                    object_write([7; 16], 3),
+                    CatalogWrite {
+                        key: catalog_key.clone(),
+                        expected_value: None,
+                        payload: Some(catalog_payload.clone()),
+                    },
+                ],
                 audit: &[audit_event(30)],
             },
         )?,

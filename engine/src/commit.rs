@@ -548,6 +548,105 @@ fn validate_final_membership_graph(
     Ok(())
 }
 
+/// Keep dependency references valid over the final catalog produced by this
+/// transaction, including dependencies or endpoint objects created together.
+fn validate_final_dependency_edges(
+    transaction: &WriteTransaction,
+    catalog_writes: &[CatalogWrite],
+) -> Result<(), CommitError> {
+    if !catalog_writes.iter().any(|write| {
+        write.key.len() >= 2 && matches!(u16::from_be_bytes([write.key[0], write.key[1]]), 2 | 15)
+    }) {
+        return Ok(());
+    }
+
+    let table = transaction.open_table(CATALOG).map_err(storage_error)?;
+    let mut object_ids = HashSet::<[u8; 16]>::new();
+    let mut dependencies = Vec::<([u8; 16], [u8; 16])>::new();
+    for family_code in [2u16, 15] {
+        let prefix = family_code.to_be_bytes();
+        let mut family_count = 0usize;
+        for entry in table.range(prefix.as_slice()..).map_err(storage_error)? {
+            let (key, value) = entry.map_err(storage_error)?;
+            let key = key.value();
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            if catalog_writes.iter().any(|write| write.key == key) {
+                continue;
+            }
+            family_count += 1;
+            if family_count > crate::snapshot::MAX_CATALOG_FAMILY_SCAN {
+                return Err(CommitError::InvalidCatalog);
+            }
+            collect_dependency_catalog_record(
+                key,
+                value.value(),
+                &mut object_ids,
+                &mut dependencies,
+            )?;
+        }
+        for write in catalog_writes
+            .iter()
+            .filter(|write| write.key.starts_with(&prefix))
+        {
+            if let Some(bytes) = &write.payload {
+                family_count += 1;
+                if family_count > crate::snapshot::MAX_CATALOG_FAMILY_SCAN {
+                    return Err(CommitError::InvalidCatalog);
+                }
+                collect_dependency_catalog_record(
+                    &write.key,
+                    bytes,
+                    &mut object_ids,
+                    &mut dependencies,
+                )?;
+            }
+        }
+    }
+
+    if dependencies.iter().any(|(dependent_id, referenced_id)| {
+        !object_ids.contains(dependent_id) || !object_ids.contains(referenced_id)
+    }) {
+        return Err(CommitError::InvalidCatalog);
+    }
+    Ok(())
+}
+
+fn collect_dependency_catalog_record(
+    key: &[u8],
+    bytes: &[u8],
+    object_ids: &mut HashSet<[u8; 16]>,
+    dependencies: &mut Vec<([u8; 16], [u8; 16])>,
+) -> Result<(), CommitError> {
+    let record = decode_catalog_record(key, bytes)?;
+    match record.family_code {
+        2 => {
+            if key.len() != 19 {
+                return Err(CommitError::InvalidCatalog);
+            }
+            let object_id = key[3..19]
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?;
+            object_ids.insert(object_id);
+        }
+        15 => {
+            if key.len() != 39 {
+                return Err(CommitError::InvalidCatalog);
+            }
+            let dependent_id = key[3..19]
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?;
+            let referenced_id = key[20..36]
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?;
+            dependencies.push((dependent_id, referenced_id));
+        }
+        _ => return Err(CommitError::InvalidCatalog),
+    }
+    Ok(())
+}
+
 /// Revalidate surviving constraints when definitions they reference can change.
 /// Stream the current family and overlay staged changes so deletion of a
 /// referenced object cannot leave an unchanged constraint dangling.
@@ -1608,6 +1707,15 @@ pub fn commit_storage_changes(
         }
         Err(error) => return Err(error),
     }
+    match validate_final_dependency_edges(&transaction, catalog_writes) {
+        Ok(()) => {}
+        Err(CommitError::InvalidCatalog) => {
+            transaction.abort().map_err(storage_error)?;
+            record_aborted_outcome(database, invocation_id, principal_id, retention_deadline_us)?;
+            return Err(CommitError::InvalidCatalog);
+        }
+        Err(error) => return Err(error),
+    }
     let (current_index_definitions, final_index_definitions) =
         load_index_definitions(&transaction, catalog_writes)?;
     for write in index_writes {
@@ -1753,8 +1861,9 @@ pub fn commit_storage_changes(
 }
 
 /// Atomically publish catalog changes and required audit events. Membership
-/// graph and changed constraint references are checked at commit. DDL authority
-/// checks still belong to the authenticated administrative access path.
+/// graphs, dependency endpoints, and changed constraint references are checked
+/// at commit. DDL authority checks still belong to the authenticated
+/// administrative access path.
 pub fn commit_catalog_and_audit(
     database: &Database,
     invocation_id: [u8; 16],

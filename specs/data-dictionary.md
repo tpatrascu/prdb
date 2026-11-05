@@ -67,6 +67,8 @@ Record dependencies during definition validation, in the same administrative tra
 
 At startup, every persisted dependency record must resolve both its dependent and referenced ID to an existing `objects` record. Edge-kind-specific endpoint agreement and consistency between dependency edges and records that imply ownership or references remain part of complete catalog graph validation.
 
+Catalog commits apply the same endpoint rule to the final catalog view. A batch may create objects and their dependency edges together; deleting an object while a dependency still names it is rejected atomically and records an ABORTED outcome.
+
 Ownership edges identify objects removed with a parent, such as a table's own indexes/policies. Reference edges block RESTRICT drops, such as another table's foreign key. Column removal is blocked by applicable policies, expressions, and keys. Role/user removal checks ownership, grants, memberships, and policy recipients. Follow [schema DDL](ddl-schema.md) for exact drop behavior.
 
 ## Snapshots and Cache Invalidation
