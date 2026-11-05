@@ -874,8 +874,8 @@ fn collect_owner_catalog_record(
     Ok(())
 }
 
-/// Require every surviving typed catalog row affected by a batch to retain a
-/// same-ID object row of the kind specified by its family.
+/// Require affected object IDs to retain exactly their matching typed rows in
+/// the final catalog, with neither side surviving alone.
 fn validate_final_typed_object_mappings(
     transaction: &WriteTransaction,
     catalog_writes: &[CatalogWrite],
@@ -916,6 +916,25 @@ fn validate_final_typed_object_mappings(
                 Ok(u16::from_le_bytes(bytes))
             })
             .transpose()?;
+
+        if let Some(object_kind) = object_kind {
+            let typed_family = match object_kind {
+                1 => 3,
+                2 => 4,
+                3 => 5,
+                4 => 6,
+                5 => 7,
+                6 => 8,
+                7 => 9,
+                8 | 9 => 10,
+                10 => 13,
+                _ => return Err(CommitError::InvalidCatalog),
+            };
+            let typed_key = id_catalog_key(typed_family, object_id);
+            if final_catalog_value(&table, catalog_writes, &typed_key)?.is_none() {
+                return Err(CommitError::InvalidCatalog);
+            }
+        }
 
         for family in TYPED_FAMILIES {
             let typed_key = id_catalog_key(family, object_id);

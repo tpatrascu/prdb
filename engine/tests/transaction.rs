@@ -2798,6 +2798,9 @@ fn catalog_rejects_deleting_expression_used_by_existing_check()
     let (constraint_key, constraint_payload) =
         check_constraint_catalog_record([185; 16], table_id, expression_id);
     let expression_dependency = dependency_catalog_write([185; 16], expression_id, 2)?;
+    let table_object = object_catalog_write_for(table_id, 3);
+    let expression_object = object_catalog_write_for(expression_id, 5);
+    let constraint_object = object_catalog_write_for([185; 16], 6);
     let audit = |n| AuditEvent {
         event_id: [n; 16],
         actor_id: Some([9; 16]),
@@ -2823,9 +2826,9 @@ fn catalog_rejects_deleting_expression_used_by_existing_check()
             expected_value: None,
             payload: Some(constraint_payload.clone()),
         },
-        object_catalog_write_for(table_id, 3),
-        object_catalog_write_for(expression_id, 5),
-        object_catalog_write_for([185; 16], 6),
+        table_object.clone(),
+        expression_object.clone(),
+        constraint_object.clone(),
         expression_dependency.clone(),
     ];
     commit_catalog_and_audit(&database, [186; 16], [9; 16], 9_999, &writes, &[audit(187)])?;
@@ -2914,6 +2917,21 @@ fn catalog_rejects_deleting_expression_used_by_existing_check()
         CatalogWrite {
             key: constraint_key,
             expected_value: Some(constraint_payload),
+            payload: None,
+        },
+        CatalogWrite {
+            key: table_object.key,
+            expected_value: table_object.payload,
+            payload: None,
+        },
+        CatalogWrite {
+            key: expression_object.key,
+            expected_value: expression_object.payload,
+            payload: None,
+        },
+        CatalogWrite {
+            key: constraint_object.key,
+            expected_value: constraint_object.payload,
             payload: None,
         },
         CatalogWrite {
@@ -3009,6 +3027,20 @@ fn invocation_loads_and_guards_catalog_table_schema() -> Result<(), Box<dyn std:
             )?),
         });
     }
+    let schema_key = catalog_id_key(3, schema_id);
+    writes.push(CatalogWrite {
+        key: schema_key.clone(),
+        expected_value: None,
+        payload: Some(catalog_record_payload(
+            3,
+            &schema_key,
+            &[CatalogField {
+                tag: 1,
+                wire_type: WireType::Ids,
+                payload: 0u32.to_le_bytes().to_vec(),
+            }],
+        )?),
+    });
     let table_key = catalog_id_key(5, table_id);
     writes.push(CatalogWrite {
         key: table_key.clone(),

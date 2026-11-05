@@ -589,6 +589,15 @@ fn principal_write_with_name(
 }
 
 fn table_write(table_id: [u8; 16], schema_id: [u8; 16]) -> CatalogWrite {
+    table_write_with_versions(table_id, schema_id, 1, 1)
+}
+
+fn table_write_with_versions(
+    table_id: [u8; 16],
+    schema_id: [u8; 16],
+    schema_version: u64,
+    write_epoch: u64,
+) -> CatalogWrite {
     let mut key = 5u16.to_be_bytes().to_vec();
     key.push(1);
     key.extend_from_slice(&table_id);
@@ -604,12 +613,12 @@ fn table_write(table_id: [u8; 16], schema_id: [u8; 16]) -> CatalogWrite {
             CatalogField {
                 tag: 2,
                 wire_type: WireType::U64,
-                payload: 1u64.to_le_bytes().to_vec(),
+                payload: schema_version.to_le_bytes().to_vec(),
             },
             CatalogField {
                 tag: 3,
                 wire_type: WireType::U64,
-                payload: 1u64.to_le_bytes().to_vec(),
+                payload: write_epoch.to_le_bytes().to_vec(),
             },
             CatalogField {
                 tag: 4,
@@ -1125,7 +1134,9 @@ fn catalog_commit_checks_dependency_endpoints_in_the_final_catalog()
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
     let table_object = object_write(id(101), 3);
+    let table = table_write(id(101), builtin_id(1));
     let column_object = object_write_with_parent(id(104), 4, Some(id(101)));
+    let column = column_write(id(104), id(101), "object_104");
     let edge = dependency_write(id(104), id(101), 1);
     assert_eq!(
         commit_catalog_and_audit(
@@ -1133,7 +1144,13 @@ fn catalog_commit_checks_dependency_endpoints_in_the_final_catalog()
             id(51),
             id(9),
             9_999,
-            &[edge.clone(), table_object.clone(), column_object],
+            &[
+                edge.clone(),
+                table_object.clone(),
+                table,
+                column_object,
+                column,
+            ],
             &[audit_event(51)],
         )?,
         1
@@ -1180,14 +1197,21 @@ fn catalog_commit_requires_owned_child_parent_edge_consistency()
     let parent_id = id(30);
     let child_id = id(31);
     let parent = object_write(parent_id, 1);
-    let child = object_write_with_parent(child_id, 4, Some(parent_id));
+    let parent_schema = schema_write(parent_id);
+    let child = object_write_with_parent(child_id, 3, Some(parent_id));
+    let child_table = table_write(child_id, parent_id);
     assert_eq!(
         commit_catalog_and_audit(
             &database,
             id(60),
             id(9),
             9_999,
-            &[parent.clone(), child.clone()],
+            &[
+                parent.clone(),
+                parent_schema.clone(),
+                child.clone(),
+                child_table.clone(),
+            ],
             &[audit_event(60)],
         ),
         Err(CommitError::InvalidCatalog),
@@ -1200,10 +1224,16 @@ fn catalog_commit_requires_owned_child_parent_edge_consistency()
             id(61),
             id(9),
             9_999,
-            &[parent.clone(), child.clone(), edge.clone()],
+            &[
+                parent.clone(),
+                parent_schema.clone(),
+                child.clone(),
+                child_table.clone(),
+                edge.clone(),
+            ],
             &[audit_event(61)],
-        )?,
-        1
+        ),
+        Ok(1),
     );
     assert_eq!(
         commit_catalog_and_audit(
@@ -1243,7 +1273,10 @@ fn catalog_commit_requires_owned_child_parent_edge_consistency()
     );
     let next_parent_id = id(34);
     let next_parent = object_write(next_parent_id, 1);
-    let reparented_child = object_write_with_parent(child_id, 4, Some(next_parent_id));
+    let next_parent_schema = schema_write(next_parent_id);
+    let reparented_child = object_write_with_parent(child_id, 3, Some(next_parent_id));
+    let mut reparented_table = table_write_with_versions(child_id, next_parent_id, 2, 2);
+    reparented_table.expected_value = child_table.payload.clone();
     let next_edge = dependency_write(child_id, next_parent_id, 1);
     assert_eq!(
         commit_catalog_and_audit(
@@ -1257,17 +1290,19 @@ fn catalog_commit_requires_owned_child_parent_edge_consistency()
                     expected_value: child.payload,
                     payload: reparented_child.payload,
                 },
+                reparented_table,
                 CatalogWrite {
                     key: edge.key,
                     expected_value: edge.payload,
                     payload: None,
                 },
                 next_parent,
+                next_parent_schema,
                 next_edge,
             ],
             &[audit_event(65)],
-        )?,
-        2
+        ),
+        Ok(2)
     );
     assert_eq!(commit_sequence(&database)?, 2);
     Ok(())
@@ -1547,13 +1582,19 @@ fn catalog_commit_requires_object_owner_principals() -> Result<(), Box<dyn std::
 
     let principal = principal_write(owner_id, 1);
     let principal_object = principal_object_write(owner_id, 1);
+    let table = table_write(id(70), builtin_id(1));
     assert_eq!(
         commit_catalog_and_audit(
             &database,
             id(67),
             id(9),
             9_999,
-            &[object.clone(), principal.clone(), principal_object.clone()],
+            &[
+                object.clone(),
+                table,
+                principal.clone(),
+                principal_object.clone(),
+            ],
             &[audit_event(67)],
         )?,
         1
@@ -1848,6 +1889,52 @@ fn catalog_commit_rejects_renaming_the_mapped_admin_role() -> Result<(), Box<dyn
         Err(CommitError::InvalidCatalog),
     );
     assert_eq!(commit_sequence(&database)?, 0);
+    Ok(())
+}
+
+#[test]
+fn catalog_commit_requires_typed_rows_for_every_object() -> Result<(), Box<dyn std::error::Error>> {
+    let orphan_fixture = Fixture::new();
+    let orphan_database = initialize(&orphan_fixture.path())?;
+    assert_eq!(
+        commit_catalog_and_audit(
+            &orphan_database,
+            id(100),
+            id(9),
+            10_002,
+            &[object_write(id(90), 1)],
+            &[audit_event(100)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+    assert_eq!(commit_sequence(&orphan_database)?, 0);
+
+    let deletion_fixture = Fixture::new();
+    let deletion_database = initialize(&deletion_fixture.path())?;
+    let schema_key = id_catalog_key(3, builtin_id(1));
+    let expected_schema = deletion_database
+        .begin_read()?
+        .open_table(CATALOG)?
+        .get(schema_key.as_slice())?
+        .ok_or("missing bootstrap schema fixture")?
+        .value()
+        .to_vec();
+    assert_eq!(
+        commit_catalog_and_audit(
+            &deletion_database,
+            id(101),
+            id(9),
+            10_003,
+            &[CatalogWrite {
+                key: schema_key,
+                expected_value: Some(expected_schema),
+                payload: None,
+            }],
+            &[audit_event(101)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+    assert_eq!(commit_sequence(&deletion_database)?, 0);
     Ok(())
 }
 
@@ -3049,6 +3136,8 @@ fn catalog_audit_metadata_and_outcome_commit_together() -> Result<(), Box<dyn st
     let catalog_writes = [
         object_write_with_parent([1; 16], 4, Some([2; 16])),
         object_write([2; 16], 3),
+        column_write([1; 16], [2; 16], "object_1"),
+        table_write([2; 16], builtin_id(1)),
         write.clone(),
     ];
 
@@ -3137,6 +3226,8 @@ fn one_redb_commit_can_publish_rows_indexes_catalog_audit_and_outcome()
                 catalog: &[
                     object_write_with_parent([6; 16], 4, Some([7; 16])),
                     object_write([7; 16], 3),
+                    column_write([6; 16], [7; 16], "object_6"),
+                    table_write([7; 16], builtin_id(1)),
                     CatalogWrite {
                         key: catalog_key.clone(),
                         expected_value: None,

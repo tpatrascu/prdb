@@ -1332,6 +1332,19 @@ fn mapped_builtin_ids_resolve_to_their_expected_typed_records()
 }
 
 #[test]
+fn rejects_objects_without_matching_typed_records() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    let (object_key, object_value) = object_record([0x51; 16], 1);
+    put_catalog(&database, &object_key, &object_value);
+    assert_eq!(
+        validate_persisted_records(&database),
+        Err(StartupError::InvalidCatalog),
+    );
+    Ok(())
+}
+
+#[test]
 fn rejects_dependency_edges_with_missing_catalog_objects() {
     for present_ids in [[true, false], [false, true]] {
         let fixture = Fixture::new();
@@ -1676,13 +1689,15 @@ fn accepts_owned_child_dependency_with_catalog_object_endpoints()
     for record in [
         object_record([0x21; 16], 3),
         object_record_with_parent([0x22; 16], 4, Some([0x21; 16])),
+        table_record([0x21; 16]),
+        column_record_for_table([0x22; 16], [0x21; 16], "object_34"),
     ] {
         put_catalog(&database, &record.0, &record.1);
     }
     let (key, value) = dependency_record([0x22; 16], [0x21; 16], 1);
     put_catalog(&database, &key, &value);
     let report = validate_persisted_records(&database)?;
-    assert_eq!(report.catalog_records, 32);
+    assert_eq!(report.catalog_records, 34);
     Ok(())
 }
 
@@ -2114,6 +2129,8 @@ fn authority_dependencies_cover_grants_and_policy_recipients()
             let record = object_record(object_id, kind);
             put_catalog(database, &record.0, &record.1);
         }
+        let table = table_record(table_id);
+        put_catalog(database, &table.0, &table.1);
         let grant = grant_record(user_id, table_id, 2, 1, table_id, builtin_owner_id());
         put_catalog(database, &grant.0, &grant.1);
         let system_grant = grant_record(user_id, [0x11; 16], 12, 1, [0x11; 16], builtin_owner_id());

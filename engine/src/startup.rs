@@ -770,6 +770,9 @@ fn validate_catalog(
     if typed_object_kinds
         .iter()
         .any(|(object_id, expected_kind)| object_kinds.get(object_id) != Some(expected_kind))
+        || object_kinds.iter().any(|(object_id, expected_kind)| {
+            typed_object_kinds.get(object_id) != Some(expected_kind)
+        })
     {
         return Err(StartupError::InvalidCatalog);
     }
