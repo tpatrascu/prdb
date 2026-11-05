@@ -99,6 +99,18 @@ fn insert_expression_reference_edge(
     Ok(())
 }
 
+fn insert_authority_edge(
+    edges: &mut std::collections::HashSet<([u8; 16], [u8; 16])>,
+    dependent_id: [u8; 16],
+    referenced_id: [u8; 16],
+) -> Result<(), StartupError> {
+    edges.insert((dependent_id, referenced_id));
+    if edges.len() > MAX_CATALOG_RECORDS_PER_FAMILY {
+        return Err(StartupError::InvalidCatalog);
+    }
+    Ok(())
+}
+
 fn validate_tables(read: &ReadTransaction) -> Result<(), StartupError> {
     drop(read.open_table(ENGINE_META).map_err(storage_error)?);
     drop(read.open_table(ROWS).map_err(storage_error)?);
@@ -139,6 +151,7 @@ fn validate_catalog(
     let mut object_kinds = HashMap::<[u8; 16], u16>::new();
     let mut object_owners = Vec::<[u8; 16]>::new();
     let mut typed_object_kinds = HashMap::<[u8; 16], u16>::new();
+    let mut column_tables = HashMap::<[u8; 16], [u8; 16]>::new();
     let mut expression_reference_edges = std::collections::HashSet::<([u8; 16], [u8; 16])>::new();
     let mut typed_name_records = Vec::<(u16, [u8; 16])>::new();
     let mut constraint_kinds = HashMap::<[u8; 16], u16>::new();
@@ -149,7 +162,10 @@ fn validate_catalog(
     let mut membership_grantors = Vec::<[u8; 16]>::new();
     let mut object_parents = HashMap::<[u8; 16], Option<[u8; 16]>>::new();
     let mut dependencies = Vec::<([u8; 16], [u8; 16], u16)>::new();
+    let mut authority_edges = std::collections::HashSet::<([u8; 16], [u8; 16])>::new();
+    let mut grantors = Vec::<[u8; 16]>::new();
     let mut database_records = 0usize;
+    let mut database_id = None;
     for entry in table.iter().map_err(storage_error)? {
         let (key, value) = entry.map_err(storage_error)?;
         let key = key.value();
@@ -174,6 +190,13 @@ fn validate_catalog(
             return Err(StartupError::InvalidCatalog);
         }
         if record.family_code == 1 {
+            if key.len() != 19
+                || database_id
+                    .replace(key[3..19].try_into().unwrap())
+                    .is_some()
+            {
+                return Err(StartupError::InvalidCatalog);
+            }
             database_records += 1;
             validate_database_record(&record, metadata)?;
         }
@@ -218,6 +241,15 @@ fn validate_catalog(
             }
             if matches!(record.family_code, 6 | 10) {
                 typed_name_records.push((record.family_code, object_id));
+            }
+        }
+        if record.family_code == 6 {
+            let column_id: [u8; 16] = key[3..19]
+                .try_into()
+                .map_err(|_| StartupError::InvalidCatalog)?;
+            let table_id = field_id(&record, 1)?;
+            if column_tables.insert(column_id, table_id).is_some() {
+                return Err(StartupError::InvalidCatalog);
             }
         }
         if record.family_code == 7 {
@@ -365,6 +397,75 @@ fn validate_catalog(
             }
             memberships.push(Membership { member_id, role_id });
             membership_grantors.push(grantor_id);
+            insert_authority_edge(&mut authority_edges, member_id, role_id)?;
+        }
+        if record.family_code == 12 {
+            if key.len() != 59
+                || key[2] != 1
+                || key[19] != 1
+                || key[36] != 1
+                || key[39] != 1
+                || key[42] != 1
+                || field_u64(&record, 2)? == 0
+            {
+                return Err(StartupError::InvalidCatalog);
+            }
+            let grantee_id: [u8; 16] = key[3..19]
+                .try_into()
+                .map_err(|_| StartupError::InvalidCatalog)?;
+            let object_id: [u8; 16] = key[20..36]
+                .try_into()
+                .map_err(|_| StartupError::InvalidCatalog)?;
+            let privilege = u16::from_be_bytes([key[37], key[38]]);
+            let scope = u16::from_be_bytes([key[40], key[41]]);
+            let target_id: [u8; 16] = key[43..59]
+                .try_into()
+                .map_err(|_| StartupError::InvalidCatalog)?;
+            let grantor_id = field_id(&record, 1)?;
+            grantors.push(grantor_id);
+            let target_kind = object_kinds.get(&target_id).copied();
+            let valid_scope = match (privilege, scope) {
+                (1 | 7, 1) => object_id == target_id && target_kind == Some(1),
+                (2..=4 | 6, 1) => object_id == target_id && target_kind == Some(3),
+                (5, 1) => object_id == target_id && target_kind == Some(3),
+                (8..=11, 1) => object_id == target_id && matches!(target_kind, Some(1 | 3)),
+                (2..=4 | 6, 2) => {
+                    object_kinds.get(&object_id) == Some(&3)
+                        && target_kind == Some(4)
+                        && column_tables.get(&target_id) == Some(&object_id)
+                }
+                (12..=14, 1) => object_id == target_id && Some(target_id) == database_id,
+                _ => false,
+            };
+            if !matches!(principal_kinds.get(&grantee_id), Some(1 | 2)) || !valid_scope {
+                return Err(StartupError::InvalidCatalog);
+            }
+            insert_authority_edge(&mut authority_edges, grantee_id, target_id)?;
+        }
+        if record.family_code == 14 {
+            if key.len() != 39 || key[2] != 1 || key[19] != 1 || key[22] != 1 {
+                return Err(StartupError::InvalidCatalog);
+            }
+            let policy_id: [u8; 16] = key[3..19]
+                .try_into()
+                .map_err(|_| StartupError::InvalidCatalog)?;
+            let target_kind = u16::from_be_bytes([key[20], key[21]]);
+            let target_id: [u8; 16] = key[23..39]
+                .try_into()
+                .map_err(|_| StartupError::InvalidCatalog)?;
+            if typed_object_kinds.get(&policy_id) != Some(&10) {
+                return Err(StartupError::InvalidCatalog);
+            }
+            match target_kind {
+                1 if principal_kinds.get(&target_id) == Some(&1) => {
+                    insert_authority_edge(&mut authority_edges, policy_id, target_id)?;
+                }
+                2 if principal_kinds.get(&target_id) == Some(&2) => {
+                    insert_authority_edge(&mut authority_edges, policy_id, target_id)?;
+                }
+                3 => {}
+                _ => return Err(StartupError::InvalidCatalog),
+            }
         }
         if record.family_code == 15 {
             if key.len() != 39 {
@@ -390,9 +491,15 @@ fn validate_catalog(
     if database_records != 1 {
         return Err(StartupError::InvalidCatalog);
     }
-    if dependencies.iter().any(|(dependent_id, referenced_id, _)| {
-        !object_parents.contains_key(dependent_id) || !object_parents.contains_key(referenced_id)
-    }) {
+    if database_id != Some(metadata.database_id)
+        || dependencies
+            .iter()
+            .any(|(dependent_id, referenced_id, kind)| {
+                !object_parents.contains_key(dependent_id)
+                    || !(object_parents.contains_key(referenced_id)
+                        || *kind == 5 && Some(*referenced_id) == database_id)
+            })
+    {
         return Err(StartupError::InvalidCatalog);
     }
     let actual_expression_reference_edges = dependencies
@@ -419,6 +526,22 @@ fn validate_catalog(
                         | (Some(5), Some(9), Some(5), Some(9))
                 )
             })
+    {
+        return Err(StartupError::InvalidCatalog);
+    }
+    let actual_authority_edges = dependencies
+        .iter()
+        .filter(|(_, _, kind)| *kind == 5)
+        .map(|(dependent_id, referenced_id, _)| (*dependent_id, *referenced_id))
+        .collect::<std::collections::HashSet<_>>();
+    if actual_authority_edges != authority_edges
+        || authority_edges.iter().any(|(dependent_id, referenced_id)| {
+            (!principal_kinds.contains_key(dependent_id)
+                && object_kinds.get(dependent_id) != Some(&10))
+                || (!principal_kinds.contains_key(referenced_id)
+                    && !object_parents.contains_key(referenced_id)
+                    && Some(*referenced_id) != database_id)
+        })
     {
         return Err(StartupError::InvalidCatalog);
     }
@@ -505,6 +628,9 @@ fn validate_catalog(
     if membership_grantors
         .iter()
         .any(|grantor_id| !principal_kinds.contains_key(grantor_id))
+        || grantors
+            .iter()
+            .any(|grantor_id| !principal_kinds.contains_key(grantor_id))
     {
         return Err(StartupError::InvalidCatalog);
     }

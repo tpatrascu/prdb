@@ -265,7 +265,50 @@ fn membership_write(member_id: [u8; 16], role_id: [u8; 16]) -> CatalogWrite {
             CatalogField {
                 tag: 1,
                 wire_type: WireType::Id,
-                payload: id(9).to_vec(),
+                payload: builtin_owner_id().to_vec(),
+            },
+            CatalogField {
+                tag: 2,
+                wire_type: WireType::U64,
+                payload: 1u64.to_le_bytes().to_vec(),
+            },
+        ],
+    )
+    .unwrap();
+    CatalogWrite {
+        key,
+        expected_value: None,
+        payload: Some(payload),
+    }
+}
+
+fn grant_write(
+    grantee_id: [u8; 16],
+    object_id: [u8; 16],
+    privilege: u16,
+    target_scope: u16,
+    target_id: [u8; 16],
+    grantor_id: [u8; 16],
+) -> CatalogWrite {
+    let mut key = 12u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&grantee_id);
+    key.push(1);
+    key.extend_from_slice(&object_id);
+    key.push(1);
+    key.extend_from_slice(&privilege.to_be_bytes());
+    key.push(1);
+    key.extend_from_slice(&target_scope.to_be_bytes());
+    key.push(1);
+    key.extend_from_slice(&target_id);
+    let payload = encode_envelope(
+        &family_schema(12).unwrap(),
+        &key,
+        &[
+            CatalogField {
+                tag: 1,
+                wire_type: WireType::Id,
+                payload: grantor_id.to_vec(),
             },
             CatalogField {
                 tag: 2,
@@ -1827,13 +1870,19 @@ fn policy_target_limit_checks_final_set_and_allows_replacements()
             );
             let expression_object = object_write(expression_id, 5);
             let expression_edge = dependency_write(policy_id, expression_id, 2);
-            for record in [expression, expression_object, expression_edge] {
+            let recipient_edge = dependency_write(policy_id, builtin_owner_id(), 5);
+            for record in [
+                expression,
+                expression_object,
+                expression_edge,
+                recipient_edge,
+            ] {
                 catalog.insert(
                     record.key.as_slice(),
                     record.payload.as_ref().unwrap().as_slice(),
                 )?;
             }
-            let recipient = target(1, id(9));
+            let recipient = target(2, builtin_owner_id());
             catalog.insert(
                 recipient.key.as_slice(),
                 recipient.payload.as_ref().unwrap().as_slice(),
@@ -1934,6 +1983,11 @@ fn membership_limit_applies_to_final_graph_independent_of_write_order()
                         edge.key.as_slice(),
                         edge.payload.as_ref().unwrap().as_slice(),
                     )?;
+                    let authority = dependency_write(node(member_number), node(role_number), 5);
+                    catalog.insert(
+                        authority.key.as_slice(),
+                        authority.payload.as_ref().unwrap().as_slice(),
+                    )?;
                 }
             }
         }
@@ -1941,9 +1995,16 @@ fn membership_limit_applies_to_final_graph_independent_of_write_order()
     }
     let old = membership_write(member, old_role);
     let new = membership_write(member, new_role);
+    let old_authority = dependency_write(member, old_role, 5);
+    let new_authority = dependency_write(member, new_role, 5);
     let removal = CatalogWrite {
         key: old.key.clone(),
         expected_value: old.payload.clone(),
+        payload: None,
+    };
+    let authority_removal = CatalogWrite {
+        key: old_authority.key.clone(),
+        expected_value: old_authority.payload.clone(),
         payload: None,
     };
     assert_eq!(
@@ -1955,6 +2016,8 @@ fn membership_limit_applies_to_final_graph_independent_of_write_order()
             &[
                 new.clone(),
                 removal.clone(),
+                authority_removal.clone(),
+                new_authority.clone(),
                 principal_epoch_update(member, 2, 2)
             ],
             &[audit_event(10)]
@@ -1965,7 +2028,7 @@ fn membership_limit_applies_to_final_graph_independent_of_write_order()
     let catalog = read.open_table(prdb_engine::schema::CATALOG)?;
     assert!(catalog.get(old.key.as_slice())?.is_none());
     assert!(catalog.get(new.key.as_slice())?.is_some());
-    assert_eq!(catalog.len()?, 263 + 4096);
+    assert_eq!(catalog.len()?, 263 + 8192);
     drop(catalog);
     drop(read);
     let mut advance = principal_write_with_epoch(member, 2, 3);
@@ -1983,9 +2046,19 @@ fn membership_limit_applies_to_final_graph_independent_of_write_order()
     );
     assert_eq!(commit_sequence(&database)?, 1);
     let removal_new = CatalogWrite {
-        key: new.key,
-        expected_value: new.payload,
+        key: new.key.clone(),
+        expected_value: new.payload.clone(),
         payload: None,
+    };
+    let new_authority_removal = CatalogWrite {
+        key: new_authority.key,
+        expected_value: new_authority.payload,
+        payload: None,
+    };
+    let old_authority_restore = CatalogWrite {
+        key: old_authority.key,
+        expected_value: None,
+        payload: old_authority.payload,
     };
     assert_eq!(
         commit_catalog_and_audit(
@@ -1993,7 +2066,13 @@ fn membership_limit_applies_to_final_graph_independent_of_write_order()
             id(3),
             id(9),
             9_999,
-            &[removal_new, old, advance],
+            &[
+                removal_new,
+                old,
+                new_authority_removal,
+                old_authority_restore,
+                advance
+            ],
             &[audit_event(30)]
         )?,
         2
@@ -2018,6 +2097,7 @@ fn membership_catalog_commits_reject_cycles_and_record_aborted_outcomes()
                 principal_object_write(id(1), 2),
                 principal_object_write(id(2), 2),
                 membership_write(id(1), id(2)),
+                dependency_write(id(1), id(2), 5),
             ],
             &[audit_event(40)],
         )?,
@@ -2126,6 +2206,107 @@ fn membership_catalog_commits_reject_cycles_and_record_aborted_outcomes()
 }
 
 #[test]
+fn catalog_commit_requires_exact_membership_authority_edges()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let identities = [
+        principal_write(id(21), 1),
+        principal_write(id(22), 2),
+        principal_object_write(id(21), 1),
+        principal_object_write(id(22), 2),
+    ];
+    let membership = membership_write(id(21), id(22));
+    let mut missing_edge = identities.to_vec();
+    missing_edge.push(membership.clone());
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(70),
+            id(9),
+            9_999,
+            &missing_edge,
+            &[audit_event(70)],
+        ),
+        Err(CommitError::InvalidCatalog)
+    );
+    assert_eq!(commit_sequence(&database)?, 0);
+
+    let authority = dependency_write(id(21), id(22), 5);
+    let mut complete = identities.to_vec();
+    complete.extend([membership, authority]);
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(71),
+            id(9),
+            9_999,
+            &complete,
+            &[audit_event(71)],
+        )?,
+        1
+    );
+    let extra = dependency_write(id(22), id(21), 5);
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(72),
+            id(9),
+            9_999,
+            &[extra],
+            &[audit_event(72)],
+        ),
+        Err(CommitError::InvalidCatalog)
+    );
+    assert_eq!(commit_sequence(&database)?, 1);
+    Ok(())
+}
+
+#[test]
+fn database_scoped_authority_grants_use_the_bootstrap_database_id()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let user_id = id(73);
+    let identities = [
+        principal_write(user_id, 1),
+        principal_object_write(user_id, 1),
+    ];
+    let database_id = id(0x33);
+    let grant = grant_write(user_id, database_id, 12, 1, database_id, builtin_owner_id());
+    let mut missing_edge = identities.to_vec();
+    missing_edge.push(grant.clone());
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(74),
+            id(9),
+            9_999,
+            &missing_edge,
+            &[audit_event(74)],
+        ),
+        Err(CommitError::InvalidCatalog)
+    );
+    assert_eq!(commit_sequence(&database)?, 0);
+
+    let mut complete = identities.to_vec();
+    complete.push(grant);
+    complete.push(dependency_write(user_id, database_id, 5));
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(75),
+            id(9),
+            9_999,
+            &complete,
+            &[audit_event(75)],
+        )?,
+        1
+    );
+    Ok(())
+}
+
+#[test]
 fn concurrent_membership_commits_cannot_publish_a_cycle() -> Result<(), Box<dyn std::error::Error>>
 {
     let fixture = Fixture::new();
@@ -2156,6 +2337,7 @@ fn concurrent_membership_commits_cannot_publish_a_cycle() -> Result<(), Box<dyn 
                 9_999,
                 &[
                     membership_write(id(1), id(2)),
+                    dependency_write(id(1), id(2), 5),
                     principal_epoch_update(id(1), 2, 2),
                 ],
                 &[audit_event(51)],
@@ -2172,6 +2354,7 @@ fn concurrent_membership_commits_cannot_publish_a_cycle() -> Result<(), Box<dyn 
                 9_999,
                 &[
                     membership_write(id(2), id(1)),
+                    dependency_write(id(2), id(1), 5),
                     principal_epoch_update(id(2), 2, 2),
                 ],
                 &[audit_event(52)],
@@ -2233,14 +2416,14 @@ fn concurrent_membership_commits_cannot_publish_a_cycle() -> Result<(), Box<dyn 
 fn catalog_audit_metadata_and_outcome_commit_together() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
-    let (catalog_key, catalog_payload) = dependency_record([1; 16], [2; 16], 5);
+    let (catalog_key, catalog_payload) = dependency_record([1; 16], [2; 16], 1);
     let write = CatalogWrite {
         key: catalog_key.clone(),
         expected_value: None,
         payload: Some(catalog_payload.clone()),
     };
     let catalog_writes = [
-        object_write([1; 16], 4),
+        object_write_with_parent([1; 16], 4, Some([2; 16])),
         object_write([2; 16], 3),
         write.clone(),
     ];
@@ -2304,7 +2487,7 @@ fn one_redb_commit_can_publish_rows_indexes_catalog_audit_and_outcome()
     let database = initialize(&fixture.path())?;
     let row_key = key(7);
     let index_key = index_key(&row_key);
-    let (catalog_key, catalog_payload) = dependency_record([6; 16], [7; 16], 5);
+    let (catalog_key, catalog_payload) = dependency_record([6; 16], [7; 16], 1);
 
     assert_eq!(
         commit_storage_changes(
@@ -2328,7 +2511,7 @@ fn one_redb_commit_can_publish_rows_indexes_catalog_audit_and_outcome()
                 }],
                 catalog_guards: &[],
                 catalog: &[
-                    object_write([6; 16], 4),
+                    object_write_with_parent([6; 16], 4, Some([7; 16])),
                     object_write([7; 16], 3),
                     CatalogWrite {
                         key: catalog_key.clone(),

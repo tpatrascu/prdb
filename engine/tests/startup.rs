@@ -764,6 +764,57 @@ fn membership_record(
     (key, payload)
 }
 
+fn grant_record(
+    grantee_id: [u8; 16],
+    object_id: [u8; 16],
+    privilege: u16,
+    scope: u16,
+    target_id: [u8; 16],
+    grantor_id: [u8; 16],
+) -> (Vec<u8>, Vec<u8>) {
+    let mut key = 12u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&grantee_id);
+    key.push(1);
+    key.extend_from_slice(&object_id);
+    key.push(1);
+    key.extend_from_slice(&privilege.to_be_bytes());
+    key.push(1);
+    key.extend_from_slice(&scope.to_be_bytes());
+    key.push(1);
+    key.extend_from_slice(&target_id);
+    let fields = [
+        CatalogField {
+            tag: 1,
+            wire_type: WireType::Id,
+            payload: grantor_id.to_vec(),
+        },
+        CatalogField {
+            tag: 2,
+            wire_type: WireType::U64,
+            payload: 1u64.to_le_bytes().to_vec(),
+        },
+    ];
+    let payload = encode_envelope(&family_schema(12).unwrap(), &key, &fields).unwrap();
+    (key, payload)
+}
+
+fn policy_target_record(
+    policy_id: [u8; 16],
+    target_kind: u16,
+    target_id: [u8; 16],
+) -> (Vec<u8>, Vec<u8>) {
+    let mut key = 14u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&policy_id);
+    key.push(1);
+    key.extend_from_slice(&target_kind.to_be_bytes());
+    key.push(1);
+    key.extend_from_slice(&target_id);
+    let payload = encode_envelope(&family_schema(14).unwrap(), &key, &[]).unwrap();
+    (key, payload)
+}
+
 #[test]
 fn validates_ready_image_records_and_references() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
@@ -1592,6 +1643,8 @@ fn accepts_pinned_acyclic_membership_graph() -> Result<(), Box<dyn std::error::E
         principal_record([3; 16], 2, false, 1),
         membership_record([1; 16], [2; 16], [1; 16], 1),
         membership_record([2; 16], [3; 16], [1; 16], 1),
+        dependency_record([1; 16], [2; 16], 5),
+        dependency_record([2; 16], [3; 16], 5),
     ] {
         put_catalog(&database, &record.0, &record.1);
     }
@@ -1600,7 +1653,130 @@ fn accepts_pinned_acyclic_membership_graph() -> Result<(), Box<dyn std::error::E
         put_catalog(&database, &object.0, &object.1);
     }
     let report = validate_persisted_records(&database)?;
-    assert_eq!(report.catalog_records, 11);
+    assert_eq!(report.catalog_records, 13);
+    Ok(())
+}
+
+#[test]
+fn authority_dependencies_must_exactly_match_membership_records() {
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    for record in [
+        principal_record([11; 16], 1, true, 1),
+        principal_record([12; 16], 2, false, 1),
+        membership_record([11; 16], [12; 16], [11; 16], 1),
+    ] {
+        put_catalog(&database, &record.0, &record.1);
+    }
+    for (principal_id, kind) in [([11; 16], 8), ([12; 16], 9)] {
+        let object = object_record(principal_id, kind);
+        put_catalog(&database, &object.0, &object.1);
+    }
+    assert!(matches!(
+        validate_persisted_records(&database),
+        Err(StartupError::InvalidCatalog)
+    ));
+
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    for record in [
+        principal_record([11; 16], 1, true, 1),
+        principal_record([12; 16], 2, false, 1),
+        membership_record([11; 16], [12; 16], [11; 16], 1),
+        dependency_record([11; 16], [12; 16], 5),
+        dependency_record([12; 16], [11; 16], 5),
+    ] {
+        put_catalog(&database, &record.0, &record.1);
+    }
+    for (principal_id, kind) in [([11; 16], 8), ([12; 16], 9)] {
+        let object = object_record(principal_id, kind);
+        put_catalog(&database, &object.0, &object.1);
+    }
+    assert!(matches!(
+        validate_persisted_records(&database),
+        Err(StartupError::InvalidCatalog)
+    ));
+}
+
+#[test]
+fn authority_dependencies_cover_grants_and_policy_recipients()
+-> Result<(), Box<dyn std::error::Error>> {
+    let seed = |database: &Database, include_edges: bool| {
+        let user_id = [13; 16];
+        let table_id = [14; 16];
+        let policy_id = [15; 16];
+        let user = principal_record(user_id, 1, true, 1);
+        put_catalog(database, &user.0, &user.1);
+        for (object_id, kind) in [(user_id, 8), (table_id, 3), (policy_id, 10)] {
+            let record = object_record(object_id, kind);
+            put_catalog(database, &record.0, &record.1);
+        }
+        let grant = grant_record(user_id, table_id, 2, 1, table_id, builtin_owner_id());
+        put_catalog(database, &grant.0, &grant.1);
+        let system_grant = grant_record(user_id, [0x11; 16], 12, 1, [0x11; 16], builtin_owner_id());
+        put_catalog(database, &system_grant.0, &system_grant.1);
+        let policy_key = {
+            let mut key = 13u16.to_be_bytes().to_vec();
+            key.push(1);
+            key.extend_from_slice(&policy_id);
+            key
+        };
+        let policy_fields = [
+            CatalogField {
+                tag: 1,
+                wire_type: WireType::Id,
+                payload: table_id.to_vec(),
+            },
+            CatalogField {
+                tag: 2,
+                wire_type: WireType::U16,
+                payload: 1u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 3,
+                wire_type: WireType::U16,
+                payload: 1u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 4,
+                wire_type: WireType::U16,
+                payload: 1u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 7,
+                wire_type: WireType::U64,
+                payload: 1u64.to_le_bytes().to_vec(),
+            },
+        ];
+        let policy =
+            encode_envelope(&family_schema(13).unwrap(), &policy_key, &policy_fields).unwrap();
+        put_catalog(database, &policy_key, &policy);
+        let target = policy_target_record(policy_id, 1, user_id);
+        put_catalog(database, &target.0, &target.1);
+        if include_edges {
+            for (dependent, referenced) in [
+                (user_id, table_id),
+                (user_id, [0x11; 16]),
+                (policy_id, user_id),
+            ] {
+                let edge = dependency_record(dependent, referenced, 5);
+                put_catalog(database, &edge.0, &edge.1);
+            }
+        }
+    };
+
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    seed(&database, false);
+    assert!(matches!(
+        validate_persisted_records(&database),
+        Err(StartupError::InvalidCatalog)
+    ));
+
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    seed(&database, true);
+    validate_persisted_records(&database)?;
     Ok(())
 }
 

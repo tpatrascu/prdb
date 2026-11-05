@@ -3012,6 +3012,8 @@ fn invocation_loads_and_guards_catalog_table_schema() -> Result<(), Box<dyn std:
         expected_value: None,
         payload: Some(membership_payload),
     });
+    writes.push(dependency_catalog_write(principal_id, role_id, 5)?);
+    let mut grant_authority_edges = std::collections::HashSet::new();
     for (privilege, scope, target) in [
         (1, 1, schema_id),
         (2, 1, table_id),
@@ -3032,6 +3034,9 @@ fn invocation_loads_and_guards_catalog_table_schema() -> Result<(), Box<dyn std:
             expected_value: None,
             payload: Some(payload),
         });
+        if grant_authority_edges.insert((principal_id, target)) {
+            writes.push(dependency_catalog_write(principal_id, target, 5)?);
+        }
     }
     let (role_grant_key, role_grant_payload) =
         grant_catalog_record(role_id, table_id, 3, 2, column_text_id, principal_id, 1);
@@ -3040,6 +3045,7 @@ fn invocation_loads_and_guards_catalog_table_schema() -> Result<(), Box<dyn std:
         expected_value: None,
         payload: Some(role_grant_payload),
     });
+    writes.push(dependency_catalog_write(role_id, column_text_id, 5)?);
     let policy_expression_key = catalog_id_key(7, policy_expression_id);
     writes.push(CatalogWrite {
         key: policy_expression_key.clone(),
@@ -3102,6 +3108,7 @@ fn invocation_loads_and_guards_catalog_table_schema() -> Result<(), Box<dyn std:
         expected_value: None,
         payload: Some(policy_target_payload),
     });
+    writes.push(dependency_catalog_write(policy_id, principal_id, 5)?);
     let (role_policy_target_key, role_policy_target_payload) =
         policy_target_catalog_record(policy_id, 2, role_id);
     writes.push(CatalogWrite {
@@ -3109,6 +3116,7 @@ fn invocation_loads_and_guards_catalog_table_schema() -> Result<(), Box<dyn std:
         expected_value: None,
         payload: Some(role_policy_target_payload),
     });
+    writes.push(dependency_catalog_write(policy_id, role_id, 5)?);
     let cell_policy_expression_key = catalog_id_key(7, cell_policy_expression_id);
     writes.push(CatalogWrite {
         key: cell_policy_expression_key.clone(),
@@ -3170,6 +3178,9 @@ fn invocation_loads_and_guards_catalog_table_schema() -> Result<(), Box<dyn std:
             expected_value: None,
             payload: Some(payload),
         });
+        if target_kind == 2 {
+            writes.push(dependency_catalog_write(cell_policy_id, target_id, 5)?);
+        }
     }
     let check_expression_key = catalog_id_key(7, check_expression_id);
     writes.push(CatalogWrite {
@@ -3260,11 +3271,19 @@ fn invocation_loads_and_guards_catalog_table_schema() -> Result<(), Box<dyn std:
             expected_value: None,
             payload: Some(payload),
         });
+        if target_kind == 2 {
+            writes.push(dependency_catalog_write(
+                cell_allow_policy_id,
+                target_id,
+                5,
+            )?);
+        }
     }
     for (object_id, object_kind) in [
         (varchar_type_id, 2),
         (uuid_type_id, 2),
         (boolean_type_id, 2),
+        (schema_id, 1),
         (table_id, 3),
         (column_text_id, 4),
         (column_uuid_id, 4),
@@ -3973,6 +3992,7 @@ fn new_membership_cannot_be_hidden_by_restoring_principal_epoch()
                 expected_value: None,
                 payload: Some(membership_payload),
             },
+            dependency_catalog_write(user, role, 5)?,
             CatalogWrite {
                 key: new.0.clone(),
                 expected_value: Some(old.1.clone()),
@@ -4043,6 +4063,8 @@ fn invocation_loads_and_guards_transitive_catalog_role_closure()
             payload: Some(payload),
         });
     }
+    writes.push(dependency_catalog_write(user_id, first_role, 5)?);
+    writes.push(dependency_catalog_write(first_role, second_role, 5)?);
     let audit = AuditEvent {
         event_id: [154; 16],
         actor_id: Some(user_id),

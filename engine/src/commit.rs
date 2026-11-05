@@ -550,14 +550,18 @@ fn validate_final_membership_graph(
 
 #[derive(Default)]
 struct DependencyCatalogGraph {
+    database_id: Option<[u8; 16]>,
     object_parents: HashMap<[u8; 16], Option<[u8; 16]>>,
     object_kinds: HashMap<[u8; 16], u16>,
     typed_object_kinds: HashMap<[u8; 16], u16>,
+    column_tables: HashMap<[u8; 16], [u8; 16]>,
     constraint_kinds: HashMap<[u8; 16], u16>,
     foreign_key_targets: HashMap<[u8; 16], [u8; 16]>,
     backing_index_targets: HashMap<[u8; 16], [u8; 16]>,
     index_owners: HashMap<[u8; 16], [u8; 16]>,
     expression_reference_edges: HashSet<([u8; 16], [u8; 16])>,
+    authority_edges: HashSet<([u8; 16], [u8; 16])>,
+    authority_principals: HashSet<[u8; 16]>,
     dependencies: Vec<([u8; 16], [u8; 16], u16)>,
 }
 
@@ -566,12 +570,13 @@ struct DependencyCatalogGraph {
 fn validate_final_dependency_edges(
     transaction: &WriteTransaction,
     catalog_writes: &[CatalogWrite],
+    database_uuid: [u8; 16],
 ) -> Result<(), CommitError> {
     if !catalog_writes.iter().any(|write| {
         write.key.len() >= 2
             && matches!(
                 u16::from_be_bytes([write.key[0], write.key[1]]),
-                2 | 6 | 7 | 8 | 9 | 10 | 13 | 15
+                1 | 2 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15
             )
     }) {
         return Ok(());
@@ -579,7 +584,7 @@ fn validate_final_dependency_edges(
 
     let table = transaction.open_table(CATALOG).map_err(storage_error)?;
     let mut graph = DependencyCatalogGraph::default();
-    for family_code in [2u16, 6, 7, 8, 9, 10, 13, 15] {
+    for family_code in [1u16, 2, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] {
         let prefix = family_code.to_be_bytes();
         let mut family_count = 0usize;
         for entry in table.range(prefix.as_slice()..).map_err(storage_error)? {
@@ -612,19 +617,33 @@ fn validate_final_dependency_edges(
     }
 
     let DependencyCatalogGraph {
+        database_id,
         object_parents,
         object_kinds,
         typed_object_kinds,
+        column_tables: _,
         constraint_kinds,
         foreign_key_targets,
         backing_index_targets,
         index_owners,
         expression_reference_edges,
+        authority_edges,
+        authority_principals,
         dependencies,
     } = &graph;
-    if dependencies.iter().any(|(dependent_id, referenced_id, _)| {
-        !object_parents.contains_key(dependent_id) || !object_parents.contains_key(referenced_id)
-    }) {
+    let database_record_changed = catalog_writes
+        .iter()
+        .any(|write| write.key.starts_with(&1u16.to_be_bytes()));
+    if database_id.is_some_and(|database_id| database_id != database_uuid)
+        || (database_record_changed && *database_id != Some(database_uuid))
+        || dependencies
+            .iter()
+            .any(|(dependent_id, referenced_id, kind)| {
+                !object_parents.contains_key(dependent_id)
+                    || !(object_parents.contains_key(referenced_id)
+                        || *kind == 5 && Some(*referenced_id) == *database_id)
+            })
+    {
         return Err(CommitError::InvalidCatalog);
     }
     let actual_expression_reference_edges = dependencies
@@ -651,6 +670,25 @@ fn validate_final_dependency_edges(
                         | (Some(5), Some(9), Some(5), Some(9))
                 )
             })
+    {
+        return Err(CommitError::InvalidCatalog);
+    }
+    let actual_authority_edges = dependencies
+        .iter()
+        .filter(|(_, _, kind)| *kind == 5)
+        .map(|(dependent_id, referenced_id, _)| (*dependent_id, *referenced_id))
+        .collect::<HashSet<_>>();
+    if &actual_authority_edges != authority_edges
+        || authority_principals.iter().any(|principal_id| {
+            object_kinds.get(principal_id) != typed_object_kinds.get(principal_id)
+        })
+        || authority_edges.iter().any(|(dependent_id, referenced_id)| {
+            !authority_principals.contains(dependent_id)
+                && !matches!(object_kinds.get(dependent_id), Some(10))
+                || (!authority_principals.contains(referenced_id)
+                    && !object_parents.contains_key(referenced_id)
+                    && Some(*referenced_id) != *database_id)
+        })
     {
         return Err(CommitError::InvalidCatalog);
     }
@@ -919,6 +957,18 @@ fn insert_expression_reference_edge(
     Ok(())
 }
 
+fn insert_authority_edge(
+    edges: &mut HashSet<([u8; 16], [u8; 16])>,
+    dependent_id: [u8; 16],
+    referenced_id: [u8; 16],
+) -> Result<(), CommitError> {
+    edges.insert((dependent_id, referenced_id));
+    if edges.len() > crate::snapshot::MAX_CATALOG_FAMILY_SCAN {
+        return Err(CommitError::InvalidCatalog);
+    }
+    Ok(())
+}
+
 fn collect_dependency_catalog_record(
     key: &[u8],
     bytes: &[u8],
@@ -926,6 +976,16 @@ fn collect_dependency_catalog_record(
 ) -> Result<(), CommitError> {
     let record = decode_catalog_record(key, bytes)?;
     match record.family_code {
+        1 => {
+            if key.len() != 19
+                || graph
+                    .database_id
+                    .replace(key[3..19].try_into().unwrap())
+                    .is_some()
+            {
+                return Err(CommitError::InvalidCatalog);
+            }
+        }
         2 => {
             if key.len() != 19 {
                 return Err(CommitError::InvalidCatalog);
@@ -966,6 +1026,13 @@ fn collect_dependency_catalog_record(
                 .try_into()
                 .map_err(|_| CommitError::InvalidCatalog)?;
             if graph.typed_object_kinds.insert(column_id, 4).is_some() {
+                return Err(CommitError::InvalidCatalog);
+            }
+            let table_id: [u8; 16] = catalog_field_bytes(key, bytes, 6, 1)?
+                .as_slice()
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?;
+            if graph.column_tables.insert(column_id, table_id).is_some() {
                 return Err(CommitError::InvalidCatalog);
             }
             for tag in [7, 10] {
@@ -1103,12 +1170,7 @@ fn collect_dependency_catalog_record(
             let principal_id: [u8; 16] = key[3..19]
                 .try_into()
                 .map_err(|_| CommitError::InvalidCatalog)?;
-            let principal_kind = u16::from_le_bytes(
-                catalog_field_bytes(key, bytes, 10, 1)?
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| CommitError::InvalidCatalog)?,
-            );
+            let principal_kind = decode_principal_kind(key, bytes)?;
             let object_kind = match principal_kind {
                 1 => 8,
                 2 => 9,
@@ -1120,6 +1182,107 @@ fn collect_dependency_catalog_record(
                 .is_some()
             {
                 return Err(CommitError::InvalidCatalog);
+            }
+            graph.authority_principals.insert(principal_id);
+        }
+        11 => {
+            if key.len() != 36 || catalog_field_u64(key, bytes, 11, 2)? == 0 {
+                return Err(CommitError::InvalidCatalog);
+            }
+            let member_id: [u8; 16] = key[3..19]
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?;
+            let role_id: [u8; 16] = key[20..36]
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?;
+            let grantor_id: [u8; 16] = catalog_field_bytes(key, bytes, 11, 1)?
+                .as_slice()
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?;
+            if !graph.authority_principals.contains(&grantor_id)
+                || !graph
+                    .typed_object_kinds
+                    .get(&member_id)
+                    .is_some_and(|kind| matches!(*kind, 8 | 9))
+                || graph.typed_object_kinds.get(&role_id) != Some(&9)
+            {
+                return Err(CommitError::InvalidCatalog);
+            }
+            insert_authority_edge(&mut graph.authority_edges, member_id, role_id)?;
+        }
+        12 => {
+            if key.len() != 59
+                || key[2] != 1
+                || key[19] != 1
+                || key[36] != 1
+                || key[39] != 1
+                || key[42] != 1
+                || catalog_field_u64(key, bytes, 12, 2)? == 0
+            {
+                return Err(CommitError::InvalidCatalog);
+            }
+            let grantee_id: [u8; 16] = key[3..19]
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?;
+            let object_id: [u8; 16] = key[20..36]
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?;
+            let privilege = u16::from_be_bytes([key[37], key[38]]);
+            let scope = u16::from_be_bytes([key[40], key[41]]);
+            let target_id: [u8; 16] = key[43..59]
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?;
+            let grantor_id: [u8; 16] = catalog_field_bytes(key, bytes, 12, 1)?
+                .as_slice()
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?;
+            if !graph.authority_principals.contains(&grantee_id)
+                || !graph.authority_principals.contains(&grantor_id)
+            {
+                return Err(CommitError::InvalidCatalog);
+            }
+            let target_kind = graph.object_kinds.get(&target_id).copied();
+            let valid_scope = match (privilege, scope) {
+                (1 | 7, 1) => object_id == target_id && target_kind == Some(1),
+                (2..=4 | 6, 1) => object_id == target_id && target_kind == Some(3),
+                (5, 1) => object_id == target_id && target_kind == Some(3),
+                (8..=11, 1) => object_id == target_id && matches!(target_kind, Some(1 | 3)),
+                (2..=4 | 6, 2) => {
+                    graph.object_kinds.get(&object_id) == Some(&3)
+                        && target_kind == Some(4)
+                        && graph.column_tables.get(&target_id) == Some(&object_id)
+                }
+                (12..=14, 1) => object_id == target_id && Some(target_id) == graph.database_id,
+                _ => false,
+            };
+            if !valid_scope {
+                return Err(CommitError::InvalidCatalog);
+            }
+            insert_authority_edge(&mut graph.authority_edges, grantee_id, target_id)?;
+        }
+        14 => {
+            if key.len() != 39 || key[2] != 1 || key[19] != 1 || key[22] != 1 {
+                return Err(CommitError::InvalidCatalog);
+            }
+            let policy_id: [u8; 16] = key[3..19]
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?;
+            let target_kind = u16::from_be_bytes([key[20], key[21]]);
+            let target_id: [u8; 16] = key[23..39]
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?;
+            if graph.typed_object_kinds.get(&policy_id) != Some(&10) {
+                return Err(CommitError::InvalidCatalog);
+            }
+            match target_kind {
+                1 if graph.typed_object_kinds.get(&target_id) == Some(&8) => {
+                    insert_authority_edge(&mut graph.authority_edges, policy_id, target_id)?;
+                }
+                2 if graph.typed_object_kinds.get(&target_id) == Some(&9) => {
+                    insert_authority_edge(&mut graph.authority_edges, policy_id, target_id)?;
+                }
+                3 => {}
+                _ => return Err(CommitError::InvalidCatalog),
             }
         }
         13 => {
@@ -2232,7 +2395,11 @@ pub fn commit_storage_changes(
         }
         Err(error) => return Err(error),
     }
-    match validate_final_dependency_edges(&transaction, catalog_writes) {
+    match validate_final_dependency_edges(
+        &transaction,
+        catalog_writes,
+        current_metadata.database_id,
+    ) {
         Ok(()) => {}
         Err(CommitError::InvalidCatalog) => {
             transaction.abort().map_err(storage_error)?;
