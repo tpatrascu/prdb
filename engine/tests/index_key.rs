@@ -1,11 +1,13 @@
-use prdb_engine::index_key::{compose_key, encode_sql_tuple};
+use prdb_engine::index_key::{
+    DeriveIndexKeyError, compose_key, derive_index_key, encode_sql_tuple,
+};
 use prdb_engine::index_key::{
     decode_bool, decode_i16, decode_i32, decode_i64, decode_i128, decode_uuid, encode_bool,
     encode_i128, encode_uuid,
 };
 use prdb_engine::index_key::{decode_bytes, encode_bytes, prefix_successor};
 use prdb_engine::index_key::{encode_i16, encode_i32, encode_i64};
-use prdb_engine::tuple::{ColumnSchema, ScalarType, ScalarValue};
+use prdb_engine::tuple::{ColumnSchema, ScalarType, ScalarValue, TupleError, encode_tuple};
 
 #[test]
 fn fixed_components_decode_and_reject_noncanonical_inputs() {
@@ -151,4 +153,108 @@ fn typed_sql_tuple_validation_rejects_nullability_and_type_errors() {
     }];
     assert!(encode_sql_tuple(&not_null, &[None]).is_err());
     assert!(encode_sql_tuple(&not_null, &[Some(ScalarValue::Text("bad".into()))]).is_err());
+}
+
+#[test]
+fn catalog_index_key_projects_typed_row_in_definition_order() {
+    let schema_columns = [
+        ColumnSchema {
+            scalar_type: ScalarType::Text,
+            nullable: false,
+        },
+        ColumnSchema {
+            scalar_type: ScalarType::Integer,
+            nullable: false,
+        },
+        ColumnSchema {
+            scalar_type: ScalarType::Boolean,
+            nullable: true,
+        },
+    ];
+    let schema_ids = [101, 205, 309];
+    let values = [
+        Some(ScalarValue::Text("a\0b".into())),
+        Some(ScalarValue::Integer(-7)),
+        Some(ScalarValue::Boolean(true)),
+    ];
+    let payload = encode_tuple(&schema_columns, 7, &values).unwrap();
+    let derived = derive_index_key(
+        [0x22; 16],
+        [0x33; 16],
+        7,
+        &schema_ids,
+        &schema_columns,
+        &payload,
+        &[309, 205],
+    )
+    .unwrap();
+
+    let expected_tuple = [encode_bool(true).as_slice(), &encode_i32(-7)].concat();
+    assert_eq!(
+        derived.key,
+        compose_key([0x22; 16], &expected_tuple, [0x33; 16])
+    );
+    assert!(!derived.has_null);
+}
+
+#[test]
+fn catalog_index_key_reports_nulls_and_rejects_invalid_definitions_or_rows() {
+    let schema_columns = [
+        ColumnSchema {
+            scalar_type: ScalarType::Integer,
+            nullable: false,
+        },
+        ColumnSchema {
+            scalar_type: ScalarType::Boolean,
+            nullable: true,
+        },
+    ];
+    let schema_ids = [101, 309];
+    let payload = encode_tuple(&schema_columns, 4, &[Some(ScalarValue::Integer(8)), None]).unwrap();
+    let args = (
+        [0x22; 16],
+        [0x33; 16],
+        4,
+        &schema_ids[..],
+        &schema_columns[..],
+        &payload[..],
+    );
+    let derived = derive_index_key(args.0, args.1, args.2, args.3, args.4, args.5, &[309]).unwrap();
+    assert!(derived.has_null);
+    assert_eq!(derived.key, compose_key([0x22; 16], &[0xff], [0x33; 16]));
+
+    assert_eq!(
+        derive_index_key(args.0, args.1, args.2, &[101, 101], args.4, args.5, &[101]),
+        Err(DeriveIndexKeyError::InvalidDefinition)
+    );
+    assert_eq!(
+        derive_index_key(args.0, args.1, args.2, args.3, args.4, args.5, &[101, 101]),
+        Err(DeriveIndexKeyError::InvalidDefinition)
+    );
+    assert_eq!(
+        derive_index_key(args.0, args.1, args.2, args.3, args.4, args.5, &[999]),
+        Err(DeriveIndexKeyError::InvalidDefinition)
+    );
+    assert_eq!(
+        derive_index_key(args.0, args.1, args.2, args.3, args.4, args.5, &[0]),
+        Err(DeriveIndexKeyError::InvalidDefinition)
+    );
+    assert_eq!(
+        derive_index_key(
+            args.0,
+            args.1,
+            args.2,
+            args.3,
+            args.4,
+            &payload[..payload.len() - 1],
+            &[101]
+        ),
+        Err(DeriveIndexKeyError::Tuple(TupleError::InvalidLength))
+    );
+    assert_eq!(
+        derive_index_key(args.0, args.1, 5, args.3, args.4, args.5, &[101]),
+        Err(DeriveIndexKeyError::Tuple(
+            TupleError::SchemaVersionMismatch
+        ))
+    );
 }

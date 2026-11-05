@@ -267,3 +267,11 @@
 - Verification: `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` passed in the prescribed Nix shell with Rust 1.95.0 and TinyCC 0.9.27-unstable-2025-01-06; all 168 integration tests across 17 targets passed. `git diff --check` and changed Markdown relative links passed.
 - Remaining: historical tuple adaptation, commit-time schema enforcement for low-level row APIs, typed index-key derivation/delta validation, bootstrap storage-object semantics, verifier-profile issuance, exclusive instance locking, authenticated startup, and service admission remain open.
 - Next: derive typed index keys from row values and validate catalog-derived index deltas.
+
+## SM-5 dependency: typed row to catalog index key — in progress
+
+- Contract: [index-key encoding](../../specs/index-key-encoding.md), Complete Keys and Values. The derivation primitive accepts ordered schema IDs/types, a schema version and TUP1 payload, and an ordered index column-ID list. It rejects zero/duplicate/misaligned schema IDs, empty/zero/duplicate/missing index IDs, and invalid TUP1 data; it projects only the indexed fields in catalog order and returns the complete index-ID/tuple/row-ID key plus an indexed-NULL flag.
+- Red evidence: the two new regressions failed against the compiling placeholder with `InvalidDefinition`. They now cover non-leading and reordered projected columns, embedded-zero text, NULL projection, invalid definitions, malformed TUP1 length, and schema-version mismatch.
+- Verification: the prescribed Nix shell provided Rust/Cargo 1.95.0, rustfmt 1.9.0, Clippy 0.1.95, and TinyCC 0.9.27-unstable-2025-01-06. Workspace build, formatting check, Clippy with warnings denied, and all 170 integration tests across 17 targets passed.
+- Limits: this is a derivation primitive only. Transaction commit still accepts caller-supplied index deltas; it does not yet prove complete catalog-derived membership changes, enforce uniqueness against the final row set, or prevent index-definition changes from publishing inconsistent memberships.
+- Next: validate and derive complete index deltas from changed rows and final catalog definitions during the serialized commit.

@@ -3,6 +3,7 @@
 //! Encoded components are only comparable within the same index definition.
 
 use crate::tuple::{ColumnSchema, ScalarType, ScalarValue, TupleError};
+use std::collections::{HashMap, HashSet};
 
 /// Encode a complete SQL tuple using the pinned column types and v1 ordering.
 /// `TUP1` validation is reused to enforce nullability, scalar ranges, decimal
@@ -51,6 +52,86 @@ pub fn compose_key(index_id: [u8; 16], tuple: &[u8], row_id: [u8; 16]) -> Vec<u8
     key.extend_from_slice(tuple);
     key.extend_from_slice(&row_id);
     key
+}
+
+/// Errors while deriving an index key from a catalog definition and row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeriveIndexKeyError {
+    InvalidDefinition,
+    Tuple(TupleError),
+}
+
+impl std::fmt::Display for DeriveIndexKeyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidDefinition => formatter.write_str("invalid index column definition"),
+            Self::Tuple(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for DeriveIndexKeyError {}
+
+/// A complete index key and the NULL fact needed by unique-index validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DerivedIndexKey {
+    pub key: Vec<u8>,
+    pub has_null: bool,
+}
+
+/// Derive a complete v1 index key by projecting a validated row into the
+/// index's ordered catalog column IDs.
+pub fn derive_index_key(
+    index_id: [u8; 16],
+    row_id: [u8; 16],
+    schema_version: u64,
+    schema_column_ids: &[u64],
+    schema_columns: &[ColumnSchema],
+    tuple_payload: &[u8],
+    index_column_ids: &[u64],
+) -> Result<DerivedIndexKey, DeriveIndexKeyError> {
+    if schema_column_ids.is_empty()
+        || schema_column_ids.len() != schema_columns.len()
+        || index_column_ids.is_empty()
+    {
+        return Err(DeriveIndexKeyError::InvalidDefinition);
+    }
+
+    let mut schema_ordinals = HashMap::with_capacity(schema_column_ids.len());
+    for (ordinal, &column_id) in schema_column_ids.iter().enumerate() {
+        if column_id == 0 || schema_ordinals.insert(column_id, ordinal).is_some() {
+            return Err(DeriveIndexKeyError::InvalidDefinition);
+        }
+    }
+
+    let mut seen_index_columns = HashSet::with_capacity(index_column_ids.len());
+    let mut projection_columns = Vec::with_capacity(index_column_ids.len());
+    let mut projection_ordinals = Vec::with_capacity(index_column_ids.len());
+    for &column_id in index_column_ids {
+        if column_id == 0 || !seen_index_columns.insert(column_id) {
+            return Err(DeriveIndexKeyError::InvalidDefinition);
+        }
+        let Some(&ordinal) = schema_ordinals.get(&column_id) else {
+            return Err(DeriveIndexKeyError::InvalidDefinition);
+        };
+        projection_columns.push(schema_columns[ordinal].clone());
+        projection_ordinals.push(ordinal);
+    }
+
+    let tuple = crate::tuple::decode_tuple(schema_columns, schema_version, tuple_payload)
+        .map_err(DeriveIndexKeyError::Tuple)?;
+    let projection_values = projection_ordinals
+        .iter()
+        .map(|&ordinal| tuple.values[ordinal].clone())
+        .collect::<Vec<_>>();
+    let has_null = projection_values.iter().any(Option::is_none);
+    let encoded_tuple = encode_sql_tuple(&projection_columns, &projection_values)
+        .map_err(DeriveIndexKeyError::Tuple)?;
+
+    Ok(DerivedIndexKey {
+        key: compose_key(index_id, &encoded_tuple, row_id),
+        has_null,
+    })
 }
 
 /// An invalid or incomplete component.
