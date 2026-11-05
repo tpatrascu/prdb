@@ -371,6 +371,15 @@ fn policy_record(
     table_id: [u8; 16],
     using_expression_id: [u8; 16],
 ) -> (Vec<u8>, Vec<u8>) {
+    policy_record_with_kind(id, table_id, using_expression_id, 1)
+}
+
+fn policy_record_with_kind(
+    id: [u8; 16],
+    table_id: [u8; 16],
+    using_expression_id: [u8; 16],
+    kind: u16,
+) -> (Vec<u8>, Vec<u8>) {
     let mut key = 13u16.to_be_bytes().to_vec();
     key.push(1);
     key.extend_from_slice(&id);
@@ -383,7 +392,7 @@ fn policy_record(
         CatalogField {
             tag: 2,
             wire_type: WireType::U16,
-            payload: 1u16.to_le_bytes().to_vec(),
+            payload: kind.to_le_bytes().to_vec(),
         },
         CatalogField {
             tag: 3,
@@ -615,11 +624,31 @@ fn principal_record_with_name(
 }
 
 fn column_record(id: [u8; 16], name: &str) -> (Vec<u8>, Vec<u8>) {
-    column_record_with_defaults(id, name, None, None)
+    column_record_for_table(id, [0x55; 16], name)
+}
+
+fn column_record_for_table(id: [u8; 16], table_id: [u8; 16], name: &str) -> (Vec<u8>, Vec<u8>) {
+    column_record_with_schema(id, table_id, name, None, None)
 }
 
 fn column_record_with_defaults(
     id: [u8; 16],
+    name: &str,
+    default_expression_id: Option<[u8; 16]>,
+    add_column_default_id: Option<[u8; 16]>,
+) -> (Vec<u8>, Vec<u8>) {
+    column_record_with_schema(
+        id,
+        [0x55; 16],
+        name,
+        default_expression_id,
+        add_column_default_id,
+    )
+}
+
+fn column_record_with_schema(
+    id: [u8; 16],
+    table_id: [u8; 16],
     name: &str,
     default_expression_id: Option<[u8; 16]>,
     add_column_default_id: Option<[u8; 16]>,
@@ -631,7 +660,7 @@ fn column_record_with_defaults(
         CatalogField {
             tag: 1,
             wire_type: WireType::Id,
-            payload: [0x55; 16].to_vec(),
+            payload: table_id.to_vec(),
         },
         CatalogField {
             tag: 2,
@@ -812,6 +841,41 @@ fn policy_target_record(
     key.push(1);
     key.extend_from_slice(&target_id);
     let payload = encode_envelope(&family_schema(14).unwrap(), &key, &[]).unwrap();
+    (key, payload)
+}
+
+fn table_record(id: [u8; 16]) -> (Vec<u8>, Vec<u8>) {
+    let mut key = 5u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&id);
+    let fields = [
+        CatalogField {
+            tag: 1,
+            wire_type: WireType::Id,
+            payload: [0x61; 16].to_vec(),
+        },
+        CatalogField {
+            tag: 2,
+            wire_type: WireType::U64,
+            payload: 1u64.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 3,
+            wire_type: WireType::U64,
+            payload: 1u64.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 4,
+            wire_type: WireType::Id,
+            payload: builtin_owner_id().to_vec(),
+        },
+        CatalogField {
+            tag: 5,
+            wire_type: WireType::U16,
+            payload: 1u16.to_le_bytes().to_vec(),
+        },
+    ];
+    let payload = encode_envelope(&family_schema(5).unwrap(), &key, &fields).unwrap();
     (key, payload)
 }
 
@@ -1777,6 +1841,81 @@ fn authority_dependencies_cover_grants_and_policy_recipients()
     let database = fixture.database(0);
     seed(&database, true);
     validate_persisted_records(&database)?;
+    Ok(())
+}
+
+#[test]
+fn policy_column_targets_resolve_to_cell_policy_table_columns()
+-> Result<(), Box<dyn std::error::Error>> {
+    let seed = |database: &Database, policy_kind: u16, column_table: Option<[u8; 16]>| {
+        let table_id = [140; 16];
+        let other_table_id = [141; 16];
+        let column_id = [142; 16];
+        let expression_id = [143; 16];
+        let policy_id = [144; 16];
+
+        for table_id_to_add in [table_id, other_table_id] {
+            let object = object_record(table_id_to_add, 3);
+            put_catalog(database, &object.0, &object.1);
+            let table = table_record(table_id_to_add);
+            put_catalog(database, &table.0, &table.1);
+        }
+
+        let policy_object = object_record(policy_id, 10);
+        put_catalog(database, &policy_object.0, &policy_object.1);
+        let policy = policy_record_with_kind(policy_id, table_id, expression_id, policy_kind);
+        put_catalog(database, &policy.0, &policy.1);
+
+        let expression_object = object_record(expression_id, 5);
+        put_catalog(database, &expression_object.0, &expression_object.1);
+        let expression = expression_record(expression_id, 3, &[], &Expr::CurrentPrincipalId);
+        put_catalog(database, &expression.0, &expression.1);
+        let expression_edge = dependency_record(policy_id, expression_id, 2);
+        put_catalog(database, &expression_edge.0, &expression_edge.1);
+
+        let column_object = object_record(column_id, 4);
+        put_catalog(database, &column_object.0, &column_object.1);
+        if let Some(column_table) = column_table {
+            let column = column_record_for_table(column_id, column_table, "object_142");
+            put_catalog(database, &column.0, &column.1);
+        }
+
+        let recipient = policy_target_record(policy_id, 2, builtin_owner_id());
+        put_catalog(database, &recipient.0, &recipient.1);
+        let column_target = policy_target_record(policy_id, 3, column_id);
+        put_catalog(database, &column_target.0, &column_target.1);
+        let authority_edge = dependency_record(policy_id, builtin_owner_id(), 5);
+        put_catalog(database, &authority_edge.0, &authority_edge.1);
+    };
+
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    seed(&database, 2, Some([140; 16]));
+    assert!(validate_persisted_records(&database).is_ok());
+
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    seed(&database, 2, None);
+    assert_eq!(
+        validate_persisted_records(&database),
+        Err(StartupError::InvalidCatalog),
+    );
+
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    seed(&database, 2, Some([141; 16]));
+    assert_eq!(
+        validate_persisted_records(&database),
+        Err(StartupError::InvalidCatalog),
+    );
+
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    seed(&database, 1, Some([140; 16]));
+    assert_eq!(
+        validate_persisted_records(&database),
+        Err(StartupError::InvalidCatalog),
+    );
     Ok(())
 }
 

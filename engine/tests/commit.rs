@@ -1828,7 +1828,7 @@ fn policy_target_limit_checks_final_set_and_allows_replacements()
             &policy_key,
             &[
                 field(1, WireType::Id, table_id.to_vec()),
-                field(2, WireType::U16, 2u16.to_le_bytes().to_vec()),
+                field(2, WireType::U16, 1u16.to_le_bytes().to_vec()),
                 field(3, WireType::U16, 1u16.to_le_bytes().to_vec()),
                 field(4, WireType::U16, 1u16.to_le_bytes().to_vec()),
                 field(5, WireType::Id, expression_id.to_vec()),
@@ -1888,17 +1888,28 @@ fn policy_target_limit_checks_final_set_and_allows_replacements()
                 recipient.payload.as_ref().unwrap().as_slice(),
             )?;
             for n in 1..=4095u128 {
-                let column = target(3, n.to_be_bytes());
-                catalog.insert(
-                    column.key.as_slice(),
-                    column.payload.as_ref().unwrap().as_slice(),
-                )?;
+                let principal_id = n.to_be_bytes();
+                for record in [
+                    principal_write(principal_id, 1),
+                    principal_object_write(principal_id, 1),
+                    dependency_write(policy_id, principal_id, 5),
+                    target(1, principal_id),
+                ] {
+                    catalog.insert(
+                        record.key.as_slice(),
+                        record.payload.as_ref().unwrap().as_slice(),
+                    )?;
+                }
             }
         }
         write.commit()?;
     }
-    let addition = target(3, 4096u128.to_be_bytes());
-    let old = target(3, 1u128.to_be_bytes());
+    let new_principal_id = 4096u128.to_be_bytes();
+    let addition = target(1, new_principal_id);
+    let new_principal = principal_write(new_principal_id, 1);
+    let new_principal_object = principal_object_write(new_principal_id, 1);
+    let new_principal_edge = dependency_write(policy_id, new_principal_id, 5);
+    let old = target(1, 1u128.to_be_bytes());
     let updates = [
         CatalogWrite {
             key: policy_key.clone(),
@@ -1917,7 +1928,14 @@ fn policy_target_limit_checks_final_set_and_allows_replacements()
             id(1),
             id(9),
             9_999,
-            &[addition.clone(), updates[0].clone(), updates[1].clone()],
+            &[
+                addition.clone(),
+                new_principal.clone(),
+                new_principal_object.clone(),
+                new_principal_edge.clone(),
+                updates[0].clone(),
+                updates[1].clone(),
+            ],
             &[audit_event(10)]
         ),
         Err(CommitError::InvalidCatalog)
@@ -1928,6 +1946,12 @@ fn policy_target_limit_checks_final_set_and_allows_replacements()
         expected_value: old.payload,
         payload: None,
     };
+    let old_edge = dependency_write(policy_id, 1u128.to_be_bytes(), 5);
+    let edge_removal = CatalogWrite {
+        key: old_edge.key,
+        expected_value: old_edge.payload,
+        payload: None,
+    };
     assert_eq!(
         commit_catalog_and_audit(
             &database,
@@ -1936,7 +1960,11 @@ fn policy_target_limit_checks_final_set_and_allows_replacements()
             9_999,
             &[
                 addition.clone(),
+                new_principal,
+                new_principal_object,
+                new_principal_edge,
                 removal,
+                edge_removal,
                 updates[0].clone(),
                 updates[1].clone()
             ],
@@ -1948,6 +1976,235 @@ fn policy_target_limit_checks_final_set_and_allows_replacements()
     let catalog = read.open_table(prdb_engine::schema::CATALOG)?;
     assert!(catalog.get(old.key.as_slice())?.is_none());
     assert!(catalog.get(addition.key.as_slice())?.is_some());
+    Ok(())
+}
+
+#[test]
+fn policy_column_targets_require_matching_cell_policy_columns()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::catalog::{PolicyTarget, encode_policy_target};
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let table_id = id(77);
+    let policy_id = id(78);
+    let expression_id = id(81);
+    let first_column_id = id(82);
+    let second_column_id = id(84);
+    let missing_column_id = id(85);
+    let other_table_id = id(86);
+    let other_column_id = id(87);
+    let schema_id = id(79);
+    let table_key = id_catalog_key(5, table_id);
+    let table_payload = |epoch: u64| {
+        encode_envelope(
+            &family_schema(5).unwrap(),
+            &table_key,
+            &[
+                CatalogField {
+                    tag: 1,
+                    wire_type: WireType::Id,
+                    payload: schema_id.to_vec(),
+                },
+                CatalogField {
+                    tag: 2,
+                    wire_type: WireType::U64,
+                    payload: 1u64.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 3,
+                    wire_type: WireType::U64,
+                    payload: epoch.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 4,
+                    wire_type: WireType::Id,
+                    payload: builtin_owner_id().to_vec(),
+                },
+                CatalogField {
+                    tag: 5,
+                    wire_type: WireType::U16,
+                    payload: 1u16.to_le_bytes().to_vec(),
+                },
+            ],
+        )
+        .unwrap()
+    };
+    let policy_key = id_catalog_key(13, policy_id);
+    let policy_payload = |kind: u16, epoch: u64| {
+        encode_envelope(
+            &family_schema(13).unwrap(),
+            &policy_key,
+            &[
+                CatalogField {
+                    tag: 1,
+                    wire_type: WireType::Id,
+                    payload: table_id.to_vec(),
+                },
+                CatalogField {
+                    tag: 2,
+                    wire_type: WireType::U16,
+                    payload: kind.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 3,
+                    wire_type: WireType::U16,
+                    payload: 1u16.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 4,
+                    wire_type: WireType::U16,
+                    payload: 1u16.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 5,
+                    wire_type: WireType::Id,
+                    payload: expression_id.to_vec(),
+                },
+                CatalogField {
+                    tag: 7,
+                    wire_type: WireType::U64,
+                    payload: epoch.to_le_bytes().to_vec(),
+                },
+            ],
+        )
+        .unwrap()
+    };
+    let policy_target = |kind: u16, target_id: [u8; 16]| {
+        let payload = encode_policy_target(&PolicyTarget {
+            policy_id,
+            kind,
+            target_id,
+        })
+        .unwrap();
+        CatalogWrite {
+            key: payload[32..].to_vec(),
+            expected_value: None,
+            payload: Some(payload),
+        }
+    };
+    let target_write = |kind: u16, target_id: [u8; 16]| policy_target(kind, target_id);
+    let dependency =
+        |dependent_id, referenced_id, kind| dependency_write(dependent_id, referenced_id, kind);
+    let table_record = CatalogWrite {
+        key: table_key.clone(),
+        expected_value: None,
+        payload: Some(table_payload(1)),
+    };
+    let policy_record = CatalogWrite {
+        key: policy_key.clone(),
+        expected_value: None,
+        payload: Some(policy_payload(2, 1)),
+    };
+    let expression = expression_write(
+        expression_id,
+        3,
+        &[],
+        &prdb_engine::authorization::Expr::CurrentPrincipalId,
+    );
+    let first_column = column_write(first_column_id, table_id, "object_82");
+    let second_column = column_write(second_column_id, table_id, "object_84");
+    let other_table = table_write(other_table_id, schema_id);
+    let other_column = column_write(other_column_id, other_table_id, "object_87");
+    {
+        let write = database.begin_write()?;
+        {
+            let mut catalog = write.open_table(prdb_engine::schema::CATALOG)?;
+            for record in [
+                table_record.clone(),
+                policy_record.clone(),
+                object_write(table_id, 3),
+                object_write(other_table_id, 3),
+                object_write(policy_id, 10),
+                other_table.clone(),
+                object_write(expression_id, 5),
+                expression.clone(),
+                dependency(policy_id, expression_id, 2),
+                dependency(policy_id, builtin_owner_id(), 5),
+                object_write(first_column_id, 4),
+                first_column.clone(),
+                object_write(second_column_id, 4),
+                second_column.clone(),
+                object_write(other_column_id, 4),
+                other_column.clone(),
+                target_write(2, builtin_owner_id()),
+                target_write(3, first_column_id),
+            ] {
+                catalog.insert(
+                    record.key.as_slice(),
+                    record.payload.as_ref().unwrap().as_slice(),
+                )?;
+            }
+        }
+        write.commit()?;
+    }
+
+    let policy_update = |kind, epoch| CatalogWrite {
+        key: policy_key.clone(),
+        expected_value: Some(policy_payload(2, 1)),
+        payload: Some(policy_payload(kind, epoch)),
+    };
+    let table_update = CatalogWrite {
+        key: table_key.clone(),
+        expected_value: Some(table_payload(1)),
+        payload: Some(table_payload(2)),
+    };
+    let missing_target = target_write(3, missing_column_id);
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(1),
+            id(9),
+            9_999,
+            &[missing_target, policy_update(2, 2), table_update.clone(),],
+            &[audit_event(10)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(2),
+            id(9),
+            9_999,
+            &[policy_update(1, 2), table_update.clone(),],
+            &[audit_event(20)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(3),
+            id(9),
+            9_999,
+            &[
+                target_write(3, other_column_id),
+                policy_update(2, 2),
+                table_update.clone(),
+            ],
+            &[audit_event(30)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(4),
+            id(9),
+            9_999,
+            &[
+                target_write(3, second_column_id),
+                policy_update(2, 2),
+                table_update,
+            ],
+            &[audit_event(40)],
+        )?,
+        1,
+    );
     Ok(())
 }
 

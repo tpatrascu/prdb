@@ -152,6 +152,8 @@ fn validate_catalog(
     let mut object_owners = Vec::<[u8; 16]>::new();
     let mut typed_object_kinds = HashMap::<[u8; 16], u16>::new();
     let mut column_tables = HashMap::<[u8; 16], [u8; 16]>::new();
+    let mut policy_tables = HashMap::<[u8; 16], [u8; 16]>::new();
+    let mut policy_kinds = HashMap::<[u8; 16], u16>::new();
     let mut expression_reference_edges = std::collections::HashSet::<([u8; 16], [u8; 16])>::new();
     let mut typed_name_records = Vec::<(u16, [u8; 16])>::new();
     let mut constraint_kinds = HashMap::<[u8; 16], u16>::new();
@@ -350,6 +352,17 @@ fn validate_catalog(
                 .ok_or(StartupError::InvalidCatalog)?
                 .try_into()
                 .map_err(|_| StartupError::InvalidCatalog)?;
+            let policy_kind = field_u16(&record, 2)?;
+            if !matches!(policy_kind, 1 | 2) {
+                return Err(StartupError::InvalidCatalog);
+            }
+            if policy_tables
+                .insert(policy_id, field_id(&record, 1)?)
+                .is_some()
+                || policy_kinds.insert(policy_id, policy_kind).is_some()
+            {
+                return Err(StartupError::InvalidCatalog);
+            }
             for tag in [5, 6] {
                 if let Some(field) = record.fields.iter().find(|field| field.tag == tag) {
                     let expression_id: [u8; 16] = field
@@ -463,7 +476,13 @@ fn validate_catalog(
                 2 if principal_kinds.get(&target_id) == Some(&2) => {
                     insert_authority_edge(&mut authority_edges, policy_id, target_id)?;
                 }
-                3 => {}
+                3 if policy_kinds.get(&policy_id) == Some(&2)
+                    && typed_object_kinds.get(&target_id) == Some(&4)
+                    && column_tables.get(&target_id) == policy_tables.get(&policy_id)
+                    && policy_tables.get(&policy_id).is_some_and(|table_id| {
+                        object_kinds.get(table_id) == Some(&3)
+                            && typed_object_kinds.get(table_id) == Some(&3)
+                    }) => {}
                 _ => return Err(StartupError::InvalidCatalog),
             }
         }

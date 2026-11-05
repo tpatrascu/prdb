@@ -555,6 +555,8 @@ struct DependencyCatalogGraph {
     object_kinds: HashMap<[u8; 16], u16>,
     typed_object_kinds: HashMap<[u8; 16], u16>,
     column_tables: HashMap<[u8; 16], [u8; 16]>,
+    policy_tables: HashMap<[u8; 16], [u8; 16]>,
+    policy_kinds: HashMap<[u8; 16], u16>,
     constraint_kinds: HashMap<[u8; 16], u16>,
     foreign_key_targets: HashMap<[u8; 16], [u8; 16]>,
     backing_index_targets: HashMap<[u8; 16], [u8; 16]>,
@@ -576,7 +578,7 @@ fn validate_final_dependency_edges(
         write.key.len() >= 2
             && matches!(
                 u16::from_be_bytes([write.key[0], write.key[1]]),
-                1 | 2 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15
+                1 | 2 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15
             )
     }) {
         return Ok(());
@@ -584,7 +586,7 @@ fn validate_final_dependency_edges(
 
     let table = transaction.open_table(CATALOG).map_err(storage_error)?;
     let mut graph = DependencyCatalogGraph::default();
-    for family_code in [1u16, 2, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] {
+    for family_code in [1u16, 2, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] {
         let prefix = family_code.to_be_bytes();
         let mut family_count = 0usize;
         for entry in table.range(prefix.as_slice()..).map_err(storage_error)? {
@@ -622,6 +624,8 @@ fn validate_final_dependency_edges(
         object_kinds,
         typed_object_kinds,
         column_tables: _,
+        policy_tables: _,
+        policy_kinds: _,
         constraint_kinds,
         foreign_key_targets,
         backing_index_targets,
@@ -1018,6 +1022,17 @@ fn collect_dependency_catalog_record(
                 return Err(CommitError::InvalidCatalog);
             }
         }
+        5 => {
+            if key.len() != 19 {
+                return Err(CommitError::InvalidCatalog);
+            }
+            let table_id: [u8; 16] = key[3..19]
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?;
+            if graph.typed_object_kinds.insert(table_id, 3).is_some() {
+                return Err(CommitError::InvalidCatalog);
+            }
+        }
         6 => {
             if key.len() != 19 {
                 return Err(CommitError::InvalidCatalog);
@@ -1281,7 +1296,14 @@ fn collect_dependency_catalog_record(
                 2 if graph.typed_object_kinds.get(&target_id) == Some(&9) => {
                     insert_authority_edge(&mut graph.authority_edges, policy_id, target_id)?;
                 }
-                3 => {}
+                3 if graph.policy_kinds.get(&policy_id) == Some(&2)
+                    && graph.typed_object_kinds.get(&target_id) == Some(&4)
+                    && graph.column_tables.get(&target_id)
+                        == graph.policy_tables.get(&policy_id)
+                    && graph.policy_tables.get(&policy_id).is_some_and(|table_id| {
+                        graph.object_kinds.get(table_id) == Some(&3)
+                            && graph.typed_object_kinds.get(table_id) == Some(&3)
+                    }) => {}
                 _ => return Err(CommitError::InvalidCatalog),
             }
         }
@@ -1293,6 +1315,22 @@ fn collect_dependency_catalog_record(
                 .try_into()
                 .map_err(|_| CommitError::InvalidCatalog)?;
             if graph.typed_object_kinds.insert(policy_id, 10).is_some() {
+                return Err(CommitError::InvalidCatalog);
+            }
+            let table_id: [u8; 16] = catalog_field_bytes(key, bytes, 13, 1)?
+                .as_slice()
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?;
+            let policy_kind = u16::from_le_bytes(
+                catalog_field_bytes(key, bytes, 13, 2)?
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| CommitError::InvalidCatalog)?,
+            );
+            if !matches!(policy_kind, 1 | 2)
+                || graph.policy_tables.insert(policy_id, table_id).is_some()
+                || graph.policy_kinds.insert(policy_id, policy_kind).is_some()
+            {
                 return Err(CommitError::InvalidCatalog);
             }
             for tag in [5, 6] {
