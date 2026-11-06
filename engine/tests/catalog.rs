@@ -240,7 +240,7 @@ fn generic_catalog_wire_types_enforce_widths_utf8_and_id_sets() {
 
 #[test]
 fn every_catalog_family_has_a_complete_required_field_registry() {
-    for family_code in 1..=16 {
+    for family_code in 1..=17 {
         let schema = family_schema(family_code).unwrap();
         let mut key = family_code.to_be_bytes().to_vec();
         match family_code {
@@ -304,5 +304,5 @@ fn every_catalog_family_has_a_complete_required_field_registry() {
         assert_eq!(decode_envelope(&schema, &encoded).unwrap().fields, fields);
     }
     assert!(family_schema(0).is_none());
-    assert!(family_schema(17).is_none());
+    assert!(family_schema(18).is_none());
 }

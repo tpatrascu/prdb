@@ -3,7 +3,7 @@ use prdb_engine::metadata::{EngineMetadata, Lifecycle, MetadataError};
 fn sample() -> EngineMetadata {
     EngineMetadata {
         database_id: [0x11; 16],
-        catalog_version: 1,
+        catalog_version: 2,
         expression_version: 2,
         builtin_semantics_version: 3,
         commit_sequence: 0x0807_0605_0403_0201,
@@ -17,7 +17,7 @@ fn metadata_has_canonical_bytes_and_round_trips() {
     let encoded = metadata.encode().unwrap();
     assert_eq!(&encoded[..6], b"ENG1\x01\x00");
     assert_eq!(&encoded[6..22], &[0x11; 16]);
-    assert_eq!(&encoded[22..34], &[1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0]);
+    assert_eq!(&encoded[22..34], &[2, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0]);
     assert_eq!(&encoded[34..42], &[1, 2, 3, 4, 5, 6, 7, 8]);
     assert_eq!(encoded[42], Lifecycle::Initializing as u8);
     assert_eq!(&encoded[43..46], &[0; 3]);

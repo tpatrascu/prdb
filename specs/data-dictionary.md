@@ -36,6 +36,7 @@ The following names describe internal record sets, not supported SQL tables. Lis
 | `policy_targets` | policy ID, target kind, target ID | Recipient user/role IDs and optional expanded column targets |
 | `dependencies` | dependent ID, referenced ID, edge kind | Ownership, expression reference, foreign-key target, backing-index, or authority dependency |
 | `credential_verifiers` | token ID | User ID, verifier/algorithm version, expiry, revocation, label; protected authentication-only storage |
+| `identity_tombstones` | identity ID | Permanent reservation preventing a dropped user/role ID from being reused |
 
 Parent `objects` records exist for named logical objects, including principals; child records must agree with their kind and lifetime. Composite grants and dependency rows need no separate public object identity. Constraint/index lifecycle is initially private BUILDING then atomically VALID, or discarded on failure; committed DROPPED definitions remain readable only to old snapshots.
 

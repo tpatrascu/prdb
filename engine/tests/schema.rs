@@ -36,7 +36,7 @@ fn creates_and_reopens_all_versioned_engine_tables() -> Result<(), Box<dyn std::
         schema::create_tables(&write)?;
         let record = EngineMetadata {
             database_id: [0x42; 16],
-            catalog_version: 1,
+            catalog_version: 2,
             expression_version: 1,
             builtin_semantics_version: 1,
             commit_sequence: 0,
@@ -61,7 +61,7 @@ fn creates_and_reopens_all_versioned_engine_tables() -> Result<(), Box<dyn std::
         EngineMetadata::decode(&stored_metadata)?,
         EngineMetadata {
             database_id: [0x42; 16],
-            catalog_version: 1,
+            catalog_version: 2,
             expression_version: 1,
             builtin_semantics_version: 1,
             commit_sequence: 0,

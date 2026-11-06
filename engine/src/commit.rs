@@ -1661,10 +1661,10 @@ fn validate_final_bootstrap_builtin_targets(
         .try_into()
         .map_err(|_| CommitError::InvalidCatalog)?;
     let count = u32::from_le_bytes(count_bytes) as usize;
-    if count != 30 || encoded.len() != 4 + count * 20 {
+    if count != 31 || encoded.len() != 4 + count * 20 {
         return Err(CommitError::InvalidCatalog);
     }
-    let expected_codes = [1u16, 2, 3].into_iter().chain(101..=111).chain(201..=216);
+    let expected_codes = [1u16, 2, 3].into_iter().chain(101..=111).chain(201..=217);
     let mut mappings = HashMap::<u16, [u8; 16]>::new();
     let mut ids = HashSet::<[u8; 16]>::new();
     for (entry, expected_code) in encoded[4..].chunks_exact(20).zip(expected_codes) {
@@ -2380,6 +2380,161 @@ where
         .map(|value| value.value().to_vec()))
 }
 
+fn validate_final_identity_tombstones(
+    transaction: &WriteTransaction,
+    catalog_writes: &[CatalogWrite],
+) -> Result<(), CommitError> {
+    if !catalog_writes.iter().any(|write| {
+        write.key.len() >= 2
+            && matches!(
+                u16::from_be_bytes([write.key[0], write.key[1]]),
+                2 | 10 | 16 | 17
+            )
+    }) {
+        return Ok(());
+    }
+
+    let table = transaction.open_table(CATALOG).map_err(storage_error)?;
+    let collect_final_ids = |family: u16| -> Result<HashSet<[u8; 16]>, CommitError> {
+        let prefix = family.to_be_bytes();
+        let mut ids = HashSet::new();
+        let mut count = 0usize;
+        for entry in table.range(prefix.as_slice()..).map_err(storage_error)? {
+            let (key, value) = entry.map_err(storage_error)?;
+            let key = key.value();
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            if catalog_writes.iter().any(|write| write.key == key) {
+                continue;
+            }
+            count += 1;
+            if count > crate::snapshot::MAX_CATALOG_FAMILY_SCAN || key.len() != 19 || key[2] != 1 {
+                return Err(CommitError::InvalidCatalog);
+            }
+            decode_catalog_record(key, value.value())?;
+            let id = key[3..19]
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?;
+            ids.insert(id);
+        }
+        for write in catalog_writes
+            .iter()
+            .filter(|write| write.key.starts_with(&prefix))
+        {
+            if write.key.len() != 19 || write.key[2] != 1 {
+                return Err(CommitError::InvalidCatalog);
+            }
+            let Some(bytes) = &write.payload else {
+                continue;
+            };
+            count += 1;
+            if count > crate::snapshot::MAX_CATALOG_FAMILY_SCAN {
+                return Err(CommitError::InvalidCatalog);
+            }
+            decode_catalog_record(&write.key, bytes)?;
+            let id = write.key[3..19]
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?;
+            ids.insert(id);
+        }
+        Ok(ids)
+    };
+
+    let object_ids = collect_final_ids(2)?;
+    let principal_ids = collect_final_ids(10)?;
+    let prefix = 17u16.to_be_bytes();
+    let mut tombstone_ids = HashSet::<[u8; 16]>::new();
+    let mut tombstone_count = 0usize;
+    for entry in table.range(prefix.as_slice()..).map_err(storage_error)? {
+        let (key, value) = entry.map_err(storage_error)?;
+        let key = key.value();
+        if !key.starts_with(&prefix) {
+            break;
+        }
+        if catalog_writes.iter().any(|write| write.key == key) {
+            continue;
+        }
+        tombstone_count += 1;
+        if tombstone_count > crate::snapshot::MAX_CATALOG_FAMILY_SCAN
+            || key.len() != 19
+            || key[2] != 1
+        {
+            return Err(CommitError::InvalidCatalog);
+        }
+        decode_catalog_record(key, value.value())?;
+        let id = key[3..19]
+            .try_into()
+            .map_err(|_| CommitError::InvalidCatalog)?;
+        tombstone_ids.insert(id);
+    }
+    for write in catalog_writes
+        .iter()
+        .filter(|write| write.key.starts_with(&prefix))
+    {
+        if write.expected_value.is_some() || write.payload.is_none() {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let bytes = write
+            .payload
+            .as_deref()
+            .ok_or(CommitError::InvalidCatalog)?;
+        if write.key.len() != 19 || write.key[2] != 1 {
+            return Err(CommitError::InvalidCatalog);
+        }
+        decode_catalog_record(&write.key, bytes)?;
+        tombstone_count += 1;
+        if tombstone_count > crate::snapshot::MAX_CATALOG_FAMILY_SCAN {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let id = write.key[3..19]
+            .try_into()
+            .map_err(|_| CommitError::InvalidCatalog)?;
+        if !tombstone_ids.insert(id) {
+            return Err(CommitError::InvalidCatalog);
+        }
+    }
+    if tombstone_ids
+        .iter()
+        .any(|id| object_ids.contains(id) || principal_ids.contains(id))
+    {
+        return Err(CommitError::InvalidCatalog);
+    }
+
+    for write in catalog_writes {
+        if write.key.starts_with(&10u16.to_be_bytes()) && write.payload.is_none() {
+            let id: [u8; 16] = write
+                .key
+                .get(3..19)
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or(CommitError::InvalidCatalog)?;
+            if !tombstone_ids.contains(&id) {
+                return Err(CommitError::InvalidCatalog);
+            }
+        }
+        if write.key.starts_with(&2u16.to_be_bytes()) && write.payload.is_none() {
+            let current = table
+                .get(write.key.as_slice())
+                .map_err(storage_error)?
+                .ok_or(CommitError::InvalidCatalog)?
+                .value()
+                .to_vec();
+            let kind = catalog_field_u16(&write.key, &current, 2, 1)?;
+            if matches!(kind, 8 | 9) {
+                let id: [u8; 16] = write
+                    .key
+                    .get(3..19)
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .ok_or(CommitError::InvalidCatalog)?;
+                if !tombstone_ids.contains(&id) {
+                    return Err(CommitError::InvalidCatalog);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_final_credential_verifiers(
     transaction: &WriteTransaction,
     catalog_writes: &[CatalogWrite],
@@ -2425,15 +2580,26 @@ fn validate_final_credential_verifiers(
         }
         let next = decode_verifier_record(&record).map_err(|_| CommitError::InvalidCatalog)?;
         let principal_key = id_catalog_key(10, next.user_id);
-        let principal_bytes = final_catalog_value(&table, catalog_writes, &principal_key)?
-            .ok_or(CommitError::InvalidCatalog)?;
-        if decode_principal_kind(&principal_key, &principal_bytes)? != 1 {
-            return Err(CommitError::InvalidCatalog);
-        }
-        let login_enabled = catalog_field_bytes(&principal_key, &principal_bytes, 10, 3)?;
-        if !matches!(login_enabled.as_slice(), [0] | [1]) || (!next.revoked && login_enabled != [1])
-        {
-            return Err(CommitError::InvalidCatalog);
+        match final_catalog_value(&table, catalog_writes, &principal_key)? {
+            Some(principal_bytes) => {
+                if decode_principal_kind(&principal_key, &principal_bytes)? != 1 {
+                    return Err(CommitError::InvalidCatalog);
+                }
+                let login_enabled = catalog_field_bytes(&principal_key, &principal_bytes, 10, 3)?;
+                if !matches!(login_enabled.as_slice(), [0] | [1])
+                    || (!next.revoked && login_enabled != [1])
+                {
+                    return Err(CommitError::InvalidCatalog);
+                }
+            }
+            None => {
+                let tombstone_key = id_catalog_key(17, next.user_id);
+                if !next.revoked
+                    || final_catalog_value(&table, catalog_writes, &tombstone_key)?.is_none()
+                {
+                    return Err(CommitError::InvalidCatalog);
+                }
+            }
         }
 
         if catalog_writes.iter().any(|write| write.key == key)
@@ -4724,6 +4890,15 @@ fn commit_storage_changes_inner_with_admin_credential_check(
         Err(error) => return Err(error),
     }
     match validate_final_principal_names(&transaction, catalog_writes) {
+        Ok(()) => {}
+        Err(CommitError::InvalidCatalog) => {
+            transaction.abort().map_err(storage_error)?;
+            record_aborted_outcome(database, invocation_id, principal_id, retention_deadline_us)?;
+            return Err(CommitError::InvalidCatalog);
+        }
+        Err(error) => return Err(error),
+    }
+    match validate_final_identity_tombstones(&transaction, catalog_writes) {
         Ok(()) => {}
         Err(CommitError::InvalidCatalog) => {
             transaction.abort().map_err(storage_error)?;
@@ -8262,8 +8437,8 @@ fn foreign_key_ddl_authority_guards(
     Ok(guards)
 }
 
-/// Authorize user/role creation, rename, and login-state changes. Drops are
-/// rejected until durable tombstones prevent ID reuse.
+/// Authorize user/role creation, rename, and login-state changes. Drops remain
+/// unavailable until their RESTRICT dependency cleanup is implemented.
 fn identity_ddl_authority_guards(
     database: &Database,
     principal_id: [u8; 16],
@@ -8518,6 +8693,20 @@ fn identity_ddl_authority_guards(
     admin_role_id[15] = 3;
     principal_ids.insert(admin_role_id);
     principal_ids.extend(credential_changes.values().copied());
+    for (object_id, (_, created, _, _, _)) in &principal_changes {
+        if !created {
+            continue;
+        }
+        let tombstone_key = id_catalog_key(17, *object_id);
+        let tombstone = catalog
+            .get(tombstone_key.as_slice())
+            .map_err(storage_error)?
+            .map(|value| value.value().to_vec());
+        if tombstone.is_some() {
+            return Err(CommitError::DdlAuthorizationDenied);
+        }
+        add_catalog_guard(&mut guards, tombstone_key, None);
+    }
     let mut membership_count = 0usize;
     for entry in catalog
         .range(membership_prefix.as_slice()..)

@@ -200,7 +200,7 @@ fn validate_catalog(
     metadata: &EngineMetadata,
 ) -> Result<PersistedCatalog, StartupError> {
     let table = read.open_table(CATALOG).map_err(storage_error)?;
-    let mut family_counts = [0usize; 17];
+    let mut family_counts = [0usize; 18];
     let mut count = 0usize;
     let mut index_definitions = HashMap::new();
     let mut builtin_mappings = None;
@@ -210,6 +210,7 @@ fn validate_catalog(
     let mut principal_names = HashMap::<[u8; 16], Vec<u8>>::new();
     let mut principal_name_ids = HashMap::<Vec<u8>, [u8; 16]>::new();
     let mut object_kinds = HashMap::<[u8; 16], u16>::new();
+    let mut identity_tombstones = HashSet::<[u8; 16]>::new();
     let mut object_owners = Vec::<[u8; 16]>::new();
     let mut typed_object_kinds = HashMap::<[u8; 16], u16>::new();
     let mut builtin_type_kinds = HashMap::<[u8; 16], u16>::new();
@@ -247,7 +248,7 @@ fn validate_catalog(
             return Err(StartupError::InvalidCatalog);
         }
         let family_code = u16::from_be_bytes([key[0], key[1]]) as usize;
-        if !(1..=16).contains(&family_code) {
+        if !(1..=17).contains(&family_code) {
             return Err(StartupError::InvalidCatalog);
         }
         family_counts[family_code] = family_counts[family_code]
@@ -266,6 +267,15 @@ fn validate_catalog(
         if record.family_code == 16 {
             credential_verifiers
                 .push(decode_verifier_record(&record).map_err(|_| StartupError::InvalidCatalog)?);
+        }
+        if record.family_code == 17 {
+            let tombstone_id = key
+                .get(3..19)
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or(StartupError::InvalidCatalog)?;
+            if key.len() != 19 || key[2] != 1 || !identity_tombstones.insert(tombstone_id) {
+                return Err(StartupError::InvalidCatalog);
+            }
         }
         if record.family_code == 1 {
             if key.len() != 19
@@ -702,10 +712,21 @@ fn validate_catalog(
     if database_records != 1 {
         return Err(StartupError::InvalidCatalog);
     }
+    if identity_tombstones
+        .iter()
+        .any(|id| object_kinds.contains_key(id) || principal_kinds.contains_key(id))
+    {
+        return Err(StartupError::InvalidCatalog);
+    }
     if credential_verifiers.iter().any(|credential| {
-        principal_kinds.get(&credential.user_id) != Some(&1)
-            || (!credential.revoked
-                && principal_login_enabled.get(&credential.user_id) != Some(&true))
+        match principal_kinds.get(&credential.user_id) {
+            Some(1) => {
+                !credential.revoked
+                    && principal_login_enabled.get(&credential.user_id) != Some(&true)
+            }
+            Some(_) => true,
+            None => !credential.revoked || !identity_tombstones.contains(&credential.user_id),
+        }
     }) {
         return Err(StartupError::InvalidCatalog);
     }
@@ -1142,7 +1163,7 @@ fn validate_database_record(
         .try_into()
         .map_err(|_| StartupError::InvalidCatalog)?;
     let count = u32::from_le_bytes(count_bytes) as usize;
-    if count != 30 {
+    if count != 31 {
         return Err(StartupError::InvalidCatalog);
     }
     let expected_len = count
@@ -1180,7 +1201,7 @@ fn validate_database_record(
 }
 
 fn required_bootstrap_codes() -> impl Iterator<Item = u16> {
-    [1, 2, 3].into_iter().chain(101..=111).chain(201..=216)
+    [1, 2, 3].into_iter().chain(101..=111).chain(201..=217)
 }
 
 fn is_required_bootstrap_code(code: u16) -> bool {

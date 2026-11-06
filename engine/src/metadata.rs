@@ -43,7 +43,7 @@ impl std::error::Error for MetadataError {}
 impl EngineMetadata {
     /// Compatibility of the independent logical database formats supported by this engine.
     pub fn supports_current_formats(&self) -> bool {
-        self.catalog_version == 1
+        self.catalog_version == 2
             && self.expression_version == 1
             && self.builtin_semantics_version == 1
     }

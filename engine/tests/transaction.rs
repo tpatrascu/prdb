@@ -883,7 +883,7 @@ fn initialize(path: &std::path::Path) -> Result<Database, Box<dyn std::error::Er
     }
     let metadata = EngineMetadata {
         database_id: [0x33; 16],
-        catalog_version: 1,
+        catalog_version: 2,
         expression_version: 1,
         builtin_semantics_version: 1,
         commit_sequence: 0,
@@ -2259,7 +2259,7 @@ fn index_overlay_budget_aborts_the_entire_invocation() -> Result<(), Box<dyn std
 #[test]
 fn unsupported_database_versions_reject_transactions_and_commits()
 -> Result<(), Box<dyn std::error::Error>> {
-    for versions in [(2, 1, 1), (1, 2, 1), (1, 1, 2)] {
+    for versions in [(1, 1, 1), (2, 2, 1), (2, 1, 2)] {
         let fixture = Fixture::new();
         let database = initialize(&fixture.path())?;
         let mut pending = InvocationTransaction::begin(&database, [32; 16], [9; 16], 9_999, 2, 64)?;
@@ -2476,7 +2476,7 @@ fn admission_requires_ready_metadata_and_a_fresh_valid_invocation_id()
     let write = database.begin_write()?;
     let next = EngineMetadata {
         database_id: [0x33; 16],
-        catalog_version: 1,
+        catalog_version: 2,
         expression_version: 1,
         builtin_semantics_version: 1,
         commit_sequence: 1,

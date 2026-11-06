@@ -515,7 +515,7 @@
 - Real-redb tests cover rejection of a user name colliding with the reserved role, startup rejection of persisted duplicates, and an atomic rename that frees a name for a newly created role.
 - Verification: the prescribed Nix-shell workspace build, formatting check, Clippy with warnings denied, and workspace tests passed. Changed Markdown links and `git diff --check` passed.
 - Contract update: [users and roles](../../specs/ddl-identity.md).
-- Remaining: action-specific identity lifecycle authorization and durable identity tombstones/non-reuse remain open; DROP is not exposed until ID non-reuse can be enforced.
+- Remaining: durable identity tombstones now enforce ID non-reuse; DROP remains unexposed until authorized RESTRICT dependency cleanup is implemented.
 
 ## SM-5 dependency: identity lifecycle DDL authorization — in progress
 
@@ -524,7 +524,7 @@
 - A real-redb regression covers MANAGE_USERS admission, MANAGE_ROLES denial, user rename and disable, rejection of disable without token revocation, atomic disable plus revocation, last-login-admin preservation, database-admin role creation, and committed sequences.
 - Verification: the prescribed Nix-shell workspace build, formatting check, Clippy with warnings denied, and workspace tests passed. Changed Markdown links and `git diff --check` passed.
 - Contract: [users and roles](../../specs/ddl-identity.md).
-- Remaining: role/user deletion needs durable ID tombstones and deterministic authorization-change race coverage remains open.
+- Remaining: role/user deletion still needs authorized RESTRICT dependency cleanup, and deterministic authorization-change race coverage remains open.
 
 ## SM-5 dependency: credential verifier profile and token-backed invocation admission — in progress
 
@@ -578,7 +578,7 @@
 - A real-redb regression covers self-inventory, inherited `MANAGE_USERS`, denial for an unrelated user, and visibility of revocation state after the revoke commit.
 - Verification: in the prescribed Nix shell, locked workspace build, formatting check, Clippy with warnings denied, and all 216 workspace tests passed. Changed Markdown local links and `git diff --check` passed.
 - Contract updates: [users and roles](../../specs/ddl-identity.md) and [storage manager](../../specs/storage-manager.md).
-- Remaining: token request rate limits, bootstrap secret handoff, gateway/supervisor integration, and authenticated control-channel integration remain open.
+- Remaining: token request rate limits, bootstrap secret handoff, gateway/supervisor integration, authenticated control-channel integration, and user/role DROP RESTRICT remain open.
 
 ## SM-5 dependency: credential-backed last-administrator protection
 
@@ -588,4 +588,14 @@
 - Real-redb regressions cover refusal to disable/revoke one administrator when the only other login admin has expired credentials, refusal to change membership when the resulting administrators have only expired credentials, and successful replacement-first token rotation.
 - Verification: in the prescribed Nix shell, the locked workspace build, formatting check, Clippy with warnings denied, and all 218 workspace tests passed. Changed Markdown links and `git diff --check` passed.
 - Contract: [users and roles](../../specs/ddl-identity.md).
-- Remaining: bootstrap secret handoff, authenticated control-channel/gateway integration, token request rate limits, durable identity tombstones, and deterministic authority-change race coverage remain open.
+- Remaining: bootstrap secret handoff, authenticated control-channel/gateway integration, token request rate limits, user/role DROP RESTRICT, and deterministic authority-change race coverage remain open.
+
+## SM-5 dependency: durable identity tombstones
+
+- Red evidence: extending the catalog registry test to family 17 failed because the identity-tombstone family had no codec schema.
+- Logical catalog schema version 2 adds family 17 for immutable ID-only tombstones and bootstrap storage-object code 217. Startup and serialized commits reject tombstones that overlap live object or principal IDs; identity creation rejects a tombstoned ID and guards the absent tombstone key through publication. Version-1 catalogs fail closed until an offline migration path exists.
+- Revoked credential verifiers may remain attached to a tombstoned user ID, while unrevoked verifiers still require a live LOGIN user.
+- Real-redb regressions cover accepted tombstones, startup rejection of ID reuse, identity-creation refusal, and catalog-commit refusal to tombstone a live principal.
+- Verification: the prescribed Nix-shell locked workspace build, formatting check, Clippy with warnings denied, and all 220 workspace tests passed. Changed Markdown local links and `git diff --check` passed.
+- Contract updates: [catalog payloads](../../specs/catalog-payloads.md), [catalog lifecycle](../../specs/catalog-lifecycle.md), [data dictionary](../../specs/data-dictionary.md), and [users and roles](../../specs/ddl-identity.md).
+- Remaining: user/role DROP RESTRICT must publish the tombstone and remove blocked references atomically.

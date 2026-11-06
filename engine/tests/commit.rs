@@ -69,6 +69,16 @@ fn id_catalog_key(family: u16, object_id: [u8; 16]) -> Vec<u8> {
     key
 }
 
+fn identity_tombstone_write(object_id: [u8; 16]) -> CatalogWrite {
+    let key = id_catalog_key(17, object_id);
+    let payload = encode_envelope(&family_schema(17).unwrap(), &key, &[]).unwrap();
+    CatalogWrite {
+        key,
+        expected_value: None,
+        payload: Some(payload),
+    }
+}
+
 fn builtin_id(code: u16) -> [u8; 16] {
     let mut id = [0x80; 16];
     id[15] = code as u8;
@@ -317,11 +327,11 @@ fn bootstrap_database_record(database_id: [u8; 16]) -> (Vec<u8>, Vec<u8>) {
     let mut key = 1u16.to_be_bytes().to_vec();
     key.push(1);
     key.extend_from_slice(&database_id);
-    let mut builtins = 30u32.to_le_bytes().to_vec();
+    let mut builtins = 31u32.to_le_bytes().to_vec();
     for code in [1u16, 2, 3]
         .into_iter()
         .chain(101u16..=111)
-        .chain(201u16..=216)
+        .chain(201u16..=217)
     {
         builtins.extend_from_slice(&code.to_le_bytes());
         builtins.extend_from_slice(&0u16.to_le_bytes());
@@ -336,7 +346,7 @@ fn bootstrap_database_record(database_id: [u8; 16]) -> (Vec<u8>, Vec<u8>) {
         CatalogField {
             tag: 2,
             wire_type: WireType::U32,
-            payload: 1u32.to_le_bytes().to_vec(),
+            payload: 2u32.to_le_bytes().to_vec(),
         },
         CatalogField {
             tag: 3,
@@ -419,7 +429,7 @@ fn initialize(path: &std::path::Path) -> Result<Database, Box<dyn std::error::Er
     }
     let metadata = EngineMetadata {
         database_id: [0x33; 16],
-        catalog_version: 1,
+        catalog_version: 2,
         expression_version: 1,
         builtin_semantics_version: 1,
         commit_sequence: 0,
@@ -4770,6 +4780,65 @@ fn storage_manager_restricts_system_privilege_ddl_to_database_admins()
     assert!(
         catalog
             .get(dependency_write(target_user, database_id, 5).key.as_slice())?
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
+fn identity_ddl_refuses_to_reuse_a_tombstoned_id() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let admin_user = id(0xc1);
+    let retired_id = id(0xc2);
+    let admin_role = builtin_owner_id();
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let setup = [
+        principal_write_with_name(admin_user, 1, 1, "tombstone_admin"),
+        object_write_with_name(admin_user, 8, "tombstone_admin"),
+        membership_write_with_grantor(admin_user, admin_role, admin_role),
+        dependency_write(admin_user, admin_role, 5),
+    ];
+    let mut setup_audit = identity_audit_event(0xc0, admin_role, admin_user);
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(id(0xc0), admin_role, 9_999, &setup, &[setup_audit])?;
+    storage.commit_catalog_and_audit(
+        id(0xc3),
+        admin_user,
+        9_999,
+        &[identity_tombstone_write(retired_id)],
+        &[identity_audit_event(0xc3, admin_user, retired_id)],
+    )?;
+
+    assert_eq!(
+        storage.commit_authorized_identity_ddl(
+            id(0xc4),
+            admin_user,
+            9_999,
+            &[
+                principal_write_with_name(retired_id, 1, 1, "retired_identity"),
+                object_write_with_name(retired_id, 8, "retired_identity"),
+            ],
+            &[identity_audit_event(0xc4, admin_user, retired_id)],
+        ),
+        Err(CommitError::DdlAuthorizationDenied)
+    );
+    assert_eq!(
+        storage.commit_catalog_and_audit(
+            id(0xc5),
+            admin_user,
+            9_999,
+            &[identity_tombstone_write(admin_user)],
+            &[identity_audit_event(0xc5, admin_user, admin_user)],
+        ),
+        Err(CommitError::InvalidCatalog)
+    );
+    assert_eq!(commit_sequence(&database)?, 2);
+    assert!(
+        database
+            .begin_read()?
+            .open_table(CATALOG)?
+            .get(id_catalog_key(10, retired_id).as_slice())?
             .is_none()
     );
     Ok(())

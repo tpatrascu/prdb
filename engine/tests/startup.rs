@@ -47,7 +47,7 @@ impl Fixture {
         schema::create_tables(&write).unwrap();
         let metadata = EngineMetadata {
             database_id: [0x11; 16],
-            catalog_version: 1,
+            catalog_version: 2,
             expression_version: 1,
             builtin_semantics_version: 1,
             commit_sequence,
@@ -55,7 +55,7 @@ impl Fixture {
         }
         .encode()
         .unwrap();
-        let (database_key, database_value) = database_record([0x11; 16], 1, 1, 1);
+        let (database_key, database_value) = database_record([0x11; 16], 2, 1, 1);
         write
             .open_table(CATALOG)
             .unwrap()
@@ -133,8 +133,8 @@ fn builtin_mapping() -> Vec<u8> {
     let codes = [1u16, 2, 3]
         .into_iter()
         .chain(101u16..=111)
-        .chain(201u16..=216);
-    let mut mapping = 30u32.to_le_bytes().to_vec();
+        .chain(201u16..=217);
+    let mut mapping = 31u32.to_le_bytes().to_vec();
     for code in codes {
         mapping.extend_from_slice(&code.to_le_bytes());
         mapping.extend_from_slice(&0u16.to_le_bytes());
@@ -682,6 +682,14 @@ fn put_catalog(database: &Database, key: &[u8], value: &[u8]) {
     write.commit().unwrap();
 }
 
+fn identity_tombstone_record(id: [u8; 16]) -> (Vec<u8>, Vec<u8>) {
+    let mut key = 17u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&id);
+    let value = encode_envelope(&family_schema(17).unwrap(), &key, &[]).unwrap();
+    (key, value)
+}
+
 fn principal_record(
     id: [u8; 16],
     kind: u16,
@@ -1198,6 +1206,29 @@ fn put_table(database: &Database, table_id: [u8; 16]) {
 }
 
 #[test]
+fn identity_tombstones_are_valid_and_reject_live_id_reuse() -> Result<(), Box<dyn std::error::Error>>
+{
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    let retired_id = [0x42; 16];
+    let (tombstone_key, tombstone_value) = identity_tombstone_record(retired_id);
+    put_catalog(&database, &tombstone_key, &tombstone_value);
+    validate_persisted_records(&database)?;
+
+    let (principal_key, principal_value) =
+        principal_record_with_name(retired_id, 1, true, 1, "retired_identity");
+    let (object_key, object_value) =
+        object_record_named(retired_id, 8, builtin_owner_id(), "retired_identity");
+    put_catalog(&database, &principal_key, &principal_value);
+    put_catalog(&database, &object_key, &object_value);
+    assert_eq!(
+        validate_persisted_records(&database),
+        Err(StartupError::InvalidCatalog)
+    );
+    Ok(())
+}
+
+#[test]
 fn validates_ready_image_records_and_references() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
     let database = fixture.database(3);
@@ -1420,7 +1451,7 @@ fn accepts_repeated_null_keys_in_persisted_unique_indexes() -> Result<(), Box<dy
 fn rejects_ready_image_without_database_bootstrap_record() {
     let fixture = Fixture::new();
     let database = fixture.database(0);
-    let (key, _) = database_record([0x11; 16], 1, 1, 1);
+    let (key, _) = database_record([0x11; 16], 2, 1, 1);
     let write = database.begin_write().unwrap();
     write.open_table(CATALOG).unwrap().remove(&key[..]).unwrap();
     write.commit().unwrap();
@@ -1434,7 +1465,7 @@ fn rejects_ready_image_without_database_bootstrap_record() {
 fn rejects_bootstrap_versions_that_disagree_with_engine_metadata() {
     let fixture = Fixture::new();
     let database = fixture.database(0);
-    let (key, value) = database_record([0x11; 16], 2, 1, 1);
+    let (key, value) = database_record([0x11; 16], 1, 1, 1);
     put_catalog(&database, &key, &value);
     assert!(matches!(
         validate_persisted_records(&database),
@@ -1447,7 +1478,7 @@ fn rejects_noncanonical_bootstrap_mappings() {
     for corrupt in ["missing", "unsorted", "reserved", "duplicate_id"] {
         let fixture = Fixture::new();
         let database = fixture.database(0);
-        let (key, _) = database_record([0x11; 16], 1, 1, 1);
+        let (key, _) = database_record([0x11; 16], 2, 1, 1);
         let mut mapping = builtin_mapping();
         match corrupt {
             "missing" => {
@@ -1471,7 +1502,7 @@ fn rejects_noncanonical_bootstrap_mappings() {
             CatalogField {
                 tag: 2,
                 wire_type: WireType::U32,
-                payload: 1u32.to_le_bytes().to_vec(),
+                payload: 2u32.to_le_bytes().to_vec(),
             },
             CatalogField {
                 tag: 3,
@@ -2571,7 +2602,7 @@ fn initializing_database_is_not_ready_for_normal_startup() {
     let database = fixture.database(0);
     let metadata = EngineMetadata {
         database_id: [0x11; 16],
-        catalog_version: 1,
+        catalog_version: 2,
         expression_version: 1,
         builtin_semantics_version: 1,
         commit_sequence: 0,

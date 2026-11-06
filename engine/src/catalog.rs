@@ -260,6 +260,7 @@ pub fn family_schema(family_code: u16) -> Option<FamilySchema<'static>> {
         13 => &POLICY_FIELDS,
         14 | 15 => &NO_FIELDS,
         16 => &VERIFIER_FIELDS,
+        17 => &NO_FIELDS,
         _ => return None,
     };
     Some(FamilySchema {
@@ -287,7 +288,7 @@ impl std::fmt::Display for InvalidCatalogRecord {
 impl std::error::Error for InvalidCatalogRecord {}
 
 fn validate_schema(schema: &FamilySchema<'_>) -> Result<(), InvalidCatalogRecord> {
-    if !(1..=16).contains(&schema.family_code) || schema.fields.len() > MAX_CATALOG_FIELDS {
+    if !(1..=17).contains(&schema.family_code) || schema.fields.len() > MAX_CATALOG_FIELDS {
         return Err(InvalidCatalogRecord);
     }
     let mut previous = 0;
@@ -308,7 +309,7 @@ fn validate_key(family_code: u16, logical_key: &[u8]) -> Result<(), InvalidCatal
     let valid_id = |bytes: &[u8]| bytes.len() == 17 && bytes[0] == 1 && bytes[1..] != [0; 16];
     let valid_u16 = |bytes: &[u8]| bytes.len() == 3 && bytes[0] == 1;
     let valid = match family_code {
-        1..=10 | 13 | 16 => valid_id(components),
+        1..=10 | 13 | 16 | 17 => valid_id(components),
         11 => components.len() == 34 && valid_id(&components[..17]) && valid_id(&components[17..]),
         12 => {
             components.len() == 57
