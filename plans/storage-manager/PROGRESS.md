@@ -489,3 +489,12 @@
 - Verification: in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and workspace tests passed. Changed Markdown links and `git diff --check` passed.
 - Contract update: [users and roles](../../specs/ddl-identity.md).
 - Remaining: credential-backed last-administrator validation, authorization for identity/grant/policy/constraint DDL, token-backed gateway admission, and deterministic authorization-change race coverage remain open.
+
+## SM-5 dependency: system privilege DDL authorization — in progress
+
+- `StorageManager::commit_authorized_system_privilege_ddl` handles only database-scoped `MANAGE_USERS`, `MANAGE_ROLES`, and `CREATE_SCHEMA` grant/revoke records, their authority dependencies, and grantees' authority-epoch updates. It denies system privilege changes unless the actor is a current database administrator.
+- The route guards the actor's login state, complete membership graph, role identities, and successful audit actor through serialized publication. New grant records identify the authenticated administrator as grantor.
+- A real-redb regression covers administrator grant/revoke, denial for a non-administrator who holds `MANAGE_ROLES`, atomic dependency removal, epoch advances, and durable outcomes.
+- Verification: in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and workspace tests passed. Changed Markdown links and `git diff --check` passed.
+- Contract update: [users and roles](../../specs/ddl-identity.md).
+- Remaining: ordinary object grant authorization, user/role lifecycle DDL, credential-backed last-administrator validation, token-backed gateway admission, and deterministic authorization-change race coverage remain open.

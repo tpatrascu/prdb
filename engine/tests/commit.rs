@@ -3628,6 +3628,139 @@ fn storage_manager_authorizes_membership_ddl_by_system_privilege_and_admin_role(
 }
 
 #[test]
+fn storage_manager_restricts_system_privilege_ddl_to_database_admins()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let admin_user = id(0x71);
+    let role_manager = id(0x72);
+    let target_user = id(0x73);
+    let admin_role = builtin_owner_id();
+    let database_id = id(0x33);
+    let records = [
+        principal_write_with_name(admin_user, 1, 1, "system_admin"),
+        object_write_with_name(admin_user, 8, "system_admin"),
+        principal_write_with_name(role_manager, 1, 1, "system_role_manager"),
+        object_write_with_name(role_manager, 8, "system_role_manager"),
+        principal_write_with_name(target_user, 1, 1, "system_target"),
+        object_write_with_name(target_user, 8, "system_target"),
+        membership_write_with_grantor(admin_user, admin_role, admin_role),
+        dependency_write(admin_user, admin_role, 5),
+        grant_write(role_manager, database_id, 13, 1, database_id, admin_role),
+        dependency_write(role_manager, database_id, 5),
+    ];
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let mut setup_audit = audit_event(90);
+    setup_audit.actor_id = Some(admin_role);
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(id(90), admin_role, 9_999, &records, &[setup_audit])?;
+
+    let bump_target_epoch = |epoch| -> Result<_, Box<dyn std::error::Error>> {
+        let mut write = principal_write_with_name(target_user, 1, epoch, "system_target");
+        let read = database.begin_read()?;
+        write.expected_value = Some(
+            read.open_table(CATALOG)?
+                .get(id_catalog_key(10, target_user).as_slice())?
+                .ok_or("missing system grant target")?
+                .value()
+                .to_vec(),
+        );
+        Ok(write)
+    };
+    let remove_catalog_record = |mut write: CatalogWrite| -> Result<_, Box<dyn std::error::Error>> {
+        let read = database.begin_read()?;
+        write.expected_value = Some(
+            read.open_table(CATALOG)?
+                .get(write.key.as_slice())?
+                .ok_or("missing system privilege record")?
+                .value()
+                .to_vec(),
+        );
+        write.payload = None;
+        Ok(write)
+    };
+
+    let manage_users_grant = grant_write(target_user, database_id, 12, 1, database_id, admin_user);
+    let mut grant_audit = audit_event(91);
+    grant_audit.actor_id = Some(admin_user);
+    grant_audit.action = AuditAction::AuthorityChange;
+    assert_eq!(
+        storage.commit_authorized_system_privilege_ddl(
+            id(91),
+            admin_user,
+            9_999,
+            &[
+                manage_users_grant.clone(),
+                dependency_write(target_user, database_id, 5),
+                bump_target_epoch(2)?,
+            ],
+            &[grant_audit],
+        )?,
+        2
+    );
+
+    let create_schema_grant =
+        grant_write(target_user, database_id, 14, 1, database_id, role_manager);
+    let mut denied_audit = audit_event(92);
+    denied_audit.actor_id = Some(role_manager);
+    denied_audit.action = AuditAction::AuthorityChange;
+    assert_eq!(
+        storage.commit_authorized_system_privilege_ddl(
+            id(92),
+            role_manager,
+            9_999,
+            &[
+                create_schema_grant,
+                dependency_write(target_user, database_id, 5),
+                bump_target_epoch(3)?,
+            ],
+            &[denied_audit],
+        ),
+        Err(CommitError::DdlAuthorizationDenied)
+    );
+
+    let mut revoke_audit = audit_event(93);
+    revoke_audit.actor_id = Some(admin_user);
+    revoke_audit.action = AuditAction::AuthorityChange;
+    assert_eq!(
+        storage.commit_authorized_system_privilege_ddl(
+            id(93),
+            admin_user,
+            9_999,
+            &[
+                remove_catalog_record(manage_users_grant.clone())?,
+                remove_catalog_record(dependency_write(target_user, database_id, 5))?,
+                bump_target_epoch(3)?,
+            ],
+            &[revoke_audit],
+        )?,
+        3
+    );
+    assert_eq!(commit_sequence(&database)?, 3);
+    for (invocation_id, principal_id, status) in [
+        (id(91), admin_user, OutcomeStatus::Committed),
+        (id(92), role_manager, OutcomeStatus::Aborted),
+        (id(93), admin_user, OutcomeStatus::Committed),
+    ] {
+        assert_eq!(
+            lookup_outcome(&database, invocation_id, principal_id, 1)?
+                .unwrap()
+                .status,
+            status
+        );
+    }
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    assert!(catalog.get(manage_users_grant.key.as_slice())?.is_none());
+    assert!(
+        catalog
+            .get(dependency_write(target_user, database_id, 5).key.as_slice())?
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
 fn storage_manager_rejects_unique_index_backfill_with_duplicate_values()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
