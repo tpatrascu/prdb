@@ -902,3 +902,10 @@
 - Changed code and contracts: [planner IPC](../../engine/src/planner_ipc.rs), [planner connection state](../../engine/src/transaction.rs), [planner handle](../../engine/src/metadata_discovery.rs), [IPC protocol](../../specs/ipc-protocol.md), and [statistics service](../../specs/storage-manager.md).
 - Verification: workspace build, format check, warning-denied Clippy, and `git diff --check` pass. Tests were not run in this increment.
 - Remaining: planner stream provisioning, planner task lifecycle/budget integration, and predicate/access-path estimates remain open.
+
+## ST-1 / ST-2 dependency: planner stream lifecycle
+
+- Behavior: `serve_planner` now loops over a single provisioned planner stream, enforces unique request IDs and a 256-request cap, preserves kind-9 handle state across requests, and durably aborts on disconnect or protocol failure.
+- Changed code and contract: [planner stream and dispatcher](../../engine/src/planner_ipc.rs) and [planner IPC contract](../../specs/ipc-protocol.md).
+- Verification: format, workspace build, and warning-denied Clippy pass. Tests were not run in this increment.
+- Remaining: supervisor provisioning, shared planner/executor invocation scheduling, and cancellation-aware planner task draining remain open.

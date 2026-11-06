@@ -8,10 +8,12 @@ use crate::ipc::{DispatchError, IpcFrame, Operation, ServiceRole, authorize_oper
 use crate::metadata_discovery::{AuthorizedRelationDescription, PlanningTableHandle};
 use crate::statistics::{AuthorizedScanEstimate, AuthorizedScanSummary, ColumnPopulation};
 use crate::transaction::{PlannerMetadataConnection, TransactionError};
+use std::io::{Read, Write};
 
 pub const PLANNER_PAYLOAD_VERSION: u16 = 1;
 const DESCRIBE_HEADER_BYTES: usize = 3;
 const ESTIMATE_HEADER_BYTES: usize = 20;
+pub const MAX_PLANNER_REQUESTS_PER_CONNECTION: usize = 256;
 
 #[derive(Debug)]
 pub enum PlannerRequestError {
@@ -19,6 +21,15 @@ pub enum PlannerRequestError {
     ResponseTooLarge,
     Dispatch(DispatchError),
     Transaction(TransactionError),
+}
+
+#[derive(Debug)]
+pub enum PlannerConnectionError {
+    Frame(crate::ipc::FrameError),
+    Request(PlannerRequestError),
+    Abort(TransactionError),
+    RequestLimitExceeded,
+    DuplicateRequestId,
 }
 
 impl std::fmt::Display for PlannerRequestError {
@@ -305,6 +316,65 @@ pub fn dispatch_planner_request(
         request_id: request.request_id,
         payload,
     })
+}
+
+/// Serve one planner stream bound out of band to a single invocation. A clean
+/// disconnect, malformed frame, or planner protocol violation aborts that
+/// invocation and records its durable outcome.
+pub fn serve_planner<S: Read + Write>(
+    stream: &mut S,
+    transaction: &mut crate::transaction::InvocationTransaction<'_>,
+) -> Result<(), PlannerConnectionError> {
+    let mut connection = transaction.open_planner_metadata_connection();
+    let mut request_ids = std::collections::HashSet::new();
+    loop {
+        let request = match crate::ipc::read_frame(stream) {
+            Ok(Some(request)) => request,
+            Ok(None) => {
+                drop(connection);
+                return transaction.abort().map_err(PlannerConnectionError::Abort);
+            }
+            Err(error) => {
+                drop(connection);
+                return match transaction.abort() {
+                    Ok(()) => Err(PlannerConnectionError::Frame(error)),
+                    Err(abort_error) => Err(PlannerConnectionError::Abort(abort_error)),
+                };
+            }
+        };
+        if request_ids.len() >= MAX_PLANNER_REQUESTS_PER_CONNECTION {
+            drop(connection);
+            return match transaction.abort() {
+                Ok(()) => Err(PlannerConnectionError::RequestLimitExceeded),
+                Err(error) => Err(PlannerConnectionError::Abort(error)),
+            };
+        }
+        if !request_ids.insert(request.request_id) {
+            drop(connection);
+            return match transaction.abort() {
+                Ok(()) => Err(PlannerConnectionError::DuplicateRequestId),
+                Err(error) => Err(PlannerConnectionError::Abort(error)),
+            };
+        }
+        let response =
+            match dispatch_planner_request(ServiceRole::Planner, &mut connection, &request) {
+                Ok(response) => response,
+                Err(error) => {
+                    drop(connection);
+                    return match transaction.abort() {
+                        Ok(()) => Err(PlannerConnectionError::Request(error)),
+                        Err(abort_error) => Err(PlannerConnectionError::Abort(abort_error)),
+                    };
+                }
+            };
+        if let Err(error) = crate::ipc::write_frame(stream, &response) {
+            drop(connection);
+            return match transaction.abort() {
+                Ok(()) => Err(PlannerConnectionError::Frame(error)),
+                Err(abort_error) => Err(PlannerConnectionError::Abort(abort_error)),
+            };
+        }
+    }
 }
 
 fn read_u16(payload: &[u8], offset: usize) -> Result<u16, PlannerRequestError> {
