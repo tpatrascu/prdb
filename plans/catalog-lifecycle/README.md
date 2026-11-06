@@ -6,7 +6,7 @@ Implement [bootstrap/startup/offline upgrades](../../specs/catalog-lifecycle.md)
 
 ## Decisions Before Implementation
 
-The local directory profile and Rust API flow are now specified and implemented for INITIALIZING/READY persistence, exclusive instance ownership, initial administrator creation, one-time secret transfer, and interrupted-handoff token rotation. Still define the protected setup socket/supervisor channel and delivery acknowledgement, supported version matrix, operator diagnostics, backup/retained-source verification, migration progress/publication and manual administrator recovery commands. Distinguish redb format, engine/catalog, policy IR, verifier and built-in semantics versions from network/ABI/plan versions.
+The local directory profile, one-time secret handoff over a permission-restricted Unix socket, and interrupted-handoff token rotation are specified and implemented at the Rust API boundary. Still integrate the production supervisor and operator-facing setup client, define the supported version matrix and operator diagnostics, and specify backup/retained-source verification, migration progress/publication and manual administrator recovery commands. Distinguish redb format, engine/catalog, policy IR, verifier and built-in semantics versions from network/ABI/plan versions.
 
 ## Increments
 
@@ -21,4 +21,4 @@ The local directory profile and Rust API flow are now specified and implemented 
 
 ## Acceptance and Handoff
 
-The CL-1 bootstrap core and the Rust API portion of CL-2 are implemented with real isolated-file tests for duplicate initialization, lock exclusion, lost handoff and pre-commit recovery. Exercise all remaining interruption points, deliver and acknowledge through the protected supervisor channel, and cover multiple identities/policies plus populated data. Use supported redb open/upgrade procedures; never edit private headers, roots or checkpoint metadata. The generation publication design must be reconciled with redb ownership in specs before implementation. Do not claim upgrade safety before a supported transition graph and executable fixtures exist.
+The CL-1 bootstrap core and CL-2 local socket handoff are implemented with real isolated-file tests for duplicate initialization, lock exclusion, successful delivery/acknowledgement, disconnect recovery, stale socket cleanup and pre-commit recovery. Integrate the production supervisor and setup client, exercise remaining interruption points, and cover multiple identities/policies plus populated data. Use supported redb open/upgrade procedures; never edit private headers, roots or checkpoint metadata. The generation publication design must be reconciled with redb ownership in specs before implementation. Do not claim upgrade safety before a supported transition graph and executable fixtures exist.

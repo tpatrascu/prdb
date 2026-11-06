@@ -51,8 +51,20 @@ pub fn encode_frame(frame: &IpcFrame) -> Result<Vec<u8>, FrameError> {
 }
 
 pub fn write_frame<W: Write>(writer: &mut W, frame: &IpcFrame) -> Result<(), FrameError> {
-    let encoded = encode_frame(frame)?;
-    writer.write_all(&encoded).map_err(FrameError::Io)
+    validate_operation_and_request(frame.operation, frame.request_id)?;
+    if frame.payload.len() > MAX_PAYLOAD_BYTES {
+        return Err(FrameError::PayloadTooLarge);
+    }
+    let payload_len =
+        u32::try_from(frame.payload.len()).map_err(|_| FrameError::PayloadTooLarge)?;
+    let mut header = [0; HEADER_LEN];
+    header[..4].copy_from_slice(MAGIC);
+    header[4..6].copy_from_slice(&FRAME_VERSION.to_be_bytes());
+    header[6..8].copy_from_slice(&frame.operation.to_be_bytes());
+    header[8..16].copy_from_slice(&frame.request_id.to_be_bytes());
+    header[16..20].copy_from_slice(&payload_len.to_be_bytes());
+    writer.write_all(&header).map_err(FrameError::Io)?;
+    writer.write_all(&frame.payload).map_err(FrameError::Io)
 }
 
 pub fn read_frame<R: Read>(reader: &mut R) -> Result<Option<IpcFrame>, FrameError> {

@@ -1,11 +1,15 @@
-use prdb_engine::bootstrap::{BootstrapError, StorageInstance, initialize, resume};
+use prdb_engine::bootstrap::{
+    BootstrapError, StorageInstance, initialize, receive_bootstrap_handoff, resume,
+};
 use prdb_engine::catalog::decode_registered_envelope;
 use prdb_engine::credentials::hash_token_secret;
+use prdb_engine::ipc::{IpcFrame, read_frame, write_frame};
 use prdb_engine::schema::CATALOG;
 use prdb_engine::startup::{StartupError, validate_persisted_records};
 use prdb_engine::storage_manager::{StorageManager, StorageManagerConfig, StorageManagerInitError};
 use redb::{Database, ReadableDatabase};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use zeroize::Zeroize;
@@ -205,4 +209,126 @@ fn bootstrap_refuses_unrecognized_files_in_a_selected_directory() {
         Err(BootstrapError::NotPrivate)
     ));
     assert_eq!(std::fs::read(note).unwrap(), b"existing user data");
+}
+
+#[test]
+fn local_setup_socket_delivers_once_and_publishes_ready_after_acknowledgement() {
+    let fixture = Fixture::new();
+    let session = initialize(&fixture.0, "first_admin", expiry()).unwrap();
+    let expected_token_id = session.token_id();
+    let listener = session.bind_setup_listener().unwrap();
+    let socket_path = listener.socket_path().to_path_buf();
+    assert_eq!(
+        std::fs::metadata(&socket_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777,
+        0o600
+    );
+
+    let client = std::thread::spawn(move || {
+        let mut stream = UnixStream::connect(socket_path).unwrap();
+        let mut handoff = receive_bootstrap_handoff(&mut stream).unwrap();
+        assert_eq!(handoff.token_id(), expected_token_id);
+        let secret = handoff.take_secret().unwrap();
+        handoff.acknowledge_delivery(&mut stream).unwrap();
+        secret
+    });
+    let ready = listener.accept_and_acknowledge(session).unwrap();
+    let mut secret = client.join().unwrap();
+    assert_eq!(
+        verifier_hash(ready.database(), expected_token_id),
+        hash_token_secret(&secret)
+    );
+    secret.zeroize();
+    assert!(validate_persisted_records(ready.database()).is_ok());
+    assert!(!fixture.0.join(".prdb-setup.sock").exists());
+}
+
+#[test]
+fn local_setup_socket_disconnect_leaves_initializing_and_resume_rotates_token() {
+    let fixture = Fixture::new();
+    let session = initialize(&fixture.0, "first_admin", expiry()).unwrap();
+    let original_token_id = session.token_id();
+    let listener = session.bind_setup_listener().unwrap();
+    let socket_path = listener.socket_path().to_path_buf();
+    let client = std::thread::spawn(move || {
+        let mut stream = UnixStream::connect(socket_path).unwrap();
+        let handoff = receive_bootstrap_handoff(&mut stream).unwrap();
+        drop(handoff);
+    });
+
+    assert!(listener.accept_and_acknowledge(session).is_err());
+    client.join().unwrap();
+    assert!(!fixture.0.join(".prdb-setup.sock").exists());
+    let mut resumed = resume(&fixture.0, "first_admin", expiry()).unwrap();
+    assert_ne!(resumed.token_id(), original_token_id);
+    let mut secret = resumed.take_secret().unwrap();
+    secret.zeroize();
+    let ready = resumed.acknowledge().unwrap();
+    assert!(validate_persisted_records(ready.database()).is_ok());
+}
+
+#[test]
+fn resume_removes_a_private_stale_setup_socket_before_rebinding() {
+    let fixture = Fixture::new();
+    let session = initialize(&fixture.0, "first_admin", expiry()).unwrap();
+    drop(session);
+
+    let socket_path = fixture.0.join(".prdb-setup.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    drop(listener);
+    assert!(socket_path.exists());
+
+    let mut resumed = resume(&fixture.0, "first_admin", expiry()).unwrap();
+    assert!(!socket_path.exists());
+    let mut secret = resumed.take_secret().unwrap();
+    secret.zeroize();
+    let ready = resumed.acknowledge().unwrap();
+    assert!(validate_persisted_records(ready.database()).is_ok());
+}
+
+#[test]
+fn local_setup_socket_rejects_an_acknowledgement_for_another_request() {
+    use prdb_engine::bootstrap::SETUP_ACK_OPERATION;
+
+    let fixture = Fixture::new();
+    let session = initialize(&fixture.0, "first_admin", expiry()).unwrap();
+    let original_token_id = session.token_id();
+    let listener = session.bind_setup_listener().unwrap();
+    let socket_path = listener.socket_path().to_path_buf();
+    let client = std::thread::spawn(move || {
+        let mut stream = UnixStream::connect(socket_path).unwrap();
+        let mut handoff = read_frame(&mut stream).unwrap().unwrap();
+        let request_id = handoff.request_id;
+        handoff.payload.zeroize();
+        let wrong_request_id = if request_id == u64::MAX {
+            request_id - 1
+        } else {
+            request_id + 1
+        };
+        write_frame(
+            &mut stream,
+            &IpcFrame {
+                operation: SETUP_ACK_OPERATION,
+                request_id: wrong_request_id,
+                payload: Vec::new(),
+            },
+        )
+        .unwrap();
+    });
+    assert!(matches!(
+        listener.accept_and_acknowledge(session),
+        Err(BootstrapError::InvalidHandoff)
+    ));
+    client.join().unwrap();
+
+    let mut resumed = resume(&fixture.0, "first_admin", expiry()).unwrap();
+    assert_ne!(resumed.token_id(), original_token_id);
+    let mut secret = resumed.take_secret().unwrap();
+    secret.zeroize();
+    let ready = resumed.acknowledge().unwrap();
+    assert!(validate_persisted_records(ready.database()).is_ok());
 }

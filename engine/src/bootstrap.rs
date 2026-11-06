@@ -9,6 +9,7 @@ use crate::credentials::{
     TOKEN_SECRET_BYTES, decode_verifier_record, encode_new_verifier_record,
     encode_revoked_verifier_record, now_unix_micros,
 };
+use crate::ipc::{FrameError, IpcFrame, read_frame, write_frame};
 use crate::metadata::{EngineMetadata, Lifecycle};
 use crate::schema::{AUDIT, CATALOG, ENGINE_META, create_tables};
 use crate::startup::{StartupError, validate_initializing_records, validate_persisted_records};
@@ -18,14 +19,21 @@ use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
+use std::path::PathBuf;
+use std::time::Duration;
 use zeroize::Zeroize;
 
 const DATABASE_FILE: &str = "storage.redb";
 const LOCK_FILE: &str = ".prdb.lock";
 const MARKER_FILE: &str = ".prdb-bootstrap";
+const SETUP_SOCKET_FILE: &str = ".prdb-setup.sock";
 const MARKER: &[u8] = b"PRDB-LOCAL-SETUP-1\n";
+const SETUP_IO_TIMEOUT: Duration = Duration::from_secs(60);
+pub const SETUP_CREDENTIAL_OPERATION: u16 = 0x0101;
+pub const SETUP_ACK_OPERATION: u16 = 0x0102;
 const ADMIN_ROLE_ID: [u8; 16] = builtin_id(3);
 const MAX_BOOTSTRAP_RECORDS: usize = 65_536;
 type EncodedCatalogRecord = (Vec<u8>, Vec<u8>);
@@ -47,6 +55,9 @@ pub enum BootstrapError {
     InvalidRequest,
     NotInitializing,
     SecretNotTaken,
+    InvalidHandoff,
+    SetupChannel,
+    UnsupportedPlatform,
     RandomnessUnavailable,
     InvalidCatalog,
     Storage,
@@ -71,6 +82,7 @@ impl From<std::io::Error> for BootstrapError {
 /// A setup session holds the database and exclusive instance lock until READY
 /// is published or the session is dropped.
 pub struct BootstrapSession {
+    directory: PathBuf,
     database: Database,
     _lock: InstanceLock,
     admin_user_id: [u8; 16],
@@ -100,6 +112,54 @@ impl BootstrapSession {
         &self.database
     }
 
+    pub fn bind_setup_listener(&self) -> Result<BootstrapSetupListener, BootstrapError> {
+        if self.secret_taken {
+            return Err(BootstrapError::SecretNotTaken);
+        }
+        let path = self.directory.join(SETUP_SOCKET_FILE);
+        let listener = UnixListener::bind(&path)?;
+        let metadata = fs::symlink_metadata(&path)?;
+        let setup_listener = BootstrapSetupListener {
+            listener,
+            path,
+            directory: self.directory.clone(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            cleaned: false,
+        };
+        fs::set_permissions(&setup_listener.path, fs::Permissions::from_mode(0o600))?;
+        validate_private_socket(&setup_listener.path)?;
+        sync_directory(&self.directory)?;
+        Ok(setup_listener)
+    }
+
+    fn send_handoff(&mut self, stream: &mut UnixStream) -> Result<(), BootstrapError> {
+        let request_id = random_request_id()?;
+        let mut secret = self.take_secret().ok_or(BootstrapError::SecretNotTaken)?;
+        let mut payload = Vec::with_capacity(16 + TOKEN_SECRET_BYTES);
+        payload.extend_from_slice(&self.token_id);
+        payload.extend_from_slice(&secret);
+        secret.zeroize();
+        let mut frame = IpcFrame {
+            operation: SETUP_CREDENTIAL_OPERATION,
+            request_id,
+            payload,
+        };
+        let write_result = write_frame(stream, &frame).map_err(map_frame_error);
+        frame.payload.zeroize();
+        write_result?;
+        let acknowledgement = read_frame(stream)
+            .map_err(map_frame_error)?
+            .ok_or(BootstrapError::InvalidHandoff)?;
+        if acknowledgement.operation != SETUP_ACK_OPERATION
+            || acknowledgement.request_id != request_id
+            || !acknowledgement.payload.is_empty()
+        {
+            return Err(BootstrapError::InvalidHandoff);
+        }
+        Ok(())
+    }
+
     /// Publish READY after the caller has taken the secret and completed
     /// protected delivery. The returned instance continues to hold the lock.
     pub fn acknowledge(self) -> Result<StorageInstance, BootstrapError> {
@@ -114,6 +174,150 @@ impl BootstrapSession {
             _lock: self._lock,
         })
     }
+}
+
+pub struct BootstrapSetupListener {
+    listener: UnixListener,
+    path: PathBuf,
+    directory: PathBuf,
+    device: u64,
+    inode: u64,
+    cleaned: bool,
+}
+
+impl BootstrapSetupListener {
+    pub fn socket_path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn accept_and_acknowledge(
+        mut self,
+        mut session: BootstrapSession,
+    ) -> Result<StorageInstance, BootstrapError> {
+        if self.directory != session.directory {
+            let _ = self.cleanup();
+            return Err(BootstrapError::InvalidRequest);
+        }
+        let handoff_result = (|| {
+            let (mut stream, _) = self.listener.accept()?;
+            validate_setup_peer(&stream)?;
+            stream.set_read_timeout(Some(SETUP_IO_TIMEOUT))?;
+            stream.set_write_timeout(Some(SETUP_IO_TIMEOUT))?;
+            session.send_handoff(&mut stream)
+        })();
+        let cleanup_result = self.cleanup();
+        handoff_result?;
+        cleanup_result?;
+        session.acknowledge()
+    }
+
+    fn cleanup(&mut self) -> Result<(), BootstrapError> {
+        if self.cleaned {
+            return Ok(());
+        }
+        match fs::symlink_metadata(&self.path) {
+            Ok(metadata)
+                if metadata.file_type().is_socket()
+                    && metadata.dev() == self.device
+                    && metadata.ino() == self.inode =>
+            {
+                fs::remove_file(&self.path)?;
+                sync_directory(&self.directory)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return Err(BootstrapError::NotPrivate),
+        }
+        self.cleaned = true;
+        Ok(())
+    }
+}
+
+impl Drop for BootstrapSetupListener {
+    fn drop(&mut self) {
+        if !self.cleaned {
+            let matches_bound_socket = fs::symlink_metadata(&self.path).is_ok_and(|metadata| {
+                metadata.file_type().is_socket()
+                    && metadata.dev() == self.device
+                    && metadata.ino() == self.inode
+            });
+            if matches_bound_socket {
+                let _ = fs::remove_file(&self.path);
+                let _ = sync_directory(&self.directory);
+            }
+        }
+    }
+}
+
+/// A client-side bootstrap handoff. The secret is zeroized if it is not taken.
+pub struct BootstrapHandoff {
+    token_id: [u8; 16],
+    request_id: u64,
+    secret: Option<[u8; TOKEN_SECRET_BYTES]>,
+}
+
+impl BootstrapHandoff {
+    pub fn token_id(&self) -> [u8; 16] {
+        self.token_id
+    }
+
+    pub fn take_secret(&mut self) -> Option<[u8; TOKEN_SECRET_BYTES]> {
+        let secret = *self.secret.as_ref()?;
+        if let Some(secret) = &mut self.secret {
+            secret.zeroize();
+        }
+        self.secret = None;
+        Some(secret)
+    }
+
+    /// Confirm that the caller received the secret, then acknowledge its frame.
+    pub fn acknowledge_delivery<W: Write>(self, writer: &mut W) -> Result<(), BootstrapError> {
+        if self.secret.is_some() {
+            return Err(BootstrapError::SecretNotTaken);
+        }
+        write_frame(
+            writer,
+            &IpcFrame {
+                operation: SETUP_ACK_OPERATION,
+                request_id: self.request_id,
+                payload: Vec::new(),
+            },
+        )
+        .map_err(map_frame_error)
+    }
+}
+
+impl Drop for BootstrapHandoff {
+    fn drop(&mut self) {
+        if let Some(secret) = &mut self.secret {
+            secret.zeroize();
+        }
+    }
+}
+
+/// Receive the one-time token credential from the protected local setup socket.
+pub fn receive_bootstrap_handoff<R: Read>(
+    reader: &mut R,
+) -> Result<BootstrapHandoff, BootstrapError> {
+    let mut frame = read_frame(reader)
+        .map_err(map_frame_error)?
+        .ok_or(BootstrapError::InvalidHandoff)?;
+    if frame.operation != SETUP_CREDENTIAL_OPERATION
+        || frame.request_id == 0
+        || frame.payload.len() != 16 + TOKEN_SECRET_BYTES
+    {
+        frame.payload.zeroize();
+        return Err(BootstrapError::InvalidHandoff);
+    }
+    let mut token_id = [0; 16];
+    token_id.copy_from_slice(&frame.payload[..16]);
+    let mut secret = [0; TOKEN_SECRET_BYTES];
+    secret.copy_from_slice(&frame.payload[16..]);
+    frame.payload.zeroize();
+    Ok(BootstrapHandoff {
+        token_id,
+        request_id: frame.request_id,
+        secret: Some(secret),
+    })
 }
 
 struct OneTimeSecret(Option<[u8; TOKEN_SECRET_BYTES]>);
@@ -150,6 +354,7 @@ impl StorageInstance {
         let directory = directory.as_ref();
         validate_managed_directory(directory, true)?;
         let lock = InstanceLock::acquire(directory)?;
+        remove_stale_setup_socket(directory)?;
         validate_managed_directory(directory, true)?;
         let database_path = directory.join(DATABASE_FILE);
         validate_private_file(&database_path)?;
@@ -208,6 +413,7 @@ pub fn initialize(
         seed_database(&database, administrator_name, expires_at_us)?;
     validate_initializing_records(&database).map_err(BootstrapError::Startup)?;
     Ok(BootstrapSession {
+        directory: directory.to_path_buf(),
         database,
         _lock: lock,
         admin_user_id,
@@ -234,6 +440,7 @@ pub fn resume(
         validate_unmarked_setup_directory(directory)?;
     }
     let lock = InstanceLock::acquire(directory)?;
+    remove_stale_setup_socket(directory)?;
     if !directory.join(MARKER_FILE).try_exists()? {
         validate_unmarked_setup_directory(directory)?;
         write_marker(directory)?;
@@ -255,6 +462,7 @@ pub fn resume(
             seed_database(&database, administrator_name, expires_at_us)?;
         validate_initializing_records(&database).map_err(BootstrapError::Startup)?;
         return Ok(BootstrapSession {
+            directory: directory.to_path_buf(),
             database,
             _lock: lock,
             admin_user_id,
@@ -368,6 +576,7 @@ pub fn resume(
     write.commit().map_err(|_| BootstrapError::Storage)?;
     validate_initializing_records(&database).map_err(BootstrapError::Startup)?;
     Ok(BootstrapSession {
+        directory: directory.to_path_buf(),
         database,
         _lock: lock,
         admin_user_id,
@@ -1122,6 +1331,7 @@ fn validate_managed_directory(
                 validate_private_file(&entry.path())?;
                 saw_database = true;
             }
+            Some(SETUP_SOCKET_FILE) => validate_private_socket(&entry.path())?,
             _ => return Err(BootstrapError::NotPrivate),
         }
     }
@@ -1160,6 +1370,90 @@ fn validate_private_file(path: &Path) -> Result<(), BootstrapError> {
         return Err(BootstrapError::NotPrivate);
     }
     Ok(())
+}
+
+fn validate_private_socket(path: &Path) -> Result<(), BootstrapError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_socket()
+        || metadata.uid() != effective_uid()
+        || metadata.permissions().mode() & 0o7777 != 0o600
+        || metadata.nlink() != 1
+    {
+        return Err(BootstrapError::NotPrivate);
+    }
+    Ok(())
+}
+
+fn remove_stale_setup_socket(directory: &Path) -> Result<(), BootstrapError> {
+    let path = directory.join(SETUP_SOCKET_FILE);
+    match fs::symlink_metadata(&path) {
+        Ok(_) => {
+            validate_private_socket(&path)?;
+            fs::remove_file(path)?;
+            sync_directory(directory)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(BootstrapError::Io(error)),
+    }
+    Ok(())
+}
+
+fn validate_setup_peer(stream: &UnixStream) -> Result<(), BootstrapError> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut credentials = libc::ucred {
+            pid: 0,
+            uid: u32::MAX,
+            gid: 0,
+        };
+        let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        // SAFETY: `stream` owns a live socket descriptor, and `credentials` and
+        // `length` point to initialized writable storage with the required sizes.
+        let status = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                (&mut credentials as *mut libc::ucred).cast(),
+                &mut length,
+            )
+        };
+        if status != 0 {
+            return Err(BootstrapError::Io(std::io::Error::last_os_error()));
+        }
+        if length as usize != std::mem::size_of::<libc::ucred>()
+            || credentials.pid <= 0
+            || credentials.uid != effective_uid()
+        {
+            return Err(BootstrapError::InvalidHandoff);
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = stream;
+        Err(BootstrapError::UnsupportedPlatform)
+    }
+}
+
+fn random_request_id() -> Result<u64, BootstrapError> {
+    for _ in 0..8 {
+        let mut bytes = [0; 8];
+        if getrandom::fill(&mut bytes).is_err() {
+            bytes.zeroize();
+            return Err(BootstrapError::RandomnessUnavailable);
+        }
+        let request_id = u64::from_be_bytes(bytes);
+        bytes.zeroize();
+        if request_id != 0 {
+            return Ok(request_id);
+        }
+    }
+    Err(BootstrapError::RandomnessUnavailable)
+}
+
+fn map_frame_error(_error: FrameError) -> BootstrapError {
+    BootstrapError::SetupChannel
 }
 
 fn write_marker(directory: &Path) -> Result<(), BootstrapError> {
