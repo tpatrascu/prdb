@@ -36,6 +36,8 @@ The Rust storage slice `InvocationTransaction::list_authorized_relations` return
 
 `InvocationTransaction::load_catalog_schema_usage_grants` derives schema USAGE grants for the admitted principal and its pinned role closure directly from the catalog. It returns no table or column privileges and retains the matching schema, grant, membership, and grantor records as commit guards.
 
+`InvocationTransaction::list_catalog_authorized_schemas` is the invocation-bound entry point: it derives that grant set and role closure from the pinned catalog, constructs the discovery context internally, and returns the same bounded USAGE-filtered schema pages. Clients cannot supply another principal or widen the grant scope through this path.
+
 `InvocationTransaction::resolve_authorized_schema` resolves an exact schema name by walking those filtered pages. Empty or over-limit names are invalid requests. A schema without USAGE and an absent schema return the same unavailable result. The returned ID is a logical reference only and grants no access by itself.
 
 Relation pages contain at most 128 records and at most 1 MiB of encoded relation IDs and names. The initial implementation orders relation IDs in ascending byte order. Its opaque continuation is valid only in the transaction that created it and is bound to that invocation snapshot, schema, authorization context, grants, and dependencies. An unavailable schema and a nonexistent schema return the same unavailable result. A relation that cannot fit by itself in a page returns a bounded response-size error. Serialized IPC cursors, SQL metadata scans, and administrative metadata endpoints remain future increments.

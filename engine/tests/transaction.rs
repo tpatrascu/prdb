@@ -1472,6 +1472,26 @@ fn schema_access_loader_uses_pinned_principal_schema_usage_grants()
 }
 
 #[test]
+fn catalog_authorized_schema_listing_derives_the_invocation_scope()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    install_relation_discovery_catalog(&database)?;
+    let mut invocation = InvocationTransaction::begin(&database, [191; 16], [9; 16], 9_999, 1, 64)?;
+    let first = invocation.list_catalog_authorized_schemas(1, None)?;
+    assert_eq!(first.schemas.len(), 1);
+    assert_eq!(first.schemas[0].schema_id, [0x91; 16]);
+    assert_eq!(first.schemas[0].name, "app");
+    let continuation = first.continuation.expect("public schema follows");
+    let second = invocation.list_catalog_authorized_schemas(1, Some(continuation))?;
+    assert_eq!(second.schemas.len(), 1);
+    assert_eq!(second.schemas[0].schema_id, [0x93; 16]);
+    assert_eq!(second.schemas[0].name, "public");
+    assert!(second.continuation.is_none());
+    Ok(())
+}
+
+#[test]
 fn column_grants_can_discover_a_relation_and_pages_are_snapshot_scoped()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();

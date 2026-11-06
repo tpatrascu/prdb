@@ -36,6 +36,8 @@ The first scoped statistics path, `InvocationTransaction::estimate_authorized_sc
 
 `InvocationTransaction::load_catalog_schema_usage_grants` derives only persisted schema USAGE grants for the admitted principal and pinned role closure. It guards the membership, grant, schema, and grantor records it reads so a later authority change invalidates a pending write.
 
+`InvocationTransaction::list_catalog_authorized_schemas` uses those pinned records to construct the metadata context internally and return bounded visible schema pages for the admitted invocation. The caller supplies neither identity nor grants.
+
 The trusted identity DDL route supports `DROP USER/ROLE ... RESTRICT` after bounded scans find no object owner/parent, membership, grant, policy-target, or dependency references. A user's active credentials are revoked in the same serialized commit that removes its principal and named object and inserts its permanent identity tombstone. The final catalog validators reject concurrent dangling references, and deletion cannot leave the database without a login-enabled administrator credential.
 
 Token issue, revoke, and inventory requests use a monotonic 60-second sliding window per authenticated actor, with a default cap of 30 requests. Administrative cancellation has a separate per-actor limiter with the same default. Live manager handles for one redb `Database` object share each limiter; each actor-history map is capped at 4,096 entries and expired histories are pruned. If a map is full, requests for new actors fail closed. Invalid token-authentication attempts require gateway-level throttling because the storage API does not receive a client source identity.

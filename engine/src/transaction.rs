@@ -1254,6 +1254,40 @@ impl<'db> InvocationTransaction<'db> {
     }
 
     /// List schemas for which the invocation has schema USAGE.
+    pub fn list_catalog_authorized_schemas(
+        &mut self,
+        page_limit: usize,
+        continuation: Option<SchemaScanCursor>,
+    ) -> Result<VisibleSchemaPage, TransactionError> {
+        let result = (|| {
+            if page_limit == 0 || page_limit > MAX_SCHEMAS_PER_PAGE {
+                return Err(TransactionError::InvalidMetadataRequest);
+            }
+            let principal_id = self.principal_id;
+            let (role_ids, grants) = self.load_catalog_schema_usage_grants(principal_id)?;
+            let scope = grants
+                .iter()
+                .map(|grant| (grant.operation, grant.target))
+                .collect();
+            let context = AuthorizationContext {
+                principal_id,
+                role_ids,
+                scope,
+            };
+            self.list_authorized_schemas(page_limit, continuation, &context, &grants, &[])
+        })();
+        match result {
+            Ok(page) => Ok(page),
+            Err(error) => {
+                if !self.aborted {
+                    self.abort()?;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// List schemas for which the invocation has schema USAGE.
     pub fn list_authorized_schemas(
         &mut self,
         page_limit: usize,
