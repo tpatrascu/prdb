@@ -32,6 +32,8 @@ The first scoped statistics path, `InvocationTransaction::estimate_authorized_sc
 
 `InvocationTransaction::list_authorized_schemas` returns schema IDs and names only for schemas with schema USAGE, in bounded pages ordered by stable schema ID. Its continuation is limited to the invocation that created it and does not disclose hidden schema totals. Serialized IPC cursor support and `information_schema` scans remain future work.
 
+`InvocationTransaction::resolve_authorized_schema` performs exact, case-sensitive lookup over the same filtered pages. Hidden and nonexistent schema names both return no result; the returned ID is only a logical reference and grants no authority.
+
 The trusted identity DDL route supports `DROP USER/ROLE ... RESTRICT` after bounded scans find no object owner/parent, membership, grant, policy-target, or dependency references. A user's active credentials are revoked in the same serialized commit that removes its principal and named object and inserts its permanent identity tombstone. The final catalog validators reject concurrent dangling references, and deletion cannot leave the database without a login-enabled administrator credential.
 
 Token issue, revoke, and inventory requests use a monotonic 60-second sliding window per authenticated actor, with a default cap of 30 requests. Administrative cancellation has a separate per-actor limiter with the same default. Live manager handles for one redb `Database` object share each limiter; each actor-history map is capped at 4,096 entries and expired histories are pruned. If a map is full, requests for new actors fail closed. Invalid token-authentication attempts require gateway-level throttling because the storage API does not receive a client source identity.

@@ -1390,6 +1390,51 @@ impl<'db> InvocationTransaction<'db> {
         }
     }
 
+    /// Resolve an exact schema name from the invocation's visible schema pages.
+    pub fn resolve_authorized_schema(
+        &mut self,
+        schema_name: &str,
+        context: &AuthorizationContext,
+        grants: &[Grant],
+        dependencies: &[AuthorityDependency],
+    ) -> Result<Option<VisibleSchema>, TransactionError> {
+        let result = (|| {
+            if schema_name.is_empty() || schema_name.len() > MAX_METADATA_PAGE_BYTES {
+                return Err(TransactionError::InvalidMetadataRequest);
+            }
+            let mut continuation = None;
+            loop {
+                let page = self.list_authorized_schemas(
+                    MAX_SCHEMAS_PER_PAGE,
+                    continuation,
+                    context,
+                    grants,
+                    dependencies,
+                )?;
+                let schema = page
+                    .schemas
+                    .into_iter()
+                    .find(|schema| schema.name == schema_name);
+                if schema.is_some() {
+                    return Ok(schema);
+                }
+                continuation = page.continuation;
+                if continuation.is_none() {
+                    return Ok(None);
+                }
+            }
+        })();
+        match result {
+            Ok(schema) => Ok(schema),
+            Err(error) => {
+                if !self.aborted {
+                    self.abort()?;
+                }
+                Err(error)
+            }
+        }
+    }
+
     fn validate_discovery_column(
         &mut self,
         table_id: [u8; 16],

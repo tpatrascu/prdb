@@ -1401,6 +1401,50 @@ fn schema_listing_includes_only_usage_grants_and_pages_by_schema_id()
 }
 
 #[test]
+fn authorized_schema_resolution_matches_only_visible_exact_names()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    install_relation_discovery_catalog(&database)?;
+    let schema_id = [0x91; 16];
+    let context = AuthorizationContext {
+        principal_id: [9; 16],
+        role_ids: std::collections::HashSet::new(),
+        scope: std::collections::HashSet::from([(
+            Operation::Usage,
+            AccessTarget::Schema(schema_id),
+        )]),
+    };
+    let grants = [Grant {
+        subject: Subject::Principal([9; 16]),
+        operation: Operation::Usage,
+        target: AccessTarget::Schema(schema_id),
+    }];
+    let mut invocation = InvocationTransaction::begin(&database, [189; 16], [9; 16], 9_999, 1, 64)?;
+    let resolved = invocation
+        .resolve_authorized_schema("app", &context, &grants, &[])?
+        .expect("USAGE-visible exact name resolves");
+    assert_eq!(resolved.schema_id, schema_id);
+    assert_eq!(resolved.name, "app");
+    assert!(
+        invocation
+            .resolve_authorized_schema("private", &context, &grants, &[])?
+            .is_none()
+    );
+    assert!(
+        invocation
+            .resolve_authorized_schema("missing", &context, &grants, &[])?
+            .is_none()
+    );
+    assert!(
+        invocation
+            .resolve_authorized_schema("App", &context, &grants, &[])?
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
 fn column_grants_can_discover_a_relation_and_pages_are_snapshot_scoped()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
