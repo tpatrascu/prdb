@@ -6,6 +6,12 @@ This document specifies internal process IPC. External clients use the separate 
 
 Use connection-scoped handles with server-side ownership and lifetime checks. Handle possession or guessability alone must not bypass authorization. Do not pass database descriptors or accept arbitrary descriptor transfer.
 
+## Frame Envelope v1
+
+Unix-stream frames use a fixed 20-byte header followed by a copied payload. Header fields are big-endian and ordered as: four-byte magic `PRDI`, u16 frame version (`1`), u16 operation code, u64 nonzero request ID, and u32 payload length. Operation code zero is reserved and rejected. A payload is at most 1,048,576 bytes; reject larger lengths before allocating or reading the payload. The header has no client-controlled service-role, principal, invocation, handle, or descriptor fields. Channel provisioning binds the service role and execution context out of band. Operation payload schemas and operation-code allowlists are independently versioned and validated by the selected channel handler.
+
+Readers accept arbitrary stream fragmentation and leave following coalesced frames available for the next read. EOF is clean only between frames; EOF within a header or payload is a truncated-frame error. Unknown frame versions and malformed headers fail before payload allocation. Frame payloads contain encoded fields, never native struct memory.
+
 ## Administrative Control
 
 Authenticated clients submit bounded schema/user/permission DDL or structured equivalents on a dedicated control channel. Storage validates both definitions and current actor authority. Administrative operations may be atomically batched, but cannot be mixed with executor DML/native code. Request IDs, budgets, durable outcomes, and status lookup apply to DDL too.

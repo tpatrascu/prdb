@@ -8,13 +8,13 @@ Server-provisioned connections bind role, invocation, identity and grant. Messag
 
 ## Decisions Before Implementation
 
-Specify envelope bytes, independent protocol versions, operation/error tags, bounded expression IR, maximum frame/collection/nesting sizes, outstanding requests/cursors, handle generations and request-ID rules. Define a role/operation matrix covering executor, planner, supervisor control, gateway service and administrative control. Freeze sanitized value/batch encodings with explicit VALUE/NULL/REDACTED states and initialized padding.
+The frame envelope is specified and implemented in Rust: fixed 20-byte v1 header, big-endian fields, 1 MiB payload cap, and nonzero operation/request IDs. Still specify operation/error tags, bounded expression IR, collection/nesting sizes, outstanding requests/cursors, handle generations and request-ID rules. Define a role/operation matrix covering executor, planner, supervisor control, gateway service and administrative control. Freeze sanitized value/batch encodings with explicit VALUE/NULL/REDACTED states and initialized padding.
 
 ## Increments
 
 | ID | Observable test first | Minimum implementation and evidence |
 | --- | --- | --- |
-| IPC-1 | Hand-checked frames decode under split/coalesced reads; invalid lengths/versions fail before allocation | Bounded framing and Rust/C codec fixtures, explicit endianness and canonical errors |
+| IPC-1 | Hand-checked frames decode under split/coalesced reads; invalid lengths/versions fail before allocation | Rust bounded framing is implemented and tested; C codec parity and canonical cross-language error fixtures remain |
 | IPC-2 | Executor attempts to finalize, estimate or administer fail even with validly encoded messages | Bind service roles on provisioned channels; implement allowlists and context lifecycle validation independently of SDK wrappers |
 | IPC-3 | Cross-connection, stale-generation and closed-context handles fail without disclosing object existence | Resolve logical references independently per connection; add cursor/row ownership, duplicate IDs and late-response rejection |
 | IPC-4 | Serialized batches omit invisible rows and every hidden payload byte/length/offset | Encode sanitized owned buffers after storage authorization; bounded next/close semantics, initialized capacity and reference-evaluator comparison |

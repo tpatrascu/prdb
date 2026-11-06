@@ -634,3 +634,12 @@
 - Verification: prescribed Nix-shell workspace build, formatting check, Clippy with warnings denied, and all 228 workspace tests passed.
 - Contracts: [authorization](../../specs/authorization.md) and [concurrency/MVCC](../../specs/concurrency-mvcc.md).
 - Remaining: concurrent schedule coverage across each action-specific grant, membership, policy, identity, and credential route remains open; the supervisor/control-channel integration is not implemented.
+
+## IPC-1 dependency: bounded Unix-stream frame v1
+
+- Red evidence: the hand-checked frame fixture failed against the compiling `NotImplemented` scaffold.
+- Added a 20-byte big-endian v1 header with magic, operation, nonzero request ID and payload length. Encoding/reading caps payloads at 1 MiB; reading rejects malformed/unsupported headers and oversized lengths before body allocation, distinguishes clean boundary EOF from truncation, and preserves following frames in a stream.
+- Tests cover the byte fixture, split/coalesced Unix-stream writes, malformed/oversized headers, zero IDs, truncation and writer limits.
+- Contracts: [IPC protocol](../../specs/ipc-protocol.md) and [IPC plan](../ipc-protocol/README.md).
+- Verification: prescribed Nix-shell workspace build, formatting check, Clippy with warnings denied, and all 233 workspace integration tests passed.
+- Remaining: operation payload schemas and allowlists, server-bound role dispatch, local service authentication, C parity, and gateway/supervisor/storage integration remain open.
