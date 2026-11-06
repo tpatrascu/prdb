@@ -44,6 +44,7 @@ struct StagedIndexChange {
 #[derive(Debug)]
 pub enum TransactionError {
     InvalidContext,
+    ClockUnavailable,
     NotReady,
     UnsupportedFormat,
     DuplicateInvocation,
@@ -255,6 +256,12 @@ impl InvocationCoordination {
     fn is_expired(&self) -> bool {
         self.max_age
             .is_some_and(|(admitted_at, max_age)| admitted_at.elapsed() >= max_age)
+    }
+
+    fn mark_committing(&self) {
+        if let Some(permit) = &self._admission_permit {
+            permit.mark_committing();
+        }
     }
 }
 
@@ -2436,7 +2443,6 @@ impl<'db> InvocationTransaction<'db> {
         self.active_scan = None;
         self.aborted = true;
         self.snapshot.take();
-        self.coordination._admission_permit.take();
         if !self.outcome_recorded {
             record_aborted_outcome(
                 self.database,
@@ -2446,6 +2452,7 @@ impl<'db> InvocationTransaction<'db> {
             )?;
             self.outcome_recorded = true;
         }
+        self.coordination._admission_permit.take();
         Ok(())
     }
 
@@ -2523,6 +2530,7 @@ impl<'db> InvocationTransaction<'db> {
             if self.coordination.is_expired() {
                 return Err(CommitError::InvocationExpired);
             }
+            self.coordination.mark_committing();
             commit_storage_changes(
                 self.database,
                 CommitRequest {

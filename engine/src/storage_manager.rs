@@ -32,6 +32,8 @@ const TOKEN_REQUEST_WINDOW: Duration = Duration::from_secs(60);
 const MAX_TRACKED_TOKEN_REQUEST_ACTORS: usize = 4096;
 static TOKEN_REQUEST_LIMITERS: OnceLock<Mutex<HashMap<usize, Weak<TokenRequestLimiter>>>> =
     OnceLock::new();
+static INVOCATION_REGISTRIES: OnceLock<Mutex<HashMap<usize, Weak<InvocationAdmissionState>>>> =
+    OnceLock::new();
 
 /// Admission and coordination limits for one storage-manager handle.
 ///
@@ -85,6 +87,45 @@ impl std::fmt::Display for StorageManagerInitError {
 }
 
 impl std::error::Error for StorageManagerInitError {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InvocationStatusConsistency {
+    BestEffort,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InvocationStatus {
+    Active {
+        started_at_us: i64,
+        deadline_at_us: Option<i64>,
+    },
+    Committing {
+        started_at_us: i64,
+        deadline_at_us: Option<i64>,
+    },
+    Terminal(InvocationOutcome),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvocationStatusSnapshot {
+    pub observed_at_us: i64,
+    pub consistency: InvocationStatusConsistency,
+    pub status: InvocationStatus,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InvocationStatusError {
+    InvalidRequest,
+    Storage,
+}
+
+impl std::fmt::Display for InvocationStatusError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "invocation status lookup failed: {self:?}")
+    }
+}
+
+impl std::error::Error for InvocationStatusError {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TokenLifecycleError {
@@ -227,43 +268,126 @@ fn shared_token_request_limiter(
     limiter
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LiveInvocationPhase {
+    Active,
+    Committing,
+}
+
+#[derive(Clone, Copy)]
+struct LiveInvocation {
+    principal_id: [u8; 16],
+    started_at_us: i64,
+    deadline_at_us: Option<i64>,
+    phase: LiveInvocationPhase,
+}
+
 struct InvocationAdmissionState {
-    active: AtomicUsize,
-    limit: usize,
+    limit: AtomicUsize,
+    live: Mutex<HashMap<[u8; 16], LiveInvocation>>,
 }
 
 pub(crate) struct InvocationAdmissionPermit {
     state: Arc<InvocationAdmissionState>,
+    invocation_id: [u8; 16],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AdmissionError {
+    Limit,
+    Duplicate,
 }
 
 impl InvocationAdmissionState {
-    fn acquire(self: &Arc<Self>) -> Option<InvocationAdmissionPermit> {
-        let mut active = self.active.load(Ordering::Acquire);
-        loop {
-            if active >= self.limit {
-                return None;
-            }
-            match self.active.compare_exchange_weak(
-                active,
-                active + 1,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    return Some(InvocationAdmissionPermit {
-                        state: Arc::clone(self),
-                    });
-                }
-                Err(actual) => active = actual,
-            }
+    fn acquire(
+        self: &Arc<Self>,
+        invocation_id: [u8; 16],
+        principal_id: [u8; 16],
+        started_at_us: i64,
+        max_age: Duration,
+    ) -> Result<InvocationAdmissionPermit, AdmissionError> {
+        let mut live = self
+            .live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if live.contains_key(&invocation_id) {
+            return Err(AdmissionError::Duplicate);
+        }
+        if live.len() >= self.limit.load(Ordering::Acquire) {
+            return Err(AdmissionError::Limit);
+        }
+        let deadline_at_us = i64::try_from(max_age.as_micros())
+            .ok()
+            .and_then(|delta| started_at_us.checked_add(delta));
+        live.insert(
+            invocation_id,
+            LiveInvocation {
+                principal_id,
+                started_at_us,
+                deadline_at_us,
+                phase: LiveInvocationPhase::Active,
+            },
+        );
+        Ok(InvocationAdmissionPermit {
+            state: Arc::clone(self),
+            invocation_id,
+        })
+    }
+
+    fn status(&self, invocation_id: [u8; 16]) -> Option<LiveInvocation> {
+        self.live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&invocation_id)
+            .copied()
+    }
+}
+
+impl InvocationAdmissionPermit {
+    pub(crate) fn mark_committing(&self) {
+        let mut live = self
+            .state
+            .live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(invocation) = live.get_mut(&self.invocation_id) {
+            invocation.phase = LiveInvocationPhase::Committing;
         }
     }
 }
 
 impl Drop for InvocationAdmissionPermit {
     fn drop(&mut self) {
-        self.state.active.fetch_sub(1, Ordering::AcqRel);
+        self.state
+            .live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.invocation_id);
     }
+}
+
+fn shared_invocation_registry(
+    database: &Database,
+    configured_limit: usize,
+) -> Arc<InvocationAdmissionState> {
+    let database_key = database as *const Database as usize;
+    let registry = INVOCATION_REGISTRIES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut registry = registry
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    registry.retain(|_, invocations| invocations.strong_count() != 0);
+    if let Some(invocations) = registry.get(&database_key).and_then(Weak::upgrade) {
+        invocations
+            .limit
+            .fetch_min(configured_limit, Ordering::Relaxed);
+        return invocations;
+    }
+    let invocations = Arc::new(InvocationAdmissionState {
+        limit: AtomicUsize::new(configured_limit),
+        live: Mutex::new(HashMap::new()),
+    });
+    registry.insert(database_key, Arc::downgrade(&invocations));
+    invocations
 }
 
 impl<'db> StorageManager<'db> {
@@ -321,22 +445,21 @@ impl<'db> StorageManager<'db> {
         }
         let token_requests =
             shared_token_request_limiter(database, config.max_token_lifecycle_requests_per_minute);
+        let admissions = shared_invocation_registry(database, config.max_active_invocations);
         Ok(Self {
             database,
             ddl_fences: DdlFenceCoordinator::new(DdlFenceManager::new(), config.ddl_fence_timeout),
             max_active_invocations: config.max_active_invocations,
-            admissions: Arc::new(InvocationAdmissionState {
-                active: AtomicUsize::new(0),
-                limit: config.max_active_invocations,
-            }),
+            admissions,
             token_requests,
             max_invocation_age: config.max_invocation_age,
         })
     }
 
-    /// The configured hard cap shared by clones of this manager.
+    /// The effective hard cap shared by live manager handles for this database.
     pub fn max_active_invocations(&self) -> usize {
         self.max_active_invocations
+            .min(self.admissions.limit.load(Ordering::Acquire))
     }
 
     pub fn max_invocation_age(&self) -> Duration {
@@ -356,10 +479,19 @@ impl<'db> StorageManager<'db> {
         max_rows: usize,
         max_bytes: usize,
     ) -> Result<InvocationTransaction<'db>, TransactionError> {
+        let started_at_us = now_unix_micros().ok_or(TransactionError::ClockUnavailable)?;
         let admission_permit = self
             .admissions
-            .acquire()
-            .ok_or(TransactionError::AdmissionLimitExceeded)?;
+            .acquire(
+                invocation_id,
+                principal_id,
+                started_at_us,
+                self.max_invocation_age,
+            )
+            .map_err(|error| match error {
+                AdmissionError::Limit => TransactionError::AdmissionLimitExceeded,
+                AdmissionError::Duplicate => TransactionError::DuplicateInvocation,
+            })?;
         InvocationTransaction::begin_inner(
             self.database,
             InvocationCoordination::managed(
@@ -894,6 +1026,54 @@ impl<'db> StorageManager<'db> {
             authenticated_principal_id,
             now_us,
         )
+    }
+
+    /// Return live state from this process registry or a retained durable
+    /// outcome. Callers must authenticate the principal before this lookup;
+    /// unknown IDs, expired outcomes, and other owners all return `None`.
+    pub fn get_invocation_status(
+        &self,
+        invocation_id: [u8; 16],
+        authenticated_principal_id: [u8; 16],
+        now_us: i64,
+    ) -> Result<Option<InvocationStatusSnapshot>, InvocationStatusError> {
+        if invocation_id == [0; 16] || authenticated_principal_id == [0; 16] || now_us <= 0 {
+            return Err(InvocationStatusError::InvalidRequest);
+        }
+        if let Some(live) = self.admissions.status(invocation_id) {
+            if live.principal_id != authenticated_principal_id {
+                return Ok(None);
+            }
+            let status = match live.phase {
+                LiveInvocationPhase::Active => InvocationStatus::Active {
+                    started_at_us: live.started_at_us,
+                    deadline_at_us: live.deadline_at_us,
+                },
+                LiveInvocationPhase::Committing => InvocationStatus::Committing {
+                    started_at_us: live.started_at_us,
+                    deadline_at_us: live.deadline_at_us,
+                },
+            };
+            return Ok(Some(InvocationStatusSnapshot {
+                observed_at_us: now_us,
+                consistency: InvocationStatusConsistency::BestEffort,
+                status,
+            }));
+        }
+        lookup_outcome(
+            self.database,
+            invocation_id,
+            authenticated_principal_id,
+            now_us,
+        )
+        .map_err(|_| InvocationStatusError::Storage)
+        .map(|outcome| {
+            outcome.map(|outcome| InvocationStatusSnapshot {
+                observed_at_us: now_us,
+                consistency: InvocationStatusConsistency::BestEffort,
+                status: InvocationStatus::Terminal(outcome),
+            })
+        })
     }
 }
 

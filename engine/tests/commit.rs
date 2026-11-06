@@ -21,7 +21,7 @@ use prdb_engine::tuple::{ColumnSchema, ScalarType, ScalarValue, encode_tuple};
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -2937,10 +2937,16 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
             max_token_lifecycle_requests_per_minute: 30,
         },
     )?;
+    let independent_handle = StorageManager::new(&database, Duration::from_millis(100))?;
+    assert_eq!(independent_handle.max_active_invocations(), 1);
     let mut first = storage.begin_invocation(id(192), id(9), 9_999, 2, 64)?;
     let cloned_storage = storage.clone();
     assert!(matches!(
         cloned_storage.begin_invocation(id(193), id(9), 9_999, 2, 64),
+        Err(prdb_engine::transaction::TransactionError::AdmissionLimitExceeded)
+    ));
+    assert!(matches!(
+        independent_handle.begin_invocation(id(195), id(9), 9_999, 2, 64),
         Err(prdb_engine::transaction::TransactionError::AdmissionLimitExceeded)
     ));
 
@@ -3040,6 +3046,101 @@ fn storage_manager_resolves_only_retained_outcomes_for_the_authenticated_owner()
     );
     assert_eq!(
         storage.lookup_invocation_outcome(id(202), id(9), 9_998)?,
+        None
+    );
+    Ok(())
+}
+
+#[test]
+fn storage_manager_reports_live_and_durable_invocation_status_to_the_owner()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::storage_manager::InvocationStatus;
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let status_storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let now_us = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_micros() as i64;
+    let retention_deadline_us = now_us + 60_000_000;
+
+    let mut active = storage.begin_invocation(id(203), id(9), retention_deadline_us, 2, 64)?;
+    assert!(matches!(
+        storage.begin_invocation(id(203), id(9), retention_deadline_us, 2, 64),
+        Err(prdb_engine::transaction::TransactionError::DuplicateInvocation)
+    ));
+    let live = status_storage
+        .get_invocation_status(id(203), id(9), now_us)?
+        .unwrap();
+    assert!(matches!(live.status, InvocationStatus::Active { .. }));
+    assert_eq!(live.observed_at_us, now_us);
+    assert_eq!(
+        status_storage.get_invocation_status(id(203), id(10), now_us)?,
+        None
+    );
+    active.abort()?;
+    drop(active);
+    assert!(matches!(
+        storage
+            .get_invocation_status(id(203), id(9), now_us)?
+            .unwrap()
+            .status,
+        InvocationStatus::Terminal(InvocationOutcome {
+            status: OutcomeStatus::Aborted,
+            ..
+        })
+    ));
+
+    let committed = storage.begin_invocation(id(204), id(9), retention_deadline_us, 2, 64)?;
+    let writer = database.begin_write()?;
+    let commit_wait_deadline = Instant::now() + Duration::from_secs(2);
+    std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+        let commit_thread = scope.spawn(move || committed.commit());
+        loop {
+            let status = status_storage
+                .get_invocation_status(id(204), id(9), now_us)?
+                .unwrap();
+            if matches!(status.status, InvocationStatus::Committing { .. }) {
+                break;
+            }
+            assert!(Instant::now() < commit_wait_deadline);
+            std::thread::yield_now();
+        }
+        writer.abort()?;
+        commit_thread
+            .join()
+            .map_err(|_| std::io::Error::other("commit thread panicked"))??;
+        Ok(())
+    })?;
+    assert!(matches!(
+        storage
+            .get_invocation_status(id(204), id(9), now_us)?
+            .unwrap()
+            .status,
+        InvocationStatus::Terminal(InvocationOutcome {
+            status: OutcomeStatus::Committed,
+            ..
+        })
+    ));
+    drop(storage);
+    drop(status_storage);
+    drop(database);
+
+    let reopened = Database::open(fixture.path())?;
+    let restarted_storage = StorageManager::new(&reopened, Duration::from_millis(100))?;
+    assert!(matches!(
+        restarted_storage
+            .get_invocation_status(id(204), id(9), now_us)?
+            .unwrap()
+            .status,
+        InvocationStatus::Terminal(InvocationOutcome {
+            status: OutcomeStatus::Committed,
+            ..
+        })
+    ));
+    assert_eq!(
+        restarted_storage.get_invocation_status(id(204), id(10), now_us)?,
         None
     );
     Ok(())

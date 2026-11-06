@@ -30,6 +30,8 @@ cancel_invocation(invocation_id, reason_code) -> accepted_or_terminal
 
 Authenticate and authorize every control call against current state. Use bounded pages/cursors and opaque identifiers. Recheck authority between pages; fail if a cursor expires or privilege changes. Runtime pages may show changes between reads and must not expose a global total to a caller limited to their own invocations. Define registry-generation tokens for coherent pagination where supported; otherwise explicitly mark best-effort enumeration.
 
+`StorageManager::get_invocation_status` provides owner-scoped point status. It returns ACTIVE or COMMITTING from the in-process registry, then falls back to an unexpired durable outcome after the invocation leaves that registry or after restart. Cross-owner, unknown, and expired IDs all return absence. Responses include the caller-supplied trusted observation time and a best-effort consistency label. The registry is shared by live manager handles for the same redb `Database` object; it is process-local and does not enumerate invocations. Administrator-wide status, paginated registries, and cancellation still require the authenticated control service.
+
 An accepted cancellation is not proof of rollback. Resolve its race with commit through storage's durable transaction state. A COMMITTED outcome remains committed even if result delivery, executor exit, or telemetry collection fails. Registry absence after restart is not ABORTED: consult the [durable outcome store](physical-metadata.md), and return UNKNOWN/EXPIRED when the retained record cannot establish a result.
 
 ## Audit Events
