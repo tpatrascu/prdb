@@ -901,6 +901,8 @@ fn install_relation_discovery_catalog(
     database: &Database,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let schema_id = [0x91; 16];
+    let hidden_schema_id = [0x92; 16];
+    let second_visible_schema_id = [0x93; 16];
     let table_id = [0x10; 16];
     let hidden_table_id = [0x20; 16];
     let column_id = [0x66; 16];
@@ -954,6 +956,25 @@ fn install_relation_discovery_catalog(
         )?;
         catalog.insert(&schema_key[..], &schema_value[..])?;
         catalog.insert(&schema_object_key[..], &schema_object_value[..])?;
+        for (other_schema_id, name) in [
+            (hidden_schema_id, "private"),
+            (second_visible_schema_id, "public"),
+        ] {
+            let other_schema_key = catalog_id_key(3, other_schema_id);
+            let other_schema_value = catalog_record_payload(
+                3,
+                &other_schema_key,
+                &[CatalogField {
+                    tag: 1,
+                    wire_type: WireType::Ids,
+                    payload: 0u32.to_le_bytes().to_vec(),
+                }],
+            )?;
+            let (other_object_key, other_object_value) =
+                object_catalog_record_with_name(other_schema_id, 1, name);
+            catalog.insert(&other_schema_key[..], &other_schema_value[..])?;
+            catalog.insert(&other_object_key[..], &other_object_value[..])?;
+        }
 
         for (table_id, name, storage_id) in [
             (table_id, b"metrics".as_slice(), [145; 16]),
@@ -1123,6 +1144,7 @@ fn install_relation_discovery_catalog(
         catalog.insert(&user_object_key[..], &user_object_value[..])?;
         for (object_id, privilege, target_scope, target_id) in [
             (schema_id, 1, 1, schema_id),
+            (second_visible_schema_id, 1, 1, second_visible_schema_id),
             (table_id, 3, 1, table_id),
             (table_id, 2, 2, column_id),
             (hidden_table_id, 5, 1, hidden_table_id),
@@ -1236,6 +1258,48 @@ fn relation_listing_rejects_grants_not_present_in_the_pinned_catalog()
         invocation.list_authorized_relations(schema_id, 16, None, &context, &forged_grants, &[]),
         Err(TransactionError::InvalidContext)
     ));
+    Ok(())
+}
+
+#[test]
+fn schema_listing_includes_only_usage_grants_and_pages_by_schema_id()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    install_relation_discovery_catalog(&database)?;
+    let app_schema_id = [0x91; 16];
+    let public_schema_id = [0x93; 16];
+    let context = AuthorizationContext {
+        principal_id: [9; 16],
+        role_ids: std::collections::HashSet::new(),
+        scope: std::collections::HashSet::from([
+            (Operation::Usage, AccessTarget::Schema(app_schema_id)),
+            (Operation::Usage, AccessTarget::Schema(public_schema_id)),
+        ]),
+    };
+    let grants = [
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Usage,
+            target: AccessTarget::Schema(app_schema_id),
+        },
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Usage,
+            target: AccessTarget::Schema(public_schema_id),
+        },
+    ];
+    let mut invocation = InvocationTransaction::begin(&database, [185; 16], [9; 16], 9_999, 1, 64)?;
+    let first = invocation.list_authorized_schemas(1, None, &context, &grants, &[])?;
+    assert_eq!(first.schemas.len(), 1);
+    assert_eq!(first.schemas[0].schema_id, app_schema_id);
+    assert_eq!(first.schemas[0].name, "app");
+    let cursor = first.continuation.expect("another visible schema");
+    let second = invocation.list_authorized_schemas(1, Some(cursor), &context, &grants, &[])?;
+    assert_eq!(second.schemas.len(), 1);
+    assert_eq!(second.schemas[0].schema_id, public_schema_id);
+    assert_eq!(second.schemas[0].name, "public");
+    assert!(second.continuation.is_none());
     Ok(())
 }
 

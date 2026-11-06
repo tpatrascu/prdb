@@ -1,6 +1,7 @@
 //! Permission-filtered logical catalog discovery results.
 
 pub const MAX_RELATIONS_PER_PAGE: usize = 128;
+pub const MAX_SCHEMAS_PER_PAGE: usize = 128;
 pub const MAX_METADATA_PAGE_BYTES: usize = 1_048_576;
 
 /// One relation admitted by schema usage and a data grant.
@@ -25,6 +26,28 @@ pub struct VisibleColumn {
 pub struct VisibleRelationSchema {
     pub relation_id: [u8; 16],
     pub columns: Vec<VisibleColumn>,
+}
+
+/// One schema visible through an effective USAGE grant.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VisibleSchema {
+    pub schema_id: [u8; 16],
+    pub name: String,
+}
+
+/// Opaque continuation for schema discovery in one invocation snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SchemaScanCursor {
+    pub(crate) invocation_id: [u8; 16],
+    pub(crate) generation: u64,
+    pub(crate) after_schema_id: [u8; 16],
+}
+
+/// One bounded page of visible schemas.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VisibleSchemaPage {
+    pub schemas: Vec<VisibleSchema>,
+    pub continuation: Option<SchemaScanCursor>,
 }
 
 /// Opaque continuation for relation discovery in one invocation snapshot.

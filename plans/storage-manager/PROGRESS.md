@@ -660,7 +660,7 @@
 - Tests cover write-only discovery, column-grant discovery, inaccessible relations, schema USAGE denial, malformed hidden row bytes, catalog grant validation and continuation ownership.
 - Checks: the locked workspace build, `cargo fmt --all -- --check`, Clippy with warnings denied, the full workspace test suite, and `git diff --check` passed in the prescribed Nix shell. Local Markdown links in the three changed documents resolved.
 - Contracts: [metadata discovery](../../specs/metadata-discovery.md), [storage manager](../../specs/storage-manager.md), and [metadata discovery plan](../metadata-discovery/README.md).
-- Remaining: schema listing, authorized column descriptions, serialized IPC cursors, built-in `information_schema` scans, resolution handles, and administrative discovery remain open.
+- Remaining: serialized IPC cursors, built-in `information_schema` scans, relation resolution handles, and administrative discovery remain open.
 
 ## MD-1 dependency: authorized declared-column descriptions — in progress
 
@@ -669,4 +669,13 @@
 - The regression verifies table write access permits declared-shape discovery and schema usage alone does not; the result type contains no default or policy fields.
 - Checks: the locked workspace build, formatting check, warning-denied Clippy, the full workspace test suite, and `git diff --check` passed in the prescribed Nix shell. Focused transaction tests also passed.
 - Contracts: [metadata discovery](../../specs/metadata-discovery.md), [storage manager](../../specs/storage-manager.md), and [metadata discovery plan](../metadata-discovery/README.md).
-- Remaining: `list_schemas`, paginated column results, serialized IPC cursors, built-in `information_schema` scans, resolution handles, and administrative discovery remain open.
+- Remaining: paginated column results, serialized IPC cursors, built-in `information_schema` scans, resolution handles, and administrative discovery remain open.
+
+## MD-1 dependency: schema listing by pinned USAGE grants — in progress
+
+- Red evidence: `schema_listing_includes_only_usage_grants_and_pages_by_schema_id` failed against the empty-page scaffold although two schemas had effective USAGE grants.
+- `InvocationTransaction::list_authorized_schemas` validates the pinned role closure and supplied grant records, filters to schema USAGE within the admitted scope, and returns only live schema objects. Pages are bounded to 128 records and 1 MiB, ordered by stable schema ID, with a transaction-local cursor bound to the caller and authorization inputs.
+- The real-redb fixture includes one ungranted schema between two granted schemas; the two visible schemas page in order and the hidden schema name is omitted.
+- Checks: the locked workspace build, formatting check, warning-denied Clippy, full workspace tests, and `git diff --check` passed in the prescribed Nix shell. The focused transaction target passed.
+- Contracts: [metadata discovery](../../specs/metadata-discovery.md), [storage manager](../../specs/storage-manager.md), and [metadata discovery plan](../metadata-discovery/README.md).
+- Remaining: paginated column results, serialized IPC cursors, built-in `information_schema` scans, relation resolution handles, and administrative discovery remain open.
