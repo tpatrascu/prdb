@@ -944,3 +944,10 @@
 - Changed code and contract: [supervisor invocation lifecycle](../../engine/src/storage_manager.rs) and [storage-manager process boundary](../../specs/storage-manager.md).
 - Verification: `cargo fmt --all`, workspace build, warning-denied Clippy, and `git diff --check` pass in the repository Nix shell. Tests were not run.
 - Remaining: supervisor worker-exit observation must close these streams before requesting commit or abort; runtime race coverage awaits an authorized test run.
+
+## SU-5 dependency: poll idle invocation deadlines
+
+- Behavior: `SupervisorInvocation::check_deadline` lets the trusted scheduler enforce transaction age and accepted cancellation while planner/executor streams are idle; expiration or cancellation aborts through the managed transaction and releases its snapshot/admission permit.
+- Changed code and contract: [supervisor invocation API](../../engine/src/storage_manager.rs) and [storage-manager lifecycle contract](../../specs/storage-manager.md).
+- Verification: `cargo fmt --all`, workspace build, warning-denied Clippy, and `git diff --check` pass in the repository Nix shell. Tests were not run.
+- Remaining: an implemented supervisor scheduler must call this method while worker channels are idle; the storage API cannot make that scheduling call itself.

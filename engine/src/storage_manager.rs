@@ -335,6 +335,7 @@ struct SupervisorWorkerChannelLease {
 pub enum SupervisorInvocationError {
     Closed,
     WorkerChannelsActive,
+    Deadline(TransactionError),
     Executor(crate::executor_ipc::ExecutorConnectionError),
     Planner(crate::planner_ipc::PlannerConnectionError),
     Supervisor(crate::supervisor_ipc::SupervisorConnectionError),
@@ -403,6 +404,25 @@ impl SupervisorInvocation<'_> {
         if let Some(mut transaction) = owner.take() {
             let _ = transaction.abort();
         }
+    }
+
+    /// Poll cancellation and transaction age while worker channels are idle.
+    /// A failed check durably aborts the invocation through its transaction.
+    pub fn check_deadline(&self) -> Result<(), SupervisorInvocationError> {
+        let mut owner = match self.transaction.lock() {
+            Ok(owner) => owner,
+            Err(poisoned) => {
+                let mut owner = poisoned.into_inner();
+                if let Some(mut transaction) = owner.take() {
+                    let _ = transaction.abort();
+                }
+                return Err(SupervisorInvocationError::Closed);
+            }
+        };
+        let transaction = owner.as_mut().ok_or(SupervisorInvocationError::Closed)?;
+        transaction
+            .check_deadline()
+            .map_err(SupervisorInvocationError::Deadline)
     }
 
     pub fn serve_planner<S: std::io::Read + std::io::Write>(
