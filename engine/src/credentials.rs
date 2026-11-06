@@ -1,6 +1,6 @@
 //! Credential verifier profiles for database-issued bearer tokens.
 
-use crate::catalog::CatalogRecord;
+use crate::catalog::{CatalogField, CatalogRecord, WireType, encode_envelope, family_schema};
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -41,6 +41,113 @@ pub(crate) enum CredentialProfileError {
 /// This profile is not intended for human-chosen passwords.
 pub fn hash_token_secret(secret: &[u8; TOKEN_SECRET_BYTES]) -> [u8; TOKEN_VERIFIER_BYTES] {
     Sha256::digest(secret).into()
+}
+
+pub(crate) fn encode_new_verifier_record(
+    token_id: [u8; 16],
+    user_id: [u8; 16],
+    secret: &[u8; TOKEN_SECRET_BYTES],
+    issued_at_us: i64,
+    expires_at_us: i64,
+    label: &str,
+) -> Result<Vec<u8>, CredentialProfileError> {
+    let mut key = 16u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&token_id);
+    let fields = [
+        CatalogField {
+            tag: 1,
+            wire_type: WireType::Id,
+            payload: user_id.to_vec(),
+        },
+        CatalogField {
+            tag: 2,
+            wire_type: WireType::U16,
+            payload: TOKEN_ALGORITHM_SHA256.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 3,
+            wire_type: WireType::U16,
+            payload: TOKEN_ALGORITHM_VERSION.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 4,
+            wire_type: WireType::Bytes,
+            payload: hash_token_secret(secret).to_vec(),
+        },
+        CatalogField {
+            tag: 5,
+            wire_type: WireType::I64,
+            payload: issued_at_us.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 6,
+            wire_type: WireType::I64,
+            payload: expires_at_us.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 7,
+            wire_type: WireType::Bool,
+            payload: vec![0],
+        },
+        CatalogField {
+            tag: 9,
+            wire_type: WireType::Text,
+            payload: label.as_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 10,
+            wire_type: WireType::U64,
+            payload: 1u64.to_le_bytes().to_vec(),
+        },
+    ];
+    encode_envelope(
+        &family_schema(16).ok_or(CredentialProfileError::InvalidRecord)?,
+        &key,
+        &fields,
+    )
+    .map_err(|_| CredentialProfileError::InvalidRecord)
+}
+
+pub(crate) fn encode_revoked_verifier_record(
+    record: &CatalogRecord,
+    revoked_at_us: i64,
+) -> Result<Vec<u8>, CredentialProfileError> {
+    let current = decode_verifier_record(record)?;
+    if current.revoked || revoked_at_us < current.issued_at_us {
+        return Err(CredentialProfileError::InvalidRecord);
+    }
+    let next_epoch = current
+        .authority_epoch
+        .checked_add(1)
+        .ok_or(CredentialProfileError::InvalidRecord)?;
+    let mut fields = record.fields.clone();
+    for field in &mut fields {
+        match field.tag {
+            7 => field.payload = vec![1],
+            8 => field.payload = revoked_at_us.to_le_bytes().to_vec(),
+            10 => field.payload = next_epoch.to_le_bytes().to_vec(),
+            _ => {}
+        }
+    }
+    if !fields.iter().any(|field| field.tag == 8) {
+        let revoked_at = CatalogField {
+            tag: 8,
+            wire_type: WireType::I64,
+            payload: revoked_at_us.to_le_bytes().to_vec(),
+        };
+        let insertion = fields
+            .iter()
+            .position(|field| field.tag > 8)
+            .unwrap_or(fields.len());
+        fields.insert(insertion, revoked_at);
+    }
+    encode_envelope(
+        &family_schema(16).ok_or(CredentialProfileError::InvalidRecord)?,
+        &record.logical_key,
+        &fields,
+    )
+    .map_err(|_| CredentialProfileError::InvalidRecord)
 }
 
 pub(crate) fn decode_verifier_record(

@@ -8041,7 +8041,10 @@ fn identity_ddl_authority_guards(
     if audit_events.is_empty()
         || audit_events.iter().any(|event| {
             event.actor_id != Some(principal_id)
-                || event.action != crate::audit::AuditAction::Ddl
+                || !matches!(
+                    event.action,
+                    crate::audit::AuditAction::Ddl | crate::audit::AuditAction::TokenLifecycle
+                )
                 || event.result != crate::audit::AuditResult::Succeeded
         })
     {
@@ -8055,6 +8058,7 @@ fn identity_ddl_authority_guards(
     let mut principal_changes = HashMap::<[u8; 16], (u16, bool, bool, bool, Vec<u8>)>::new();
     let mut object_changes = HashMap::<[u8; 16], (u16, bool, bool)>::new();
     let mut credential_changes = HashMap::<[u8; 16], [u8; 16]>::new();
+    let mut credential_issues = HashSet::<[u8; 16]>::new();
     let mut required_privileges = HashSet::<u16>::new();
 
     for write in catalog_writes {
@@ -8078,35 +8082,51 @@ fn identity_ddl_authority_guards(
             if write.key.len() != 19 || write.key[2] != 1 || write.payload.is_none() {
                 return Err(CommitError::InvalidCatalog);
             }
-            let current_bytes = current.as_deref().ok_or(CommitError::InvalidCatalog)?;
             let next_bytes = write
                 .payload
                 .as_deref()
                 .ok_or(CommitError::InvalidCatalog)?;
-            let current_record = decode_catalog_record(&write.key, current_bytes)?;
             let next_record = decode_catalog_record(&write.key, next_bytes)?;
-            let current_credential =
-                decode_verifier_record(&current_record).map_err(|_| CommitError::InvalidCatalog)?;
             let next_credential =
                 decode_verifier_record(&next_record).map_err(|_| CommitError::InvalidCatalog)?;
-            if current_credential.revoked
-                || !next_credential.revoked
-                || current_credential.user_id != next_credential.user_id
-                || current_credential.verifier != next_credential.verifier
-                || current_credential.issued_at_us != next_credential.issued_at_us
-                || current_credential.expires_at_us != next_credential.expires_at_us
-                || current_credential.label != next_credential.label
-                || next_credential.authority_epoch <= current_credential.authority_epoch
-            {
-                return Err(CommitError::InvalidCatalog);
-            }
             let token_id: [u8; 16] = write.key[3..19]
                 .try_into()
                 .map_err(|_| CommitError::InvalidCatalog)?;
-            if credential_changes
-                .insert(token_id, current_credential.user_id)
-                .is_some()
-            {
+            let user_id = if let Some(current_bytes) = current.as_deref() {
+                let current_record = decode_catalog_record(&write.key, current_bytes)?;
+                let current_credential = decode_verifier_record(&current_record)
+                    .map_err(|_| CommitError::InvalidCatalog)?;
+                if current_credential.revoked
+                    || !next_credential.revoked
+                    || current_credential.user_id != next_credential.user_id
+                    || current_credential.verifier != next_credential.verifier
+                    || current_credential.issued_at_us != next_credential.issued_at_us
+                    || current_credential.expires_at_us != next_credential.expires_at_us
+                    || current_credential.label != next_credential.label
+                    || next_credential.authority_epoch <= current_credential.authority_epoch
+                {
+                    return Err(CommitError::InvalidCatalog);
+                }
+                current_credential.user_id
+            } else {
+                if next_credential.revoked {
+                    return Err(CommitError::InvalidCatalog);
+                }
+                let user_key = id_catalog_key(10, next_credential.user_id);
+                let user_bytes = catalog
+                    .get(user_key.as_slice())
+                    .map_err(storage_error)?
+                    .map(|value| value.value().to_vec())
+                    .ok_or(CommitError::DdlAuthorizationDenied)?;
+                if decode_principal_kind(&user_key, &user_bytes)? != 1
+                    || catalog_field_bytes(&user_key, &user_bytes, 10, 3)? != [1]
+                {
+                    return Err(CommitError::DdlAuthorizationDenied);
+                }
+                credential_issues.insert(token_id);
+                next_credential.user_id
+            };
+            if credential_changes.insert(token_id, user_id).is_some() {
                 return Err(CommitError::InvalidCatalog);
             }
             required_privileges.insert(12);
@@ -8206,6 +8226,22 @@ fn identity_ddl_authority_guards(
 
     if principal_changes.is_empty() && credential_changes.is_empty() {
         return Err(CommitError::InvalidCatalog);
+    }
+    if (principal_changes.is_empty()
+        && audit_events
+            .iter()
+            .any(|event| event.action != crate::audit::AuditAction::TokenLifecycle))
+        || (!principal_changes.is_empty()
+            && audit_events
+                .iter()
+                .any(|event| event.action != crate::audit::AuditAction::Ddl))
+        || credential_issues.iter().any(|token_id| {
+            credential_changes
+                .get(token_id)
+                .is_some_and(|user_id| principal_changes.contains_key(user_id))
+        })
+    {
+        return Err(CommitError::InvalidAudit);
     }
     if object_changes
         .keys()

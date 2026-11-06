@@ -6,4 +6,6 @@ publish = false
 
 [dependencies]
 redb = "=4.4.0"
+getrandom = "=0.4.3"
 sha2 = "=0.11.1"
+zeroize = "=1.9.1"

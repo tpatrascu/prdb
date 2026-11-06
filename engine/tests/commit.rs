@@ -6296,6 +6296,138 @@ fn token_admission_checks_expiry_secret_revocation_and_commit_guards()
 }
 
 #[test]
+fn storage_manager_issues_and_revokes_tokens_for_manage_users()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::storage_manager::{TokenIssueRequest, TokenLifecycleError};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let admin_user = id(0x90);
+    let user_manager = id(0x91);
+    let target_user = id(0x92);
+    let denied_user = id(0x93);
+    let database_id = id(0x33);
+    let admin_role = builtin_owner_id();
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let seed_records = [
+        principal_write_with_name(admin_user, 1, 1, "token_admin"),
+        object_write_with_name(admin_user, 8, "token_admin"),
+        principal_write_with_name(user_manager, 1, 1, "token_manager"),
+        object_write_with_name(user_manager, 8, "token_manager"),
+        principal_write_with_name(target_user, 1, 1, "token_target"),
+        object_write_with_name(target_user, 8, "token_target"),
+        principal_write_with_name(denied_user, 1, 1, "token_denied"),
+        object_write_with_name(denied_user, 8, "token_denied"),
+        membership_write_with_grantor(admin_user, admin_role, admin_role),
+        dependency_write(admin_user, admin_role, 5),
+        grant_write(user_manager, database_id, 12, 1, database_id, admin_role),
+        dependency_write(user_manager, database_id, 5),
+    ];
+    let mut seed_audit = identity_audit_event(0x90, admin_role, admin_user);
+    seed_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(id(0x90), admin_role, 9_999, &seed_records, &[seed_audit])?;
+
+    let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
+    let lifecycle_event = |event_id: u8, actor_id, target_ids| AuditEvent {
+        event_id: id(event_id),
+        actor_id: Some(actor_id),
+        correlation_id: id(event_id.wrapping_add(1)),
+        occurred_at_us: now,
+        action: AuditAction::TokenLifecycle,
+        result: AuditResult::Succeeded,
+        target_ids,
+    };
+    let expires_at_us = now + 3_600_000_000;
+    let mut issued = storage.issue_token(TokenIssueRequest {
+        invocation_id: id(0x94),
+        authenticated_actor_id: user_manager,
+        user_id: target_user,
+        label: "integration client",
+        expires_at_us,
+        retention_deadline_us: now + 7_200_000_000,
+        audit_event: lifecycle_event(0x94, user_manager, vec![target_user]),
+    })?;
+    let token_id = issued.token_id;
+    assert_eq!(issued.commit_sequence, 2);
+    let secret = issued.take_secret().ok_or("issued secret missing")?;
+    assert!(issued.take_secret().is_none());
+
+    let read = database.begin_read()?;
+    let token_key = id_catalog_key(16, token_id);
+    let token_bytes = read
+        .open_table(CATALOG)?
+        .get(token_key.as_slice())?
+        .ok_or("issued verifier missing")?
+        .value()
+        .to_vec();
+    let verifier_record = decode_registered_envelope(&token_bytes)?;
+    let verifier = verifier_record
+        .fields
+        .iter()
+        .find(|field| field.tag == 4)
+        .ok_or("verifier field missing")?;
+    assert_eq!(verifier.payload, hash_token_secret(&secret));
+    assert_ne!(verifier.payload, secret);
+    drop(read);
+
+    let (admitted, roles) = storage.begin_token_authenticated_invocation(
+        id(0x95),
+        token_id,
+        &secret,
+        now + 7_200_000_000,
+        2,
+        64,
+    )?;
+    assert!(roles.is_empty());
+    assert_eq!(
+        storage.revoke_token(
+            id(0x96),
+            user_manager,
+            token_id,
+            now + 7_200_000_000,
+            lifecycle_event(0x96, user_manager, vec![token_id]),
+        )?,
+        3
+    );
+    assert!(matches!(
+        admitted.commit(),
+        Err(prdb_engine::transaction::TransactionError::Commit(
+            CommitError::Conflict
+        ))
+    ));
+    assert!(matches!(
+        storage.begin_token_authenticated_invocation(
+            id(0x97),
+            token_id,
+            &secret,
+            now + 7_200_000_000,
+            2,
+            64,
+        ),
+        Err(prdb_engine::transaction::TransactionError::AuthenticationFailed)
+    ));
+
+    let denied_issue = storage.issue_token(TokenIssueRequest {
+        invocation_id: id(0x98),
+        authenticated_actor_id: denied_user,
+        user_id: target_user,
+        label: "denied client",
+        expires_at_us,
+        retention_deadline_us: now + 7_200_000_000,
+        audit_event: lifecycle_event(0x98, denied_user, vec![target_user]),
+    });
+    assert!(matches!(
+        denied_issue,
+        Err(TokenLifecycleError::Commit(
+            CommitError::DdlAuthorizationDenied
+        ))
+    ));
+    assert!(prdb_engine::startup::validate_persisted_records(&database).is_ok());
+    Ok(())
+}
+
+#[test]
 fn catalog_commit_requires_principal_object_identity_and_kind()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
