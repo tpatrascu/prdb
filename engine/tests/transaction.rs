@@ -2543,8 +2543,8 @@ fn executor_resolve_relation_ipc_dispatch_returns_only_authorized_handle()
 fn executor_relation_socket_loop_serves_then_aborts_on_disconnect()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::executor_ipc::{
-        ExecutorConnectionError, ResolveRelationRequest, ResolveRelationResponse,
-        serve_executor_resolve_relation,
+        CloseCursorRequest, ExecutorConnectionError, OpenScanRequest, OpenScanResponse,
+        ResolveRelationRequest, ResolveRelationResponse, serve_executor_resolve_relation,
     };
     use prdb_engine::ipc::{IpcFrame, Operation, read_frame, write_frame};
     use prdb_engine::outcome::{OutcomeStatus, lookup_outcome};
@@ -2559,26 +2559,55 @@ fn executor_relation_socket_loop_serves_then_aborts_on_disconnect()
     let mut invocation =
         InvocationTransaction::begin(&database, invocation_id, principal_id, 9_999, 1, 64)?;
     let (mut client, mut server) = UnixStream::pair()?;
-    let request = IpcFrame {
-        operation: Operation::ResolveRelation as u16,
-        request_id: 51,
-        payload: ResolveRelationRequest {
-            schema_name: "app".to_owned(),
-            relation_name: "metrics".to_owned(),
-        }
-        .encode()?,
-    };
-    write_frame(&mut client, &request)?;
-    client.shutdown(Shutdown::Write)?;
+    let client_task = std::thread::spawn(move || {
+        let resolve_request = IpcFrame {
+            operation: Operation::ResolveRelation as u16,
+            request_id: 51,
+            payload: ResolveRelationRequest {
+                schema_name: "app".to_owned(),
+                relation_name: "metrics".to_owned(),
+            }
+            .encode()
+            .unwrap(),
+        };
+        write_frame(&mut client, &resolve_request).unwrap();
+        let resolve_response = read_frame(&mut client).unwrap().unwrap();
+        let ResolveRelationResponse::Resolved { handle, .. } =
+            ResolveRelationResponse::decode(&resolve_response.payload).unwrap()
+        else {
+            panic!("visible relation must resolve over the stream")
+        };
 
+        let open_request = IpcFrame {
+            operation: Operation::OpenScan as u16,
+            request_id: 52,
+            payload: OpenScanRequest {
+                relation: handle,
+                column_ids: Vec::new(),
+            }
+            .encode()
+            .unwrap(),
+        };
+        write_frame(&mut client, &open_request).unwrap();
+        let open_response = read_frame(&mut client).unwrap().unwrap();
+        let cursor = OpenScanResponse::decode(&open_response.payload)
+            .unwrap()
+            .cursor;
+
+        let close_request = IpcFrame {
+            operation: Operation::CloseCursor as u16,
+            request_id: 53,
+            payload: CloseCursorRequest { cursor }.encode(),
+        };
+        write_frame(&mut client, &close_request).unwrap();
+        let close_response = read_frame(&mut client).unwrap().unwrap();
+        assert_eq!(close_response.payload, [0, 1, 0]);
+        client.shutdown(Shutdown::Write).unwrap();
+    });
     serve_executor_resolve_relation(&mut server, &mut invocation)?;
-
-    let response = read_frame(&mut client)?.expect("resolver returned a frame");
-    assert_eq!(response.request_id, request.request_id);
-    assert!(matches!(
-        ResolveRelationResponse::decode(&response.payload)?,
-        ResolveRelationResponse::Resolved { .. }
-    ));
+    client_task
+        .join()
+        .expect("client stream sequence completes");
     let outcome = lookup_outcome(&database, invocation_id, principal_id, 1)?
         .expect("disconnect persists an aborted outcome");
     assert_eq!(outcome.status, OutcomeStatus::Aborted);
@@ -2595,7 +2624,12 @@ fn executor_relation_socket_loop_serves_then_aborts_on_disconnect()
     let (mut duplicate_client, mut duplicate_server) = UnixStream::pair()?;
     let duplicate_request = IpcFrame {
         request_id: 52,
-        ..request
+        operation: Operation::ResolveRelation as u16,
+        payload: ResolveRelationRequest {
+            schema_name: "app".to_owned(),
+            relation_name: "metrics".to_owned(),
+        }
+        .encode()?,
     };
     write_frame(&mut duplicate_client, &duplicate_request)?;
     write_frame(&mut duplicate_client, &duplicate_request)?;

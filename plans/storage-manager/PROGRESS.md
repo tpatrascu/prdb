@@ -877,3 +877,13 @@
 - Verification: workspace build, format check, warning-denied Clippy, full workspace tests, all 158 changed-document local links, and `git diff --check` pass.
 - Remaining: exercise this failure through a live Unix stream and validate NULL/REDACTED and malformed response edge cases.
 - Next smallest task: add a stream-level multi-operation executor request regression before socket provisioning work.
+
+## SM-6 dependency: multi-operation executor stream
+
+- Behavior: one Unix stream keeps its connection-owned relation and cursor handles across `resolve_relation`, `open_scan`, and `close_cursor` requests; clean disconnect still durably aborts the invocation.
+- Changed fixture: [executor Unix-stream regression](../../engine/tests/transaction.rs).
+- Evidence: the focused stream regression passes and confirms a close acknowledgement before the disconnect outcome.
+- Red evidence: an initial attempt to include `next_batch` in the relation-discovery-only fixture failed with `CorruptCatalog`; that fixture lacks the scan policy records. The richer catalog-authorized regression already exercises `next_batch` through the same dispatcher, while this stream test covers persistent handle state and cursor lifecycle.
+- Verification: workspace build, format check, warning-denied Clippy, full tests, all 159 changed-document local links, and `git diff --check` pass.
+- Remaining: run scan and mutation operations through a live stream with the full authorization fixture; provision the stream through a supervisor lifecycle when that component exists.
+- Next smallest task: share the authorized scan fixture with the stream-level test, then document the executor stream as the storage boundary for supervisor callers.
