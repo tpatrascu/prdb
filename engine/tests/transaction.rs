@@ -897,6 +897,419 @@ fn initialize(path: &std::path::Path) -> Result<Database, Box<dyn std::error::Er
     Ok(database)
 }
 
+fn install_relation_discovery_catalog(
+    database: &Database,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let schema_id = [0x91; 16];
+    let table_id = [0x10; 16];
+    let hidden_table_id = [0x20; 16];
+    let column_id = [0x66; 16];
+    let write = database.begin_write()?;
+    {
+        let mut catalog = write.open_table(CATALOG)?;
+        let mut table_ids = 2u32.to_le_bytes().to_vec();
+        table_ids.extend_from_slice(&table_id);
+        table_ids.extend_from_slice(&hidden_table_id);
+        let schema_key = catalog_id_key(3, schema_id);
+        let schema_value = catalog_record_payload(
+            3,
+            &schema_key,
+            &[CatalogField {
+                tag: 1,
+                wire_type: WireType::Ids,
+                payload: table_ids,
+            }],
+        )?;
+        let schema_object_key = catalog_id_key(2, schema_id);
+        let schema_object_value = catalog_record_payload(
+            2,
+            &schema_object_key,
+            &[
+                CatalogField {
+                    tag: 1,
+                    wire_type: WireType::U16,
+                    payload: 1u16.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 3,
+                    wire_type: WireType::Text,
+                    payload: b"app".to_vec(),
+                },
+                CatalogField {
+                    tag: 4,
+                    wire_type: WireType::Id,
+                    payload: builtin_owner_id().to_vec(),
+                },
+                CatalogField {
+                    tag: 5,
+                    wire_type: WireType::U64,
+                    payload: 1u64.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 6,
+                    wire_type: WireType::U16,
+                    payload: 1u16.to_le_bytes().to_vec(),
+                },
+            ],
+        )?;
+        catalog.insert(&schema_key[..], &schema_value[..])?;
+        catalog.insert(&schema_object_key[..], &schema_object_value[..])?;
+
+        for (table_id, name, storage_id) in [
+            (table_id, b"metrics".as_slice(), [145; 16]),
+            (hidden_table_id, b"secret".as_slice(), [146; 16]),
+        ] {
+            let table_key = catalog_id_key(5, table_id);
+            let table_value = catalog_record_payload(
+                5,
+                &table_key,
+                &[
+                    CatalogField {
+                        tag: 1,
+                        wire_type: WireType::Id,
+                        payload: schema_id.to_vec(),
+                    },
+                    CatalogField {
+                        tag: 2,
+                        wire_type: WireType::U64,
+                        payload: 1u64.to_le_bytes().to_vec(),
+                    },
+                    CatalogField {
+                        tag: 3,
+                        wire_type: WireType::U64,
+                        payload: 1u64.to_le_bytes().to_vec(),
+                    },
+                    CatalogField {
+                        tag: 4,
+                        wire_type: WireType::Id,
+                        payload: storage_id.to_vec(),
+                    },
+                    CatalogField {
+                        tag: 5,
+                        wire_type: WireType::U16,
+                        payload: 1u16.to_le_bytes().to_vec(),
+                    },
+                ],
+            )?;
+            let object_fields = vec![
+                CatalogField {
+                    tag: 1,
+                    wire_type: WireType::U16,
+                    payload: 3u16.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 2,
+                    wire_type: WireType::Id,
+                    payload: schema_id.to_vec(),
+                },
+                CatalogField {
+                    tag: 3,
+                    wire_type: WireType::Text,
+                    payload: name.to_vec(),
+                },
+                CatalogField {
+                    tag: 4,
+                    wire_type: WireType::Id,
+                    payload: builtin_owner_id().to_vec(),
+                },
+                CatalogField {
+                    tag: 5,
+                    wire_type: WireType::U64,
+                    payload: 1u64.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 6,
+                    wire_type: WireType::U16,
+                    payload: 1u16.to_le_bytes().to_vec(),
+                },
+            ];
+            let object_key = catalog_id_key(2, table_id);
+            let object_value = catalog_record_payload(2, &object_key, &object_fields)?;
+            catalog.insert(&table_key[..], &table_value[..])?;
+            catalog.insert(&object_key[..], &object_value[..])?;
+        }
+
+        let column_key = catalog_id_key(6, column_id);
+        let column_value = catalog_record_payload(
+            6,
+            &column_key,
+            &[
+                CatalogField {
+                    tag: 1,
+                    wire_type: WireType::Id,
+                    payload: table_id.to_vec(),
+                },
+                CatalogField {
+                    tag: 2,
+                    wire_type: WireType::U32,
+                    payload: 0u32.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 3,
+                    wire_type: WireType::Text,
+                    payload: b"value".to_vec(),
+                },
+                CatalogField {
+                    tag: 4,
+                    wire_type: WireType::Id,
+                    payload: [0x40; 16].to_vec(),
+                },
+                CatalogField {
+                    tag: 5,
+                    wire_type: WireType::Bytes,
+                    payload: vec![0; 8],
+                },
+                CatalogField {
+                    tag: 6,
+                    wire_type: WireType::Bool,
+                    payload: vec![1],
+                },
+                CatalogField {
+                    tag: 8,
+                    wire_type: WireType::U16,
+                    payload: 0u16.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 9,
+                    wire_type: WireType::U64,
+                    payload: 1u64.to_le_bytes().to_vec(),
+                },
+            ],
+        )?;
+        let column_object_key = catalog_id_key(2, column_id);
+        let column_object_value = catalog_record_payload(
+            2,
+            &column_object_key,
+            &[
+                CatalogField {
+                    tag: 1,
+                    wire_type: WireType::U16,
+                    payload: 4u16.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 2,
+                    wire_type: WireType::Id,
+                    payload: table_id.to_vec(),
+                },
+                CatalogField {
+                    tag: 3,
+                    wire_type: WireType::Text,
+                    payload: b"value".to_vec(),
+                },
+                CatalogField {
+                    tag: 4,
+                    wire_type: WireType::Id,
+                    payload: builtin_owner_id().to_vec(),
+                },
+                CatalogField {
+                    tag: 5,
+                    wire_type: WireType::U64,
+                    payload: 1u64.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 6,
+                    wire_type: WireType::U16,
+                    payload: 1u16.to_le_bytes().to_vec(),
+                },
+            ],
+        )?;
+        catalog.insert(&column_key[..], &column_value[..])?;
+        catalog.insert(&column_object_key[..], &column_object_value[..])?;
+
+        let (user_key, user_value) =
+            principal_catalog_record_for([9; 16], 1, b"metadata_user", true, 1);
+        let (user_object_key, user_object_value) = principal_object_record_for([9; 16], 1);
+        catalog.insert(&user_key[..], &user_value[..])?;
+        catalog.insert(&user_object_key[..], &user_object_value[..])?;
+        for (object_id, privilege, target_scope, target_id) in [
+            (schema_id, 1, 1, schema_id),
+            (table_id, 3, 1, table_id),
+            (table_id, 2, 2, column_id),
+            (hidden_table_id, 5, 1, hidden_table_id),
+        ] {
+            let (grant_key, grant_value) = grant_catalog_record(
+                [9; 16],
+                object_id,
+                privilege,
+                target_scope,
+                target_id,
+                builtin_owner_id(),
+                1,
+            );
+            catalog.insert(&grant_key[..], &grant_value[..])?;
+        }
+    }
+    write.commit()?;
+    Ok(())
+}
+
+#[test]
+fn authorized_relation_listing_uses_schema_usage_and_data_grants()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    install_relation_discovery_catalog(&database)?;
+    let mut malformed_hidden_row_key = [0x20; 32];
+    malformed_hidden_row_key[16..].fill(0xfe);
+    let write = database.begin_write()?;
+    write
+        .open_table(ROWS)?
+        .insert(&malformed_hidden_row_key[..], &b"not-a-row"[..])?;
+    write.commit()?;
+
+    let schema_id = [0x91; 16];
+    let table_id = [0x10; 16];
+    let context = AuthorizationContext {
+        principal_id: [9; 16],
+        role_ids: std::collections::HashSet::new(),
+        scope: std::collections::HashSet::from([
+            (Operation::Usage, AccessTarget::Schema(schema_id)),
+            (Operation::Insert, AccessTarget::Table(table_id)),
+        ]),
+    };
+    let grants = [
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Usage,
+            target: AccessTarget::Schema(schema_id),
+        },
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Insert,
+            target: AccessTarget::Table(table_id),
+        },
+    ];
+    let mut invocation = InvocationTransaction::begin(&database, [180; 16], [9; 16], 9_999, 1, 64)?;
+    let page = invocation
+        .list_authorized_relations(schema_id, 16, None, &context, &grants, &[])?
+        .expect("schema is discoverable");
+    assert_eq!(page.relations.len(), 1);
+    assert_eq!(page.relations[0].relation_id, table_id);
+    assert_eq!(page.relations[0].name, "metrics");
+    assert!(page.continuation.is_none());
+
+    let no_usage = AuthorizationContext {
+        scope: std::collections::HashSet::from([(
+            Operation::Insert,
+            AccessTarget::Table(table_id),
+        )]),
+        ..context
+    };
+    assert!(
+        invocation
+            .list_authorized_relations(schema_id, 16, None, &no_usage, &grants, &[])?
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
+fn relation_listing_rejects_grants_not_present_in_the_pinned_catalog()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    install_relation_discovery_catalog(&database)?;
+    let schema_id = [0x91; 16];
+    let table_id = [0x10; 16];
+    let context = AuthorizationContext {
+        principal_id: [9; 16],
+        role_ids: std::collections::HashSet::new(),
+        scope: std::collections::HashSet::from([
+            (Operation::Usage, AccessTarget::Schema(schema_id)),
+            (Operation::Select, AccessTarget::Table(table_id)),
+        ]),
+    };
+    let forged_grants = [
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Usage,
+            target: AccessTarget::Schema(schema_id),
+        },
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Select,
+            target: AccessTarget::Table(table_id),
+        },
+    ];
+    let mut invocation = InvocationTransaction::begin(&database, [183; 16], [9; 16], 9_999, 1, 64)?;
+    assert!(matches!(
+        invocation.list_authorized_relations(schema_id, 16, None, &context, &forged_grants, &[]),
+        Err(TransactionError::InvalidContext)
+    ));
+    Ok(())
+}
+
+#[test]
+fn column_grants_can_discover_a_relation_and_pages_are_snapshot_scoped()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    install_relation_discovery_catalog(&database)?;
+    let schema_id = [0x91; 16];
+    let context = AuthorizationContext {
+        principal_id: [9; 16],
+        role_ids: std::collections::HashSet::new(),
+        scope: std::collections::HashSet::from([
+            (Operation::Usage, AccessTarget::Schema(schema_id)),
+            (
+                Operation::Select,
+                AccessTarget::Column {
+                    table_id: [0x10; 16],
+                    column_id: [0x66; 16],
+                },
+            ),
+            (Operation::Delete, AccessTarget::Table([0x20; 16])),
+        ]),
+    };
+    let grants = [
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Usage,
+            target: AccessTarget::Schema(schema_id),
+        },
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Select,
+            target: AccessTarget::Column {
+                table_id: [0x10; 16],
+                column_id: [0x66; 16],
+            },
+        },
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Delete,
+            target: AccessTarget::Table([0x20; 16]),
+        },
+    ];
+    let mut invocation = InvocationTransaction::begin(&database, [181; 16], [9; 16], 9_999, 1, 64)?;
+    let first = invocation
+        .list_authorized_relations(schema_id, 1, None, &context, &grants, &[])?
+        .expect("schema is discoverable");
+    assert_eq!(first.relations.len(), 1);
+    assert_eq!(first.relations[0].name, "metrics");
+    let cursor = first.continuation.expect("second granted relation");
+    let mut other_invocation =
+        InvocationTransaction::begin(&database, [182; 16], [9; 16], 9_999, 1, 64)?;
+    assert!(matches!(
+        other_invocation.list_authorized_relations(
+            schema_id,
+            1,
+            Some(cursor.clone()),
+            &context,
+            &grants,
+            &[],
+        ),
+        Err(TransactionError::InvalidMetadataRequest)
+    ));
+    let second = invocation
+        .list_authorized_relations(schema_id, 1, Some(cursor), &context, &grants, &[])?
+        .expect("schema remains discoverable");
+    assert_eq!(second.relations.len(), 1);
+    assert_eq!(second.relations[0].name, "secret");
+    assert!(second.continuation.is_none());
+    Ok(())
+}
+
 fn stage_initial_row(database: &Database) -> Result<(), Box<dyn std::error::Error>> {
     commit_rows(
         database,

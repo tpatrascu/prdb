@@ -18,6 +18,10 @@ use crate::expression::{
 };
 use crate::index_key::{DeriveIndexKeyError, derive_index_key};
 use crate::metadata::{EngineMetadata, Lifecycle};
+use crate::metadata_discovery::{
+    MAX_METADATA_PAGE_BYTES, MAX_RELATIONS_PER_PAGE, RelationScanCursor, VisibleRelation,
+    VisibleRelationPage,
+};
 use crate::outcome::{InvocationOutcome, OutcomeStatus};
 use crate::overlay::{Overlay, OverlayError, ResolvedRow, RowId, StagedRow};
 use crate::row_record::{RowRecord, RowRecordError};
@@ -65,6 +69,8 @@ pub enum TransactionError {
     CorruptRowKey,
     ScanStillActive,
     CorruptCatalog,
+    InvalidMetadataRequest,
+    MetadataResultTooLarge,
     Authorization(AuthorizationError),
     Aborted,
     NotFound,
@@ -222,6 +228,19 @@ pub struct InvocationTransaction<'db> {
     aborted: bool,
     outcome_recorded: bool,
     active_scan: Option<ActiveRowScan>,
+    active_relation_scan: Option<ActiveRelationScan>,
+    metadata_scan_generation: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ActiveRelationScan {
+    generation: u64,
+    schema_id: [u8; 16],
+    principal_id: [u8; 16],
+    role_ids: HashSet<[u8; 16]>,
+    scope: HashSet<(Operation, AccessTarget)>,
+    grants: Vec<Grant>,
+    dependencies: Vec<AuthorityDependency>,
 }
 
 pub(crate) struct InvocationCoordination {
@@ -388,6 +407,8 @@ impl<'db> InvocationTransaction<'db> {
             aborted: false,
             outcome_recorded: false,
             active_scan: None,
+            active_relation_scan: None,
+            metadata_scan_generation: 0,
         })
     }
 
@@ -745,6 +766,346 @@ impl<'db> InvocationTransaction<'db> {
         }
         self.catalog_guards.insert(key.to_vec(), Some(bytes));
         Ok(Some(record))
+    }
+
+    /// List relations in one schema only when the invocation has schema usage
+    /// and at least one table or column data grant. The role closure and each
+    /// supplied grant are checked against this transaction's pinned catalog.
+    pub fn list_authorized_relations(
+        &mut self,
+        schema_id: [u8; 16],
+        page_limit: usize,
+        continuation: Option<RelationScanCursor>,
+        context: &AuthorizationContext,
+        grants: &[Grant],
+        dependencies: &[AuthorityDependency],
+    ) -> Result<Option<VisibleRelationPage>, TransactionError> {
+        let result = (|| {
+            if schema_id == [0; 16]
+                || page_limit == 0
+                || page_limit > MAX_RELATIONS_PER_PAGE
+                || grants.len() > crate::authorization::MAX_AUTHORIZATION_INPUTS
+            {
+                return Err(TransactionError::InvalidMetadataRequest);
+            }
+            self.check_deadline()?;
+            self.capture_authority_dependencies(context, dependencies)?;
+            let pinned_roles = self.load_catalog_role_closure(context.principal_id)?;
+            if pinned_roles != context.role_ids {
+                return Err(TransactionError::InvalidContext);
+            }
+            for grant in grants {
+                self.validate_metadata_grant(context, *grant)?;
+            }
+
+            if !has_permission(
+                context,
+                grants,
+                Operation::Usage,
+                AccessTarget::Schema(schema_id),
+            ) {
+                return Ok(None);
+            }
+
+            let active_scan = match continuation.as_ref() {
+                Some(cursor) => {
+                    if cursor.invocation_id != self.invocation_id
+                        || cursor.schema_id != schema_id
+                        || self.active_relation_scan.as_ref().is_none_or(|active| {
+                            active.generation != cursor.generation
+                                || active.schema_id != schema_id
+                                || active.principal_id != context.principal_id
+                                || active.role_ids != context.role_ids
+                                || active.scope != context.scope
+                                || active.grants != grants
+                                || active.dependencies != dependencies
+                        })
+                    {
+                        return Err(TransactionError::InvalidMetadataRequest);
+                    }
+                    self.active_relation_scan
+                        .as_ref()
+                        .ok_or(TransactionError::InvalidMetadataRequest)?
+                        .clone()
+                }
+                None => {
+                    self.metadata_scan_generation = self
+                        .metadata_scan_generation
+                        .checked_add(1)
+                        .ok_or(TransactionError::InvalidMetadataRequest)?;
+                    let active = ActiveRelationScan {
+                        generation: self.metadata_scan_generation,
+                        schema_id,
+                        principal_id: context.principal_id,
+                        role_ids: context.role_ids.clone(),
+                        scope: context.scope.clone(),
+                        grants: grants.to_vec(),
+                        dependencies: dependencies.to_vec(),
+                    };
+                    self.active_relation_scan = Some(active.clone());
+                    active
+                }
+            };
+
+            let schema_object_key = catalog_id_key(2, schema_id);
+            let Some(schema_object) = self.read_catalog_record(&schema_object_key)? else {
+                return Ok(None);
+            };
+            if schema_object.family_code != 2
+                || catalog_u16(&schema_object, 1)? != 1
+                || catalog_optional_id(&schema_object, 2)?.is_some()
+                || catalog_id(&schema_object, 4)? == [0; 16]
+                || catalog_u64(&schema_object, 5)? == 0
+                || catalog_u16(&schema_object, 6)? != 1
+            {
+                return Err(TransactionError::CorruptCatalog);
+            }
+            let schema_key = catalog_id_key(3, schema_id);
+            let schema = self
+                .read_catalog_record(&schema_key)?
+                .ok_or(TransactionError::CorruptCatalog)?;
+            if schema.family_code != 3 {
+                return Err(TransactionError::CorruptCatalog);
+            }
+            let mut table_ids = catalog_id_list(&schema, 1)?;
+            if table_ids.contains(&[0; 16]) {
+                return Err(TransactionError::CorruptCatalog);
+            }
+            table_ids.sort_unstable();
+            if table_ids.windows(2).any(|pair| pair[0] == pair[1]) {
+                return Err(TransactionError::CorruptCatalog);
+            }
+
+            let mut table_grants = HashSet::new();
+            let mut column_grants = HashMap::<[u8; 16], HashSet<[u8; 16]>>::new();
+            for grant in grants {
+                let subject_matches = match grant.subject {
+                    Subject::Principal(id) => id == context.principal_id,
+                    Subject::Role(id) => context.role_ids.contains(&id),
+                };
+                if !subject_matches || !context.scope.contains(&(grant.operation, grant.target)) {
+                    continue;
+                }
+                match (grant.operation, grant.target) {
+                    (
+                        Operation::Select
+                        | Operation::Insert
+                        | Operation::Update
+                        | Operation::Delete,
+                        AccessTarget::Table(table_id),
+                    ) => {
+                        table_grants.insert(table_id);
+                    }
+                    (
+                        Operation::Select | Operation::Insert | Operation::Update,
+                        AccessTarget::Column {
+                            table_id,
+                            column_id,
+                        },
+                    ) => {
+                        column_grants.entry(table_id).or_default().insert(column_id);
+                    }
+                    _ => {}
+                }
+            }
+
+            let after_id = continuation.as_ref().map(|cursor| cursor.after_relation_id);
+            let mut relations = Vec::with_capacity(page_limit);
+            let mut page_bytes = 0usize;
+            let mut has_more = false;
+            for table_id in table_ids {
+                if after_id.is_some_and(|after| table_id <= after) {
+                    continue;
+                }
+                let mut discoverable = table_grants.contains(&table_id);
+                if !discoverable && let Some(column_ids) = column_grants.get(&table_id) {
+                    for column_id in column_ids {
+                        self.validate_discovery_column(table_id, *column_id)?;
+                    }
+                    discoverable = !column_ids.is_empty();
+                }
+                if !discoverable {
+                    continue;
+                }
+                let relation = self.read_discovery_relation(schema_id, table_id)?;
+                let encoded_size = relation
+                    .name
+                    .len()
+                    .checked_add(24)
+                    .ok_or(TransactionError::MetadataResultTooLarge)?;
+                if relations.len() == page_limit
+                    || page_bytes.saturating_add(encoded_size) > MAX_METADATA_PAGE_BYTES
+                {
+                    if relations.is_empty() {
+                        return Err(TransactionError::MetadataResultTooLarge);
+                    }
+                    has_more = true;
+                    break;
+                }
+                page_bytes += encoded_size;
+                relations.push(relation);
+            }
+            let next_after = relations.last().map(|relation| relation.relation_id);
+            let continuation = if has_more {
+                Some(RelationScanCursor {
+                    invocation_id: self.invocation_id,
+                    schema_id,
+                    generation: active_scan.generation,
+                    after_relation_id: next_after
+                        .ok_or(TransactionError::InvalidMetadataRequest)?,
+                })
+            } else {
+                None
+            };
+            Ok(Some(VisibleRelationPage {
+                relations,
+                continuation,
+            }))
+        })();
+        match result {
+            Ok(page) => Ok(page),
+            Err(error) => {
+                if !self.aborted {
+                    self.abort()?;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn validate_discovery_column(
+        &mut self,
+        table_id: [u8; 16],
+        column_id: [u8; 16],
+    ) -> Result<(), TransactionError> {
+        let column_key = catalog_id_key(6, column_id);
+        let column = self
+            .read_catalog_record(&column_key)?
+            .ok_or(TransactionError::CorruptCatalog)?;
+        if column.family_code != 6 || catalog_id(&column, 1)? != table_id {
+            return Err(TransactionError::CorruptCatalog);
+        }
+        let column_object_key = catalog_id_key(2, column_id);
+        let column_object = self
+            .read_catalog_record(&column_object_key)?
+            .ok_or(TransactionError::CorruptCatalog)?;
+        if column_object.family_code != 2
+            || catalog_u16(&column_object, 1)? != 4
+            || catalog_optional_id(&column_object, 2)? != Some(table_id)
+            || catalog_id(&column_object, 4)? == [0; 16]
+            || catalog_u64(&column_object, 5)? == 0
+            || catalog_u16(&column_object, 6)? != 1
+            || catalog_field(&column_object, 3)? != catalog_field(&column, 3)?
+        {
+            return Err(TransactionError::CorruptCatalog);
+        }
+        Ok(())
+    }
+
+    fn validate_metadata_grant(
+        &mut self,
+        context: &AuthorizationContext,
+        grant: Grant,
+    ) -> Result<(), TransactionError> {
+        let grantee_id = match grant.subject {
+            Subject::Principal(id) if id == context.principal_id => id,
+            Subject::Role(id) if context.role_ids.contains(&id) => id,
+            _ => return Err(TransactionError::InvalidContext),
+        };
+        let (object_id, privilege, target_scope, target_id) = match (grant.operation, grant.target)
+        {
+            (Operation::Usage, AccessTarget::Schema(schema_id)) => (schema_id, 1, 1, schema_id),
+            (Operation::Select, AccessTarget::Table(table_id)) => (table_id, 2, 1, table_id),
+            (Operation::Insert, AccessTarget::Table(table_id)) => (table_id, 3, 1, table_id),
+            (Operation::Update, AccessTarget::Table(table_id)) => (table_id, 4, 1, table_id),
+            (Operation::Delete, AccessTarget::Table(table_id)) => (table_id, 5, 1, table_id),
+            (
+                Operation::Select,
+                AccessTarget::Column {
+                    table_id,
+                    column_id,
+                },
+            ) => (table_id, 2, 2, column_id),
+            (
+                Operation::Insert,
+                AccessTarget::Column {
+                    table_id,
+                    column_id,
+                },
+            ) => (table_id, 3, 2, column_id),
+            (
+                Operation::Update,
+                AccessTarget::Column {
+                    table_id,
+                    column_id,
+                },
+            ) => (table_id, 4, 2, column_id),
+            _ => return Err(TransactionError::InvalidContext),
+        };
+        if grantee_id == [0; 16] || object_id == [0; 16] || target_id == [0; 16] {
+            return Err(TransactionError::InvalidContext);
+        }
+        let key = catalog_grant_key(grantee_id, object_id, privilege, target_scope, target_id);
+        let record = self
+            .read_catalog_record(&key)?
+            .ok_or(TransactionError::InvalidContext)?;
+        let grantor_id = catalog_id(&record, 1)?;
+        if record.family_code != 12 || grantor_id == [0; 16] || catalog_u64(&record, 2)? == 0 {
+            return Err(TransactionError::CorruptCatalog);
+        }
+        let grantor = self
+            .read_catalog_record(&catalog_id_key(10, grantor_id))?
+            .ok_or(TransactionError::CorruptCatalog)?;
+        let grantor_kind = catalog_u16(&grantor, 1)?;
+        let grantor_login = catalog_field(&grantor, 3)?;
+        if grantor.family_code != 10
+            || !matches!(grantor_kind, 1 | 2)
+            || catalog_u64(&grantor, 4)? == 0
+            || !matches!(grantor_login, [0] | [1])
+            || (grantor_kind == 2 && grantor_login != [0])
+        {
+            return Err(TransactionError::CorruptCatalog);
+        }
+        Ok(())
+    }
+
+    fn read_discovery_relation(
+        &mut self,
+        schema_id: [u8; 16],
+        table_id: [u8; 16],
+    ) -> Result<VisibleRelation, TransactionError> {
+        let table_key = catalog_id_key(5, table_id);
+        let table = self
+            .read_catalog_record(&table_key)?
+            .ok_or(TransactionError::CorruptCatalog)?;
+        if table.family_code != 5
+            || catalog_id(&table, 1)? != schema_id
+            || catalog_u64(&table, 2)? == 0
+            || catalog_u64(&table, 3)? == 0
+            || catalog_id(&table, 4)? == [0; 16]
+            || catalog_u16(&table, 5)? != 1
+        {
+            return Err(TransactionError::CorruptCatalog);
+        }
+        let object_key = catalog_id_key(2, table_id);
+        let object = self
+            .read_catalog_record(&object_key)?
+            .ok_or(TransactionError::CorruptCatalog)?;
+        if object.family_code != 2
+            || catalog_u16(&object, 1)? != 3
+            || catalog_optional_id(&object, 2)? != Some(schema_id)
+            || catalog_id(&object, 4)? == [0; 16]
+            || catalog_u64(&object, 5)? == 0
+            || catalog_u16(&object, 6)? != 1
+        {
+            return Err(TransactionError::CorruptCatalog);
+        }
+        let name = String::from_utf8(catalog_field(&object, 3)?.to_vec())
+            .map_err(|_| TransactionError::CorruptCatalog)?;
+        Ok(VisibleRelation {
+            relation_id: table_id,
+            name,
+        })
     }
 
     /// Verify one database-issued bearer token against this invocation's
@@ -3145,6 +3506,27 @@ fn catalog_id_key(family: u16, id: [u8; 16]) -> Vec<u8> {
     let mut key = family.to_be_bytes().to_vec();
     key.push(1);
     key.extend_from_slice(&id);
+    key
+}
+
+fn catalog_grant_key(
+    grantee_id: [u8; 16],
+    object_id: [u8; 16],
+    privilege: u16,
+    target_scope: u16,
+    target_id: [u8; 16],
+) -> Vec<u8> {
+    let mut key = 12u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&grantee_id);
+    key.push(1);
+    key.extend_from_slice(&object_id);
+    key.push(1);
+    key.extend_from_slice(&privilege.to_be_bytes());
+    key.push(1);
+    key.extend_from_slice(&target_scope.to_be_bytes());
+    key.push(1);
+    key.extend_from_slice(&target_id);
     key
 }
 

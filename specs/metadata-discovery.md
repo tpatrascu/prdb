@@ -24,6 +24,10 @@ resolve_relation(relation_ref) -> connection_local_handle, authorized_schema
 admin_describe_object(object_ref, section, page_limit, continuation?) -> admin_page
 ```
 
+The Rust storage slice `InvocationTransaction::list_authorized_relations` returns relation IDs and names from the invocation's pinned catalog. It requires schema USAGE and admits a relation when the invocation has an effective table-level SELECT, INSERT, UPDATE, or DELETE grant, or a column-level SELECT, INSERT, or UPDATE grant. It filters from catalog grants and scope without reading relation rows or evaluating row policies. It does not return defaults, policy text, ownership, grant provenance, schema versions, or hidden relation totals.
+
+Relation pages contain at most 128 records and at most 1 MiB of encoded relation IDs and names. The initial implementation orders relation IDs in ascending byte order. Its opaque continuation is valid only in the transaction that created it and is bound to that invocation snapshot, schema, authorization context, grants, and dependencies. An unavailable schema and a nonexistent schema return the same unavailable result. A relation that cannot fit by itself in a page returns a bounded response-size error. Other metadata endpoints remain future increments.
+
 Pages contain bounded typed records and opaque snapshot-bound continuation tokens. Tokens bind the connection, role, query/filter, and snapshot; they cannot resume against another principal or choose an older snapshot. Use deterministic logical ordering and do not return hidden total counts, ordinal gaps from hidden relations, or global catalog epochs. Column ordinal gaps caused by actual dropped columns may be visible as part of declared schema shape; they are not row counts.
 
 Stable object IDs may be returned for visible objects; they convey no capability. Errors, expired cursors, changed administrative authority, cancellation, and response-size limits follow IPC rules. Recheck each resolution independently; do not accept optimizer-local handles in executor scans.

@@ -19,6 +19,10 @@ Specify bounded typed records, deterministic ordering, byte/page limits and opaq
 | MD-5 | Mutations/grants/policy edits on virtual relations reject; optimizer sees only approved logical access paths | Dedicated system interface and role-filtered projection without raw definition/private statistics access |
 | MD-6 | Admin revocation between pages invalidates cursor; dependency inspection does not expose hidden endpoints | Request-scoped catalog snapshot plus current administrative authority, bounded sections and no secret/verifier access even for admins |
 
+## Current Implementation Slice
+
+`InvocationTransaction::list_authorized_relations` implements the first MD-1 behavior: schema USAGE plus a table or column data grant controls relation listing, including write-only grants, without consulting table rows or row policies. Its pages are bounded to 128 relations and 1 MiB, ordered by stable relation ID, and use invocation-local continuations. `list_schemas`, `describe_columns`, serialized IPC cursors, the built-in `information_schema` scans, and administrative discovery remain unimplemented.
+
 ## Acceptance and Handoff
 
 Run real two-user API/SQL parity fixtures, continuation substitution, empty/hidden data variation and old-reader DDL tests. Discovery never grants data access or permits planner-handle reuse by executors. First behavior: list one granted relation and omit an inaccessible one without consulting row visibility.

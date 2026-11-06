@@ -12,6 +12,7 @@ pub mod index_key;
 pub mod index_locator;
 pub mod ipc;
 pub mod metadata;
+pub mod metadata_discovery;
 pub mod outcome;
 pub mod overlay;
 pub mod row_record;
