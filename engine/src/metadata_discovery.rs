@@ -109,6 +109,19 @@ pub struct VisibleSchemaPage {
     pub continuation: Option<SchemaScanCursor>,
 }
 
+/// One row exposed by the read-only `information_schema.schemata` relation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InformationSchemaSchemataRow {
+    pub schema_name: String,
+}
+
+/// One bounded page from `information_schema.schemata`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InformationSchemaSchemataPage {
+    pub rows: Vec<InformationSchemaSchemataRow>,
+    pub continuation: Option<SchemaScanCursor>,
+}
+
 /// Opaque continuation for relation discovery in one invocation snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RelationScanCursor {

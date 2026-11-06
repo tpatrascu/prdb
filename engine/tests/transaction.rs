@@ -1630,6 +1630,24 @@ fn catalog_authorized_schema_listing_derives_the_invocation_scope()
 }
 
 #[test]
+fn information_schema_schemata_exposes_only_authorized_names()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    install_relation_discovery_catalog(&database)?;
+    let mut invocation = InvocationTransaction::begin(&database, [199; 16], [9; 16], 9_999, 1, 64)?;
+    let first = invocation.scan_information_schema_schemata(1, None)?;
+    assert_eq!(first.rows.len(), 1);
+    assert_eq!(first.rows[0].schema_name, "app");
+    let continuation = first.continuation.expect("public schema follows");
+    let second = invocation.scan_information_schema_schemata(1, Some(continuation))?;
+    assert_eq!(second.rows.len(), 1);
+    assert_eq!(second.rows[0].schema_name, "public");
+    assert!(second.continuation.is_none());
+    Ok(())
+}
+
+#[test]
 fn column_grants_can_discover_a_relation_and_pages_are_snapshot_scoped()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();

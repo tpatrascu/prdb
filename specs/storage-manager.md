@@ -30,7 +30,7 @@ The first scoped statistics path, `InvocationTransaction::estimate_authorized_sc
 
 `InvocationTransaction::resolve_authorized_relation` resolves an exact relation name through the filtered relation pages and then independently rechecks access before returning its stable ID, name, and declared columns. Hidden and nonexistent names produce the same unavailable result. The bounded description is not a row-access capability; later reads reauthorize their own requests. Serialized IPC cursors, SQL `information_schema` scans, and administrative discovery remain future work.
 
-`InvocationTransaction::list_authorized_schemas` returns schema IDs and names only for schemas with schema USAGE, in bounded pages ordered by stable schema ID. Its continuation is limited to the invocation that created it and does not disclose hidden schema totals. Serialized IPC cursor support and `information_schema` scans remain future work.
+`InvocationTransaction::list_authorized_schemas` returns schema IDs and names only for schemas with schema USAGE, in bounded pages ordered by stable schema ID. Its continuation is limited to the invocation that created it and does not disclose hidden schema totals. `scan_information_schema_schemata` projects these pages to `schema_name` rows while preserving the same filtering, bounds, ordering, and continuation. SQL binding/execution for the virtual relation and the `information_schema.tables` and `.columns` scans remain future work.
 
 Schema, relation, and column continuation tokens have a fixed 16-byte wire form with a cursor-kind byte and 15 OS-random bytes. One-use server-side state binds them to the invocation and authorization inputs. Modified, replayed, cross-invocation, or cross-kind tokens fail closed.
 

@@ -758,3 +758,11 @@
 - Added a cursor-kind discriminator to the 16-byte schema, relation, and column tokens. Decoders reject tokens from the other cursor families; the remaining bytes use the operating-system random source.
 - Regression assertions verify that each cursor encoding is accepted only by its matching decoder.
 - Contracts: [metadata discovery](../../specs/metadata-discovery.md) and [storage manager](../../specs/storage-manager.md).
+
+## MD-4 dependency: authorized `information_schema.schemata` projection
+
+- Red evidence: `information_schema_schemata_exposes_only_authorized_names` failed before the projection was implemented.
+- `InvocationTransaction::scan_information_schema_schemata` reuses the catalog-authorized schema scan and maps each visible schema to a row containing only `schema_name`, preserving page bounds and continuation behavior.
+- The regression pages the `app` and `public` schemas through one invocation and verifies ordering and completion.
+- Contracts: [metadata discovery](../../specs/metadata-discovery.md), [storage manager](../../specs/storage-manager.md), and [metadata discovery plan](../metadata-discovery/README.md).
+- Remaining: SQL planner/executor integration for `information_schema`, `tables` and `columns` projections, connection-local executor handles, and administrative discovery.

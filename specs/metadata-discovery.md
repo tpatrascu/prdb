@@ -34,6 +34,8 @@ The Rust storage slice `InvocationTransaction::list_authorized_relations` return
 
 `InvocationTransaction::list_authorized_schemas` returns only schemas with an effective USAGE grant in the admitted scope. Pages contain at most 128 schema IDs and names and at most 1 MiB, ordered by ascending stable schema ID. The continuation is transaction-local and binds the invocation snapshot and authorization inputs; schemas without USAGE grants do not contribute names or total counts.
 
+`InvocationTransaction::scan_information_schema_schemata` projects those same bounded, authorized schema pages into `information_schema.schemata` rows containing only `schema_name`. It reuses the schema cursor and filtering path, so hidden schemas do not appear. This is the storage-side projection primitive; SQL planner/executor integration for the built-in relation remains unimplemented.
+
 Schema, relation, and column continuations serialize as fixed-width 16-byte opaque tokens. Byte 0 identifies the cursor kind and bytes 1–15 come from the operating-system random source. The active invocation retains each token's position and authorization binding server-side; tokens are one-use and modified, replayed, cross-invocation, or cross-kind tokens are rejected.
 
 `InvocationTransaction::load_catalog_schema_usage_grants` derives schema USAGE grants for the admitted principal and its pinned role closure directly from the catalog. It returns no table or column privileges and retains the matching schema, grant, membership, and grantor records as commit guards.
@@ -71,6 +73,8 @@ WHERE table_schema = 'app' AND table_name = 'employees';
 Use SQL null only for genuinely inapplicable type parameters, not for redacted secrets. Filtering happens in storage before any user predicate or projection, so query rewrites cannot inspect hidden metadata rows. No user GRANT, policy alteration, INSERT, UPDATE, DELETE, or DDL is permitted on these virtual relations. Their fixed metadata-access rules are a reserved system interface, not an owner bypass for user tables.
 
 Schemas/columns for the three built-in relations themselves are public interface definitions and appear consistently in discovery without recursively querying the same views. Privileged catalog sections use `admin_describe_object`, not extra secrets-bearing SQL views in executor processes. General user-created views remain deferred.
+
+The current engine slice implements the storage-side `information_schema.schemata` projection through `scan_information_schema_schemata`; SQL binding and execution of the virtual relation, plus the `tables` and `columns` scans, remain future work.
 
 ## Administrative Sections
 

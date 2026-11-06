@@ -20,7 +20,8 @@ use crate::index_key::{DeriveIndexKeyError, derive_index_key};
 use crate::metadata::{EngineMetadata, Lifecycle};
 use crate::metadata_discovery::{
     AuthorizedRelationDescription, COLUMN_CURSOR_TOKEN_KIND, ColumnScanCursor,
-    MAX_COLUMNS_PER_PAGE, MAX_METADATA_PAGE_BYTES, MAX_RELATIONS_PER_PAGE, MAX_SCHEMAS_PER_PAGE,
+    InformationSchemaSchemataPage, InformationSchemaSchemataRow, MAX_COLUMNS_PER_PAGE,
+    MAX_METADATA_PAGE_BYTES, MAX_RELATIONS_PER_PAGE, MAX_SCHEMAS_PER_PAGE,
     RELATION_CURSOR_TOKEN_KIND, RelationScanCursor, SCHEMA_CURSOR_TOKEN_KIND, SchemaScanCursor,
     VisibleColumn, VisibleColumnPage, VisibleRelation, VisibleRelationPage, VisibleRelationSchema,
     VisibleSchema, VisibleSchemaPage,
@@ -1396,6 +1397,25 @@ impl<'db> InvocationTransaction<'db> {
                 Err(error)
             }
         }
+    }
+
+    /// Return the authorized rows exposed by `information_schema.schemata`.
+    pub fn scan_information_schema_schemata(
+        &mut self,
+        page_limit: usize,
+        continuation: Option<SchemaScanCursor>,
+    ) -> Result<InformationSchemaSchemataPage, TransactionError> {
+        let page = self.list_catalog_authorized_schemas(page_limit, continuation)?;
+        Ok(InformationSchemaSchemataPage {
+            rows: page
+                .schemas
+                .into_iter()
+                .map(|schema| InformationSchemaSchemataRow {
+                    schema_name: schema.name,
+                })
+                .collect(),
+            continuation: page.continuation,
+        })
     }
 
     /// List schemas for which the invocation has schema USAGE.
