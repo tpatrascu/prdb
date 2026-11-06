@@ -533,7 +533,7 @@
 - `StorageManager::issue_token` creates random 32-byte secrets through the system CSPRNG, stores only the SHA-256 verifier, authorizes through `MANAGE_USERS`, records a `TokenLifecycle` audit event, and exposes the secret once through a zeroizing result type. `StorageManager::revoke_token` uses the same authorization route; unknown/already-revoked/unauthorized requests share an error. Identity DDL allows only one-way revocation of existing verifiers and requires all active tokens to be revoked atomically with a NOLOGIN change.
 - Tests cover supported and malformed profiles, successful admission, wrong secret, expiry, authorized issue/revoke, one-time secret transfer, denied issuance, durable abort outcomes, concurrent revocation conflict, and the LOGIN disable path.
 - Verification: Rust/C toolchain versions matched the configured Nix environment; locked workspace build, formatting check, Clippy with warnings denied, and all 216 tests across 18 integration targets passed. Changed Markdown local-link checks and `git diff --check` passed.
-- Remaining: token inventory API, bootstrap secret handoff, credential-backed last-administrator checks, gateway/supervisor integration, and authentication rate limits.
+- Remaining: bootstrap secret handoff, credential-backed last-administrator checks, gateway/supervisor integration, and authentication rate limits.
 
 ## SM-5 dependency: policy DDL authorization — in progress
 
@@ -570,3 +570,12 @@
 - Verification: `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` passed in the prescribed Nix shell. Changed Markdown local-link checks and `git diff --check` passed.
 - Contract updates: [schema DDL](../../specs/ddl-schema.md) and [permissions](../../specs/ddl-permissions.md).
 - Remaining: deterministic authority-change race coverage and authenticated control-channel integration remain open.
+
+## SM-5 dependency: token inventory — in progress
+
+- `StorageManager::list_tokens` returns stable token IDs, labels, issue/expiry times, and revocation metadata from one redb catalog snapshot. The public metadata type has no verifier or secret field.
+- Users can list their own tokens. Cross-user inventory requires current inherited `MANAGE_USERS` or database-administrator membership; missing target users and unauthorized cross-user requests share the same result.
+- A real-redb regression covers self-inventory, inherited `MANAGE_USERS`, denial for an unrelated user, and visibility of revocation state after the revoke commit.
+- Verification: in the prescribed Nix shell, locked workspace build, formatting check, Clippy with warnings denied, and all 216 workspace tests passed. Changed Markdown local links and `git diff --check` passed.
+- Contract updates: [users and roles](../../specs/ddl-identity.md) and [storage manager](../../specs/storage-manager.md).
+- Remaining: token request rate limits, bootstrap secret handoff, credential-backed last-administrator checks, gateway/supervisor integration, and authenticated control-channel integration remain open.

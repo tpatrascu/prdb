@@ -1,7 +1,8 @@
 //! Coordinated entry points for invocation commits and administrative DDL.
 
 use crate::audit::{AuditAction, AuditEvent, AuditResult};
-use crate::catalog::decode_registered_envelope;
+use crate::authorization::{Membership, resolve_role_closure};
+use crate::catalog::{CatalogRecord, decode_registered_envelope};
 use crate::commit::{
     CatalogWrite, CommitError, commit_authorized_constraint_ddl_with_fences,
     commit_authorized_foreign_key_ddl_with_fences, commit_authorized_identity_ddl_with_fences,
@@ -14,8 +15,10 @@ use crate::credentials::{
     encode_revoked_verifier_record, now_unix_micros,
 };
 use crate::ddl_fence::{DdlFenceCoordinator, DdlFenceManager};
+use crate::metadata::{EngineMetadata, Lifecycle};
 use crate::outcome::{InvocationOutcome, lookup_outcome};
 use crate::schema::CATALOG;
+use crate::snapshot::{MAX_CATALOG_FAMILY_SCAN, RowSnapshot};
 use crate::startup::{StartupError, validate_persisted_records};
 use crate::transaction::{InvocationCoordination, InvocationTransaction, TransactionError};
 use redb::{Database, ReadableDatabase};
@@ -103,6 +106,17 @@ pub struct TokenIssueRequest<'a> {
     pub expires_at_us: i64,
     pub retention_deadline_us: i64,
     pub audit_event: AuditEvent,
+}
+
+/// Non-secret metadata for one issued token. Verifier bytes are never exposed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TokenMetadata {
+    pub token_id: [u8; 16],
+    pub label: String,
+    pub issued_at_us: i64,
+    pub expires_at_us: i64,
+    pub revoked: bool,
+    pub revoked_at_us: Option<i64>,
 }
 
 /// Newly issued bearer token. Call [`Self::take_secret`] once to transfer the
@@ -509,6 +523,55 @@ impl<'db> StorageManager<'db> {
         })
     }
 
+    /// List token metadata for the authenticated user, or for another user
+    /// when the actor has database-admin membership or MANAGE_USERS. The read
+    /// uses one catalog snapshot and never returns verifier material.
+    pub fn list_tokens(
+        &self,
+        authenticated_actor_id: [u8; 16],
+        user_id: [u8; 16],
+    ) -> Result<Vec<TokenMetadata>, TokenLifecycleError> {
+        if authenticated_actor_id == [0; 16] || user_id == [0; 16] {
+            return Err(TokenLifecycleError::InvalidRequest);
+        }
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|error| TokenLifecycleError::Storage(error.to_string()))?;
+        let snapshot = RowSnapshot::new(read);
+        let can_list = token_inventory_authority(&snapshot, authenticated_actor_id, user_id)?;
+        if !can_list {
+            return Err(TokenLifecycleError::TokenUnavailable);
+        }
+        let records = snapshot
+            .scan_catalog_family(16, MAX_CATALOG_FAMILY_SCAN)
+            .map_err(|error| TokenLifecycleError::Storage(error.to_string()))?;
+        let mut tokens = Vec::new();
+        for record in records {
+            let verifier = decode_verifier_record(&record)
+                .map_err(|_| TokenLifecycleError::Storage("invalid token catalog record".into()))?;
+            if verifier.user_id != user_id {
+                continue;
+            }
+            let token_id = record
+                .logical_key
+                .get(3..19)
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or_else(|| TokenLifecycleError::Storage("invalid token catalog key".into()))?;
+            let label = String::from_utf8(verifier.label)
+                .map_err(|_| TokenLifecycleError::Storage("invalid token label".into()))?;
+            tokens.push(TokenMetadata {
+                token_id,
+                label,
+                issued_at_us: verifier.issued_at_us,
+                expires_at_us: verifier.expires_at_us,
+                revoked: verifier.revoked,
+                revoked_at_us: verifier.revoked_at_us,
+            });
+        }
+        Ok(tokens)
+    }
+
     /// Trusted coordinated catalog publication with no actor authorization.
     /// Use only from an internal caller that has already applied the relevant
     /// action-specific administrative checks.
@@ -728,6 +791,187 @@ impl<'db> StorageManager<'db> {
             now_us,
         )
     }
+}
+
+fn token_inventory_authority(
+    snapshot: &RowSnapshot,
+    actor_id: [u8; 16],
+    user_id: [u8; 16],
+) -> Result<bool, TokenLifecycleError> {
+    let metadata_bytes = snapshot
+        .get_engine_metadata_value()
+        .map_err(|error| TokenLifecycleError::Storage(error.to_string()))?
+        .ok_or_else(|| TokenLifecycleError::Storage("engine metadata is missing".into()))?;
+    let metadata = EngineMetadata::decode(&metadata_bytes)
+        .map_err(|error| TokenLifecycleError::Storage(error.to_string()))?;
+    if metadata.lifecycle != Lifecycle::Ready || !metadata.supports_current_formats() {
+        return Err(TokenLifecycleError::Storage(
+            "database is not ready for token inventory".into(),
+        ));
+    }
+
+    let actor = snapshot
+        .get_catalog_record(&principal_catalog_key(actor_id))
+        .map_err(|error| TokenLifecycleError::Storage(error.to_string()))?
+        .ok_or(TokenLifecycleError::TokenUnavailable)?;
+    if token_catalog_u16(&actor, 1)? != 1
+        || token_catalog_field(&actor, 3)? != [1]
+        || token_catalog_u64(&actor, 4)? == 0
+    {
+        return Err(TokenLifecycleError::TokenUnavailable);
+    }
+
+    let membership_records = snapshot
+        .scan_catalog_family(11, MAX_CATALOG_FAMILY_SCAN)
+        .map_err(|error| TokenLifecycleError::Storage(error.to_string()))?;
+    if membership_records.len() > crate::authorization::MAX_MEMBERSHIP_EDGES {
+        return Err(TokenLifecycleError::Storage(
+            "membership graph exceeds its configured limit".into(),
+        ));
+    }
+    let mut memberships = Vec::with_capacity(membership_records.len());
+    let mut principal_ids = HashSet::from([actor_id]);
+    for record in membership_records {
+        let key = &record.logical_key;
+        if key.len() != 36 || key[2] != 1 || key[19] != 1 {
+            return Err(TokenLifecycleError::Storage(
+                "invalid membership catalog key".into(),
+            ));
+        }
+        if token_catalog_id(&record, 1)? == [0; 16] || token_catalog_u64(&record, 2)? == 0 {
+            return Err(TokenLifecycleError::Storage(
+                "invalid membership catalog record".into(),
+            ));
+        }
+        let member_id: [u8; 16] = key[3..19]
+            .try_into()
+            .map_err(|_| TokenLifecycleError::Storage("invalid membership key".into()))?;
+        let role_id: [u8; 16] = key[20..36]
+            .try_into()
+            .map_err(|_| TokenLifecycleError::Storage("invalid membership key".into()))?;
+        memberships.push(Membership { member_id, role_id });
+        principal_ids.insert(member_id);
+        principal_ids.insert(role_id);
+    }
+    for principal_id in &principal_ids {
+        let record = snapshot
+            .get_catalog_record(&principal_catalog_key(*principal_id))
+            .map_err(|error| TokenLifecycleError::Storage(error.to_string()))?
+            .ok_or_else(|| {
+                TokenLifecycleError::Storage("membership references a missing principal".into())
+            })?;
+        let kind = token_catalog_u16(&record, 1)?;
+        let login = token_catalog_field(&record, 3)?;
+        if !matches!(kind, 1 | 2)
+            || !matches!(login, [0] | [1])
+            || token_catalog_u64(&record, 4)? == 0
+            || (kind == 2 && login != [0])
+            || (memberships.iter().any(|edge| edge.role_id == *principal_id) && kind != 2)
+        {
+            return Err(TokenLifecycleError::Storage(
+                "invalid membership principal".into(),
+            ));
+        }
+    }
+    let roles = resolve_role_closure(actor_id, &memberships)
+        .map_err(|_| TokenLifecycleError::Storage("invalid membership graph".into()))?;
+    let mut authority_subjects = roles.clone();
+    authority_subjects.insert(actor_id);
+    let mut database_admin_role = [0x80; 16];
+    database_admin_role[15] = 3;
+    let is_database_admin = roles.contains(&database_admin_role);
+
+    if actor_id == user_id {
+        return Ok(true);
+    }
+    if is_database_admin
+        || token_inventory_has_manage_users(snapshot, metadata.database_id, &authority_subjects)?
+    {
+        let target = snapshot
+            .get_catalog_record(&principal_catalog_key(user_id))
+            .map_err(|error| TokenLifecycleError::Storage(error.to_string()))?;
+        return match target {
+            Some(record) if token_catalog_u16(&record, 1)? == 1 => Ok(true),
+            _ => Ok(false),
+        };
+    }
+    Ok(false)
+}
+
+fn token_inventory_has_manage_users(
+    snapshot: &RowSnapshot,
+    database_id: [u8; 16],
+    authority_subjects: &HashSet<[u8; 16]>,
+) -> Result<bool, TokenLifecycleError> {
+    for subject_id in authority_subjects {
+        let key = system_privilege_catalog_key(*subject_id, database_id, 12);
+        let Some(record) = snapshot
+            .get_catalog_record(&key)
+            .map_err(|error| TokenLifecycleError::Storage(error.to_string()))?
+        else {
+            continue;
+        };
+        if token_catalog_id(&record, 1)? == [0; 16] || token_catalog_u64(&record, 2)? == 0 {
+            return Err(TokenLifecycleError::Storage("invalid system grant".into()));
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn principal_catalog_key(principal_id: [u8; 16]) -> Vec<u8> {
+    let mut key = 10u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&principal_id);
+    key
+}
+
+fn system_privilege_catalog_key(
+    grantee_id: [u8; 16],
+    database_id: [u8; 16],
+    privilege: u16,
+) -> Vec<u8> {
+    let mut key = 12u16.to_be_bytes().to_vec();
+    key.extend_from_slice(&[1]);
+    key.extend_from_slice(&grantee_id);
+    key.extend_from_slice(&[1]);
+    key.extend_from_slice(&database_id);
+    key.extend_from_slice(&[1]);
+    key.extend_from_slice(&privilege.to_be_bytes());
+    key.extend_from_slice(&[1]);
+    key.extend_from_slice(&1u16.to_be_bytes());
+    key.extend_from_slice(&[1]);
+    key.extend_from_slice(&database_id);
+    key
+}
+
+fn token_catalog_field(record: &CatalogRecord, tag: u16) -> Result<&[u8], TokenLifecycleError> {
+    record
+        .fields
+        .iter()
+        .find(|field| field.tag == tag)
+        .map(|field| field.payload.as_slice())
+        .ok_or_else(|| TokenLifecycleError::Storage("invalid catalog payload".into()))
+}
+
+fn token_catalog_id(record: &CatalogRecord, tag: u16) -> Result<[u8; 16], TokenLifecycleError> {
+    token_catalog_field(record, tag)?
+        .try_into()
+        .map_err(|_| TokenLifecycleError::Storage("invalid catalog ID".into()))
+}
+
+fn token_catalog_u16(record: &CatalogRecord, tag: u16) -> Result<u16, TokenLifecycleError> {
+    token_catalog_field(record, tag)?
+        .try_into()
+        .map(u16::from_le_bytes)
+        .map_err(|_| TokenLifecycleError::Storage("invalid catalog integer".into()))
+}
+
+fn token_catalog_u64(record: &CatalogRecord, tag: u16) -> Result<u64, TokenLifecycleError> {
+    token_catalog_field(record, tag)?
+        .try_into()
+        .map(u64::from_le_bytes)
+        .map_err(|_| TokenLifecycleError::Storage("invalid catalog integer".into()))
 }
 
 fn credential_catalog_key(token_id: [u8; 16]) -> Vec<u8> {

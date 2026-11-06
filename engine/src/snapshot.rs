@@ -2,7 +2,7 @@
 use crate::catalog::{CatalogRecord, InvalidCatalogRecord, decode_registered_envelope};
 use crate::expression::decode_catalog_expression_record;
 use crate::index_locator::IndexLocator;
-use crate::schema::{CATALOG, INDEXES, ROWS};
+use crate::schema::{CATALOG, ENGINE_META, INDEXES, ROWS};
 use redb::ReadTransaction;
 
 pub const MAX_CATALOG_FAMILY_SCAN: usize = 65_536;
@@ -15,6 +15,15 @@ pub struct RowSnapshot {
 impl RowSnapshot {
     pub fn new(transaction: ReadTransaction) -> Self {
         Self { transaction }
+    }
+
+    /// Copy engine metadata from the same retained read transaction as catalog
+    /// and row access.
+    pub fn get_engine_metadata_value(&self) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
+        let table = self.transaction.open_table(ENGINE_META)?;
+        Ok(table
+            .get(&b"format"[..])?
+            .map(|value| value.value().to_vec()))
     }
 
     /// Copy one row value out of its redb guard. No guard or database borrow escapes.

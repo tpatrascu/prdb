@@ -6307,6 +6307,7 @@ fn storage_manager_issues_and_revokes_tokens_for_manage_users()
     let user_manager = id(0x91);
     let target_user = id(0x92);
     let denied_user = id(0x93);
+    let manage_users_role = id(0x9a);
     let database_id = id(0x33);
     let admin_role = builtin_owner_id();
     let storage = StorageManager::new(&database, Duration::from_millis(100))?;
@@ -6315,14 +6316,25 @@ fn storage_manager_issues_and_revokes_tokens_for_manage_users()
         object_write_with_name(admin_user, 8, "token_admin"),
         principal_write_with_name(user_manager, 1, 1, "token_manager"),
         object_write_with_name(user_manager, 8, "token_manager"),
+        principal_write_with_name(manage_users_role, 2, 1, "token_managers"),
+        object_write_with_name(manage_users_role, 9, "token_managers"),
         principal_write_with_name(target_user, 1, 1, "token_target"),
         object_write_with_name(target_user, 8, "token_target"),
         principal_write_with_name(denied_user, 1, 1, "token_denied"),
         object_write_with_name(denied_user, 8, "token_denied"),
         membership_write_with_grantor(admin_user, admin_role, admin_role),
+        membership_write_with_grantor(user_manager, manage_users_role, admin_role),
         dependency_write(admin_user, admin_role, 5),
-        grant_write(user_manager, database_id, 12, 1, database_id, admin_role),
-        dependency_write(user_manager, database_id, 5),
+        dependency_write(user_manager, manage_users_role, 5),
+        grant_write(
+            manage_users_role,
+            database_id,
+            12,
+            1,
+            database_id,
+            admin_role,
+        ),
+        dependency_write(manage_users_role, database_id, 5),
     ];
     let mut seed_audit = identity_audit_event(0x90, admin_role, admin_user);
     seed_audit.action = AuditAction::AuthorityChange;
@@ -6352,6 +6364,23 @@ fn storage_manager_issues_and_revokes_tokens_for_manage_users()
     assert_eq!(issued.commit_sequence, 2);
     let secret = issued.take_secret().ok_or("issued secret missing")?;
     assert!(issued.take_secret().is_none());
+    let own_inventory = storage.list_tokens(target_user, target_user)?;
+    assert_eq!(own_inventory.len(), 1);
+    assert_eq!(own_inventory[0].token_id, token_id);
+    assert_eq!(own_inventory[0].label, "integration client");
+    assert!(own_inventory[0].issued_at_us >= now);
+    assert_eq!(own_inventory[0].expires_at_us, expires_at_us);
+    assert!(!own_inventory[0].revoked);
+    let managed_inventory = storage.list_tokens(user_manager, target_user)?;
+    assert_eq!(managed_inventory, own_inventory);
+    assert_eq!(
+        storage.list_tokens(denied_user, target_user).unwrap_err(),
+        TokenLifecycleError::TokenUnavailable
+    );
+    assert_eq!(
+        storage.list_tokens(user_manager, id(0x94)).unwrap_err(),
+        TokenLifecycleError::TokenUnavailable
+    );
 
     let read = database.begin_read()?;
     let token_key = id_catalog_key(16, token_id);
@@ -6407,6 +6436,10 @@ fn storage_manager_issues_and_revokes_tokens_for_manage_users()
         ),
         Err(prdb_engine::transaction::TransactionError::AuthenticationFailed)
     ));
+    let revoked_inventory = storage.list_tokens(user_manager, target_user)?;
+    assert_eq!(revoked_inventory.len(), 1);
+    assert!(revoked_inventory[0].revoked);
+    assert!(revoked_inventory[0].revoked_at_us.is_some());
 
     let denied_issue = storage.issue_token(TokenIssueRequest {
         invocation_id: id(0x98),
