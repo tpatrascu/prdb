@@ -303,7 +303,7 @@ struct ActiveExecutorScan {
     pending_row: Option<(RowId, Vec<SanitizedCell>)>,
 }
 
-struct CatalogExecutorWriteProjection {
+struct CatalogTableProjection {
     schema: CatalogTableSchema,
     context: AuthorizationContext,
     grants: Vec<Grant>,
@@ -312,7 +312,7 @@ struct CatalogExecutorWriteProjection {
     policy_driving_columns: Vec<[u8; 16]>,
 }
 
-impl CatalogExecutorWriteProjection {
+impl CatalogTableProjection {
     fn as_projection(&self) -> AuthorizedProjection<'_> {
         AuthorizedProjection {
             columns: &self.schema.columns,
@@ -849,7 +849,7 @@ impl<'db> InvocationTransaction<'db> {
     fn load_catalog_executor_write_projection(
         &mut self,
         table_id: [u8; 16],
-    ) -> Result<CatalogExecutorWriteProjection, TransactionError> {
+    ) -> Result<CatalogTableProjection, TransactionError> {
         let schema = self.load_catalog_table_schema(table_id)?;
         let principal_id = self.principal_id;
         let (role_ids, grants) = self.load_catalog_grants(principal_id, &schema)?;
@@ -885,12 +885,59 @@ impl<'db> InvocationTransaction<'db> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         policy_driving_columns.sort_unstable();
-        Ok(CatalogExecutorWriteProjection {
+        Ok(CatalogTableProjection {
             schema,
             context,
             grants,
             policies,
             checks,
+            policy_driving_columns,
+        })
+    }
+
+    fn load_catalog_estimate_projection(
+        &mut self,
+        table_id: [u8; 16],
+    ) -> Result<CatalogTableProjection, TransactionError> {
+        let schema = self.load_catalog_table_schema(table_id)?;
+        let principal_id = self.principal_id;
+        let (role_ids, grants) = self.load_catalog_grants(principal_id, &schema)?;
+        let policies = self.load_catalog_policies(principal_id, &schema)?;
+        let scope = grants
+            .iter()
+            .map(|grant| (grant.operation, grant.target))
+            .collect();
+        let context = AuthorizationContext {
+            principal_id,
+            role_ids,
+            scope,
+        };
+        let mut referenced_ordinals = HashSet::new();
+        for policy in &policies {
+            if let Some(expression) = &policy.using {
+                collect_expression_fields(expression, &mut referenced_ordinals);
+            }
+            if let Some(expression) = &policy.with_check {
+                collect_expression_fields(expression, &mut referenced_ordinals);
+            }
+        }
+        let mut policy_driving_columns = referenced_ordinals
+            .into_iter()
+            .map(|ordinal| {
+                schema
+                    .column_ids
+                    .get(ordinal)
+                    .copied()
+                    .ok_or(TransactionError::CorruptCatalog)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        policy_driving_columns.sort_unstable();
+        Ok(CatalogTableProjection {
+            schema,
+            context,
+            grants,
+            policies,
+            checks: Vec::new(),
             policy_driving_columns,
         })
     }
@@ -5996,7 +6043,7 @@ impl PlannerMetadataConnection<'_, '_> {
         }
         let state = self
             .transaction
-            .load_catalog_executor_write_projection(description.relation_id)?;
+            .load_catalog_estimate_projection(description.relation_id)?;
         let ordinals = if column_ids.is_empty() {
             (0..state.schema.columns.len()).collect::<Vec<_>>()
         } else {
