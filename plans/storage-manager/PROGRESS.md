@@ -608,3 +608,12 @@
 - Real-redb regressions cover unreferenced user and role drops with tombstone persistence, user-token revocation in the same batch, refusal to omit an active-token revocation, a grant reference that blocks `RESTRICT`, and persisted-catalog validation after deletion.
 - Contract updates: [users and roles](../../specs/ddl-identity.md) and [storage manager](../../specs/storage-manager.md).
 - Remaining: bootstrap secret handoff, authenticated control-channel/gateway integration, token request rate limits, deterministic authority-change race coverage, and role/user DROP integration through a SQL/control frontend remain open.
+
+## SM-5 dependency: token lifecycle rate limiting
+
+- Red evidence: with the limiter disabled, the real-redb control-path regression expected `RateLimited` on the sixth request across two manager handles but received token metadata.
+- `issue_token`, `revoke_token`, and `list_tokens` now use a monotonic rolling 60-second budget per authenticated actor. The default is 30 requests per minute, configured through `StorageManagerConfig`; lower limits take effect across live handles for the same redb `Database` object. The actor-history map is bounded at 4,096 and stale entries are pruned. A full map and poisoned per-actor state fail closed.
+- An integration regression verifies the budget across issue, inventory, and revoke calls and across independently constructed manager handles. Zero limits are rejected during configuration validation.
+- Contract updates: [users and roles](../../specs/ddl-identity.md) and [storage manager](../../specs/storage-manager.md).
+- Verification: prescribed Nix-shell workspace build, formatting check, Clippy with warnings denied, and all 222 workspace tests passed. Changed Markdown local links and `git diff --check` passed.
+- Remaining: token-authentication failures still need gateway-level throttling because storage admission lacks peer/source context; bootstrap secret handoff, authenticated control-channel integration, deterministic authority-change race coverage, and SQL/control frontend integration remain open.

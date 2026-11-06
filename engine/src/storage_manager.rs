@@ -22,21 +22,28 @@ use crate::snapshot::{MAX_CATALOG_FAMILY_SCAN, RowSnapshot};
 use crate::startup::{StartupError, validate_persisted_records};
 use crate::transaction::{InvocationCoordination, InvocationTransaction, TransactionError};
 use redb::{Database, ReadableDatabase};
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::{Duration, Instant};
 use zeroize::Zeroize;
+
+const TOKEN_REQUEST_WINDOW: Duration = Duration::from_secs(60);
+const MAX_TRACKED_TOKEN_REQUEST_ACTORS: usize = 4096;
+static TOKEN_REQUEST_LIMITERS: OnceLock<Mutex<HashMap<usize, Weak<TokenRequestLimiter>>>> =
+    OnceLock::new();
 
 /// Admission and coordination limits for one storage-manager handle.
 ///
-/// Defaults allow at most 128 simultaneous invocation snapshots and a
-/// 15-minute lifetime for each managed invocation.
+/// Defaults allow at most 128 simultaneous invocation snapshots, a 15-minute
+/// lifetime per managed invocation, and 30 token-lifecycle requests per actor
+/// per rolling minute.
 #[derive(Clone, Copy, Debug)]
 pub struct StorageManagerConfig {
     pub ddl_fence_timeout: Duration,
     pub max_active_invocations: usize,
     pub max_invocation_age: Duration,
+    pub max_token_lifecycle_requests_per_minute: usize,
 }
 
 impl Default for StorageManagerConfig {
@@ -45,6 +52,7 @@ impl Default for StorageManagerConfig {
             ddl_fence_timeout: Duration::from_secs(5),
             max_active_invocations: 128,
             max_invocation_age: Duration::from_secs(15 * 60),
+            max_token_lifecycle_requests_per_minute: 30,
         }
     }
 }
@@ -53,6 +61,7 @@ impl Default for StorageManagerConfig {
 pub enum StorageManagerConfigError {
     ZeroActiveInvocationLimit,
     ZeroInvocationAge,
+    ZeroTokenLifecycleRequestLimit,
 }
 
 impl std::fmt::Display for StorageManagerConfigError {
@@ -86,6 +95,7 @@ pub enum TokenLifecycleError {
     TokenUnavailable,
     EncodingFailed,
     Storage(String),
+    RateLimited,
     Commit(CommitError),
 }
 
@@ -150,7 +160,71 @@ pub struct StorageManager<'db> {
     ddl_fences: DdlFenceCoordinator,
     max_active_invocations: usize,
     admissions: Arc<InvocationAdmissionState>,
+    token_requests: Arc<TokenRequestLimiter>,
     max_invocation_age: Duration,
+}
+
+struct TokenRequestLimiter {
+    limit: AtomicUsize,
+    requests: Mutex<HashMap<[u8; 16], VecDeque<Instant>>>,
+}
+
+impl TokenRequestLimiter {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit: AtomicUsize::new(limit),
+            requests: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn consume(&self, actor_id: [u8; 16]) -> Result<(), TokenLifecycleError> {
+        let now = Instant::now();
+        let mut requests = self
+            .requests
+            .lock()
+            .map_err(|_| TokenLifecycleError::RateLimited)?;
+        requests.retain(|_, history| {
+            while history.front().is_some_and(|oldest| {
+                now.saturating_duration_since(*oldest) >= TOKEN_REQUEST_WINDOW
+            }) {
+                history.pop_front();
+            }
+            !history.is_empty()
+        });
+        if !requests.contains_key(&actor_id) {
+            if requests.len() >= MAX_TRACKED_TOKEN_REQUEST_ACTORS {
+                return Err(TokenLifecycleError::RateLimited);
+            }
+            requests.insert(actor_id, VecDeque::new());
+        }
+        let history = requests
+            .get_mut(&actor_id)
+            .ok_or(TokenLifecycleError::RateLimited)?;
+        if history.len() >= self.limit.load(Ordering::Relaxed) {
+            return Err(TokenLifecycleError::RateLimited);
+        }
+        history.push_back(now);
+        Ok(())
+    }
+}
+
+fn shared_token_request_limiter(
+    database: &Database,
+    configured_limit: usize,
+) -> Arc<TokenRequestLimiter> {
+    let database_key = database as *const Database as usize;
+    let registry = TOKEN_REQUEST_LIMITERS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut registry = registry
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    registry.retain(|_, limiter| limiter.strong_count() != 0);
+    if let Some(limiter) = registry.get(&database_key).and_then(Weak::upgrade) {
+        limiter.limit.fetch_min(configured_limit, Ordering::Relaxed);
+        return limiter;
+    }
+    let limiter = Arc::new(TokenRequestLimiter::new(configured_limit));
+    registry.insert(database_key, Arc::downgrade(&limiter));
+    limiter
 }
 
 struct InvocationAdmissionState {
@@ -222,7 +296,14 @@ impl<'db> StorageManager<'db> {
                 StorageManagerConfigError::ZeroInvocationAge,
             ));
         }
+        if config.max_token_lifecycle_requests_per_minute == 0 {
+            return Err(StorageManagerInitError::Config(
+                StorageManagerConfigError::ZeroTokenLifecycleRequestLimit,
+            ));
+        }
         validate_persisted_records(database).map_err(StorageManagerInitError::Startup)?;
+        let token_requests =
+            shared_token_request_limiter(database, config.max_token_lifecycle_requests_per_minute);
         Ok(Self {
             database,
             ddl_fences: DdlFenceCoordinator::new(DdlFenceManager::new(), config.ddl_fence_timeout),
@@ -231,6 +312,7 @@ impl<'db> StorageManager<'db> {
                 active: AtomicUsize::new(0),
                 limit: config.max_active_invocations,
             }),
+            token_requests,
             max_invocation_age: config.max_invocation_age,
         })
     }
@@ -363,6 +445,7 @@ impl<'db> StorageManager<'db> {
         {
             return Err(TokenLifecycleError::InvalidAudit);
         }
+        self.token_requests.consume(authenticated_actor_id)?;
 
         let mut generated = None;
         for _ in 0..8 {
@@ -467,6 +550,7 @@ impl<'db> StorageManager<'db> {
         {
             return Err(TokenLifecycleError::InvalidAudit);
         }
+        self.token_requests.consume(authenticated_actor_id)?;
         let key = credential_catalog_key(token_id);
         let read = self
             .database
@@ -534,6 +618,7 @@ impl<'db> StorageManager<'db> {
         if authenticated_actor_id == [0; 16] || user_id == [0; 16] {
             return Err(TokenLifecycleError::InvalidRequest);
         }
+        self.token_requests.consume(authenticated_actor_id)?;
         let read = self
             .database
             .begin_read()

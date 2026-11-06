@@ -2841,6 +2841,7 @@ fn storage_manager_admission_requires_a_login_enabled_catalog_user()
             ddl_fence_timeout: Duration::from_millis(100),
             max_active_invocations: 1,
             max_invocation_age: Duration::from_secs(30),
+            max_token_lifecycle_requests_per_minute: 30,
         },
     )?;
     let enabled_user = id(229);
@@ -2889,6 +2890,7 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
                 ddl_fence_timeout: Duration::from_millis(100),
                 max_active_invocations: 0,
                 max_invocation_age: Duration::from_secs(30),
+                max_token_lifecycle_requests_per_minute: 30,
             },
         )
         .err(),
@@ -2903,11 +2905,27 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
                 ddl_fence_timeout: Duration::from_millis(100),
                 max_active_invocations: 1,
                 max_invocation_age: Duration::ZERO,
+                max_token_lifecycle_requests_per_minute: 30,
             },
         )
         .err(),
         Some(StorageManagerInitError::Config(
             prdb_engine::storage_manager::StorageManagerConfigError::ZeroInvocationAge,
+        ))
+    );
+    assert_eq!(
+        StorageManager::with_config(
+            &database,
+            StorageManagerConfig {
+                ddl_fence_timeout: Duration::from_millis(100),
+                max_active_invocations: 1,
+                max_invocation_age: Duration::from_secs(30),
+                max_token_lifecycle_requests_per_minute: 0,
+            },
+        )
+        .err(),
+        Some(StorageManagerInitError::Config(
+            prdb_engine::storage_manager::StorageManagerConfigError::ZeroTokenLifecycleRequestLimit,
         ))
     );
     let storage = StorageManager::with_config(
@@ -2916,6 +2934,7 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
             ddl_fence_timeout: Duration::from_millis(100),
             max_active_invocations: 1,
             max_invocation_age: Duration::from_secs(30),
+            max_token_lifecycle_requests_per_minute: 30,
         },
     )?;
     let mut first = storage.begin_invocation(id(192), id(9), 9_999, 2, 64)?;
@@ -2943,6 +2962,7 @@ fn storage_manager_expires_idle_invocations_and_releases_the_snapshot()
             ddl_fence_timeout: Duration::from_millis(100),
             max_active_invocations: 1,
             max_invocation_age: Duration::from_millis(1),
+            max_token_lifecycle_requests_per_minute: 30,
         },
     )?;
     let mut expired = storage.begin_invocation(id(196), id(9), 9_999, 2, 64)?;
@@ -6912,7 +6932,14 @@ fn storage_manager_issues_and_revokes_tokens_for_manage_users()
     let manage_users_role = id(0x9a);
     let database_id = id(0x33);
     let admin_role = builtin_owner_id();
-    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let token_config = StorageManagerConfig {
+        ddl_fence_timeout: Duration::from_millis(100),
+        max_active_invocations: 128,
+        max_invocation_age: Duration::from_secs(15 * 60),
+        max_token_lifecycle_requests_per_minute: 5,
+    };
+    let storage = StorageManager::with_config(&database, token_config)?;
+    let second_storage_handle = StorageManager::with_config(&database, token_config)?;
     let seed_records = [
         principal_write_with_name(admin_user, 1, 1, "token_admin"),
         object_write_with_name(admin_user, 8, "token_admin"),
@@ -7059,6 +7086,12 @@ fn storage_manager_issues_and_revokes_tokens_for_manage_users()
             CommitError::DdlAuthorizationDenied
         ))
     ));
+    assert_eq!(
+        second_storage_handle
+            .list_tokens(user_manager, target_user)
+            .unwrap_err(),
+        TokenLifecycleError::RateLimited
+    );
     assert!(prdb_engine::startup::validate_persisted_records(&database).is_ok());
     Ok(())
 }
