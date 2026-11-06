@@ -1,7 +1,7 @@
 //! Coordinated entry points for invocation commits and administrative DDL.
 
 use crate::audit::{AuditAction, AuditEvent, AuditResult};
-use crate::authorization::{Membership, resolve_role_closure};
+use crate::authorization::{MAX_MEMBERSHIP_EDGES, Membership, resolve_role_closure};
 use crate::catalog::{CatalogRecord, decode_registered_envelope};
 use crate::commit::{
     CatalogWrite, CommitError, commit_authorized_constraint_ddl_with_fences,
@@ -31,6 +31,7 @@ use zeroize::Zeroize;
 const TOKEN_REQUEST_WINDOW: Duration = Duration::from_secs(60);
 const MAX_TRACKED_TOKEN_REQUEST_ACTORS: usize = 4096;
 pub const MAX_OWN_INVOCATION_PAGE: usize = 128;
+pub const MAX_ADMIN_INVOCATION_PAGE: usize = 128;
 static TOKEN_REQUEST_LIMITERS: OnceLock<Mutex<HashMap<usize, Weak<TokenRequestLimiter>>>> =
     OnceLock::new();
 static INVOCATION_REGISTRIES: OnceLock<Mutex<HashMap<usize, Weak<InvocationAdmissionState>>>> =
@@ -137,6 +138,29 @@ pub struct InvocationStatusPage {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdministrativeInvocationStatus {
+    pub invocation_id: [u8; 16],
+    pub principal_id: [u8; 16],
+    pub status: InvocationStatus,
+}
+
+/// Opaque continuation for an administrator's live runtime page sequence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdministrativeInvocationCursor {
+    administrator_id: [u8; 16],
+    registry_generation: u128,
+    after_invocation_id: [u8; 16],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdministrativeInvocationPage {
+    pub observed_at_us: i64,
+    pub consistency: InvocationStatusConsistency,
+    pub invocations: Vec<AdministrativeInvocationStatus>,
+    pub continuation: Option<AdministrativeInvocationCursor>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InvocationStatusError {
     InvalidRequest,
     InvalidPageLimit,
@@ -152,6 +176,27 @@ impl std::fmt::Display for InvocationStatusError {
 }
 
 impl std::error::Error for InvocationStatusError {}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AdministrativeInvocationListError {
+    InvalidRequest,
+    InvalidPageLimit,
+    InvalidCursor,
+    StaleCursor,
+    Unauthorized,
+    Storage,
+}
+
+impl std::fmt::Display for AdministrativeInvocationListError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "administrative invocation listing failed: {self:?}"
+        )
+    }
+}
+
+impl std::error::Error for AdministrativeInvocationListError {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TokenLifecycleError {
@@ -444,6 +489,67 @@ impl InvocationAdmissionState {
             entries.last().map(|entry| InvocationListCursor {
                 principal_id,
                 owner_generation,
+                after_invocation_id: entry.invocation_id,
+            })
+        } else {
+            None
+        };
+        Ok((entries, continuation))
+    }
+
+    fn administrative_page(
+        &self,
+        administrator_id: [u8; 16],
+        limit: usize,
+        cursor: Option<&AdministrativeInvocationCursor>,
+    ) -> Result<
+        (
+            Vec<AdministrativeInvocationStatus>,
+            Option<AdministrativeInvocationCursor>,
+        ),
+        AdministrativeInvocationListError,
+    > {
+        let live = self
+            .live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(cursor) = cursor {
+            if cursor.administrator_id != administrator_id {
+                return Err(AdministrativeInvocationListError::InvalidCursor);
+            }
+            if cursor.registry_generation != live.generation {
+                return Err(AdministrativeInvocationListError::StaleCursor);
+            }
+        }
+        let after = cursor.map(|cursor| cursor.after_invocation_id);
+        let mut entries = live
+            .entries
+            .iter()
+            .filter(|(invocation_id, _)| after.is_none_or(|after| **invocation_id > after))
+            .map(
+                |(invocation_id, invocation)| AdministrativeInvocationStatus {
+                    invocation_id: *invocation_id,
+                    principal_id: invocation.principal_id,
+                    status: match invocation.phase {
+                        LiveInvocationPhase::Active => InvocationStatus::Active {
+                            started_at_us: invocation.started_at_us,
+                            deadline_at_us: invocation.deadline_at_us,
+                        },
+                        LiveInvocationPhase::Committing => InvocationStatus::Committing {
+                            started_at_us: invocation.started_at_us,
+                            deadline_at_us: invocation.deadline_at_us,
+                        },
+                    },
+                },
+            )
+            .collect::<Vec<_>>();
+        entries.sort_unstable_by_key(|entry| entry.invocation_id);
+        let has_more = entries.len() > limit;
+        entries.truncate(limit);
+        let continuation = if has_more {
+            entries.last().map(|entry| AdministrativeInvocationCursor {
+                administrator_id,
+                registry_generation: live.generation,
                 after_invocation_id: entry.invocation_id,
             })
         } else {
@@ -1234,12 +1340,61 @@ impl<'db> StorageManager<'db> {
             continuation,
         })
     }
+
+    /// Return a bounded best-effort page of live invocations for a current
+    /// database administrator. Authority is revalidated from the latest
+    /// catalog snapshot on every call; no global total is returned.
+    pub fn list_runtime_invocations(
+        &self,
+        authenticated_administrator_id: [u8; 16],
+        now_us: i64,
+        page_limit: usize,
+        continuation: Option<&AdministrativeInvocationCursor>,
+    ) -> Result<AdministrativeInvocationPage, AdministrativeInvocationListError> {
+        if authenticated_administrator_id == [0; 16] || now_us <= 0 {
+            return Err(AdministrativeInvocationListError::InvalidRequest);
+        }
+        if page_limit == 0 || page_limit > MAX_ADMIN_INVOCATION_PAGE {
+            return Err(AdministrativeInvocationListError::InvalidPageLimit);
+        }
+        if continuation.is_some_and(|cursor| {
+            cursor.administrator_id == [0; 16] || cursor.after_invocation_id == [0; 16]
+        }) {
+            return Err(AdministrativeInvocationListError::InvalidCursor);
+        }
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|_| AdministrativeInvocationListError::Storage)?;
+        let snapshot = RowSnapshot::new(read);
+        let is_administrator = database_admin_authority(&snapshot, authenticated_administrator_id)
+            .map_err(|error| match error {
+                TokenLifecycleError::TokenUnavailable => {
+                    AdministrativeInvocationListError::Unauthorized
+                }
+                _ => AdministrativeInvocationListError::Storage,
+            })?;
+        drop(snapshot);
+        if !is_administrator {
+            return Err(AdministrativeInvocationListError::Unauthorized);
+        }
+        let (invocations, continuation) = self.admissions.administrative_page(
+            authenticated_administrator_id,
+            page_limit,
+            continuation,
+        )?;
+        Ok(AdministrativeInvocationPage {
+            observed_at_us: now_us,
+            consistency: InvocationStatusConsistency::BestEffort,
+            invocations,
+            continuation,
+        })
+    }
 }
 
-fn token_inventory_authority(
+fn database_admin_authority(
     snapshot: &RowSnapshot,
     actor_id: [u8; 16],
-    user_id: [u8; 16],
 ) -> Result<bool, TokenLifecycleError> {
     let metadata_bytes = snapshot
         .get_engine_metadata_value()
@@ -1249,10 +1404,19 @@ fn token_inventory_authority(
         .map_err(|error| TokenLifecycleError::Storage(error.to_string()))?;
     if metadata.lifecycle != Lifecycle::Ready || !metadata.supports_current_formats() {
         return Err(TokenLifecycleError::Storage(
-            "database is not ready for token inventory".into(),
+            "database is not ready for runtime listing".into(),
         ));
     }
+    let roles = token_actor_roles(snapshot, actor_id)?;
+    let mut database_admin_role = [0x80; 16];
+    database_admin_role[15] = 3;
+    Ok(roles.contains(&database_admin_role))
+}
 
+fn token_actor_roles(
+    snapshot: &RowSnapshot,
+    actor_id: [u8; 16],
+) -> Result<HashSet<[u8; 16]>, TokenLifecycleError> {
     let actor = snapshot
         .get_catalog_record(&principal_catalog_key(actor_id))
         .map_err(|error| TokenLifecycleError::Storage(error.to_string()))?
@@ -1267,7 +1431,7 @@ fn token_inventory_authority(
     let membership_records = snapshot
         .scan_catalog_family(11, MAX_CATALOG_FAMILY_SCAN)
         .map_err(|error| TokenLifecycleError::Storage(error.to_string()))?;
-    if membership_records.len() > crate::authorization::MAX_MEMBERSHIP_EDGES {
+    if membership_records.len() > MAX_MEMBERSHIP_EDGES {
         return Err(TokenLifecycleError::Storage(
             "membership graph exceeds its configured limit".into(),
         ));
@@ -1318,6 +1482,27 @@ fn token_inventory_authority(
     }
     let roles = resolve_role_closure(actor_id, &memberships)
         .map_err(|_| TokenLifecycleError::Storage("invalid membership graph".into()))?;
+    Ok(roles)
+}
+
+fn token_inventory_authority(
+    snapshot: &RowSnapshot,
+    actor_id: [u8; 16],
+    user_id: [u8; 16],
+) -> Result<bool, TokenLifecycleError> {
+    let metadata_bytes = snapshot
+        .get_engine_metadata_value()
+        .map_err(|error| TokenLifecycleError::Storage(error.to_string()))?
+        .ok_or_else(|| TokenLifecycleError::Storage("engine metadata is missing".into()))?;
+    let metadata = EngineMetadata::decode(&metadata_bytes)
+        .map_err(|error| TokenLifecycleError::Storage(error.to_string()))?;
+    if metadata.lifecycle != Lifecycle::Ready || !metadata.supports_current_formats() {
+        return Err(TokenLifecycleError::Storage(
+            "database is not ready for token inventory".into(),
+        ));
+    }
+
+    let roles = token_actor_roles(snapshot, actor_id)?;
     let mut authority_subjects = roles.clone();
     authority_subjects.insert(actor_id);
     let mut database_admin_role = [0x80; 16];

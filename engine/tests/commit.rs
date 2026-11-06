@@ -3213,6 +3213,146 @@ fn storage_manager_lists_only_owner_live_invocations_with_generation_bound_pages
 }
 
 #[test]
+fn storage_manager_lists_runtime_invocations_only_to_database_admins()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::storage_manager::{
+        AdministrativeInvocationListError, InvocationStatusConsistency, MAX_ADMIN_INVOCATION_PAGE,
+    };
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let admin_id = id(230);
+    let ordinary_id = id(231);
+    let backup_admin_id = id(235);
+    let admin_role = builtin_owner_id();
+    let records = [
+        principal_write_with_name(admin_id, 1, 1, "runtime_admin"),
+        object_write_with_name(admin_id, 8, "runtime_admin"),
+        principal_write_with_name(ordinary_id, 1, 1, "runtime_user"),
+        object_write_with_name(ordinary_id, 8, "runtime_user"),
+        principal_write_with_name(backup_admin_id, 1, 1, "backup_admin"),
+        object_write_with_name(backup_admin_id, 8, "backup_admin"),
+        membership_write_with_grantor(admin_id, admin_role, admin_role),
+        dependency_write(admin_id, admin_role, 5),
+        membership_write_with_grantor(backup_admin_id, admin_role, admin_role),
+        dependency_write(backup_admin_id, admin_role, 5),
+        credential_verifier_write(id(236), backup_admin_id, &[0x6a; 32], 1, i64::MAX, None, 1),
+    ];
+    let mut setup_audit = audit_event(216);
+    setup_audit.actor_id = Some(admin_role);
+    storage
+        .commit_catalog_and_audit(id(216), admin_role, 9_999, &records, &[setup_audit])
+        .map_err(|error| format!("setup catalog commit: {error:?}"))?;
+
+    let now_us = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_micros() as i64;
+    let retention_deadline_us = now_us + 60_000_000;
+    let mut first = storage.begin_invocation(id(232), admin_id, retention_deadline_us, 2, 64)?;
+    let mut second =
+        storage.begin_invocation(id(233), ordinary_id, retention_deadline_us, 2, 64)?;
+
+    assert!(matches!(
+        storage.list_runtime_invocations(ordinary_id, now_us, 1, None),
+        Err(AdministrativeInvocationListError::Unauthorized)
+    ));
+    let first_page = storage.list_runtime_invocations(admin_id, now_us, 1, None)?;
+    assert_eq!(first_page.invocations.len(), 1);
+    assert_eq!(first_page.invocations[0].invocation_id, id(232));
+    assert_eq!(first_page.invocations[0].principal_id, admin_id);
+    assert_eq!(first_page.observed_at_us, now_us);
+    assert_eq!(
+        first_page.consistency,
+        InvocationStatusConsistency::BestEffort
+    );
+    let cursor = first_page.continuation.unwrap();
+    assert!(matches!(
+        storage.list_runtime_invocations(backup_admin_id, now_us, 1, Some(&cursor)),
+        Err(AdministrativeInvocationListError::InvalidCursor)
+    ));
+    let second_page = storage.list_runtime_invocations(admin_id, now_us, 1, Some(&cursor))?;
+    assert_eq!(second_page.invocations.len(), 1);
+    assert_eq!(second_page.invocations[0].invocation_id, id(233));
+    assert_eq!(second_page.invocations[0].principal_id, ordinary_id);
+
+    let stale = storage
+        .list_runtime_invocations(admin_id, now_us, 1, None)?
+        .continuation
+        .unwrap();
+    let mut third = storage.begin_invocation(id(234), ordinary_id, retention_deadline_us, 2, 64)?;
+    assert!(matches!(
+        storage.list_runtime_invocations(admin_id, now_us, 1, Some(&stale)),
+        Err(AdministrativeInvocationListError::StaleCursor)
+    ));
+    assert!(matches!(
+        storage.list_runtime_invocations(admin_id, now_us, 0, None),
+        Err(AdministrativeInvocationListError::InvalidPageLimit)
+    ));
+    assert!(
+        storage
+            .list_runtime_invocations(admin_id, now_us, MAX_ADMIN_INVOCATION_PAGE + 1, None)
+            .is_err()
+    );
+
+    let revocation_cursor = storage
+        .list_runtime_invocations(admin_id, now_us, 1, None)?
+        .continuation
+        .unwrap();
+    let membership = membership_write_with_grantor(admin_id, admin_role, admin_role);
+    let dependency = dependency_write(admin_id, admin_role, 5);
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    let membership_value = catalog
+        .get(membership.key.as_slice())?
+        .ok_or("missing admin membership")?
+        .value()
+        .to_vec();
+    let dependency_value = catalog
+        .get(dependency.key.as_slice())?
+        .ok_or("missing admin dependency")?
+        .value()
+        .to_vec();
+    drop(catalog);
+    drop(read);
+    let removals = [
+        catalog_delete(membership, membership_value),
+        catalog_delete(dependency, dependency_value),
+    ];
+    let mut admin_epoch = principal_write_with_name(admin_id, 1, 2, "runtime_admin");
+    let read = database.begin_read()?;
+    admin_epoch.expected_value = Some(
+        read.open_table(CATALOG)?
+            .get(id_catalog_key(10, admin_id).as_slice())?
+            .ok_or("missing admin principal")?
+            .value()
+            .to_vec(),
+    );
+    drop(read);
+    let mut revoke_audit = audit_event(217);
+    revoke_audit.actor_id = Some(backup_admin_id);
+    revoke_audit.action = AuditAction::AuthorityChange;
+    storage
+        .commit_authorized_membership_ddl(
+            id(217),
+            backup_admin_id,
+            9_999,
+            &[removals[0].clone(), removals[1].clone(), admin_epoch],
+            &[revoke_audit],
+        )
+        .map_err(|error| format!("admin revocation commit: {error:?}"))?;
+    assert!(matches!(
+        storage.list_runtime_invocations(admin_id, now_us, 1, Some(&revocation_cursor)),
+        Err(AdministrativeInvocationListError::Unauthorized)
+    ));
+
+    third.abort()?;
+    second.abort()?;
+    first.abort()?;
+    Ok(())
+}
+
+#[test]
 fn storage_manager_rejects_invalid_recovered_images_before_admission()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
