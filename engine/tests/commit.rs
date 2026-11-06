@@ -7,6 +7,7 @@ use prdb_engine::commit::{
     commit_catalog_and_audit, commit_catalog_and_audit_with_fences, commit_rows,
     commit_rows_and_indexes, commit_storage_changes,
 };
+use prdb_engine::credentials::hash_token_secret;
 use prdb_engine::ddl_fence::{DdlFenceCoordinator, DdlFenceManager};
 use prdb_engine::index_locator::IndexLocator;
 use prdb_engine::metadata::{EngineMetadata, Lifecycle};
@@ -864,6 +865,79 @@ fn principal_write_with_login(
         .unwrap(),
     );
     write
+}
+
+fn credential_verifier_write(
+    token_id: [u8; 16],
+    user_id: [u8; 16],
+    secret: &[u8; 32],
+    issued_at_us: i64,
+    expires_at_us: i64,
+    revoked_at_us: Option<i64>,
+    authority_epoch: u64,
+) -> CatalogWrite {
+    let key = id_catalog_key(16, token_id);
+    let mut fields = vec![
+        CatalogField {
+            tag: 1,
+            wire_type: WireType::Id,
+            payload: user_id.to_vec(),
+        },
+        CatalogField {
+            tag: 2,
+            wire_type: WireType::U16,
+            payload: 1u16.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 3,
+            wire_type: WireType::U16,
+            payload: 1u16.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 4,
+            wire_type: WireType::Bytes,
+            payload: hash_token_secret(secret).to_vec(),
+        },
+        CatalogField {
+            tag: 5,
+            wire_type: WireType::I64,
+            payload: issued_at_us.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 6,
+            wire_type: WireType::I64,
+            payload: expires_at_us.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 7,
+            wire_type: WireType::Bool,
+            payload: vec![u8::from(revoked_at_us.is_some())],
+        },
+    ];
+    if let Some(revoked_at_us) = revoked_at_us {
+        fields.push(CatalogField {
+            tag: 8,
+            wire_type: WireType::I64,
+            payload: revoked_at_us.to_le_bytes().to_vec(),
+        });
+    }
+    fields.extend([
+        CatalogField {
+            tag: 9,
+            wire_type: WireType::Text,
+            payload: b"test token".to_vec(),
+        },
+        CatalogField {
+            tag: 10,
+            wire_type: WireType::U64,
+            payload: authority_epoch.to_le_bytes().to_vec(),
+        },
+    ]);
+    CatalogWrite {
+        key: key.clone(),
+        expected_value: None,
+        payload: Some(encode_envelope(&family_schema(16).unwrap(), &key, &fields).unwrap()),
+    }
 }
 
 fn table_write(table_id: [u8; 16], schema_id: [u8; 16]) -> CatalogWrite {
@@ -4731,6 +4805,27 @@ fn storage_manager_authorizes_identity_ddl_and_preserves_a_login_admin()
         3
     );
 
+    let user_token_secret = [0x47; 32];
+    let active_user_token = credential_verifier_write(
+        id(0x8b),
+        created_user,
+        &user_token_secret,
+        1,
+        i64::MAX,
+        None,
+        1,
+    );
+    let active_user_token_payload = active_user_token.payload.clone().unwrap();
+    let mut token_audit = identity_audit_event(0x8b, user_manager, created_user);
+    token_audit.target_ids = vec![created_user, id(0x8b)];
+    storage.commit_catalog_and_audit(
+        id(0x8b),
+        user_manager,
+        9_999,
+        &[active_user_token],
+        &[token_audit],
+    )?;
+
     let mut disable_user = principal_write_with_login(created_user, 1, false, 3, "renamed_user");
     disable_user.expected_value = Some(current_value(&disable_user.key)?);
     assert_eq!(
@@ -4738,10 +4833,35 @@ fn storage_manager_authorizes_identity_ddl_and_preserves_a_login_admin()
             id(0x84),
             user_manager,
             9_999,
-            &[disable_user],
+            std::slice::from_ref(&disable_user),
             &[identity_audit_event(0x84, user_manager, created_user)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+
+    let mut revoked_user_token = credential_verifier_write(
+        id(0x8b),
+        created_user,
+        &user_token_secret,
+        1,
+        i64::MAX,
+        Some(2),
+        2,
+    );
+    revoked_user_token.expected_value = Some(active_user_token_payload);
+    let mut disable_and_revoke = disable_user;
+    disable_and_revoke.expected_value = Some(current_value(&disable_and_revoke.key)?);
+    let mut revoke_audit = identity_audit_event(0x8c, user_manager, created_user);
+    revoke_audit.target_ids = vec![created_user, id(0x8b)];
+    assert_eq!(
+        storage.commit_authorized_identity_ddl(
+            id(0x8c),
+            user_manager,
+            9_999,
+            &[disable_and_revoke, revoked_user_token],
+            &[revoke_audit],
         )?,
-        4
+        5
     );
 
     let mut disable_last_admin =
@@ -4776,9 +4896,9 @@ fn storage_manager_authorizes_identity_ddl_and_preserves_a_login_admin()
             &admin_role_create,
             &[identity_audit_event(0x8a, admin_user, created_role)],
         )?,
-        5
+        6
     );
-    assert_eq!(commit_sequence(&database)?, 5);
+    assert_eq!(commit_sequence(&database)?, 6);
     Ok(())
 }
 
@@ -5960,7 +6080,7 @@ fn catalog_commit_requires_typed_rows_for_every_object() -> Result<(), Box<dyn s
 }
 
 #[test]
-fn catalog_commit_rejects_credential_verifiers_without_a_supported_profile()
+fn catalog_commit_rejects_malformed_credential_verifier_profiles()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
@@ -6016,22 +6136,162 @@ fn catalog_commit_rejects_credential_verifiers_without_a_supported_profile()
             },
         ],
     )?;
+    let mut writes = vec![
+        principal_write_with_name(id(70), 1, 1, "credential_user"),
+        object_write_with_name(id(70), 8, "credential_user"),
+    ];
+    writes.push(CatalogWrite {
+        key,
+        expected_value: None,
+        payload: Some(payload),
+    });
     assert_eq!(
-        commit_catalog_and_audit(
-            &database,
-            id(72),
-            id(9),
-            9_999,
-            &[CatalogWrite {
-                key,
-                expected_value: None,
-                payload: Some(payload),
-            }],
-            &[audit_event(72)],
-        ),
+        commit_catalog_and_audit(&database, id(72), id(9), 9_999, &writes, &[audit_event(72)],),
         Err(CommitError::InvalidCatalog),
     );
     assert_eq!(commit_sequence(&database)?, 0);
+    Ok(())
+}
+
+#[test]
+fn token_admission_checks_expiry_secret_revocation_and_commit_guards()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::transaction::TransactionError;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
+    let user_id = id(70);
+    let active_secret = [0x31; 32];
+    let expired_secret = [0x32; 32];
+    let revoked_secret = [0x33; 32];
+    let active = credential_verifier_write(
+        id(71),
+        user_id,
+        &active_secret,
+        now - 1_000_000,
+        now + 60_000_000,
+        None,
+        1,
+    );
+    let expired = credential_verifier_write(
+        id(72),
+        user_id,
+        &expired_secret,
+        now - 2_000_000,
+        now - 1_000_000,
+        None,
+        1,
+    );
+    let revoked = credential_verifier_write(
+        id(73),
+        user_id,
+        &revoked_secret,
+        now - 2_000_000,
+        now + 60_000_000,
+        Some(now - 1_000_000),
+        1,
+    );
+    let active_payload = active.payload.clone().unwrap();
+    commit_catalog_and_audit(
+        &database,
+        id(74),
+        id(9),
+        now + 3_600_000_000,
+        &[
+            principal_write_with_name(user_id, 1, 1, "credential_user"),
+            object_write_with_name(user_id, 8, "credential_user"),
+            active,
+            expired,
+            revoked,
+        ],
+        &[audit_event(74)],
+    )
+    .map_err(|error| format!("seed credential records: {error:?}"))?;
+
+    let storage = StorageManager::new(&database, Duration::from_millis(10))
+        .map_err(|error| format!("validate seeded credential records: {error:?}"))?;
+    let (admitted, roles) = storage.begin_token_authenticated_invocation(
+        id(75),
+        id(71),
+        &active_secret,
+        now + 3_600_000_000,
+        2,
+        64,
+    )?;
+    assert!(roles.is_empty());
+
+    for (invocation_id, token_id, secret) in [
+        (id(76), id(71), [0xFF; 32]),
+        (id(77), id(72), expired_secret),
+        (id(78), id(73), revoked_secret),
+    ] {
+        assert!(matches!(
+            storage.begin_token_authenticated_invocation(
+                invocation_id,
+                token_id,
+                &secret,
+                now + 3_600_000_000,
+                2,
+                64,
+            ),
+            Err(TransactionError::AuthenticationFailed)
+        ));
+        assert_eq!(
+            lookup_outcome(&database, invocation_id, user_id, now)?
+                .unwrap()
+                .status,
+            OutcomeStatus::Aborted
+        );
+    }
+
+    let mut revoked_active = credential_verifier_write(
+        id(71),
+        user_id,
+        &active_secret,
+        now - 1_000_000,
+        now + 60_000_000,
+        Some(now),
+        2,
+    );
+    revoked_active.expected_value = Some(active_payload);
+    storage.commit_catalog_and_audit(
+        id(79),
+        id(9),
+        now + 3_600_000_000,
+        &[revoked_active],
+        &[audit_event(79)],
+    )?;
+    assert!(matches!(
+        admitted.commit(),
+        Err(TransactionError::Commit(CommitError::Conflict))
+    ));
+    assert_eq!(
+        lookup_outcome(&database, id(75), user_id, now)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Aborted
+    );
+
+    assert!(matches!(
+        storage.begin_token_authenticated_invocation(
+            id(80),
+            id(71),
+            &active_secret,
+            now + 3_600_000_000,
+            2,
+            64,
+        ),
+        Err(TransactionError::AuthenticationFailed)
+    ));
+    assert_eq!(
+        lookup_outcome(&database, id(80), user_id, now)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Aborted
+    );
+    assert!(prdb_engine::startup::validate_persisted_records(&database).is_ok());
     Ok(())
 }
 

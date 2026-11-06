@@ -10,6 +10,7 @@ use crate::commit::{
     CatalogGuard, CommitError, CommitRequest, ForeignKeyCheck, IndexWrite, RowWrite,
     commit_storage_changes, record_aborted_outcome,
 };
+use crate::credentials::{TOKEN_SECRET_BYTES, decode_verifier_record};
 use crate::ddl_fence::DdlFenceCoordinator;
 use crate::expression::{
     CatalogExpression, ExpressionPurpose, decode_catalog_expression_record,
@@ -46,6 +47,7 @@ pub enum TransactionError {
     NotReady,
     UnsupportedFormat,
     DuplicateInvocation,
+    AuthenticationFailed,
     AdmissionLimitExceeded,
     Expired,
     IndexRowNotStaged,
@@ -397,6 +399,55 @@ impl<'db> InvocationTransaction<'db> {
         }
         self.catalog_guards.insert(key.to_vec(), Some(bytes));
         Ok(Some(record))
+    }
+
+    /// Verify one database-issued bearer token against this invocation's
+    /// pinned catalog snapshot, then return the pinned role closure. The token
+    /// record and every identity/membership record used for admission remain
+    /// guarded through commit, so revocation or an authority change conflicts.
+    pub fn authenticate_credential_token(
+        &mut self,
+        token_id: [u8; 16],
+        secret: &[u8; TOKEN_SECRET_BYTES],
+        now_us: i64,
+    ) -> Result<HashSet<[u8; 16]>, TransactionError> {
+        let result = (|| {
+            if token_id == [0; 16] {
+                return Err(TransactionError::AuthenticationFailed);
+            }
+            let record = match self.read_catalog_record(&catalog_id_key(16, token_id)) {
+                Ok(Some(record)) => record,
+                Ok(None) => return Err(TransactionError::AuthenticationFailed),
+                Err(TransactionError::CorruptCatalog) => {
+                    return Err(TransactionError::AuthenticationFailed);
+                }
+                Err(error) => return Err(error),
+            };
+            let credential = decode_verifier_record(&record)
+                .map_err(|_| TransactionError::AuthenticationFailed)?;
+            if credential.user_id != self.principal_id
+                || !credential.is_valid_at(now_us)
+                || !credential.matches_secret(secret)
+            {
+                return Err(TransactionError::AuthenticationFailed);
+            }
+            match self.load_catalog_role_closure(self.principal_id) {
+                Ok(roles) => Ok(roles),
+                Err(TransactionError::Authorization(AuthorizationError::Denied)) => {
+                    Err(TransactionError::AuthenticationFailed)
+                }
+                Err(error) => Err(error),
+            }
+        })();
+        match result {
+            Ok(roles) => Ok(roles),
+            Err(error) => {
+                if !self.aborted {
+                    self.abort()?;
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Resolve a table's current schema from its pinned catalog snapshot.

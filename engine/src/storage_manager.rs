@@ -1,6 +1,7 @@
 //! Coordinated entry points for invocation commits and administrative DDL.
 
 use crate::audit::AuditEvent;
+use crate::catalog::decode_registered_envelope;
 use crate::commit::{
     CatalogWrite, CommitError, commit_authorized_constraint_ddl_with_fences,
     commit_authorized_foreign_key_ddl_with_fences, commit_authorized_identity_ddl_with_fences,
@@ -8,11 +9,13 @@ use crate::commit::{
     commit_authorized_object_grant_ddl_with_fences, commit_authorized_policy_ddl_with_fences,
     commit_authorized_system_privilege_ddl_with_fences, commit_catalog_and_audit_with_fences,
 };
+use crate::credentials::{TOKEN_SECRET_BYTES, decode_verifier_record, now_unix_micros};
 use crate::ddl_fence::{DdlFenceCoordinator, DdlFenceManager};
 use crate::outcome::{InvocationOutcome, lookup_outcome};
+use crate::schema::CATALOG;
 use crate::startup::{StartupError, validate_persisted_records};
 use crate::transaction::{InvocationCoordination, InvocationTransaction, TransactionError};
-use redb::Database;
+use redb::{Database, ReadableDatabase};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -223,6 +226,35 @@ impl<'db> StorageManager<'db> {
             max_bytes,
         )?;
         let roles = transaction.load_catalog_role_closure(authenticated_principal_id)?;
+        Ok((transaction, roles))
+    }
+
+    /// Authenticate a database-issued bearer token, then admit the invocation
+    /// against one pinned catalog snapshot. Token, user, and membership bytes
+    /// are guarded through commit; a concurrent revocation makes the pending
+    /// invocation conflict.
+    pub fn begin_token_authenticated_invocation(
+        &self,
+        invocation_id: [u8; 16],
+        token_id: [u8; 16],
+        token_secret: &[u8; TOKEN_SECRET_BYTES],
+        retention_deadline_us: i64,
+        max_rows: usize,
+        max_bytes: usize,
+    ) -> Result<(InvocationTransaction<'db>, HashSet<[u8; 16]>), TransactionError> {
+        let principal_id = lookup_credential_principal(self.database, token_id)?;
+        let mut transaction = self.begin_invocation(
+            invocation_id,
+            principal_id,
+            retention_deadline_us,
+            max_rows,
+            max_bytes,
+        )?;
+        let Some(now_us) = now_unix_micros() else {
+            transaction.abort()?;
+            return Err(TransactionError::AuthenticationFailed);
+        };
+        let roles = transaction.authenticate_credential_token(token_id, token_secret, now_us)?;
         Ok((transaction, roles))
     }
 
@@ -445,4 +477,35 @@ impl<'db> StorageManager<'db> {
             now_us,
         )
     }
+}
+
+fn lookup_credential_principal(
+    database: &Database,
+    token_id: [u8; 16],
+) -> Result<[u8; 16], TransactionError> {
+    if token_id == [0; 16] {
+        return Err(TransactionError::AuthenticationFailed);
+    }
+    let read = database
+        .begin_read()
+        .map_err(|error| TransactionError::Storage(error.to_string()))?;
+    let table = read
+        .open_table(CATALOG)
+        .map_err(|error| TransactionError::Storage(error.to_string()))?;
+    let mut key = 16u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&token_id);
+    let bytes = table
+        .get(key.as_slice())
+        .map_err(|error| TransactionError::Storage(error.to_string()))?
+        .map(|value| value.value().to_vec())
+        .ok_or(TransactionError::AuthenticationFailed)?;
+    let record =
+        decode_registered_envelope(&bytes).map_err(|_| TransactionError::AuthenticationFailed)?;
+    if record.logical_key != key {
+        return Err(TransactionError::AuthenticationFailed);
+    }
+    let credential =
+        decode_verifier_record(&record).map_err(|_| TransactionError::AuthenticationFailed)?;
+    Ok(credential.user_id)
 }

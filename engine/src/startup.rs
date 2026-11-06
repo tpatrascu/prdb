@@ -6,6 +6,7 @@ use crate::catalog::{
     CatalogRecord, decode_builtin_scalar_type, decode_registered_envelope,
     validate_builtin_type_profile, validate_owned_child_graph,
 };
+use crate::credentials::{CredentialVerifier, decode_verifier_record};
 use crate::expression::decode_catalog_expression_record;
 use crate::index_key::{DerivedIndexKey, derive_index_key, encode_sql_tuple};
 use crate::index_locator::IndexLocator;
@@ -204,6 +205,8 @@ fn validate_catalog(
     let mut index_definitions = HashMap::new();
     let mut builtin_mappings = None;
     let mut principal_kinds = HashMap::<[u8; 16], u16>::new();
+    let mut principal_login_enabled = HashMap::<[u8; 16], bool>::new();
+    let mut credential_verifiers = Vec::<CredentialVerifier>::new();
     let mut principal_names = HashMap::<[u8; 16], Vec<u8>>::new();
     let mut principal_name_ids = HashMap::<Vec<u8>, [u8; 16]>::new();
     let mut object_kinds = HashMap::<[u8; 16], u16>::new();
@@ -261,7 +264,8 @@ fn validate_catalog(
             return Err(StartupError::InvalidCatalog);
         }
         if record.family_code == 16 {
-            return Err(StartupError::InvalidCatalog);
+            credential_verifiers
+                .push(decode_verifier_record(&record).map_err(|_| StartupError::InvalidCatalog)?);
         }
         if record.family_code == 1 {
             if key.len() != 19
@@ -573,6 +577,9 @@ fn validate_catalog(
                 || (kind == 2 && login_enabled)
                 || field_u64(&record, 4)? == 0
                 || principal_kinds.insert(principal_id, kind).is_some()
+                || principal_login_enabled
+                    .insert(principal_id, login_enabled)
+                    .is_some()
                 || principal_names.insert(principal_id, name.clone()).is_some()
                 || principal_name_ids.insert(name, principal_id).is_some()
             {
@@ -693,6 +700,13 @@ fn validate_catalog(
         }
     }
     if database_records != 1 {
+        return Err(StartupError::InvalidCatalog);
+    }
+    if credential_verifiers.iter().any(|credential| {
+        principal_kinds.get(&credential.user_id) != Some(&1)
+            || (!credential.revoked
+                && principal_login_enabled.get(&credential.user_id) != Some(&true))
+    }) {
         return Err(StartupError::InvalidCatalog);
     }
     if database_id != Some(metadata.database_id)

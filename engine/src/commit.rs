@@ -8,6 +8,7 @@ use crate::catalog::{
     CatalogRecord, decode_builtin_scalar_type, decode_policy_target, decode_registered_envelope,
     validate_builtin_type_profile,
 };
+use crate::credentials::decode_verifier_record;
 use crate::ddl_fence::DdlFenceCoordinator;
 use crate::expression::{
     ExpressionPurpose, decode_catalog_expression_record, is_row_local_expression,
@@ -2379,6 +2380,88 @@ where
         .map(|value| value.value().to_vec()))
 }
 
+fn validate_final_credential_verifiers(
+    transaction: &WriteTransaction,
+    catalog_writes: &[CatalogWrite],
+) -> Result<(), CommitError> {
+    if !catalog_writes.iter().any(|write| {
+        write.key.starts_with(&10u16.to_be_bytes()) || write.key.starts_with(&16u16.to_be_bytes())
+    }) {
+        return Ok(());
+    }
+
+    let table = transaction.open_table(CATALOG).map_err(storage_error)?;
+    let prefix = 16u16.to_be_bytes();
+    let mut verifiers = HashMap::<Vec<u8>, Vec<u8>>::new();
+    for entry in table.range(prefix.as_slice()..).map_err(storage_error)? {
+        let (key, value) = entry.map_err(storage_error)?;
+        let key = key.value().to_vec();
+        if !key.starts_with(&prefix) {
+            break;
+        }
+        verifiers.insert(key, value.value().to_vec());
+        if verifiers.len() > 65_536 {
+            return Err(CommitError::InvalidCatalog);
+        }
+    }
+    for write in catalog_writes
+        .iter()
+        .filter(|write| write.key.starts_with(&prefix))
+    {
+        if let Some(payload) = &write.payload {
+            verifiers.insert(write.key.clone(), payload.clone());
+        } else {
+            verifiers.remove(&write.key);
+        }
+    }
+    if verifiers.len() > 65_536 {
+        return Err(CommitError::InvalidCatalog);
+    }
+
+    for (key, bytes) in verifiers {
+        let record = decode_registered_envelope(&bytes).map_err(|_| CommitError::InvalidCatalog)?;
+        if record.logical_key != key {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let next = decode_verifier_record(&record).map_err(|_| CommitError::InvalidCatalog)?;
+        let principal_key = id_catalog_key(10, next.user_id);
+        let principal_bytes = final_catalog_value(&table, catalog_writes, &principal_key)?
+            .ok_or(CommitError::InvalidCatalog)?;
+        if decode_principal_kind(&principal_key, &principal_bytes)? != 1 {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let login_enabled = catalog_field_bytes(&principal_key, &principal_bytes, 10, 3)?;
+        if !matches!(login_enabled.as_slice(), [0] | [1]) || (!next.revoked && login_enabled != [1])
+        {
+            return Err(CommitError::InvalidCatalog);
+        }
+
+        if catalog_writes.iter().any(|write| write.key == key)
+            && let Some(current_bytes) = table
+                .get(&key[..])
+                .map_err(storage_error)?
+                .map(|value| value.value().to_vec())
+        {
+            let current_record = decode_registered_envelope(&current_bytes)
+                .map_err(|_| CommitError::InvalidCatalog)?;
+            let current =
+                decode_verifier_record(&current_record).map_err(|_| CommitError::InvalidCatalog)?;
+            if current.user_id != next.user_id
+                || current.verifier != next.verifier
+                || current.issued_at_us != next.issued_at_us
+                || current.expires_at_us != next.expires_at_us
+                || current.label != next.label
+                || (current.revoked && !next.revoked)
+                || (current.revoked && current.revoked_at_us != next.revoked_at_us)
+                || (current_record != record && next.authority_epoch <= current.authority_epoch)
+            {
+                return Err(CommitError::InvalidCatalog);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn catalog_field_bytes(
     key: &[u8],
     bytes: &[u8],
@@ -4184,9 +4267,6 @@ fn commit_storage_changes_inner(
     for write in catalog_writes {
         if !unique_catalog.insert(write.key.as_slice())
             || (write.expected_value.is_none() && write.payload.is_none())
-            || (write.payload.is_some()
-                && write.key.len() >= 2
-                && u16::from_be_bytes([write.key[0], write.key[1]]) == 16)
         {
             return Err(CommitError::InvalidCatalog);
         }
@@ -4512,6 +4592,15 @@ fn commit_storage_changes_inner(
         Err(error) => return Err(error),
     }
     match validate_final_principal_names(&transaction, catalog_writes) {
+        Ok(()) => {}
+        Err(CommitError::InvalidCatalog) => {
+            transaction.abort().map_err(storage_error)?;
+            record_aborted_outcome(database, invocation_id, principal_id, retention_deadline_us)?;
+            return Err(CommitError::InvalidCatalog);
+        }
+        Err(error) => return Err(error),
+    }
+    match validate_final_credential_verifiers(&transaction, catalog_writes) {
         Ok(()) => {}
         Err(CommitError::InvalidCatalog) => {
             transaction.abort().map_err(storage_error)?;
@@ -7959,12 +8048,13 @@ fn identity_ddl_authority_guards(
         return Err(CommitError::InvalidAudit);
     }
 
-    // Keep this route limited to identity rows and their named object rows.
-    // Every actual change must be a creation pair or a supported update.
+    // Identity rows, their named object rows, and one-way verifier revocations
+    // are the only writes accepted by this route.
     let read = database.begin_read().map_err(storage_error)?;
     let catalog = read.open_table(CATALOG).map_err(storage_error)?;
     let mut principal_changes = HashMap::<[u8; 16], (u16, bool, bool, bool, Vec<u8>)>::new();
     let mut object_changes = HashMap::<[u8; 16], (u16, bool, bool)>::new();
+    let mut credential_changes = HashMap::<[u8; 16], [u8; 16]>::new();
     let mut required_privileges = HashSet::<u16>::new();
 
     for write in catalog_writes {
@@ -7974,7 +8064,7 @@ fn identity_ddl_authority_guards(
             .and_then(|bytes| <[u8; 2]>::try_from(bytes).ok())
             .map(u16::from_be_bytes)
             .ok_or(CommitError::InvalidCatalog)?;
-        if !matches!(family, 2 | 10) {
+        if !matches!(family, 2 | 10 | 16) {
             return Err(CommitError::InvalidCatalog);
         }
         let current = catalog
@@ -7982,6 +8072,44 @@ fn identity_ddl_authority_guards(
             .map_err(storage_error)?
             .map(|value| value.value().to_vec());
         if current.as_deref() == write.payload.as_deref() {
+            continue;
+        }
+        if family == 16 {
+            if write.key.len() != 19 || write.key[2] != 1 || write.payload.is_none() {
+                return Err(CommitError::InvalidCatalog);
+            }
+            let current_bytes = current.as_deref().ok_or(CommitError::InvalidCatalog)?;
+            let next_bytes = write
+                .payload
+                .as_deref()
+                .ok_or(CommitError::InvalidCatalog)?;
+            let current_record = decode_catalog_record(&write.key, current_bytes)?;
+            let next_record = decode_catalog_record(&write.key, next_bytes)?;
+            let current_credential =
+                decode_verifier_record(&current_record).map_err(|_| CommitError::InvalidCatalog)?;
+            let next_credential =
+                decode_verifier_record(&next_record).map_err(|_| CommitError::InvalidCatalog)?;
+            if current_credential.revoked
+                || !next_credential.revoked
+                || current_credential.user_id != next_credential.user_id
+                || current_credential.verifier != next_credential.verifier
+                || current_credential.issued_at_us != next_credential.issued_at_us
+                || current_credential.expires_at_us != next_credential.expires_at_us
+                || current_credential.label != next_credential.label
+                || next_credential.authority_epoch <= current_credential.authority_epoch
+            {
+                return Err(CommitError::InvalidCatalog);
+            }
+            let token_id: [u8; 16] = write.key[3..19]
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?;
+            if credential_changes
+                .insert(token_id, current_credential.user_id)
+                .is_some()
+            {
+                return Err(CommitError::InvalidCatalog);
+            }
+            required_privileges.insert(12);
             continue;
         }
         if write.key.len() != 19 || write.key[2] != 1 || write.payload.is_none() {
@@ -8076,7 +8204,7 @@ fn identity_ddl_authority_guards(
         }
     }
 
-    if principal_changes.is_empty() {
+    if principal_changes.is_empty() && credential_changes.is_empty() {
         return Err(CommitError::InvalidCatalog);
     }
     if object_changes
@@ -8118,6 +8246,7 @@ fn identity_ddl_authority_guards(
     let mut admin_role_id = [0x80; 16];
     admin_role_id[15] = 3;
     principal_ids.insert(admin_role_id);
+    principal_ids.extend(credential_changes.values().copied());
     let mut membership_count = 0usize;
     for entry in catalog
         .range(membership_prefix.as_slice()..)

@@ -727,7 +727,11 @@ fn principal_record_with_name(
     (key, payload)
 }
 
-fn credential_verifier_record(token_id: [u8; 16], user_id: [u8; 16]) -> (Vec<u8>, Vec<u8>) {
+fn credential_verifier_record(
+    token_id: [u8; 16],
+    user_id: [u8; 16],
+    verifier: &[u8],
+) -> (Vec<u8>, Vec<u8>) {
     let mut key = 16u16.to_be_bytes().to_vec();
     key.push(1);
     key.extend_from_slice(&token_id);
@@ -750,7 +754,7 @@ fn credential_verifier_record(token_id: [u8; 16], user_id: [u8; 16]) -> (Vec<u8>
         CatalogField {
             tag: 4,
             wire_type: WireType::Bytes,
-            payload: b"synthetic-verifier".to_vec(),
+            payload: verifier.to_vec(),
         },
         CatalogField {
             tag: 5,
@@ -1498,13 +1502,13 @@ fn rejects_noncanonical_bootstrap_mappings() {
 }
 
 #[test]
-fn rejects_credential_verifiers_without_a_supported_profile() {
+fn accepts_credential_verifiers_with_the_supported_profile() {
     let fixture = Fixture::new();
     let database = fixture.database(0);
     let user_id = [70; 16];
     let (user_key, user_value) = principal_record(user_id, 1, true, 1);
     let (object_key, object_value) = object_record(user_id, 8);
-    let (verifier_key, verifier_value) = credential_verifier_record([71; 16], user_id);
+    let (verifier_key, verifier_value) = credential_verifier_record([71; 16], user_id, &[0xA5; 32]);
     for (key, value) in [
         (user_key, user_value),
         (object_key, object_value),
@@ -1512,10 +1516,33 @@ fn rejects_credential_verifiers_without_a_supported_profile() {
     ] {
         put_catalog(&database, &key, &value);
     }
-    assert_eq!(
-        validate_persisted_records(&database),
-        Err(StartupError::InvalidCatalog),
-    );
+    assert!(validate_persisted_records(&database).is_ok());
+}
+
+#[test]
+fn rejects_malformed_or_disabled_user_credential_verifiers() {
+    for (login_enabled, verifier) in [(true, vec![0xA5; 31]), (false, vec![0xA5; 32])] {
+        let fixture = Fixture::new();
+        let database = fixture.database(0);
+        let user_id = [72; 16];
+        let (user_key, user_value) =
+            principal_record_with_name(user_id, 1, login_enabled, 1, "credential_user");
+        let (object_key, object_value) =
+            object_record_named(user_id, 8, builtin_owner_id(), "credential_user");
+        let (verifier_key, verifier_value) =
+            credential_verifier_record([73; 16], user_id, &verifier);
+        for (key, value) in [
+            (user_key, user_value),
+            (object_key, object_value),
+            (verifier_key, verifier_value),
+        ] {
+            put_catalog(&database, &key, &value);
+        }
+        assert_eq!(
+            validate_persisted_records(&database),
+            Err(StartupError::InvalidCatalog),
+        );
+    }
 }
 
 #[test]

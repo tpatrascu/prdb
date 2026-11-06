@@ -474,17 +474,17 @@
 ## SM-5 dependency: managed user admission — in progress
 
 - `StorageManager::begin_authenticated_invocation` accepts an identity from a trusted caller, validates that the principal is a live `LOGIN` user in the invocation's pinned catalog snapshot, and returns the pinned role closure. Identity and membership records used for admission are guarded through commit. Unknown and disabled users are denied with durable ABORTED outcomes.
-- Credential verification, token expiry/revocation checks, and the gateway/supervisor authentication boundary remain outside this storage entry point. The existing `begin_invocation` remains a lower-level trusted path.
+- Token verification and expiry/revocation checks are now handled by `begin_token_authenticated_invocation`; the caller-supplied-identity method remains available only after trusted external authentication. The gateway/supervisor authentication boundary remains outside the storage manager, and `begin_invocation` remains a lower-level trusted path.
 - A real-redb integration test covers successful admission, disabled and unknown-user denial, durable outcomes, and release of the admission slot after failed attempts.
 - Verification: in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and workspace tests passed. Changed Markdown links and `git diff --check` passed.
 - Contract update: [users and roles](../../specs/ddl-identity.md).
-- Remaining: token and verifier records/loaders, gateway/supervisor authentication, and action-specific authorization for other DDL remain open.
+- Remaining: token issuance/inventory APIs, gateway/supervisor authentication, and action-specific authorization for other DDL remain open.
 
 ## SM-5 dependency: role-membership DDL authorization — in progress
 
 - `StorageManager::commit_authorized_membership_ddl` accepts only membership edges, their exact authority-dependency edges, and affected principals' authority-epoch increments. It authorizes ordinary membership changes through inherited `MANAGE_ROLES` or current administrator membership; changes to the reserved administrator role require a current administrator.
 - The route guards the actor identity, complete membership graph, applicable system-grant records, and role records through serialized publication. Added membership edges must name the authenticated actor as grantor, and successful audit events must identify that actor.
-- It blocks direct or inherited membership changes that grant or remove database-administrator membership without an administrator, and preserves at least one login-enabled administrator. Credential usability cannot yet be checked because verifier records and token lifecycle support remain unspecified.
+- It blocks direct or inherited membership changes that grant or remove database-administrator membership without an administrator, and preserves at least one login-enabled administrator. Credential-backed administrator usability is still not checked at membership publication.
 - A real-redb regression covers authorized membership add/remove, denial without `MANAGE_ROLES`, administrator-only changes to the reserved role, final-administrator preservation, authority epochs, and durable outcomes.
 - Verification: in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and workspace tests passed. Changed Markdown links and `git diff --check` passed.
 - Contract update: [users and roles](../../specs/ddl-identity.md).
@@ -520,11 +520,19 @@
 ## SM-5 dependency: identity lifecycle DDL authorization — in progress
 
 - `StorageManager::commit_authorized_identity_ddl` now supports user creation, rename, and LOGIN/NOLOGIN changes plus role creation and rename. User changes require inherited `MANAGE_USERS`; role changes require inherited `MANAGE_ROLES`; current database administrators may do either.
-- The route accepts only complete principal/object creation pairs, matched rename pairs, and principal-only login-state changes. It rejects identity deletion and unrelated catalog writes. Actor identity, membership closure, role records, system grants, and the login-enabled administrator set are guarded through commit; successful DDL audit actors must match the authenticated caller.
-- A real-redb regression covers MANAGE_USERS admission, MANAGE_ROLES denial, user rename and disable, last-login-admin preservation, database-admin role creation, and committed sequences.
+- The route accepts complete principal/object creation pairs, matched rename pairs, principal-only login-state changes, and one-way token revocations. Disabling a user with active tokens requires their revocation records in the same batch; active tokens cannot remain attached to a NOLOGIN user. It rejects identity deletion and unrelated catalog writes. Actor identity, membership closure, role records, system grants, and the login-enabled administrator set are guarded through commit; successful DDL audit actors must match the authenticated caller.
+- A real-redb regression covers MANAGE_USERS admission, MANAGE_ROLES denial, user rename and disable, rejection of disable without token revocation, atomic disable plus revocation, last-login-admin preservation, database-admin role creation, and committed sequences.
 - Verification: the prescribed Nix-shell workspace build, formatting check, Clippy with warnings denied, and workspace tests passed. Changed Markdown links and `git diff --check` passed.
 - Contract: [users and roles](../../specs/ddl-identity.md).
-- Remaining: role/user deletion needs durable ID tombstones, credential-backed final-admin checks need a verifier profile, and deterministic authorization-change race coverage remains open.
+- Remaining: role/user deletion needs durable ID tombstones, credential-backed final-admin checks remain open, token issuance/inventory APIs remain open, and deterministic authorization-change race coverage remains open.
+
+## SM-5 dependency: credential verifier profile and token-backed invocation admission — in progress
+
+- Family-16 verifiers use SHA-256 algorithm/version 1 over an exactly 32-byte uniformly random bearer secret. The profile validates verifier width, issue/expiry times, revocation metadata, labels, authority epochs, user ownership, and LOGIN state. This profile is not for human-chosen passwords.
+- `StorageManager::begin_token_authenticated_invocation` verifies the secret and trusted current time against the invocation's pinned catalog snapshot, then loads the role closure. The verifier, user, and membership records are guarded through commit; a token revocation after admission makes pending writes conflict. Authentication failures do not distinguish unknown, malformed, wrong-secret, expired, revoked, or disabled-user credentials.
+- Identity DDL allows only one-way revocation of existing verifiers and requires all active tokens to be revoked atomically with a NOLOGIN change. Tests cover supported and malformed profiles, successful admission, wrong secret, expiry, revocation, durable abort outcomes, concurrent revocation conflict, and the LOGIN disable path.
+- Verification: Rust/C toolchain versions matched the configured Nix environment; locked workspace build, formatting check, Clippy with warnings denied, and all 215 tests across 18 integration targets passed. Changed Markdown local-link checks and `git diff --check` passed.
+- Remaining: secure token issuance/inventory APIs, bootstrap secret handoff, credential-backed last-administrator checks, gateway/supervisor integration, and authentication rate limits.
 
 ## SM-5 dependency: policy DDL authorization — in progress
 
