@@ -88,6 +88,27 @@ fn bytea_tuple(value: &[u8]) -> Vec<u8> {
     .unwrap()
 }
 
+fn two_bytea_tuple(first: &[u8], second: &[u8]) -> Vec<u8> {
+    encode_tuple(
+        &[
+            ColumnSchema {
+                scalar_type: ScalarType::Bytea,
+                nullable: true,
+            },
+            ColumnSchema {
+                scalar_type: ScalarType::Bytea,
+                nullable: true,
+            },
+        ],
+        1,
+        &[
+            Some(ScalarValue::Bytea(first.to_vec())),
+            Some(ScalarValue::Bytea(second.to_vec())),
+        ],
+    )
+    .unwrap()
+}
+
 fn index_definition(index_id: [u8; 16], table_id: [u8; 16]) -> (Vec<u8>, Vec<u8>) {
     index_definition_with_columns(index_id, table_id, &[[0x66; 16]])
 }
@@ -178,6 +199,33 @@ fn typed_bytea_index_key(
         }],
         payload,
         &[id(0x66)],
+    )
+    .unwrap()
+}
+
+fn typed_two_bytea_index_key(
+    index_id: [u8; 16],
+    row_key: &[u8; 32],
+    payload: &[u8],
+    column_id: [u8; 16],
+) -> prdb_engine::index_key::DerivedIndexKey {
+    prdb_engine::index_key::derive_index_key(
+        index_id,
+        row_key[16..].try_into().unwrap(),
+        1,
+        &[id(0x66), id(0x67)],
+        &[
+            ColumnSchema {
+                scalar_type: ScalarType::Bytea,
+                nullable: true,
+            },
+            ColumnSchema {
+                scalar_type: ScalarType::Bytea,
+                nullable: true,
+            },
+        ],
+        payload,
+        &[column_id],
     )
     .unwrap()
 }
@@ -780,6 +828,67 @@ fn table_write_with_versions(
 
 fn column_write(column_id: [u8; 16], table_id: [u8; 16], name: &str) -> CatalogWrite {
     column_write_with_defaults(column_id, table_id, name, None, None)
+}
+
+fn column_write_at_ordinal(
+    column_id: [u8; 16],
+    table_id: [u8; 16],
+    ordinal: u32,
+    name: &str,
+) -> CatalogWrite {
+    let key = id_catalog_key(6, column_id);
+    let payload = encode_envelope(
+        &family_schema(6).unwrap(),
+        &key,
+        &[
+            CatalogField {
+                tag: 1,
+                wire_type: WireType::Id,
+                payload: table_id.to_vec(),
+            },
+            CatalogField {
+                tag: 2,
+                wire_type: WireType::U32,
+                payload: ordinal.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 3,
+                wire_type: WireType::Text,
+                payload: name.as_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 4,
+                wire_type: WireType::Id,
+                payload: builtin_id(108).to_vec(),
+            },
+            CatalogField {
+                tag: 5,
+                wire_type: WireType::Bytes,
+                payload: vec![0; 8],
+            },
+            CatalogField {
+                tag: 6,
+                wire_type: WireType::Bool,
+                payload: vec![1],
+            },
+            CatalogField {
+                tag: 8,
+                wire_type: WireType::U16,
+                payload: 0u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 9,
+                wire_type: WireType::U64,
+                payload: 1u64.to_le_bytes().to_vec(),
+            },
+        ],
+    )
+    .unwrap();
+    CatalogWrite {
+        key,
+        expected_value: None,
+        payload: Some(payload),
+    }
 }
 
 fn column_write_not_null(column_id: [u8; 16], table_id: [u8; 16], name: &str) -> CatalogWrite {
@@ -2652,6 +2761,258 @@ fn storage_manager_builds_and_drops_populated_indexes_atomically()
     );
     drop(read);
     StorageManager::new(&database, Duration::from_millis(100))?;
+    Ok(())
+}
+
+#[test]
+fn storage_manager_rebuilds_populated_indexes_atomically() -> Result<(), Box<dyn std::error::Error>>
+{
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let new_column_object = object_write(id(0x67), 4);
+    let new_column = column_write_at_ordinal(id(0x67), id(16), 1, "object_103");
+    {
+        let setup = database.begin_write()?;
+        for record in [new_column_object, new_column] {
+            setup
+                .open_table(CATALOG)?
+                .insert(&record.key[..], record.payload.as_ref().unwrap().as_slice())?;
+        }
+        setup.commit()?;
+    }
+    let row_key = table_row_key(id(16), id(73));
+    let payload = two_bytea_tuple(b"old index key", b"new index key");
+    let existing = typed_two_bytea_index_key(id(0x44), &row_key, &payload, id(0x66));
+    commit_rows_and_indexes(
+        &database,
+        id(204),
+        id(9),
+        9_999,
+        &[RowWrite {
+            key: row_key,
+            expected_version: None,
+            payload: Some(payload.clone()),
+        }],
+        &[IndexWrite {
+            key: existing.key.clone(),
+            row_key,
+            expected_version: None,
+            present: true,
+            unique: false,
+            null_exempt: false,
+        }],
+    )?;
+    let old_snapshot = database.begin_read()?;
+    let index_catalog_key = id_catalog_key(9, id(0x44));
+    let old_definition = old_snapshot
+        .open_table(CATALOG)?
+        .get(index_catalog_key.as_slice())?
+        .ok_or("missing existing index definition")?
+        .value()
+        .to_vec();
+    let (same_index_key, unique_definition) =
+        index_definition_with_options(id(0x44), id(16), &[id(0x67)], true);
+    assert_eq!(same_index_key, index_catalog_key);
+    let rebuilt = typed_two_bytea_index_key(id(0x44), &row_key, &payload, id(0x67));
+    assert_ne!(existing.key, rebuilt.key);
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(208),
+            id(9),
+            9_999,
+            &[CatalogWrite {
+                key: index_catalog_key.clone(),
+                expected_value: Some(old_definition.clone()),
+                payload: Some(unique_definition.clone()),
+            }],
+            &[audit_event(208)],
+        ),
+        Err(CommitError::InvalidCatalog)
+    );
+    assert_eq!(
+        storage.commit_catalog_and_audit(
+            id(205),
+            id(9),
+            9_999,
+            &[CatalogWrite {
+                key: index_catalog_key.clone(),
+                expected_value: Some(old_definition.clone()),
+                payload: Some(unique_definition.clone()),
+            }],
+            &[audit_event(205)],
+        )?,
+        2
+    );
+
+    let old_catalog = old_snapshot.open_table(CATALOG)?;
+    assert_eq!(
+        old_catalog
+            .get(index_catalog_key.as_slice())?
+            .unwrap()
+            .value(),
+        old_definition
+    );
+    let old_indexes = old_snapshot.open_table(schema::INDEXES)?;
+    let old_locator = old_indexes.get(existing.key.as_slice())?.unwrap();
+    assert_eq!(
+        IndexLocator::decode_for_key(&existing.key, old_locator.value())?.row_version,
+        1
+    );
+    let reverse_key = {
+        let mut key = row_key.to_vec();
+        key.extend_from_slice(&existing.key[..existing.key.len() - 16]);
+        key
+    };
+    assert!(
+        old_snapshot
+            .open_table(schema::ROW_INDEXES)?
+            .get(reverse_key.as_slice())?
+            .is_some()
+    );
+    assert!(old_indexes.get(rebuilt.key.as_slice())?.is_none());
+
+    let current = database.begin_read()?;
+    assert_eq!(
+        current
+            .open_table(CATALOG)?
+            .get(index_catalog_key.as_slice())?
+            .unwrap()
+            .value(),
+        unique_definition
+    );
+    let locator = current
+        .open_table(schema::INDEXES)?
+        .get(rebuilt.key.as_slice())?
+        .unwrap();
+    assert_eq!(
+        IndexLocator::decode_for_key(&rebuilt.key, locator.value())?.row_version,
+        1
+    );
+    assert!(
+        current
+            .open_table(schema::INDEXES)?
+            .get(existing.key.as_slice())?
+            .is_none()
+    );
+    let rebuilt_reverse_key = {
+        let mut key = row_key.to_vec();
+        key.extend_from_slice(&rebuilt.key[..rebuilt.key.len() - 16]);
+        key
+    };
+    assert!(
+        current
+            .open_table(schema::ROW_INDEXES)?
+            .get(reverse_key.as_slice())?
+            .is_none()
+    );
+    assert!(
+        current
+            .open_table(schema::ROW_INDEXES)?
+            .get(rebuilt_reverse_key.as_slice())?
+            .is_some()
+    );
+    assert_eq!(
+        lookup_outcome(&database, id(205), id(9), 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Committed
+    );
+    drop(current);
+    drop(old_snapshot);
+    StorageManager::new(&database, Duration::from_millis(100))?;
+    Ok(())
+}
+
+#[test]
+fn storage_manager_rejects_unique_rebuild_with_duplicate_values()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let payload = bytea_tuple(b"duplicate rebuild");
+    let row_keys = [table_row_key(id(16), id(74)), table_row_key(id(16), id(75))];
+    let indexes = row_keys
+        .iter()
+        .map(|row_key| {
+            let derived = typed_bytea_index_key(id(0x44), row_key, &payload);
+            IndexWrite {
+                key: derived.key,
+                row_key: *row_key,
+                expected_version: None,
+                present: true,
+                unique: false,
+                null_exempt: false,
+            }
+        })
+        .collect::<Vec<_>>();
+    commit_rows_and_indexes(
+        &database,
+        id(206),
+        id(9),
+        9_999,
+        &row_keys
+            .iter()
+            .map(|row_key| RowWrite {
+                key: *row_key,
+                expected_version: None,
+                payload: Some(payload.clone()),
+            })
+            .collect::<Vec<_>>(),
+        &indexes,
+    )?;
+
+    let index_catalog_key = id_catalog_key(9, id(0x44));
+    let old_definition = database
+        .begin_read()?
+        .open_table(CATALOG)?
+        .get(index_catalog_key.as_slice())?
+        .unwrap()
+        .value()
+        .to_vec();
+    let (_, unique_definition) = index_definition_with_options(id(0x44), id(16), &[id(0x66)], true);
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    assert_eq!(
+        storage.commit_catalog_and_audit(
+            id(207),
+            id(9),
+            9_999,
+            &[CatalogWrite {
+                key: index_catalog_key.clone(),
+                expected_value: Some(old_definition.clone()),
+                payload: Some(unique_definition),
+            }],
+            &[audit_event(207)],
+        ),
+        Err(CommitError::UniqueViolation)
+    );
+    assert_eq!(commit_sequence(&database)?, 1);
+    assert_eq!(
+        lookup_outcome(&database, id(207), id(9), 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Aborted
+    );
+    let read = database.begin_read()?;
+    assert_eq!(
+        read.open_table(CATALOG)?
+            .get(index_catalog_key.as_slice())?
+            .unwrap()
+            .value(),
+        old_definition
+    );
+    for index_write in &indexes {
+        assert!(
+            read.open_table(schema::INDEXES)?
+                .get(index_write.key.as_slice())?
+                .is_some()
+        );
+    }
+    assert!(
+        read.open_table(schema::AUDIT)?
+            .get(&[207; 16][..])?
+            .is_none()
+    );
     Ok(())
 }
 

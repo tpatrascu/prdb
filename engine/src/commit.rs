@@ -18,9 +18,9 @@ use std::collections::{HashMap, HashSet};
 type IndexTableMap = HashMap<[u8; 16], [u8; 16]>;
 const MAX_FOREIGN_KEY_ROW_VISITS_PER_COMMIT: usize = 65_536;
 const MAX_FOREIGN_KEY_COMPARISON_KEY_BYTES_PER_COMMIT: usize = 16 * 1024 * 1024;
-const MAX_INDEX_BACKFILL_ROWS_PER_COMMIT: usize = 65_536;
-const MAX_INDEX_BACKFILL_ENTRIES_PER_COMMIT: usize = 65_536;
-const MAX_INDEX_BACKFILL_BYTES_PER_COMMIT: usize = 64 * 1024 * 1024;
+const MAX_INDEX_DDL_ROWS_PER_COMMIT: usize = 65_536;
+const MAX_INDEX_DDL_ENTRIES_PER_COMMIT: usize = 65_536;
+const MAX_INDEX_DDL_BYTES_PER_COMMIT: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RowWrite {
@@ -96,13 +96,14 @@ struct IndexDdlPlan {
     index_tables: HashMap<[u8; 16], [u8; 16]>,
     created_indexes: HashSet<[u8; 16]>,
     dropped_indexes: HashSet<[u8; 16]>,
+    rebuilt_indexes: HashSet<[u8; 16]>,
     expected_rows: HashMap<[u8; 16], Vec<([u8; 32], u64)>>,
     row_versions: HashMap<[u8; 32], u64>,
     writes: Vec<IndexWrite>,
 }
 
 #[derive(Clone, Debug)]
-struct BackfillIndexDefinition {
+struct IndexDdlDefinition {
     index_id: [u8; 16],
     table_id: [u8; 16],
     column_ids: Vec<[u8; 16]>,
@@ -2800,6 +2801,9 @@ fn validate_index_definition_changes(
         let planned_drop = current.is_some()
             && write.payload.is_none()
             && backfill.is_some_and(|plan| plan.dropped_indexes.contains(&index_id));
+        let planned_rebuild = current.is_some()
+            && write.payload.is_some()
+            && backfill.is_some_and(|plan| plan.rebuilt_indexes.contains(&index_id));
         let mut affected_tables = HashSet::new();
         if let Some(current) = current.as_deref() {
             affected_tables.insert(decode_index_definition(&write.key, current)?.1);
@@ -2835,7 +2839,7 @@ fn validate_index_definition_changes(
             }
             let planned_for_table = backfill.is_some_and(|plan| {
                 plan.index_tables.get(&index_id) == Some(&table_id)
-                    && (planned_create || planned_drop)
+                    && (planned_create || planned_drop || planned_rebuild)
             });
             if has_persisted_rows && !planned_for_table {
                 return Err(CommitError::InvalidCatalog);
@@ -2848,10 +2852,7 @@ fn validate_index_definition_changes(
             .next()
         {
             let (key, _) = entry.map_err(storage_error)?;
-            if key.value().starts_with(&index_id)
-                && !(planned_drop
-                    && backfill.is_some_and(|plan| plan.dropped_indexes.contains(&index_id)))
-            {
+            if key.value().starts_with(&index_id) && !(planned_drop || planned_rebuild) {
                 return Err(CommitError::InvalidCatalog);
             }
         }
@@ -2859,11 +2860,11 @@ fn validate_index_definition_changes(
     Ok(())
 }
 
-fn decode_backfill_index_definition(
+fn decode_index_ddl_definition(
     key: &[u8],
     bytes: &[u8],
     schema: &FinalTableSchema,
-) -> Result<BackfillIndexDefinition, CommitError> {
+) -> Result<IndexDdlDefinition, CommitError> {
     let (index_id, table_id) = decode_index_definition(key, bytes)?;
     let record = decode_catalog_record(key, bytes)?;
     let column_ids = catalog_id_list_field(key, bytes, 9, 2)?;
@@ -2890,6 +2891,7 @@ fn decode_backfill_index_definition(
                 Err(_) => true,
             },
         );
+    let has_owner = record.fields.iter().any(|field| field.tag == 6);
     let mut seen_columns = HashSet::new();
     if index_id == [0; 16]
         || table_id == [0; 16]
@@ -2909,6 +2911,7 @@ fn decode_backfill_index_definition(
                 .map_err(|_| CommitError::InvalidCatalog)?,
         ) != 1
         || owner_is_invalid
+        || (has_owner && !unique)
         || storage_object_id == [0; 16]
         || u16::from_le_bytes(
             catalog_field_bytes(key, bytes, 9, 8)?
@@ -2924,12 +2927,19 @@ fn decode_backfill_index_definition(
     {
         return Err(CommitError::InvalidCatalog);
     }
-    Ok(BackfillIndexDefinition {
+    Ok(IndexDdlDefinition {
         index_id,
         table_id,
         column_ids,
         unique,
     })
+}
+
+fn map_index_key_error(error: crate::index_key::DeriveIndexKeyError) -> CommitError {
+    match error {
+        crate::index_key::DeriveIndexKeyError::InvalidDefinition => CommitError::InvalidCatalog,
+        crate::index_key::DeriveIndexKeyError::Tuple(_) => CommitError::InvalidRow,
+    }
 }
 
 fn validate_final_catalog_index_definitions(
@@ -2949,7 +2959,7 @@ fn validate_final_catalog_index_definitions(
         }
         let (_, table_id) = decode_index_definition(&write.key, payload)?;
         let schema = load_final_table_schema(&catalog, catalog_writes, table_id)?;
-        decode_backfill_index_definition(&write.key, payload, &schema)?;
+        decode_index_ddl_definition(&write.key, payload, &schema)?;
     }
     Ok(())
 }
@@ -2962,6 +2972,7 @@ fn build_index_ddl_plan(
     let catalog = read.open_table(CATALOG).map_err(storage_error)?;
     let mut new_indexes = Vec::new();
     let mut dropped_indexes = Vec::new();
+    let mut updated_indexes = Vec::new();
     for write in catalog_writes
         .iter()
         .filter(|write| write.key.starts_with(&9u16.to_be_bytes()))
@@ -2981,6 +2992,22 @@ fn build_index_ddl_plan(
         } else if let (Some(current), None) = (current.as_deref(), write.payload.as_deref()) {
             let (index_id, table_id) = decode_index_definition(&write.key, current)?;
             dropped_indexes.push((index_id, table_id));
+        } else if let (Some(current), Some(payload)) =
+            (current.as_deref(), write.payload.as_deref())
+            && current != payload
+        {
+            let (old_index_id, old_table_id) = decode_index_definition(&write.key, current)?;
+            let (new_index_id, new_table_id) = decode_index_definition(&write.key, payload)?;
+            if old_index_id != new_index_id || old_table_id != new_table_id {
+                return Err(CommitError::InvalidCatalog);
+            }
+            updated_indexes.push((
+                old_index_id,
+                old_table_id,
+                write.key.clone(),
+                current.to_vec(),
+                payload.to_vec(),
+            ));
         }
     }
 
@@ -2995,6 +3022,7 @@ fn build_index_ddl_plan(
         index_tables: HashMap::new(),
         created_indexes: HashSet::new(),
         dropped_indexes: HashSet::new(),
+        rebuilt_indexes: HashSet::new(),
         expected_rows: HashMap::new(),
         row_versions: HashMap::new(),
         writes: Vec::new(),
@@ -3027,14 +3055,14 @@ fn build_index_ddl_plan(
             total_rows = total_rows
                 .checked_add(1)
                 .ok_or(CommitError::IndexDdlLimitExceeded)?;
-            if total_rows > MAX_INDEX_BACKFILL_ROWS_PER_COMMIT {
+            if total_rows > MAX_INDEX_DDL_ROWS_PER_COMMIT {
                 return Err(CommitError::IndexDdlLimitExceeded);
             }
             let bytes = value.value().to_vec();
             total_bytes = total_bytes
                 .checked_add(bytes.len())
                 .ok_or(CommitError::IndexDdlLimitExceeded)?;
-            if total_bytes > MAX_INDEX_BACKFILL_BYTES_PER_COMMIT {
+            if total_bytes > MAX_INDEX_DDL_BYTES_PER_COMMIT {
                 return Err(CommitError::IndexDdlLimitExceeded);
             }
             let row = RowRecord::decode(&bytes).map_err(|_| CommitError::InvalidRow)?;
@@ -3077,7 +3105,7 @@ fn build_index_ddl_plan(
         let schema = load_final_table_schema(&catalog, &[], table_id)?;
         let definitions = definitions
             .iter()
-            .map(|(key, bytes)| decode_backfill_index_definition(key, bytes, &schema))
+            .map(|(key, bytes)| decode_index_ddl_definition(key, bytes, &schema))
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut expected_rows = Vec::with_capacity(persisted_rows.len());
@@ -3088,7 +3116,7 @@ fn build_index_ddl_plan(
                 total_entries = total_entries
                     .checked_add(1)
                     .ok_or(CommitError::IndexDdlLimitExceeded)?;
-                if total_entries > MAX_INDEX_BACKFILL_ENTRIES_PER_COMMIT {
+                if total_entries > MAX_INDEX_DDL_ENTRIES_PER_COMMIT {
                     return Err(CommitError::IndexDdlLimitExceeded);
                 }
                 let derived = crate::index_key::derive_index_key(
@@ -3109,7 +3137,7 @@ fn build_index_ddl_plan(
                 total_bytes = total_bytes
                     .checked_add(derived.key.len())
                     .ok_or(CommitError::IndexDdlLimitExceeded)?;
-                if total_bytes > MAX_INDEX_BACKFILL_BYTES_PER_COMMIT {
+                if total_bytes > MAX_INDEX_DDL_BYTES_PER_COMMIT {
                     return Err(CommitError::IndexDdlLimitExceeded);
                 }
                 plan.writes.push(IndexWrite {
@@ -3129,6 +3157,163 @@ fn build_index_ddl_plan(
 
     let indexes = read.open_table(INDEXES).map_err(storage_error)?;
     let reverse_indexes = read.open_table(ROW_INDEXES).map_err(storage_error)?;
+    for (index_id, table_id, key, old_bytes, new_bytes) in updated_indexes {
+        if !seen_index_ids.insert(index_id) {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let mut persisted_rows = Vec::new();
+        for entry in rows.range(table_id.as_slice()..).map_err(storage_error)? {
+            let (row_key, value) = entry.map_err(storage_error)?;
+            let row_key = row_key.value();
+            if !row_key.starts_with(&table_id) {
+                break;
+            }
+            if row_key.len() != 32 {
+                return Err(CommitError::InvalidRow);
+            }
+            total_rows = total_rows
+                .checked_add(1)
+                .ok_or(CommitError::IndexDdlLimitExceeded)?;
+            if total_rows > MAX_INDEX_DDL_ROWS_PER_COMMIT {
+                return Err(CommitError::IndexDdlLimitExceeded);
+            }
+            let bytes = value.value().to_vec();
+            total_bytes = total_bytes
+                .checked_add(bytes.len())
+                .ok_or(CommitError::IndexDdlLimitExceeded)?;
+            if total_bytes > MAX_INDEX_DDL_BYTES_PER_COMMIT {
+                return Err(CommitError::IndexDdlLimitExceeded);
+            }
+            let row = RowRecord::decode(&bytes).map_err(|_| CommitError::InvalidRow)?;
+            let row_key: [u8; 32] = row_key.try_into().map_err(|_| CommitError::InvalidRow)?;
+            if row_key[16..] == [0; 16] {
+                return Err(CommitError::InvalidRow);
+            }
+            persisted_rows.push((row_key, row));
+        }
+        if persisted_rows.is_empty() {
+            continue;
+        }
+        let table_key = id_catalog_key(5, table_id);
+        for write in catalog_writes {
+            let family = write
+                .key
+                .get(..2)
+                .and_then(|bytes| <[u8; 2]>::try_from(bytes).ok())
+                .map(u16::from_be_bytes);
+            if family == Some(5) && write.key == table_key && write.expected_value != write.payload
+            {
+                return Err(CommitError::InvalidCatalog);
+            }
+            if family == Some(6) && write.expected_value != write.payload {
+                for bytes in [write.expected_value.as_deref(), write.payload.as_deref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    if column_table_id(&write.key, bytes)? == table_id {
+                        return Err(CommitError::InvalidCatalog);
+                    }
+                }
+            }
+        }
+        let schema = load_final_table_schema(&catalog, &[], table_id)?;
+        let old_definition = decode_index_ddl_definition(&key, &old_bytes, &schema)?;
+        let new_definition = decode_index_ddl_definition(&key, &new_bytes, &schema)?;
+        plan.index_tables.insert(index_id, table_id);
+        plan.rebuilt_indexes.insert(index_id);
+        let mut expected_rows = Vec::with_capacity(persisted_rows.len());
+        for (row_key, row) in persisted_rows {
+            expected_rows.push((row_key, row.row_version));
+            plan.row_versions.insert(row_key, row.row_version);
+            let row_id = row_key[16..].try_into().unwrap();
+            let old_key = crate::index_key::derive_index_key(
+                old_definition.index_id,
+                row_id,
+                schema.schema_version,
+                &schema.column_ids,
+                &schema.columns,
+                &row.payload,
+                &old_definition.column_ids,
+            )
+            .map_err(map_index_key_error)?;
+            let new_key = crate::index_key::derive_index_key(
+                new_definition.index_id,
+                row_id,
+                schema.schema_version,
+                &schema.column_ids,
+                &schema.columns,
+                &row.payload,
+                &new_definition.column_ids,
+            )
+            .map_err(map_index_key_error)?;
+            let locator_bytes = indexes
+                .get(old_key.key.as_slice())
+                .map_err(storage_error)?
+                .map(|value| value.value().to_vec())
+                .ok_or(CommitError::InvalidIndex)?;
+            let locator = IndexLocator::decode_for_key(&old_key.key, &locator_bytes)
+                .map_err(|_| CommitError::InvalidIndex)?;
+            if locator.row_version != row.row_version {
+                return Err(CommitError::InvalidIndex);
+            }
+            let reverse_key = reverse_index_key(&row_key, &old_key.key);
+            let marker = reverse_indexes
+                .get(&reverse_key[..])
+                .map_err(storage_error)?
+                .ok_or(CommitError::InvalidIndex)?;
+            if !marker.value().is_empty() {
+                return Err(CommitError::InvalidIndex);
+            }
+            if old_key.key == new_key.key {
+                total_entries = total_entries
+                    .checked_add(1)
+                    .ok_or(CommitError::IndexDdlLimitExceeded)?;
+                total_bytes = total_bytes
+                    .checked_add(new_key.key.len())
+                    .and_then(|size| size.checked_add(locator_bytes.len()))
+                    .ok_or(CommitError::IndexDdlLimitExceeded)?;
+                plan.writes.push(IndexWrite {
+                    key: new_key.key,
+                    row_key,
+                    expected_version: Some(row.row_version),
+                    present: true,
+                    unique: new_definition.unique,
+                    null_exempt: new_definition.unique && new_key.has_null,
+                });
+            } else {
+                total_entries = total_entries
+                    .checked_add(2)
+                    .ok_or(CommitError::IndexDdlLimitExceeded)?;
+                total_bytes = total_bytes
+                    .checked_add(old_key.key.len())
+                    .and_then(|size| size.checked_add(new_key.key.len()))
+                    .and_then(|size| size.checked_add(locator_bytes.len()))
+                    .ok_or(CommitError::IndexDdlLimitExceeded)?;
+                plan.writes.push(IndexWrite {
+                    key: old_key.key,
+                    row_key,
+                    expected_version: Some(row.row_version),
+                    present: false,
+                    unique: old_definition.unique,
+                    null_exempt: false,
+                });
+                plan.writes.push(IndexWrite {
+                    key: new_key.key,
+                    row_key,
+                    expected_version: None,
+                    present: true,
+                    unique: new_definition.unique,
+                    null_exempt: new_definition.unique && new_key.has_null,
+                });
+            }
+            if total_entries > MAX_INDEX_DDL_ENTRIES_PER_COMMIT
+                || total_bytes > MAX_INDEX_DDL_BYTES_PER_COMMIT
+            {
+                return Err(CommitError::IndexDdlLimitExceeded);
+            }
+        }
+        plan.expected_rows.insert(table_id, expected_rows);
+    }
     for (index_id, table_id) in dropped_indexes {
         if !seen_index_ids.insert(index_id) {
             return Err(CommitError::InvalidCatalog);
@@ -3150,7 +3335,7 @@ fn build_index_ddl_plan(
             total_entries = total_entries
                 .checked_add(1)
                 .ok_or(CommitError::IndexDdlLimitExceeded)?;
-            if total_entries > MAX_INDEX_BACKFILL_ENTRIES_PER_COMMIT {
+            if total_entries > MAX_INDEX_DDL_ENTRIES_PER_COMMIT {
                 return Err(CommitError::IndexDdlLimitExceeded);
             }
             let locator_bytes = value.value().to_vec();
@@ -3158,7 +3343,7 @@ fn build_index_ddl_plan(
                 .checked_add(key.len())
                 .and_then(|size| size.checked_add(locator_bytes.len()))
                 .ok_or(CommitError::IndexDdlLimitExceeded)?;
-            if total_bytes > MAX_INDEX_BACKFILL_BYTES_PER_COMMIT {
+            if total_bytes > MAX_INDEX_DDL_BYTES_PER_COMMIT {
                 return Err(CommitError::IndexDdlLimitExceeded);
             }
             let locator = IndexLocator::decode_for_key(&key, &locator_bytes)
@@ -3197,6 +3382,7 @@ fn build_index_ddl_plan(
             });
         }
     }
+    plan.writes.sort_by(|left, right| left.key.cmp(&right.key));
     Ok(plan)
 }
 
@@ -3222,8 +3408,8 @@ fn validate_index_ddl_snapshot(
             total_bytes = total_bytes
                 .checked_add(value.value().len())
                 .ok_or(CommitError::Conflict)?;
-            if total_rows > MAX_INDEX_BACKFILL_ROWS_PER_COMMIT
-                || total_bytes > MAX_INDEX_BACKFILL_BYTES_PER_COMMIT
+            if total_rows > MAX_INDEX_DDL_ROWS_PER_COMMIT
+                || total_bytes > MAX_INDEX_DDL_BYTES_PER_COMMIT
             {
                 return Err(CommitError::Conflict);
             }
@@ -3240,11 +3426,16 @@ fn validate_index_ddl_snapshot(
     let indexes = transaction.open_table(INDEXES).map_err(storage_error)?;
     let reverse_indexes = transaction.open_table(ROW_INDEXES).map_err(storage_error)?;
     let mut total_entries = 0usize;
-    for index_id in &plan.dropped_indexes {
-        let mut expected_writes = plan
-            .writes
-            .iter()
-            .filter(|write| !write.present && write.key.get(..16) == Some(index_id.as_slice()));
+    let mut revalidated_indexes = plan
+        .dropped_indexes
+        .union(&plan.rebuilt_indexes)
+        .copied()
+        .collect::<Vec<_>>();
+    revalidated_indexes.sort_unstable();
+    for index_id in &revalidated_indexes {
+        let mut expected_writes = plan.writes.iter().filter(|write| {
+            write.expected_version.is_some() && write.key.get(..16) == Some(index_id.as_slice())
+        });
         let table_id = plan
             .index_tables
             .get(index_id)
@@ -3267,8 +3458,8 @@ fn validate_index_ddl_snapshot(
                 .checked_add(key.len())
                 .and_then(|bytes| bytes.checked_add(locator_bytes.len()))
                 .ok_or(CommitError::Conflict)?;
-            if total_entries > MAX_INDEX_BACKFILL_ENTRIES_PER_COMMIT
-                || total_bytes > MAX_INDEX_BACKFILL_BYTES_PER_COMMIT
+            if total_entries > MAX_INDEX_DDL_ENTRIES_PER_COMMIT
+                || total_bytes > MAX_INDEX_DDL_BYTES_PER_COMMIT
             {
                 return Err(CommitError::Conflict);
             }
@@ -3513,13 +3704,15 @@ fn commit_storage_changes_inner(
                 .and_then(|id| plan.index_tables.get(&id).copied().map(|table| (id, table)))
                 .is_some_and(|(index_id, table_id)| {
                     table_id == index_write.row_key[..16]
-                        && if index_write.present {
-                            index_write.expected_version.is_none()
-                                && plan.created_indexes.contains(&index_id)
+                        && (if index_write.present {
+                            (index_write.expected_version.is_none()
+                                && plan.created_indexes.contains(&index_id))
+                                || plan.rebuilt_indexes.contains(&index_id)
                         } else {
                             index_write.expected_version.is_some()
-                                && plan.dropped_indexes.contains(&index_id)
-                        }
+                                && (plan.dropped_indexes.contains(&index_id)
+                                    || plan.rebuilt_indexes.contains(&index_id))
+                        })
                         && plan.writes.contains(index_write)
                 })
         });

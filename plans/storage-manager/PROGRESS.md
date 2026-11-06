@@ -439,11 +439,11 @@
 ## SM-5 dependency: bounded existing-row index creation — in progress
 
 - Coordinated catalog DDL now builds new index memberships from a pinned redb read snapshot while holding the table's exclusive DDL fence, without holding the serialized writer during the scan. It rechecks all scanned row keys and versions in the write transaction, then publishes forward/reverse memberships, catalog definition, audit, sequence, and outcome atomically.
-- Builds are limited to 65,536 rows, 65,536 generated memberships, and 64 MiB combined stored-row and generated-key bytes per commit. Unique conflicts, malformed rows, stale snapshots, and limit failures leave no catalog or index publication. Populated-index rebuild/drop and combining a populated-table schema change with index creation remain rejected. Trusted unfenced catalog helpers still fail closed for populated-table index changes.
+- Builds are limited to 65,536 rows, 65,536 generated memberships, and 64 MiB combined stored-row and generated-key bytes per commit. Unique conflicts, malformed rows, stale snapshots, and limit failures leave no catalog or index publication. Combining a populated-table schema change with index creation remains rejected. Trusted unfenced catalog helpers still fail closed for populated-table index changes.
 - Real-redb regressions cover successful backfill, atomic rejection of duplicate values for a new unique index, and failure above the row cap; the low-level rejection regression remains.
 - Verification: in the prescribed Nix shell, `cargo build --workspace --locked`, `cargo fmt --all -- --check`, Clippy with warnings denied, and all 198 integration tests across 18 targets passed. `git diff --check` and changed Markdown link checks passed.
 - Contract updates: [schema DDL](../../specs/ddl-schema.md) and [redb storage](../../specs/redb-storage.md).
-- Remaining: populated-index rebuild, authenticated DDL authorization, and service admission remain open.
+- Remaining: authenticated DDL authorization and service admission remain open.
 
 ## SM-5 dependency: populated index drop — in progress
 
@@ -451,4 +451,13 @@
 - Removal shares the 65,536-membership and 64 MiB index-key/locator work bounds. Unique/constraint-owned indexes remain subject to final catalog dependency checks. Unfenced low-level catalog commits still reject drops when rows or memberships remain.
 - The real-redb lifecycle regression creates an index over an existing row, proves the trusted low-level helper rejects dropping it, then drops it through `StorageManager`; the old snapshot still resolves the old membership and startup accepts the new image.
 - Verification: in the prescribed Nix shell, workspace build, format check, Clippy with warnings denied, and all 198 integration tests across 18 targets passed. `git diff --check` and changed Markdown link checks passed.
-- Remaining: populated-index rebuild, authenticated DDL authorization, and service admission remain open.
+- Remaining: authenticated DDL authorization and service admission remain open.
+
+## SM-5 dependency: populated index rebuild
+
+- Coordinated DDL can update an existing index definition on a populated table under its exclusive table fence. It derives old and new keys from a pinned row snapshot, validates every existing forward locator and matching reverse entry, and rechecks row keys/versions and the complete old index prefix under the serialized writer.
+- Changed memberships are removed and inserted in one durable commit with the updated catalog definition, audit event, sequence, and outcome. Unchanged keys retain their row versions. New unique definitions are checked against each other and the current index contents; duplicate values abort without changing the catalog or membership set. Rebuilds share the 65,536-row, 65,536-membership, and 64 MiB DDL bounds. Combining a populated-table schema change with index creation or rebuild remains unsupported.
+- Real-redb regressions cover a successful populated-index re-key and nonunique-to-unique change with an old pinned reader, rejection by the unfenced low-level helper, startup validation after publication, and rejection of a unique rebuild with duplicate values. The existing populated-index drop and create regressions remain in place.
+- Verification: with Rust/Cargo 1.95.0, rustfmt 1.9.0, Clippy 0.1.95, and TinyCC 0.9.27-unstable-2025-01-06 in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and all workspace tests passed. `git diff --check` and changed Markdown local-link checks passed.
+- Contract updates: [schema DDL](../../specs/ddl-schema.md) and [redb storage](../../specs/redb-storage.md).
+- Remaining: authenticated DDL authorization and service admission remain open.
