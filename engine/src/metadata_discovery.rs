@@ -11,7 +11,10 @@ pub const INFORMATION_SCHEMA_TABLES_CURSOR_TOKEN_KIND: u8 = 4;
 pub const INFORMATION_SCHEMA_COLUMNS_CURSOR_TOKEN_KIND: u8 = 5;
 pub const RELATION_HANDLE_TOKEN_KIND: u8 = 6;
 pub const EXECUTOR_SCAN_CURSOR_TOKEN_KIND: u8 = 7;
+pub const EXECUTOR_ROW_HANDLE_TOKEN_KIND: u8 = 8;
 pub const MAX_RELATION_HANDLES: usize = 256;
+pub const MAX_EXECUTOR_ROW_HANDLES: usize = 4_096;
+pub const MAX_EXECUTOR_BATCH_CANDIDATES: usize = 128;
 
 /// One relation admitted by schema usage and a data grant.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -84,6 +87,27 @@ impl ExecutorScanCursor {
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         if bytes.len() != 16 || bytes[0] != EXECUTOR_SCAN_CURSOR_TOKEN_KIND {
+            return None;
+        }
+        Some(Self {
+            token: bytes.try_into().ok()?,
+        })
+    }
+}
+
+/// Opaque visible-row reference owned by one executor metadata connection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutorRowHandle {
+    pub(crate) token: [u8; 16],
+}
+
+impl ExecutorRowHandle {
+    pub fn to_bytes(&self) -> [u8; 16] {
+        self.token
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != 16 || bytes[0] != EXECUTOR_ROW_HANDLE_TOKEN_KIND {
             return None;
         }
         Some(Self {

@@ -2439,13 +2439,15 @@ fn executor_resolve_relation_ipc_dispatch_returns_only_authorized_handle()
     assert_eq!(response.operation, request.operation);
     assert_eq!(response.request_id, request.request_id);
     let ResolveRelationResponse::Resolved {
-        relation_id,
         handle,
+        description,
     } = ResolveRelationResponse::decode(&response.payload)?
     else {
         panic!("visible relation must resolve")
     };
-    assert_eq!(relation_id, [0x10; 16]);
+    assert_eq!(description.relation_id, [0x10; 16]);
+    assert_eq!(description.name, "metrics");
+    assert_eq!(description.columns[0].name, "value");
     assert_eq!(
         connection.revalidate_relation_handle(&handle)?.relation_id,
         [0x10; 16]
@@ -2555,6 +2557,12 @@ fn executor_relation_socket_loop_serves_then_aborts_on_disconnect()
 #[test]
 fn catalog_authorized_scan_builds_its_projection_from_pinned_records()
 -> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::executor_ipc::{
+        CloseCursorRequest, NextBatchRequest, NextBatchResponse, OpenScanRequest, OpenScanResponse,
+        dispatch_executor_request,
+    };
+    use prdb_engine::ipc::{IpcFrame, Operation as IpcOperation, ServiceRole};
+
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
     install_relation_discovery_catalog(&database)?;
@@ -2742,31 +2750,114 @@ fn catalog_authorized_scan_builds_its_projection_from_pinned_records()
     let (relation_handle, _) = connection
         .resolve_relation("app", "metrics")?
         .expect("catalog grants authorize relation resolution");
-    let scan_cursor = connection.open_relation_scan(&relation_handle)?;
-    let cursor_bytes = scan_cursor.to_bytes();
-    assert_eq!(cursor_bytes[0], 7);
-    let decoded = prdb_engine::metadata_discovery::ExecutorScanCursor::from_bytes(&cursor_bytes)
-        .expect("executor cursor has the fixed wire form");
-    assert!(prdb_engine::metadata_discovery::SchemaScanCursor::from_bytes(&cursor_bytes).is_none());
-    let first_scan_page = connection.next_relation_scan_page(&decoded, 1)?;
-    assert_eq!(first_scan_page.rows.len(), 1);
-    let next_cursor = first_scan_page
+    let open_request = IpcFrame {
+        operation: IpcOperation::OpenScan as u16,
+        request_id: 61,
+        payload: OpenScanRequest {
+            relation: relation_handle,
+            column_ids: vec![[0x66; 16]],
+        }
+        .encode()?,
+    };
+    let open_response =
+        dispatch_executor_request(ServiceRole::Executor, &mut connection, &open_request)?;
+    let scan_cursor = OpenScanResponse::decode(&open_response.payload)?.cursor;
+    assert_eq!(scan_cursor.to_bytes()[0], 7);
+    assert!(
+        prdb_engine::metadata_discovery::SchemaScanCursor::from_bytes(&scan_cursor.to_bytes())
+            .is_none()
+    );
+
+    let first_request = IpcFrame {
+        operation: IpcOperation::NextBatch as u16,
+        request_id: 62,
+        payload: NextBatchRequest {
+            cursor: scan_cursor.clone(),
+            max_scanned: 2,
+            max_bytes: 48,
+        }
+        .encode()?,
+    };
+    let first_response =
+        dispatch_executor_request(ServiceRole::Executor, &mut connection, &first_request)?;
+    let first_page = NextBatchResponse::decode(&first_response.payload)?;
+    assert_eq!(first_page.rows.len(), 1);
+    assert_eq!(
+        first_page.rows[0].cells,
+        [SanitizedCell::Value(ScalarValue::Bytea(vec![1, 2, 3]))]
+    );
+    assert_eq!(first_page.rows[0].handle.to_bytes()[0], 8);
+    assert_eq!(
+        connection.revalidate_row_handle(&first_page.rows[0].handle)?,
+        row_id
+    );
+    let next_cursor = first_page
         .continuation
         .expect("full page returns a fresh continuation");
     assert!(matches!(
-        connection.next_relation_scan_page(&decoded, 1),
+        connection.next_relation_scan_page(&scan_cursor, 1),
         Err(TransactionError::InvalidMetadataRequest)
     ));
-    let second_scan_page = connection.next_relation_scan_page(&next_cursor, 1)?;
-    assert_eq!(second_scan_page.rows.len(), 1);
-    let final_cursor = second_scan_page
+
+    let second_request = IpcFrame {
+        request_id: 63,
+        payload: NextBatchRequest {
+            cursor: next_cursor.clone(),
+            max_scanned: 1,
+            max_bytes: 256,
+        }
+        .encode()?,
+        ..first_request.clone()
+    };
+    let second_response =
+        dispatch_executor_request(ServiceRole::Executor, &mut connection, &second_request)?;
+    let second_page = NextBatchResponse::decode(&second_response.payload)?;
+    assert_eq!(second_page.rows.len(), 1);
+    let final_cursor = second_page
         .continuation
         .expect("full final page requires an EOF confirmation");
-    let final_scan_page = connection.next_relation_scan_page(&final_cursor, 1)?;
-    assert!(final_scan_page.rows.is_empty());
-    assert!(final_scan_page.continuation.is_none());
+    let final_request = IpcFrame {
+        request_id: 64,
+        payload: NextBatchRequest {
+            cursor: final_cursor.clone(),
+            max_scanned: 1,
+            max_bytes: 256,
+        }
+        .encode()?,
+        ..first_request.clone()
+    };
+    let final_response =
+        dispatch_executor_request(ServiceRole::Executor, &mut connection, &final_request)?;
+    let final_page = NextBatchResponse::decode(&final_response.payload)?;
+    assert!(final_page.rows.is_empty());
+    assert!(final_page.continuation.is_none());
     assert!(matches!(
         connection.next_relation_scan_page(&final_cursor, 1),
+        Err(TransactionError::InvalidMetadataRequest)
+    ));
+
+    let second_open_request = IpcFrame {
+        request_id: 65,
+        ..open_request
+    };
+    let second_open_response =
+        dispatch_executor_request(ServiceRole::Executor, &mut connection, &second_open_request)?;
+    let close_cursor = OpenScanResponse::decode(&second_open_response.payload)?.cursor;
+    let close_response = dispatch_executor_request(
+        ServiceRole::Executor,
+        &mut connection,
+        &IpcFrame {
+            operation: IpcOperation::CloseCursor as u16,
+            request_id: 66,
+            payload: CloseCursorRequest {
+                cursor: close_cursor.clone(),
+            }
+            .encode(),
+        },
+    )?;
+    assert_eq!(close_response.payload, [0, 1, 0]);
+    assert!(matches!(
+        connection.next_relation_scan_page(&close_cursor, 1),
         Err(TransactionError::InvalidMetadataRequest)
     ));
     drop(connection);

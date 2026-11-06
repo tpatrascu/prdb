@@ -1,14 +1,21 @@
 //! Executor IPC operations that terminate at trusted storage primitives.
 
+use crate::authorization::SanitizedCell;
 use crate::ipc::{DispatchError, IpcFrame, Operation, ServiceRole, authorize_operation};
-use crate::metadata_discovery::ResolvedRelationHandle;
+use crate::metadata_discovery::{
+    AuthorizedRelationDescription, ExecutorRowHandle, ExecutorScanCursor, ResolvedRelationHandle,
+    VisibleColumn,
+};
 use crate::transaction::{ExecutorMetadataConnection, InvocationTransaction, TransactionError};
+use crate::tuple::{ScalarType, ScalarValue};
 use std::io::{Read, Write};
 
 pub const RESOLVE_RELATION_PAYLOAD_VERSION: u16 = 1;
 const RESOLVE_REQUEST_HEADER_BYTES: usize = 6;
 const RESOLVE_RESPONSE_HEADER_BYTES: usize = 3;
-pub const MAX_RESOLVE_REQUESTS_PER_CONNECTION: usize = 256;
+pub const MAX_EXECUTOR_REQUESTS_PER_CONNECTION: usize = 256;
+pub const MAX_EXECUTOR_BATCH_CANDIDATES: u16 = 128;
+pub const EXECUTOR_BATCH_PAYLOAD_VERSION: u16 = 1;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolveRelationRequest {
@@ -72,28 +79,36 @@ impl ResolveRelationRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ResolveRelationResponse {
     Resolved {
-        relation_id: [u8; 16],
         handle: ResolvedRelationHandle,
+        description: AuthorizedRelationDescription,
     },
     Unavailable,
 }
 
 impl ResolveRelationResponse {
-    pub fn encode(&self) -> Vec<u8> {
-        let mut payload = Vec::with_capacity(35);
+    pub fn encode(&self) -> Result<Vec<u8>, ExecutorRequestError> {
+        let mut payload = Vec::new();
         payload.extend_from_slice(&RESOLVE_RELATION_PAYLOAD_VERSION.to_be_bytes());
         match self {
             Self::Resolved {
-                relation_id,
                 handle,
+                description,
             } => {
                 payload.push(0);
-                payload.extend_from_slice(relation_id);
+                payload.extend_from_slice(&description.relation_id);
                 payload.extend_from_slice(&handle.to_bytes());
+                encode_name(&mut payload, &description.name)?;
+                let column_count = u16::try_from(description.columns.len())
+                    .map_err(|_| ExecutorRequestError::ResponseTooLarge)?;
+                payload.extend_from_slice(&column_count.to_be_bytes());
+                for column in &description.columns {
+                    encode_visible_column(&mut payload, column)?;
+                }
             }
             Self::Unavailable => payload.push(1),
         }
-        payload
+        ensure_response_size(&payload)?;
+        Ok(payload)
     }
 
     pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
@@ -103,15 +118,35 @@ impl ResolveRelationResponse {
             return Err(ExecutorRequestError::InvalidPayload);
         }
         match (payload[2], payload.len()) {
-            (0, 35) => {
+            (0, _) => {
+                if payload.len() < 40 {
+                    return Err(ExecutorRequestError::InvalidPayload);
+                }
                 let relation_id = payload[3..19]
                     .try_into()
                     .map_err(|_| ExecutorRequestError::InvalidPayload)?;
-                let handle = ResolvedRelationHandle::from_bytes(&payload[19..])
+                let handle = ResolvedRelationHandle::from_bytes(&payload[19..35])
                     .ok_or(ExecutorRequestError::InvalidPayload)?;
+                let mut offset = 35;
+                let name = decode_name(payload, &mut offset)?;
+                let column_count = read_u16(payload, &mut offset)? as usize;
+                if column_count > crate::tuple::MAX_COLUMNS {
+                    return Err(ExecutorRequestError::InvalidPayload);
+                }
+                let mut columns = Vec::with_capacity(column_count);
+                for _ in 0..column_count {
+                    columns.push(decode_visible_column(payload, &mut offset)?);
+                }
+                if offset != payload.len() {
+                    return Err(ExecutorRequestError::InvalidPayload);
+                }
                 Ok(Self::Resolved {
-                    relation_id,
                     handle,
+                    description: AuthorizedRelationDescription {
+                        relation_id,
+                        name,
+                        columns,
+                    },
                 })
             }
             (1, RESOLVE_RESPONSE_HEADER_BYTES) => Ok(Self::Unavailable),
@@ -120,11 +155,544 @@ impl ResolveRelationResponse {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenScanRequest {
+    pub relation: ResolvedRelationHandle,
+    /// Empty selects the full declared shape. Otherwise IDs are validated
+    /// against the resolved relation; results retain ordinal order.
+    pub column_ids: Vec<[u8; 16]>,
+}
+
+impl OpenScanRequest {
+    pub fn encode(&self) -> Result<Vec<u8>, ExecutorRequestError> {
+        if self.column_ids.len() > crate::tuple::MAX_COLUMNS
+            || self.column_ids.contains(&[0; 16])
+            || self
+                .column_ids
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != self.column_ids.len()
+        {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        let count = u16::try_from(self.column_ids.len())
+            .map_err(|_| ExecutorRequestError::InvalidPayload)?;
+        let mut payload = EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes().to_vec();
+        payload.extend_from_slice(&self.relation.to_bytes());
+        payload.extend_from_slice(&count.to_be_bytes());
+        for column_id in &self.column_ids {
+            payload.extend_from_slice(column_id);
+        }
+        if payload.len() > crate::ipc::MAX_PAYLOAD_BYTES {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        Ok(payload)
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
+        if payload.len() < 20
+            || u16::from_be_bytes([payload[0], payload[1]]) != EXECUTOR_BATCH_PAYLOAD_VERSION
+        {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        let relation = ResolvedRelationHandle::from_bytes(&payload[2..18])
+            .ok_or(ExecutorRequestError::InvalidPayload)?;
+        let column_count = usize::from(u16::from_be_bytes([payload[18], payload[19]]));
+        if column_count > crate::tuple::MAX_COLUMNS || payload.len() != 20 + column_count * 16 {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        let mut column_ids = Vec::with_capacity(column_count);
+        for chunk in payload[20..].chunks_exact(16) {
+            column_ids.push(
+                chunk
+                    .try_into()
+                    .map_err(|_| ExecutorRequestError::InvalidPayload)?,
+            );
+        }
+        if column_ids.contains(&[0; 16])
+            || column_ids
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != column_ids.len()
+        {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        Ok(Self {
+            relation,
+            column_ids,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenScanResponse {
+    pub cursor: ExecutorScanCursor,
+}
+
+impl OpenScanResponse {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut payload = EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes().to_vec();
+        payload.extend_from_slice(&self.cursor.to_bytes());
+        payload
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
+        if payload.len() != 18
+            || u16::from_be_bytes([payload[0], payload[1]]) != EXECUTOR_BATCH_PAYLOAD_VERSION
+        {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        Ok(Self {
+            cursor: ExecutorScanCursor::from_bytes(&payload[2..])
+                .ok_or(ExecutorRequestError::InvalidPayload)?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NextBatchRequest {
+    pub cursor: ExecutorScanCursor,
+    pub max_scanned: u16,
+    pub max_bytes: u32,
+}
+
+impl NextBatchRequest {
+    pub fn encode(&self) -> Result<Vec<u8>, ExecutorRequestError> {
+        validate_batch_limits(self.max_scanned, self.max_bytes)?;
+        let mut payload = EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes().to_vec();
+        payload.extend_from_slice(&self.cursor.to_bytes());
+        payload.extend_from_slice(&self.max_scanned.to_be_bytes());
+        payload.extend_from_slice(&self.max_bytes.to_be_bytes());
+        Ok(payload)
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
+        if payload.len() != 24
+            || u16::from_be_bytes([payload[0], payload[1]]) != EXECUTOR_BATCH_PAYLOAD_VERSION
+        {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        let request = Self {
+            cursor: ExecutorScanCursor::from_bytes(&payload[2..18])
+                .ok_or(ExecutorRequestError::InvalidPayload)?,
+            max_scanned: u16::from_be_bytes([payload[18], payload[19]]),
+            max_bytes: u32::from_be_bytes(payload[20..24].try_into().expect("fixed payload")),
+        };
+        validate_batch_limits(request.max_scanned, request.max_bytes)?;
+        Ok(request)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CloseCursorRequest {
+    pub cursor: ExecutorScanCursor,
+}
+
+impl CloseCursorRequest {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut payload = EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes().to_vec();
+        payload.extend_from_slice(&self.cursor.to_bytes());
+        payload
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
+        if payload.len() != 18
+            || u16::from_be_bytes([payload[0], payload[1]]) != EXECUTOR_BATCH_PAYLOAD_VERSION
+        {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        Ok(Self {
+            cursor: ExecutorScanCursor::from_bytes(&payload[2..])
+                .ok_or(ExecutorRequestError::InvalidPayload)?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutorBatchRow {
+    pub handle: ExecutorRowHandle,
+    pub cells: Vec<SanitizedCell>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NextBatchResponse {
+    pub rows: Vec<ExecutorBatchRow>,
+    pub continuation: Option<ExecutorScanCursor>,
+}
+
+impl NextBatchResponse {
+    pub fn encode(&self, max_bytes: u32) -> Result<Vec<u8>, ExecutorRequestError> {
+        validate_batch_limits(1, max_bytes)?;
+        let max_bytes =
+            usize::try_from(max_bytes).map_err(|_| ExecutorRequestError::ResponseTooLarge)?;
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes());
+        payload.push(u8::from(self.continuation.is_none()));
+        if let Some(cursor) = &self.continuation {
+            payload.extend_from_slice(&cursor.to_bytes());
+        }
+        let row_count =
+            u16::try_from(self.rows.len()).map_err(|_| ExecutorRequestError::ResponseTooLarge)?;
+        payload.extend_from_slice(&row_count.to_be_bytes());
+        ensure_batch_size(&payload, max_bytes)?;
+        for row in &self.rows {
+            payload.extend_from_slice(&row.handle.to_bytes());
+            let cell_count = u16::try_from(row.cells.len())
+                .map_err(|_| ExecutorRequestError::ResponseTooLarge)?;
+            payload.extend_from_slice(&cell_count.to_be_bytes());
+            ensure_batch_size(&payload, max_bytes)?;
+            for cell in &row.cells {
+                encode_sanitized_cell(&mut payload, cell, max_bytes)?;
+            }
+        }
+        ensure_response_size(&payload)?;
+        Ok(payload)
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
+        if payload.len() > crate::ipc::MAX_PAYLOAD_BYTES || payload.len() < 5 {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        let mut offset = 0;
+        if read_u16(payload, &mut offset)? != EXECUTOR_BATCH_PAYLOAD_VERSION {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        let finished = *payload
+            .get(offset)
+            .ok_or(ExecutorRequestError::InvalidPayload)?;
+        offset += 1;
+        if finished > 1 {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        let continuation = if finished == 0 {
+            Some(
+                ExecutorScanCursor::from_bytes(&read_array_16(payload, &mut offset)?)
+                    .ok_or(ExecutorRequestError::InvalidPayload)?,
+            )
+        } else {
+            None
+        };
+        let row_count = usize::from(read_u16(payload, &mut offset)?);
+        if row_count > usize::from(MAX_EXECUTOR_BATCH_CANDIDATES) {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        let mut rows = Vec::with_capacity(row_count);
+        for _ in 0..row_count {
+            let handle = ExecutorRowHandle::from_bytes(&read_array_16(payload, &mut offset)?)
+                .ok_or(ExecutorRequestError::InvalidPayload)?;
+            let cell_count = usize::from(read_u16(payload, &mut offset)?);
+            if cell_count > crate::tuple::MAX_COLUMNS {
+                return Err(ExecutorRequestError::InvalidPayload);
+            }
+            let mut cells = Vec::with_capacity(cell_count);
+            for _ in 0..cell_count {
+                let state = *payload
+                    .get(offset)
+                    .ok_or(ExecutorRequestError::InvalidPayload)?;
+                offset += 1;
+                cells.push(match state {
+                    0 => {
+                        let type_code = *payload
+                            .get(offset)
+                            .ok_or(ExecutorRequestError::InvalidPayload)?;
+                        offset += 1;
+                        let value_len = usize::try_from(read_u32(payload, &mut offset)?)
+                            .map_err(|_| ExecutorRequestError::InvalidPayload)?;
+                        let value_end = offset
+                            .checked_add(value_len)
+                            .filter(|end| *end <= payload.len())
+                            .ok_or(ExecutorRequestError::InvalidPayload)?;
+                        let value = decode_scalar_value(type_code, &payload[offset..value_end])?;
+                        offset = value_end;
+                        SanitizedCell::Value(value)
+                    }
+                    1 => SanitizedCell::Null,
+                    2 => SanitizedCell::Redacted,
+                    _ => return Err(ExecutorRequestError::InvalidPayload),
+                });
+            }
+            rows.push(ExecutorBatchRow { handle, cells });
+        }
+        if offset != payload.len() {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        Ok(Self { rows, continuation })
+    }
+}
+
+fn validate_batch_limits(max_scanned: u16, max_bytes: u32) -> Result<(), ExecutorRequestError> {
+    if max_scanned == 0
+        || max_scanned > MAX_EXECUTOR_BATCH_CANDIDATES
+        || max_bytes < 8
+        || usize::try_from(max_bytes).map_or(true, |bytes| bytes > crate::ipc::MAX_PAYLOAD_BYTES)
+    {
+        return Err(ExecutorRequestError::InvalidPayload);
+    }
+    Ok(())
+}
+
+fn ensure_response_size(payload: &[u8]) -> Result<(), ExecutorRequestError> {
+    if payload.len() > crate::ipc::MAX_PAYLOAD_BYTES {
+        Err(ExecutorRequestError::ResponseTooLarge)
+    } else {
+        Ok(())
+    }
+}
+
+fn ensure_batch_size(payload: &[u8], max_bytes: usize) -> Result<(), ExecutorRequestError> {
+    if payload.len() > max_bytes || payload.len() > crate::ipc::MAX_PAYLOAD_BYTES {
+        Err(ExecutorRequestError::ResponseTooLarge)
+    } else {
+        Ok(())
+    }
+}
+
+fn encode_sanitized_cell(
+    payload: &mut Vec<u8>,
+    cell: &SanitizedCell,
+    max_bytes: usize,
+) -> Result<(), ExecutorRequestError> {
+    match cell {
+        SanitizedCell::Null => payload.push(1),
+        SanitizedCell::Redacted => payload.push(2),
+        SanitizedCell::Value(value) => {
+            payload.push(0);
+            let (type_code, bytes) = encode_scalar_value(value)?;
+            payload.push(type_code);
+            let len =
+                u32::try_from(bytes.len()).map_err(|_| ExecutorRequestError::ResponseTooLarge)?;
+            payload.extend_from_slice(&len.to_be_bytes());
+            payload.extend_from_slice(&bytes);
+        }
+    }
+    ensure_batch_size(payload, max_bytes)
+}
+
+fn encode_scalar_value(value: &ScalarValue) -> Result<(u8, Vec<u8>), ExecutorRequestError> {
+    let encoded = match value {
+        ScalarValue::Boolean(value) => (1, vec![u8::from(*value)]),
+        ScalarValue::SmallInt(value) => (2, value.to_be_bytes().to_vec()),
+        ScalarValue::Integer(value) => (3, value.to_be_bytes().to_vec()),
+        ScalarValue::BigInt(value) => (4, value.to_be_bytes().to_vec()),
+        ScalarValue::Decimal(value) => (5, value.to_be_bytes().to_vec()),
+        ScalarValue::Text(value) => (6, value.as_bytes().to_vec()),
+        ScalarValue::Varchar(value) => (7, value.as_bytes().to_vec()),
+        ScalarValue::Bytea(value) => (8, value.clone()),
+        ScalarValue::Uuid(value) => (9, value.to_vec()),
+        ScalarValue::Date(value) => (10, value.to_be_bytes().to_vec()),
+        ScalarValue::TimestampTz(value) => (11, value.to_be_bytes().to_vec()),
+    };
+    Ok(encoded)
+}
+
+fn decode_scalar_value(type_code: u8, bytes: &[u8]) -> Result<ScalarValue, ExecutorRequestError> {
+    let invalid = || ExecutorRequestError::InvalidPayload;
+    let value = match type_code {
+        1 if bytes.len() == 1 && bytes[0] <= 1 => ScalarValue::Boolean(bytes[0] == 1),
+        2 if bytes.len() == 2 => {
+            ScalarValue::SmallInt(i16::from_be_bytes(bytes.try_into().map_err(|_| invalid())?))
+        }
+        3 if bytes.len() == 4 => {
+            ScalarValue::Integer(i32::from_be_bytes(bytes.try_into().map_err(|_| invalid())?))
+        }
+        4 if bytes.len() == 8 => {
+            ScalarValue::BigInt(i64::from_be_bytes(bytes.try_into().map_err(|_| invalid())?))
+        }
+        5 if bytes.len() == 16 => ScalarValue::Decimal(i128::from_be_bytes(
+            bytes.try_into().map_err(|_| invalid())?,
+        )),
+        6 => ScalarValue::Text(
+            std::str::from_utf8(bytes)
+                .map_err(|_| invalid())?
+                .to_owned(),
+        ),
+        7 => ScalarValue::Varchar(
+            std::str::from_utf8(bytes)
+                .map_err(|_| invalid())?
+                .to_owned(),
+        ),
+        8 => ScalarValue::Bytea(bytes.to_vec()),
+        9 if bytes.len() == 16 => ScalarValue::Uuid(bytes.try_into().map_err(|_| invalid())?),
+        10 if bytes.len() == 4 => {
+            ScalarValue::Date(i32::from_be_bytes(bytes.try_into().map_err(|_| invalid())?))
+        }
+        11 if bytes.len() == 8 => {
+            ScalarValue::TimestampTz(i64::from_be_bytes(bytes.try_into().map_err(|_| invalid())?))
+        }
+        _ => return Err(invalid()),
+    };
+    Ok(value)
+}
+
+fn encode_name(payload: &mut Vec<u8>, name: &str) -> Result<(), ExecutorRequestError> {
+    let name_len = u16::try_from(name.len()).map_err(|_| ExecutorRequestError::ResponseTooLarge)?;
+    if name.is_empty() {
+        return Err(ExecutorRequestError::InvalidPayload);
+    }
+    payload.extend_from_slice(&name_len.to_be_bytes());
+    payload.extend_from_slice(name.as_bytes());
+    ensure_response_size(payload)
+}
+
+fn decode_name(payload: &[u8], offset: &mut usize) -> Result<String, ExecutorRequestError> {
+    let name_len = usize::from(read_u16(payload, offset)?);
+    if name_len == 0 {
+        return Err(ExecutorRequestError::InvalidPayload);
+    }
+    let end = offset
+        .checked_add(name_len)
+        .filter(|end| *end <= payload.len())
+        .ok_or(ExecutorRequestError::InvalidPayload)?;
+    let name = std::str::from_utf8(&payload[*offset..end])
+        .map_err(|_| ExecutorRequestError::InvalidPayload)?
+        .to_owned();
+    *offset = end;
+    Ok(name)
+}
+
+fn encode_visible_column(
+    payload: &mut Vec<u8>,
+    column: &VisibleColumn,
+) -> Result<(), ExecutorRequestError> {
+    payload.extend_from_slice(&column.column_id);
+    payload.extend_from_slice(&column.ordinal.to_be_bytes());
+    payload.push(u8::from(column.nullable));
+    let (type_code, parameters) = encode_scalar_type(column.scalar_type);
+    payload.push(type_code);
+    payload.extend_from_slice(&parameters);
+    encode_name(payload, &column.name)
+}
+
+fn decode_visible_column(
+    payload: &[u8],
+    offset: &mut usize,
+) -> Result<VisibleColumn, ExecutorRequestError> {
+    let column_id = read_array_16(payload, offset)?;
+    let ordinal = read_u32(payload, offset)?;
+    let nullable = *payload
+        .get(*offset)
+        .ok_or(ExecutorRequestError::InvalidPayload)?;
+    *offset += 1;
+    let type_code = *payload
+        .get(*offset)
+        .ok_or(ExecutorRequestError::InvalidPayload)?;
+    *offset += 1;
+    let param_end = offset
+        .checked_add(4)
+        .filter(|end| *end <= payload.len())
+        .ok_or(ExecutorRequestError::InvalidPayload)?;
+    let parameters: [u8; 4] = payload[*offset..param_end]
+        .try_into()
+        .map_err(|_| ExecutorRequestError::InvalidPayload)?;
+    *offset = param_end;
+    if nullable > 1 {
+        return Err(ExecutorRequestError::InvalidPayload);
+    }
+    let scalar_type = decode_scalar_type(type_code, parameters)?;
+    let name = decode_name(payload, offset)?;
+    Ok(VisibleColumn {
+        column_id,
+        name,
+        ordinal,
+        scalar_type,
+        nullable: nullable == 1,
+    })
+}
+
+fn encode_scalar_type(scalar_type: ScalarType) -> (u8, [u8; 4]) {
+    match scalar_type {
+        ScalarType::Boolean => (1, [0; 4]),
+        ScalarType::SmallInt => (2, [0; 4]),
+        ScalarType::Integer => (3, [0; 4]),
+        ScalarType::BigInt => (4, [0; 4]),
+        ScalarType::Decimal { precision, scale } => (5, [precision, scale, 0, 0]),
+        ScalarType::Text => (6, [0; 4]),
+        ScalarType::Varchar { max_chars } => (7, max_chars.to_be_bytes()),
+        ScalarType::Bytea => (8, [0; 4]),
+        ScalarType::Uuid => (9, [0; 4]),
+        ScalarType::Date => (10, [0; 4]),
+        ScalarType::TimestampTz => (11, [0; 4]),
+    }
+}
+
+fn decode_scalar_type(
+    type_code: u8,
+    parameters: [u8; 4],
+) -> Result<ScalarType, ExecutorRequestError> {
+    let scalar_type = match type_code {
+        1 if parameters == [0; 4] => ScalarType::Boolean,
+        2 if parameters == [0; 4] => ScalarType::SmallInt,
+        3 if parameters == [0; 4] => ScalarType::Integer,
+        4 if parameters == [0; 4] => ScalarType::BigInt,
+        5 if parameters[2..] == [0; 2] && parameters[0] != 0 && parameters[1] <= parameters[0] => {
+            ScalarType::Decimal {
+                precision: parameters[0],
+                scale: parameters[1],
+            }
+        }
+        6 if parameters == [0; 4] => ScalarType::Text,
+        7 if u32::from_be_bytes(parameters) != 0 => ScalarType::Varchar {
+            max_chars: u32::from_be_bytes(parameters),
+        },
+        8 if parameters == [0; 4] => ScalarType::Bytea,
+        9 if parameters == [0; 4] => ScalarType::Uuid,
+        10 if parameters == [0; 4] => ScalarType::Date,
+        11 if parameters == [0; 4] => ScalarType::TimestampTz,
+        _ => return Err(ExecutorRequestError::InvalidPayload),
+    };
+    Ok(scalar_type)
+}
+
+fn read_u16(payload: &[u8], offset: &mut usize) -> Result<u16, ExecutorRequestError> {
+    let end = offset
+        .checked_add(2)
+        .filter(|end| *end <= payload.len())
+        .ok_or(ExecutorRequestError::InvalidPayload)?;
+    let value = u16::from_be_bytes(
+        payload[*offset..end]
+            .try_into()
+            .map_err(|_| ExecutorRequestError::InvalidPayload)?,
+    );
+    *offset = end;
+    Ok(value)
+}
+
+fn read_u32(payload: &[u8], offset: &mut usize) -> Result<u32, ExecutorRequestError> {
+    let end = offset
+        .checked_add(4)
+        .filter(|end| *end <= payload.len())
+        .ok_or(ExecutorRequestError::InvalidPayload)?;
+    let value = u32::from_be_bytes(
+        payload[*offset..end]
+            .try_into()
+            .map_err(|_| ExecutorRequestError::InvalidPayload)?,
+    );
+    *offset = end;
+    Ok(value)
+}
+
+fn read_array_16(payload: &[u8], offset: &mut usize) -> Result<[u8; 16], ExecutorRequestError> {
+    let end = offset
+        .checked_add(16)
+        .filter(|end| *end <= payload.len())
+        .ok_or(ExecutorRequestError::InvalidPayload)?;
+    let value = payload[*offset..end]
+        .try_into()
+        .map_err(|_| ExecutorRequestError::InvalidPayload)?;
+    *offset = end;
+    Ok(value)
+}
+
 #[derive(Debug)]
 pub enum ExecutorRequestError {
     Dispatch(DispatchError),
     UnsupportedOperation(Operation),
     InvalidPayload,
+    ResponseTooLarge,
     Transaction(TransactionError),
 }
 
@@ -175,15 +743,68 @@ pub fn dispatch_executor_resolve_relation(
         .resolve_relation(&request_payload.schema_name, &request_payload.relation_name)?
     {
         Some((handle, description)) => ResolveRelationResponse::Resolved {
-            relation_id: description.relation_id,
             handle,
+            description,
         },
         None => ResolveRelationResponse::Unavailable,
     };
     Ok(IpcFrame {
         operation: request.operation,
         request_id: request.request_id,
-        payload: response.encode(),
+        payload: response.encode()?,
+    })
+}
+
+pub fn dispatch_executor_request(
+    role: ServiceRole,
+    connection: &mut ExecutorMetadataConnection<'_, '_>,
+    request: &IpcFrame,
+) -> Result<IpcFrame, ExecutorRequestError> {
+    let operation =
+        Operation::from_code(request.operation).map_err(ExecutorRequestError::Dispatch)?;
+    authorize_operation(role, operation).map_err(ExecutorRequestError::Dispatch)?;
+    let payload = match operation {
+        Operation::ResolveRelation => {
+            return dispatch_executor_resolve_relation(role, connection, request);
+        }
+        Operation::OpenScan => {
+            let decoded = OpenScanRequest::decode(&request.payload)?;
+            OpenScanResponse {
+                cursor: connection.open_relation_scan(&decoded.relation, &decoded.column_ids)?,
+            }
+            .encode()
+        }
+        Operation::NextBatch => {
+            let decoded = NextBatchRequest::decode(&request.payload)?;
+            let page = connection.next_relation_scan_batch(
+                &decoded.cursor,
+                usize::from(decoded.max_scanned),
+                usize::try_from(decoded.max_bytes)
+                    .map_err(|_| ExecutorRequestError::InvalidPayload)?,
+            )?;
+            let response = NextBatchResponse {
+                rows: page
+                    .rows
+                    .into_iter()
+                    .map(|(handle, cells)| ExecutorBatchRow { handle, cells })
+                    .collect(),
+                continuation: page.continuation,
+            };
+            response.encode(decoded.max_bytes)?
+        }
+        Operation::CloseCursor => {
+            let decoded = CloseCursorRequest::decode(&request.payload)?;
+            connection.close_relation_scan(&decoded.cursor)?;
+            let mut payload = EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes().to_vec();
+            payload.push(0);
+            payload
+        }
+        _ => return Err(ExecutorRequestError::UnsupportedOperation(operation)),
+    };
+    Ok(IpcFrame {
+        operation: request.operation,
+        request_id: request.request_id,
+        payload,
     })
 }
 
@@ -211,7 +832,7 @@ pub fn serve_executor_resolve_relation<S: Read + Write>(
                 };
             }
         };
-        if request_ids.len() >= MAX_RESOLVE_REQUESTS_PER_CONNECTION {
+        if request_ids.len() >= MAX_EXECUTOR_REQUESTS_PER_CONNECTION {
             drop(connection);
             return match transaction.abort() {
                 Ok(()) => Err(ExecutorConnectionError::RequestLimitExceeded),
@@ -225,20 +846,17 @@ pub fn serve_executor_resolve_relation<S: Read + Write>(
                 Err(abort_error) => Err(ExecutorConnectionError::Abort(abort_error)),
             };
         }
-        let response = match dispatch_executor_resolve_relation(
-            ServiceRole::Executor,
-            &mut connection,
-            &request,
-        ) {
-            Ok(response) => response,
-            Err(error) => {
-                drop(connection);
-                return match transaction.abort() {
-                    Ok(()) => Err(ExecutorConnectionError::Request(error)),
-                    Err(abort_error) => Err(ExecutorConnectionError::Abort(abort_error)),
-                };
-            }
-        };
+        let response =
+            match dispatch_executor_request(ServiceRole::Executor, &mut connection, &request) {
+                Ok(response) => response,
+                Err(error) => {
+                    drop(connection);
+                    return match transaction.abort() {
+                        Ok(()) => Err(ExecutorConnectionError::Request(error)),
+                        Err(abort_error) => Err(ExecutorConnectionError::Abort(abort_error)),
+                    };
+                }
+            };
         if let Err(error) = crate::ipc::write_frame(stream, &response) {
             drop(connection);
             return match transaction.abort() {

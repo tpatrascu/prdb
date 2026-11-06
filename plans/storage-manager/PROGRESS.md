@@ -849,3 +849,13 @@
 - Red evidence: an early assertion expected a full one-row page to prove EOF; the existing scan contract requires an additional page to confirm EOF, so the regression was corrected to consume the continuation and final empty page.
 - Remaining: encode/decode `open_scan`, `next_batch`, and `close_cursor` IPC payloads, enforce output-byte bounds, and test the derived path against concurrent policy/grant changes.
 - Next smallest task: define the bounded wire payload for opening a scan from a resolved relation handle and validate requested row-count limits.
+
+## SM-6 dependency: executor scan and batch IPC
+
+- Behavior: executor resolve responses now include the authorized declared shape. Version-1 `open_scan`, `next_batch`, and `close_cursor` payloads dispatch through the connection-owned session. The wire path supports ordinal-ordered column subsets, candidate and byte caps, VALUE/NULL/REDACTED cells, and opaque row handles; it never serializes row IDs.
+- Changed code and fixtures: [executor IPC codec/dispatcher](../../engine/src/executor_ipc.rs), [row-handle and cursor ownership](../../engine/src/transaction.rs), [real-redb IPC regression](../../engine/tests/transaction.rs), and [IPC protocol contract](../../specs/ipc-protocol.md).
+- Evidence: the real-redb regression resolves the catalog shape, opens a selected-column scan, transfers two visible rows through one-use cursor batches under a 48-byte response cap, decodes canonical BYTEA values and opaque row handles, confirms the final empty EOF page, and verifies close/replay behavior.
+- Red evidence: the first resolver-response decode rejected ordinal zero because the new decoder assumed one-based ordinals; the catalog stores zero-based ordinals. The decoder now preserves that contract.
+- Verification: workspace build, format check, warning-denied Clippy, full workspace tests, all 168 changed-document local links, and `git diff --check` pass in the prescribed Nix shell.
+- Remaining: test max-byte failure through the stream loop, exercise NULL/REDACTED wire states and hostile payloads, and connect the provisioned supervisor socket to this loop.
+- Next smallest task: add StageInsert/StageUpdate/StageDelete request dispatch that consumes row handles and rechecks catalog authority.

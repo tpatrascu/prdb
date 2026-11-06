@@ -20,16 +20,18 @@ use crate::index_key::{DeriveIndexKeyError, derive_index_key};
 use crate::metadata::{EngineMetadata, Lifecycle};
 use crate::metadata_discovery::{
     AuthorizedRelationDescription, COLUMN_CURSOR_TOKEN_KIND, ColumnScanCursor,
-    EXECUTOR_SCAN_CURSOR_TOKEN_KIND, ExecutorScanCursor,
-    INFORMATION_SCHEMA_COLUMNS_CURSOR_TOKEN_KIND, INFORMATION_SCHEMA_TABLES_CURSOR_TOKEN_KIND,
-    InformationSchemaColumnRow, InformationSchemaColumnsCursor, InformationSchemaColumnsPage,
-    InformationSchemaColumnsScanPage, InformationSchemaSchemataPage, InformationSchemaSchemataRow,
-    InformationSchemaTableRow, InformationSchemaTablesCursor, InformationSchemaTablesPage,
-    InformationSchemaTablesScanPage, MAX_COLUMNS_PER_PAGE, MAX_METADATA_PAGE_BYTES,
-    MAX_RELATION_HANDLES, MAX_RELATIONS_PER_PAGE, MAX_SCHEMAS_PER_PAGE, RELATION_CURSOR_TOKEN_KIND,
-    RELATION_HANDLE_TOKEN_KIND, RelationScanCursor, ResolvedRelationHandle,
-    SCHEMA_CURSOR_TOKEN_KIND, SchemaScanCursor, VisibleColumn, VisibleColumnPage, VisibleRelation,
-    VisibleRelationPage, VisibleRelationSchema, VisibleSchema, VisibleSchemaPage,
+    EXECUTOR_ROW_HANDLE_TOKEN_KIND, EXECUTOR_SCAN_CURSOR_TOKEN_KIND, ExecutorRowHandle,
+    ExecutorScanCursor, INFORMATION_SCHEMA_COLUMNS_CURSOR_TOKEN_KIND,
+    INFORMATION_SCHEMA_TABLES_CURSOR_TOKEN_KIND, InformationSchemaColumnRow,
+    InformationSchemaColumnsCursor, InformationSchemaColumnsPage, InformationSchemaColumnsScanPage,
+    InformationSchemaSchemataPage, InformationSchemaSchemataRow, InformationSchemaTableRow,
+    InformationSchemaTablesCursor, InformationSchemaTablesPage, InformationSchemaTablesScanPage,
+    MAX_COLUMNS_PER_PAGE, MAX_EXECUTOR_BATCH_CANDIDATES, MAX_EXECUTOR_ROW_HANDLES,
+    MAX_METADATA_PAGE_BYTES, MAX_RELATION_HANDLES, MAX_RELATIONS_PER_PAGE, MAX_SCHEMAS_PER_PAGE,
+    RELATION_CURSOR_TOKEN_KIND, RELATION_HANDLE_TOKEN_KIND, RelationScanCursor,
+    ResolvedRelationHandle, SCHEMA_CURSOR_TOKEN_KIND, SchemaScanCursor, VisibleColumn,
+    VisibleColumnPage, VisibleRelation, VisibleRelationPage, VisibleRelationSchema, VisibleSchema,
+    VisibleSchemaPage,
 };
 use crate::outcome::{InvocationOutcome, OutcomeStatus};
 use crate::overlay::{Overlay, OverlayError, ResolvedRow, RowId, StagedRow};
@@ -148,7 +150,7 @@ pub struct AuthorizedRowScanPage {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutorAuthorizedRowScanPage {
-    pub rows: Vec<(RowId, Vec<SanitizedCell>)>,
+    pub rows: Vec<(ExecutorRowHandle, Vec<SanitizedCell>)>,
     pub continuation: Option<ExecutorScanCursor>,
 }
 
@@ -268,6 +270,8 @@ pub struct ExecutorMetadataConnection<'connection, 'db> {
     used_tokens: HashSet<[u8; 16]>,
     scans: HashMap<[u8; 16], ActiveExecutorScan>,
     used_scan_tokens: HashSet<[u8; 16]>,
+    row_handles: HashMap<[u8; 16], RowId>,
+    used_row_tokens: HashSet<[u8; 16]>,
 }
 
 #[derive(Clone)]
@@ -280,7 +284,9 @@ struct ResolvedRelationHandleState {
 #[derive(Clone)]
 struct ActiveExecutorScan {
     relation_handle: [u8; 16],
+    selected_column_ordinals: Vec<usize>,
     row_cursor: Option<RowScanCursor>,
+    pending_row: Option<(RowId, Vec<SanitizedCell>)>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -559,6 +565,8 @@ impl<'db> InvocationTransaction<'db> {
             used_tokens: HashSet::new(),
             scans: HashMap::new(),
             used_scan_tokens: HashSet::new(),
+            row_handles: HashMap::new(),
+            used_row_tokens: HashSet::new(),
         }
     }
 
@@ -5371,9 +5379,12 @@ impl ExecutorMetadataConnection<'_, '_> {
         &mut self,
         handle: &ResolvedRelationHandle,
     ) -> Result<(), TransactionError> {
-        self.handles
+        let state = self
+            .handles
             .remove(&handle.token)
             .ok_or(TransactionError::InvalidMetadataRequest)?;
+        self.row_handles
+            .retain(|_, row_id| row_id.table != state.relation_id);
         if let Some((token, scan)) = self
             .scans
             .iter()
@@ -5403,9 +5414,21 @@ impl ExecutorMetadataConnection<'_, '_> {
     pub fn open_relation_scan(
         &mut self,
         handle: &ResolvedRelationHandle,
+        requested_column_ids: &[[u8; 16]],
     ) -> Result<ExecutorScanCursor, TransactionError> {
         let description = self.revalidate_relation_handle(handle)?;
         if builtin_information_schema_relation_schema(description.relation_id).is_some() {
+            return Err(TransactionError::InvalidMetadataRequest);
+        }
+        if requested_column_ids.len() > crate::tuple::MAX_COLUMNS
+            || requested_column_ids.contains(&[0; 16])
+            || requested_column_ids
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>()
+                .len()
+                != requested_column_ids.len()
+        {
             return Err(TransactionError::InvalidMetadataRequest);
         }
         if !self.scans.is_empty() {
@@ -5416,11 +5439,31 @@ impl ExecutorMetadataConnection<'_, '_> {
         }
         let token =
             new_metadata_cursor_token(&mut self.used_scan_tokens, EXECUTOR_SCAN_CURSOR_TOKEN_KIND)?;
+        let selected_column_ordinals = if requested_column_ids.is_empty() {
+            (0..description.columns.len()).collect()
+        } else {
+            let selected = description
+                .columns
+                .iter()
+                .enumerate()
+                .filter_map(|(index, column)| {
+                    requested_column_ids
+                        .contains(&column.column_id)
+                        .then_some(index)
+                })
+                .collect::<Vec<_>>();
+            if selected.len() != requested_column_ids.len() {
+                return Err(TransactionError::InvalidMetadataRequest);
+            }
+            selected
+        };
         self.scans.insert(
             token,
             ActiveExecutorScan {
                 relation_handle: handle.token,
+                selected_column_ordinals,
                 row_cursor: None,
+                pending_row: None,
             },
         );
         Ok(ExecutorScanCursor { token })
@@ -5447,6 +5490,39 @@ impl ExecutorMetadataConnection<'_, '_> {
             scan.row_cursor.as_ref(),
             max_scanned,
         )?;
+        if self.used_row_tokens.len().saturating_add(page.rows.len()) > MAX_EXECUTOR_ROW_HANDLES {
+            self.transaction.abort()?;
+            return Err(TransactionError::RelationHandleLimitExceeded);
+        }
+        let mut rows = Vec::with_capacity(page.rows.len());
+        for (row_id, cells) in page.rows {
+            if row_id.table != description.relation_id {
+                self.transaction.abort()?;
+                return Err(TransactionError::InvalidMetadataRequest);
+            }
+            let selected_cells = scan
+                .selected_column_ordinals
+                .iter()
+                .map(|ordinal| {
+                    cells
+                        .get(*ordinal)
+                        .cloned()
+                        .ok_or(TransactionError::InvalidMetadataRequest)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let token = match new_metadata_cursor_token(
+                &mut self.used_row_tokens,
+                EXECUTOR_ROW_HANDLE_TOKEN_KIND,
+            ) {
+                Ok(token) => token,
+                Err(error) => {
+                    self.transaction.abort()?;
+                    return Err(error);
+                }
+            };
+            self.row_handles.insert(token, row_id);
+            rows.push((ExecutorRowHandle { token }, selected_cells));
+        }
         let continuation = if let Some(row_cursor) = page.continuation {
             if self.used_scan_tokens.len() >= MAX_RELATION_HANDLES {
                 self.transaction.abort()?;
@@ -5466,17 +5542,151 @@ impl ExecutorMetadataConnection<'_, '_> {
                 token,
                 ActiveExecutorScan {
                     relation_handle: scan.relation_handle,
+                    selected_column_ordinals: scan.selected_column_ordinals,
                     row_cursor: Some(row_cursor),
+                    pending_row: None,
                 },
             );
             Some(ExecutorScanCursor { token })
         } else {
             None
         };
-        Ok(ExecutorAuthorizedRowScanPage {
-            rows: page.rows,
-            continuation,
-        })
+        Ok(ExecutorAuthorizedRowScanPage { rows, continuation })
+    }
+
+    /// Build an executor batch while bounding both candidate work and encoded
+    /// response size. One authorized row that does not fit is retained for the
+    /// next request; an individually oversized row aborts the invocation.
+    pub fn next_relation_scan_batch(
+        &mut self,
+        cursor: &ExecutorScanCursor,
+        max_scanned: usize,
+        max_bytes: usize,
+    ) -> Result<ExecutorAuthorizedRowScanPage, TransactionError> {
+        if max_scanned == 0
+            || max_scanned > MAX_EXECUTOR_BATCH_CANDIDATES
+            || max_bytes > crate::ipc::MAX_PAYLOAD_BYTES
+        {
+            return Err(TransactionError::InvalidMetadataRequest);
+        }
+        let mut scan = self
+            .scans
+            .remove(&cursor.token)
+            .ok_or(TransactionError::InvalidMetadataRequest)?;
+        let handle = ResolvedRelationHandle {
+            token: scan.relation_handle,
+        };
+        let description = self.revalidate_relation_handle(&handle)?;
+        // Reserve the larger header, which includes a continuation token.
+        let mut encoded_bytes = 21usize;
+        let mut scanned = 0usize;
+        let mut rows = Vec::new();
+        let mut pending_row = scan.pending_row.take();
+
+        while rows.len() < max_scanned {
+            let candidate = if let Some(candidate) = pending_row.take() {
+                Some(candidate)
+            } else if scanned < max_scanned {
+                let page = self.transaction.scan_catalog_authorized_rows(
+                    description.relation_id,
+                    scan.row_cursor.as_ref(),
+                    1,
+                )?;
+                scanned += 1;
+                scan.row_cursor = page.continuation;
+                page.rows.into_iter().next()
+            } else {
+                None
+            };
+            let Some((row_id, cells)) = candidate else {
+                if scan.row_cursor.is_none() {
+                    break;
+                }
+                continue;
+            };
+            if row_id.table != description.relation_id {
+                self.transaction.abort()?;
+                return Err(TransactionError::InvalidMetadataRequest);
+            }
+            let selected_cells = scan
+                .selected_column_ordinals
+                .iter()
+                .map(|ordinal| {
+                    cells
+                        .get(*ordinal)
+                        .cloned()
+                        .ok_or(TransactionError::InvalidMetadataRequest)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let row_bytes = executor_batch_row_encoded_size(&selected_cells)?;
+            if encoded_bytes.saturating_add(row_bytes) > max_bytes {
+                if rows.is_empty() {
+                    self.transaction.abort()?;
+                    return Err(TransactionError::MetadataResultTooLarge);
+                }
+                pending_row = Some((row_id, selected_cells));
+                break;
+            }
+            if self.used_row_tokens.len() >= MAX_EXECUTOR_ROW_HANDLES {
+                self.transaction.abort()?;
+                return Err(TransactionError::RelationHandleLimitExceeded);
+            }
+            let token = match new_metadata_cursor_token(
+                &mut self.used_row_tokens,
+                EXECUTOR_ROW_HANDLE_TOKEN_KIND,
+            ) {
+                Ok(token) => token,
+                Err(error) => {
+                    self.transaction.abort()?;
+                    return Err(error);
+                }
+            };
+            self.row_handles.insert(token, row_id);
+            rows.push((ExecutorRowHandle { token }, selected_cells));
+            encoded_bytes += row_bytes;
+        }
+
+        let continuation = if pending_row.is_some() || scan.row_cursor.is_some() {
+            if self.used_scan_tokens.len() >= MAX_RELATION_HANDLES {
+                self.transaction.abort()?;
+                return Err(TransactionError::RelationHandleLimitExceeded);
+            }
+            let token = match new_metadata_cursor_token(
+                &mut self.used_scan_tokens,
+                EXECUTOR_SCAN_CURSOR_TOKEN_KIND,
+            ) {
+                Ok(token) => token,
+                Err(error) => {
+                    self.transaction.abort()?;
+                    return Err(error);
+                }
+            };
+            self.scans.insert(
+                token,
+                ActiveExecutorScan {
+                    relation_handle: scan.relation_handle,
+                    selected_column_ordinals: scan.selected_column_ordinals,
+                    row_cursor: scan.row_cursor,
+                    pending_row,
+                },
+            );
+            Some(ExecutorScanCursor { token })
+        } else {
+            None
+        };
+        Ok(ExecutorAuthorizedRowScanPage { rows, continuation })
+    }
+
+    /// Resolve a connection-local visible-row handle to its internal row ID.
+    /// The caller must still perform operation-specific authorization.
+    pub fn revalidate_row_handle(
+        &self,
+        handle: &ExecutorRowHandle,
+    ) -> Result<RowId, TransactionError> {
+        self.row_handles
+            .get(&handle.token)
+            .copied()
+            .ok_or(TransactionError::InvalidMetadataRequest)
     }
 
     /// Close a live cursor and release the invocation's active row-scan slot.
@@ -5530,6 +5740,32 @@ fn valid_estimate_projection(table_id: [u8; 16], projection: &AuthorizedProjecti
             .policies
             .iter()
             .all(|policy| policy.subjects.len() <= crate::authorization::MAX_POLICY_SUBJECTS)
+}
+
+fn executor_batch_row_encoded_size(cells: &[SanitizedCell]) -> Result<usize, TransactionError> {
+    let mut size = 18usize; // Opaque row handle and cell count.
+    for cell in cells {
+        size = size
+            .checked_add(match cell {
+                SanitizedCell::Null | SanitizedCell::Redacted => 1,
+                SanitizedCell::Value(value) => {
+                    let value_bytes = match value {
+                        ScalarValue::Boolean(_) => 1,
+                        ScalarValue::SmallInt(_) => 2,
+                        ScalarValue::Integer(_) | ScalarValue::Date(_) => 4,
+                        ScalarValue::BigInt(_) | ScalarValue::TimestampTz(_) => 8,
+                        ScalarValue::Decimal(_) | ScalarValue::Uuid(_) => 16,
+                        ScalarValue::Text(value) | ScalarValue::Varchar(value) => value.len(),
+                        ScalarValue::Bytea(value) => value.len(),
+                    };
+                    6usize
+                        .checked_add(value_bytes)
+                        .ok_or(TransactionError::MetadataResultTooLarge)?
+                }
+            })
+            .ok_or(TransactionError::MetadataResultTooLarge)?;
+    }
+    Ok(size)
 }
 
 /// Exact counts are released only when row inclusion is independent of row
