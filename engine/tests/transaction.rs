@@ -1472,6 +1472,83 @@ fn schema_access_loader_uses_pinned_principal_schema_usage_grants()
 }
 
 #[test]
+fn relation_discovery_grant_loader_filters_to_one_schema() -> Result<(), Box<dyn std::error::Error>>
+{
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    install_relation_discovery_catalog(&database)?;
+    let schema_id = [0x91; 16];
+    let mut invocation = InvocationTransaction::begin(&database, [192; 16], [9; 16], 9_999, 1, 64)?;
+    let (roles, grants) = invocation.load_catalog_relation_discovery_grants(schema_id)?;
+    assert!(roles.is_empty());
+    assert_eq!(grants.len(), 4);
+    assert!(
+        grants
+            .iter()
+            .all(|grant| grant.subject == Subject::Principal([9; 16]))
+    );
+    assert!(grants.contains(&Grant {
+        subject: Subject::Principal([9; 16]),
+        operation: Operation::Usage,
+        target: AccessTarget::Schema(schema_id),
+    }));
+    assert!(grants.contains(&Grant {
+        subject: Subject::Principal([9; 16]),
+        operation: Operation::Insert,
+        target: AccessTarget::Table([0x10; 16]),
+    }));
+    assert!(grants.contains(&Grant {
+        subject: Subject::Principal([9; 16]),
+        operation: Operation::Select,
+        target: AccessTarget::Column {
+            table_id: [0x10; 16],
+            column_id: [0x66; 16],
+        },
+    }));
+    assert!(grants.contains(&Grant {
+        subject: Subject::Principal([9; 16]),
+        operation: Operation::Delete,
+        target: AccessTarget::Table([0x20; 16]),
+    }));
+    Ok(())
+}
+
+#[test]
+fn catalog_authorized_relation_listing_derives_the_invocation_scope()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    install_relation_discovery_catalog(&database)?;
+    let schema_id = [0x91; 16];
+    let mut invocation = InvocationTransaction::begin(&database, [193; 16], [9; 16], 9_999, 1, 64)?;
+    let first = invocation
+        .list_catalog_authorized_relations(schema_id, 1, None)?
+        .expect("schema is visible");
+    assert_eq!(first.relations.len(), 1);
+    assert_eq!(first.relations[0].relation_id, [0x10; 16]);
+    assert_eq!(first.relations[0].name, "metrics");
+    let continuation = first.continuation.expect("second granted relation follows");
+    let second = invocation
+        .list_catalog_authorized_relations(schema_id, 1, Some(continuation))?
+        .expect("schema remains visible");
+    assert_eq!(second.relations.len(), 1);
+    assert_eq!(second.relations[0].relation_id, [0x20; 16]);
+    assert_eq!(second.relations[0].name, "secret");
+    assert!(second.continuation.is_none());
+    assert!(
+        invocation
+            .list_catalog_authorized_relations([0x92; 16], 1, None)?
+            .is_none()
+    );
+    assert!(
+        invocation
+            .list_catalog_authorized_relations([0x94; 16], 1, None)?
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
 fn catalog_authorized_schema_listing_derives_the_invocation_scope()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
