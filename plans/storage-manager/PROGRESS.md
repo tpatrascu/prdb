@@ -617,3 +617,13 @@
 - Contract updates: [users and roles](../../specs/ddl-identity.md) and [storage manager](../../specs/storage-manager.md).
 - Verification: prescribed Nix-shell workspace build, formatting check, Clippy with warnings denied, and all 222 workspace tests passed. Changed Markdown local links and `git diff --check` passed.
 - Remaining: token-authentication failures still need gateway-level throttling because storage admission lacks peer/source context; bootstrap secret handoff, authenticated control-channel integration, deterministic authority-change race coverage, and SQL/control frontend integration remain open.
+
+## CL-1 / CL-2 dependency: local bootstrap and credential handoff — verified core
+
+- Red evidence: the focused bootstrap regression failed when the initial scaffold returned `NotImplemented` for initialization.
+- `bootstrap::initialize` creates an owner-only directory, instance lock, setup marker, redb file, complete built-in catalog, reserved administrator role, first LOGIN user, membership, first token verifier, audit event, and `INITIALIZING` metadata in one immediate-durability transaction.
+- `BootstrapSession::take_secret` transfers the random secret once and zeroizes its retained buffer. Acknowledgement requires prior transfer, validates the initializing image and active token, then durably publishes `READY`. `StorageInstance::open` holds the nonblocking exclusive lock and accepts only a validated READY image; its manager constructor reuses that validation.
+- Resume rejects READY or corrupt images, recovers owner-only empty pre-marker/pre-commit directories, rotates an unclaimed token atomically, and refuses directories containing unknown files. Real-redb tests cover duplicate initialization, lock exclusion, permissions, verifier-only persistence, lost handoff, acknowledgement ordering, pre-marker recovery, and empty-file recovery.
+- Verification: the prescribed Nix-shell workspace build, formatting check, Clippy with warnings denied, and all 227 workspace tests passed. `git diff --check` passed.
+- Contract updates: [catalog lifecycle](../../specs/catalog-lifecycle.md), [storage manager](../../specs/storage-manager.md), and [credential lifecycle](../../specs/ddl-identity.md).
+- Remaining: a protected setup socket/supervisor to deliver the secret and acknowledge delivery, power-loss fault injection at transaction boundaries, and normal service integration remain open. Direct `StorageManager` constructors are trusted low-level entry points and do not acquire the filesystem lock; service startup must use `StorageInstance::open`.

@@ -105,13 +105,26 @@ impl std::error::Error for StartupError {}
 pub fn validate_persisted_records(
     database: &Database,
 ) -> Result<StorageHealthReport, StartupError> {
+    validate_persisted_records_for_lifecycle(database, Lifecycle::Ready)
+}
+
+pub(crate) fn validate_initializing_records(
+    database: &Database,
+) -> Result<StorageHealthReport, StartupError> {
+    validate_persisted_records_for_lifecycle(database, Lifecycle::Initializing)
+}
+
+fn validate_persisted_records_for_lifecycle(
+    database: &Database,
+    required_lifecycle: Lifecycle,
+) -> Result<StorageHealthReport, StartupError> {
     let read = database.begin_read().map_err(storage_error)?;
     validate_tables(&read)?;
     let metadata = read_metadata(&read)?;
     if !metadata.supports_current_formats() {
         return Err(StartupError::UnsupportedFormat);
     }
-    if metadata.lifecycle != Lifecycle::Ready {
+    if metadata.lifecycle != required_lifecycle {
         return Err(StartupError::NotReady);
     }
 

@@ -286,6 +286,21 @@ impl<'db> StorageManager<'db> {
         database: &'db Database,
         config: StorageManagerConfig,
     ) -> Result<Self, StorageManagerInitError> {
+        Self::build(database, config, true)
+    }
+
+    pub(crate) fn from_validated_database(
+        database: &'db Database,
+        config: StorageManagerConfig,
+    ) -> Result<Self, StorageManagerInitError> {
+        Self::build(database, config, false)
+    }
+
+    fn build(
+        database: &'db Database,
+        config: StorageManagerConfig,
+        validate_startup: bool,
+    ) -> Result<Self, StorageManagerInitError> {
         if config.max_active_invocations == 0 {
             return Err(StorageManagerInitError::Config(
                 StorageManagerConfigError::ZeroActiveInvocationLimit,
@@ -301,7 +316,9 @@ impl<'db> StorageManager<'db> {
                 StorageManagerConfigError::ZeroTokenLifecycleRequestLimit,
             ));
         }
-        validate_persisted_records(database).map_err(StorageManagerInitError::Startup)?;
+        if validate_startup {
+            validate_persisted_records(database).map_err(StorageManagerInitError::Startup)?;
+        }
         let token_requests =
             shared_token_request_limiter(database, config.max_token_lifecycle_requests_per_minute);
         Ok(Self {
