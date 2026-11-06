@@ -65,9 +65,21 @@ pub struct VisibleSchema {
 /// Opaque continuation for schema discovery in one invocation snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SchemaScanCursor {
-    pub(crate) invocation_id: [u8; 16],
-    pub(crate) generation: u64,
-    pub(crate) after_schema_id: [u8; 16],
+    pub(crate) token: [u8; 16],
+}
+
+impl SchemaScanCursor {
+    /// Encode the cursor for the bounded IPC payload.
+    pub fn to_bytes(&self) -> [u8; 16] {
+        self.token
+    }
+
+    /// Decode a cursor token from its fixed-width wire form.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        Some(Self {
+            token: bytes.try_into().ok()?,
+        })
+    }
 }
 
 /// One bounded page of visible schemas.

@@ -62,6 +62,7 @@ pub enum TransactionError {
     AdmissionLimitExceeded,
     Expired,
     CancellationRequested,
+    RandomnessUnavailable,
     IndexRowNotStaged,
     RowAlreadyExists,
     GeneratedIdentityUnsupported,
@@ -233,7 +234,6 @@ pub struct InvocationTransaction<'db> {
     active_relation_scan: Option<ActiveRelationScan>,
     metadata_scan_generation: u64,
     active_schema_scan: Option<ActiveSchemaScan>,
-    metadata_schema_scan_generation: u64,
     active_column_scan: Option<ActiveColumnScan>,
     metadata_column_scan_generation: u64,
 }
@@ -251,12 +251,13 @@ struct ActiveRelationScan {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ActiveSchemaScan {
-    generation: u64,
     principal_id: [u8; 16],
     role_ids: HashSet<[u8; 16]>,
     scope: HashSet<(Operation, AccessTarget)>,
     grants: Vec<Grant>,
     dependencies: Vec<AuthorityDependency>,
+    continuation: Option<([u8; 16], [u8; 16])>,
+    used_tokens: HashSet<[u8; 16]>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -437,7 +438,6 @@ impl<'db> InvocationTransaction<'db> {
             active_relation_scan: None,
             metadata_scan_generation: 0,
             active_schema_scan: None,
-            metadata_schema_scan_generation: 0,
             active_column_scan: None,
             metadata_column_scan_generation: 0,
         })
@@ -1420,41 +1420,33 @@ impl<'db> InvocationTransaction<'db> {
                 self.validate_metadata_grant(context, *grant)?;
             }
 
-            let active_scan = match continuation.as_ref() {
+            let mut active_scan = match continuation.as_ref() {
                 Some(cursor) => {
-                    if cursor.invocation_id != self.invocation_id
-                        || self.active_schema_scan.as_ref().is_none_or(|active| {
-                            active.generation != cursor.generation
-                                || active.principal_id != context.principal_id
-                                || active.role_ids != context.role_ids
-                                || active.scope != context.scope
-                                || active.grants != grants
-                                || active.dependencies != dependencies
-                        })
+                    let Some(active) = self.active_schema_scan.as_ref() else {
+                        return Err(TransactionError::InvalidMetadataRequest);
+                    };
+                    if active.principal_id != context.principal_id
+                        || active.role_ids != context.role_ids
+                        || active.scope != context.scope
+                        || active.grants != grants
+                        || active.dependencies != dependencies
+                        || active
+                            .continuation
+                            .is_none_or(|(token, _)| token != cursor.token)
                     {
                         return Err(TransactionError::InvalidMetadataRequest);
                     }
-                    self.active_schema_scan
-                        .as_ref()
-                        .ok_or(TransactionError::InvalidMetadataRequest)?
-                        .clone()
+                    active.clone()
                 }
-                None => {
-                    self.metadata_schema_scan_generation = self
-                        .metadata_schema_scan_generation
-                        .checked_add(1)
-                        .ok_or(TransactionError::InvalidMetadataRequest)?;
-                    let active = ActiveSchemaScan {
-                        generation: self.metadata_schema_scan_generation,
-                        principal_id: context.principal_id,
-                        role_ids: context.role_ids.clone(),
-                        scope: context.scope.clone(),
-                        grants: grants.to_vec(),
-                        dependencies: dependencies.to_vec(),
-                    };
-                    self.active_schema_scan = Some(active.clone());
-                    active
-                }
+                None => ActiveSchemaScan {
+                    principal_id: context.principal_id,
+                    role_ids: context.role_ids.clone(),
+                    scope: context.scope.clone(),
+                    grants: grants.to_vec(),
+                    dependencies: dependencies.to_vec(),
+                    continuation: None,
+                    used_tokens: HashSet::new(),
+                },
             };
 
             let mut visible_schema_ids = grants
@@ -1477,7 +1469,18 @@ impl<'db> InvocationTransaction<'db> {
                 .collect::<Vec<_>>();
             visible_schema_ids.sort_unstable();
             visible_schema_ids.dedup();
-            let after_id = continuation.as_ref().map(|cursor| cursor.after_schema_id);
+            let after_id = if let Some(cursor) = continuation.as_ref() {
+                let (token, after_id) = active_scan
+                    .continuation
+                    .take()
+                    .ok_or(TransactionError::InvalidMetadataRequest)?;
+                if token != cursor.token {
+                    return Err(TransactionError::InvalidMetadataRequest);
+                }
+                Some(after_id)
+            } else {
+                None
+            };
             let mut schemas = Vec::with_capacity(page_limit);
             let mut page_bytes = 0usize;
             let mut has_more = false;
@@ -1504,17 +1507,18 @@ impl<'db> InvocationTransaction<'db> {
                 schemas.push(schema);
             }
             let continuation = if has_more {
-                Some(SchemaScanCursor {
-                    invocation_id: self.invocation_id,
-                    generation: active_scan.generation,
-                    after_schema_id: schemas
-                        .last()
-                        .map(|schema| schema.schema_id)
-                        .ok_or(TransactionError::InvalidMetadataRequest)?,
-                })
+                let after_id = schemas
+                    .last()
+                    .map(|schema| schema.schema_id)
+                    .ok_or(TransactionError::InvalidMetadataRequest)?;
+                let token = new_metadata_cursor_token(&mut active_scan.used_tokens)?;
+                active_scan.continuation = Some((token, after_id));
+                Some(SchemaScanCursor { token })
             } else {
+                active_scan.continuation = None;
                 None
             };
+            self.active_schema_scan = Some(active_scan);
             Ok(VisibleSchemaPage {
                 schemas,
                 continuation,
@@ -4530,6 +4534,19 @@ fn catalog_id_list(record: &CatalogRecord, tag: u16) -> Result<Vec<[u8; 16]>, Tr
         .chunks_exact(16)
         .map(|id| id.try_into().map_err(|_| TransactionError::CorruptCatalog))
         .collect()
+}
+
+fn new_metadata_cursor_token(
+    used_tokens: &mut HashSet<[u8; 16]>,
+) -> Result<[u8; 16], TransactionError> {
+    for _ in 0..8 {
+        let mut token = [0; 16];
+        getrandom::fill(&mut token).map_err(|_| TransactionError::RandomnessUnavailable)?;
+        if token != [0; 16] && used_tokens.insert(token) {
+            return Ok(token);
+        }
+    }
+    Err(TransactionError::RandomnessUnavailable)
 }
 
 fn catalog_id_key(family: u16, id: [u8; 16]) -> Vec<u8> {

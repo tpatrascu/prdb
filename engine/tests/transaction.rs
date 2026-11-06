@@ -1392,11 +1392,65 @@ fn schema_listing_includes_only_usage_grants_and_pages_by_schema_id()
     assert_eq!(first.schemas[0].schema_id, app_schema_id);
     assert_eq!(first.schemas[0].name, "app");
     let cursor = first.continuation.expect("another visible schema");
-    let second = invocation.list_authorized_schemas(1, Some(cursor), &context, &grants, &[])?;
+    let serialized_cursor = cursor.to_bytes();
+    let cursor = prdb_engine::metadata_discovery::SchemaScanCursor::from_bytes(&serialized_cursor)
+        .expect("cursor wire form is fixed width");
+    let mut other_invocation =
+        InvocationTransaction::begin(&database, [195; 16], [9; 16], 9_999, 1, 64)?;
+    assert!(matches!(
+        other_invocation.list_authorized_schemas(1, Some(cursor.clone()), &context, &grants, &[],),
+        Err(TransactionError::InvalidMetadataRequest)
+    ));
+    let second =
+        invocation.list_authorized_schemas(1, Some(cursor.clone()), &context, &grants, &[])?;
     assert_eq!(second.schemas.len(), 1);
     assert_eq!(second.schemas[0].schema_id, public_schema_id);
     assert_eq!(second.schemas[0].name, "public");
     assert!(second.continuation.is_none());
+    assert!(matches!(
+        invocation.list_authorized_schemas(1, Some(cursor), &context, &grants, &[]),
+        Err(TransactionError::InvalidMetadataRequest)
+    ));
+    Ok(())
+}
+
+#[test]
+fn schema_cursor_rejects_modified_wire_tokens() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    install_relation_discovery_catalog(&database)?;
+    let schema_id = [0x91; 16];
+    let context = AuthorizationContext {
+        principal_id: [9; 16],
+        role_ids: std::collections::HashSet::new(),
+        scope: std::collections::HashSet::from([
+            (Operation::Usage, AccessTarget::Schema(schema_id)),
+            (Operation::Usage, AccessTarget::Schema([0x93; 16])),
+        ]),
+    };
+    let grants = [
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Usage,
+            target: AccessTarget::Schema(schema_id),
+        },
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Usage,
+            target: AccessTarget::Schema([0x93; 16]),
+        },
+    ];
+    let mut invocation = InvocationTransaction::begin(&database, [196; 16], [9; 16], 9_999, 1, 64)?;
+    let first = invocation.list_authorized_schemas(1, None, &context, &grants, &[])?;
+    let cursor = first.continuation.expect("another visible schema");
+    let mut bytes = cursor.to_bytes();
+    bytes[0] ^= 1;
+    let modified = prdb_engine::metadata_discovery::SchemaScanCursor::from_bytes(&bytes).unwrap();
+    assert!(matches!(
+        invocation.list_authorized_schemas(1, Some(modified), &context, &grants, &[]),
+        Err(TransactionError::InvalidMetadataRequest)
+    ));
+    assert!(prdb_engine::metadata_discovery::SchemaScanCursor::from_bytes(&bytes[..15]).is_none());
     Ok(())
 }
 
