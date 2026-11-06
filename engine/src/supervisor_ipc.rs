@@ -1,6 +1,8 @@
 //! Supervisor-only transaction finalization over a provisioned local channel.
 
 use crate::ipc::{DispatchError, IpcFrame, Operation, ServiceRole, authorize_operation};
+use crate::outcome::OutcomeStatus;
+use crate::storage_manager::{InvocationStatus, InvocationStatusError, StorageManager};
 use crate::transaction::{InvocationTransaction, TransactionError};
 use std::io::{Read, Write};
 
@@ -11,6 +13,7 @@ pub const MAX_SUPERVISOR_REQUESTS_PER_CONNECTION: usize = 16;
 pub enum SupervisorRequestError {
     InvalidPayload,
     Dispatch(DispatchError),
+    Status(InvocationStatusError),
     Transaction(TransactionError),
 }
 
@@ -26,6 +29,104 @@ impl From<TransactionError> for SupervisorRequestError {
     fn from(error: TransactionError) -> Self {
         Self::Transaction(error)
     }
+}
+
+/// Read owner-scoped status for one invocation. The principal is bound by
+/// trusted supervisor admission and never read from the request payload.
+pub fn dispatch_supervisor_status_request(
+    role: ServiceRole,
+    manager: &StorageManager<'_>,
+    authenticated_principal_id: [u8; 16],
+    request: &IpcFrame,
+) -> Result<IpcFrame, SupervisorRequestError> {
+    let operation =
+        Operation::from_code(request.operation).map_err(SupervisorRequestError::Dispatch)?;
+    authorize_operation(role, operation).map_err(SupervisorRequestError::Dispatch)?;
+    if operation != Operation::SupervisorGetInvocationStatus || request.payload.len() != 18 {
+        return Err(SupervisorRequestError::InvalidPayload);
+    }
+    if u16::from_be_bytes([request.payload[0], request.payload[1]]) != SUPERVISOR_PAYLOAD_VERSION {
+        return Err(SupervisorRequestError::InvalidPayload);
+    }
+    let invocation_id: [u8; 16] = request.payload[2..]
+        .try_into()
+        .map_err(|_| SupervisorRequestError::InvalidPayload)?;
+    let now_us = crate::credentials::now_unix_micros().ok_or(
+        SupervisorRequestError::Transaction(TransactionError::ClockUnavailable),
+    )?;
+    let snapshot = manager
+        .get_invocation_status(invocation_id, authenticated_principal_id, now_us)
+        .map_err(SupervisorRequestError::Status)?;
+    let payload = encode_supervisor_status(snapshot.as_ref())?;
+    Ok(IpcFrame {
+        operation: request.operation,
+        request_id: request.request_id,
+        payload,
+    })
+}
+
+fn encode_supervisor_status(
+    snapshot: Option<&crate::storage_manager::InvocationStatusSnapshot>,
+) -> Result<Vec<u8>, SupervisorRequestError> {
+    let mut payload = SUPERVISOR_PAYLOAD_VERSION.to_be_bytes().to_vec();
+    let Some(snapshot) = snapshot else {
+        payload.push(0); // Unknown or not owned by this principal.
+        return Ok(payload);
+    };
+    match &snapshot.status {
+        InvocationStatus::Active {
+            started_at_us,
+            deadline_at_us,
+            cancellation_requested,
+        } => encode_active_status(
+            &mut payload,
+            1,
+            snapshot.observed_at_us,
+            *started_at_us,
+            *deadline_at_us,
+            *cancellation_requested,
+        ),
+        InvocationStatus::Committing {
+            started_at_us,
+            deadline_at_us,
+            cancellation_requested,
+        } => encode_active_status(
+            &mut payload,
+            2,
+            snapshot.observed_at_us,
+            *started_at_us,
+            *deadline_at_us,
+            *cancellation_requested,
+        ),
+        InvocationStatus::Terminal(outcome) => {
+            payload.push(match outcome.status {
+                OutcomeStatus::Committed => 3,
+                OutcomeStatus::Aborted => 4,
+            });
+            payload.extend_from_slice(&snapshot.observed_at_us.to_be_bytes());
+            payload.extend_from_slice(&outcome.commit_sequence.to_be_bytes());
+            payload.extend_from_slice(&outcome.retention_deadline_us.to_be_bytes());
+        }
+    }
+    Ok(payload)
+}
+
+fn encode_active_status(
+    payload: &mut Vec<u8>,
+    status: u8,
+    observed_at_us: i64,
+    started_at_us: i64,
+    deadline_at_us: Option<i64>,
+    cancellation_requested: bool,
+) {
+    payload.push(status);
+    payload.extend_from_slice(&observed_at_us.to_be_bytes());
+    payload.extend_from_slice(&started_at_us.to_be_bytes());
+    payload.push(u8::from(deadline_at_us.is_some()));
+    if let Some(deadline_at_us) = deadline_at_us {
+        payload.extend_from_slice(&deadline_at_us.to_be_bytes());
+    }
+    payload.push(u8::from(cancellation_requested));
 }
 
 #[derive(Debug)]
@@ -145,6 +246,37 @@ pub fn serve_supervisor<S: Read + Write>(
         if invocation.is_none() {
             return Ok(());
         }
+    }
+}
+
+/// Serve owner-scoped status lookups on a supervisor connection whose
+/// authenticated principal is supplied by trusted channel setup.
+pub fn serve_supervisor_status<S: Read + Write>(
+    stream: &mut S,
+    manager: &StorageManager<'_>,
+    authenticated_principal_id: [u8; 16],
+) -> Result<(), SupervisorConnectionError> {
+    let mut request_ids = std::collections::HashSet::new();
+    loop {
+        let request = match crate::ipc::read_frame(stream) {
+            Ok(Some(request)) => request,
+            Ok(None) => return Ok(()),
+            Err(error) => return Err(SupervisorConnectionError::Frame(error)),
+        };
+        if request_ids.len() >= MAX_SUPERVISOR_REQUESTS_PER_CONNECTION {
+            return Err(SupervisorConnectionError::RequestLimitExceeded);
+        }
+        if !request_ids.insert(request.request_id) {
+            return Err(SupervisorConnectionError::DuplicateRequestId);
+        }
+        let response = dispatch_supervisor_status_request(
+            ServiceRole::Supervisor,
+            manager,
+            authenticated_principal_id,
+            &request,
+        )
+        .map_err(SupervisorConnectionError::Request)?;
+        crate::ipc::write_frame(stream, &response).map_err(SupervisorConnectionError::Frame)?;
     }
 }
 
