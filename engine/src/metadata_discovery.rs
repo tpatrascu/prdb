@@ -8,6 +8,7 @@ pub const SCHEMA_CURSOR_TOKEN_KIND: u8 = 1;
 pub const RELATION_CURSOR_TOKEN_KIND: u8 = 2;
 pub const COLUMN_CURSOR_TOKEN_KIND: u8 = 3;
 pub const INFORMATION_SCHEMA_TABLES_CURSOR_TOKEN_KIND: u8 = 4;
+pub const INFORMATION_SCHEMA_COLUMNS_CURSOR_TOKEN_KIND: u8 = 5;
 
 /// One relation admitted by schema usage and a data grant.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -187,6 +188,36 @@ pub struct InformationSchemaColumnRow {
 pub struct InformationSchemaColumnsPage {
     pub rows: Vec<InformationSchemaColumnRow>,
     pub continuation: Option<ColumnScanCursor>,
+}
+
+/// Opaque continuation for a scan across all visible relations' columns.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InformationSchemaColumnsCursor {
+    pub(crate) token: [u8; 16],
+}
+
+impl InformationSchemaColumnsCursor {
+    /// Encode the cursor for the bounded IPC payload.
+    pub fn to_bytes(&self) -> [u8; 16] {
+        self.token
+    }
+
+    /// Decode a cursor token from its fixed-width wire form.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != 16 || bytes[0] != INFORMATION_SCHEMA_COLUMNS_CURSOR_TOKEN_KIND {
+            return None;
+        }
+        Some(Self {
+            token: bytes.try_into().ok()?,
+        })
+    }
+}
+
+/// One bounded page across all schema-authorized relations' columns.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InformationSchemaColumnsScanPage {
+    pub rows: Vec<InformationSchemaColumnRow>,
+    pub continuation: Option<InformationSchemaColumnsCursor>,
 }
 
 /// Opaque continuation for relation discovery in one invocation snapshot.

@@ -20,8 +20,9 @@ use crate::index_key::{DeriveIndexKeyError, derive_index_key};
 use crate::metadata::{EngineMetadata, Lifecycle};
 use crate::metadata_discovery::{
     AuthorizedRelationDescription, COLUMN_CURSOR_TOKEN_KIND, ColumnScanCursor,
-    INFORMATION_SCHEMA_TABLES_CURSOR_TOKEN_KIND, InformationSchemaColumnRow,
-    InformationSchemaColumnsPage, InformationSchemaSchemataPage, InformationSchemaSchemataRow,
+    INFORMATION_SCHEMA_COLUMNS_CURSOR_TOKEN_KIND, INFORMATION_SCHEMA_TABLES_CURSOR_TOKEN_KIND,
+    InformationSchemaColumnRow, InformationSchemaColumnsCursor, InformationSchemaColumnsPage,
+    InformationSchemaColumnsScanPage, InformationSchemaSchemataPage, InformationSchemaSchemataRow,
     InformationSchemaTableRow, InformationSchemaTablesCursor, InformationSchemaTablesPage,
     InformationSchemaTablesScanPage, MAX_COLUMNS_PER_PAGE, MAX_METADATA_PAGE_BYTES,
     MAX_RELATIONS_PER_PAGE, MAX_SCHEMAS_PER_PAGE, RELATION_CURSOR_TOKEN_KIND, RelationScanCursor,
@@ -241,6 +242,7 @@ pub struct InvocationTransaction<'db> {
     active_schema_scan: Option<ActiveSchemaScan>,
     active_column_scan: Option<ActiveColumnScan>,
     active_information_schema_tables_scan: Option<ActiveInformationSchemaTablesScan>,
+    active_information_schema_columns_scan: Option<ActiveInformationSchemaColumnsScan>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -292,6 +294,22 @@ struct ActiveInformationSchemaTablesScan {
     current_schema: Option<VisibleSchema>,
     schema_continuation: Option<SchemaScanCursor>,
     relation_continuation: Option<RelationScanCursor>,
+    continuation: Option<[u8; 16]>,
+    used_tokens: HashSet<[u8; 16]>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ActiveInformationSchemaColumnsScan {
+    principal_id: [u8; 16],
+    schema_scan_started: bool,
+    current_schema: Option<VisibleSchema>,
+    schema_continuation: Option<SchemaScanCursor>,
+    relation_scan_started: bool,
+    relation_scan_exhausted: bool,
+    current_relation: Option<VisibleRelation>,
+    relation_continuation: Option<RelationScanCursor>,
+    current_relation_columns_started: bool,
+    column_continuation: Option<ColumnScanCursor>,
     continuation: Option<[u8; 16]>,
     used_tokens: HashSet<[u8; 16]>,
 }
@@ -464,6 +482,7 @@ impl<'db> InvocationTransaction<'db> {
             active_schema_scan: None,
             active_column_scan: None,
             active_information_schema_tables_scan: None,
+            active_information_schema_columns_scan: None,
         })
     }
 
@@ -1758,64 +1777,272 @@ impl<'db> InvocationTransaction<'db> {
                 }
             };
 
-            let (relation_roles, relation_grants) =
-                self.load_catalog_relation_discovery_grants(schema.schema_id)?;
-            let relation_scope = relation_grants
-                .iter()
-                .map(|grant| (grant.operation, grant.target))
-                .collect();
-            let relation_context = AuthorizationContext {
-                principal_id,
-                role_ids: relation_roles,
-                scope: relation_scope,
-            };
-            let extra_bytes_per_column = schema
-                .name
-                .len()
-                .checked_add(relation.name.len())
-                .and_then(|size| size.checked_add(INFORMATION_SCHEMA_COLUMN_EXTRA_BYTES))
-                .ok_or(TransactionError::MetadataResultTooLarge)?;
-            let Some(page) = self.describe_authorized_columns_page_with_extra_bytes(
-                relation.relation_id,
+            self.scan_information_schema_columns_for_visible_relation(
+                &schema,
+                &relation,
                 page_limit,
                 continuation,
-                extra_bytes_per_column,
-                MetadataDiscoveryAccess {
-                    context: &relation_context,
-                    grants: &relation_grants,
-                    dependencies: &[],
-                },
-            )?
-            else {
-                return Ok(None);
-            };
-            let rows = page
-                .columns
-                .into_iter()
-                .map(|column| {
-                    let ordinal_position = column
-                        .ordinal
-                        .checked_add(1)
-                        .ok_or(TransactionError::CorruptCatalog)?;
-                    let (data_type, character_maximum_length, numeric_precision, numeric_scale) =
-                        information_schema_column_type(column.scalar_type);
-                    Ok(InformationSchemaColumnRow {
-                        table_schema: schema.name.clone(),
-                        table_name: relation.name.clone(),
-                        column_name: column.name,
-                        ordinal_position,
-                        data_type: data_type.to_owned(),
-                        is_nullable: if column.nullable { "YES" } else { "NO" }.to_owned(),
-                        character_maximum_length,
-                        numeric_precision,
-                        numeric_scale,
-                    })
+            )
+        })();
+        match result {
+            Ok(page) => Ok(page),
+            Err(error) => {
+                if !self.aborted {
+                    self.abort()?;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn scan_information_schema_columns_for_visible_relation(
+        &mut self,
+        schema: &VisibleSchema,
+        relation: &VisibleRelation,
+        page_limit: usize,
+        continuation: Option<ColumnScanCursor>,
+    ) -> Result<Option<InformationSchemaColumnsPage>, TransactionError> {
+        let principal_id = self.principal_id;
+        let (relation_roles, relation_grants) =
+            self.load_catalog_relation_discovery_grants(schema.schema_id)?;
+        let relation_scope = relation_grants
+            .iter()
+            .map(|grant| (grant.operation, grant.target))
+            .collect();
+        let relation_context = AuthorizationContext {
+            principal_id,
+            role_ids: relation_roles,
+            scope: relation_scope,
+        };
+        let extra_bytes_per_column = schema
+            .name
+            .len()
+            .checked_add(relation.name.len())
+            .and_then(|size| size.checked_add(INFORMATION_SCHEMA_COLUMN_EXTRA_BYTES))
+            .ok_or(TransactionError::MetadataResultTooLarge)?;
+        let Some(page) = self.describe_authorized_columns_page_with_extra_bytes(
+            relation.relation_id,
+            page_limit,
+            continuation,
+            extra_bytes_per_column,
+            MetadataDiscoveryAccess {
+                context: &relation_context,
+                grants: &relation_grants,
+                dependencies: &[],
+            },
+        )?
+        else {
+            return Ok(None);
+        };
+        let rows = page
+            .columns
+            .into_iter()
+            .map(|column| {
+                let ordinal_position = column
+                    .ordinal
+                    .checked_add(1)
+                    .ok_or(TransactionError::CorruptCatalog)?;
+                let (data_type, character_maximum_length, numeric_precision, numeric_scale) =
+                    information_schema_column_type(column.scalar_type);
+                Ok(InformationSchemaColumnRow {
+                    table_schema: schema.name.clone(),
+                    table_name: relation.name.clone(),
+                    column_name: column.name,
+                    ordinal_position,
+                    data_type: data_type.to_owned(),
+                    is_nullable: if column.nullable { "YES" } else { "NO" }.to_owned(),
+                    character_maximum_length,
+                    numeric_precision,
+                    numeric_scale,
                 })
-                .collect::<Result<Vec<_>, TransactionError>>()?;
-            Ok(Some(InformationSchemaColumnsPage {
-                rows,
-                continuation: page.continuation,
-            }))
+            })
+            .collect::<Result<Vec<_>, TransactionError>>()?;
+        Ok(Some(InformationSchemaColumnsPage {
+            rows,
+            continuation: page.continuation,
+        }))
+    }
+
+    /// Return declared columns for every relation admitted to the invocation.
+    pub fn scan_information_schema_columns(
+        &mut self,
+        page_limit: usize,
+        continuation: Option<InformationSchemaColumnsCursor>,
+    ) -> Result<InformationSchemaColumnsScanPage, TransactionError> {
+        let result = (|| {
+            if page_limit == 0 || page_limit > MAX_COLUMNS_PER_PAGE {
+                return Err(TransactionError::InvalidMetadataRequest);
+            }
+            let principal_id = self.principal_id;
+            let mut active_scan = match continuation.as_ref() {
+                Some(cursor) => {
+                    let Some(active) = self.active_information_schema_columns_scan.as_ref() else {
+                        return Err(TransactionError::InvalidMetadataRequest);
+                    };
+                    if active.principal_id != principal_id
+                        || active
+                            .continuation
+                            .is_none_or(|token| token != cursor.token)
+                    {
+                        return Err(TransactionError::InvalidMetadataRequest);
+                    }
+                    active.clone()
+                }
+                None => ActiveInformationSchemaColumnsScan {
+                    principal_id,
+                    schema_scan_started: false,
+                    current_schema: None,
+                    schema_continuation: None,
+                    relation_scan_started: false,
+                    relation_scan_exhausted: false,
+                    current_relation: None,
+                    relation_continuation: None,
+                    current_relation_columns_started: false,
+                    column_continuation: None,
+                    continuation: None,
+                    used_tokens: HashSet::new(),
+                },
+            };
+            if let Some(cursor) = continuation.as_ref() {
+                let token = active_scan
+                    .continuation
+                    .take()
+                    .ok_or(TransactionError::InvalidMetadataRequest)?;
+                if token != cursor.token {
+                    return Err(TransactionError::InvalidMetadataRequest);
+                }
+            }
+            if active_scan.current_relation_columns_started
+                && active_scan.column_continuation.is_none()
+            {
+                active_scan.current_relation = None;
+                active_scan.current_relation_columns_started = false;
+            }
+            let mut empty_schema_pages = 0usize;
+            while active_scan.current_relation.is_none() {
+                if active_scan.current_schema.is_none() {
+                    if active_scan.schema_scan_started && active_scan.schema_continuation.is_none()
+                    {
+                        break;
+                    }
+                    let schema_page = self.list_catalog_authorized_schemas(
+                        1,
+                        active_scan.schema_continuation.take(),
+                    )?;
+                    active_scan.schema_scan_started = true;
+                    active_scan.current_schema = schema_page.schemas.into_iter().next();
+                    active_scan.schema_continuation = schema_page.continuation;
+                    active_scan.relation_scan_started = false;
+                    active_scan.relation_scan_exhausted = false;
+                    active_scan.relation_continuation = None;
+                    if active_scan.current_schema.is_none() {
+                        break;
+                    }
+                }
+                if active_scan.relation_scan_started && active_scan.relation_scan_exhausted {
+                    active_scan.current_schema = None;
+                    active_scan.relation_scan_started = false;
+                    active_scan.relation_scan_exhausted = false;
+                    active_scan.relation_continuation = None;
+                    empty_schema_pages += 1;
+                    if empty_schema_pages >= MAX_SCHEMAS_PER_PAGE {
+                        break;
+                    }
+                    continue;
+                }
+                let schema = active_scan
+                    .current_schema
+                    .as_ref()
+                    .ok_or(TransactionError::InvalidContext)?
+                    .clone();
+                let relation_page = self
+                    .list_catalog_authorized_relations(
+                        schema.schema_id,
+                        1,
+                        active_scan.relation_continuation.take(),
+                    )?
+                    .ok_or(TransactionError::InvalidContext)?;
+                active_scan.relation_continuation = relation_page.continuation;
+                active_scan.relation_scan_started = true;
+                active_scan.relation_scan_exhausted = active_scan.relation_continuation.is_none();
+                if let Some(relation) = relation_page.relations.into_iter().next() {
+                    active_scan.current_relation = Some(relation);
+                    break;
+                }
+                if active_scan.relation_continuation.is_some() {
+                    continue;
+                }
+                active_scan.current_schema = None;
+                active_scan.relation_scan_started = false;
+                active_scan.relation_scan_exhausted = false;
+                empty_schema_pages += 1;
+                if empty_schema_pages >= MAX_SCHEMAS_PER_PAGE {
+                    break;
+                }
+            }
+            let projected_page = match (
+                active_scan.current_schema.as_ref(),
+                active_scan.current_relation.as_ref(),
+            ) {
+                (Some(schema), Some(relation)) => {
+                    let schema = schema.clone();
+                    let relation = relation.clone();
+                    let column_continuation = active_scan.column_continuation.take();
+                    Some(
+                        self.scan_information_schema_columns_for_visible_relation(
+                            &schema,
+                            &relation,
+                            page_limit,
+                            column_continuation,
+                        )?
+                        .ok_or(TransactionError::InvalidContext)?,
+                    )
+                }
+                _ => None,
+            };
+            if let Some(page) = projected_page {
+                active_scan.column_continuation = page.continuation;
+                active_scan.current_relation_columns_started = true;
+                let more = active_scan.column_continuation.is_some()
+                    || active_scan.relation_continuation.is_some()
+                    || active_scan.schema_continuation.is_some();
+                let continuation = if more {
+                    let token = new_metadata_cursor_token(
+                        &mut active_scan.used_tokens,
+                        INFORMATION_SCHEMA_COLUMNS_CURSOR_TOKEN_KIND,
+                    )?;
+                    active_scan.continuation = Some(token);
+                    Some(InformationSchemaColumnsCursor { token })
+                } else {
+                    active_scan.continuation = None;
+                    None
+                };
+                self.active_information_schema_columns_scan =
+                    continuation.as_ref().map(|_| active_scan);
+                Ok(InformationSchemaColumnsScanPage {
+                    rows: page.rows,
+                    continuation,
+                })
+            } else {
+                let continuation = if active_scan.relation_continuation.is_some()
+                    || active_scan.schema_continuation.is_some()
+                {
+                    let token = new_metadata_cursor_token(
+                        &mut active_scan.used_tokens,
+                        INFORMATION_SCHEMA_COLUMNS_CURSOR_TOKEN_KIND,
+                    )?;
+                    active_scan.continuation = Some(token);
+                    Some(InformationSchemaColumnsCursor { token })
+                } else {
+                    None
+                };
+                self.active_information_schema_columns_scan =
+                    continuation.as_ref().map(|_| active_scan);
+                Ok(InformationSchemaColumnsScanPage {
+                    rows: Vec::new(),
+                    continuation,
+                })
+            }
         })();
         match result {
             Ok(page) => Ok(page),
@@ -4440,6 +4667,7 @@ impl<'db> InvocationTransaction<'db> {
         self.active_schema_scan = None;
         self.active_column_scan = None;
         self.active_information_schema_tables_scan = None;
+        self.active_information_schema_columns_scan = None;
         self.aborted = true;
         self.snapshot.take();
         if !self.outcome_recorded {

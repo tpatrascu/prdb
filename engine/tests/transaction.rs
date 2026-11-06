@@ -1166,97 +1166,106 @@ fn install_relation_discovery_catalog(
 }
 
 fn install_second_relation_column(database: &Database) -> Result<(), Box<dyn std::error::Error>> {
-    let table_id = [0x10; 16];
-    let column_id = [0x67; 16];
     let write = database.begin_write()?;
     {
         let mut catalog = write.open_table(CATALOG)?;
-        let column_key = catalog_id_key(6, column_id);
-        let column_value = catalog_record_payload(
-            6,
-            &column_key,
-            &[
-                CatalogField {
-                    tag: 1,
-                    wire_type: WireType::Id,
-                    payload: table_id.to_vec(),
-                },
-                CatalogField {
-                    tag: 2,
-                    wire_type: WireType::U32,
-                    payload: 1u32.to_le_bytes().to_vec(),
-                },
-                CatalogField {
-                    tag: 3,
-                    wire_type: WireType::Text,
-                    payload: b"value2".to_vec(),
-                },
-                CatalogField {
-                    tag: 4,
-                    wire_type: WireType::Id,
-                    payload: [0x40; 16].to_vec(),
-                },
-                CatalogField {
-                    tag: 5,
-                    wire_type: WireType::Bytes,
-                    payload: vec![0; 8],
-                },
-                CatalogField {
-                    tag: 6,
-                    wire_type: WireType::Bool,
-                    payload: vec![0],
-                },
-                CatalogField {
-                    tag: 8,
-                    wire_type: WireType::U16,
-                    payload: 0u16.to_le_bytes().to_vec(),
-                },
-                CatalogField {
-                    tag: 9,
-                    wire_type: WireType::U64,
-                    payload: 1u64.to_le_bytes().to_vec(),
-                },
-            ],
-        )?;
-        let object_key = catalog_id_key(2, column_id);
-        let object_value = catalog_record_payload(
-            2,
-            &object_key,
-            &[
-                CatalogField {
-                    tag: 1,
-                    wire_type: WireType::U16,
-                    payload: 4u16.to_le_bytes().to_vec(),
-                },
-                CatalogField {
-                    tag: 2,
-                    wire_type: WireType::Id,
-                    payload: table_id.to_vec(),
-                },
-                CatalogField {
-                    tag: 3,
-                    wire_type: WireType::Text,
-                    payload: b"value2".to_vec(),
-                },
-                CatalogField {
-                    tag: 4,
-                    wire_type: WireType::Id,
-                    payload: builtin_owner_id().to_vec(),
-                },
-                CatalogField {
-                    tag: 5,
-                    wire_type: WireType::U64,
-                    payload: 1u64.to_le_bytes().to_vec(),
-                },
-                CatalogField {
-                    tag: 6,
-                    wire_type: WireType::U16,
-                    payload: 1u16.to_le_bytes().to_vec(),
-                },
-            ],
-        )?;
-        catalog.insert(&column_key[..], &column_value[..])?;
-        catalog.insert(&object_key[..], &object_value[..])?;
+        for (column_id, table_id, ordinal, name, nullable) in [
+            ([0x67; 16], [0x10; 16], 1u32, b"value2".as_slice(), false),
+            (
+                [0x68; 16],
+                [0x20; 16],
+                0u32,
+                b"secret_value".as_slice(),
+                true,
+            ),
+        ] {
+            let column_key = catalog_id_key(6, column_id);
+            let column_value = catalog_record_payload(
+                6,
+                &column_key,
+                &[
+                    CatalogField {
+                        tag: 1,
+                        wire_type: WireType::Id,
+                        payload: table_id.to_vec(),
+                    },
+                    CatalogField {
+                        tag: 2,
+                        wire_type: WireType::U32,
+                        payload: ordinal.to_le_bytes().to_vec(),
+                    },
+                    CatalogField {
+                        tag: 3,
+                        wire_type: WireType::Text,
+                        payload: name.to_vec(),
+                    },
+                    CatalogField {
+                        tag: 4,
+                        wire_type: WireType::Id,
+                        payload: [0x40; 16].to_vec(),
+                    },
+                    CatalogField {
+                        tag: 5,
+                        wire_type: WireType::Bytes,
+                        payload: vec![0; 8],
+                    },
+                    CatalogField {
+                        tag: 6,
+                        wire_type: WireType::Bool,
+                        payload: vec![u8::from(nullable)],
+                    },
+                    CatalogField {
+                        tag: 8,
+                        wire_type: WireType::U16,
+                        payload: 0u16.to_le_bytes().to_vec(),
+                    },
+                    CatalogField {
+                        tag: 9,
+                        wire_type: WireType::U64,
+                        payload: 1u64.to_le_bytes().to_vec(),
+                    },
+                ],
+            )?;
+            let object_key = catalog_id_key(2, column_id);
+            let object_value = catalog_record_payload(
+                2,
+                &object_key,
+                &[
+                    CatalogField {
+                        tag: 1,
+                        wire_type: WireType::U16,
+                        payload: 4u16.to_le_bytes().to_vec(),
+                    },
+                    CatalogField {
+                        tag: 2,
+                        wire_type: WireType::Id,
+                        payload: table_id.to_vec(),
+                    },
+                    CatalogField {
+                        tag: 3,
+                        wire_type: WireType::Text,
+                        payload: name.to_vec(),
+                    },
+                    CatalogField {
+                        tag: 4,
+                        wire_type: WireType::Id,
+                        payload: builtin_owner_id().to_vec(),
+                    },
+                    CatalogField {
+                        tag: 5,
+                        wire_type: WireType::U64,
+                        payload: 1u64.to_le_bytes().to_vec(),
+                    },
+                    CatalogField {
+                        tag: 6,
+                        wire_type: WireType::U16,
+                        payload: 1u16.to_le_bytes().to_vec(),
+                    },
+                ],
+            )?;
+            catalog.insert(&column_key[..], &column_value[..])?;
+            catalog.insert(&object_key[..], &object_value[..])?;
+        }
     }
     write.commit()?;
     Ok(())
@@ -1830,6 +1839,89 @@ fn information_schema_columns_projects_declared_shape_in_pages()
             &grants,
             &[],
         ),
+        Err(TransactionError::InvalidMetadataRequest)
+    ));
+    Ok(())
+}
+
+#[test]
+fn information_schema_columns_scan_walks_visible_relation_pages()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    install_relation_discovery_catalog(&database)?;
+    install_second_relation_column(&database)?;
+    let mut invocation = InvocationTransaction::begin(&database, [209; 16], [9; 16], 9_999, 1, 64)?;
+    let first = invocation.scan_information_schema_columns(1, None)?;
+    assert_eq!(first.rows.len(), 1);
+    assert_eq!(first.rows[0].table_schema, "app");
+    assert_eq!(first.rows[0].table_name, "metrics");
+    assert_eq!(first.rows[0].column_name, "value");
+    assert_eq!(first.rows[0].ordinal_position, 1);
+    let cursor = first.continuation.expect("second column follows");
+    let cursor_bytes = cursor.to_bytes();
+    assert!(
+        prdb_engine::metadata_discovery::InformationSchemaColumnsCursor::from_bytes(&cursor_bytes)
+            .is_some()
+    );
+    assert!(prdb_engine::metadata_discovery::ColumnScanCursor::from_bytes(&cursor_bytes).is_none());
+    assert!(
+        prdb_engine::metadata_discovery::InformationSchemaTablesCursor::from_bytes(&cursor_bytes)
+            .is_none()
+    );
+    assert!(prdb_engine::metadata_discovery::SchemaScanCursor::from_bytes(&cursor_bytes).is_none());
+    assert!(
+        prdb_engine::metadata_discovery::RelationScanCursor::from_bytes(&cursor_bytes).is_none()
+    );
+    let second = invocation.scan_information_schema_columns(
+        1,
+        Some(
+            prdb_engine::metadata_discovery::InformationSchemaColumnsCursor::from_bytes(
+                &cursor_bytes,
+            )
+            .expect("columns scan token round trips"),
+        ),
+    )?;
+    assert_eq!(second.rows.len(), 1);
+    assert_eq!(second.rows[0].column_name, "value2");
+    assert_eq!(second.rows[0].ordinal_position, 2);
+    let next_relation = second
+        .continuation
+        .expect("visible secret relation follows");
+    let third = invocation.scan_information_schema_columns(1, Some(next_relation))?;
+    assert_eq!(third.rows.len(), 1);
+    assert_eq!(third.rows[0].table_schema, "app");
+    assert_eq!(third.rows[0].table_name, "secret");
+    assert_eq!(third.rows[0].column_name, "secret_value");
+    let next_schema = third.continuation.expect("visible public schema follows");
+    let fourth = invocation.scan_information_schema_columns(1, Some(next_schema))?;
+    assert!(fourth.rows.is_empty());
+    assert!(fourth.continuation.is_none());
+
+    let mut cross_invocation =
+        InvocationTransaction::begin(&database, [210; 16], [9; 16], 9_999, 1, 64)?;
+    assert!(matches!(
+        cross_invocation.scan_information_schema_columns(
+            1,
+            Some(
+                prdb_engine::metadata_discovery::InformationSchemaColumnsCursor::from_bytes(
+                    &cursor_bytes,
+                )
+                .expect("columns scan token round trips"),
+            ),
+        ),
+        Err(TransactionError::InvalidMetadataRequest)
+    ));
+
+    let mut replay_invocation =
+        InvocationTransaction::begin(&database, [211; 16], [9; 16], 9_999, 1, 64)?;
+    let first = replay_invocation.scan_information_schema_columns(1, None)?;
+    let first_cursor = first.continuation.expect("second column follows");
+    let second =
+        replay_invocation.scan_information_schema_columns(1, Some(first_cursor.clone()))?;
+    assert!(second.continuation.is_some());
+    assert!(matches!(
+        replay_invocation.scan_information_schema_columns(1, Some(first_cursor)),
         Err(TransactionError::InvalidMetadataRequest)
     ));
     Ok(())
