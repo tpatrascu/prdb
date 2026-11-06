@@ -30,6 +30,8 @@ Schema `CREATE` permits creating tables and taking ownership. Object ownership i
 
 `StorageManager::commit_authorized_object_grant_ddl` accepts ordinary privilege changes only: schema `USAGE`/`CREATE`, table/column data grants, and schema/table `ALTER`, `INDEX`, `MANAGE_POLICIES`, or `MANAGE_GRANTS`. It checks the current object owner, inherited `MANAGE_GRANTS`, or database-administrator membership for every affected schema/table. Database-scoped system privileges use a separate administrator-only route.
 
+`StorageManager::commit_authorized_policy_ddl` accepts row/cell policy and target changes, their expression/object/dependency records, and the required table write-epoch advances for existing tables. Each surviving policy must retain at least one recipient. For every affected table, the actor must own the table through the inherited role closure or hold inherited `MANAGE_POLICIES` directly on the table or its schema. The route guards the actor, membership graph, table/schema ownership records, and applicable grants through publication; successful DDL audit events must name the authenticated actor.
+
 Grant/revoke adds/removes the specified direct grant. Another inherited role grant can still provide authority; revoking one source is not an explicit deny. Policy restrictions provide mandatory intersections. Show grant provenance to authorized administrators.
 
 ## Policy Syntax

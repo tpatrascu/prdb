@@ -4,7 +4,7 @@ use crate::authorization::{
     MAX_MEMBERSHIP_EDGES, Membership, resolve_role_closure, validate_membership_graph,
 };
 use crate::catalog::{
-    CatalogRecord, decode_builtin_scalar_type, decode_registered_envelope,
+    CatalogRecord, decode_builtin_scalar_type, decode_policy_target, decode_registered_envelope,
     validate_builtin_type_profile,
 };
 use crate::ddl_fence::DdlFenceCoordinator;
@@ -139,6 +139,7 @@ enum CatalogAuthorizationMode {
     Trusted,
     IndexDdl,
     IdentityDdl,
+    PolicyDdl,
     MembershipDdl,
     SystemPrivilegeDdl,
     ObjectGrantDdl,
@@ -4546,6 +4547,32 @@ pub fn commit_authorized_identity_ddl_with_fences(
     )
 }
 
+/// Authorize and publish row/cell policy DDL for an actor authenticated by
+/// the trusted administrative channel. The actor must own each affected table
+/// or hold inherited `MANAGE_POLICIES` on it.
+pub fn commit_authorized_policy_ddl_with_fences(
+    database: &Database,
+    ddl_fences: &DdlFenceCoordinator,
+    invocation_id: [u8; 16],
+    authenticated_principal_id: [u8; 16],
+    retention_deadline_us: i64,
+    catalog_writes: &[CatalogWrite],
+    audit_events: &[AuditEvent],
+) -> Result<u64, CommitError> {
+    commit_catalog_and_audit_with_fences_inner(
+        database,
+        ddl_fences,
+        CatalogCommitRequest {
+            invocation_id,
+            principal_id: authenticated_principal_id,
+            retention_deadline_us,
+            catalog_writes,
+            audit_events,
+        },
+        CatalogAuthorizationMode::PolicyDdl,
+    )
+}
+
 /// Authorize and publish role-membership changes for a principal already
 /// authenticated by the trusted administrative channel. `MANAGE_ROLES` is
 /// sufficient except when the reserved database-administrator role is a
@@ -4684,6 +4711,23 @@ fn commit_catalog_and_audit_with_fences_inner(
                 catalog_writes,
                 audit_events,
             ) {
+                Ok(guards) => guards,
+                Err(error) => {
+                    if !matches!(error, CommitError::Storage(_)) {
+                        record_aborted_outcome(
+                            database,
+                            invocation_id,
+                            principal_id,
+                            retention_deadline_us,
+                        )?;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        CatalogAuthorizationMode::PolicyDdl => {
+            match policy_ddl_authority_guards(database, principal_id, catalog_writes, audit_events)
+            {
                 Ok(guards) => guards,
                 Err(error) => {
                     if !matches!(error, CommitError::Storage(_)) {
@@ -5028,6 +5072,11 @@ fn membership_ddl_authority_guards(
 ) -> Result<Vec<CatalogGuard>, CommitError> {
     if principal_id == [0; 16] {
         return Err(CommitError::DdlAuthorizationDenied);
+    }
+    if catalog_writes.is_empty()
+        || catalog_writes.len() > crate::authorization::MAX_AUTHORIZATION_INPUTS
+    {
+        return Err(CommitError::InvalidCatalog);
     }
     if audit_events.is_empty()
         || audit_events.iter().any(|event| {
@@ -5860,6 +5909,471 @@ fn catalog_fields_equal_except(
                 .fields
                 .iter()
                 .filter(|field| !ignored_tags.contains(&field.tag)))
+}
+
+/// Authorize policy DDL for an already authenticated administrative caller.
+/// Owners and principals with inherited `MANAGE_POLICIES` may change policies
+/// on each affected existing table.
+fn policy_ddl_authority_guards(
+    database: &Database,
+    principal_id: [u8; 16],
+    catalog_writes: &[CatalogWrite],
+    audit_events: &[AuditEvent],
+) -> Result<Vec<CatalogGuard>, CommitError> {
+    if principal_id == [0; 16] {
+        return Err(CommitError::DdlAuthorizationDenied);
+    }
+    if audit_events.is_empty()
+        || audit_events.iter().any(|event| {
+            event.actor_id != Some(principal_id)
+                || event.action != crate::audit::AuditAction::Ddl
+                || event.result != crate::audit::AuditResult::Succeeded
+        })
+    {
+        return Err(CommitError::InvalidAudit);
+    }
+
+    let read = database.begin_read().map_err(storage_error)?;
+    let catalog = read.open_table(CATALOG).map_err(storage_error)?;
+    let mut actual_writes = Vec::new();
+    for write in catalog_writes {
+        let family = write
+            .key
+            .get(..2)
+            .and_then(|bytes| <[u8; 2]>::try_from(bytes).ok())
+            .map(u16::from_be_bytes)
+            .ok_or(CommitError::InvalidCatalog)?;
+        if !matches!(family, 2 | 5 | 7 | 13 | 14 | 15) {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let current = catalog
+            .get(write.key.as_slice())
+            .map_err(storage_error)?
+            .map(|value| value.value().to_vec());
+        if current != write.payload {
+            actual_writes.push((family, write, current));
+        }
+    }
+
+    let mut changed_policies = HashSet::<[u8; 16]>::new();
+    let mut policy_tables = HashMap::<[u8; 16], (Option<[u8; 16]>, Option<[u8; 16]>)>::new();
+    let mut referenced_expressions = HashSet::<[u8; 16]>::new();
+    for (_, write, current) in actual_writes.iter().filter(|(family, _, _)| *family == 13) {
+        if write.key.len() != 19 || write.key[2] != 1 {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let policy_id: [u8; 16] = write.key[3..19]
+            .try_into()
+            .map_err(|_| CommitError::InvalidCatalog)?;
+        let current_table = current
+            .as_deref()
+            .map(|bytes| policy_table_id(&write.key, bytes))
+            .transpose()?;
+        let next_table = write
+            .payload
+            .as_deref()
+            .map(|bytes| policy_table_id(&write.key, bytes))
+            .transpose()?;
+        if current_table.is_some() && next_table.is_some() && current_table != next_table {
+            return Err(CommitError::InvalidCatalog);
+        }
+        for bytes in [current.as_deref(), write.payload.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            let record = decode_catalog_record(&write.key, bytes)?;
+            for tag in [5, 6] {
+                if let Some(field) = record.fields.iter().find(|field| field.tag == tag) {
+                    let expression_id: [u8; 16] = field
+                        .payload
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| CommitError::InvalidCatalog)?;
+                    referenced_expressions.insert(expression_id);
+                }
+            }
+        }
+        changed_policies.insert(policy_id);
+        policy_tables.insert(policy_id, (current_table, next_table));
+    }
+    if changed_policies.is_empty()
+        || changed_policies.len() > crate::authorization::MAX_AUTHORIZATION_INPUTS
+    {
+        return Err(CommitError::InvalidCatalog);
+    }
+
+    let mut target_policy_ids = HashSet::<[u8; 16]>::new();
+    for (_, write, current) in actual_writes.iter().filter(|(family, _, _)| *family == 14) {
+        if write.key.len() != 39 {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let policy_id: [u8; 16] = write.key[3..19]
+            .try_into()
+            .map_err(|_| CommitError::InvalidCatalog)?;
+        for bytes in [current.as_deref(), write.payload.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            let target = decode_policy_target(bytes).map_err(|_| CommitError::InvalidCatalog)?;
+            if target.policy_id != policy_id || bytes[32..] != write.key {
+                return Err(CommitError::InvalidCatalog);
+            }
+        }
+        target_policy_ids.insert(policy_id);
+    }
+    if target_policy_ids
+        .iter()
+        .any(|policy_id| !changed_policies.contains(policy_id))
+    {
+        return Err(CommitError::InvalidCatalog);
+    }
+
+    let mut changed_expressions = HashSet::<[u8; 16]>::new();
+    for (_, write, current) in actual_writes.iter().filter(|(family, _, _)| *family == 7) {
+        if write.key.len() != 19 || current.is_some() == write.payload.is_some() {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let expression_id: [u8; 16] = write.key[3..19]
+            .try_into()
+            .map_err(|_| CommitError::InvalidCatalog)?;
+        if !referenced_expressions.contains(&expression_id) {
+            return Err(CommitError::InvalidCatalog);
+        }
+        changed_expressions.insert(expression_id);
+    }
+
+    let mut object_states = HashMap::<[u8; 16], (u16, bool, bool)>::new();
+    for (_, write, current) in actual_writes.iter().filter(|(family, _, _)| *family == 2) {
+        if write.key.len() != 19 || current.is_some() == write.payload.is_some() {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let object_id: [u8; 16] = write.key[3..19]
+            .try_into()
+            .map_err(|_| CommitError::InvalidCatalog)?;
+        let kind = current
+            .as_deref()
+            .or(write.payload.as_deref())
+            .map(|bytes| catalog_field_u16(&write.key, bytes, 2, 1))
+            .transpose()?
+            .ok_or(CommitError::InvalidCatalog)?;
+        if !matches!(kind, 5 | 10) {
+            return Err(CommitError::InvalidCatalog);
+        }
+        if let Some(old) = current.as_deref()
+            && catalog_field_u16(&write.key, old, 2, 1)? != kind
+        {
+            return Err(CommitError::InvalidCatalog);
+        }
+        if let Some(next) = write.payload.as_deref()
+            && catalog_field_u16(&write.key, next, 2, 1)? != kind
+        {
+            return Err(CommitError::InvalidCatalog);
+        }
+        object_states.insert(
+            object_id,
+            (kind, current.is_some(), write.payload.is_some()),
+        );
+    }
+
+    for policy_id in &changed_policies {
+        let (current, next) = policy_tables
+            .get(policy_id)
+            .copied()
+            .ok_or(CommitError::InvalidCatalog)?;
+        let policy_write = actual_writes
+            .iter()
+            .find(|(family, write, _)| *family == 13 && write.key == id_catalog_key(13, *policy_id))
+            .ok_or(CommitError::InvalidCatalog)?;
+        let mut target_prefix = 14u16.to_be_bytes().to_vec();
+        target_prefix.push(1);
+        target_prefix.extend_from_slice(policy_id);
+        let mut final_targets = HashSet::<Vec<u8>>::new();
+        for entry in catalog
+            .range(target_prefix.as_slice()..)
+            .map_err(storage_error)?
+        {
+            let (key, _) = entry.map_err(storage_error)?;
+            let key = key.value().to_vec();
+            if !key.starts_with(&target_prefix) {
+                break;
+            }
+            if key.len() != 39 || !final_targets.insert(key) {
+                return Err(CommitError::InvalidCatalog);
+            }
+            if final_targets.len() > crate::authorization::MAX_AUTHORIZATION_INPUTS {
+                return Err(CommitError::InvalidCatalog);
+            }
+        }
+        for (_, target_write, _) in actual_writes
+            .iter()
+            .filter(|(family, write, _)| *family == 14 && write.key.starts_with(&target_prefix))
+        {
+            if target_write.payload.is_some() {
+                final_targets.insert(target_write.key.clone());
+            } else {
+                final_targets.remove(&target_write.key);
+            }
+        }
+        if policy_write.1.payload.is_some() == final_targets.is_empty() {
+            return Err(CommitError::InvalidCatalog);
+        }
+        if policy_write.2.is_some() != policy_write.1.payload.is_some() {
+            let object_state = object_states.get(policy_id);
+            if object_state
+                != Some(&(
+                    10,
+                    policy_write.2.is_some(),
+                    policy_write.1.payload.is_some(),
+                ))
+            {
+                return Err(CommitError::InvalidCatalog);
+            }
+        } else if object_states.contains_key(policy_id) {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let table_id = current.or(next).ok_or(CommitError::InvalidCatalog)?;
+        if table_id == [0; 16] {
+            return Err(CommitError::InvalidCatalog);
+        }
+    }
+    for expression_id in &changed_expressions {
+        let expression_write = actual_writes
+            .iter()
+            .find(|(family, write, _)| {
+                *family == 7 && write.key == id_catalog_key(7, *expression_id)
+            })
+            .ok_or(CommitError::InvalidCatalog)?;
+        if object_states.get(expression_id)
+            != Some(&(
+                5,
+                expression_write.2.is_some(),
+                expression_write.1.payload.is_some(),
+            ))
+        {
+            return Err(CommitError::InvalidCatalog);
+        }
+    }
+    if object_states.iter().any(|(object_id, (kind, _, _))| {
+        (*kind == 10 && !changed_policies.contains(object_id))
+            || (*kind == 5 && !changed_expressions.contains(object_id))
+    }) {
+        return Err(CommitError::InvalidCatalog);
+    }
+
+    let mut affected_tables = HashSet::<[u8; 16]>::new();
+    for (current_table, next_table) in policy_tables.values() {
+        affected_tables.extend(current_table.iter().copied());
+        affected_tables.extend(next_table.iter().copied());
+    }
+    for (_, write, current) in actual_writes.iter().filter(|(family, _, _)| *family == 5) {
+        if write.key.len() != 19 || current.is_none() || write.payload.is_none() {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let table_id: [u8; 16] = write.key[3..19]
+            .try_into()
+            .map_err(|_| CommitError::InvalidCatalog)?;
+        let next = decode_catalog_record(&write.key, write.payload.as_deref().unwrap())?;
+        let old = decode_catalog_record(&write.key, current.as_deref().unwrap())?;
+        if !affected_tables.contains(&table_id)
+            || !catalog_fields_equal_except(&old, &next, &[3])
+            || table_write_epoch(&write.key, write.payload.as_deref().unwrap())?
+                <= table_write_epoch(&write.key, current.as_deref().unwrap())?
+        {
+            return Err(CommitError::InvalidCatalog);
+        }
+    }
+
+    for (_, write, current) in actual_writes.iter().filter(|(family, _, _)| *family == 15) {
+        let bytes = current
+            .as_deref()
+            .or(write.payload.as_deref())
+            .ok_or(CommitError::InvalidCatalog)?;
+        let (dependent_id, _, kind) = decode_dependency_edge(&write.key, bytes)?;
+        if !matches!(kind, 2 | 5)
+            || !(changed_policies.contains(&dependent_id)
+                || kind == 2 && changed_expressions.contains(&dependent_id))
+        {
+            return Err(CommitError::InvalidCatalog);
+        }
+    }
+
+    let actor_key = id_catalog_key(10, principal_id);
+    let actor_bytes = catalog
+        .get(actor_key.as_slice())
+        .map_err(storage_error)?
+        .map(|value| value.value().to_vec())
+        .ok_or(CommitError::DdlAuthorizationDenied)?;
+    if decode_principal_kind(&actor_key, &actor_bytes)? != 1
+        || catalog_field_bytes(&actor_key, &actor_bytes, 10, 3)? != [1]
+    {
+        return Err(CommitError::DdlAuthorizationDenied);
+    }
+    principal_authority_epoch(&actor_key, &actor_bytes)?;
+    let mut guards = HashMap::<Vec<u8>, Option<Vec<u8>>>::new();
+    add_catalog_guard(&mut guards, actor_key, Some(actor_bytes));
+
+    let membership_prefix = 11u16.to_be_bytes();
+    let mut memberships = Vec::new();
+    let mut principal_ids = HashSet::from([principal_id]);
+    let mut membership_count = 0usize;
+    for entry in catalog
+        .range(membership_prefix.as_slice()..)
+        .map_err(storage_error)?
+    {
+        let (key, value) = entry.map_err(storage_error)?;
+        let key = key.value().to_vec();
+        if !key.starts_with(&membership_prefix) {
+            break;
+        }
+        membership_count += 1;
+        if membership_count > MAX_MEMBERSHIP_EDGES || key.len() != 36 {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let bytes = value.value().to_vec();
+        let membership = decode_membership_record(&key, &bytes)?;
+        if membership.member_id == [0; 16]
+            || membership.role_id == [0; 16]
+            || catalog_field_bytes(&key, &bytes, 11, 1)? == [0; 16]
+            || catalog_field_u64(&key, &bytes, 11, 2)? == 0
+        {
+            return Err(CommitError::InvalidCatalog);
+        }
+        principal_ids.insert(membership.member_id);
+        principal_ids.insert(membership.role_id);
+        memberships.push(membership);
+        add_catalog_guard(&mut guards, key, Some(bytes));
+    }
+    validate_membership_graph(&memberships).map_err(|_| CommitError::InvalidCatalog)?;
+    let mut principals = HashMap::<[u8; 16], Vec<u8>>::new();
+    for id in principal_ids {
+        let key = id_catalog_key(10, id);
+        let bytes = catalog
+            .get(key.as_slice())
+            .map_err(storage_error)?
+            .map(|value| value.value().to_vec())
+            .ok_or(CommitError::InvalidCatalog)?;
+        let kind = decode_principal_kind(&key, &bytes)?;
+        if catalog_field_u64(&key, &bytes, 10, 4)? == 0
+            || (id == principal_id
+                && (kind != 1 || catalog_field_bytes(&key, &bytes, 10, 3)? != [1]))
+            || (memberships.iter().any(|edge| edge.role_id == id) && kind != 2)
+        {
+            return Err(CommitError::InvalidCatalog);
+        }
+        principals.insert(id, bytes.clone());
+        add_catalog_guard(&mut guards, key, Some(bytes));
+    }
+    for edge in &memberships {
+        if decode_principal_kind(
+            &id_catalog_key(10, edge.role_id),
+            principals
+                .get(&edge.role_id)
+                .ok_or(CommitError::InvalidCatalog)?,
+        )? != 2
+        {
+            return Err(CommitError::InvalidCatalog);
+        }
+    }
+    let roles = resolve_role_closure(principal_id, &memberships)
+        .map_err(|_| CommitError::InvalidCatalog)?;
+    let mut authority_subjects = roles;
+    authority_subjects.insert(principal_id);
+
+    for table_id in &affected_tables {
+        let table_key = id_catalog_key(2, *table_id);
+        let table_bytes = catalog
+            .get(table_key.as_slice())
+            .map_err(storage_error)?
+            .map(|value| value.value().to_vec())
+            .ok_or(CommitError::InvalidCatalog)?;
+        if catalog_field_u16(&table_key, &table_bytes, 2, 1)? != 3 {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let owner_id: [u8; 16] = catalog_field_bytes(&table_key, &table_bytes, 2, 4)?
+            .try_into()
+            .map_err(|_| CommitError::InvalidCatalog)?;
+        if owner_id == [0; 16] {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let owner_key = id_catalog_key(10, owner_id);
+        let owner_bytes = catalog
+            .get(owner_key.as_slice())
+            .map_err(storage_error)?
+            .map(|value| value.value().to_vec())
+            .ok_or(CommitError::InvalidCatalog)?;
+        if !matches!(decode_principal_kind(&owner_key, &owner_bytes)?, 1 | 2) {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let table_record_key = id_catalog_key(5, *table_id);
+        let table_record_bytes = catalog
+            .get(table_record_key.as_slice())
+            .map_err(storage_error)?
+            .map(|value| value.value().to_vec())
+            .ok_or(CommitError::InvalidCatalog)?;
+        let schema_id: [u8; 16] =
+            catalog_field_bytes(&table_record_key, &table_record_bytes, 5, 1)?
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?;
+        if schema_id == [0; 16] {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let schema_key = id_catalog_key(2, schema_id);
+        let schema_bytes = catalog
+            .get(schema_key.as_slice())
+            .map_err(storage_error)?
+            .map(|value| value.value().to_vec())
+            .ok_or(CommitError::InvalidCatalog)?;
+        if catalog_field_u16(&schema_key, &schema_bytes, 2, 1)? != 1 {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let schema_record_key = id_catalog_key(3, schema_id);
+        let schema_record_bytes = catalog
+            .get(schema_record_key.as_slice())
+            .map_err(storage_error)?
+            .map(|value| value.value().to_vec())
+            .ok_or(CommitError::InvalidCatalog)?;
+        decode_catalog_record(&schema_record_key, &schema_record_bytes)?;
+        add_catalog_guard(&mut guards, table_key, Some(table_bytes));
+        add_catalog_guard(&mut guards, table_record_key, Some(table_record_bytes));
+        add_catalog_guard(&mut guards, owner_key, Some(owner_bytes));
+        add_catalog_guard(&mut guards, schema_key, Some(schema_bytes));
+        add_catalog_guard(&mut guards, schema_record_key, Some(schema_record_bytes));
+        if authority_subjects.contains(&owner_id) {
+            continue;
+        }
+        let mut has_manage_policies = false;
+        for subject in &authority_subjects {
+            for object_id in [*table_id, schema_id] {
+                let key = grant_key(*subject, object_id, 10, 1, object_id);
+                let bytes = catalog
+                    .get(key.as_slice())
+                    .map_err(storage_error)?
+                    .map(|value| value.value().to_vec());
+                if let Some(bytes) = &bytes {
+                    if catalog_field_bytes(&key, bytes, 12, 1)? == [0; 16]
+                        || catalog_field_u64(&key, bytes, 12, 2)? == 0
+                    {
+                        return Err(CommitError::InvalidCatalog);
+                    }
+                    has_manage_policies = true;
+                }
+                add_catalog_guard(&mut guards, key, bytes);
+            }
+        }
+        if !has_manage_policies {
+            return Err(CommitError::DdlAuthorizationDenied);
+        }
+    }
+
+    let mut guards = guards
+        .into_iter()
+        .map(|(key, expected_value)| CatalogGuard {
+            key,
+            expected_value,
+        })
+        .collect::<Vec<_>>();
+    guards.sort_by(|left, right| left.key.cmp(&right.key));
+    Ok(guards)
 }
 
 /// Authorize user/role creation, rename, and login-state changes. Drops are

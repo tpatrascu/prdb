@@ -4149,6 +4149,426 @@ fn storage_manager_authorizes_object_grants_for_owners_and_manage_grants_holders
 }
 
 #[test]
+fn storage_manager_authorizes_policy_ddl_for_owners_and_inherited_manage_policies()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::authorization::Expr;
+    use prdb_engine::catalog::{PolicyTarget, encode_policy_target};
+    use prdb_engine::tuple::ScalarValue;
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let table_owner = id(0x30);
+    let policy_manager = id(0x31);
+    let denied_user = id(0x32);
+    let manager_role = id(0x33);
+    let schema_id = id(0x34);
+    let table_id = id(0x35);
+    let policy_id = id(0x36);
+    let expression_id = id(0x37);
+    let admin_role = builtin_owner_id();
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+
+    let schema_object = object_write_with_parent_and_owner_and_name(
+        schema_id,
+        1,
+        None,
+        admin_role,
+        "policy_schema",
+    );
+    let table_object = object_write_with_parent_and_owner_and_name(
+        table_id,
+        3,
+        Some(schema_id),
+        table_owner,
+        "policy_table",
+    );
+    let policy_key = id_catalog_key(13, policy_id);
+    let table_key = id_catalog_key(5, table_id);
+    let policy_payload_for =
+        |target_policy_id: [u8; 16], target_expression_id: [u8; 16], epoch: u64| {
+            let key = id_catalog_key(13, target_policy_id);
+            encode_envelope(
+                &family_schema(13).unwrap(),
+                &key,
+                &[
+                    CatalogField {
+                        tag: 1,
+                        wire_type: WireType::Id,
+                        payload: table_id.to_vec(),
+                    },
+                    CatalogField {
+                        tag: 2,
+                        wire_type: WireType::U16,
+                        payload: 1u16.to_le_bytes().to_vec(),
+                    },
+                    CatalogField {
+                        tag: 3,
+                        wire_type: WireType::U16,
+                        payload: 1u16.to_le_bytes().to_vec(),
+                    },
+                    CatalogField {
+                        tag: 4,
+                        wire_type: WireType::U16,
+                        payload: 1u16.to_le_bytes().to_vec(),
+                    },
+                    CatalogField {
+                        tag: 5,
+                        wire_type: WireType::Id,
+                        payload: target_expression_id.to_vec(),
+                    },
+                    CatalogField {
+                        tag: 7,
+                        wire_type: WireType::U64,
+                        payload: epoch.to_le_bytes().to_vec(),
+                    },
+                ],
+            )
+            .unwrap()
+        };
+    let policy_payload = |epoch| policy_payload_for(policy_id, expression_id, epoch);
+    let table_payload = |epoch: u64| {
+        table_write_with_versions(table_id, schema_id, 1, epoch)
+            .payload
+            .unwrap()
+    };
+    let policy_target_payload = encode_policy_target(&PolicyTarget {
+        policy_id,
+        kind: 2,
+        target_id: manager_role,
+    })?;
+    let policy_target = CatalogWrite {
+        key: policy_target_payload[32..].to_vec(),
+        expected_value: None,
+        payload: Some(policy_target_payload),
+    };
+    let mut setup_audit = audit_event(0x80);
+    setup_audit.actor_id = Some(admin_role);
+    let setup_writes = vec![
+        principal_write_with_name(table_owner, 1, 1, "policy_table_owner"),
+        object_write_with_name(table_owner, 8, "policy_table_owner"),
+        principal_write_with_name(policy_manager, 1, 1, "policy_manager"),
+        object_write_with_name(policy_manager, 8, "policy_manager"),
+        principal_write_with_name(denied_user, 1, 1, "policy_denied"),
+        object_write_with_name(denied_user, 8, "policy_denied"),
+        principal_write_with_name(manager_role, 2, 1, "policy_managers"),
+        object_write_with_name(manager_role, 9, "policy_managers"),
+        membership_write(policy_manager, manager_role),
+        dependency_write(policy_manager, manager_role, 5),
+        grant_write(manager_role, schema_id, 10, 1, schema_id, admin_role),
+        dependency_write(manager_role, schema_id, 5),
+        schema_object,
+        schema_write(schema_id),
+        table_object,
+        table_write_with_versions(table_id, schema_id, 1, 1),
+        dependency_write(table_id, schema_id, 1),
+        CatalogWrite {
+            key: policy_key.clone(),
+            expected_value: None,
+            payload: Some(policy_payload(1)),
+        },
+        object_write_with_parent_and_owner_and_name(
+            policy_id,
+            10,
+            None,
+            table_owner,
+            "visible_rows",
+        ),
+        expression_write(
+            expression_id,
+            3,
+            &[],
+            &Expr::Literal(Some(ScalarValue::Boolean(true))),
+        ),
+        object_write_with_parent_and_owner_and_name(
+            expression_id,
+            5,
+            None,
+            table_owner,
+            "visible_rows_expression",
+        ),
+        dependency_write(policy_id, expression_id, 2),
+        dependency_write(policy_id, manager_role, 5),
+        policy_target,
+    ];
+    assert_eq!(
+        storage.commit_catalog_and_audit(
+            id(0x80),
+            admin_role,
+            9_999,
+            &setup_writes,
+            &[setup_audit],
+        )?,
+        1
+    );
+
+    let change_policy = |policy_epoch: u64, table_epoch: u64| {
+        vec![
+            CatalogWrite {
+                key: policy_key.clone(),
+                expected_value: Some(policy_payload(policy_epoch - 1)),
+                payload: Some(policy_payload(policy_epoch)),
+            },
+            CatalogWrite {
+                key: table_key.clone(),
+                expected_value: Some(table_payload(table_epoch - 1)),
+                payload: Some(table_payload(table_epoch)),
+            },
+        ]
+    };
+    let policy_audit = |event_id, actor_id| {
+        let mut event = audit_event(event_id);
+        event.actor_id = Some(actor_id);
+        event.action = AuditAction::Ddl;
+        event.target_ids = vec![policy_id];
+        event
+    };
+    assert_eq!(
+        storage.commit_authorized_policy_ddl(
+            id(0x81),
+            table_owner,
+            9_999,
+            &change_policy(2, 2),
+            &[policy_audit(0x81, table_owner)],
+        )?,
+        2
+    );
+    assert_eq!(
+        storage.commit_authorized_policy_ddl(
+            id(0x82),
+            policy_manager,
+            9_999,
+            &change_policy(3, 3),
+            &[policy_audit(0x82, policy_manager)],
+        )?,
+        3
+    );
+
+    let added_policy_id = id(0x38);
+    let added_expression_id = id(0x39);
+    let added_policy_key = id_catalog_key(13, added_policy_id);
+    let added_policy_payload =
+        |epoch| policy_payload_for(added_policy_id, added_expression_id, epoch);
+    let added_policy_object = object_write_with_parent_and_owner_and_name(
+        added_policy_id,
+        10,
+        None,
+        table_owner,
+        "additional_rows",
+    );
+    let added_expression = expression_write(
+        added_expression_id,
+        3,
+        &[],
+        &Expr::Literal(Some(ScalarValue::Boolean(true))),
+    );
+    let added_expression_object = object_write_with_parent_and_owner_and_name(
+        added_expression_id,
+        5,
+        None,
+        table_owner,
+        "additional_rows_expression",
+    );
+    let added_target_payload = encode_policy_target(&PolicyTarget {
+        policy_id: added_policy_id,
+        kind: 2,
+        target_id: manager_role,
+    })?;
+    let added_target = CatalogWrite {
+        key: added_target_payload[32..].to_vec(),
+        expected_value: None,
+        payload: Some(added_target_payload.clone()),
+    };
+    let added_expression_edge = dependency_write(added_policy_id, added_expression_id, 2);
+    let added_recipient_edge = dependency_write(added_policy_id, manager_role, 5);
+    let mut add_table_epoch = table_write_with_versions(table_id, schema_id, 1, 4);
+    add_table_epoch.expected_value = Some(table_payload(3));
+    let mut create_audit = policy_audit(0x84, table_owner);
+    create_audit.target_ids = vec![added_policy_id];
+    assert_eq!(
+        storage.commit_authorized_policy_ddl(
+            id(0x84),
+            table_owner,
+            9_999,
+            &[
+                CatalogWrite {
+                    key: added_policy_key.clone(),
+                    expected_value: None,
+                    payload: Some(added_policy_payload(1)),
+                },
+                added_policy_object.clone(),
+                added_expression.clone(),
+                added_expression_object.clone(),
+                added_target.clone(),
+                added_expression_edge.clone(),
+                added_recipient_edge.clone(),
+                add_table_epoch,
+            ],
+            &[create_audit.clone()],
+        )?,
+        4
+    );
+
+    let mut deleted_policy_object = added_policy_object.clone();
+    deleted_policy_object.expected_value = added_policy_object.payload.clone();
+    deleted_policy_object.payload = None;
+    let mut deleted_expression = added_expression.clone();
+    deleted_expression.expected_value = added_expression.payload.clone();
+    deleted_expression.payload = None;
+    let mut deleted_expression_object = added_expression_object.clone();
+    deleted_expression_object.expected_value = added_expression_object.payload.clone();
+    deleted_expression_object.payload = None;
+    let mut deleted_target = added_target.clone();
+    deleted_target.expected_value = Some(added_target_payload);
+    deleted_target.payload = None;
+    let mut deleted_expression_edge = added_expression_edge.clone();
+    deleted_expression_edge.expected_value = added_expression_edge.payload.clone();
+    deleted_expression_edge.payload = None;
+    let mut deleted_recipient_edge = added_recipient_edge.clone();
+    deleted_recipient_edge.expected_value = added_recipient_edge.payload.clone();
+    deleted_recipient_edge.payload = None;
+    let mut delete_table_epoch = table_write_with_versions(table_id, schema_id, 1, 5);
+    delete_table_epoch.expected_value = Some(table_payload(4));
+    let deleted_policy = CatalogWrite {
+        key: added_policy_key.clone(),
+        expected_value: Some(added_policy_payload(1)),
+        payload: None,
+    };
+    let mut delete_audit = policy_audit(0x85, table_owner);
+    delete_audit.target_ids = vec![added_policy_id];
+    assert_eq!(
+        storage.commit_authorized_policy_ddl(
+            id(0x85),
+            table_owner,
+            9_999,
+            &[
+                deleted_policy.clone(),
+                deleted_policy_object,
+                deleted_expression,
+                deleted_expression_object,
+                deleted_target,
+                deleted_expression_edge,
+                deleted_recipient_edge,
+                delete_table_epoch,
+            ],
+            &[delete_audit],
+        )?,
+        5
+    );
+
+    let unassigned_policy_id = id(0x40);
+    let unassigned_expression_id = id(0x41);
+    let unassigned_policy_key = id_catalog_key(13, unassigned_policy_id);
+    let unassigned_policy_payload =
+        policy_payload_for(unassigned_policy_id, unassigned_expression_id, 1);
+    let unassigned_policy_object = object_write_with_parent_and_owner_and_name(
+        unassigned_policy_id,
+        10,
+        None,
+        table_owner,
+        "unassigned_rows",
+    );
+    let unassigned_expression = expression_write(
+        unassigned_expression_id,
+        3,
+        &[],
+        &Expr::Literal(Some(ScalarValue::Boolean(true))),
+    );
+    let unassigned_expression_object = object_write_with_parent_and_owner_and_name(
+        unassigned_expression_id,
+        5,
+        None,
+        table_owner,
+        "unassigned_rows_expression",
+    );
+    let mut unassigned_table_epoch = table_write_with_versions(table_id, schema_id, 1, 6);
+    unassigned_table_epoch.expected_value = Some(table_payload(5));
+    let mut unassigned_audit = policy_audit(0x86, table_owner);
+    unassigned_audit.target_ids = vec![unassigned_policy_id];
+    assert_eq!(
+        storage.commit_authorized_policy_ddl(
+            id(0x86),
+            table_owner,
+            9_999,
+            &[
+                CatalogWrite {
+                    key: unassigned_policy_key.clone(),
+                    expected_value: None,
+                    payload: Some(unassigned_policy_payload),
+                },
+                unassigned_policy_object,
+                unassigned_expression,
+                unassigned_expression_object,
+                dependency_write(unassigned_policy_id, unassigned_expression_id, 2),
+                unassigned_table_epoch,
+            ],
+            &[unassigned_audit],
+        ),
+        Err(CommitError::InvalidCatalog)
+    );
+
+    assert_eq!(
+        storage.commit_authorized_policy_ddl(
+            id(0x83),
+            denied_user,
+            9_999,
+            &change_policy(4, 6),
+            &[policy_audit(0x83, denied_user)],
+        ),
+        Err(CommitError::DdlAuthorizationDenied)
+    );
+
+    assert_eq!(commit_sequence(&database)?, 5);
+    assert_eq!(
+        lookup_outcome(&database, id(0x81), table_owner, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Committed
+    );
+    assert_eq!(
+        lookup_outcome(&database, id(0x82), policy_manager, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Committed
+    );
+    assert_eq!(
+        lookup_outcome(&database, id(0x84), table_owner, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Committed
+    );
+    assert_eq!(
+        lookup_outcome(&database, id(0x85), table_owner, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Committed
+    );
+    assert_eq!(
+        lookup_outcome(&database, id(0x86), table_owner, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Aborted
+    );
+    assert_eq!(
+        lookup_outcome(&database, id(0x83), denied_user, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Aborted
+    );
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    assert_eq!(
+        catalog.get(policy_key.as_slice())?.unwrap().value(),
+        policy_payload(3).as_slice()
+    );
+    assert_eq!(
+        catalog.get(table_key.as_slice())?.unwrap().value(),
+        table_payload(5).as_slice()
+    );
+    assert!(catalog.get(added_policy_key.as_slice())?.is_none());
+    Ok(())
+}
+
+#[test]
 fn storage_manager_rejects_unique_index_backfill_with_duplicate_values()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();

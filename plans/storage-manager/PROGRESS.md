@@ -525,3 +525,12 @@
 - Verification: the prescribed Nix-shell workspace build, formatting check, Clippy with warnings denied, and workspace tests passed. Changed Markdown links and `git diff --check` passed.
 - Contract: [users and roles](../../specs/ddl-identity.md).
 - Remaining: role/user deletion needs durable ID tombstones, credential-backed final-admin checks need a verifier profile, and deterministic authorization-change race coverage remains open.
+
+## SM-5 dependency: policy DDL authorization — in progress
+
+- `StorageManager::commit_authorized_policy_ddl` authorizes row/cell policy and target changes on existing tables. The actor must own every affected table through its role closure or hold inherited `MANAGE_POLICIES` on the table or schema.
+- The route accepts paired policy/target/expression/object/dependency writes, requires table write-epoch changes, checks that surviving policies have recipients, and guards the actor, membership graph, owner/schema records, and applicable grants through publication. Requests are bounded by `MAX_AUTHORIZATION_INPUTS`; audit events must identify the authenticated DDL actor.
+- A real-redb regression covers table-owner and inherited schema-level `MANAGE_POLICIES` authorization, policy create/update/drop, denial without authority, empty-recipient rejection, epoch publication, and durable outcomes.
+- Verification: `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` passed in the prescribed Nix shell; all 210 tests across 18 test targets passed. Changed Markdown local links and `git diff --check` passed.
+- Contract: [permission DDL](../../specs/ddl-permissions.md).
+- Remaining: constraint DDL authorization, durable identity tombstones, credential-backed final-administrator checks, authenticated control-channel integration, and deterministic authorization-change race coverage remain open.
