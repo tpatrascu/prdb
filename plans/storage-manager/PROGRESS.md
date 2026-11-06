@@ -543,3 +543,11 @@
 - Contracts: [schema DDL](../../specs/ddl-schema.md) and [permission DDL](../../specs/ddl-permissions.md).
 - Verification: the prescribed Nix-shell workspace build, formatting check, Clippy with warnings denied, and workspace tests passed; all 211 tests across 18 test targets passed. Changed Markdown local links and `git diff --check` passed.
 - Remaining: authorization routes for NOT NULL, CHECK, PRIMARY KEY, and UNIQUE DDL; deterministic authorization-change race coverage; and authenticated control-channel integration remain open.
+
+## SM-5 dependency: bounded NOT NULL validation — in progress
+
+- A catalog commit that changes an existing column from nullable to non-nullable scans persisted rows under the table DDL fence, rejects NULL values, and aborts atomically when the 65,536-row or 64 MiB row-record bound is exceeded. Nullability-only changes preserve the tuple schema version and advance the table write epoch.
+- A real-redb regression verifies rejection without publication when a stored row contains NULL, then accepts the DDL after the row is updated and confirms startup validation succeeds.
+- Verification: prescribed Nix-shell build, formatting, Clippy with warnings denied, and all 212 workspace tests passed.
+- Contract updates: [schema DDL](../../specs/ddl-schema.md) and [catalog payloads](../../specs/catalog-payloads.md).
+- Remaining: authorized DDL routing for NOT NULL and the other constraint kinds remains open.

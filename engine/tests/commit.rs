@@ -2330,6 +2330,160 @@ fn catalog_commit_requires_backing_index_dependency_edges() -> Result<(), Box<dy
 }
 
 #[test]
+fn catalog_commit_rejects_not_null_when_an_existing_row_is_null()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let schema_id = id(80);
+    let table_id = id(82);
+    let column_id = id(84);
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(0xa1),
+            id(9),
+            9_999,
+            &foreign_key_catalog_writes(true, true),
+            &[audit_event(0xa1)],
+        )?,
+        1
+    );
+    let parent_tuple = encode_tuple(
+        &[ColumnSchema {
+            scalar_type: ScalarType::Bytea,
+            nullable: false,
+        }],
+        1,
+        &[Some(ScalarValue::Bytea(b"present".to_vec()))],
+    )?;
+    let parent_key = table_row_key(id(81), id(0xa9));
+    let parent_index_key = prdb_engine::index_key::derive_index_key(
+        id(87),
+        id(0xa9),
+        1,
+        &[id(83)],
+        &[ColumnSchema {
+            scalar_type: ScalarType::Bytea,
+            nullable: false,
+        }],
+        &parent_tuple,
+        &[id(83)],
+    )?
+    .key;
+    assert_eq!(
+        commit_rows_and_indexes(
+            &database,
+            id(0xa2),
+            id(9),
+            9_999,
+            &[RowWrite {
+                key: parent_key,
+                expected_version: None,
+                payload: Some(parent_tuple),
+            }],
+            &[IndexWrite {
+                key: parent_index_key,
+                row_key: parent_key,
+                expected_version: None,
+                present: true,
+                unique: true,
+                null_exempt: false,
+            }],
+        )?,
+        2
+    );
+    let null_tuple = encode_tuple(
+        &[ColumnSchema {
+            scalar_type: ScalarType::Bytea,
+            nullable: true,
+        }],
+        1,
+        &[None],
+    )?;
+    assert_eq!(
+        commit_rows(
+            &database,
+            id(0xa8),
+            id(9),
+            9_999,
+            &[RowWrite {
+                key: table_row_key(table_id, id(0xa3)),
+                expected_version: None,
+                payload: Some(null_tuple),
+            }],
+        )?,
+        3
+    );
+
+    let row_key = table_row_key(table_id, id(0xa3));
+    let mut column = column_write_not_null(column_id, table_id, "object_84");
+    column.expected_value = column_write(column_id, table_id, "object_84").payload;
+    let mut table = table_write_with_versions(table_id, schema_id, 1, 2);
+    table.expected_value = table_write(table_id, schema_id).payload;
+    let constraint_id = id(0xa4);
+    let changes = [
+        constraint_write(constraint_id, table_id, 1, &[column_id], None, &[], None),
+        object_write(constraint_id, 6),
+        column,
+        table,
+    ];
+    assert_eq!(
+        storage.commit_catalog_and_audit(id(0xa5), id(9), 9_999, &changes, &[audit_event(0xa5)],),
+        Err(CommitError::NotNullViolation)
+    );
+    assert_eq!(commit_sequence(&database)?, 3);
+    assert_eq!(
+        lookup_outcome(&database, id(0xa5), id(9), 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Aborted
+    );
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(0xa0),
+            id(9),
+            9_999,
+            &changes,
+            &[audit_event(0xa0)],
+        ),
+        Err(CommitError::NotNullViolation)
+    );
+    assert_eq!(commit_sequence(&database)?, 3);
+
+    let non_null_tuple = encode_tuple(
+        &[ColumnSchema {
+            scalar_type: ScalarType::Bytea,
+            nullable: true,
+        }],
+        1,
+        &[Some(ScalarValue::Bytea(b"present".to_vec()))],
+    )?;
+    assert_eq!(
+        commit_rows(
+            &database,
+            id(0xa6),
+            id(9),
+            9_999,
+            &[RowWrite {
+                key: row_key,
+                expected_version: Some(3),
+                payload: Some(non_null_tuple),
+            }],
+        )?,
+        4
+    );
+    assert_eq!(
+        storage.commit_catalog_and_audit(id(0xa7), id(9), 9_999, &changes, &[audit_event(0xa7)],)?,
+        5
+    );
+    assert_eq!(commit_sequence(&database)?, 5);
+    StorageManager::new(&database, Duration::from_millis(100))?;
+    Ok(())
+}
+
+#[test]
 fn catalog_commit_requires_expression_reference_dependency_edges()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::authorization::Expr;

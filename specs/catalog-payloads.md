@@ -54,7 +54,7 @@ Grant target-scope is object=1 or column=2; object scope repeats object ID as ta
 
 ## Field Registry
 
-Notation `tag:name TYPE`; `?` means optional, all other fields are required. IDs embedded only in the key need not be repeated as TLVs. Epochs and schema versions are nonzero u64 values advanced under commit serialization. Semantic constraints from DDL remain mandatory in addition to byte validation.
+Notation `tag:name TYPE`; `?` means optional, all other fields are required. IDs embedded only in the key need not be repeated as TLVs. Epochs and schema versions are nonzero u64 values updated under commit serialization. Column-record changes advance the table schema version except nullability-only changes, which preserve the tuple schema version and advance the table write epoch. Semantic constraints from DDL remain mandatory in addition to byte validation.
 
 | Family | Tags |
 | --- | --- |
