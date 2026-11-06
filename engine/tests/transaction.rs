@@ -1627,6 +1627,176 @@ fn invocation_sees_own_writes_and_commits_against_its_pinned_snapshot()
 }
 
 #[test]
+fn authorized_row_scan_pages_over_the_pinned_snapshot_and_private_overlay()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let columns = [ColumnSchema {
+        scalar_type: ScalarType::Text,
+        nullable: false,
+    }];
+    let column_id = [0x22; 16];
+    let column_ids = [column_id];
+    let schema_id = [0x23; 16];
+    let table_id = id(0).table;
+    let first = encode_tuple(&columns, 1, &[Some(ScalarValue::Text("first".to_owned()))])?;
+    let third = encode_tuple(&columns, 1, &[Some(ScalarValue::Text("third".to_owned()))])?;
+    let mut seed = InvocationTransaction::begin(&database, [0x31; 16], [9; 16], 9_999, 8, 512)?;
+    seed.stage_put(id(1), &first)?;
+    seed.stage_put(id(3), &third)?;
+    seed.commit()?;
+
+    let context = AuthorizationContext {
+        principal_id: [9; 16],
+        role_ids: std::collections::HashSet::new(),
+        scope: std::collections::HashSet::from([
+            (Operation::Usage, AccessTarget::Schema(schema_id)),
+            (Operation::Select, AccessTarget::Table(table_id)),
+            (
+                Operation::Select,
+                AccessTarget::Column {
+                    table_id,
+                    column_id,
+                },
+            ),
+        ]),
+    };
+    let grants = [
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Usage,
+            target: AccessTarget::Schema(schema_id),
+        },
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Select,
+            target: AccessTarget::Column {
+                table_id,
+                column_id,
+            },
+        },
+    ];
+    let allow = Policy {
+        subjects: vec![Subject::Principal([9; 16])],
+        operation: Operation::Select,
+        target: AccessTarget::Table(table_id),
+        effect: Effect::Allow,
+        using: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+        with_check: None,
+    };
+    let cell_allow = Policy {
+        target: AccessTarget::Column {
+            table_id,
+            column_id,
+        },
+        ..allow.clone()
+    };
+    let policies = [allow, cell_allow];
+    let projection = AuthorizedProjection {
+        columns: &columns,
+        column_ids: &column_ids,
+        schema_version: 1,
+        schema_id,
+        context: &context,
+        grants: &grants,
+        policies: &policies,
+        checks: &[],
+        policy_driving_columns: &[],
+        dependencies: &[],
+    };
+
+    let mut invocation =
+        InvocationTransaction::begin(&database, [0x32; 16], [9; 16], 9_999, 8, 512)?;
+    invocation.stage_delete(id(1))?;
+    invocation.stage_put(
+        id(2),
+        &encode_tuple(&columns, 1, &[Some(ScalarValue::Text("second".to_owned()))])?,
+    )?;
+    invocation.stage_put(
+        id(3),
+        &encode_tuple(
+            &columns,
+            1,
+            &[Some(ScalarValue::Text("changed".to_owned()))],
+        )?,
+    )?;
+    commit_rows(
+        &database,
+        [0x33; 16],
+        [9; 16],
+        9_999,
+        &[RowWrite {
+            key: key(id(4)),
+            expected_version: None,
+            payload: Some(encode_tuple(
+                &columns,
+                1,
+                &[Some(ScalarValue::Text("concurrent".to_owned()))],
+            )?),
+        }],
+    )?;
+
+    let first_page = invocation.scan_authorized(table_id, None, 2, &projection)?;
+    assert!(first_page.continuation.is_some());
+    assert_eq!(first_page.rows.len(), 1);
+    assert_eq!(first_page.rows[0].0, id(2));
+    assert_eq!(
+        first_page.rows[0].1,
+        vec![SanitizedCell::Value(ScalarValue::Text("second".to_owned()))]
+    );
+
+    let second_page =
+        invocation.scan_authorized(table_id, first_page.continuation.as_ref(), 2, &projection)?;
+    assert!(second_page.continuation.is_none());
+    assert_eq!(second_page.rows.len(), 1);
+    assert_eq!(second_page.rows[0].0, id(3));
+    assert_eq!(
+        second_page.rows[0].1,
+        vec![SanitizedCell::Value(ScalarValue::Text(
+            "changed".to_owned()
+        ))]
+    );
+    invocation.abort()?;
+
+    let mut active_cursor =
+        InvocationTransaction::begin(&database, [0x35; 16], [9; 16], 9_999, 8, 512)?;
+    let page = active_cursor.scan_authorized(table_id, None, 1, &projection)?;
+    assert!(page.continuation.is_some());
+    assert!(matches!(
+        active_cursor.stage_put(id(5), &first),
+        Err(TransactionError::ScanStillActive)
+    ));
+
+    let mut unclosed_cursor =
+        InvocationTransaction::begin(&database, [0x36; 16], [9; 16], 9_999, 8, 512)?;
+    let page = unclosed_cursor.scan_authorized(table_id, None, 1, &projection)?;
+    assert!(page.continuation.is_some());
+    assert!(matches!(
+        unclosed_cursor.commit(),
+        Err(TransactionError::ScanStillActive)
+    ));
+
+    let mut changed_authority =
+        InvocationTransaction::begin(&database, [0x37; 16], [9; 16], 9_999, 8, 512)?;
+    let page = changed_authority.scan_authorized(table_id, None, 1, &projection)?;
+    let no_grants: [Grant; 0] = [];
+    let changed_projection = AuthorizedProjection {
+        grants: &no_grants,
+        ..projection
+    };
+    assert!(matches!(
+        changed_authority.scan_authorized(
+            table_id,
+            page.continuation.as_ref(),
+            1,
+            &changed_projection
+        ),
+        Err(TransactionError::InvalidScanRequest)
+    ));
+    Ok(())
+}
+
+#[test]
 fn invocation_auto_indexes_row_writes() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;

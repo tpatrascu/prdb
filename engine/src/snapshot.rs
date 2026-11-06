@@ -6,6 +6,24 @@ use crate::schema::{CATALOG, ENGINE_META, INDEXES, ROWS};
 use redb::ReadTransaction;
 
 pub const MAX_CATALOG_FAMILY_SCAN: usize = 65_536;
+pub(crate) const MAX_ROW_SCAN_PAGE: usize = 1_024;
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum SnapshotError {
+    InvalidTableId,
+    InvalidCursor,
+    InvalidScanLimit,
+    InvalidRowKey,
+    Storage(String),
+}
+
+impl std::fmt::Display for SnapshotError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "snapshot scan failed: {self:?}")
+    }
+}
+
+impl std::error::Error for SnapshotError {}
 
 /// Owns one redb read transaction for the lifetime of the invocation snapshot.
 pub struct RowSnapshot {
@@ -30,6 +48,65 @@ impl RowSnapshot {
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
         let table = self.transaction.open_table(ROWS)?;
         Ok(table.get(key)?.map(|value| value.value().to_vec()))
+    }
+
+    /// Return a bounded, ordered page of row IDs from this pinned snapshot.
+    /// A full page is reported as incomplete; callers can resume after its last
+    /// row ID, and an empty follow-up page confirms completion.
+    pub(crate) fn scan_row_ids_after(
+        &self,
+        table_id: [u8; 16],
+        after_row_id: Option<[u8; 16]>,
+        limit: usize,
+    ) -> Result<(Vec<[u8; 16]>, bool), SnapshotError> {
+        if table_id == [0; 16] {
+            return Err(SnapshotError::InvalidTableId);
+        }
+        if after_row_id.is_some_and(|row_id| row_id == [0; 16]) {
+            return Err(SnapshotError::InvalidCursor);
+        }
+        if limit == 0 || limit > MAX_ROW_SCAN_PAGE {
+            return Err(SnapshotError::InvalidScanLimit);
+        }
+
+        let mut start_key = Vec::with_capacity(32);
+        start_key.extend_from_slice(&table_id);
+        if let Some(row_id) = after_row_id {
+            start_key.extend_from_slice(&row_id);
+        }
+        let table = self
+            .transaction
+            .open_table(ROWS)
+            .map_err(|error| SnapshotError::Storage(error.to_string()))?;
+        let mut row_ids = Vec::with_capacity(limit);
+        for entry in table
+            .range::<&[u8]>(start_key.as_slice()..)
+            .map_err(|error| SnapshotError::Storage(error.to_string()))?
+        {
+            let (key, _) = entry.map_err(|error| SnapshotError::Storage(error.to_string()))?;
+            let key = key.value();
+            if !key.starts_with(&table_id) {
+                break;
+            }
+            if key.len() != 32 {
+                return Err(SnapshotError::InvalidRowKey);
+            }
+            let row_id: [u8; 16] = key[16..]
+                .try_into()
+                .map_err(|_| SnapshotError::InvalidRowKey)?;
+            if row_id == [0; 16] {
+                return Err(SnapshotError::InvalidRowKey);
+            }
+            if after_row_id.is_some_and(|after| row_id <= after) {
+                continue;
+            }
+            row_ids.push(row_id);
+            if row_ids.len() == limit {
+                break;
+            }
+        }
+        let complete = row_ids.len() < limit;
+        Ok((row_ids, complete))
     }
 
     /// Read one logical index locator from this invocation's pinned snapshot.

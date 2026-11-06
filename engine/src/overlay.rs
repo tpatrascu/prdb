@@ -88,6 +88,29 @@ impl Overlay {
         }))
     }
 
+    /// Return an ordered, bounded set of staged row IDs for one table. Values
+    /// are resolved later through `read`, preserving overlay ownership rules.
+    pub(crate) fn row_ids_after(
+        &self,
+        table_id: [u8; 16],
+        after_row_id: Option<[u8; 16]>,
+        limit: usize,
+    ) -> Result<(Vec<[u8; 16]>, bool), OverlayError> {
+        if self.aborted {
+            return Err(OverlayError::Aborted);
+        }
+        let mut row_ids = self
+            .rows
+            .keys()
+            .filter(|id| id.table == table_id && after_row_id.is_none_or(|after| id.row > after))
+            .map(|id| id.row)
+            .collect::<Vec<_>>();
+        row_ids.sort_unstable();
+        let complete = row_ids.len() < limit;
+        row_ids.truncate(limit);
+        Ok((row_ids, complete))
+    }
+
     /// Read the latest staged value first, falling back to the caller's pinned snapshot.
     /// The snapshot lookup is only invoked when this overlay has no entry for the row.
     pub fn read<'overlay, 'snapshot, F>(

@@ -22,7 +22,7 @@ use crate::outcome::{InvocationOutcome, OutcomeStatus};
 use crate::overlay::{Overlay, OverlayError, ResolvedRow, RowId, StagedRow};
 use crate::row_record::{RowRecord, RowRecordError};
 use crate::schema::{ENGINE_META, OUTCOMES};
-use crate::snapshot::{MAX_CATALOG_FAMILY_SCAN, RowSnapshot};
+use crate::snapshot::{MAX_CATALOG_FAMILY_SCAN, MAX_ROW_SCAN_PAGE, RowSnapshot, SnapshotError};
 use crate::storage_manager::InvocationAdmissionPermit;
 use crate::tuple::{
     ColumnSchema, FieldPatch, ScalarType, TupleError, apply_patch, decode_tuple, encode_tuple,
@@ -55,6 +55,9 @@ pub enum TransactionError {
     GeneratedIdentityUnsupported,
     ConstraintViolation,
     IndexOverlayLimitExceeded,
+    InvalidScanRequest,
+    CorruptRowKey,
+    ScanStillActive,
     CorruptCatalog,
     Authorization(AuthorizationError),
     Aborted,
@@ -100,6 +103,74 @@ pub struct CatalogIndexDefinition {
     pub unique: bool,
 }
 
+/// Opaque continuation for a row scan, scoped to the transaction that produced it.
+#[derive(Clone)]
+pub struct RowScanCursor {
+    invocation_id: [u8; 16],
+    table_id: [u8; 16],
+    after_row_id: [u8; 16],
+}
+
+/// One bounded authorized row-scan page.
+#[derive(Clone)]
+pub struct AuthorizedRowScanPage {
+    pub rows: Vec<(RowId, Vec<SanitizedCell>)>,
+    pub continuation: Option<RowScanCursor>,
+}
+
+#[derive(Clone)]
+struct ActiveRowScan {
+    table_id: [u8; 16],
+    after_row_id: [u8; 16],
+    authority: ScanAuthority,
+}
+
+#[derive(Clone)]
+struct ScanAuthority {
+    columns: Vec<ColumnSchema>,
+    column_ids: Vec<[u8; 16]>,
+    schema_version: u64,
+    schema_id: [u8; 16],
+    context: AuthorizationContext,
+    grants: Vec<Grant>,
+    policies: Vec<Policy>,
+    checks: Vec<Expr>,
+    policy_driving_columns: Vec<[u8; 16]>,
+    dependencies: Vec<AuthorityDependency>,
+}
+
+impl ScanAuthority {
+    fn capture(projection: &AuthorizedProjection<'_>) -> Self {
+        Self {
+            columns: projection.columns.to_vec(),
+            column_ids: projection.column_ids.to_vec(),
+            schema_version: projection.schema_version,
+            schema_id: projection.schema_id,
+            context: projection.context.clone(),
+            grants: projection.grants.to_vec(),
+            policies: projection.policies.to_vec(),
+            checks: projection.checks.to_vec(),
+            policy_driving_columns: projection.policy_driving_columns.to_vec(),
+            dependencies: projection.dependencies.to_vec(),
+        }
+    }
+
+    fn matches(&self, projection: &AuthorizedProjection<'_>) -> bool {
+        self.columns == projection.columns
+            && self.column_ids == projection.column_ids
+            && self.schema_version == projection.schema_version
+            && self.schema_id == projection.schema_id
+            && self.context.principal_id == projection.context.principal_id
+            && self.context.role_ids == projection.context.role_ids
+            && self.context.scope == projection.context.scope
+            && self.grants == projection.grants
+            && self.policies == projection.policies
+            && self.checks == projection.checks
+            && self.policy_driving_columns == projection.policy_driving_columns
+            && self.dependencies == projection.dependencies
+    }
+}
+
 impl std::fmt::Display for TransactionError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "invocation transaction failed: {self:?}")
@@ -143,6 +214,7 @@ pub struct InvocationTransaction<'db> {
     coordination: InvocationCoordination,
     aborted: bool,
     outcome_recorded: bool,
+    active_scan: Option<ActiveRowScan>,
 }
 
 pub(crate) struct InvocationCoordination {
@@ -296,6 +368,7 @@ impl<'db> InvocationTransaction<'db> {
             coordination,
             aborted: false,
             outcome_recorded: false,
+            active_scan: None,
         })
     }
 
@@ -359,6 +432,109 @@ impl<'db> InvocationTransaction<'db> {
         })();
         match result {
             Ok(projected) => Ok(projected),
+            Err(error) => {
+                self.abort()?;
+                Err(error)
+            }
+        }
+    }
+
+    /// Scan a bounded page from the invocation snapshot plus its private
+    /// overlay, then apply the pinned SELECT policy and cell projection to
+    /// each resolved row. Full pages require a follow-up call to confirm EOF.
+    pub fn scan_authorized(
+        &mut self,
+        table_id: [u8; 16],
+        cursor: Option<&RowScanCursor>,
+        max_scanned: usize,
+        projection: &AuthorizedProjection<'_>,
+    ) -> Result<AuthorizedRowScanPage, TransactionError> {
+        let result = (|| {
+            if table_id == [0; 16]
+                || max_scanned == 0
+                || max_scanned > MAX_ROW_SCAN_PAGE
+                || projection.columns.is_empty()
+                || projection.columns.len() != projection.column_ids.len()
+                || projection.columns.len() > crate::tuple::MAX_COLUMNS
+                || projection.schema_version == 0
+                || projection.schema_id == [0; 16]
+                || projection.column_ids.contains(&[0; 16])
+                || projection.grants.len() > crate::authorization::MAX_AUTHORIZATION_INPUTS
+                || projection.policies.len() > crate::authorization::MAX_AUTHORIZATION_INPUTS
+                || projection.checks.len() > crate::authorization::MAX_AUTHORIZATION_INPUTS
+                || projection.policy_driving_columns.len()
+                    > crate::authorization::MAX_AUTHORIZATION_INPUTS
+                || projection.dependencies.len() > crate::authorization::MAX_AUTHORIZATION_INPUTS
+            {
+                return Err(TransactionError::InvalidScanRequest);
+            }
+            let after_row_id = cursor.map(|cursor| cursor.after_row_id);
+            match self.active_scan.as_ref() {
+                Some(active)
+                    if active.table_id == table_id
+                        && Some(active.after_row_id) == after_row_id
+                        && cursor.is_some_and(|cursor| {
+                            cursor.invocation_id == self.invocation_id
+                                && cursor.table_id == table_id
+                        })
+                        && active.authority.matches(projection) => {}
+                Some(_) => return Err(TransactionError::InvalidScanRequest),
+                None if after_row_id.is_some() => {
+                    return Err(TransactionError::InvalidScanRequest);
+                }
+                None => {}
+            }
+            self.capture_authority_dependencies(projection.context, projection.dependencies)?;
+            let (snapshot_ids, snapshot_complete) = {
+                self.pinned_snapshot()?
+                    .scan_row_ids_after(table_id, after_row_id, max_scanned)
+                    .map_err(map_snapshot_scan_error)?
+            };
+            let (overlay_ids, overlay_complete) =
+                self.overlay
+                    .row_ids_after(table_id, after_row_id, max_scanned)?;
+
+            let mut row_ids = snapshot_ids;
+            row_ids.extend(overlay_ids);
+            row_ids.sort_unstable();
+            row_ids.dedup();
+            row_ids.truncate(max_scanned);
+            let complete = snapshot_complete && overlay_complete && row_ids.len() < max_scanned;
+            let after_row_id = row_ids.last().copied();
+            let mut rows = Vec::with_capacity(row_ids.len());
+            for row in &row_ids {
+                let id = RowId {
+                    table: table_id,
+                    row: *row,
+                };
+                if let Some(cells) = self.read_authorized(id, projection)? {
+                    rows.push((id, cells));
+                }
+            }
+            self.active_scan = if complete {
+                None
+            } else {
+                after_row_id.map(|after_row_id| ActiveRowScan {
+                    table_id,
+                    after_row_id,
+                    authority: ScanAuthority::capture(projection),
+                })
+            };
+            Ok(AuthorizedRowScanPage {
+                rows,
+                continuation: if complete {
+                    None
+                } else {
+                    after_row_id.map(|after_row_id| RowScanCursor {
+                        invocation_id: self.invocation_id,
+                        table_id,
+                        after_row_id,
+                    })
+                },
+            })
+        })();
+        match result {
+            Ok(page) => Ok(page),
             Err(error) => {
                 self.abort()?;
                 Err(error)
@@ -1854,6 +2030,9 @@ impl<'db> InvocationTransaction<'db> {
         if self.aborted {
             return Err(TransactionError::Aborted);
         }
+        if self.active_scan.is_some() {
+            return Err(TransactionError::ScanStillActive);
+        }
         self.capture_base_version(id)?;
         self.overlay.put(id, payload)?;
         Ok(())
@@ -1973,6 +2152,9 @@ impl<'db> InvocationTransaction<'db> {
     ) -> Result<(), TransactionError> {
         if self.aborted {
             return Err(TransactionError::Aborted);
+        }
+        if self.active_scan.is_some() {
+            return Err(TransactionError::ScanStillActive);
         }
         match self.overlay.get(&id)? {
             Some(StagedRow::Value(_)) => {}
@@ -2203,6 +2385,9 @@ impl<'db> InvocationTransaction<'db> {
         if self.aborted {
             return Err(TransactionError::Aborted);
         }
+        if self.active_scan.is_some() {
+            return Err(TransactionError::ScanStillActive);
+        }
         let payload = self.read_inner(id)?.ok_or(TransactionError::NotFound)?;
         let mut tuple =
             decode_tuple(columns, schema_version, &payload).map_err(TransactionError::Tuple)?;
@@ -2215,6 +2400,9 @@ impl<'db> InvocationTransaction<'db> {
     fn stage_delete_inner(&mut self, id: RowId) -> Result<(), TransactionError> {
         if self.aborted {
             return Err(TransactionError::Aborted);
+        }
+        if self.active_scan.is_some() {
+            return Err(TransactionError::ScanStillActive);
         }
         let base_version = self.capture_base_version(id)?;
         let current = self.overlay.get(&id)?;
@@ -2245,6 +2433,7 @@ impl<'db> InvocationTransaction<'db> {
         self.loaded_foreign_keys.clear();
         self.index_bytes = 0;
         self.catalog_guards.clear();
+        self.active_scan = None;
         self.aborted = true;
         self.snapshot.take();
         self.coordination._admission_permit.take();
@@ -2272,6 +2461,10 @@ impl<'db> InvocationTransaction<'db> {
                 )?;
             }
             return Err(TransactionError::Aborted);
+        }
+        if self.active_scan.is_some() {
+            self.abort()?;
+            return Err(TransactionError::ScanStillActive);
         }
         self.check_deadline()?;
         let ddl_fences = self.coordination.ddl_fences.clone();
@@ -2721,4 +2914,14 @@ fn row_key(id: RowId) -> [u8; 32] {
     key[..16].copy_from_slice(&id.table);
     key[16..].copy_from_slice(&id.row);
     key
+}
+
+fn map_snapshot_scan_error(error: SnapshotError) -> TransactionError {
+    match error {
+        SnapshotError::InvalidTableId
+        | SnapshotError::InvalidCursor
+        | SnapshotError::InvalidScanLimit => TransactionError::InvalidScanRequest,
+        SnapshotError::InvalidRowKey => TransactionError::CorruptRowKey,
+        SnapshotError::Storage(error) => TransactionError::Storage(error),
+    }
 }
