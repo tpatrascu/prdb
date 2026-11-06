@@ -1105,8 +1105,9 @@ pub fn dispatch_executor_request(
 }
 
 /// Serve executor requests on one provisioned stream. The stream's caller
-/// binds it to this invocation out of band. A clean disconnect aborts the
-/// invocation; framing or request errors do the same.
+/// binds it to this invocation out of band. Clean EOF ends the executor
+/// session but leaves the decision to commit or abort to the supervisor;
+/// framing or request errors abort the invocation.
 pub fn serve_executor<S: Read + Write>(
     stream: &mut S,
     transaction: &mut InvocationTransaction<'_>,
@@ -1118,7 +1119,7 @@ pub fn serve_executor<S: Read + Write>(
             Ok(Some(request)) => request,
             Ok(None) => {
                 drop(connection);
-                return transaction.abort().map_err(ExecutorConnectionError::Abort);
+                return Ok(());
             }
             Err(error) => {
                 drop(connection);

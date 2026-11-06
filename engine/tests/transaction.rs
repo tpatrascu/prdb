@@ -2540,7 +2540,7 @@ fn executor_resolve_relation_ipc_dispatch_returns_only_authorized_handle()
 }
 
 #[test]
-fn executor_relation_socket_loop_serves_then_aborts_on_disconnect()
+fn executor_relation_socket_loop_ends_session_without_finalizing()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::executor_ipc::{
         CloseCursorRequest, ExecutorConnectionError, OpenScanRequest, OpenScanResponse,
@@ -2608,8 +2608,10 @@ fn executor_relation_socket_loop_serves_then_aborts_on_disconnect()
     client_task
         .join()
         .expect("client stream sequence completes");
+    assert!(lookup_outcome(&database, invocation_id, principal_id, 1)?.is_none());
+    invocation.abort()?;
     let outcome = lookup_outcome(&database, invocation_id, principal_id, 1)?
-        .expect("disconnect persists an aborted outcome");
+        .expect("the supervisor's abort persists an outcome");
     assert_eq!(outcome.status, OutcomeStatus::Aborted);
 
     let duplicate_invocation_id = [219; 16];

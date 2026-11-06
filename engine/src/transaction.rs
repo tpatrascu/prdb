@@ -5915,6 +5915,19 @@ impl ExecutorMetadataConnection<'_, '_> {
     }
 }
 
+impl Drop for ExecutorMetadataConnection<'_, '_> {
+    fn drop(&mut self) {
+        let table_ids = self
+            .handles
+            .values()
+            .map(|handle| handle.relation_id)
+            .collect::<HashSet<_>>();
+        for table_id in table_ids {
+            self.transaction.discard_active_scan_for_table(table_id);
+        }
+    }
+}
+
 impl PlannerMetadataConnection<'_, '_> {
     /// Resolve an authorized relation name and issue a planner-only handle.
     pub fn resolve_relation(
