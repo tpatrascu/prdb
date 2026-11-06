@@ -3230,6 +3230,47 @@ fn catalog_authorized_scan_builds_its_projection_from_pinned_records()
     assert!(invocation.read(second_row_id)?.is_none());
     assert!(invocation.read(inserted_row_id)?.is_some());
     invocation.abort()?;
+
+    let mut insert_invocation =
+        InvocationTransaction::begin(&database, [235; 16], principal_id, 9_999, 2, 128)?;
+    let mut insert_connection = insert_invocation.open_executor_metadata_connection();
+    let (insert_relation, _) = insert_connection
+        .resolve_relation("app", "metrics")?
+        .expect("insert grants keep the relation discoverable");
+    let response = dispatch_executor_request(
+        ServiceRole::Executor,
+        &mut insert_connection,
+        &IpcFrame {
+            operation: IpcOperation::StageInsert as u16,
+            request_id: 70,
+            payload: StageInsertRequest {
+                relation: insert_relation,
+                values: vec![Some(ScalarValue::Bytea(vec![88]))],
+            }
+            .encode()?,
+        },
+    )?;
+    let persisted_handle = StageInsertResponse::decode(&response.payload)?.handle;
+    let persisted_row_id = insert_connection.revalidate_row_handle(&persisted_handle)?;
+    drop(insert_connection);
+    insert_invocation.commit()?;
+
+    let mut verify =
+        InvocationTransaction::begin(&database, [236; 16], principal_id, 9_999, 1, 128)?;
+    let persisted = verify
+        .read(persisted_row_id)?
+        .expect("executor insert becomes visible after commit");
+    let persisted_schema = verify.load_catalog_table_schema(table_id)?;
+    assert_eq!(
+        decode_tuple(
+            &persisted_schema.columns,
+            persisted_schema.schema_version,
+            &persisted
+        )?
+        .values,
+        [Some(ScalarValue::Bytea(vec![88]))]
+    );
+    verify.abort()?;
     Ok(())
 }
 
