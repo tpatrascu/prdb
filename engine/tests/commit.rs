@@ -14,7 +14,9 @@ use prdb_engine::metadata::{EngineMetadata, Lifecycle};
 use prdb_engine::outcome::{InvocationOutcome, OutcomeStatus, lookup_outcome};
 use prdb_engine::row_record::RowRecord;
 use prdb_engine::schema::{self, CATALOG, ENGINE_META, ROWS};
-use prdb_engine::storage_manager::{StorageManager, StorageManagerConfig, StorageManagerInitError};
+use prdb_engine::storage_manager::{
+    StorageManager, StorageManagerConfig, StorageManagerInitError, TokenIssueRequest,
+};
 use prdb_engine::tuple::{ColumnSchema, ScalarType, ScalarValue, encode_tuple};
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -4303,6 +4305,8 @@ fn storage_manager_authorizes_membership_ddl_by_system_privilege_and_admin_role(
         dependency_write(role_manager, database_id, 5),
         membership_write_with_grantor(admin_user, admin_role, admin_role),
         dependency_write(admin_user, admin_role, 5),
+        credential_verifier_write(id(0x6a), admin_user, &[0x6a; 32], 1, i64::MAX, None, 1),
+        credential_verifier_write(id(0x6b), second_member, &[0x6b; 32], 1, i64::MAX, None, 1),
         membership_write_with_grantor(admin_parent_role, admin_role, admin_role),
         dependency_write(admin_parent_role, admin_role, 5),
     ];
@@ -4579,6 +4583,66 @@ fn storage_manager_authorizes_membership_ddl_by_system_privilege_and_admin_role(
 }
 
 #[test]
+fn membership_ddl_requires_an_unexpired_credential_for_a_final_admin()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let admin_user = id(0xa1);
+    let added_admin = id(0xa2);
+    let admin_role = builtin_owner_id();
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let records = [
+        principal_write_with_name(admin_user, 1, 1, "expired_admin"),
+        object_write_with_name(admin_user, 8, "expired_admin"),
+        principal_write_with_name(added_admin, 1, 1, "expired_added_admin"),
+        object_write_with_name(added_admin, 8, "expired_added_admin"),
+        membership_write_with_grantor(admin_user, admin_role, admin_role),
+        dependency_write(admin_user, admin_role, 5),
+        credential_verifier_write(id(0xa3), admin_user, &[0xa3; 32], 1, 2, None, 1),
+        credential_verifier_write(id(0xa4), added_admin, &[0xa4; 32], 1, 2, None, 1),
+    ];
+    let mut setup_audit = identity_audit_event(0xa0, admin_role, admin_user);
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(id(0xa0), admin_role, 9_999, &records, &[setup_audit])?;
+
+    let mut bump = principal_write_with_name(added_admin, 1, 2, "expired_added_admin");
+    bump.expected_value = Some(
+        database
+            .begin_read()?
+            .open_table(CATALOG)?
+            .get(id_catalog_key(10, added_admin).as_slice())?
+            .ok_or("added admin principal missing")?
+            .value()
+            .to_vec(),
+    );
+    let membership = membership_write_with_grantor(added_admin, admin_role, admin_user);
+    let mut audit = identity_audit_event(0xa5, admin_user, added_admin);
+    audit.action = AuditAction::AuthorityChange;
+    assert_eq!(
+        storage.commit_authorized_membership_ddl(
+            id(0xa5),
+            admin_user,
+            9_999,
+            &[
+                membership,
+                dependency_write(added_admin, admin_role, 5),
+                bump,
+            ],
+            &[audit],
+        ),
+        Err(CommitError::DdlAuthorizationDenied)
+    );
+    assert_eq!(commit_sequence(&database)?, 1);
+    assert_eq!(
+        lookup_outcome(&database, id(0xa5), admin_user, 1)?
+            .ok_or("missing aborted outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
+    Ok(())
+}
+
+#[test]
 fn storage_manager_restricts_system_privilege_ddl_to_database_admins()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
@@ -4731,6 +4795,8 @@ fn storage_manager_authorizes_identity_ddl_and_preserves_a_login_admin()
         object_write_with_name(user_manager, 8, "identity_user_manager"),
         membership_write_with_grantor(admin_user, admin_role, admin_role),
         dependency_write(admin_user, admin_role, 5),
+        credential_verifier_write(id(0x8d), admin_user, &[0x8d; 32], 1, i64::MAX, None, 1),
+        credential_verifier_write(id(0x8e), admin_user, &[0x8e; 32], 1, 2, None, 1),
         grant_write(user_manager, database_id, 12, 1, database_id, admin_role),
         dependency_write(user_manager, database_id, 5),
     ];
@@ -4789,6 +4855,72 @@ fn storage_manager_authorizes_identity_ddl_and_preserves_a_login_admin()
             .value()
             .to_vec())
     };
+    let admin_token_secret = [0x8d; 32];
+    let mut revoke_admin_token = credential_verifier_write(
+        id(0x8d),
+        admin_user,
+        &admin_token_secret,
+        1,
+        i64::MAX,
+        Some(2),
+        2,
+    );
+    revoke_admin_token.expected_value = Some(current_value(&revoke_admin_token.key)?);
+    let mut revoke_admin_audit = identity_audit_event(0x95, user_manager, admin_user);
+    revoke_admin_audit.action = AuditAction::TokenLifecycle;
+    revoke_admin_audit.target_ids = vec![admin_user, id(0x8d)];
+    assert_eq!(
+        storage.commit_authorized_identity_ddl(
+            id(0x95),
+            user_manager,
+            9_999,
+            &[revoke_admin_token],
+            &[revoke_admin_audit],
+        ),
+        Err(CommitError::DdlAuthorizationDenied)
+    );
+    assert!(!storage.list_tokens(user_manager, admin_user)?[0].revoked);
+
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_micros(),
+    )?;
+    let replacement_event = AuditEvent {
+        event_id: id(0x96),
+        actor_id: Some(user_manager),
+        correlation_id: id(0x97),
+        occurred_at_us: now,
+        action: AuditAction::TokenLifecycle,
+        result: AuditResult::Succeeded,
+        target_ids: vec![admin_user],
+    };
+    let _replacement = storage.issue_token(TokenIssueRequest {
+        invocation_id: id(0x96),
+        authenticated_actor_id: user_manager,
+        user_id: admin_user,
+        label: "replacement admin token",
+        expires_at_us: now + 3_600_000_000,
+        retention_deadline_us: now + 7_200_000_000,
+        audit_event: replacement_event,
+    })?;
+    let revoke_old_event = AuditEvent {
+        event_id: id(0x98),
+        actor_id: Some(user_manager),
+        correlation_id: id(0x99),
+        occurred_at_us: now,
+        action: AuditAction::TokenLifecycle,
+        result: AuditResult::Succeeded,
+        target_ids: vec![id(0x8d)],
+    };
+    storage.revoke_token(
+        id(0x98),
+        user_manager,
+        id(0x8d),
+        now + 7_200_000_000,
+        revoke_old_event,
+    )?;
+
     let mut rename_user = principal_write_with_name(created_user, 1, 2, "renamed_user");
     rename_user.expected_value = Some(current_value(&rename_user.key)?);
     let mut rename_object =
@@ -4802,7 +4934,7 @@ fn storage_manager_authorizes_identity_ddl_and_preserves_a_login_admin()
             &[rename_user, rename_object],
             &[identity_audit_event(0x83, user_manager, created_user)],
         )?,
-        3
+        5
     );
 
     let user_token_secret = [0x47; 32];
@@ -4861,7 +4993,7 @@ fn storage_manager_authorizes_identity_ddl_and_preserves_a_login_admin()
             &[disable_and_revoke, revoked_user_token],
             &[revoke_audit],
         )?,
-        5
+        7
     );
 
     let mut disable_last_admin =
@@ -4896,9 +5028,101 @@ fn storage_manager_authorizes_identity_ddl_and_preserves_a_login_admin()
             &admin_role_create,
             &[identity_audit_event(0x8a, admin_user, created_role)],
         )?,
-        6
+        8
     );
-    assert_eq!(commit_sequence(&database)?, 6);
+    assert_eq!(commit_sequence(&database)?, 8);
+    Ok(())
+}
+
+#[test]
+fn identity_ddl_cannot_disable_the_last_credentialed_admin()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let admin_to_disable = id(0xb1);
+    let expired_admin = id(0xb2);
+    let user_manager = id(0xb3);
+    let active_token_id = id(0xb4);
+    let expired_token_id = id(0xb5);
+    let database_id = id(0x33);
+    let admin_role = builtin_owner_id();
+    let active_secret = [0xb4; 32];
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let records = [
+        principal_write_with_name(admin_to_disable, 1, 1, "admin_to_disable"),
+        object_write_with_name(admin_to_disable, 8, "admin_to_disable"),
+        principal_write_with_name(expired_admin, 1, 1, "expired_admin"),
+        object_write_with_name(expired_admin, 8, "expired_admin"),
+        principal_write_with_name(user_manager, 1, 1, "credential_manager"),
+        object_write_with_name(user_manager, 8, "credential_manager"),
+        membership_write_with_grantor(admin_to_disable, admin_role, admin_role),
+        membership_write_with_grantor(expired_admin, admin_role, admin_role),
+        dependency_write(admin_to_disable, admin_role, 5),
+        dependency_write(expired_admin, admin_role, 5),
+        credential_verifier_write(
+            active_token_id,
+            admin_to_disable,
+            &active_secret,
+            1,
+            i64::MAX,
+            None,
+            1,
+        ),
+        credential_verifier_write(expired_token_id, expired_admin, &[0xb5; 32], 1, 2, None, 1),
+        grant_write(user_manager, database_id, 12, 1, database_id, admin_role),
+        dependency_write(user_manager, database_id, 5),
+    ];
+    let mut setup_audit = identity_audit_event(0xb0, admin_role, admin_to_disable);
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(id(0xb0), admin_role, 9_999, &records, &[setup_audit])?;
+
+    let mut disable = principal_write_with_login(admin_to_disable, 1, false, 2, "admin_to_disable");
+    let mut revoke = credential_verifier_write(
+        active_token_id,
+        admin_to_disable,
+        &active_secret,
+        1,
+        i64::MAX,
+        Some(2),
+        2,
+    );
+    {
+        let read = database.begin_read()?;
+        let catalog = read.open_table(CATALOG)?;
+        disable.expected_value = Some(
+            catalog
+                .get(disable.key.as_slice())?
+                .ok_or("admin principal missing")?
+                .value()
+                .to_vec(),
+        );
+        revoke.expected_value = Some(
+            catalog
+                .get(revoke.key.as_slice())?
+                .ok_or("admin token missing")?
+                .value()
+                .to_vec(),
+        );
+    }
+    let mut audit = identity_audit_event(0xb6, user_manager, admin_to_disable);
+    audit.target_ids = vec![admin_to_disable, active_token_id];
+    assert_eq!(
+        storage.commit_authorized_identity_ddl(
+            id(0xb6),
+            user_manager,
+            9_999,
+            &[disable, revoke],
+            &[audit],
+        ),
+        Err(CommitError::DdlAuthorizationDenied)
+    );
+    assert_eq!(commit_sequence(&database)?, 1);
+    assert_eq!(
+        lookup_outcome(&database, id(0xb6), user_manager, 1)?
+            .ok_or("missing aborted outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
     Ok(())
 }
 
@@ -6326,6 +6550,7 @@ fn storage_manager_issues_and_revokes_tokens_for_manage_users()
         membership_write_with_grantor(user_manager, manage_users_role, admin_role),
         dependency_write(admin_user, admin_role, 5),
         dependency_write(user_manager, manage_users_role, 5),
+        credential_verifier_write(id(0x9b), admin_user, &[0x9b; 32], 1, i64::MAX, None, 1),
         grant_write(
             manage_users_role,
             database_id,

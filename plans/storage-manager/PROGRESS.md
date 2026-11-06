@@ -484,11 +484,11 @@
 
 - `StorageManager::commit_authorized_membership_ddl` accepts only membership edges, their exact authority-dependency edges, and affected principals' authority-epoch increments. It authorizes ordinary membership changes through inherited `MANAGE_ROLES` or current administrator membership; changes to the reserved administrator role require a current administrator.
 - The route guards the actor identity, complete membership graph, applicable system-grant records, and role records through serialized publication. Added membership edges must name the authenticated actor as grantor, and successful audit events must identify that actor.
-- It blocks direct or inherited membership changes that grant or remove database-administrator membership without an administrator, and preserves at least one login-enabled administrator. Credential-backed administrator usability is still not checked at membership publication.
+- It blocks direct or inherited membership changes that grant or remove database-administrator membership without an administrator, and preserves at least one login-enabled administrator with a current credential.
 - A real-redb regression covers authorized membership add/remove, denial without `MANAGE_ROLES`, administrator-only changes to the reserved role, final-administrator preservation, authority epochs, and durable outcomes.
 - Verification: in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and workspace tests passed. Changed Markdown links and `git diff --check` passed.
 - Contract update: [users and roles](../../specs/ddl-identity.md).
-- Remaining: credential-backed last-administrator validation, authorization for identity/grant/policy/constraint DDL, token-backed gateway admission, and deterministic authorization-change race coverage remain open.
+- Remaining: authorization for identity/grant/policy/constraint DDL, token-backed gateway admission, and deterministic authorization-change race coverage remain open.
 
 ## SM-5 dependency: system privilege DDL authorization — in progress
 
@@ -497,7 +497,7 @@
 - A real-redb regression covers administrator grant/revoke, denial for a non-administrator who holds `MANAGE_ROLES`, atomic dependency removal, epoch advances, and durable outcomes.
 - Verification: in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and workspace tests passed. Changed Markdown links and `git diff --check` passed.
 - Contract update: [users and roles](../../specs/ddl-identity.md).
-- Remaining: ordinary object grant authorization, user/role lifecycle DDL, credential-backed last-administrator validation, token-backed gateway admission, and deterministic authorization-change race coverage remain open.
+- Remaining: ordinary object grant authorization, user/role lifecycle DDL, token-backed gateway admission, and deterministic authorization-change race coverage remain open.
 
 ## SM-5 dependency: object grant DDL authorization — in progress
 
@@ -507,7 +507,7 @@
 - A real-redb regression covers owner and `MANAGE_GRANTS` authority, denial without either, grant/revoke publication, authority-epoch updates, and durable outcomes.
 - Verification: in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and workspace tests passed. Changed Markdown links and `git diff --check` passed.
 - Contract update: [permission DDL](../../specs/ddl-permissions.md).
-- Remaining: identity lifecycle DDL, policy/constraint authorization, credential-backed last-administrator validation, token-backed gateway admission, and deterministic authorization-change race coverage remain open.
+- Remaining: identity lifecycle DDL, policy/constraint authorization, token-backed gateway admission, and deterministic authorization-change race coverage remain open.
 
 ## SM-5 dependency: shared principal namespace integrity — in progress
 
@@ -524,7 +524,7 @@
 - A real-redb regression covers MANAGE_USERS admission, MANAGE_ROLES denial, user rename and disable, rejection of disable without token revocation, atomic disable plus revocation, last-login-admin preservation, database-admin role creation, and committed sequences.
 - Verification: the prescribed Nix-shell workspace build, formatting check, Clippy with warnings denied, and workspace tests passed. Changed Markdown links and `git diff --check` passed.
 - Contract: [users and roles](../../specs/ddl-identity.md).
-- Remaining: role/user deletion needs durable ID tombstones, credential-backed final-admin checks remain open, token issuance/inventory APIs remain open, and deterministic authorization-change race coverage remains open.
+- Remaining: role/user deletion needs durable ID tombstones and deterministic authorization-change race coverage remains open.
 
 ## SM-5 dependency: credential verifier profile and token-backed invocation admission — in progress
 
@@ -533,7 +533,7 @@
 - `StorageManager::issue_token` creates random 32-byte secrets through the system CSPRNG, stores only the SHA-256 verifier, authorizes through `MANAGE_USERS`, records a `TokenLifecycle` audit event, and exposes the secret once through a zeroizing result type. `StorageManager::revoke_token` uses the same authorization route; unknown/already-revoked/unauthorized requests share an error. Identity DDL allows only one-way revocation of existing verifiers and requires all active tokens to be revoked atomically with a NOLOGIN change.
 - Tests cover supported and malformed profiles, successful admission, wrong secret, expiry, authorized issue/revoke, one-time secret transfer, denied issuance, durable abort outcomes, concurrent revocation conflict, and the LOGIN disable path.
 - Verification: Rust/C toolchain versions matched the configured Nix environment; locked workspace build, formatting check, Clippy with warnings denied, and all 216 tests across 18 integration targets passed. Changed Markdown local-link checks and `git diff --check` passed.
-- Remaining: bootstrap secret handoff, credential-backed last-administrator checks, gateway/supervisor integration, and authentication rate limits.
+- Remaining: bootstrap secret handoff, gateway/supervisor integration, and authentication rate limits.
 
 ## SM-5 dependency: policy DDL authorization — in progress
 
@@ -542,7 +542,7 @@
 - A real-redb regression covers table-owner and inherited schema-level `MANAGE_POLICIES` authorization, policy create/update/drop, denial without authority, empty-recipient rejection, epoch publication, and durable outcomes.
 - Verification: `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` passed in the prescribed Nix shell; all 210 tests across 18 test targets passed. Changed Markdown local links and `git diff --check` passed.
 - Contract: [permission DDL](../../specs/ddl-permissions.md).
-- Remaining: non-foreign-key constraint DDL authorization, durable identity tombstones, credential-backed final-administrator checks, authenticated control-channel integration, and deterministic authorization-change race coverage remain open.
+- Remaining: non-foreign-key constraint DDL authorization, durable identity tombstones, authenticated control-channel integration, and deterministic authorization-change race coverage remain open.
 
 ## SM-5 dependency: foreign-key DDL authorization — in progress
 
@@ -578,4 +578,14 @@
 - A real-redb regression covers self-inventory, inherited `MANAGE_USERS`, denial for an unrelated user, and visibility of revocation state after the revoke commit.
 - Verification: in the prescribed Nix shell, locked workspace build, formatting check, Clippy with warnings denied, and all 216 workspace tests passed. Changed Markdown local links and `git diff --check` passed.
 - Contract updates: [users and roles](../../specs/ddl-identity.md) and [storage manager](../../specs/storage-manager.md).
-- Remaining: token request rate limits, bootstrap secret handoff, credential-backed last-administrator checks, gateway/supervisor integration, and authenticated control-channel integration remain open.
+- Remaining: token request rate limits, bootstrap secret handoff, gateway/supervisor integration, and authenticated control-channel integration remain open.
+
+## SM-5 dependency: credential-backed last-administrator protection
+
+- Red evidence: an identity DDL regression showed that revoking the only unexpired administrator token committed even though the remaining verifier was expired. The test expected `DdlAuthorizationDenied` and observed `Ok(3)` before implementation.
+- The serialized writer now checks final membership, principal login state, and family-16 verifier state together. A usable administrator must be in the reserved database-admin closure, have `LOGIN`, and have at least one unrevoked verifier valid at trusted UTC commit time.
+- The guard runs for membership changes, login disablement, and active credential revocation, then validates the serialized final catalog. Token issuance remains available to add or restore a credential before old-token revocation.
+- Real-redb regressions cover refusal to disable/revoke one administrator when the only other login admin has expired credentials, refusal to change membership when the resulting administrators have only expired credentials, and successful replacement-first token rotation.
+- Verification: in the prescribed Nix shell, the locked workspace build, formatting check, Clippy with warnings denied, and all 218 workspace tests passed. Changed Markdown links and `git diff --check` passed.
+- Contract: [users and roles](../../specs/ddl-identity.md).
+- Remaining: bootstrap secret handoff, authenticated control-channel/gateway integration, token request rate limits, durable identity tombstones, and deterministic authority-change race coverage remain open.

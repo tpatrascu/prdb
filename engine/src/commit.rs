@@ -2462,6 +2462,129 @@ fn validate_final_credential_verifiers(
     Ok(())
 }
 
+fn validate_final_admin_credential(
+    transaction: &WriteTransaction,
+    catalog_writes: &[CatalogWrite],
+) -> Result<(), CommitError> {
+    let now_us =
+        crate::credentials::now_unix_micros().ok_or(CommitError::DdlAuthorizationDenied)?;
+    let membership_prefix = 11u16.to_be_bytes();
+    let mut memberships = {
+        let catalog = transaction.open_table(CATALOG).map_err(storage_error)?;
+        let mut memberships = HashMap::<Vec<u8>, Membership>::new();
+        for entry in catalog
+            .range(membership_prefix.as_slice()..)
+            .map_err(storage_error)?
+        {
+            let (key, value) = entry.map_err(storage_error)?;
+            let key = key.value().to_vec();
+            if !key.starts_with(&membership_prefix) {
+                break;
+            }
+            memberships.insert(key.clone(), decode_membership_record(&key, value.value())?);
+        }
+        memberships
+    };
+    for write in catalog_writes
+        .iter()
+        .filter(|write| write.key.starts_with(&membership_prefix) && write.payload.is_none())
+    {
+        memberships.remove(&write.key);
+    }
+    for write in catalog_writes
+        .iter()
+        .filter(|write| write.key.starts_with(&membership_prefix) && write.payload.is_some())
+    {
+        let bytes = write
+            .payload
+            .as_deref()
+            .ok_or(CommitError::InvalidCatalog)?;
+        memberships.insert(
+            write.key.clone(),
+            decode_membership_record(&write.key, bytes)?,
+        );
+    }
+    if memberships.len() > MAX_MEMBERSHIP_EDGES {
+        return Err(CommitError::InvalidCatalog);
+    }
+    let membership_pairs = memberships
+        .values()
+        .map(|edge| (edge.member_id, edge.role_id))
+        .collect::<HashSet<_>>();
+    let mut admin_role_id = [0x80; 16];
+    admin_role_id[15] = 3;
+    let admin_members = members_in_role_closure(&membership_pairs, admin_role_id);
+
+    let login_admins = {
+        let catalog = transaction.open_table(CATALOG).map_err(storage_error)?;
+        let mut login_admins = HashSet::new();
+        for admin_id in admin_members {
+            let key = id_catalog_key(10, admin_id);
+            let Some(bytes) = final_catalog_value(&catalog, catalog_writes, &key)? else {
+                return Err(CommitError::InvalidCatalog);
+            };
+            if decode_principal_kind(&key, &bytes)? == 1 {
+                let login = catalog_field_bytes(&key, &bytes, 10, 3)?;
+                if !matches!(login.as_slice(), [0] | [1]) {
+                    return Err(CommitError::InvalidCatalog);
+                }
+                if login == [1] {
+                    login_admins.insert(admin_id);
+                }
+            }
+        }
+        login_admins
+    };
+    if login_admins.is_empty() {
+        return Err(CommitError::DdlAuthorizationDenied);
+    }
+
+    let verifier_prefix = 16u16.to_be_bytes();
+    let mut verifiers = {
+        let catalog = transaction.open_table(CATALOG).map_err(storage_error)?;
+        let mut verifiers = HashMap::<Vec<u8>, Vec<u8>>::new();
+        for entry in catalog
+            .range(verifier_prefix.as_slice()..)
+            .map_err(storage_error)?
+        {
+            let (key, value) = entry.map_err(storage_error)?;
+            let key = key.value().to_vec();
+            if !key.starts_with(&verifier_prefix) {
+                break;
+            }
+            verifiers.insert(key, value.value().to_vec());
+            if verifiers.len() > 65_536 {
+                return Err(CommitError::InvalidCatalog);
+            }
+        }
+        verifiers
+    };
+    for write in catalog_writes
+        .iter()
+        .filter(|write| write.key.starts_with(&verifier_prefix))
+    {
+        if let Some(payload) = &write.payload {
+            verifiers.insert(write.key.clone(), payload.clone());
+        } else {
+            verifiers.remove(&write.key);
+        }
+    }
+    if verifiers.len() > 65_536 {
+        return Err(CommitError::InvalidCatalog);
+    }
+    for (key, bytes) in verifiers {
+        let record = decode_registered_envelope(&bytes).map_err(|_| CommitError::InvalidCatalog)?;
+        if record.logical_key != key {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let verifier = decode_verifier_record(&record).map_err(|_| CommitError::InvalidCatalog)?;
+        if login_admins.contains(&verifier.user_id) && verifier.is_valid_at(now_us) {
+            return Ok(());
+        }
+    }
+    Err(CommitError::DdlAuthorizationDenied)
+}
+
 fn catalog_field_bytes(
     key: &[u8],
     bytes: &[u8],
@@ -4179,27 +4302,36 @@ pub fn commit_storage_changes(
             }
         };
     if expected_rows.is_empty() {
-        return commit_storage_changes_inner(database, request, None);
+        return commit_storage_changes_inner_with_admin_credential_check(
+            database, request, None, false,
+        );
     }
     let plan = IndexDdlPlan {
         expected_rows,
         ..IndexDdlPlan::default()
     };
-    commit_storage_changes_inner(database, request, Some(&plan))
+    commit_storage_changes_inner_with_admin_credential_check(database, request, Some(&plan), false)
 }
 
 fn commit_storage_changes_with_index_ddl(
     database: &Database,
     request: CommitRequest<'_>,
     backfill: &IndexDdlPlan,
+    require_usable_admin_credential: bool,
 ) -> Result<u64, CommitError> {
-    commit_storage_changes_inner(database, request, Some(backfill))
+    commit_storage_changes_inner_with_admin_credential_check(
+        database,
+        request,
+        Some(backfill),
+        require_usable_admin_credential,
+    )
 }
 
-fn commit_storage_changes_inner(
+fn commit_storage_changes_inner_with_admin_credential_check(
     database: &Database,
     request: CommitRequest<'_>,
     index_ddl_plan: Option<&IndexDdlPlan>,
+    require_usable_admin_credential: bool,
 ) -> Result<u64, CommitError> {
     let CommitRequest {
         invocation_id,
@@ -4711,6 +4843,23 @@ fn commit_storage_changes_inner(
         }
     }
 
+    if require_usable_admin_credential {
+        match validate_final_admin_credential(&transaction, catalog_writes) {
+            Ok(()) => {}
+            Err(error @ (CommitError::DdlAuthorizationDenied | CommitError::InvalidCatalog)) => {
+                transaction.abort().map_err(storage_error)?;
+                record_aborted_outcome(
+                    database,
+                    invocation_id,
+                    principal_id,
+                    retention_deadline_us,
+                )?;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
     {
         let mut table = transaction.open_table(ROWS).map_err(storage_error)?;
         for write in writes {
@@ -4860,6 +5009,7 @@ fn commit_catalog_and_audit_with_index_ddl(
     request: CatalogCommitRequest<'_>,
     catalog_guards: &[CatalogGuard],
     backfill: &IndexDdlPlan,
+    require_usable_admin_credential: bool,
 ) -> Result<u64, CommitError> {
     let CatalogCommitRequest {
         invocation_id,
@@ -4872,6 +5022,7 @@ fn commit_catalog_and_audit_with_index_ddl(
         && backfill.expected_rows.is_empty()
         && backfill.writes.is_empty()
         && catalog_guards.is_empty()
+        && !require_usable_admin_credential
     {
         return commit_catalog_and_audit(
             database,
@@ -4896,6 +5047,7 @@ fn commit_catalog_and_audit_with_index_ddl(
             audit: audit_events,
         },
         backfill,
+        require_usable_admin_credential,
     )
 }
 
@@ -5336,6 +5488,23 @@ fn commit_catalog_and_audit_with_fences_inner(
             }
         }
     };
+    let require_usable_admin_credential = match catalog_changes_may_remove_last_admin_credential(
+        authorization_mode,
+        catalog_writes,
+    ) {
+        Ok(required) => required,
+        Err(error) => {
+            if !matches!(error, CommitError::Storage(_)) {
+                record_aborted_outcome(
+                    database,
+                    invocation_id,
+                    principal_id,
+                    retention_deadline_us,
+                )?;
+            }
+            return Err(error);
+        }
+    };
     let backfill = match build_index_ddl_plan(database, catalog_writes) {
         Ok(mut plan) => {
             match build_constraint_validation_rows(database, catalog_writes, &[]) {
@@ -5382,7 +5551,13 @@ fn commit_catalog_and_audit_with_fences_inner(
             return Err(error);
         }
     };
-    commit_catalog_and_audit_with_index_ddl(database, request, &catalog_guards, &backfill)
+    commit_catalog_and_audit_with_index_ddl(
+        database,
+        request,
+        &catalog_guards,
+        &backfill,
+        require_usable_admin_credential,
+    )
 }
 
 fn index_ddl_authority_guards(
@@ -5931,6 +6106,66 @@ fn members_in_role_closure(
         }
     }
     closure
+}
+
+fn catalog_changes_may_remove_last_admin_credential(
+    authorization_mode: CatalogAuthorizationMode,
+    catalog_writes: &[CatalogWrite],
+) -> Result<bool, CommitError> {
+    let potential_check = match authorization_mode {
+        CatalogAuthorizationMode::MembershipDdl => catalog_writes.iter().any(|write| {
+            write.key.starts_with(&11u16.to_be_bytes()) && write.expected_value != write.payload
+        }),
+        CatalogAuthorizationMode::IdentityDdl => catalog_writes.iter().any(|write| {
+            (write.key.starts_with(&10u16.to_be_bytes())
+                || write.key.starts_with(&16u16.to_be_bytes()))
+                && write.expected_value.is_some()
+                && write.payload.is_some()
+        }),
+        _ => false,
+    };
+    if !potential_check {
+        return Ok(false);
+    }
+
+    let prefix = 11u16.to_be_bytes();
+    match authorization_mode {
+        CatalogAuthorizationMode::MembershipDdl => {
+            return Ok(catalog_writes.iter().any(|write| {
+                write.key.starts_with(&prefix) && write.expected_value != write.payload
+            }));
+        }
+        CatalogAuthorizationMode::IdentityDdl => {
+            for write in catalog_writes {
+                if write.key.starts_with(&10u16.to_be_bytes())
+                    && let (Some(current), Some(next)) =
+                        (write.expected_value.as_deref(), write.payload.as_deref())
+                {
+                    let current_login = catalog_field_bytes(&write.key, current, 10, 3)?;
+                    let next_login = catalog_field_bytes(&write.key, next, 10, 3)?;
+                    if current_login == [1] && next_login == [0] {
+                        return Ok(true);
+                    }
+                }
+                if write.key.starts_with(&16u16.to_be_bytes())
+                    && let (Some(current), Some(next)) =
+                        (write.expected_value.as_deref(), write.payload.as_deref())
+                {
+                    let current_record = decode_catalog_record(&write.key, current)?;
+                    let next_record = decode_catalog_record(&write.key, next)?;
+                    let current_credential = decode_verifier_record(&current_record)
+                        .map_err(|_| CommitError::InvalidCatalog)?;
+                    let next_credential = decode_verifier_record(&next_record)
+                        .map_err(|_| CommitError::InvalidCatalog)?;
+                    if !current_credential.revoked && next_credential.revoked {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(false)
 }
 
 fn system_privilege_ddl_authority_guards(
