@@ -1532,6 +1532,67 @@ fn authorized_column_description_returns_only_declared_shape()
 }
 
 #[test]
+fn authorized_relation_resolution_requires_visibility_and_exact_name()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    install_relation_discovery_catalog(&database)?;
+    let mut malformed_hidden_row_key = [0x20; 32];
+    malformed_hidden_row_key[16..].fill(0xfe);
+    let write = database.begin_write()?;
+    write
+        .open_table(ROWS)?
+        .insert(&malformed_hidden_row_key[..], &b"not-a-row"[..])?;
+    write.commit()?;
+    let schema_id = [0x91; 16];
+    let table_id = [0x10; 16];
+    let context = AuthorizationContext {
+        principal_id: [9; 16],
+        role_ids: std::collections::HashSet::new(),
+        scope: std::collections::HashSet::from([
+            (Operation::Usage, AccessTarget::Schema(schema_id)),
+            (Operation::Insert, AccessTarget::Table(table_id)),
+        ]),
+    };
+    let grants = [
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Usage,
+            target: AccessTarget::Schema(schema_id),
+        },
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Insert,
+            target: AccessTarget::Table(table_id),
+        },
+    ];
+    let mut invocation = InvocationTransaction::begin(&database, [188; 16], [9; 16], 9_999, 1, 64)?;
+    let resolved = invocation
+        .resolve_authorized_relation(schema_id, "metrics", &context, &grants, &[])?
+        .expect("visible exact name resolves");
+    assert_eq!(resolved.relation_id, table_id);
+    assert_eq!(resolved.name, "metrics");
+    assert_eq!(resolved.columns.len(), 1);
+    assert_eq!(resolved.columns[0].name, "value");
+    assert!(
+        invocation
+            .resolve_authorized_relation(schema_id, "secret", &context, &grants, &[])?
+            .is_none()
+    );
+    assert!(
+        invocation
+            .resolve_authorized_relation(schema_id, "missing", &context, &grants, &[])?
+            .is_none()
+    );
+    assert!(
+        invocation
+            .resolve_authorized_relation(schema_id, "Metrics", &context, &grants, &[])?
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
 fn authorized_column_description_pages_bind_the_snapshot_and_order()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();

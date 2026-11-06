@@ -19,9 +19,10 @@ use crate::expression::{
 use crate::index_key::{DeriveIndexKeyError, derive_index_key};
 use crate::metadata::{EngineMetadata, Lifecycle};
 use crate::metadata_discovery::{
-    ColumnScanCursor, MAX_COLUMNS_PER_PAGE, MAX_METADATA_PAGE_BYTES, MAX_RELATIONS_PER_PAGE,
-    MAX_SCHEMAS_PER_PAGE, RelationScanCursor, SchemaScanCursor, VisibleColumn, VisibleColumnPage,
-    VisibleRelation, VisibleRelationPage, VisibleRelationSchema, VisibleSchema, VisibleSchemaPage,
+    AuthorizedRelationDescription, ColumnScanCursor, MAX_COLUMNS_PER_PAGE, MAX_METADATA_PAGE_BYTES,
+    MAX_RELATIONS_PER_PAGE, MAX_SCHEMAS_PER_PAGE, RelationScanCursor, SchemaScanCursor,
+    VisibleColumn, VisibleColumnPage, VisibleRelation, VisibleRelationPage, VisibleRelationSchema,
+    VisibleSchema, VisibleSchemaPage,
 };
 use crate::outcome::{InvocationOutcome, OutcomeStatus};
 use crate::overlay::{Overlay, OverlayError, ResolvedRow, RowId, StagedRow};
@@ -994,6 +995,87 @@ impl<'db> InvocationTransaction<'db> {
         })();
         match result {
             Ok(page) => Ok(page),
+            Err(error) => {
+                if !self.aborted {
+                    self.abort()?;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Resolve an exact relation name from filtered catalog pages, then
+    /// independently recheck authority before returning its declared shape.
+    pub fn resolve_authorized_relation(
+        &mut self,
+        schema_id: [u8; 16],
+        relation_name: &str,
+        context: &AuthorizationContext,
+        grants: &[Grant],
+        dependencies: &[AuthorityDependency],
+    ) -> Result<Option<AuthorizedRelationDescription>, TransactionError> {
+        let result = (|| {
+            if relation_name.is_empty() || relation_name.len() > MAX_METADATA_PAGE_BYTES {
+                return Err(TransactionError::InvalidMetadataRequest);
+            }
+            let mut continuation = None;
+            loop {
+                let Some(page) = self.list_authorized_relations(
+                    schema_id,
+                    MAX_RELATIONS_PER_PAGE,
+                    continuation,
+                    context,
+                    grants,
+                    dependencies,
+                )?
+                else {
+                    return Ok(None);
+                };
+                let relation = page
+                    .relations
+                    .into_iter()
+                    .find(|relation| relation.name == relation_name);
+                if let Some(relation) = relation {
+                    let Some(description) = self.describe_authorized_columns(
+                        relation.relation_id,
+                        context,
+                        grants,
+                        dependencies,
+                    )?
+                    else {
+                        return Ok(None);
+                    };
+                    let initial_response_bytes = relation
+                        .name
+                        .len()
+                        .checked_add(24)
+                        .ok_or(TransactionError::MetadataResultTooLarge)?;
+                    let response_bytes = description
+                        .columns
+                        .iter()
+                        .try_fold(initial_response_bytes, |bytes, column| {
+                            bytes
+                                .checked_add(column.name.len())
+                                .and_then(|total| total.checked_add(32))
+                        })
+                        .ok_or(TransactionError::MetadataResultTooLarge)?;
+                    if response_bytes > MAX_METADATA_PAGE_BYTES {
+                        return Err(TransactionError::MetadataResultTooLarge);
+                    }
+                    return Ok(Some(AuthorizedRelationDescription {
+                        relation_id: relation.relation_id,
+                        name: relation.name,
+                        columns: description.columns,
+                    }));
+                }
+                continuation = page.continuation;
+                if continuation.is_none() {
+                    return Ok(None);
+                }
+            }
+        })();
+        match result {
+            Ok(description) => Ok(description),
             Err(error) => {
                 if !self.aborted {
                     self.abort()?;

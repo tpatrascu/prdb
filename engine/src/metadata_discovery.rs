@@ -29,6 +29,15 @@ pub struct VisibleRelationSchema {
     pub columns: Vec<VisibleColumn>,
 }
 
+/// An exact-name resolution result containing only an independently
+/// authorized relation and its declared shape.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthorizedRelationDescription {
+    pub relation_id: [u8; 16],
+    pub name: String,
+    pub columns: Vec<VisibleColumn>,
+}
+
 /// Opaque continuation for column descriptions in one invocation snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ColumnScanCursor {
