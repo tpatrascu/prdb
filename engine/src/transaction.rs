@@ -289,6 +289,32 @@ struct ActiveExecutorScan {
     pending_row: Option<(RowId, Vec<SanitizedCell>)>,
 }
 
+struct CatalogExecutorWriteProjection {
+    schema: CatalogTableSchema,
+    context: AuthorizationContext,
+    grants: Vec<Grant>,
+    policies: Vec<Policy>,
+    checks: Vec<Expr>,
+    policy_driving_columns: Vec<[u8; 16]>,
+}
+
+impl CatalogExecutorWriteProjection {
+    fn as_projection(&self) -> AuthorizedProjection<'_> {
+        AuthorizedProjection {
+            columns: &self.schema.columns,
+            column_ids: &self.schema.column_ids,
+            schema_version: self.schema.schema_version,
+            schema_id: self.schema.schema_id,
+            context: &self.context,
+            grants: &self.grants,
+            policies: &self.policies,
+            checks: &self.checks,
+            policy_driving_columns: &self.policy_driving_columns,
+            dependencies: &[],
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ActiveRelationScan {
     schema_id: [u8; 16],
@@ -794,6 +820,55 @@ impl<'db> InvocationTransaction<'db> {
                 Err(error)
             }
         }
+    }
+
+    fn load_catalog_executor_write_projection(
+        &mut self,
+        table_id: [u8; 16],
+    ) -> Result<CatalogExecutorWriteProjection, TransactionError> {
+        let schema = self.load_catalog_table_schema(table_id)?;
+        let principal_id = self.principal_id;
+        let (role_ids, grants) = self.load_catalog_grants(principal_id, &schema)?;
+        let policies = self.load_catalog_policies(principal_id, &schema)?;
+        let checks = self.load_catalog_check_constraints(&schema)?;
+        self.load_catalog_indexes(&schema)?;
+        let scope = grants
+            .iter()
+            .map(|grant| (grant.operation, grant.target))
+            .collect();
+        let context = AuthorizationContext {
+            principal_id,
+            role_ids,
+            scope,
+        };
+        let mut referenced_ordinals = HashSet::new();
+        for policy in &policies {
+            if let Some(expression) = &policy.using {
+                collect_expression_fields(expression, &mut referenced_ordinals);
+            }
+            if let Some(expression) = &policy.with_check {
+                collect_expression_fields(expression, &mut referenced_ordinals);
+            }
+        }
+        let mut policy_driving_columns = referenced_ordinals
+            .into_iter()
+            .map(|ordinal| {
+                schema
+                    .column_ids
+                    .get(ordinal)
+                    .copied()
+                    .ok_or(TransactionError::CorruptCatalog)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        policy_driving_columns.sort_unstable();
+        Ok(CatalogExecutorWriteProjection {
+            schema,
+            context,
+            grants,
+            policies,
+            checks,
+            policy_driving_columns,
+        })
     }
 
     fn discard_active_scan_for_table(&mut self, table_id: [u8; 16]) {
@@ -5689,6 +5764,93 @@ impl ExecutorMetadataConnection<'_, '_> {
             .ok_or(TransactionError::InvalidMetadataRequest)
     }
 
+    /// Stage an insert from a complete declared-shape value vector. The new
+    /// row receives an opaque connection-local handle; defaults are materialized
+    /// by storage and generated identities remain unsupported.
+    pub fn stage_insert(
+        &mut self,
+        relation: &ResolvedRelationHandle,
+        values: &[Option<ScalarValue>],
+    ) -> Result<ExecutorRowHandle, TransactionError> {
+        let description = self.revalidate_relation_handle(relation)?;
+        if self.used_row_tokens.len() >= MAX_EXECUTOR_ROW_HANDLES {
+            self.transaction.abort()?;
+            return Err(TransactionError::RelationHandleLimitExceeded);
+        }
+        let projection_state = self
+            .transaction
+            .load_catalog_executor_write_projection(description.relation_id)?;
+        if projection_state
+            .schema
+            .generation_modes
+            .iter()
+            .any(|mode| *mode != 0)
+        {
+            self.transaction.abort()?;
+            return Err(TransactionError::GeneratedIdentityUnsupported);
+        }
+        let mut row_id_bytes = [0; 16];
+        getrandom::fill(&mut row_id_bytes).map_err(|_| TransactionError::RandomnessUnavailable)?;
+        if row_id_bytes == [0; 16] {
+            self.transaction.abort()?;
+            return Err(TransactionError::RandomnessUnavailable);
+        }
+        let id = RowId {
+            table: description.relation_id,
+            row: row_id_bytes,
+        };
+        let handle_token =
+            new_metadata_cursor_token(&mut self.used_row_tokens, EXECUTOR_ROW_HANDLE_TOKEN_KIND)?;
+        let inputs = values
+            .iter()
+            .cloned()
+            .map(InsertInput::Value)
+            .collect::<Vec<_>>();
+        let projection = projection_state.as_projection();
+        self.transaction
+            .stage_insert_authorized_from_catalog_defaults(
+                id,
+                &projection,
+                &inputs,
+                &projection_state.schema,
+            )?;
+        self.row_handles.insert(handle_token, id);
+        Ok(ExecutorRowHandle {
+            token: handle_token,
+        })
+    }
+
+    /// Apply a catalog-authorized field patch to a visible opaque row handle.
+    /// All previously issued handles for that row expire after the update.
+    pub fn stage_update(
+        &mut self,
+        handle: &ExecutorRowHandle,
+        patches: &[FieldPatch],
+    ) -> Result<(), TransactionError> {
+        let id = self.revalidate_row_handle(handle)?;
+        let projection_state = self
+            .transaction
+            .load_catalog_executor_write_projection(id.table)?;
+        let projection = projection_state.as_projection();
+        self.transaction
+            .stage_patch_authorized(id, &projection, patches)?;
+        self.row_handles.retain(|_, row_id| *row_id != id);
+        Ok(())
+    }
+
+    /// Delete a visible opaque row handle after pinned-catalog authorization.
+    /// All previously issued handles for that row expire after deletion.
+    pub fn stage_delete(&mut self, handle: &ExecutorRowHandle) -> Result<(), TransactionError> {
+        let id = self.revalidate_row_handle(handle)?;
+        let projection_state = self
+            .transaction
+            .load_catalog_executor_write_projection(id.table)?;
+        let projection = projection_state.as_projection();
+        self.transaction.stage_delete_authorized(id, &projection)?;
+        self.row_handles.retain(|_, row_id| *row_id != id);
+        Ok(())
+    }
+
     /// Close a live cursor and release the invocation's active row-scan slot.
     pub fn close_relation_scan(
         &mut self,
@@ -5766,6 +5928,32 @@ fn executor_batch_row_encoded_size(cells: &[SanitizedCell]) -> Result<usize, Tra
             .ok_or(TransactionError::MetadataResultTooLarge)?;
     }
     Ok(size)
+}
+
+fn collect_expression_fields(expression: &Expr, ordinals: &mut HashSet<usize>) {
+    match expression {
+        Expr::Field(ordinal) => {
+            ordinals.insert(*ordinal);
+        }
+        Expr::Equal(left, right)
+        | Expr::NotEqual(left, right)
+        | Expr::Less(left, right)
+        | Expr::LessEqual(left, right)
+        | Expr::Greater(left, right)
+        | Expr::GreaterEqual(left, right) => {
+            collect_expression_fields(left, ordinals);
+            collect_expression_fields(right, ordinals);
+        }
+        Expr::And(expressions) | Expr::Or(expressions) => {
+            for expression in expressions {
+                collect_expression_fields(expression, ordinals);
+            }
+        }
+        Expr::Not(expression) | Expr::IsNull(expression) => {
+            collect_expression_fields(expression, ordinals);
+        }
+        Expr::Literal(_) | Expr::CurrentPrincipalId | Expr::HasRole(_) => {}
+    }
 }
 
 /// Exact counts are released only when row inclusion is independent of row

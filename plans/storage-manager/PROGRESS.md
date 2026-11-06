@@ -859,3 +859,11 @@
 - Verification: workspace build, format check, warning-denied Clippy, full workspace tests, all 168 changed-document local links, and `git diff --check` pass in the prescribed Nix shell.
 - Remaining: test max-byte failure through the stream loop, exercise NULL/REDACTED wire states and hostile payloads, and connect the provisioned supervisor socket to this loop.
 - Next smallest task: add StageInsert/StageUpdate/StageDelete request dispatch that consumes row handles and rechecks catalog authority.
+
+## SM-6 dependency: catalog-authorized executor mutations
+
+- Behavior: executor IPC now decodes full-shape INSERT values and unique ordinal UPDATE patches, and dispatches INSERT/UPDATE/DELETE through connection-local handles. Storage rebuilds write projection, checks, foreign keys, and index definitions from pinned catalog records; policy-referenced fields cannot be updated, and successful UPDATE/DELETE invalidates row handles.
+- Changed code and fixture: [executor IPC](../../engine/src/executor_ipc.rs), [catalog-derived write projection and handle staging](../../engine/src/transaction.rs), [mutation codec regressions](../../engine/tests/executor_ipc.rs), [real-redb delete dispatch regression](../../engine/tests/transaction.rs), and [IPC contract](../../specs/ipc-protocol.md).
+- Evidence: focused mutation codec tests and the real-redb executor update/delete dispatch regression pass; the test verifies catalog-derived policy/grant checks, staged values, and handle invalidation. Full workspace checks are pending.
+- Remaining: successful INSERT dispatch and generated identity allocation are not yet covered; broader index/constraint mutation integration also needs fixtures.
+- Next smallest task: add a catalog-authorized INSERT/UPDATE regression with explicit grants and row/cell policies.

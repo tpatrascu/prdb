@@ -7,7 +7,7 @@ use crate::metadata_discovery::{
     VisibleColumn,
 };
 use crate::transaction::{ExecutorMetadataConnection, InvocationTransaction, TransactionError};
-use crate::tuple::{ScalarType, ScalarValue};
+use crate::tuple::{FieldPatch, ScalarType, ScalarValue};
 use std::io::{Read, Write};
 
 pub const RESOLVE_RELATION_PAYLOAD_VERSION: u16 = 1;
@@ -309,6 +309,256 @@ impl CloseCursorRequest {
             cursor: ExecutorScanCursor::from_bytes(&payload[2..])
                 .ok_or(ExecutorRequestError::InvalidPayload)?,
         })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StageInsertRequest {
+    pub relation: ResolvedRelationHandle,
+    pub values: Vec<Option<ScalarValue>>,
+}
+
+impl StageInsertRequest {
+    pub fn encode(&self) -> Result<Vec<u8>, ExecutorRequestError> {
+        if self.values.len() > crate::tuple::MAX_COLUMNS {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        let mut payload = EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes().to_vec();
+        payload.extend_from_slice(&self.relation.to_bytes());
+        payload.extend_from_slice(
+            &u16::try_from(self.values.len())
+                .map_err(|_| ExecutorRequestError::InvalidPayload)?
+                .to_be_bytes(),
+        );
+        for value in &self.values {
+            encode_mutation_value(&mut payload, value.as_ref())?;
+        }
+        ensure_response_size(&payload)?;
+        Ok(payload)
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
+        if payload.len() < 20
+            || payload.len() > crate::ipc::MAX_PAYLOAD_BYTES
+            || u16::from_be_bytes([payload[0], payload[1]]) != EXECUTOR_BATCH_PAYLOAD_VERSION
+        {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        let relation = ResolvedRelationHandle::from_bytes(&payload[2..18])
+            .ok_or(ExecutorRequestError::InvalidPayload)?;
+        let count = usize::from(u16::from_be_bytes([payload[18], payload[19]]));
+        if count > crate::tuple::MAX_COLUMNS {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        let mut offset = 20;
+        let mut values = Vec::with_capacity(count);
+        for _ in 0..count {
+            values.push(decode_mutation_value(payload, &mut offset)?);
+        }
+        if offset != payload.len() {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        Ok(Self { relation, values })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StageInsertResponse {
+    pub handle: ExecutorRowHandle,
+}
+
+impl StageInsertResponse {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut payload = EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes().to_vec();
+        payload.extend_from_slice(&self.handle.to_bytes());
+        payload
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
+        if payload.len() != 18
+            || u16::from_be_bytes([payload[0], payload[1]]) != EXECUTOR_BATCH_PAYLOAD_VERSION
+        {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        Ok(Self {
+            handle: ExecutorRowHandle::from_bytes(&payload[2..])
+                .ok_or(ExecutorRequestError::InvalidPayload)?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StageUpdateRequest {
+    pub handle: ExecutorRowHandle,
+    pub patches: Vec<FieldPatch>,
+}
+
+impl StageUpdateRequest {
+    pub fn encode(&self) -> Result<Vec<u8>, ExecutorRequestError> {
+        if self.patches.len() > crate::tuple::MAX_COLUMNS
+            || self
+                .patches
+                .iter()
+                .any(|patch| patch.ordinal >= crate::tuple::MAX_COLUMNS)
+            || self
+                .patches
+                .iter()
+                .map(|patch| patch.ordinal)
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != self.patches.len()
+        {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        let mut payload = EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes().to_vec();
+        payload.extend_from_slice(&self.handle.to_bytes());
+        payload.extend_from_slice(
+            &u16::try_from(self.patches.len())
+                .map_err(|_| ExecutorRequestError::InvalidPayload)?
+                .to_be_bytes(),
+        );
+        for patch in &self.patches {
+            payload.extend_from_slice(
+                &u32::try_from(patch.ordinal)
+                    .map_err(|_| ExecutorRequestError::InvalidPayload)?
+                    .to_be_bytes(),
+            );
+            encode_mutation_value(&mut payload, patch.value.as_ref())?;
+        }
+        ensure_response_size(&payload)?;
+        Ok(payload)
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
+        if payload.len() < 20
+            || payload.len() > crate::ipc::MAX_PAYLOAD_BYTES
+            || u16::from_be_bytes([payload[0], payload[1]]) != EXECUTOR_BATCH_PAYLOAD_VERSION
+        {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        let handle = ExecutorRowHandle::from_bytes(&payload[2..18])
+            .ok_or(ExecutorRequestError::InvalidPayload)?;
+        let count = usize::from(u16::from_be_bytes([payload[18], payload[19]]));
+        if count > crate::tuple::MAX_COLUMNS {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        let mut offset = 20;
+        let mut patches = Vec::with_capacity(count);
+        let mut ordinals = std::collections::HashSet::with_capacity(count);
+        for _ in 0..count {
+            let ordinal = usize::try_from(read_u32(payload, &mut offset)?)
+                .map_err(|_| ExecutorRequestError::InvalidPayload)?;
+            if ordinal >= crate::tuple::MAX_COLUMNS || !ordinals.insert(ordinal) {
+                return Err(ExecutorRequestError::InvalidPayload);
+            }
+            patches.push(FieldPatch {
+                ordinal,
+                value: decode_mutation_value(payload, &mut offset)?,
+            });
+        }
+        if offset != payload.len() {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        Ok(Self { handle, patches })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StageDeleteRequest {
+    pub handle: ExecutorRowHandle,
+}
+
+impl StageDeleteRequest {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut payload = EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes().to_vec();
+        payload.extend_from_slice(&self.handle.to_bytes());
+        payload
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
+        if payload.len() != 18
+            || u16::from_be_bytes([payload[0], payload[1]]) != EXECUTOR_BATCH_PAYLOAD_VERSION
+        {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        Ok(Self {
+            handle: ExecutorRowHandle::from_bytes(&payload[2..])
+                .ok_or(ExecutorRequestError::InvalidPayload)?,
+        })
+    }
+}
+
+fn encode_mutation_value(
+    payload: &mut Vec<u8>,
+    value: Option<&ScalarValue>,
+) -> Result<(), ExecutorRequestError> {
+    match value {
+        None => payload.push(1),
+        Some(value) => {
+            payload.push(0);
+            let (type_code, bytes) = encode_scalar_value(value)?;
+            payload.push(type_code);
+            let len =
+                u32::try_from(bytes.len()).map_err(|_| ExecutorRequestError::InvalidPayload)?;
+            payload.extend_from_slice(&len.to_be_bytes());
+            payload.extend_from_slice(&bytes);
+        }
+    }
+    ensure_response_size(payload)
+}
+
+fn decode_mutation_value(
+    payload: &[u8],
+    offset: &mut usize,
+) -> Result<Option<ScalarValue>, ExecutorRequestError> {
+    let state = *payload
+        .get(*offset)
+        .ok_or(ExecutorRequestError::InvalidPayload)?;
+    *offset += 1;
+    match state {
+        1 => Ok(None),
+        0 => {
+            let type_code = *payload
+                .get(*offset)
+                .ok_or(ExecutorRequestError::InvalidPayload)?;
+            *offset += 1;
+            let len = usize::try_from(read_u32(payload, offset)?)
+                .map_err(|_| ExecutorRequestError::InvalidPayload)?;
+            let end = offset
+                .checked_add(len)
+                .filter(|end| *end <= payload.len())
+                .ok_or(ExecutorRequestError::InvalidPayload)?;
+            let value = decode_scalar_value(type_code, &payload[*offset..end])?;
+            *offset = end;
+            Ok(Some(value))
+        }
+        _ => Err(ExecutorRequestError::InvalidPayload),
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MutationAcknowledgement;
+
+impl MutationAcknowledgement {
+    pub fn encode(&self) -> Vec<u8> {
+        [
+            EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes().as_slice(),
+            &[0],
+        ]
+        .concat()
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
+        if payload
+            != [
+                EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes().as_slice(),
+                &[0],
+            ]
+            .concat()
+        {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        Ok(Self)
     }
 }
 
@@ -799,6 +1049,23 @@ pub fn dispatch_executor_request(
             payload.push(0);
             payload
         }
+        Operation::StageInsert => {
+            let decoded = StageInsertRequest::decode(&request.payload)?;
+            StageInsertResponse {
+                handle: connection.stage_insert(&decoded.relation, &decoded.values)?,
+            }
+            .encode()
+        }
+        Operation::StageUpdate => {
+            let decoded = StageUpdateRequest::decode(&request.payload)?;
+            connection.stage_update(&decoded.handle, &decoded.patches)?;
+            MutationAcknowledgement.encode()
+        }
+        Operation::StageDelete => {
+            let decoded = StageDeleteRequest::decode(&request.payload)?;
+            connection.stage_delete(&decoded.handle)?;
+            MutationAcknowledgement.encode()
+        }
         _ => return Err(ExecutorRequestError::UnsupportedOperation(operation)),
     };
     Ok(IpcFrame {
@@ -808,9 +1075,9 @@ pub fn dispatch_executor_request(
     })
 }
 
-/// Serve the initial executor metadata operation on one provisioned stream.
-/// The stream's caller must bind it to this invocation out of band. A clean
-/// disconnect aborts the invocation; framing or request errors do the same.
+/// Serve executor requests on one provisioned stream. The stream's caller
+/// binds it to this invocation out of band. A clean disconnect aborts the
+/// invocation; framing or request errors do the same.
 pub fn serve_executor_resolve_relation<S: Read + Write>(
     stream: &mut S,
     transaction: &mut InvocationTransaction<'_>,

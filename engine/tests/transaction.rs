@@ -2559,7 +2559,7 @@ fn catalog_authorized_scan_builds_its_projection_from_pinned_records()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::executor_ipc::{
         CloseCursorRequest, NextBatchRequest, NextBatchResponse, OpenScanRequest, OpenScanResponse,
-        dispatch_executor_request,
+        StageDeleteRequest, StageUpdateRequest, dispatch_executor_request,
     };
     use prdb_engine::ipc::{IpcFrame, Operation as IpcOperation, ServiceRole};
 
@@ -2592,6 +2592,31 @@ fn catalog_authorized_scan_builds_its_projection_from_pinned_records()
         builtin_owner_id(),
         1,
     );
+    let (table_delete_key, table_delete_payload) = grant_catalog_record(
+        principal_id,
+        table_id,
+        5,
+        1,
+        table_id,
+        builtin_owner_id(),
+        1,
+    );
+    let delete_policy_id = [228; 16];
+    let delete_policy_key = catalog_id_key(13, delete_policy_id);
+    let (delete_policy_target_key, delete_policy_target_payload) =
+        policy_target_catalog_record(delete_policy_id, 1, principal_id);
+    let update_policy_id = [230; 16];
+    let update_policy_key = catalog_id_key(13, update_policy_id);
+    let (update_policy_target_key, update_policy_target_payload) =
+        policy_target_catalog_record(update_policy_id, 1, principal_id);
+    let cell_update_policy_id = [231; 16];
+    let cell_update_policy_key = catalog_id_key(13, cell_update_policy_id);
+    let (cell_update_principal_target_key, cell_update_principal_target_payload) =
+        policy_target_catalog_record(cell_update_policy_id, 1, principal_id);
+    let (cell_update_column_target_key, cell_update_column_target_payload) =
+        policy_target_catalog_record(cell_update_policy_id, 3, [0x66; 16]);
+    let update_check_expression_id = [232; 16];
+    let update_check_expression_key = catalog_id_key(7, update_check_expression_id);
     let write = database.begin_write()?;
     {
         let mut catalog = write.open_table(CATALOG)?;
@@ -2606,6 +2631,17 @@ fn catalog_authorized_scan_builds_its_projection_from_pinned_records()
                 expression_catalog_payload_full(
                     expression_id,
                     3,
+                    boolean_type_id,
+                    [0; 8],
+                    &[],
+                    &Expr::Literal(Some(ScalarValue::Boolean(true))),
+                )?,
+            ),
+            (
+                update_check_expression_key.clone(),
+                expression_catalog_payload_full(
+                    update_check_expression_id,
+                    4,
                     boolean_type_id,
                     [0; 8],
                     &[],
@@ -2690,10 +2726,166 @@ fn catalog_authorized_scan_builds_its_projection_from_pinned_records()
                     ],
                 )?,
             ),
+            (
+                delete_policy_key.clone(),
+                catalog_record_payload(
+                    13,
+                    &delete_policy_key,
+                    &[
+                        CatalogField {
+                            tag: 1,
+                            wire_type: WireType::Id,
+                            payload: table_id.to_vec(),
+                        },
+                        CatalogField {
+                            tag: 2,
+                            wire_type: WireType::U16,
+                            payload: 1u16.to_le_bytes().to_vec(),
+                        },
+                        CatalogField {
+                            tag: 3,
+                            wire_type: WireType::U16,
+                            payload: 4u16.to_le_bytes().to_vec(),
+                        },
+                        CatalogField {
+                            tag: 4,
+                            wire_type: WireType::U16,
+                            payload: 1u16.to_le_bytes().to_vec(),
+                        },
+                        CatalogField {
+                            tag: 5,
+                            wire_type: WireType::Id,
+                            payload: expression_id.to_vec(),
+                        },
+                        CatalogField {
+                            tag: 7,
+                            wire_type: WireType::U64,
+                            payload: 1u64.to_le_bytes().to_vec(),
+                        },
+                    ],
+                )?,
+            ),
+            (
+                update_policy_key.clone(),
+                catalog_record_payload(
+                    13,
+                    &update_policy_key,
+                    &[
+                        CatalogField {
+                            tag: 1,
+                            wire_type: WireType::Id,
+                            payload: table_id.to_vec(),
+                        },
+                        CatalogField {
+                            tag: 2,
+                            wire_type: WireType::U16,
+                            payload: 1u16.to_le_bytes().to_vec(),
+                        },
+                        CatalogField {
+                            tag: 3,
+                            wire_type: WireType::U16,
+                            payload: 3u16.to_le_bytes().to_vec(),
+                        },
+                        CatalogField {
+                            tag: 4,
+                            wire_type: WireType::U16,
+                            payload: 1u16.to_le_bytes().to_vec(),
+                        },
+                        CatalogField {
+                            tag: 5,
+                            wire_type: WireType::Id,
+                            payload: expression_id.to_vec(),
+                        },
+                        CatalogField {
+                            tag: 6,
+                            wire_type: WireType::Id,
+                            payload: update_check_expression_id.to_vec(),
+                        },
+                        CatalogField {
+                            tag: 7,
+                            wire_type: WireType::U64,
+                            payload: 1u64.to_le_bytes().to_vec(),
+                        },
+                    ],
+                )?,
+            ),
+            (
+                cell_update_policy_key.clone(),
+                catalog_record_payload(
+                    13,
+                    &cell_update_policy_key,
+                    &[
+                        CatalogField {
+                            tag: 1,
+                            wire_type: WireType::Id,
+                            payload: table_id.to_vec(),
+                        },
+                        CatalogField {
+                            tag: 2,
+                            wire_type: WireType::U16,
+                            payload: 2u16.to_le_bytes().to_vec(),
+                        },
+                        CatalogField {
+                            tag: 3,
+                            wire_type: WireType::U16,
+                            payload: 3u16.to_le_bytes().to_vec(),
+                        },
+                        CatalogField {
+                            tag: 4,
+                            wire_type: WireType::U16,
+                            payload: 1u16.to_le_bytes().to_vec(),
+                        },
+                        CatalogField {
+                            tag: 5,
+                            wire_type: WireType::Id,
+                            payload: expression_id.to_vec(),
+                        },
+                        CatalogField {
+                            tag: 6,
+                            wire_type: WireType::Id,
+                            payload: update_check_expression_id.to_vec(),
+                        },
+                        CatalogField {
+                            tag: 7,
+                            wire_type: WireType::U64,
+                            payload: 1u64.to_le_bytes().to_vec(),
+                        },
+                    ],
+                )?,
+            ),
             (target_key, target_payload),
             (cell_principal_target_key, cell_principal_target_payload),
             (cell_column_target_key, cell_column_target_payload),
+            (delete_policy_target_key, delete_policy_target_payload),
+            (update_policy_target_key, update_policy_target_payload),
+            (
+                cell_update_principal_target_key,
+                cell_update_principal_target_payload,
+            ),
+            (
+                cell_update_column_target_key,
+                cell_update_column_target_payload,
+            ),
             (table_select_key, table_select_payload),
+            (table_delete_key, table_delete_payload),
+            grant_catalog_record(
+                principal_id,
+                table_id,
+                4,
+                1,
+                table_id,
+                builtin_owner_id(),
+                1,
+            ),
+            grant_catalog_record(
+                principal_id,
+                table_id,
+                4,
+                2,
+                [0x66; 16],
+                builtin_owner_id(),
+                1,
+            ),
         ] {
             catalog.insert(&key[..], &payload[..])?;
         }
@@ -2860,12 +3052,56 @@ fn catalog_authorized_scan_builds_its_projection_from_pinned_records()
         connection.next_relation_scan_page(&close_cursor, 1),
         Err(TransactionError::InvalidMetadataRequest)
     ));
+    let updated_row_handle = first_page.rows[0].handle.clone();
+    let update_response = dispatch_executor_request(
+        ServiceRole::Executor,
+        &mut connection,
+        &IpcFrame {
+            operation: IpcOperation::StageUpdate as u16,
+            request_id: 67,
+            payload: StageUpdateRequest {
+                handle: updated_row_handle.clone(),
+                patches: vec![FieldPatch {
+                    ordinal: 0,
+                    value: Some(ScalarValue::Bytea(vec![9, 9])),
+                }],
+            }
+            .encode()?,
+        },
+    )?;
+    assert_eq!(update_response.payload, [0, 1, 0]);
+    assert!(matches!(
+        connection.revalidate_row_handle(&updated_row_handle),
+        Err(TransactionError::InvalidMetadataRequest)
+    ));
+    let deleted_row_handle = second_page.rows[0].handle.clone();
+    let delete_response = dispatch_executor_request(
+        ServiceRole::Executor,
+        &mut connection,
+        &IpcFrame {
+            operation: IpcOperation::StageDelete as u16,
+            request_id: 68,
+            payload: StageDeleteRequest {
+                handle: deleted_row_handle.clone(),
+            }
+            .encode(),
+        },
+    )?;
+    assert_eq!(delete_response.payload, [0, 1, 0]);
+    assert!(matches!(
+        connection.revalidate_row_handle(&deleted_row_handle),
+        Err(TransactionError::InvalidMetadataRequest)
+    ));
     drop(connection);
     let mut replacement = invocation.open_executor_metadata_connection();
     assert!(matches!(
         replacement.next_relation_scan_page(&next_cursor, 1),
         Err(TransactionError::InvalidMetadataRequest)
     ));
+    drop(replacement);
+    assert!(invocation.read(row_id)?.is_some());
+    assert!(invocation.read(second_row_id)?.is_none());
+    invocation.abort()?;
     Ok(())
 }
 
