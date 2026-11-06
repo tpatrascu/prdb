@@ -1165,6 +1165,103 @@ fn install_relation_discovery_catalog(
     Ok(())
 }
 
+fn install_second_relation_column(database: &Database) -> Result<(), Box<dyn std::error::Error>> {
+    let table_id = [0x10; 16];
+    let column_id = [0x67; 16];
+    let write = database.begin_write()?;
+    {
+        let mut catalog = write.open_table(CATALOG)?;
+        let column_key = catalog_id_key(6, column_id);
+        let column_value = catalog_record_payload(
+            6,
+            &column_key,
+            &[
+                CatalogField {
+                    tag: 1,
+                    wire_type: WireType::Id,
+                    payload: table_id.to_vec(),
+                },
+                CatalogField {
+                    tag: 2,
+                    wire_type: WireType::U32,
+                    payload: 1u32.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 3,
+                    wire_type: WireType::Text,
+                    payload: b"value2".to_vec(),
+                },
+                CatalogField {
+                    tag: 4,
+                    wire_type: WireType::Id,
+                    payload: [0x40; 16].to_vec(),
+                },
+                CatalogField {
+                    tag: 5,
+                    wire_type: WireType::Bytes,
+                    payload: vec![0; 8],
+                },
+                CatalogField {
+                    tag: 6,
+                    wire_type: WireType::Bool,
+                    payload: vec![0],
+                },
+                CatalogField {
+                    tag: 8,
+                    wire_type: WireType::U16,
+                    payload: 0u16.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 9,
+                    wire_type: WireType::U64,
+                    payload: 1u64.to_le_bytes().to_vec(),
+                },
+            ],
+        )?;
+        let object_key = catalog_id_key(2, column_id);
+        let object_value = catalog_record_payload(
+            2,
+            &object_key,
+            &[
+                CatalogField {
+                    tag: 1,
+                    wire_type: WireType::U16,
+                    payload: 4u16.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 2,
+                    wire_type: WireType::Id,
+                    payload: table_id.to_vec(),
+                },
+                CatalogField {
+                    tag: 3,
+                    wire_type: WireType::Text,
+                    payload: b"value2".to_vec(),
+                },
+                CatalogField {
+                    tag: 4,
+                    wire_type: WireType::Id,
+                    payload: builtin_owner_id().to_vec(),
+                },
+                CatalogField {
+                    tag: 5,
+                    wire_type: WireType::U64,
+                    payload: 1u64.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 6,
+                    wire_type: WireType::U16,
+                    payload: 1u16.to_le_bytes().to_vec(),
+                },
+            ],
+        )?;
+        catalog.insert(&column_key[..], &column_value[..])?;
+        catalog.insert(&object_key[..], &object_value[..])?;
+    }
+    write.commit()?;
+    Ok(())
+}
+
 #[test]
 fn authorized_relation_listing_uses_schema_usage_and_data_grants()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -1431,6 +1528,68 @@ fn authorized_column_description_returns_only_declared_shape()
             .describe_authorized_columns(table_id, &no_data_scope, &grants, &[])?
             .is_none()
     );
+    Ok(())
+}
+
+#[test]
+fn authorized_column_description_pages_bind_the_snapshot_and_order()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    install_relation_discovery_catalog(&database)?;
+    install_second_relation_column(&database)?;
+    let schema_id = [0x91; 16];
+    let table_id = [0x10; 16];
+    let context = AuthorizationContext {
+        principal_id: [9; 16],
+        role_ids: std::collections::HashSet::new(),
+        scope: std::collections::HashSet::from([
+            (Operation::Usage, AccessTarget::Schema(schema_id)),
+            (Operation::Insert, AccessTarget::Table(table_id)),
+        ]),
+    };
+    let grants = [
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Usage,
+            target: AccessTarget::Schema(schema_id),
+        },
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Insert,
+            target: AccessTarget::Table(table_id),
+        },
+    ];
+    let mut invocation = InvocationTransaction::begin(&database, [186; 16], [9; 16], 9_999, 1, 64)?;
+    let first = invocation
+        .describe_authorized_columns_page(table_id, 1, None, &context, &grants, &[])?
+        .expect("table write grant permits shape discovery");
+    assert_eq!(first.columns.len(), 1);
+    assert_eq!(first.columns[0].name, "value");
+    assert_eq!(first.columns[0].ordinal, 0);
+    let cursor = first.continuation.expect("second column");
+
+    let mut other_invocation =
+        InvocationTransaction::begin(&database, [187; 16], [9; 16], 9_999, 1, 64)?;
+    assert!(matches!(
+        other_invocation.describe_authorized_columns_page(
+            table_id,
+            1,
+            Some(cursor.clone()),
+            &context,
+            &grants,
+            &[],
+        ),
+        Err(TransactionError::InvalidMetadataRequest)
+    ));
+    let second = invocation
+        .describe_authorized_columns_page(table_id, 1, Some(cursor), &context, &grants, &[])?
+        .expect("same snapshot continues");
+    assert_eq!(second.columns.len(), 1);
+    assert_eq!(second.columns[0].column_id, [0x67; 16]);
+    assert_eq!(second.columns[0].name, "value2");
+    assert_eq!(second.columns[0].ordinal, 1);
+    assert!(second.continuation.is_none());
     Ok(())
 }
 

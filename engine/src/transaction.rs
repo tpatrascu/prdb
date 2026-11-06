@@ -19,9 +19,9 @@ use crate::expression::{
 use crate::index_key::{DeriveIndexKeyError, derive_index_key};
 use crate::metadata::{EngineMetadata, Lifecycle};
 use crate::metadata_discovery::{
-    MAX_METADATA_PAGE_BYTES, MAX_RELATIONS_PER_PAGE, MAX_SCHEMAS_PER_PAGE, RelationScanCursor,
-    SchemaScanCursor, VisibleColumn, VisibleRelation, VisibleRelationPage, VisibleRelationSchema,
-    VisibleSchema, VisibleSchemaPage,
+    ColumnScanCursor, MAX_COLUMNS_PER_PAGE, MAX_METADATA_PAGE_BYTES, MAX_RELATIONS_PER_PAGE,
+    MAX_SCHEMAS_PER_PAGE, RelationScanCursor, SchemaScanCursor, VisibleColumn, VisibleColumnPage,
+    VisibleRelation, VisibleRelationPage, VisibleRelationSchema, VisibleSchema, VisibleSchemaPage,
 };
 use crate::outcome::{InvocationOutcome, OutcomeStatus};
 use crate::overlay::{Overlay, OverlayError, ResolvedRow, RowId, StagedRow};
@@ -233,6 +233,8 @@ pub struct InvocationTransaction<'db> {
     metadata_scan_generation: u64,
     active_schema_scan: Option<ActiveSchemaScan>,
     metadata_schema_scan_generation: u64,
+    active_column_scan: Option<ActiveColumnScan>,
+    metadata_column_scan_generation: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -249,6 +251,17 @@ struct ActiveRelationScan {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ActiveSchemaScan {
     generation: u64,
+    principal_id: [u8; 16],
+    role_ids: HashSet<[u8; 16]>,
+    scope: HashSet<(Operation, AccessTarget)>,
+    grants: Vec<Grant>,
+    dependencies: Vec<AuthorityDependency>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ActiveColumnScan {
+    generation: u64,
+    relation_id: [u8; 16],
     principal_id: [u8; 16],
     role_ids: HashSet<[u8; 16]>,
     scope: HashSet<(Operation, AccessTarget)>,
@@ -424,6 +437,8 @@ impl<'db> InvocationTransaction<'db> {
             metadata_scan_generation: 0,
             active_schema_scan: None,
             metadata_schema_scan_generation: 0,
+            active_column_scan: None,
+            metadata_column_scan_generation: 0,
         })
     }
 
@@ -997,109 +1012,23 @@ impl<'db> InvocationTransaction<'db> {
         dependencies: &[AuthorityDependency],
     ) -> Result<Option<VisibleRelationSchema>, TransactionError> {
         let result = (|| {
-            if table_id == [0; 16] || grants.len() > crate::authorization::MAX_AUTHORIZATION_INPUTS
-            {
-                return Err(TransactionError::InvalidMetadataRequest);
-            }
-            self.check_deadline()?;
-            self.capture_authority_dependencies(context, dependencies)?;
-            let pinned_roles = self.load_catalog_role_closure(context.principal_id)?;
-            if pinned_roles != context.role_ids {
-                return Err(TransactionError::InvalidContext);
-            }
-            for grant in grants {
-                self.validate_metadata_grant(context, *grant)?;
-            }
-
-            let table_key = catalog_id_key(5, table_id);
-            let Some(table) = self.read_catalog_record(&table_key)? else {
+            let Some(trusted_schema) =
+                self.load_authorized_discovery_schema(table_id, context, grants, dependencies)?
+            else {
                 return Ok(None);
             };
-            if table.family_code != 5 {
-                return Err(TransactionError::CorruptCatalog);
-            }
-            let schema_id = catalog_id(&table, 1)?;
-            if !has_permission(
-                context,
-                grants,
-                Operation::Usage,
-                AccessTarget::Schema(schema_id),
-            ) {
-                return Ok(None);
-            }
-
-            let table_target = AccessTarget::Table(table_id);
-            let table_grant = [
-                Operation::Select,
-                Operation::Insert,
-                Operation::Update,
-                Operation::Delete,
-            ]
-            .into_iter()
-            .any(|operation| has_permission(context, grants, operation, table_target));
-            let column_grants = grants
-                .iter()
-                .filter_map(|grant| {
-                    let AccessTarget::Column {
-                        table_id: granted_table_id,
-                        column_id,
-                    } = grant.target
-                    else {
-                        return None;
-                    };
-                    let operation_allowed = matches!(
-                        grant.operation,
-                        Operation::Select | Operation::Insert | Operation::Update
-                    );
-                    let subject_matches = match grant.subject {
-                        Subject::Principal(id) => id == context.principal_id,
-                        Subject::Role(id) => context.role_ids.contains(&id),
-                    };
-                    (granted_table_id == table_id
-                        && operation_allowed
-                        && subject_matches
-                        && context.scope.contains(&(grant.operation, grant.target)))
-                    .then_some(column_id)
-                })
-                .collect::<HashSet<_>>();
-            if !table_grant && column_grants.is_empty() {
-                return Ok(None);
-            }
-            if !table_grant {
-                for column_id in &column_grants {
-                    self.validate_discovery_column(table_id, *column_id)?;
-                }
-            }
-
-            self.read_discovery_relation(schema_id, table_id)?;
-            let trusted_schema = self.load_catalog_table_schema(table_id)?;
             let mut columns = Vec::with_capacity(trusted_schema.column_ids.len());
             let mut response_bytes = 0usize;
-            for (ordinal, column_id) in trusted_schema.column_ids.iter().copied().enumerate() {
-                self.validate_discovery_column(table_id, column_id)?;
-                let record = self
-                    .read_catalog_record(&catalog_id_key(6, column_id))?
-                    .ok_or(TransactionError::CorruptCatalog)?;
-                let name = String::from_utf8(catalog_field(&record, 3)?.to_vec())
-                    .map_err(|_| TransactionError::CorruptCatalog)?;
+            for ordinal in 0..trusted_schema.column_ids.len() {
+                let column = self.read_visible_column(table_id, &trusted_schema, ordinal)?;
                 response_bytes = response_bytes
-                    .checked_add(name.len())
+                    .checked_add(column.name.len())
                     .and_then(|bytes| bytes.checked_add(32))
                     .ok_or(TransactionError::MetadataResultTooLarge)?;
                 if response_bytes > MAX_METADATA_PAGE_BYTES {
                     return Err(TransactionError::MetadataResultTooLarge);
                 }
-                let schema_column = trusted_schema
-                    .columns
-                    .get(ordinal)
-                    .ok_or(TransactionError::CorruptCatalog)?;
-                columns.push(VisibleColumn {
-                    column_id,
-                    name,
-                    ordinal: ordinal as u32,
-                    scalar_type: schema_column.scalar_type,
-                    nullable: schema_column.nullable,
-                });
+                columns.push(column);
             }
             Ok(Some(VisibleRelationSchema {
                 relation_id: table_id,
@@ -1108,6 +1037,131 @@ impl<'db> InvocationTransaction<'db> {
         })();
         match result {
             Ok(description) => Ok(description),
+            Err(error) => {
+                if !self.aborted {
+                    self.abort()?;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Return one bounded page of a relation's declared columns.
+    pub fn describe_authorized_columns_page(
+        &mut self,
+        table_id: [u8; 16],
+        page_limit: usize,
+        continuation: Option<ColumnScanCursor>,
+        context: &AuthorizationContext,
+        grants: &[Grant],
+        dependencies: &[AuthorityDependency],
+    ) -> Result<Option<VisibleColumnPage>, TransactionError> {
+        let result = (|| {
+            if page_limit == 0 || page_limit > MAX_COLUMNS_PER_PAGE {
+                return Err(TransactionError::InvalidMetadataRequest);
+            }
+            let Some(trusted_schema) =
+                self.load_authorized_discovery_schema(table_id, context, grants, dependencies)?
+            else {
+                return Ok(None);
+            };
+            let active_scan = match continuation.as_ref() {
+                Some(cursor) => {
+                    if cursor.invocation_id != self.invocation_id
+                        || cursor.relation_id != table_id
+                        || self.active_column_scan.as_ref().is_none_or(|active| {
+                            active.generation != cursor.generation
+                                || active.relation_id != table_id
+                                || active.principal_id != context.principal_id
+                                || active.role_ids != context.role_ids
+                                || active.scope != context.scope
+                                || active.grants != grants
+                                || active.dependencies != dependencies
+                        })
+                    {
+                        return Err(TransactionError::InvalidMetadataRequest);
+                    }
+                    self.active_column_scan
+                        .as_ref()
+                        .ok_or(TransactionError::InvalidMetadataRequest)?
+                        .clone()
+                }
+                None => {
+                    self.metadata_column_scan_generation = self
+                        .metadata_column_scan_generation
+                        .checked_add(1)
+                        .ok_or(TransactionError::InvalidMetadataRequest)?;
+                    let active = ActiveColumnScan {
+                        generation: self.metadata_column_scan_generation,
+                        relation_id: table_id,
+                        principal_id: context.principal_id,
+                        role_ids: context.role_ids.clone(),
+                        scope: context.scope.clone(),
+                        grants: grants.to_vec(),
+                        dependencies: dependencies.to_vec(),
+                    };
+                    self.active_column_scan = Some(active.clone());
+                    active
+                }
+            };
+            let start_ordinal = continuation
+                .as_ref()
+                .map(|cursor| {
+                    usize::try_from(cursor.after_ordinal)
+                        .ok()
+                        .and_then(|ordinal| ordinal.checked_add(1))
+                        .ok_or(TransactionError::InvalidMetadataRequest)
+                })
+                .transpose()?
+                .unwrap_or(0);
+            if start_ordinal > trusted_schema.column_ids.len() {
+                return Err(TransactionError::InvalidMetadataRequest);
+            }
+            let mut columns = Vec::with_capacity(page_limit);
+            let mut response_bytes = 0usize;
+            let mut has_more = false;
+            for ordinal in start_ordinal..trusted_schema.column_ids.len() {
+                if columns.len() == page_limit {
+                    has_more = true;
+                    break;
+                }
+                let column = self.read_visible_column(table_id, &trusted_schema, ordinal)?;
+                let encoded_size = column
+                    .name
+                    .len()
+                    .checked_add(32)
+                    .ok_or(TransactionError::MetadataResultTooLarge)?;
+                if response_bytes.saturating_add(encoded_size) > MAX_METADATA_PAGE_BYTES {
+                    if columns.is_empty() {
+                        return Err(TransactionError::MetadataResultTooLarge);
+                    }
+                    has_more = true;
+                    break;
+                }
+                response_bytes += encoded_size;
+                columns.push(column);
+            }
+            let continuation = if has_more {
+                Some(ColumnScanCursor {
+                    invocation_id: self.invocation_id,
+                    relation_id: table_id,
+                    generation: active_scan.generation,
+                    after_ordinal: columns
+                        .last()
+                        .map(|column| column.ordinal)
+                        .ok_or(TransactionError::InvalidMetadataRequest)?,
+                })
+            } else {
+                None
+            };
+            Ok(Some(VisibleColumnPage {
+                relation_id: table_id,
+                columns,
+                continuation,
+            }))
+        })();
+        match result {
+            Ok(page) => Ok(page),
             Err(error) => {
                 if !self.aborted {
                     self.abort()?;
@@ -1281,6 +1335,119 @@ impl<'db> InvocationTransaction<'db> {
             return Err(TransactionError::CorruptCatalog);
         }
         Ok(())
+    }
+
+    fn load_authorized_discovery_schema(
+        &mut self,
+        table_id: [u8; 16],
+        context: &AuthorizationContext,
+        grants: &[Grant],
+        dependencies: &[AuthorityDependency],
+    ) -> Result<Option<CatalogTableSchema>, TransactionError> {
+        if table_id == [0; 16] || grants.len() > crate::authorization::MAX_AUTHORIZATION_INPUTS {
+            return Err(TransactionError::InvalidMetadataRequest);
+        }
+        self.check_deadline()?;
+        self.capture_authority_dependencies(context, dependencies)?;
+        let pinned_roles = self.load_catalog_role_closure(context.principal_id)?;
+        if pinned_roles != context.role_ids {
+            return Err(TransactionError::InvalidContext);
+        }
+        for grant in grants {
+            self.validate_metadata_grant(context, *grant)?;
+        }
+
+        let table_key = catalog_id_key(5, table_id);
+        let Some(table) = self.read_catalog_record(&table_key)? else {
+            return Ok(None);
+        };
+        if table.family_code != 5 {
+            return Err(TransactionError::CorruptCatalog);
+        }
+        let schema_id = catalog_id(&table, 1)?;
+        if !has_permission(
+            context,
+            grants,
+            Operation::Usage,
+            AccessTarget::Schema(schema_id),
+        ) {
+            return Ok(None);
+        }
+
+        let table_target = AccessTarget::Table(table_id);
+        let table_grant = [
+            Operation::Select,
+            Operation::Insert,
+            Operation::Update,
+            Operation::Delete,
+        ]
+        .into_iter()
+        .any(|operation| has_permission(context, grants, operation, table_target));
+        let column_grants = grants
+            .iter()
+            .filter_map(|grant| {
+                let AccessTarget::Column {
+                    table_id: granted_table_id,
+                    column_id,
+                } = grant.target
+                else {
+                    return None;
+                };
+                let operation_allowed = matches!(
+                    grant.operation,
+                    Operation::Select | Operation::Insert | Operation::Update
+                );
+                let subject_matches = match grant.subject {
+                    Subject::Principal(id) => id == context.principal_id,
+                    Subject::Role(id) => context.role_ids.contains(&id),
+                };
+                (granted_table_id == table_id
+                    && operation_allowed
+                    && subject_matches
+                    && context.scope.contains(&(grant.operation, grant.target)))
+                .then_some(column_id)
+            })
+            .collect::<HashSet<_>>();
+        if !table_grant && column_grants.is_empty() {
+            return Ok(None);
+        }
+        if !table_grant {
+            for column_id in &column_grants {
+                self.validate_discovery_column(table_id, *column_id)?;
+            }
+        }
+
+        self.read_discovery_relation(schema_id, table_id)?;
+        self.load_catalog_table_schema(table_id).map(Some)
+    }
+
+    fn read_visible_column(
+        &mut self,
+        table_id: [u8; 16],
+        schema: &CatalogTableSchema,
+        ordinal: usize,
+    ) -> Result<VisibleColumn, TransactionError> {
+        let column_id = *schema
+            .column_ids
+            .get(ordinal)
+            .ok_or(TransactionError::CorruptCatalog)?;
+        self.validate_discovery_column(table_id, column_id)?;
+        let record = self
+            .read_catalog_record(&catalog_id_key(6, column_id))?
+            .ok_or(TransactionError::CorruptCatalog)?;
+        let name = String::from_utf8(catalog_field(&record, 3)?.to_vec())
+            .map_err(|_| TransactionError::CorruptCatalog)?;
+        let schema_column = schema
+            .columns
+            .get(ordinal)
+            .ok_or(TransactionError::CorruptCatalog)?;
+        Ok(VisibleColumn {
+            column_id,
+            name,
+            ordinal: ordinal as u32,
+            scalar_type: schema_column.scalar_type,
+            nullable: schema_column.nullable,
+        })
     }
 
     fn validate_metadata_grant(
