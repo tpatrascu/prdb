@@ -462,6 +462,14 @@ fn audit_event(n: u8) -> AuditEvent {
 }
 
 fn membership_write(member_id: [u8; 16], role_id: [u8; 16]) -> CatalogWrite {
+    membership_write_with_grantor(member_id, role_id, builtin_owner_id())
+}
+
+fn membership_write_with_grantor(
+    member_id: [u8; 16],
+    role_id: [u8; 16],
+    grantor_id: [u8; 16],
+) -> CatalogWrite {
     let mut key = 11u16.to_be_bytes().to_vec();
     key.push(1);
     key.extend_from_slice(&member_id);
@@ -474,7 +482,7 @@ fn membership_write(member_id: [u8; 16], role_id: [u8; 16]) -> CatalogWrite {
             CatalogField {
                 tag: 1,
                 wire_type: WireType::Id,
-                payload: builtin_owner_id().to_vec(),
+                payload: grantor_id.to_vec(),
             },
             CatalogField {
                 tag: 2,
@@ -3307,6 +3315,314 @@ fn storage_manager_checks_index_ddl_authority_for_current_actor()
         read.open_table(schema::AUDIT)?
             .get(&[213; 16][..])?
             .is_none()
+    );
+    Ok(())
+}
+
+#[test]
+fn storage_manager_authorizes_membership_ddl_by_system_privilege_and_admin_role()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let role_manager = id(0x61);
+    let denied_user = id(0x62);
+    let admin_user = id(0x63);
+    let first_member = id(0x64);
+    let second_member = id(0x65);
+    let app_role = id(0x67);
+    let admin_parent_role = id(0x68);
+    let database_id = id(0x33);
+    let admin_role = builtin_owner_id();
+    let records = [
+        principal_write_with_name(role_manager, 1, 1, "role_manager"),
+        object_write_with_name(role_manager, 8, "role_manager"),
+        principal_write_with_name(denied_user, 1, 1, "role_denied"),
+        object_write_with_name(denied_user, 8, "role_denied"),
+        principal_write_with_name(admin_user, 1, 1, "role_admin"),
+        object_write_with_name(admin_user, 8, "role_admin"),
+        principal_write_with_name(first_member, 1, 1, "first_member"),
+        object_write_with_name(first_member, 8, "first_member"),
+        principal_write_with_name(second_member, 1, 1, "second_member"),
+        object_write_with_name(second_member, 8, "second_member"),
+        principal_write_with_name(app_role, 2, 1, "app_role"),
+        object_write_with_name(app_role, 9, "app_role"),
+        principal_write_with_name(admin_parent_role, 2, 1, "admin_parent_role"),
+        object_write_with_name(admin_parent_role, 9, "admin_parent_role"),
+        grant_write(role_manager, database_id, 13, 1, database_id, admin_role),
+        dependency_write(role_manager, database_id, 5),
+        membership_write_with_grantor(admin_user, admin_role, admin_role),
+        dependency_write(admin_user, admin_role, 5),
+        membership_write_with_grantor(admin_parent_role, admin_role, admin_role),
+        dependency_write(admin_parent_role, admin_role, 5),
+    ];
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let preflight = database.begin_read()?;
+    let preflight_catalog = preflight.open_table(CATALOG)?;
+    for record in &records {
+        assert!(record.expected_value.is_none());
+        assert!(
+            preflight_catalog.get(record.key.as_slice())?.is_none(),
+            "fixture catalog key already exists: {:?}",
+            record.key
+        );
+    }
+    drop(preflight_catalog);
+    drop(preflight);
+    let mut setup_audit = audit_event(79);
+    setup_audit.actor_id = Some(admin_role);
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage
+        .commit_catalog_and_audit(id(79), admin_role, 9_999, &records, &[setup_audit])
+        .map_err(|error| format!("membership authorization fixture setup: {error:?}"))?;
+    let bump_member_epoch =
+        |member_id, epoch, name: &str| -> Result<_, Box<dyn std::error::Error>> {
+            let mut write = principal_write_with_name(member_id, 1, epoch, name);
+            let read = database.begin_read()?;
+            write.expected_value = Some(
+                read.open_table(CATALOG)?
+                    .get(id_catalog_key(10, member_id).as_slice())?
+                    .ok_or("missing member principal")?
+                    .value()
+                    .to_vec(),
+            );
+            Ok(write)
+        };
+    let remove_catalog_record = |mut write: CatalogWrite| -> Result<_, Box<dyn std::error::Error>> {
+        let read = database.begin_read()?;
+        write.expected_value = Some(
+            read.open_table(CATALOG)?
+                .get(write.key.as_slice())?
+                .ok_or("missing catalog record to remove")?
+                .value()
+                .to_vec(),
+        );
+        write.payload = None;
+        Ok(write)
+    };
+    let mut allowed_audit = audit_event(80);
+    allowed_audit.actor_id = Some(role_manager);
+    allowed_audit.action = AuditAction::AuthorityChange;
+    let manager_membership = membership_write_with_grantor(first_member, app_role, role_manager);
+    assert_eq!(
+        storage
+            .commit_authorized_membership_ddl(
+                id(80),
+                role_manager,
+                9_999,
+                &[
+                    manager_membership.clone(),
+                    dependency_write(first_member, app_role, 5),
+                    bump_member_epoch(first_member, 2, "first_member")?,
+                ],
+                &[allowed_audit],
+            )
+            .map_err(|error| format!("MANAGE_ROLES membership change: {error:?}"))?,
+        2
+    );
+
+    let mut removal_audit = audit_event(84);
+    removal_audit.actor_id = Some(role_manager);
+    removal_audit.action = AuditAction::AuthorityChange;
+    assert_eq!(
+        storage.commit_authorized_membership_ddl(
+            id(84),
+            role_manager,
+            9_999,
+            &[
+                remove_catalog_record(manager_membership.clone())?,
+                remove_catalog_record(dependency_write(first_member, app_role, 5))?,
+                bump_member_epoch(first_member, 3, "first_member")?,
+            ],
+            &[removal_audit],
+        )?,
+        3
+    );
+
+    let denied_membership = membership_write_with_grantor(second_member, app_role, denied_user);
+    let mut denied_audit = audit_event(81);
+    denied_audit.actor_id = Some(denied_user);
+    denied_audit.action = AuditAction::AuthorityChange;
+    assert_eq!(
+        storage.commit_authorized_membership_ddl(
+            id(81),
+            denied_user,
+            9_999,
+            &[
+                denied_membership.clone(),
+                dependency_write(second_member, app_role, 5),
+                bump_member_epoch(second_member, 2, "second_member")?,
+            ],
+            &[denied_audit],
+        ),
+        Err(CommitError::DdlAuthorizationDenied)
+    );
+
+    let inherited_admin_membership =
+        membership_write_with_grantor(second_member, admin_parent_role, role_manager);
+    let mut inherited_admin_audit = audit_event(87);
+    inherited_admin_audit.actor_id = Some(role_manager);
+    inherited_admin_audit.action = AuditAction::AuthorityChange;
+    assert_eq!(
+        storage.commit_authorized_membership_ddl(
+            id(87),
+            role_manager,
+            9_999,
+            &[
+                inherited_admin_membership.clone(),
+                dependency_write(second_member, admin_parent_role, 5),
+                bump_member_epoch(second_member, 2, "second_member")?,
+            ],
+            &[inherited_admin_audit],
+        ),
+        Err(CommitError::DdlAuthorizationDenied)
+    );
+
+    let admin_role_membership =
+        membership_write_with_grantor(second_member, admin_role, role_manager);
+    let admin_role_membership_by_admin =
+        membership_write_with_grantor(second_member, admin_role, admin_user);
+    let mut restricted_audit = audit_event(82);
+    restricted_audit.actor_id = Some(role_manager);
+    restricted_audit.action = AuditAction::AuthorityChange;
+    assert_eq!(
+        storage.commit_authorized_membership_ddl(
+            id(82),
+            role_manager,
+            9_999,
+            &[
+                admin_role_membership.clone(),
+                dependency_write(second_member, admin_role, 5),
+                bump_member_epoch(second_member, 2, "second_member")?,
+            ],
+            &[restricted_audit],
+        ),
+        Err(CommitError::DdlAuthorizationDenied)
+    );
+
+    let mut admin_audit = audit_event(83);
+    admin_audit.actor_id = Some(admin_user);
+    admin_audit.action = AuditAction::AuthorityChange;
+    assert_eq!(
+        storage.commit_authorized_membership_ddl(
+            id(83),
+            admin_user,
+            9_999,
+            &[
+                admin_role_membership_by_admin.clone(),
+                dependency_write(second_member, admin_role, 5),
+                bump_member_epoch(second_member, 2, "second_member")?,
+            ],
+            &[admin_audit],
+        )?,
+        4
+    );
+    let mut reduce_admin_audit = audit_event(85);
+    reduce_admin_audit.actor_id = Some(admin_user);
+    reduce_admin_audit.action = AuditAction::AuthorityChange;
+    assert_eq!(
+        storage.commit_authorized_membership_ddl(
+            id(85),
+            admin_user,
+            9_999,
+            &[
+                remove_catalog_record(membership_write_with_grantor(
+                    admin_user, admin_role, admin_role,
+                ))?,
+                remove_catalog_record(dependency_write(admin_user, admin_role, 5))?,
+                bump_member_epoch(admin_user, 2, "role_admin")?,
+            ],
+            &[reduce_admin_audit],
+        )?,
+        5
+    );
+
+    let mut last_admin_audit = audit_event(86);
+    last_admin_audit.actor_id = Some(second_member);
+    last_admin_audit.action = AuditAction::AuthorityChange;
+    assert_eq!(
+        storage.commit_authorized_membership_ddl(
+            id(86),
+            second_member,
+            9_999,
+            &[
+                remove_catalog_record(admin_role_membership_by_admin.clone())?,
+                remove_catalog_record(dependency_write(second_member, admin_role, 5))?,
+                bump_member_epoch(second_member, 3, "second_member")?,
+            ],
+            &[last_admin_audit],
+        ),
+        Err(CommitError::DdlAuthorizationDenied)
+    );
+    assert_eq!(commit_sequence(&database)?, 5);
+    assert_eq!(
+        lookup_outcome(&database, id(80), role_manager, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Committed
+    );
+    assert_eq!(
+        lookup_outcome(&database, id(84), role_manager, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Committed
+    );
+    for (invocation_id, principal_id) in [
+        (id(81), denied_user),
+        (id(82), role_manager),
+        (id(87), role_manager),
+    ] {
+        assert_eq!(
+            lookup_outcome(&database, invocation_id, principal_id, 1)?
+                .unwrap()
+                .status,
+            OutcomeStatus::Aborted
+        );
+    }
+    assert_eq!(
+        lookup_outcome(&database, id(83), admin_user, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Committed
+    );
+    assert_eq!(
+        lookup_outcome(&database, id(85), admin_user, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Committed
+    );
+    assert_eq!(
+        lookup_outcome(&database, id(86), second_member, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Aborted
+    );
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    assert!(catalog.get(manager_membership.key.as_slice())?.is_none());
+    assert!(catalog.get(denied_membership.key.as_slice())?.is_none());
+    assert!(
+        catalog
+            .get(inherited_admin_membership.key.as_slice())?
+            .is_none()
+    );
+    assert!(
+        catalog
+            .get(admin_role_membership_by_admin.key.as_slice())?
+            .is_some()
+    );
+    assert!(
+        catalog
+            .get(
+                membership_write_with_grantor(admin_user, admin_role, admin_role)
+                    .key
+                    .as_slice()
+            )?
+            .is_none()
+    );
+    assert!(
+        catalog
+            .get(id_catalog_key(10, second_member).as_slice())?
+            .is_some()
     );
     Ok(())
 }
