@@ -6419,7 +6419,7 @@ fn authorized_insert_materializes_defaults_before_policy_and_check_validation()
 }
 
 #[test]
-fn catalog_insert_rejects_caller_values_for_generated_identity()
+fn catalog_insert_allocates_generated_identity_and_rejects_caller_override()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
@@ -6486,35 +6486,43 @@ fn catalog_insert_rejects_caller_values_for_generated_identity()
         default_expression_ids: vec![None],
         generation_modes: vec![1],
     };
-    for (invocation_id, input) in [
-        (
-            [216; 16],
-            InsertInput::Value(Some(ScalarValue::Uuid([217; 16]))),
+    let mut override_invocation =
+        InvocationTransaction::begin(&database, [216; 16], [9; 16], 9_999, 2, 128)?;
+    assert!(matches!(
+        override_invocation.stage_insert_authorized_from_catalog_defaults(
+            row_id,
+            &projection,
+            &[InsertInput::Value(Some(ScalarValue::Uuid([217; 16])))],
+            &schema,
         ),
-        ([218; 16], InsertInput::Default),
-    ] {
-        let mut invocation =
-            InvocationTransaction::begin(&database, invocation_id, [9; 16], 9_999, 2, 128)?;
-        assert!(matches!(
-            invocation.stage_insert_authorized_from_catalog_defaults(
-                row_id,
-                &projection,
-                &[input],
-                &schema,
-            ),
-            Err(TransactionError::GeneratedIdentityUnsupported)
-        ));
-        assert!(matches!(
-            invocation.commit(),
-            Err(TransactionError::Aborted)
-        ));
-        assert_eq!(
-            prdb_engine::outcome::lookup_outcome(&database, invocation_id, [9; 16], 1)?
-                .unwrap()
-                .status,
-            OutcomeStatus::Aborted
-        );
-    }
+        Err(TransactionError::InvalidContext)
+    ));
+    assert!(matches!(
+        override_invocation.commit(),
+        Err(TransactionError::Aborted)
+    ));
+
+    let mut invocation =
+        InvocationTransaction::begin(&database, [218; 16], [9; 16], 9_999, 2, 128)?;
+    invocation.stage_insert_authorized_from_catalog_defaults(
+        row_id,
+        &projection,
+        &[InsertInput::Default],
+        &schema,
+    )?;
+    let payload = invocation.read(row_id)?.expect("generated row is staged");
+    let tuple = decode_tuple(&columns, 1, &payload)?;
+    assert!(matches!(
+        tuple.values.first(),
+        Some(Some(ScalarValue::Uuid(value))) if *value != [0; 16]
+    ));
+    invocation.abort()?;
+    assert_eq!(
+        prdb_engine::outcome::lookup_outcome(&database, [218; 16], [9; 16], 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Aborted
+    );
     let read = database.begin_read()?;
     assert!(read.open_table(ROWS)?.get(&key(row_id)[..])?.is_none());
     Ok(())

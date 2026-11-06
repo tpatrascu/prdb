@@ -19,7 +19,7 @@ use crate::metadata::{EngineMetadata, Lifecycle};
 use crate::outcome::{InvocationOutcome, OutcomeStatus};
 use crate::row_record::RowRecord;
 use crate::schema::{AUDIT, CATALOG, ENGINE_META, INDEXES, OUTCOMES, ROW_INDEXES, ROWS};
-use crate::tuple::{ColumnSchema, ScalarType, decode_tuple, encode_tuple};
+use crate::tuple::{ColumnSchema, ScalarType, ScalarValue, decode_tuple, encode_tuple};
 use redb::{Database, ReadOnlyTable, ReadableDatabase, ReadableTable, WriteTransaction};
 use std::collections::{HashMap, HashSet};
 
@@ -340,6 +340,158 @@ fn validate_foreign_key_constraints(
         )?;
         if source_keys.iter().any(|key| !target_keys.contains(key)) {
             return Err(CommitError::ForeignKeyViolation);
+        }
+    }
+    Ok(())
+}
+
+/// Check generated UUID values against the final table contents inside the
+/// serialized commit transaction, including concurrent inserts.
+fn validate_generated_identity_collisions(
+    transaction: &WriteTransaction,
+    writes: &[RowWrite],
+    catalog_writes: &[CatalogWrite],
+) -> Result<(), CommitError> {
+    let touched_tables = writes
+        .iter()
+        .map(|write| {
+            write.key[..16]
+                .try_into()
+                .map_err(|_| CommitError::InvalidWrite)
+        })
+        .collect::<Result<HashSet<[u8; 16]>, _>>()?;
+    if touched_tables.is_empty() {
+        return Ok(());
+    }
+
+    let catalog = transaction.open_table(CATALOG).map_err(storage_error)?;
+    for table_id in touched_tables {
+        let prefix = 6u16.to_be_bytes();
+        let mut columns = HashMap::<Vec<u8>, (usize, u16)>::new();
+        for entry in catalog.range(prefix.as_slice()..).map_err(storage_error)? {
+            let (key, value) = entry.map_err(storage_error)?;
+            let key = key.value();
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            if catalog_writes.iter().any(|write| write.key == key) {
+                continue;
+            }
+            let bytes = value.value();
+            if column_table_id(key, bytes)? == table_id {
+                let ordinal = u32::from_le_bytes(
+                    catalog_field_bytes(key, bytes, 6, 2)?
+                        .try_into()
+                        .map_err(|_| CommitError::InvalidCatalog)?,
+                ) as usize;
+                let mode = u16::from_le_bytes(
+                    catalog_field_bytes(key, bytes, 6, 8)?
+                        .try_into()
+                        .map_err(|_| CommitError::InvalidCatalog)?,
+                );
+                if mode > 1 {
+                    return Err(CommitError::InvalidCatalog);
+                }
+                columns.insert(key.to_vec(), (ordinal, mode));
+            }
+        }
+        for write in catalog_writes
+            .iter()
+            .filter(|write| write.key.starts_with(&prefix))
+        {
+            let Some(bytes) = write.payload.as_deref() else {
+                continue;
+            };
+            if column_table_id(&write.key, bytes)? == table_id {
+                let ordinal = u32::from_le_bytes(
+                    catalog_field_bytes(&write.key, bytes, 6, 2)?
+                        .try_into()
+                        .map_err(|_| CommitError::InvalidCatalog)?,
+                ) as usize;
+                let mode = u16::from_le_bytes(
+                    catalog_field_bytes(&write.key, bytes, 6, 8)?
+                        .try_into()
+                        .map_err(|_| CommitError::InvalidCatalog)?,
+                );
+                if mode > 1 {
+                    return Err(CommitError::InvalidCatalog);
+                }
+                columns.insert(write.key.clone(), (ordinal, mode));
+            }
+        }
+        let mut generated = columns
+            .values()
+            .filter_map(|(ordinal, mode)| (*mode == 1).then_some(*ordinal))
+            .collect::<Vec<_>>();
+        generated.sort_unstable();
+        generated.dedup();
+        if generated.is_empty() {
+            continue;
+        }
+        let schema = load_final_table_schema(&catalog, catalog_writes, table_id)?;
+        if generated.iter().any(|ordinal| {
+            *ordinal >= schema.columns.len()
+                || schema.columns[*ordinal].scalar_type != ScalarType::Uuid
+        }) {
+            return Err(CommitError::InvalidCatalog);
+        }
+
+        let write_keys = writes.iter().map(|write| write.key).collect::<HashSet<_>>();
+        let mut values = generated
+            .iter()
+            .map(|ordinal| (*ordinal, HashSet::<[u8; 16]>::new()))
+            .collect::<HashMap<_, _>>();
+        let mut visits = 0usize;
+        let mut start = [0; 32];
+        start[..16].copy_from_slice(&table_id);
+        let mut end = [u8::MAX; 32];
+        end[..16].copy_from_slice(&table_id);
+        let rows = transaction.open_table(ROWS).map_err(storage_error)?;
+        for entry in rows
+            .range(start.as_slice()..=end.as_slice())
+            .map_err(storage_error)?
+        {
+            let (key, record) = entry.map_err(storage_error)?;
+            let row_key: [u8; 32] = key
+                .value()
+                .try_into()
+                .map_err(|_| CommitError::InvalidRow)?;
+            visits = visits
+                .checked_add(1)
+                .ok_or(CommitError::ForeignKeyValidationLimitExceeded)?;
+            if visits > MAX_FOREIGN_KEY_ROW_VISITS_PER_COMMIT {
+                return Err(CommitError::ForeignKeyValidationLimitExceeded);
+            }
+            if write_keys.contains(&row_key) {
+                continue;
+            }
+            let row = RowRecord::decode(record.value()).map_err(|_| CommitError::InvalidRow)?;
+            let tuple = decode_tuple(&schema.columns, schema.schema_version, &row.payload)
+                .map_err(|_| CommitError::InvalidRow)?;
+            for ordinal in &generated {
+                let Some(Some(ScalarValue::Uuid(value))) = tuple.values.get(*ordinal) else {
+                    return Err(CommitError::InvalidRow);
+                };
+                if !values.get_mut(ordinal).unwrap().insert(*value) {
+                    return Err(CommitError::UniqueViolation);
+                }
+            }
+        }
+        drop(rows);
+        for write in writes.iter().filter(|write| write.key[..16] == table_id) {
+            let Some(payload) = write.payload.as_deref() else {
+                continue;
+            };
+            let tuple = decode_tuple(&schema.columns, schema.schema_version, payload)
+                .map_err(|_| CommitError::InvalidRow)?;
+            for ordinal in &generated {
+                let Some(Some(ScalarValue::Uuid(value))) = tuple.values.get(*ordinal) else {
+                    return Err(CommitError::InvalidRow);
+                };
+                if !values.get_mut(ordinal).unwrap().insert(*value) {
+                    return Err(CommitError::UniqueViolation);
+                }
+            }
         }
     }
     Ok(())
@@ -4851,6 +5003,20 @@ fn commit_storage_changes_inner_with_admin_credential_check(
             error @ (CommitError::InvalidCatalog
             | CommitError::InvalidRow
             | CommitError::ForeignKeyViolation
+            | CommitError::ForeignKeyValidationLimitExceeded),
+        ) => {
+            transaction.abort().map_err(storage_error)?;
+            record_aborted_outcome(database, invocation_id, principal_id, retention_deadline_us)?;
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    }
+    match validate_generated_identity_collisions(&transaction, writes, catalog_writes) {
+        Ok(()) => {}
+        Err(
+            error @ (CommitError::InvalidCatalog
+            | CommitError::InvalidRow
+            | CommitError::UniqueViolation
             | CommitError::ForeignKeyValidationLimitExceeded),
         ) => {
             transaction.abort().map_err(storage_error)?;

@@ -79,7 +79,6 @@ pub enum TransactionError {
     RandomnessUnavailable,
     IndexRowNotStaged,
     RowAlreadyExists,
-    GeneratedIdentityUnsupported,
     ConstraintViolation,
     IndexOverlayLimitExceeded,
     InvalidScanRequest,
@@ -4533,10 +4532,10 @@ impl<'db> InvocationTransaction<'db> {
         }
     }
 
-    /// Materialize defaults by expression ID from the pinned catalog. Each
-    /// expression must be a valid family-7 DEFAULT record; reading it also
-    /// adds its exact bytes to the final-commit catalog guard set. Generated
-    /// identities fail closed until storage can allocate and collision-check them.
+    /// Materialize defaults and generated UUID identities from the pinned
+    /// catalog. Reading each DEFAULT expression adds its exact bytes to the
+    /// final-commit catalog guard set; generated values are collision-checked
+    /// against the serialized final table state during commit.
     pub fn stage_insert_authorized_from_catalog_defaults(
         &mut self,
         id: RowId,
@@ -4559,8 +4558,27 @@ impl<'db> InvocationTransaction<'db> {
             {
                 return Err(TransactionError::InvalidContext);
             }
-            if schema.generation_modes.iter().any(|&mode| mode != 0) {
-                return Err(TransactionError::GeneratedIdentityUnsupported);
+            let generated_columns = schema
+                .generation_modes
+                .iter()
+                .enumerate()
+                .filter_map(|(ordinal, mode)| (*mode == 1).then_some(schema.column_ids[ordinal]))
+                .collect::<Vec<_>>();
+            let mut materialized_inputs = inputs.to_vec();
+            for (ordinal, mode) in schema.generation_modes.iter().enumerate() {
+                if *mode == 1 {
+                    if inputs[ordinal] != InsertInput::Default {
+                        return Err(TransactionError::InvalidContext);
+                    }
+                    let mut uuid = [0; 16];
+                    getrandom::fill(&mut uuid)
+                        .map_err(|_| TransactionError::RandomnessUnavailable)?;
+                    if uuid == [0; 16] {
+                        return Err(TransactionError::RandomnessUnavailable);
+                    }
+                    materialized_inputs[ordinal] =
+                        InsertInput::Value(Some(crate::tuple::ScalarValue::Uuid(uuid)));
+                }
             }
             let mut defaults = Vec::with_capacity(inputs.len());
             for (ordinal, expression_id) in schema.default_expression_ids.iter().enumerate() {
@@ -4592,7 +4610,13 @@ impl<'db> InvocationTransaction<'db> {
                 }
                 defaults.push(Some(expression.expression));
             }
-            self.stage_insert_authorized_with_defaults(id, projection, inputs, &defaults, &[])
+            self.stage_insert_authorized_with_defaults(
+                id,
+                projection,
+                &materialized_inputs,
+                &defaults,
+                &generated_columns,
+            )
         })();
         match result {
             Ok(()) => Ok(()),
@@ -5765,9 +5789,8 @@ impl ExecutorMetadataConnection<'_, '_> {
     }
 
     /// Stage an insert from a complete declared-shape value vector. The new
-    /// row receives an opaque connection-local handle. DEFAULT markers are
-    /// materialized from the pinned catalog; generated identities remain
-    /// unsupported until collision-safe allocation is implemented.
+    /// row receives an opaque connection-local handle. DEFAULT markers and
+    /// generated UUID identities are materialized from the pinned catalog.
     pub fn stage_insert(
         &mut self,
         relation: &ResolvedRelationHandle,
@@ -5781,15 +5804,6 @@ impl ExecutorMetadataConnection<'_, '_> {
         let projection_state = self
             .transaction
             .load_catalog_executor_write_projection(description.relation_id)?;
-        if projection_state
-            .schema
-            .generation_modes
-            .iter()
-            .any(|mode| *mode != 0)
-        {
-            self.transaction.abort()?;
-            return Err(TransactionError::GeneratedIdentityUnsupported);
-        }
         let mut row_id_bytes = [0; 16];
         getrandom::fill(&mut row_id_bytes).map_err(|_| TransactionError::RandomnessUnavailable)?;
         if row_id_bytes == [0; 16] {
@@ -5827,6 +5841,16 @@ impl ExecutorMetadataConnection<'_, '_> {
         let projection_state = self
             .transaction
             .load_catalog_executor_write_projection(id.table)?;
+        if patches.iter().any(|patch| {
+            projection_state
+                .schema
+                .generation_modes
+                .get(patch.ordinal as usize)
+                .is_none_or(|mode| *mode != 0)
+        }) {
+            self.transaction.abort()?;
+            return Err(TransactionError::InvalidContext);
+        }
         let projection = projection_state.as_projection();
         self.transaction
             .stage_patch_authorized(id, &projection, patches)?;

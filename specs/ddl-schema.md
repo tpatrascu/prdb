@@ -39,7 +39,7 @@ CREATE TABLE app.employees (
 
 `UUID GENERATED ALWAYS AS IDENTITY` is this engine's extension: storage allocates an opaque non-sequential ID, rejects explicit overrides, and checks collisions. Every table has a stable internal identity even when its SQL primary key is user-supplied. No global sequence values are exposed by default.
 
-The current catalog-default insert helper does not yet allocate or collision-check identities and rejects tables containing generated columns; it must not accept caller values as generated identities. The lower-level materialized-row helper accepts only trusted generated values and is not an executor-facing boundary. Catalog-aware update enforcement for generated columns is also outstanding.
+Catalog-backed executor INSERT materializes generated identities only from DEFAULT, rejects caller-supplied identity values, and checks UUID collisions against the serialized final table state at commit. Updates reject patches to generated identity columns. The lower-level materialized-row helper remains a trusted internal boundary.
 
 Supported constraints:
 
