@@ -1,7 +1,10 @@
 //! Coordinated entry points for invocation commits and administrative DDL.
 
 use crate::audit::AuditEvent;
-use crate::commit::{CatalogWrite, CommitError, commit_catalog_and_audit_with_fences};
+use crate::commit::{
+    CatalogWrite, CommitError, commit_authorized_index_ddl_with_fences,
+    commit_catalog_and_audit_with_fences,
+};
 use crate::ddl_fence::{DdlFenceCoordinator, DdlFenceManager};
 use crate::outcome::{InvocationOutcome, lookup_outcome};
 use crate::startup::{StartupError, validate_persisted_records};
@@ -191,6 +194,9 @@ impl<'db> StorageManager<'db> {
         )
     }
 
+    /// Trusted coordinated catalog publication with no actor authorization.
+    /// Use only from an internal caller that has already applied the relevant
+    /// action-specific administrative checks.
     pub fn commit_catalog_and_audit(
         &self,
         invocation_id: [u8; 16],
@@ -204,6 +210,30 @@ impl<'db> StorageManager<'db> {
             &self.ddl_fences,
             invocation_id,
             principal_id,
+            retention_deadline_us,
+            catalog_writes,
+            audit_events,
+        )
+    }
+
+    /// Authorize ordinary index DDL for a principal authenticated by the
+    /// trusted administrative channel, then commit it under the shared DDL
+    /// fences. Supports family-9 index definitions and matching family-2 index
+    /// objects. Other catalog DDL remains on the trusted internal entry point
+    /// until its action-specific authority rules are implemented.
+    pub fn commit_authorized_index_ddl(
+        &self,
+        invocation_id: [u8; 16],
+        authenticated_principal_id: [u8; 16],
+        retention_deadline_us: i64,
+        catalog_writes: &[CatalogWrite],
+        audit_events: &[AuditEvent],
+    ) -> Result<u64, CommitError> {
+        commit_authorized_index_ddl_with_fences(
+            self.database,
+            &self.ddl_fences,
+            invocation_id,
+            authenticated_principal_id,
             retention_deadline_us,
             catalog_writes,
             audit_events,

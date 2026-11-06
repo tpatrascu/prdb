@@ -443,7 +443,7 @@
 - Real-redb regressions cover successful backfill, atomic rejection of duplicate values for a new unique index, and failure above the row cap; the low-level rejection regression remains.
 - Verification: in the prescribed Nix shell, `cargo build --workspace --locked`, `cargo fmt --all -- --check`, Clippy with warnings denied, and all 198 integration tests across 18 targets passed. `git diff --check` and changed Markdown link checks passed.
 - Contract updates: [schema DDL](../../specs/ddl-schema.md) and [redb storage](../../specs/redb-storage.md).
-- Remaining: authenticated DDL authorization and service admission remain open.
+- Remaining: action-specific authorization for other DDL and service admission remain open.
 
 ## SM-5 dependency: populated index drop — in progress
 
@@ -451,7 +451,7 @@
 - Removal shares the 65,536-membership and 64 MiB index-key/locator work bounds. Unique/constraint-owned indexes remain subject to final catalog dependency checks. Unfenced low-level catalog commits still reject drops when rows or memberships remain.
 - The real-redb lifecycle regression creates an index over an existing row, proves the trusted low-level helper rejects dropping it, then drops it through `StorageManager`; the old snapshot still resolves the old membership and startup accepts the new image.
 - Verification: in the prescribed Nix shell, workspace build, format check, Clippy with warnings denied, and all 198 integration tests across 18 targets passed. `git diff --check` and changed Markdown link checks passed.
-- Remaining: authenticated DDL authorization and service admission remain open.
+- Remaining: action-specific authorization for other DDL and service admission remain open.
 
 ## SM-5 dependency: populated index rebuild
 
@@ -460,4 +460,13 @@
 - Real-redb regressions cover a successful populated-index re-key and nonunique-to-unique change with an old pinned reader, rejection by the unfenced low-level helper, startup validation after publication, and rejection of a unique rebuild with duplicate values. The existing populated-index drop and create regressions remain in place.
 - Verification: with Rust/Cargo 1.95.0, rustfmt 1.9.0, Clippy 0.1.95, and TinyCC 0.9.27-unstable-2025-01-06 in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and all workspace tests passed. `git diff --check` and changed Markdown local-link checks passed.
 - Contract updates: [schema DDL](../../specs/ddl-schema.md) and [redb storage](../../specs/redb-storage.md).
-- Remaining: authenticated DDL authorization and service admission remain open.
+- Remaining: action-specific authorization for other DDL and service admission remain open.
+
+## SM-5 dependency: ordinary index DDL authorization — in progress
+
+- `StorageManager::commit_authorized_index_ddl` is a narrow route for an actor already authenticated by a trusted administrative caller. It accepts only index-definition and matching index-object changes, verifies the actor is a live login-enabled user, then checks database-administrator membership, table ownership through the inherited role closure, or an `INDEX` grant on every affected table.
+- The route carries the actor, complete membership graph, role records, applicable grants, and table-owner records into the serialized commit as catalog guards. Revoked grants, changed memberships, disabled users, or transferred ownership invalidate a stale authorization. The generic coordinated catalog helper remains trusted-only and has no authorization check.
+- A real-redb integration test covers a direct `INDEX` grant, inherited membership in the reserved administrator role, denial without either authority source, durable ABORTED outcome, and absence of catalog/audit publication on denial.
+- Verification: in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and all workspace tests passed. `git diff --check` and changed Markdown local-link checks passed.
+- Contract update: [schema DDL](../../specs/ddl-schema.md) and [redb storage](../../specs/redb-storage.md).
+- Remaining: the administrative channel must authenticate the actor before calling this route; table-owner authorization coverage, deterministic authority-change races, authorization rules for constraints/policies/identity/grants, and service admission remain open.

@@ -3017,6 +3017,205 @@ fn storage_manager_rejects_unique_rebuild_with_duplicate_values()
 }
 
 #[test]
+fn storage_manager_checks_index_ddl_authority_for_current_actor()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let authorized_user = id(0x51);
+    let denied_user = id(0x52);
+    let admin_user = id(0x53);
+    let mut records = vec![
+        principal_write_with_name(authorized_user, 1, 1, "indexer"),
+        object_write_with_name(authorized_user, 8, "indexer"),
+        principal_write_with_name(denied_user, 1, 1, "no_index"),
+        object_write_with_name(denied_user, 8, "no_index"),
+        principal_write_with_name(admin_user, 1, 1, "database_admin_member"),
+        object_write_with_name(admin_user, 8, "database_admin_member"),
+        grant_write(authorized_user, id(16), 9, 1, id(16), builtin_owner_id()),
+        dependency_write(authorized_user, id(16), 5),
+        membership_write(admin_user, builtin_owner_id()),
+        dependency_write(admin_user, builtin_owner_id(), 5),
+    ];
+    {
+        let setup = database.begin_write()?;
+        for record in records.drain(..) {
+            setup
+                .open_table(CATALOG)?
+                .insert(&record.key[..], record.payload.as_ref().unwrap().as_slice())?;
+        }
+        setup.commit()?;
+    }
+
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let (allowed_index_key, allowed_index_definition) = index_definition(id(0x8b), id(16));
+    let mut allowed_audit = audit_event(210);
+    allowed_audit.actor_id = Some(authorized_user);
+    assert_eq!(
+        storage.commit_authorized_index_ddl(
+            id(210),
+            authorized_user,
+            9_999,
+            &[
+                CatalogWrite {
+                    key: allowed_index_key.clone(),
+                    expected_value: None,
+                    payload: Some(allowed_index_definition),
+                },
+                object_write(id(0x8b), 7),
+            ],
+            &[allowed_audit],
+        )?,
+        1
+    );
+
+    let (admin_index_key, admin_index_definition) = index_definition(id(0x8d), id(16));
+    let mut admin_audit = audit_event(212);
+    admin_audit.actor_id = Some(admin_user);
+    assert_eq!(
+        storage.commit_authorized_index_ddl(
+            id(212),
+            admin_user,
+            9_999,
+            &[
+                CatalogWrite {
+                    key: admin_index_key.clone(),
+                    expected_value: None,
+                    payload: Some(admin_index_definition),
+                },
+                object_write(id(0x8d), 7),
+            ],
+            &[admin_audit],
+        )?,
+        2
+    );
+
+    let allowed_index_definition_key = id_catalog_key(9, id(0x8b));
+    let allowed_index_object_key = id_catalog_key(2, id(0x8b));
+    let (old_index_definition, old_index_object) = {
+        let read = database.begin_read()?;
+        let catalog = read.open_table(CATALOG)?;
+        (
+            catalog
+                .get(allowed_index_definition_key.as_slice())?
+                .unwrap()
+                .value()
+                .to_vec(),
+            catalog
+                .get(allowed_index_object_key.as_slice())?
+                .unwrap()
+                .value()
+                .to_vec(),
+        )
+    };
+    let (_, unique_index_definition) =
+        index_definition_with_options(id(0x8b), id(16), &[id(0x66)], true);
+    let owner_transfer = object_write_with_owner(id(0x8b), 7, denied_user);
+    let mut transfer_audit = audit_event(213);
+    transfer_audit.actor_id = Some(authorized_user);
+    assert_eq!(
+        storage.commit_authorized_index_ddl(
+            id(213),
+            authorized_user,
+            9_999,
+            &[
+                CatalogWrite {
+                    key: allowed_index_definition_key.clone(),
+                    expected_value: Some(old_index_definition.clone()),
+                    payload: Some(unique_index_definition),
+                },
+                CatalogWrite {
+                    key: allowed_index_object_key,
+                    expected_value: Some(old_index_object),
+                    payload: owner_transfer.payload,
+                },
+            ],
+            &[transfer_audit],
+        ),
+        Err(CommitError::InvalidCatalog)
+    );
+
+    let (denied_index_key, denied_index_definition) = index_definition(id(0x8c), id(16));
+    let mut denied_audit = audit_event(211);
+    denied_audit.actor_id = Some(denied_user);
+    assert_eq!(
+        storage.commit_authorized_index_ddl(
+            id(211),
+            denied_user,
+            9_999,
+            &[
+                CatalogWrite {
+                    key: denied_index_key.clone(),
+                    expected_value: None,
+                    payload: Some(denied_index_definition),
+                },
+                object_write(id(0x8c), 7),
+            ],
+            &[denied_audit],
+        ),
+        Err(CommitError::DdlAuthorizationDenied)
+    );
+    assert_eq!(commit_sequence(&database)?, 2);
+    assert_eq!(
+        lookup_outcome(&database, id(210), authorized_user, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Committed
+    );
+    assert_eq!(
+        lookup_outcome(&database, id(212), admin_user, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Committed
+    );
+    assert_eq!(
+        lookup_outcome(&database, id(213), authorized_user, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Aborted
+    );
+    assert_eq!(
+        lookup_outcome(&database, id(211), denied_user, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Aborted
+    );
+    let read = database.begin_read()?;
+    assert!(
+        read.open_table(CATALOG)?
+            .get(allowed_index_key.as_slice())?
+            .is_some()
+    );
+    assert!(
+        read.open_table(CATALOG)?
+            .get(denied_index_key.as_slice())?
+            .is_none()
+    );
+    assert!(
+        read.open_table(CATALOG)?
+            .get(admin_index_key.as_slice())?
+            .is_some()
+    );
+    assert_eq!(
+        read.open_table(CATALOG)?
+            .get(allowed_index_definition_key.as_slice())?
+            .unwrap()
+            .value(),
+        old_index_definition
+    );
+    assert!(
+        read.open_table(schema::AUDIT)?
+            .get(&[211; 16][..])?
+            .is_none()
+    );
+    assert!(
+        read.open_table(schema::AUDIT)?
+            .get(&[213; 16][..])?
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
 fn storage_manager_rejects_unique_index_backfill_with_duplicate_values()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();

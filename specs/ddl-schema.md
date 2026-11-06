@@ -92,6 +92,8 @@ DROP INDEX app.employees_department RESTRICT;
 
 Index names live in the table's schema. Initial indexes are B-trees on one or more plain columns, ascending with nulls last. A unique index uses the same null/commit-validation semantics as `UNIQUE`. Primary/unique constraints own backing indexes; their indexes cannot be dropped independently while required. Expression, partial, covering, full-text, custom access methods, and `CREATE INDEX CONCURRENTLY` are deferred.
 
+For ordinary index creation, removal, and rebuild, the storage manager accepts an actor identity only from a trusted authenticated administrative caller, then independently verifies that the actor is an enabled user with table ownership, an inherited owner role, an `INDEX` grant, or membership in the reserved database-administrator role. The commit guards the actor, role-membership, grant, and table-owner records used by that decision so concurrent revocation or ownership changes abort stale DDL. This narrow route handles index-definition and matching index-object records; every other administrative action needs its own permission check before control-channel exposure.
+
 An index is an internal access path, not an authorization boundary or raw data API. Entries must resolve to MVCC-visible row versions and be subject to identical row/cell checks as scans. An index-only read is allowed only if storage can enforce those checks and snapshot visibility. Index definitions/size/statistics are disclosed only through authorized catalog/optimizer surfaces.
 
 ## DDL Concurrency and Recovery
