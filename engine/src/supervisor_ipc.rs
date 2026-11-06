@@ -78,7 +78,11 @@ pub fn dispatch_supervisor_request(
         Operation::AbortTransaction => {
             let mut transaction = transaction;
             match transaction.abort() {
-                Ok(()) => (SUPERVISOR_PAYLOAD_VERSION.to_be_bytes().to_vec(), None),
+                Ok(()) => {
+                    let mut payload = SUPERVISOR_PAYLOAD_VERSION.to_be_bytes().to_vec();
+                    payload.push(0);
+                    (payload, None)
+                }
                 Err(error) => (Vec::new(), Some(error)),
             }
         }
