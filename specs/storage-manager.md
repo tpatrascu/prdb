@@ -12,6 +12,8 @@ Resolve logical table/column IDs through the versioned catalog. At admission, pi
 
 Writes are private field patches until finalization. Storage checks readable/writable changed cells, row policies, constraints, and hidden unchanged-field preservation. At commit it revalidates row versions and authority epochs against the latest redb state. Indexes are access paths only; every candidate still passes visibility and permission checks.
 
+`InvocationTransaction::scan_catalog_authorized_rows` loads the table schema, admitted principal's role closure, data grants, and applicable policies from the pinned catalog, builds the projection internally, and scans the snapshot plus private overlay. The caller supplies only a stable table ID, invocation-local continuation, and bounded candidate count; caller-built grants and policy lists cannot authorize this path. Returned rows are filtered by row policies and each cell is VALUE, NULL, or REDACTED according to the pinned grants and cell policies. Continuation state remains invocation-local until an executor IPC cursor is bound to a provisioned connection.
+
 ## Commit and Concurrent Invocations
 
 Allow concurrent redb read transactions and concurrent engine staging. Do not hold a redb write transaction across user execution or individual SQL statements. At successful library return, the supervisor requests finalization; storage obtains the serialized writer, validates all conflicts/constraints/authority, applies data/index/catalog/audit/outcome changes in one redb write transaction, and commits using the selected durable mode.

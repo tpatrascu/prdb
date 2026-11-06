@@ -2553,6 +2553,182 @@ fn executor_relation_socket_loop_serves_then_aborts_on_disconnect()
 }
 
 #[test]
+fn catalog_authorized_scan_builds_its_projection_from_pinned_records()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    install_relation_discovery_catalog(&database)?;
+
+    let principal_id = [9; 16];
+    let table_id = [0x10; 16];
+    let boolean_type_id = [46; 16];
+    let policy_id = [221; 16];
+    let expression_id = [222; 16];
+    let policy_key = catalog_id_key(13, policy_id);
+    let cell_policy_id = [226; 16];
+    let cell_policy_key = catalog_id_key(13, cell_policy_id);
+    let expression_key = catalog_id_key(7, expression_id);
+    let (target_key, target_payload) = policy_target_catalog_record(policy_id, 1, principal_id);
+    let (cell_principal_target_key, cell_principal_target_payload) =
+        policy_target_catalog_record(cell_policy_id, 1, principal_id);
+    let (cell_column_target_key, cell_column_target_payload) =
+        policy_target_catalog_record(cell_policy_id, 3, [0x66; 16]);
+    let (type_object_key, type_object_payload) = object_catalog_record_for(boolean_type_id, 2);
+    let type_write = boolean_type_catalog_write(boolean_type_id)?;
+    let (table_select_key, table_select_payload) = grant_catalog_record(
+        principal_id,
+        table_id,
+        2,
+        1,
+        table_id,
+        builtin_owner_id(),
+        1,
+    );
+    let write = database.begin_write()?;
+    {
+        let mut catalog = write.open_table(CATALOG)?;
+        for (key, payload) in [
+            (
+                type_write.key.clone(),
+                type_write.payload.clone().expect("type definition payload"),
+            ),
+            (type_object_key, type_object_payload),
+            (
+                expression_key.clone(),
+                expression_catalog_payload_full(
+                    expression_id,
+                    3,
+                    boolean_type_id,
+                    [0; 8],
+                    &[],
+                    &Expr::Literal(Some(ScalarValue::Boolean(true))),
+                )?,
+            ),
+            (
+                policy_key.clone(),
+                catalog_record_payload(
+                    13,
+                    &policy_key,
+                    &[
+                        CatalogField {
+                            tag: 1,
+                            wire_type: WireType::Id,
+                            payload: table_id.to_vec(),
+                        },
+                        CatalogField {
+                            tag: 2,
+                            wire_type: WireType::U16,
+                            payload: 1u16.to_le_bytes().to_vec(),
+                        },
+                        CatalogField {
+                            tag: 3,
+                            wire_type: WireType::U16,
+                            payload: 1u16.to_le_bytes().to_vec(),
+                        },
+                        CatalogField {
+                            tag: 4,
+                            wire_type: WireType::U16,
+                            payload: 1u16.to_le_bytes().to_vec(),
+                        },
+                        CatalogField {
+                            tag: 5,
+                            wire_type: WireType::Id,
+                            payload: expression_id.to_vec(),
+                        },
+                        CatalogField {
+                            tag: 7,
+                            wire_type: WireType::U64,
+                            payload: 1u64.to_le_bytes().to_vec(),
+                        },
+                    ],
+                )?,
+            ),
+            (
+                cell_policy_key.clone(),
+                catalog_record_payload(
+                    13,
+                    &cell_policy_key,
+                    &[
+                        CatalogField {
+                            tag: 1,
+                            wire_type: WireType::Id,
+                            payload: table_id.to_vec(),
+                        },
+                        CatalogField {
+                            tag: 2,
+                            wire_type: WireType::U16,
+                            payload: 2u16.to_le_bytes().to_vec(),
+                        },
+                        CatalogField {
+                            tag: 3,
+                            wire_type: WireType::U16,
+                            payload: 1u16.to_le_bytes().to_vec(),
+                        },
+                        CatalogField {
+                            tag: 4,
+                            wire_type: WireType::U16,
+                            payload: 1u16.to_le_bytes().to_vec(),
+                        },
+                        CatalogField {
+                            tag: 5,
+                            wire_type: WireType::Id,
+                            payload: expression_id.to_vec(),
+                        },
+                        CatalogField {
+                            tag: 7,
+                            wire_type: WireType::U64,
+                            payload: 1u64.to_le_bytes().to_vec(),
+                        },
+                    ],
+                )?,
+            ),
+            (target_key, target_payload),
+            (cell_principal_target_key, cell_principal_target_payload),
+            (cell_column_target_key, cell_column_target_payload),
+            (table_select_key, table_select_payload),
+        ] {
+            catalog.insert(&key[..], &payload[..])?;
+        }
+    }
+    write.commit()?;
+
+    let row_id = prdb_engine::overlay::RowId {
+        table: table_id,
+        row: [223; 16],
+    };
+    let mut seed = InvocationTransaction::begin(&database, [224; 16], principal_id, 9_999, 1, 128)?;
+    let schema = seed.load_catalog_table_schema(table_id)?;
+    let value = match schema.columns[0].scalar_type {
+        ScalarType::Bytea => ScalarValue::Bytea(vec![1, 2, 3]),
+        ScalarType::Text => ScalarValue::Text("visible".to_owned()),
+        ScalarType::Varchar { .. } => ScalarValue::Varchar("visible".to_owned()),
+        _ => return Err("fixture column has an unsupported scalar type".into()),
+    };
+    let tuple = encode_tuple(&schema.columns, schema.schema_version, &[Some(value)])?;
+    drop(seed);
+    commit_rows(
+        &database,
+        [224; 16],
+        principal_id,
+        9_999,
+        &[RowWrite {
+            key: key(row_id),
+            expected_version: None,
+            payload: Some(tuple),
+        }],
+    )?;
+
+    let mut invocation =
+        InvocationTransaction::begin(&database, [225; 16], principal_id, 9_999, 2, 128)?;
+    let page = invocation.scan_catalog_authorized_rows(table_id, None, 2)?;
+    assert_eq!(page.rows.len(), 1);
+    assert_eq!(page.rows[0].0, row_id);
+    assert!(matches!(page.rows[0].1[0], SanitizedCell::Value(_)));
+    assert!(page.continuation.is_none());
+    Ok(())
+}
+
+#[test]
 fn authorized_column_description_pages_bind_the_snapshot_and_order()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();

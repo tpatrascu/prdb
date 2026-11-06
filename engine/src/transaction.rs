@@ -723,6 +723,54 @@ impl<'db> InvocationTransaction<'db> {
         }
     }
 
+    /// Scan authorized rows using schema, grants, and policies loaded from this
+    /// invocation's pinned catalog. Callers cannot substitute authorization
+    /// contexts or grant records for this read path.
+    pub fn scan_catalog_authorized_rows(
+        &mut self,
+        table_id: [u8; 16],
+        cursor: Option<&RowScanCursor>,
+        max_scanned: usize,
+    ) -> Result<AuthorizedRowScanPage, TransactionError> {
+        let result = (|| {
+            let schema = self.load_catalog_table_schema(table_id)?;
+            let principal_id = self.principal_id;
+            let (role_ids, grants) = self.load_catalog_grants(principal_id, &schema)?;
+            let policies = self.load_catalog_policies(principal_id, &schema)?;
+            let scope = grants
+                .iter()
+                .map(|grant| (grant.operation, grant.target))
+                .collect();
+            let context = AuthorizationContext {
+                principal_id,
+                role_ids,
+                scope,
+            };
+            let projection = AuthorizedProjection {
+                columns: &schema.columns,
+                column_ids: &schema.column_ids,
+                schema_version: schema.schema_version,
+                schema_id: schema.schema_id,
+                context: &context,
+                grants: &grants,
+                policies: &policies,
+                checks: &[],
+                policy_driving_columns: &[],
+                dependencies: &[],
+            };
+            self.scan_authorized(table_id, cursor, max_scanned, &projection)
+        })();
+        match result {
+            Ok(page) => Ok(page),
+            Err(error) => {
+                if !self.aborted {
+                    self.abort()?;
+                }
+                Err(error)
+            }
+        }
+    }
+
     /// Return summary counts for the trusted planner without returning row
     /// values. This entry point is intended for a provisioned planner channel.
     pub fn estimate_authorized_scan(

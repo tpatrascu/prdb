@@ -831,3 +831,12 @@
 - Evidence: a real Unix stream pair sends an authorized resolution, half-closes, receives the matching response, and verifies the persisted ABORTED outcome on disconnect. The focused test passes in the prescribed Nix shell.
 - Remaining: supervisor socket provisioning, scan/cursor/mutation dispatch and reauthorization, SQL integration, and administrative discovery.
 - Next smallest task: add authorized `open_scan` and bounded cursor state to the same session before exposing row batches.
+
+## SM-3 dependency: catalog-derived authorized row scanning
+
+- Behavior: `InvocationTransaction::scan_catalog_authorized_rows` constructs its authorized projection from the pinned table schema, role closure, data grants, and applicable row/cell policies, then scans the pinned snapshot plus private overlay. Callers cannot supply grant or policy vectors to authorize the operation.
+- Changed code and fixture: [transaction implementation](../../engine/src/transaction.rs), [catalog scan regression](../../engine/tests/transaction.rs), and [storage-manager contract](../../specs/storage-manager.md).
+- Red evidence: the regression initially failed to compile because the catalog-derived scan API did not exist. During fixture completion, row-policy filtering and cell redaction behaved as specified; the valid real-redb fixture was completed with table SELECT and row/cell ALLOW policies.
+- Verification: workspace build, `cargo fmt --all -- --check`, warning-denied workspace Clippy, full workspace tests, focused scan regression, and `git diff --check` passed in the prescribed Nix shell.
+- Remaining: serialize/bind its continuation to executor IPC, enforce response-byte limits, and test this derived path against policy/grant changes before finalization.
+- Next smallest task: add a connection-local scan cursor token that wraps `RowScanCursor` without exposing row IDs or accepting cross-connection tokens.
