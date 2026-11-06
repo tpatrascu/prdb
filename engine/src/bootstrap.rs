@@ -1197,9 +1197,7 @@ fn validate_marker(directory: &Path) -> Result<(), BootstrapError> {
 
 fn set_private_file_mode(path: &Path) -> Result<(), BootstrapError> {
     let metadata = fs::symlink_metadata(path)?;
-    if !metadata.file_type().is_file()
-        || metadata.uid() != effective_uid()
-        || metadata.nlink() != 1
+    if !metadata.file_type().is_file() || metadata.uid() != effective_uid() || metadata.nlink() != 1
     {
         return Err(BootstrapError::NotPrivate);
     }

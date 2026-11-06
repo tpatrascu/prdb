@@ -1307,6 +1307,115 @@ fn latest_catalog_authority_change_blocks_a_stale_invocation_commit()
 }
 
 #[test]
+fn racing_catalog_authority_change_linearizes_before_or_after_pending_write()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let principal_id = [0xA1; 16];
+    let (principal_key, principal_v1) =
+        principal_catalog_record_for(principal_id, 1, b"race_user", true, 1);
+    let (object_key, object_value) = principal_object_record_for(principal_id, 1);
+    let seed = database.begin_write()?;
+    seed.open_table(CATALOG)?
+        .insert(principal_key.as_slice(), principal_v1.as_slice())?;
+    seed.open_table(CATALOG)?
+        .insert(object_key.as_slice(), object_value.as_slice())?;
+    seed.commit()?;
+
+    let (principal_key, principal_v2) =
+        principal_catalog_record_for(principal_id, 1, b"race_user", true, 2);
+    let row_id = id(0xA2);
+    let invocation_id = [0xA3; 16];
+    let authority_invocation_id = [0xA4; 16];
+    let barrier = Arc::new(Barrier::new(3));
+    let (write_result, authority_result) = std::thread::scope(|scope| {
+        let write_barrier = barrier.clone();
+        let write_database = &database;
+        let write = scope.spawn(move || {
+            let mut invocation = InvocationTransaction::begin(
+                write_database,
+                invocation_id,
+                principal_id,
+                9_999,
+                2,
+                64,
+            )?;
+            assert!(
+                invocation
+                    .load_catalog_role_closure(principal_id)?
+                    .is_empty()
+            );
+            invocation.stage_put(row_id, b"authorized before race")?;
+            write_barrier.wait();
+            invocation.commit()
+        });
+
+        let authority_barrier = barrier.clone();
+        let authority_database = &database;
+        let authority_key = principal_key.clone();
+        let authority_expected = principal_v1.clone();
+        let authority_payload = principal_v2.clone();
+        let authority = scope.spawn(move || {
+            authority_barrier.wait();
+            let event = AuditEvent {
+                event_id: authority_invocation_id,
+                actor_id: Some([9; 16]),
+                correlation_id: [0xA5; 16],
+                occurred_at_us: 1_700_000_000_000_000,
+                action: AuditAction::AuthorityChange,
+                result: AuditResult::Succeeded,
+                target_ids: vec![principal_id],
+            };
+            commit_catalog_and_audit(
+                authority_database,
+                authority_invocation_id,
+                [9; 16],
+                9_999,
+                &[CatalogWrite {
+                    key: authority_key,
+                    expected_value: Some(authority_expected),
+                    payload: Some(authority_payload),
+                }],
+                &[event],
+            )
+        });
+
+        barrier.wait();
+        (write.join().unwrap(), authority.join().unwrap())
+    });
+
+    let authority_sequence = authority_result?;
+    let write_sequence = match write_result {
+        Ok(sequence) => Some(sequence),
+        Err(TransactionError::Commit(CommitError::Conflict)) => None,
+        Err(error) => return Err(Box::new(error)),
+    };
+    let read = database.begin_read()?;
+    let row_exists = read.open_table(ROWS)?.get(&key(row_id)[..])?.is_some();
+    let write_outcome = InvocationOutcome::decode(
+        read.open_table(prdb_engine::schema::OUTCOMES)?
+            .get(&invocation_id[..])?
+            .ok_or("invocation outcome missing")?
+            .value(),
+    )?;
+    assert_eq!(row_exists, write_sequence.is_some());
+    assert_eq!(
+        write_outcome.status,
+        if write_sequence.is_some() {
+            OutcomeStatus::Committed
+        } else {
+            OutcomeStatus::Aborted
+        }
+    );
+    assert_eq!(commit_sequence(&database)?, authority_sequence);
+    assert!(
+        write_sequence.is_none() || write_sequence.unwrap() < authority_sequence,
+        "a pending write may commit only before the concurrent authority change"
+    );
+    Ok(())
+}
+
+#[test]
 fn catalog_absence_guard_blocks_a_phantom_authority_record()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();

@@ -627,3 +627,10 @@
 - Verification: the prescribed Nix-shell workspace build, formatting check, Clippy with warnings denied, and all 227 workspace tests passed. `git diff --check` passed.
 - Contract updates: [catalog lifecycle](../../specs/catalog-lifecycle.md), [storage manager](../../specs/storage-manager.md), and [credential lifecycle](../../specs/ddl-identity.md).
 - Remaining: a protected setup socket/supervisor to deliver the secret and acknowledge delivery, power-loss fault injection at transaction boundaries, and normal service integration remain open. Direct `StorageManager` constructors are trusted low-level entry points and do not acquire the filesystem lock; service startup must use `StorageInstance::open`.
+
+## SM-4 / SM-5 dependency: catalog authority-change race validation
+
+- Added a barrier-coordinated real-redb race between an invocation staging a write under a pinned principal authority epoch and a catalog commit advancing that epoch. The row write either commits before the authority change, or the authority change commits first and the invocation records ABORTED; row visibility, outcome, and commit sequence are checked against that order. The existing sequential regression covers the change-first ordering directly.
+- Verification: prescribed Nix-shell workspace build, formatting check, Clippy with warnings denied, and all 228 workspace tests passed.
+- Contracts: [authorization](../../specs/authorization.md) and [concurrency/MVCC](../../specs/concurrency-mvcc.md).
+- Remaining: concurrent schedule coverage across each action-specific grant, membership, policy, identity, and credential route remains open; the supervisor/control-channel integration is not implemented.
