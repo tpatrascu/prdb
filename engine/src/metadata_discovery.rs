@@ -10,6 +10,7 @@ pub const COLUMN_CURSOR_TOKEN_KIND: u8 = 3;
 pub const INFORMATION_SCHEMA_TABLES_CURSOR_TOKEN_KIND: u8 = 4;
 pub const INFORMATION_SCHEMA_COLUMNS_CURSOR_TOKEN_KIND: u8 = 5;
 pub const RELATION_HANDLE_TOKEN_KIND: u8 = 6;
+pub const EXECUTOR_SCAN_CURSOR_TOKEN_KIND: u8 = 7;
 pub const MAX_RELATION_HANDLES: usize = 256;
 
 /// One relation admitted by schema usage and a data grant.
@@ -62,6 +63,27 @@ impl ResolvedRelationHandle {
     /// Decode the fixed-width opaque handle representation.
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         if bytes.len() != 16 || bytes[0] != RELATION_HANDLE_TOKEN_KIND {
+            return None;
+        }
+        Some(Self {
+            token: bytes.try_into().ok()?,
+        })
+    }
+}
+
+/// Opaque continuation owned by one executor metadata connection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutorScanCursor {
+    pub(crate) token: [u8; 16],
+}
+
+impl ExecutorScanCursor {
+    pub fn to_bytes(&self) -> [u8; 16] {
+        self.token
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != 16 || bytes[0] != EXECUTOR_SCAN_CURSOR_TOKEN_KIND {
             return None;
         }
         Some(Self {

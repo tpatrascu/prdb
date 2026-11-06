@@ -840,3 +840,12 @@
 - Verification: workspace build, `cargo fmt --all -- --check`, warning-denied workspace Clippy, full workspace tests, focused scan regression, and `git diff --check` passed in the prescribed Nix shell.
 - Remaining: serialize/bind its continuation to executor IPC, enforce response-byte limits, and test this derived path against policy/grant changes before finalization.
 - Next smallest task: add a connection-local scan cursor token that wraps `RowScanCursor` without exposing row IDs or accepting cross-connection tokens.
+
+## SM-6 dependency: connection-local executor scan cursors
+
+- Behavior: `ExecutorMetadataConnection` now issues kind-7 opaque scan cursors, consumes one token per page, revalidates the relation handle and delegates to the pinned-catalog authorized scan path. It rejects replay and cross-connection use, and can close a scan to release the active scan slot.
+- Changed code and fixture: [transaction implementation](../../engine/src/transaction.rs), [cursor wire type](../../engine/src/metadata_discovery.rs), and [real-redb pagination regression](../../engine/tests/transaction.rs).
+- Evidence: the regression scans two persisted rows across one-row pages, confirms the required final empty page for EOF, rejects replay and replacement-connection use, and rejects the cursor through another kind's decoder. Workspace build, format check, warning-denied Clippy, full workspace tests, and `git diff --check` all pass in the prescribed Nix shell.
+- Red evidence: an early assertion expected a full one-row page to prove EOF; the existing scan contract requires an additional page to confirm EOF, so the regression was corrected to consume the continuation and final empty page.
+- Remaining: encode/decode `open_scan`, `next_batch`, and `close_cursor` IPC payloads, enforce output-byte bounds, and test the derived path against concurrent policy/grant changes.
+- Next smallest task: define the bounded wire payload for opening a scan from a resolved relation handle and validate requested row-count limits.

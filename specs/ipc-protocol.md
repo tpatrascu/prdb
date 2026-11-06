@@ -51,6 +51,8 @@ The initial Rust executor dispatcher implements `resolve_relation` (`0x1101`) fo
 
 The initial Rust stream loop serves only `resolve_relation`, accepts at most 256 request frames per connection, and rejects a reused request ID. A clean disconnect or a malformed/unsupported request aborts the bound invocation and records its durable outcome; the loop never treats disconnect as commit. The supervisor remains responsible for provisioning the stream and invoking the loop with the correct invocation context.
 
+The storage API also provides a distinct connection-local executor scan cursor: the session revalidates its relation handle and derives row/cell authorization from the pinned catalog before each page. The `open_scan`, `next_batch`, and `close_cursor` IPC payload schemas and stream dispatch are not implemented yet; clients must not treat the engine cursor type as a wire operation contract.
+
 ## Conceptual Operations
 
 ```text

@@ -2696,6 +2696,10 @@ fn catalog_authorized_scan_builds_its_projection_from_pinned_records()
         table: table_id,
         row: [223; 16],
     };
+    let second_row_id = prdb_engine::overlay::RowId {
+        table: table_id,
+        row: [227; 16],
+    };
     let mut seed = InvocationTransaction::begin(&database, [224; 16], principal_id, 9_999, 1, 128)?;
     let schema = seed.load_catalog_table_schema(table_id)?;
     let value = match schema.columns[0].scalar_type {
@@ -2711,20 +2715,66 @@ fn catalog_authorized_scan_builds_its_projection_from_pinned_records()
         [224; 16],
         principal_id,
         9_999,
-        &[RowWrite {
-            key: key(row_id),
-            expected_version: None,
-            payload: Some(tuple),
-        }],
+        &[
+            RowWrite {
+                key: key(row_id),
+                expected_version: None,
+                payload: Some(tuple.clone()),
+            },
+            RowWrite {
+                key: key(second_row_id),
+                expected_version: None,
+                payload: Some(tuple),
+            },
+        ],
     )?;
 
     let mut invocation =
         InvocationTransaction::begin(&database, [225; 16], principal_id, 9_999, 2, 128)?;
-    let page = invocation.scan_catalog_authorized_rows(table_id, None, 2)?;
-    assert_eq!(page.rows.len(), 1);
+    let page = invocation.scan_catalog_authorized_rows(table_id, None, 3)?;
+    assert_eq!(page.rows.len(), 2);
     assert_eq!(page.rows[0].0, row_id);
+    assert_eq!(page.rows[1].0, second_row_id);
     assert!(matches!(page.rows[0].1[0], SanitizedCell::Value(_)));
     assert!(page.continuation.is_none());
+
+    let mut connection = invocation.open_executor_metadata_connection();
+    let (relation_handle, _) = connection
+        .resolve_relation("app", "metrics")?
+        .expect("catalog grants authorize relation resolution");
+    let scan_cursor = connection.open_relation_scan(&relation_handle)?;
+    let cursor_bytes = scan_cursor.to_bytes();
+    assert_eq!(cursor_bytes[0], 7);
+    let decoded = prdb_engine::metadata_discovery::ExecutorScanCursor::from_bytes(&cursor_bytes)
+        .expect("executor cursor has the fixed wire form");
+    assert!(prdb_engine::metadata_discovery::SchemaScanCursor::from_bytes(&cursor_bytes).is_none());
+    let first_scan_page = connection.next_relation_scan_page(&decoded, 1)?;
+    assert_eq!(first_scan_page.rows.len(), 1);
+    let next_cursor = first_scan_page
+        .continuation
+        .expect("full page returns a fresh continuation");
+    assert!(matches!(
+        connection.next_relation_scan_page(&decoded, 1),
+        Err(TransactionError::InvalidMetadataRequest)
+    ));
+    let second_scan_page = connection.next_relation_scan_page(&next_cursor, 1)?;
+    assert_eq!(second_scan_page.rows.len(), 1);
+    let final_cursor = second_scan_page
+        .continuation
+        .expect("full final page requires an EOF confirmation");
+    let final_scan_page = connection.next_relation_scan_page(&final_cursor, 1)?;
+    assert!(final_scan_page.rows.is_empty());
+    assert!(final_scan_page.continuation.is_none());
+    assert!(matches!(
+        connection.next_relation_scan_page(&final_cursor, 1),
+        Err(TransactionError::InvalidMetadataRequest)
+    ));
+    drop(connection);
+    let mut replacement = invocation.open_executor_metadata_connection();
+    assert!(matches!(
+        replacement.next_relation_scan_page(&next_cursor, 1),
+        Err(TransactionError::InvalidMetadataRequest)
+    ));
     Ok(())
 }
 

@@ -20,6 +20,7 @@ use crate::index_key::{DeriveIndexKeyError, derive_index_key};
 use crate::metadata::{EngineMetadata, Lifecycle};
 use crate::metadata_discovery::{
     AuthorizedRelationDescription, COLUMN_CURSOR_TOKEN_KIND, ColumnScanCursor,
+    EXECUTOR_SCAN_CURSOR_TOKEN_KIND, ExecutorScanCursor,
     INFORMATION_SCHEMA_COLUMNS_CURSOR_TOKEN_KIND, INFORMATION_SCHEMA_TABLES_CURSOR_TOKEN_KIND,
     InformationSchemaColumnRow, InformationSchemaColumnsCursor, InformationSchemaColumnsPage,
     InformationSchemaColumnsScanPage, InformationSchemaSchemataPage, InformationSchemaSchemataRow,
@@ -145,6 +146,12 @@ pub struct AuthorizedRowScanPage {
     pub continuation: Option<RowScanCursor>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutorAuthorizedRowScanPage {
+    pub rows: Vec<(RowId, Vec<SanitizedCell>)>,
+    pub continuation: Option<ExecutorScanCursor>,
+}
+
 #[derive(Clone)]
 struct ActiveRowScan {
     table_id: [u8; 16],
@@ -259,6 +266,8 @@ pub struct ExecutorMetadataConnection<'connection, 'db> {
     transaction: &'connection mut InvocationTransaction<'db>,
     handles: HashMap<[u8; 16], ResolvedRelationHandleState>,
     used_tokens: HashSet<[u8; 16]>,
+    scans: HashMap<[u8; 16], ActiveExecutorScan>,
+    used_scan_tokens: HashSet<[u8; 16]>,
 }
 
 #[derive(Clone)]
@@ -266,6 +275,12 @@ struct ResolvedRelationHandleState {
     schema_name: String,
     relation_name: String,
     relation_id: [u8; 16],
+}
+
+#[derive(Clone)]
+struct ActiveExecutorScan {
+    relation_handle: [u8; 16],
+    row_cursor: Option<RowScanCursor>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -542,6 +557,8 @@ impl<'db> InvocationTransaction<'db> {
             transaction: self,
             handles: HashMap::new(),
             used_tokens: HashSet::new(),
+            scans: HashMap::new(),
+            used_scan_tokens: HashSet::new(),
         }
     }
 
@@ -768,6 +785,16 @@ impl<'db> InvocationTransaction<'db> {
                 }
                 Err(error)
             }
+        }
+    }
+
+    fn discard_active_scan_for_table(&mut self, table_id: [u8; 16]) {
+        if self
+            .active_scan
+            .as_ref()
+            .is_some_and(|active| active.table_id == table_id)
+        {
+            self.active_scan = None;
         }
     }
 
@@ -5346,8 +5373,128 @@ impl ExecutorMetadataConnection<'_, '_> {
     ) -> Result<(), TransactionError> {
         self.handles
             .remove(&handle.token)
-            .map(|_| ())
-            .ok_or(TransactionError::InvalidMetadataRequest)
+            .ok_or(TransactionError::InvalidMetadataRequest)?;
+        if let Some((token, scan)) = self
+            .scans
+            .iter()
+            .find(|(_, scan)| scan.relation_handle == handle.token)
+            .map(|(token, scan)| (*token, scan.clone()))
+        {
+            self.scans.remove(&token);
+            if let Some(table_id) = scan
+                .row_cursor
+                .as_ref()
+                .map(|cursor| cursor.table_id)
+                .or_else(|| {
+                    self.transaction
+                        .active_scan
+                        .as_ref()
+                        .map(|active| active.table_id)
+                })
+            {
+                self.transaction.discard_active_scan_for_table(table_id);
+            }
+        }
+        Ok(())
+    }
+
+    /// Open one connection-local scan for a resolved relation. The returned
+    /// opaque cursor does not expose row IDs or own authorization.
+    pub fn open_relation_scan(
+        &mut self,
+        handle: &ResolvedRelationHandle,
+    ) -> Result<ExecutorScanCursor, TransactionError> {
+        let description = self.revalidate_relation_handle(handle)?;
+        if builtin_information_schema_relation_schema(description.relation_id).is_some() {
+            return Err(TransactionError::InvalidMetadataRequest);
+        }
+        if !self.scans.is_empty() {
+            return Err(TransactionError::ScanStillActive);
+        }
+        if self.used_scan_tokens.len() >= MAX_RELATION_HANDLES {
+            return Err(TransactionError::RelationHandleLimitExceeded);
+        }
+        let token =
+            new_metadata_cursor_token(&mut self.used_scan_tokens, EXECUTOR_SCAN_CURSOR_TOKEN_KIND)?;
+        self.scans.insert(
+            token,
+            ActiveExecutorScan {
+                relation_handle: handle.token,
+                row_cursor: None,
+            },
+        );
+        Ok(ExecutorScanCursor { token })
+    }
+
+    /// Consume one cursor and return the next authorized row page. A live
+    /// continuation receives a fresh token; completed and old tokens cannot
+    /// be replayed.
+    pub fn next_relation_scan_page(
+        &mut self,
+        cursor: &ExecutorScanCursor,
+        max_scanned: usize,
+    ) -> Result<ExecutorAuthorizedRowScanPage, TransactionError> {
+        let scan = self
+            .scans
+            .remove(&cursor.token)
+            .ok_or(TransactionError::InvalidMetadataRequest)?;
+        let handle = ResolvedRelationHandle {
+            token: scan.relation_handle,
+        };
+        let description = self.revalidate_relation_handle(&handle)?;
+        let page = self.transaction.scan_catalog_authorized_rows(
+            description.relation_id,
+            scan.row_cursor.as_ref(),
+            max_scanned,
+        )?;
+        let continuation = if let Some(row_cursor) = page.continuation {
+            if self.used_scan_tokens.len() >= MAX_RELATION_HANDLES {
+                self.transaction.abort()?;
+                return Err(TransactionError::RelationHandleLimitExceeded);
+            }
+            let token = match new_metadata_cursor_token(
+                &mut self.used_scan_tokens,
+                EXECUTOR_SCAN_CURSOR_TOKEN_KIND,
+            ) {
+                Ok(token) => token,
+                Err(error) => {
+                    self.transaction.abort()?;
+                    return Err(error);
+                }
+            };
+            self.scans.insert(
+                token,
+                ActiveExecutorScan {
+                    relation_handle: scan.relation_handle,
+                    row_cursor: Some(row_cursor),
+                },
+            );
+            Some(ExecutorScanCursor { token })
+        } else {
+            None
+        };
+        Ok(ExecutorAuthorizedRowScanPage {
+            rows: page.rows,
+            continuation,
+        })
+    }
+
+    /// Close a live cursor and release the invocation's active row-scan slot.
+    pub fn close_relation_scan(
+        &mut self,
+        cursor: &ExecutorScanCursor,
+    ) -> Result<(), TransactionError> {
+        let scan = self
+            .scans
+            .remove(&cursor.token)
+            .ok_or(TransactionError::InvalidMetadataRequest)?;
+        let table_id = self
+            .handles
+            .get(&scan.relation_handle)
+            .map(|handle| handle.relation_id)
+            .ok_or(TransactionError::InvalidMetadataRequest)?;
+        self.transaction.discard_active_scan_for_table(table_id);
+        Ok(())
     }
 }
 
