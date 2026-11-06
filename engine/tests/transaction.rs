@@ -2544,7 +2544,7 @@ fn executor_relation_socket_loop_serves_then_aborts_on_disconnect()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::executor_ipc::{
         CloseCursorRequest, ExecutorConnectionError, OpenScanRequest, OpenScanResponse,
-        ResolveRelationRequest, ResolveRelationResponse, serve_executor_resolve_relation,
+        ResolveRelationRequest, ResolveRelationResponse, serve_executor,
     };
     use prdb_engine::ipc::{IpcFrame, Operation, read_frame, write_frame};
     use prdb_engine::outcome::{OutcomeStatus, lookup_outcome};
@@ -2604,7 +2604,7 @@ fn executor_relation_socket_loop_serves_then_aborts_on_disconnect()
         assert_eq!(close_response.payload, [0, 1, 0]);
         client.shutdown(Shutdown::Write).unwrap();
     });
-    serve_executor_resolve_relation(&mut server, &mut invocation)?;
+    serve_executor(&mut server, &mut invocation)?;
     client_task
         .join()
         .expect("client stream sequence completes");
@@ -2635,7 +2635,7 @@ fn executor_relation_socket_loop_serves_then_aborts_on_disconnect()
     write_frame(&mut duplicate_client, &duplicate_request)?;
     duplicate_client.shutdown(Shutdown::Write)?;
     assert!(matches!(
-        serve_executor_resolve_relation(&mut duplicate_server, &mut duplicate_invocation),
+        serve_executor(&mut duplicate_server, &mut duplicate_invocation),
         Err(ExecutorConnectionError::DuplicateRequestId)
     ));
     assert!(read_frame(&mut duplicate_client)?.is_some());

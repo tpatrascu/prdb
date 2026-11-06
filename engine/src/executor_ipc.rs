@@ -1078,7 +1078,7 @@ pub fn dispatch_executor_request(
 /// Serve executor requests on one provisioned stream. The stream's caller
 /// binds it to this invocation out of band. A clean disconnect aborts the
 /// invocation; framing or request errors do the same.
-pub fn serve_executor_resolve_relation<S: Read + Write>(
+pub fn serve_executor<S: Read + Write>(
     stream: &mut S,
     transaction: &mut InvocationTransaction<'_>,
 ) -> Result<(), ExecutorConnectionError> {
@@ -1132,4 +1132,12 @@ pub fn serve_executor_resolve_relation<S: Read + Write>(
             };
         }
     }
+}
+
+/// Compatibility wrapper for callers of the original resolver-only loop.
+pub fn serve_executor_resolve_relation<S: Read + Write>(
+    stream: &mut S,
+    transaction: &mut InvocationTransaction<'_>,
+) -> Result<(), ExecutorConnectionError> {
+    serve_executor(stream, transaction)
 }
