@@ -3003,45 +3003,29 @@ fn catalog_authorized_scan_builds_its_projection_from_pinned_records()
     }
     write.commit()?;
 
-    let row_id = prdb_engine::overlay::RowId {
-        table: table_id,
-        row: [223; 16],
-    };
-    let second_row_id = prdb_engine::overlay::RowId {
-        table: table_id,
-        row: [227; 16],
-    };
-    let mut seed = InvocationTransaction::begin(&database, [224; 16], principal_id, 9_999, 1, 128)?;
-    let schema = seed.load_catalog_table_schema(table_id)?;
-    let value = match schema.columns[0].scalar_type {
-        ScalarType::Bytea => ScalarValue::Bytea(vec![1, 2, 3]),
-        ScalarType::Text => ScalarValue::Text("visible".to_owned()),
-        ScalarType::Varchar { .. } => ScalarValue::Varchar("visible".to_owned()),
-        _ => return Err("fixture column has an unsupported scalar type".into()),
-    };
-    let tuple = encode_tuple(&schema.columns, schema.schema_version, &[Some(value)])?;
-    drop(seed);
-    commit_rows(
-        &database,
-        [224; 16],
-        principal_id,
-        9_999,
-        &[
-            RowWrite {
-                key: key(row_id),
-                expected_version: None,
-                payload: Some(tuple.clone()),
-            },
-            RowWrite {
-                key: key(second_row_id),
-                expected_version: None,
-                payload: Some(tuple),
-            },
-        ],
-    )?;
+    let mut seed =
+        InvocationTransaction::begin(&database, [224; 16], principal_id, 9_999, 2, 16_384)?;
+    let mut seed_connection = seed.open_executor_metadata_connection();
+    let (seed_relation, _) = seed_connection
+        .resolve_relation("app", "metrics")?
+        .expect("insert grants keep the relation discoverable");
+    let seed_first =
+        seed_connection.stage_insert(&seed_relation, &[Some(ScalarValue::Bytea(vec![1, 2, 3]))])?;
+    let seed_first_id = seed_connection.revalidate_row_handle(&seed_first)?;
+    let seed_second =
+        seed_connection.stage_insert(&seed_relation, &[Some(ScalarValue::Bytea(vec![4, 5, 6]))])?;
+    let seed_second_id = seed_connection.revalidate_row_handle(&seed_second)?;
+    drop(seed_connection);
+    seed.commit()?;
+    let (row_id, first_value, second_row_id, second_value) =
+        if seed_first_id.row < seed_second_id.row {
+            (seed_first_id, vec![1, 2, 3], seed_second_id, vec![4, 5, 6])
+        } else {
+            (seed_second_id, vec![4, 5, 6], seed_first_id, vec![1, 2, 3])
+        };
 
     let mut invocation =
-        InvocationTransaction::begin(&database, [225; 16], principal_id, 9_999, 4, 256)?;
+        InvocationTransaction::begin(&database, [225; 16], principal_id, 9_999, 4, 16_384)?;
     let page = invocation.scan_catalog_authorized_rows(table_id, None, 3)?;
     assert_eq!(page.rows.len(), 2);
     assert_eq!(page.rows[0].0, row_id);
@@ -3087,7 +3071,9 @@ fn catalog_authorized_scan_builds_its_projection_from_pinned_records()
     assert_eq!(first_page.rows.len(), 1);
     assert_eq!(
         first_page.rows[0].cells,
-        [SanitizedCell::Value(ScalarValue::Bytea(vec![1, 2, 3]))]
+        [SanitizedCell::Value(ScalarValue::Bytea(
+            first_value.clone()
+        ))]
     );
     assert_eq!(first_page.rows[0].handle.to_bytes()[0], 8);
     assert_eq!(
@@ -3116,6 +3102,10 @@ fn catalog_authorized_scan_builds_its_projection_from_pinned_records()
         dispatch_executor_request(ServiceRole::Executor, &mut connection, &second_request)?;
     let second_page = NextBatchResponse::decode(&second_response.payload)?;
     assert_eq!(second_page.rows.len(), 1);
+    assert_eq!(
+        second_page.rows[0].cells,
+        [SanitizedCell::Value(ScalarValue::Bytea(second_value))]
+    );
     let final_cursor = second_page
         .continuation
         .expect("full final page requires an EOF confirmation");
@@ -3226,41 +3216,13 @@ fn catalog_authorized_scan_builds_its_projection_from_pinned_records()
         Err(TransactionError::InvalidMetadataRequest)
     ));
     drop(replacement);
-    assert!(invocation.read(row_id)?.is_some());
-    assert!(invocation.read(second_row_id)?.is_none());
-    assert!(invocation.read(inserted_row_id)?.is_some());
-    invocation.abort()?;
-
-    let mut insert_invocation =
-        InvocationTransaction::begin(&database, [235; 16], principal_id, 9_999, 2, 128)?;
-    let mut insert_connection = insert_invocation.open_executor_metadata_connection();
-    let (insert_relation, _) = insert_connection
-        .resolve_relation("app", "metrics")?
-        .expect("insert grants keep the relation discoverable");
-    let response = dispatch_executor_request(
-        ServiceRole::Executor,
-        &mut insert_connection,
-        &IpcFrame {
-            operation: IpcOperation::StageInsert as u16,
-            request_id: 70,
-            payload: StageInsertRequest {
-                relation: insert_relation,
-                values: vec![Some(ScalarValue::Bytea(vec![88]))],
-            }
-            .encode()?,
-        },
-    )?;
-    let persisted_handle = StageInsertResponse::decode(&response.payload)?.handle;
-    let persisted_row_id = insert_connection.revalidate_row_handle(&persisted_handle)?;
-    drop(insert_connection);
-    insert_invocation.commit()?;
-
+    invocation.commit()?;
     let mut verify =
         InvocationTransaction::begin(&database, [236; 16], principal_id, 9_999, 1, 128)?;
-    let persisted = verify
-        .read(persisted_row_id)?
-        .expect("executor insert becomes visible after commit");
     let persisted_schema = verify.load_catalog_table_schema(table_id)?;
+    let persisted = verify
+        .read(row_id)?
+        .expect("updated row remains visible after commit");
     assert_eq!(
         decode_tuple(
             &persisted_schema.columns,
@@ -3268,7 +3230,20 @@ fn catalog_authorized_scan_builds_its_projection_from_pinned_records()
             &persisted
         )?
         .values,
-        [Some(ScalarValue::Bytea(vec![88]))]
+        [Some(ScalarValue::Bytea(vec![9, 9]))]
+    );
+    assert!(verify.read(second_row_id)?.is_none());
+    let inserted = verify
+        .read(inserted_row_id)?
+        .expect("inserted row remains visible after commit");
+    assert_eq!(
+        decode_tuple(
+            &persisted_schema.columns,
+            persisted_schema.schema_version,
+            &inserted
+        )?
+        .values,
+        [Some(ScalarValue::Bytea(vec![4, 5]))]
     );
     verify.abort()?;
     Ok(())
