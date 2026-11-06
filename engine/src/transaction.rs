@@ -28,10 +28,10 @@ use crate::metadata_discovery::{
     InformationSchemaTablesCursor, InformationSchemaTablesPage, InformationSchemaTablesScanPage,
     MAX_COLUMNS_PER_PAGE, MAX_EXECUTOR_BATCH_CANDIDATES, MAX_EXECUTOR_ROW_HANDLES,
     MAX_METADATA_PAGE_BYTES, MAX_RELATION_HANDLES, MAX_RELATIONS_PER_PAGE, MAX_SCHEMAS_PER_PAGE,
-    RELATION_CURSOR_TOKEN_KIND, RELATION_HANDLE_TOKEN_KIND, RelationScanCursor,
-    ResolvedRelationHandle, SCHEMA_CURSOR_TOKEN_KIND, SchemaScanCursor, VisibleColumn,
-    VisibleColumnPage, VisibleRelation, VisibleRelationPage, VisibleRelationSchema, VisibleSchema,
-    VisibleSchemaPage,
+    PLANNING_TABLE_HANDLE_TOKEN_KIND, PlanningTableHandle, RELATION_CURSOR_TOKEN_KIND,
+    RELATION_HANDLE_TOKEN_KIND, RelationScanCursor, ResolvedRelationHandle,
+    SCHEMA_CURSOR_TOKEN_KIND, SchemaScanCursor, VisibleColumn, VisibleColumnPage, VisibleRelation,
+    VisibleRelationPage, VisibleRelationSchema, VisibleSchema, VisibleSchemaPage,
 };
 use crate::outcome::{InvocationOutcome, OutcomeStatus};
 use crate::overlay::{Overlay, OverlayError, ResolvedRow, RowId, StagedRow};
@@ -271,6 +271,21 @@ pub struct ExecutorMetadataConnection<'connection, 'db> {
     used_scan_tokens: HashSet<[u8; 16]>,
     row_handles: HashMap<[u8; 16], RowId>,
     used_row_tokens: HashSet<[u8; 16]>,
+}
+
+/// Planner metadata session with opaque, connection-local table handles.
+/// Estimates are rebuilt from the invocation's pinned catalog on each request.
+pub struct PlannerMetadataConnection<'connection, 'db> {
+    transaction: &'connection mut InvocationTransaction<'db>,
+    handles: HashMap<[u8; 16], PlannerTableHandleState>,
+    used_tokens: HashSet<[u8; 16]>,
+}
+
+#[derive(Clone)]
+struct PlannerTableHandleState {
+    schema_name: String,
+    relation_name: String,
+    relation_id: [u8; 16],
 }
 
 #[derive(Clone)]
@@ -592,6 +607,16 @@ impl<'db> InvocationTransaction<'db> {
             used_scan_tokens: HashSet::new(),
             row_handles: HashMap::new(),
             used_row_tokens: HashSet::new(),
+        }
+    }
+
+    /// Open a planner session with planning handles isolated from executor
+    /// relation and row handles.
+    pub fn open_planner_metadata_connection(&mut self) -> PlannerMetadataConnection<'_, 'db> {
+        PlannerMetadataConnection {
+            transaction: self,
+            handles: HashMap::new(),
+            used_tokens: HashSet::new(),
         }
     }
 
@@ -5887,6 +5912,128 @@ impl ExecutorMetadataConnection<'_, '_> {
             .ok_or(TransactionError::InvalidMetadataRequest)?;
         self.transaction.discard_active_scan_for_table(table_id);
         Ok(())
+    }
+}
+
+impl PlannerMetadataConnection<'_, '_> {
+    /// Resolve an authorized relation name and issue a planner-only handle.
+    pub fn resolve_relation(
+        &mut self,
+        schema_name: &str,
+        relation_name: &str,
+    ) -> Result<Option<(PlanningTableHandle, AuthorizedRelationDescription)>, TransactionError>
+    {
+        let Some(description) = self
+            .transaction
+            .resolve_catalog_authorized_relation(schema_name, relation_name)?
+        else {
+            return Ok(None);
+        };
+        if self.used_tokens.len() >= MAX_RELATION_HANDLES {
+            return Err(TransactionError::RelationHandleLimitExceeded);
+        }
+        let token =
+            new_metadata_cursor_token(&mut self.used_tokens, PLANNING_TABLE_HANDLE_TOKEN_KIND)?;
+        self.handles.insert(
+            token,
+            PlannerTableHandleState {
+                schema_name: schema_name.to_owned(),
+                relation_name: relation_name.to_owned(),
+                relation_id: description.relation_id,
+            },
+        );
+        Ok(Some((PlanningTableHandle { token }, description)))
+    }
+
+    /// Revalidate the qualified name before returning its authorized schema.
+    pub fn describe_relation(
+        &mut self,
+        handle: &PlanningTableHandle,
+    ) -> Result<AuthorizedRelationDescription, TransactionError> {
+        let state = self
+            .handles
+            .get(&handle.token)
+            .cloned()
+            .ok_or(TransactionError::InvalidMetadataRequest)?;
+        let description = self
+            .transaction
+            .resolve_catalog_authorized_relation(&state.schema_name, &state.relation_name)?
+            .ok_or(TransactionError::InvalidMetadataRequest)?;
+        if description.relation_id != state.relation_id || description.name != state.relation_name {
+            return Err(TransactionError::InvalidMetadataRequest);
+        }
+        Ok(description)
+    }
+
+    /// Produce an authorized-view summary for selected stable column IDs.
+    /// Empty selection requests every declared column. The planner receives
+    /// only counts and cannot use this handle for executor row access.
+    pub fn estimate_scan(
+        &mut self,
+        handle: &PlanningTableHandle,
+        column_ids: &[[u8; 16]],
+    ) -> Result<AuthorizedScanEstimate, TransactionError> {
+        let description = self.describe_relation(handle)?;
+        if self
+            .handles
+            .get(&handle.token)
+            .is_some_and(|state| state.schema_name == "information_schema")
+        {
+            return Ok(AuthorizedScanEstimate::Unknown);
+        }
+        let state = self
+            .transaction
+            .load_catalog_executor_write_projection(description.relation_id)?;
+        let ordinals = if column_ids.is_empty() {
+            (0..state.schema.columns.len()).collect::<Vec<_>>()
+        } else {
+            if column_ids.iter().copied().collect::<HashSet<_>>().len() != column_ids.len() {
+                return Err(TransactionError::InvalidMetadataRequest);
+            }
+            column_ids
+                .iter()
+                .map(|column_id| {
+                    state
+                        .schema
+                        .column_ids
+                        .iter()
+                        .position(|candidate| candidate == column_id)
+                        .ok_or(TransactionError::InvalidMetadataRequest)
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        if ordinals.is_empty() {
+            return Ok(AuthorizedScanEstimate::Unknown);
+        }
+        let columns = ordinals
+            .iter()
+            .map(|ordinal| state.schema.columns[*ordinal].clone())
+            .collect::<Vec<_>>();
+        let selected_column_ids = ordinals
+            .iter()
+            .map(|ordinal| state.schema.column_ids[*ordinal])
+            .collect::<Vec<_>>();
+        let projection = AuthorizedProjection {
+            columns: &columns,
+            column_ids: &selected_column_ids,
+            schema_version: state.schema.schema_version,
+            schema_id: state.schema.schema_id,
+            context: &state.context,
+            grants: &state.grants,
+            policies: &state.policies,
+            checks: &state.checks,
+            policy_driving_columns: &state.policy_driving_columns,
+            dependencies: &[],
+        };
+        self.transaction
+            .estimate_authorized_scan(description.relation_id, &projection)
+    }
+
+    pub fn close_relation(&mut self, handle: &PlanningTableHandle) -> Result<(), TransactionError> {
+        self.handles
+            .remove(&handle.token)
+            .map(|_| ())
+            .ok_or(TransactionError::InvalidMetadataRequest)
     }
 }
 

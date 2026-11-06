@@ -12,6 +12,7 @@ pub const INFORMATION_SCHEMA_COLUMNS_CURSOR_TOKEN_KIND: u8 = 5;
 pub const RELATION_HANDLE_TOKEN_KIND: u8 = 6;
 pub const EXECUTOR_SCAN_CURSOR_TOKEN_KIND: u8 = 7;
 pub const EXECUTOR_ROW_HANDLE_TOKEN_KIND: u8 = 8;
+pub const PLANNING_TABLE_HANDLE_TOKEN_KIND: u8 = 9;
 pub const MAX_RELATION_HANDLES: usize = 256;
 pub const MAX_EXECUTOR_ROW_HANDLES: usize = 4_096;
 pub const MAX_EXECUTOR_BATCH_CANDIDATES: usize = 128;
@@ -55,6 +56,28 @@ pub struct AuthorizedRelationDescription {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedRelationHandle {
     pub(crate) token: [u8; 16],
+}
+
+/// Opaque planning reference owned by one planner metadata connection. It
+/// conveys no row access and cannot be used by the executor protocol.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlanningTableHandle {
+    pub(crate) token: [u8; 16],
+}
+
+impl PlanningTableHandle {
+    pub fn to_bytes(&self) -> [u8; 16] {
+        self.token
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != 16 || bytes[0] != PLANNING_TABLE_HANDLE_TOKEN_KIND {
+            return None;
+        }
+        Some(Self {
+            token: bytes.try_into().ok()?,
+        })
+    }
 }
 
 impl ResolvedRelationHandle {

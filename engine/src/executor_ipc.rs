@@ -711,7 +711,7 @@ fn validate_batch_limits(max_scanned: u16, max_bytes: u32) -> Result<(), Executo
     Ok(())
 }
 
-fn ensure_response_size(payload: &[u8]) -> Result<(), ExecutorRequestError> {
+pub(crate) fn ensure_response_size(payload: &[u8]) -> Result<(), ExecutorRequestError> {
     if payload.len() > crate::ipc::MAX_PAYLOAD_BYTES {
         Err(ExecutorRequestError::ResponseTooLarge)
     } else {
@@ -804,7 +804,7 @@ fn decode_scalar_value(type_code: u8, bytes: &[u8]) -> Result<ScalarValue, Execu
     Ok(value)
 }
 
-fn encode_name(payload: &mut Vec<u8>, name: &str) -> Result<(), ExecutorRequestError> {
+pub(crate) fn encode_name(payload: &mut Vec<u8>, name: &str) -> Result<(), ExecutorRequestError> {
     let name_len = u16::try_from(name.len()).map_err(|_| ExecutorRequestError::ResponseTooLarge)?;
     if name.is_empty() {
         return Err(ExecutorRequestError::InvalidPayload);
@@ -814,7 +814,10 @@ fn encode_name(payload: &mut Vec<u8>, name: &str) -> Result<(), ExecutorRequestE
     ensure_response_size(payload)
 }
 
-fn decode_name(payload: &[u8], offset: &mut usize) -> Result<String, ExecutorRequestError> {
+pub(crate) fn decode_name(
+    payload: &[u8],
+    offset: &mut usize,
+) -> Result<String, ExecutorRequestError> {
     let name_len = usize::from(read_u16(payload, offset)?);
     if name_len == 0 {
         return Err(ExecutorRequestError::InvalidPayload);
@@ -830,7 +833,7 @@ fn decode_name(payload: &[u8], offset: &mut usize) -> Result<String, ExecutorReq
     Ok(name)
 }
 
-fn encode_visible_column(
+pub(crate) fn encode_visible_column(
     payload: &mut Vec<u8>,
     column: &VisibleColumn,
 ) -> Result<(), ExecutorRequestError> {
@@ -843,7 +846,7 @@ fn encode_visible_column(
     encode_name(payload, &column.name)
 }
 
-fn decode_visible_column(
+pub(crate) fn decode_visible_column(
     payload: &[u8],
     offset: &mut usize,
 ) -> Result<VisibleColumn, ExecutorRequestError> {

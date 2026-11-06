@@ -895,3 +895,10 @@
 - Changed code and contract: [transaction and commit validation](../../engine/src/transaction.rs), [executor INSERT codec](../../engine/src/executor_ipc.rs), [IPC protocol](../../specs/ipc-protocol.md), and [schema DDL contract](../../specs/ddl-schema.md).
 - Verification: workspace build, format check, warning-denied Clippy, and `git diff --check` pass. Tests were not run in this increment.
 - Remaining: generated identity allocation has only a focused staged-value regression so far; add catalog-backed end-to-end coverage when test execution is requested.
+
+## ST-1 / ST-2 dependency: planner metadata and estimate dispatch
+
+- Behavior: planner-only connection handles resolve and revalidate authorized relation descriptions, and estimate requests return bounded visible/readable/null/redacted summaries or UNKNOWN. Executor handles cannot be decoded as planner handles.
+- Changed code and contracts: [planner IPC](../../engine/src/planner_ipc.rs), [planner connection state](../../engine/src/transaction.rs), [planner handle](../../engine/src/metadata_discovery.rs), [IPC protocol](../../specs/ipc-protocol.md), and [statistics service](../../specs/storage-manager.md).
+- Verification: workspace build, format check, warning-denied Clippy, and `git diff --check` pass. Tests were not run in this increment.
+- Remaining: planner stream provisioning, planner task lifecycle/budget integration, and predicate/access-path estimates remain open.
