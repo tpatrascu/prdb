@@ -1698,6 +1698,76 @@ fn information_schema_tables_projects_authorized_schema_pages()
 }
 
 #[test]
+fn information_schema_columns_projects_declared_shape_in_pages()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    install_relation_discovery_catalog(&database)?;
+    install_second_relation_column(&database)?;
+    let mut invocation = InvocationTransaction::begin(&database, [203; 16], [9; 16], 9_999, 1, 64)?;
+    let first = invocation
+        .scan_information_schema_columns_for_relation("app", "metrics", 1, None)?
+        .expect("metrics is visible");
+    assert_eq!(first.rows.len(), 1);
+    assert_eq!(first.rows[0].table_schema, "app");
+    assert_eq!(first.rows[0].table_name, "metrics");
+    assert_eq!(first.rows[0].column_name, "value");
+    assert_eq!(first.rows[0].ordinal_position, 1);
+    assert_eq!(first.rows[0].data_type, "BYTEA");
+    assert_eq!(first.rows[0].is_nullable, "YES");
+    assert_eq!(first.rows[0].character_maximum_length, None);
+    assert_eq!(first.rows[0].numeric_precision, None);
+    assert_eq!(first.rows[0].numeric_scale, None);
+    let second = invocation
+        .scan_information_schema_columns_for_relation("app", "metrics", 1, first.continuation)?
+        .expect("metrics is visible");
+    assert_eq!(second.rows.len(), 1);
+    assert_eq!(second.rows[0].column_name, "value2");
+    assert_eq!(second.rows[0].ordinal_position, 2);
+    assert_eq!(second.rows[0].is_nullable, "NO");
+    assert!(second.continuation.is_none());
+    assert!(
+        invocation
+            .scan_information_schema_columns_for_relation("private", "metrics", 1, None)?
+            .is_none()
+    );
+    assert!(
+        invocation
+            .scan_information_schema_columns_for_relation("app", "missing", 1, None)?
+            .is_none()
+    );
+
+    let mut cursor_probe =
+        InvocationTransaction::begin(&database, [204; 16], [9; 16], 9_999, 1, 64)?;
+    let projected = cursor_probe
+        .scan_information_schema_columns_for_relation("app", "metrics", 1, None)?
+        .expect("metrics is visible");
+    let cursor = projected.continuation.expect("second column follows");
+    let (role_ids, grants) = cursor_probe.load_catalog_relation_discovery_grants([0x91; 16])?;
+    let scope = grants
+        .iter()
+        .map(|grant| (grant.operation, grant.target))
+        .collect();
+    let context = AuthorizationContext {
+        principal_id: [9; 16],
+        role_ids,
+        scope,
+    };
+    assert!(matches!(
+        cursor_probe.describe_authorized_columns_page(
+            [0x10; 16],
+            1,
+            Some(cursor),
+            &context,
+            &grants,
+            &[],
+        ),
+        Err(TransactionError::InvalidMetadataRequest)
+    ));
+    Ok(())
+}
+
+#[test]
 fn column_grants_can_discover_a_relation_and_pages_are_snapshot_scoped()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();

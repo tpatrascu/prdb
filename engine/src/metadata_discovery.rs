@@ -137,6 +137,27 @@ pub struct InformationSchemaTablesPage {
     pub continuation: Option<RelationScanCursor>,
 }
 
+/// One declared column row exposed by `information_schema.columns`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InformationSchemaColumnRow {
+    pub table_schema: String,
+    pub table_name: String,
+    pub column_name: String,
+    pub ordinal_position: u32,
+    pub data_type: String,
+    pub is_nullable: String,
+    pub character_maximum_length: Option<u32>,
+    pub numeric_precision: Option<u32>,
+    pub numeric_scale: Option<u32>,
+}
+
+/// One bounded relation-scoped page from `information_schema.columns`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InformationSchemaColumnsPage {
+    pub rows: Vec<InformationSchemaColumnRow>,
+    pub continuation: Option<ColumnScanCursor>,
+}
+
 /// Opaque continuation for relation discovery in one invocation snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RelationScanCursor {

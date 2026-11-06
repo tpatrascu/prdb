@@ -20,11 +20,12 @@ use crate::index_key::{DeriveIndexKeyError, derive_index_key};
 use crate::metadata::{EngineMetadata, Lifecycle};
 use crate::metadata_discovery::{
     AuthorizedRelationDescription, COLUMN_CURSOR_TOKEN_KIND, ColumnScanCursor,
-    InformationSchemaSchemataPage, InformationSchemaSchemataRow, InformationSchemaTableRow,
-    InformationSchemaTablesPage, MAX_COLUMNS_PER_PAGE, MAX_METADATA_PAGE_BYTES,
-    MAX_RELATIONS_PER_PAGE, MAX_SCHEMAS_PER_PAGE, RELATION_CURSOR_TOKEN_KIND, RelationScanCursor,
-    SCHEMA_CURSOR_TOKEN_KIND, SchemaScanCursor, VisibleColumn, VisibleColumnPage, VisibleRelation,
-    VisibleRelationPage, VisibleRelationSchema, VisibleSchema, VisibleSchemaPage,
+    InformationSchemaColumnRow, InformationSchemaColumnsPage, InformationSchemaSchemataPage,
+    InformationSchemaSchemataRow, InformationSchemaTableRow, InformationSchemaTablesPage,
+    MAX_COLUMNS_PER_PAGE, MAX_METADATA_PAGE_BYTES, MAX_RELATIONS_PER_PAGE, MAX_SCHEMAS_PER_PAGE,
+    RELATION_CURSOR_TOKEN_KIND, RelationScanCursor, SCHEMA_CURSOR_TOKEN_KIND, SchemaScanCursor,
+    VisibleColumn, VisibleColumnPage, VisibleRelation, VisibleRelationPage, VisibleRelationSchema,
+    VisibleSchema, VisibleSchemaPage,
 };
 use crate::outcome::{InvocationOutcome, OutcomeStatus};
 use crate::overlay::{Overlay, OverlayError, ResolvedRow, RowId, StagedRow};
@@ -44,6 +45,8 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 const MAX_INDEX_CHANGES_PER_ROW: usize = 256;
+const INFORMATION_SCHEMA_COLUMN_EXTRA_BYTES: usize =
+    "TIMESTAMP WITH TIME ZONE".len() + "YES".len() + 4 + 3 * 5 + 16;
 
 struct StagedIndexChange {
     row_id: RowId,
@@ -271,6 +274,7 @@ struct ActiveSchemaScan {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ActiveColumnScan {
     relation_id: [u8; 16],
+    extra_bytes_per_column: usize,
     principal_id: [u8; 16],
     role_ids: HashSet<[u8; 16]>,
     scope: HashSet<(Operation, AccessTarget)>,
@@ -1305,7 +1309,33 @@ impl<'db> InvocationTransaction<'db> {
         grants: &[Grant],
         dependencies: &[AuthorityDependency],
     ) -> Result<Option<VisibleColumnPage>, TransactionError> {
+        self.describe_authorized_columns_page_with_extra_bytes(
+            table_id,
+            page_limit,
+            continuation,
+            0,
+            MetadataDiscoveryAccess {
+                context,
+                grants,
+                dependencies,
+            },
+        )
+    }
+
+    fn describe_authorized_columns_page_with_extra_bytes(
+        &mut self,
+        table_id: [u8; 16],
+        page_limit: usize,
+        continuation: Option<ColumnScanCursor>,
+        extra_bytes_per_column: usize,
+        access: MetadataDiscoveryAccess<'_>,
+    ) -> Result<Option<VisibleColumnPage>, TransactionError> {
         let result = (|| {
+            let MetadataDiscoveryAccess {
+                context,
+                grants,
+                dependencies,
+            } = access;
             if page_limit == 0 || page_limit > MAX_COLUMNS_PER_PAGE {
                 return Err(TransactionError::InvalidMetadataRequest);
             }
@@ -1320,6 +1350,7 @@ impl<'db> InvocationTransaction<'db> {
                         return Err(TransactionError::InvalidMetadataRequest);
                     };
                     if active.relation_id != table_id
+                        || active.extra_bytes_per_column != extra_bytes_per_column
                         || active.principal_id != context.principal_id
                         || active.role_ids != context.role_ids
                         || active.scope != context.scope
@@ -1335,6 +1366,7 @@ impl<'db> InvocationTransaction<'db> {
                 }
                 None => ActiveColumnScan {
                     relation_id: table_id,
+                    extra_bytes_per_column,
                     principal_id: context.principal_id,
                     role_ids: context.role_ids.clone(),
                     scope: context.scope.clone(),
@@ -1375,6 +1407,7 @@ impl<'db> InvocationTransaction<'db> {
                     .name
                     .len()
                     .checked_add(32)
+                    .and_then(|size| size.checked_add(extra_bytes_per_column))
                     .ok_or(TransactionError::MetadataResultTooLarge)?;
                 if response_bytes.saturating_add(encoded_size) > MAX_METADATA_PAGE_BYTES {
                     if columns.is_empty() {
@@ -1527,6 +1560,135 @@ impl<'db> InvocationTransaction<'db> {
                         table_type: "BASE TABLE".to_owned(),
                     })
                     .collect(),
+                continuation: page.continuation,
+            }))
+        })();
+        match result {
+            Ok(page) => Ok(page),
+            Err(error) => {
+                if !self.aborted {
+                    self.abort()?;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Return the authorized `information_schema.columns` rows for one relation.
+    pub fn scan_information_schema_columns_for_relation(
+        &mut self,
+        schema_name: &str,
+        relation_name: &str,
+        page_limit: usize,
+        continuation: Option<ColumnScanCursor>,
+    ) -> Result<Option<InformationSchemaColumnsPage>, TransactionError> {
+        let result = (|| {
+            if schema_name.is_empty()
+                || schema_name.len() > MAX_METADATA_PAGE_BYTES
+                || relation_name.is_empty()
+                || relation_name.len() > MAX_METADATA_PAGE_BYTES
+                || page_limit == 0
+                || page_limit > MAX_COLUMNS_PER_PAGE
+            {
+                return Err(TransactionError::InvalidMetadataRequest);
+            }
+            let principal_id = self.principal_id;
+            let (schema_roles, schema_grants) =
+                self.load_catalog_schema_usage_grants(principal_id)?;
+            let schema_scope = schema_grants
+                .iter()
+                .map(|grant| (grant.operation, grant.target))
+                .collect();
+            let schema_context = AuthorizationContext {
+                principal_id,
+                role_ids: schema_roles,
+                scope: schema_scope,
+            };
+            let Some(schema) =
+                self.resolve_authorized_schema(schema_name, &schema_context, &schema_grants, &[])?
+            else {
+                return Ok(None);
+            };
+
+            let mut relation_continuation = None;
+            let relation = loop {
+                let Some(page) = self.list_catalog_authorized_relations(
+                    schema.schema_id,
+                    MAX_RELATIONS_PER_PAGE,
+                    relation_continuation,
+                )?
+                else {
+                    return Ok(None);
+                };
+                if let Some(relation) = page
+                    .relations
+                    .into_iter()
+                    .find(|relation| relation.name == relation_name)
+                {
+                    break relation;
+                }
+                relation_continuation = page.continuation;
+                if relation_continuation.is_none() {
+                    return Ok(None);
+                }
+            };
+
+            let (relation_roles, relation_grants) =
+                self.load_catalog_relation_discovery_grants(schema.schema_id)?;
+            let relation_scope = relation_grants
+                .iter()
+                .map(|grant| (grant.operation, grant.target))
+                .collect();
+            let relation_context = AuthorizationContext {
+                principal_id,
+                role_ids: relation_roles,
+                scope: relation_scope,
+            };
+            let extra_bytes_per_column = schema
+                .name
+                .len()
+                .checked_add(relation.name.len())
+                .and_then(|size| size.checked_add(INFORMATION_SCHEMA_COLUMN_EXTRA_BYTES))
+                .ok_or(TransactionError::MetadataResultTooLarge)?;
+            let Some(page) = self.describe_authorized_columns_page_with_extra_bytes(
+                relation.relation_id,
+                page_limit,
+                continuation,
+                extra_bytes_per_column,
+                MetadataDiscoveryAccess {
+                    context: &relation_context,
+                    grants: &relation_grants,
+                    dependencies: &[],
+                },
+            )?
+            else {
+                return Ok(None);
+            };
+            let rows = page
+                .columns
+                .into_iter()
+                .map(|column| {
+                    let ordinal_position = column
+                        .ordinal
+                        .checked_add(1)
+                        .ok_or(TransactionError::CorruptCatalog)?;
+                    let (data_type, character_maximum_length, numeric_precision, numeric_scale) =
+                        information_schema_column_type(column.scalar_type);
+                    Ok(InformationSchemaColumnRow {
+                        table_schema: schema.name.clone(),
+                        table_name: relation.name.clone(),
+                        column_name: column.name,
+                        ordinal_position,
+                        data_type: data_type.to_owned(),
+                        is_nullable: if column.nullable { "YES" } else { "NO" }.to_owned(),
+                        character_maximum_length,
+                        numeric_precision,
+                        numeric_scale,
+                    })
+                })
+                .collect::<Result<Vec<_>, TransactionError>>()?;
+            Ok(Some(InformationSchemaColumnsPage {
+                rows,
                 continuation: page.continuation,
             }))
         })();
@@ -4747,6 +4909,29 @@ fn decode_catalog_scalar_type_parameters(
         .map_err(|_| TransactionError::CorruptCatalog)
 }
 
+fn information_schema_column_type(
+    scalar_type: ScalarType,
+) -> (&'static str, Option<u32>, Option<u32>, Option<u32>) {
+    match scalar_type {
+        ScalarType::Boolean => ("BOOLEAN", None, None, None),
+        ScalarType::SmallInt => ("SMALLINT", None, Some(5), Some(0)),
+        ScalarType::Integer => ("INTEGER", None, Some(10), Some(0)),
+        ScalarType::BigInt => ("BIGINT", None, Some(19), Some(0)),
+        ScalarType::Decimal { precision, scale } => (
+            "DECIMAL",
+            None,
+            Some(u32::from(precision)),
+            Some(u32::from(scale)),
+        ),
+        ScalarType::Text => ("TEXT", None, None, None),
+        ScalarType::Varchar { max_chars } => ("CHARACTER VARYING", Some(max_chars), None, None),
+        ScalarType::Bytea => ("BYTEA", None, None, None),
+        ScalarType::Uuid => ("UUID", None, None, None),
+        ScalarType::Date => ("DATE", None, None, None),
+        ScalarType::TimestampTz => ("TIMESTAMP WITH TIME ZONE", None, None, None),
+    }
+}
+
 fn validate_check_constraints(
     projection: &AuthorizedProjection<'_>,
     values: &[Option<crate::tuple::ScalarValue>],
@@ -4778,5 +4963,41 @@ fn map_snapshot_scan_error(error: SnapshotError) -> TransactionError {
         | SnapshotError::InvalidScanLimit => TransactionError::InvalidScanRequest,
         SnapshotError::InvalidRowKey => TransactionError::CorruptRowKey,
         SnapshotError::Storage(error) => TransactionError::Storage(error),
+    }
+}
+
+#[cfg(test)]
+mod information_schema_column_type_tests {
+    use super::{ScalarType, information_schema_column_type};
+
+    #[test]
+    fn reports_declared_type_names_and_applicable_parameters() {
+        assert_eq!(
+            information_schema_column_type(ScalarType::Varchar { max_chars: 37 }),
+            ("CHARACTER VARYING", Some(37), None, None)
+        );
+        assert_eq!(
+            information_schema_column_type(ScalarType::Decimal {
+                precision: 12,
+                scale: 3,
+            }),
+            ("DECIMAL", None, Some(12), Some(3))
+        );
+        assert_eq!(
+            information_schema_column_type(ScalarType::SmallInt),
+            ("SMALLINT", None, Some(5), Some(0))
+        );
+        assert_eq!(
+            information_schema_column_type(ScalarType::Integer),
+            ("INTEGER", None, Some(10), Some(0))
+        );
+        assert_eq!(
+            information_schema_column_type(ScalarType::BigInt),
+            ("BIGINT", None, Some(19), Some(0))
+        );
+        assert_eq!(
+            information_schema_column_type(ScalarType::TimestampTz),
+            ("TIMESTAMP WITH TIME ZONE", None, None, None)
+        );
     }
 }
