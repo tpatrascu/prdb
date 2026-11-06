@@ -3500,7 +3500,20 @@ fn build_index_ddl_plan(
                 .map(u16::from_be_bytes);
             if family == Some(5) && write.key == table_key && write.expected_value != write.payload
             {
-                schema_changed = true;
+                let table_write_is_epoch_only =
+                    match (write.expected_value.as_deref(), write.payload.as_deref()) {
+                        (Some(current), Some(next)) => {
+                            let current_record = decode_catalog_record(&write.key, current)?;
+                            let next_record = decode_catalog_record(&write.key, next)?;
+                            catalog_fields_equal_except(&current_record, &next_record, &[3])
+                                && table_schema_version(&write.key, current)?
+                                    == table_schema_version(&write.key, next)?
+                        }
+                        _ => false,
+                    };
+                if !table_write_is_epoch_only {
+                    schema_changed = true;
+                }
             } else if family == Some(6) && write.expected_value != write.payload {
                 for bytes in [write.expected_value.as_deref(), write.payload.as_deref()]
                     .into_iter()
@@ -4931,9 +4944,11 @@ pub fn commit_authorized_foreign_key_ddl_with_fences(
     )
 }
 
-/// Authorize add/drop operations for NOT NULL and CHECK constraints on existing
-/// tables. CHECK additions validate stored rows before publication. The actor
-/// must own the source table or hold inherited ALTER on its table or schema.
+/// Authorize add/drop operations for NOT NULL, PRIMARY KEY, UNIQUE, and CHECK
+/// constraints on existing tables. Key constraints atomically create or remove
+/// their owned unique backing indexes. CHECK and key additions validate stored
+/// rows before publication. The actor must own the source table or hold
+/// inherited ALTER on its table or schema.
 pub fn commit_authorized_constraint_ddl_with_fences(
     database: &Database,
     ddl_fences: &DdlFenceCoordinator,
@@ -6865,14 +6880,17 @@ fn constraint_ddl_authority_guards(
         table_id: [u8; 16],
         kind: u16,
         subject_id: [u8; 16],
+        columns: Vec<[u8; 16]>,
         adding: bool,
     }
     let mut constraint_changes = HashMap::<[u8; 16], ConstraintChange>::new();
     let mut object_changes = HashMap::<[u8; 16], (u16, bool, bool)>::new();
     let mut column_changes = HashMap::<[u8; 16], ([u8; 16], bool, bool)>::new();
     let mut table_changes = HashSet::<[u8; 16]>::new();
+    let mut index_definition_states = HashMap::<[u8; 16], (bool, bool)>::new();
+    let mut index_details = HashMap::<[u8; 16], ([u8; 16], Vec<[u8; 16]>, [u8; 16])>::new();
     let mut expression_changes = HashMap::<[u8; 16], (bool, Vec<[u8; 16]>)>::new();
-    let mut dependency_changes = HashMap::<([u8; 16], [u8; 16]), (bool, bool)>::new();
+    let mut dependency_changes = HashMap::<([u8; 16], [u8; 16]), (u16, bool, bool)>::new();
 
     for write in catalog_writes {
         let family = write
@@ -6902,7 +6920,7 @@ fn constraint_ddl_authority_guards(
                     .ok_or(CommitError::InvalidCatalog)?;
                 let object_kind = catalog_field_u16(&write.key, object_bytes, 2, 1)?;
                 if object_id == [0; 16]
-                    || !matches!(object_kind, 5 | 6)
+                    || !matches!(object_kind, 5..=7)
                     || object_changes
                         .insert(
                             object_id,
@@ -6988,7 +7006,7 @@ fn constraint_ddl_authority_guards(
                     .or(write.payload.as_deref())
                     .ok_or(CommitError::InvalidCatalog)?;
                 let kind = catalog_field_u16(&write.key, bytes, 8, 2)?;
-                if constraint_id == [0; 16] || !matches!(kind, 1 | 4) {
+                if constraint_id == [0; 16] || !matches!(kind, 1..=4) {
                     return Err(CommitError::InvalidCatalog);
                 }
                 validate_constraint_shape(&write.key, bytes)?;
@@ -6996,6 +7014,15 @@ fn constraint_ddl_authority_guards(
                 let columns = catalog_id_list_field(&write.key, bytes, 8, 3)?;
                 let subject_id = match kind {
                     1 if columns.len() == 1 => columns[0],
+                    2 | 3 if !columns.is_empty() => {
+                        let index_id: [u8; 16] = catalog_field_bytes(&write.key, bytes, 8, 11)?
+                            .try_into()
+                            .map_err(|_| CommitError::InvalidCatalog)?;
+                        if index_id == [0; 16] {
+                            return Err(CommitError::InvalidCatalog);
+                        }
+                        index_id
+                    }
                     4 if columns.is_empty() => {
                         let expression_id: [u8; 16] = catalog_field_bytes(&write.key, bytes, 8, 4)?
                             .try_into()
@@ -7014,10 +7041,42 @@ fn constraint_ddl_authority_guards(
                             table_id,
                             kind,
                             subject_id,
+                            columns,
                             adding: write.payload.is_some(),
                         },
                     )
                     .is_some()
+                {
+                    return Err(CommitError::InvalidCatalog);
+                }
+            }
+            9 => {
+                if write.key.len() != 19 || current.is_some() == write.payload.is_some() {
+                    return Err(CommitError::InvalidCatalog);
+                }
+                let index_id: [u8; 16] = write.key[3..19]
+                    .try_into()
+                    .map_err(|_| CommitError::InvalidCatalog)?;
+                let bytes = current
+                    .as_deref()
+                    .or(write.payload.as_deref())
+                    .ok_or(CommitError::InvalidCatalog)?;
+                let (decoded_id, table_id) = decode_index_definition(&write.key, bytes)?;
+                let columns = catalog_id_list_field(&write.key, bytes, 9, 2)?;
+                let unique = catalog_field_bytes(&write.key, bytes, 9, 4)?;
+                let owner: [u8; 16] = catalog_field_bytes(&write.key, bytes, 9, 6)?
+                    .try_into()
+                    .map_err(|_| CommitError::InvalidCatalog)?;
+                if index_id == [0; 16]
+                    || decoded_id != index_id
+                    || unique != [1]
+                    || owner == [0; 16]
+                    || index_definition_states
+                        .insert(index_id, (current.is_some(), write.payload.is_some()))
+                        .is_some()
+                    || index_details
+                        .insert(index_id, (table_id, columns, owner))
+                        .is_some()
                 {
                     return Err(CommitError::InvalidCatalog);
                 }
@@ -7067,11 +7126,11 @@ fn constraint_ddl_authority_guards(
                     .ok_or(CommitError::InvalidCatalog)?;
                 let (dependent_id, referenced_id, kind) =
                     decode_dependency_edge(&write.key, bytes)?;
-                if kind != 2
+                if !matches!(kind, 2 | 4)
                     || dependency_changes
                         .insert(
                             (dependent_id, referenced_id),
-                            (current.is_some(), write.payload.is_some()),
+                            (kind, current.is_some(), write.payload.is_some()),
                         )
                         .is_some()
                 {
@@ -7089,7 +7148,8 @@ fn constraint_ddl_authority_guards(
     let mut affected_tables = HashSet::new();
     let mut expected_columns = HashMap::<[u8; 16], ([u8; 16], bool, bool)>::new();
     let mut expected_objects = HashMap::<[u8; 16], (u16, bool, bool)>::new();
-    let mut expected_dependencies = HashMap::<([u8; 16], [u8; 16]), (bool, bool)>::new();
+    let mut expected_dependencies = HashMap::<([u8; 16], [u8; 16]), (u16, bool, bool)>::new();
+    let mut expected_index_definitions = HashMap::<[u8; 16], (bool, bool)>::new();
     let mut check_expression_ids = HashSet::new();
     for (constraint_id, change) in &constraint_changes {
         affected_tables.insert(change.table_id);
@@ -7124,7 +7184,33 @@ fn constraint_ddl_authority_guards(
                 }
                 expected_dependencies.insert(
                     (*constraint_id, change.subject_id),
-                    (!change.adding, change.adding),
+                    (2, !change.adding, change.adding),
+                );
+            }
+            2 | 3 => {
+                if expected_objects
+                    .insert(change.subject_id, (7, !change.adding, change.adding))
+                    .is_some()
+                {
+                    return Err(CommitError::InvalidCatalog);
+                }
+                let index_state = (!change.adding, change.adding);
+                let (index_table_id, index_columns, index_owner) = index_details
+                    .get(&change.subject_id)
+                    .ok_or(CommitError::InvalidCatalog)?;
+                if *index_table_id != change.table_id
+                    || *index_columns != change.columns
+                    || *index_owner != *constraint_id
+                    || index_definition_states.get(&change.subject_id) != Some(&index_state)
+                    || expected_index_definitions
+                        .insert(change.subject_id, index_state)
+                        .is_some()
+                {
+                    return Err(CommitError::InvalidCatalog);
+                }
+                expected_dependencies.insert(
+                    (*constraint_id, change.subject_id),
+                    (4, !change.adding, change.adding),
                 );
             }
             _ => return Err(CommitError::InvalidCatalog),
@@ -7141,12 +7227,13 @@ fn constraint_ddl_authority_guards(
             return Err(CommitError::InvalidCatalog);
         }
         for dependency_id in dependencies {
-            expected_dependencies.insert((*expression_id, *dependency_id), (!adding, *adding));
+            expected_dependencies.insert((*expression_id, *dependency_id), (2, !adding, *adding));
         }
     }
     if expected_objects != object_changes
         || expected_columns != column_changes
         || expected_dependencies != dependency_changes
+        || expected_index_definitions != index_definition_states
         || affected_tables.len() != table_changes.len()
         || table_changes
             .iter()

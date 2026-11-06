@@ -1749,7 +1749,7 @@ fn storage_manager_authorizes_constraint_ddl_by_table_alter()
     removed_object.expected_value = removed_object.payload.clone();
     removed_object.payload = None;
     let mut column_nullable = column_write(column_id, table_id, "object_84");
-    column_nullable.expected_value = column_not_null.payload;
+    column_nullable.expected_value = column_not_null.payload.clone();
     let drop_changes = [
         removed_constraint,
         removed_object,
@@ -2010,6 +2010,214 @@ fn storage_manager_authorizes_constraint_ddl_by_table_alter()
             &[check_drop_audit],
         )?,
         8
+    );
+    StorageManager::new(&database, Duration::from_millis(100))?;
+
+    let unique_constraint_id = id(0xb7);
+    let unique_index_id = id(0xb8);
+    let unique_constraint = constraint_write(
+        unique_constraint_id,
+        table_id,
+        3,
+        &[column_id],
+        None,
+        &[],
+        Some(unique_index_id),
+    );
+    let (unique_index_key, unique_index_payload) = owned_unique_index_definition(
+        unique_index_id,
+        table_id,
+        &[column_id],
+        unique_constraint_id,
+    );
+    let unique_add = [
+        unique_constraint.clone(),
+        object_write(unique_constraint_id, 6),
+        CatalogWrite {
+            key: unique_index_key.clone(),
+            expected_value: None,
+            payload: Some(unique_index_payload.clone()),
+        },
+        object_write(unique_index_id, 7),
+        dependency_write(unique_constraint_id, unique_index_id, 4),
+        table_epoch(6),
+    ];
+    let unique_audit = identity_audit_event(0xba, table_owner, unique_constraint_id);
+    let unique_result = storage.commit_authorized_constraint_ddl(
+        id(0xba),
+        table_owner,
+        9_999,
+        &unique_add,
+        &[unique_audit],
+    );
+    assert_eq!(unique_result, Ok(9));
+    assert_eq!(commit_sequence(&database)?, 9);
+    StorageManager::new(&database, Duration::from_millis(100))?;
+
+    let mut unique_constraint_drop = unique_constraint;
+    unique_constraint_drop.expected_value = unique_constraint_drop.payload.clone();
+    unique_constraint_drop.payload = None;
+    let mut unique_constraint_object_drop = object_write(unique_constraint_id, 6);
+    unique_constraint_object_drop.expected_value = unique_constraint_object_drop.payload.clone();
+    unique_constraint_object_drop.payload = None;
+    let unique_index_drop = CatalogWrite {
+        key: unique_index_key,
+        expected_value: Some(unique_index_payload),
+        payload: None,
+    };
+    let mut unique_index_object_drop = object_write(unique_index_id, 7);
+    unique_index_object_drop.expected_value = unique_index_object_drop.payload.clone();
+    unique_index_object_drop.payload = None;
+    let unique_dependency = dependency_write(unique_constraint_id, unique_index_id, 4);
+    let unique_drop = [
+        unique_constraint_drop,
+        unique_constraint_object_drop,
+        unique_index_drop,
+        unique_index_object_drop,
+        CatalogWrite {
+            key: unique_dependency.key,
+            expected_value: unique_dependency.payload,
+            payload: None,
+        },
+        table_epoch(7),
+    ];
+    let denied_drop_audit = identity_audit_event(0xbc, outsider, unique_constraint_id);
+    assert_eq!(
+        storage.commit_authorized_constraint_ddl(
+            id(0xbc),
+            outsider,
+            9_999,
+            &unique_drop,
+            &[denied_drop_audit],
+        ),
+        Err(CommitError::DdlAuthorizationDenied)
+    );
+    assert_eq!(commit_sequence(&database)?, 9);
+    assert_eq!(
+        lookup_outcome(&database, id(0xbc), outsider, 1)?
+            .ok_or(CommitError::Conflict)?
+            .status,
+        OutcomeStatus::Aborted
+    );
+    let unique_drop_audit = identity_audit_event(0xbb, table_owner, unique_constraint_id);
+    let unique_drop_result = storage.commit_authorized_constraint_ddl(
+        id(0xbb),
+        table_owner,
+        9_999,
+        &unique_drop,
+        &[unique_drop_audit],
+    );
+    assert_eq!(unique_drop_result, Ok(10));
+    StorageManager::new(&database, Duration::from_millis(100))?;
+
+    let not_null_constraint_id = id(0xbd);
+    let not_null = constraint_write(
+        not_null_constraint_id,
+        table_id,
+        1,
+        &[column_id],
+        None,
+        &[],
+        None,
+    );
+    let not_null_add = [
+        not_null,
+        object_write(not_null_constraint_id, 6),
+        column_not_null.clone(),
+        table_epoch(8),
+    ];
+    let not_null_audit = identity_audit_event(0xbe, table_owner, not_null_constraint_id);
+    assert_eq!(
+        storage.commit_authorized_constraint_ddl(
+            id(0xbe),
+            table_owner,
+            9_999,
+            &not_null_add,
+            &[not_null_audit],
+        )?,
+        11
+    );
+    StorageManager::new(&database, Duration::from_millis(100))?;
+
+    let primary_constraint_id = id(0xbf);
+    let primary_index_id = id(0xc0);
+    let primary_constraint = constraint_write(
+        primary_constraint_id,
+        table_id,
+        2,
+        &[column_id],
+        None,
+        &[],
+        Some(primary_index_id),
+    );
+    let (primary_index_key, primary_index_payload) = owned_unique_index_definition(
+        primary_index_id,
+        table_id,
+        &[column_id],
+        primary_constraint_id,
+    );
+    let primary_add = [
+        primary_constraint.clone(),
+        object_write(primary_constraint_id, 6),
+        CatalogWrite {
+            key: primary_index_key.clone(),
+            expected_value: None,
+            payload: Some(primary_index_payload.clone()),
+        },
+        object_write(primary_index_id, 7),
+        dependency_write(primary_constraint_id, primary_index_id, 4),
+        table_epoch(9),
+    ];
+    let primary_audit = identity_audit_event(0xc1, table_owner, primary_constraint_id);
+    assert_eq!(
+        storage.commit_authorized_constraint_ddl(
+            id(0xc1),
+            table_owner,
+            9_999,
+            &primary_add,
+            &[primary_audit],
+        )?,
+        12
+    );
+    StorageManager::new(&database, Duration::from_millis(100))?;
+
+    let mut primary_constraint_drop = primary_constraint;
+    primary_constraint_drop.expected_value = primary_constraint_drop.payload.clone();
+    primary_constraint_drop.payload = None;
+    let mut primary_constraint_object_drop = object_write(primary_constraint_id, 6);
+    primary_constraint_object_drop.expected_value = primary_constraint_object_drop.payload.clone();
+    primary_constraint_object_drop.payload = None;
+    let primary_index_drop = CatalogWrite {
+        key: primary_index_key,
+        expected_value: Some(primary_index_payload),
+        payload: None,
+    };
+    let mut primary_index_object_drop = object_write(primary_index_id, 7);
+    primary_index_object_drop.expected_value = primary_index_object_drop.payload.clone();
+    primary_index_object_drop.payload = None;
+    let primary_dependency = dependency_write(primary_constraint_id, primary_index_id, 4);
+    let primary_drop = [
+        primary_constraint_drop,
+        primary_constraint_object_drop,
+        primary_index_drop,
+        primary_index_object_drop,
+        CatalogWrite {
+            key: primary_dependency.key,
+            expected_value: primary_dependency.payload,
+            payload: None,
+        },
+        table_epoch(10),
+    ];
+    let primary_drop_audit = identity_audit_event(0xc2, table_owner, primary_constraint_id);
+    assert_eq!(
+        storage.commit_authorized_constraint_ddl(
+            id(0xc2),
+            table_owner,
+            9_999,
+            &primary_drop,
+            &[primary_drop_audit],
+        )?,
+        13
     );
     StorageManager::new(&database, Duration::from_millis(100))?;
     Ok(())
