@@ -205,6 +205,7 @@ fn validate_catalog(
     let mut builtin_mappings = None;
     let mut principal_kinds = HashMap::<[u8; 16], u16>::new();
     let mut principal_names = HashMap::<[u8; 16], Vec<u8>>::new();
+    let mut principal_name_ids = HashMap::<Vec<u8>, [u8; 16]>::new();
     let mut object_kinds = HashMap::<[u8; 16], u16>::new();
     let mut object_owners = Vec::<[u8; 16]>::new();
     let mut typed_object_kinds = HashMap::<[u8; 16], u16>::new();
@@ -561,22 +562,19 @@ fn validate_catalog(
                 .map_err(|_| StartupError::InvalidCatalog)?;
             let kind = field_u16(&record, 1)?;
             let login_enabled = field_bool(&record, 3)?;
+            let name = record
+                .fields
+                .iter()
+                .find(|field| field.tag == 2)
+                .ok_or(StartupError::InvalidCatalog)?
+                .payload
+                .clone();
             if !matches!(kind, 1 | 2)
                 || (kind == 2 && login_enabled)
                 || field_u64(&record, 4)? == 0
                 || principal_kinds.insert(principal_id, kind).is_some()
-                || principal_names
-                    .insert(
-                        principal_id,
-                        record
-                            .fields
-                            .iter()
-                            .find(|field| field.tag == 2)
-                            .ok_or(StartupError::InvalidCatalog)?
-                            .payload
-                            .clone(),
-                    )
-                    .is_some()
+                || principal_names.insert(principal_id, name.clone()).is_some()
+                || principal_name_ids.insert(name, principal_id).is_some()
             {
                 return Err(StartupError::InvalidCatalog);
             }

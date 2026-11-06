@@ -2285,6 +2285,24 @@ fn rejects_column_and_principal_names_that_disagree_with_objects() {
 }
 
 #[test]
+fn rejects_duplicate_names_across_users_and_roles() {
+    let fixture = Fixture::new();
+    let database = fixture.database(0);
+    let user_id = [76; 16];
+    let (principal_key, principal_value) =
+        principal_record_with_name(user_id, 1, true, 1, "database_admin");
+    let (object_key, object_value) =
+        object_record_named(user_id, 8, builtin_owner_id(), "database_admin");
+    put_catalog(&database, &principal_key, &principal_value);
+    put_catalog(&database, &object_key, &object_value);
+
+    assert_eq!(
+        validate_persisted_records(&database),
+        Err(StartupError::InvalidCatalog),
+    );
+}
+
+#[test]
 fn rejects_row_versions_beyond_the_commit_frontier() {
     let fixture = Fixture::new();
     let database = fixture.database(1);

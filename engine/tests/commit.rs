@@ -76,6 +76,17 @@ fn builtin_owner_id() -> [u8; 16] {
     id
 }
 
+fn principal_test_name(principal_id: [u8; 16]) -> String {
+    if principal_id == builtin_owner_id() {
+        return "database_admin".to_owned();
+    }
+    let suffix = principal_id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("principal_{suffix}")
+}
+
 fn bytea_tuple(value: &[u8]) -> Vec<u8> {
     encode_tuple(
         &[ColumnSchema {
@@ -566,6 +577,8 @@ fn object_write_with_parent_and_owner(
 ) -> CatalogWrite {
     let name = if object_id == builtin_owner_id() && kind == 9 {
         "database_admin".to_owned()
+    } else if matches!(kind, 8 | 9) {
+        principal_test_name(object_id)
     } else {
         format!("object_{}", object_id[0])
     };
@@ -4462,6 +4475,69 @@ fn catalog_commit_requires_matching_column_and_principal_names()
 }
 
 #[test]
+fn catalog_commit_rejects_duplicate_user_and_role_names() -> Result<(), Box<dyn std::error::Error>>
+{
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let user_id = id(80);
+    let principal = principal_write_with_name(user_id, 1, 1, "database_admin");
+    let object = object_write_with_name(user_id, 8, "database_admin");
+
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(80),
+            id(9),
+            9_999,
+            &[principal, object],
+            &[audit_event(80)],
+        ),
+        Err(CommitError::InvalidCatalog),
+    );
+    assert_eq!(commit_sequence(&database)?, 0);
+    Ok(())
+}
+
+#[test]
+fn catalog_commit_checks_principal_name_uniqueness_in_the_final_view()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let user_id = id(81);
+    let mut user = principal_write_with_name(user_id, 1, 1, "alice");
+    let mut user_object = object_write_with_name(user_id, 8, "alice");
+    commit_catalog_and_audit(
+        &database,
+        id(81),
+        id(9),
+        9_999,
+        &[user.clone(), user_object.clone()],
+        &[audit_event(81)],
+    )?;
+
+    let mut renamed_user = principal_write_with_name(user_id, 1, 2, "bob");
+    renamed_user.expected_value = user.payload.take();
+    let mut renamed_object = object_write_with_name(user_id, 8, "bob");
+    renamed_object.expected_value = user_object.payload.take();
+    let role_id = id(82);
+    let role = principal_write_with_login(role_id, 2, false, 1, "alice");
+    let role_object = object_write_with_name(role_id, 9, "alice");
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(82),
+            id(9),
+            9_999,
+            &[renamed_user, renamed_object, role, role_object],
+            &[audit_event(82)],
+        )?,
+        2
+    );
+    assert_eq!(commit_sequence(&database)?, 2);
+    Ok(())
+}
+
+#[test]
 fn catalog_commit_requires_schema_object_identity_and_kind()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
@@ -4529,7 +4605,7 @@ fn principal_write_with_epoch(principal_id: [u8; 16], kind: u16, epoch: u64) -> 
             CatalogField {
                 tag: 2,
                 wire_type: WireType::Text,
-                payload: format!("object_{}", principal_id[0]).into_bytes(),
+                payload: principal_test_name(principal_id).into_bytes(),
             },
             CatalogField {
                 tag: 3,

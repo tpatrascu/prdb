@@ -508,3 +508,11 @@
 - Verification: in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and workspace tests passed. Changed Markdown links and `git diff --check` passed.
 - Contract update: [permission DDL](../../specs/ddl-permissions.md).
 - Remaining: identity lifecycle DDL, policy/constraint authorization, credential-backed last-administrator validation, token-backed gateway admission, and deterministic authorization-change race coverage remain open.
+
+## SM-5 dependency: shared principal namespace integrity — in progress
+
+- Startup validation rejects persisted duplicate normalized names across users and roles. Catalog publication checks the complete final principal-name set under commit serialization, applying renames and deletions before additions and bounding the scan to the catalog-family limit.
+- Real-redb tests cover rejection of a user name colliding with the reserved role, startup rejection of persisted duplicates, and an atomic rename that frees a name for a newly created role.
+- Verification: the prescribed Nix-shell workspace build, formatting check, Clippy with warnings denied, and workspace tests passed. Changed Markdown links and `git diff --check` passed.
+- Contract update: [users and roles](../../specs/ddl-identity.md).
+- Remaining: action-specific identity lifecycle authorization and durable identity tombstones/non-reuse remain open; DROP is not exposed until ID non-reuse can be enforced.

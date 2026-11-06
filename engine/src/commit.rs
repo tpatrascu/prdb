@@ -1403,6 +1403,71 @@ fn validate_final_object_owners(
     Ok(())
 }
 
+/// Require the final set of user and role names to be unique in their shared
+/// database namespace. The DDL layer supplies already-normalized names.
+fn validate_final_principal_names(
+    transaction: &WriteTransaction,
+    catalog_writes: &[CatalogWrite],
+) -> Result<(), CommitError> {
+    let prefix = 10u16.to_be_bytes();
+    if !catalog_writes
+        .iter()
+        .any(|write| write.key.starts_with(&prefix))
+    {
+        return Ok(());
+    }
+
+    let table = transaction.open_table(CATALOG).map_err(storage_error)?;
+    let changed_keys = catalog_writes
+        .iter()
+        .filter(|write| write.key.starts_with(&prefix))
+        .map(|write| write.key.as_slice())
+        .collect::<HashSet<_>>();
+    let mut names = HashSet::<Vec<u8>>::new();
+    let mut final_count = 0usize;
+    for entry in table.range(prefix.as_slice()..).map_err(storage_error)? {
+        let (key, value) = entry.map_err(storage_error)?;
+        let key = key.value();
+        if !key.starts_with(&prefix) {
+            break;
+        }
+        if changed_keys.contains(key) {
+            continue;
+        }
+        final_count += 1;
+        if final_count > crate::snapshot::MAX_CATALOG_FAMILY_SCAN {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let bytes = value.value();
+        let name = catalog_field_bytes(key, bytes, 10, 2)?;
+        if !names.insert(name) {
+            return Err(CommitError::InvalidCatalog);
+        }
+    }
+
+    for write in catalog_writes
+        .iter()
+        .filter(|write| write.key.starts_with(&prefix))
+    {
+        if write.key.len() != 19 {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let Some(bytes) = &write.payload else {
+            continue;
+        };
+        final_count += 1;
+        if final_count > crate::snapshot::MAX_CATALOG_FAMILY_SCAN {
+            return Err(CommitError::InvalidCatalog);
+        }
+        decode_catalog_record(&write.key, bytes)?;
+        let name = catalog_field_bytes(&write.key, bytes, 10, 2)?;
+        if !names.insert(name) {
+            return Err(CommitError::InvalidCatalog);
+        }
+    }
+    Ok(())
+}
+
 fn collect_owner_catalog_record(
     family_code: u16,
     key: &[u8],
@@ -4094,6 +4159,15 @@ fn commit_storage_changes_inner(
         Err(error) => return Err(error),
     }
     match validate_final_object_owners(&transaction, catalog_writes) {
+        Ok(()) => {}
+        Err(CommitError::InvalidCatalog) => {
+            transaction.abort().map_err(storage_error)?;
+            record_aborted_outcome(database, invocation_id, principal_id, retention_deadline_us)?;
+            return Err(CommitError::InvalidCatalog);
+        }
+        Err(error) => return Err(error),
+    }
+    match validate_final_principal_names(&transaction, catalog_writes) {
         Ok(()) => {}
         Err(CommitError::InvalidCatalog) => {
             transaction.abort().map_err(storage_error)?;

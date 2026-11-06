@@ -329,7 +329,7 @@ fn principal_catalog_record_for(
     authority_epoch: u64,
 ) -> (Vec<u8>, Vec<u8>) {
     let key = catalog_id_key(10, principal_id);
-    let name = format!("object_{}", principal_id[0]);
+    let name = principal_test_name(principal_id);
     let fields = [
         CatalogField {
             tag: 1,
@@ -365,10 +365,33 @@ fn principal_object_record_for(principal_id: [u8; 16], principal_kind: u16) -> (
         2 => 9,
         _ => panic!("unsupported test principal kind"),
     };
-    object_catalog_record_for(principal_id, object_kind)
+    object_catalog_record_with_name(
+        principal_id,
+        object_kind,
+        &principal_test_name(principal_id),
+    )
 }
 
 fn object_catalog_record_for(object_id: [u8; 16], object_kind: u16) -> (Vec<u8>, Vec<u8>) {
+    object_catalog_record_with_name(object_id, object_kind, &format!("object_{}", object_id[0]))
+}
+
+fn principal_test_name(principal_id: [u8; 16]) -> String {
+    if principal_id == builtin_owner_id() {
+        return "database_admin".to_owned();
+    }
+    let suffix = principal_id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("principal_{suffix}")
+}
+
+fn object_catalog_record_with_name(
+    object_id: [u8; 16],
+    object_kind: u16,
+    name: &str,
+) -> (Vec<u8>, Vec<u8>) {
     let key = catalog_id_key(2, object_id);
     let fields = [
         CatalogField {
@@ -379,7 +402,7 @@ fn object_catalog_record_for(object_id: [u8; 16], object_kind: u16) -> (Vec<u8>,
         CatalogField {
             tag: 3,
             wire_type: WireType::Text,
-            payload: format!("object_{}", object_id[0]).into_bytes(),
+            payload: name.as_bytes().to_vec(),
         },
         CatalogField {
             tag: 4,
