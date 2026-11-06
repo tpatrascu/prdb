@@ -6,7 +6,9 @@ use crate::metadata_discovery::{
     AuthorizedRelationDescription, ExecutorRowHandle, ExecutorScanCursor, ResolvedRelationHandle,
     VisibleColumn,
 };
-use crate::transaction::{ExecutorMetadataConnection, InvocationTransaction, TransactionError};
+use crate::transaction::{
+    ExecutorMetadataConnection, InsertInput, InvocationTransaction, TransactionError,
+};
 use crate::tuple::{FieldPatch, ScalarType, ScalarValue};
 use std::io::{Read, Write};
 
@@ -315,7 +317,7 @@ impl CloseCursorRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StageInsertRequest {
     pub relation: ResolvedRelationHandle,
-    pub values: Vec<Option<ScalarValue>>,
+    pub values: Vec<InsertInput>,
 }
 
 impl StageInsertRequest {
@@ -331,7 +333,20 @@ impl StageInsertRequest {
                 .to_be_bytes(),
         );
         for value in &self.values {
-            encode_mutation_value(&mut payload, value.as_ref())?;
+            match value {
+                InsertInput::Default => payload.push(2),
+                InsertInput::Value(None) => payload.push(1),
+                InsertInput::Value(Some(value)) => {
+                    payload.push(0);
+                    let (type_code, bytes) = encode_scalar_value(value)?;
+                    payload.push(type_code);
+                    let len = u32::try_from(bytes.len())
+                        .map_err(|_| ExecutorRequestError::InvalidPayload)?;
+                    payload.extend_from_slice(&len.to_be_bytes());
+                    payload.extend_from_slice(&bytes);
+                }
+            }
+            ensure_response_size(&payload)?;
         }
         ensure_response_size(&payload)?;
         Ok(payload)
@@ -353,7 +368,18 @@ impl StageInsertRequest {
         let mut offset = 20;
         let mut values = Vec::with_capacity(count);
         for _ in 0..count {
-            values.push(decode_mutation_value(payload, &mut offset)?);
+            let state = *payload
+                .get(offset)
+                .ok_or(ExecutorRequestError::InvalidPayload)?;
+            if state == 2 {
+                offset += 1;
+                values.push(InsertInput::Default);
+            } else {
+                values.push(InsertInput::Value(decode_mutation_value(
+                    payload,
+                    &mut offset,
+                )?));
+            }
         }
         if offset != payload.len() {
             return Err(ExecutorRequestError::InvalidPayload);

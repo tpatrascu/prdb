@@ -3043,11 +3043,15 @@ fn catalog_authorized_scan_builds_its_projection_from_pinned_records()
     let (seed_relation, _) = seed_connection
         .resolve_relation("app", "metrics")?
         .expect("insert grants keep the relation discoverable");
-    let seed_first =
-        seed_connection.stage_insert(&seed_relation, &[Some(ScalarValue::Bytea(vec![1, 2, 3]))])?;
+    let seed_first = seed_connection.stage_insert(
+        &seed_relation,
+        &[InsertInput::Value(Some(ScalarValue::Bytea(vec![1, 2, 3])))],
+    )?;
     let seed_first_id = seed_connection.revalidate_row_handle(&seed_first)?;
-    let seed_second =
-        seed_connection.stage_insert(&seed_relation, &[Some(ScalarValue::Bytea(vec![4, 5, 6]))])?;
+    let seed_second = seed_connection.stage_insert(
+        &seed_relation,
+        &[InsertInput::Value(Some(ScalarValue::Bytea(vec![4, 5, 6])))],
+    )?;
     let seed_second_id = seed_connection.revalidate_row_handle(&seed_second)?;
     drop(seed_connection);
     seed.commit()?;
@@ -3195,7 +3199,7 @@ fn catalog_authorized_scan_builds_its_projection_from_pinned_records()
             request_id: 67,
             payload: StageInsertRequest {
                 relation: relation_handle,
-                values: vec![Some(ScalarValue::Bytea(vec![4, 5]))],
+                values: vec![InsertInput::Value(Some(ScalarValue::Bytea(vec![4, 5])))],
             }
             .encode()?,
         },

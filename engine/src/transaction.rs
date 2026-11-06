@@ -5765,12 +5765,13 @@ impl ExecutorMetadataConnection<'_, '_> {
     }
 
     /// Stage an insert from a complete declared-shape value vector. The new
-    /// row receives an opaque connection-local handle. Generated identities
-    /// remain unsupported by this explicit-value wire operation.
+    /// row receives an opaque connection-local handle. DEFAULT markers are
+    /// materialized from the pinned catalog; generated identities remain
+    /// unsupported until collision-safe allocation is implemented.
     pub fn stage_insert(
         &mut self,
         relation: &ResolvedRelationHandle,
-        values: &[Option<ScalarValue>],
+        values: &[InsertInput],
     ) -> Result<ExecutorRowHandle, TransactionError> {
         let description = self.revalidate_relation_handle(relation)?;
         if self.used_row_tokens.len() >= MAX_EXECUTOR_ROW_HANDLES {
@@ -5801,17 +5802,12 @@ impl ExecutorMetadataConnection<'_, '_> {
         };
         let handle_token =
             new_metadata_cursor_token(&mut self.used_row_tokens, EXECUTOR_ROW_HANDLE_TOKEN_KIND)?;
-        let inputs = values
-            .iter()
-            .cloned()
-            .map(InsertInput::Value)
-            .collect::<Vec<_>>();
         let projection = projection_state.as_projection();
         self.transaction
             .stage_insert_authorized_from_catalog_defaults(
                 id,
                 &projection,
-                &inputs,
+                values,
                 &projection_state.schema,
             )?;
         self.row_handles.insert(handle_token, id);

@@ -3,6 +3,7 @@ use prdb_engine::executor_ipc::{
     StageUpdateRequest,
 };
 use prdb_engine::metadata_discovery::{ExecutorRowHandle, ResolvedRelationHandle};
+use prdb_engine::transaction::InsertInput;
 use prdb_engine::tuple::{FieldPatch, ScalarValue};
 
 fn handle(kind: u8) -> [u8; 16] {
@@ -17,20 +18,23 @@ fn executor_mutation_payloads_round_trip_canonical_values_and_handles() {
     let insert = StageInsertRequest {
         relation,
         values: vec![
-            Some(ScalarValue::Integer(-42)),
-            None,
-            Some(ScalarValue::Text("value".to_owned())),
-            Some(ScalarValue::Bytea(vec![0, 1, 255])),
+            InsertInput::Value(Some(ScalarValue::Integer(-42))),
+            InsertInput::Value(None),
+            InsertInput::Default,
+            InsertInput::Value(Some(ScalarValue::Bytea(vec![0, 1, 255]))),
         ],
     };
     let insert = StageInsertRequest::decode(&insert.encode().unwrap()).unwrap();
-    assert_eq!(insert.values[0], Some(ScalarValue::Integer(-42)));
-    assert_eq!(insert.values[1], None);
     assert_eq!(
-        insert.values[2],
-        Some(ScalarValue::Text("value".to_owned()))
+        insert.values[0],
+        InsertInput::Value(Some(ScalarValue::Integer(-42)))
     );
-    assert_eq!(insert.values[3], Some(ScalarValue::Bytea(vec![0, 1, 255])));
+    assert_eq!(insert.values[1], InsertInput::Value(None));
+    assert_eq!(insert.values[2], InsertInput::Default);
+    assert_eq!(
+        insert.values[3],
+        InsertInput::Value(Some(ScalarValue::Bytea(vec![0, 1, 255])))
+    );
 
     let row = ExecutorRowHandle::from_bytes(&handle(8)).unwrap();
     let update = StageUpdateRequest {
@@ -90,10 +94,10 @@ fn executor_mutation_payloads_reject_duplicate_or_redacted_fields() {
     let relation = ResolvedRelationHandle::from_bytes(&handle(6)).unwrap();
     let insert = StageInsertRequest {
         relation,
-        values: vec![Some(ScalarValue::Boolean(true))],
+        values: vec![InsertInput::Value(Some(ScalarValue::Boolean(true)))],
     };
     let mut payload = insert.encode().unwrap();
-    payload[20] = 2; // REDACTED is a response-only state.
+    payload[20] = 3; // Unknown cell states are invalid; REDACTED is response-only.
     assert!(StageInsertRequest::decode(&payload).is_err());
 
     let mut patch = StageUpdateRequest {
