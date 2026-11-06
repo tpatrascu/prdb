@@ -3024,6 +3024,7 @@ fn storage_manager_checks_index_ddl_authority_for_current_actor()
     let authorized_user = id(0x51);
     let denied_user = id(0x52);
     let admin_user = id(0x53);
+    let table_owner = id(0x54);
     let mut records = vec![
         principal_write_with_name(authorized_user, 1, 1, "indexer"),
         object_write_with_name(authorized_user, 8, "indexer"),
@@ -3031,6 +3032,9 @@ fn storage_manager_checks_index_ddl_authority_for_current_actor()
         object_write_with_name(denied_user, 8, "no_index"),
         principal_write_with_name(admin_user, 1, 1, "database_admin_member"),
         object_write_with_name(admin_user, 8, "database_admin_member"),
+        principal_write_with_name(table_owner, 1, 1, "table_owner"),
+        object_write_with_name(table_owner, 8, "table_owner"),
+        object_write_with_owner(id(16), 3, table_owner),
         grant_write(authorized_user, id(16), 9, 1, id(16), builtin_owner_id()),
         dependency_write(authorized_user, id(16), 5),
         membership_write(admin_user, builtin_owner_id()),
@@ -3087,6 +3091,27 @@ fn storage_manager_checks_index_ddl_authority_for_current_actor()
             &[admin_audit],
         )?,
         2
+    );
+
+    let (owned_index_key, owned_index_definition) = index_definition(id(0x8e), id(16));
+    let mut owner_audit = audit_event(214);
+    owner_audit.actor_id = Some(table_owner);
+    assert_eq!(
+        storage.commit_authorized_index_ddl(
+            id(214),
+            table_owner,
+            9_999,
+            &[
+                CatalogWrite {
+                    key: owned_index_key.clone(),
+                    expected_value: None,
+                    payload: Some(owned_index_definition),
+                },
+                object_write(id(0x8e), 7),
+            ],
+            &[owner_audit],
+        )?,
+        3
     );
 
     let allowed_index_definition_key = id_catalog_key(9, id(0x8b));
@@ -3154,7 +3179,7 @@ fn storage_manager_checks_index_ddl_authority_for_current_actor()
         ),
         Err(CommitError::DdlAuthorizationDenied)
     );
-    assert_eq!(commit_sequence(&database)?, 2);
+    assert_eq!(commit_sequence(&database)?, 3);
     assert_eq!(
         lookup_outcome(&database, id(210), authorized_user, 1)?
             .unwrap()
@@ -3163,6 +3188,12 @@ fn storage_manager_checks_index_ddl_authority_for_current_actor()
     );
     assert_eq!(
         lookup_outcome(&database, id(212), admin_user, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Committed
+    );
+    assert_eq!(
+        lookup_outcome(&database, id(214), table_owner, 1)?
             .unwrap()
             .status,
         OutcomeStatus::Committed
@@ -3193,6 +3224,11 @@ fn storage_manager_checks_index_ddl_authority_for_current_actor()
     assert!(
         read.open_table(CATALOG)?
             .get(admin_index_key.as_slice())?
+            .is_some()
+    );
+    assert!(
+        read.open_table(CATALOG)?
+            .get(owned_index_key.as_slice())?
             .is_some()
     );
     assert_eq!(
