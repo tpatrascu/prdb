@@ -8,6 +8,8 @@ Rows, indexes, relevant catalog/authority changes, required audit entries, and t
 
 Persist invocation outcome in the same redb write transaction as committed user data. A lost response is resolved from this table after reopen. Missing or expired history returns UNKNOWN/EXPIRED and never implies rollback. Required administrative audit/outbox records commit atomically with the administrative change; optional telemetry cannot undo a committed data operation.
 
+Trusted storage maintenance prunes outcomes whose UTC retention deadline has passed. Each call scans at most 1,024 records and deletes expired records in one immediate, two-phase redb transaction. Its resume cursor is stored in `stats_v1` and committed atomically with deletions; it does not advance the logical commit sequence. A completed scan clears the cursor. An exact-size batch may need one empty follow-up call to confirm that the cycle is complete. The caller supplies trusted current time, and malformed cursors or outcome records fail the maintenance transaction without partial deletion.
+
 On startup, open/recover using the pinned supported redb version, validate engine metadata and required logical tables, then validate catalog/authority invariants before exposing listeners. Corrupt or unsupported state fails closed. There is no independent engine checkpoint, WAL truncation, page reuse, or repair path.
 
 Test atomic record-family updates, redb restart/recovery, snapshots concurrent with commits, bounded retention, old schema decoding, outcome status after lost replies, required audit recovery, and failure on unsupported engine/redb versions. Do not expose raw redb statistics to query planning.

@@ -3,7 +3,13 @@ const MAGIC: &[u8; 4] = b"OUT1";
 const FORMAT_VERSION: u16 = 1;
 const ENCODED_LEN: usize = 56;
 use crate::schema::OUTCOMES;
-use redb::{Database, ReadableDatabase};
+use crate::schema::STATS;
+use redb::{Database, Durability, ReadableDatabase, ReadableTable};
+
+const PRUNE_CURSOR_KEY: &[u8] = b"outcome_prune_cursor_v1";
+const PRUNE_CURSOR_MAGIC: &[u8; 4] = b"OCS1";
+const PRUNE_CURSOR_LEN: usize = 20;
+pub const MAX_OUTCOME_PRUNE_BATCH: usize = 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OutcomeStatus {
@@ -31,6 +37,190 @@ pub enum OutcomeError {
     InvalidId,
     InvalidCommitSequence,
     InvalidRetentionDeadline,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum OutcomeMaintenanceError {
+    InvalidTime,
+    InvalidLimit,
+    InvalidCursor,
+    InvalidOutcome(OutcomeError),
+    Storage(String),
+}
+
+impl std::fmt::Display for OutcomeMaintenanceError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "outcome maintenance failed: {self:?}")
+    }
+}
+
+impl std::error::Error for OutcomeMaintenanceError {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OutcomePruneResult {
+    pub scanned: usize,
+    pub removed: usize,
+    pub cycle_complete: bool,
+}
+
+pub fn prune_expired_outcomes(
+    database: &Database,
+    now_us: i64,
+    max_scanned: usize,
+) -> Result<OutcomePruneResult, OutcomeMaintenanceError> {
+    if now_us <= 0 {
+        return Err(OutcomeMaintenanceError::InvalidTime);
+    }
+    if max_scanned == 0 || max_scanned > MAX_OUTCOME_PRUNE_BATCH {
+        return Err(OutcomeMaintenanceError::InvalidLimit);
+    }
+
+    let mut write = database
+        .begin_write()
+        .map_err(|error| OutcomeMaintenanceError::Storage(error.to_string()))?;
+    write
+        .set_durability(Durability::Immediate)
+        .map_err(|error| OutcomeMaintenanceError::Storage(error.to_string()))?;
+    write.set_two_phase_commit(true);
+
+    let cursor = {
+        let stats = write
+            .open_table(STATS)
+            .map_err(|error| OutcomeMaintenanceError::Storage(error.to_string()))?;
+        stats
+            .get(PRUNE_CURSOR_KEY)
+            .map_err(|error| OutcomeMaintenanceError::Storage(error.to_string()))?
+            .map(|value| decode_prune_cursor(value.value()))
+            .transpose()?
+    };
+
+    let mut scanned_entries = Vec::<([u8; 16], bool)>::with_capacity(max_scanned);
+    {
+        let outcomes = write
+            .open_table(OUTCOMES)
+            .map_err(|error| OutcomeMaintenanceError::Storage(error.to_string()))?;
+        if let Some(cursor) = cursor {
+            for entry in outcomes
+                .range::<&[u8]>(cursor.as_slice()..)
+                .map_err(|error| OutcomeMaintenanceError::Storage(error.to_string()))?
+            {
+                let (key, value) =
+                    entry.map_err(|error| OutcomeMaintenanceError::Storage(error.to_string()))?;
+                if key.value() == cursor.as_slice() {
+                    continue;
+                }
+                scanned_entries.push(decode_prune_entry(key.value(), value.value(), now_us)?);
+                if scanned_entries.len() == max_scanned {
+                    break;
+                }
+            }
+            if scanned_entries.len() < max_scanned {
+                for entry in outcomes
+                    .range::<&[u8]>(..)
+                    .map_err(|error| OutcomeMaintenanceError::Storage(error.to_string()))?
+                {
+                    let (key, value) = entry
+                        .map_err(|error| OutcomeMaintenanceError::Storage(error.to_string()))?;
+                    if key.value() >= cursor.as_slice() {
+                        break;
+                    }
+                    scanned_entries.push(decode_prune_entry(key.value(), value.value(), now_us)?);
+                    if scanned_entries.len() == max_scanned {
+                        break;
+                    }
+                }
+            }
+        } else {
+            for entry in outcomes
+                .iter()
+                .map_err(|error| OutcomeMaintenanceError::Storage(error.to_string()))?
+            {
+                let (key, value) =
+                    entry.map_err(|error| OutcomeMaintenanceError::Storage(error.to_string()))?;
+                scanned_entries.push(decode_prune_entry(key.value(), value.value(), now_us)?);
+                if scanned_entries.len() == max_scanned {
+                    break;
+                }
+            }
+        }
+    }
+
+    let cycle_complete = scanned_entries.len() < max_scanned;
+    let mut removed = 0;
+    {
+        let mut outcomes = write
+            .open_table(OUTCOMES)
+            .map_err(|error| OutcomeMaintenanceError::Storage(error.to_string()))?;
+        for (invocation_id, expired) in &scanned_entries {
+            if *expired {
+                outcomes
+                    .remove(invocation_id.as_slice())
+                    .map_err(|error| OutcomeMaintenanceError::Storage(error.to_string()))?;
+                removed += 1;
+            }
+        }
+    }
+    {
+        let mut stats = write
+            .open_table(STATS)
+            .map_err(|error| OutcomeMaintenanceError::Storage(error.to_string()))?;
+        if cycle_complete {
+            stats
+                .remove(PRUNE_CURSOR_KEY)
+                .map_err(|error| OutcomeMaintenanceError::Storage(error.to_string()))?;
+        } else if let Some((last_id, _)) = scanned_entries.last() {
+            let cursor = encode_prune_cursor(last_id);
+            stats
+                .insert(PRUNE_CURSOR_KEY, cursor.as_slice())
+                .map_err(|error| OutcomeMaintenanceError::Storage(error.to_string()))?;
+        }
+    }
+    write
+        .commit()
+        .map_err(|error| OutcomeMaintenanceError::Storage(error.to_string()))?;
+
+    Ok(OutcomePruneResult {
+        scanned: scanned_entries.len(),
+        removed,
+        cycle_complete,
+    })
+}
+
+fn decode_prune_entry(
+    key: &[u8],
+    value: &[u8],
+    now_us: i64,
+) -> Result<([u8; 16], bool), OutcomeMaintenanceError> {
+    let invocation_id: [u8; 16] = key
+        .try_into()
+        .map_err(|_| OutcomeMaintenanceError::InvalidOutcome(OutcomeError::InvalidId))?;
+    let outcome =
+        InvocationOutcome::decode(value).map_err(OutcomeMaintenanceError::InvalidOutcome)?;
+    if outcome.invocation_id != invocation_id {
+        return Err(OutcomeMaintenanceError::InvalidOutcome(
+            OutcomeError::InvalidId,
+        ));
+    }
+    Ok((invocation_id, now_us >= outcome.retention_deadline_us))
+}
+
+fn encode_prune_cursor(invocation_id: &[u8; 16]) -> [u8; PRUNE_CURSOR_LEN] {
+    let mut cursor = [0; PRUNE_CURSOR_LEN];
+    cursor[..4].copy_from_slice(PRUNE_CURSOR_MAGIC);
+    cursor[4..].copy_from_slice(invocation_id);
+    cursor
+}
+
+fn decode_prune_cursor(bytes: &[u8]) -> Result<[u8; 16], OutcomeMaintenanceError> {
+    if bytes.len() != PRUNE_CURSOR_LEN || &bytes[..4] != PRUNE_CURSOR_MAGIC {
+        return Err(OutcomeMaintenanceError::InvalidCursor);
+    }
+    let mut cursor = [0; 16];
+    cursor.copy_from_slice(&bytes[4..]);
+    if cursor == [0; 16] {
+        return Err(OutcomeMaintenanceError::InvalidCursor);
+    }
+    Ok(cursor)
 }
 
 impl std::fmt::Display for OutcomeError {

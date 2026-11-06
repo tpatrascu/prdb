@@ -377,6 +377,16 @@ impl StorageInstance {
     ) -> Result<StorageManager<'_>, StorageManagerInitError> {
         StorageManager::from_validated_database(&self.database, config)
     }
+
+    /// Prune expired durable outcomes in a bounded immediate redb transaction.
+    /// `now_us` must come from the trusted service clock.
+    pub fn prune_expired_outcomes(
+        &self,
+        now_us: i64,
+        max_scanned: usize,
+    ) -> Result<crate::outcome::OutcomePruneResult, crate::outcome::OutcomeMaintenanceError> {
+        crate::outcome::prune_expired_outcomes(&self.database, now_us, max_scanned)
+    }
 }
 
 /// Create a new local database in a previously absent directory.
