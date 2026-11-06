@@ -18,6 +18,7 @@ pub mod row_record;
 pub mod schema;
 pub mod snapshot;
 pub mod startup;
+pub mod statistics;
 pub mod storage_manager;
 pub mod transaction;
 pub mod tuple;

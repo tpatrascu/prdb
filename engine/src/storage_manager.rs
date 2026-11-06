@@ -632,6 +632,31 @@ impl InvocationAdmissionState {
 }
 
 impl InvocationAdmissionPermit {
+    pub(crate) fn may_continue(&self) -> bool {
+        let mut live = self
+            .state
+            .live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            let phase = live
+                .entries
+                .get(&self.invocation_id)
+                .map(|invocation| (invocation.phase, invocation.cancellation_reason_code));
+            match phase {
+                Some((LiveInvocationPhase::Active, None)) => return true,
+                Some((LiveInvocationPhase::CancellationPending, _)) => {
+                    live = self
+                        .state
+                        .changed
+                        .wait(live)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
+                _ => return false,
+            }
+        }
+    }
+
     pub(crate) fn try_mark_committing(&self) -> bool {
         let mut live = self
             .state

@@ -40,6 +40,12 @@ Planning table handles belong only to the optimizer connection and cannot be pas
 
 Provide only fields justified by authorized data or public configuration. Histograms and raw samples are not part of the initial external API. Estimates must not conceal privileged data in errors, logs, response metadata, or returned physical plans.
 
+### Initial On-Demand Summary
+
+`InvocationTransaction::estimate_authorized_scan(table_id, projection)` returns either an exact authorized-view summary or `Unknown`. Exact summaries contain the visible-row count and, in requested-column order, VALUE/NULL/REDACTED cell counts. They contain no row values, widths, row IDs, partial counts, or predicate selectivity. Collection reads the invocation's pinned snapshot plus its private overlay and applies the same trusted row/cell projection as an authorized scan.
+
+The initial implementation is bounded to 16,384 candidate rows. It returns `Unknown` without partial counts when the bound is reached or the request's context/schema cannot be validated. To keep the completion result independent of invisible-row volume, it only scans when it can prove row inclusion is value-independent: an applicable table SELECT policy must allow every row with a literal TRUE predicate, no applicable table policy may filter by row values, and at least one requested column must be granted. Value-dependent table policies return `Unknown` before scanning. Predicate selectivity, cached summaries, and planner-channel transport remain unsupported in this increment. Cancellation and deadline expiry remain terminal rather than becoming `Unknown`.
+
 ## Cell-Specific Semantics
 
 For a department manager, visible employee count may cover the department, but salary distributions may use only readable salaries of direct reports. State both populations explicitly. A readable-salary distribution must never stand in for the full department's salary distribution.

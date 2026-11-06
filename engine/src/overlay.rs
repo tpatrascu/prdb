@@ -111,6 +111,30 @@ impl Overlay {
         Ok((row_ids, complete))
     }
 
+    /// Copy all IDs for one table only when the full overlay fits the caller's
+    /// bounded-work allowance. Sorting once avoids rescanning the hash map for
+    /// every estimate page.
+    pub(crate) fn bounded_row_ids_for_table(
+        &self,
+        table_id: [u8; 16],
+        max_overlay_rows: usize,
+    ) -> Result<Option<Vec<[u8; 16]>>, OverlayError> {
+        if self.aborted {
+            return Err(OverlayError::Aborted);
+        }
+        if self.rows.len() > max_overlay_rows {
+            return Ok(None);
+        }
+        let mut row_ids = self
+            .rows
+            .keys()
+            .filter(|id| id.table == table_id)
+            .map(|id| id.row)
+            .collect::<Vec<_>>();
+        row_ids.sort_unstable();
+        Ok(Some(row_ids))
+    }
+
     /// Read the latest staged value first, falling back to the caller's pinned snapshot.
     /// The snapshot lookup is only invoked when this overlay has no entry for the row.
     pub fn read<'overlay, 'snapshot, F>(

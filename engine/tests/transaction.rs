@@ -1797,6 +1797,226 @@ fn authorized_row_scan_pages_over_the_pinned_snapshot_and_private_overlay()
 }
 
 #[test]
+fn authorized_scan_estimate_counts_sanitized_cells_and_private_writes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let columns = [
+        ColumnSchema {
+            scalar_type: ScalarType::Text,
+            nullable: true,
+        },
+        ColumnSchema {
+            scalar_type: ScalarType::Text,
+            nullable: true,
+        },
+    ];
+    let column_ids = [[0x22; 16], [0x24; 16]];
+    let schema_id = [0x23; 16];
+    let table_id = id(0).table;
+    let row = |visible: Option<&str>, hidden: &str| {
+        encode_tuple(
+            &columns,
+            1,
+            &[
+                visible.map(|value| ScalarValue::Text(value.to_owned())),
+                Some(ScalarValue::Text(hidden.to_owned())),
+            ],
+        )
+        .unwrap()
+    };
+    let mut seed = InvocationTransaction::begin(&database, [0x31; 16], [9; 16], 9_999, 8, 512)?;
+    seed.stage_put(id(1), &row(Some("first"), "secret-one"))?;
+    seed.stage_put(id(2), &row(None, "secret-two"))?;
+    seed.commit()?;
+
+    let context = AuthorizationContext {
+        principal_id: [9; 16],
+        role_ids: std::collections::HashSet::new(),
+        scope: std::collections::HashSet::from([
+            (Operation::Usage, AccessTarget::Schema(schema_id)),
+            (Operation::Select, AccessTarget::Table(table_id)),
+            (
+                Operation::Select,
+                AccessTarget::Column {
+                    table_id,
+                    column_id: column_ids[0],
+                },
+            ),
+        ]),
+    };
+    let grants = [
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Usage,
+            target: AccessTarget::Schema(schema_id),
+        },
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Select,
+            target: AccessTarget::Column {
+                table_id,
+                column_id: column_ids[0],
+            },
+        },
+    ];
+    let table_allow = Policy {
+        subjects: vec![Subject::Principal([9; 16])],
+        operation: Operation::Select,
+        target: AccessTarget::Table(table_id),
+        effect: Effect::Allow,
+        using: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+        with_check: None,
+    };
+    let readable_cell_allow = Policy {
+        target: AccessTarget::Column {
+            table_id,
+            column_id: column_ids[0],
+        },
+        ..table_allow.clone()
+    };
+    let policies = [table_allow, readable_cell_allow];
+    let projection = AuthorizedProjection {
+        columns: &columns,
+        column_ids: &column_ids,
+        schema_version: 1,
+        schema_id,
+        context: &context,
+        grants: &grants,
+        policies: &policies,
+        checks: &[],
+        policy_driving_columns: &[],
+        dependencies: &[],
+    };
+
+    let mut observer = InvocationTransaction::begin(&database, [0x32; 16], [9; 16], 9_999, 8, 512)?;
+    let mut writer = InvocationTransaction::begin(&database, [0x33; 16], [9; 16], 9_999, 8, 512)?;
+    assert_eq!(
+        observer.estimate_authorized_scan(table_id, &projection)?,
+        prdb_engine::statistics::AuthorizedScanEstimate::Exact(
+            prdb_engine::statistics::AuthorizedScanSummary {
+                visible_rows: 2,
+                columns: vec![
+                    prdb_engine::statistics::ColumnPopulation {
+                        readable_values: 1,
+                        nulls: 1,
+                        redacted: 0,
+                    },
+                    prdb_engine::statistics::ColumnPopulation {
+                        readable_values: 0,
+                        nulls: 0,
+                        redacted: 2,
+                    },
+                ],
+            }
+        )
+    );
+
+    writer.stage_put(id(3), &row(Some("third"), "secret-three"))?;
+    let private_summary = writer.estimate_authorized_scan(table_id, &projection)?;
+    assert_eq!(
+        private_summary,
+        prdb_engine::statistics::AuthorizedScanEstimate::Exact(
+            prdb_engine::statistics::AuthorizedScanSummary {
+                visible_rows: 3,
+                columns: vec![
+                    prdb_engine::statistics::ColumnPopulation {
+                        readable_values: 2,
+                        nulls: 1,
+                        redacted: 0,
+                    },
+                    prdb_engine::statistics::ColumnPopulation {
+                        readable_values: 0,
+                        nulls: 0,
+                        redacted: 3,
+                    },
+                ],
+            }
+        )
+    );
+    writer.stage_put(id(1), &row(Some("first"), "changed-secret"))?;
+    assert_eq!(
+        writer.estimate_authorized_scan(table_id, &projection)?,
+        private_summary
+    );
+    writer.stage_delete(id(2))?;
+    assert_eq!(
+        writer.estimate_authorized_scan(table_id, &projection)?,
+        prdb_engine::statistics::AuthorizedScanEstimate::Exact(
+            prdb_engine::statistics::AuthorizedScanSummary {
+                visible_rows: 2,
+                columns: vec![
+                    prdb_engine::statistics::ColumnPopulation {
+                        readable_values: 2,
+                        nulls: 0,
+                        redacted: 0,
+                    },
+                    prdb_engine::statistics::ColumnPopulation {
+                        readable_values: 0,
+                        nulls: 0,
+                        redacted: 2,
+                    },
+                ],
+            }
+        )
+    );
+    assert_eq!(
+        observer.estimate_authorized_scan(table_id, &projection)?,
+        prdb_engine::statistics::AuthorizedScanEstimate::Exact(
+            prdb_engine::statistics::AuthorizedScanSummary {
+                visible_rows: 2,
+                columns: vec![
+                    prdb_engine::statistics::ColumnPopulation {
+                        readable_values: 1,
+                        nulls: 1,
+                        redacted: 0,
+                    },
+                    prdb_engine::statistics::ColumnPopulation {
+                        readable_values: 0,
+                        nulls: 0,
+                        redacted: 2,
+                    },
+                ],
+            }
+        )
+    );
+
+    let row_filter = Policy {
+        using: Some(Expr::Equal(
+            Box::new(Expr::Field(0)),
+            Box::new(Expr::Literal(Some(ScalarValue::Text("first".to_owned())))),
+        )),
+        ..policies[0].clone()
+    };
+    let filtered_policies = [row_filter, policies[1].clone()];
+    let filtered_projection = AuthorizedProjection {
+        policies: &filtered_policies,
+        ..projection
+    };
+    let mut fewer_candidates =
+        InvocationTransaction::begin(&database, [0x34; 16], [9; 16], 9_999, 32, 2_048)?;
+    let mut more_candidates =
+        InvocationTransaction::begin(&database, [0x35; 16], [9; 16], 9_999, 32, 2_048)?;
+    for row_id in 3..=10 {
+        more_candidates.stage_put(
+            id(row_id),
+            &row(Some("not-visible"), &format!("hidden-{row_id}")),
+        )?;
+    }
+    assert_eq!(
+        fewer_candidates.estimate_authorized_scan(table_id, &filtered_projection)?,
+        prdb_engine::statistics::AuthorizedScanEstimate::Unknown
+    );
+    assert_eq!(
+        more_candidates.estimate_authorized_scan(table_id, &filtered_projection)?,
+        prdb_engine::statistics::AuthorizedScanEstimate::Unknown
+    );
+    assert!(fewer_candidates.check_deadline().is_ok());
+    assert!(more_candidates.check_deadline().is_ok());
+    Ok(())
+}
+
+#[test]
 fn invocation_auto_indexes_row_writes() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;

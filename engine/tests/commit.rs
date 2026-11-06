@@ -3434,7 +3434,7 @@ fn storage_manager_audits_cancellation_before_commit_and_preserves_terminal_outc
         target_ids: vec![target_id],
     };
 
-    let pending = storage.begin_invocation(id(243), owner_id, retention_deadline_us, 2, 64)?;
+    let mut pending = storage.begin_invocation(id(243), owner_id, retention_deadline_us, 2, 64)?;
     assert!(matches!(
         storage.cancel_invocation(
             owner_id,
@@ -3481,7 +3481,7 @@ fn storage_manager_audits_cancellation_before_commit_and_preserves_terminal_outc
         }
     ));
     assert!(matches!(
-        pending.commit(),
+        pending.check_deadline(),
         Err(TransactionError::CancellationRequested)
     ));
     assert_eq!(

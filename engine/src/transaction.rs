@@ -23,9 +23,13 @@ use crate::overlay::{Overlay, OverlayError, ResolvedRow, RowId, StagedRow};
 use crate::row_record::{RowRecord, RowRecordError};
 use crate::schema::{ENGINE_META, OUTCOMES};
 use crate::snapshot::{MAX_CATALOG_FAMILY_SCAN, MAX_ROW_SCAN_PAGE, RowSnapshot, SnapshotError};
+use crate::statistics::{
+    AuthorizedScanEstimate, AuthorizedScanSummary, ColumnPopulation, MAX_ESTIMATE_CANDIDATES,
+};
 use crate::storage_manager::InvocationAdmissionPermit;
 use crate::tuple::{
-    ColumnSchema, FieldPatch, ScalarType, TupleError, apply_patch, decode_tuple, encode_tuple,
+    ColumnSchema, FieldPatch, ScalarType, ScalarValue, TupleError, apply_patch, decode_tuple,
+    encode_tuple,
 };
 use redb::{Database, ReadableDatabase};
 use std::collections::{HashMap, HashSet};
@@ -260,6 +264,12 @@ impl InvocationCoordination {
             .is_some_and(|(admitted_at, max_age)| admitted_at.elapsed() >= max_age)
     }
 
+    fn may_continue(&self) -> bool {
+        self._admission_permit
+            .as_ref()
+            .is_none_or(InvocationAdmissionPermit::may_continue)
+    }
+
     fn mark_committing(&self) -> bool {
         self._admission_permit
             .as_ref()
@@ -381,8 +391,8 @@ impl<'db> InvocationTransaction<'db> {
         })
     }
 
-    /// Check the managed invocation's age. Runtime services should call this
-    /// while an executor is idle so expired work releases its retained snapshot.
+    /// Check whether the managed invocation is still active and within its age
+    /// limit. Runtime services should poll this while an executor is idle.
     pub fn check_deadline(&mut self) -> Result<(), TransactionError> {
         if self.aborted {
             return Err(TransactionError::Aborted);
@@ -391,6 +401,10 @@ impl<'db> InvocationTransaction<'db> {
             self.abort()?;
             return Err(TransactionError::Expired);
         }
+        if !self.coordination.may_continue() {
+            self.abort()?;
+            return Err(TransactionError::CancellationRequested);
+        }
         Ok(())
     }
 
@@ -398,6 +412,10 @@ impl<'db> InvocationTransaction<'db> {
         if self.coordination.is_expired() {
             self.abort()?;
             return Err(TransactionError::Expired);
+        }
+        if !self.coordination.may_continue() {
+            self.abort()?;
+            return Err(TransactionError::CancellationRequested);
         }
         self.snapshot.as_ref().ok_or(TransactionError::Aborted)
     }
@@ -549,6 +567,149 @@ impl<'db> InvocationTransaction<'db> {
                 Err(error)
             }
         }
+    }
+
+    /// Return summary counts for the trusted planner without returning row
+    /// values. This entry point is intended for a provisioned planner channel.
+    pub fn estimate_authorized_scan(
+        &mut self,
+        table_id: [u8; 16],
+        projection: &AuthorizedProjection<'_>,
+    ) -> Result<AuthorizedScanEstimate, TransactionError> {
+        self.check_deadline()?;
+        if !valid_estimate_projection(table_id, projection) {
+            return self.finish_estimate(AuthorizedScanEstimate::Unknown);
+        }
+        if let Err(error) =
+            self.capture_authority_dependencies(projection.context, projection.dependencies)
+        {
+            return if estimate_error_is_terminal(&error) {
+                Err(error)
+            } else {
+                self.finish_estimate(AuthorizedScanEstimate::Unknown)
+            };
+        }
+        if !estimate_population_is_unfiltered(table_id, projection) {
+            return self.finish_estimate(AuthorizedScanEstimate::Unknown);
+        }
+        let overlay_row_ids = match self
+            .overlay
+            .bounded_row_ids_for_table(table_id, MAX_ESTIMATE_CANDIDATES)
+        {
+            Ok(Some(row_ids)) => row_ids,
+            Ok(None) => return self.finish_estimate(AuthorizedScanEstimate::Unknown),
+            Err(OverlayError::Aborted) => return Err(TransactionError::Aborted),
+            Err(_) => return self.finish_estimate(AuthorizedScanEstimate::Unknown),
+        };
+
+        let mut populations = vec![ColumnPopulation::default(); projection.columns.len()];
+        let mut visible_rows = 0u64;
+        let mut scanned = 0usize;
+        let mut after_row_id = None;
+        loop {
+            let remaining = MAX_ESTIMATE_CANDIDATES.saturating_sub(scanned);
+            if remaining == 0 {
+                return self.finish_estimate(AuthorizedScanEstimate::Unknown);
+            }
+            let limit = remaining.min(MAX_ROW_SCAN_PAGE);
+            let (mut snapshot_ids, snapshot_complete) = match self
+                .pinned_snapshot()?
+                .scan_row_ids_after(table_id, after_row_id, limit)
+            {
+                Ok(page) => page,
+                Err(_) => return self.finish_estimate(AuthorizedScanEstimate::Unknown),
+            };
+            let overlay_start = after_row_id.map_or(0, |after| {
+                overlay_row_ids.partition_point(|row_id| *row_id <= after)
+            });
+            let overlay_end = overlay_start
+                .saturating_add(limit)
+                .min(overlay_row_ids.len());
+            let overlay_complete = overlay_end == overlay_row_ids.len();
+            snapshot_ids.extend_from_slice(&overlay_row_ids[overlay_start..overlay_end]);
+            snapshot_ids.sort_unstable();
+            snapshot_ids.dedup();
+            snapshot_ids.truncate(limit);
+            let page_complete = snapshot_complete && overlay_complete && snapshot_ids.len() < limit;
+            let Some(next_after_row_id) = snapshot_ids.last().copied() else {
+                if page_complete {
+                    return self.finish_estimate(AuthorizedScanEstimate::Exact(
+                        AuthorizedScanSummary {
+                            visible_rows,
+                            columns: populations,
+                        },
+                    ));
+                }
+                return self.finish_estimate(AuthorizedScanEstimate::Unknown);
+            };
+
+            for row_id in &snapshot_ids {
+                let id = RowId {
+                    table: table_id,
+                    row: *row_id,
+                };
+                let cells = match self.project_row_for_estimate(id, projection) {
+                    Ok(Some(cells)) => cells,
+                    Ok(None) => continue,
+                    Err(error) if estimate_error_is_terminal(&error) => return Err(error),
+                    Err(_) => return self.finish_estimate(AuthorizedScanEstimate::Unknown),
+                };
+                if cells.len() != populations.len() {
+                    return self.finish_estimate(AuthorizedScanEstimate::Unknown);
+                }
+                visible_rows += 1;
+                for (population, cell) in populations.iter_mut().zip(cells) {
+                    match cell {
+                        SanitizedCell::Value(_) => population.readable_values += 1,
+                        SanitizedCell::Null => population.nulls += 1,
+                        SanitizedCell::Redacted => population.redacted += 1,
+                    }
+                }
+            }
+            scanned += snapshot_ids.len();
+            if page_complete {
+                return self.finish_estimate(AuthorizedScanEstimate::Exact(
+                    AuthorizedScanSummary {
+                        visible_rows,
+                        columns: populations,
+                    },
+                ));
+            }
+            if scanned >= MAX_ESTIMATE_CANDIDATES {
+                return self.finish_estimate(AuthorizedScanEstimate::Unknown);
+            }
+            after_row_id = Some(next_after_row_id);
+        }
+    }
+
+    fn finish_estimate(
+        &mut self,
+        estimate: AuthorizedScanEstimate,
+    ) -> Result<AuthorizedScanEstimate, TransactionError> {
+        self.check_deadline()?;
+        Ok(estimate)
+    }
+
+    fn project_row_for_estimate(
+        &mut self,
+        id: RowId,
+        projection: &AuthorizedProjection<'_>,
+    ) -> Result<Option<Vec<SanitizedCell>>, TransactionError> {
+        let Some(payload) = self.read_inner(id)? else {
+            return Ok(None);
+        };
+        let tuple = decode_tuple(projection.columns, projection.schema_version, &payload)
+            .map_err(TransactionError::Tuple)?;
+        project_row(
+            projection.context,
+            projection.grants,
+            projection.policies,
+            projection.schema_id,
+            id.table,
+            projection.column_ids,
+            &tuple.values,
+        )
+        .map_err(TransactionError::Authorization)
     }
 
     /// Read one catalog definition from the pinned snapshot and retain its exact
@@ -2629,6 +2790,104 @@ impl<'db> InvocationTransaction<'db> {
         }
         Ok(())
     }
+}
+
+fn valid_estimate_projection(table_id: [u8; 16], projection: &AuthorizedProjection<'_>) -> bool {
+    table_id != [0; 16]
+        && !projection.columns.is_empty()
+        && projection.columns.len() == projection.column_ids.len()
+        && projection.columns.len() <= crate::tuple::MAX_COLUMNS
+        && projection.schema_version != 0
+        && projection.schema_id != [0; 16]
+        && projection.column_ids.iter().all(|id| id != &[0; 16])
+        && projection
+            .column_ids
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>()
+            .len()
+            == projection.column_ids.len()
+        && projection.grants.len() <= crate::authorization::MAX_AUTHORIZATION_INPUTS
+        && projection.policies.len() <= crate::authorization::MAX_AUTHORIZATION_INPUTS
+        && projection.checks.len() <= crate::authorization::MAX_AUTHORIZATION_INPUTS
+        && projection.policy_driving_columns.len() <= crate::authorization::MAX_AUTHORIZATION_INPUTS
+        && projection.dependencies.len() <= crate::authorization::MAX_AUTHORIZATION_INPUTS
+        && projection.context.principal_id != [0; 16]
+        && projection.context.role_ids.len() <= crate::authorization::MAX_AUTHORIZATION_INPUTS
+        && projection.context.scope.len() <= crate::authorization::MAX_AUTHORIZATION_INPUTS
+        && projection
+            .context
+            .role_ids
+            .iter()
+            .all(|role_id| role_id != &[0; 16])
+        && projection
+            .policies
+            .iter()
+            .all(|policy| policy.subjects.len() <= crate::authorization::MAX_POLICY_SUBJECTS)
+}
+
+/// Exact counts are released only when row inclusion is independent of row
+/// values. Otherwise a work-limit result could reveal the number of invisible
+/// candidates through whether the scan completed.
+fn estimate_population_is_unfiltered(
+    table_id: [u8; 16],
+    projection: &AuthorizedProjection<'_>,
+) -> bool {
+    let context = projection.context;
+    if !has_permission(
+        context,
+        projection.grants,
+        Operation::Usage,
+        AccessTarget::Schema(projection.schema_id),
+    ) || !context
+        .scope
+        .contains(&(Operation::Select, AccessTarget::Table(table_id)))
+        || !projection.column_ids.iter().any(|&column_id| {
+            has_permission(
+                context,
+                projection.grants,
+                Operation::Select,
+                AccessTarget::Column {
+                    table_id,
+                    column_id,
+                },
+            )
+        })
+    {
+        return false;
+    }
+
+    let mut has_allow = false;
+    let mut has_applicable_policy = false;
+    for policy in projection.policies.iter().filter(|policy| {
+        policy.operation == Operation::Select
+            && policy.target == AccessTarget::Table(table_id)
+            && policy.subjects.iter().any(|subject| match subject {
+                Subject::Principal(principal_id) => *principal_id == context.principal_id,
+                Subject::Role(role_id) => context.role_ids.contains(role_id),
+            })
+    }) {
+        has_applicable_policy = true;
+        if !matches!(
+            policy.using.as_ref(),
+            Some(Expr::Literal(Some(ScalarValue::Boolean(true))))
+        ) || policy.with_check.is_some()
+        {
+            return false;
+        }
+        has_allow |= policy.effect == Effect::Allow;
+    }
+    has_applicable_policy && has_allow
+}
+
+fn estimate_error_is_terminal(error: &TransactionError) -> bool {
+    matches!(
+        error,
+        TransactionError::Expired
+            | TransactionError::CancellationRequested
+            | TransactionError::Aborted
+            | TransactionError::Commit(CommitError::InvocationCancelled)
+    )
 }
 
 fn derive_catalog_index_key(
