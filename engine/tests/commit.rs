@@ -1,5 +1,7 @@
 use prdb_engine::audit::{AuditAction, AuditEvent, AuditResult};
-use prdb_engine::catalog::{CatalogField, WireType, encode_envelope, family_schema};
+use prdb_engine::catalog::{
+    CatalogField, WireType, decode_registered_envelope, encode_envelope, family_schema,
+};
 use prdb_engine::commit::{
     CatalogWrite, CommitError, CommitRequest, ForeignKeyCheck, IndexWrite, RowWrite,
     commit_catalog_and_audit, commit_catalog_and_audit_with_fences, commit_rows,
@@ -1573,7 +1575,7 @@ fn catalog_commit_rejects_dangling_dependency_edges_and_records_abort()
 }
 
 #[test]
-fn storage_manager_authorizes_not_null_constraint_ddl_by_table_alter()
+fn storage_manager_authorizes_constraint_ddl_by_table_alter()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
@@ -1766,6 +1768,248 @@ fn storage_manager_authorizes_not_null_constraint_ddl_by_table_alter()
             &[owner_audit],
         )?,
         6
+    );
+    StorageManager::new(&database, Duration::from_millis(100))?;
+
+    let check_constraint_id = id(0xb1);
+    let check_expression_id = id(0xb2);
+    let check_expression_key = id_catalog_key(7, check_expression_id);
+    let check_expression_payload = encode_envelope(
+        &family_schema(7).unwrap(),
+        &check_expression_key,
+        &[
+            CatalogField {
+                tag: 1,
+                wire_type: WireType::U16,
+                payload: 2u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 2,
+                wire_type: WireType::U32,
+                payload: 1u32.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 3,
+                wire_type: WireType::Id,
+                payload: builtin_id(101).to_vec(),
+            },
+            CatalogField {
+                tag: 4,
+                wire_type: WireType::Bytes,
+                payload: vec![0; 8],
+            },
+            CatalogField {
+                tag: 5,
+                wire_type: WireType::Bytes,
+                payload: prdb_engine::expression::encode_expression(
+                    &prdb_engine::authorization::Expr::Literal(Some(ScalarValue::Boolean(true))),
+                )?,
+            },
+            CatalogField {
+                tag: 6,
+                wire_type: WireType::Ids,
+                payload: 0u32.to_le_bytes().to_vec(),
+            },
+        ],
+    )?;
+    let check_constraint_key = id_catalog_key(8, check_constraint_id);
+    let check_constraint_payload = encode_envelope(
+        &family_schema(8).unwrap(),
+        &check_constraint_key,
+        &[
+            CatalogField {
+                tag: 1,
+                wire_type: WireType::Id,
+                payload: table_id.to_vec(),
+            },
+            CatalogField {
+                tag: 2,
+                wire_type: WireType::U16,
+                payload: 4u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 3,
+                wire_type: WireType::Ids,
+                payload: 0u32.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 4,
+                wire_type: WireType::Id,
+                payload: check_expression_id.to_vec(),
+            },
+            CatalogField {
+                tag: 6,
+                wire_type: WireType::Ids,
+                payload: 0u32.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 7,
+                wire_type: WireType::U16,
+                payload: 0u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 8,
+                wire_type: WireType::U16,
+                payload: 0u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 9,
+                wire_type: WireType::U16,
+                payload: 0u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 10,
+                wire_type: WireType::U16,
+                payload: 1u16.to_le_bytes().to_vec(),
+            },
+        ],
+    )?;
+    let check_add = [
+        CatalogWrite {
+            key: check_constraint_key.clone(),
+            expected_value: None,
+            payload: Some(check_constraint_payload.clone()),
+        },
+        object_write(check_constraint_id, 6),
+        CatalogWrite {
+            key: check_expression_key.clone(),
+            expected_value: None,
+            payload: Some(check_expression_payload.clone()),
+        },
+        object_write(check_expression_id, 5),
+        dependency_write(check_constraint_id, check_expression_id, 2),
+        table_epoch(4),
+    ];
+    let mut contextual_expression_fields =
+        decode_registered_envelope(&check_expression_payload)?.fields;
+    contextual_expression_fields
+        .iter_mut()
+        .find(|field| field.tag == 5)
+        .ok_or("CHECK expression field is missing")?
+        .payload =
+        prdb_engine::expression::encode_expression(&prdb_engine::authorization::Expr::Equal(
+            Box::new(prdb_engine::authorization::Expr::Literal(Some(
+                ScalarValue::Uuid([9; 16]),
+            ))),
+            Box::new(prdb_engine::authorization::Expr::CurrentPrincipalId),
+        ))?;
+    let contextual_expression_payload = encode_envelope(
+        &family_schema(7).unwrap(),
+        &check_expression_key,
+        &contextual_expression_fields,
+    )?;
+    let mut contextual_check_add = check_add.clone();
+    contextual_check_add
+        .iter_mut()
+        .find(|write| write.key == check_expression_key)
+        .ok_or("CHECK expression write is missing")?
+        .payload = Some(contextual_expression_payload);
+    let contextual_check_audit = identity_audit_event(0xb6, table_owner, check_constraint_id);
+    assert_eq!(
+        storage.commit_authorized_constraint_ddl(
+            id(0xb6),
+            table_owner,
+            9_999,
+            &contextual_check_add,
+            &[contextual_check_audit],
+        ),
+        Err(CommitError::InvalidCatalog)
+    );
+    assert_eq!(commit_sequence(&database)?, 6);
+    assert_eq!(
+        lookup_outcome(&database, id(0xb6), table_owner, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Aborted
+    );
+    let mut false_expression_fields = decode_registered_envelope(&check_expression_payload)?.fields;
+    false_expression_fields
+        .iter_mut()
+        .find(|field| field.tag == 5)
+        .ok_or("CHECK expression field is missing")?
+        .payload = prdb_engine::expression::encode_expression(
+        &prdb_engine::authorization::Expr::Literal(Some(ScalarValue::Boolean(false))),
+    )?;
+    let false_expression_payload = encode_envelope(
+        &family_schema(7).unwrap(),
+        &check_expression_key,
+        &false_expression_fields,
+    )?;
+    let mut failing_check_add = check_add.clone();
+    failing_check_add
+        .iter_mut()
+        .find(|write| write.key == check_expression_key)
+        .ok_or("CHECK expression write is missing")?
+        .payload = Some(false_expression_payload);
+    let failing_check_audit = identity_audit_event(0xb5, table_owner, check_constraint_id);
+    assert_eq!(
+        storage.commit_authorized_constraint_ddl(
+            id(0xb5),
+            table_owner,
+            9_999,
+            &failing_check_add,
+            &[failing_check_audit],
+        ),
+        Err(CommitError::CheckViolation)
+    );
+    assert_eq!(commit_sequence(&database)?, 6);
+    assert_eq!(
+        lookup_outcome(&database, id(0xb5), table_owner, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Aborted
+    );
+    let check_audit = identity_audit_event(0xb3, table_owner, check_constraint_id);
+    assert_eq!(
+        storage.commit_authorized_constraint_ddl(
+            id(0xb3),
+            table_owner,
+            9_999,
+            &check_add,
+            &[check_audit],
+        )?,
+        7
+    );
+    StorageManager::new(&database, Duration::from_millis(100))?;
+
+    let check_drop = [
+        CatalogWrite {
+            key: check_constraint_key,
+            expected_value: Some(check_constraint_payload),
+            payload: None,
+        },
+        CatalogWrite {
+            key: id_catalog_key(2, check_constraint_id),
+            expected_value: object_write(check_constraint_id, 6).payload,
+            payload: None,
+        },
+        CatalogWrite {
+            key: check_expression_key,
+            expected_value: Some(check_expression_payload),
+            payload: None,
+        },
+        CatalogWrite {
+            key: id_catalog_key(2, check_expression_id),
+            expected_value: object_write(check_expression_id, 5).payload,
+            payload: None,
+        },
+        CatalogWrite {
+            key: dependency_write(check_constraint_id, check_expression_id, 2).key,
+            expected_value: dependency_write(check_constraint_id, check_expression_id, 2).payload,
+            payload: None,
+        },
+        table_epoch(5),
+    ];
+    let check_drop_audit = identity_audit_event(0xb4, table_owner, check_constraint_id);
+    assert_eq!(
+        storage.commit_authorized_constraint_ddl(
+            id(0xb4),
+            table_owner,
+            9_999,
+            &check_drop,
+            &[check_drop_audit],
+        )?,
+        8
     );
     StorageManager::new(&database, Duration::from_millis(100))?;
     Ok(())

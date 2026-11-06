@@ -339,8 +339,9 @@ impl<'db> StorageManager<'db> {
         )
     }
 
-    /// Authorize NOT NULL constraint add/drop for an existing table. The
-    /// actor must own the table or hold inherited ALTER on the table/schema.
+    /// Authorize NOT NULL and CHECK constraint add/drop for an existing table.
+    /// CHECK additions validate stored rows before publication. The actor must
+    /// own the table or hold inherited ALTER on the table/schema.
     pub fn commit_authorized_constraint_ddl(
         &self,
         invocation_id: [u8; 16],

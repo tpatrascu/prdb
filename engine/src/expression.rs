@@ -49,6 +49,28 @@ pub struct CatalogExpression {
     pub expression: Expr,
 }
 
+/// CHECK expressions are deterministic functions of the row alone. Identity
+/// and role predicates remain available to row policies, but cannot be stored
+/// as CHECK constraints.
+pub fn is_row_local_expression(expression: &Expr) -> bool {
+    match expression {
+        Expr::Literal(_) | Expr::Field(_) => true,
+        Expr::CurrentPrincipalId | Expr::HasRole(_) => false,
+        Expr::Equal(left, right)
+        | Expr::NotEqual(left, right)
+        | Expr::Less(left, right)
+        | Expr::LessEqual(left, right)
+        | Expr::Greater(left, right)
+        | Expr::GreaterEqual(left, right) => {
+            is_row_local_expression(left) && is_row_local_expression(right)
+        }
+        Expr::And(expressions) | Expr::Or(expressions) => {
+            expressions.iter().all(is_row_local_expression)
+        }
+        Expr::Not(inner) | Expr::IsNull(inner) => is_row_local_expression(inner),
+    }
+}
+
 /// Validate an expression record against its containing table schema and
 /// expected result type. Stable field/role IDs discovered from EIR must match
 /// the catalog record's declared dependency set exactly.

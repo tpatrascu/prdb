@@ -552,11 +552,11 @@
 - Contract updates: [schema DDL](../../specs/ddl-schema.md) and [catalog payloads](../../specs/catalog-payloads.md).
 - Remaining: action-specific CHECK, PRIMARY KEY, and UNIQUE authorization routes remain open.
 
-## SM-5 dependency: NOT NULL DDL authorization — in progress
+## SM-5 dependency: NOT NULL and CHECK DDL authorization — in progress
 
-- `StorageManager::commit_authorized_constraint_ddl` accepts paired NOT NULL constraint/object additions or removals, the matching nullable-column change, and a table write-epoch advance. It permits the table owner or inherited `ALTER` on the table/schema, verifies a login-enabled actor and successful audit attribution, and guards membership, ownership, and grant inputs through fenced publication.
+- `StorageManager::commit_authorized_constraint_ddl` accepts paired NOT NULL and CHECK constraint/object additions or removals, with the matching nullable-column change for NOT NULL and a table write-epoch advance. It permits the table owner or inherited `ALTER` on the table/schema, verifies a login-enabled actor and successful audit attribution, and guards membership, ownership, and grant inputs through fenced publication.
 - Red evidence: the managed DDL regression failed with `DdlAuthorizationDenied` for a user holding `ALTER` on the table before the authorized route was connected.
-- A real-redb regression covers denied DDL without sequence publication, successful `SET NOT NULL` and drop through table `ALTER`, and successful startup validation afterward. Bounded row validation remains part of the same atomic publication path.
-- Verification: workspace build, formatting check, Clippy with warnings denied, and all 213 workspace tests across 18 targets passed in the prescribed Nix shell. Changed Markdown local links and `git diff --check` passed.
+- A real-redb regression covers denied DDL without sequence publication, successful `SET NOT NULL` and drop through table `ALTER`, rejection of a CHECK addition that fails on a stored row, successful CHECK addition/drop, and startup validation afterward. CHECK expressions are schema-bound and row-local; existing-row scans capture row versions and are rechecked in the serialized writer before publication. Work is capped at 65,536 row visits, 64 MiB of row-record data, and 65,536 CHECK evaluations per commit.
+- Verification: `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` passed in the prescribed Nix shell; 213 tests across 18 targets passed. Changed Markdown local links and `git diff --check` passed.
 - Contract updates: [schema DDL](../../specs/ddl-schema.md) and [permissions](../../specs/ddl-permissions.md).
-- Remaining: CHECK, PRIMARY KEY, and UNIQUE authorization routes; deterministic authority-change race coverage; and authenticated control-channel integration remain open.
+- Remaining: PRIMARY KEY and UNIQUE authorization routes; deterministic authority-change race coverage; and authenticated control-channel integration remain open.

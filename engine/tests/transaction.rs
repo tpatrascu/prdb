@@ -436,6 +436,53 @@ fn object_catalog_write_for(object_id: [u8; 16], object_kind: u16) -> CatalogWri
     }
 }
 
+fn boolean_type_catalog_write(
+    type_id: [u8; 16],
+) -> Result<CatalogWrite, Box<dyn std::error::Error>> {
+    let key = catalog_id_key(4, type_id);
+    let payload = catalog_record_payload(
+        4,
+        &key,
+        &[
+            CatalogField {
+                tag: 1,
+                wire_type: WireType::U16,
+                payload: 1u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 2,
+                wire_type: WireType::U16,
+                payload: 0u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 3,
+                wire_type: WireType::U32,
+                payload: 1u32.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 4,
+                wire_type: WireType::U32,
+                payload: 1u32.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 5,
+                wire_type: WireType::U32,
+                payload: 1u32.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 6,
+                wire_type: WireType::U32,
+                payload: 1u32.to_le_bytes().to_vec(),
+            },
+        ],
+    )?;
+    Ok(CatalogWrite {
+        key,
+        expected_value: None,
+        payload: Some(payload),
+    })
+}
+
 fn membership_catalog_record(
     member_id: [u8; 16],
     role_id: [u8; 16],
@@ -2984,7 +3031,7 @@ fn authorized_insert_materializes_defaults_before_policy_and_check_validation()
     let column_ids = [column_id];
     let checks = [Expr::Equal(
         Box::new(Expr::Field(0)),
-        Box::new(Expr::CurrentPrincipalId),
+        Box::new(Expr::Literal(Some(ScalarValue::Uuid([9; 16])))),
     )];
     let projection = AuthorizedProjection {
         columns: &columns,
@@ -3014,6 +3061,7 @@ fn authorized_insert_materializes_defaults_before_policy_and_check_validation()
     ));
     let default_expression_id = [117; 16];
     let check_expression_id = [121; 16];
+    let boolean_type_id = [46; 16];
     let mut default_expression_key = 7u16.to_be_bytes().to_vec();
     default_expression_key.push(1);
     default_expression_key.extend_from_slice(&default_expression_id);
@@ -3199,10 +3247,13 @@ fn authorized_insert_materializes_defaults_before_policy_and_check_validation()
     let check_expression = expression_catalog_payload_full(
         check_expression_id,
         2,
-        [46; 16],
+        boolean_type_id,
         [0; 8],
         &[column_ids[0]],
-        &Expr::Equal(Box::new(Expr::Field(0)), Box::new(Expr::CurrentPrincipalId)),
+        &Expr::Equal(
+            Box::new(Expr::Field(0)),
+            Box::new(Expr::Literal(Some(ScalarValue::Uuid([9; 16])))),
+        ),
     )?;
     let default_audit = AuditEvent {
         event_id: [119; 16],
@@ -3235,6 +3286,7 @@ fn authorized_insert_materializes_defaults_before_policy_and_check_validation()
             expected_value: None,
             payload: Some(type_payload),
         },
+        boolean_type_catalog_write(boolean_type_id)?,
         CatalogWrite {
             key: table_key,
             expected_value: Some(initial_table_payload),
@@ -3248,6 +3300,7 @@ fn authorized_insert_materializes_defaults_before_policy_and_check_validation()
         object_catalog_write_for(default_expression_id, 5),
         object_catalog_write_for(check_expression_id, 5),
         object_catalog_write_for(type_id, 2),
+        object_catalog_write_for(boolean_type_id, 2),
         dependency_catalog_write(column_id, default_expression_id, 2)?,
         dependency_catalog_write(check_expression_id, column_id, 2)?,
     ];
@@ -3715,6 +3768,8 @@ fn catalog_rejects_deleting_expression_used_by_existing_check()
         2,
         &Expr::Literal(Some(ScalarValue::Boolean(true))),
     )?;
+    let boolean_type = boolean_type_catalog_write([45; 16])?;
+    let boolean_type_object = object_catalog_write_for([45; 16], 2);
     let (constraint_key, constraint_payload) =
         check_constraint_catalog_record([185; 16], table_id, expression_id);
     let expression_dependency = dependency_catalog_write([185; 16], expression_id, 2)?;
@@ -3741,6 +3796,8 @@ fn catalog_rejects_deleting_expression_used_by_existing_check()
             expected_value: None,
             payload: Some(expression_payload.clone()),
         },
+        boolean_type.clone(),
+        boolean_type_object.clone(),
         CatalogWrite {
             key: constraint_key.clone(),
             expected_value: None,
@@ -3857,6 +3914,16 @@ fn catalog_rejects_deleting_expression_used_by_existing_check()
         CatalogWrite {
             key: expression_dependency.key,
             expected_value: expression_dependency.payload,
+            payload: None,
+        },
+        CatalogWrite {
+            key: boolean_type.key,
+            expected_value: boolean_type.payload,
+            payload: None,
+        },
+        CatalogWrite {
+            key: boolean_type_object.key,
+            expected_value: boolean_type_object.payload,
             payload: None,
         },
     ];
@@ -4283,7 +4350,10 @@ fn invocation_loads_and_guards_catalog_table_schema() -> Result<(), Box<dyn std:
             boolean_type_id,
             [0; 8],
             &[column_uuid_id],
-            &Expr::Equal(Box::new(Expr::Field(0)), Box::new(Expr::CurrentPrincipalId)),
+            &Expr::Equal(
+                Box::new(Expr::Field(0)),
+                Box::new(Expr::Literal(Some(ScalarValue::Uuid(principal_id)))),
+            ),
         )?),
     });
     let (check_constraint_key, check_constraint_payload) =
@@ -4661,7 +4731,7 @@ fn invocation_loads_and_guards_catalog_table_schema() -> Result<(), Box<dyn std:
         checks,
         [Expr::Equal(
             Box::new(Expr::Field(0)),
-            Box::new(Expr::CurrentPrincipalId),
+            Box::new(Expr::Literal(Some(ScalarValue::Uuid(principal_id)))),
         )]
     );
     let (roles, grants) = invocation.load_catalog_grants(principal_id, &loaded)?;

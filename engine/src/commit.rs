@@ -1,20 +1,24 @@
 //! Serialized row publication with optimistic row-version validation.
 use crate::audit::AuditEvent;
 use crate::authorization::{
-    MAX_MEMBERSHIP_EDGES, Membership, resolve_role_closure, validate_membership_graph,
+    AuthorizationContext, MAX_MEMBERSHIP_EDGES, Membership, check_constraint_passes,
+    resolve_role_closure, validate_membership_graph,
 };
 use crate::catalog::{
     CatalogRecord, decode_builtin_scalar_type, decode_policy_target, decode_registered_envelope,
     validate_builtin_type_profile,
 };
 use crate::ddl_fence::DdlFenceCoordinator;
-use crate::expression::decode_catalog_expression_record;
+use crate::expression::{
+    ExpressionPurpose, decode_catalog_expression_record, is_row_local_expression,
+    validate_expression_binding,
+};
 use crate::index_locator::IndexLocator;
 use crate::metadata::{EngineMetadata, Lifecycle};
 use crate::outcome::{InvocationOutcome, OutcomeStatus};
 use crate::row_record::RowRecord;
 use crate::schema::{AUDIT, CATALOG, ENGINE_META, INDEXES, OUTCOMES, ROW_INDEXES, ROWS};
-use crate::tuple::{ColumnSchema, decode_tuple, encode_tuple};
+use crate::tuple::{ColumnSchema, ScalarType, decode_tuple, encode_tuple};
 use redb::{Database, ReadOnlyTable, ReadableDatabase, ReadableTable, WriteTransaction};
 use std::collections::{HashMap, HashSet};
 
@@ -26,6 +30,7 @@ const MAX_INDEX_DDL_ROWS_PER_COMMIT: usize = 65_536;
 const MAX_INDEX_DDL_ENTRIES_PER_COMMIT: usize = 65_536;
 const MAX_INDEX_DDL_BYTES_PER_COMMIT: usize = 64 * 1024 * 1024;
 const MAX_NOT_NULL_VALIDATION_ROWS_PER_COMMIT: usize = 65_536;
+const MAX_CHECK_VALIDATION_EVALUATIONS_PER_COMMIT: usize = 65_536;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RowWrite {
@@ -164,6 +169,8 @@ pub enum CommitError {
     UniqueViolation,
     NotNullViolation,
     NotNullValidationLimitExceeded,
+    CheckViolation,
+    ConstraintValidationLimitExceeded,
     ForeignKeyViolation,
     ForeignKeyValidationLimitExceeded,
     IndexDdlLimitExceeded,
@@ -2662,16 +2669,16 @@ fn validate_column_schema_epochs(
     Ok(())
 }
 
-fn build_not_null_validation_rows(
+fn build_constraint_validation_rows(
     database: &Database,
     catalog_writes: &[CatalogWrite],
     row_writes: &[RowWrite],
 ) -> Result<ExpectedTableRows, CommitError> {
     let column_prefix = 6u16.to_be_bytes();
-    if !catalog_writes
-        .iter()
-        .any(|write| write.key.starts_with(&column_prefix))
-    {
+    let constraint_prefix = 8u16.to_be_bytes();
+    if !catalog_writes.iter().any(|write| {
+        write.key.starts_with(&column_prefix) || write.key.starts_with(&constraint_prefix)
+    }) {
         return Ok(HashMap::new());
     }
 
@@ -2712,17 +2719,82 @@ fn build_not_null_validation_rows(
                 .insert(column_id);
         }
     }
-    if changed_columns.is_empty() {
+    let mut changed_checks = HashMap::<[u8; 16], Vec<[u8; 16]>>::new();
+    for write in catalog_writes
+        .iter()
+        .filter(|write| write.key.starts_with(&constraint_prefix))
+    {
+        if write.key.len() != 19 {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let current = catalog
+            .get(write.key.as_slice())
+            .map_err(storage_error)?
+            .map(|value| value.value().to_vec());
+        if current.as_deref() == write.payload.as_deref() {
+            continue;
+        }
+        let Some(next) = write.payload.as_deref() else {
+            continue;
+        };
+        if catalog_field_u16(&write.key, next, 8, 2)? == 4 {
+            let constraint_table_id = constraint_table_id(&write.key, next)?;
+            let expression_id: [u8; 16] = catalog_field_bytes(&write.key, next, 8, 4)?
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?;
+            if expression_id == [0; 16] {
+                return Err(CommitError::InvalidCatalog);
+            }
+            changed_checks
+                .entry(constraint_table_id)
+                .or_default()
+                .push(expression_id);
+        }
+    }
+    if changed_columns.is_empty() && changed_checks.is_empty() {
         return Ok(HashMap::new());
     }
+    let check_count = changed_checks
+        .values()
+        .try_fold(0usize, |count, checks| count.checked_add(checks.len()));
+    if check_count.is_none_or(|count| count > crate::authorization::MAX_AUTHORIZATION_INPUTS) {
+        return Err(CommitError::ConstraintValidationLimitExceeded);
+    }
 
-    let mut validation_rows = HashMap::with_capacity(changed_columns.len());
+    let has_check_validation = !changed_checks.is_empty();
+    let limit_error = if has_check_validation {
+        CommitError::ConstraintValidationLimitExceeded
+    } else {
+        CommitError::NotNullValidationLimitExceeded
+    };
+    let mut affected_tables = changed_columns.keys().copied().collect::<HashSet<_>>();
+    affected_tables.extend(changed_checks.keys().copied());
+    let mut validation_rows = HashMap::with_capacity(affected_tables.len());
     let mut visited = 0usize;
     let mut accounted_bytes = 0usize;
-    for (table_id, column_ids) in changed_columns {
+    let mut check_evaluations = 0usize;
+    let check_context = AuthorizationContext {
+        principal_id: [0; 16],
+        role_ids: HashSet::new(),
+        scope: HashSet::new(),
+    };
+    for table_id in affected_tables {
+        let column_ids = changed_columns.get(&table_id).cloned().unwrap_or_default();
+        let check_expression_ids = changed_checks.get(&table_id).cloned().unwrap_or_default();
         if column_ids.len() > crate::authorization::MAX_AUTHORIZATION_INPUTS
-            || row_writes.iter().any(|write| write.key[..16] == table_id)
+            || check_expression_ids.len() > crate::authorization::MAX_AUTHORIZATION_INPUTS
+            || row_writes
+                .iter()
+                .any(|write| write.key.get(..16) == Some(table_id.as_slice()))
         {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let table_key = id_catalog_key(5, table_id);
+        let table_existed = catalog
+            .get(table_key.as_slice())
+            .map_err(storage_error)?
+            .is_some();
+        if !table_existed && !column_ids.is_empty() {
             return Err(CommitError::InvalidCatalog);
         }
         let mut persisted_rows = Vec::new();
@@ -2738,16 +2810,17 @@ fn build_not_null_validation_rows(
             if key.value().len() != 32 || key.value()[..16] != table_id {
                 return Err(CommitError::InvalidRow);
             }
-            visited = visited
-                .checked_add(1)
-                .ok_or(CommitError::NotNullValidationLimitExceeded)?;
+            if !table_existed {
+                return Err(CommitError::InvalidCatalog);
+            }
+            visited = visited.checked_add(1).ok_or(limit_error.clone())?;
             accounted_bytes = accounted_bytes
                 .checked_add(value.value().len())
-                .ok_or(CommitError::NotNullValidationLimitExceeded)?;
+                .ok_or(limit_error.clone())?;
             if visited > MAX_NOT_NULL_VALIDATION_ROWS_PER_COMMIT
                 || accounted_bytes > MAX_INDEX_DDL_BYTES_PER_COMMIT
             {
-                return Err(CommitError::NotNullValidationLimitExceeded);
+                return Err(limit_error.clone());
             }
             persisted_rows.push((
                 key.value()
@@ -2756,23 +2829,29 @@ fn build_not_null_validation_rows(
                 RowRecord::decode(value.value()).map_err(|_| CommitError::InvalidRow)?,
             ));
         }
-        if persisted_rows.is_empty() {
+        if persisted_rows.is_empty() && check_expression_ids.is_empty() {
             validation_rows.insert(table_id, Vec::new());
             continue;
         }
-        let old_schema = load_final_table_schema(&catalog, &[], table_id)?;
+
         let next_schema = load_final_table_schema(&catalog, catalog_writes, table_id)?;
+        let old_schema = if table_existed {
+            load_final_table_schema(&catalog, &[], table_id)?
+        } else {
+            next_schema.clone()
+        };
         if old_schema.column_ids != next_schema.column_ids
             || old_schema.columns.len() != next_schema.columns.len()
+            || old_schema.schema_version != next_schema.schema_version
         {
             return Err(CommitError::InvalidCatalog);
         }
         let mut ordinals = Vec::with_capacity(column_ids.len());
-        for column_id in column_ids {
+        for column_id in &column_ids {
             let ordinal = old_schema
                 .column_ids
                 .iter()
-                .position(|candidate| *candidate == column_id)
+                .position(|candidate| *candidate == *column_id)
                 .ok_or(CommitError::InvalidCatalog)?;
             if !old_schema.columns[ordinal].nullable
                 || next_schema.columns[ordinal].nullable
@@ -2796,11 +2875,43 @@ fn build_not_null_validation_rows(
             return Err(CommitError::InvalidCatalog);
         }
 
-        let mut expected_rows = Vec::with_capacity(persisted_rows.len());
-        for (key, row) in persisted_rows {
-            if old_schema.schema_version != next_schema.schema_version {
+        let mut checks = Vec::with_capacity(check_expression_ids.len());
+        for expression_id in check_expression_ids {
+            let expression_key = id_catalog_key(7, expression_id);
+            let expression_bytes = final_catalog_value(&catalog, catalog_writes, &expression_key)?
+                .ok_or(CommitError::InvalidCatalog)?;
+            let expression_record = decode_catalog_record(&expression_key, &expression_bytes)?;
+            let expression = decode_catalog_expression_record(&expression_record)
+                .map_err(|_| CommitError::InvalidCatalog)?;
+            if expression.expression_id != expression_id
+                || expression.purpose != ExpressionPurpose::Check
+                || !is_row_local_expression(&expression.expression)
+            {
                 return Err(CommitError::InvalidCatalog);
             }
+            let type_key = id_catalog_key(4, expression.result_type_id);
+            let type_bytes = final_catalog_value(&catalog, catalog_writes, &type_key)?
+                .ok_or(CommitError::InvalidCatalog)?;
+            let type_record = decode_catalog_record(&type_key, &type_bytes)?;
+            if validate_builtin_type_profile(&type_record)
+                .map_err(|_| CommitError::InvalidCatalog)?
+                != 1
+            {
+                return Err(CommitError::InvalidCatalog);
+            }
+            validate_expression_binding(
+                &expression,
+                &next_schema.columns,
+                &next_schema.column_ids,
+                expression.result_type_id,
+                ScalarType::Boolean,
+            )
+            .map_err(|_| CommitError::InvalidCatalog)?;
+            checks.push(expression.expression);
+        }
+
+        let mut expected_rows = Vec::with_capacity(persisted_rows.len());
+        for (key, row) in persisted_rows {
             let tuple = decode_tuple(&old_schema.columns, old_schema.schema_version, &row.payload)
                 .map_err(|_| CommitError::InvalidRow)?;
             if ordinals
@@ -2808,6 +2919,19 @@ fn build_not_null_validation_rows(
                 .any(|ordinal| !matches!(tuple.values.get(*ordinal), Some(Some(_))))
             {
                 return Err(CommitError::NotNullViolation);
+            }
+            for expression in &checks {
+                check_evaluations = check_evaluations
+                    .checked_add(1)
+                    .ok_or(CommitError::ConstraintValidationLimitExceeded)?;
+                if check_evaluations > MAX_CHECK_VALIDATION_EVALUATIONS_PER_COMMIT {
+                    return Err(CommitError::ConstraintValidationLimitExceeded);
+                }
+                if !check_constraint_passes(expression, &tuple.values, &check_context)
+                    .map_err(|_| CommitError::InvalidCatalog)?
+                {
+                    return Err(CommitError::CheckViolation);
+                }
             }
             expected_rows.push((key, row.row_version));
         }
@@ -3944,7 +4068,7 @@ pub fn commit_storage_changes(
     request: CommitRequest<'_>,
 ) -> Result<u64, CommitError> {
     let expected_rows =
-        match build_not_null_validation_rows(database, request.catalog, request.rows) {
+        match build_constraint_validation_rows(database, request.catalog, request.rows) {
             Ok(rows) => rows,
             Err(error) => {
                 if !matches!(error, CommitError::Storage(_)) {
@@ -4807,9 +4931,9 @@ pub fn commit_authorized_foreign_key_ddl_with_fences(
     )
 }
 
-/// Authorize add/drop operations for NOT NULL constraints on existing tables.
-/// The actor must own the source table or hold inherited ALTER on its table
-/// or schema.
+/// Authorize add/drop operations for NOT NULL and CHECK constraints on existing
+/// tables. CHECK additions validate stored rows before publication. The actor
+/// must own the source table or hold inherited ALTER on its table or schema.
 pub fn commit_authorized_constraint_ddl_with_fences(
     database: &Database,
     ddl_fences: &DdlFenceCoordinator,
@@ -5110,7 +5234,7 @@ fn commit_catalog_and_audit_with_fences_inner(
     };
     let backfill = match build_index_ddl_plan(database, catalog_writes) {
         Ok(mut plan) => {
-            match build_not_null_validation_rows(database, catalog_writes, &[]) {
+            match build_constraint_validation_rows(database, catalog_writes, &[]) {
                 Ok(rows) => {
                     for (table_id, expected_rows) in rows {
                         if plan
@@ -6736,10 +6860,19 @@ fn constraint_ddl_authority_guards(
 
     let read = database.begin_read().map_err(storage_error)?;
     let catalog = read.open_table(CATALOG).map_err(storage_error)?;
-    let mut constraint_changes = HashMap::<[u8; 16], ([u8; 16], [u8; 16], bool)>::new();
-    let mut object_changes = HashMap::<[u8; 16], (bool, bool)>::new();
+    #[derive(Clone)]
+    struct ConstraintChange {
+        table_id: [u8; 16],
+        kind: u16,
+        subject_id: [u8; 16],
+        adding: bool,
+    }
+    let mut constraint_changes = HashMap::<[u8; 16], ConstraintChange>::new();
+    let mut object_changes = HashMap::<[u8; 16], (u16, bool, bool)>::new();
     let mut column_changes = HashMap::<[u8; 16], ([u8; 16], bool, bool)>::new();
     let mut table_changes = HashSet::<[u8; 16]>::new();
+    let mut expression_changes = HashMap::<[u8; 16], (bool, Vec<[u8; 16]>)>::new();
+    let mut dependency_changes = HashMap::<([u8; 16], [u8; 16]), (bool, bool)>::new();
 
     for write in catalog_writes {
         let family = write
@@ -6767,10 +6900,14 @@ fn constraint_ddl_authority_guards(
                     .as_deref()
                     .or(write.payload.as_deref())
                     .ok_or(CommitError::InvalidCatalog)?;
+                let object_kind = catalog_field_u16(&write.key, object_bytes, 2, 1)?;
                 if object_id == [0; 16]
-                    || catalog_field_u16(&write.key, object_bytes, 2, 1)? != 6
+                    || !matches!(object_kind, 5 | 6)
                     || object_changes
-                        .insert(object_id, (current.is_some(), write.payload.is_some()))
+                        .insert(
+                            object_id,
+                            (object_kind, current.is_some(), write.payload.is_some()),
+                        )
                         .is_some()
                 {
                     return Err(CommitError::InvalidCatalog);
@@ -6850,17 +6987,91 @@ fn constraint_ddl_authority_guards(
                     .as_deref()
                     .or(write.payload.as_deref())
                     .ok_or(CommitError::InvalidCatalog)?;
-                if constraint_id == [0; 16] || catalog_field_u16(&write.key, bytes, 8, 2)? != 1 {
+                let kind = catalog_field_u16(&write.key, bytes, 8, 2)?;
+                if constraint_id == [0; 16] || !matches!(kind, 1 | 4) {
                     return Err(CommitError::InvalidCatalog);
                 }
                 validate_constraint_shape(&write.key, bytes)?;
                 let table_id = constraint_table_id(&write.key, bytes)?;
                 let columns = catalog_id_list_field(&write.key, bytes, 8, 3)?;
-                if columns.len() != 1
-                    || constraint_changes
+                let subject_id = match kind {
+                    1 if columns.len() == 1 => columns[0],
+                    4 if columns.is_empty() => {
+                        let expression_id: [u8; 16] = catalog_field_bytes(&write.key, bytes, 8, 4)?
+                            .try_into()
+                            .map_err(|_| CommitError::InvalidCatalog)?;
+                        if expression_id == [0; 16] {
+                            return Err(CommitError::InvalidCatalog);
+                        }
+                        expression_id
+                    }
+                    _ => return Err(CommitError::InvalidCatalog),
+                };
+                if constraint_changes
+                    .insert(
+                        constraint_id,
+                        ConstraintChange {
+                            table_id,
+                            kind,
+                            subject_id,
+                            adding: write.payload.is_some(),
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(CommitError::InvalidCatalog);
+                }
+            }
+            7 => {
+                if write.key.len() != 19 || current.is_some() == write.payload.is_some() {
+                    return Err(CommitError::InvalidCatalog);
+                }
+                let expression_id: [u8; 16] = write.key[3..19]
+                    .try_into()
+                    .map_err(|_| CommitError::InvalidCatalog)?;
+                let bytes = current
+                    .as_deref()
+                    .or(write.payload.as_deref())
+                    .ok_or(CommitError::InvalidCatalog)?;
+                let record = decode_catalog_record(&write.key, bytes)?;
+                let expression = decode_catalog_expression_record(&record)
+                    .map_err(|_| CommitError::InvalidCatalog)?;
+                if expression_id == [0; 16]
+                    || expression.expression_id != expression_id
+                    || expression.purpose != crate::expression::ExpressionPurpose::Check
+                {
+                    return Err(CommitError::InvalidCatalog);
+                }
+                let mut dependencies = HashSet::new();
+                if expression
+                    .dependencies
+                    .iter()
+                    .any(|dependency| *dependency == [0; 16] || !dependencies.insert(*dependency))
+                    || expression_changes
                         .insert(
-                            constraint_id,
-                            (table_id, columns[0], write.payload.is_some()),
+                            expression_id,
+                            (write.payload.is_some(), expression.dependencies),
+                        )
+                        .is_some()
+                {
+                    return Err(CommitError::InvalidCatalog);
+                }
+            }
+            15 => {
+                if current.is_some() == write.payload.is_some() {
+                    return Err(CommitError::InvalidCatalog);
+                }
+                let bytes = current
+                    .as_deref()
+                    .or(write.payload.as_deref())
+                    .ok_or(CommitError::InvalidCatalog)?;
+                let (dependent_id, referenced_id, kind) =
+                    decode_dependency_edge(&write.key, bytes)?;
+                if kind != 2
+                    || dependency_changes
+                        .insert(
+                            (dependent_id, referenced_id),
+                            (current.is_some(), write.payload.is_some()),
                         )
                         .is_some()
                 {
@@ -6871,39 +7082,71 @@ fn constraint_ddl_authority_guards(
         }
     }
 
-    if constraint_changes.is_empty()
-        || object_changes.len() != constraint_changes.len()
-        || object_changes
-            .iter()
-            .any(|(id, (was_present, is_present))| {
-                constraint_changes.get(id).is_none_or(|(_, _, adding)| {
-                    *was_present == *is_present || *adding != *is_present
-                })
-            })
-    {
+    if constraint_changes.is_empty() {
         return Err(CommitError::InvalidCatalog);
     }
 
     let mut affected_tables = HashSet::new();
     let mut expected_columns = HashMap::<[u8; 16], ([u8; 16], bool, bool)>::new();
-    for (table_id, column_id, adding) in constraint_changes.values() {
-        affected_tables.insert(*table_id);
-        let expected_nullable = if *adding {
-            (true, false)
-        } else {
-            (false, true)
-        };
-        if expected_columns
-            .insert(
-                *column_id,
-                (*table_id, expected_nullable.0, expected_nullable.1),
-            )
+    let mut expected_objects = HashMap::<[u8; 16], (u16, bool, bool)>::new();
+    let mut expected_dependencies = HashMap::<([u8; 16], [u8; 16]), (bool, bool)>::new();
+    let mut check_expression_ids = HashSet::new();
+    for (constraint_id, change) in &constraint_changes {
+        affected_tables.insert(change.table_id);
+        let constraint_object_state = (6, !change.adding, change.adding);
+        if expected_objects
+            .insert(*constraint_id, constraint_object_state)
             .is_some()
         {
             return Err(CommitError::InvalidCatalog);
         }
+        match change.kind {
+            1 => {
+                let nullable = if change.adding {
+                    (true, false)
+                } else {
+                    (false, true)
+                };
+                if expected_columns
+                    .insert(change.subject_id, (change.table_id, nullable.0, nullable.1))
+                    .is_some()
+                {
+                    return Err(CommitError::InvalidCatalog);
+                }
+            }
+            4 => {
+                if !check_expression_ids.insert(change.subject_id)
+                    || expression_changes
+                        .get(&change.subject_id)
+                        .is_none_or(|(adding, _)| *adding != change.adding)
+                {
+                    return Err(CommitError::InvalidCatalog);
+                }
+                expected_dependencies.insert(
+                    (*constraint_id, change.subject_id),
+                    (!change.adding, change.adding),
+                );
+            }
+            _ => return Err(CommitError::InvalidCatalog),
+        }
     }
-    if expected_columns != column_changes
+    if check_expression_ids.len() != expression_changes.len() {
+        return Err(CommitError::InvalidCatalog);
+    }
+    for (expression_id, (adding, dependencies)) in &expression_changes {
+        if expected_objects
+            .insert(*expression_id, (5, !adding, *adding))
+            .is_some()
+        {
+            return Err(CommitError::InvalidCatalog);
+        }
+        for dependency_id in dependencies {
+            expected_dependencies.insert((*expression_id, *dependency_id), (!adding, *adding));
+        }
+    }
+    if expected_objects != object_changes
+        || expected_columns != column_changes
+        || expected_dependencies != dependency_changes
         || affected_tables.len() != table_changes.len()
         || table_changes
             .iter()

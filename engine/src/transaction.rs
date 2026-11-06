@@ -13,7 +13,7 @@ use crate::commit::{
 use crate::ddl_fence::DdlFenceCoordinator;
 use crate::expression::{
     CatalogExpression, ExpressionPurpose, decode_catalog_expression_record,
-    validate_expression_binding,
+    is_row_local_expression, validate_expression_binding,
 };
 use crate::index_key::{DeriveIndexKeyError, derive_index_key};
 use crate::metadata::{EngineMetadata, Lifecycle};
@@ -1466,7 +1466,10 @@ impl<'db> InvocationTransaction<'db> {
         let expression = self
             .read_catalog_expression(expression_id)?
             .ok_or(TransactionError::CorruptCatalog)?;
-        if expression.purpose != purpose {
+        if expression.purpose != purpose
+            || (purpose == ExpressionPurpose::Check
+                && !is_row_local_expression(&expression.expression))
+        {
             return Err(TransactionError::CorruptCatalog);
         }
         validate_expression_binding(
@@ -1506,7 +1509,10 @@ impl<'db> InvocationTransaction<'db> {
                 let expression = self
                     .read_catalog_expression(*expression_id)?
                     .ok_or(TransactionError::CorruptCatalog)?;
-                if expression.purpose != expected_purpose {
+                if expression.purpose != expected_purpose
+                    || (expected_purpose == ExpressionPurpose::Check
+                        && !is_row_local_expression(&expression.expression))
+                {
                     return Err(TransactionError::CorruptCatalog);
                 }
                 validate_expression_binding(
