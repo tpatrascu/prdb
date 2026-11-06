@@ -533,4 +533,13 @@
 - A real-redb regression covers table-owner and inherited schema-level `MANAGE_POLICIES` authorization, policy create/update/drop, denial without authority, empty-recipient rejection, epoch publication, and durable outcomes.
 - Verification: `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` passed in the prescribed Nix shell; all 210 tests across 18 test targets passed. Changed Markdown local links and `git diff --check` passed.
 - Contract: [permission DDL](../../specs/ddl-permissions.md).
-- Remaining: constraint DDL authorization, durable identity tombstones, credential-backed final-administrator checks, authenticated control-channel integration, and deterministic authorization-change race coverage remain open.
+- Remaining: non-foreign-key constraint DDL authorization, durable identity tombstones, credential-backed final-administrator checks, authenticated control-channel integration, and deterministic authorization-change race coverage remain open.
+
+## SM-5 dependency: foreign-key DDL authorization — in progress
+
+- `StorageManager::commit_authorized_foreign_key_ddl` accepts add/drop batches for foreign keys on existing tables. Source authority is table ownership or inherited `ALTER` on the table/schema. Creation separately requires inherited `REFERENCES` on the target table or every referenced key column; drop requires only source `ALTER`.
+- The route requires paired constraint/object/target-dependency records and write-epoch advances for both source and referenced tables. It guards the authenticated actor, full membership graph, source/target table and schema records, referenced key/column records, and applicable authority grants through publication. Request, membership, column, and grant-lookup work is bounded.
+- A real-redb regression covers column-level `REFERENCES` with table `ALTER`, denial when either permission is missing, removal without target `REFERENCES`, durable outcomes, and atomic source/target epoch publication.
+- Contracts: [schema DDL](../../specs/ddl-schema.md) and [permission DDL](../../specs/ddl-permissions.md).
+- Verification: the prescribed Nix-shell workspace build, formatting check, Clippy with warnings denied, and workspace tests passed; all 211 tests across 18 test targets passed. Changed Markdown local links and `git diff --check` passed.
+- Remaining: authorization routes for NOT NULL, CHECK, PRIMARY KEY, and UNIQUE DDL; deterministic authorization-change race coverage; and authenticated control-channel integration remain open.

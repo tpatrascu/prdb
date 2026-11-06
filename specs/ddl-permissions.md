@@ -32,6 +32,8 @@ Schema `CREATE` permits creating tables and taking ownership. Object ownership i
 
 `StorageManager::commit_authorized_policy_ddl` accepts row/cell policy and target changes, their expression/object/dependency records, and the required table write-epoch advances for existing tables. Each surviving policy must retain at least one recipient. For every affected table, the actor must own the table through the inherited role closure or hold inherited `MANAGE_POLICIES` directly on the table or its schema. The route guards the actor, membership graph, table/schema ownership records, and applicable grants through publication; successful DDL audit events must name the authenticated actor.
 
+`StorageManager::commit_authorized_foreign_key_ddl` accepts foreign-key additions/removals on existing tables. The actor needs source-table ownership or inherited `ALTER` on the source table or its schema. Creation also requires inherited `REFERENCES` on the referenced table or on every referenced key column; removal requires no `REFERENCES` grant. The route guards the membership graph, target constraint/columns, and applicable grants through publication, and advances both source and referenced table write epochs. Other constraint kinds do not use this route.
+
 Grant/revoke adds/removes the specified direct grant. Another inherited role grant can still provide authority; revoking one source is not an explicit deny. Policy restrictions provide mandatory intersections. Show grant provenance to authorized administrators.
 
 ## Policy Syntax

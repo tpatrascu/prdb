@@ -4291,13 +4291,9 @@ fn storage_manager_authorizes_policy_ddl_for_owners_and_inherited_manage_policie
         policy_target,
     ];
     assert_eq!(
-        storage.commit_catalog_and_audit(
-            id(0x80),
-            admin_role,
-            9_999,
-            &setup_writes,
-            &[setup_audit],
-        )?,
+        storage
+            .commit_catalog_and_audit(id(0x80), admin_role, 9_999, &setup_writes, &[setup_audit],)
+            .map_err(|error| format!("base catalog setup: {error:?}"))?,
         1
     );
 
@@ -4565,6 +4561,256 @@ fn storage_manager_authorizes_policy_ddl_for_owners_and_inherited_manage_policie
         table_payload(5).as_slice()
     );
     assert!(catalog.get(added_policy_key.as_slice())?.is_none());
+    Ok(())
+}
+
+#[test]
+fn storage_manager_separates_foreign_key_alter_and_references_authority()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let alter_and_reference_user = id(0x90);
+    let reference_only_user = id(0x91);
+    let alter_only_user = id(0x92);
+    let target_table_id = id(81);
+    let source_table_id = id(82);
+    let target_column_id = id(83);
+    let target_constraint_id = id(85);
+    let foreign_key_id = id(86);
+    let schema_id = id(80);
+    let admin_role = builtin_owner_id();
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let foreign_key_key = id_catalog_key(8, foreign_key_id);
+    let foreign_key_object_key = id_catalog_key(2, foreign_key_id);
+    let target_edge = dependency_write(foreign_key_id, target_constraint_id, 3);
+
+    let mut setup_writes = foreign_key_catalog_writes(false, true)
+        .into_iter()
+        .filter(|write| {
+            write.key != foreign_key_key
+                && write.key != foreign_key_object_key
+                && write.key != target_edge.key
+        })
+        .collect::<Vec<_>>();
+    setup_writes.extend([
+        principal_write_with_name(alter_and_reference_user, 1, 1, "alter_reference_user"),
+        object_write_with_name(alter_and_reference_user, 8, "alter_reference_user"),
+        principal_write_with_name(reference_only_user, 1, 1, "reference_only_user"),
+        object_write_with_name(reference_only_user, 8, "reference_only_user"),
+        principal_write_with_name(alter_only_user, 1, 1, "alter_only_user"),
+        object_write_with_name(alter_only_user, 8, "alter_only_user"),
+    ]);
+    let mut setup_audit = audit_event(0x70);
+    setup_audit.actor_id = Some(admin_role);
+    assert_eq!(
+        storage
+            .commit_catalog_and_audit(id(0x70), admin_role, 9_999, &setup_writes, &[setup_audit],)
+            .map_err(|error| format!("base catalog setup: {error:?}"))?,
+        1
+    );
+    let bump_principal_epoch = |principal_id, name: &str| {
+        let mut write = principal_write_with_name(principal_id, 1, 2, name);
+        write.expected_value = Some(
+            principal_write_with_name(principal_id, 1, 1, name)
+                .payload
+                .unwrap(),
+        );
+        write
+    };
+    let authority_setup = [
+        grant_write(
+            alter_and_reference_user,
+            source_table_id,
+            8,
+            1,
+            source_table_id,
+            admin_role,
+        ),
+        dependency_write(alter_and_reference_user, source_table_id, 5),
+        grant_write(
+            alter_and_reference_user,
+            target_table_id,
+            6,
+            2,
+            target_column_id,
+            admin_role,
+        ),
+        dependency_write(alter_and_reference_user, target_column_id, 5),
+        grant_write(
+            reference_only_user,
+            target_table_id,
+            6,
+            1,
+            target_table_id,
+            admin_role,
+        ),
+        dependency_write(reference_only_user, target_table_id, 5),
+        grant_write(
+            alter_only_user,
+            source_table_id,
+            8,
+            1,
+            source_table_id,
+            admin_role,
+        ),
+        dependency_write(alter_only_user, source_table_id, 5),
+        bump_principal_epoch(alter_and_reference_user, "alter_reference_user"),
+        bump_principal_epoch(reference_only_user, "reference_only_user"),
+        bump_principal_epoch(alter_only_user, "alter_only_user"),
+    ];
+    let mut authority_setup_audit = audit_event(0x75);
+    authority_setup_audit.actor_id = Some(admin_role);
+    assert_eq!(
+        storage
+            .commit_catalog_and_audit(
+                id(0x75),
+                admin_role,
+                9_999,
+                &authority_setup,
+                &[authority_setup_audit],
+            )
+            .map_err(|error| format!("authority setup: {error:?}"))?,
+        2
+    );
+
+    let foreign_key_definition = foreign_key_catalog_writes(true, true)
+        .into_iter()
+        .find(|write| write.key == foreign_key_key)
+        .ok_or("missing foreign-key test definition")?;
+    let foreign_key_object = object_write(foreign_key_id, 6);
+    let add_edge = target_edge.clone();
+    let mut source_table_add = table_write_with_versions(source_table_id, schema_id, 1, 2);
+    source_table_add.expected_value = table_write(source_table_id, schema_id).payload;
+    let mut target_table_add = table_write_with_versions(target_table_id, schema_id, 1, 2);
+    target_table_add.expected_value = table_write(target_table_id, schema_id).payload;
+    let mut alter_only_audit = audit_event(0x71);
+    alter_only_audit.actor_id = Some(alter_only_user);
+    assert_eq!(
+        storage.commit_authorized_foreign_key_ddl(
+            id(0x71),
+            alter_only_user,
+            9_999,
+            &[
+                foreign_key_definition.clone(),
+                foreign_key_object.clone(),
+                add_edge.clone(),
+                source_table_add.clone(),
+                target_table_add.clone(),
+            ],
+            &[alter_only_audit],
+        ),
+        Err(CommitError::DdlAuthorizationDenied)
+    );
+
+    let mut alter_reference_audit = audit_event(0x72);
+    alter_reference_audit.actor_id = Some(alter_and_reference_user);
+    assert_eq!(
+        storage.commit_authorized_foreign_key_ddl(
+            id(0x72),
+            alter_and_reference_user,
+            9_999,
+            &[
+                foreign_key_definition.clone(),
+                foreign_key_object.clone(),
+                add_edge.clone(),
+                source_table_add,
+                target_table_add,
+            ],
+            &[alter_reference_audit],
+        )?,
+        3
+    );
+
+    let mut removed_foreign_key = foreign_key_definition.clone();
+    removed_foreign_key.expected_value = foreign_key_definition.payload.clone();
+    removed_foreign_key.payload = None;
+    let mut removed_object = foreign_key_object.clone();
+    removed_object.expected_value = foreign_key_object.payload.clone();
+    removed_object.payload = None;
+    let mut removed_edge = add_edge.clone();
+    removed_edge.expected_value = add_edge.payload.clone();
+    removed_edge.payload = None;
+    let mut source_table_drop = table_write_with_versions(source_table_id, schema_id, 1, 3);
+    source_table_drop.expected_value =
+        table_write_with_versions(source_table_id, schema_id, 1, 2).payload;
+    let mut target_table_drop = table_write_with_versions(target_table_id, schema_id, 1, 3);
+    target_table_drop.expected_value =
+        table_write_with_versions(target_table_id, schema_id, 1, 2).payload;
+    let mut alter_only_drop_audit = audit_event(0x73);
+    alter_only_drop_audit.actor_id = Some(alter_only_user);
+    assert_eq!(
+        storage.commit_authorized_foreign_key_ddl(
+            id(0x73),
+            alter_only_user,
+            9_999,
+            &[
+                removed_foreign_key,
+                removed_object,
+                removed_edge,
+                source_table_drop,
+                target_table_drop,
+            ],
+            &[alter_only_drop_audit],
+        )?,
+        4
+    );
+
+    let mut reference_only_audit = audit_event(0x74);
+    reference_only_audit.actor_id = Some(reference_only_user);
+    let mut source_table_reference_only =
+        table_write_with_versions(source_table_id, schema_id, 1, 4);
+    source_table_reference_only.expected_value =
+        table_write_with_versions(source_table_id, schema_id, 1, 3).payload;
+    let mut target_table_reference_only =
+        table_write_with_versions(target_table_id, schema_id, 1, 4);
+    target_table_reference_only.expected_value =
+        table_write_with_versions(target_table_id, schema_id, 1, 3).payload;
+    assert_eq!(
+        storage.commit_authorized_foreign_key_ddl(
+            id(0x74),
+            reference_only_user,
+            9_999,
+            &[
+                foreign_key_definition,
+                foreign_key_object,
+                add_edge.clone(),
+                source_table_reference_only,
+                target_table_reference_only,
+            ],
+            &[reference_only_audit],
+        ),
+        Err(CommitError::DdlAuthorizationDenied)
+    );
+
+    assert_eq!(commit_sequence(&database)?, 4);
+    for (invocation_id, principal_id, status) in [
+        (id(0x71), alter_only_user, OutcomeStatus::Aborted),
+        (id(0x72), alter_and_reference_user, OutcomeStatus::Committed),
+        (id(0x73), alter_only_user, OutcomeStatus::Committed),
+        (id(0x74), reference_only_user, OutcomeStatus::Aborted),
+    ] {
+        assert_eq!(
+            lookup_outcome(&database, invocation_id, principal_id, 1)?
+                .unwrap()
+                .status,
+            status
+        );
+    }
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    assert!(catalog.get(foreign_key_key.as_slice())?.is_none());
+    assert!(catalog.get(foreign_key_object_key.as_slice())?.is_none());
+    assert!(catalog.get(add_edge.key.as_slice())?.is_none());
+    assert!(
+        read.open_table(schema::AUDIT)?
+            .get(&[0x71; 16][..])?
+            .is_none()
+    );
+    assert!(
+        read.open_table(schema::AUDIT)?
+            .get(&[0x74; 16][..])?
+            .is_none()
+    );
     Ok(())
 }
 

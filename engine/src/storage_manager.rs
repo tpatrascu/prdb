@@ -2,10 +2,11 @@
 
 use crate::audit::AuditEvent;
 use crate::commit::{
-    CatalogWrite, CommitError, commit_authorized_identity_ddl_with_fences,
-    commit_authorized_index_ddl_with_fences, commit_authorized_membership_ddl_with_fences,
-    commit_authorized_object_grant_ddl_with_fences, commit_authorized_policy_ddl_with_fences,
-    commit_authorized_system_privilege_ddl_with_fences, commit_catalog_and_audit_with_fences,
+    CatalogWrite, CommitError, commit_authorized_foreign_key_ddl_with_fences,
+    commit_authorized_identity_ddl_with_fences, commit_authorized_index_ddl_with_fences,
+    commit_authorized_membership_ddl_with_fences, commit_authorized_object_grant_ddl_with_fences,
+    commit_authorized_policy_ddl_with_fences, commit_authorized_system_privilege_ddl_with_fences,
+    commit_catalog_and_audit_with_fences,
 };
 use crate::ddl_fence::{DdlFenceCoordinator, DdlFenceManager};
 use crate::outcome::{InvocationOutcome, lookup_outcome};
@@ -306,6 +307,28 @@ impl<'db> StorageManager<'db> {
         audit_events: &[AuditEvent],
     ) -> Result<u64, CommitError> {
         commit_authorized_policy_ddl_with_fences(
+            self.database,
+            &self.ddl_fences,
+            invocation_id,
+            authenticated_principal_id,
+            retention_deadline_us,
+            catalog_writes,
+            audit_events,
+        )
+    }
+
+    /// Authorize and commit foreign-key additions/removals on existing
+    /// tables. Creation requires source-table `ALTER` and target-table or
+    /// target-column `REFERENCES`; removal requires source-table `ALTER`.
+    pub fn commit_authorized_foreign_key_ddl(
+        &self,
+        invocation_id: [u8; 16],
+        authenticated_principal_id: [u8; 16],
+        retention_deadline_us: i64,
+        catalog_writes: &[CatalogWrite],
+        audit_events: &[AuditEvent],
+    ) -> Result<u64, CommitError> {
+        commit_authorized_foreign_key_ddl_with_fences(
             self.database,
             &self.ddl_fences,
             invocation_id,
