@@ -4,6 +4,9 @@ pub const MAX_RELATIONS_PER_PAGE: usize = 128;
 pub const MAX_SCHEMAS_PER_PAGE: usize = 128;
 pub const MAX_COLUMNS_PER_PAGE: usize = 128;
 pub const MAX_METADATA_PAGE_BYTES: usize = 1_048_576;
+pub const SCHEMA_CURSOR_TOKEN_KIND: u8 = 1;
+pub const RELATION_CURSOR_TOKEN_KIND: u8 = 2;
+pub const COLUMN_CURSOR_TOKEN_KIND: u8 = 3;
 
 /// One relation admitted by schema usage and a data grant.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -52,6 +55,9 @@ impl ColumnScanCursor {
 
     /// Decode a cursor token from its fixed-width wire form.
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != 16 || bytes[0] != COLUMN_CURSOR_TOKEN_KIND {
+            return None;
+        }
         Some(Self {
             token: bytes.try_into().ok()?,
         })
@@ -87,6 +93,9 @@ impl SchemaScanCursor {
 
     /// Decode a cursor token from its fixed-width wire form.
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != 16 || bytes[0] != SCHEMA_CURSOR_TOKEN_KIND {
+            return None;
+        }
         Some(Self {
             token: bytes.try_into().ok()?,
         })
@@ -114,6 +123,9 @@ impl RelationScanCursor {
 
     /// Decode a cursor token from its fixed-width wire form.
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != 16 || bytes[0] != RELATION_CURSOR_TOKEN_KIND {
+            return None;
+        }
         Some(Self {
             token: bytes.try_into().ok()?,
         })

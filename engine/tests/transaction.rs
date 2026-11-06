@@ -1393,6 +1393,13 @@ fn schema_listing_includes_only_usage_grants_and_pages_by_schema_id()
     assert_eq!(first.schemas[0].name, "app");
     let cursor = first.continuation.expect("another visible schema");
     let serialized_cursor = cursor.to_bytes();
+    assert!(
+        prdb_engine::metadata_discovery::RelationScanCursor::from_bytes(&serialized_cursor)
+            .is_none()
+    );
+    assert!(
+        prdb_engine::metadata_discovery::ColumnScanCursor::from_bytes(&serialized_cursor).is_none()
+    );
     let cursor = prdb_engine::metadata_discovery::SchemaScanCursor::from_bytes(&serialized_cursor)
         .expect("cursor wire form is fixed width");
     let mut other_invocation =
@@ -1444,7 +1451,7 @@ fn schema_cursor_rejects_modified_wire_tokens() -> Result<(), Box<dyn std::error
     let first = invocation.list_authorized_schemas(1, None, &context, &grants, &[])?;
     let cursor = first.continuation.expect("another visible schema");
     let mut bytes = cursor.to_bytes();
-    bytes[0] ^= 1;
+    bytes[1] ^= 1;
     let modified = prdb_engine::metadata_discovery::SchemaScanCursor::from_bytes(&bytes).unwrap();
     assert!(matches!(
         invocation.list_authorized_schemas(1, Some(modified), &context, &grants, &[]),
@@ -1672,6 +1679,8 @@ fn column_grants_can_discover_a_relation_and_pages_are_snapshot_scoped()
     assert_eq!(first.relations[0].name, "metrics");
     let cursor = first.continuation.expect("second granted relation");
     let cursor_bytes = cursor.to_bytes();
+    assert!(prdb_engine::metadata_discovery::SchemaScanCursor::from_bytes(&cursor_bytes).is_none());
+    assert!(prdb_engine::metadata_discovery::ColumnScanCursor::from_bytes(&cursor_bytes).is_none());
     let cursor = prdb_engine::metadata_discovery::RelationScanCursor::from_bytes(&cursor_bytes)
         .expect("relation cursor wire form is fixed width");
     let mut other_invocation =
@@ -1896,6 +1905,10 @@ fn authorized_column_description_pages_bind_the_snapshot_and_order()
     assert_eq!(first.columns[0].ordinal, 0);
     let cursor = first.continuation.expect("second column");
     let cursor_bytes = cursor.to_bytes();
+    assert!(prdb_engine::metadata_discovery::SchemaScanCursor::from_bytes(&cursor_bytes).is_none());
+    assert!(
+        prdb_engine::metadata_discovery::RelationScanCursor::from_bytes(&cursor_bytes).is_none()
+    );
     let cursor = prdb_engine::metadata_discovery::ColumnScanCursor::from_bytes(&cursor_bytes)
         .expect("column cursor wire form is fixed width");
 

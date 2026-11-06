@@ -32,7 +32,7 @@ The first scoped statistics path, `InvocationTransaction::estimate_authorized_sc
 
 `InvocationTransaction::list_authorized_schemas` returns schema IDs and names only for schemas with schema USAGE, in bounded pages ordered by stable schema ID. Its continuation is limited to the invocation that created it and does not disclose hidden schema totals. Serialized IPC cursor support and `information_schema` scans remain future work.
 
-Schema, relation, and column continuation tokens have a fixed 16-byte wire form and are backed by one-use server-side state bound to the invocation and authorization inputs. Modified, replayed, or cross-invocation tokens fail closed.
+Schema, relation, and column continuation tokens have a fixed 16-byte wire form with a cursor-kind byte and 15 OS-random bytes. One-use server-side state binds them to the invocation and authorization inputs. Modified, replayed, cross-invocation, or cross-kind tokens fail closed.
 
 `InvocationTransaction::resolve_authorized_schema` performs exact, case-sensitive lookup over the same filtered pages. Hidden and nonexistent schema names both return no result; the returned ID is only a logical reference and grants no authority.
 

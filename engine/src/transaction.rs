@@ -19,8 +19,9 @@ use crate::expression::{
 use crate::index_key::{DeriveIndexKeyError, derive_index_key};
 use crate::metadata::{EngineMetadata, Lifecycle};
 use crate::metadata_discovery::{
-    AuthorizedRelationDescription, ColumnScanCursor, MAX_COLUMNS_PER_PAGE, MAX_METADATA_PAGE_BYTES,
-    MAX_RELATIONS_PER_PAGE, MAX_SCHEMAS_PER_PAGE, RelationScanCursor, SchemaScanCursor,
+    AuthorizedRelationDescription, COLUMN_CURSOR_TOKEN_KIND, ColumnScanCursor,
+    MAX_COLUMNS_PER_PAGE, MAX_METADATA_PAGE_BYTES, MAX_RELATIONS_PER_PAGE, MAX_SCHEMAS_PER_PAGE,
+    RELATION_CURSOR_TOKEN_KIND, RelationScanCursor, SCHEMA_CURSOR_TOKEN_KIND, SchemaScanCursor,
     VisibleColumn, VisibleColumnPage, VisibleRelation, VisibleRelationPage, VisibleRelationSchema,
     VisibleSchema, VisibleSchemaPage,
 };
@@ -1088,7 +1089,10 @@ impl<'db> InvocationTransaction<'db> {
                     .last()
                     .map(|relation| relation.relation_id)
                     .ok_or(TransactionError::InvalidMetadataRequest)?;
-                let token = new_metadata_cursor_token(&mut active_scan.used_tokens)?;
+                let token = new_metadata_cursor_token(
+                    &mut active_scan.used_tokens,
+                    RELATION_CURSOR_TOKEN_KIND,
+                )?;
                 active_scan.continuation = Some((token, after_id));
                 Some(RelationScanCursor { token })
             } else {
@@ -1332,7 +1336,10 @@ impl<'db> InvocationTransaction<'db> {
                     .last()
                     .map(|column| column.ordinal)
                     .ok_or(TransactionError::InvalidMetadataRequest)?;
-                let token = new_metadata_cursor_token(&mut active_scan.used_tokens)?;
+                let token = new_metadata_cursor_token(
+                    &mut active_scan.used_tokens,
+                    COLUMN_CURSOR_TOKEN_KIND,
+                )?;
                 active_scan.continuation = Some((token, after_ordinal));
                 Some(ColumnScanCursor { token })
             } else {
@@ -1508,7 +1515,10 @@ impl<'db> InvocationTransaction<'db> {
                     .last()
                     .map(|schema| schema.schema_id)
                     .ok_or(TransactionError::InvalidMetadataRequest)?;
-                let token = new_metadata_cursor_token(&mut active_scan.used_tokens)?;
+                let token = new_metadata_cursor_token(
+                    &mut active_scan.used_tokens,
+                    SCHEMA_CURSOR_TOKEN_KIND,
+                )?;
                 active_scan.continuation = Some((token, after_id));
                 Some(SchemaScanCursor { token })
             } else {
@@ -4538,10 +4548,12 @@ fn catalog_id_list(record: &CatalogRecord, tag: u16) -> Result<Vec<[u8; 16]>, Tr
 
 fn new_metadata_cursor_token(
     used_tokens: &mut HashSet<[u8; 16]>,
+    token_kind: u8,
 ) -> Result<[u8; 16], TransactionError> {
     for _ in 0..8 {
         let mut token = [0; 16];
-        getrandom::fill(&mut token).map_err(|_| TransactionError::RandomnessUnavailable)?;
+        token[0] = token_kind;
+        getrandom::fill(&mut token[1..]).map_err(|_| TransactionError::RandomnessUnavailable)?;
         if token != [0; 16] && used_tokens.insert(token) {
             return Ok(token);
         }
