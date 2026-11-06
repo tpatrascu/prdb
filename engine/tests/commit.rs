@@ -1573,6 +1573,205 @@ fn catalog_commit_rejects_dangling_dependency_edges_and_records_abort()
 }
 
 #[test]
+fn storage_manager_authorizes_not_null_constraint_ddl_by_table_alter()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let table_id = id(82);
+    let schema_id = id(80);
+    let column_id = id(84);
+    let constraint_id = id(0xa1);
+    let table_owner = id(0xa2);
+    let outsider = id(0xa3);
+    let admin = builtin_owner_id();
+
+    let mut setup = foreign_key_catalog_writes(false, true);
+    let foreign_key_key = id_catalog_key(8, id(86));
+    let foreign_key_object_key = id_catalog_key(2, id(86));
+    let target_edge = dependency_write(id(86), id(85), 3);
+    setup.retain(|write| {
+        write.key != foreign_key_key
+            && write.key != foreign_key_object_key
+            && write.key != target_edge.key
+    });
+    setup.extend([
+        principal_write_with_name(table_owner, 1, 1, "constraint_owner"),
+        object_write_with_name(table_owner, 8, "constraint_owner"),
+        principal_write_with_name(outsider, 1, 1, "constraint_outsider"),
+        object_write_with_name(outsider, 8, "constraint_outsider"),
+    ]);
+    let mut setup_audit = identity_audit_event(0xa4, admin, table_id);
+    setup_audit.target_ids = vec![table_id, table_owner, outsider];
+    assert_eq!(
+        commit_catalog_and_audit(&database, id(0xa4), admin, 9_999, &setup, &[setup_audit],)?,
+        1
+    );
+    let alter_grant = grant_write(table_owner, table_id, 8, 1, table_id, admin);
+    let old_principal = principal_write_with_name(table_owner, 1, 1, "constraint_owner");
+    let mut bumped_principal = principal_write_with_name(table_owner, 1, 2, "constraint_owner");
+    bumped_principal.expected_value = old_principal.payload;
+    let mut grant_audit = identity_audit_event(0xa9, admin, table_id);
+    grant_audit.target_ids = vec![table_id, table_owner];
+    assert_eq!(
+        commit_catalog_and_audit(
+            &database,
+            id(0xa9),
+            admin,
+            9_999,
+            &[
+                alter_grant,
+                dependency_write(table_owner, table_id, 5),
+                bumped_principal,
+            ],
+            &[grant_audit],
+        )?,
+        2
+    );
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+
+    let mut column_not_null = column_write_not_null(column_id, table_id, "object_84");
+    column_not_null.expected_value = column_write(column_id, table_id, "object_84").payload;
+    let constraint = constraint_write(constraint_id, table_id, 1, &[column_id], None, &[], None);
+    let table_epoch = |next_epoch| {
+        let mut write = table_write_with_versions(table_id, schema_id, 1, next_epoch);
+        write.expected_value =
+            table_write_with_versions(table_id, schema_id, 1, next_epoch - 1).payload;
+        write
+    };
+    let add_changes = [
+        constraint.clone(),
+        object_write(constraint_id, 6),
+        column_not_null.clone(),
+        table_epoch(2),
+    ];
+    let row_key = table_row_key(table_id, id(0xac));
+    let null_row = encode_tuple(
+        &[ColumnSchema {
+            scalar_type: ScalarType::Bytea,
+            nullable: true,
+        }],
+        1,
+        &[None],
+    )?;
+    assert_eq!(
+        commit_rows(
+            &database,
+            id(0xab),
+            admin,
+            9_999,
+            &[RowWrite {
+                key: row_key,
+                expected_version: None,
+                payload: Some(null_row),
+            }],
+        )?,
+        3
+    );
+    let denied_audit = identity_audit_event(0xa5, outsider, constraint_id);
+    assert_eq!(
+        storage.commit_authorized_constraint_ddl(
+            id(0xa5),
+            outsider,
+            9_999,
+            &add_changes,
+            &[denied_audit],
+        ),
+        Err(CommitError::DdlAuthorizationDenied)
+    );
+    assert_eq!(commit_sequence(&database)?, 3);
+    assert_eq!(
+        lookup_outcome(&database, id(0xa5), outsider, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Aborted
+    );
+
+    let invalid_audit = identity_audit_event(0xa6, table_owner, constraint_id);
+    assert_eq!(
+        storage.commit_authorized_constraint_ddl(
+            id(0xa6),
+            table_owner,
+            9_999,
+            &add_changes,
+            &[invalid_audit],
+        ),
+        Err(CommitError::NotNullViolation)
+    );
+    assert_eq!(commit_sequence(&database)?, 3);
+    assert_eq!(
+        lookup_outcome(&database, id(0xa6), table_owner, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Aborted
+    );
+
+    let non_null_row = encode_tuple(
+        &[ColumnSchema {
+            scalar_type: ScalarType::Bytea,
+            nullable: true,
+        }],
+        1,
+        &[Some(ScalarValue::Bytea(b"ready".to_vec()))],
+    )?;
+    assert_eq!(
+        commit_rows(
+            &database,
+            id(0xad),
+            admin,
+            9_999,
+            &[RowWrite {
+                key: row_key,
+                expected_version: Some(3),
+                payload: Some(non_null_row),
+            }],
+        )?,
+        4
+    );
+    let mut owner_audit = identity_audit_event(0xae, table_owner, constraint_id);
+    assert_eq!(
+        storage.commit_authorized_constraint_ddl(
+            id(0xae),
+            table_owner,
+            9_999,
+            &add_changes,
+            &[owner_audit.clone()],
+        )?,
+        5
+    );
+    StorageManager::new(&database, Duration::from_millis(100))?;
+
+    let mut removed_constraint = constraint;
+    removed_constraint.expected_value = removed_constraint.payload.clone();
+    removed_constraint.payload = None;
+    let mut removed_object = object_write(constraint_id, 6);
+    removed_object.expected_value = removed_object.payload.clone();
+    removed_object.payload = None;
+    let mut column_nullable = column_write(column_id, table_id, "object_84");
+    column_nullable.expected_value = column_not_null.payload;
+    let drop_changes = [
+        removed_constraint,
+        removed_object,
+        column_nullable,
+        table_epoch(3),
+    ];
+    owner_audit.event_id = id(0xaf);
+    owner_audit.correlation_id = id(0xb0);
+    owner_audit.target_ids = vec![constraint_id];
+    assert_eq!(
+        storage.commit_authorized_constraint_ddl(
+            id(0xaf),
+            table_owner,
+            9_999,
+            &drop_changes,
+            &[owner_audit],
+        )?,
+        6
+    );
+    StorageManager::new(&database, Duration::from_millis(100))?;
+    Ok(())
+}
+
+#[test]
 fn catalog_commit_checks_dependency_endpoints_in_the_final_catalog()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
