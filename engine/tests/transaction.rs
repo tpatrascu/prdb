@@ -1368,7 +1368,7 @@ fn relation_listing_rejects_grants_not_present_in_the_pinned_catalog()
 }
 
 #[test]
-fn schema_listing_includes_only_usage_grants_and_pages_by_schema_id()
+fn schema_listing_includes_the_public_namespace_and_usage_grants()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
@@ -1398,8 +1398,7 @@ fn schema_listing_includes_only_usage_grants_and_pages_by_schema_id()
     let mut invocation = InvocationTransaction::begin(&database, [185; 16], [9; 16], 9_999, 1, 64)?;
     let first = invocation.list_authorized_schemas(1, None, &context, &grants, &[])?;
     assert_eq!(first.schemas.len(), 1);
-    assert_eq!(first.schemas[0].schema_id, app_schema_id);
-    assert_eq!(first.schemas[0].name, "app");
+    assert_eq!(first.schemas[0].name, "information_schema");
     let cursor = first.continuation.expect("another visible schema");
     let serialized_cursor = cursor.to_bytes();
     assert!(
@@ -1420,9 +1419,19 @@ fn schema_listing_includes_only_usage_grants_and_pages_by_schema_id()
     let second =
         invocation.list_authorized_schemas(1, Some(cursor.clone()), &context, &grants, &[])?;
     assert_eq!(second.schemas.len(), 1);
-    assert_eq!(second.schemas[0].schema_id, public_schema_id);
-    assert_eq!(second.schemas[0].name, "public");
-    assert!(second.continuation.is_none());
+    assert_eq!(second.schemas[0].schema_id, app_schema_id);
+    assert_eq!(second.schemas[0].name, "app");
+    let third = invocation.list_authorized_schemas(
+        1,
+        second.continuation.clone(),
+        &context,
+        &grants,
+        &[],
+    )?;
+    assert_eq!(third.schemas.len(), 1);
+    assert_eq!(third.schemas[0].schema_id, public_schema_id);
+    assert_eq!(third.schemas[0].name, "public");
+    assert!(third.continuation.is_none());
     assert!(matches!(
         invocation.list_authorized_schemas(1, Some(cursor), &context, &grants, &[]),
         Err(TransactionError::InvalidMetadataRequest)
@@ -1627,19 +1636,21 @@ fn catalog_authorized_schema_listing_derives_the_invocation_scope()
     let mut invocation = InvocationTransaction::begin(&database, [191; 16], [9; 16], 9_999, 1, 64)?;
     let first = invocation.list_catalog_authorized_schemas(1, None)?;
     assert_eq!(first.schemas.len(), 1);
-    assert_eq!(first.schemas[0].schema_id, [0x91; 16]);
-    assert_eq!(first.schemas[0].name, "app");
+    assert_eq!(first.schemas[0].name, "information_schema");
     let continuation = first.continuation.expect("public schema follows");
     let second = invocation.list_catalog_authorized_schemas(1, Some(continuation))?;
     assert_eq!(second.schemas.len(), 1);
-    assert_eq!(second.schemas[0].schema_id, [0x93; 16]);
-    assert_eq!(second.schemas[0].name, "public");
-    assert!(second.continuation.is_none());
+    assert_eq!(second.schemas[0].schema_id, [0x91; 16]);
+    assert_eq!(second.schemas[0].name, "app");
+    let third = invocation.list_catalog_authorized_schemas(1, second.continuation)?;
+    assert_eq!(third.schemas[0].schema_id, [0x93; 16]);
+    assert_eq!(third.schemas[0].name, "public");
+    assert!(third.continuation.is_none());
     Ok(())
 }
 
 #[test]
-fn information_schema_schemata_exposes_only_authorized_names()
+fn information_schema_schemata_exposes_public_and_authorized_names()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
@@ -1647,12 +1658,133 @@ fn information_schema_schemata_exposes_only_authorized_names()
     let mut invocation = InvocationTransaction::begin(&database, [199; 16], [9; 16], 9_999, 1, 64)?;
     let first = invocation.scan_information_schema_schemata(1, None)?;
     assert_eq!(first.rows.len(), 1);
-    assert_eq!(first.rows[0].schema_name, "app");
+    assert_eq!(first.rows[0].schema_name, "information_schema");
     let continuation = first.continuation.expect("public schema follows");
     let second = invocation.scan_information_schema_schemata(1, Some(continuation))?;
     assert_eq!(second.rows.len(), 1);
-    assert_eq!(second.rows[0].schema_name, "public");
-    assert!(second.continuation.is_none());
+    assert_eq!(second.rows[0].schema_name, "app");
+    let third = invocation.scan_information_schema_schemata(1, second.continuation)?;
+    assert_eq!(third.rows[0].schema_name, "public");
+    assert!(third.continuation.is_none());
+    Ok(())
+}
+
+#[test]
+fn information_schema_builtin_relations_have_public_self_descriptions()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    install_relation_discovery_catalog(&database)?;
+    let mut invocation = InvocationTransaction::begin(&database, [212; 16], [9; 16], 9_999, 1, 64)?;
+
+    let schemata = invocation.scan_information_schema_schemata(1, None)?;
+    assert_eq!(schemata.rows.len(), 1);
+    assert_eq!(schemata.rows[0].schema_name, "information_schema");
+
+    let tables = invocation
+        .scan_information_schema_tables_in_schema("information_schema", 1, None)?
+        .expect("the built-in namespace is public");
+    assert_eq!(tables.rows.len(), 1);
+    assert_eq!(tables.rows[0].table_schema, "information_schema");
+    assert_eq!(tables.rows[0].table_name, "columns");
+    assert_eq!(tables.rows[0].table_type, "VIEW");
+    let tables_continuation = tables
+        .continuation
+        .clone()
+        .expect("built-in relation follows");
+
+    let columns = invocation
+        .scan_information_schema_columns_for_relation("information_schema", "columns", 1, None)?
+        .expect("the built-in relation shape is public");
+    assert_eq!(columns.rows.len(), 1);
+    assert_eq!(columns.rows[0].table_schema, "information_schema");
+    assert_eq!(columns.rows[0].table_name, "columns");
+    assert_eq!(columns.rows[0].column_name, "table_schema");
+    assert_eq!(columns.rows[0].ordinal_position, 1);
+    assert_eq!(columns.rows[0].data_type, "TEXT");
+    assert_eq!(columns.rows[0].is_nullable, "NO");
+    let columns_continuation = columns
+        .continuation
+        .clone()
+        .expect("built-in column follows");
+
+    let mut other_table_invocation =
+        InvocationTransaction::begin(&database, [213; 16], [9; 16], 9_999, 1, 64)?;
+    assert!(matches!(
+        other_table_invocation.scan_information_schema_tables_in_schema(
+            "information_schema",
+            1,
+            Some(tables_continuation),
+        ),
+        Err(TransactionError::InvalidMetadataRequest)
+    ));
+    let mut other_column_invocation =
+        InvocationTransaction::begin(&database, [214; 16], [9; 16], 9_999, 1, 64)?;
+    assert!(matches!(
+        other_column_invocation.scan_information_schema_columns_for_relation(
+            "information_schema",
+            "columns",
+            1,
+            Some(columns_continuation),
+        ),
+        Err(TransactionError::InvalidMetadataRequest)
+    ));
+
+    let description = invocation
+        .resolve_catalog_authorized_relation("information_schema", "columns")?
+        .expect("the public definition resolves");
+    assert_eq!(description.name, "columns");
+    assert_eq!(description.columns.len(), 9);
+    assert_eq!(
+        description
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "table_schema",
+            "table_name",
+            "column_name",
+            "ordinal_position",
+            "data_type",
+            "is_nullable",
+            "character_maximum_length",
+            "numeric_precision",
+            "numeric_scale",
+        ]
+    );
+    assert!(
+        description.columns[6..]
+            .iter()
+            .all(|column| column.nullable)
+    );
+    assert!(
+        description.columns[..6]
+            .iter()
+            .all(|column| !column.nullable)
+    );
+    assert_eq!(description.columns[3].scalar_type, ScalarType::Integer);
+    assert_eq!(description.columns[6].scalar_type, ScalarType::Integer);
+    let schemata_description = invocation
+        .resolve_catalog_authorized_relation("information_schema", "schemata")?
+        .expect("the public schema definition resolves");
+    assert_eq!(schemata_description.columns[0].name, "schema_name");
+    let tables_description = invocation
+        .resolve_catalog_authorized_relation("information_schema", "tables")?
+        .expect("the public table definition resolves");
+    assert_eq!(
+        tables_description
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        ["table_schema", "table_name", "table_type"]
+    );
+
+    let all_tables = invocation.scan_information_schema_tables(1, None)?;
+    assert_eq!(all_tables.rows[0].table_schema, "information_schema");
+    let all_columns = invocation.scan_information_schema_columns(1, None)?;
+    assert_eq!(all_columns.rows[0].table_schema, "information_schema");
     Ok(())
 }
 
@@ -1715,10 +1847,12 @@ fn information_schema_tables_scan_walks_visible_schema_pages()
     let mut invocation = InvocationTransaction::begin(&database, [205; 16], [9; 16], 9_999, 1, 64)?;
     let first = invocation.scan_information_schema_tables(1, None)?;
     assert_eq!(first.rows.len(), 1);
-    assert_eq!(first.rows[0].table_schema, "app");
-    assert_eq!(first.rows[0].table_name, "metrics");
-    assert_eq!(first.rows[0].table_type, "BASE TABLE");
-    let cursor = first.continuation.expect("second relation follows");
+    assert_eq!(first.rows[0].table_schema, "information_schema");
+    assert_eq!(first.rows[0].table_name, "columns");
+    assert_eq!(first.rows[0].table_type, "VIEW");
+    let cursor = first
+        .continuation
+        .expect("second built-in relation follows");
     let cursor_bytes = cursor.to_bytes();
     assert!(
         prdb_engine::metadata_discovery::InformationSchemaTablesCursor::from_bytes(&cursor_bytes)
@@ -1739,12 +1873,30 @@ fn information_schema_tables_scan_walks_visible_schema_pages()
         ),
     )?;
     assert_eq!(second.rows.len(), 1);
-    assert_eq!(second.rows[0].table_schema, "app");
-    assert_eq!(second.rows[0].table_name, "secret");
-    let next_schema = second.continuation.expect("visible public schema follows");
-    let third = invocation.scan_information_schema_tables(1, Some(next_schema))?;
-    assert!(third.rows.is_empty());
-    assert!(third.continuation.is_none());
+    assert_eq!(second.rows[0].table_schema, "information_schema");
+    assert_eq!(second.rows[0].table_name, "schemata");
+    assert_eq!(second.rows[0].table_type, "VIEW");
+    let next_builtin_relation = second
+        .continuation
+        .expect("third built-in relation follows");
+    let third = invocation.scan_information_schema_tables(1, Some(next_builtin_relation))?;
+    assert_eq!(third.rows[0].table_schema, "information_schema");
+    assert_eq!(third.rows[0].table_name, "tables");
+    assert_eq!(third.rows[0].table_type, "VIEW");
+    let next_app = third.continuation.expect("visible app schema follows");
+    let fourth = invocation.scan_information_schema_tables(1, Some(next_app))?;
+    assert_eq!(fourth.rows[0].table_schema, "app");
+    assert_eq!(fourth.rows[0].table_name, "metrics");
+    assert_eq!(fourth.rows[0].table_type, "BASE TABLE");
+    let next_secret = fourth.continuation.expect("second app relation follows");
+    let fifth = invocation.scan_information_schema_tables(1, Some(next_secret))?;
+    assert_eq!(fifth.rows[0].table_schema, "app");
+    assert_eq!(fifth.rows[0].table_name, "secret");
+    assert_eq!(fifth.rows[0].table_type, "BASE TABLE");
+    let next_schema = fifth.continuation.expect("visible public schema follows");
+    let sixth = invocation.scan_information_schema_tables(1, Some(next_schema))?;
+    assert!(sixth.rows.is_empty());
+    assert!(sixth.continuation.is_none());
 
     let mut cross_invocation =
         InvocationTransaction::begin(&database, [206; 16], [9; 16], 9_999, 1, 64)?;
@@ -1854,11 +2006,11 @@ fn information_schema_columns_scan_walks_visible_relation_pages()
     let mut invocation = InvocationTransaction::begin(&database, [209; 16], [9; 16], 9_999, 1, 64)?;
     let first = invocation.scan_information_schema_columns(1, None)?;
     assert_eq!(first.rows.len(), 1);
-    assert_eq!(first.rows[0].table_schema, "app");
-    assert_eq!(first.rows[0].table_name, "metrics");
-    assert_eq!(first.rows[0].column_name, "value");
+    assert_eq!(first.rows[0].table_schema, "information_schema");
+    assert_eq!(first.rows[0].table_name, "columns");
+    assert_eq!(first.rows[0].column_name, "table_schema");
     assert_eq!(first.rows[0].ordinal_position, 1);
-    let cursor = first.continuation.expect("second column follows");
+    let cursor = first.continuation.clone().expect("second column follows");
     let cursor_bytes = cursor.to_bytes();
     assert!(
         prdb_engine::metadata_discovery::InformationSchemaColumnsCursor::from_bytes(&cursor_bytes)
@@ -1873,30 +2025,47 @@ fn information_schema_columns_scan_walks_visible_relation_pages()
     assert!(
         prdb_engine::metadata_discovery::RelationScanCursor::from_bytes(&cursor_bytes).is_none()
     );
-    let second = invocation.scan_information_schema_columns(
-        1,
-        Some(
-            prdb_engine::metadata_discovery::InformationSchemaColumnsCursor::from_bytes(
-                &cursor_bytes,
-            )
-            .expect("columns scan token round trips"),
+    let expected_columns = [
+        ("information_schema", "columns", "table_schema", 1),
+        ("information_schema", "columns", "table_name", 2),
+        ("information_schema", "columns", "column_name", 3),
+        ("information_schema", "columns", "ordinal_position", 4),
+        ("information_schema", "columns", "data_type", 5),
+        ("information_schema", "columns", "is_nullable", 6),
+        (
+            "information_schema",
+            "columns",
+            "character_maximum_length",
+            7,
         ),
-    )?;
-    assert_eq!(second.rows.len(), 1);
-    assert_eq!(second.rows[0].column_name, "value2");
-    assert_eq!(second.rows[0].ordinal_position, 2);
-    let next_relation = second
-        .continuation
-        .expect("visible secret relation follows");
-    let third = invocation.scan_information_schema_columns(1, Some(next_relation))?;
-    assert_eq!(third.rows.len(), 1);
-    assert_eq!(third.rows[0].table_schema, "app");
-    assert_eq!(third.rows[0].table_name, "secret");
-    assert_eq!(third.rows[0].column_name, "secret_value");
-    let next_schema = third.continuation.expect("visible public schema follows");
-    let fourth = invocation.scan_information_schema_columns(1, Some(next_schema))?;
-    assert!(fourth.rows.is_empty());
-    assert!(fourth.continuation.is_none());
+        ("information_schema", "columns", "numeric_precision", 8),
+        ("information_schema", "columns", "numeric_scale", 9),
+        ("information_schema", "schemata", "schema_name", 1),
+        ("information_schema", "tables", "table_schema", 1),
+        ("information_schema", "tables", "table_name", 2),
+        ("information_schema", "tables", "table_type", 3),
+        ("app", "metrics", "value", 1),
+        ("app", "metrics", "value2", 2),
+        ("app", "secret", "secret_value", 1),
+    ];
+    let mut page = first;
+    for (index, (table_schema, table_name, column_name, ordinal_position)) in
+        expected_columns.iter().enumerate()
+    {
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.rows[0].table_schema, *table_schema);
+        assert_eq!(page.rows[0].table_name, *table_name);
+        assert_eq!(page.rows[0].column_name, *column_name);
+        assert_eq!(page.rows[0].ordinal_position, *ordinal_position);
+        if index + 1 < expected_columns.len() {
+            let next = page.continuation.expect("next visible column follows");
+            page = invocation.scan_information_schema_columns(1, Some(next))?;
+        }
+    }
+    let next_schema = page.continuation.expect("visible public schema follows");
+    let final_page = invocation.scan_information_schema_columns(1, Some(next_schema))?;
+    assert!(final_page.rows.is_empty());
+    assert!(final_page.continuation.is_none());
 
     let mut cross_invocation =
         InvocationTransaction::begin(&database, [210; 16], [9; 16], 9_999, 1, 64)?;

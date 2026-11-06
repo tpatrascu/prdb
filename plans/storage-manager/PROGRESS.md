@@ -761,7 +761,7 @@
 
 ## MD-4 dependency: authorized `information_schema.schemata` projection
 
-- Red evidence: `information_schema_schemata_exposes_only_authorized_names` failed before the projection was implemented.
+- Red evidence: `information_schema_schemata_exposes_public_and_authorized_names` failed before the projection was implemented.
 - `InvocationTransaction::scan_information_schema_schemata` reuses the catalog-authorized schema scan and maps each visible schema to a row containing only `schema_name`, preserving page bounds and continuation behavior.
 - The regression pages the `app` and `public` schemas through one invocation and verifies ordering and completion.
 - Contracts: [metadata discovery](../../specs/metadata-discovery.md), [storage manager](../../specs/storage-manager.md), and [metadata discovery plan](../metadata-discovery/README.md).
@@ -798,3 +798,12 @@
 - The real-redb regression pages two columns of `app.metrics`, continues to `app.secret`, advances over empty `public`, verifies cursor-kind isolation, and rejects cross-invocation use and replay.
 - Contracts: [metadata discovery](../../specs/metadata-discovery.md), [storage manager](../../specs/storage-manager.md), and [metadata discovery plan](../metadata-discovery/README.md).
 - Remaining: fixed public self-description rows, SQL binding/execution, connection-local executor handles, and administrative discovery.
+
+## MD-4 dependency: public `information_schema` self-description
+
+- Red evidence: `information_schema_builtin_relations_have_public_self_descriptions` first returned the granted `app` schema instead of the public reserved namespace.
+- Schema discovery now includes `information_schema` as a public exception to user-schema USAGE grants, represented without recursively reading its virtual relations from the catalog. Its fixed logical relations are `columns`, `schemata`, and `tables`; all are reported as `VIEW`.
+- The relation resolver and schema-scoped scans return fixed column IDs, names, ordinals, scalar types, and nullability for all three shapes. Global tables and columns scans include those definitions and retain their existing bounded nested cursors.
+- Real-redb regressions cover the complete `columns` shape, the other relation definitions, paged `VIEW` rows, public schema listing, and global scans across built-in and granted user relations.
+- Contracts: [metadata discovery](../../specs/metadata-discovery.md), [storage manager](../../specs/storage-manager.md), and [metadata discovery plan](../metadata-discovery/README.md).
+- Remaining: SQL binding/execution for the virtual relations, connection-local executor handles, and administrative discovery.

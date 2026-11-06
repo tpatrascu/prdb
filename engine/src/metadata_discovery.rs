@@ -74,7 +74,7 @@ pub struct VisibleColumnPage {
     pub continuation: Option<ColumnScanCursor>,
 }
 
-/// One schema visible through an effective USAGE grant.
+/// One schema visible through USAGE or the reserved public namespace.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VisibleSchema {
     pub schema_id: [u8; 16],

@@ -47,6 +47,9 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 const MAX_INDEX_CHANGES_PER_ROW: usize = 256;
+const INFORMATION_SCHEMA_ID: [u8; 16] = [
+    0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 2,
+];
 const INFORMATION_SCHEMA_COLUMN_EXTRA_BYTES: usize =
     "TIMESTAMP WITH TIME ZONE".len() + "YES".len() + 4 + 3 * 5 + 16;
 
@@ -241,6 +244,8 @@ pub struct InvocationTransaction<'db> {
     active_relation_scan: Option<ActiveRelationScan>,
     active_schema_scan: Option<ActiveSchemaScan>,
     active_column_scan: Option<ActiveColumnScan>,
+    active_builtin_relation_scan: Option<ActiveBuiltinRelationScan>,
+    active_builtin_column_scan: Option<ActiveBuiltinColumnScan>,
     active_information_schema_tables_scan: Option<ActiveInformationSchemaTablesScan>,
     active_information_schema_columns_scan: Option<ActiveInformationSchemaColumnsScan>,
 }
@@ -284,6 +289,30 @@ struct ActiveColumnScan {
     scope: HashSet<(Operation, AccessTarget)>,
     grants: Vec<Grant>,
     dependencies: Vec<AuthorityDependency>,
+    continuation: Option<([u8; 16], u32)>,
+    used_tokens: HashSet<[u8; 16]>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BuiltinRelationScanPurpose {
+    Tables,
+    Columns,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ActiveBuiltinRelationScan {
+    purpose: BuiltinRelationScanPurpose,
+    extra_bytes_per_relation: usize,
+    principal_id: [u8; 16],
+    continuation: Option<([u8; 16], usize)>,
+    used_tokens: HashSet<[u8; 16]>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ActiveBuiltinColumnScan {
+    relation_id: [u8; 16],
+    extra_bytes_per_column: usize,
+    principal_id: [u8; 16],
     continuation: Option<([u8; 16], u32)>,
     used_tokens: HashSet<[u8; 16]>,
 }
@@ -481,6 +510,8 @@ impl<'db> InvocationTransaction<'db> {
             active_relation_scan: None,
             active_schema_scan: None,
             active_column_scan: None,
+            active_builtin_relation_scan: None,
+            active_builtin_column_scan: None,
             active_information_schema_tables_scan: None,
             active_information_schema_columns_scan: None,
         })
@@ -937,6 +968,16 @@ impl<'db> InvocationTransaction<'db> {
                 return Ok(None);
             };
 
+            if schema.schema_id == INFORMATION_SCHEMA_ID {
+                return self.resolve_authorized_relation(
+                    schema.schema_id,
+                    relation_name,
+                    &schema_context,
+                    &schema_grants,
+                    &[],
+                );
+            }
+
             let (relation_roles, relation_grants) =
                 self.load_catalog_relation_discovery_grants(schema.schema_id)?;
             let relation_scope = relation_grants
@@ -1209,6 +1250,7 @@ impl<'db> InvocationTransaction<'db> {
 
     /// Resolve an exact relation name from filtered catalog pages, then
     /// independently recheck authority before returning its declared shape.
+    /// The reserved information_schema relations have fixed public shapes.
     pub fn resolve_authorized_relation(
         &mut self,
         schema_id: [u8; 16],
@@ -1220,6 +1262,34 @@ impl<'db> InvocationTransaction<'db> {
         let result = (|| {
             if relation_name.is_empty() || relation_name.len() > MAX_METADATA_PAGE_BYTES {
                 return Err(TransactionError::InvalidMetadataRequest);
+            }
+            if schema_id == INFORMATION_SCHEMA_ID {
+                self.check_deadline()?;
+                let Some(relation) = builtin_information_schema_relation(relation_name) else {
+                    return Ok(None);
+                };
+                let schema = builtin_information_schema_relation_schema(relation.relation_id)
+                    .ok_or(TransactionError::CorruptCatalog)?;
+                let response_bytes = relation
+                    .name
+                    .len()
+                    .checked_add(24)
+                    .and_then(|bytes| {
+                        schema.columns.iter().try_fold(bytes, |total, column| {
+                            total
+                                .checked_add(column.name.len())
+                                .and_then(|sum| sum.checked_add(32))
+                        })
+                    })
+                    .ok_or(TransactionError::MetadataResultTooLarge)?;
+                if response_bytes > MAX_METADATA_PAGE_BYTES {
+                    return Err(TransactionError::MetadataResultTooLarge);
+                }
+                return Ok(Some(AuthorizedRelationDescription {
+                    relation_id: relation.relation_id,
+                    name: relation.name,
+                    columns: schema.columns,
+                }));
             }
             let mut continuation = None;
             loop {
@@ -1484,7 +1554,8 @@ impl<'db> InvocationTransaction<'db> {
         }
     }
 
-    /// List schemas for which the invocation has schema USAGE.
+    /// List schemas for which the invocation has schema USAGE, plus the public
+    /// reserved information_schema namespace.
     pub fn list_catalog_authorized_schemas(
         &mut self,
         page_limit: usize,
@@ -1591,6 +1662,31 @@ impl<'db> InvocationTransaction<'db> {
         page_limit: usize,
         continuation: Option<RelationScanCursor>,
     ) -> Result<Option<InformationSchemaTablesPage>, TransactionError> {
+        if schema.schema_id == INFORMATION_SCHEMA_ID {
+            let extra_bytes_per_relation = schema
+                .name
+                .len()
+                .checked_add("VIEW".len())
+                .ok_or(TransactionError::MetadataResultTooLarge)?;
+            let page = self.list_builtin_information_schema_relations(
+                page_limit,
+                continuation,
+                BuiltinRelationScanPurpose::Tables,
+                extra_bytes_per_relation,
+            )?;
+            return Ok(Some(InformationSchemaTablesPage {
+                rows: page
+                    .relations
+                    .into_iter()
+                    .map(|relation| InformationSchemaTableRow {
+                        table_schema: schema.name.clone(),
+                        table_name: relation.name,
+                        table_type: "VIEW".to_owned(),
+                    })
+                    .collect(),
+                continuation: page.continuation,
+            }));
+        }
         let extra_bytes_per_relation = schema
             .name
             .len()
@@ -1617,6 +1713,224 @@ impl<'db> InvocationTransaction<'db> {
                 .collect(),
             continuation: page.continuation,
         }))
+    }
+
+    fn list_builtin_information_schema_relations(
+        &mut self,
+        page_limit: usize,
+        continuation: Option<RelationScanCursor>,
+        purpose: BuiltinRelationScanPurpose,
+        extra_bytes_per_relation: usize,
+    ) -> Result<VisibleRelationPage, TransactionError> {
+        let result = (|| {
+            if page_limit == 0 || page_limit > MAX_RELATIONS_PER_PAGE {
+                return Err(TransactionError::InvalidMetadataRequest);
+            }
+            self.check_deadline()?;
+            let principal_id = self.principal_id;
+            let mut active_scan = match continuation.as_ref() {
+                Some(cursor) => {
+                    let Some(active) = self.active_builtin_relation_scan.as_ref() else {
+                        return Err(TransactionError::InvalidMetadataRequest);
+                    };
+                    if active.principal_id != principal_id
+                        || active.purpose != purpose
+                        || active.extra_bytes_per_relation != extra_bytes_per_relation
+                        || active
+                            .continuation
+                            .is_none_or(|(token, _)| token != cursor.token)
+                    {
+                        return Err(TransactionError::InvalidMetadataRequest);
+                    }
+                    active.clone()
+                }
+                None => ActiveBuiltinRelationScan {
+                    purpose,
+                    extra_bytes_per_relation,
+                    principal_id,
+                    continuation: None,
+                    used_tokens: HashSet::new(),
+                },
+            };
+            let start_index = if let Some(cursor) = continuation.as_ref() {
+                let (token, after_index) = active_scan
+                    .continuation
+                    .take()
+                    .ok_or(TransactionError::InvalidMetadataRequest)?;
+                if token != cursor.token {
+                    return Err(TransactionError::InvalidMetadataRequest);
+                }
+                after_index
+            } else {
+                0
+            };
+            let available = builtin_information_schema_relations();
+            let mut relations = Vec::with_capacity(page_limit);
+            let mut page_bytes = 0usize;
+            let mut next_index = None;
+            for (index, relation) in available.into_iter().enumerate().skip(start_index) {
+                if relations.len() == page_limit {
+                    next_index = Some(index);
+                    break;
+                }
+                let encoded_size = relation
+                    .name
+                    .len()
+                    .checked_add(24)
+                    .and_then(|size| size.checked_add(extra_bytes_per_relation))
+                    .ok_or(TransactionError::MetadataResultTooLarge)?;
+                if page_bytes.saturating_add(encoded_size) > MAX_METADATA_PAGE_BYTES {
+                    if relations.is_empty() {
+                        return Err(TransactionError::MetadataResultTooLarge);
+                    }
+                    next_index = Some(index);
+                    break;
+                }
+                page_bytes += encoded_size;
+                relations.push(relation);
+            }
+            let continuation = if let Some(after_index) = next_index {
+                let token = new_metadata_cursor_token(
+                    &mut active_scan.used_tokens,
+                    RELATION_CURSOR_TOKEN_KIND,
+                )?;
+                active_scan.continuation = Some((token, after_index));
+                Some(RelationScanCursor { token })
+            } else {
+                active_scan.continuation = None;
+                None
+            };
+            self.active_builtin_relation_scan = continuation.as_ref().map(|_| active_scan);
+            Ok(VisibleRelationPage {
+                relations,
+                continuation,
+            })
+        })();
+        match result {
+            Ok(page) => Ok(page),
+            Err(error) => {
+                if !self.aborted {
+                    self.abort()?;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn describe_builtin_information_schema_columns_page(
+        &mut self,
+        relation_id: [u8; 16],
+        page_limit: usize,
+        continuation: Option<ColumnScanCursor>,
+        extra_bytes_per_column: usize,
+    ) -> Result<Option<VisibleColumnPage>, TransactionError> {
+        let result = (|| {
+            if page_limit == 0 || page_limit > MAX_COLUMNS_PER_PAGE {
+                return Err(TransactionError::InvalidMetadataRequest);
+            }
+            let Some(schema) = builtin_information_schema_relation_schema(relation_id) else {
+                return Ok(None);
+            };
+            self.check_deadline()?;
+            let principal_id = self.principal_id;
+            let mut active_scan = match continuation.as_ref() {
+                Some(cursor) => {
+                    let Some(active) = self.active_builtin_column_scan.as_ref() else {
+                        return Err(TransactionError::InvalidMetadataRequest);
+                    };
+                    if active.relation_id != relation_id
+                        || active.extra_bytes_per_column != extra_bytes_per_column
+                        || active.principal_id != principal_id
+                        || active
+                            .continuation
+                            .is_none_or(|(token, _)| token != cursor.token)
+                    {
+                        return Err(TransactionError::InvalidMetadataRequest);
+                    }
+                    active.clone()
+                }
+                None => ActiveBuiltinColumnScan {
+                    relation_id,
+                    extra_bytes_per_column,
+                    principal_id,
+                    continuation: None,
+                    used_tokens: HashSet::new(),
+                },
+            };
+            let start_ordinal = if let Some(cursor) = continuation.as_ref() {
+                let (token, after_ordinal) = active_scan
+                    .continuation
+                    .take()
+                    .ok_or(TransactionError::InvalidMetadataRequest)?;
+                if token != cursor.token {
+                    return Err(TransactionError::InvalidMetadataRequest);
+                }
+                usize::try_from(after_ordinal)
+                    .ok()
+                    .and_then(|ordinal| ordinal.checked_add(1))
+                    .ok_or(TransactionError::InvalidMetadataRequest)?
+            } else {
+                0
+            };
+            if start_ordinal > schema.columns.len() {
+                return Err(TransactionError::InvalidMetadataRequest);
+            }
+            let mut columns = Vec::with_capacity(page_limit);
+            let mut page_bytes = 0usize;
+            let mut has_more = false;
+            for ordinal in start_ordinal..schema.columns.len() {
+                if columns.len() == page_limit {
+                    has_more = true;
+                    break;
+                }
+                let column = schema.columns[ordinal].clone();
+                let encoded_size = column
+                    .name
+                    .len()
+                    .checked_add(32)
+                    .and_then(|size| size.checked_add(extra_bytes_per_column))
+                    .ok_or(TransactionError::MetadataResultTooLarge)?;
+                if page_bytes.saturating_add(encoded_size) > MAX_METADATA_PAGE_BYTES {
+                    if columns.is_empty() {
+                        return Err(TransactionError::MetadataResultTooLarge);
+                    }
+                    has_more = true;
+                    break;
+                }
+                page_bytes += encoded_size;
+                columns.push(column);
+            }
+            let continuation = if has_more {
+                let after_ordinal = columns
+                    .last()
+                    .map(|column| column.ordinal)
+                    .ok_or(TransactionError::InvalidMetadataRequest)?;
+                let token = new_metadata_cursor_token(
+                    &mut active_scan.used_tokens,
+                    COLUMN_CURSOR_TOKEN_KIND,
+                )?;
+                active_scan.continuation = Some((token, after_ordinal));
+                Some(ColumnScanCursor { token })
+            } else {
+                active_scan.continuation = None;
+                None
+            };
+            self.active_builtin_column_scan = continuation.as_ref().map(|_| active_scan);
+            Ok(Some(VisibleColumnPage {
+                relation_id,
+                columns,
+                continuation,
+            }))
+        })();
+        match result {
+            Ok(page) => Ok(page),
+            Err(error) => {
+                if !self.aborted {
+                    self.abort()?;
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Return all schema-authorized table rows in bounded metadata pages.
@@ -1754,6 +2068,18 @@ impl<'db> InvocationTransaction<'db> {
                 return Ok(None);
             };
 
+            if schema.schema_id == INFORMATION_SCHEMA_ID {
+                let Some(relation) = builtin_information_schema_relation(relation_name) else {
+                    return Ok(None);
+                };
+                return self.scan_information_schema_columns_for_visible_relation(
+                    &schema,
+                    &relation,
+                    page_limit,
+                    continuation,
+                );
+            }
+
             let mut relation_continuation = None;
             let relation = loop {
                 let Some(page) = self.list_catalog_authorized_relations(
@@ -1802,36 +2128,44 @@ impl<'db> InvocationTransaction<'db> {
         page_limit: usize,
         continuation: Option<ColumnScanCursor>,
     ) -> Result<Option<InformationSchemaColumnsPage>, TransactionError> {
-        let principal_id = self.principal_id;
-        let (relation_roles, relation_grants) =
-            self.load_catalog_relation_discovery_grants(schema.schema_id)?;
-        let relation_scope = relation_grants
-            .iter()
-            .map(|grant| (grant.operation, grant.target))
-            .collect();
-        let relation_context = AuthorizationContext {
-            principal_id,
-            role_ids: relation_roles,
-            scope: relation_scope,
-        };
         let extra_bytes_per_column = schema
             .name
             .len()
             .checked_add(relation.name.len())
             .and_then(|size| size.checked_add(INFORMATION_SCHEMA_COLUMN_EXTRA_BYTES))
             .ok_or(TransactionError::MetadataResultTooLarge)?;
-        let Some(page) = self.describe_authorized_columns_page_with_extra_bytes(
-            relation.relation_id,
-            page_limit,
-            continuation,
-            extra_bytes_per_column,
-            MetadataDiscoveryAccess {
-                context: &relation_context,
-                grants: &relation_grants,
-                dependencies: &[],
-            },
-        )?
-        else {
+        let Some(page) = (if schema.schema_id == INFORMATION_SCHEMA_ID {
+            self.describe_builtin_information_schema_columns_page(
+                relation.relation_id,
+                page_limit,
+                continuation,
+                extra_bytes_per_column,
+            )?
+        } else {
+            let principal_id = self.principal_id;
+            let (relation_roles, relation_grants) =
+                self.load_catalog_relation_discovery_grants(schema.schema_id)?;
+            let relation_scope = relation_grants
+                .iter()
+                .map(|grant| (grant.operation, grant.target))
+                .collect();
+            let relation_context = AuthorizationContext {
+                principal_id,
+                role_ids: relation_roles,
+                scope: relation_scope,
+            };
+            self.describe_authorized_columns_page_with_extra_bytes(
+                relation.relation_id,
+                page_limit,
+                continuation,
+                extra_bytes_per_column,
+                MetadataDiscoveryAccess {
+                    context: &relation_context,
+                    grants: &relation_grants,
+                    dependencies: &[],
+                },
+            )?
+        }) else {
             return Ok(None);
         };
         let rows = page
@@ -1955,13 +2289,21 @@ impl<'db> InvocationTransaction<'db> {
                     .as_ref()
                     .ok_or(TransactionError::InvalidContext)?
                     .clone();
-                let relation_page = self
-                    .list_catalog_authorized_relations(
+                let relation_page = if schema.schema_id == INFORMATION_SCHEMA_ID {
+                    self.list_builtin_information_schema_relations(
+                        1,
+                        active_scan.relation_continuation.take(),
+                        BuiltinRelationScanPurpose::Columns,
+                        0,
+                    )?
+                } else {
+                    self.list_catalog_authorized_relations(
                         schema.schema_id,
                         1,
                         active_scan.relation_continuation.take(),
                     )?
-                    .ok_or(TransactionError::InvalidContext)?;
+                    .ok_or(TransactionError::InvalidContext)?
+                };
                 active_scan.relation_continuation = relation_page.continuation;
                 active_scan.relation_scan_started = true;
                 active_scan.relation_scan_exhausted = active_scan.relation_continuation.is_none();
@@ -2055,7 +2397,8 @@ impl<'db> InvocationTransaction<'db> {
         }
     }
 
-    /// List schemas for which the invocation has schema USAGE.
+    /// List schemas for which the invocation has schema USAGE, plus the public
+    /// reserved information_schema namespace.
     pub fn list_authorized_schemas(
         &mut self,
         page_limit: usize,
@@ -2128,6 +2471,9 @@ impl<'db> InvocationTransaction<'db> {
                     .then_some(schema_id)
                 })
                 .collect::<Vec<_>>();
+            // The reserved information_schema namespace is public even though
+            // bootstrap does not represent its virtual views as stored tables.
+            visible_schema_ids.push(INFORMATION_SCHEMA_ID);
             visible_schema_ids.sort_unstable();
             visible_schema_ids.dedup();
             let after_id = if let Some(cursor) = continuation.as_ref() {
@@ -2149,7 +2495,14 @@ impl<'db> InvocationTransaction<'db> {
                 if after_id.is_some_and(|after| schema_id <= after) {
                     continue;
                 }
-                let schema = self.read_discovery_schema(schema_id)?;
+                let schema = if schema_id == INFORMATION_SCHEMA_ID {
+                    VisibleSchema {
+                        schema_id,
+                        name: "information_schema".to_owned(),
+                    }
+                } else {
+                    self.read_discovery_schema(schema_id)?
+                };
                 let encoded_size = schema
                     .name
                     .len()
@@ -4666,6 +5019,8 @@ impl<'db> InvocationTransaction<'db> {
         self.active_relation_scan = None;
         self.active_schema_scan = None;
         self.active_column_scan = None;
+        self.active_builtin_relation_scan = None;
+        self.active_builtin_column_scan = None;
         self.active_information_schema_tables_scan = None;
         self.active_information_schema_columns_scan = None;
         self.aborted = true;
@@ -5261,6 +5616,88 @@ fn decode_catalog_scalar_type_parameters(
 ) -> Result<ScalarType, TransactionError> {
     decode_builtin_scalar_type(type_record, parameters)
         .map_err(|_| TransactionError::CorruptCatalog)
+}
+
+fn builtin_information_schema_relations() -> [VisibleRelation; 3] {
+    [
+        VisibleRelation {
+            relation_id: builtin_information_schema_relation_id(1),
+            name: "columns".to_owned(),
+        },
+        VisibleRelation {
+            relation_id: builtin_information_schema_relation_id(2),
+            name: "schemata".to_owned(),
+        },
+        VisibleRelation {
+            relation_id: builtin_information_schema_relation_id(3),
+            name: "tables".to_owned(),
+        },
+    ]
+}
+
+fn builtin_information_schema_relation(relation_name: &str) -> Option<VisibleRelation> {
+    builtin_information_schema_relations()
+        .into_iter()
+        .find(|relation| relation.name == relation_name)
+}
+
+fn builtin_information_schema_relation_schema(
+    relation_id: [u8; 16],
+) -> Option<VisibleRelationSchema> {
+    let relation_code = match relation_id {
+        id if id == builtin_information_schema_relation_id(1) => 1,
+        id if id == builtin_information_schema_relation_id(2) => 2,
+        id if id == builtin_information_schema_relation_id(3) => 3,
+        _ => return None,
+    };
+    let columns = match relation_code {
+        1 => vec![
+            ("table_schema", ScalarType::Text, false),
+            ("table_name", ScalarType::Text, false),
+            ("column_name", ScalarType::Text, false),
+            ("ordinal_position", ScalarType::Integer, false),
+            ("data_type", ScalarType::Text, false),
+            ("is_nullable", ScalarType::Text, false),
+            ("character_maximum_length", ScalarType::Integer, true),
+            ("numeric_precision", ScalarType::Integer, true),
+            ("numeric_scale", ScalarType::Integer, true),
+        ],
+        2 => vec![("schema_name", ScalarType::Text, false)],
+        3 => vec![
+            ("table_schema", ScalarType::Text, false),
+            ("table_name", ScalarType::Text, false),
+            ("table_type", ScalarType::Text, false),
+        ],
+        _ => return None,
+    };
+    Some(VisibleRelationSchema {
+        relation_id,
+        columns: columns
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, (name, scalar_type, nullable))| VisibleColumn {
+                column_id: builtin_information_schema_column_id(
+                    relation_code * 16 + ordinal as u8 + 1,
+                ),
+                name: name.to_owned(),
+                ordinal: ordinal as u32,
+                scalar_type,
+                nullable,
+            })
+            .collect(),
+    })
+}
+
+const fn builtin_information_schema_relation_id(code: u8) -> [u8; 16] {
+    let mut id = [0x81; 16];
+    id[15] = code;
+    id
+}
+
+const fn builtin_information_schema_column_id(code: u8) -> [u8; 16] {
+    let mut id = [0x82; 16];
+    id[15] = code;
+    id
 }
 
 fn information_schema_column_type(
