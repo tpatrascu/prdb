@@ -38,9 +38,11 @@ The Rust storage slice `InvocationTransaction::list_authorized_relations` return
 
 `InvocationTransaction::scan_information_schema_tables_in_schema` returns bounded `information_schema.tables` rows for one exact schema name. It resolves the name through schema USAGE-filtered discovery, then applies the usual relation data-grant filter. Hidden and nonexistent schema names return the same unavailable result; an authorized empty schema returns an empty page. Rows expose `table_schema`, `table_name`, and `table_type` (`BASE TABLE`) only, with relation-page ordering and continuation. Full scans that iterate all visible schemas and SQL planner/executor integration remain unimplemented.
 
+`InvocationTransaction::scan_information_schema_tables` walks authorized schema pages and returns one bounded relation page per visible schema. Pages follow schema-ID then relation-ID order, contain at most 128 rows and 1 MiB, and use a separate 16-byte, one-use cursor bound to the invocation. An empty visible schema may yield an empty page with a continuation; hidden schemas and relations produce no rows.
+
 `InvocationTransaction::scan_information_schema_columns_for_relation` returns bounded rows for one exact visible schema and relation. It applies the same schema and relation discovery rules and pages the authorized declared shape. Hidden and nonexistent relations return the same unavailable result. `ordinal_position` is one-based; `is_nullable` is `YES` or `NO`. `data_type` uses the uppercase spelling of the declared built-in type (`CHARACTER VARYING` and `TIMESTAMP WITH TIME ZONE` for those types). `character_maximum_length` is present only for VARCHAR; `numeric_precision` and `numeric_scale` are present for integer and decimal types, with integer decimal precisions 5/10/19 and scale 0. All three parameters are NULL for other types.
 
-Schema, relation, and column continuations serialize as fixed-width 16-byte opaque tokens. Byte 0 identifies the cursor kind and bytes 1–15 come from the operating-system random source. The active invocation retains each token's position and authorization binding server-side; tokens are one-use and modified, replayed, cross-invocation, or cross-kind tokens are rejected.
+Schema, relation, column, and all-schema `information_schema.tables` continuations serialize as fixed-width 16-byte opaque tokens. Byte 0 identifies the cursor kind and bytes 1–15 come from the operating-system random source. The active invocation retains each token's position and authorization binding server-side; tokens are one-use and modified, replayed, cross-invocation, or cross-kind tokens are rejected.
 
 `InvocationTransaction::load_catalog_schema_usage_grants` derives schema USAGE grants for the admitted principal and its pinned role closure directly from the catalog. It returns no table or column privileges and retains the matching schema, grant, membership, and grantor records as commit guards.
 
@@ -78,7 +80,7 @@ Use SQL null only for genuinely inapplicable type parameters, not for redacted s
 
 Schemas/columns for the three built-in relations themselves are public interface definitions and appear consistently in discovery without recursively querying the same views. Privileged catalog sections use `admin_describe_object`, not extra secrets-bearing SQL views in executor processes. General user-created views remain deferred.
 
-The current engine slice implements storage-side `information_schema.schemata`, schema-scoped `information_schema.tables`, and relation-scoped `information_schema.columns` projections through their corresponding `scan_information_schema_*` methods. A single tables request names one schema and a single columns request names one relation; iterating all authorized schemas/relations and SQL binding/execution remain future work.
+The current engine slice implements storage-side `information_schema.schemata`, schema-scoped and all-visible-schema `information_schema.tables`, and relation-scoped `information_schema.columns` projections through their corresponding `scan_information_schema_*` methods. A single columns request names one relation; iterating all visible relations for `columns`, fixed public self-description rows, and SQL binding/execution remain future work.
 
 ## Administrative Sections
 

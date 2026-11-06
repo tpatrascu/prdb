@@ -1698,6 +1698,74 @@ fn information_schema_tables_projects_authorized_schema_pages()
 }
 
 #[test]
+fn information_schema_tables_scan_walks_visible_schema_pages()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    install_relation_discovery_catalog(&database)?;
+    let mut invocation = InvocationTransaction::begin(&database, [205; 16], [9; 16], 9_999, 1, 64)?;
+    let first = invocation.scan_information_schema_tables(1, None)?;
+    assert_eq!(first.rows.len(), 1);
+    assert_eq!(first.rows[0].table_schema, "app");
+    assert_eq!(first.rows[0].table_name, "metrics");
+    assert_eq!(first.rows[0].table_type, "BASE TABLE");
+    let cursor = first.continuation.expect("second relation follows");
+    let cursor_bytes = cursor.to_bytes();
+    assert!(
+        prdb_engine::metadata_discovery::InformationSchemaTablesCursor::from_bytes(&cursor_bytes)
+            .is_some()
+    );
+    assert!(
+        prdb_engine::metadata_discovery::RelationScanCursor::from_bytes(&cursor_bytes).is_none()
+    );
+    assert!(prdb_engine::metadata_discovery::SchemaScanCursor::from_bytes(&cursor_bytes).is_none());
+    assert!(prdb_engine::metadata_discovery::ColumnScanCursor::from_bytes(&cursor_bytes).is_none());
+    let second = invocation.scan_information_schema_tables(
+        1,
+        Some(
+            prdb_engine::metadata_discovery::InformationSchemaTablesCursor::from_bytes(
+                &cursor_bytes,
+            )
+            .expect("table scan token round trips"),
+        ),
+    )?;
+    assert_eq!(second.rows.len(), 1);
+    assert_eq!(second.rows[0].table_schema, "app");
+    assert_eq!(second.rows[0].table_name, "secret");
+    let next_schema = second.continuation.expect("visible public schema follows");
+    let third = invocation.scan_information_schema_tables(1, Some(next_schema))?;
+    assert!(third.rows.is_empty());
+    assert!(third.continuation.is_none());
+
+    let mut cross_invocation =
+        InvocationTransaction::begin(&database, [206; 16], [9; 16], 9_999, 1, 64)?;
+    assert!(matches!(
+        cross_invocation.scan_information_schema_tables(
+            1,
+            Some(
+                prdb_engine::metadata_discovery::InformationSchemaTablesCursor::from_bytes(
+                    &cursor_bytes,
+                )
+                .expect("table scan token round trips"),
+            ),
+        ),
+        Err(TransactionError::InvalidMetadataRequest)
+    ));
+
+    let mut replay_invocation =
+        InvocationTransaction::begin(&database, [207; 16], [9; 16], 9_999, 1, 64)?;
+    let first = replay_invocation.scan_information_schema_tables(1, None)?;
+    let first_cursor = first.continuation.expect("second relation follows");
+    let second = replay_invocation.scan_information_schema_tables(1, Some(first_cursor.clone()))?;
+    assert!(second.continuation.is_some());
+    assert!(matches!(
+        replay_invocation.scan_information_schema_tables(1, Some(first_cursor)),
+        Err(TransactionError::InvalidMetadataRequest)
+    ));
+    Ok(())
+}
+
+#[test]
 fn information_schema_columns_projects_declared_shape_in_pages()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
