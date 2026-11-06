@@ -516,3 +516,12 @@
 - Verification: the prescribed Nix-shell workspace build, formatting check, Clippy with warnings denied, and workspace tests passed. Changed Markdown links and `git diff --check` passed.
 - Contract update: [users and roles](../../specs/ddl-identity.md).
 - Remaining: action-specific identity lifecycle authorization and durable identity tombstones/non-reuse remain open; DROP is not exposed until ID non-reuse can be enforced.
+
+## SM-5 dependency: identity lifecycle DDL authorization — in progress
+
+- `StorageManager::commit_authorized_identity_ddl` now supports user creation, rename, and LOGIN/NOLOGIN changes plus role creation and rename. User changes require inherited `MANAGE_USERS`; role changes require inherited `MANAGE_ROLES`; current database administrators may do either.
+- The route accepts only complete principal/object creation pairs, matched rename pairs, and principal-only login-state changes. It rejects identity deletion and unrelated catalog writes. Actor identity, membership closure, role records, system grants, and the login-enabled administrator set are guarded through commit; successful DDL audit actors must match the authenticated caller.
+- A real-redb regression covers MANAGE_USERS admission, MANAGE_ROLES denial, user rename and disable, last-login-admin preservation, database-admin role creation, and committed sequences.
+- Verification: the prescribed Nix-shell workspace build, formatting check, Clippy with warnings denied, and workspace tests passed. Changed Markdown links and `git diff --check` passed.
+- Contract: [users and roles](../../specs/ddl-identity.md).
+- Remaining: role/user deletion needs durable ID tombstones, credential-backed final-admin checks need a verifier profile, and deterministic authorization-change race coverage remains open.

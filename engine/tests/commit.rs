@@ -472,6 +472,18 @@ fn audit_event(n: u8) -> AuditEvent {
     }
 }
 
+fn identity_audit_event(n: u8, actor_id: [u8; 16], target_id: [u8; 16]) -> AuditEvent {
+    AuditEvent {
+        event_id: [n; 16],
+        actor_id: Some(actor_id),
+        correlation_id: [n.wrapping_add(1); 16],
+        occurred_at_us: 1_700_000_000_000_000,
+        action: AuditAction::Ddl,
+        result: AuditResult::Succeeded,
+        target_ids: vec![target_id],
+    }
+}
+
 fn membership_write(member_id: [u8; 16], role_id: [u8; 16]) -> CatalogWrite {
     membership_write_with_grantor(member_id, role_id, builtin_owner_id())
 }
@@ -634,6 +646,53 @@ fn object_write_with_parent_and_owner_and_name(
         },
     ]);
     let payload = encode_envelope(&family_schema(2).unwrap(), &key, &fields).unwrap();
+    CatalogWrite {
+        key,
+        expected_value: None,
+        payload: Some(payload),
+    }
+}
+
+fn principal_object_rename_write(
+    object_id: [u8; 16],
+    object_kind: u16,
+    owner_id: [u8; 16],
+    name: &str,
+    definition_epoch: u64,
+) -> CatalogWrite {
+    let key = id_catalog_key(2, object_id);
+    let payload = encode_envelope(
+        &family_schema(2).unwrap(),
+        &key,
+        &[
+            CatalogField {
+                tag: 1,
+                wire_type: WireType::U16,
+                payload: object_kind.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 3,
+                wire_type: WireType::Text,
+                payload: name.as_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 4,
+                wire_type: WireType::Id,
+                payload: owner_id.to_vec(),
+            },
+            CatalogField {
+                tag: 5,
+                wire_type: WireType::U64,
+                payload: definition_epoch.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 6,
+                wire_type: WireType::U16,
+                payload: 1u16.to_le_bytes().to_vec(),
+            },
+        ],
+    )
+    .unwrap();
     CatalogWrite {
         key,
         expected_value: None,
@@ -3770,6 +3829,151 @@ fn storage_manager_restricts_system_privilege_ddl_to_database_admins()
             .get(dependency_write(target_user, database_id, 5).key.as_slice())?
             .is_none()
     );
+    Ok(())
+}
+
+#[test]
+fn storage_manager_authorizes_identity_ddl_and_preserves_a_login_admin()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let admin_user = id(0x85);
+    let user_manager = id(0x86);
+    let created_user = id(0x87);
+    let created_role = id(0x88);
+    let database_id = id(0x33);
+    let admin_role = builtin_owner_id();
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+
+    let seed_records = [
+        principal_write_with_name(admin_user, 1, 1, "identity_admin"),
+        object_write_with_name(admin_user, 8, "identity_admin"),
+        principal_write_with_name(user_manager, 1, 1, "identity_user_manager"),
+        object_write_with_name(user_manager, 8, "identity_user_manager"),
+        membership_write_with_grantor(admin_user, admin_role, admin_role),
+        dependency_write(admin_user, admin_role, 5),
+        grant_write(user_manager, database_id, 12, 1, database_id, admin_role),
+        dependency_write(user_manager, database_id, 5),
+    ];
+    let mut seed_audit = identity_audit_event(0x80, admin_role, admin_user);
+    seed_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(id(0x80), admin_role, 9_999, &seed_records, &[seed_audit])?;
+
+    let user_create = [
+        principal_write_with_name(created_user, 1, 1, "created_user"),
+        object_write_with_parent_and_owner_and_name(
+            created_user,
+            8,
+            None,
+            user_manager,
+            "created_user",
+        ),
+    ];
+    assert_eq!(
+        storage.commit_authorized_identity_ddl(
+            id(0x81),
+            user_manager,
+            9_999,
+            &user_create,
+            &[identity_audit_event(0x81, user_manager, created_user)],
+        )?,
+        2
+    );
+
+    let role_create = [
+        principal_write_with_name(created_role, 2, 1, "created_role"),
+        object_write_with_parent_and_owner_and_name(
+            created_role,
+            9,
+            None,
+            user_manager,
+            "created_role",
+        ),
+    ];
+    assert_eq!(
+        storage.commit_authorized_identity_ddl(
+            id(0x82),
+            user_manager,
+            9_999,
+            &role_create,
+            &[identity_audit_event(0x82, user_manager, created_role)],
+        ),
+        Err(CommitError::DdlAuthorizationDenied)
+    );
+
+    let current_value = |key: &[u8]| -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        Ok(database
+            .begin_read()?
+            .open_table(CATALOG)?
+            .get(key)?
+            .ok_or("missing identity record")?
+            .value()
+            .to_vec())
+    };
+    let mut rename_user = principal_write_with_name(created_user, 1, 2, "renamed_user");
+    rename_user.expected_value = Some(current_value(&rename_user.key)?);
+    let mut rename_object =
+        principal_object_rename_write(created_user, 8, user_manager, "renamed_user", 2);
+    rename_object.expected_value = Some(current_value(&rename_object.key)?);
+    assert_eq!(
+        storage.commit_authorized_identity_ddl(
+            id(0x83),
+            user_manager,
+            9_999,
+            &[rename_user, rename_object],
+            &[identity_audit_event(0x83, user_manager, created_user)],
+        )?,
+        3
+    );
+
+    let mut disable_user = principal_write_with_login(created_user, 1, false, 3, "renamed_user");
+    disable_user.expected_value = Some(current_value(&disable_user.key)?);
+    assert_eq!(
+        storage.commit_authorized_identity_ddl(
+            id(0x84),
+            user_manager,
+            9_999,
+            &[disable_user],
+            &[identity_audit_event(0x84, user_manager, created_user)],
+        )?,
+        4
+    );
+
+    let mut disable_last_admin =
+        principal_write_with_login(admin_user, 1, false, 2, "identity_admin");
+    disable_last_admin.expected_value = Some(current_value(&disable_last_admin.key)?);
+    assert_eq!(
+        storage.commit_authorized_identity_ddl(
+            id(0x89),
+            user_manager,
+            9_999,
+            &[disable_last_admin],
+            &[identity_audit_event(0x89, user_manager, admin_user)],
+        ),
+        Err(CommitError::DdlAuthorizationDenied)
+    );
+
+    let admin_role_create = [
+        principal_write_with_name(created_role, 2, 1, "created_role"),
+        object_write_with_parent_and_owner_and_name(
+            created_role,
+            9,
+            None,
+            admin_user,
+            "created_role",
+        ),
+    ];
+    assert_eq!(
+        storage.commit_authorized_identity_ddl(
+            id(0x8a),
+            admin_user,
+            9_999,
+            &admin_role_create,
+            &[identity_audit_event(0x8a, admin_user, created_role)],
+        )?,
+        5
+    );
+    assert_eq!(commit_sequence(&database)?, 5);
     Ok(())
 }
 
