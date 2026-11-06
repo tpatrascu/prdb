@@ -2805,7 +2805,16 @@ fn storage_manager_routes_invocations_and_catalog_commits_through_shared_fences(
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
-    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let storage = StorageManager::with_config(
+        &database,
+        StorageManagerConfig {
+            ddl_fence_timeout: Duration::from_millis(100),
+            max_active_invocations: 128,
+            max_invocation_age: Duration::from_secs(15 * 60),
+            max_token_lifecycle_requests_per_minute: 30,
+            max_admin_cancellation_requests_per_minute: 30,
+        },
+    )?;
     assert_eq!(
         storage.commit_catalog_and_audit(id(190), id(9), 9_999, &[], &[audit_event(190)],)?,
         1
@@ -2842,6 +2851,7 @@ fn storage_manager_admission_requires_a_login_enabled_catalog_user()
             max_active_invocations: 1,
             max_invocation_age: Duration::from_secs(30),
             max_token_lifecycle_requests_per_minute: 30,
+            max_admin_cancellation_requests_per_minute: 30,
         },
     )?;
     let enabled_user = id(229);
@@ -2891,6 +2901,7 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
                 max_active_invocations: 0,
                 max_invocation_age: Duration::from_secs(30),
                 max_token_lifecycle_requests_per_minute: 30,
+                max_admin_cancellation_requests_per_minute: 30,
             },
         )
         .err(),
@@ -2906,6 +2917,7 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
                 max_active_invocations: 1,
                 max_invocation_age: Duration::ZERO,
                 max_token_lifecycle_requests_per_minute: 30,
+                max_admin_cancellation_requests_per_minute: 30,
             },
         )
         .err(),
@@ -2921,11 +2933,28 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
                 max_active_invocations: 1,
                 max_invocation_age: Duration::from_secs(30),
                 max_token_lifecycle_requests_per_minute: 0,
+                max_admin_cancellation_requests_per_minute: 30,
             },
         )
         .err(),
         Some(StorageManagerInitError::Config(
             prdb_engine::storage_manager::StorageManagerConfigError::ZeroTokenLifecycleRequestLimit,
+        ))
+    );
+    assert_eq!(
+        StorageManager::with_config(
+            &database,
+            StorageManagerConfig {
+                ddl_fence_timeout: Duration::from_millis(100),
+                max_active_invocations: 1,
+                max_invocation_age: Duration::from_secs(30),
+                max_token_lifecycle_requests_per_minute: 30,
+                max_admin_cancellation_requests_per_minute: 0,
+            },
+        )
+        .err(),
+        Some(StorageManagerInitError::Config(
+            prdb_engine::storage_manager::StorageManagerConfigError::ZeroAdminCancellationRequestLimit,
         ))
     );
     let storage = StorageManager::with_config(
@@ -2935,6 +2964,7 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
             max_active_invocations: 1,
             max_invocation_age: Duration::from_secs(30),
             max_token_lifecycle_requests_per_minute: 30,
+            max_admin_cancellation_requests_per_minute: 30,
         },
     )?;
     let independent_handle = StorageManager::new(&database, Duration::from_millis(100))?;
@@ -2969,6 +2999,7 @@ fn storage_manager_expires_idle_invocations_and_releases_the_snapshot()
             max_active_invocations: 1,
             max_invocation_age: Duration::from_millis(1),
             max_token_lifecycle_requests_per_minute: 30,
+            max_admin_cancellation_requests_per_minute: 30,
         },
     )?;
     let mut expired = storage.begin_invocation(id(196), id(9), 9_999, 2, 64)?;
@@ -3349,6 +3380,155 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
     third.abort()?;
     second.abort()?;
     first.abort()?;
+    Ok(())
+}
+
+#[test]
+fn storage_manager_audits_cancellation_before_commit_and_preserves_terminal_outcomes()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::audit::{AuditEvent, AuditResult};
+    use prdb_engine::storage_manager::{
+        AdministrativeCancellationError, AdministrativeCancellationResult, InvocationStatus,
+    };
+    use prdb_engine::transaction::TransactionError;
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::with_config(
+        &database,
+        StorageManagerConfig {
+            ddl_fence_timeout: Duration::from_millis(100),
+            max_active_invocations: 128,
+            max_invocation_age: Duration::from_secs(15 * 60),
+            max_token_lifecycle_requests_per_minute: 30,
+            max_admin_cancellation_requests_per_minute: 2,
+        },
+    )?;
+    let admin_id = id(240);
+    let owner_id = id(241);
+    let admin_role = builtin_owner_id();
+    let records = [
+        principal_write_with_name(admin_id, 1, 1, "cancel_admin"),
+        object_write_with_name(admin_id, 8, "cancel_admin"),
+        principal_write_with_name(owner_id, 1, 1, "cancel_owner"),
+        object_write_with_name(owner_id, 8, "cancel_owner"),
+        membership_write_with_grantor(admin_id, admin_role, admin_role),
+        dependency_write(admin_id, admin_role, 5),
+        credential_verifier_write(id(242), admin_id, &[0x6b; 32], 1, i64::MAX, None, 1),
+    ];
+    let mut setup_audit = audit_event(238);
+    setup_audit.actor_id = Some(admin_role);
+    storage.commit_catalog_and_audit(id(238), admin_role, 9_999, &records, &[setup_audit])?;
+
+    let now_us = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_micros() as i64;
+    let retention_deadline_us = now_us + 60_000_000;
+    let cancellation_audit = |event_id, actor_id, target_id| AuditEvent {
+        event_id: id(event_id),
+        actor_id: Some(actor_id),
+        correlation_id: id(event_id.wrapping_add(1)),
+        occurred_at_us: now_us,
+        action: AuditAction::AdministrativeCancellation,
+        result: AuditResult::Denied,
+        target_ids: vec![target_id],
+    };
+
+    let pending = storage.begin_invocation(id(243), owner_id, retention_deadline_us, 2, 64)?;
+    assert!(matches!(
+        storage.cancel_invocation(
+            owner_id,
+            id(243),
+            7,
+            now_us,
+            cancellation_audit(244, owner_id, id(243)),
+        ),
+        Err(AdministrativeCancellationError::Unauthorized)
+    ));
+    assert!(matches!(
+        storage
+            .get_invocation_status(id(243), owner_id, now_us)?
+            .unwrap()
+            .status,
+        InvocationStatus::Active {
+            cancellation_requested: false,
+            ..
+        }
+    ));
+    assert_eq!(
+        storage.cancel_invocation(
+            admin_id,
+            id(243),
+            7,
+            now_us,
+            cancellation_audit(245, admin_id, id(243)),
+        )?,
+        AdministrativeCancellationResult::Accepted
+    );
+    let administrative_page = storage.list_runtime_invocations(admin_id, now_us, 1, None)?;
+    assert_eq!(
+        administrative_page.invocations[0].cancellation_reason_code,
+        Some(7)
+    );
+    assert!(matches!(
+        storage
+            .get_invocation_status(id(243), owner_id, now_us)?
+            .unwrap()
+            .status,
+        InvocationStatus::Active {
+            cancellation_requested: true,
+            ..
+        }
+    ));
+    assert!(matches!(
+        pending.commit(),
+        Err(TransactionError::CancellationRequested)
+    ));
+    assert_eq!(
+        lookup_outcome(&database, id(243), owner_id, now_us)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Aborted
+    );
+    let audit_read = database.begin_read()?;
+    let audit_table = audit_read.open_table(schema::AUDIT)?;
+    let audit = audit_table
+        .get(id(245).as_slice())?
+        .ok_or("missing accepted cancellation audit")?;
+    assert_eq!(
+        AuditEvent::decode(audit.value())?.result,
+        AuditResult::Accepted
+    );
+    drop(audit);
+    drop(audit_table);
+    drop(audit_read);
+
+    let committed = storage.begin_invocation(id(246), owner_id, retention_deadline_us, 2, 64)?;
+    let commit_sequence = committed.commit()?;
+    assert!(matches!(
+        storage.cancel_invocation(
+            admin_id,
+            id(246),
+            8,
+            now_us,
+            cancellation_audit(247, admin_id, id(246)),
+        )?,
+        AdministrativeCancellationResult::Terminal(InvocationOutcome {
+            status: OutcomeStatus::Committed,
+            commit_sequence: committed_sequence,
+            ..
+        }) if committed_sequence == commit_sequence
+    ));
+    assert!(matches!(
+        storage.cancel_invocation(
+            admin_id,
+            id(248),
+            9,
+            now_us,
+            cancellation_audit(249, admin_id, id(248)),
+        ),
+        Err(AdministrativeCancellationError::RateLimited)
+    ));
     Ok(())
 }
 
@@ -7244,6 +7424,7 @@ fn storage_manager_issues_and_revokes_tokens_for_manage_users()
         max_active_invocations: 128,
         max_invocation_age: Duration::from_secs(15 * 60),
         max_token_lifecycle_requests_per_minute: 5,
+        max_admin_cancellation_requests_per_minute: 30,
     };
     let storage = StorageManager::with_config(&database, token_config)?;
     let second_storage_handle = StorageManager::with_config(&database, token_config)?;

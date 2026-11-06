@@ -17,14 +17,14 @@ use crate::credentials::{
 use crate::ddl_fence::{DdlFenceCoordinator, DdlFenceManager};
 use crate::metadata::{EngineMetadata, Lifecycle};
 use crate::outcome::{InvocationOutcome, lookup_outcome};
-use crate::schema::CATALOG;
+use crate::schema::{AUDIT, CATALOG, OUTCOMES};
 use crate::snapshot::{MAX_CATALOG_FAMILY_SCAN, RowSnapshot};
 use crate::startup::{StartupError, validate_persisted_records};
 use crate::transaction::{InvocationCoordination, InvocationTransaction, TransactionError};
-use redb::{Database, ReadableDatabase};
+use redb::{Database, ReadableDatabase, ReadableTable};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 use zeroize::Zeroize;
 
@@ -34,20 +34,23 @@ pub const MAX_OWN_INVOCATION_PAGE: usize = 128;
 pub const MAX_ADMIN_INVOCATION_PAGE: usize = 128;
 static TOKEN_REQUEST_LIMITERS: OnceLock<Mutex<HashMap<usize, Weak<TokenRequestLimiter>>>> =
     OnceLock::new();
+static ADMIN_CANCELLATION_LIMITERS: OnceLock<Mutex<HashMap<usize, Weak<TokenRequestLimiter>>>> =
+    OnceLock::new();
 static INVOCATION_REGISTRIES: OnceLock<Mutex<HashMap<usize, Weak<InvocationAdmissionState>>>> =
     OnceLock::new();
 
 /// Admission and coordination limits for one storage-manager handle.
 ///
 /// Defaults allow at most 128 simultaneous invocation snapshots, a 15-minute
-/// lifetime per managed invocation, and 30 token-lifecycle requests per actor
-/// per rolling minute.
+/// lifetime per managed invocation, and 30 token-lifecycle and administrative
+/// cancellation requests per actor per rolling minute.
 #[derive(Clone, Copy, Debug)]
 pub struct StorageManagerConfig {
     pub ddl_fence_timeout: Duration,
     pub max_active_invocations: usize,
     pub max_invocation_age: Duration,
     pub max_token_lifecycle_requests_per_minute: usize,
+    pub max_admin_cancellation_requests_per_minute: usize,
 }
 
 impl Default for StorageManagerConfig {
@@ -57,6 +60,7 @@ impl Default for StorageManagerConfig {
             max_active_invocations: 128,
             max_invocation_age: Duration::from_secs(15 * 60),
             max_token_lifecycle_requests_per_minute: 30,
+            max_admin_cancellation_requests_per_minute: 30,
         }
     }
 }
@@ -66,6 +70,7 @@ pub enum StorageManagerConfigError {
     ZeroActiveInvocationLimit,
     ZeroInvocationAge,
     ZeroTokenLifecycleRequestLimit,
+    ZeroAdminCancellationRequestLimit,
 }
 
 impl std::fmt::Display for StorageManagerConfigError {
@@ -100,10 +105,12 @@ pub enum InvocationStatus {
     Active {
         started_at_us: i64,
         deadline_at_us: Option<i64>,
+        cancellation_requested: bool,
     },
     Committing {
         started_at_us: i64,
         deadline_at_us: Option<i64>,
+        cancellation_requested: bool,
     },
     Terminal(InvocationOutcome),
 }
@@ -142,6 +149,7 @@ pub struct AdministrativeInvocationStatus {
     pub invocation_id: [u8; 16],
     pub principal_id: [u8; 16],
     pub status: InvocationStatus,
+    pub cancellation_reason_code: Option<u16>,
 }
 
 /// Opaque continuation for an administrator's live runtime page sequence.
@@ -197,6 +205,31 @@ impl std::fmt::Display for AdministrativeInvocationListError {
 }
 
 impl std::error::Error for AdministrativeInvocationListError {}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AdministrativeCancellationResult {
+    Accepted,
+    TooLate,
+    Terminal(InvocationOutcome),
+    Unknown,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AdministrativeCancellationError {
+    InvalidRequest,
+    InvalidAudit,
+    Unauthorized,
+    RateLimited,
+    Storage,
+}
+
+impl std::fmt::Display for AdministrativeCancellationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "administrative cancellation failed: {self:?}")
+    }
+}
+
+impl std::error::Error for AdministrativeCancellationError {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TokenLifecycleError {
@@ -273,6 +306,7 @@ pub struct StorageManager<'db> {
     max_active_invocations: usize,
     admissions: Arc<InvocationAdmissionState>,
     token_requests: Arc<TokenRequestLimiter>,
+    admin_cancellation_requests: Arc<TokenRequestLimiter>,
     max_invocation_age: Duration,
 }
 
@@ -339,9 +373,29 @@ fn shared_token_request_limiter(
     limiter
 }
 
+fn shared_admin_cancellation_limiter(
+    database: &Database,
+    configured_limit: usize,
+) -> Arc<TokenRequestLimiter> {
+    let database_key = database as *const Database as usize;
+    let registry = ADMIN_CANCELLATION_LIMITERS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut registry = registry
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    registry.retain(|_, limiter| limiter.strong_count() != 0);
+    if let Some(limiter) = registry.get(&database_key).and_then(Weak::upgrade) {
+        limiter.limit.fetch_min(configured_limit, Ordering::Relaxed);
+        return limiter;
+    }
+    let limiter = Arc::new(TokenRequestLimiter::new(configured_limit));
+    registry.insert(database_key, Arc::downgrade(&limiter));
+    limiter
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LiveInvocationPhase {
     Active,
+    CancellationPending,
     Committing,
 }
 
@@ -351,12 +405,14 @@ struct LiveInvocation {
     started_at_us: i64,
     deadline_at_us: Option<i64>,
     phase: LiveInvocationPhase,
+    cancellation_reason_code: Option<u16>,
     owner_generation: u128,
 }
 
 struct InvocationAdmissionState {
     limit: AtomicUsize,
     live: Mutex<LiveInvocationRegistry>,
+    changed: Condvar,
 }
 
 struct LiveInvocationRegistry {
@@ -415,6 +471,7 @@ impl InvocationAdmissionState {
                 started_at_us,
                 deadline_at_us,
                 phase: LiveInvocationPhase::Active,
+                cancellation_reason_code: None,
                 owner_generation: 0,
             },
         );
@@ -473,10 +530,17 @@ impl InvocationAdmissionState {
                     LiveInvocationPhase::Active => InvocationStatus::Active {
                         started_at_us: invocation.started_at_us,
                         deadline_at_us: invocation.deadline_at_us,
+                        cancellation_requested: invocation.cancellation_reason_code.is_some(),
+                    },
+                    LiveInvocationPhase::CancellationPending => InvocationStatus::Active {
+                        started_at_us: invocation.started_at_us,
+                        deadline_at_us: invocation.deadline_at_us,
+                        cancellation_requested: false,
                     },
                     LiveInvocationPhase::Committing => InvocationStatus::Committing {
                         started_at_us: invocation.started_at_us,
                         deadline_at_us: invocation.deadline_at_us,
+                        cancellation_requested: invocation.cancellation_reason_code.is_some(),
                     },
                 },
             })
@@ -534,12 +598,20 @@ impl InvocationAdmissionState {
                         LiveInvocationPhase::Active => InvocationStatus::Active {
                             started_at_us: invocation.started_at_us,
                             deadline_at_us: invocation.deadline_at_us,
+                            cancellation_requested: invocation.cancellation_reason_code.is_some(),
+                        },
+                        LiveInvocationPhase::CancellationPending => InvocationStatus::Active {
+                            started_at_us: invocation.started_at_us,
+                            deadline_at_us: invocation.deadline_at_us,
+                            cancellation_requested: false,
                         },
                         LiveInvocationPhase::Committing => InvocationStatus::Committing {
                             started_at_us: invocation.started_at_us,
                             deadline_at_us: invocation.deadline_at_us,
+                            cancellation_requested: invocation.cancellation_reason_code.is_some(),
                         },
                     },
+                    cancellation_reason_code: invocation.cancellation_reason_code,
                 },
             )
             .collect::<Vec<_>>();
@@ -560,24 +632,37 @@ impl InvocationAdmissionState {
 }
 
 impl InvocationAdmissionPermit {
-    pub(crate) fn mark_committing(&self) {
+    pub(crate) fn try_mark_committing(&self) -> bool {
         let mut live = self
             .state
             .live
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let owner = if let Some(invocation) = live.entries.get_mut(&self.invocation_id) {
-            if invocation.phase != LiveInvocationPhase::Committing {
-                invocation.phase = LiveInvocationPhase::Committing;
-                Some(invocation.principal_id)
-            } else {
-                None
+        loop {
+            let phase = live
+                .entries
+                .get(&self.invocation_id)
+                .map(|invocation| (invocation.phase, invocation.cancellation_reason_code));
+            match phase {
+                Some((LiveInvocationPhase::Active, None)) => {
+                    let Some(invocation) = live.entries.get_mut(&self.invocation_id) else {
+                        return false;
+                    };
+                    invocation.phase = LiveInvocationPhase::Committing;
+                    let principal_id = invocation.principal_id;
+                    live.advance_owner_generation(principal_id);
+                    self.state.changed.notify_all();
+                    return true;
+                }
+                Some((LiveInvocationPhase::CancellationPending, _)) => {
+                    live = self
+                        .state
+                        .changed
+                        .wait(live)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
+                _ => return false,
             }
-        } else {
-            None
-        };
-        if let Some(principal_id) = owner {
-            live.advance_owner_generation(principal_id);
         }
     }
 }
@@ -591,6 +676,7 @@ impl Drop for InvocationAdmissionPermit {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(invocation) = live.entries.remove(&self.invocation_id) {
             live.advance_owner_generation(invocation.principal_id);
+            self.state.changed.notify_all();
         }
     }
 }
@@ -617,6 +703,7 @@ fn shared_invocation_registry(
             generation: 1,
             entries: HashMap::new(),
         }),
+        changed: Condvar::new(),
     });
     registry.insert(database_key, Arc::downgrade(&invocations));
     invocations
@@ -672,11 +759,20 @@ impl<'db> StorageManager<'db> {
                 StorageManagerConfigError::ZeroTokenLifecycleRequestLimit,
             ));
         }
+        if config.max_admin_cancellation_requests_per_minute == 0 {
+            return Err(StorageManagerInitError::Config(
+                StorageManagerConfigError::ZeroAdminCancellationRequestLimit,
+            ));
+        }
         if validate_startup {
             validate_persisted_records(database).map_err(StorageManagerInitError::Startup)?;
         }
         let token_requests =
             shared_token_request_limiter(database, config.max_token_lifecycle_requests_per_minute);
+        let admin_cancellation_requests = shared_admin_cancellation_limiter(
+            database,
+            config.max_admin_cancellation_requests_per_minute,
+        );
         let admissions = shared_invocation_registry(database, config.max_active_invocations);
         Ok(Self {
             database,
@@ -684,6 +780,7 @@ impl<'db> StorageManager<'db> {
             max_active_invocations: config.max_active_invocations,
             admissions,
             token_requests,
+            admin_cancellation_requests,
             max_invocation_age: config.max_invocation_age,
         })
     }
@@ -1280,10 +1377,17 @@ impl<'db> StorageManager<'db> {
                 LiveInvocationPhase::Active => InvocationStatus::Active {
                     started_at_us: live.started_at_us,
                     deadline_at_us: live.deadline_at_us,
+                    cancellation_requested: live.cancellation_reason_code.is_some(),
+                },
+                LiveInvocationPhase::CancellationPending => InvocationStatus::Active {
+                    started_at_us: live.started_at_us,
+                    deadline_at_us: live.deadline_at_us,
+                    cancellation_requested: false,
                 },
                 LiveInvocationPhase::Committing => InvocationStatus::Committing {
                     started_at_us: live.started_at_us,
                     deadline_at_us: live.deadline_at_us,
+                    cancellation_requested: live.cancellation_reason_code.is_some(),
                 },
             };
             return Ok(Some(InvocationStatusSnapshot {
@@ -1390,6 +1494,125 @@ impl<'db> StorageManager<'db> {
             continuation,
         })
     }
+
+    /// Request audited cancellation for a live invocation. A short-lived
+    /// pending state makes commit wait for the durable audit decision without
+    /// holding the registry lock during redb I/O.
+    pub fn cancel_invocation(
+        &self,
+        authenticated_administrator_id: [u8; 16],
+        invocation_id: [u8; 16],
+        reason_code: u16,
+        now_us: i64,
+        mut audit_event: AuditEvent,
+    ) -> Result<AdministrativeCancellationResult, AdministrativeCancellationError> {
+        if authenticated_administrator_id == [0; 16]
+            || invocation_id == [0; 16]
+            || reason_code == 0
+            || now_us <= 0
+        {
+            return Err(AdministrativeCancellationError::InvalidRequest);
+        }
+        self.admin_cancellation_requests
+            .consume(authenticated_administrator_id)
+            .map_err(|_| AdministrativeCancellationError::RateLimited)?;
+        if audit_event.actor_id != Some(authenticated_administrator_id)
+            || audit_event.action != AuditAction::AdministrativeCancellation
+            || audit_event.target_ids.as_slice() != [invocation_id]
+        {
+            return Err(AdministrativeCancellationError::InvalidAudit);
+        }
+
+        loop {
+            let mut live = self
+                .admissions
+                .live
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let invocation = live.entries.get(&invocation_id).copied();
+            match invocation {
+                Some(invocation)
+                    if invocation.phase == LiveInvocationPhase::CancellationPending =>
+                {
+                    live = self
+                        .admissions
+                        .changed
+                        .wait(live)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    drop(live);
+                }
+                Some(invocation) if invocation.phase == LiveInvocationPhase::Committing => {
+                    drop(live);
+                    audit_event.result = AuditResult::Denied;
+                    persist_admin_cancellation_audit(
+                        self.database,
+                        authenticated_administrator_id,
+                        &audit_event,
+                    )?;
+                    return Ok(AdministrativeCancellationResult::TooLate);
+                }
+                Some(invocation) if invocation.cancellation_reason_code.is_some() => {
+                    drop(live);
+                    audit_event.result = AuditResult::Accepted;
+                    persist_admin_cancellation_audit(
+                        self.database,
+                        authenticated_administrator_id,
+                        &audit_event,
+                    )?;
+                    return Ok(AdministrativeCancellationResult::Accepted);
+                }
+                Some(invocation) if invocation.phase == LiveInvocationPhase::Active => {
+                    if let Some(entry) = live.entries.get_mut(&invocation_id) {
+                        entry.phase = LiveInvocationPhase::CancellationPending;
+                    }
+                    drop(live);
+
+                    audit_event.result = AuditResult::Accepted;
+                    let audit_result = persist_admin_cancellation_audit(
+                        self.database,
+                        authenticated_administrator_id,
+                        &audit_event,
+                    );
+
+                    let mut live = self
+                        .admissions
+                        .live
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let mut changed = false;
+                    if let Some(entry) = live.entries.get_mut(&invocation_id)
+                        && entry.phase == LiveInvocationPhase::CancellationPending
+                    {
+                        entry.phase = LiveInvocationPhase::Active;
+                        if audit_result.is_ok() {
+                            entry.cancellation_reason_code = Some(reason_code);
+                            changed = true;
+                        }
+                    }
+                    if changed {
+                        live.advance_owner_generation(invocation.principal_id);
+                    }
+                    self.admissions.changed.notify_all();
+                    audit_result?;
+                    return Ok(AdministrativeCancellationResult::Accepted);
+                }
+                None => {
+                    drop(live);
+                    audit_event.result = AuditResult::Denied;
+                    persist_admin_cancellation_audit(
+                        self.database,
+                        authenticated_administrator_id,
+                        &audit_event,
+                    )?;
+                    return match lookup_any_outcome(self.database, invocation_id, now_us)? {
+                        Some(outcome) => Ok(AdministrativeCancellationResult::Terminal(outcome)),
+                        None => Ok(AdministrativeCancellationResult::Unknown),
+                    };
+                }
+                Some(_) => return Ok(AdministrativeCancellationResult::TooLate),
+            }
+        }
+    }
 }
 
 fn database_admin_authority(
@@ -1411,6 +1634,134 @@ fn database_admin_authority(
     let mut database_admin_role = [0x80; 16];
     database_admin_role[15] = 3;
     Ok(roles.contains(&database_admin_role))
+}
+
+fn persist_admin_cancellation_audit(
+    database: &Database,
+    administrator_id: [u8; 16],
+    event: &AuditEvent,
+) -> Result<(), AdministrativeCancellationError> {
+    if event.actor_id != Some(administrator_id)
+        || event.action != AuditAction::AdministrativeCancellation
+        || !matches!(event.result, AuditResult::Accepted | AuditResult::Denied)
+    {
+        return Err(AdministrativeCancellationError::InvalidAudit);
+    }
+    let encoded = event
+        .encode()
+        .map_err(|_| AdministrativeCancellationError::InvalidAudit)?;
+
+    let read = database
+        .begin_read()
+        .map_err(|_| AdministrativeCancellationError::Storage)?;
+    let snapshot = RowSnapshot::new(read);
+    let is_administrator =
+        database_admin_authority(&snapshot, administrator_id).map_err(|error| match error {
+            TokenLifecycleError::TokenUnavailable => AdministrativeCancellationError::Unauthorized,
+            _ => AdministrativeCancellationError::Storage,
+        })?;
+    if !is_administrator {
+        return Err(AdministrativeCancellationError::Unauthorized);
+    }
+
+    let membership_records = snapshot
+        .scan_catalog_family(11, MAX_CATALOG_FAMILY_SCAN)
+        .map_err(|_| AdministrativeCancellationError::Storage)?;
+    let mut guarded_values = HashMap::<Vec<u8>, Vec<u8>>::new();
+    let mut principal_ids = HashSet::from([administrator_id]);
+    for record in membership_records {
+        let key = record.logical_key;
+        if key.len() != 36 || key[2] != 1 || key[19] != 1 {
+            return Err(AdministrativeCancellationError::Storage);
+        }
+        let member_id: [u8; 16] = key[3..19]
+            .try_into()
+            .map_err(|_| AdministrativeCancellationError::Storage)?;
+        let role_id: [u8; 16] = key[20..36]
+            .try_into()
+            .map_err(|_| AdministrativeCancellationError::Storage)?;
+        principal_ids.insert(member_id);
+        principal_ids.insert(role_id);
+        let value = snapshot
+            .get_catalog_value(&key)
+            .map_err(|_| AdministrativeCancellationError::Storage)?
+            .ok_or(AdministrativeCancellationError::Storage)?;
+        guarded_values.insert(key, value);
+    }
+    for principal_id in principal_ids {
+        let key = principal_catalog_key(principal_id);
+        let value = snapshot
+            .get_catalog_value(&key)
+            .map_err(|_| AdministrativeCancellationError::Storage)?
+            .ok_or(AdministrativeCancellationError::Storage)?;
+        guarded_values.insert(key, value);
+    }
+    drop(snapshot);
+
+    let mut write = database
+        .begin_write()
+        .map_err(|_| AdministrativeCancellationError::Storage)?;
+    write
+        .set_durability(redb::Durability::Immediate)
+        .map_err(|_| AdministrativeCancellationError::Storage)?;
+    write.set_two_phase_commit(true);
+    {
+        let catalog = write
+            .open_table(CATALOG)
+            .map_err(|_| AdministrativeCancellationError::Storage)?;
+        for (key, expected) in guarded_values {
+            let current = catalog
+                .get(key.as_slice())
+                .map_err(|_| AdministrativeCancellationError::Storage)?
+                .map(|value| value.value().to_vec());
+            if current.as_deref() != Some(expected.as_slice()) {
+                return Err(AdministrativeCancellationError::Unauthorized);
+            }
+        }
+    }
+    {
+        let mut audit = write
+            .open_table(AUDIT)
+            .map_err(|_| AdministrativeCancellationError::Storage)?;
+        if audit
+            .get(event.event_id.as_slice())
+            .map_err(|_| AdministrativeCancellationError::Storage)?
+            .is_some()
+        {
+            return Err(AdministrativeCancellationError::InvalidAudit);
+        }
+        audit
+            .insert(event.event_id.as_slice(), encoded.as_slice())
+            .map_err(|_| AdministrativeCancellationError::Storage)?;
+    }
+    write
+        .commit()
+        .map_err(|_| AdministrativeCancellationError::Storage)
+}
+
+fn lookup_any_outcome(
+    database: &Database,
+    invocation_id: [u8; 16],
+    now_us: i64,
+) -> Result<Option<InvocationOutcome>, AdministrativeCancellationError> {
+    let read = database
+        .begin_read()
+        .map_err(|_| AdministrativeCancellationError::Storage)?;
+    let outcomes = read
+        .open_table(OUTCOMES)
+        .map_err(|_| AdministrativeCancellationError::Storage)?;
+    let Some(value) = outcomes
+        .get(invocation_id.as_slice())
+        .map_err(|_| AdministrativeCancellationError::Storage)?
+    else {
+        return Ok(None);
+    };
+    let outcome = InvocationOutcome::decode(value.value())
+        .map_err(|_| AdministrativeCancellationError::Storage)?;
+    if outcome.invocation_id != invocation_id {
+        return Err(AdministrativeCancellationError::Storage);
+    }
+    Ok((now_us < outcome.retention_deadline_us).then_some(outcome))
 }
 
 fn token_actor_roles(

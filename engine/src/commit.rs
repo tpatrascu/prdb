@@ -178,6 +178,7 @@ pub enum CommitError {
     DdlFenceUnavailable,
     DdlAuthorizationDenied,
     InvocationExpired,
+    InvocationCancelled,
     InvalidCatalog,
     InvalidAudit,
     AuditAlreadyExists,

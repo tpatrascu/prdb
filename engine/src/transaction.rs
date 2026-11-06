@@ -51,6 +51,7 @@ pub enum TransactionError {
     AuthenticationFailed,
     AdmissionLimitExceeded,
     Expired,
+    CancellationRequested,
     IndexRowNotStaged,
     RowAlreadyExists,
     GeneratedIdentityUnsupported,
@@ -191,6 +192,7 @@ impl From<CommitError> for TransactionError {
         match error {
             CommitError::IndexOverlayLimitExceeded => Self::IndexOverlayLimitExceeded,
             CommitError::InvocationExpired => Self::Expired,
+            CommitError::InvocationCancelled => Self::CancellationRequested,
             error => Self::Commit(error),
         }
     }
@@ -258,10 +260,10 @@ impl InvocationCoordination {
             .is_some_and(|(admitted_at, max_age)| admitted_at.elapsed() >= max_age)
     }
 
-    fn mark_committing(&self) {
-        if let Some(permit) = &self._admission_permit {
-            permit.mark_committing();
-        }
+    fn mark_committing(&self) -> bool {
+        self._admission_permit
+            .as_ref()
+            .is_none_or(|permit| permit.try_mark_committing())
     }
 }
 
@@ -2530,7 +2532,9 @@ impl<'db> InvocationTransaction<'db> {
             if self.coordination.is_expired() {
                 return Err(CommitError::InvocationExpired);
             }
-            self.coordination.mark_committing();
+            if !self.coordination.mark_committing() {
+                return Err(CommitError::InvocationCancelled);
+            }
             commit_storage_changes(
                 self.database,
                 CommitRequest {
