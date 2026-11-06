@@ -318,9 +318,9 @@ pub fn dispatch_planner_request(
     })
 }
 
-/// Serve one planner stream bound out of band to a single invocation. A clean
-/// disconnect, malformed frame, or planner protocol violation aborts that
-/// invocation and records its durable outcome.
+/// Serve one planner stream bound out of band to a single invocation. Clean
+/// EOF ends only this planning session so the invocation can continue with
+/// execution; malformed frames and protocol violations abort it.
 pub fn serve_planner<S: Read + Write>(
     stream: &mut S,
     transaction: &mut crate::transaction::InvocationTransaction<'_>,
@@ -332,7 +332,7 @@ pub fn serve_planner<S: Read + Write>(
             Ok(Some(request)) => request,
             Ok(None) => {
                 drop(connection);
-                return transaction.abort().map_err(PlannerConnectionError::Abort);
+                return Ok(());
             }
             Err(error) => {
                 drop(connection);

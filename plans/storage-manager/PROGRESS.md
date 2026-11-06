@@ -905,7 +905,7 @@
 
 ## ST-1 / ST-2 dependency: planner stream lifecycle
 
-- Behavior: `serve_planner` now loops over a single provisioned planner stream, enforces unique request IDs and a 256-request cap, preserves kind-9 handle state across requests, and durably aborts on disconnect or protocol failure.
+- Behavior: `serve_planner` loops over one provisioned planner stream, enforces unique request IDs and a 256-request cap, and preserves kind-9 handle state across requests. Clean EOF closes only the planner session so execution can continue; malformed frames and protocol violations durably abort the invocation.
 - Changed code and contract: [planner stream and dispatcher](../../engine/src/planner_ipc.rs) and [planner IPC contract](../../specs/ipc-protocol.md).
 - Verification: format, workspace build, and warning-denied Clippy pass. Tests were not run in this increment.
 - Remaining: supervisor provisioning, shared planner/executor invocation scheduling, and cancellation-aware planner task draining remain open.
