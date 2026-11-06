@@ -618,10 +618,12 @@ impl<'db> StorageManager<'db> {
         )
     }
 
-    /// Authorize user/role creation, rename, and login-state changes for an
-    /// actor authenticated by the trusted administrative channel. User
+    /// Authorize user/role creation, rename, login-state changes, and
+    /// `DROP ... RESTRICT` when no dependencies reference the identity. The
+    /// actor is authenticated by the trusted administrative channel. User
     /// lifecycle changes require `MANAGE_USERS`, role changes require
-    /// `MANAGE_ROLES`, and identity deletion remains unsupported.
+    /// `MANAGE_ROLES`; a dropped user's active tokens are revoked in the same
+    /// batch as its tombstone.
     pub fn commit_authorized_identity_ddl(
         &self,
         invocation_id: [u8; 16],

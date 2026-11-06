@@ -599,3 +599,12 @@
 - Verification: the prescribed Nix-shell locked workspace build, formatting check, Clippy with warnings denied, and all 220 workspace tests passed. Changed Markdown local links and `git diff --check` passed.
 - Contract updates: [catalog payloads](../../specs/catalog-payloads.md), [catalog lifecycle](../../specs/catalog-lifecycle.md), [data dictionary](../../specs/data-dictionary.md), and [users and roles](../../specs/ddl-identity.md).
 - Remaining: user/role DROP RESTRICT must publish the tombstone and remove blocked references atomically.
+
+## SM-5 dependency: restricted user and role deletion
+
+- Red evidence: the unreferenced-user deletion regression initially failed with `InvalidCatalog` because the authorized identity route rejected deletes and family-17 tombstones.
+- The identity DDL route now accepts paired principal/object deletion plus a new tombstone, requires `MANAGE_USERS` or `MANAGE_ROLES`, rejects the reserved `database_admin` role, and performs bounded RESTRICT scans for object ownership/parent references, membership/grantor references, grants, policy targets, and dependency edges. Existing serialized final-catalog validation rejects concurrent references that were absent from the preflight snapshot.
+- Deleting a user requires every active family-16 credential to be revoked in the same batch. The writer checks that at least one login-enabled administrator with a current credential remains. The principal/object removal, token revocations, tombstone, audit, outcome, and commit sequence publish atomically.
+- Real-redb regressions cover unreferenced user and role drops with tombstone persistence, user-token revocation in the same batch, refusal to omit an active-token revocation, a grant reference that blocks `RESTRICT`, and persisted-catalog validation after deletion.
+- Contract updates: [users and roles](../../specs/ddl-identity.md) and [storage manager](../../specs/storage-manager.md).
+- Remaining: bootstrap secret handoff, authenticated control-channel/gateway integration, token request rate limits, deterministic authority-change race coverage, and role/user DROP integration through a SQL/control frontend remain open.

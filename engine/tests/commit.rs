@@ -79,6 +79,17 @@ fn identity_tombstone_write(object_id: [u8; 16]) -> CatalogWrite {
     }
 }
 
+fn catalog_delete(mut write: CatalogWrite, current_value: Vec<u8>) -> CatalogWrite {
+    write.expected_value = Some(current_value);
+    write.payload = None;
+    write
+}
+
+fn catalog_expect(mut write: CatalogWrite, current_value: Vec<u8>) -> CatalogWrite {
+    write.expected_value = Some(current_value);
+    write
+}
+
 fn builtin_id(code: u16) -> [u8; 16] {
     let mut id = [0x80; 16];
     id[15] = code as u8;
@@ -4841,6 +4852,304 @@ fn identity_ddl_refuses_to_reuse_a_tombstoned_id() -> Result<(), Box<dyn std::er
             .get(id_catalog_key(10, retired_id).as_slice())?
             .is_none()
     );
+    Ok(())
+}
+
+#[test]
+fn identity_ddl_drops_unreferenced_user_and_revokes_tokens_atomically()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let admin_user = id(0xd1);
+    let dropped_user = id(0xd2);
+    let admin_token = id(0xd3);
+    let dropped_token = id(0xd4);
+    let dropped_role = id(0xd7);
+    let admin_role = builtin_owner_id();
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let mut seed_audit = identity_audit_event(0xd0, admin_role, admin_user);
+    seed_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(
+        id(0xd0),
+        admin_role,
+        9_999,
+        &[
+            principal_write_with_name(admin_user, 1, 1, "drop_admin"),
+            object_write_with_name(admin_user, 8, "drop_admin"),
+            principal_write_with_name(dropped_user, 1, 1, "drop_target"),
+            object_write_with_parent_and_owner_and_name(
+                dropped_user,
+                8,
+                None,
+                admin_user,
+                "drop_target",
+            ),
+            principal_write_with_name(dropped_role, 2, 1, "drop_role"),
+            object_write_with_parent_and_owner_and_name(
+                dropped_role,
+                9,
+                None,
+                admin_user,
+                "drop_role",
+            ),
+            membership_write_with_grantor(admin_user, admin_role, admin_role),
+            dependency_write(admin_user, admin_role, 5),
+            credential_verifier_write(admin_token, admin_user, &[0xd3; 32], 1, i64::MAX, None, 1),
+            credential_verifier_write(
+                dropped_token,
+                dropped_user,
+                &[0xd4; 32],
+                1,
+                i64::MAX,
+                None,
+                1,
+            ),
+        ],
+        &[seed_audit],
+    )?;
+    let read_catalog = || -> Result<_, Box<dyn std::error::Error>> {
+        let read = database.begin_read()?;
+        let catalog = read.open_table(CATALOG)?;
+        Ok((
+            catalog
+                .get(id_catalog_key(2, dropped_user).as_slice())?
+                .map(|v| v.value().to_vec()),
+            catalog
+                .get(id_catalog_key(10, dropped_user).as_slice())?
+                .map(|v| v.value().to_vec()),
+            catalog
+                .get(id_catalog_key(2, dropped_role).as_slice())?
+                .map(|v| v.value().to_vec()),
+            catalog
+                .get(id_catalog_key(10, dropped_role).as_slice())?
+                .map(|v| v.value().to_vec()),
+            catalog
+                .get(id_catalog_key(16, dropped_token).as_slice())?
+                .map(|v| v.value().to_vec()),
+        ))
+    };
+    let (object, principal, role_object, role_principal, token) = read_catalog()?;
+    let revoked_token = catalog_expect(
+        credential_verifier_write(
+            dropped_token,
+            dropped_user,
+            &[0xd4; 32],
+            1,
+            i64::MAX,
+            Some(2),
+            2,
+        ),
+        token.ok_or("missing target token")?,
+    );
+    let drop_writes = [
+        catalog_delete(
+            CatalogWrite {
+                key: id_catalog_key(2, dropped_user),
+                expected_value: None,
+                payload: None,
+            },
+            object.ok_or("missing user object")?,
+        ),
+        catalog_delete(
+            CatalogWrite {
+                key: id_catalog_key(10, dropped_user),
+                expected_value: None,
+                payload: None,
+            },
+            principal.ok_or("missing user principal")?,
+        ),
+        identity_tombstone_write(dropped_user),
+        catalog_delete(
+            CatalogWrite {
+                key: id_catalog_key(2, dropped_role),
+                expected_value: None,
+                payload: None,
+            },
+            role_object.ok_or("missing role object")?,
+        ),
+        catalog_delete(
+            CatalogWrite {
+                key: id_catalog_key(10, dropped_role),
+                expected_value: None,
+                payload: None,
+            },
+            role_principal.ok_or("missing role principal")?,
+        ),
+        identity_tombstone_write(dropped_role),
+        revoked_token,
+    ];
+    let mut incomplete_drop_audit = identity_audit_event(0xd6, admin_user, dropped_user);
+    incomplete_drop_audit.target_ids = vec![dropped_user];
+    assert_eq!(
+        storage.commit_authorized_identity_ddl(
+            id(0xd6),
+            admin_user,
+            9_999,
+            &drop_writes[..6],
+            &[incomplete_drop_audit],
+        ),
+        Err(CommitError::DdlAuthorizationDenied)
+    );
+    let mut drop_audit = identity_audit_event(0xd5, admin_user, dropped_user);
+    drop_audit.target_ids = vec![dropped_user, dropped_token, dropped_role];
+    let drop_result = storage.commit_authorized_identity_ddl(
+        id(0xd5),
+        admin_user,
+        9_999,
+        &drop_writes,
+        &[drop_audit],
+    );
+    assert_eq!(drop_result, Ok(2));
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    assert!(
+        catalog
+            .get(id_catalog_key(2, dropped_user).as_slice())?
+            .is_none()
+    );
+    assert!(
+        catalog
+            .get(id_catalog_key(10, dropped_user).as_slice())?
+            .is_none()
+    );
+    assert!(
+        catalog
+            .get(id_catalog_key(17, dropped_user).as_slice())?
+            .is_some()
+    );
+    assert!(
+        catalog
+            .get(id_catalog_key(2, dropped_role).as_slice())?
+            .is_none()
+    );
+    assert!(
+        catalog
+            .get(id_catalog_key(10, dropped_role).as_slice())?
+            .is_none()
+    );
+    assert!(
+        catalog
+            .get(id_catalog_key(17, dropped_role).as_slice())?
+            .is_some()
+    );
+    assert!(
+        catalog
+            .get(id_catalog_key(16, dropped_token).as_slice())?
+            .is_some()
+    );
+    assert_eq!(commit_sequence(&database)?, 2);
+    prdb_engine::startup::validate_persisted_records(&database)?;
+    Ok(())
+}
+
+#[test]
+fn identity_ddl_restricts_user_drop_when_a_grant_references_the_user()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let admin_user = id(0xe1);
+    let dropped_user = id(0xe2);
+    let admin_token = id(0xe3);
+    let dropped_token = id(0xe4);
+    let admin_role = builtin_owner_id();
+    let database_id = id(0x33);
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let mut seed_audit = identity_audit_event(0xe0, admin_role, admin_user);
+    seed_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(
+        id(0xe0),
+        admin_role,
+        9_999,
+        &[
+            principal_write_with_name(admin_user, 1, 1, "restrict_admin"),
+            object_write_with_name(admin_user, 8, "restrict_admin"),
+            principal_write_with_name(dropped_user, 1, 1, "restrict_target"),
+            object_write_with_parent_and_owner_and_name(
+                dropped_user,
+                8,
+                None,
+                admin_user,
+                "restrict_target",
+            ),
+            membership_write_with_grantor(admin_user, admin_role, admin_role),
+            dependency_write(admin_user, admin_role, 5),
+            credential_verifier_write(admin_token, admin_user, &[0xe3; 32], 1, i64::MAX, None, 1),
+            credential_verifier_write(
+                dropped_token,
+                dropped_user,
+                &[0xe4; 32],
+                1,
+                i64::MAX,
+                None,
+                1,
+            ),
+            grant_write(dropped_user, database_id, 12, 1, database_id, admin_role),
+            dependency_write(dropped_user, database_id, 5),
+        ],
+        &[seed_audit],
+    )?;
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    let object = catalog
+        .get(id_catalog_key(2, dropped_user).as_slice())?
+        .ok_or("missing user object")?
+        .value()
+        .to_vec();
+    let principal = catalog
+        .get(id_catalog_key(10, dropped_user).as_slice())?
+        .ok_or("missing user principal")?
+        .value()
+        .to_vec();
+    let token = catalog
+        .get(id_catalog_key(16, dropped_token).as_slice())?
+        .ok_or("missing target token")?
+        .value()
+        .to_vec();
+    let grant = grant_write(dropped_user, database_id, 12, 1, database_id, admin_role);
+    let mut drop_audit = identity_audit_event(0xe5, admin_user, dropped_user);
+    drop_audit.target_ids = vec![dropped_user, dropped_token];
+    assert_eq!(
+        storage.commit_authorized_identity_ddl(
+            id(0xe5),
+            admin_user,
+            9_999,
+            &[
+                catalog_delete(
+                    CatalogWrite {
+                        key: id_catalog_key(2, dropped_user),
+                        expected_value: None,
+                        payload: None,
+                    },
+                    object,
+                ),
+                catalog_delete(
+                    CatalogWrite {
+                        key: id_catalog_key(10, dropped_user),
+                        expected_value: None,
+                        payload: None,
+                    },
+                    principal,
+                ),
+                identity_tombstone_write(dropped_user),
+                catalog_expect(
+                    credential_verifier_write(
+                        dropped_token,
+                        dropped_user,
+                        &[0xe4; 32],
+                        1,
+                        i64::MAX,
+                        Some(2),
+                        2,
+                    ),
+                    token,
+                ),
+            ],
+            &[drop_audit],
+        ),
+        Err(CommitError::DdlAuthorizationDenied)
+    );
+    assert!(catalog.get(grant.key.as_slice())?.is_some());
+    assert_eq!(commit_sequence(&database)?, 1);
     Ok(())
 }
 
