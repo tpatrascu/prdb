@@ -310,6 +310,95 @@ pub struct StorageManager<'db> {
     max_invocation_age: Duration,
 }
 
+/// One token-authenticated invocation owned by the trusted supervisor-facing
+/// storage service. The transaction cannot be finalized through executor or
+/// planner methods and is aborted if this owner drops it without a decision.
+pub struct SupervisorInvocation<'db> {
+    invocation_id: [u8; 16],
+    principal_id: [u8; 16],
+    role_ids: HashSet<[u8; 16]>,
+    transaction: Option<InvocationTransaction<'db>>,
+}
+
+#[derive(Debug)]
+pub enum SupervisorInvocationError {
+    Closed,
+    Executor(crate::executor_ipc::ExecutorConnectionError),
+    Planner(crate::planner_ipc::PlannerConnectionError),
+    Supervisor(crate::supervisor_ipc::SupervisorConnectionError),
+}
+
+impl std::fmt::Display for SupervisorInvocationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "supervisor invocation failed: {self:?}")
+    }
+}
+
+impl std::error::Error for SupervisorInvocationError {}
+
+impl SupervisorInvocation<'_> {
+    pub fn invocation_id(&self) -> [u8; 16] {
+        self.invocation_id
+    }
+
+    pub fn principal_id(&self) -> [u8; 16] {
+        self.principal_id
+    }
+
+    pub fn role_ids(&self) -> &HashSet<[u8; 16]> {
+        &self.role_ids
+    }
+
+    pub fn serve_planner<S: std::io::Read + std::io::Write>(
+        &mut self,
+        stream: &mut S,
+    ) -> Result<(), SupervisorInvocationError> {
+        let transaction = self
+            .transaction
+            .as_mut()
+            .ok_or(SupervisorInvocationError::Closed)?;
+        crate::planner_ipc::serve_planner(stream, transaction)
+            .map_err(SupervisorInvocationError::Planner)
+    }
+
+    pub fn serve_executor<S: std::io::Read + std::io::Write>(
+        &mut self,
+        stream: &mut S,
+    ) -> Result<(), SupervisorInvocationError> {
+        let transaction = self
+            .transaction
+            .as_mut()
+            .ok_or(SupervisorInvocationError::Closed)?;
+        crate::executor_ipc::serve_executor(stream, transaction)
+            .map_err(SupervisorInvocationError::Executor)
+    }
+
+    pub fn serve_terminal<S: std::io::Read + std::io::Write>(
+        &mut self,
+        stream: &mut S,
+    ) -> Result<(), SupervisorInvocationError> {
+        crate::supervisor_ipc::serve_supervisor(stream, &mut self.transaction)
+            .map_err(SupervisorInvocationError::Supervisor)
+    }
+
+    pub fn serve_control<S: std::io::Read + std::io::Write>(
+        &self,
+        manager: &StorageManager<'_>,
+        stream: &mut S,
+    ) -> Result<(), SupervisorInvocationError> {
+        crate::supervisor_ipc::serve_supervisor_control(stream, manager, self.principal_id)
+            .map_err(SupervisorInvocationError::Supervisor)
+    }
+}
+
+impl Drop for SupervisorInvocation<'_> {
+    fn drop(&mut self) {
+        if let Some(mut transaction) = self.transaction.take() {
+            let _ = transaction.abort();
+        }
+    }
+}
+
 struct TokenRequestLimiter {
     limit: AtomicUsize,
     requests: Mutex<HashMap<[u8; 16], VecDeque<Instant>>>,
@@ -913,6 +1002,34 @@ impl<'db> StorageManager<'db> {
         };
         let roles = transaction.authenticate_credential_token(token_id, token_secret, now_us)?;
         Ok((transaction, roles))
+    }
+
+    /// Admit a token-authenticated invocation into the supervisor-owned
+    /// storage context used by planner, executor, and terminal IPC handlers.
+    pub fn admit_supervisor_invocation(
+        &self,
+        invocation_id: [u8; 16],
+        token_id: [u8; 16],
+        token_secret: &[u8; TOKEN_SECRET_BYTES],
+        retention_deadline_us: i64,
+        max_rows: usize,
+        max_bytes: usize,
+    ) -> Result<SupervisorInvocation<'db>, TransactionError> {
+        let principal_id = lookup_credential_principal(self.database, token_id)?;
+        let (transaction, role_ids) = self.begin_token_authenticated_invocation(
+            invocation_id,
+            token_id,
+            token_secret,
+            retention_deadline_us,
+            max_rows,
+            max_bytes,
+        )?;
+        Ok(SupervisorInvocation {
+            invocation_id,
+            principal_id,
+            role_ids,
+            transaction: Some(transaction),
+        })
     }
 
     /// Issue one random bearer token for a LOGIN user through the authorized

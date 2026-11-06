@@ -915,4 +915,11 @@
 - Behavior: role-checked Supervisor handlers finalize or abort one out-of-band-bound invocation, look up owner-scoped status, and request audited administrative cancellation with the administrator bound outside the payload. Terminal operations consume the invocation, finalize returns the durable commit sequence, and losing the terminal channel before a decision durably aborts. Executor EOF only closes its session.
 - Changed code and contract: [supervisor IPC handlers](../../engine/src/supervisor_ipc.rs), [executor stream lifecycle](../../engine/src/executor_ipc.rs), and [IPC protocol](../../specs/ipc-protocol.md).
 - Verification: format, workspace build, warning-denied Clippy, and `git diff --check` pass. Tests were not run in this increment.
-- Remaining: wire these handlers to supervisor-owned invocation state, implement supervisor admission/worker exit observation, and connect gateway cancellation to this audited admin operation.
+- Remaining: implement worker exit observation, planner/executor multiplexing, and gateway cancellation wiring to the audited admin operation.
+
+## SU-1 / SU-5 dependency: token-bound supervisor invocation owner
+
+- Behavior: `StorageManager::admit_supervisor_invocation` verifies a database token, pins identity and role authority, and returns an owner that binds planner/executor channels to one invocation and exposes terminal and control channels. Dropping the owner without finalization attempts a durable abort.
+- Changed code and contract: [storage manager admission wrapper](../../engine/src/storage_manager.rs) and [storage manager lifecycle contract](../../specs/storage-manager.md).
+- Verification: format, workspace build, warning-denied Clippy, and `git diff --check` pass. Tests were not run in this increment.
+- Remaining: this synchronous wrapper does not multiplex planner and executor requests during worker execution or launch/reap a confined worker; those remain supervisor scheduler responsibilities.
