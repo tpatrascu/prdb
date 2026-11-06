@@ -1761,6 +1761,43 @@ fn authorized_relation_resolution_requires_visibility_and_exact_name()
 }
 
 #[test]
+fn catalog_authorized_qualified_relation_resolution_uses_pinned_grants()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    install_relation_discovery_catalog(&database)?;
+    let mut invocation = InvocationTransaction::begin(&database, [194; 16], [9; 16], 9_999, 1, 64)?;
+    let resolved = invocation
+        .resolve_catalog_authorized_relation("app", "metrics")?
+        .expect("qualified visible relation resolves");
+    assert_eq!(resolved.relation_id, [0x10; 16]);
+    assert_eq!(resolved.name, "metrics");
+    assert_eq!(resolved.columns.len(), 1);
+    assert_eq!(resolved.columns[0].name, "value");
+    assert!(
+        invocation
+            .resolve_catalog_authorized_relation("private", "secret")?
+            .is_none()
+    );
+    assert!(
+        invocation
+            .resolve_catalog_authorized_relation("missing", "secret")?
+            .is_none()
+    );
+    assert!(
+        invocation
+            .resolve_catalog_authorized_relation("app", "missing")?
+            .is_none()
+    );
+    assert!(
+        invocation
+            .resolve_catalog_authorized_relation("APP", "metrics")?
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
 fn authorized_column_description_pages_bind_the_snapshot_and_order()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();

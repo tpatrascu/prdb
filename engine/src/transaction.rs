@@ -843,6 +843,69 @@ impl<'db> InvocationTransaction<'db> {
         }
     }
 
+    /// Resolve a qualified schema and relation name using authority derived
+    /// from the admitted invocation's pinned catalog.
+    pub fn resolve_catalog_authorized_relation(
+        &mut self,
+        schema_name: &str,
+        relation_name: &str,
+    ) -> Result<Option<AuthorizedRelationDescription>, TransactionError> {
+        let result = (|| {
+            if schema_name.is_empty()
+                || schema_name.len() > MAX_METADATA_PAGE_BYTES
+                || relation_name.is_empty()
+                || relation_name.len() > MAX_METADATA_PAGE_BYTES
+            {
+                return Err(TransactionError::InvalidMetadataRequest);
+            }
+            let principal_id = self.principal_id;
+            let (schema_roles, schema_grants) =
+                self.load_catalog_schema_usage_grants(principal_id)?;
+            let schema_scope = schema_grants
+                .iter()
+                .map(|grant| (grant.operation, grant.target))
+                .collect();
+            let schema_context = AuthorizationContext {
+                principal_id,
+                role_ids: schema_roles,
+                scope: schema_scope,
+            };
+            let Some(schema) =
+                self.resolve_authorized_schema(schema_name, &schema_context, &schema_grants, &[])?
+            else {
+                return Ok(None);
+            };
+
+            let (relation_roles, relation_grants) =
+                self.load_catalog_relation_discovery_grants(schema.schema_id)?;
+            let relation_scope = relation_grants
+                .iter()
+                .map(|grant| (grant.operation, grant.target))
+                .collect();
+            let relation_context = AuthorizationContext {
+                principal_id,
+                role_ids: relation_roles,
+                scope: relation_scope,
+            };
+            self.resolve_authorized_relation(
+                schema.schema_id,
+                relation_name,
+                &relation_context,
+                &relation_grants,
+                &[],
+            )
+        })();
+        match result {
+            Ok(description) => Ok(description),
+            Err(error) => {
+                if !self.aborted {
+                    self.abort()?;
+                }
+                Err(error)
+            }
+        }
+    }
+
     /// List relations in one schema only when the invocation has schema usage
     /// and at least one table or column data grant. The role closure and each
     /// supplied grant are checked against this transaction's pinned catalog.
