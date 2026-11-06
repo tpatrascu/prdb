@@ -3246,6 +3246,61 @@ fn catalog_authorized_scan_builds_its_projection_from_pinned_records()
         [Some(ScalarValue::Bytea(vec![4, 5]))]
     );
     verify.abort()?;
+
+    let oversized_invocation_id = [237; 16];
+    let mut oversized = InvocationTransaction::begin(
+        &database,
+        oversized_invocation_id,
+        principal_id,
+        9_999,
+        1,
+        128,
+    )?;
+    let mut oversized_connection = oversized.open_executor_metadata_connection();
+    let (oversized_relation, _) = oversized_connection
+        .resolve_relation("app", "metrics")?
+        .expect("visible relation resolves");
+    let open_response = dispatch_executor_request(
+        ServiceRole::Executor,
+        &mut oversized_connection,
+        &IpcFrame {
+            operation: IpcOperation::OpenScan as u16,
+            request_id: 71,
+            payload: OpenScanRequest {
+                relation: oversized_relation,
+                column_ids: vec![[0x66; 16]],
+            }
+            .encode()?,
+        },
+    )?;
+    let oversized_cursor = OpenScanResponse::decode(&open_response.payload)?.cursor;
+    assert!(matches!(
+        dispatch_executor_request(
+            ServiceRole::Executor,
+            &mut oversized_connection,
+            &IpcFrame {
+                operation: IpcOperation::NextBatch as u16,
+                request_id: 72,
+                payload: NextBatchRequest {
+                    cursor: oversized_cursor,
+                    max_scanned: 1,
+                    max_bytes: 46,
+                }
+                .encode()?,
+            },
+        ),
+        Err(
+            prdb_engine::executor_ipc::ExecutorRequestError::Transaction(
+                TransactionError::MetadataResultTooLarge
+            )
+        )
+    ));
+    assert_eq!(
+        prdb_engine::outcome::lookup_outcome(&database, oversized_invocation_id, principal_id, 1,)?
+            .expect("oversized batch aborts durably")
+            .status,
+        OutcomeStatus::Aborted
+    );
     Ok(())
 }
 

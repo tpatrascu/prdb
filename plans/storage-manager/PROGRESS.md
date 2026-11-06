@@ -868,3 +868,12 @@
 - Red evidence: an early mixed-fixture commit returned `InvalidIndex` because its existing rows came from the low-level writer and lacked catalog index locators; reseeding them through authorized INSERT made index maintenance valid. A first seed attempt also hit `IndexOverlayLimitExceeded` with an undersized fixture budget; the fixture now allows its catalog-derived index entries. Workspace build, format, warning-denied Clippy, full tests, local Markdown links, and diff checks pass.
 - Remaining: generated identity allocation remains unsupported; broader FK/unique-index mutation cases still need dedicated executor-path fixtures.
 - Next smallest task: bind the generic executor request loop to supervisor-provisioned socket lifecycle.
+
+## SM-6 dependency: executor batch overflow abort
+
+- Behavior: a single authorized row that exceeds the caller's `max_bytes` aborts the invocation before any partial row is returned.
+- Changed fixture: [real-redb executor batch regression](../../engine/tests/transaction.rs).
+- Evidence: the request is rejected at a 46-byte cap for a 47-byte encoded row, and the invocation's durable outcome is ABORTED. The 48-byte pagination case still succeeds.
+- Verification: workspace build, format check, warning-denied Clippy, full workspace tests, all 158 changed-document local links, and `git diff --check` pass.
+- Remaining: exercise this failure through a live Unix stream and validate NULL/REDACTED and malformed response edge cases.
+- Next smallest task: add a stream-level multi-operation executor request regression before socket provisioning work.
