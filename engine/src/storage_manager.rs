@@ -3,7 +3,7 @@
 use crate::audit::AuditEvent;
 use crate::commit::{
     CatalogWrite, CommitError, commit_authorized_index_ddl_with_fences,
-    commit_authorized_membership_ddl_with_fences,
+    commit_authorized_membership_ddl_with_fences, commit_authorized_object_grant_ddl_with_fences,
     commit_authorized_system_privilege_ddl_with_fences, commit_catalog_and_audit_with_fences,
 };
 use crate::ddl_fence::{DdlFenceCoordinator, DdlFenceManager};
@@ -305,6 +305,28 @@ impl<'db> StorageManager<'db> {
         audit_events: &[AuditEvent],
     ) -> Result<u64, CommitError> {
         commit_authorized_system_privilege_ddl_with_fences(
+            self.database,
+            &self.ddl_fences,
+            invocation_id,
+            authenticated_principal_id,
+            retention_deadline_us,
+            catalog_writes,
+            audit_events,
+        )
+    }
+
+    /// Authorize and commit object grant/revoke changes for an actor
+    /// authenticated by the trusted administrative channel. The actor must
+    /// own each target, hold `MANAGE_GRANTS` on it, or be a database admin.
+    pub fn commit_authorized_object_grant_ddl(
+        &self,
+        invocation_id: [u8; 16],
+        authenticated_principal_id: [u8; 16],
+        retention_deadline_us: i64,
+        catalog_writes: &[CatalogWrite],
+        audit_events: &[AuditEvent],
+    ) -> Result<u64, CommitError> {
+        commit_authorized_object_grant_ddl_with_fences(
             self.database,
             &self.ddl_fences,
             invocation_id,

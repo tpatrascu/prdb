@@ -498,3 +498,13 @@
 - Verification: in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and workspace tests passed. Changed Markdown links and `git diff --check` passed.
 - Contract update: [users and roles](../../specs/ddl-identity.md).
 - Remaining: ordinary object grant authorization, user/role lifecycle DDL, credential-backed last-administrator validation, token-backed gateway admission, and deterministic authorization-change race coverage remain open.
+
+## SM-5 dependency: object grant DDL authorization — in progress
+
+- `StorageManager::commit_authorized_object_grant_ddl` accepts ordinary family-12 grant/revoke changes, their authority dependencies, and affected grantees' authority-epoch increments. It excludes database-scoped system privileges.
+- Each schema/table target is checked against its current owner, inherited `MANAGE_GRANTS` on that same object, or current database-administrator membership. Actor identity, membership closure, owner records, and applicable `MANAGE_GRANTS` records are guarded through publication; new grants identify the actor as grantor.
+- Scope validation permits schema-only `USAGE`/`CREATE`, table or column data grants, table-only `DELETE`, and schema/table administration privileges. Column grants resolve ownership through their table.
+- A real-redb regression covers owner and `MANAGE_GRANTS` authority, denial without either, grant/revoke publication, authority-epoch updates, and durable outcomes.
+- Verification: in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and workspace tests passed. Changed Markdown links and `git diff --check` passed.
+- Contract update: [permission DDL](../../specs/ddl-permissions.md).
+- Remaining: identity lifecycle DDL, policy/constraint authorization, credential-backed last-administrator validation, token-backed gateway admission, and deterministic authorization-change race coverage remain open.

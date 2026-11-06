@@ -3761,6 +3761,177 @@ fn storage_manager_restricts_system_privilege_ddl_to_database_admins()
 }
 
 #[test]
+fn storage_manager_authorizes_object_grants_for_owners_and_manage_grants_holders()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let table_owner = id(0x74);
+    let grant_manager = id(0x75);
+    let denied_user = id(0x76);
+    let owner_grantee = id(0x77);
+    let manager_grantee = id(0x78);
+    let denied_grantee = id(0x79);
+    let admin_role = builtin_owner_id();
+    let records = vec![
+        principal_write_with_name(table_owner, 1, 1, "table_owner"),
+        object_write_with_name(table_owner, 8, "table_owner"),
+        principal_write_with_name(grant_manager, 1, 1, "grant_manager"),
+        object_write_with_name(grant_manager, 8, "grant_manager"),
+        principal_write_with_name(denied_user, 1, 1, "grant_denied"),
+        object_write_with_name(denied_user, 8, "grant_denied"),
+        principal_write_with_name(owner_grantee, 1, 1, "owner_grantee"),
+        object_write_with_name(owner_grantee, 8, "owner_grantee"),
+        principal_write_with_name(manager_grantee, 1, 1, "manager_grantee"),
+        object_write_with_name(manager_grantee, 8, "manager_grantee"),
+        principal_write_with_name(denied_grantee, 1, 1, "denied_grantee"),
+        object_write_with_name(denied_grantee, 8, "denied_grantee"),
+        grant_write(grant_manager, id(16), 11, 1, id(16), admin_role),
+        dependency_write(grant_manager, id(16), 5),
+    ];
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let old_table_object = database
+        .begin_read()?
+        .open_table(CATALOG)?
+        .get(id_catalog_key(2, id(16)).as_slice())?
+        .ok_or("missing table object")?
+        .value()
+        .to_vec();
+    let mut owner_table = object_write_with_owner(id(16), 3, table_owner);
+    owner_table.expected_value = Some(old_table_object);
+    let mut setup_writes = records;
+    setup_writes.push(owner_table);
+    let mut setup_audit = audit_event(100);
+    setup_audit.actor_id = Some(admin_role);
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(id(100), admin_role, 9_999, &setup_writes, &[setup_audit])?;
+
+    let bump_grantee_epoch =
+        |grantee_id, epoch, name: &str| -> Result<_, Box<dyn std::error::Error>> {
+            let mut write = principal_write_with_name(grantee_id, 1, epoch, name);
+            let read = database.begin_read()?;
+            write.expected_value = Some(
+                read.open_table(CATALOG)?
+                    .get(id_catalog_key(10, grantee_id).as_slice())?
+                    .ok_or("missing grant grantee")?
+                    .value()
+                    .to_vec(),
+            );
+            Ok(write)
+        };
+    let remove_catalog_record = |mut write: CatalogWrite| -> Result<_, Box<dyn std::error::Error>> {
+        let read = database.begin_read()?;
+        write.expected_value = Some(
+            read.open_table(CATALOG)?
+                .get(write.key.as_slice())?
+                .ok_or("missing grant record")?
+                .value()
+                .to_vec(),
+        );
+        write.payload = None;
+        Ok(write)
+    };
+
+    let owner_select = grant_write(owner_grantee, id(16), 2, 1, id(16), table_owner);
+    let mut owner_audit = audit_event(101);
+    owner_audit.actor_id = Some(table_owner);
+    owner_audit.action = AuditAction::AuthorityChange;
+    assert_eq!(
+        storage.commit_authorized_object_grant_ddl(
+            id(101),
+            table_owner,
+            9_999,
+            &[
+                owner_select.clone(),
+                dependency_write(owner_grantee, id(16), 5),
+                bump_grantee_epoch(owner_grantee, 2, "owner_grantee")?,
+            ],
+            &[owner_audit],
+        )?,
+        2
+    );
+
+    let manager_update = grant_write(manager_grantee, id(16), 4, 1, id(16), grant_manager);
+    let mut manager_audit = audit_event(102);
+    manager_audit.actor_id = Some(grant_manager);
+    manager_audit.action = AuditAction::AuthorityChange;
+    assert_eq!(
+        storage.commit_authorized_object_grant_ddl(
+            id(102),
+            grant_manager,
+            9_999,
+            &[
+                manager_update.clone(),
+                dependency_write(manager_grantee, id(16), 5),
+                bump_grantee_epoch(manager_grantee, 2, "manager_grantee")?,
+            ],
+            &[manager_audit],
+        )?,
+        3
+    );
+
+    let denied_insert = grant_write(denied_grantee, id(16), 3, 1, id(16), denied_user);
+    let mut denied_audit = audit_event(103);
+    denied_audit.actor_id = Some(denied_user);
+    denied_audit.action = AuditAction::AuthorityChange;
+    assert_eq!(
+        storage.commit_authorized_object_grant_ddl(
+            id(103),
+            denied_user,
+            9_999,
+            &[
+                denied_insert.clone(),
+                bump_grantee_epoch(denied_grantee, 2, "denied_grantee")?,
+            ],
+            &[denied_audit],
+        ),
+        Err(CommitError::DdlAuthorizationDenied)
+    );
+
+    let mut revoke_audit = audit_event(104);
+    revoke_audit.actor_id = Some(table_owner);
+    revoke_audit.action = AuditAction::AuthorityChange;
+    assert_eq!(
+        storage.commit_authorized_object_grant_ddl(
+            id(104),
+            table_owner,
+            9_999,
+            &[
+                remove_catalog_record(owner_select.clone())?,
+                remove_catalog_record(dependency_write(owner_grantee, id(16), 5))?,
+                bump_grantee_epoch(owner_grantee, 3, "owner_grantee")?,
+            ],
+            &[revoke_audit],
+        )?,
+        4
+    );
+    assert_eq!(commit_sequence(&database)?, 4);
+    for (invocation_id, principal_id, status) in [
+        (id(101), table_owner, OutcomeStatus::Committed),
+        (id(102), grant_manager, OutcomeStatus::Committed),
+        (id(103), denied_user, OutcomeStatus::Aborted),
+        (id(104), table_owner, OutcomeStatus::Committed),
+    ] {
+        assert_eq!(
+            lookup_outcome(&database, invocation_id, principal_id, 1)?
+                .unwrap()
+                .status,
+            status
+        );
+    }
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    assert!(catalog.get(owner_select.key.as_slice())?.is_none());
+    assert!(catalog.get(manager_update.key.as_slice())?.is_some());
+    assert!(catalog.get(denied_insert.key.as_slice())?.is_none());
+    assert!(
+        catalog
+            .get(dependency_write(owner_grantee, id(16), 5).key.as_slice())?
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
 fn storage_manager_rejects_unique_index_backfill_with_duplicate_values()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();

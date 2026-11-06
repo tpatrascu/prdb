@@ -28,6 +28,8 @@ Supported data privileges: schema `USAGE`; table/column `SELECT`, `INSERT`, `UPD
 
 Schema `CREATE` permits creating tables and taking ownership. Object ownership includes `ALTER`, `INDEX`, `MANAGE_POLICIES`, and `MANAGE_GRANTS` on that object, not data privileges. Schema owners administer their schema, not automatic ownership of every table within it. `ALTER` covers rename/drop and ownership transfer; target owner existence and actor authority are checked. Only owners or `MANAGE_GRANTS` holders may change object grants; only owners or `MANAGE_POLICIES` holders may change policies. Only database administrators may grant system privileges. No grant option, implicit ownership transfer, or broad `ALL PRIVILEGES` shorthand initially.
 
+`StorageManager::commit_authorized_object_grant_ddl` accepts ordinary privilege changes only: schema `USAGE`/`CREATE`, table/column data grants, and schema/table `ALTER`, `INDEX`, `MANAGE_POLICIES`, or `MANAGE_GRANTS`. It checks the current object owner, inherited `MANAGE_GRANTS`, or database-administrator membership for every affected schema/table. Database-scoped system privileges use a separate administrator-only route.
+
 Grant/revoke adds/removes the specified direct grant. Another inherited role grant can still provide authority; revoking one source is not an explicit deny. Policy restrictions provide mandatory intersections. Show grant provenance to authorized administrators.
 
 ## Policy Syntax
