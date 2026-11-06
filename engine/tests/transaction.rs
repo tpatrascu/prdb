@@ -1310,6 +1310,66 @@ fn column_grants_can_discover_a_relation_and_pages_are_snapshot_scoped()
     Ok(())
 }
 
+#[test]
+fn authorized_column_description_returns_only_declared_shape()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    install_relation_discovery_catalog(&database)?;
+    let schema_id = [0x91; 16];
+    let table_id = [0x10; 16];
+    let context = AuthorizationContext {
+        principal_id: [9; 16],
+        role_ids: std::collections::HashSet::new(),
+        scope: std::collections::HashSet::from([
+            (Operation::Usage, AccessTarget::Schema(schema_id)),
+            (Operation::Insert, AccessTarget::Table(table_id)),
+        ]),
+    };
+    let grants = [
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Usage,
+            target: AccessTarget::Schema(schema_id),
+        },
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Insert,
+            target: AccessTarget::Table(table_id),
+        },
+    ];
+    let mut invocation = InvocationTransaction::begin(&database, [184; 16], [9; 16], 9_999, 1, 64)?;
+    let description = invocation
+        .describe_authorized_columns(table_id, &context, &grants, &[])?
+        .expect("table write grant permits shape discovery");
+    assert_eq!(description.relation_id, table_id);
+    assert_eq!(description.columns.len(), 1);
+    assert_eq!(
+        description.columns[0],
+        prdb_engine::metadata_discovery::VisibleColumn {
+            column_id: [0x66; 16],
+            name: "value".to_owned(),
+            ordinal: 0,
+            scalar_type: ScalarType::Bytea,
+            nullable: true,
+        }
+    );
+
+    let no_data_scope = AuthorizationContext {
+        scope: std::collections::HashSet::from([(
+            Operation::Usage,
+            AccessTarget::Schema(schema_id),
+        )]),
+        ..context
+    };
+    assert!(
+        invocation
+            .describe_authorized_columns(table_id, &no_data_scope, &grants, &[])?
+            .is_none()
+    );
+    Ok(())
+}
+
 fn stage_initial_row(database: &Database) -> Result<(), Box<dyn std::error::Error>> {
     commit_rows(
         database,

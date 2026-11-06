@@ -21,7 +21,7 @@ Specify bounded typed records, deterministic ordering, byte/page limits and opaq
 
 ## Current Implementation Slice
 
-`InvocationTransaction::list_authorized_relations` implements the first MD-1 behavior: schema USAGE plus a table or column data grant controls relation listing, including write-only grants, without consulting table rows or row policies. Its pages are bounded to 128 relations and 1 MiB, ordered by stable relation ID, and use invocation-local continuations. `list_schemas`, `describe_columns`, serialized IPC cursors, the built-in `information_schema` scans, and administrative discovery remain unimplemented.
+`InvocationTransaction::list_authorized_relations` implements the first MD-1 behavior: schema USAGE plus a table or column data grant controls relation listing, including write-only grants, without consulting table rows or row policies. Its pages are bounded to 128 relations and 1 MiB, ordered by stable relation ID, and use invocation-local continuations. `InvocationTransaction::describe_authorized_columns` returns the full declared shape of one admitted relation in a single response capped at 1 MiB. `list_schemas`, paginated column descriptions and serialized IPC cursors, the built-in `information_schema` scans, and administrative discovery remain unimplemented.
 
 ## Acceptance and Handoff
 

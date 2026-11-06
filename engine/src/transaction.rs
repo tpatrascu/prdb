@@ -19,8 +19,8 @@ use crate::expression::{
 use crate::index_key::{DeriveIndexKeyError, derive_index_key};
 use crate::metadata::{EngineMetadata, Lifecycle};
 use crate::metadata_discovery::{
-    MAX_METADATA_PAGE_BYTES, MAX_RELATIONS_PER_PAGE, RelationScanCursor, VisibleRelation,
-    VisibleRelationPage,
+    MAX_METADATA_PAGE_BYTES, MAX_RELATIONS_PER_PAGE, RelationScanCursor, VisibleColumn,
+    VisibleRelation, VisibleRelationPage, VisibleRelationSchema,
 };
 use crate::outcome::{InvocationOutcome, OutcomeStatus};
 use crate::overlay::{Overlay, OverlayError, ResolvedRow, RowId, StagedRow};
@@ -964,6 +964,135 @@ impl<'db> InvocationTransaction<'db> {
         })();
         match result {
             Ok(page) => Ok(page),
+            Err(error) => {
+                if !self.aborted {
+                    self.abort()?;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Describe declared column shape after checking relation discovery authority.
+    pub fn describe_authorized_columns(
+        &mut self,
+        table_id: [u8; 16],
+        context: &AuthorizationContext,
+        grants: &[Grant],
+        dependencies: &[AuthorityDependency],
+    ) -> Result<Option<VisibleRelationSchema>, TransactionError> {
+        let result = (|| {
+            if table_id == [0; 16] || grants.len() > crate::authorization::MAX_AUTHORIZATION_INPUTS
+            {
+                return Err(TransactionError::InvalidMetadataRequest);
+            }
+            self.check_deadline()?;
+            self.capture_authority_dependencies(context, dependencies)?;
+            let pinned_roles = self.load_catalog_role_closure(context.principal_id)?;
+            if pinned_roles != context.role_ids {
+                return Err(TransactionError::InvalidContext);
+            }
+            for grant in grants {
+                self.validate_metadata_grant(context, *grant)?;
+            }
+
+            let table_key = catalog_id_key(5, table_id);
+            let Some(table) = self.read_catalog_record(&table_key)? else {
+                return Ok(None);
+            };
+            if table.family_code != 5 {
+                return Err(TransactionError::CorruptCatalog);
+            }
+            let schema_id = catalog_id(&table, 1)?;
+            if !has_permission(
+                context,
+                grants,
+                Operation::Usage,
+                AccessTarget::Schema(schema_id),
+            ) {
+                return Ok(None);
+            }
+
+            let table_target = AccessTarget::Table(table_id);
+            let table_grant = [
+                Operation::Select,
+                Operation::Insert,
+                Operation::Update,
+                Operation::Delete,
+            ]
+            .into_iter()
+            .any(|operation| has_permission(context, grants, operation, table_target));
+            let column_grants = grants
+                .iter()
+                .filter_map(|grant| {
+                    let AccessTarget::Column {
+                        table_id: granted_table_id,
+                        column_id,
+                    } = grant.target
+                    else {
+                        return None;
+                    };
+                    let operation_allowed = matches!(
+                        grant.operation,
+                        Operation::Select | Operation::Insert | Operation::Update
+                    );
+                    let subject_matches = match grant.subject {
+                        Subject::Principal(id) => id == context.principal_id,
+                        Subject::Role(id) => context.role_ids.contains(&id),
+                    };
+                    (granted_table_id == table_id
+                        && operation_allowed
+                        && subject_matches
+                        && context.scope.contains(&(grant.operation, grant.target)))
+                    .then_some(column_id)
+                })
+                .collect::<HashSet<_>>();
+            if !table_grant && column_grants.is_empty() {
+                return Ok(None);
+            }
+            if !table_grant {
+                for column_id in &column_grants {
+                    self.validate_discovery_column(table_id, *column_id)?;
+                }
+            }
+
+            self.read_discovery_relation(schema_id, table_id)?;
+            let trusted_schema = self.load_catalog_table_schema(table_id)?;
+            let mut columns = Vec::with_capacity(trusted_schema.column_ids.len());
+            let mut response_bytes = 0usize;
+            for (ordinal, column_id) in trusted_schema.column_ids.iter().copied().enumerate() {
+                self.validate_discovery_column(table_id, column_id)?;
+                let record = self
+                    .read_catalog_record(&catalog_id_key(6, column_id))?
+                    .ok_or(TransactionError::CorruptCatalog)?;
+                let name = String::from_utf8(catalog_field(&record, 3)?.to_vec())
+                    .map_err(|_| TransactionError::CorruptCatalog)?;
+                response_bytes = response_bytes
+                    .checked_add(name.len())
+                    .and_then(|bytes| bytes.checked_add(32))
+                    .ok_or(TransactionError::MetadataResultTooLarge)?;
+                if response_bytes > MAX_METADATA_PAGE_BYTES {
+                    return Err(TransactionError::MetadataResultTooLarge);
+                }
+                let schema_column = trusted_schema
+                    .columns
+                    .get(ordinal)
+                    .ok_or(TransactionError::CorruptCatalog)?;
+                columns.push(VisibleColumn {
+                    column_id,
+                    name,
+                    ordinal: ordinal as u32,
+                    scalar_type: schema_column.scalar_type,
+                    nullable: schema_column.nullable,
+                });
+            }
+            Ok(Some(VisibleRelationSchema {
+                relation_id: table_id,
+                columns,
+            }))
+        })();
+        match result {
+            Ok(description) => Ok(description),
             Err(error) => {
                 if !self.aborted {
                     self.abort()?;

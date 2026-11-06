@@ -10,6 +10,23 @@ pub struct VisibleRelation {
     pub name: String,
 }
 
+/// One declared column that is safe for the authorized caller to bind.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VisibleColumn {
+    pub column_id: [u8; 16],
+    pub name: String,
+    pub ordinal: u32,
+    pub scalar_type: crate::tuple::ScalarType,
+    pub nullable: bool,
+}
+
+/// The declared column shape of one discoverable relation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VisibleRelationSchema {
+    pub relation_id: [u8; 16],
+    pub columns: Vec<VisibleColumn>,
+}
+
 /// Opaque continuation for relation discovery in one invocation snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RelationScanCursor {
