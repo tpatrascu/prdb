@@ -3147,6 +3147,72 @@ fn storage_manager_reports_live_and_durable_invocation_status_to_the_owner()
 }
 
 #[test]
+fn storage_manager_lists_only_owner_live_invocations_with_generation_bound_pages()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::storage_manager::{
+        InvocationStatus, InvocationStatusConsistency, InvocationStatusError,
+        MAX_OWN_INVOCATION_PAGE,
+    };
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let now_us = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_micros() as i64;
+    let retention_deadline_us = now_us + 60_000_000;
+    let mut first = storage.begin_invocation(id(220), id(9), retention_deadline_us, 2, 64)?;
+    let mut hidden = storage.begin_invocation(id(221), id(10), retention_deadline_us, 2, 64)?;
+    let mut second = storage.begin_invocation(id(222), id(9), retention_deadline_us, 2, 64)?;
+
+    let page = storage.list_own_invocations(id(9), now_us, 1, None)?;
+    assert_eq!(page.invocations.len(), 1);
+    assert_eq!(page.invocations[0].invocation_id, id(220));
+    assert!(matches!(
+        page.invocations[0].status,
+        InvocationStatus::Active { .. }
+    ));
+    assert_eq!(page.observed_at_us, now_us);
+    assert_eq!(page.consistency, InvocationStatusConsistency::BestEffort);
+    let cursor = page.continuation.unwrap();
+    let mut unrelated = storage.begin_invocation(id(224), id(10), retention_deadline_us, 2, 64)?;
+    assert!(matches!(
+        storage.list_own_invocations(id(10), now_us, 1, Some(&cursor)),
+        Err(InvocationStatusError::InvalidCursor)
+    ));
+    let next = storage.list_own_invocations(id(9), now_us, 1, Some(&cursor))?;
+    assert_eq!(next.invocations.len(), 1);
+    assert_eq!(next.invocations[0].invocation_id, id(222));
+    assert_eq!(next.continuation, None);
+    assert!(matches!(
+        storage.list_own_invocations(id(9), now_us, 0, None),
+        Err(InvocationStatusError::InvalidPageLimit)
+    ));
+    assert!(
+        storage
+            .list_own_invocations(id(9), now_us, MAX_OWN_INVOCATION_PAGE + 1, None)
+            .is_err()
+    );
+
+    let stale = storage
+        .list_own_invocations(id(9), now_us, 1, None)?
+        .continuation
+        .unwrap();
+    let mut added = storage.begin_invocation(id(223), id(9), retention_deadline_us, 2, 64)?;
+    assert!(matches!(
+        storage.list_own_invocations(id(9), now_us, 1, Some(&stale)),
+        Err(InvocationStatusError::StaleCursor)
+    ));
+
+    added.abort()?;
+    unrelated.abort()?;
+    second.abort()?;
+    hidden.abort()?;
+    first.abort()?;
+    Ok(())
+}
+
+#[test]
 fn storage_manager_rejects_invalid_recovered_images_before_admission()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();

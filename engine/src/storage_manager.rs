@@ -30,6 +30,7 @@ use zeroize::Zeroize;
 
 const TOKEN_REQUEST_WINDOW: Duration = Duration::from_secs(60);
 const MAX_TRACKED_TOKEN_REQUEST_ACTORS: usize = 4096;
+pub const MAX_OWN_INVOCATION_PAGE: usize = 128;
 static TOKEN_REQUEST_LIMITERS: OnceLock<Mutex<HashMap<usize, Weak<TokenRequestLimiter>>>> =
     OnceLock::new();
 static INVOCATION_REGISTRIES: OnceLock<Mutex<HashMap<usize, Weak<InvocationAdmissionState>>>> =
@@ -114,8 +115,33 @@ pub struct InvocationStatusSnapshot {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OwnInvocationStatus {
+    pub invocation_id: [u8; 16],
+    pub status: InvocationStatus,
+}
+
+/// Opaque continuation for one owner's live invocation page sequence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvocationListCursor {
+    principal_id: [u8; 16],
+    owner_generation: u128,
+    after_invocation_id: [u8; 16],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvocationStatusPage {
+    pub observed_at_us: i64,
+    pub consistency: InvocationStatusConsistency,
+    pub invocations: Vec<OwnInvocationStatus>,
+    pub continuation: Option<InvocationListCursor>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InvocationStatusError {
     InvalidRequest,
+    InvalidPageLimit,
+    InvalidCursor,
+    StaleCursor,
     Storage,
 }
 
@@ -280,11 +306,29 @@ struct LiveInvocation {
     started_at_us: i64,
     deadline_at_us: Option<i64>,
     phase: LiveInvocationPhase,
+    owner_generation: u128,
 }
 
 struct InvocationAdmissionState {
     limit: AtomicUsize,
-    live: Mutex<HashMap<[u8; 16], LiveInvocation>>,
+    live: Mutex<LiveInvocationRegistry>,
+}
+
+struct LiveInvocationRegistry {
+    generation: u128,
+    entries: HashMap<[u8; 16], LiveInvocation>,
+}
+
+impl LiveInvocationRegistry {
+    fn advance_owner_generation(&mut self, principal_id: [u8; 16]) {
+        self.generation = self.generation.wrapping_add(1).max(1);
+        let generation = self.generation;
+        for invocation in self.entries.values_mut() {
+            if invocation.principal_id == principal_id {
+                invocation.owner_generation = generation;
+            }
+        }
+    }
 }
 
 pub(crate) struct InvocationAdmissionPermit {
@@ -310,24 +354,26 @@ impl InvocationAdmissionState {
             .live
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if live.contains_key(&invocation_id) {
+        if live.entries.contains_key(&invocation_id) {
             return Err(AdmissionError::Duplicate);
         }
-        if live.len() >= self.limit.load(Ordering::Acquire) {
+        if live.entries.len() >= self.limit.load(Ordering::Acquire) {
             return Err(AdmissionError::Limit);
         }
         let deadline_at_us = i64::try_from(max_age.as_micros())
             .ok()
             .and_then(|delta| started_at_us.checked_add(delta));
-        live.insert(
+        live.entries.insert(
             invocation_id,
             LiveInvocation {
                 principal_id,
                 started_at_us,
                 deadline_at_us,
                 phase: LiveInvocationPhase::Active,
+                owner_generation: 0,
             },
         );
+        live.advance_owner_generation(principal_id);
         Ok(InvocationAdmissionPermit {
             state: Arc::clone(self),
             invocation_id,
@@ -338,8 +384,72 @@ impl InvocationAdmissionState {
         self.live
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entries
             .get(&invocation_id)
             .copied()
+    }
+
+    fn own_page(
+        &self,
+        principal_id: [u8; 16],
+        limit: usize,
+        cursor: Option<&InvocationListCursor>,
+    ) -> Result<(Vec<OwnInvocationStatus>, Option<InvocationListCursor>), InvocationStatusError>
+    {
+        let live = self
+            .live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let owner_generation = live
+            .entries
+            .values()
+            .filter(|invocation| invocation.principal_id == principal_id)
+            .map(|invocation| invocation.owner_generation)
+            .max();
+        if let Some(cursor) = cursor {
+            if cursor.principal_id != principal_id {
+                return Err(InvocationStatusError::InvalidCursor);
+            }
+            if owner_generation != Some(cursor.owner_generation) {
+                return Err(InvocationStatusError::StaleCursor);
+            }
+        }
+        let after = cursor.map(|cursor| cursor.after_invocation_id);
+        let mut entries = live
+            .entries
+            .iter()
+            .filter(|(invocation_id, invocation)| {
+                invocation.principal_id == principal_id
+                    && after.is_none_or(|after| **invocation_id > after)
+            })
+            .map(|(invocation_id, invocation)| OwnInvocationStatus {
+                invocation_id: *invocation_id,
+                status: match invocation.phase {
+                    LiveInvocationPhase::Active => InvocationStatus::Active {
+                        started_at_us: invocation.started_at_us,
+                        deadline_at_us: invocation.deadline_at_us,
+                    },
+                    LiveInvocationPhase::Committing => InvocationStatus::Committing {
+                        started_at_us: invocation.started_at_us,
+                        deadline_at_us: invocation.deadline_at_us,
+                    },
+                },
+            })
+            .collect::<Vec<_>>();
+        entries.sort_unstable_by_key(|entry| entry.invocation_id);
+        let has_more = entries.len() > limit;
+        entries.truncate(limit);
+        let continuation = if has_more {
+            let owner_generation = owner_generation.ok_or(InvocationStatusError::InvalidRequest)?;
+            entries.last().map(|entry| InvocationListCursor {
+                principal_id,
+                owner_generation,
+                after_invocation_id: entry.invocation_id,
+            })
+        } else {
+            None
+        };
+        Ok((entries, continuation))
     }
 }
 
@@ -350,19 +460,32 @@ impl InvocationAdmissionPermit {
             .live
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(invocation) = live.get_mut(&self.invocation_id) {
-            invocation.phase = LiveInvocationPhase::Committing;
+        let owner = if let Some(invocation) = live.entries.get_mut(&self.invocation_id) {
+            if invocation.phase != LiveInvocationPhase::Committing {
+                invocation.phase = LiveInvocationPhase::Committing;
+                Some(invocation.principal_id)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(principal_id) = owner {
+            live.advance_owner_generation(principal_id);
         }
     }
 }
 
 impl Drop for InvocationAdmissionPermit {
     fn drop(&mut self) {
-        self.state
+        let mut live = self
+            .state
             .live
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&self.invocation_id);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(invocation) = live.entries.remove(&self.invocation_id) {
+            live.advance_owner_generation(invocation.principal_id);
+        }
     }
 }
 
@@ -384,7 +507,10 @@ fn shared_invocation_registry(
     }
     let invocations = Arc::new(InvocationAdmissionState {
         limit: AtomicUsize::new(configured_limit),
-        live: Mutex::new(HashMap::new()),
+        live: Mutex::new(LiveInvocationRegistry {
+            generation: 1,
+            entries: HashMap::new(),
+        }),
     });
     registry.insert(database_key, Arc::downgrade(&invocations));
     invocations
@@ -1073,6 +1199,39 @@ impl<'db> StorageManager<'db> {
                 consistency: InvocationStatusConsistency::BestEffort,
                 status: InvocationStatus::Terminal(outcome),
             })
+        })
+    }
+
+    /// Return a bounded best-effort page of this authenticated owner's live
+    /// invocations. Terminal outcomes remain available through point status.
+    /// A change to this owner's entries invalidates an outstanding
+    /// continuation so pages never silently skip or repeat this owner's rows.
+    pub fn list_own_invocations(
+        &self,
+        authenticated_principal_id: [u8; 16],
+        now_us: i64,
+        page_limit: usize,
+        continuation: Option<&InvocationListCursor>,
+    ) -> Result<InvocationStatusPage, InvocationStatusError> {
+        if authenticated_principal_id == [0; 16] || now_us <= 0 {
+            return Err(InvocationStatusError::InvalidRequest);
+        }
+        if page_limit == 0 || page_limit > MAX_OWN_INVOCATION_PAGE {
+            return Err(InvocationStatusError::InvalidPageLimit);
+        }
+        if continuation.is_some_and(|cursor| {
+            cursor.principal_id == [0; 16] || cursor.after_invocation_id == [0; 16]
+        }) {
+            return Err(InvocationStatusError::InvalidCursor);
+        }
+        let (invocations, continuation) =
+            self.admissions
+                .own_page(authenticated_principal_id, page_limit, continuation)?;
+        Ok(InvocationStatusPage {
+            observed_at_us: now_us,
+            consistency: InvocationStatusConsistency::BestEffort,
+            invocations,
+            continuation,
         })
     }
 }
