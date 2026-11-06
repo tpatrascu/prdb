@@ -2,11 +2,13 @@
 
 use crate::ipc::{DispatchError, IpcFrame, Operation, ServiceRole, authorize_operation};
 use crate::metadata_discovery::ResolvedRelationHandle;
-use crate::transaction::{ExecutorMetadataConnection, TransactionError};
+use crate::transaction::{ExecutorMetadataConnection, InvocationTransaction, TransactionError};
+use std::io::{Read, Write};
 
 pub const RESOLVE_RELATION_PAYLOAD_VERSION: u16 = 1;
 const RESOLVE_REQUEST_HEADER_BYTES: usize = 6;
 const RESOLVE_RESPONSE_HEADER_BYTES: usize = 3;
+pub const MAX_RESOLVE_REQUESTS_PER_CONNECTION: usize = 256;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolveRelationRequest {
@@ -126,6 +128,15 @@ pub enum ExecutorRequestError {
     Transaction(TransactionError),
 }
 
+#[derive(Debug)]
+pub enum ExecutorConnectionError {
+    Frame(crate::ipc::FrameError),
+    Request(ExecutorRequestError),
+    DuplicateRequestId,
+    RequestLimitExceeded,
+    Abort(TransactionError),
+}
+
 impl std::fmt::Display for ExecutorRequestError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "executor IPC request failed: {self:?}")
@@ -133,6 +144,14 @@ impl std::fmt::Display for ExecutorRequestError {
 }
 
 impl std::error::Error for ExecutorRequestError {}
+
+impl std::fmt::Display for ExecutorConnectionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "executor IPC connection failed: {self:?}")
+    }
+}
+
+impl std::error::Error for ExecutorConnectionError {}
 
 impl From<TransactionError> for ExecutorRequestError {
     fn from(error: TransactionError) -> Self {
@@ -166,4 +185,66 @@ pub fn dispatch_executor_resolve_relation(
         request_id: request.request_id,
         payload: response.encode(),
     })
+}
+
+/// Serve the initial executor metadata operation on one provisioned stream.
+/// The stream's caller must bind it to this invocation out of band. A clean
+/// disconnect aborts the invocation; framing or request errors do the same.
+pub fn serve_executor_resolve_relation<S: Read + Write>(
+    stream: &mut S,
+    transaction: &mut InvocationTransaction<'_>,
+) -> Result<(), ExecutorConnectionError> {
+    let mut connection = transaction.open_executor_metadata_connection();
+    let mut request_ids = std::collections::HashSet::new();
+    loop {
+        let request = match crate::ipc::read_frame(stream) {
+            Ok(Some(request)) => request,
+            Ok(None) => {
+                drop(connection);
+                return transaction.abort().map_err(ExecutorConnectionError::Abort);
+            }
+            Err(error) => {
+                drop(connection);
+                return match transaction.abort() {
+                    Ok(()) => Err(ExecutorConnectionError::Frame(error)),
+                    Err(abort_error) => Err(ExecutorConnectionError::Abort(abort_error)),
+                };
+            }
+        };
+        if request_ids.len() >= MAX_RESOLVE_REQUESTS_PER_CONNECTION {
+            drop(connection);
+            return match transaction.abort() {
+                Ok(()) => Err(ExecutorConnectionError::RequestLimitExceeded),
+                Err(abort_error) => Err(ExecutorConnectionError::Abort(abort_error)),
+            };
+        }
+        if !request_ids.insert(request.request_id) {
+            drop(connection);
+            return match transaction.abort() {
+                Ok(()) => Err(ExecutorConnectionError::DuplicateRequestId),
+                Err(abort_error) => Err(ExecutorConnectionError::Abort(abort_error)),
+            };
+        }
+        let response = match dispatch_executor_resolve_relation(
+            ServiceRole::Executor,
+            &mut connection,
+            &request,
+        ) {
+            Ok(response) => response,
+            Err(error) => {
+                drop(connection);
+                return match transaction.abort() {
+                    Ok(()) => Err(ExecutorConnectionError::Request(error)),
+                    Err(abort_error) => Err(ExecutorConnectionError::Abort(abort_error)),
+                };
+            }
+        };
+        if let Err(error) = crate::ipc::write_frame(stream, &response) {
+            drop(connection);
+            return match transaction.abort() {
+                Ok(()) => Err(ExecutorConnectionError::Frame(error)),
+                Err(abort_error) => Err(ExecutorConnectionError::Abort(abort_error)),
+            };
+        }
+    }
 }

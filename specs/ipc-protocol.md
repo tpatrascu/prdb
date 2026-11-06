@@ -49,6 +49,8 @@ The storage engine provides an `ExecutorMetadataConnection` resolver session wit
 
 The initial Rust executor dispatcher implements `resolve_relation` (`0x1101`) for the executor role. Its payload schema version 1 request is `u16 version = 1`, `u16 schema_name_bytes`, `u16 relation_name_bytes`, then the two nonempty UTF-8 names without terminators. The combined payload must fit the frame limit and lengths must consume it exactly. The response repeats the payload version and contains a `u8 status`: status 0 is followed by a 16-byte relation ID and 16-byte connection-local handle; status 1 means unavailable, covering both hidden and absent names. The response preserves the request ID. Other executor operations still require their own dispatchers and payload schemas.
 
+The initial Rust stream loop serves only `resolve_relation`, accepts at most 256 request frames per connection, and rejects a reused request ID. A clean disconnect or a malformed/unsupported request aborts the bound invocation and records its durable outcome; the loop never treats disconnect as commit. The supervisor remains responsible for provisioning the stream and invoking the loop with the correct invocation context.
+
 ## Conceptual Operations
 
 ```text

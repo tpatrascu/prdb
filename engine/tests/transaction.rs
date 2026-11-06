@@ -2481,6 +2481,78 @@ fn executor_resolve_relation_ipc_dispatch_returns_only_authorized_handle()
 }
 
 #[test]
+fn executor_relation_socket_loop_serves_then_aborts_on_disconnect()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::executor_ipc::{
+        ExecutorConnectionError, ResolveRelationRequest, ResolveRelationResponse,
+        serve_executor_resolve_relation,
+    };
+    use prdb_engine::ipc::{IpcFrame, Operation, read_frame, write_frame};
+    use prdb_engine::outcome::{OutcomeStatus, lookup_outcome};
+    use std::net::Shutdown;
+    use std::os::unix::net::UnixStream;
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    install_relation_discovery_catalog(&database)?;
+    let invocation_id = [218; 16];
+    let principal_id = [9; 16];
+    let mut invocation =
+        InvocationTransaction::begin(&database, invocation_id, principal_id, 9_999, 1, 64)?;
+    let (mut client, mut server) = UnixStream::pair()?;
+    let request = IpcFrame {
+        operation: Operation::ResolveRelation as u16,
+        request_id: 51,
+        payload: ResolveRelationRequest {
+            schema_name: "app".to_owned(),
+            relation_name: "metrics".to_owned(),
+        }
+        .encode()?,
+    };
+    write_frame(&mut client, &request)?;
+    client.shutdown(Shutdown::Write)?;
+
+    serve_executor_resolve_relation(&mut server, &mut invocation)?;
+
+    let response = read_frame(&mut client)?.expect("resolver returned a frame");
+    assert_eq!(response.request_id, request.request_id);
+    assert!(matches!(
+        ResolveRelationResponse::decode(&response.payload)?,
+        ResolveRelationResponse::Resolved { .. }
+    ));
+    let outcome = lookup_outcome(&database, invocation_id, principal_id, 1)?
+        .expect("disconnect persists an aborted outcome");
+    assert_eq!(outcome.status, OutcomeStatus::Aborted);
+
+    let duplicate_invocation_id = [219; 16];
+    let mut duplicate_invocation = InvocationTransaction::begin(
+        &database,
+        duplicate_invocation_id,
+        principal_id,
+        9_999,
+        1,
+        64,
+    )?;
+    let (mut duplicate_client, mut duplicate_server) = UnixStream::pair()?;
+    let duplicate_request = IpcFrame {
+        request_id: 52,
+        ..request
+    };
+    write_frame(&mut duplicate_client, &duplicate_request)?;
+    write_frame(&mut duplicate_client, &duplicate_request)?;
+    duplicate_client.shutdown(Shutdown::Write)?;
+    assert!(matches!(
+        serve_executor_resolve_relation(&mut duplicate_server, &mut duplicate_invocation),
+        Err(ExecutorConnectionError::DuplicateRequestId)
+    ));
+    assert!(read_frame(&mut duplicate_client)?.is_some());
+    let duplicate_outcome = lookup_outcome(&database, duplicate_invocation_id, principal_id, 1)?
+        .expect("duplicate request persists an aborted outcome");
+    assert_eq!(duplicate_outcome.status, OutcomeStatus::Aborted);
+    Ok(())
+}
+
+#[test]
 fn authorized_column_description_pages_bind_the_snapshot_and_order()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();

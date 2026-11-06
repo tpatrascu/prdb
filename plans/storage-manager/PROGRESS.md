@@ -821,6 +821,13 @@
 - Behavior: executor role dispatch for `resolve_relation` decodes a versioned bounded payload, resolves through the connection-scoped session and returns a stable relation ID plus opaque handle. Hidden and absent qualified names share one unavailable response; planner role calls are denied before storage lookup.
 - Changed code and fixture: [executor IPC dispatcher](../../engine/src/executor_ipc.rs), [transaction regression](../../engine/tests/transaction.rs), and [IPC protocol](../../specs/ipc-protocol.md).
 - Red evidence: the new regression first failed to compile because the executor dispatch module/API did not exist. This established the missing implementation surface; it was not an assertion-level red test.
-- Checks: focused `cargo test --test transaction executor_resolve_relation_ipc_dispatch_returns_only_authorized_handle --locked` passed in the prescribed Nix shell. Full workspace checks are pending for this increment.
-- Remaining: socket provisioning and lifetime binding, scan/cursor/mutation dispatch, statement-error abort handling at the socket owner, SQL integration, and administrative discovery.
-- Next smallest task: add the provisioned executor socket loop for `resolve_relation` and ensure disconnect drops its resolver session.
+- Checks: `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, full workspace tests, and `git diff --check` passed in the prescribed Nix shell. Changed Markdown local links passed.
+- Remaining: supervisor socket provisioning, scan/cursor/mutation dispatch and reauthorization, SQL integration, and administrative discovery.
+
+## SM-6 dependency: executor relation-resolution stream loop
+
+- Behavior: a bound stream can serve repeated `resolve_relation` frames with one connection-owned handle registry. Duplicate request IDs and more than 256 requests fail closed; clean disconnect and protocol/request/write errors drop the registry and durably abort the bound invocation.
+- Changed code and fixture: [executor IPC dispatcher](../../engine/src/executor_ipc.rs), [transaction socket regression](../../engine/tests/transaction.rs), and [IPC protocol](../../specs/ipc-protocol.md).
+- Evidence: a real Unix stream pair sends an authorized resolution, half-closes, receives the matching response, and verifies the persisted ABORTED outcome on disconnect. The focused test passes in the prescribed Nix shell.
+- Remaining: supervisor socket provisioning, scan/cursor/mutation dispatch and reauthorization, SQL integration, and administrative discovery.
+- Next smallest task: add authorized `open_scan` and bounded cursor state to the same session before exposing row batches.
