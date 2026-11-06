@@ -8,9 +8,24 @@ Use connection-scoped handles with server-side ownership and lifetime checks. Ha
 
 ## Frame Envelope v1
 
-Unix-stream frames use a fixed 20-byte header followed by a copied payload. Header fields are big-endian and ordered as: four-byte magic `PRDI`, u16 frame version (`1`), u16 operation code, u64 nonzero request ID, and u32 payload length. Operation code zero is reserved and rejected. A payload is at most 1,048,576 bytes; reject larger lengths before allocating or reading the payload. The header has no client-controlled service-role, principal, invocation, handle, or descriptor fields. Channel provisioning binds the service role and execution context out of band. Operation payload schemas and operation-code allowlists are independently versioned and validated by the selected channel handler.
+Unix-stream frames use a fixed 20-byte header followed by a copied payload. Header fields are big-endian and ordered as: four-byte magic `PRDI`, u16 frame version (`1`), u16 operation code, u64 nonzero request ID, and u32 payload length. Operation code zero is reserved and rejected. A payload is at most 1,048,576 bytes; reject larger lengths before allocating or reading the payload. The header has no client-controlled service-role, principal, invocation, handle, or descriptor fields. Channel provisioning binds the service role and execution context out of band. Operation payload schemas are independently versioned and validated by the selected channel handler.
 
 Readers accept arbitrary stream fragmentation and leave following coalesced frames available for the next read. EOF is clean only between frames; EOF within a header or payload is a truncated-frame error. Unknown frame versions and malformed headers fail before payload allocation. Frame payloads contain encoded fields, never native struct memory.
+
+### Version-1 Operation Tags and Service Roles
+
+Operation tags are fixed independently of their payload schemas. The channel's service role is assigned during trusted connection provisioning and is never selected by a frame field. `Operation::from_code` rejects unknown tags; framing rejects them before payload allocation. A role/operation mismatch is denied before the selected handler runs. Database-principal authorization remains a separate StorageManager check.
+
+| Role provisioned for the channel | Operation tags |
+| --- | --- |
+| Bootstrap | `0x0101` deliver setup credential; `0x0102` acknowledge delivery |
+| Executor | `0x1101` resolve relation; `0x1102` open scan; `0x1103` next batch; `0x1104` close cursor; `0x1110` stage insert; `0x1111` stage update; `0x1112` stage delete |
+| Planner | `0x1201` describe relation; `0x1202` estimate scan |
+| Supervisor | `0x1301` finalize transaction; `0x1302` abort transaction; `0x1303` cancel invocation; `0x1304` get invocation status |
+| Gateway service | `0x1401` authenticate session; `0x1402` close session; `0x1403` prepare submission; `0x1404` upload submission chunk; `0x1405` seal submission; `0x1406` start submission; `0x1407` get invocation status; `0x1408` cancel invocation; `0x1409` submit administrative operation |
+| Administrative control | `0x1501` commit administrative DDL; `0x1502` issue credential; `0x1503` revoke credential; `0x1504` list credentials; `0x1505` cancel invocation |
+
+The administrative-control channel is bound to an already authenticated actor; its service role does not confer database privileges. Gateway operations go to the supervisor service and cannot be forwarded as arbitrary internal operation codes. The protected bootstrap socket accepts only its credential-delivery and acknowledgement operations. Executor and planner roles are distinct: only the planner receives estimate operations, and neither role can finalize or administer.
 
 ## Administrative Control
 

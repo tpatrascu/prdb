@@ -9,7 +9,10 @@ use crate::credentials::{
     TOKEN_SECRET_BYTES, decode_verifier_record, encode_new_verifier_record,
     encode_revoked_verifier_record, now_unix_micros,
 };
-use crate::ipc::{FrameError, IpcFrame, read_frame, write_frame};
+use crate::ipc::{
+    DispatchError, FrameError, IpcFrame, Operation, ServiceRole, authorize_operation, read_frame,
+    write_frame,
+};
 use crate::metadata::{EngineMetadata, Lifecycle};
 use crate::schema::{AUDIT, CATALOG, ENGINE_META, create_tables};
 use crate::startup::{StartupError, validate_initializing_records, validate_persisted_records};
@@ -32,8 +35,8 @@ const MARKER_FILE: &str = ".prdb-bootstrap";
 const SETUP_SOCKET_FILE: &str = ".prdb-setup.sock";
 const MARKER: &[u8] = b"PRDB-LOCAL-SETUP-1\n";
 const SETUP_IO_TIMEOUT: Duration = Duration::from_secs(60);
-pub const SETUP_CREDENTIAL_OPERATION: u16 = 0x0101;
-pub const SETUP_ACK_OPERATION: u16 = 0x0102;
+pub const SETUP_CREDENTIAL_OPERATION: u16 = Operation::BootstrapDeliverCredential as u16;
+pub const SETUP_ACK_OPERATION: u16 = Operation::BootstrapAcknowledgeDelivery as u16;
 const ADMIN_ROLE_ID: [u8; 16] = builtin_id(3);
 const MAX_BOOTSTRAP_RECORDS: usize = 65_536;
 type EncodedCatalogRecord = (Vec<u8>, Vec<u8>);
@@ -134,6 +137,11 @@ impl BootstrapSession {
     }
 
     fn send_handoff(&mut self, stream: &mut UnixStream) -> Result<(), BootstrapError> {
+        authorize_operation(
+            ServiceRole::Bootstrap,
+            Operation::BootstrapDeliverCredential,
+        )
+        .map_err(map_dispatch_error)?;
         let request_id = random_request_id()?;
         let mut secret = self.take_secret().ok_or(BootstrapError::SecretNotTaken)?;
         let mut payload = Vec::with_capacity(16 + TOKEN_SECRET_BYTES);
@@ -151,6 +159,10 @@ impl BootstrapSession {
         let acknowledgement = read_frame(stream)
             .map_err(map_frame_error)?
             .ok_or(BootstrapError::InvalidHandoff)?;
+        let acknowledgement_operation =
+            Operation::from_code(acknowledgement.operation).map_err(map_dispatch_error)?;
+        authorize_operation(ServiceRole::Bootstrap, acknowledgement_operation)
+            .map_err(map_dispatch_error)?;
         if acknowledgement.operation != SETUP_ACK_OPERATION
             || acknowledgement.request_id != request_id
             || !acknowledgement.payload.is_empty()
@@ -274,6 +286,11 @@ impl BootstrapHandoff {
         if self.secret.is_some() {
             return Err(BootstrapError::SecretNotTaken);
         }
+        authorize_operation(
+            ServiceRole::Bootstrap,
+            Operation::BootstrapAcknowledgeDelivery,
+        )
+        .map_err(map_dispatch_error)?;
         write_frame(
             writer,
             &IpcFrame {
@@ -1463,6 +1480,10 @@ fn random_request_id() -> Result<u64, BootstrapError> {
 }
 
 fn map_frame_error(_error: FrameError) -> BootstrapError {
+    BootstrapError::SetupChannel
+}
+
+fn map_dispatch_error(_error: DispatchError) -> BootstrapError {
     BootstrapError::SetupChannel
 }
 
