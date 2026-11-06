@@ -2407,6 +2407,80 @@ fn executor_relation_handles_are_connection_scoped_and_revalidated()
 }
 
 #[test]
+fn executor_resolve_relation_ipc_dispatch_returns_only_authorized_handle()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::executor_ipc::{
+        ExecutorRequestError, ResolveRelationRequest, ResolveRelationResponse,
+        dispatch_executor_resolve_relation,
+    };
+    use prdb_engine::ipc::{IpcFrame, Operation, ServiceRole};
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    install_relation_discovery_catalog(&database)?;
+    let mut invocation = InvocationTransaction::begin(&database, [217; 16], [9; 16], 9_999, 1, 64)?;
+    let mut connection = invocation.open_executor_metadata_connection();
+
+    let encode_request = |schema: &str, relation: &str| {
+        ResolveRelationRequest {
+            schema_name: schema.to_owned(),
+            relation_name: relation.to_owned(),
+        }
+        .encode()
+        .expect("valid relation names encode")
+    };
+    let request = IpcFrame {
+        operation: Operation::ResolveRelation as u16,
+        request_id: 41,
+        payload: encode_request("app", "metrics"),
+    };
+    let response =
+        dispatch_executor_resolve_relation(ServiceRole::Executor, &mut connection, &request)?;
+    assert_eq!(response.operation, request.operation);
+    assert_eq!(response.request_id, request.request_id);
+    let ResolveRelationResponse::Resolved {
+        relation_id,
+        handle,
+    } = ResolveRelationResponse::decode(&response.payload)?
+    else {
+        panic!("visible relation must resolve")
+    };
+    assert_eq!(relation_id, [0x10; 16]);
+    assert_eq!(
+        connection.revalidate_relation_handle(&handle)?.relation_id,
+        [0x10; 16]
+    );
+
+    let hidden_request = IpcFrame {
+        payload: encode_request("private", "metrics"),
+        ..request.clone()
+    };
+    let hidden_response = dispatch_executor_resolve_relation(
+        ServiceRole::Executor,
+        &mut connection,
+        &hidden_request,
+    )?;
+    assert_eq!(
+        ResolveRelationResponse::decode(&hidden_response.payload)?,
+        ResolveRelationResponse::Unavailable
+    );
+
+    assert!(matches!(
+        dispatch_executor_resolve_relation(ServiceRole::Planner, &mut connection, &request),
+        Err(ExecutorRequestError::Dispatch(_))
+    ));
+    let malformed = IpcFrame {
+        payload: vec![0, 1, 0],
+        ..request
+    };
+    assert!(matches!(
+        dispatch_executor_resolve_relation(ServiceRole::Executor, &mut connection, &malformed),
+        Err(ExecutorRequestError::InvalidPayload)
+    ));
+    Ok(())
+}
+
+#[test]
 fn authorized_column_description_pages_bind_the_snapshot_and_order()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();

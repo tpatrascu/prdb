@@ -7,6 +7,7 @@ pub mod catalog;
 pub mod commit;
 pub mod credentials;
 pub mod ddl_fence;
+pub mod executor_ipc;
 pub mod expression;
 pub mod index_key;
 pub mod index_locator;

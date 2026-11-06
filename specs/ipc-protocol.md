@@ -47,6 +47,8 @@ The executor role supports authorized schema discovery and relation resolution f
 
 The storage engine provides an `ExecutorMetadataConnection` resolver session with opaque relation handles. An IPC handler must own one such session per provisioned executor connection, revalidate each handle through the invocation's pinned catalog before use, and drop it on connection close. These handles are references only; the scan and mutation operations still perform their own grant, policy, and snapshot checks. Optimizer-local handles are never accepted by executor handlers.
 
+The initial Rust executor dispatcher implements `resolve_relation` (`0x1101`) for the executor role. Its payload schema version 1 request is `u16 version = 1`, `u16 schema_name_bytes`, `u16 relation_name_bytes`, then the two nonempty UTF-8 names without terminators. The combined payload must fit the frame limit and lengths must consume it exactly. The response repeats the payload version and contains a `u8 status`: status 0 is followed by a 16-byte relation ID and 16-byte connection-local handle; status 1 means unavailable, covering both hidden and absent names. The response preserves the request ID. Other executor operations still require their own dispatchers and payload schemas.
+
 ## Conceptual Operations
 
 ```text

@@ -814,4 +814,13 @@
 - `InvocationTransaction::open_executor_metadata_connection` creates a session-local registry. Resolution returns a random 16-byte kind-6 handle plus the authorized description; each revalidation resolves the stored qualified name through pinned catalog grants and checks its stable relation ID. Handles do not authorize data operations.
 - Each session can issue at most 256 handles over its lifetime. Explicit close and session drop invalidate them. The regression covers byte round-trip, cursor-kind/width rejection, revalidation, close, and rejection from a replacement connection and another invocation.
 - Contracts: [metadata discovery](../../specs/metadata-discovery.md), [storage manager](../../specs/storage-manager.md), and [IPC protocol](../../specs/ipc-protocol.md).
-- Remaining: bind one session to each provisioned executor socket, implement request dispatch and scan/mutation reauthorization, SQL integration, and administrative discovery.
+- Remaining: bind one session to each provisioned executor socket, implement scan/mutation request dispatch and reauthorization, SQL integration, and administrative discovery.
+
+## SM-6 dependency: executor relation-resolution dispatch
+
+- Behavior: executor role dispatch for `resolve_relation` decodes a versioned bounded payload, resolves through the connection-scoped session and returns a stable relation ID plus opaque handle. Hidden and absent qualified names share one unavailable response; planner role calls are denied before storage lookup.
+- Changed code and fixture: [executor IPC dispatcher](../../engine/src/executor_ipc.rs), [transaction regression](../../engine/tests/transaction.rs), and [IPC protocol](../../specs/ipc-protocol.md).
+- Red evidence: the new regression first failed to compile because the executor dispatch module/API did not exist. This established the missing implementation surface; it was not an assertion-level red test.
+- Checks: focused `cargo test --test transaction executor_resolve_relation_ipc_dispatch_returns_only_authorized_handle --locked` passed in the prescribed Nix shell. Full workspace checks are pending for this increment.
+- Remaining: socket provisioning and lifetime binding, scan/cursor/mutation dispatch, statement-error abort handling at the socket owner, SQL integration, and administrative discovery.
+- Next smallest task: add the provisioned executor socket loop for `resolve_relation` and ensure disconnect drops its resolver session.
