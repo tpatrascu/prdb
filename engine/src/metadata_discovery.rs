@@ -41,10 +41,21 @@ pub struct AuthorizedRelationDescription {
 /// Opaque continuation for column descriptions in one invocation snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ColumnScanCursor {
-    pub(crate) invocation_id: [u8; 16],
-    pub(crate) relation_id: [u8; 16],
-    pub(crate) generation: u64,
-    pub(crate) after_ordinal: u32,
+    pub(crate) token: [u8; 16],
+}
+
+impl ColumnScanCursor {
+    /// Encode the cursor for the bounded IPC payload.
+    pub fn to_bytes(&self) -> [u8; 16] {
+        self.token
+    }
+
+    /// Decode a cursor token from its fixed-width wire form.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        Some(Self {
+            token: bytes.try_into().ok()?,
+        })
+    }
 }
 
 /// One bounded page of declared columns for a discoverable relation.
@@ -92,10 +103,21 @@ pub struct VisibleSchemaPage {
 /// Opaque continuation for relation discovery in one invocation snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RelationScanCursor {
-    pub(crate) invocation_id: [u8; 16],
-    pub(crate) schema_id: [u8; 16],
-    pub(crate) generation: u64,
-    pub(crate) after_relation_id: [u8; 16],
+    pub(crate) token: [u8; 16],
+}
+
+impl RelationScanCursor {
+    /// Encode the cursor for the bounded IPC payload.
+    pub fn to_bytes(&self) -> [u8; 16] {
+        self.token
+    }
+
+    /// Decode a cursor token from its fixed-width wire form.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        Some(Self {
+            token: bytes.try_into().ok()?,
+        })
+    }
 }
 
 /// One bounded page of visible relations.

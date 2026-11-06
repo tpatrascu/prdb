@@ -1671,6 +1671,9 @@ fn column_grants_can_discover_a_relation_and_pages_are_snapshot_scoped()
     assert_eq!(first.relations.len(), 1);
     assert_eq!(first.relations[0].name, "metrics");
     let cursor = first.continuation.expect("second granted relation");
+    let cursor_bytes = cursor.to_bytes();
+    let cursor = prdb_engine::metadata_discovery::RelationScanCursor::from_bytes(&cursor_bytes)
+        .expect("relation cursor wire form is fixed width");
     let mut other_invocation =
         InvocationTransaction::begin(&database, [182; 16], [9; 16], 9_999, 1, 64)?;
     assert!(matches!(
@@ -1685,11 +1688,15 @@ fn column_grants_can_discover_a_relation_and_pages_are_snapshot_scoped()
         Err(TransactionError::InvalidMetadataRequest)
     ));
     let second = invocation
-        .list_authorized_relations(schema_id, 1, Some(cursor), &context, &grants, &[])?
+        .list_authorized_relations(schema_id, 1, Some(cursor.clone()), &context, &grants, &[])?
         .expect("schema remains discoverable");
     assert_eq!(second.relations.len(), 1);
     assert_eq!(second.relations[0].name, "secret");
     assert!(second.continuation.is_none());
+    assert!(matches!(
+        invocation.list_authorized_relations(schema_id, 1, Some(cursor), &context, &grants, &[]),
+        Err(TransactionError::InvalidMetadataRequest)
+    ));
     Ok(())
 }
 
@@ -1888,6 +1895,9 @@ fn authorized_column_description_pages_bind_the_snapshot_and_order()
     assert_eq!(first.columns[0].name, "value");
     assert_eq!(first.columns[0].ordinal, 0);
     let cursor = first.continuation.expect("second column");
+    let cursor_bytes = cursor.to_bytes();
+    let cursor = prdb_engine::metadata_discovery::ColumnScanCursor::from_bytes(&cursor_bytes)
+        .expect("column cursor wire form is fixed width");
 
     let mut other_invocation =
         InvocationTransaction::begin(&database, [187; 16], [9; 16], 9_999, 1, 64)?;
@@ -1903,13 +1913,31 @@ fn authorized_column_description_pages_bind_the_snapshot_and_order()
         Err(TransactionError::InvalidMetadataRequest)
     ));
     let second = invocation
-        .describe_authorized_columns_page(table_id, 1, Some(cursor), &context, &grants, &[])?
+        .describe_authorized_columns_page(
+            table_id,
+            1,
+            Some(cursor.clone()),
+            &context,
+            &grants,
+            &[],
+        )?
         .expect("same snapshot continues");
     assert_eq!(second.columns.len(), 1);
     assert_eq!(second.columns[0].column_id, [0x67; 16]);
     assert_eq!(second.columns[0].name, "value2");
     assert_eq!(second.columns[0].ordinal, 1);
     assert!(second.continuation.is_none());
+    assert!(matches!(
+        invocation.describe_authorized_columns_page(
+            table_id,
+            1,
+            Some(cursor),
+            &context,
+            &grants,
+            &[],
+        ),
+        Err(TransactionError::InvalidMetadataRequest)
+    ));
     Ok(())
 }
 

@@ -34,7 +34,7 @@ The Rust storage slice `InvocationTransaction::list_authorized_relations` return
 
 `InvocationTransaction::list_authorized_schemas` returns only schemas with an effective USAGE grant in the admitted scope. Pages contain at most 128 schema IDs and names and at most 1 MiB, ordered by ascending stable schema ID. The continuation is transaction-local and binds the invocation snapshot and authorization inputs; schemas without USAGE grants do not contribute names or total counts.
 
-Schema continuations serialize as fixed-width 16-byte opaque tokens. The active invocation retains the token's position and authorization binding server-side; tokens are one-use and modified, replayed, or cross-invocation tokens are rejected. Relation and column continuations remain Rust transaction-local values pending their corresponding wire form.
+Schema, relation, and column continuations serialize as fixed-width 16-byte opaque tokens. The active invocation retains each token's position and authorization binding server-side; tokens are one-use and modified, replayed, or cross-invocation tokens are rejected.
 
 `InvocationTransaction::load_catalog_schema_usage_grants` derives schema USAGE grants for the admitted principal and its pinned role closure directly from the catalog. It returns no table or column privileges and retains the matching schema, grant, membership, and grantor records as commit guards.
 

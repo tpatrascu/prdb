@@ -232,21 +232,20 @@ pub struct InvocationTransaction<'db> {
     outcome_recorded: bool,
     active_scan: Option<ActiveRowScan>,
     active_relation_scan: Option<ActiveRelationScan>,
-    metadata_scan_generation: u64,
     active_schema_scan: Option<ActiveSchemaScan>,
     active_column_scan: Option<ActiveColumnScan>,
-    metadata_column_scan_generation: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ActiveRelationScan {
-    generation: u64,
     schema_id: [u8; 16],
     principal_id: [u8; 16],
     role_ids: HashSet<[u8; 16]>,
     scope: HashSet<(Operation, AccessTarget)>,
     grants: Vec<Grant>,
     dependencies: Vec<AuthorityDependency>,
+    continuation: Option<([u8; 16], [u8; 16])>,
+    used_tokens: HashSet<[u8; 16]>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -262,13 +261,14 @@ struct ActiveSchemaScan {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ActiveColumnScan {
-    generation: u64,
     relation_id: [u8; 16],
     principal_id: [u8; 16],
     role_ids: HashSet<[u8; 16]>,
     scope: HashSet<(Operation, AccessTarget)>,
     grants: Vec<Grant>,
     dependencies: Vec<AuthorityDependency>,
+    continuation: Option<([u8; 16], u32)>,
+    used_tokens: HashSet<[u8; 16]>,
 }
 
 pub(crate) struct InvocationCoordination {
@@ -436,10 +436,8 @@ impl<'db> InvocationTransaction<'db> {
             outcome_recorded: false,
             active_scan: None,
             active_relation_scan: None,
-            metadata_scan_generation: 0,
             active_schema_scan: None,
             active_column_scan: None,
-            metadata_column_scan_generation: 0,
         })
     }
 
@@ -945,44 +943,35 @@ impl<'db> InvocationTransaction<'db> {
                 return Ok(None);
             }
 
-            let active_scan = match continuation.as_ref() {
+            let mut active_scan = match continuation.as_ref() {
                 Some(cursor) => {
-                    if cursor.invocation_id != self.invocation_id
-                        || cursor.schema_id != schema_id
-                        || self.active_relation_scan.as_ref().is_none_or(|active| {
-                            active.generation != cursor.generation
-                                || active.schema_id != schema_id
-                                || active.principal_id != context.principal_id
-                                || active.role_ids != context.role_ids
-                                || active.scope != context.scope
-                                || active.grants != grants
-                                || active.dependencies != dependencies
-                        })
+                    let Some(active) = self.active_relation_scan.as_ref() else {
+                        return Err(TransactionError::InvalidMetadataRequest);
+                    };
+                    if active.schema_id != schema_id
+                        || active.principal_id != context.principal_id
+                        || active.role_ids != context.role_ids
+                        || active.scope != context.scope
+                        || active.grants != grants
+                        || active.dependencies != dependencies
+                        || active
+                            .continuation
+                            .is_none_or(|(token, _)| token != cursor.token)
                     {
                         return Err(TransactionError::InvalidMetadataRequest);
                     }
-                    self.active_relation_scan
-                        .as_ref()
-                        .ok_or(TransactionError::InvalidMetadataRequest)?
-                        .clone()
+                    active.clone()
                 }
-                None => {
-                    self.metadata_scan_generation = self
-                        .metadata_scan_generation
-                        .checked_add(1)
-                        .ok_or(TransactionError::InvalidMetadataRequest)?;
-                    let active = ActiveRelationScan {
-                        generation: self.metadata_scan_generation,
-                        schema_id,
-                        principal_id: context.principal_id,
-                        role_ids: context.role_ids.clone(),
-                        scope: context.scope.clone(),
-                        grants: grants.to_vec(),
-                        dependencies: dependencies.to_vec(),
-                    };
-                    self.active_relation_scan = Some(active.clone());
-                    active
-                }
+                None => ActiveRelationScan {
+                    schema_id,
+                    principal_id: context.principal_id,
+                    role_ids: context.role_ids.clone(),
+                    scope: context.scope.clone(),
+                    grants: grants.to_vec(),
+                    dependencies: dependencies.to_vec(),
+                    continuation: None,
+                    used_tokens: HashSet::new(),
+                },
             };
 
             let schema_object_key = catalog_id_key(2, schema_id);
@@ -1047,7 +1036,18 @@ impl<'db> InvocationTransaction<'db> {
                 }
             }
 
-            let after_id = continuation.as_ref().map(|cursor| cursor.after_relation_id);
+            let after_id = if let Some(cursor) = continuation.as_ref() {
+                let (token, after_id) = active_scan
+                    .continuation
+                    .take()
+                    .ok_or(TransactionError::InvalidMetadataRequest)?;
+                if token != cursor.token {
+                    return Err(TransactionError::InvalidMetadataRequest);
+                }
+                Some(after_id)
+            } else {
+                None
+            };
             let mut relations = Vec::with_capacity(page_limit);
             let mut page_bytes = 0usize;
             let mut has_more = false;
@@ -1083,18 +1083,19 @@ impl<'db> InvocationTransaction<'db> {
                 page_bytes += encoded_size;
                 relations.push(relation);
             }
-            let next_after = relations.last().map(|relation| relation.relation_id);
             let continuation = if has_more {
-                Some(RelationScanCursor {
-                    invocation_id: self.invocation_id,
-                    schema_id,
-                    generation: active_scan.generation,
-                    after_relation_id: next_after
-                        .ok_or(TransactionError::InvalidMetadataRequest)?,
-                })
+                let after_id = relations
+                    .last()
+                    .map(|relation| relation.relation_id)
+                    .ok_or(TransactionError::InvalidMetadataRequest)?;
+                let token = new_metadata_cursor_token(&mut active_scan.used_tokens)?;
+                active_scan.continuation = Some((token, after_id));
+                Some(RelationScanCursor { token })
             } else {
+                active_scan.continuation = None;
                 None
             };
+            self.active_relation_scan = Some(active_scan);
             Ok(Some(VisibleRelationPage {
                 relations,
                 continuation,
@@ -1254,55 +1255,51 @@ impl<'db> InvocationTransaction<'db> {
             else {
                 return Ok(None);
             };
-            let active_scan = match continuation.as_ref() {
+            let mut active_scan = match continuation.as_ref() {
                 Some(cursor) => {
-                    if cursor.invocation_id != self.invocation_id
-                        || cursor.relation_id != table_id
-                        || self.active_column_scan.as_ref().is_none_or(|active| {
-                            active.generation != cursor.generation
-                                || active.relation_id != table_id
-                                || active.principal_id != context.principal_id
-                                || active.role_ids != context.role_ids
-                                || active.scope != context.scope
-                                || active.grants != grants
-                                || active.dependencies != dependencies
-                        })
+                    let Some(active) = self.active_column_scan.as_ref() else {
+                        return Err(TransactionError::InvalidMetadataRequest);
+                    };
+                    if active.relation_id != table_id
+                        || active.principal_id != context.principal_id
+                        || active.role_ids != context.role_ids
+                        || active.scope != context.scope
+                        || active.grants != grants
+                        || active.dependencies != dependencies
+                        || active
+                            .continuation
+                            .is_none_or(|(token, _)| token != cursor.token)
                     {
                         return Err(TransactionError::InvalidMetadataRequest);
                     }
-                    self.active_column_scan
-                        .as_ref()
-                        .ok_or(TransactionError::InvalidMetadataRequest)?
-                        .clone()
+                    active.clone()
                 }
-                None => {
-                    self.metadata_column_scan_generation = self
-                        .metadata_column_scan_generation
-                        .checked_add(1)
-                        .ok_or(TransactionError::InvalidMetadataRequest)?;
-                    let active = ActiveColumnScan {
-                        generation: self.metadata_column_scan_generation,
-                        relation_id: table_id,
-                        principal_id: context.principal_id,
-                        role_ids: context.role_ids.clone(),
-                        scope: context.scope.clone(),
-                        grants: grants.to_vec(),
-                        dependencies: dependencies.to_vec(),
-                    };
-                    self.active_column_scan = Some(active.clone());
-                    active
-                }
+                None => ActiveColumnScan {
+                    relation_id: table_id,
+                    principal_id: context.principal_id,
+                    role_ids: context.role_ids.clone(),
+                    scope: context.scope.clone(),
+                    grants: grants.to_vec(),
+                    dependencies: dependencies.to_vec(),
+                    continuation: None,
+                    used_tokens: HashSet::new(),
+                },
             };
-            let start_ordinal = continuation
-                .as_ref()
-                .map(|cursor| {
-                    usize::try_from(cursor.after_ordinal)
-                        .ok()
-                        .and_then(|ordinal| ordinal.checked_add(1))
-                        .ok_or(TransactionError::InvalidMetadataRequest)
-                })
-                .transpose()?
-                .unwrap_or(0);
+            let start_ordinal = if let Some(cursor) = continuation.as_ref() {
+                let (token, after_ordinal) = active_scan
+                    .continuation
+                    .take()
+                    .ok_or(TransactionError::InvalidMetadataRequest)?;
+                if token != cursor.token {
+                    return Err(TransactionError::InvalidMetadataRequest);
+                }
+                usize::try_from(after_ordinal)
+                    .ok()
+                    .and_then(|ordinal| ordinal.checked_add(1))
+                    .ok_or(TransactionError::InvalidMetadataRequest)?
+            } else {
+                0
+            };
             if start_ordinal > trusted_schema.column_ids.len() {
                 return Err(TransactionError::InvalidMetadataRequest);
             }
@@ -1331,18 +1328,18 @@ impl<'db> InvocationTransaction<'db> {
                 columns.push(column);
             }
             let continuation = if has_more {
-                Some(ColumnScanCursor {
-                    invocation_id: self.invocation_id,
-                    relation_id: table_id,
-                    generation: active_scan.generation,
-                    after_ordinal: columns
-                        .last()
-                        .map(|column| column.ordinal)
-                        .ok_or(TransactionError::InvalidMetadataRequest)?,
-                })
+                let after_ordinal = columns
+                    .last()
+                    .map(|column| column.ordinal)
+                    .ok_or(TransactionError::InvalidMetadataRequest)?;
+                let token = new_metadata_cursor_token(&mut active_scan.used_tokens)?;
+                active_scan.continuation = Some((token, after_ordinal));
+                Some(ColumnScanCursor { token })
             } else {
+                active_scan.continuation = None;
                 None
             };
+            self.active_column_scan = Some(active_scan);
             Ok(Some(VisibleColumnPage {
                 relation_id: table_id,
                 columns,
@@ -3999,6 +3996,9 @@ impl<'db> InvocationTransaction<'db> {
         self.index_bytes = 0;
         self.catalog_guards.clear();
         self.active_scan = None;
+        self.active_relation_scan = None;
+        self.active_schema_scan = None;
+        self.active_column_scan = None;
         self.aborted = true;
         self.snapshot.take();
         if !self.outcome_recorded {
