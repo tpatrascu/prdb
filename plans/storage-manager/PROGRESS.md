@@ -912,7 +912,7 @@
 
 ## SM-4 / SU-5 dependency: supervisor terminal storage channel
 
-- Behavior: role-checked Supervisor handlers finalize or abort one out-of-band-bound invocation and look up owner-scoped status with the principal bound outside the payload. Terminal operations consume the invocation, finalize returns the durable commit sequence, and losing the terminal channel before a decision durably aborts. Executor EOF only closes its session.
+- Behavior: role-checked Supervisor handlers finalize or abort one out-of-band-bound invocation, look up owner-scoped status, and request audited administrative cancellation with the administrator bound outside the payload. Terminal operations consume the invocation, finalize returns the durable commit sequence, and losing the terminal channel before a decision durably aborts. Executor EOF only closes its session.
 - Changed code and contract: [supervisor IPC handlers](../../engine/src/supervisor_ipc.rs), [executor stream lifecycle](../../engine/src/executor_ipc.rs), and [IPC protocol](../../specs/ipc-protocol.md).
 - Verification: format, workspace build, warning-denied Clippy, and `git diff --check` pass. Tests were not run in this increment.
-- Remaining: wire these handlers to supervisor-owned invocation state, implement supervisor admission/worker exit observation, and expose cancellation on the supervisor channel.
+- Remaining: wire these handlers to supervisor-owned invocation state, implement supervisor admission/worker exit observation, and connect gateway cancellation to this audited admin operation.

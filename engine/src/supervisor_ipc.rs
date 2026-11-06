@@ -1,8 +1,12 @@
 //! Supervisor-only transaction finalization over a provisioned local channel.
 
+use crate::audit::{AuditAction, AuditEvent, AuditResult};
 use crate::ipc::{DispatchError, IpcFrame, Operation, ServiceRole, authorize_operation};
 use crate::outcome::OutcomeStatus;
-use crate::storage_manager::{InvocationStatus, InvocationStatusError, StorageManager};
+use crate::storage_manager::{
+    AdministrativeCancellationError, AdministrativeCancellationResult, InvocationStatus,
+    InvocationStatusError, StorageManager,
+};
 use crate::transaction::{InvocationTransaction, TransactionError};
 use std::io::{Read, Write};
 
@@ -13,6 +17,7 @@ pub const MAX_SUPERVISOR_REQUESTS_PER_CONNECTION: usize = 16;
 pub enum SupervisorRequestError {
     InvalidPayload,
     Dispatch(DispatchError),
+    Cancellation(AdministrativeCancellationError),
     Status(InvocationStatusError),
     Transaction(TransactionError),
 }
@@ -31,9 +36,9 @@ impl From<TransactionError> for SupervisorRequestError {
     }
 }
 
-/// Read owner-scoped status for one invocation. The principal is bound by
-/// trusted supervisor admission and never read from the request payload.
-pub fn dispatch_supervisor_status_request(
+/// Handle supervisor status or administrative cancellation with an actor
+/// bound by trusted channel setup, never read from request payloads.
+pub fn dispatch_supervisor_control_request(
     role: ServiceRole,
     manager: &StorageManager<'_>,
     authenticated_principal_id: [u8; 16],
@@ -42,27 +47,88 @@ pub fn dispatch_supervisor_status_request(
     let operation =
         Operation::from_code(request.operation).map_err(SupervisorRequestError::Dispatch)?;
     authorize_operation(role, operation).map_err(SupervisorRequestError::Dispatch)?;
-    if operation != Operation::SupervisorGetInvocationStatus || request.payload.len() != 18 {
+    if request.payload.len() < 2
+        || u16::from_be_bytes([request.payload[0], request.payload[1]])
+            != SUPERVISOR_PAYLOAD_VERSION
+    {
         return Err(SupervisorRequestError::InvalidPayload);
     }
-    if u16::from_be_bytes([request.payload[0], request.payload[1]]) != SUPERVISOR_PAYLOAD_VERSION {
-        return Err(SupervisorRequestError::InvalidPayload);
-    }
-    let invocation_id: [u8; 16] = request.payload[2..]
-        .try_into()
-        .map_err(|_| SupervisorRequestError::InvalidPayload)?;
-    let now_us = crate::credentials::now_unix_micros().ok_or(
-        SupervisorRequestError::Transaction(TransactionError::ClockUnavailable),
-    )?;
-    let snapshot = manager
-        .get_invocation_status(invocation_id, authenticated_principal_id, now_us)
-        .map_err(SupervisorRequestError::Status)?;
-    let payload = encode_supervisor_status(snapshot.as_ref())?;
+    let payload = match operation {
+        Operation::SupervisorGetInvocationStatus if request.payload.len() == 18 => {
+            let invocation_id: [u8; 16] = request.payload[2..]
+                .try_into()
+                .map_err(|_| SupervisorRequestError::InvalidPayload)?;
+            let now_us = crate::credentials::now_unix_micros().ok_or(
+                SupervisorRequestError::Transaction(TransactionError::ClockUnavailable),
+            )?;
+            let snapshot = manager
+                .get_invocation_status(invocation_id, authenticated_principal_id, now_us)
+                .map_err(SupervisorRequestError::Status)?;
+            encode_supervisor_status(snapshot.as_ref())?
+        }
+        Operation::SupervisorCancelInvocation if request.payload.len() == 20 => {
+            let invocation_id: [u8; 16] = request.payload[2..18]
+                .try_into()
+                .map_err(|_| SupervisorRequestError::InvalidPayload)?;
+            let reason_code = u16::from_be_bytes([request.payload[18], request.payload[19]]);
+            let now_us = crate::credentials::now_unix_micros().ok_or(
+                SupervisorRequestError::Transaction(TransactionError::ClockUnavailable),
+            )?;
+            let mut event_id = [0; 16];
+            getrandom::fill(&mut event_id).map_err(|_| {
+                SupervisorRequestError::Transaction(TransactionError::RandomnessUnavailable)
+            })?;
+            if event_id == [0; 16] {
+                return Err(SupervisorRequestError::Transaction(
+                    TransactionError::RandomnessUnavailable,
+                ));
+            }
+            let event = AuditEvent {
+                event_id,
+                actor_id: Some(authenticated_principal_id),
+                correlation_id: invocation_id,
+                occurred_at_us: now_us,
+                action: AuditAction::AdministrativeCancellation,
+                result: AuditResult::Denied,
+                target_ids: vec![invocation_id],
+            };
+            let result = manager
+                .cancel_invocation(
+                    authenticated_principal_id,
+                    invocation_id,
+                    reason_code,
+                    now_us,
+                    event,
+                )
+                .map_err(SupervisorRequestError::Cancellation)?;
+            encode_cancellation_result(result)
+        }
+        _ => return Err(SupervisorRequestError::InvalidPayload),
+    };
     Ok(IpcFrame {
         operation: request.operation,
         request_id: request.request_id,
         payload,
     })
+}
+
+fn encode_cancellation_result(result: AdministrativeCancellationResult) -> Vec<u8> {
+    let mut payload = SUPERVISOR_PAYLOAD_VERSION.to_be_bytes().to_vec();
+    match result {
+        AdministrativeCancellationResult::Accepted => payload.push(0),
+        AdministrativeCancellationResult::TooLate => payload.push(1),
+        AdministrativeCancellationResult::Terminal(outcome) => {
+            payload.push(2);
+            payload.push(match outcome.status {
+                OutcomeStatus::Committed => 1,
+                OutcomeStatus::Aborted => 2,
+            });
+            payload.extend_from_slice(&outcome.commit_sequence.to_be_bytes());
+            payload.extend_from_slice(&outcome.retention_deadline_us.to_be_bytes());
+        }
+        AdministrativeCancellationResult::Unknown => payload.push(3),
+    }
+    payload
 }
 
 fn encode_supervisor_status(
@@ -249,9 +315,9 @@ pub fn serve_supervisor<S: Read + Write>(
     }
 }
 
-/// Serve owner-scoped status lookups on a supervisor connection whose
-/// authenticated principal is supplied by trusted channel setup.
-pub fn serve_supervisor_status<S: Read + Write>(
+/// Serve status and cancellation controls on a supervisor connection whose
+/// authenticated actor is supplied by trusted channel setup.
+pub fn serve_supervisor_control<S: Read + Write>(
     stream: &mut S,
     manager: &StorageManager<'_>,
     authenticated_principal_id: [u8; 16],
@@ -269,7 +335,7 @@ pub fn serve_supervisor_status<S: Read + Write>(
         if !request_ids.insert(request.request_id) {
             return Err(SupervisorConnectionError::DuplicateRequestId);
         }
-        let response = dispatch_supervisor_status_request(
+        let response = dispatch_supervisor_control_request(
             ServiceRole::Supervisor,
             manager,
             authenticated_principal_id,
