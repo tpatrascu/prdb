@@ -318,11 +318,23 @@ pub struct SupervisorInvocation<'db> {
     principal_id: [u8; 16],
     role_ids: HashSet<[u8; 16]>,
     transaction: Arc<Mutex<Option<InvocationTransaction<'db>>>>,
+    channels: Arc<Mutex<SupervisorChannelState>>,
+}
+
+#[derive(Default)]
+struct SupervisorChannelState {
+    active_worker_channels: usize,
+    terminal_requested: bool,
+}
+
+struct SupervisorWorkerChannelLease {
+    channels: Arc<Mutex<SupervisorChannelState>>,
 }
 
 #[derive(Debug)]
 pub enum SupervisorInvocationError {
     Closed,
+    WorkerChannelsActive,
     Executor(crate::executor_ipc::ExecutorConnectionError),
     Planner(crate::planner_ipc::PlannerConnectionError),
     Supervisor(crate::supervisor_ipc::SupervisorConnectionError),
@@ -335,6 +347,16 @@ impl std::fmt::Display for SupervisorInvocationError {
 }
 
 impl std::error::Error for SupervisorInvocationError {}
+
+impl Drop for SupervisorWorkerChannelLease {
+    fn drop(&mut self) {
+        let mut channels = self
+            .channels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        channels.active_worker_channels = channels.active_worker_channels.saturating_sub(1);
+    }
+}
 
 impl SupervisorInvocation<'_> {
     pub fn invocation_id(&self) -> [u8; 16] {
@@ -349,10 +371,45 @@ impl SupervisorInvocation<'_> {
         &self.role_ids
     }
 
+    fn enter_worker_channel(
+        &self,
+    ) -> Result<SupervisorWorkerChannelLease, SupervisorInvocationError> {
+        let mut channels = match self.channels.lock() {
+            Ok(channels) => channels,
+            Err(poisoned) => {
+                let mut channels = poisoned.into_inner();
+                channels.terminal_requested = true;
+                self.abort_owned_invocation();
+                return Err(SupervisorInvocationError::Closed);
+            }
+        };
+        if channels.terminal_requested {
+            return Err(SupervisorInvocationError::Closed);
+        }
+        channels.active_worker_channels = channels
+            .active_worker_channels
+            .checked_add(1)
+            .ok_or(SupervisorInvocationError::Closed)?;
+        Ok(SupervisorWorkerChannelLease {
+            channels: Arc::clone(&self.channels),
+        })
+    }
+
+    fn abort_owned_invocation(&self) {
+        let mut owner = self
+            .transaction
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(mut transaction) = owner.take() {
+            let _ = transaction.abort();
+        }
+    }
+
     pub fn serve_planner<S: std::io::Read + std::io::Write>(
         &self,
         stream: &mut S,
     ) -> Result<(), SupervisorInvocationError> {
+        let _lease = self.enter_worker_channel()?;
         crate::planner_ipc::serve_planner_shared(stream, &self.transaction)
             .map_err(SupervisorInvocationError::Planner)
     }
@@ -361,6 +418,7 @@ impl SupervisorInvocation<'_> {
         &self,
         stream: &mut S,
     ) -> Result<(), SupervisorInvocationError> {
+        let _lease = self.enter_worker_channel()?;
         crate::executor_ipc::serve_executor_shared(stream, &self.transaction)
             .map_err(SupervisorInvocationError::Executor)
     }
@@ -369,6 +427,23 @@ impl SupervisorInvocation<'_> {
         &mut self,
         stream: &mut S,
     ) -> Result<(), SupervisorInvocationError> {
+        let mut channels = match self.channels.lock() {
+            Ok(channels) => channels,
+            Err(poisoned) => {
+                let mut channels = poisoned.into_inner();
+                channels.terminal_requested = true;
+                self.abort_owned_invocation();
+                return Err(SupervisorInvocationError::Closed);
+            }
+        };
+        if channels.terminal_requested {
+            return Err(SupervisorInvocationError::Closed);
+        }
+        if channels.active_worker_channels != 0 {
+            return Err(SupervisorInvocationError::WorkerChannelsActive);
+        }
+        channels.terminal_requested = true;
+        drop(channels);
         let mut transaction = match self.transaction.lock() {
             Ok(transaction) => transaction,
             Err(poisoned) => {
@@ -1035,6 +1110,7 @@ impl<'db> StorageManager<'db> {
             principal_id,
             role_ids,
             transaction: Arc::new(Mutex::new(Some(transaction))),
+            channels: Arc::new(Mutex::new(SupervisorChannelState::default())),
         })
     }
 

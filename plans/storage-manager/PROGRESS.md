@@ -937,3 +937,10 @@
 - Changed code: [shared planner/executor handlers](../../engine/src/planner_ipc.rs), [executor request loop](../../engine/src/executor_ipc.rs), and [terminal owner](../../engine/src/storage_manager.rs).
 - Verification: `cargo fmt --all`, workspace build, warning-denied Clippy, and `git diff --check` pass in the repository Nix shell. Tests were not run.
 - Remaining: runtime tests should cover panic poisoning and abort outcome when test execution is authorized.
+
+## SU-5 dependency: drain worker channels before terminal decisions
+
+- Behavior: the supervisor-owned storage context tracks active planner and executor streams. A terminal request while either stream remains open returns `WorkerChannelsActive`; once terminal handling begins, no new worker stream is admitted.
+- Changed code and contract: [supervisor invocation lifecycle](../../engine/src/storage_manager.rs) and [storage-manager process boundary](../../specs/storage-manager.md).
+- Verification: `cargo fmt --all`, workspace build, warning-denied Clippy, and `git diff --check` pass in the repository Nix shell. Tests were not run.
+- Remaining: supervisor worker-exit observation must close these streams before requesting commit or abort; runtime race coverage awaits an authorized test run.
