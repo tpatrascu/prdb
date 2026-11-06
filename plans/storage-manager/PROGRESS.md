@@ -469,4 +469,13 @@
 - A real-redb integration test covers a direct `INDEX` grant, table ownership, inherited membership in the reserved administrator role, denial without authority, rejection of an index-object owner transfer through this route, durable ABORTED outcomes, and absence of catalog/audit publication on denial.
 - Verification: in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and all workspace tests passed. `git diff --check` and changed Markdown local-link checks passed.
 - Contract update: [schema DDL](../../specs/ddl-schema.md) and [redb storage](../../specs/redb-storage.md).
-- Remaining: the administrative channel must authenticate the actor before calling this route; deterministic authority-change races, authorization rules for constraints/policies/identity/grants, and service admission remain open.
+- Remaining: the administrative channel must authenticate the actor before calling this route; deterministic authority-change races, authorization rules for constraints/policies/identity/grants, and token-backed gateway/supervisor admission remain open.
+
+## SM-5 dependency: managed user admission — in progress
+
+- `StorageManager::begin_authenticated_invocation` accepts an identity from a trusted caller, validates that the principal is a live `LOGIN` user in the invocation's pinned catalog snapshot, and returns the pinned role closure. Identity and membership records used for admission are guarded through commit. Unknown and disabled users are denied with durable ABORTED outcomes.
+- Credential verification, token expiry/revocation checks, and the gateway/supervisor authentication boundary remain outside this storage entry point. The existing `begin_invocation` remains a lower-level trusted path.
+- A real-redb integration test covers successful admission, disabled and unknown-user denial, durable outcomes, and release of the admission slot after failed attempts.
+- Verification: in the prescribed Nix shell, workspace build, formatting check, Clippy with warnings denied, and workspace tests passed. Changed Markdown links and `git diff --check` passed.
+- Contract update: [users and roles](../../specs/ddl-identity.md).
+- Remaining: token and verifier records/loaders, gateway/supervisor authentication, and action-specific authorization for other DDL remain open.

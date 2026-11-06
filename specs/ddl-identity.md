@@ -54,6 +54,8 @@ Administrative batches revalidate the actor's current authority before commit; a
 
 Database user/role IDs are unrelated to IPC service roles such as executor or optimizer. Authentication yields a user; the supervisor provisions service channels. Effective data authority is the intersection of current admitted user permissions and the requested invocation grant.
 
+After a trusted caller verifies a credential, `StorageManager::begin_authenticated_invocation` checks that the supplied identity is a live `LOGIN` user in the invocation's pinned catalog snapshot and returns its pinned role closure. It guards the identity and membership records used for admission. Credential verification, token expiry, and revocation checks must happen before this call; the method does not authenticate a caller-supplied ID by itself.
+
 Pin role membership and identity/policy epochs for the transaction. Token revocation, user disable/drop, or membership changes block new invocations and make affected pending writes fail commit validation. Already admitted reads retain their bounded snapshot; immediate read revocation is not promised. An explicit cancel request may terminate active invocations, but cannot recall delivered bytes or undo committed writes.
 
 Outcome lookup requires the authenticated originating user or an authorized administrator. No cross-user enumeration of invocation IDs, token inventories, or role membership. An expired/revoked credential cannot be used for status lookup; the caller must authenticate with another valid credential or seek an administrator.

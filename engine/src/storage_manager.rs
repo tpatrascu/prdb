@@ -10,6 +10,7 @@ use crate::outcome::{InvocationOutcome, lookup_outcome};
 use crate::startup::{StartupError, validate_persisted_records};
 use crate::transaction::{InvocationCoordination, InvocationTransaction, TransactionError};
 use redb::Database;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -165,8 +166,11 @@ impl<'db> StorageManager<'db> {
         self.max_invocation_age
     }
 
-    /// Reserve an invocation slot before opening its pinned redb snapshot.
-    /// The slot remains held until commit, abort, expiry, or transaction drop.
+    /// Begin a managed invocation after a trusted caller has established its
+    /// identity and performed the required admission checks. Service callers
+    /// should use [`Self::begin_authenticated_invocation`] to validate the
+    /// principal against the pinned catalog. The slot remains held until
+    /// commit, abort, expiry, or transaction drop.
     pub fn begin_invocation(
         &self,
         invocation_id: [u8; 16],
@@ -192,6 +196,31 @@ impl<'db> StorageManager<'db> {
             max_rows,
             max_bytes,
         )
+    }
+
+    /// Admit an invocation for a principal already authenticated by a trusted
+    /// caller, then load its role closure from the invocation's pinned catalog
+    /// snapshot. This validates that the principal is a live LOGIN user and
+    /// guards the identity and membership records through commit. It does not
+    /// verify credentials, token expiry, or revocation; callers must complete
+    /// those checks before invoking this method.
+    pub fn begin_authenticated_invocation(
+        &self,
+        invocation_id: [u8; 16],
+        authenticated_principal_id: [u8; 16],
+        retention_deadline_us: i64,
+        max_rows: usize,
+        max_bytes: usize,
+    ) -> Result<(InvocationTransaction<'db>, HashSet<[u8; 16]>), TransactionError> {
+        let mut transaction = self.begin_invocation(
+            invocation_id,
+            authenticated_principal_id,
+            retention_deadline_us,
+            max_rows,
+            max_bytes,
+        )?;
+        let roles = transaction.load_catalog_role_closure(authenticated_principal_id)?;
+        Ok((transaction, roles))
     }
 
     /// Trusted coordinated catalog publication with no actor authorization.

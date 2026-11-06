@@ -740,6 +740,16 @@ fn principal_write_with_name(
     epoch: u64,
     name: &str,
 ) -> CatalogWrite {
+    principal_write_with_login(principal_id, kind, kind == 1, epoch, name)
+}
+
+fn principal_write_with_login(
+    principal_id: [u8; 16],
+    kind: u16,
+    login_enabled: bool,
+    epoch: u64,
+    name: &str,
+) -> CatalogWrite {
     let mut write = principal_write_with_epoch(principal_id, kind, epoch);
     let key = write.key.clone();
     write.payload = Some(
@@ -760,7 +770,7 @@ fn principal_write_with_name(
                 CatalogField {
                     tag: 3,
                     wire_type: WireType::Bool,
-                    payload: vec![u8::from(kind == 1)],
+                    payload: vec![u8::from(login_enabled)],
                 },
                 CatalogField {
                     tag: 4,
@@ -1986,6 +1996,56 @@ fn storage_manager_routes_invocations_and_catalog_commits_through_shared_fences(
             .payload,
         b"coordinated"
     );
+    Ok(())
+}
+
+#[test]
+fn storage_manager_admission_requires_a_login_enabled_catalog_user()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::authorization::AuthorizationError;
+    use prdb_engine::transaction::TransactionError;
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::with_config(
+        &database,
+        StorageManagerConfig {
+            ddl_fence_timeout: Duration::from_millis(100),
+            max_active_invocations: 1,
+            max_invocation_age: Duration::from_secs(30),
+        },
+    )?;
+    let enabled_user = id(229);
+    let disabled_user = id(230);
+    let writes = [
+        object_write_with_name(enabled_user, 8, "admitted_user"),
+        principal_write_with_name(enabled_user, 1, 1, "admitted_user"),
+        object_write_with_name(disabled_user, 8, "disabled_user"),
+        principal_write_with_login(disabled_user, 1, false, 1, "disabled_user"),
+    ];
+    storage.commit_catalog_and_audit(id(231), id(9), 9_999, &writes, &[audit_event(231)])?;
+
+    let (mut admitted, roles) =
+        storage.begin_authenticated_invocation(id(232), enabled_user, 9_999, 2, 64)?;
+    assert!(roles.is_empty());
+    admitted.abort()?;
+
+    for (invocation_id, principal_id) in [(id(233), disabled_user), (id(234), id(235))] {
+        assert!(matches!(
+            storage.begin_authenticated_invocation(invocation_id, principal_id, 9_999, 2, 64,),
+            Err(TransactionError::Authorization(AuthorizationError::Denied))
+        ));
+        assert_eq!(
+            lookup_outcome(&database, invocation_id, principal_id, 1)?
+                .unwrap()
+                .status,
+            OutcomeStatus::Aborted
+        );
+    }
+
+    let (mut admitted_again, _) =
+        storage.begin_authenticated_invocation(id(236), enabled_user, 9_999, 2, 64)?;
+    admitted_again.abort()?;
     Ok(())
 }
 

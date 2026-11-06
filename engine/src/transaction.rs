@@ -854,11 +854,18 @@ impl<'db> InvocationTransaction<'db> {
                 principal_ids.insert(member_id);
                 principal_ids.insert(role_id);
             }
+            let principal_is_membership_endpoint = principal_ids.contains(&principal_id);
             principal_ids.insert(principal_id);
             for id in principal_ids {
                 let record = self
                     .read_catalog_record(&catalog_id_key(10, id))?
-                    .ok_or(TransactionError::CorruptCatalog)?;
+                    .ok_or_else(|| {
+                        if id == self.principal_id && !principal_is_membership_endpoint {
+                            TransactionError::Authorization(AuthorizationError::Denied)
+                        } else {
+                            TransactionError::CorruptCatalog
+                        }
+                    })?;
                 let kind = catalog_u16(&record, 1)?;
                 let login_enabled = catalog_field(&record, 3)?;
                 if !matches!(kind, 1 | 2)
