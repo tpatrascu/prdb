@@ -864,6 +864,6 @@
 
 - Behavior: executor IPC now decodes full-shape INSERT values and unique ordinal UPDATE patches, and dispatches INSERT/UPDATE/DELETE through connection-local handles. Storage rebuilds write projection, checks, foreign keys, and index definitions from pinned catalog records; policy-referenced fields cannot be updated, and successful UPDATE/DELETE invalidates row handles.
 - Changed code and fixture: [executor IPC](../../engine/src/executor_ipc.rs), [catalog-derived write projection and handle staging](../../engine/src/transaction.rs), [mutation codec regressions](../../engine/tests/executor_ipc.rs), [real-redb delete dispatch regression](../../engine/tests/transaction.rs), and [IPC contract](../../specs/ipc-protocol.md).
-- Evidence: focused mutation codec tests and the real-redb executor update/delete dispatch regression pass; the test verifies catalog-derived policy/grant checks, staged values, and handle invalidation. Full workspace checks are pending.
-- Remaining: successful INSERT dispatch and generated identity allocation are not yet covered; broader index/constraint mutation integration also needs fixtures.
-- Next smallest task: add a catalog-authorized INSERT/UPDATE regression with explicit grants and row/cell policies.
+- Evidence: focused mutation codec tests and the real-redb executor INSERT/UPDATE/DELETE dispatch regression pass; the test verifies catalog-derived policy/grant checks, staged values, and handle invalidation. Workspace build, format, warning-denied Clippy, full tests, local Markdown links, and diff checks pass.
+- Remaining: generated identity allocation remains unsupported; broader index/constraint mutation integration needs dedicated fixtures.
+- Next smallest task: bind the generic executor request loop to supervisor-provisioned socket lifecycle.

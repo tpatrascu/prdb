@@ -568,6 +568,63 @@ fn policy_target_catalog_record(
     )
 }
 
+fn policy_catalog_record(
+    policy_id: [u8; 16],
+    table_id: [u8; 16],
+    kind: u16,
+    operation: u16,
+    using_expression_id: Option<[u8; 16]>,
+    check_expression_id: Option<[u8; 16]>,
+) -> (Vec<u8>, Vec<u8>) {
+    let key = catalog_id_key(13, policy_id);
+    let mut fields = vec![
+        CatalogField {
+            tag: 1,
+            wire_type: WireType::Id,
+            payload: table_id.to_vec(),
+        },
+        CatalogField {
+            tag: 2,
+            wire_type: WireType::U16,
+            payload: kind.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 3,
+            wire_type: WireType::U16,
+            payload: operation.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 4,
+            wire_type: WireType::U16,
+            payload: 1u16.to_le_bytes().to_vec(),
+        },
+        CatalogField {
+            tag: 7,
+            wire_type: WireType::U64,
+            payload: 1u64.to_le_bytes().to_vec(),
+        },
+    ];
+    if let Some(expression_id) = using_expression_id {
+        fields.push(CatalogField {
+            tag: 5,
+            wire_type: WireType::Id,
+            payload: expression_id.to_vec(),
+        });
+    }
+    if let Some(expression_id) = check_expression_id {
+        fields.push(CatalogField {
+            tag: 6,
+            wire_type: WireType::Id,
+            payload: expression_id.to_vec(),
+        });
+    }
+    fields.sort_by_key(|field| field.tag);
+    (
+        key.clone(),
+        catalog_record_payload(13, &key, &fields).unwrap(),
+    )
+}
+
 fn check_constraint_catalog_record(
     constraint_id: [u8; 16],
     table_id: [u8; 16],
@@ -2559,7 +2616,8 @@ fn catalog_authorized_scan_builds_its_projection_from_pinned_records()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::executor_ipc::{
         CloseCursorRequest, NextBatchRequest, NextBatchResponse, OpenScanRequest, OpenScanResponse,
-        StageDeleteRequest, StageUpdateRequest, dispatch_executor_request,
+        StageDeleteRequest, StageInsertRequest, StageInsertResponse, StageUpdateRequest,
+        dispatch_executor_request,
     };
     use prdb_engine::ipc::{IpcFrame, Operation as IpcOperation, ServiceRole};
 
@@ -2617,6 +2675,30 @@ fn catalog_authorized_scan_builds_its_projection_from_pinned_records()
         policy_target_catalog_record(cell_update_policy_id, 3, [0x66; 16]);
     let update_check_expression_id = [232; 16];
     let update_check_expression_key = catalog_id_key(7, update_check_expression_id);
+    let insert_policy_id = [233; 16];
+    let (insert_policy_key, insert_policy_payload) = policy_catalog_record(
+        insert_policy_id,
+        table_id,
+        1,
+        2,
+        None,
+        Some(update_check_expression_id),
+    );
+    let (insert_policy_target_key, insert_policy_target_payload) =
+        policy_target_catalog_record(insert_policy_id, 1, principal_id);
+    let cell_insert_policy_id = [234; 16];
+    let (cell_insert_policy_key, cell_insert_policy_payload) = policy_catalog_record(
+        cell_insert_policy_id,
+        table_id,
+        2,
+        2,
+        None,
+        Some(update_check_expression_id),
+    );
+    let (cell_insert_principal_target_key, cell_insert_principal_target_payload) =
+        policy_target_catalog_record(cell_insert_policy_id, 1, principal_id);
+    let (cell_insert_column_target_key, cell_insert_column_target_payload) =
+        policy_target_catalog_record(cell_insert_policy_id, 3, [0x66; 16]);
     let write = database.begin_write()?;
     {
         let mut catalog = write.open_table(CATALOG)?;
@@ -2854,9 +2936,20 @@ fn catalog_authorized_scan_builds_its_projection_from_pinned_records()
                 )?,
             ),
             (target_key, target_payload),
+            (insert_policy_key, insert_policy_payload),
+            (cell_insert_policy_key, cell_insert_policy_payload),
             (cell_principal_target_key, cell_principal_target_payload),
             (cell_column_target_key, cell_column_target_payload),
             (delete_policy_target_key, delete_policy_target_payload),
+            (insert_policy_target_key, insert_policy_target_payload),
+            (
+                cell_insert_principal_target_key,
+                cell_insert_principal_target_payload,
+            ),
+            (
+                cell_insert_column_target_key,
+                cell_insert_column_target_payload,
+            ),
             (update_policy_target_key, update_policy_target_payload),
             (
                 cell_update_principal_target_key,
@@ -2868,6 +2961,24 @@ fn catalog_authorized_scan_builds_its_projection_from_pinned_records()
             ),
             (table_select_key, table_select_payload),
             (table_delete_key, table_delete_payload),
+            grant_catalog_record(
+                principal_id,
+                table_id,
+                3,
+                1,
+                table_id,
+                builtin_owner_id(),
+                1,
+            ),
+            grant_catalog_record(
+                principal_id,
+                table_id,
+                3,
+                2,
+                [0x66; 16],
+                builtin_owner_id(),
+                1,
+            ),
             grant_catalog_record(
                 principal_id,
                 table_id,
@@ -2930,7 +3041,7 @@ fn catalog_authorized_scan_builds_its_projection_from_pinned_records()
     )?;
 
     let mut invocation =
-        InvocationTransaction::begin(&database, [225; 16], principal_id, 9_999, 2, 128)?;
+        InvocationTransaction::begin(&database, [225; 16], principal_id, 9_999, 4, 256)?;
     let page = invocation.scan_catalog_authorized_rows(table_id, None, 3)?;
     assert_eq!(page.rows.len(), 2);
     assert_eq!(page.rows[0].0, row_id);
@@ -2946,7 +3057,7 @@ fn catalog_authorized_scan_builds_its_projection_from_pinned_records()
         operation: IpcOperation::OpenScan as u16,
         request_id: 61,
         payload: OpenScanRequest {
-            relation: relation_handle,
+            relation: relation_handle.clone(),
             column_ids: vec![[0x66; 16]],
         }
         .encode()?,
@@ -3052,13 +3163,29 @@ fn catalog_authorized_scan_builds_its_projection_from_pinned_records()
         connection.next_relation_scan_page(&close_cursor, 1),
         Err(TransactionError::InvalidMetadataRequest)
     ));
+    let insert_response = dispatch_executor_request(
+        ServiceRole::Executor,
+        &mut connection,
+        &IpcFrame {
+            operation: IpcOperation::StageInsert as u16,
+            request_id: 67,
+            payload: StageInsertRequest {
+                relation: relation_handle,
+                values: vec![Some(ScalarValue::Bytea(vec![4, 5]))],
+            }
+            .encode()?,
+        },
+    )?;
+    let inserted_handle = StageInsertResponse::decode(&insert_response.payload)?.handle;
+    let inserted_row_id = connection.revalidate_row_handle(&inserted_handle)?;
+    assert_eq!(inserted_row_id.table, table_id);
     let updated_row_handle = first_page.rows[0].handle.clone();
     let update_response = dispatch_executor_request(
         ServiceRole::Executor,
         &mut connection,
         &IpcFrame {
             operation: IpcOperation::StageUpdate as u16,
-            request_id: 67,
+            request_id: 68,
             payload: StageUpdateRequest {
                 handle: updated_row_handle.clone(),
                 patches: vec![FieldPatch {
@@ -3080,7 +3207,7 @@ fn catalog_authorized_scan_builds_its_projection_from_pinned_records()
         &mut connection,
         &IpcFrame {
             operation: IpcOperation::StageDelete as u16,
-            request_id: 68,
+            request_id: 69,
             payload: StageDeleteRequest {
                 handle: deleted_row_handle.clone(),
             }
@@ -3101,6 +3228,7 @@ fn catalog_authorized_scan_builds_its_projection_from_pinned_records()
     drop(replacement);
     assert!(invocation.read(row_id)?.is_some());
     assert!(invocation.read(second_row_id)?.is_none());
+    assert!(invocation.read(inserted_row_id)?.is_some());
     invocation.abort()?;
     Ok(())
 }

@@ -5765,8 +5765,8 @@ impl ExecutorMetadataConnection<'_, '_> {
     }
 
     /// Stage an insert from a complete declared-shape value vector. The new
-    /// row receives an opaque connection-local handle; defaults are materialized
-    /// by storage and generated identities remain unsupported.
+    /// row receives an opaque connection-local handle. Generated identities
+    /// remain unsupported by this explicit-value wire operation.
     pub fn stage_insert(
         &mut self,
         relation: &ResolvedRelationHandle,
