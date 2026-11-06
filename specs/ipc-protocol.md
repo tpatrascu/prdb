@@ -25,6 +25,8 @@ Operation tags are fixed independently of their payload schemas. The channel's s
 | Gateway service | `0x1401` authenticate session; `0x1402` close session; `0x1403` prepare submission; `0x1404` upload submission chunk; `0x1405` seal submission; `0x1406` start submission; `0x1407` get invocation status; `0x1408` cancel invocation; `0x1409` submit administrative operation |
 | Administrative control | `0x1501` commit administrative DDL; `0x1502` issue credential; `0x1503` revoke credential; `0x1504` list credentials; `0x1505` cancel invocation |
 
+The storage-side Supervisor handler accepts `0x1301` finalize and `0x1302` abort on a channel bound out of band to one active invocation. Both requests carry only `u16 version = 1`; finalize responds with version, status 0, and the committed sequence `u64`, while abort responds with version and status 0. The handler consumes the invocation on either decision, rejects further terminal requests, and aborts if the supervisor channel closes before a decision. Worker or planner EOF alone does not finalize. Cancel and status operations remain separate manager APIs until their supervisor IPC handlers are implemented.
+
 The administrative-control channel is bound to an already authenticated actor; its service role does not confer database privileges. Gateway operations go to the supervisor service and cannot be forwarded as arbitrary internal operation codes. The protected bootstrap socket accepts only its credential-delivery and acknowledgement operations. Executor and planner roles are distinct: only the planner receives estimate operations, and neither role can finalize or administer.
 
 ## Administrative Control

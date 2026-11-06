@@ -909,3 +909,10 @@
 - Changed code and contract: [planner stream and dispatcher](../../engine/src/planner_ipc.rs) and [planner IPC contract](../../specs/ipc-protocol.md).
 - Verification: format, workspace build, and warning-denied Clippy pass. Tests were not run in this increment.
 - Remaining: supervisor provisioning, shared planner/executor invocation scheduling, and cancellation-aware planner task draining remain open.
+
+## SM-4 / SU-5 dependency: supervisor terminal storage channel
+
+- Behavior: a role-checked Supervisor handler can finalize or abort one out-of-band-bound invocation; terminal operations consume it, finalize returns the durable commit sequence, and losing the supervisor channel before a decision durably aborts. Executor EOF now only closes the executor session, leaving finalization to this channel.
+- Changed code and contract: [supervisor IPC handler](../../engine/src/supervisor_ipc.rs), [executor stream lifecycle](../../engine/src/executor_ipc.rs), and [IPC protocol](../../specs/ipc-protocol.md).
+- Verification: format, workspace build, warning-denied Clippy, and `git diff --check` pass. Tests were not run in this increment.
+- Remaining: wire this handler to supervisor-owned invocation state, implement supervisor admission/worker exit observation, and expose cancellation/status requests on the supervisor channel.
