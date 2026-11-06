@@ -1445,6 +1445,33 @@ fn authorized_schema_resolution_matches_only_visible_exact_names()
 }
 
 #[test]
+fn schema_access_loader_uses_pinned_principal_schema_usage_grants()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    install_relation_discovery_catalog(&database)?;
+    let app_schema_id = [0x91; 16];
+    let public_schema_id = [0x93; 16];
+    let mut invocation = InvocationTransaction::begin(&database, [190; 16], [9; 16], 9_999, 1, 64)?;
+    let (roles, grants) = invocation.load_catalog_schema_usage_grants([9; 16])?;
+    assert!(roles.is_empty());
+    assert_eq!(grants.len(), 2);
+    assert!(grants.iter().all(|grant| {
+        grant.subject == Subject::Principal([9; 16]) && grant.operation == Operation::Usage
+    }));
+    let mut visible_schemas = grants
+        .iter()
+        .filter_map(|grant| match grant.target {
+            AccessTarget::Schema(schema_id) => Some(schema_id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    visible_schemas.sort_unstable();
+    assert_eq!(visible_schemas, [app_schema_id, public_schema_id]);
+    Ok(())
+}
+
+#[test]
 fn column_grants_can_discover_a_relation_and_pages_are_snapshot_scoped()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();

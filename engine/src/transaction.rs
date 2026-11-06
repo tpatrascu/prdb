@@ -2388,6 +2388,109 @@ impl<'db> InvocationTransaction<'db> {
         }
     }
 
+    /// Load schema USAGE grants for the admitted principal and its pinned role
+    /// closure. Matching grants, grantors, and schema records become commit
+    /// guards on this invocation.
+    pub fn load_catalog_schema_usage_grants(
+        &mut self,
+        principal_id: [u8; 16],
+    ) -> Result<(HashSet<[u8; 16]>, Vec<Grant>), TransactionError> {
+        let result = (|| {
+            if principal_id != self.principal_id || principal_id == [0; 16] {
+                return Err(TransactionError::InvalidContext);
+            }
+            let roles = self.load_catalog_role_closure(principal_id)?;
+            let mut grantees = roles.clone();
+            grantees.insert(principal_id);
+            let records = self
+                .pinned_snapshot()?
+                .scan_catalog_family(12, MAX_CATALOG_FAMILY_SCAN)
+                .map_err(|error| TransactionError::Storage(error.to_string()))?;
+            let mut grants = Vec::new();
+            let mut guarded_principals = HashSet::new();
+            for record in records {
+                let key = &record.logical_key;
+                if key.len() != 59
+                    || key[2] != 1
+                    || key[19] != 1
+                    || key[36] != 1
+                    || key[39] != 1
+                    || key[42] != 1
+                {
+                    return Err(TransactionError::CorruptCatalog);
+                }
+                let grantee_id: [u8; 16] = key[3..19]
+                    .try_into()
+                    .map_err(|_| TransactionError::CorruptCatalog)?;
+                if !grantees.contains(&grantee_id) {
+                    continue;
+                }
+                let schema_id: [u8; 16] = key[20..36]
+                    .try_into()
+                    .map_err(|_| TransactionError::CorruptCatalog)?;
+                let privilege = u16::from_be_bytes([key[37], key[38]]);
+                let target_scope = u16::from_be_bytes([key[40], key[41]]);
+                let target_id: [u8; 16] = key[43..59]
+                    .try_into()
+                    .map_err(|_| TransactionError::CorruptCatalog)?;
+                if privilege != 1 {
+                    continue;
+                }
+                if target_scope != 1 || schema_id == [0; 16] || target_id != schema_id {
+                    return Err(TransactionError::CorruptCatalog);
+                }
+                let guarded = self
+                    .read_catalog_record(key)?
+                    .ok_or(TransactionError::CorruptCatalog)?;
+                if guarded != record || guarded.family_code != 12 || catalog_u64(&record, 2)? == 0 {
+                    return Err(TransactionError::CorruptCatalog);
+                }
+                self.read_discovery_schema(schema_id)?;
+                let grantor_id = catalog_id(&record, 1)?;
+                if grantor_id == [0; 16] {
+                    return Err(TransactionError::CorruptCatalog);
+                }
+                if guarded_principals.insert(grantor_id) {
+                    let grantor = self
+                        .read_catalog_record(&catalog_id_key(10, grantor_id))?
+                        .ok_or(TransactionError::CorruptCatalog)?;
+                    let grantor_kind = catalog_u16(&grantor, 1)?;
+                    let grantor_login = catalog_field(&grantor, 3)?;
+                    if grantor.family_code != 10
+                        || !matches!(grantor_kind, 1 | 2)
+                        || catalog_u64(&grantor, 4)? == 0
+                        || !matches!(grantor_login, [0] | [1])
+                        || (grantor_kind == 2 && grantor_login != [0])
+                    {
+                        return Err(TransactionError::CorruptCatalog);
+                    }
+                }
+                grants.push(Grant {
+                    subject: if grantee_id == principal_id {
+                        Subject::Principal(principal_id)
+                    } else {
+                        Subject::Role(grantee_id)
+                    },
+                    operation: Operation::Usage,
+                    target: AccessTarget::Schema(schema_id),
+                });
+                if grants.len() > crate::authorization::MAX_AUTHORIZATION_INPUTS {
+                    return Err(TransactionError::CorruptCatalog);
+                }
+            }
+            Ok((roles, grants))
+        })();
+        match result {
+            Ok(authorization) => Ok(authorization),
+            Err(error) => {
+                if !self.aborted {
+                    self.abort()?;
+                }
+                Err(error)
+            }
+        }
+    }
+
     /// Resolve one unique built-in type ID from the pinned type catalog and
     /// retain the type definition as a commit guard.
     pub fn load_catalog_builtin_type_id(
