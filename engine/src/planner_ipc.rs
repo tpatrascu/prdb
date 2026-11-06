@@ -406,9 +406,16 @@ pub fn serve_planner_shared<S: Read + Write>(
             return Err(PlannerConnectionError::DuplicateRequestId);
         }
         let response = {
-            let mut invocation = invocation
-                .lock()
-                .map_err(|_| PlannerConnectionError::SharedInvocationPoisoned)?;
+            let mut invocation = match invocation.lock() {
+                Ok(invocation) => invocation,
+                Err(poisoned) => {
+                    let mut invocation = poisoned.into_inner();
+                    if let Some(mut transaction) = invocation.take() {
+                        let _ = transaction.abort();
+                    }
+                    return Err(PlannerConnectionError::SharedInvocationPoisoned);
+                }
+            };
             let transaction = invocation
                 .as_mut()
                 .ok_or(PlannerConnectionError::SharedInvocationUnavailable)?;
@@ -435,9 +442,16 @@ pub fn serve_planner_shared<S: Read + Write>(
 fn abort_shared_planner_invocation(
     invocation: &Arc<Mutex<Option<crate::transaction::InvocationTransaction<'_>>>>,
 ) -> Result<(), PlannerConnectionError> {
-    let mut invocation = invocation
-        .lock()
-        .map_err(|_| PlannerConnectionError::SharedInvocationPoisoned)?;
+    let mut invocation = match invocation.lock() {
+        Ok(invocation) => invocation,
+        Err(poisoned) => {
+            let mut invocation = poisoned.into_inner();
+            if let Some(mut transaction) = invocation.take() {
+                let _ = transaction.abort();
+            }
+            return Err(PlannerConnectionError::SharedInvocationPoisoned);
+        }
+    };
     if let Some(transaction) = invocation.as_mut() {
         transaction.abort().map_err(PlannerConnectionError::Abort)?;
     }

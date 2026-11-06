@@ -930,3 +930,10 @@
 - Changed code and contract: [shared IPC handlers](../../engine/src/planner_ipc.rs), [executor session state](../../engine/src/executor_ipc.rs), [transaction connection state](../../engine/src/transaction.rs), [supervisor invocation owner](../../engine/src/storage_manager.rs), and [storage-manager contract](../../specs/storage-manager.md).
 - Verification: `cargo fmt --all`, workspace build, warning-denied Clippy, and `git diff --check` pass in the repository Nix shell. Tests were not run.
 - Remaining: the supervisor must stop and drain worker channels before terminal finalization; process scheduling, worker exit observation, and gateway cancellation remain open.
+
+## SU-5 dependency: fail-closed shared invocation lock poisoning
+
+- Behavior: if a planner or executor request panics while holding the shared invocation lock, planner/executor handlers and the terminal owner consume the poisoned invocation and attempt durable abort; terminal handling cannot recover the lock and commit interrupted state.
+- Changed code: [shared planner/executor handlers](../../engine/src/planner_ipc.rs), [executor request loop](../../engine/src/executor_ipc.rs), and [terminal owner](../../engine/src/storage_manager.rs).
+- Verification: `cargo fmt --all`, workspace build, warning-denied Clippy, and `git diff --check` pass in the repository Nix shell. Tests were not run.
+- Remaining: runtime tests should cover panic poisoning and abort outcome when test execution is authorized.

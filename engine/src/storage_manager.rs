@@ -369,10 +369,16 @@ impl SupervisorInvocation<'_> {
         &mut self,
         stream: &mut S,
     ) -> Result<(), SupervisorInvocationError> {
-        let mut transaction = self
-            .transaction
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut transaction = match self.transaction.lock() {
+            Ok(transaction) => transaction,
+            Err(poisoned) => {
+                let mut transaction = poisoned.into_inner();
+                if let Some(mut invocation) = transaction.take() {
+                    let _ = invocation.abort();
+                }
+                return Err(SupervisorInvocationError::Closed);
+            }
+        };
         crate::supervisor_ipc::serve_supervisor(stream, &mut transaction)
             .map_err(SupervisorInvocationError::Supervisor)
     }

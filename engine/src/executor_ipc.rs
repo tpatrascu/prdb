@@ -1197,9 +1197,16 @@ pub fn serve_executor_shared<S: Read + Write>(
             return Err(ExecutorConnectionError::DuplicateRequestId);
         }
         let response = {
-            let mut invocation = invocation
-                .lock()
-                .map_err(|_| ExecutorConnectionError::SharedInvocationPoisoned)?;
+            let mut invocation = match invocation.lock() {
+                Ok(invocation) => invocation,
+                Err(poisoned) => {
+                    let mut invocation = poisoned.into_inner();
+                    if let Some(mut transaction) = invocation.take() {
+                        let _ = transaction.abort();
+                    }
+                    return Err(ExecutorConnectionError::SharedInvocationPoisoned);
+                }
+            };
             let transaction = invocation
                 .as_mut()
                 .ok_or(ExecutorConnectionError::SharedInvocationUnavailable)?;
@@ -1229,9 +1236,16 @@ fn finish_shared_executor_session(
     state: &mut crate::transaction::ExecutorMetadataSessionState,
     abort: bool,
 ) -> Result<(), ExecutorConnectionError> {
-    let mut invocation = invocation
-        .lock()
-        .map_err(|_| ExecutorConnectionError::SharedInvocationPoisoned)?;
+    let mut invocation = match invocation.lock() {
+        Ok(invocation) => invocation,
+        Err(poisoned) => {
+            let mut invocation = poisoned.into_inner();
+            if let Some(mut transaction) = invocation.take() {
+                let _ = transaction.abort();
+            }
+            return Err(ExecutorConnectionError::SharedInvocationPoisoned);
+        }
+    };
     if let Some(transaction) = invocation.as_mut() {
         let connection =
             transaction.open_executor_metadata_connection_with_state(std::mem::take(state));
