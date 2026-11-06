@@ -5845,7 +5845,7 @@ impl ExecutorMetadataConnection<'_, '_> {
             projection_state
                 .schema
                 .generation_modes
-                .get(patch.ordinal as usize)
+                .get(patch.ordinal)
                 .is_none_or(|mode| *mode != 0)
         }) {
             self.transaction.abort()?;

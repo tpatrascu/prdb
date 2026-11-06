@@ -893,5 +893,5 @@
 
 - Behavior: executor INSERT now uses DEFAULT markers independently from NULL, allocates UUID identities only for DEFAULT, rejects explicit generated values and updates to identity columns, and validates collisions against the serialized final table contents.
 - Changed code and contract: [transaction and commit validation](../../engine/src/transaction.rs), [executor INSERT codec](../../engine/src/executor_ipc.rs), [IPC protocol](../../specs/ipc-protocol.md), and [schema DDL contract](../../specs/ddl-schema.md).
-- Verification: workspace build, format check, and `git diff --check` pass. Tests were not run in this increment.
+- Verification: workspace build, format check, warning-denied Clippy, and `git diff --check` pass. Tests were not run in this increment.
 - Remaining: generated identity allocation has only a focused staged-value regression so far; add catalog-backed end-to-end coverage when test execution is requested.
