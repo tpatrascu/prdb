@@ -922,4 +922,11 @@
 - Behavior: `StorageManager::admit_supervisor_invocation` verifies a database token, pins identity and role authority, and returns an owner that binds planner/executor channels to one invocation and exposes terminal and control channels. Dropping the owner without finalization attempts a durable abort.
 - Changed code and contract: [storage manager admission wrapper](../../engine/src/storage_manager.rs) and [storage manager lifecycle contract](../../specs/storage-manager.md).
 - Verification: format, workspace build, warning-denied Clippy, and `git diff --check` pass. Tests were not run in this increment.
-- Remaining: this synchronous wrapper does not multiplex planner and executor requests during worker execution or launch/reap a confined worker; those remain supervisor scheduler responsibilities.
+- Remaining: launch/reap a confined worker, observe worker completion, and wire gateway cancellation; those remain supervisor scheduler responsibilities.
+
+## SU-5 dependency: shared planner/executor invocation scheduling
+
+- Behavior: planner and executor IPC streams may run concurrently against one supervisor-owned invocation. Each request takes the shared transaction lock only for dispatch, and per-stream opaque handle/cursor state survives between requests. Executor clean EOF releases its scans without deciding the invocation outcome; protocol failures abort.
+- Changed code and contract: [shared IPC handlers](../../engine/src/planner_ipc.rs), [executor session state](../../engine/src/executor_ipc.rs), [transaction connection state](../../engine/src/transaction.rs), [supervisor invocation owner](../../engine/src/storage_manager.rs), and [storage-manager contract](../../specs/storage-manager.md).
+- Verification: `cargo fmt --all`, workspace build, warning-denied Clippy, and `git diff --check` pass in the repository Nix shell. Tests were not run.
+- Remaining: the supervisor must stop and drain worker channels before terminal finalization; process scheduling, worker exit observation, and gateway cancellation remain open.

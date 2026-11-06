@@ -271,12 +271,29 @@ pub struct ExecutorMetadataConnection<'connection, 'db> {
     used_scan_tokens: HashSet<[u8; 16]>,
     row_handles: HashMap<[u8; 16], RowId>,
     used_row_tokens: HashSet<[u8; 16]>,
+    detached: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct ExecutorMetadataSessionState {
+    handles: HashMap<[u8; 16], ResolvedRelationHandleState>,
+    used_tokens: HashSet<[u8; 16]>,
+    scans: HashMap<[u8; 16], ActiveExecutorScan>,
+    used_scan_tokens: HashSet<[u8; 16]>,
+    row_handles: HashMap<[u8; 16], RowId>,
+    used_row_tokens: HashSet<[u8; 16]>,
 }
 
 /// Planner metadata session with opaque, connection-local table handles.
 /// Estimates are rebuilt from the invocation's pinned catalog on each request.
 pub struct PlannerMetadataConnection<'connection, 'db> {
     transaction: &'connection mut InvocationTransaction<'db>,
+    handles: HashMap<[u8; 16], PlannerTableHandleState>,
+    used_tokens: HashSet<[u8; 16]>,
+}
+
+#[derive(Default)]
+pub(crate) struct PlannerMetadataSessionState {
     handles: HashMap<[u8; 16], PlannerTableHandleState>,
     used_tokens: HashSet<[u8; 16]>,
 }
@@ -599,24 +616,39 @@ impl<'db> InvocationTransaction<'db> {
     /// Open an executor metadata session whose relation handles are private to
     /// that connection and expire when the returned value is dropped.
     pub fn open_executor_metadata_connection(&mut self) -> ExecutorMetadataConnection<'_, 'db> {
+        self.open_executor_metadata_connection_with_state(ExecutorMetadataSessionState::default())
+    }
+
+    pub(crate) fn open_executor_metadata_connection_with_state(
+        &mut self,
+        state: ExecutorMetadataSessionState,
+    ) -> ExecutorMetadataConnection<'_, 'db> {
         ExecutorMetadataConnection {
             transaction: self,
-            handles: HashMap::new(),
-            used_tokens: HashSet::new(),
-            scans: HashMap::new(),
-            used_scan_tokens: HashSet::new(),
-            row_handles: HashMap::new(),
-            used_row_tokens: HashSet::new(),
+            handles: state.handles,
+            used_tokens: state.used_tokens,
+            scans: state.scans,
+            used_scan_tokens: state.used_scan_tokens,
+            row_handles: state.row_handles,
+            used_row_tokens: state.used_row_tokens,
+            detached: false,
         }
     }
 
     /// Open a planner session with planning handles isolated from executor
     /// relation and row handles.
     pub fn open_planner_metadata_connection(&mut self) -> PlannerMetadataConnection<'_, 'db> {
+        self.open_planner_metadata_connection_with_state(PlannerMetadataSessionState::default())
+    }
+
+    pub(crate) fn open_planner_metadata_connection_with_state(
+        &mut self,
+        state: PlannerMetadataSessionState,
+    ) -> PlannerMetadataConnection<'_, 'db> {
         PlannerMetadataConnection {
             transaction: self,
-            handles: HashMap::new(),
-            used_tokens: HashSet::new(),
+            handles: state.handles,
+            used_tokens: state.used_tokens,
         }
     }
 
@@ -5494,6 +5526,18 @@ impl<'db> InvocationTransaction<'db> {
 }
 
 impl ExecutorMetadataConnection<'_, '_> {
+    pub(crate) fn detach(mut self) -> ExecutorMetadataSessionState {
+        self.detached = true;
+        ExecutorMetadataSessionState {
+            handles: std::mem::take(&mut self.handles),
+            used_tokens: std::mem::take(&mut self.used_tokens),
+            scans: std::mem::take(&mut self.scans),
+            used_scan_tokens: std::mem::take(&mut self.used_scan_tokens),
+            row_handles: std::mem::take(&mut self.row_handles),
+            used_row_tokens: std::mem::take(&mut self.used_row_tokens),
+        }
+    }
+
     /// Resolve a qualified name through the invocation's pinned catalog and
     /// issue an opaque handle owned by this executor metadata session.
     pub fn resolve_relation(
@@ -5964,6 +6008,9 @@ impl ExecutorMetadataConnection<'_, '_> {
 
 impl Drop for ExecutorMetadataConnection<'_, '_> {
     fn drop(&mut self) {
+        if self.detached {
+            return;
+        }
         let table_ids = self
             .handles
             .values()
@@ -5976,6 +6023,13 @@ impl Drop for ExecutorMetadataConnection<'_, '_> {
 }
 
 impl PlannerMetadataConnection<'_, '_> {
+    pub(crate) fn detach(self) -> PlannerMetadataSessionState {
+        PlannerMetadataSessionState {
+            handles: self.handles,
+            used_tokens: self.used_tokens,
+        }
+    }
+
     /// Resolve an authorized relation name and issue a planner-only handle.
     pub fn resolve_relation(
         &mut self,

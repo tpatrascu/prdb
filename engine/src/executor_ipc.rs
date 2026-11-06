@@ -11,6 +11,7 @@ use crate::transaction::{
 };
 use crate::tuple::{FieldPatch, ScalarType, ScalarValue};
 use std::io::{Read, Write};
+use std::sync::{Arc, Mutex};
 
 pub const RESOLVE_RELATION_PAYLOAD_VERSION: u16 = 1;
 const RESOLVE_REQUEST_HEADER_BYTES: usize = 6;
@@ -982,6 +983,8 @@ pub enum ExecutorConnectionError {
     DuplicateRequestId,
     RequestLimitExceeded,
     Abort(TransactionError),
+    SharedInvocationUnavailable,
+    SharedInvocationPoisoned,
 }
 
 impl std::fmt::Display for ExecutorRequestError {
@@ -1162,6 +1165,84 @@ pub fn serve_executor<S: Read + Write>(
             };
         }
     }
+}
+
+/// Serve an executor connection that shares an invocation with planner
+/// sessions. The transaction lock is held for one request at a time, while
+/// the connection's opaque handles remain private to this stream.
+pub fn serve_executor_shared<S: Read + Write>(
+    stream: &mut S,
+    invocation: &Arc<Mutex<Option<InvocationTransaction<'_>>>>,
+) -> Result<(), ExecutorConnectionError> {
+    let mut state = crate::transaction::ExecutorMetadataSessionState::default();
+    let mut request_ids = std::collections::HashSet::new();
+    loop {
+        let request = match crate::ipc::read_frame(stream) {
+            Ok(Some(request)) => request,
+            Ok(None) => {
+                finish_shared_executor_session(invocation, &mut state, false)?;
+                return Ok(());
+            }
+            Err(error) => {
+                finish_shared_executor_session(invocation, &mut state, true)?;
+                return Err(ExecutorConnectionError::Frame(error));
+            }
+        };
+        if request_ids.len() >= MAX_EXECUTOR_REQUESTS_PER_CONNECTION {
+            finish_shared_executor_session(invocation, &mut state, true)?;
+            return Err(ExecutorConnectionError::RequestLimitExceeded);
+        }
+        if !request_ids.insert(request.request_id) {
+            finish_shared_executor_session(invocation, &mut state, true)?;
+            return Err(ExecutorConnectionError::DuplicateRequestId);
+        }
+        let response = {
+            let mut invocation = invocation
+                .lock()
+                .map_err(|_| ExecutorConnectionError::SharedInvocationPoisoned)?;
+            let transaction = invocation
+                .as_mut()
+                .ok_or(ExecutorConnectionError::SharedInvocationUnavailable)?;
+            let mut connection = transaction
+                .open_executor_metadata_connection_with_state(std::mem::take(&mut state));
+            let result =
+                dispatch_executor_request(ServiceRole::Executor, &mut connection, &request);
+            state = connection.detach();
+            result
+        };
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                finish_shared_executor_session(invocation, &mut state, true)?;
+                return Err(ExecutorConnectionError::Request(error));
+            }
+        };
+        if let Err(error) = crate::ipc::write_frame(stream, &response) {
+            finish_shared_executor_session(invocation, &mut state, true)?;
+            return Err(ExecutorConnectionError::Frame(error));
+        }
+    }
+}
+
+fn finish_shared_executor_session(
+    invocation: &Arc<Mutex<Option<InvocationTransaction<'_>>>>,
+    state: &mut crate::transaction::ExecutorMetadataSessionState,
+    abort: bool,
+) -> Result<(), ExecutorConnectionError> {
+    let mut invocation = invocation
+        .lock()
+        .map_err(|_| ExecutorConnectionError::SharedInvocationPoisoned)?;
+    if let Some(transaction) = invocation.as_mut() {
+        let connection =
+            transaction.open_executor_metadata_connection_with_state(std::mem::take(state));
+        drop(connection);
+        if abort {
+            transaction
+                .abort()
+                .map_err(ExecutorConnectionError::Abort)?;
+        }
+    }
+    Ok(())
 }
 
 /// Compatibility wrapper for callers of the original resolver-only loop.

@@ -9,6 +9,7 @@ use crate::metadata_discovery::{AuthorizedRelationDescription, PlanningTableHand
 use crate::statistics::{AuthorizedScanEstimate, AuthorizedScanSummary, ColumnPopulation};
 use crate::transaction::{PlannerMetadataConnection, TransactionError};
 use std::io::{Read, Write};
+use std::sync::{Arc, Mutex};
 
 pub const PLANNER_PAYLOAD_VERSION: u16 = 1;
 const DESCRIBE_HEADER_BYTES: usize = 3;
@@ -30,6 +31,8 @@ pub enum PlannerConnectionError {
     Abort(TransactionError),
     RequestLimitExceeded,
     DuplicateRequestId,
+    SharedInvocationUnavailable,
+    SharedInvocationPoisoned,
 }
 
 impl std::fmt::Display for PlannerRequestError {
@@ -375,6 +378,70 @@ pub fn serve_planner<S: Read + Write>(
             };
         }
     }
+}
+
+/// Serve a planner connection that shares an invocation with executor
+/// sessions. The transaction lock is held only while one request is handled.
+pub fn serve_planner_shared<S: Read + Write>(
+    stream: &mut S,
+    invocation: &Arc<Mutex<Option<crate::transaction::InvocationTransaction<'_>>>>,
+) -> Result<(), PlannerConnectionError> {
+    let mut state = crate::transaction::PlannerMetadataSessionState::default();
+    let mut request_ids = std::collections::HashSet::new();
+    loop {
+        let request = match crate::ipc::read_frame(stream) {
+            Ok(Some(request)) => request,
+            Ok(None) => return Ok(()),
+            Err(error) => {
+                abort_shared_planner_invocation(invocation)?;
+                return Err(PlannerConnectionError::Frame(error));
+            }
+        };
+        if request_ids.len() >= MAX_PLANNER_REQUESTS_PER_CONNECTION {
+            abort_shared_planner_invocation(invocation)?;
+            return Err(PlannerConnectionError::RequestLimitExceeded);
+        }
+        if !request_ids.insert(request.request_id) {
+            abort_shared_planner_invocation(invocation)?;
+            return Err(PlannerConnectionError::DuplicateRequestId);
+        }
+        let response = {
+            let mut invocation = invocation
+                .lock()
+                .map_err(|_| PlannerConnectionError::SharedInvocationPoisoned)?;
+            let transaction = invocation
+                .as_mut()
+                .ok_or(PlannerConnectionError::SharedInvocationUnavailable)?;
+            let mut connection =
+                transaction.open_planner_metadata_connection_with_state(std::mem::take(&mut state));
+            let result = dispatch_planner_request(ServiceRole::Planner, &mut connection, &request);
+            state = connection.detach();
+            result
+        };
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                abort_shared_planner_invocation(invocation)?;
+                return Err(PlannerConnectionError::Request(error));
+            }
+        };
+        if let Err(error) = crate::ipc::write_frame(stream, &response) {
+            abort_shared_planner_invocation(invocation)?;
+            return Err(PlannerConnectionError::Frame(error));
+        }
+    }
+}
+
+fn abort_shared_planner_invocation(
+    invocation: &Arc<Mutex<Option<crate::transaction::InvocationTransaction<'_>>>>,
+) -> Result<(), PlannerConnectionError> {
+    let mut invocation = invocation
+        .lock()
+        .map_err(|_| PlannerConnectionError::SharedInvocationPoisoned)?;
+    if let Some(transaction) = invocation.as_mut() {
+        transaction.abort().map_err(PlannerConnectionError::Abort)?;
+    }
+    Ok(())
 }
 
 fn read_u16(payload: &[u8], offset: usize) -> Result<u16, PlannerRequestError> {

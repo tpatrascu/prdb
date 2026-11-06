@@ -317,7 +317,7 @@ pub struct SupervisorInvocation<'db> {
     invocation_id: [u8; 16],
     principal_id: [u8; 16],
     role_ids: HashSet<[u8; 16]>,
-    transaction: Option<InvocationTransaction<'db>>,
+    transaction: Arc<Mutex<Option<InvocationTransaction<'db>>>>,
 }
 
 #[derive(Debug)]
@@ -350,26 +350,18 @@ impl SupervisorInvocation<'_> {
     }
 
     pub fn serve_planner<S: std::io::Read + std::io::Write>(
-        &mut self,
+        &self,
         stream: &mut S,
     ) -> Result<(), SupervisorInvocationError> {
-        let transaction = self
-            .transaction
-            .as_mut()
-            .ok_or(SupervisorInvocationError::Closed)?;
-        crate::planner_ipc::serve_planner(stream, transaction)
+        crate::planner_ipc::serve_planner_shared(stream, &self.transaction)
             .map_err(SupervisorInvocationError::Planner)
     }
 
     pub fn serve_executor<S: std::io::Read + std::io::Write>(
-        &mut self,
+        &self,
         stream: &mut S,
     ) -> Result<(), SupervisorInvocationError> {
-        let transaction = self
-            .transaction
-            .as_mut()
-            .ok_or(SupervisorInvocationError::Closed)?;
-        crate::executor_ipc::serve_executor(stream, transaction)
+        crate::executor_ipc::serve_executor_shared(stream, &self.transaction)
             .map_err(SupervisorInvocationError::Executor)
     }
 
@@ -377,7 +369,11 @@ impl SupervisorInvocation<'_> {
         &mut self,
         stream: &mut S,
     ) -> Result<(), SupervisorInvocationError> {
-        crate::supervisor_ipc::serve_supervisor(stream, &mut self.transaction)
+        let mut transaction = self
+            .transaction
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::supervisor_ipc::serve_supervisor(stream, &mut transaction)
             .map_err(SupervisorInvocationError::Supervisor)
     }
 
@@ -393,7 +389,11 @@ impl SupervisorInvocation<'_> {
 
 impl Drop for SupervisorInvocation<'_> {
     fn drop(&mut self) {
-        if let Some(mut transaction) = self.transaction.take() {
+        let mut owner = self
+            .transaction
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(mut transaction) = owner.take() {
             let _ = transaction.abort();
         }
     }
@@ -1028,7 +1028,7 @@ impl<'db> StorageManager<'db> {
             invocation_id,
             principal_id,
             role_ids,
-            transaction: Some(transaction),
+            transaction: Arc::new(Mutex::new(Some(transaction))),
         })
     }
 
