@@ -122,6 +122,21 @@ pub struct InformationSchemaSchemataPage {
     pub continuation: Option<SchemaScanCursor>,
 }
 
+/// One table row exposed for an authorized schema by `information_schema.tables`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InformationSchemaTableRow {
+    pub table_schema: String,
+    pub table_name: String,
+    pub table_type: String,
+}
+
+/// One bounded schema-scoped page from `information_schema.tables`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InformationSchemaTablesPage {
+    pub rows: Vec<InformationSchemaTableRow>,
+    pub continuation: Option<RelationScanCursor>,
+}
+
 /// Opaque continuation for relation discovery in one invocation snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RelationScanCursor {

@@ -1648,6 +1648,56 @@ fn information_schema_schemata_exposes_only_authorized_names()
 }
 
 #[test]
+fn information_schema_tables_projects_authorized_schema_pages()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    install_relation_discovery_catalog(&database)?;
+    let mut invocation = InvocationTransaction::begin(&database, [201; 16], [9; 16], 9_999, 1, 64)?;
+    let first = invocation
+        .scan_information_schema_tables_in_schema("app", 1, None)?
+        .expect("app is visible");
+    assert_eq!(first.rows.len(), 1);
+    assert_eq!(first.rows[0].table_schema, "app");
+    assert_eq!(first.rows[0].table_name, "metrics");
+    assert_eq!(first.rows[0].table_type, "BASE TABLE");
+    let second = invocation
+        .scan_information_schema_tables_in_schema("app", 1, first.continuation)?
+        .expect("app is visible");
+    assert_eq!(second.rows.len(), 1);
+    assert_eq!(second.rows[0].table_name, "secret");
+    assert!(second.continuation.is_none());
+
+    let empty = invocation
+        .scan_information_schema_tables_in_schema("public", 1, None)?
+        .expect("public is visible");
+    assert!(empty.rows.is_empty());
+    assert!(empty.continuation.is_none());
+    assert!(
+        invocation
+            .scan_information_schema_tables_in_schema("private", 1, None)?
+            .is_none()
+    );
+    assert!(
+        invocation
+            .scan_information_schema_tables_in_schema("missing", 1, None)?
+            .is_none()
+    );
+
+    let mut cursor_probe =
+        InvocationTransaction::begin(&database, [202; 16], [9; 16], 9_999, 1, 64)?;
+    let projected = cursor_probe
+        .scan_information_schema_tables_in_schema("app", 1, None)?
+        .expect("app is visible");
+    let cursor = projected.continuation.expect("second relation follows");
+    assert!(matches!(
+        cursor_probe.list_catalog_authorized_relations([0x91; 16], 1, Some(cursor)),
+        Err(TransactionError::InvalidMetadataRequest)
+    ));
+    Ok(())
+}
+
+#[test]
 fn column_grants_can_discover_a_relation_and_pages_are_snapshot_scoped()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();

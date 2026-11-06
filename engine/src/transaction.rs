@@ -20,11 +20,11 @@ use crate::index_key::{DeriveIndexKeyError, derive_index_key};
 use crate::metadata::{EngineMetadata, Lifecycle};
 use crate::metadata_discovery::{
     AuthorizedRelationDescription, COLUMN_CURSOR_TOKEN_KIND, ColumnScanCursor,
-    InformationSchemaSchemataPage, InformationSchemaSchemataRow, MAX_COLUMNS_PER_PAGE,
-    MAX_METADATA_PAGE_BYTES, MAX_RELATIONS_PER_PAGE, MAX_SCHEMAS_PER_PAGE,
-    RELATION_CURSOR_TOKEN_KIND, RelationScanCursor, SCHEMA_CURSOR_TOKEN_KIND, SchemaScanCursor,
-    VisibleColumn, VisibleColumnPage, VisibleRelation, VisibleRelationPage, VisibleRelationSchema,
-    VisibleSchema, VisibleSchemaPage,
+    InformationSchemaSchemataPage, InformationSchemaSchemataRow, InformationSchemaTableRow,
+    InformationSchemaTablesPage, MAX_COLUMNS_PER_PAGE, MAX_METADATA_PAGE_BYTES,
+    MAX_RELATIONS_PER_PAGE, MAX_SCHEMAS_PER_PAGE, RELATION_CURSOR_TOKEN_KIND, RelationScanCursor,
+    SCHEMA_CURSOR_TOKEN_KIND, SchemaScanCursor, VisibleColumn, VisibleColumnPage, VisibleRelation,
+    VisibleRelationPage, VisibleRelationSchema, VisibleSchema, VisibleSchemaPage,
 };
 use crate::outcome::{InvocationOutcome, OutcomeStatus};
 use crate::overlay::{Overlay, OverlayError, ResolvedRow, RowId, StagedRow};
@@ -241,6 +241,7 @@ pub struct InvocationTransaction<'db> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ActiveRelationScan {
     schema_id: [u8; 16],
+    extra_bytes_per_relation: usize,
     principal_id: [u8; 16],
     role_ids: HashSet<[u8; 16]>,
     scope: HashSet<(Operation, AccessTarget)>,
@@ -248,6 +249,12 @@ struct ActiveRelationScan {
     dependencies: Vec<AuthorityDependency>,
     continuation: Option<([u8; 16], [u8; 16])>,
     used_tokens: HashSet<[u8; 16]>,
+}
+
+struct MetadataDiscoveryAccess<'a> {
+    context: &'a AuthorizationContext,
+    grants: &'a [Grant],
+    dependencies: &'a [AuthorityDependency],
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -808,6 +815,21 @@ impl<'db> InvocationTransaction<'db> {
         page_limit: usize,
         continuation: Option<RelationScanCursor>,
     ) -> Result<Option<VisibleRelationPage>, TransactionError> {
+        self.list_catalog_authorized_relations_with_extra_bytes(
+            schema_id,
+            page_limit,
+            continuation,
+            0,
+        )
+    }
+
+    fn list_catalog_authorized_relations_with_extra_bytes(
+        &mut self,
+        schema_id: [u8; 16],
+        page_limit: usize,
+        continuation: Option<RelationScanCursor>,
+        extra_bytes_per_relation: usize,
+    ) -> Result<Option<VisibleRelationPage>, TransactionError> {
         let result = (|| {
             if schema_id == [0; 16] || page_limit == 0 || page_limit > MAX_RELATIONS_PER_PAGE {
                 return Err(TransactionError::InvalidMetadataRequest);
@@ -823,13 +845,16 @@ impl<'db> InvocationTransaction<'db> {
                 role_ids,
                 scope,
             };
-            self.list_authorized_relations(
+            self.list_authorized_relations_with_extra_bytes(
                 schema_id,
                 page_limit,
                 continuation,
-                &context,
-                &grants,
-                &[],
+                extra_bytes_per_relation,
+                MetadataDiscoveryAccess {
+                    context: &context,
+                    grants: &grants,
+                    dependencies: &[],
+                },
             )
         })();
         match result {
@@ -918,7 +943,33 @@ impl<'db> InvocationTransaction<'db> {
         grants: &[Grant],
         dependencies: &[AuthorityDependency],
     ) -> Result<Option<VisibleRelationPage>, TransactionError> {
+        self.list_authorized_relations_with_extra_bytes(
+            schema_id,
+            page_limit,
+            continuation,
+            0,
+            MetadataDiscoveryAccess {
+                context,
+                grants,
+                dependencies,
+            },
+        )
+    }
+
+    fn list_authorized_relations_with_extra_bytes(
+        &mut self,
+        schema_id: [u8; 16],
+        page_limit: usize,
+        continuation: Option<RelationScanCursor>,
+        extra_bytes_per_relation: usize,
+        access: MetadataDiscoveryAccess<'_>,
+    ) -> Result<Option<VisibleRelationPage>, TransactionError> {
         let result = (|| {
+            let MetadataDiscoveryAccess {
+                context,
+                grants,
+                dependencies,
+            } = access;
             if schema_id == [0; 16]
                 || page_limit == 0
                 || page_limit > MAX_RELATIONS_PER_PAGE
@@ -951,6 +1002,7 @@ impl<'db> InvocationTransaction<'db> {
                         return Err(TransactionError::InvalidMetadataRequest);
                     };
                     if active.schema_id != schema_id
+                        || active.extra_bytes_per_relation != extra_bytes_per_relation
                         || active.principal_id != context.principal_id
                         || active.role_ids != context.role_ids
                         || active.scope != context.scope
@@ -971,6 +1023,7 @@ impl<'db> InvocationTransaction<'db> {
                     scope: context.scope.clone(),
                     grants: grants.to_vec(),
                     dependencies: dependencies.to_vec(),
+                    extra_bytes_per_relation,
                     continuation: None,
                     used_tokens: HashSet::new(),
                 },
@@ -1072,6 +1125,7 @@ impl<'db> InvocationTransaction<'db> {
                     .name
                     .len()
                     .checked_add(24)
+                    .and_then(|size| size.checked_add(extra_bytes_per_relation))
                     .ok_or(TransactionError::MetadataResultTooLarge)?;
                 if relations.len() == page_limit
                     || page_bytes.saturating_add(encoded_size) > MAX_METADATA_PAGE_BYTES
@@ -1416,6 +1470,75 @@ impl<'db> InvocationTransaction<'db> {
                 .collect(),
             continuation: page.continuation,
         })
+    }
+
+    /// Return the authorized `information_schema.tables` rows for one schema.
+    pub fn scan_information_schema_tables_in_schema(
+        &mut self,
+        schema_name: &str,
+        page_limit: usize,
+        continuation: Option<RelationScanCursor>,
+    ) -> Result<Option<InformationSchemaTablesPage>, TransactionError> {
+        let result = (|| {
+            if schema_name.is_empty()
+                || schema_name.len() > MAX_METADATA_PAGE_BYTES
+                || page_limit == 0
+                || page_limit > MAX_RELATIONS_PER_PAGE
+            {
+                return Err(TransactionError::InvalidMetadataRequest);
+            }
+            let principal_id = self.principal_id;
+            let (role_ids, schema_grants) = self.load_catalog_schema_usage_grants(principal_id)?;
+            let scope = schema_grants
+                .iter()
+                .map(|grant| (grant.operation, grant.target))
+                .collect();
+            let schema_context = AuthorizationContext {
+                principal_id,
+                role_ids,
+                scope,
+            };
+            let Some(schema) =
+                self.resolve_authorized_schema(schema_name, &schema_context, &schema_grants, &[])?
+            else {
+                return Ok(None);
+            };
+            let extra_bytes_per_relation = schema
+                .name
+                .len()
+                .checked_add("BASE TABLE".len())
+                .ok_or(TransactionError::MetadataResultTooLarge)?;
+            let Some(page) = self.list_catalog_authorized_relations_with_extra_bytes(
+                schema.schema_id,
+                page_limit,
+                continuation,
+                extra_bytes_per_relation,
+            )?
+            else {
+                return Ok(None);
+            };
+            Ok(Some(InformationSchemaTablesPage {
+                rows: page
+                    .relations
+                    .into_iter()
+                    .map(|relation| InformationSchemaTableRow {
+                        table_schema: schema.name.clone(),
+                        table_name: relation.name,
+                        table_type: "BASE TABLE".to_owned(),
+                    })
+                    .collect(),
+                continuation: page.continuation,
+            }))
+        })();
+        match result {
+            Ok(page) => Ok(page),
+            Err(error) => {
+                if !self.aborted {
+                    self.abort()?;
+                }
+                Err(error)
+            }
+        }
     }
 
     /// List schemas for which the invocation has schema USAGE.
