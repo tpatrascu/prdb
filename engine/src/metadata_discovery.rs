@@ -9,6 +9,8 @@ pub const RELATION_CURSOR_TOKEN_KIND: u8 = 2;
 pub const COLUMN_CURSOR_TOKEN_KIND: u8 = 3;
 pub const INFORMATION_SCHEMA_TABLES_CURSOR_TOKEN_KIND: u8 = 4;
 pub const INFORMATION_SCHEMA_COLUMNS_CURSOR_TOKEN_KIND: u8 = 5;
+pub const RELATION_HANDLE_TOKEN_KIND: u8 = 6;
+pub const MAX_RELATION_HANDLES: usize = 256;
 
 /// One relation admitted by schema usage and a data grant.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -41,6 +43,31 @@ pub struct AuthorizedRelationDescription {
     pub relation_id: [u8; 16],
     pub name: String,
     pub columns: Vec<VisibleColumn>,
+}
+
+/// Opaque relation reference owned by one executor metadata connection.
+/// Possession identifies a previously resolved name but does not authorize a
+/// row read; the connection rechecks pinned catalog authority on use.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedRelationHandle {
+    pub(crate) token: [u8; 16],
+}
+
+impl ResolvedRelationHandle {
+    /// Encode the connection-local handle for its bounded IPC payload.
+    pub fn to_bytes(&self) -> [u8; 16] {
+        self.token
+    }
+
+    /// Decode the fixed-width opaque handle representation.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != 16 || bytes[0] != RELATION_HANDLE_TOKEN_KIND {
+            return None;
+        }
+        Some(Self {
+            token: bytes.try_into().ok()?,
+        })
+    }
 }
 
 /// Opaque continuation for column descriptions in one invocation snapshot.

@@ -2335,6 +2335,78 @@ fn catalog_authorized_qualified_relation_resolution_uses_pinned_grants()
 }
 
 #[test]
+fn executor_relation_handles_are_connection_scoped_and_revalidated()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    install_relation_discovery_catalog(&database)?;
+    let mut invocation = InvocationTransaction::begin(&database, [215; 16], [9; 16], 9_999, 1, 64)?;
+    let handle_bytes;
+    {
+        let mut connection = invocation.open_executor_metadata_connection();
+        let (handle, description) = connection
+            .resolve_relation("app", "metrics")?
+            .expect("qualified visible relation resolves");
+        assert_eq!(description.relation_id, [0x10; 16]);
+        assert_eq!(description.columns[0].name, "value");
+        handle_bytes = handle.to_bytes();
+        let decoded =
+            prdb_engine::metadata_discovery::ResolvedRelationHandle::from_bytes(&handle_bytes)
+                .expect("opaque handle has its fixed wire form");
+        assert!(
+            prdb_engine::metadata_discovery::ColumnScanCursor::from_bytes(&handle_bytes).is_none()
+        );
+        assert!(
+            prdb_engine::metadata_discovery::ResolvedRelationHandle::from_bytes(
+                &handle_bytes[..15]
+            )
+            .is_none()
+        );
+        assert_eq!(
+            connection.revalidate_relation_handle(&decoded)?,
+            description
+        );
+        connection.close_relation_handle(&decoded)?;
+        assert!(matches!(
+            connection.revalidate_relation_handle(&decoded),
+            Err(TransactionError::InvalidMetadataRequest)
+        ));
+    }
+
+    let decoded =
+        prdb_engine::metadata_discovery::ResolvedRelationHandle::from_bytes(&handle_bytes)
+            .expect("opaque handle has its fixed wire form");
+    let mut new_connection = invocation.open_executor_metadata_connection();
+    assert!(matches!(
+        new_connection.revalidate_relation_handle(&decoded),
+        Err(TransactionError::InvalidMetadataRequest)
+    ));
+    drop(new_connection);
+
+    let mut other_invocation =
+        InvocationTransaction::begin(&database, [216; 16], [9; 16], 9_999, 1, 64)?;
+    let mut other_connection = other_invocation.open_executor_metadata_connection();
+    assert!(matches!(
+        other_connection.revalidate_relation_handle(&decoded),
+        Err(TransactionError::InvalidMetadataRequest)
+    ));
+
+    let mut bounded_connection = invocation.open_executor_metadata_connection();
+    for _ in 0..prdb_engine::metadata_discovery::MAX_RELATION_HANDLES {
+        assert!(
+            bounded_connection
+                .resolve_relation("app", "metrics")?
+                .is_some()
+        );
+    }
+    assert!(matches!(
+        bounded_connection.resolve_relation("app", "metrics"),
+        Err(TransactionError::RelationHandleLimitExceeded)
+    ));
+    Ok(())
+}
+
+#[test]
 fn authorized_column_description_pages_bind_the_snapshot_and_order()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();

@@ -45,6 +45,8 @@ Structured SQL requests name relations. The optimizer resolves those names throu
 
 The executor role supports authorized schema discovery and relation resolution for direct SDK access as well as plan execution. It does not receive physical access-path statistics or the optimizer's estimation role. Cursors and row handles remain connection-local. Snapshot/schema mismatch fails the request rather than silently rebinding a plan to another relation.
 
+The storage engine provides an `ExecutorMetadataConnection` resolver session with opaque relation handles. An IPC handler must own one such session per provisioned executor connection, revalidate each handle through the invocation's pinned catalog before use, and drop it on connection close. These handles are references only; the scan and mutation operations still perform their own grant, policy, and snapshot checks. Optimizer-local handles are never accepted by executor handlers.
+
 ## Conceptual Operations
 
 ```text

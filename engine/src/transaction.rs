@@ -25,7 +25,8 @@ use crate::metadata_discovery::{
     InformationSchemaColumnsScanPage, InformationSchemaSchemataPage, InformationSchemaSchemataRow,
     InformationSchemaTableRow, InformationSchemaTablesCursor, InformationSchemaTablesPage,
     InformationSchemaTablesScanPage, MAX_COLUMNS_PER_PAGE, MAX_METADATA_PAGE_BYTES,
-    MAX_RELATIONS_PER_PAGE, MAX_SCHEMAS_PER_PAGE, RELATION_CURSOR_TOKEN_KIND, RelationScanCursor,
+    MAX_RELATION_HANDLES, MAX_RELATIONS_PER_PAGE, MAX_SCHEMAS_PER_PAGE, RELATION_CURSOR_TOKEN_KIND,
+    RELATION_HANDLE_TOKEN_KIND, RelationScanCursor, ResolvedRelationHandle,
     SCHEMA_CURSOR_TOKEN_KIND, SchemaScanCursor, VisibleColumn, VisibleColumnPage, VisibleRelation,
     VisibleRelationPage, VisibleRelationSchema, VisibleSchema, VisibleSchemaPage,
 };
@@ -83,6 +84,7 @@ pub enum TransactionError {
     ScanStillActive,
     CorruptCatalog,
     InvalidMetadataRequest,
+    RelationHandleLimitExceeded,
     MetadataResultTooLarge,
     Authorization(AuthorizationError),
     Aborted,
@@ -248,6 +250,22 @@ pub struct InvocationTransaction<'db> {
     active_builtin_column_scan: Option<ActiveBuiltinColumnScan>,
     active_information_schema_tables_scan: Option<ActiveInformationSchemaTablesScan>,
     active_information_schema_columns_scan: Option<ActiveInformationSchemaColumnsScan>,
+}
+
+/// Executor metadata session whose opaque relation handles expire when the
+/// session is dropped. Handle resolution and revalidation always consult the
+/// transaction's pinned catalog and never grant row access by themselves.
+pub struct ExecutorMetadataConnection<'connection, 'db> {
+    transaction: &'connection mut InvocationTransaction<'db>,
+    handles: HashMap<[u8; 16], ResolvedRelationHandleState>,
+    used_tokens: HashSet<[u8; 16]>,
+}
+
+#[derive(Clone)]
+struct ResolvedRelationHandleState {
+    schema_name: String,
+    relation_name: String,
+    relation_id: [u8; 16],
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -515,6 +533,16 @@ impl<'db> InvocationTransaction<'db> {
             active_information_schema_tables_scan: None,
             active_information_schema_columns_scan: None,
         })
+    }
+
+    /// Open an executor metadata session whose relation handles are private to
+    /// that connection and expire when the returned value is dropped.
+    pub fn open_executor_metadata_connection(&mut self) -> ExecutorMetadataConnection<'_, 'db> {
+        ExecutorMetadataConnection {
+            transaction: self,
+            handles: HashMap::new(),
+            used_tokens: HashSet::new(),
+        }
     }
 
     /// Check whether the managed invocation is still active and within its age
@@ -5208,6 +5236,70 @@ impl<'db> InvocationTransaction<'db> {
                 .insert(dependency.key.clone(), dependency.expected_value.clone());
         }
         Ok(())
+    }
+}
+
+impl ExecutorMetadataConnection<'_, '_> {
+    /// Resolve a qualified name through the invocation's pinned catalog and
+    /// issue an opaque handle owned by this executor metadata session.
+    pub fn resolve_relation(
+        &mut self,
+        schema_name: &str,
+        relation_name: &str,
+    ) -> Result<Option<(ResolvedRelationHandle, AuthorizedRelationDescription)>, TransactionError>
+    {
+        let Some(description) = self
+            .transaction
+            .resolve_catalog_authorized_relation(schema_name, relation_name)?
+        else {
+            return Ok(None);
+        };
+        if self.used_tokens.len() >= MAX_RELATION_HANDLES {
+            return Err(TransactionError::RelationHandleLimitExceeded);
+        }
+        let token = new_metadata_cursor_token(&mut self.used_tokens, RELATION_HANDLE_TOKEN_KIND)?;
+        let handle = ResolvedRelationHandle { token };
+        self.handles.insert(
+            token,
+            ResolvedRelationHandleState {
+                schema_name: schema_name.to_owned(),
+                relation_name: relation_name.to_owned(),
+                relation_id: description.relation_id,
+            },
+        );
+        Ok(Some((handle, description)))
+    }
+
+    /// Re-resolve the saved qualified name against this connection's pinned
+    /// catalog before returning its description. The handle is not authority.
+    pub fn revalidate_relation_handle(
+        &mut self,
+        handle: &ResolvedRelationHandle,
+    ) -> Result<AuthorizedRelationDescription, TransactionError> {
+        let state = self
+            .handles
+            .get(&handle.token)
+            .cloned()
+            .ok_or(TransactionError::InvalidMetadataRequest)?;
+        let description = self
+            .transaction
+            .resolve_catalog_authorized_relation(&state.schema_name, &state.relation_name)?
+            .ok_or(TransactionError::InvalidMetadataRequest)?;
+        if description.relation_id != state.relation_id || description.name != state.relation_name {
+            return Err(TransactionError::InvalidMetadataRequest);
+        }
+        Ok(description)
+    }
+
+    /// Invalidate a relation handle before the connection closes.
+    pub fn close_relation_handle(
+        &mut self,
+        handle: &ResolvedRelationHandle,
+    ) -> Result<(), TransactionError> {
+        self.handles
+            .remove(&handle.token)
+            .map(|_| ())
+            .ok_or(TransactionError::InvalidMetadataRequest)
     }
 }
 
