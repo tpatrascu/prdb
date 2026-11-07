@@ -3997,6 +3997,138 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
             .payload,
         [0]
     );
+    let grant_role_prepare = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut control,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 11,
+            payload: format!(
+                "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"roles.grant\",\"arguments\":{{\"member_id\":\"{created_user_id_wire}\",\"role_id\":\"{created_role_id_wire}\"}}}}"
+            )
+            .into_bytes(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_deadline_us,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )?;
+    let grant_role_prepare = match grant_role_prepare {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => {
+            String::from_utf8(response.payload)?
+        }
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
+            return Err("ADMIN role-grant prepare unexpectedly started an invocation".into());
+        }
+    };
+    let grant_role_operation_id = grant_role_prepare
+        .split("\"operation_id\":\"")
+        .nth(1)
+        .ok_or("missing ADMIN role-grant operation ID")?
+        .get(..32)
+        .ok_or("invalid ADMIN role-grant operation ID")?;
+    let grant_role = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut control,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 12,
+            payload: format!(
+                "{{\"phase\":\"start\",\"operation_id\":\"{grant_role_operation_id}\"}}"
+            )
+            .into_bytes(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_deadline_us,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )?;
+    let grant_role = match grant_role {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => {
+            String::from_utf8(response.payload)?
+        }
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
+            return Err("ADMIN role-grant start returned a worker invocation".into());
+        }
+    };
+    assert!(grant_role.contains("\"outcome\":\"committed\""));
+    let role_session = storage.authenticate_query_session(
+        created_user_credentials.token_id,
+        &created_user_credentials.token_secret,
+    )?;
+    assert!(role_session.role_ids().contains(&created_role_id));
+    let revoke_role_prepare = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut control,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 13,
+            payload: format!(
+                "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"roles.revoke\",\"arguments\":{{\"member_id\":\"{created_user_id_wire}\",\"role_id\":\"{created_role_id_wire}\"}}}}"
+            )
+            .into_bytes(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_deadline_us,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )?;
+    let revoke_role_prepare = match revoke_role_prepare {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => {
+            String::from_utf8(response.payload)?
+        }
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
+            return Err("ADMIN role-revoke prepare unexpectedly started an invocation".into());
+        }
+    };
+    let revoke_role_operation_id = revoke_role_prepare
+        .split("\"operation_id\":\"")
+        .nth(1)
+        .ok_or("missing ADMIN role-revoke operation ID")?
+        .get(..32)
+        .ok_or("invalid ADMIN role-revoke operation ID")?;
+    let revoke_role = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut control,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 14,
+            payload: format!(
+                "{{\"phase\":\"start\",\"operation_id\":\"{revoke_role_operation_id}\"}}"
+            )
+            .into_bytes(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_deadline_us,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )?;
+    let revoke_role = match revoke_role {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => {
+            String::from_utf8(response.payload)?
+        }
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
+            return Err("ADMIN role-revoke start returned a worker invocation".into());
+        }
+    };
+    assert!(revoke_role.contains("\"outcome\":\"committed\""));
+    let role_session = storage.authenticate_query_session(
+        created_user_credentials.token_id,
+        &created_user_credentials.token_secret,
+    )?;
+    assert!(!role_session.role_ids().contains(&created_role_id));
     assert!(
         storage
             .list_tokens(admin_id, user_manager_id)?

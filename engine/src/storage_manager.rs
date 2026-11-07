@@ -338,6 +338,23 @@ impl std::fmt::Display for IdentityLifecycleError {
 impl std::error::Error for IdentityLifecycleError {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MembershipLifecycleError {
+    InvalidRequest,
+    InvalidAudit,
+    Unauthorized,
+    Storage,
+    Commit(CommitError),
+}
+
+impl std::fmt::Display for MembershipLifecycleError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "membership lifecycle operation failed: {self:?}")
+    }
+}
+
+impl std::error::Error for MembershipLifecycleError {}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreatedUser {
     pub user_id: [u8; 16],
     pub commit_sequence: u64,
@@ -347,6 +364,13 @@ pub struct CreatedUser {
 pub struct CreatedRole {
     pub role_id: [u8; 16],
     pub commit_sequence: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RoleMembershipChange {
+    pub member_id: [u8; 16],
+    pub role_id: [u8; 16],
+    pub grant: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1862,6 +1886,157 @@ impl<'db> StorageManager<'db> {
         Ok((user_id, commit_sequence))
     }
 
+    /// Grant or revoke one role membership through the audited membership DDL path.
+    pub fn set_role_membership(
+        &self,
+        invocation_id: [u8; 16],
+        authenticated_actor_id: [u8; 16],
+        change: RoleMembershipChange,
+        retention_deadline_us: i64,
+        mut audit_event: AuditEvent,
+    ) -> Result<u64, MembershipLifecycleError> {
+        let RoleMembershipChange {
+            member_id,
+            role_id,
+            grant,
+        } = change;
+        if invocation_id == [0; 16]
+            || authenticated_actor_id == [0; 16]
+            || member_id == [0; 16]
+            || role_id == [0; 16]
+            || member_id == role_id
+            || retention_deadline_us <= 0
+        {
+            return Err(MembershipLifecycleError::InvalidRequest);
+        }
+        if audit_event.actor_id != Some(authenticated_actor_id)
+            || audit_event.correlation_id != invocation_id
+            || audit_event.action != AuditAction::AuthorityChange
+            || audit_event.result != AuditResult::Succeeded
+        {
+            return Err(MembershipLifecycleError::InvalidAudit);
+        }
+        let membership_key = membership_catalog_key(member_id, role_id);
+        let dependency_key = dependency_catalog_key(member_id, role_id, 5);
+        let member_key = principal_catalog_key(member_id);
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|_| MembershipLifecycleError::Storage)?;
+        let catalog = read
+            .open_table(CATALOG)
+            .map_err(|_| MembershipLifecycleError::Storage)?;
+        let membership_value = catalog
+            .get(membership_key.as_slice())
+            .map_err(|_| MembershipLifecycleError::Storage)?
+            .map(|value| value.value().to_vec());
+        let dependency_value = catalog
+            .get(dependency_key.as_slice())
+            .map_err(|_| MembershipLifecycleError::Storage)?
+            .map(|value| value.value().to_vec());
+        let member_value = catalog
+            .get(member_key.as_slice())
+            .map_err(|_| MembershipLifecycleError::Storage)?
+            .map(|value| value.value().to_vec())
+            .ok_or(MembershipLifecycleError::InvalidRequest)?;
+        drop(catalog);
+        drop(read);
+        if membership_value.is_some() != dependency_value.is_some() {
+            return Err(MembershipLifecycleError::Storage);
+        }
+        let (membership_payload, dependency_payload) = if grant {
+            if membership_value.is_some() {
+                return Err(MembershipLifecycleError::InvalidRequest);
+            }
+            let membership_payload = encode_envelope(
+                &family_schema(11).ok_or(MembershipLifecycleError::Storage)?,
+                &membership_key,
+                &[
+                    CatalogField {
+                        tag: 1,
+                        wire_type: WireType::Id,
+                        payload: authenticated_actor_id.to_vec(),
+                    },
+                    CatalogField {
+                        tag: 2,
+                        wire_type: WireType::U64,
+                        payload: 1u64.to_le_bytes().to_vec(),
+                    },
+                ],
+            )
+            .map_err(|_| MembershipLifecycleError::InvalidRequest)?;
+            let dependency_payload = encode_envelope(
+                &family_schema(15).ok_or(MembershipLifecycleError::Storage)?,
+                &dependency_key,
+                &[],
+            )
+            .map_err(|_| MembershipLifecycleError::InvalidRequest)?;
+            (Some(membership_payload), Some(dependency_payload))
+        } else {
+            if membership_value.is_none() {
+                return Err(MembershipLifecycleError::InvalidRequest);
+            }
+            (None, None)
+        };
+        let mut member_record = decode_registered_envelope(&member_value)
+            .map_err(|_| MembershipLifecycleError::Storage)?;
+        let epoch_field = member_record
+            .fields
+            .iter_mut()
+            .find(|field| field.tag == 4 && field.wire_type == WireType::U64)
+            .ok_or(MembershipLifecycleError::Storage)?;
+        let current_epoch = u64::from_le_bytes(
+            epoch_field
+                .payload
+                .as_slice()
+                .try_into()
+                .map_err(|_| MembershipLifecycleError::Storage)?,
+        );
+        let next_epoch = current_epoch
+            .checked_add(1)
+            .filter(|epoch| *epoch != 0)
+            .ok_or(MembershipLifecycleError::InvalidRequest)?;
+        epoch_field.payload = next_epoch.to_le_bytes().to_vec();
+        let member_payload = encode_envelope(
+            &family_schema(10).ok_or(MembershipLifecycleError::Storage)?,
+            &member_key,
+            &member_record.fields,
+        )
+        .map_err(|_| MembershipLifecycleError::Storage)?;
+        let mut target_ids = vec![member_id, role_id];
+        target_ids.sort_unstable();
+        target_ids.dedup();
+        audit_event.target_ids = target_ids;
+        let writes = [
+            CatalogWrite {
+                key: membership_key,
+                expected_value: membership_value,
+                payload: membership_payload,
+            },
+            CatalogWrite {
+                key: dependency_key,
+                expected_value: dependency_value,
+                payload: dependency_payload,
+            },
+            CatalogWrite {
+                key: member_key,
+                expected_value: Some(member_value),
+                payload: Some(member_payload),
+            },
+        ];
+        self.commit_authorized_membership_ddl(
+            invocation_id,
+            authenticated_actor_id,
+            retention_deadline_us,
+            &writes,
+            &[audit_event],
+        )
+        .map_err(|error| match error {
+            CommitError::DdlAuthorizationDenied => MembershipLifecycleError::Unauthorized,
+            error => MembershipLifecycleError::Commit(error),
+        })
+    }
+
     fn generate_identity_id(&self) -> Result<[u8; 16], IdentityLifecycleError> {
         for _ in 0..8 {
             let mut user_id = [0; 16];
@@ -3124,6 +3299,30 @@ fn identity_tombstone_catalog_key(object_id: [u8; 16]) -> Vec<u8> {
     let mut key = 17u16.to_be_bytes().to_vec();
     key.push(1);
     key.extend_from_slice(&object_id);
+    key
+}
+
+fn membership_catalog_key(member_id: [u8; 16], role_id: [u8; 16]) -> Vec<u8> {
+    let mut key = 11u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&member_id);
+    key.push(1);
+    key.extend_from_slice(&role_id);
+    key
+}
+
+fn dependency_catalog_key(
+    dependent_id: [u8; 16],
+    referenced_id: [u8; 16],
+    dependency_kind: u16,
+) -> Vec<u8> {
+    let mut key = 15u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&dependent_id);
+    key.push(1);
+    key.extend_from_slice(&referenced_id);
+    key.push(1);
+    key.extend_from_slice(&dependency_kind.to_be_bytes());
     key
 }
 

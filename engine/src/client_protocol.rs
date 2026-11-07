@@ -79,6 +79,7 @@ pub enum ClientSessionError {
     AdministrativeCancellation(crate::storage_manager::AdministrativeCancellationError),
     TokenInventory(crate::storage_manager::TokenLifecycleError),
     IdentityLifecycle(crate::storage_manager::IdentityLifecycleError),
+    MembershipLifecycle(crate::storage_manager::MembershipLifecycleError),
     Storage(TransactionError),
 }
 
@@ -160,6 +161,11 @@ enum PendingAdminAction {
     CreateRole {
         name: String,
     },
+    ChangeRoleMembership {
+        member_id: [u8; 16],
+        role_id: [u8; 16],
+        grant: bool,
+    },
     Revoke {
         token_id: [u8; 16],
     },
@@ -198,6 +204,14 @@ pub enum ClientAdminCommand {
     },
     PrepareCreateRole {
         name: String,
+    },
+    PrepareGrantRole {
+        member_id: [u8; 16],
+        role_id: [u8; 16],
+    },
+    PrepareRevokeRole {
+        member_id: [u8; 16],
+        role_id: [u8; 16],
     },
     PrepareRevoke {
         token_id: [u8; 16],
@@ -376,6 +390,12 @@ pub fn decode_client_admin_command(
             }
             Ok(ClientAdminCommand::PrepareCreateRole { name })
         }
+        Some("prepare") if version == Some(1) && operation.as_deref() == Some("roles.grant") => {
+            decode_role_membership_prepare(arguments, operation_id, seen.len(), true)
+        }
+        Some("prepare") if version == Some(1) && operation.as_deref() == Some("roles.revoke") => {
+            decode_role_membership_prepare(arguments, operation_id, seen.len(), false)
+        }
         Some("prepare") if version == Some(1) && operation.as_deref() == Some("tokens.revoke") => {
             if operation_id.is_some() || seen.len() != 4 {
                 return Err(ClientControlError::UnknownKey);
@@ -429,6 +449,36 @@ pub fn decode_client_admin_command(
         }
         _ => Err(ClientControlError::UnsupportedAdminOperation),
     }
+}
+
+fn decode_role_membership_prepare(
+    arguments: Option<HashMap<String, String>>,
+    operation_id: Option<String>,
+    seen_len: usize,
+    grant: bool,
+) -> Result<ClientAdminCommand, ClientControlError> {
+    if operation_id.is_some() || seen_len != 4 {
+        return Err(ClientControlError::UnknownKey);
+    }
+    let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
+    let member_id = decode_lower_hex_id(
+        &args
+            .remove("member_id")
+            .ok_or(ClientControlError::MissingKey)?,
+    )?;
+    let role_id = decode_lower_hex_id(
+        &args
+            .remove("role_id")
+            .ok_or(ClientControlError::MissingKey)?,
+    )?;
+    if !args.is_empty() || member_id == role_id {
+        return Err(ClientControlError::InvalidPrepare);
+    }
+    Ok(if grant {
+        ClientAdminCommand::PrepareGrantRole { member_id, role_id }
+    } else {
+        ClientAdminCommand::PrepareRevokeRole { member_id, role_id }
+    })
 }
 
 fn is_canonical_admin_principal_name(name: &str) -> bool {
@@ -1564,6 +1614,12 @@ impl ClientConnectionSession {
                     .into_bytes(),
                 )
             }
+            ClientAdminCommand::PrepareGrantRole { member_id, role_id } => {
+                self.prepare_role_membership(request.request_id, member_id, role_id, true)
+            }
+            ClientAdminCommand::PrepareRevokeRole { member_id, role_id } => {
+                self.prepare_role_membership(request.request_id, member_id, role_id, false)
+            }
             ClientAdminCommand::PrepareRevoke { token_id } => {
                 if self.pending_admin_operation.is_some() {
                     return Err(ClientSessionError::WrongMode);
@@ -1652,6 +1708,41 @@ impl ClientConnectionSession {
                     ));
                 }
                 match pending.action {
+                    PendingAdminAction::ChangeRoleMembership {
+                        member_id,
+                        role_id,
+                        grant,
+                    } => {
+                        let sequence = storage
+                            .set_role_membership(
+                                operation_id,
+                                actor_id,
+                                crate::storage_manager::RoleMembershipChange {
+                                    member_id,
+                                    role_id,
+                                    grant,
+                                },
+                                retention_deadline_us,
+                                crate::audit::AuditEvent {
+                                    event_id,
+                                    actor_id: Some(actor_id),
+                                    correlation_id: operation_id,
+                                    occurred_at_us: now_us,
+                                    action: crate::audit::AuditAction::AuthorityChange,
+                                    result: crate::audit::AuditResult::Succeeded,
+                                    target_ids: Vec::new(),
+                                },
+                            )
+                            .map_err(ClientSessionError::MembershipLifecycle)?;
+                        self.json_response(
+                            request.request_id,
+                            format!(
+                                "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"commit_sequence\":\"{sequence}\"}}",
+                                encode_lower_hex_id(operation_id)
+                            )
+                            .into_bytes(),
+                        )
+                    }
                     PendingAdminAction::CreateRole { name } => {
                         let created = storage
                             .create_role(
@@ -1781,6 +1872,43 @@ impl ClientConnectionSession {
                 }
             }
         }
+    }
+
+    fn prepare_role_membership(
+        &mut self,
+        request_id: u64,
+        member_id: [u8; 16],
+        role_id: [u8; 16],
+        grant: bool,
+    ) -> Result<ClientFrame, ClientSessionError> {
+        if self.pending_admin_operation.is_some() {
+            return Err(ClientSessionError::WrongMode);
+        }
+        let mut operation_id = [0; 16];
+        getrandom::fill(&mut operation_id)
+            .map_err(|_| ClientSessionError::Storage(TransactionError::RandomnessUnavailable))?;
+        if operation_id == [0; 16] {
+            return Err(ClientSessionError::Storage(
+                TransactionError::RandomnessUnavailable,
+            ));
+        }
+        let action = PendingAdminAction::ChangeRoleMembership {
+            member_id,
+            role_id,
+            grant,
+        };
+        self.pending_admin_operation = Some(PendingAdminOperation {
+            operation_id,
+            action,
+        });
+        self.json_response(
+            request_id,
+            format!(
+                "{{\"operation_id\":\"{}\",\"state\":\"prepared\"}}",
+                encode_lower_hex_id(operation_id)
+            )
+            .into_bytes(),
+        )
     }
 
     /// Cancel an unstarted reservation without creating a storage outcome.

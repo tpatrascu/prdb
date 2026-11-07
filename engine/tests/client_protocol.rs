@@ -247,4 +247,20 @@ fn admin_revoke_decoder_requires_prepare_then_start_schemas() {
             name: "reporting_role".into(),
         })
     );
+    let membership_request = format!(
+        "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"roles.grant\",\"arguments\":{{\"member_id\":\"{}\",\"role_id\":\"{}\"}}}}",
+        "01".repeat(16),
+        "02".repeat(16)
+    );
+    assert!(matches!(
+        decode_client_admin_command(membership_request.as_bytes()),
+        Ok(ClientAdminCommand::PrepareGrantRole { member_id, role_id })
+            if member_id == [1; 16] && role_id == [2; 16]
+    ));
+    let revoke_membership_request = membership_request.replace("roles.grant", "roles.revoke");
+    assert!(matches!(
+        decode_client_admin_command(revoke_membership_request.as_bytes()),
+        Ok(ClientAdminCommand::PrepareRevokeRole { member_id, role_id })
+            if member_id == [1; 16] && role_id == [2; 16]
+    ));
 }

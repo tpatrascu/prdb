@@ -1312,4 +1312,12 @@
 - Contract and implementation: [identity DDL protocol](../../specs/client-protocol.md), [shared storage principal creation](../../engine/src/storage_manager.rs), and [ADMIN session handling](../../engine/src/client_protocol.rs).
 - Regression evidence: decoder accepts normalized role names. A real-redb database-administrator session creates the role, and the test reads its persisted principal record to verify role kind and disabled LOGIN state.
 - Verification: format check, workspace build, warning-denied Clippy, all workspace tests, and `git diff --check` passed in the configured Nix shell.
-- Remaining: role membership/grant DDL, other user lifecycle DDL, remaining ADMIN operations, and separate supervisor/worker process integration.
+- Remaining at that increment: role membership DDL is recorded below; other user lifecycle DDL, remaining ADMIN operations, and separate supervisor/worker process integration remain open.
+
+## SM-5 / DDL-identity dependency: role membership ADMIN operations
+
+- Behavior: `roles.grant` and `roles.revoke` use the connection-owned PREPARE/START flow. Storage atomically changes the membership and dependency records, increments the member authority epoch, and delegates authorization, endpoint validation, cycle checks, and last-administrator protection to the established membership DDL commit path.
+- Contract and implementation: [membership protocol](../../specs/client-protocol.md), [storage membership lifecycle](../../engine/src/storage_manager.rs), and [ADMIN session handling](../../engine/src/client_protocol.rs).
+- Regression evidence: decoder tests cover grant and revoke schemas. A real-redb ADMIN lifecycle grants and revokes a newly created role for a new user, then authenticates again to confirm role closure changes are visible.
+- Verification: format check, workspace build, warning-denied Clippy, all workspace tests, and `git diff --check` passed in the configured Nix shell.
+- Remaining: other user lifecycle DDL, privilege grant/revoke ADMIN operations, remaining ADMIN operations, and separate supervisor/worker process integration.
