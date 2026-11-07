@@ -1202,6 +1202,15 @@
 - Full validation in the configured Nix shell passed: `cargo fmt --all -- --check`, `cargo build --workspace --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, and `git diff --check`.
 - Remaining: connect real confined worker output/completion to these events, bound result queues/backpressure across processes, and test cancellation/restart around streaming terminal transitions.
 
+## SU-5 dependency: worker exit observation and reaping
+
+- Behavior: after planner and executor streams have drained, `SupervisorInvocation::observe_worker_exit` polls the associated process while checking cancellation and age. A nonzero exit or process-inspection error durably aborts; successful exit is required before the caller may request commit. Deadline failure kills and reaps the worker.
+- Contract and implementation: [supervisor lifecycle contract](../../specs/storage-manager.md) and [worker process observation](../../engine/src/storage_manager.rs).
+- Changed real-redb regression: [failed worker exit records ABORTED and is reaped](../../engine/tests/commit.rs).
+- Observed red: the test first failed to compile because the supervisor process-observation API and failed-exit outcome were absent.
+- Verification: focused `cargo test -p prdb-engine --test commit supervisor_worker_exit_failure_is_reaped_and_durably_aborted --locked` passed. Full configured Nix-shell validation passed: `cargo fmt --all -- --check`, `cargo build --workspace --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, and `git diff --check`.
+- Remaining: launch a worker with a verified sandbox profile, bind worker channels to that process, relay its result bytes, and test cancellation/expiry during the process wait.
+
 ## SU-1 / IPC-6 dependency: gateway submission IPC dispatcher
 
 - Behavior: a role-checked gateway dispatcher maps AUTH, PREPARE, chunk, SEAL, START, STATUS, and CANCEL operation tags to the strict per-client session handlers. Chunk IPC prepends an explicit artifact/parameter kind byte. START returns the network acknowledgement plus a typed storage invocation and immutable submission handle to trusted supervisor code; those authority-bearing objects are never serialized.

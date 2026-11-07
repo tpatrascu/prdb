@@ -8093,6 +8093,65 @@ fn supervisor_drains_both_worker_channels_before_durable_finalize()
 }
 
 #[test]
+fn supervisor_worker_exit_failure_is_reaped_and_durably_aborted()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::outcome::OutcomeStatus;
+    use prdb_engine::storage_manager::SupervisorInvocationError;
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
+    let user_id = id(0x70);
+    let token_id = id(0x71);
+    let secret = [0x31; 32];
+    commit_catalog_and_audit(
+        &database,
+        id(0x72),
+        id(9),
+        now + 3_600_000_000,
+        &[
+            principal_write_with_name(user_id, 1, 1, "worker_exit_user"),
+            object_write_with_name(user_id, 8, "worker_exit_user"),
+            credential_verifier_write(
+                token_id,
+                user_id,
+                &secret,
+                now - 1_000_000,
+                now + 60_000_000,
+                None,
+                1,
+            ),
+        ],
+        &[audit_event(0x72)],
+    )?;
+    let invocation = storage.admit_supervisor_invocation(
+        id(0x73),
+        token_id,
+        &secret,
+        now + 60_000_000,
+        2,
+        64,
+    )?;
+    let mut worker = Command::new("sh").args(["-c", "exit 7"]).spawn()?;
+    assert!(matches!(
+        invocation.observe_worker_exit(&mut worker),
+        Err(SupervisorInvocationError::WorkerExited(_))
+    ));
+    assert_eq!(worker.try_wait()?.unwrap().code(), Some(7));
+    assert_eq!(
+        storage
+            .lookup_invocation_outcome(id(0x73), user_id, now + 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Aborted
+    );
+    Ok(())
+}
+
+#[test]
 fn sealed_start_admits_only_current_credentials_and_enforces_request_deadline()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::client_protocol::{

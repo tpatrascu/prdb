@@ -392,6 +392,8 @@ pub enum SupervisorInvocationError {
     Closed,
     WorkerChannelsActive,
     WorkerChannelIo(std::io::Error),
+    WorkerProcessIo(std::io::Error),
+    WorkerExited(std::process::ExitStatus),
     WorkerHandlerPanicked,
     Deadline(TransactionError),
     Executor(crate::executor_ipc::ExecutorConnectionError),
@@ -493,6 +495,56 @@ impl SupervisorInvocation<'_> {
             ));
         }
         Ok(())
+    }
+
+    /// Observe and reap a worker after its planner and executor channels have
+    /// drained. A failed exit or process-inspection error durably aborts the
+    /// invocation; the caller may request commit only after this returns Ok.
+    pub fn observe_worker_exit(
+        &self,
+        worker: &mut std::process::Child,
+    ) -> Result<std::process::ExitStatus, SupervisorInvocationError> {
+        {
+            let channels = match self.channels.lock() {
+                Ok(channels) => channels,
+                Err(poisoned) => {
+                    let mut channels = poisoned.into_inner();
+                    channels.terminal_requested = true;
+                    self.abort_owned_invocation();
+                    return Err(SupervisorInvocationError::Closed);
+                }
+            };
+            if channels.terminal_requested {
+                return Err(SupervisorInvocationError::Closed);
+            }
+            if channels.active_worker_channels != 0 {
+                return Err(SupervisorInvocationError::WorkerChannelsActive);
+            }
+        }
+
+        loop {
+            match worker.try_wait() {
+                Ok(Some(status)) if status.success() => return Ok(status),
+                Ok(Some(status)) => {
+                    self.abort_owned_invocation();
+                    return Err(SupervisorInvocationError::WorkerExited(status));
+                }
+                Ok(None) => {
+                    if let Err(error) = self.check_deadline() {
+                        let _ = worker.kill();
+                        let _ = worker.wait();
+                        return Err(error);
+                    }
+                    std::thread::sleep(SUPERVISOR_IDLE_POLL_INTERVAL);
+                }
+                Err(error) => {
+                    self.abort_owned_invocation();
+                    let _ = worker.kill();
+                    let _ = worker.wait();
+                    return Err(SupervisorInvocationError::WorkerProcessIo(error));
+                }
+            }
+        }
     }
 
     /// Serve provisioned planner and executor Unix streams concurrently.
