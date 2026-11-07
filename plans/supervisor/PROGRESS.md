@@ -50,3 +50,11 @@
 - Contract: [supervisor START lifecycle](../../specs/supervisor.md) distinguishes capability preflight from installing confinement.
 - Verification: focused `sandbox_preflight_rejects_before_storage_admission` test passed in the configured Nix shell.
 - Remaining: the real START path does not yet use a worker launcher; passing this probe alone does not establish confinement. Implement namespace, Landlock, seccomp, cgroup, clean descriptor/environment setup, and process launch before opening any artifact.
+
+## SU-3 / SB-1: provision worker cgroup before storage admission — implemented
+
+- Behavior: `StagingStore::start_with_worker_cgroup` validates the prepared reservation, checks the host profile, and creates/configures the invocation cgroup before entering the one-shot START callback. Setup errors leave the reservation prepared and do not enter storage admission. The callback receives ownership of the cgroup and must complete confinement and process launch.
+- Regression: an ordinary directory used as the cgroup parent is rejected before callback entry; the prepared reservation remains available. This verifies the fail-closed setup boundary only, not successful cgroup provisioning or process launch.
+- Contract: [supervisor START lifecycle](../../specs/supervisor.md).
+- Verification: the focused regression passed. In the repository Nix shell, `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, all workspace tests, and `git diff --check` passed.
+- Remaining: connect the callback to executor command construction/spawn and process-exit observation; verify successful launch on a writable delegated cgroup host before treating the worker path as integrated.

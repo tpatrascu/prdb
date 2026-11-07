@@ -213,6 +213,7 @@ impl std::error::Error for StagingError {}
 pub enum StartError<E> {
     Staging(StagingError),
     Sandbox(crate::linux_sandbox::SandboxCapabilityError),
+    WorkerSetup(std::io::Error),
     Admission(E),
 }
 
@@ -538,6 +539,54 @@ impl StagingStore {
             .require_supported()
             .map_err(StartError::Sandbox)?;
         self.start_with(owner, invocation_id, revalidate_and_start)
+    }
+
+    /// Create the invocation cgroup before consuming the prepared reservation
+    /// or opening storage admission. The callback owns the cgroup and must
+    /// place the executor in it before untrusted code can run, and clean up
+    /// the cgroup if launch fails. If setup fails, the reservation remains
+    /// prepared for retry.
+    pub fn start_with_worker_cgroup<T, E>(
+        &self,
+        owner: StagingOwner,
+        invocation_id: [u8; 16],
+        cgroup_parent: impl AsRef<std::path::Path>,
+        limits: crate::linux_sandbox::WorkerResourceLimits,
+        revalidate_and_launch: impl FnOnce(
+            &SealedSubmission,
+            crate::linux_sandbox::WorkerCgroup,
+        ) -> Result<T, E>,
+    ) -> Result<T, StartError<E>> {
+        let cgroup_parent = cgroup_parent.as_ref();
+        crate::linux_sandbox::probe(cgroup_parent)
+            .require_supported()
+            .map_err(StartError::Sandbox)?;
+
+        // Check readiness without retaining artifact bytes outside the
+        // staging quota. Cancellation may still win; `start_with` rechecks
+        // ownership and state before invoking the callback.
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| StartError::Staging(StagingError::Poisoned))?;
+            reap_expired(&mut state, self.limits.reservation_ttl, Instant::now());
+            let reservation = owned_reservation_mut(&mut state, owner, invocation_id)
+                .map_err(StartError::Staging)?;
+            if reservation.state != ReservationState::Sealed {
+                return Err(StartError::Staging(StagingError::InvalidState));
+            }
+            if reservation.sealed.is_none() {
+                return Err(StartError::Staging(StagingError::InvalidState));
+            }
+        };
+        let cgroup =
+            crate::linux_sandbox::WorkerCgroup::create(cgroup_parent, invocation_id, limits)
+                .map_err(StartError::WorkerSetup)?;
+
+        self.start_with(owner, invocation_id, |current_submission| {
+            revalidate_and_launch(current_submission, cgroup)
+        })
     }
 
     /// Release sealed bytes and quota after the invocation reaches a durable
@@ -900,6 +949,44 @@ mod tests {
             });
 
         assert!(matches!(result, Err(StartError::Sandbox(_))));
+        assert!(!callback_called.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            store.status(owner, invocation_id).unwrap(),
+            SubmissionState::Prepared
+        );
+        std::fs::remove_dir_all(cgroup_parent).unwrap();
+    }
+
+    #[test]
+    fn cgroup_setup_rejects_before_admission_and_preserves_prepared_submission() {
+        let store = store(Arc::new(AcceptMetadata));
+        let owner = make_owner(31, 32);
+        let invocation_id = upload_and_seal(&store, owner, b"artifact", b"params");
+        let cgroup_parent =
+            std::env::temp_dir().join(format!("prdb-cgroup-setup-{}", std::process::id()));
+        std::fs::create_dir_all(&cgroup_parent).unwrap();
+        let callback_called = std::sync::atomic::AtomicBool::new(false);
+
+        let result = store.start_with_worker_cgroup(
+            owner,
+            invocation_id,
+            &cgroup_parent,
+            crate::linux_sandbox::WorkerResourceLimits {
+                cpu_quota_micros: 100_000,
+                cpu_period_micros: 100_000,
+                memory_max_bytes: 64 * 1024 * 1024,
+                max_processes: 16,
+            },
+            |_, _| {
+                callback_called.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok::<_, ()>(())
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(StartError::Sandbox(_) | StartError::WorkerSetup(_))
+        ));
         assert!(!callback_called.load(std::sync::atomic::Ordering::SeqCst));
         assert_eq!(
             store.status(owner, invocation_id).unwrap(),
