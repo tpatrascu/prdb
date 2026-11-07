@@ -13,6 +13,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use zeroize::Zeroize;
 
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -518,8 +519,14 @@ pub fn serve_gateway_client_session<'db, S: Read + Write>(
             }
         };
         match dispatched {
-            GatewayClientDispatch::Response(response) => {
-                if let Err(error) = crate::ipc::write_frame(stream, &response) {
+            GatewayClientDispatch::Response(mut response) => {
+                let sensitive =
+                    response.operation == Operation::SubmitAdministrativeOperation as u16;
+                let write_result = crate::ipc::write_frame(stream, &response);
+                if sensitive {
+                    response.payload.zeroize();
+                }
+                if let Err(error) = write_result {
                     close_gateway_client_session(manager, staging, session)?;
                     return Err(SupervisorConnectionError::Frame(error));
                 }

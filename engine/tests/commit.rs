@@ -3251,6 +3251,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         AdministrativeInvocationListError, InvocationStatus, InvocationStatusConsistency,
         MAX_ADMIN_INVOCATION_PAGE,
     };
+    use zeroize::{Zeroize, Zeroizing};
 
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
@@ -3462,7 +3463,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
     let mut user_manager_control = ClientConnectionSession::default();
     user_manager_control.accept_hello(ClientMode::Control, "token-manager")?;
     user_manager_control.authenticate(&storage, id(240), &[0x4b; 32])?;
-    let prepare_revoke = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+    let issue_prepare = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
         prdb_engine::ipc::ServiceRole::Gateway,
         &storage,
         &staging,
@@ -3470,6 +3471,104 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &prdb_engine::ipc::IpcFrame {
             operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
             request_id: 1,
+            payload: format!(
+                "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"tokens.issue\",\"arguments\":{{\"user_id\":\"{}\",\"label\":\"issued by ADMIN\",\"expires_at_us\":\"{}\"}}}}",
+                id(231).iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+                now_us + 3_600_000_000
+            )
+            .into_bytes(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_deadline_us,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )?;
+    let issue_prepare = match issue_prepare {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => {
+            String::from_utf8(response.payload)?
+        }
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
+            return Err("ADMIN issue prepare unexpectedly started".into());
+        }
+    };
+    let issue_operation_id = issue_prepare
+        .split("\"operation_id\":\"")
+        .nth(1)
+        .ok_or("missing ADMIN issue operation ID")?
+        .get(..32)
+        .ok_or("invalid ADMIN issue operation ID")?;
+    let issue = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut user_manager_control,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 2,
+            payload: format!("{{\"phase\":\"start\",\"operation_id\":\"{issue_operation_id}\"}}")
+                .into_bytes(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_deadline_us,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )?;
+    let mut issue = match issue {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => {
+            String::from_utf8(response.payload)?
+        }
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
+            return Err("ADMIN issue start returned a worker invocation".into());
+        }
+    };
+    assert!(issue.contains("\"outcome\":\"committed\""));
+    let issued_token_id = issue
+        .split("\"token_id\":\"")
+        .nth(1)
+        .ok_or("missing one-time issued token ID")?
+        .get(..32)
+        .ok_or("invalid one-time issued token ID")?;
+    let issued_secret = issue
+        .split("\"token_secret\":\"")
+        .nth(1)
+        .ok_or("missing one-time issued token secret")?
+        .get(..44)
+        .ok_or("invalid one-time issued token secret")?;
+    let mut credentials_payload = Zeroizing::new(format!(
+        "{{\"token_id\":\"{issued_token_id}\",\"token_secret\":\"{issued_secret}\"}}"
+    ));
+    let credentials =
+        prdb_engine::client_protocol::decode_client_credentials(credentials_payload.as_bytes())?;
+    credentials_payload.zeroize();
+    let mut issued_session = ClientConnectionSession::default();
+    issued_session.accept_hello(ClientMode::Query, "new-token")?;
+    issued_session.authenticate(&storage, credentials.token_id, &credentials.token_secret)?;
+    assert!(storage
+        .list_tokens(admin_id, ordinary_id)?
+        .iter()
+        .any(|token| token.token_id == credentials.token_id && token.label == "issued by ADMIN"));
+    let issuance_status = control.handle_status_request(
+        &storage,
+        &staging,
+        ClientFrame {
+            kind: 8,
+            request_id: 5,
+            response_sequence: 0,
+            payload: format!("{{\"invocation_id\":\"{issue_operation_id}\"}}").into_bytes(),
+        },
+    )?;
+    assert_eq!(issuance_status.payload, b"{\"state\":\"committed\"}");
+    issue.zeroize();
+    let prepare_revoke = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut user_manager_control,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 3,
             payload: format!(
                 "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"tokens.revoke\",\"arguments\":{{\"token_id\":\"{}\"}}}}",
                 id(240).iter().map(|byte| format!("{byte:02x}")).collect::<String>()
@@ -3503,7 +3602,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &mut user_manager_control,
         &prdb_engine::ipc::IpcFrame {
             operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
-            request_id: 2,
+            request_id: 4,
             payload: format!(
                 "{{\"phase\":\"start\",\"operation_id\":\"{}\"}}",
                 format!("{:02x}", 241).repeat(16)
@@ -3529,7 +3628,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &mut user_manager_control,
         &prdb_engine::ipc::IpcFrame {
             operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
-            request_id: 3,
+            request_id: 5,
             payload: format!("{{\"phase\":\"start\",\"operation_id\":\"{operation_id}\"}}")
                 .into_bytes(),
         },

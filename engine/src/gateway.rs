@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GatewayListenerConfig {
@@ -577,17 +579,23 @@ fn serve_tcp_client_connection_inner<C: GatewayClientStream, S: Read + Write>(
         if response.operation != ipc_request.operation {
             return Err(GatewayConnectionError::MismatchedServiceResponse);
         }
-        let response = crate::client_protocol::ClientFrame {
+        let mut response_frame = crate::client_protocol::ClientFrame {
             kind: 100,
             request_id: response.request_id,
             response_sequence: 0,
             payload: response.payload,
-        }
-        .encode()
-        .map_err(GatewayConnectionError::ClientFrame)?;
-        client
+        };
+        let mut response = Zeroizing::new(
+            response_frame
+                .encode()
+                .map_err(GatewayConnectionError::ClientFrame)?,
+        );
+        let write_result = client
             .write_all(&response)
-            .map_err(GatewayConnectionError::Io)?;
+            .map_err(GatewayConnectionError::Io);
+        response_frame.payload.zeroize();
+        response.zeroize();
+        write_result?;
         if operation == crate::ipc::Operation::StartSubmission {
             relay_gateway_result_events(client, service, request.request_id)?;
         }
