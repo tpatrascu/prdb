@@ -1204,11 +1204,11 @@
 
 ## SU-5 dependency: worker exit observation and reaping
 
-- Behavior: after planner and executor streams have drained, `SupervisorInvocation::observe_worker_exit` polls the associated process while checking cancellation and age. `serve_terminal` enforces that the worker exited successfully before commit, and no new worker channel can open after exit observation starts or succeeds. A nonzero exit or process-inspection error durably aborts; deadline failure kills and reaps the worker.
+- Behavior: after planner and executor streams have drained, `SupervisorInvocation::observe_worker_exit` polls the associated process while checking cancellation and age. The sandbox path uses `observe_worker_exit_in_cgroup`, which kills descendants and waits for an empty cgroup before authorizing terminal storage. `serve_terminal` enforces that the worker exited successfully before commit, and no new worker channel can open after exit observation starts or succeeds. A nonzero exit or process-inspection error durably aborts; deadline failure kills and reaps the worker.
 - Contract and implementation: [supervisor lifecycle contract](../../specs/storage-manager.md) and [worker process observation](../../engine/src/storage_manager.rs).
 - Changed real-redb regression: [failed worker exit records ABORTED and is reaped](../../engine/tests/commit.rs).
 - Observed red: the terminal-authority regression first failed to compile because no `WorkerExitNotObserved` state existed. The existing worker-observation regression also established nonzero exit as a durable ABORTED result.
-- Verification: focused worker-failure and worker-channel/terminal tests passed. Full configured Nix-shell validation passed: `cargo fmt --all -- --check`, `cargo build --workspace --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, and `git diff --check`.
+- Verification: focused worker-failure and worker-channel/terminal tests passed. Full configured Nix-shell validation passed after cgroup cleanup integration: `cargo fmt --all -- --check`, `cargo build --workspace --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, and `git diff --check`.
 - Remaining: launch a worker with a verified sandbox profile, bind worker channels to that process, relay its result bytes, and test cancellation/expiry during the process wait.
 
 ## SU-1 / IPC-6 dependency: gateway submission IPC dispatcher

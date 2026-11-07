@@ -397,6 +397,7 @@ pub enum SupervisorInvocationError {
     WorkerExitObservationActive,
     WorkerChannelIo(std::io::Error),
     WorkerProcessIo(std::io::Error),
+    WorkerCgroupIo(std::io::Error),
     WorkerExited(std::process::ExitStatus),
     WorkerHandlerPanicked,
     Deadline(TransactionError),
@@ -511,6 +512,26 @@ impl SupervisorInvocation<'_> {
         &self,
         worker: &mut std::process::Child,
     ) -> Result<std::process::ExitStatus, SupervisorInvocationError> {
+        self.observe_worker_exit_inner(worker, None)
+    }
+
+    /// Observe a worker whose process was placed in `cgroup` before exec.
+    /// The cgroup is killed and verified empty before successful exit can
+    /// authorize terminal storage decisions.
+    pub fn observe_worker_exit_in_cgroup(
+        &self,
+        worker: &mut std::process::Child,
+        cgroup: crate::linux_sandbox::WorkerCgroup,
+        cleanup_timeout: Duration,
+    ) -> Result<std::process::ExitStatus, SupervisorInvocationError> {
+        self.observe_worker_exit_inner(worker, Some((cgroup, cleanup_timeout)))
+    }
+
+    fn observe_worker_exit_inner(
+        &self,
+        worker: &mut std::process::Child,
+        mut cgroup: Option<(crate::linux_sandbox::WorkerCgroup, Duration)>,
+    ) -> Result<std::process::ExitStatus, SupervisorInvocationError> {
         {
             let mut channels = match self.channels.lock() {
                 Ok(channels) => channels,
@@ -539,32 +560,61 @@ impl SupervisorInvocation<'_> {
         loop {
             match worker.try_wait() {
                 Ok(Some(status)) if status.success() => {
+                    if let Err(error) = Self::cleanup_worker_cgroup(&mut cgroup) {
+                        self.finish_worker_exit_observation(false)?;
+                        self.abort_owned_invocation();
+                        return Err(error);
+                    }
                     self.finish_worker_exit_observation(true)?;
                     return Ok(status);
                 }
                 Ok(Some(status)) => {
+                    let cleanup_error = Self::cleanup_worker_cgroup(&mut cgroup).err();
                     self.finish_worker_exit_observation(false)?;
                     self.abort_owned_invocation();
+                    if let Some(error) = cleanup_error {
+                        return Err(error);
+                    }
                     return Err(SupervisorInvocationError::WorkerExited(status));
                 }
                 Ok(None) => {
                     if let Err(error) = self.check_deadline() {
                         let _ = worker.kill();
                         let _ = worker.wait();
+                        let cleanup_error = Self::cleanup_worker_cgroup(&mut cgroup).err();
                         self.finish_worker_exit_observation(false)?;
+                        if let Some(cleanup_error) = cleanup_error {
+                            self.abort_owned_invocation();
+                            return Err(cleanup_error);
+                        }
                         return Err(error);
                     }
                     std::thread::sleep(SUPERVISOR_IDLE_POLL_INTERVAL);
                 }
                 Err(error) => {
-                    self.finish_worker_exit_observation(false)?;
-                    self.abort_owned_invocation();
                     let _ = worker.kill();
                     let _ = worker.wait();
+                    let cleanup_error = Self::cleanup_worker_cgroup(&mut cgroup).err();
+                    self.finish_worker_exit_observation(false)?;
+                    self.abort_owned_invocation();
+                    if let Some(cleanup_error) = cleanup_error {
+                        return Err(cleanup_error);
+                    }
                     return Err(SupervisorInvocationError::WorkerProcessIo(error));
                 }
             }
         }
+    }
+
+    fn cleanup_worker_cgroup(
+        cgroup: &mut Option<(crate::linux_sandbox::WorkerCgroup, Duration)>,
+    ) -> Result<(), SupervisorInvocationError> {
+        if let Some((cgroup, timeout)) = cgroup.take() {
+            cgroup
+                .cleanup(timeout)
+                .map_err(SupervisorInvocationError::WorkerCgroupIo)?;
+        }
+        Ok(())
     }
 
     fn finish_worker_exit_observation(
