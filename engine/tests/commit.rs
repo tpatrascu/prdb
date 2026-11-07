@@ -7484,7 +7484,10 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
     use prdb_engine::supervisor::{
         StagingLimits, StagingStore, SubmissionMetadata, SubmissionMetadataValidator,
     };
-    use prdb_engine::supervisor_ipc::GatewayAdmissionConfig;
+    use prdb_engine::supervisor_ipc::{
+        GatewayAdmissionConfig, GatewayTerminalDecision,
+        finalize_gateway_invocation_and_send_terminal, send_gateway_result_data_event,
+    };
     use sha2::{Digest, Sha256};
     use std::net::{TcpListener, TcpStream};
     use std::os::unix::net::UnixStream;
@@ -7578,8 +7581,7 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
         let staging_ref = &staging;
         let service_thread = scope.spawn(move || {
             let mut service_session = session;
-            let mut active_invocation = None;
-            let mut staging_owner = None;
+            let mut started = false;
             loop {
                 match prdb_engine::supervisor_ipc::serve_gateway_client_session(
                     &mut service,
@@ -7591,41 +7593,39 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
                 .map_err(|error| format!("gateway service failed: {error:?}"))?
                 {
                     prdb_engine::supervisor_ipc::GatewayClientServiceEvent::Started {
+                        request_id,
                         invocation,
                         submission,
-                        ..
                     } => {
                         assert_eq!(submission.artifact(), artifact);
-                        staging_owner =
-                            Some(service_session.staging_owner().map_err(|error| {
-                                format!("session owner unavailable: {error:?}")
-                            })?);
+                        let owner = service_session
+                            .staging_owner()
+                            .map_err(|error| format!("session owner unavailable: {error:?}"))?;
                         assert_eq!(
                             staging_ref
-                                .status(
-                                    staging_owner.expect("owner was just recorded"),
-                                    invocation.invocation_id()
-                                )
+                                .status(owner, invocation.invocation_id())
                                 .map_err(|error| format!("staging status failed: {error:?}"))?,
                             prdb_engine::supervisor::SubmissionState::Started
                         );
-                        active_invocation = Some(invocation);
+                        send_gateway_result_data_event(&mut service, request_id, b"rows".to_vec())
+                            .map_err(|error| format!("result event failed: {error:?}"))?;
+                        let mut invocation = invocation;
+                        finalize_gateway_invocation_and_send_terminal(
+                            &mut invocation,
+                            &mut service,
+                            request_id,
+                            GatewayTerminalDecision::Commit,
+                        )
+                        .map_err(|error| format!("terminal relay failed: {error:?}"))?;
+                        staging_ref
+                            .finish_started(owner, invocation.invocation_id())
+                            .map_err(|error| format!("staging cleanup failed: {error:?}"))?;
+                        started = true;
                     }
                     prdb_engine::supervisor_ipc::GatewayClientServiceEvent::Disconnected => {
-                        let invocation =
-                            active_invocation.take().ok_or("disconnect before START")?;
-                        assert!(matches!(
-                            invocation.check_deadline(),
-                            Err(prdb_engine::storage_manager::SupervisorInvocationError::Deadline(
-                                prdb_engine::transaction::TransactionError::CancellationRequested
-                            ))
-                        ));
-                        let invocation_id = invocation.invocation_id();
-                        let owner = staging_owner
-                            .ok_or_else(|| "START lost its staging owner".to_owned())?;
-                        staging_ref
-                            .finish_started(owner, invocation_id)
-                            .map_err(|error| format!("staging cleanup failed: {error:?}"))?;
+                        if !started {
+                            return Err("disconnect before START".to_owned());
+                        }
                         return Ok::<_, String>(service_session);
                     }
                 }
@@ -7639,6 +7639,22 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
 
         let mut response_decoder = prdb_engine::client_protocol::ClientFrameDecoder::default();
         let mut response_buffer = [0u8; 8192];
+        let mut pending_responses = std::collections::VecDeque::new();
+
+        macro_rules! next_response {
+            () => {{
+                loop {
+                    if let Some(response) = pending_responses.pop_front() {
+                        break response;
+                    }
+                    let count = std::io::Read::read(&mut gateway, &mut response_buffer)?;
+                    if count == 0 {
+                        return Err("missing gateway response".into());
+                    }
+                    pending_responses.extend(response_decoder.push(&response_buffer[..count])?);
+                }
+            }};
+        }
 
         macro_rules! round_trip {
             ($kind:expr, $request_id:expr, $payload:expr) => {{
@@ -7650,19 +7666,7 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
                 }
                 .encode()?;
                 std::io::Write::write_all(&mut gateway, &encoded)?;
-                loop {
-                    let count = std::io::Read::read(&mut gateway, &mut response_buffer)?;
-                    if count == 0 {
-                        return Err("missing gateway response".into());
-                    }
-                    let mut frames = response_decoder.push(&response_buffer[..count])?;
-                    if let Some(response) = frames.pop() {
-                        if !frames.is_empty() {
-                            return Err("unexpected additional pipelined response".into());
-                        }
-                        break response;
-                    }
-                }
+                next_response!()
             }};
         }
 
@@ -7717,12 +7721,16 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
             format!("{{\"invocation_id\":\"{invocation_hex}\"}}").into_bytes()
         );
         assert_eq!(accepted.payload, b"{\"state\":\"accepted\"}");
-        let cancel = round_trip!(
-            9,
-            9,
-            format!("{{\"invocation_id\":\"{invocation_hex}\"}}").into_bytes()
-        );
-        assert_eq!(cancel.payload, b"{\"state\":\"accepted\"}");
+        let result_data = next_response!();
+        assert_eq!(result_data.kind, 102);
+        assert_eq!(result_data.request_id, 8);
+        assert_eq!(result_data.response_sequence, 1);
+        assert_eq!(result_data.payload, b"rows");
+        let terminal = next_response!();
+        assert_eq!(terminal.kind, 103);
+        assert_eq!(terminal.request_id, 8);
+        assert_eq!(terminal.response_sequence, 2);
+        assert!(std::str::from_utf8(&terminal.payload)?.contains("\"outcome\":\"committed\""));
         gateway.shutdown(std::net::Shutdown::Write)?;
         bridge_thread
             .join()
@@ -7739,7 +7747,7 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
         &storage,
         ClientFrame {
             kind: 11,
-            request_id: 10,
+            request_id: 9,
             response_sequence: 0,
             payload: b"{}".to_vec(),
         },
@@ -7750,7 +7758,7 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
             &storage,
             ClientFrame {
                 kind: 1,
-                request_id: 11,
+                request_id: 10,
                 response_sequence: 0,
                 payload: br#"{"mode":"query","client_name":"again"}"#.to_vec(),
             },
@@ -7907,7 +7915,7 @@ fn gateway_service_listener_binds_peer_and_serves_hello() -> Result<(), Box<dyn 
                     accept_poll_interval: Duration::from_millis(5),
                 },
                 shutdown_server,
-                |_invocation, _submission| {},
+                |_request_id, _stream, _invocation, _submission| {},
             )
         });
 
@@ -7932,6 +7940,80 @@ fn gateway_service_listener_binds_peer_and_serves_hello() -> Result<(), Box<dyn 
         Ok::<_, Box<dyn std::error::Error>>(())
     })?;
     std::fs::remove_file(socket_path)?;
+    Ok(())
+}
+
+#[test]
+fn gateway_terminal_event_requires_a_storage_confirmed_decision()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::ipc::{Operation, read_frame};
+    use prdb_engine::outcome::OutcomeStatus;
+    use prdb_engine::supervisor_ipc::{
+        GatewayTerminalDecision, finalize_gateway_invocation_and_send_terminal,
+        send_gateway_result_data_event,
+    };
+    use std::os::unix::net::UnixStream;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
+    let user_id = id(0x70);
+    let token_id = id(0x71);
+    let secret = [0x31; 32];
+    commit_catalog_and_audit(
+        &database,
+        id(0x72),
+        id(9),
+        now + 3_600_000_000,
+        &[
+            principal_write_with_name(user_id, 1, 1, "terminal_user"),
+            object_write_with_name(user_id, 8, "terminal_user"),
+            credential_verifier_write(
+                token_id,
+                user_id,
+                &secret,
+                now - 1_000_000,
+                now + 60_000_000,
+                None,
+                1,
+            ),
+        ],
+        &[audit_event(0x72)],
+    )?;
+    let mut invocation = storage.admit_supervisor_invocation(
+        id(0x73),
+        token_id,
+        &secret,
+        now + 60_000_000,
+        2,
+        64,
+    )?;
+    let (mut service, mut gateway) = UnixStream::pair()?;
+    send_gateway_result_data_event(&mut service, 9, b"provisional".to_vec())?;
+    finalize_gateway_invocation_and_send_terminal(
+        &mut invocation,
+        &mut service,
+        9,
+        GatewayTerminalDecision::Commit,
+    )?;
+
+    let data = read_frame(&mut gateway)?.ok_or("missing provisional event")?;
+    assert_eq!(data.operation, Operation::GatewayResultData as u16);
+    assert_eq!(data.request_id, 9);
+    assert_eq!(data.payload, b"provisional");
+    let terminal = read_frame(&mut gateway)?.ok_or("missing terminal event")?;
+    assert_eq!(terminal.operation, Operation::GatewayTerminal as u16);
+    assert_eq!(terminal.request_id, 9);
+    assert!(std::str::from_utf8(&terminal.payload)?.contains("\"outcome\":\"committed\""));
+    assert_eq!(
+        storage
+            .lookup_invocation_outcome(id(0x73), user_id, now + 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Committed
+    );
     Ok(())
 }
 

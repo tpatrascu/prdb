@@ -384,3 +384,81 @@ fn unauthenticated_gateway_phase_has_one_absolute_deadline() {
     assert!(gateway.join().unwrap().is_err());
     supervisor.join().unwrap();
 }
+
+#[test]
+fn start_gateway_bridge_relays_provisional_data_then_terminal() {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let (mut gateway_service, mut supervisor_service) =
+        std::os::unix::net::UnixStream::pair().unwrap();
+    let supervisor = std::thread::spawn(move || {
+        let start = read_frame(&mut supervisor_service).unwrap().unwrap();
+        assert_eq!(start.operation, Operation::StartSubmission as u16);
+        write_frame(
+            &mut supervisor_service,
+            &IpcFrame {
+                operation: start.operation,
+                request_id: start.request_id,
+                payload: br#"{"state":"accepted"}"#.to_vec(),
+            },
+        )
+        .unwrap();
+        write_frame(
+            &mut supervisor_service,
+            &IpcFrame {
+                operation: Operation::GatewayResultData as u16,
+                request_id: start.request_id,
+                payload: b"provisional bytes".to_vec(),
+            },
+        )
+        .unwrap();
+        write_frame(
+            &mut supervisor_service,
+            &IpcFrame {
+                operation: Operation::GatewayTerminal as u16,
+                request_id: start.request_id,
+                payload: br#"{"outcome":"committed"}"#.to_vec(),
+            },
+        )
+        .unwrap();
+    });
+    let gateway = std::thread::spawn(move || {
+        let (mut client, _) = listener.accept().unwrap();
+        prdb_engine::gateway::serve_tcp_client_connection(&mut client, &mut gateway_service)
+            .unwrap();
+    });
+
+    let mut client = std::net::TcpStream::connect(address).unwrap();
+    client
+        .write_all(
+            &ClientFrame {
+                kind: 7,
+                request_id: 8,
+                response_sequence: 0,
+                payload: b"{}".to_vec(),
+            }
+            .encode()
+            .unwrap(),
+        )
+        .unwrap();
+    let mut decoder = ClientFrameDecoder::default();
+    let mut buffer = [0u8; 256];
+    let mut responses = Vec::new();
+    while responses.len() < 3 {
+        let count = client.read(&mut buffer).unwrap();
+        assert_ne!(count, 0);
+        responses.extend(decoder.push(&buffer[..count]).unwrap());
+    }
+    assert_eq!(responses[0].kind, 100);
+    assert_eq!(responses[0].response_sequence, 0);
+    assert_eq!(responses[1].kind, 102);
+    assert_eq!(responses[1].request_id, 8);
+    assert_eq!(responses[1].response_sequence, 1);
+    assert_eq!(responses[1].payload, b"provisional bytes");
+    assert_eq!(responses[2].kind, 103);
+    assert_eq!(responses[2].request_id, 8);
+    assert_eq!(responses[2].response_sequence, 2);
+    client.shutdown(std::net::Shutdown::Write).unwrap();
+    gateway.join().unwrap();
+    supervisor.join().unwrap();
+}

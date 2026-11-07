@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 #[cfg(unix)]
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 
 pub const SUPERVISOR_PAYLOAD_VERSION: u16 = 1;
 pub const MAX_SUPERVISOR_REQUESTS_PER_CONNECTION: usize = 16;
@@ -88,6 +88,138 @@ pub enum GatewayServiceListenerError {
     WorkerPanicked,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GatewayAbortReason {
+    QueryError,
+    WorkerFailure,
+    Cancelled,
+    Deadline,
+    ResourceLimit,
+    InternalError,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GatewayTerminalDecision {
+    Commit,
+    Abort(GatewayAbortReason),
+}
+
+#[derive(Debug)]
+pub enum GatewayTerminalRelayError {
+    Io(io::Error),
+    Frame(crate::ipc::FrameError),
+    Invocation(crate::storage_manager::SupervisorInvocationError),
+    InvalidStorageResponse,
+    HandlerPanicked,
+}
+
+impl std::fmt::Display for GatewayTerminalRelayError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "gateway terminal relay failed: {self:?}")
+    }
+}
+
+impl std::error::Error for GatewayTerminalRelayError {}
+
+pub fn send_gateway_result_data_event<W: Write>(
+    stream: &mut W,
+    start_request_id: u64,
+    payload: Vec<u8>,
+) -> Result<(), crate::ipc::FrameError> {
+    if payload.len() > crate::client_protocol::CLIENT_MAX_PAYLOAD_BYTES {
+        return Err(crate::ipc::FrameError::PayloadTooLarge);
+    }
+    crate::ipc::write_frame(
+        stream,
+        &IpcFrame {
+            operation: Operation::GatewayResultData as u16,
+            request_id: start_request_id,
+            payload,
+        },
+    )
+}
+
+/// Commit or abort through storage's terminal authority, then emit TERMINAL
+/// only after its correlated response confirms the durable decision.
+pub fn finalize_gateway_invocation_and_send_terminal<'db, W: Write>(
+    invocation: &mut crate::storage_manager::SupervisorInvocation<'db>,
+    result_stream: &mut W,
+    start_request_id: u64,
+    decision: GatewayTerminalDecision,
+) -> Result<(), GatewayTerminalRelayError> {
+    let operation = match decision {
+        GatewayTerminalDecision::Commit => Operation::FinalizeTransaction,
+        GatewayTerminalDecision::Abort(_) => Operation::AbortTransaction,
+    };
+    let (mut storage_stream, mut supervisor_stream) =
+        UnixStream::pair().map_err(GatewayTerminalRelayError::Io)?;
+    let response = std::thread::scope(|scope| {
+        let handler = scope.spawn(|| invocation.serve_terminal(&mut storage_stream));
+        crate::ipc::write_frame(
+            &mut supervisor_stream,
+            &IpcFrame {
+                operation: operation as u16,
+                request_id: 1,
+                payload: SUPERVISOR_PAYLOAD_VERSION.to_be_bytes().to_vec(),
+            },
+        )
+        .map_err(GatewayTerminalRelayError::Frame)?;
+        let response = crate::ipc::read_frame(&mut supervisor_stream)
+            .map_err(GatewayTerminalRelayError::Frame)?
+            .ok_or(GatewayTerminalRelayError::InvalidStorageResponse)?;
+        handler
+            .join()
+            .map_err(|_| GatewayTerminalRelayError::HandlerPanicked)?
+            .map_err(GatewayTerminalRelayError::Invocation)?;
+        Ok::<_, GatewayTerminalRelayError>(response)
+    })?;
+    let valid = response.operation == operation as u16
+        && response.request_id == 1
+        && response.payload.len()
+            == match decision {
+                GatewayTerminalDecision::Commit => 11,
+                GatewayTerminalDecision::Abort(_) => 3,
+            }
+        && u16::from_be_bytes([response.payload[0], response.payload[1]])
+            == SUPERVISOR_PAYLOAD_VERSION
+        && response.payload[2] == 0;
+    if !valid {
+        return Err(GatewayTerminalRelayError::InvalidStorageResponse);
+    }
+    let (outcome, reason_code) = match decision {
+        GatewayTerminalDecision::Commit => ("committed", "success"),
+        GatewayTerminalDecision::Abort(reason) => (
+            "aborted",
+            match reason {
+                GatewayAbortReason::QueryError => "query_error",
+                GatewayAbortReason::WorkerFailure => "worker_failure",
+                GatewayAbortReason::Cancelled => "cancelled",
+                GatewayAbortReason::Deadline => "deadline",
+                GatewayAbortReason::ResourceLimit => "resource_limit",
+                GatewayAbortReason::InternalError => "internal_error",
+            },
+        ),
+    };
+    let invocation_id = invocation
+        .invocation_id()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let payload = format!(
+        "{{\"invocation_id\":\"{invocation_id}\",\"outcome\":\"{outcome}\",\"reason_code\":\"{reason_code}\"}}"
+    )
+    .into_bytes();
+    crate::ipc::write_frame(
+        result_stream,
+        &IpcFrame {
+            operation: Operation::GatewayTerminal as u16,
+            request_id: start_request_id,
+            payload,
+        },
+    )
+    .map_err(GatewayTerminalRelayError::Frame)
+}
+
 #[cfg(unix)]
 impl std::fmt::Display for GatewayServiceListenerError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -114,8 +246,8 @@ pub fn bind_gateway_service_socket(socket_path: impl AsRef<Path>) -> io::Result<
 }
 
 /// Accept bounded per-client Unix streams from the configured gateway UID.
-/// The START callback must hand invocation work to a trusted scheduler and
-/// return so the service thread can continue processing cancellation/status.
+/// The START callback owns trusted scheduling and event emission for that
+/// invocation; status/cancel control remains available through other sessions.
 #[cfg(unix)]
 pub fn serve_gateway_service_listener<'db, F>(
     listener: UnixListener,
@@ -127,8 +259,12 @@ pub fn serve_gateway_service_listener<'db, F>(
     on_started: F,
 ) -> Result<(), GatewayServiceListenerError>
 where
-    F: Fn(crate::storage_manager::SupervisorInvocation<'db>, crate::supervisor::SealedSubmission)
-        + Sync,
+    F: Fn(
+            u64,
+            &mut UnixStream,
+            crate::storage_manager::SupervisorInvocation<'db>,
+            crate::supervisor::SealedSubmission,
+        ) + Sync,
 {
     if config.max_connections == 0
         || config.idle_timeout.is_zero()
@@ -180,10 +316,12 @@ where
                             ) {
                                 Ok(GatewayClientServiceEvent::Disconnected) => return,
                                 Ok(GatewayClientServiceEvent::Started {
+                                    request_id,
                                     invocation,
                                     submission,
-                                    ..
-                                }) => worker_started(invocation, submission),
+                                }) => {
+                                    worker_started(request_id, &mut stream, invocation, submission)
+                                }
                                 Err(_) => return,
                             }
                         }

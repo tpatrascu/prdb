@@ -1193,6 +1193,15 @@
 - Commands actually run in the configured Nix shell: `cargo fmt --all`; focused `cargo test -p prdb-engine --test gateway --locked unauthenticated_gateway_phase_has_one_absolute_deadline` passed; and `cargo fmt --all -- --check && cargo build --workspace --locked && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && git diff --check`. All passed.
 - Remaining: rate-limit failed AUTH attempts separately and test gateway/service restarts with live sessions.
 
+## GW-4 / SU-4 dependency: START result and terminal event relay
+
+- Behavior: after START acknowledgement, the TCP bridge accepts only request-correlated result-data or terminal IPC events, maps them to RESULT_DATA/TERMINAL, and assigns increasing network sequence numbers. Supervisor helpers bound provisional data and emit TERMINAL only after storage's correlated commit/abort response succeeds; ambiguous failures emit no terminal claim.
+- Contract and implementation: [gateway event IPC](../../specs/ipc-protocol.md), [TCP event relay](../../engine/src/gateway.rs), and [storage-confirmed terminal sender](../../engine/src/supervisor_ipc.rs).
+- Changed tests: [network event ordering/correlation](../../engine/tests/gateway.rs) and [real-redb terminal evidence](../../engine/tests/commit.rs).
+- Focused verification: `cargo test -p prdb-engine --test gateway --locked start_gateway_bridge_relays_provisional_data_then_terminal`, `cargo test -p prdb-engine --test commit --locked gateway_terminal_event_requires_a_storage_confirmed_decision`, and the real TCP/IPC lifecycle test `cargo test -p prdb-engine --test commit --locked client_handshake_requires_hello_first_and_sequences_responses` passed.
+- Full validation in the configured Nix shell passed: `cargo fmt --all -- --check`, `cargo build --workspace --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, and `git diff --check`.
+- Remaining: connect real confined worker output/completion to these events, bound result queues/backpressure across processes, and test cancellation/restart around streaming terminal transitions.
+
 ## SU-1 / IPC-6 dependency: gateway submission IPC dispatcher
 
 - Behavior: a role-checked gateway dispatcher maps AUTH, PREPARE, chunk, SEAL, START, STATUS, and CANCEL operation tags to the strict per-client session handlers. Chunk IPC prepends an explicit artifact/parameter kind byte. START returns the network acknowledgement plus a typed storage invocation and immutable submission handle to trusted supervisor code; those authority-bearing objects are never serialized.

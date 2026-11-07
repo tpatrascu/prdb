@@ -279,6 +279,7 @@ pub enum GatewayConnectionError {
     UnsupportedClientKind(u16),
     ServiceDisconnected,
     MismatchedServiceResponse,
+    UnexpectedServiceEvent,
 }
 
 impl std::fmt::Display for GatewayConnectionError {
@@ -392,6 +393,50 @@ fn serve_tcp_client_connection_inner<C: GatewayClientStream, S: Read + Write>(
         client
             .write_all(&response)
             .map_err(GatewayConnectionError::Io)?;
+        if operation == crate::ipc::Operation::StartSubmission {
+            relay_gateway_result_events(client, service, request.request_id)?;
+        }
+    }
+}
+
+fn relay_gateway_result_events<C: GatewayClientStream, S: Read + Write>(
+    client: &mut C,
+    service: &mut S,
+    start_request_id: u64,
+) -> Result<(), GatewayConnectionError> {
+    let mut response_sequence = 0u64;
+    loop {
+        let event = crate::ipc::read_frame(service)
+            .map_err(GatewayConnectionError::ServiceFrame)?
+            .ok_or(GatewayConnectionError::ServiceDisconnected)?;
+        if event.request_id != start_request_id {
+            return Err(GatewayConnectionError::MismatchedServiceResponse);
+        }
+        let kind = match crate::ipc::Operation::from_code(event.operation)
+            .map_err(|_| GatewayConnectionError::UnexpectedServiceEvent)?
+        {
+            crate::ipc::Operation::GatewayResultData => 102,
+            crate::ipc::Operation::GatewayTerminal => 103,
+            _ => return Err(GatewayConnectionError::UnexpectedServiceEvent),
+        };
+        response_sequence = response_sequence
+            .checked_add(1)
+            .ok_or(GatewayConnectionError::UnexpectedServiceEvent)?;
+        let terminal = kind == 103;
+        let bytes = crate::client_protocol::ClientFrame {
+            kind,
+            request_id: start_request_id,
+            response_sequence,
+            payload: event.payload,
+        }
+        .encode()
+        .map_err(GatewayConnectionError::ClientFrame)?;
+        client
+            .write_all(&bytes)
+            .map_err(GatewayConnectionError::Io)?;
+        if terminal {
+            return Ok(());
+        }
     }
 }
 
