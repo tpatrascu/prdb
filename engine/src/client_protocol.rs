@@ -5,7 +5,7 @@ use crate::storage_manager::{AuthenticatedQuerySession, StorageManager};
 use crate::supervisor::StagingOwner;
 use crate::transaction::TransactionError;
 use std::collections::HashMap;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 pub const CLIENT_FRAME_HEADER_BYTES: usize = 32;
 pub const CLIENT_MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
@@ -67,7 +67,330 @@ pub enum ClientSessionError {
     AlreadyAuthenticated,
     AuthenticationRequired,
     WrongMode,
+    InvalidControlPayload(ClientControlError),
     Storage(TransactionError),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClientControlError {
+    InvalidJson,
+    DuplicateKey,
+    UnknownKey,
+    MissingKey,
+    InvalidMode,
+    InvalidClientName,
+    InvalidTokenId,
+    InvalidTokenSecret,
+}
+
+impl std::fmt::Display for ClientControlError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "invalid client control payload: {self:?}")
+    }
+}
+
+impl std::error::Error for ClientControlError {}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClientHello {
+    pub mode: ClientMode,
+    pub client_name: String,
+}
+
+#[derive(Eq, PartialEq)]
+pub struct ClientCredentials {
+    pub token_id: [u8; 16],
+    pub token_secret: [u8; TOKEN_SECRET_BYTES],
+}
+
+impl Drop for ClientCredentials {
+    fn drop(&mut self) {
+        self.token_secret.zeroize();
+    }
+}
+
+/// Decode the exact HELLO v1 JSON object. Keys and values are strictly typed
+/// strings; duplicate and unknown keys are rejected.
+pub fn decode_client_hello(payload: &[u8]) -> Result<ClientHello, ClientControlError> {
+    let mut fields = parse_string_object(payload)?;
+    let mode = match take_required(&mut fields, "mode")?.as_str() {
+        "query" => ClientMode::Query,
+        "control" => ClientMode::Control,
+        _ => return Err(ClientControlError::InvalidMode),
+    };
+    let client_name = take_required(&mut fields, "client_name")?;
+    if client_name.len() > 128 {
+        return Err(ClientControlError::InvalidClientName);
+    }
+    reject_unknown_fields(fields)?;
+    Ok(ClientHello { mode, client_name })
+}
+
+/// Decode the exact AUTH v1 JSON object, requiring a lowercase opaque token
+/// ID and canonical padded base64 for the fixed-size bearer secret.
+pub fn decode_client_credentials(payload: &[u8]) -> Result<ClientCredentials, ClientControlError> {
+    let mut fields = parse_string_object(payload)?;
+    let token_id = decode_lower_hex_id(&take_required(&mut fields, "token_id")?)?;
+    let secret_bytes = decode_canonical_base64(&take_required(&mut fields, "token_secret")?)?;
+    let token_secret = secret_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| ClientControlError::InvalidTokenSecret)?;
+    reject_unknown_fields(fields)?;
+    Ok(ClientCredentials {
+        token_id,
+        token_secret,
+    })
+}
+
+fn parse_string_object(payload: &[u8]) -> Result<HashMap<String, String>, ClientControlError> {
+    if payload.len() > CLIENT_MAX_CONTROL_BYTES {
+        return Err(ClientControlError::InvalidJson);
+    }
+    let text = std::str::from_utf8(payload).map_err(|_| ClientControlError::InvalidJson)?;
+    let mut parser = JsonStringObjectParser {
+        text: text.as_bytes(),
+        offset: 0,
+    };
+    parser.skip_whitespace();
+    parser.expect(b'{')?;
+    parser.skip_whitespace();
+    let mut fields = HashMap::new();
+    if parser.consume(b'}') {
+        parser.skip_whitespace();
+        return if parser.offset == parser.text.len() {
+            Ok(fields)
+        } else {
+            Err(ClientControlError::InvalidJson)
+        };
+    }
+    loop {
+        parser.skip_whitespace();
+        let key = parser.parse_string()?;
+        parser.skip_whitespace();
+        parser.expect(b':')?;
+        parser.skip_whitespace();
+        let value = parser.parse_string()?;
+        if fields.insert(key, value).is_some() {
+            return Err(ClientControlError::DuplicateKey);
+        }
+        parser.skip_whitespace();
+        if parser.consume(b'}') {
+            parser.skip_whitespace();
+            return if parser.offset == parser.text.len() {
+                Ok(fields)
+            } else {
+                Err(ClientControlError::InvalidJson)
+            };
+        }
+        parser.expect(b',')?;
+    }
+}
+
+struct JsonStringObjectParser<'a> {
+    text: &'a [u8],
+    offset: usize,
+}
+
+impl JsonStringObjectParser<'_> {
+    fn skip_whitespace(&mut self) {
+        while self
+            .text
+            .get(self.offset)
+            .is_some_and(|byte| matches!(byte, b' ' | b'\n' | b'\r' | b'\t'))
+        {
+            self.offset += 1;
+        }
+    }
+
+    fn consume(&mut self, expected: u8) -> bool {
+        if self.text.get(self.offset) == Some(&expected) {
+            self.offset += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn expect(&mut self, expected: u8) -> Result<(), ClientControlError> {
+        self.consume(expected)
+            .then_some(())
+            .ok_or(ClientControlError::InvalidJson)
+    }
+
+    fn parse_string(&mut self) -> Result<String, ClientControlError> {
+        self.expect(b'"')?;
+        let mut output = Vec::new();
+        loop {
+            let byte = *self
+                .text
+                .get(self.offset)
+                .ok_or(ClientControlError::InvalidJson)?;
+            self.offset += 1;
+            match byte {
+                b'"' => {
+                    return String::from_utf8(output).map_err(|_| ClientControlError::InvalidJson);
+                }
+                b'\\' => {
+                    let escaped = *self
+                        .text
+                        .get(self.offset)
+                        .ok_or(ClientControlError::InvalidJson)?;
+                    self.offset += 1;
+                    match escaped {
+                        b'"' | b'\\' | b'/' => output.push(escaped),
+                        b'b' => output.push(0x08),
+                        b'f' => output.push(0x0c),
+                        b'n' => output.push(b'\n'),
+                        b'r' => output.push(b'\r'),
+                        b't' => output.push(b'\t'),
+                        b'u' => {
+                            let first = self.parse_hex_quad()?;
+                            let scalar = if (0xd800..=0xdbff).contains(&first) {
+                                self.expect(b'\\')?;
+                                self.expect(b'u')?;
+                                let second = self.parse_hex_quad()?;
+                                if !(0xdc00..=0xdfff).contains(&second) {
+                                    return Err(ClientControlError::InvalidJson);
+                                }
+                                0x1_0000
+                                    + (((first as u32 - 0xd800) << 10) | (second as u32 - 0xdc00))
+                            } else if (0xdc00..=0xdfff).contains(&first) {
+                                return Err(ClientControlError::InvalidJson);
+                            } else {
+                                first as u32
+                            };
+                            let character =
+                                char::from_u32(scalar).ok_or(ClientControlError::InvalidJson)?;
+                            let mut encoded = [0; 4];
+                            output
+                                .extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());
+                        }
+                        _ => return Err(ClientControlError::InvalidJson),
+                    }
+                }
+                0x00..=0x1f => return Err(ClientControlError::InvalidJson),
+                other => output.push(other),
+            }
+        }
+    }
+
+    fn parse_hex_quad(&mut self) -> Result<u16, ClientControlError> {
+        let end = self
+            .offset
+            .checked_add(4)
+            .ok_or(ClientControlError::InvalidJson)?;
+        let digits = self
+            .text
+            .get(self.offset..end)
+            .ok_or(ClientControlError::InvalidJson)?;
+        let mut value = 0u16;
+        for digit in digits {
+            value = value
+                .checked_mul(16)
+                .and_then(|value| value.checked_add(hex_nibble(*digit)? as u16))
+                .ok_or(ClientControlError::InvalidJson)?;
+        }
+        self.offset = end;
+        Ok(value)
+    }
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn take_required(
+    fields: &mut HashMap<String, String>,
+    key: &str,
+) -> Result<String, ClientControlError> {
+    fields.remove(key).ok_or(ClientControlError::MissingKey)
+}
+
+fn reject_unknown_fields(fields: HashMap<String, String>) -> Result<(), ClientControlError> {
+    if fields.is_empty() {
+        Ok(())
+    } else {
+        Err(ClientControlError::UnknownKey)
+    }
+}
+
+fn decode_lower_hex_id(text: &str) -> Result<[u8; 16], ClientControlError> {
+    if text.len() != 32 {
+        return Err(ClientControlError::InvalidTokenId);
+    }
+    let mut id = [0; 16];
+    for (index, pair) in text.as_bytes().chunks_exact(2).enumerate() {
+        let high = lower_hex_nibble(pair[0]).ok_or(ClientControlError::InvalidTokenId)?;
+        let low = lower_hex_nibble(pair[1]).ok_or(ClientControlError::InvalidTokenId)?;
+        id[index] = (high << 4) | low;
+    }
+    if id == [0; 16] {
+        return Err(ClientControlError::InvalidTokenId);
+    }
+    Ok(id)
+}
+
+fn lower_hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
+}
+
+fn decode_canonical_base64(text: &str) -> Result<Zeroizing<Vec<u8>>, ClientControlError> {
+    let input = text.as_bytes();
+    if input.is_empty() || !input.len().is_multiple_of(4) {
+        return Err(ClientControlError::InvalidTokenSecret);
+    }
+    let mut output = Zeroizing::new(Vec::new());
+    output
+        .try_reserve_exact(input.len() / 4 * 3)
+        .map_err(|_| ClientControlError::InvalidTokenSecret)?;
+    for (index, chunk) in input.chunks_exact(4).enumerate() {
+        let last = index + 1 == input.len() / 4;
+        let a = base64_value(chunk[0]).ok_or(ClientControlError::InvalidTokenSecret)?;
+        let b = base64_value(chunk[1]).ok_or(ClientControlError::InvalidTokenSecret)?;
+        output.push((a << 2) | (b >> 4));
+        match (chunk[2], chunk[3]) {
+            (b'=', b'=') if last && b & 0x0f == 0 => (),
+            (c, b'=') if last => {
+                let c = base64_value(c).ok_or(ClientControlError::InvalidTokenSecret)?;
+                if c & 0x03 != 0 {
+                    return Err(ClientControlError::InvalidTokenSecret);
+                }
+                output.push((b << 4) | (c >> 2));
+            }
+            (c, d) if c != b'=' && d != b'=' => {
+                let c = base64_value(c).ok_or(ClientControlError::InvalidTokenSecret)?;
+                let d = base64_value(d).ok_or(ClientControlError::InvalidTokenSecret)?;
+                output.push((b << 4) | (c >> 2));
+                output.push((c << 6) | d);
+            }
+            _ => return Err(ClientControlError::InvalidTokenSecret),
+        }
+    }
+    if output.len() != TOKEN_SECRET_BYTES {
+        return Err(ClientControlError::InvalidTokenSecret);
+    }
+    Ok(output)
+}
+
+fn base64_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    }
 }
 
 impl std::fmt::Display for ClientSessionError {
@@ -105,6 +428,12 @@ impl ClientConnectionSession {
         Ok(())
     }
 
+    pub fn accept_hello_payload(&mut self, payload: &[u8]) -> Result<(), ClientSessionError> {
+        let hello =
+            decode_client_hello(payload).map_err(ClientSessionError::InvalidControlPayload)?;
+        self.accept_hello(hello.mode, &hello.client_name)
+    }
+
     /// Authenticate using storage's current token and login/role snapshot.
     /// Callers should map all storage authentication failures to one public
     /// unauthenticated response category.
@@ -129,6 +458,16 @@ impl ClientConnectionSession {
             .authenticated
             .as_ref()
             .expect("session was just stored"))
+    }
+
+    pub fn authenticate_payload(
+        &mut self,
+        storage: &StorageManager<'_>,
+        payload: &[u8],
+    ) -> Result<&AuthenticatedQuerySession, ClientSessionError> {
+        let credentials = decode_client_credentials(payload)
+            .map_err(ClientSessionError::InvalidControlPayload)?;
+        self.authenticate(storage, credentials.token_id, &credentials.token_secret)
     }
 
     /// Authorize a request kind and refresh token/login/role authority before

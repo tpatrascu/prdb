@@ -978,4 +978,11 @@
 - Behavior: a query connection authenticates against a real redb catalog, receives a stable nonzero session identity and staging owner, and revalidates before a protected operation. Revoking the token causes the next operation to fail authentication without changing the connection ID.
 - Changed fixture: [client session AUTH regression](../../engine/tests/commit.rs).
 - Verification: focused `cargo test -p prdb-engine --test commit client_session_authenticates_and_revalidates_before_operations --locked` passed in the repository Nix shell; formatting, workspace build, and warning-denied Clippy passed after the session implementation.
-- Remaining: strict JSON/AUTH wire decoding, live gateway TCP service, supervisor process provisioning, and sandboxed end-to-end persistence/reconciliation evidence.
+- Remaining: live gateway TCP service, supervisor process provisioning, and sandboxed end-to-end persistence/reconciliation evidence.
+
+## SU-1 dependency: strict AUTH wire credentials
+
+- Behavior: strict HELLO/AUTH JSON decoding validates the only token credential representation accepted by storage session authentication and prevents duplicate/unknown fields or alternate token encodings.
+- Changed code and fixtures: [gateway protocol decoder](../../engine/src/client_protocol.rs) and [decoder tests](../../engine/tests/client_protocol.rs).
+- Verification: focused `client_protocol` integration suite passed all 4 tests in the repository Nix shell.
+- Remaining: live gateway service, supervisor process provisioning, and sandboxed end-to-end persistence/reconciliation evidence.

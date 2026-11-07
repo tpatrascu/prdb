@@ -20,3 +20,10 @@
 - Evidence: the focused commit integration test authenticates a seeded token, checks HELLO/AUTH ordering and query mode, revalidates a protected request, then revokes the credential and confirms the next protected request fails while the session ID remains stable.
 - Test: [real-redb session regression](../../engine/tests/commit.rs).
 - Remaining: wire JSON/base64 decoding and network listener integration.
+
+## NP-2 dependency: strict HELLO and AUTH decoding
+
+- Behavior: HELLO/AUTH accept exact flat string schemas, reject duplicate/unknown fields and malformed JSON, and validate lowercase nonzero token IDs plus canonical padded base64 for the fixed-size credential. Decoded secrets zeroize on drop and do not implement `Debug`.
+- Changed code and fixtures: [HELLO/AUTH decoder](../../engine/src/client_protocol.rs) and [control decoder regressions](../../engine/tests/client_protocol.rs).
+- Verification: focused protocol suite passed: 4 tests, including duplicate/unknown keys, escapes, trailing bytes, unpaired surrogates, lowercase IDs, and canonical base64.
+- Remaining: decode other operation payloads and connect the session state to a live gateway TCP listener/service.

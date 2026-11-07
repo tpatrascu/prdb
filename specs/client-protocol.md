@@ -53,6 +53,8 @@ AUTH supplies `{ "token_id": id, "token_secret": base64 }`; decoded secret is bo
 
 The gateway session state accepts one HELLO before AUTH, authenticates through storage, and then applies the request allowlist for the selected mode. Before HELLO only HELLO and PING are permitted; after HELLO but before AUTH only AUTH and PING are permitted. Query sessions may use PREPARE, chunks, SEAL, START, STATUS, CANCEL, and PING. Control sessions may use STATUS, CANCEL, ADMIN, and PING. A query staging owner is derived from the storage-authenticated session, not request fields. The gateway retains the bearer secret only for the connection lifetime, zeroizes its in-memory copy on disconnect, and asks storage to revalidate token, login, and current role closure before each execution or control request. PING does not require revalidation.
 
+The initial control-payload decoder implements the exact flat string-object shapes for HELLO and AUTH. It rejects duplicate keys (including escaped-equivalent names), unknown or non-string fields, malformed JSON escapes, trailing bytes, noncanonical token IDs, and noncanonical or wrong-sized base64 secrets. Other request payload schemas remain unimplemented until their allowlisted operation increments.
+
 Query mode supports PREPARE through START, STATUS, CANCEL, and PING. Control mode supports STATUS, CANCEL, ADMIN, and PING. Mode selection never grants administrative privileges. Every new execution/admin/status/cancel operation revalidates credential/current authority; an initially valid AUTH does not freeze permissions for the connection lifetime.
 
 ## Submission and Upload
