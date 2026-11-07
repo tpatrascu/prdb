@@ -1329,3 +1329,10 @@
 - Regression evidence: decoder coverage checks grant/revoke schemas. The real-redb ADMIN test grants `MANAGE_ROLES` to a newly created user and verifies that the user's token-backed session can then create a role.
 - Focused verification: formatting and the client-protocol decoder and real-redb ADMIN lifecycle tests passed in the configured Nix shell. Workspace checks remain to run.
 - Remaining: user rename/login-state/drop ADMIN operations, remaining ADMIN operations, and separate supervisor/worker process integration.
+
+## SM-5 / DDL-identity dependency: user and role rename ADMIN operations
+
+- Behavior: `users.rename` and `roles.rename` use connection-owned PREPARE/START. Storage updates the principal name and authority epoch with the matching named object and object version in one authorized DDL commit.
+- Contract and implementation: [identity ADMIN protocol](../../specs/client-protocol.md), [storage-manager contract](../../specs/storage-manager.md), [identity lifecycle](../../engine/src/storage_manager.rs), and [ADMIN dispatch](../../engine/src/client_protocol.rs).
+- Regression evidence: strict decoder tests cover both operation schemas. The real-redb identity lifecycle test exercises `StorageManager::rename_identity` under `MANAGE_USERS`, alongside the authorization path's existing rename validation.
+- Remaining: login-state and DROP ADMIN operations, remaining ADMIN operations, and separate supervisor/worker process integration.

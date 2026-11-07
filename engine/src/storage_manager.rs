@@ -1809,6 +1809,165 @@ impl<'db> StorageManager<'db> {
         })
     }
 
+    /// Rename a user or role through the authorized identity DDL path.
+    pub fn rename_identity(
+        &self,
+        invocation_id: [u8; 16],
+        authenticated_actor_id: [u8; 16],
+        identity_id: [u8; 16],
+        name: &str,
+        retention_deadline_us: i64,
+        mut audit_event: AuditEvent,
+    ) -> Result<u64, IdentityLifecycleError> {
+        if invocation_id == [0; 16]
+            || authenticated_actor_id == [0; 16]
+            || identity_id == [0; 16]
+            || retention_deadline_us <= 0
+            || !is_normalized_principal_name(name)
+        {
+            return Err(IdentityLifecycleError::InvalidRequest);
+        }
+        if audit_event.actor_id != Some(authenticated_actor_id)
+            || audit_event.correlation_id != invocation_id
+            || audit_event.action != AuditAction::Ddl
+            || audit_event.result != AuditResult::Succeeded
+        {
+            return Err(IdentityLifecycleError::InvalidAudit);
+        }
+        let principal_key = principal_catalog_key(identity_id);
+        let object_key = identity_object_catalog_key(identity_id);
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|_| IdentityLifecycleError::Storage)?;
+        let catalog = read
+            .open_table(CATALOG)
+            .map_err(|_| IdentityLifecycleError::Storage)?;
+        let principal_current = catalog
+            .get(principal_key.as_slice())
+            .map_err(|_| IdentityLifecycleError::Storage)?
+            .map(|value| value.value().to_vec())
+            .ok_or(IdentityLifecycleError::InvalidRequest)?;
+        let object_current = catalog
+            .get(object_key.as_slice())
+            .map_err(|_| IdentityLifecycleError::Storage)?
+            .map(|value| value.value().to_vec())
+            .ok_or(IdentityLifecycleError::Storage)?;
+        drop(catalog);
+        drop(read);
+
+        let mut principal = decode_registered_envelope(&principal_current)
+            .map_err(|_| IdentityLifecycleError::Storage)?;
+        let kind = principal
+            .fields
+            .iter()
+            .find(|field| field.tag == 1 && field.wire_type == WireType::U16)
+            .and_then(|field| <[u8; 2]>::try_from(field.payload.as_slice()).ok())
+            .map(u16::from_le_bytes)
+            .filter(|kind| matches!(kind, 1 | 2))
+            .ok_or(IdentityLifecycleError::Storage)?;
+        let principal_name = principal
+            .fields
+            .iter_mut()
+            .find(|field| field.tag == 2 && field.wire_type == WireType::Text)
+            .ok_or(IdentityLifecycleError::Storage)?;
+        if principal_name.payload == name.as_bytes() {
+            return Err(IdentityLifecycleError::InvalidRequest);
+        }
+        principal_name.payload = name.as_bytes().to_vec();
+        let epoch = principal
+            .fields
+            .iter_mut()
+            .find(|field| field.tag == 4 && field.wire_type == WireType::U64)
+            .ok_or(IdentityLifecycleError::Storage)?;
+        let current_epoch = u64::from_le_bytes(
+            epoch
+                .payload
+                .as_slice()
+                .try_into()
+                .map_err(|_| IdentityLifecycleError::Storage)?,
+        );
+        epoch.payload = current_epoch
+            .checked_add(1)
+            .filter(|next| *next != 0)
+            .ok_or(IdentityLifecycleError::InvalidRequest)?
+            .to_le_bytes()
+            .to_vec();
+        let principal_payload = encode_envelope(
+            &family_schema(10).ok_or(IdentityLifecycleError::Storage)?,
+            &principal_key,
+            &principal.fields,
+        )
+        .map_err(|_| IdentityLifecycleError::Storage)?;
+
+        let mut object = decode_registered_envelope(&object_current)
+            .map_err(|_| IdentityLifecycleError::Storage)?;
+        let expected_object_kind = if kind == 1 { 8 } else { 9 };
+        let object_kind = object
+            .fields
+            .iter()
+            .find(|field| field.tag == 1 && field.wire_type == WireType::U16)
+            .and_then(|field| <[u8; 2]>::try_from(field.payload.as_slice()).ok())
+            .map(u16::from_le_bytes);
+        if object_kind != Some(expected_object_kind) {
+            return Err(IdentityLifecycleError::Storage);
+        }
+        let object_name = object
+            .fields
+            .iter_mut()
+            .find(|field| field.tag == 3 && field.wire_type == WireType::Text)
+            .ok_or(IdentityLifecycleError::Storage)?;
+        object_name.payload = name.as_bytes().to_vec();
+        let version = object
+            .fields
+            .iter_mut()
+            .find(|field| field.tag == 5 && field.wire_type == WireType::U64)
+            .ok_or(IdentityLifecycleError::Storage)?;
+        let current_version = u64::from_le_bytes(
+            version
+                .payload
+                .as_slice()
+                .try_into()
+                .map_err(|_| IdentityLifecycleError::Storage)?,
+        );
+        version.payload = current_version
+            .checked_add(1)
+            .filter(|next| *next != 0)
+            .ok_or(IdentityLifecycleError::InvalidRequest)?
+            .to_le_bytes()
+            .to_vec();
+        let object_payload = encode_envelope(
+            &family_schema(2).ok_or(IdentityLifecycleError::Storage)?,
+            &object_key,
+            &object.fields,
+        )
+        .map_err(|_| IdentityLifecycleError::Storage)?;
+        audit_event.target_ids = vec![identity_id];
+        let writes = [
+            CatalogWrite {
+                key: principal_key,
+                expected_value: Some(principal_current),
+                payload: Some(principal_payload),
+            },
+            CatalogWrite {
+                key: object_key,
+                expected_value: Some(object_current),
+                payload: Some(object_payload),
+            },
+        ];
+        self.commit_authorized_identity_ddl(
+            invocation_id,
+            authenticated_actor_id,
+            retention_deadline_us,
+            &writes,
+            &[audit_event],
+        )
+        .map_err(|error| match error {
+            CommitError::DdlAuthorizationDenied => IdentityLifecycleError::Unauthorized,
+            error => IdentityLifecycleError::Commit(error),
+        })
+    }
+
     fn create_identity(
         &self,
         invocation_id: [u8; 16],

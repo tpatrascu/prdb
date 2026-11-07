@@ -679,53 +679,6 @@ fn object_write_with_parent_and_owner_and_name(
     }
 }
 
-fn principal_object_rename_write(
-    object_id: [u8; 16],
-    object_kind: u16,
-    owner_id: [u8; 16],
-    name: &str,
-    definition_epoch: u64,
-) -> CatalogWrite {
-    let key = id_catalog_key(2, object_id);
-    let payload = encode_envelope(
-        &family_schema(2).unwrap(),
-        &key,
-        &[
-            CatalogField {
-                tag: 1,
-                wire_type: WireType::U16,
-                payload: object_kind.to_le_bytes().to_vec(),
-            },
-            CatalogField {
-                tag: 3,
-                wire_type: WireType::Text,
-                payload: name.as_bytes().to_vec(),
-            },
-            CatalogField {
-                tag: 4,
-                wire_type: WireType::Id,
-                payload: owner_id.to_vec(),
-            },
-            CatalogField {
-                tag: 5,
-                wire_type: WireType::U64,
-                payload: definition_epoch.to_le_bytes().to_vec(),
-            },
-            CatalogField {
-                tag: 6,
-                wire_type: WireType::U16,
-                payload: 1u16.to_le_bytes().to_vec(),
-            },
-        ],
-    )
-    .unwrap();
-    CatalogWrite {
-        key,
-        expected_value: None,
-        payload: Some(payload),
-    }
-}
-
 fn principal_object_write(principal_id: [u8; 16], principal_kind: u16) -> CatalogWrite {
     let object_kind = match principal_kind {
         1 => 8,
@@ -6742,18 +6695,16 @@ fn storage_manager_authorizes_identity_ddl_and_preserves_a_login_admin()
         revoke_old_event,
     )?;
 
-    let mut rename_user = principal_write_with_name(created_user, 1, 2, "renamed_user");
-    rename_user.expected_value = Some(current_value(&rename_user.key)?);
-    let mut rename_object =
-        principal_object_rename_write(created_user, 8, user_manager, "renamed_user", 2);
-    rename_object.expected_value = Some(current_value(&rename_object.key)?);
+    let mut rename_audit = identity_audit_event(0x83, user_manager, created_user);
+    rename_audit.correlation_id = id(0x83);
     assert_eq!(
-        storage.commit_authorized_identity_ddl(
+        storage.rename_identity(
             id(0x83),
             user_manager,
+            created_user,
+            "renamed_user",
             9_999,
-            &[rename_user, rename_object],
-            &[identity_audit_event(0x83, user_manager, created_user)],
+            rename_audit,
         )?,
         5
     );
@@ -6851,7 +6802,20 @@ fn storage_manager_authorizes_identity_ddl_and_preserves_a_login_admin()
         )?,
         8
     );
-    assert_eq!(commit_sequence(&database)?, 8);
+    let mut rename_role_audit = identity_audit_event(0x9a, admin_user, created_role);
+    rename_role_audit.correlation_id = id(0x9a);
+    assert_eq!(
+        storage.rename_identity(
+            id(0x9a),
+            admin_user,
+            created_role,
+            "renamed_created_role",
+            9_999,
+            rename_role_audit,
+        )?,
+        9
+    );
+    assert_eq!(commit_sequence(&database)?, 9);
     Ok(())
 }
 
