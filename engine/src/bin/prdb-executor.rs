@@ -38,6 +38,7 @@ mod worker {
         parameters_fd: i32,
         _planner_fd: i32,
         _executor_fd: i32,
+        _result_fd: i32,
     }
 
     pub fn main() {
@@ -71,13 +72,14 @@ mod worker {
     }
 
     fn parse_args(values: &[std::ffi::OsString]) -> Result<WorkerArgs, String> {
-        if values.len() != 8
+        if values.len() != 10
             || values[0] != "--library"
             || values[2] != "--parameters-fd"
             || values[4] != "--planner-fd"
             || values[6] != "--executor-fd"
+            || values[8] != "--result-fd"
         {
-            return Err("usage: prdb-executor --library ABSOLUTE_PATH --parameters-fd FD --planner-fd FD --executor-fd FD (or --self-check)".to_owned());
+            return Err("usage: prdb-executor --library ABSOLUTE_PATH --parameters-fd FD --planner-fd FD --executor-fd FD --result-fd FD (or --self-check)".to_owned());
         }
         let library = PathBuf::from(&values[1]);
         if !library.is_absolute() {
@@ -98,10 +100,21 @@ mod worker {
             .ok_or_else(|| "executor descriptor is not UTF-8".to_owned())?
             .parse::<i32>()
             .map_err(|_| "invalid executor descriptor".to_owned())?;
-        if parameters_fd < 3 || planner_fd < 3 || executor_fd < 3 {
+        let result_fd = values[9]
+            .to_str()
+            .ok_or_else(|| "result descriptor is not UTF-8".to_owned())?
+            .parse::<i32>()
+            .map_err(|_| "invalid result descriptor".to_owned())?;
+        if parameters_fd < 3 || planner_fd < 3 || executor_fd < 3 || result_fd < 3 {
             return Err("worker descriptors must be greater than stderr".to_owned());
         }
-        if parameters_fd == planner_fd || parameters_fd == executor_fd || planner_fd == executor_fd
+        let descriptors = [parameters_fd, planner_fd, executor_fd, result_fd];
+        if descriptors
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != descriptors.len()
         {
             return Err("worker descriptors must be distinct".to_owned());
         }
@@ -110,6 +123,7 @@ mod worker {
             parameters_fd,
             _planner_fd: planner_fd,
             _executor_fd: executor_fd,
+            _result_fd: result_fd,
         })
     }
 

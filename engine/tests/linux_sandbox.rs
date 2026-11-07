@@ -452,6 +452,8 @@ fn executor_host_rejects_direct_unconfined_launch_before_library_loading() {
             "4",
             "--executor-fd",
             "5",
+            "--result-fd",
+            "6",
         ])
         .output()
         .unwrap();

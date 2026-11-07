@@ -54,6 +54,7 @@ pub struct RunningExecutor {
     cgroup: Option<WorkerCgroup>,
     artifact_directory: Option<PrivateArtifactDirectory>,
     worker_channels: Option<(UnixStream, UnixStream)>,
+    result_stream: Option<UnixStream>,
     cleanup_timeout: Duration,
 }
 
@@ -73,29 +74,38 @@ struct WorkerChannelPair {
     planner_supervisor: UnixStream,
     executor_worker: UnixStream,
     executor_supervisor: UnixStream,
+    result_worker: UnixStream,
+    result_supervisor: UnixStream,
 }
 
 impl WorkerChannelPair {
     fn new() -> io::Result<Self> {
         let (planner_worker, planner_supervisor) = UnixStream::pair()?;
         let (executor_worker, executor_supervisor) = UnixStream::pair()?;
+        let (result_worker, result_supervisor) = UnixStream::pair()?;
         Ok(Self {
             planner_worker,
             planner_supervisor,
             executor_worker,
             executor_supervisor,
+            result_worker,
+            result_supervisor,
         })
     }
 
-    fn worker_fds(&self) -> [i32; 2] {
+    fn worker_fds(&self) -> [i32; 3] {
         [
             self.planner_worker.as_raw_fd(),
             self.executor_worker.as_raw_fd(),
+            self.result_worker.as_raw_fd(),
         ]
     }
 
-    fn into_supervisor_streams(self) -> (UnixStream, UnixStream) {
-        (self.planner_supervisor, self.executor_supervisor)
+    fn into_supervisor_streams(self) -> ((UnixStream, UnixStream), UnixStream) {
+        (
+            (self.planner_supervisor, self.executor_supervisor),
+            self.result_supervisor,
+        )
     }
 }
 
@@ -151,6 +161,13 @@ impl RunningExecutor {
         invocation.serve_worker_channels(planner, executor)
     }
 
+    /// Transfer the supervisor endpoint to the trusted result relay.
+    pub fn take_result_stream(&mut self) -> Result<UnixStream, SupervisorInvocationError> {
+        self.result_stream
+            .take()
+            .ok_or(SupervisorInvocationError::Closed)
+    }
+
     fn kill_reap_and_cleanup(&mut self) {
         if let Some(cgroup) = self.cgroup.as_ref() {
             let _ = cgroup.kill_all();
@@ -177,6 +194,7 @@ impl Drop for RunningExecutor {
         }
         self.artifact_directory.take();
         self.worker_channels.take();
+        self.result_stream.take();
     }
 }
 
@@ -268,12 +286,13 @@ impl PreparedExecutor {
                     .worker_channels
                     .take()
                     .expect("prepared worker channels");
-                let supervisor_streams = channels.into_supervisor_streams();
+                let (supervisor_streams, result_stream) = channels.into_supervisor_streams();
                 Ok(RunningExecutor {
                     child,
                     cgroup: self.cgroup.take(),
                     artifact_directory: self.artifact_directory.take(),
                     worker_channels: Some(supervisor_streams),
+                    result_stream: Some(result_stream),
                     cleanup_timeout: self.cleanup_timeout,
                 })
             }
@@ -331,7 +350,7 @@ fn build_command(
     }
     let ruleset = LandlockRuleset::new(&policy)?;
 
-    let [planner_fd, executor_fd] = channels.worker_fds();
+    let [planner_fd, executor_fd, result_fd] = channels.worker_fds();
     let mut command = Command::new(executor_path);
     command
         .arg("--library")
@@ -342,10 +361,12 @@ fn build_command(
         .arg(planner_fd.to_string())
         .arg("--executor-fd")
         .arg(executor_fd.to_string())
+        .arg("--result-fd")
+        .arg(result_fd.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let mut inherited_fds = vec![parameters.as_raw_fd(), planner_fd, executor_fd];
+    let mut inherited_fds = vec![parameters.as_raw_fd(), planner_fd, executor_fd, result_fd];
     inherited_fds.sort_unstable();
     inherited_fds.dedup();
     configure_worker_command(&mut command, cgroup.path(), &ruleset, &inherited_fds)?;
@@ -477,22 +498,31 @@ mod tests {
         use std::io::{Read, Write};
 
         let channels = WorkerChannelPair::new().unwrap();
-        let [planner_fd, executor_fd] = channels.worker_fds();
+        let [planner_fd, executor_fd, result_fd] = channels.worker_fds();
         assert!(planner_fd >= 3);
         assert!(executor_fd >= 3);
+        assert!(result_fd >= 3);
         assert_ne!(planner_fd, executor_fd);
+        assert_ne!(planner_fd, result_fd);
+        assert_ne!(executor_fd, result_fd);
 
         let mut planner_peer = channels.planner_supervisor.try_clone().unwrap();
         let mut executor_peer = channels.executor_supervisor.try_clone().unwrap();
+        let mut result_peer = channels.result_supervisor.try_clone().unwrap();
         let mut planner_worker = channels.planner_worker;
         let mut executor_worker = channels.executor_worker;
+        let mut result_worker = channels.result_worker;
         planner_worker.write_all(b"planner").unwrap();
         executor_worker.write_all(b"executor").unwrap();
+        result_worker.write_all(b"result").unwrap();
         let mut planner_request = [0; 7];
         let mut executor_request = [0; 8];
+        let mut result = [0; 6];
         planner_peer.read_exact(&mut planner_request).unwrap();
         executor_peer.read_exact(&mut executor_request).unwrap();
+        result_peer.read_exact(&mut result).unwrap();
         assert_eq!(&planner_request, b"planner");
         assert_eq!(&executor_request, b"executor");
+        assert_eq!(&result, b"result");
     }
 }

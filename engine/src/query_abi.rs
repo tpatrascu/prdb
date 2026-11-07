@@ -14,6 +14,7 @@ pub const QUERY_ENTRY_V2_SYMBOL: &str = "prdb_query_main_v2";
 pub const MAX_PARAMETER_BYTES: u64 = 1024 * 1024;
 pub const MAX_IPC_REQUEST_BYTES: u64 = 1024 * 1024;
 pub const MAX_RESULT_CHUNK_BYTES: u64 = 16 * 1024;
+pub const MAX_TOTAL_RESULT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Generic bounded callback for one request on a role-bound IPC channel.
 /// The channel determines authority; the operation remains subject to the
