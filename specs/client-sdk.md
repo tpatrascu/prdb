@@ -38,6 +38,8 @@ The artifact manifest declares target OS/architecture, CPU baseline, native ABI 
 
 Borrow SDK result values from immutable authorized batches until explicit batch release; do not allocate/copy every cell by default. The C API must make ownership and invalidation visible, and copied input validation remains necessary at the trust boundary. Follow [memory storage](memory-storage.md); no API exposes disk-page pointers or ring buffers.
 
+The first SDK value view is [`prdb_sdk_value_v1`](../engine/include/prdb_sdk_value_v1.h). It is a sized/versioned C record with a 32-bit state and type code, a borrowed byte pointer, and a 64-bit length. States are VALUE (0), NULL (1), and REDACTED (2); NULL and REDACTED have type code zero and no bytes. VALUE type codes 1 through 11 match the executor batch scalar codes, with fixed-width integers encoded big-endian, UUID as 16 bytes, Boolean as one byte containing zero or one, and text/varchar as UTF-8. Bytea is uninterpreted bytes. Empty text/bytea may use a null pointer with zero length. Values are capped at 1 MiB. The view never owns or frees its byte pointer; it stays valid only while its source batch remains borrowed. The validator checks record size/version, state/type, lengths, fixed widths, Boolean encoding, and UTF-8 validity. It cannot make an invalid native pointer safe to dereference. This is the initial SDK value primitive; batch handles, explicit batch release, and typed accessors remain future work.
+
 The SDK serves operational invocations first and also supports bounded analytical work. SQL analytical operators follow the [workload roadmap](workload-profile.md), run over authorized batches, and must not treat redaction as SQL null or omit denied inputs silently.
 
 ## Administrative SDK
