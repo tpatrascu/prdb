@@ -15,3 +15,9 @@
 - Changed code and contract: [staging state machine](../../engine/src/supervisor.rs) and [supervisor staging semantics](../../specs/supervisor.md).
 - Verification: workspace format, build, warning-denied Clippy, and `git diff --check` pass in the repository Nix shell. Tests were not run.
 - Remaining: connect STATUS/CANCEL to authenticated gateway frames and cover concurrent seal/cancel behavior in runtime tests when tests are authorized.
+
+## SU-5 verification: drain paired worker channels before commit
+
+- Evidence: a real-redb test closes planner/executor Unix peers, serves both channels, then sends FINALIZE through the supervisor-only terminal stream and verifies the durable owner outcome is COMMITTED.
+- Test: [paired worker drain and terminal commit](../../engine/tests/commit.rs).
+- Remaining: worker process launch/exit observation must decide whether successful user return justifies FINALIZE; clean socket EOF by itself is not evidence of process success.

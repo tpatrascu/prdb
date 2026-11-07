@@ -986,3 +986,17 @@
 - Changed code and fixtures: [gateway protocol decoder](../../engine/src/client_protocol.rs) and [decoder tests](../../engine/tests/client_protocol.rs).
 - Verification: focused `client_protocol` integration suite passed all 4 tests in the repository Nix shell.
 - Remaining: live gateway service, supervisor process provisioning, and sandboxed end-to-end persistence/reconciliation evidence.
+
+## SU-5 verification: paired worker drain before terminal commit
+
+- Behavior: one token-admitted supervisor invocation serves planner and executor Unix streams concurrently; clean EOF on both drains the channels, after which the supervisor terminal request commits and storage records a durable COMMITTED outcome.
+- Changed fixture: [real-redb paired worker stream regression](../../engine/tests/commit.rs).
+- Verification: focused `cargo test -p prdb-engine --test commit supervisor_drains_both_worker_channels_before_durable_finalize --locked` passed in the repository Nix shell.
+- Remaining: provision the streams to launched workers, observe their exit status, and require the worker process result before terminal commit.
+
+## NP-2 / SM-6 dependency: handshake request dispatch
+
+- Behavior: the request dispatcher handles HELLO/AUTH/PING frame state, rejects pre-HELLO requests and duplicate HELLO, and returns correlated sequence-zero responses. AUTH and operation revalidation use the storage session API.
+- Changed code and fixture: [client handshake state](../../engine/src/client_protocol.rs) and [Unix-stream/storage integration regressions](../../engine/tests/commit.rs).
+- Verification: full `cargo test --workspace --locked` passes; `cargo fmt --all -- --check`, workspace build, warning-denied Clippy, and `git diff --check` pass in the repository Nix shell.
+- Remaining: implement TCP/gateway service and trusted gateway-to-supervisor IPC; launch confined worker processes and reconcile their outcomes.

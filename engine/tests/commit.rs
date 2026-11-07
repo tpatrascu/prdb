@@ -7545,6 +7545,81 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
 }
 
 #[test]
+fn supervisor_drains_both_worker_channels_before_durable_finalize()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::ipc::{IpcFrame, Operation, encode_frame, read_frame};
+    use prdb_engine::supervisor_ipc::SUPERVISOR_PAYLOAD_VERSION;
+    use std::io::Cursor;
+    use std::os::unix::net::UnixStream;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
+    let user_id = id(0x70);
+    let token_id = id(0x71);
+    let secret = [0x31; 32];
+    commit_catalog_and_audit(
+        &database,
+        id(0x72),
+        id(9),
+        now + 3_600_000_000,
+        &[
+            principal_write_with_name(user_id, 1, 1, "worker_user"),
+            object_write_with_name(user_id, 8, "worker_user"),
+            credential_verifier_write(
+                token_id,
+                user_id,
+                &secret,
+                now - 1_000_000,
+                now + 60_000_000,
+                None,
+                1,
+            ),
+        ],
+        &[audit_event(0x72)],
+    )?;
+    let mut invocation = storage.admit_supervisor_invocation(
+        id(0x73),
+        token_id,
+        &secret,
+        now + 60_000_000,
+        2,
+        64,
+    )?;
+
+    let (planner_worker, planner_storage) = UnixStream::pair()?;
+    let (executor_worker, executor_storage) = UnixStream::pair()?;
+    drop(planner_worker);
+    drop(executor_worker);
+    invocation.serve_worker_channels(planner_storage, executor_storage)?;
+
+    let terminal = IpcFrame {
+        operation: Operation::FinalizeTransaction as u16,
+        request_id: 1,
+        payload: SUPERVISOR_PAYLOAD_VERSION.to_be_bytes().to_vec(),
+    };
+    let request_bytes = encode_frame(&terminal)?;
+    let response_start = request_bytes.len() as u64;
+    let mut terminal_stream = Cursor::new(request_bytes);
+    invocation.serve_terminal(&mut terminal_stream)?;
+    terminal_stream.set_position(response_start);
+    let response = read_frame(&mut terminal_stream)?.ok_or("missing terminal response")?;
+    assert_eq!(response.operation, Operation::FinalizeTransaction as u16);
+    assert_eq!(response.request_id, 1);
+    assert_eq!(response.payload[2], 0);
+    assert_eq!(
+        storage
+            .lookup_invocation_outcome(id(0x73), user_id, now + 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Committed
+    );
+    Ok(())
+}
+
+#[test]
 fn storage_manager_issues_and_revokes_tokens_for_manage_users()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::storage_manager::{TokenIssueRequest, TokenLifecycleError};

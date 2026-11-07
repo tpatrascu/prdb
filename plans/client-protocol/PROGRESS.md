@@ -32,5 +32,5 @@
 
 - Behavior: the connection session accepts HELLO as the first request, validates increasing request IDs, answers HELLO/AUTH/PING with bounded sequence-zero responses, and rejects pre-HELLO PING and repeated/out-of-order operations.
 - Changed code: [handshake dispatcher](../../engine/src/client_protocol.rs) and [client session integration regression](../../engine/tests/commit.rs).
-- Verification: focused real-redb handshake regression passes in the repository Nix shell.
+- Verification: focused real-redb handshake regression and full workspace tests pass; workspace format, build, and warning-denied Clippy also pass.
 - Remaining: dispatch query/control operation schemas and connect to TCP and the supervisor service channel.
