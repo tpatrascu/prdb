@@ -36,4 +36,4 @@ Test hostile protocol clients, library constructors, crashes, infinite loops, ch
 
 ## Open Questions
 
-The initial ABI target is Linux x86_64. Runtime v2 callback implementation, output quotas and relay, and the permitted threading profile remain open implementation work. The user query is dynamically loadable; the baseline links a prebuilt SQL SDK archive into it. A separately packaged SQL shared dependency and standalone executable support are future options. Shared-memory batches and process reuse are deferred.
+The initial ABI target is Linux x86_64. Runtime v2 callbacks, output quotas, and gateway relay are implemented in the Rust host and covered by Rust tests; `engine/tests/fixtures/query_abi_v2_callbacks.c` checks the public C callback contract under TinyCC. The permitted threading profile remains open. The user query is dynamically loadable; the baseline links a prebuilt SQL SDK archive into it. A separately packaged SQL shared dependency and standalone executable support are future options. Shared-memory batches and process reuse are deferred.
