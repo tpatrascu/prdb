@@ -34,3 +34,10 @@
 - Changed code: [handshake dispatcher](../../engine/src/client_protocol.rs) and [client session integration regression](../../engine/tests/commit.rs).
 - Verification: focused real-redb handshake regression and full workspace tests pass; workspace format, build, and warning-denied Clippy also pass.
 - Remaining: dispatch query/control operation schemas and connect to TCP and the supervisor service channel.
+
+## NP-2 / SU-1 integration: frame AUTH through storage
+
+- Behavior: the frame-level AUTH dispatcher decodes canonical credentials, calls storage, and returns only the opaque session ID; the real-redb fixture verifies the response correlates to the accepted request and contains no principal/token secret.
+- Test: [real-redb HELLO/AUTH/PING frame flow](../../engine/tests/commit.rs).
+- Verification: focused handshake regression passes; workspace formatting, build, warning-denied Clippy, and diff checks pass.
+- Remaining: network listener and gateway-service IPC integration.

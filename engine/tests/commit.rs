@@ -7488,9 +7488,34 @@ fn client_session_authenticates_and_revalidates_before_operations()
 fn client_handshake_requires_hello_first_and_sequences_responses()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::client_protocol::{ClientConnectionSession, ClientFrame, ClientSessionError};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
+    let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
+    let user_id = id(0x70);
+    let token_id = id(0x71);
+    let secret = [0; 32];
+    commit_catalog_and_audit(
+        &database,
+        id(0x72),
+        id(9),
+        now + 3_600_000_000,
+        &[
+            principal_write_with_name(user_id, 1, 1, "handshake_user"),
+            object_write_with_name(user_id, 8, "handshake_user"),
+            credential_verifier_write(
+                token_id,
+                user_id,
+                &secret,
+                now - 1_000_000,
+                now + 60_000_000,
+                None,
+                1,
+            ),
+        ],
+        &[audit_event(0x72)],
+    )?;
     let storage = StorageManager::new(&database, Duration::from_millis(100))?;
     let mut session = ClientConnectionSession::default();
     assert!(matches!(
@@ -7519,11 +7544,36 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
     assert_eq!(hello.response_sequence, 0);
     assert!(std::str::from_utf8(&hello.payload)?.contains("\"mode\":\"query\""));
 
+    let token_id_hex = token_id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let token_secret_base64 = "A".repeat(43) + "=";
+    let auth_payload =
+        format!("{{\"token_id\":\"{token_id_hex}\",\"token_secret\":\"{token_secret_base64}\"}}");
+    let auth = session.handle_handshake_request(
+        &storage,
+        ClientFrame {
+            kind: 2,
+            request_id: 3,
+            response_sequence: 0,
+            payload: auth_payload.into_bytes(),
+        },
+    )?;
+    assert_eq!(auth.kind, 100);
+    assert!(std::str::from_utf8(&auth.payload)?.contains("\"authenticated\":true"));
+    let session_id = session.session_id()?;
+    let encoded_session_id = session_id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert!(std::str::from_utf8(&auth.payload)?.contains(&encoded_session_id));
+
     let ping = session.handle_handshake_request(
         &storage,
         ClientFrame {
             kind: 11,
-            request_id: 3,
+            request_id: 4,
             response_sequence: 0,
             payload: b"{}".to_vec(),
         },
@@ -7534,7 +7584,7 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
             &storage,
             ClientFrame {
                 kind: 1,
-                request_id: 4,
+                request_id: 5,
                 response_sequence: 0,
                 payload: br#"{"mode":"query","client_name":"again"}"#.to_vec(),
             },

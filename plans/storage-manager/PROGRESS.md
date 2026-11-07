@@ -1007,3 +1007,10 @@
 - Test: [staging state-machine tests](../../engine/src/supervisor.rs).
 - Verification: `cargo test -p prdb-engine --lib supervisor::tests --locked` passed.
 - Remaining: live gateway upload flow and concurrency/quota stress under multiple sessions.
+
+## SU-1 integration: protocol AUTH dispatch into storage
+
+- Behavior: the HELLO/AUTH/PING frame handler routes AUTH through `StorageManager`, correlates a sequence-zero response, returns a nonsecret server session reference, and honors the strict JSON/base64 decoder.
+- Changed code and test: [client protocol session dispatcher](../../engine/src/client_protocol.rs) and [real-redb AUTH handshake regression](../../engine/tests/commit.rs).
+- Verification: focused handshake regression, workspace format/build, warning-denied Clippy, and `git diff --check` pass.
+- Remaining: use the dispatcher in a real loopback TCP gateway and provision authenticated gateway-service IPC.

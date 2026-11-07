@@ -905,8 +905,10 @@ mod tests {
             Err(StagingError::Unavailable)
         );
 
-        let mut limits = StagingLimits::default();
-        limits.reservation_ttl = Duration::from_millis(1);
+        let limits = StagingLimits {
+            reservation_ttl: Duration::from_millis(1),
+            ..StagingLimits::default()
+        };
         let expiring_store = StagingStore::new(limits, validator).unwrap();
         let expiring_owner = make_owner(10, 9);
         let expiring = expiring_store
