@@ -1401,10 +1401,10 @@
 
 - Behavior and normative contracts: [schema DDL](../../specs/ddl-schema.md), [client protocol](../../specs/client-protocol.md), and [storage-manager contract](../../specs/storage-manager.md). The table owner or a database administrator can rename a column on a non-system table. Storage preserves column ID, ordinal, tuple schema version, and dependencies; updates the family 6 and family 2 names and object version; and advances the table write epoch. Table-local uniqueness is checked against the serialized final catalog.
 - Implementation: [authorized column-rename commit path](../../engine/src/commit.rs), [storage entry point](../../engine/src/storage_manager.rs), and connection-owned PREPARE/START in [client protocol](../../engine/src/client_protocol.rs).
-- Regression evidence: the real-redb test verifies duplicate-name rejection with a durable aborted outcome and successful name agreement in both catalog records; the existing DDL lifecycle continues through table rename/drop and startup validation. The gateway ADMIN lifecycle test exercises `tables.rename_column` PREPARE/START, and the strict decoder test checks the request shape.
+- Regression evidence: the real-redb test verifies duplicate-name rejection with a durable aborted outcome and successful name agreement in both catalog records; a writer staged against the previous column schema conflicts after rename, publishes no row, and records an aborted outcome. The gateway ADMIN lifecycle test exercises `tables.rename_column` PREPARE/START, and the strict decoder test checks the request shape.
 - TDD note: the behavior test first failed with `InvalidRequest` against the compiling storage stub. Initial implementation exposed the family 6 name tag and schema-epoch behavior, which were corrected to match the catalog contract.
 - Verification: in the configured Nix shell, `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, and `git diff --check` all passed. Focused real-redb, protocol decoder, and gateway ADMIN PREPARE/START tests passed.
-- Remaining: DDL stale-writer race coverage, default changes, role-owner authorization regression, and separate supervisor/gateway process integration remain open.
+- Remaining: stale-writer coverage for default changes, DROP COLUMN, and index/constraint DDL, plus separate supervisor/gateway process integration.
 
 ## DS-5 / SM-5: current column default changes — implemented
 

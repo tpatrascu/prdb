@@ -1414,6 +1414,24 @@ fn storage_manager_renames_tables_and_drop_column_rewrites_rows()
             .status,
         OutcomeStatus::Aborted
     );
+    let stale_column_writer_invocation = id(0x86);
+    let stale_column_row = prdb_engine::overlay::RowId {
+        table: table.table_id,
+        row: id(0x87),
+    };
+    let mut stale_column_writer =
+        storage.begin_invocation(stale_column_writer_invocation, actor, 9_999, 1, 1024)?;
+    let stale_column_schema = stale_column_writer.load_catalog_table_schema(table.table_id)?;
+    stale_column_writer.load_catalog_indexes(&stale_column_schema)?;
+    let stale_column_tuple = encode_tuple(
+        &stale_column_schema.columns,
+        stale_column_schema.schema_version,
+        &[
+            Some(ScalarValue::Integer(17)),
+            Some(ScalarValue::Text("old shape".to_owned())),
+        ],
+    )?;
+    stale_column_writer.stage_put(stale_column_row, &stale_column_tuple)?;
     let column_rename = id(0x83);
     let mut column_rename_audit = identity_audit_event(0x84, actor, id(0x85));
     column_rename_audit.correlation_id = column_rename;
@@ -1432,6 +1450,25 @@ fn storage_manager_renames_tables_and_drop_column_rewrites_rows()
     );
     let column_rename_sequence = column_rename_result?;
     assert!(column_rename_sequence > table.commit_sequence);
+    assert!(matches!(
+        stale_column_writer.commit(),
+        Err(prdb_engine::transaction::TransactionError::Commit(
+            CommitError::Conflict
+        ))
+    ));
+    assert!(
+        row(
+            &database,
+            &table_row_key(table.table_id, stale_column_row.row)
+        )?
+        .is_none()
+    );
+    assert_eq!(
+        lookup_outcome(&database, stale_column_writer_invocation, actor, 1)?
+            .ok_or("missing stale column-rename writer outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
     {
         let read = database.begin_read()?;
         let catalog = read.open_table(CATALOG)?;
