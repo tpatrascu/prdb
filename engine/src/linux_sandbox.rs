@@ -8,6 +8,192 @@ use std::path::{Path, PathBuf};
 
 const REQUIRED_CGROUP_CONTROLLERS: [&str; 3] = ["cpu", "memory", "pids"];
 
+const LANDLOCK_ABI_REQUIRED: i32 = 3;
+
+/// Filesystem paths explicitly exposed to a worker before it starts.
+/// Unlisted filesystem access is denied by the Landlock ruleset.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Default)]
+pub struct LandlockPolicy {
+    rules: Vec<(PathBuf, u64)>,
+}
+
+#[cfg(target_os = "linux")]
+impl LandlockPolicy {
+    pub fn allow_read(&mut self, path: impl AsRef<Path>) -> io::Result<&mut Self> {
+        self.add_path(path.as_ref(), LANDLOCK_READ_ACCESS)
+    }
+
+    pub fn allow_read_execute(&mut self, path: impl AsRef<Path>) -> io::Result<&mut Self> {
+        self.add_path(path.as_ref(), LANDLOCK_READ_ACCESS | LANDLOCK_EXECUTE)
+    }
+
+    /// Grant read and write access, including creation, removal, and truncate
+    /// operations, beneath a directory.
+    pub fn allow_writable(&mut self, path: impl AsRef<Path>) -> io::Result<&mut Self> {
+        let path = path.as_ref();
+        if !path.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "writable Landlock rules require a directory",
+            ));
+        }
+        self.add_path(path, LANDLOCK_WRITE_ACCESS | LANDLOCK_READ_ACCESS)
+    }
+
+    fn add_path(&mut self, path: &Path, access: u64) -> io::Result<&mut Self> {
+        let path = path.canonicalize()?;
+        let metadata = path.metadata()?;
+        let access = if metadata.is_dir() {
+            access | LANDLOCK_READ_DIR
+        } else {
+            access & !LANDLOCK_READ_DIR
+        };
+        if let Some((_, existing)) = self.rules.iter_mut().find(|(item, _)| *item == path) {
+            *existing |= access;
+        } else {
+            self.rules.push((path, access));
+        }
+        Ok(self)
+    }
+}
+
+/// A prepared Landlock ruleset that can be installed in a worker child.
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+pub struct LandlockRuleset {
+    fd: std::os::fd::OwnedFd,
+}
+
+#[cfg(target_os = "linux")]
+impl LandlockRuleset {
+    pub fn new(policy: &LandlockPolicy) -> io::Result<Self> {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+        let abi = probe_landlock_abi()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "Landlock is unavailable"))?;
+        if abi < LANDLOCK_ABI_REQUIRED {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("Landlock ABI {LANDLOCK_ABI_REQUIRED} or newer is required"),
+            ));
+        }
+        let attr = LandlockRulesetAttr {
+            handled_access_fs: LANDLOCK_HANDLED_ACCESS,
+        };
+        // SAFETY: the attribute is initialized and remains valid for this syscall.
+        let fd = unsafe {
+            libc::syscall(
+                libc::SYS_landlock_create_ruleset,
+                &attr,
+                std::mem::size_of::<LandlockRulesetAttr>(),
+                0u32,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: successful create_ruleset returns a new owned file descriptor.
+        let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+        for (path, access) in &policy.rules {
+            add_landlock_path_rule(fd.as_raw_fd(), path, *access)?;
+        }
+        Ok(Self { fd })
+    }
+
+    /// Install the ruleset after earlier pre-exec hooks have placed the child
+    /// in its cgroup, and before `exec` transfers control to worker code.
+    #[cfg(unix)]
+    pub fn attach_command_before_exec(
+        &self,
+        command: &mut std::process::Command,
+    ) -> io::Result<()> {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        use std::os::unix::process::CommandExt;
+
+        // Duplicate in the parent so the child hook only performs syscalls.
+        // SAFETY: fcntl duplicates the valid ruleset descriptor.
+        let child_fd = unsafe { libc::fcntl(self.fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
+        if child_fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: fcntl returned a new owned descriptor.
+        let child_fd = unsafe { OwnedFd::from_raw_fd(child_fd) };
+        let raw_fd = child_fd.as_raw_fd();
+        // SAFETY: pre_exec uses only prctl and landlock_restrict_self, with a
+        // pre-opened descriptor. The captured OwnedFd remains alive through fork.
+        unsafe {
+            command.pre_exec(move || {
+                let _keep_ruleset_open = &child_fd;
+                if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                let result = libc::syscall(libc::SYS_landlock_restrict_self, raw_fd, 0u32);
+                if result < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct LandlockRulesetAttr {
+    handled_access_fs: u64,
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct LandlockPathBeneathAttr {
+    allowed_access: u64,
+    parent_fd: i32,
+    reserved: u32,
+}
+
+#[cfg(target_os = "linux")]
+const LANDLOCK_EXECUTE: u64 = 1 << 0;
+#[cfg(target_os = "linux")]
+const LANDLOCK_READ_DIR: u64 = 1 << 3;
+#[cfg(target_os = "linux")]
+const LANDLOCK_READ_ACCESS: u64 = 1 << 2;
+#[cfg(target_os = "linux")]
+const LANDLOCK_WRITE_ACCESS: u64 = (1 << 1) | (0x1ff << 4) | (1 << 13) | (1 << 14);
+#[cfg(target_os = "linux")]
+const LANDLOCK_HANDLED_ACCESS: u64 = (1 << 15) - 1;
+
+#[cfg(target_os = "linux")]
+fn add_landlock_path_rule(ruleset_fd: i32, path: &Path, access: u64) -> io::Result<()> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    let path_c = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Landlock path contains NUL"))?;
+    // SAFETY: the canonical path is a NUL-terminated string and open returns
+    // an O_PATH descriptor used only for this rule addition.
+    let path_fd = unsafe { libc::open(path_c.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+    if path_fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: path_fd is an owned descriptor returned by open.
+    let path_fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(path_fd) };
+    let attr = LandlockPathBeneathAttr {
+        allowed_access: access,
+        parent_fd: path_fd.as_raw_fd(),
+        reserved: 0,
+    };
+    // SAFETY: attr is initialized and both descriptors are valid for the call.
+    let result =
+        unsafe { libc::syscall(libc::SYS_landlock_add_rule, ruleset_fd, 1u32, &attr, 0u32) };
+    if result < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 /// Per-invocation resource ceilings for a non-root cgroup v2 leaf.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WorkerResourceLimits {
@@ -299,8 +485,11 @@ impl SandboxCapabilityReport {
         if !self.user_namespaces {
             missing.push("user namespaces");
         }
-        if self.landlock_abi.is_none_or(|abi| abi < 1) {
-            missing.push("Landlock ABI 1 or newer");
+        if self
+            .landlock_abi
+            .is_none_or(|abi| abi < LANDLOCK_ABI_REQUIRED)
+        {
+            missing.push("Landlock ABI 3 or newer");
         }
         if !self.seccomp_kill_process {
             missing.push("seccomp filter with KILL_PROCESS");

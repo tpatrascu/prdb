@@ -143,3 +143,52 @@ fn sandbox_probe_rejects_regular_directory_as_cgroup_v2_mount() {
     assert!(!report.cgroup_v2_mounted);
     assert!(report.missing_requirements().contains(&"cgroup v2 mount"));
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn landlock_blocks_unlisted_filesystem_reads_before_exec() {
+    use prdb_engine::linux_sandbox::{LandlockPolicy, LandlockRuleset};
+    use std::process::{Command, Stdio};
+
+    let fixture = Fixture::new();
+    let mut policy = LandlockPolicy::default();
+    for path in [
+        "/bin",
+        "/usr/bin",
+        "/lib",
+        "/lib64",
+        "/usr/lib",
+        "/usr/lib64",
+        "/nix/store",
+    ] {
+        if std::path::Path::new(path).exists() {
+            policy.allow_read_execute(path).unwrap();
+        }
+    }
+    if std::path::Path::new("/etc/ld.so.cache").exists() {
+        policy.allow_read("/etc/ld.so.cache").unwrap();
+    }
+    policy.allow_writable(&fixture.0).unwrap();
+    let ruleset = LandlockRuleset::new(&policy).unwrap();
+    let marker = fixture.0.join("landlock-result");
+    let resolve = |name: &str| {
+        std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|directory| directory.join(name))
+            .find(|candidate| candidate.is_file())
+            .unwrap()
+    };
+    let shell = resolve("sh");
+    let cat = resolve("cat");
+    let mut command = Command::new(shell);
+    command
+        .args([
+            "-c",
+            &format!("{} /etc/passwd; printf '%s' \"$?\" > \"$1\"", cat.display()),
+            "worker",
+            marker.to_str().unwrap(),
+        ])
+        .stdout(Stdio::null());
+    ruleset.attach_command_before_exec(&mut command).unwrap();
+    assert!(command.status().unwrap().success());
+    assert_eq!(fs::read_to_string(marker).unwrap(), "1");
+}

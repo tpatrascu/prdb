@@ -14,12 +14,12 @@ Contain arbitrary native worker code using Linux OS mechanisms without a VM. The
 - Only explicitly provisioned descriptors and approved runtime resources.
 - Bounded CPU, memory, process count, output, and wall time.
 
-Use user, mount, network, and PID namespaces, filesystem restrictions, Landlock, and a narrow seccomp allowlist as complementary mechanisms. The initial launch profile requires Landlock ABI 1 or newer, seccomp filter support with `KILL_PROCESS`, and a writable delegated cgroup v2 parent with the `cpu`, `memory`, and `pids` controllers enabled. The `prdb-engine::linux_sandbox::probe` report is a preflight only; the launcher must still establish each restriction for the worker and fail closed if any setup operation fails. This profile requires rootless user namespaces and delegated cgroup v2 control; there is no weaker launch fallback.
+Use user, mount, network, and PID namespaces, filesystem restrictions, Landlock, and a narrow seccomp allowlist as complementary mechanisms. The initial launch profile requires Landlock ABI 3 or newer, seccomp filter support with `KILL_PROCESS`, and a writable delegated cgroup v2 parent with the `cpu`, `memory`, and `pids` controllers enabled. ABI 3 is required so the ruleset can handle filesystem reference and truncate operations along with the original filesystem rights. The `prdb-engine::linux_sandbox::probe` report is a preflight only; the launcher must still establish each restriction for the worker and fail closed if any setup operation fails. This profile requires rootless user namespaces and delegated cgroup v2 control; there is no weaker launch fallback.
 
 ## Launch Ordering
 
 1. A trusted launch path creates the execution environment and scoped channels.
-2. Establish filesystem/process/network isolation and resource controls.
+2. Establish filesystem/process/network isolation and resource controls. Register cgroup placement first, then install Landlock in a child-side pre-exec hook; both must succeed before `exec`.
 3. Remove inherited descriptors, environment secrets, capabilities, and unwanted access.
 4. Apply required restrictions before transferring control to any untrusted code.
 5. In the clean executor host, load the admitted immutable query.so and supported dependencies only inside that confinement, then invoke its entry point.
@@ -35,6 +35,8 @@ The TinyCC-produced C library, prebuilt C SDK, libc dependencies, and Rust execu
 ## Capability Detection and Failure
 
 Verify the minimum supported feature profile before launch. The capability probe verifies cgroup v2 using the filesystem type, not just a `cgroup.controllers` filename. Capability presence does not prove that namespace, Landlock, seccomp, or cgroup setup will succeed for a particular worker; each setup step must be checked at launch before transferring control to the executor. Fail closed when required restrictions are unavailable; never silently run with weaker isolation. Rootless deployment feasibility and cgroup delegation depend on the host configuration and require explicit validation.
+
+`LandlockPolicy` builds explicit read, read/execute, and writable path rules. `LandlockRuleset` handles filesystem access, creates a ruleset only on ABI 3 or newer, and installs it in the child with `no_new_privs` before `exec`; paths without a rule are denied for handled filesystem rights. Register `WorkerCgroup::attach_command_before_exec` before the Landlock hook, because cgroup placement must happen before filesystem rights are narrowed. These helpers are not yet wired into the full confined worker launcher.
 
 The supervisor must clean up descendants and resources after crashes or timeouts and request transaction abort before commit. Killing a process does not undo a durable commit. Storage retains version pins until its own in-flight tasks drain. Sandbox limits do not replace storage-side request, write-set, and history-retention budgets.
 
