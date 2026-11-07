@@ -66,4 +66,12 @@
 - Contract: [supervisor lifecycle](../../specs/supervisor.md) and [executor lifecycle](../../specs/query-worker.md).
 - Verification: launcher unit tests, authenticated START fail-closed regression, and gateway listener integration passed; after routing START, workspace build, format check, warning-denied Clippy, all workspace tests, and `git diff --check` passed in the repository Nix shell.
 - Limitation: this machine's cgroup mount is read only, so successful process launch, real cgroup cleanup, and dynamic loading remain unverified. Runtime filesystem paths are explicit caller configuration and need a pinned deployment profile.
-- Remaining: gateway START is now routed through this helper; provision planner/storage IPC, then validate a real launch on a writable delegated cgroup host before claiming process-level integration.
+- Remaining: gateway START and paired worker channel provisioning are integrated. Add documented host callbacks to a new query ABI version, result relay, then validate a real launch on a writable delegated cgroup host before claiming process-level integration.
+
+## SU-5 / EX-1: bind worker storage channels to the executor lifetime — implemented, ABI callbacks pending
+
+- Behavior: each prepared executor owns separate planner and executor Unix socket pairs. The launcher passes only the worker endpoints through the cleaned descriptor list and command line; `RunningExecutor::observe_exit` serves the trusted endpoints concurrently through `SupervisorInvocation`, waits for both streams to drain, then reaps the process and checks cgroup emptiness before authorizing success.
+- Regression: launcher unit coverage verifies both connected pairs and distinct descriptors. The existing storage-manager drain/finalize regression covers concurrent handler drain and refusal to finalize before worker exit observation. No user library was loaded.
+- Contract: [supervisor lifecycle](../../specs/supervisor.md), [query worker](../../specs/query-worker.md), and [storage manager](../../specs/storage-manager.md).
+- Limitation: successful cgroup-backed spawn remains unavailable on this host; ABI v1 has no callbacks, so SDK query code cannot make documented requests over these channels.
+- Remaining: define and implement a new sized query ABI with bounded executor/planner operations and output relay, then exercise the actual C callback path inside the complete sandbox harness.

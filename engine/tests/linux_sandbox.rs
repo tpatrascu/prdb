@@ -443,7 +443,16 @@ fn executor_host_rejects_direct_unconfined_launch_before_library_loading() {
 
     let executable = env!("CARGO_BIN_EXE_prdb-executor");
     let output = Command::new(executable)
-        .args(["--library", "/etc/passwd", "--parameters-fd", "3"])
+        .args([
+            "--library",
+            "/etc/passwd",
+            "--parameters-fd",
+            "3",
+            "--planner-fd",
+            "4",
+            "--executor-fd",
+            "5",
+        ])
         .output()
         .unwrap();
     assert!(!output.status.success());

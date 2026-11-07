@@ -12,6 +12,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::Duration;
@@ -52,6 +53,7 @@ pub struct RunningExecutor {
     child: Child,
     cgroup: Option<WorkerCgroup>,
     artifact_directory: Option<PrivateArtifactDirectory>,
+    worker_channels: Option<(UnixStream, UnixStream)>,
     cleanup_timeout: Duration,
 }
 
@@ -62,7 +64,39 @@ pub struct PreparedExecutor {
     parameters: Option<File>,
     cgroup: Option<WorkerCgroup>,
     artifact_directory: Option<PrivateArtifactDirectory>,
+    worker_channels: Option<WorkerChannelPair>,
     cleanup_timeout: Duration,
+}
+
+struct WorkerChannelPair {
+    planner_worker: UnixStream,
+    planner_supervisor: UnixStream,
+    executor_worker: UnixStream,
+    executor_supervisor: UnixStream,
+}
+
+impl WorkerChannelPair {
+    fn new() -> io::Result<Self> {
+        let (planner_worker, planner_supervisor) = UnixStream::pair()?;
+        let (executor_worker, executor_supervisor) = UnixStream::pair()?;
+        Ok(Self {
+            planner_worker,
+            planner_supervisor,
+            executor_worker,
+            executor_supervisor,
+        })
+    }
+
+    fn worker_fds(&self) -> [i32; 2] {
+        [
+            self.planner_worker.as_raw_fd(),
+            self.executor_worker.as_raw_fd(),
+        ]
+    }
+
+    fn into_supervisor_streams(self) -> (UnixStream, UnixStream) {
+        (self.planner_supervisor, self.executor_supervisor)
+    }
 }
 
 #[derive(Debug)]
@@ -83,6 +117,12 @@ impl RunningExecutor {
         &mut self,
         invocation: &SupervisorInvocation<'_>,
     ) -> Result<ExitStatus, SupervisorInvocationError> {
+        if self.worker_channels.is_some()
+            && let Err(error) = self.serve_worker_channels(invocation)
+        {
+            self.kill_reap_and_cleanup();
+            return Err(error);
+        }
         let cgroup = self
             .cgroup
             .take()
@@ -95,6 +135,32 @@ impl RunningExecutor {
         }
         self.artifact_directory.take();
         result
+    }
+
+    /// Serve the invocation's planner and executor endpoints concurrently.
+    /// `observe_exit` calls this automatically if the caller has not already
+    /// started the channel service.
+    pub fn serve_worker_channels(
+        &mut self,
+        invocation: &SupervisorInvocation<'_>,
+    ) -> Result<(), SupervisorInvocationError> {
+        let (planner, executor) = self
+            .worker_channels
+            .take()
+            .ok_or(SupervisorInvocationError::Closed)?;
+        invocation.serve_worker_channels(planner, executor)
+    }
+
+    fn kill_reap_and_cleanup(&mut self) {
+        if let Some(cgroup) = self.cgroup.as_ref() {
+            let _ = cgroup.kill_all();
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Some(cgroup) = self.cgroup.take() {
+            let _ = cgroup.cleanup(self.cleanup_timeout);
+        }
+        self.artifact_directory.take();
     }
 }
 
@@ -110,6 +176,7 @@ impl Drop for RunningExecutor {
             let _ = self.child.wait();
         }
         self.artifact_directory.take();
+        self.worker_channels.take();
     }
 }
 
@@ -132,8 +199,17 @@ pub fn start_and_launch_executor<T, E>(
         cgroup_parent,
         limits,
         |submission, cgroup| {
-            let prepared =
-                prepare_executor(submission, cgroup, config).map_err(ExecutorStartError::Launch)?;
+            let channels = match WorkerChannelPair::new() {
+                Ok(channels) => channels,
+                Err(error) => {
+                    return Err(ExecutorStartError::Launch(ExecutorLaunchError {
+                        launch_error: error,
+                        cleanup_error: cgroup.cleanup(config.cleanup_timeout).err(),
+                    }));
+                }
+            };
+            let prepared = prepare_executor(submission, cgroup, channels, config)
+                .map_err(ExecutorStartError::Launch)?;
             let admitted = match admit(submission) {
                 Ok(admitted) => admitted,
                 Err(error) => {
@@ -151,17 +227,19 @@ pub fn start_and_launch_executor<T, E>(
 
 /// Materialize staged bytes privately and install the pre-exec restrictions.
 /// The returned host process is not started until `PreparedExecutor::spawn`.
-pub fn prepare_executor(
+fn prepare_executor(
     submission: &SealedSubmission,
     cgroup: WorkerCgroup,
+    channels: WorkerChannelPair,
     config: &ExecutorLaunchConfig,
 ) -> Result<PreparedExecutor, ExecutorLaunchError> {
-    match build_command(submission, &cgroup, config) {
+    match build_command(submission, &cgroup, &channels, config) {
         Ok((command, parameters, artifact_directory)) => Ok(PreparedExecutor {
             command,
             parameters: Some(parameters),
             cgroup: Some(cgroup),
             artifact_directory: Some(artifact_directory),
+            worker_channels: Some(channels),
             cleanup_timeout: config.cleanup_timeout,
         }),
         Err(launch_error) => Err(ExecutorLaunchError {
@@ -186,10 +264,16 @@ impl PreparedExecutor {
         match self.command.spawn() {
             Ok(child) => {
                 self.parameters.take();
+                let channels = self
+                    .worker_channels
+                    .take()
+                    .expect("prepared worker channels");
+                let supervisor_streams = channels.into_supervisor_streams();
                 Ok(RunningExecutor {
                     child,
                     cgroup: self.cgroup.take(),
                     artifact_directory: self.artifact_directory.take(),
+                    worker_channels: Some(supervisor_streams),
                     cleanup_timeout: self.cleanup_timeout,
                 })
             }
@@ -212,12 +296,14 @@ impl Drop for PreparedExecutor {
         }
         self.artifact_directory.take();
         self.parameters.take();
+        self.worker_channels.take();
     }
 }
 
 fn build_command(
     submission: &SealedSubmission,
     cgroup: &WorkerCgroup,
+    channels: &WorkerChannelPair,
     config: &ExecutorLaunchConfig,
 ) -> io::Result<(Command, File, PrivateArtifactDirectory)> {
     let executor_path = config.executor_path.canonicalize()?;
@@ -245,21 +331,24 @@ fn build_command(
     }
     let ruleset = LandlockRuleset::new(&policy)?;
 
+    let [planner_fd, executor_fd] = channels.worker_fds();
     let mut command = Command::new(executor_path);
     command
         .arg("--library")
         .arg(&artifact_directory.artifact_path)
         .arg("--parameters-fd")
         .arg(parameters.as_raw_fd().to_string())
+        .arg("--planner-fd")
+        .arg(planner_fd.to_string())
+        .arg("--executor-fd")
+        .arg(executor_fd.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    configure_worker_command(
-        &mut command,
-        cgroup.path(),
-        &ruleset,
-        &[parameters.as_raw_fd()],
-    )?;
+    let mut inherited_fds = vec![parameters.as_raw_fd(), planner_fd, executor_fd];
+    inherited_fds.sort_unstable();
+    inherited_fds.dedup();
+    configure_worker_command(&mut command, cgroup.path(), &ruleset, &inherited_fds)?;
     Ok((command, parameters, artifact_directory))
 }
 
@@ -337,7 +426,7 @@ fn create_sealed_parameters(parameters: &[u8]) -> io::Result<File> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PrivateArtifactDirectory, create_sealed_parameters};
+    use super::{PrivateArtifactDirectory, WorkerChannelPair, create_sealed_parameters};
     use std::io::{Read, Seek, SeekFrom, Write};
     use std::os::unix::fs::PermissionsExt;
 
@@ -381,5 +470,29 @@ mod tests {
         assert_eq!(bytes, b"params");
         assert!(parameters.seek(SeekFrom::Start(0)).is_ok());
         assert!(parameters.write_all(b"x").is_err());
+    }
+
+    #[test]
+    fn planner_and_executor_stream_pairs_are_distinct_and_connected() {
+        use std::io::{Read, Write};
+
+        let channels = WorkerChannelPair::new().unwrap();
+        let [planner_fd, executor_fd] = channels.worker_fds();
+        assert!(planner_fd >= 3);
+        assert!(executor_fd >= 3);
+        assert_ne!(planner_fd, executor_fd);
+
+        let mut planner_peer = channels.planner_supervisor.try_clone().unwrap();
+        let mut executor_peer = channels.executor_supervisor.try_clone().unwrap();
+        let mut planner_worker = channels.planner_worker;
+        let mut executor_worker = channels.executor_worker;
+        planner_worker.write_all(b"planner").unwrap();
+        executor_worker.write_all(b"executor").unwrap();
+        let mut planner_request = [0; 7];
+        let mut executor_request = [0; 8];
+        planner_peer.read_exact(&mut planner_request).unwrap();
+        executor_peer.read_exact(&mut executor_request).unwrap();
+        assert_eq!(&planner_request, b"planner");
+        assert_eq!(&executor_request, b"executor");
     }
 }
