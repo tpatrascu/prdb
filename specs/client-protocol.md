@@ -81,7 +81,7 @@ Every RESULT_DATA frame is provisional until COMMITTED. An aborted invocation in
 
 ## Control Operations and Administration
 
-STATUS `{ "invocation_id": id }` returns an authorized state: `prepared`, `active`, `committing`, `committed`, `aborted`, `unknown`, or `expired`. Prepared is ephemeral and means no execution has started. Query mode is owner-scoped; control mode revalidates current database-administrator authority before returning another owner's live or retained terminal state. Missing and inaccessible IDs use the same non-disclosing response category. Committed/aborted recovery status comes from storage, not gateway memory.
+STATUS `{ "invocation_id": id }` returns an authorized state: `prepared`, `active`, `committing`, `committed`, `aborted`, `unknown`, or `expired`. Prepared is ephemeral and means no execution has started. Query mode is owner-scoped. Control mode can reconcile the caller's own live or retained outcome, including an ADMIN mutation outcome; looking up another owner's live or retained terminal state requires current database-administrator authority. Committed/aborted recovery status comes from storage, not gateway memory.
 
 CANCEL `{ "invocation_id": id }` returns `accepted`, `too_late`, or an authorized terminal state. Query mode cancels only the caller's prepared or active invocation. Control mode revalidates current database-administrator authority and records an administrative cancellation audit before reporting its decision. Cancellation accepted before COMMIT submission prevents commit; after submission, report too_late/pending resolution. Cancelling prepared staging removes it without starting a transaction. Status/cancellation acknowledgements are not synthetic transaction terminal events.
 

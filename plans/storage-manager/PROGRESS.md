@@ -1295,5 +1295,5 @@
 ## SM-5 / NP-5 dependency: reconcile a lost ADMIN mutation reply
 
 - Behavior: after a prepared token revocation commits, an authorized database administrator can query STATUS with the operation ID and retrieve its durable committed outcome. The client does not repeat START when the original response is unavailable.
-- Regression evidence: the real-redb ADMIN lifecycle test discards the revocation response payload, then queries the operation ID from a separate administrator control session and receives `committed`.
-- Remaining: operation-status authorization for non-database-admin mutation actors, other ADMIN operations, and separate supervisor/worker process integration.
+- Regression evidence: the real-redb ADMIN lifecycle test discards the revocation response payload, then queries the operation ID from both a separate token-manager session and a database-administrator control session; each receives `committed`.
+- Remaining: other ADMIN operations and separate supervisor/worker process integration.

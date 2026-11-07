@@ -1241,8 +1241,18 @@ impl ClientConnectionSession {
         let now_us = current_unix_micros().ok_or(ClientSessionError::UnsupportedRequest)?;
         if self.hello == Some(ClientMode::Control) {
             let snapshot = storage
-                .get_administrative_invocation_status(session.principal_id(), invocation_id, now_us)
-                .map_err(ClientSessionError::AdministrativeStatus)?;
+                .get_invocation_status(invocation_id, session.principal_id(), now_us)
+                .map_err(ClientSessionError::Status)?;
+            let snapshot = match snapshot {
+                Some(snapshot) => Some(snapshot),
+                None => storage
+                    .get_administrative_invocation_status(
+                        session.principal_id(),
+                        invocation_id,
+                        now_us,
+                    )
+                    .map_err(ClientSessionError::AdministrativeStatus)?,
+            };
             let payload = match snapshot.map(|snapshot| snapshot.status) {
                 Some(crate::storage_manager::InvocationStatus::Active { .. }) => {
                     b"{\"state\":\"active\"}".to_vec()

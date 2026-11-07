@@ -3292,6 +3292,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         credential_verifier_write(id(236), backup_admin_id, &[0x6a; 32], 1, i64::MAX, None, 1),
         credential_verifier_write(id(237), admin_id, &[0x5a; 32], 1, i64::MAX, None, 1),
         credential_verifier_write(id(240), user_manager_id, &[0x4b; 32], 1, i64::MAX, None, 1),
+        credential_verifier_write(id(241), user_manager_id, &[0x3c; 32], 1, i64::MAX, None, 1),
     ];
     let mut setup_audit = audit_event(216);
     setup_audit.actor_id = Some(admin_role);
@@ -3712,6 +3713,23 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         }
     };
     drop(revoke);
+    let mut manager_recovery_control = ClientConnectionSession::default();
+    manager_recovery_control.accept_hello(ClientMode::Control, "token-manager-recovery")?;
+    manager_recovery_control.authenticate(&storage, id(241), &[0x3c; 32])?;
+    let owner_reconciled_revoke = manager_recovery_control.handle_status_request(
+        &storage,
+        &staging,
+        ClientFrame {
+            kind: 8,
+            request_id: 6,
+            response_sequence: 0,
+            payload: format!("{{\"invocation_id\":\"{operation_id}\"}}").into_bytes(),
+        },
+    )?;
+    assert_eq!(
+        owner_reconciled_revoke.payload,
+        b"{\"state\":\"committed\"}"
+    );
     let reconciled_revoke = control.handle_status_request(
         &storage,
         &staging,
