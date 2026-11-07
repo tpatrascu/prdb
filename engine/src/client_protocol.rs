@@ -1,5 +1,9 @@
 //! Bounded framing primitives for client network protocol version 1.0.
 
+use crate::credentials::TOKEN_SECRET_BYTES;
+use crate::storage_manager::{AuthenticatedQuerySession, StorageManager};
+use crate::supervisor::StagingOwner;
+use crate::transaction::TransactionError;
 use std::collections::HashMap;
 
 pub const CLIENT_FRAME_HEADER_BYTES: usize = 32;
@@ -47,6 +51,114 @@ impl std::fmt::Display for ClientFrameError {
 }
 
 impl std::error::Error for ClientFrameError {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClientMode {
+    Query,
+    Control,
+}
+
+#[derive(Debug)]
+pub enum ClientSessionError {
+    InvalidHello,
+    HelloAlreadyAccepted,
+    AuthenticationOutOfOrder,
+    AlreadyAuthenticated,
+    AuthenticationRequired,
+    WrongMode,
+    Storage(TransactionError),
+}
+
+impl std::fmt::Display for ClientSessionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "client session error: {self:?}")
+    }
+}
+
+impl std::error::Error for ClientSessionError {}
+
+/// Per-connection authentication and mode state used by the gateway dispatcher.
+/// It holds no token secret and gives staging authority only after storage AUTH.
+#[derive(Default)]
+pub struct ClientConnectionSession {
+    hello: Option<ClientMode>,
+    authenticated: Option<AuthenticatedQuerySession>,
+}
+
+impl ClientConnectionSession {
+    /// Accept the one HELLO for this connection before any AUTH request.
+    pub fn accept_hello(
+        &mut self,
+        mode: ClientMode,
+        client_name: &str,
+    ) -> Result<(), ClientSessionError> {
+        if self.hello.is_some() {
+            return Err(ClientSessionError::HelloAlreadyAccepted);
+        }
+        if client_name.len() > 128 || self.authenticated.is_some() {
+            return Err(ClientSessionError::InvalidHello);
+        }
+        self.hello = Some(mode);
+        Ok(())
+    }
+
+    /// Authenticate using storage's current token and login/role snapshot.
+    /// Callers should map all storage authentication failures to one public
+    /// unauthenticated response category.
+    pub fn authenticate(
+        &mut self,
+        storage: &StorageManager<'_>,
+        token_id: [u8; 16],
+        token_secret: &[u8; TOKEN_SECRET_BYTES],
+    ) -> Result<&AuthenticatedQuerySession, ClientSessionError> {
+        if self.hello.is_none() {
+            return Err(ClientSessionError::AuthenticationOutOfOrder);
+        }
+        if self.authenticated.is_some() {
+            return Err(ClientSessionError::AlreadyAuthenticated);
+        }
+        let session = storage
+            .authenticate_query_session(token_id, token_secret)
+            .map_err(ClientSessionError::Storage)?;
+        self.authenticated = Some(session);
+        Ok(self
+            .authenticated
+            .as_ref()
+            .expect("session was just stored"))
+    }
+
+    pub fn session_id(&self) -> Result<[u8; 16], ClientSessionError> {
+        self.authenticated
+            .as_ref()
+            .map(AuthenticatedQuerySession::connection_id)
+            .ok_or(ClientSessionError::AuthenticationRequired)
+    }
+
+    /// Return the authenticated owner required for query staging.
+    pub fn staging_owner(&self) -> Result<StagingOwner, ClientSessionError> {
+        if self.hello != Some(ClientMode::Query) {
+            return Err(ClientSessionError::WrongMode);
+        }
+        self.authenticated
+            .as_ref()
+            .map(AuthenticatedQuerySession::staging_owner)
+            .ok_or(ClientSessionError::AuthenticationRequired)
+    }
+
+    /// Enforce the v1 mode and pre-authentication operation allowlists.
+    pub fn permits_request_kind(&self, kind: u16) -> bool {
+        let Some(mode) = self.hello else {
+            return kind == 1 || kind == 11;
+        };
+        let Some(_) = self.authenticated else {
+            return kind == 2 || kind == 11;
+        };
+        match mode {
+            ClientMode::Query => (3..=9).contains(&kind) || kind == 11,
+            ClientMode::Control => (8..=10).contains(&kind) || kind == 11,
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct ClientFrameDecoder {

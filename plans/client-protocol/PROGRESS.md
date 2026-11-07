@@ -6,4 +6,11 @@
 - Contract: [client network protocol](../../specs/client-protocol.md).
 - Changed code: [frame codec and sequence state](../../engine/src/client_protocol.rs) and [module export](../../engine/src/lib.rs).
 - Verification: workspace format, build, warning-denied Clippy, and `git diff --check` pass in the repository Nix shell. Tests were not run.
-- Remaining: strict JSON/base64 operation decoding, HELLO/AUTH/session state, live TCP/gateway integration, fuzzing and golden fragmented-frame fixtures.
+- Remaining: strict JSON/base64 operation decoding, live TCP/gateway integration, fuzzing and golden fragmented-frame fixtures.
+
+## NP-2 dependency: per-connection HELLO/AUTH state
+
+- Behavior: `ClientConnectionSession` accepts one HELLO, requires storage authentication before authenticated operations, stores only the non-secret identity context, enforces query/control request-kind allowlists, and derives query staging ownership from storage-authenticated identity.
+- Changed code and contract: [client session state](../../engine/src/client_protocol.rs) and [HELLO/AUTH mode rules](../../specs/client-protocol.md).
+- Verification: repository Nix-shell formatting, workspace build, warning-denied Clippy, and `git diff --check` pass. Tests were not run.
+- Remaining: strict JSON/base64 wire decoding, TCP listener and service integration, and per-operation current-authority revalidation.
