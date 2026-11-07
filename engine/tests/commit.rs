@@ -7481,12 +7481,12 @@ fn client_session_authenticates_and_revalidates_before_operations()
 fn client_handshake_requires_hello_first_and_sequences_responses()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::client_protocol::{ClientConnectionSession, ClientFrame, ClientSessionError};
-    use prdb_engine::ipc::{IpcFrame, Operation, read_frame, write_frame};
     use prdb_engine::supervisor::{
         StagingLimits, StagingStore, SubmissionMetadata, SubmissionMetadataValidator,
     };
     use prdb_engine::supervisor_ipc::GatewayAdmissionConfig;
     use sha2::{Digest, Sha256};
+    use std::net::{TcpListener, TcpStream};
     use std::os::unix::net::UnixStream;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -7565,9 +7565,14 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    let (mut service, mut gateway) = UnixStream::pair()?;
+    let (mut service, mut ipc_gateway) = UnixStream::pair()?;
     service.set_read_timeout(Some(Duration::from_secs(10)))?;
+    ipc_gateway.set_read_timeout(Some(Duration::from_secs(10)))?;
+    let tcp_listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let mut gateway = TcpStream::connect(tcp_listener.local_addr()?)?;
+    let (mut gateway_tcp, _) = tcp_listener.accept()?;
     gateway.set_read_timeout(Some(Duration::from_secs(10)))?;
+    gateway_tcp.set_read_timeout(Some(Duration::from_secs(10)))?;
     let mut session = std::thread::scope(|scope| {
         let storage_ref = &storage;
         let staging_ref = &staging;
@@ -7627,29 +7632,45 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
             }
         });
 
+        let bridge_thread = scope.spawn(move || {
+            prdb_engine::gateway::serve_tcp_client_connection(&mut gateway_tcp, &mut ipc_gateway)
+                .map_err(|error| format!("TCP gateway bridge failed: {error:?}"))
+        });
+
+        let mut response_decoder = prdb_engine::client_protocol::ClientFrameDecoder::default();
+        let mut response_buffer = [0u8; 8192];
+
         macro_rules! round_trip {
-            ($operation:expr, $request_id:expr, $payload:expr) => {{
-                write_frame(
-                    &mut gateway,
-                    &IpcFrame {
-                        operation: $operation as u16,
-                        request_id: $request_id,
-                        payload: $payload,
-                    },
-                )?;
-                read_frame(&mut gateway)?.ok_or("missing gateway IPC response")?
+            ($kind:expr, $request_id:expr, $payload:expr) => {{
+                let encoded = ClientFrame {
+                    kind: $kind,
+                    request_id: $request_id,
+                    response_sequence: 0,
+                    payload: $payload,
+                }
+                .encode()?;
+                std::io::Write::write_all(&mut gateway, &encoded)?;
+                loop {
+                    let count = std::io::Read::read(&mut gateway, &mut response_buffer)?;
+                    if count == 0 {
+                        return Err("missing gateway response".into());
+                    }
+                    let mut frames = response_decoder.push(&response_buffer[..count])?;
+                    if let Some(response) = frames.pop() {
+                        if !frames.is_empty() {
+                            return Err("unexpected additional pipelined response".into());
+                        }
+                        break response;
+                    }
+                }
             }};
         }
 
-        let hello = round_trip!(
-            Operation::OpenClientSession,
-            2,
-            br#"{"mode":"query","client_name":"test"}"#.to_vec()
-        );
-        assert_eq!(hello.operation, Operation::OpenClientSession as u16);
+        let hello = round_trip!(1, 2, br#"{"mode":"query","client_name":"test"}"#.to_vec());
+        assert_eq!(hello.kind, 100);
         assert!(std::str::from_utf8(&hello.payload)?.contains("\"mode\":\"query\""));
-        let auth = round_trip!(Operation::AuthenticateSession, 3, auth_payload.into_bytes());
-        assert_eq!(auth.operation, Operation::AuthenticateSession as u16);
+        let auth = round_trip!(2, 3, auth_payload.into_bytes());
+        assert_eq!(auth.kind, 100);
         assert!(std::str::from_utf8(&auth.payload)?.contains("\"authenticated\":true"));
         let auth_response = std::str::from_utf8(&auth.payload)?;
         let session_id = auth_response
@@ -7660,7 +7681,7 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
         assert_eq!(session_id.len(), 32);
 
         let prepare = round_trip!(
-            Operation::PrepareSubmission,
+            3,
             4,
             format!("{{\"manifest_version\":1,\"manifest\":\"bQ==\",\"artifact_bytes\":\"6\",\"artifact_sha256\":\"{artifact_hash}\",\"parameter_bytes\":\"0\",\"parameter_sha256\":\"{empty_hash}\",\"scope_version\":1,\"requested_scope\":\"cw==\",\"deadline_ms\":\"30000\",\"workload_class\":\"operational\"}}").into_bytes()
         );
@@ -7673,37 +7694,40 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
         let invocation_id = prdb_engine::client_protocol::decode_client_seal(
             format!("{{\"invocation_id\":\"{invocation_hex}\"}}").as_bytes(),
         )?;
-        let mut chunk_payload = vec![4];
-        chunk_payload.extend_from_slice(&invocation_id);
+        let mut chunk_payload = invocation_id.to_vec();
         chunk_payload.extend_from_slice(&0u64.to_le_bytes());
         chunk_payload.extend_from_slice(artifact);
-        let chunk = round_trip!(Operation::UploadSubmissionChunk, 5, chunk_payload);
+        let chunk = round_trip!(4, 5, chunk_payload);
         assert_eq!(chunk.payload, b"{\"next_offset\":\"6\"}");
         let seal = round_trip!(
-            Operation::SealSubmission,
+            6,
             6,
             format!("{{\"invocation_id\":\"{invocation_hex}\"}}").into_bytes()
         );
         assert_eq!(seal.payload, b"{\"state\":\"prepared\"}");
         let status = round_trip!(
-            Operation::ClientGetInvocationStatus,
+            8,
             7,
             format!("{{\"invocation_id\":\"{invocation_hex}\"}}").into_bytes()
         );
         assert_eq!(status.payload, b"{\"state\":\"prepared\"}");
         let accepted = round_trip!(
-            Operation::StartSubmission,
+            7,
             8,
             format!("{{\"invocation_id\":\"{invocation_hex}\"}}").into_bytes()
         );
         assert_eq!(accepted.payload, b"{\"state\":\"accepted\"}");
         let cancel = round_trip!(
-            Operation::ClientCancelInvocation,
+            9,
             9,
             format!("{{\"invocation_id\":\"{invocation_hex}\"}}").into_bytes()
         );
         assert_eq!(cancel.payload, b"{\"state\":\"accepted\"}");
         gateway.shutdown(std::net::Shutdown::Write)?;
+        bridge_thread
+            .join()
+            .map_err(|_| std::io::Error::other("gateway bridge thread panicked"))?
+            .map_err(std::io::Error::other)?;
         let session = service_thread
             .join()
             .map_err(|_| std::io::Error::other("gateway service thread panicked"))?

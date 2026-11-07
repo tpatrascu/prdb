@@ -1116,6 +1116,7 @@
 - Behavior: the TCP adapter decodes bounded client frames, translates the supported HELLO/AUTH/PREPARE/chunk/SEAL/START/STATUS/CANCEL/PING kinds to the dedicated gateway IPC operation allowlist, adds an explicit chunk-kind byte, and returns only correlated sequence-zero RESPONSE frames. Unsupported kinds, malformed/pipelined frames, service EOF, and mismatched IPC responses return errors for the caller to handle by closing the connection.
 - Contract and implementation: [client protocol](../../specs/client-protocol.md), [gateway service IPC](../../specs/ipc-protocol.md), and [TCP adapter](../../engine/src/gateway.rs).
 - Changed regression: [loopback TCP to Unix IPC bridge](../../engine/tests/gateway.rs) checks HELLO and PING correlation across real sockets.
+- End-to-end regression: [real-redb gateway submission lifecycle](../../engine/tests/commit.rs) now drives HELLO, AUTH, PREPARE, upload, SEAL, STATUS, START, and CANCEL from a loopback TCP client through the frame bridge and per-client Unix service loop, then verifies disconnect cleanup and durable ABORTED.
 - Observed red: the initial focused test failed to compile because the TCP bridge and `PingClientSession` IPC operation were absent.
 - Commands actually run in the configured Nix shell: `cargo fmt --all`; focused `cargo test -p prdb-engine --test gateway --locked tcp_client_hello_and_ping_bridge_over_the_gateway_service_channel` passed; and `cargo fmt --all -- --check && cargo build --workspace --locked && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && git diff --check`. All passed.
 - Remaining: run bounded concurrent accepted connections with read/write deadlines; implement ADMIN and explicit sanitized ERROR responses; connect a separately runnable gateway process to authenticated service-channel provisioning and result relay.
@@ -1143,6 +1144,14 @@
 - Observed red: the focused test did not compile before the connector API existed. A later compile caught a test assertion using equality on `std::os::unix::net::SocketAddr`; the assertion was removed because successful connector verification is the behavior under test.
 - Commands actually run in the configured Nix shell: `cargo fmt --all`; focused `cargo test -p prdb-engine --test gateway --locked unix_gateway_connector_checks_peer_uid` passed; and `cargo fmt --all -- --check && cargo build --workspace --locked && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && git diff --check`. All passed.
 - Remaining: bind service connections to gateway generation and per-client connection ID; verify socket filesystem ownership/mode; add authenticated handoff on non-Linux platforms if they enter the supported profile.
+
+## GW-3 / SU-1 / SU-2 validation: real-redb TCP admission and upload path
+
+- Behavior: a loopback TCP client now drives the real-redb session and staging state through the gateway adapter and its Unix IPC service channel. The regression covers HELLO, AUTH, PREPARE, artifact upload, SEAL, STATUS, START, active CANCEL, EOF cleanup, and durable ABORTED status.
+- Changed regression: [gateway lifecycle integration](../../engine/tests/commit.rs).
+- Focused command: `cargo test -p prdb-engine --test commit --locked client_handshake_requires_hello_first_and_sequences_responses` passed.
+- Full configured Nix-shell checks: `cargo fmt --all -- --check && cargo build --workspace --locked && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && git diff --check` all passed.
+- Remaining: worker process launch/reap, result data and terminal relay, sandbox enforcement, and status reconciliation after gateway/process failure.
 
 ## SU-1 / IPC-6 dependency: gateway submission IPC dispatcher
 
