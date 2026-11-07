@@ -1211,12 +1211,12 @@
 - Verification: focused worker-failure and worker-channel/terminal tests passed. Full configured Nix-shell validation passed after cgroup cleanup integration: `cargo fmt --all -- --check`, `cargo build --workspace --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, and `git diff --check`.
 - Remaining: launch a worker with a verified sandbox profile, bind worker channels to that process, relay its result bytes, and test cancellation/expiry during the process wait.
 
-## SU-5 validation: cancellation during worker wait
+## SU-5 validation: cancellation and expiry during worker wait
 
-- Behavior: an accepted owner cancellation is observed while the worker process is idle; the supervisor kills/reaps the worker, and storage records ABORTED before terminal handling can commit.
+- Behavior: accepted owner cancellation and the admitted execution deadline are both observed while a worker process is idle; the supervisor kills/reaps the worker, and storage records ABORTED before terminal handling can commit.
 - Changed real-redb regression: [cancellation during process observation](../../engine/tests/commit.rs).
-- Verification: focused `supervisor_cancellation_during_worker_wait_kills_and_aborts` passed. Full configured Nix-shell validation passed: format check, workspace build, warning-denied Clippy, workspace tests, and `git diff --check`.
-- Remaining: exercise this path with cgroup descendant cleanup and cover deadline expiry while the worker is running.
+- Verification: focused `supervisor_cancellation_and_deadline_during_worker_wait_abort` passed for both paths. Full configured Nix-shell validation passed: format check, workspace build, warning-denied Clippy, workspace tests, and `git diff --check`.
+- Remaining: exercise these paths with cgroup descendant cleanup and live cgroup availability.
 
 ## SU-6 validation: reconcile after terminal delivery loss
 

@@ -8181,10 +8181,12 @@ fn supervisor_worker_exit_failure_is_reaped_and_durably_aborted()
 }
 
 #[test]
-fn supervisor_cancellation_during_worker_wait_kills_and_aborts()
+fn supervisor_cancellation_and_deadline_during_worker_wait_abort()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::outcome::OutcomeStatus;
-    use prdb_engine::storage_manager::{OwnerCancellationResult, SupervisorInvocationError};
+    use prdb_engine::storage_manager::{
+        OwnerCancellationResult, SupervisorAdmissionRequest, SupervisorInvocationError,
+    };
     use prdb_engine::transaction::TransactionError;
     use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -8248,6 +8250,33 @@ fn supervisor_cancellation_during_worker_wait_kills_and_aborts()
     assert_eq!(
         storage
             .lookup_invocation_outcome(id(0x73), user_id, now + 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Aborted
+    );
+
+    let expired = storage.admit_supervisor_invocation_with_deadline(
+        SupervisorAdmissionRequest {
+            invocation_id: id(0x74),
+            token_id,
+            retention_deadline_us: now + 3_600_000_000,
+            max_rows: 2,
+            max_bytes: 64,
+            deadline: Some(std::time::Instant::now() + Duration::from_millis(40)),
+        },
+        &secret,
+    )?;
+    let mut deadline_worker = Command::new("sleep").arg("30").spawn()?;
+    assert!(matches!(
+        expired.observe_worker_exit(&mut deadline_worker),
+        Err(SupervisorInvocationError::Deadline(
+            TransactionError::Expired
+        ))
+    ));
+    assert!(deadline_worker.try_wait()?.is_some());
+    assert_eq!(
+        storage
+            .lookup_invocation_outcome(id(0x74), user_id, now + 2)?
             .unwrap()
             .status,
         OutcomeStatus::Aborted
