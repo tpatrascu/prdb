@@ -204,6 +204,15 @@ pub enum ConnectionClose {
     CancelStarted(Vec<[u8; 16]>),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubmissionState {
+    Uploading,
+    Sealing,
+    Prepared,
+    Starting,
+    Started,
+}
+
 impl StagingStore {
     pub fn new(
         limits: StagingLimits,
@@ -513,6 +522,53 @@ impl StagingStore {
         }
         discard_reservation(&mut state, invocation_id);
         Ok(())
+    }
+
+    /// Cancel an owner-scoped reservation without starting a storage
+    /// transaction. A concurrent seal is marked for discard when validation
+    /// finishes; started work must use invocation cancellation instead.
+    pub fn cancel_prepared(
+        &self,
+        owner: StagingOwner,
+        invocation_id: [u8; 16],
+    ) -> Result<(), StagingError> {
+        let mut state = self.state.lock().map_err(|_| StagingError::Poisoned)?;
+        reap_expired(&mut state, self.limits.reservation_ttl, Instant::now());
+        let reservation = owned_reservation_mut(&mut state, owner, invocation_id)?;
+        match reservation.state {
+            ReservationState::Uploading | ReservationState::Sealed => {
+                discard_reservation(&mut state, invocation_id);
+                Ok(())
+            }
+            ReservationState::Sealing => {
+                reservation.state = ReservationState::DiscardRequested;
+                Ok(())
+            }
+            ReservationState::DiscardRequested => Ok(()),
+            ReservationState::Starting | ReservationState::Started => {
+                Err(StagingError::InvalidState)
+            }
+        }
+    }
+
+    /// Return an owner-scoped ephemeral staging state; unknown and foreign IDs
+    /// share one unavailable result.
+    pub fn status(
+        &self,
+        owner: StagingOwner,
+        invocation_id: [u8; 16],
+    ) -> Result<SubmissionState, StagingError> {
+        let mut state = self.state.lock().map_err(|_| StagingError::Poisoned)?;
+        reap_expired(&mut state, self.limits.reservation_ttl, Instant::now());
+        let reservation = owned_reservation_mut(&mut state, owner, invocation_id)?;
+        match reservation.state {
+            ReservationState::Uploading => Ok(SubmissionState::Uploading),
+            ReservationState::Sealing => Ok(SubmissionState::Sealing),
+            ReservationState::Sealed => Ok(SubmissionState::Prepared),
+            ReservationState::Starting => Ok(SubmissionState::Starting),
+            ReservationState::Started => Ok(SubmissionState::Started),
+            ReservationState::DiscardRequested => Err(StagingError::Unavailable),
+        }
     }
 
     /// Reap expired reservations that have not started and return their IDs.
