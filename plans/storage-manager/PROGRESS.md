@@ -1061,7 +1061,7 @@
 
 ## NP-5 dependency: session-bound status and prepared cancellation
 
-- Behavior: protected staging and status requests revalidate the storage session on every operation. Owner STATUS consults bounded staging first, then storage's live/durable outcome lookup; prepared CANCEL releases only unstarted staging and creates no outcome. Foreign and unknown IDs share the same unavailable/unknown behavior.
-- Changed code and regression: [client status/cancel dispatch and revalidation](../../engine/src/client_protocol.rs), [real-redb authenticated flow](../../engine/tests/commit.rs).
-- Verification: focused authentication and handshake/status/cancel regressions pass in the repository Nix shell.
-- Remaining: owner-initiated active cancellation, admin control mode, TCP gateway and supervisor IPC, worker result/finalization lifecycle.
+- Behavior: PREPARE, chunk, SEAL, STATUS, and CANCEL requests revalidate the storage session. Owner STATUS consults staging then live/durable storage status; CANCEL releases pre-start staging or marks an active owned invocation cancelled under the storage commit barrier. Foreign and unknown IDs share unavailable/unknown behavior.
+- Changed code and regressions: [client request revalidation and dispatch](../../engine/src/client_protocol.rs), [owner cancellation transition](../../engine/src/storage_manager.rs), and [real-redb authenticated flow](../../engine/tests/commit.rs).
+- Verification: focused status/cancel and active cancellation regressions plus warning-denied Clippy pass in the repository Nix shell.
+- Remaining: admin control mode, TCP gateway and supervisor IPC, worker process/result/finalization lifecycle.

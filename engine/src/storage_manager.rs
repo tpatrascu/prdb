@@ -178,6 +178,14 @@ pub enum InvocationStatusError {
     Storage,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OwnerCancellationResult {
+    Accepted,
+    TooLate,
+    Terminal(InvocationOutcome),
+    Unknown,
+}
+
 impl std::fmt::Display for InvocationStatusError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "invocation status lookup failed: {self:?}")
@@ -1959,6 +1967,87 @@ impl<'db> StorageManager<'db> {
                 status: InvocationStatus::Terminal(outcome),
             })
         })
+    }
+
+    /// Request cancellation for an invocation owned by the authenticated
+    /// principal. The commit transition and cancellation request are
+    /// serialized by the admission registry; unknown and foreign IDs match.
+    pub fn cancel_owned_invocation(
+        &self,
+        authenticated_principal_id: [u8; 16],
+        invocation_id: [u8; 16],
+        now_us: i64,
+    ) -> Result<OwnerCancellationResult, InvocationStatusError> {
+        if authenticated_principal_id == [0; 16] || invocation_id == [0; 16] || now_us <= 0 {
+            return Err(InvocationStatusError::InvalidRequest);
+        }
+        loop {
+            let mut live = self
+                .admissions
+                .live
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let invocation = live.entries.get(&invocation_id).copied();
+            match invocation {
+                Some(invocation) if invocation.principal_id != authenticated_principal_id => {
+                    return Ok(OwnerCancellationResult::Unknown);
+                }
+                Some(invocation) if invocation.phase == LiveInvocationPhase::Committing => {
+                    return Ok(OwnerCancellationResult::TooLate);
+                }
+                Some(invocation)
+                    if invocation.phase == LiveInvocationPhase::CancellationPending =>
+                {
+                    live = self
+                        .admissions
+                        .changed
+                        .wait(live)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    drop(live);
+                }
+                Some(invocation) if invocation.cancellation_reason_code.is_some() => {
+                    return Ok(OwnerCancellationResult::Accepted);
+                }
+                Some(invocation) if invocation.phase == LiveInvocationPhase::Active => {
+                    if let Some(entry) = live.entries.get_mut(&invocation_id) {
+                        entry.phase = LiveInvocationPhase::CancellationPending;
+                    }
+                    drop(live);
+                    let mut live = self
+                        .admissions
+                        .live
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let Some(entry) = live.entries.get_mut(&invocation_id) else {
+                        self.admissions.changed.notify_all();
+                        drop(live);
+                        continue;
+                    };
+                    if entry.phase == LiveInvocationPhase::CancellationPending {
+                        entry.phase = LiveInvocationPhase::Active;
+                        entry.cancellation_reason_code = Some(1);
+                        live.advance_owner_generation(authenticated_principal_id);
+                    }
+                    self.admissions.changed.notify_all();
+                    return Ok(OwnerCancellationResult::Accepted);
+                }
+                None => {
+                    drop(live);
+                    return match lookup_outcome(
+                        self.database,
+                        invocation_id,
+                        authenticated_principal_id,
+                        now_us,
+                    )
+                    .map_err(|_| InvocationStatusError::Storage)?
+                    {
+                        Some(outcome) => Ok(OwnerCancellationResult::Terminal(outcome)),
+                        None => Ok(OwnerCancellationResult::Unknown),
+                    };
+                }
+                Some(_) => return Ok(OwnerCancellationResult::TooLate),
+            }
+        }
     }
 
     /// Return a bounded best-effort page of this authenticated owner's live

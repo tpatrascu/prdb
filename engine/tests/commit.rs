@@ -7859,7 +7859,7 @@ fn sealed_start_admits_only_current_credentials_and_enforces_request_deadline()
             requested_scope: b"s".to_vec(),
             parameter_bytes: 0,
             parameter_sha256: Sha256::digest([]).into(),
-            deadline_ms: 10,
+            deadline_ms: 10_000,
             workload_class: WorkloadClass::Operational,
         },
     )?;
@@ -7894,17 +7894,27 @@ fn sealed_start_admits_only_current_credentials_and_enforces_request_deadline()
     )?;
     assert_eq!(accepted.payload, b"{\"state\":\"accepted\"}");
     assert_eq!(accepted.request_id, 1);
+    let cancelled = client.handle_cancel_prepared_request(
+        &storage,
+        &staging,
+        ClientFrame {
+            kind: 9,
+            request_id: 2,
+            response_sequence: 0,
+            payload: format!("{{\"invocation_id\":\"{invocation_hex}\"}}").into_bytes(),
+        },
+    )?;
+    assert_eq!(cancelled.payload, b"{\"state\":\"accepted\"}");
     assert!(
         storage
             .get_invocation_status(first.invocation_id, user_id, now)?
             .is_some()
     );
-    std::thread::sleep(Duration::from_millis(20));
     assert!(matches!(
         admitted.check_deadline(),
         Err(
             prdb_engine::storage_manager::SupervisorInvocationError::Deadline(
-                TransactionError::Expired
+                TransactionError::CancellationRequested
             )
         )
     ));

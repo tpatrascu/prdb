@@ -1006,7 +1006,32 @@ impl ClientConnectionSession {
         match staging.cancel_prepared(session.staging_owner(), invocation_id) {
             Ok(()) => self.json_response(request.request_id, b"{\"state\":\"accepted\"}".to_vec()),
             Err(crate::supervisor::StagingError::InvalidState) => {
-                Err(ClientSessionError::UnsupportedRequest)
+                let now_us = current_unix_micros().ok_or(ClientSessionError::UnsupportedRequest)?;
+                let result = storage
+                    .cancel_owned_invocation(session.principal_id(), invocation_id, now_us)
+                    .map_err(ClientSessionError::Status)?;
+                let payload = match result {
+                    crate::storage_manager::OwnerCancellationResult::Accepted => {
+                        b"{\"state\":\"accepted\"}".to_vec()
+                    }
+                    crate::storage_manager::OwnerCancellationResult::TooLate => {
+                        b"{\"state\":\"too_late\"}".to_vec()
+                    }
+                    crate::storage_manager::OwnerCancellationResult::Terminal(outcome) => {
+                        match outcome.status {
+                            crate::outcome::OutcomeStatus::Committed => {
+                                b"{\"state\":\"committed\"}".to_vec()
+                            }
+                            crate::outcome::OutcomeStatus::Aborted => {
+                                b"{\"state\":\"aborted\"}".to_vec()
+                            }
+                        }
+                    }
+                    crate::storage_manager::OwnerCancellationResult::Unknown => {
+                        b"{\"state\":\"unknown\"}".to_vec()
+                    }
+                };
+                self.json_response(request.request_id, payload)
             }
             Err(error) => Err(ClientSessionError::Staging(error)),
         }
