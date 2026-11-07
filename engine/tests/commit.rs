@@ -502,6 +502,7 @@ fn storage_manager_creates_schema_atomically_for_privileged_actor()
     let denied = id(0xe2);
     let actor = id(0xe8);
     let successor_owner = id(0xea);
+    let successor_role = id(0xf7);
     let admin_role = builtin_owner_id();
     let setup = vec![
         principal_write_with_name(setup_admin, 1, 1, "schema_admin"),
@@ -514,6 +515,10 @@ fn storage_manager_creates_schema_atomically_for_privileged_actor()
         object_write_with_name(actor, 8, "schema_creator"),
         principal_write_with_name(successor_owner, 1, 1, "schema_successor"),
         object_write_with_name(successor_owner, 8, "schema_successor"),
+        principal_write_with_name(successor_role, 2, 1, "schema_successor_role"),
+        object_write_with_name(successor_role, 9, "schema_successor_role"),
+        membership_write(successor_owner, successor_role),
+        dependency_write(successor_owner, successor_role, 5),
         grant_write(actor, id(0x33), 14, 1, id(0x33), admin_role),
         dependency_write(actor, id(0x33), 5),
     ];
@@ -581,7 +586,7 @@ fn storage_manager_creates_schema_atomically_for_privileged_actor()
         transfer_invocation,
         actor,
         created.schema_id,
-        successor_owner,
+        successor_role,
         9_999,
         transfer_audit,
     );
@@ -605,7 +610,7 @@ fn storage_manager_creates_schema_atomically_for_privileged_actor()
                 .find(|field| field.tag == 4)
                 .unwrap()
                 .payload,
-            successor_owner
+            successor_role
         );
         assert_eq!(
             u64::from_le_bytes(
@@ -642,7 +647,7 @@ fn storage_manager_creates_schema_atomically_for_privileged_actor()
     let child_grant_prefix = {
         let mut prefix = 12u16.to_be_bytes().to_vec();
         prefix.push(1);
-        prefix.extend_from_slice(&successor_owner);
+        prefix.extend_from_slice(&successor_role);
         prefix
     };
     {
