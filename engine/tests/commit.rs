@@ -2682,6 +2682,7 @@ fn storage_manager_renames_tables_and_drop_column_rewrites_rows()
     let successor_owner = id(0xd0);
     let successor_role = id(0xd6);
     let outsider = id(0xd7);
+    let revocation_admin = id(0xc8);
     let setup = vec![
         principal_write_with_name(actor, 1, 1, "column_drop_owner"),
         object_write_with_name(actor, 8, "column_drop_owner"),
@@ -2693,6 +2694,19 @@ fn storage_manager_renames_tables_and_drop_column_rewrites_rows()
         dependency_write(successor_owner, successor_role, 5),
         principal_write_with_name(outsider, 1, 1, "table_ddl_outsider"),
         object_write_with_name(outsider, 8, "table_ddl_outsider"),
+        principal_write_with_name(revocation_admin, 1, 1, "role_revocation_admin"),
+        object_write_with_name(revocation_admin, 8, "role_revocation_admin"),
+        credential_verifier_write(
+            id(0xc9),
+            revocation_admin,
+            &[0xc9; 32],
+            1,
+            i64::MAX,
+            None,
+            1,
+        ),
+        membership_write(revocation_admin, admin_role),
+        dependency_write(revocation_admin, admin_role, 5),
         membership_write(actor, admin_role),
         dependency_write(actor, admin_role, 5),
     ];
@@ -3372,6 +3386,67 @@ fn storage_manager_renames_tables_and_drop_column_rewrites_rows()
         9_999,
         successor_rename_audit,
     )?;
+    let membership_revoke_invocation = id(0xdc);
+    let mut membership_revoke_audit = identity_audit_event(0xdd, revocation_admin, successor_owner);
+    membership_revoke_audit.correlation_id = membership_revoke_invocation;
+    membership_revoke_audit.action = AuditAction::AuthorityChange;
+    storage
+        .set_role_membership(
+            membership_revoke_invocation,
+            revocation_admin,
+            prdb_engine::storage_manager::RoleMembershipChange {
+                member_id: successor_owner,
+                role_id: successor_role,
+                grant: false,
+            },
+            9_999,
+            membership_revoke_audit,
+        )
+        .map_err(|error| format!("membership revocation failed: {error:?}"))?;
+    let revoked_owner_rename_invocation = id(0xde);
+    let mut revoked_owner_rename_audit =
+        identity_audit_event(0xdf, successor_owner, table.table_id);
+    revoked_owner_rename_audit.correlation_id = revoked_owner_rename_invocation;
+    assert!(matches!(
+        storage.rename_table(
+            revoked_owner_rename_invocation,
+            successor_owner,
+            table.table_id,
+            "revoked_role_owner_table",
+            9_999,
+            revoked_owner_rename_audit,
+        ),
+        Err(prdb_engine::storage_manager::TableLifecycleError::Unauthorized)
+    ));
+    assert_eq!(
+        lookup_outcome(
+            &database,
+            revoked_owner_rename_invocation,
+            successor_owner,
+            1
+        )?
+        .ok_or("missing role-owner revocation outcome")?
+        .status,
+        OutcomeStatus::Aborted
+    );
+    {
+        let read = database.begin_read()?;
+        let object = decode_registered_envelope(
+            read.open_table(CATALOG)?
+                .get(id_catalog_key(2, table.table_id).as_slice())?
+                .ok_or("table object disappeared after revoked owner operation")?
+                .value(),
+        )?;
+        assert_eq!(
+            object
+                .fields
+                .iter()
+                .find(|field| field.tag == 3)
+                .ok_or("table name missing after revoked owner operation")?
+                .payload,
+            b"successor_owned_table"
+        );
+    }
     let return_invocation = id(0xd5);
     let mut return_audit = identity_audit_event(0xd6, actor, table.table_id);
     return_audit.correlation_id = return_invocation;

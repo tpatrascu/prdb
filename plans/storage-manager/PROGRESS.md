@@ -1518,3 +1518,11 @@
 - Implementation: no production change was needed; the existing serialized foreign-key DDL path protects both table epochs.
 - Verification: the focused real-redb FK authority regression passed in the configured Nix shell.
 - Remaining: separate supervisor/gateway process integration and broader DDL acceptance evidence remain open.
+
+## DS-5: role-owned table authority follows current membership — verified
+
+- Behavior: a role member can use owner-derived table DDL while membership is active, then loses that authority after an administrator revokes the membership.
+- Regression: the real-redb [table rename and ownership lifecycle test](../../engine/tests/commit.rs) transfers ownership to a role, verifies the member can rename the table, revokes membership through a credentialed database administrator, and confirms the former member's next rename is denied with an ABORTED outcome and leaves the table name unchanged.
+- Test setup: the initial attempt to revoke membership from the fixture's non-credentialed owner was correctly denied because changing a role's membership requires an authorized administrative caller. The fixture now provisions a credentialed database administrator and performs the revocation through the supported API.
+- Verification: the focused real-redb lifecycle test passed in the configured Nix shell.
+- Remaining: separate supervisor/gateway process integration and broader DDL acceptance evidence remain open.
