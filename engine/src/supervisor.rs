@@ -30,6 +30,10 @@ impl StagingOwner {
             principal_id,
         }
     }
+
+    pub(crate) fn principal_id(self) -> [u8; 16] {
+        self.principal_id
+    }
 }
 
 #[derive(Clone, Debug)]

@@ -48,6 +48,15 @@ pub enum GatewayClientDispatch<'db> {
     },
 }
 
+pub enum GatewayClientServiceEvent<'db> {
+    Disconnected,
+    Started {
+        request_id: u64,
+        invocation: crate::storage_manager::SupervisorInvocation<'db>,
+        submission: crate::supervisor::SealedSubmission,
+    },
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct GatewayAdmissionConfig {
     pub retention_deadline_us: i64,
@@ -145,6 +154,102 @@ pub fn dispatch_gateway_client_request<'db>(
         request_id: response.request_id,
         payload: response.payload,
     }))
+}
+
+/// Serve one gateway IPC stream bound to one client session. A clean close or
+/// protocol failure discards unstarted staging and requests cancellation of
+/// started work. START returns its trusted launch event to the caller after
+/// the acknowledgement is written; the caller may resume this function after
+/// that invocation reaches a terminal state.
+pub fn serve_gateway_client_session<'db, S: Read + Write>(
+    stream: &mut S,
+    manager: &StorageManager<'db>,
+    staging: &crate::supervisor::StagingStore,
+    session: &mut crate::client_protocol::ClientConnectionSession,
+    admission: GatewayAdmissionConfig,
+) -> Result<GatewayClientServiceEvent<'db>, SupervisorConnectionError> {
+    loop {
+        let request = match crate::ipc::read_frame(stream) {
+            Ok(Some(request)) => request,
+            Ok(None) => {
+                close_gateway_client_session(manager, staging, session)?;
+                return Ok(GatewayClientServiceEvent::Disconnected);
+            }
+            Err(error) => {
+                let cleanup = close_gateway_client_session(manager, staging, session);
+                cleanup?;
+                return Err(SupervisorConnectionError::Frame(error));
+            }
+        };
+        let dispatched = match dispatch_gateway_client_request(
+            ServiceRole::Gateway,
+            manager,
+            staging,
+            session,
+            &request,
+            admission,
+        ) {
+            Ok(dispatched) => dispatched,
+            Err(error) => {
+                close_gateway_client_session(manager, staging, session)?;
+                return Err(SupervisorConnectionError::Gateway(error));
+            }
+        };
+        match dispatched {
+            GatewayClientDispatch::Response(response) => {
+                if let Err(error) = crate::ipc::write_frame(stream, &response) {
+                    close_gateway_client_session(manager, staging, session)?;
+                    return Err(SupervisorConnectionError::Frame(error));
+                }
+            }
+            GatewayClientDispatch::Started {
+                response,
+                invocation,
+                submission,
+            } => {
+                if let Err(error) = crate::ipc::write_frame(stream, &response) {
+                    close_gateway_client_session(manager, staging, session)?;
+                    return Err(SupervisorConnectionError::Frame(error));
+                }
+                return Ok(GatewayClientServiceEvent::Started {
+                    request_id: response.request_id,
+                    invocation,
+                    submission,
+                });
+            }
+        }
+    }
+}
+
+fn close_gateway_client_session(
+    manager: &StorageManager<'_>,
+    staging: &crate::supervisor::StagingStore,
+    session: &crate::client_protocol::ClientConnectionSession,
+) -> Result<(), SupervisorConnectionError> {
+    let owner = match session.staging_owner() {
+        Ok(owner) => owner,
+        Err(crate::client_protocol::ClientSessionError::AuthenticationRequired)
+        | Err(crate::client_protocol::ClientSessionError::WrongMode) => return Ok(()),
+        Err(error) => {
+            return Err(SupervisorConnectionError::Gateway(
+                GatewayRequestError::Client(error),
+            ));
+        }
+    };
+    let closed = staging
+        .close_connection(owner)
+        .map_err(SupervisorConnectionError::Staging)?;
+    if let crate::supervisor::ConnectionClose::CancelStarted(invocation_ids) = closed {
+        let now_us = crate::credentials::now_unix_micros().ok_or(
+            SupervisorConnectionError::Transaction(TransactionError::ClockUnavailable),
+        )?;
+        for invocation_id in invocation_ids {
+            manager
+                .cancel_owned_invocation(owner.principal_id(), invocation_id, now_us)
+                .map_err(SupervisorConnectionError::Status)?;
+        }
+    }
+    Ok(())
 }
 
 impl std::fmt::Display for SupervisorRequestError {
@@ -390,6 +495,10 @@ fn encode_active_status(
 pub enum SupervisorConnectionError {
     Frame(crate::ipc::FrameError),
     Request(SupervisorRequestError),
+    Gateway(GatewayRequestError),
+    Staging(crate::supervisor::StagingError),
+    Status(InvocationStatusError),
+    Transaction(TransactionError),
     Abort(TransactionError),
     RequestLimitExceeded,
     DuplicateRequestId,

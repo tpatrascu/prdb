@@ -37,6 +37,8 @@ For `0x1401`, `0x1403`, `0x1405`, `0x1407`, and `0x1408`, the payload is the cor
 
 START has an additional trusted in-process result: the supervisor-side dispatcher retains the admitted `SupervisorInvocation` and owner-checked immutable `SealedSubmission` handle for launch code while returning the sequence-zero `accepted` response. Those Rust objects are never serialized over gateway IPC. A failed START returns an error and does not expose staged bytes or a storage transaction. Result relay and terminal messages remain separate supervisor-generated events.
 
+The server provisions one service stream and `ClientConnectionSession` per client connection. Request IDs must increase for that session. Clean EOF, malformed framing, a role/payload error, or a failed response write closes the context: unstarted staging is discarded, while started work is signalled for storage cancellation. After START, trusted supervisor code owns the invocation event; it may resume servicing that session only after execution/result handling returns control. The runner must separately monitor client disconnect while execution is active.
+
 ## Administrative Control
 
 Authenticated clients submit bounded schema/user/permission DDL or structured equivalents on a dedicated control channel. Storage validates both definitions and current actor authority. Administrative operations may be atomically batched, but cannot be mixed with executor DML/native code. Request IDs, budgets, durable outcomes, and status lookup apply to DDL too.

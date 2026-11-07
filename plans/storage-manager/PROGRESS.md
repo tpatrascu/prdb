@@ -1087,6 +1087,13 @@
 - Verification: focused START/handoff regression passes in the repository Nix shell.
 - Remaining: pass the handle to a supervisor process launcher that establishes the required sandbox before loading the artifact.
 
+## IPC-6 dependency: per-client gateway Unix service loop
+
+- Behavior: one trusted gateway stream owns a client session through the entire upload/start sequence. It preserves request ordering, writes correlated responses, hands START's admission/immutable bytes back to supervisor code, and discards unstarted reservations or cancels started work on EOF and protocol/write failure.
+- Changed code and test: [gateway Unix service loop and disconnect cleanup](../../engine/src/supervisor_ipc.rs), [authenticated owner helper](../../engine/src/supervisor.rs), and [real-redb UnixStream lifecycle](../../engine/tests/commit.rs).
+- Verification: focused UnixStream test covers AUTH, PREPARE, artifact chunk, SEAL, STATUS, START, active CANCEL, EOF cleanup, and durable ABORTED outcome.
+- Remaining: bind sockets to authenticated gateway process identity/generation and monitor network disconnects while workers execute; the TCP listener, launcher, sandbox, and result relay remain absent.
+
 ## SU-1 / IPC-6 dependency: gateway submission IPC dispatcher
 
 - Behavior: a role-checked gateway dispatcher maps AUTH, PREPARE, chunk, SEAL, START, STATUS, and CANCEL operation tags to the strict per-client session handlers. Chunk IPC prepends an explicit artifact/parameter kind byte. START returns the network acknowledgement plus a typed storage invocation and immutable submission handle to trusted supervisor code; those authority-bearing objects are never serialized.
