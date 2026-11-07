@@ -1386,7 +1386,15 @@
 - Regression evidence: [storage_manager_drop_table_removes_owned_primary_and_unique_indexes](../../engine/tests/commit.rs) first makes a nullable column NOT NULL through the storage-manager lifecycle, then adds both key constraints. It commits a row through `InvocationTransaction` so both physical index directions contain entries, drops the table, checks all constraint/index/column records and dependencies are gone, verifies the row and memberships are removed, and reopens through startup validation.
 - Verification: the focused real-redb test passed. In the configured Nix shell, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` passed; all 104 commit integration tests passed. `git diff --check` passed.
 - Remaining: DROP TABLE coverage for remaining constraint combinations and separate supervisor/gateway process integration remain open.
-- Next smallest behavior: cover table-drop cleanup of a self-referential foreign key, where the referenced table and the FK owner are the same table.
+
+## DS-5 / SM-5: self-referential FK cleanup on table drop — verified
+
+- Behavior and normative contracts: [schema DDL](../../specs/ddl-schema.md) and [storage manager](../../specs/storage-manager.md). A self-referential foreign key is owned by the table it references; DROP TABLE removes that FK, its target dependency, and its owned table/index definitions atomically rather than treating the internal reference as an external RESTRICT dependency.
+- Red evidence: no behavioral failure was observed. The first fixture attempt was rejected during catalog setup because its column and object names differed; after correcting the fixture and publishing the primary key before the FK, the lifecycle test passed.
+- Regression evidence: [storage_manager_drop_table_removes_self_referential_foreign_key](../../engine/tests/commit.rs) creates a table with a primary key, adds a foreign key from that table back to its own key, commits a row whose FK value resolves to itself, and then drops the table through `StorageManager`. It checks removal of table/column/constraint/index objects, both dependency edges, the row, and both physical index directions, then confirms a durable COMMITTED outcome and validates startup.
+- Verification: the focused real-redb test passed. In the configured Nix shell, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` passed; all 105 commit integration tests passed. `git diff --check` passed.
+- Remaining: DROP TABLE coverage for remaining constraint combinations and separate supervisor/gateway process integration remain open.
+- Next smallest behavior: review remaining storage-manager validation gaps and address the next unfinished acceptance case before process-level integration.
 
 ## DS-5 / SM-5: column DROP RESTRICT — implemented
 

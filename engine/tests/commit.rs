@@ -6318,6 +6318,211 @@ fn storage_manager_drop_referencing_table_removes_owned_foreign_key()
 }
 
 #[test]
+fn storage_manager_drop_table_removes_self_referential_foreign_key()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let admin_role = builtin_owner_id();
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let schema_id = id(80);
+    let table_id = id(82);
+    let column_id = id(84);
+    let primary_id = id(85);
+    let foreign_key_id = id(86);
+    let index_id = id(87);
+    let catalog_writes = [
+        schema_write(schema_id),
+        table_write(table_id, schema_id),
+        column_write_not_null(column_id, table_id, "object_84"),
+        object_write(schema_id, 1),
+        object_write(table_id, 3),
+        object_write(column_id, 4),
+    ];
+    let mut catalog_audit = identity_audit_event(0x91, admin_role, table_id);
+    catalog_audit.action = AuditAction::AuthorityChange;
+    storage
+        .commit_catalog_and_audit(
+            id(0x91),
+            admin_role,
+            9_999,
+            &catalog_writes,
+            &[catalog_audit],
+        )
+        .map_err(|error| format!("self-FK catalog setup failed: {error:?}"))?;
+
+    let actor = id(0x92);
+    let mut setup_audit = identity_audit_event(0x93, admin_role, actor);
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage
+        .commit_catalog_and_audit(
+            id(0x93),
+            admin_role,
+            9_999,
+            &[
+                principal_write_with_name(actor, 1, 1, "self_fk_drop_admin"),
+                object_write_with_name(actor, 8, "self_fk_drop_admin"),
+                membership_write(actor, admin_role),
+                dependency_write(actor, admin_role, 5),
+            ],
+            &[setup_audit],
+        )
+        .map_err(|error| format!("self-FK actor setup failed: {error:?}"))?;
+
+    let primary_constraint = constraint_write(
+        primary_id,
+        table_id,
+        2,
+        &[column_id],
+        None,
+        &[],
+        Some(index_id),
+    );
+    let (primary_index_key, primary_index_payload) =
+        owned_unique_index_definition(index_id, table_id, &[column_id], primary_id);
+    let table_key = id_catalog_key(5, table_id);
+    let current_table = database
+        .begin_read()?
+        .open_table(CATALOG)?
+        .get(table_key.as_slice())?
+        .ok_or("self-FK table missing before primary key add")?
+        .value()
+        .to_vec();
+    let mut primary_table_epoch = table_write_with_versions(table_id, schema_id, 1, 2);
+    primary_table_epoch.expected_value = Some(current_table);
+    let primary_invocation = id(0x96);
+    let mut primary_audit = identity_audit_event(0x97, actor, primary_id);
+    primary_audit.correlation_id = primary_invocation;
+    storage
+        .commit_authorized_constraint_ddl(
+            primary_invocation,
+            actor,
+            9_999,
+            &[
+                primary_constraint,
+                object_write(primary_id, 6),
+                CatalogWrite {
+                    key: primary_index_key,
+                    expected_value: None,
+                    payload: Some(primary_index_payload),
+                },
+                object_write(index_id, 7),
+                dependency_write(primary_id, index_id, 4),
+                primary_table_epoch,
+            ],
+            &[primary_audit],
+        )
+        .map_err(|error| format!("self-FK primary setup failed: {error:?}"))?;
+
+    let foreign_key = constraint_write(
+        foreign_key_id,
+        table_id,
+        5,
+        &[column_id],
+        Some(primary_id),
+        &[column_id],
+        None,
+    );
+    let current_table = database
+        .begin_read()?
+        .open_table(CATALOG)?
+        .get(table_key.as_slice())?
+        .ok_or("self-FK table missing before foreign key add")?
+        .value()
+        .to_vec();
+    let mut foreign_key_table_epoch = table_write_with_versions(table_id, schema_id, 1, 3);
+    foreign_key_table_epoch.expected_value = Some(current_table);
+    let foreign_key_invocation = id(0x98);
+    let mut foreign_key_audit = identity_audit_event(0x99, admin_role, foreign_key_id);
+    foreign_key_audit.action = AuditAction::AuthorityChange;
+    foreign_key_audit.correlation_id = foreign_key_invocation;
+    storage
+        .commit_catalog_and_audit(
+            foreign_key_invocation,
+            admin_role,
+            9_999,
+            &[
+                foreign_key,
+                object_write(foreign_key_id, 6),
+                dependency_write(foreign_key_id, primary_id, 3),
+                foreign_key_table_epoch,
+            ],
+            &[foreign_key_audit],
+        )
+        .map_err(|error| format!("self-FK foreign-key setup failed: {error:?}"))?;
+
+    let self_row_id = id(0x9c);
+    let mut insert = storage.begin_invocation(id(0x9d), actor, 9_999, 1, 1024)?;
+    let table_schema = insert.load_catalog_table_schema(table_id)?;
+    insert.load_catalog_indexes(&table_schema)?;
+    let self_tuple = encode_tuple(
+        &table_schema.columns,
+        table_schema.schema_version,
+        &[Some(ScalarValue::Bytea(b"self".to_vec()))],
+    )?;
+    insert.stage_put(
+        prdb_engine::overlay::RowId {
+            table: table_id,
+            row: self_row_id,
+        },
+        &self_tuple,
+    )?;
+    insert.commit()?;
+    let self_row_key = table_row_key(table_id, self_row_id);
+    {
+        let read = database.begin_read()?;
+        assert!(
+            read.open_table(ROWS)?.get(&self_row_key[..])?.is_some(),
+            "self-referencing row was not committed"
+        );
+        assert_eq!(read.open_table(schema::INDEXES)?.iter()?.count(), 1);
+        assert_eq!(read.open_table(schema::ROW_INDEXES)?.iter()?.count(), 1);
+    }
+
+    let invocation_id = id(0x9a);
+    let mut drop_audit = identity_audit_event(0x9b, actor, table_id);
+    drop_audit.correlation_id = invocation_id;
+    let dropped = storage.drop_table(invocation_id, actor, table_id, 9_999, drop_audit);
+    assert!(
+        dropped.is_ok(),
+        "dropping the self-FK table returned {dropped:?}"
+    );
+    assert_eq!(dropped.unwrap().table_id, table_id);
+    assert_eq!(
+        lookup_outcome(&database, invocation_id, actor, 1)?
+            .ok_or("missing self-FK table-drop outcome")?
+            .status,
+        OutcomeStatus::Committed
+    );
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    for key in [
+        id_catalog_key(2, table_id),
+        id_catalog_key(5, table_id),
+        id_catalog_key(2, column_id),
+        id_catalog_key(6, column_id),
+        id_catalog_key(2, primary_id),
+        id_catalog_key(8, primary_id),
+        id_catalog_key(2, foreign_key_id),
+        id_catalog_key(8, foreign_key_id),
+        id_catalog_key(2, index_id),
+        id_catalog_key(9, index_id),
+        dependency_write(foreign_key_id, primary_id, 3).key,
+        dependency_write(primary_id, index_id, 4).key,
+    ] {
+        assert!(
+            catalog.get(key.as_slice())?.is_none(),
+            "self-FK table-drop record remained: {key:?}"
+        );
+    }
+    assert!(read.open_table(ROWS)?.get(&self_row_key[..])?.is_none());
+    assert_eq!(read.open_table(schema::INDEXES)?.iter()?.count(), 0);
+    assert_eq!(read.open_table(schema::ROW_INDEXES)?.iter()?.count(), 0);
+    drop(read);
+    StorageManager::new(&database, Duration::from_millis(100))?;
+    Ok(())
+}
+
+#[test]
 fn catalog_commit_requires_foreign_key_target_dependency_edges()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
