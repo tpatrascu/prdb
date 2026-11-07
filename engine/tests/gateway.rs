@@ -1,6 +1,7 @@
 use prdb_engine::client_protocol::{ClientFrame, ClientFrameDecoder};
 use prdb_engine::gateway::{
-    GatewayConnectionLimiter, GatewayListenerConfig, GatewayListenerError, TcpGatewayListener,
+    GatewayConnectionLimiter, GatewayListenerConfig, GatewayListenerError, GatewayRuntimeConfig,
+    TcpGatewayListener, run_gateway,
 };
 use prdb_engine::ipc::{IpcFrame, Operation, read_frame, write_frame};
 use std::io::{Read, Write};
@@ -137,4 +138,77 @@ fn accepted_gateway_connections_obey_a_shared_limit() {
     drop(permit_one);
     let _client_three = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
     assert!(listener.accept_bounded(&limiter).is_ok());
+}
+
+#[test]
+fn gateway_worker_pool_opens_one_service_stream_per_client() {
+    let listener = TcpGatewayListener::bind(GatewayListenerConfig::default()).unwrap();
+    let address = listener.local_addr().unwrap();
+    let (service_tx, service_rx) = std::sync::mpsc::channel();
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let service_shutdown = std::sync::Arc::clone(&shutdown);
+    let gateway = std::thread::spawn(move || {
+        let config = GatewayRuntimeConfig {
+            worker_count: 1,
+            queue_capacity: 1,
+            idle_timeout: std::time::Duration::from_secs(5),
+            accept_poll_interval: std::time::Duration::from_millis(5),
+        };
+        run_gateway(
+            listener,
+            config,
+            move || {
+                let (gateway_service, supervisor_service) = std::os::unix::net::UnixStream::pair()?;
+                service_tx.send(supervisor_service).map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, "test service closed")
+                })?;
+                Ok(gateway_service)
+            },
+            service_shutdown,
+        )
+        .unwrap();
+    });
+
+    let mut client = std::net::TcpStream::connect(address).unwrap();
+    let mut service = service_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    client
+        .write_all(
+            &ClientFrame {
+                kind: 1,
+                request_id: 1,
+                response_sequence: 0,
+                payload: br#"{"mode":"query","client_name":"pooled"}"#.to_vec(),
+            }
+            .encode()
+            .unwrap(),
+        )
+        .unwrap();
+    let hello = read_frame(&mut service).unwrap().unwrap();
+    assert_eq!(hello.operation, Operation::OpenClientSession as u16);
+    write_frame(
+        &mut service,
+        &IpcFrame {
+            operation: hello.operation,
+            request_id: hello.request_id,
+            payload: br#"{"mode":"query"}"#.to_vec(),
+        },
+    )
+    .unwrap();
+    let mut decoder = ClientFrameDecoder::default();
+    let mut bytes = [0u8; 256];
+    let response = loop {
+        let count = client.read(&mut bytes).unwrap();
+        assert_ne!(count, 0);
+        if let Some(frame) = decoder.push(&bytes[..count]).unwrap().pop() {
+            break frame;
+        }
+    };
+    assert_eq!(response.kind, 100);
+    assert_eq!(response.request_id, 1);
+    client.shutdown(std::net::Shutdown::Write).unwrap();
+    drop(service);
+    shutdown.store(true, std::sync::atomic::Ordering::Release);
+    gateway.join().unwrap();
 }

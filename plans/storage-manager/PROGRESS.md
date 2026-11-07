@@ -1126,7 +1126,15 @@
 - Changed implementation and regression: [listener limits and timeout bridge](../../engine/src/gateway.rs) and [shared connection-cap test](../../engine/tests/gateway.rs).
 - Observed red: the focused test initially failed to compile because the shared limiter and bounded accept API were absent; a subsequent compile exposed and corrected the test's tuple destructuring.
 - Commands actually run in the configured Nix shell: `cargo fmt --all`; focused `cargo test -p prdb-engine --test gateway --locked` (5 passed); and `cargo fmt --all -- --check && cargo build --workspace --locked && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && git diff --check`. All passed.
-- Remaining: use permits/timeouts in a bounded listener worker pool; add absolute pre-auth deadlines and per-IP rate limits.
+- Remaining: add absolute pre-auth deadlines and per-IP rate limits. The fixed bounded listener worker pool is recorded in the following entry.
+
+## GW-1 / GW-2 dependency: bounded TCP gateway worker pool
+
+- Behavior: one listener process accepts TCP peers into a bounded queue served by a fixed number of workers. Each worker opens one private Unix service stream, applies idle read/write timeouts to both ends, and forwards the client session. Shutdown stops accepting, drains queued clients, and joins all workers.
+- Changed implementation and integration regression: [gateway runtime](../../engine/src/gateway.rs) and [TCP/Unix worker-pool test](../../engine/tests/gateway.rs).
+- Observed red: initial runtime test compilation failed because `GatewayRuntimeConfig` and `run_gateway` were absent.
+- Commands actually run in the configured Nix shell: `cargo fmt --all`; focused `cargo test -p prdb-engine --test gateway --locked gateway_worker_pool_opens_one_service_stream_per_client` passed; and `cargo fmt --all -- --check && cargo build --workspace --locked && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && git diff --check`. All passed.
+- Remaining: bind the Unix service connector to verified peer identity and generation; add pre-auth absolute deadlines, rate limits, ADMIN forwarding, result relay, and process startup configuration.
 
 ## SU-1 / IPC-6 dependency: gateway submission IPC dispatcher
 

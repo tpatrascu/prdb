@@ -70,6 +70,40 @@ pub struct TcpGatewayListener {
     listener: TcpListener,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct GatewayRuntimeConfig {
+    pub worker_count: usize,
+    pub queue_capacity: usize,
+    pub idle_timeout: Duration,
+    pub accept_poll_interval: Duration,
+}
+
+impl Default for GatewayRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            worker_count: 32,
+            queue_capacity: 64,
+            idle_timeout: Duration::from_secs(30),
+            accept_poll_interval: Duration::from_millis(10),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum GatewayRuntimeError {
+    InvalidConfig,
+    Io(io::Error),
+    WorkerPanicked,
+}
+
+impl std::fmt::Display for GatewayRuntimeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "gateway runtime failed: {self:?}")
+    }
+}
+
+impl std::error::Error for GatewayRuntimeError {}
+
 struct GatewayConnectionLimit {
     maximum: NonZeroUsize,
     active: AtomicUsize,
@@ -247,6 +281,95 @@ pub fn serve_tcp_client_connection_with_timeout(
         .set_write_timeout(Some(idle_timeout))
         .map_err(GatewayConnectionError::Io)?;
     serve_tcp_client_connection(client, service)
+}
+
+/// Run a fixed worker pool with a bounded pending-connection queue. The
+/// connector opens exactly one private Unix service stream for each accepted
+/// client. Set `shutdown` to drain the queue and join workers.
+pub fn run_gateway<F>(
+    gateway: TcpGatewayListener,
+    config: GatewayRuntimeConfig,
+    connect_service: F,
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
+) -> Result<(), GatewayRuntimeError>
+where
+    F: Fn() -> io::Result<std::os::unix::net::UnixStream> + Send + Sync + 'static,
+{
+    if config.worker_count == 0
+        || config.queue_capacity == 0
+        || config.idle_timeout.is_zero()
+        || config.accept_poll_interval.is_zero()
+    {
+        return Err(GatewayRuntimeError::InvalidConfig);
+    }
+    gateway
+        .listener
+        .set_nonblocking(true)
+        .map_err(GatewayRuntimeError::Io)?;
+
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<TcpStream>(config.queue_capacity);
+    let receiver = Arc::new(std::sync::Mutex::new(receiver));
+    let connector = Arc::new(connect_service);
+    let mut workers = Vec::with_capacity(config.worker_count);
+    for _ in 0..config.worker_count {
+        let receiver = Arc::clone(&receiver);
+        let connector = Arc::clone(&connector);
+        let idle_timeout = config.idle_timeout;
+        workers.push(
+            std::thread::Builder::new()
+                .name("prdb-gateway-worker".to_owned())
+                .spawn(move || {
+                    loop {
+                        let client = receiver
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .recv();
+                        let Ok(mut client) = client else {
+                            break;
+                        };
+                        let Ok(mut service) = connector() else {
+                            continue;
+                        };
+                        let _ = serve_tcp_client_connection_with_timeout(
+                            &mut client,
+                            &mut service,
+                            idle_timeout,
+                        );
+                    }
+                })
+                .map_err(GatewayRuntimeError::Io)?,
+        );
+    }
+
+    let accept_result = loop {
+        if shutdown.load(Ordering::Acquire) {
+            break Ok(());
+        }
+        match gateway.listener.accept() {
+            Ok((client, _peer)) => match sender.try_send(client) {
+                Ok(()) | Err(std::sync::mpsc::TrySendError::Full(_)) => {}
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                    break Err(GatewayRuntimeError::WorkerPanicked);
+                }
+            },
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(config.accept_poll_interval);
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => break Err(GatewayRuntimeError::Io(error)),
+        }
+    };
+    drop(sender);
+
+    let mut worker_panicked = false;
+    for worker in workers {
+        worker_panicked |= worker.join().is_err();
+    }
+    if worker_panicked {
+        Err(GatewayRuntimeError::WorkerPanicked)
+    } else {
+        accept_result
+    }
 }
 
 fn read_client_request<R: Read>(
