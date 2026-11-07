@@ -1051,3 +1051,10 @@
 - Changed code and tests: [client request handlers](../../engine/src/client_protocol.rs), [protocol regressions](../../engine/tests/client_protocol.rs), and [real-redb handshake/upload integration](../../engine/tests/commit.rs).
 - Verification: focused protocol suite and real-redb HELLO/AUTH/PREPARE/chunk/SEAL regression pass in the repository Nix shell.
 - Remaining: START frame dispatch, actual supervisor/gateway IPC, TCP transport, worker process lifecycle, and sandboxed execution evidence.
+
+## NP-4 dependency: START admission response
+
+- Behavior: one strict START frame claims a sealed reservation, revalidates storage credentials/current authority before creating a snapshot, and returns sequence-zero `accepted` alongside the supervisor-owned invocation.
+- Changed code and test: [START frame path](../../engine/src/client_protocol.rs) and [current-credential/deadline real-redb regression](../../engine/tests/commit.rs).
+- Verification: focused START regression passes in the repository Nix shell.
+- Remaining: process launch/exit observation, streamed result and trusted terminal delivery, and gateway integration.

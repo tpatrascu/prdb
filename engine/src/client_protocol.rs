@@ -880,6 +880,58 @@ impl ClientConnectionSession {
         })
     }
 
+    /// Accept one sealed invocation and return both the sequence-zero wire
+    /// acknowledgement and the storage admission that the supervisor owns.
+    pub fn handle_start_request<'db>(
+        &mut self,
+        storage: &StorageManager<'db>,
+        staging: &crate::supervisor::StagingStore,
+        request: ClientFrame,
+        retention_deadline_us: i64,
+        max_rows: usize,
+        max_bytes: usize,
+    ) -> Result<
+        (
+            ClientFrame,
+            crate::storage_manager::SupervisorInvocation<'db>,
+        ),
+        ClientStartError,
+    > {
+        if request.response_sequence != 0 || request.kind != 7 {
+            return Err(ClientStartError::Session(
+                ClientSessionError::UnsupportedRequest,
+            ));
+        }
+        self.request_ids
+            .accept(&request)
+            .map_err(|_| ClientStartError::Session(ClientSessionError::UnsupportedRequest))?;
+        if !self.permits_request_kind(request.kind) {
+            return Err(ClientStartError::Session(if self.authenticated.is_none() {
+                ClientSessionError::AuthenticationRequired
+            } else {
+                ClientSessionError::WrongMode
+            }));
+        }
+        let invocation_id = decode_client_seal(&request.payload).map_err(|error| {
+            ClientStartError::Session(ClientSessionError::InvalidControlPayload(error))
+        })?;
+        let invocation = self.start_submission(
+            storage,
+            staging,
+            invocation_id,
+            retention_deadline_us,
+            max_rows,
+            max_bytes,
+        )?;
+        let response = ClientFrame {
+            kind: 100,
+            request_id: request.request_id,
+            response_sequence: 0,
+            payload: b"{\"state\":\"accepted\"}".to_vec(),
+        };
+        Ok((response, invocation))
+    }
+
     /// Accept the one HELLO for this connection before any AUTH request.
     pub fn accept_hello(
         &mut self,

@@ -7752,7 +7752,9 @@ fn supervisor_drains_both_worker_channels_before_durable_finalize()
 #[test]
 fn sealed_start_admits_only_current_credentials_and_enforces_request_deadline()
 -> Result<(), Box<dyn std::error::Error>> {
-    use prdb_engine::client_protocol::{ClientConnectionSession, ClientMode, ClientStartError};
+    use prdb_engine::client_protocol::{
+        ClientConnectionSession, ClientFrame, ClientMode, ClientStartError,
+    };
     use prdb_engine::supervisor::{
         ChunkKind, PrepareSubmission, StagingError, StagingLimits, StagingStore,
         SubmissionMetadata, SubmissionMetadataValidator, WorkloadClass,
@@ -7835,14 +7837,26 @@ fn sealed_start_admits_only_current_credentials_and_enforces_request_deadline()
         None
     );
 
-    let admitted = client.start_submission(
+    let invocation_hex = first
+        .invocation_id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let (accepted, admitted) = client.handle_start_request(
         &storage,
         &staging,
-        first.invocation_id,
+        ClientFrame {
+            kind: 7,
+            request_id: 1,
+            response_sequence: 0,
+            payload: format!("{{\"invocation_id\":\"{invocation_hex}\"}}").into_bytes(),
+        },
         now + 3_600_000_000,
         2,
         64,
     )?;
+    assert_eq!(accepted.payload, b"{\"state\":\"accepted\"}");
+    assert_eq!(accepted.request_id, 1);
     assert!(
         storage
             .get_invocation_status(first.invocation_id, user_id, now)?

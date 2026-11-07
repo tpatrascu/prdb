@@ -55,3 +55,10 @@
 - Changed code and tests: [PREPARE/SEAL decoders and handlers](../../engine/src/client_protocol.rs), [schema regressions](../../engine/tests/client_protocol.rs), and [real-redb session upload lifecycle](../../engine/tests/commit.rs).
 - Verification: focused protocol tests and HELLO/AUTH/PREPARE/chunk/SEAL integration regression pass in the repository Nix shell.
 - Remaining: START frame response dispatch, STATUS/CANCEL, TCP listener, and gateway-service IPC integration.
+
+## NP-4 dependency: one-shot START frame acceptance
+
+- Behavior: START accepts only the strict invocation-ID envelope, routes through the sealed staging transition and current storage-authority revalidation, then returns sequence-zero `accepted` with the admitted supervisor invocation.
+- Changed code and test: [START dispatcher](../../engine/src/client_protocol.rs) and [real-redb deadline/revocation regression](../../engine/tests/commit.rs).
+- Verification: focused real-redb START regression passes in the repository Nix shell.
+- Remaining: launch and supervise the worker before streaming RESULT_DATA and a trusted terminal.
