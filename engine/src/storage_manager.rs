@@ -2508,6 +2508,7 @@ impl<'db> StorageManager<'db> {
         let grants_prefix = 12u16.to_be_bytes();
         let mut scanned = 0usize;
         let mut grant_pairs = Vec::new();
+        let mut changed_grantees = HashSet::<[u8; 16]>::new();
         for entry in catalog
             .range(grants_prefix.as_slice()..)
             .map_err(|_| TableLifecycleError::Storage)?
@@ -2529,6 +2530,7 @@ impl<'db> StorageManager<'db> {
                 let grantee: [u8; 16] = key[3..19].try_into().unwrap();
                 let target: [u8; 16] = key[43..59].try_into().unwrap();
                 grant_pairs.push((grantee, target));
+                changed_grantees.insert(grantee);
                 deletes.insert(key, value.value().to_vec());
             }
         }
@@ -2540,6 +2542,48 @@ impl<'db> StorageManager<'db> {
             {
                 deletes.insert(key, value.value().to_vec());
             }
+        }
+        let mut principal_updates = Vec::with_capacity(changed_grantees.len());
+        for grantee_id in changed_grantees {
+            let principal_key = id_catalog_key(10, grantee_id);
+            let principal_bytes = catalog
+                .get(principal_key.as_slice())
+                .map_err(|_| TableLifecycleError::Storage)?
+                .ok_or(TableLifecycleError::Commit(CommitError::InvalidCatalog))?
+                .value()
+                .to_vec();
+            let mut principal = decode_registered_envelope(&principal_bytes)
+                .map_err(|_| TableLifecycleError::Commit(CommitError::InvalidCatalog))?;
+            let epoch = principal
+                .fields
+                .iter_mut()
+                .find(|field| field.tag == 4 && field.wire_type == WireType::U64)
+                .ok_or(TableLifecycleError::Commit(CommitError::InvalidCatalog))?;
+            let current_epoch = u64::from_le_bytes(
+                epoch
+                    .payload
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| TableLifecycleError::Commit(CommitError::InvalidCatalog))?,
+            );
+            epoch.payload = current_epoch
+                .checked_add(1)
+                .filter(|next| *next != 0)
+                .ok_or(TableLifecycleError::Commit(CommitError::InvalidCatalog))?
+                .to_le_bytes()
+                .to_vec();
+            let payload = encode_envelope(
+                &family_schema(10)
+                    .ok_or(TableLifecycleError::Commit(CommitError::InvalidCatalog))?,
+                &principal_key,
+                &principal.fields,
+            )
+            .map_err(|_| TableLifecycleError::Commit(CommitError::InvalidCatalog))?;
+            principal_updates.push(CatalogWrite {
+                key: principal_key,
+                expected_value: Some(principal_bytes),
+                payload: Some(payload),
+            });
         }
         let dependency_prefix = 15u16.to_be_bytes();
         let mut scanned = 0usize;
@@ -2565,13 +2609,17 @@ impl<'db> StorageManager<'db> {
                 deletes.insert(key, value.value().to_vec());
             }
         }
-        let writes = deletes
+        let writes = principal_updates
             .into_iter()
-            .map(|(key, expected_value)| CatalogWrite {
-                key,
-                expected_value: Some(expected_value),
-                payload: None,
-            })
+            .chain(
+                deletes
+                    .into_iter()
+                    .map(|(key, expected_value)| CatalogWrite {
+                        key,
+                        expected_value: Some(expected_value),
+                        payload: None,
+                    }),
+            )
             .collect::<Vec<_>>();
         audit_event.target_ids = vec![table_id];
         let commit_sequence = commit_authorized_table_drop_ddl_with_fences(

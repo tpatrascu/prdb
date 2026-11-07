@@ -9475,9 +9475,10 @@ fn table_drop_ddl_authority_guards(
         .ok_or(CommitError::InvalidCatalog)?;
     if principal_id == [0; 16]
         || table_id == [0; 16]
-        || catalog_writes
-            .iter()
-            .any(|write| write.payload.is_some() || write.expected_value.is_none())
+        || catalog_writes.iter().any(|write| {
+            write.expected_value.is_none()
+                || (write.payload.is_some() && !write.key.starts_with(&10u16.to_be_bytes()))
+        })
         || audit_events.is_empty()
         || audit_events.iter().any(|event| {
             event.actor_id != Some(principal_id)
@@ -9703,13 +9704,67 @@ fn table_drop_ddl_authority_guards(
             ))
         })
         .collect::<Result<HashSet<_>, _>>()?;
+    let changed_grantees = grant_pairs
+        .iter()
+        .map(|(grantee, _)| *grantee)
+        .collect::<HashSet<_>>();
+    let principal_writes = catalog_writes
+        .iter()
+        .filter(|write| write.key.starts_with(&10u16.to_be_bytes()))
+        .collect::<Vec<_>>();
+    if principal_writes.len() != changed_grantees.len() {
+        return Err(CommitError::InvalidCatalog);
+    }
+    let mut updated_grantees = HashSet::new();
+    for write in principal_writes {
+        let grantee_id: [u8; 16] = write
+            .key
+            .get(3..19)
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or(CommitError::InvalidCatalog)?;
+        if write.key != id_catalog_key(10, grantee_id) {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let Some(expected) = write.expected_value.as_deref() else {
+            return Err(CommitError::InvalidCatalog);
+        };
+        let Some(next) = write.payload.as_deref() else {
+            return Err(CommitError::InvalidCatalog);
+        };
+        let current_record = decode_catalog_record(&write.key, expected)?;
+        let next_record = decode_catalog_record(&write.key, next)?;
+        let current_fields = current_record
+            .fields
+            .iter()
+            .filter(|field| field.tag != 4)
+            .collect::<Vec<_>>();
+        let next_fields = next_record
+            .fields
+            .iter()
+            .filter(|field| field.tag != 4)
+            .collect::<Vec<_>>();
+        if current_record.family_code != 10
+            || next_record.family_code != 10
+            || current_record.logical_key != next_record.logical_key
+            || current_fields != next_fields
+            || !changed_grantees.contains(&grantee_id)
+            || !updated_grantees.insert(grantee_id)
+            || principal_authority_epoch(&write.key, expected)?.checked_add(1)
+                != Some(principal_authority_epoch(&write.key, next)?)
+        {
+            return Err(CommitError::InvalidCatalog);
+        }
+    }
+    if updated_grantees != changed_grantees {
+        return Err(CommitError::InvalidCatalog);
+    }
     for write in catalog_writes {
         let family = write
             .key
             .get(..2)
             .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
             .ok_or(CommitError::InvalidCatalog)?;
-        if write.payload.is_some() || write.expected_value.is_none() {
+        if write.expected_value.is_none() || (write.payload.is_some() && family != 10) {
             return Err(CommitError::InvalidCatalog);
         }
         let id = write
@@ -9729,6 +9784,7 @@ fn table_drop_ddl_authority_guards(
                         .and_then(|bytes| <[u8; 16]>::try_from(bytes).ok())
                         .is_some_and(|id| owned_ids.contains(&id))
             }
+            10 => id.is_some_and(|id| changed_grantees.contains(&id)),
             14 => id.is_some_and(|id| policy_ids.contains(&id)),
             15 => {
                 let dependent = write
@@ -9802,7 +9858,7 @@ fn table_drop_ddl_authority_guards(
             .key
             .get(..2)
             .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]));
-        if !matches!(family, Some(2 | 5 | 6 | 7 | 8 | 9 | 12 | 13 | 14 | 15)) {
+        if !matches!(family, Some(2 | 5 | 6 | 7 | 8 | 9 | 10 | 12 | 13 | 14 | 15)) {
             return Err(CommitError::InvalidCatalog);
         }
         add_catalog_guard(&mut guards, write.key.clone(), write.expected_value.clone());

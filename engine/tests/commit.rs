@@ -1199,9 +1199,12 @@ fn storage_manager_drop_table_removes_owned_catalog_and_rows()
     let storage = StorageManager::new(&database, Duration::from_millis(100))?;
     let admin_role = builtin_owner_id();
     let actor = id(0x40);
+    let grantee = id(0x47);
     let setup = vec![
         principal_write_with_name(actor, 1, 1, "table_drop_owner"),
         object_write_with_name(actor, 8, "table_drop_owner"),
+        principal_write_with_name(grantee, 1, 1, "table_drop_grantee"),
+        object_write_with_name(grantee, 8, "table_drop_grantee"),
         membership_write(actor, admin_role),
         dependency_write(actor, admin_role, 5),
     ];
@@ -1239,6 +1242,29 @@ fn storage_manager_drop_table_removes_owned_catalog_and_rows()
         retention_deadline_us: 9_999,
         audit_event: create_audit,
     })?;
+    let table_grant = grant_write(grantee, created.table_id, 2, 1, created.table_id, actor);
+    let grant_edge = dependency_write(grantee, created.table_id, 5);
+    let mut advanced_grantee = principal_write_with_name(grantee, 1, 2, "table_drop_grantee");
+    advanced_grantee.expected_value = Some(
+        database
+            .begin_read()?
+            .open_table(CATALOG)?
+            .get(id_catalog_key(10, grantee).as_slice())?
+            .ok_or("table-drop grant recipient missing")?
+            .value()
+            .to_vec(),
+    );
+    let grant_invocation = id(0x5a);
+    let mut grant_audit = identity_audit_event(0x5b, actor, created.table_id);
+    grant_audit.action = AuditAction::AuthorityChange;
+    grant_audit.correlation_id = grant_invocation;
+    storage.commit_authorized_object_grant_ddl(
+        grant_invocation,
+        actor,
+        9_999,
+        &[table_grant.clone(), grant_edge.clone(), advanced_grantee],
+        &[grant_audit],
+    )?;
     let payload = encode_tuple(
         &[ColumnSchema {
             scalar_type: ScalarType::Text,
@@ -1383,12 +1409,30 @@ fn storage_manager_drop_table_removes_owned_catalog_and_rows()
         id_catalog_key(6, created.column_ids[0]),
         id_catalog_key(2, expression_id),
         id_catalog_key(7, expression_id),
+        table_grant.key,
+        grant_edge.key,
     ] {
         assert!(
             catalog.get(key.as_slice())?.is_none(),
             "record remained: {key:?}"
         );
     }
+    let grantee_key = id_catalog_key(10, grantee);
+    let grantee_record = decode_registered_envelope(
+        catalog
+            .get(grantee_key.as_slice())?
+            .ok_or("table-drop grant recipient missing after cleanup")?
+            .value(),
+    )?;
+    let grantee_epoch = grantee_record
+        .fields
+        .iter()
+        .find(|field| field.tag == 4)
+        .ok_or("table-drop grant recipient epoch missing")?;
+    assert_eq!(
+        u64::from_le_bytes(grantee_epoch.payload.as_slice().try_into()?),
+        3
+    );
     assert!(read.open_table(ROWS)?.get(&row_key[..])?.is_none());
     assert_eq!(
         lookup_outcome(&database, drop_invocation, actor, 1)?
