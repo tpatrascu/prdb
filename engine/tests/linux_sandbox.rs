@@ -242,6 +242,61 @@ fn namespace_command_spawn_returns_after_worker_exec() {
     assert!(child.wait().unwrap().success());
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn worker_seccomp_filter_allows_runtime_calls_and_kills_unlisted_syscalls() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::Command;
+
+    const CHILD_MODE: &str = "PRDB_SECCOMP_PROBE_MODE";
+    if let Some(mode) = std::env::var_os(CHILD_MODE) {
+        linux_sandbox::install_worker_seccomp_filter().unwrap();
+        match mode.to_str().unwrap() {
+            "allow" => {
+                assert!(unsafe { libc::syscall(libc::SYS_getpid) } > 0);
+            }
+            "deny" => {
+                // Creating a new socket is outside the worker profile. The
+                // filter must terminate the whole child process with SIGSYS.
+                unsafe { libc::syscall(libc::SYS_socket, libc::AF_INET, libc::SOCK_STREAM, 0) };
+                panic!("unlisted socket syscall unexpectedly returned");
+            }
+            other => panic!("unknown seccomp probe mode: {other}"),
+        }
+        return;
+    }
+
+    let executable = std::env::current_exe().unwrap();
+    let run_probe = |mode: &str| {
+        Command::new(&executable)
+            .args([
+                "--exact",
+                "worker_seccomp_filter_allows_runtime_calls_and_kills_unlisted_syscalls",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD_MODE, mode)
+            .output()
+            .unwrap()
+    };
+
+    let allowed = run_probe("allow");
+    assert!(
+        allowed.status.success(),
+        "allowlisted probe failed: {}",
+        String::from_utf8_lossy(&allowed.stderr)
+    );
+
+    let denied = run_probe("deny");
+    assert_eq!(
+        denied.status.signal(),
+        Some(libc::SIGSYS),
+        "unlisted syscall was not killed: status={:?}, stderr={}",
+        denied.status,
+        String::from_utf8_lossy(&denied.stderr)
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn landlock_blocks_unlisted_filesystem_reads_before_exec() {

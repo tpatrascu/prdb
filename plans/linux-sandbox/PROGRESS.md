@@ -39,4 +39,12 @@
 - Ordering: attach the invocation cgroup first, then namespaces, then Landlock and seccomp. The command handle tracks the reaper; the invocation cgroup is required to terminate the entire worker tree.
 - Regression: [Linux namespace tests](../../engine/tests/linux_sandbox.rs) check distinct user/mount/network/PID namespace handles, worker PID 1, zero effective and bounding capabilities, `NoNewPrivs`, isolation from the supervisor PID in `/proc`, cgroup-hook ordering, and that `Command::spawn` returns before worker exit.
 - Observed runtime: both focused namespace tests passed on the configured Linux host. They launch only harmless shell probes; no query artifact is loaded.
-- Remaining: wire the hook chain into a clean executor launcher, scrub inherited worker descriptors/environment, install seccomp before artifact loading, provision filesystem/runtime resources, and exercise the full profile with a delegated cgroup parent and hostile fixtures.
+- Remaining: wire the hook chain into a clean executor launcher, scrub inherited worker descriptors/environment, provision filesystem/runtime resources, and exercise the full profile with a delegated cgroup parent and hostile fixtures.
+
+## SB-4 dependency: worker syscall filter — implemented for Linux x86_64
+
+- Behavior: `install_worker_seccomp_filter` installs an initial allowlist in the current clean worker host, checks the x86_64 audit architecture before syscall numbers, sets `no_new_privs`, applies the filter to existing threads with TSYNC, and kills the process tree for any unlisted syscall. Unsupported targets return `Unsupported`.
+- Ordering: call after the worker host's final `exec` and before loading the query library or creating threads. Do not install it in the supervisor or before the namespace hook's final exec.
+- Regression: a disposable copy of the test executable confirms `getpid` remains available and a new socket syscall terminates the child with `SIGSYS`.
+- Verification: the focused seccomp regression passed with Rust/Cargo 1.95.0. Full Nix-shell validation passed: formatting, workspace build, warning-denied Clippy, all workspace tests, and `git diff --check`.
+- Remaining: integrate with the clean executor launcher, validate the allowlist against the supported Rust/libc/SDK runtime and admitted query behavior, and run hostile artifact fixtures only in that sandbox. This host still lacks the writable delegated cgroup parent needed for a complete launch.

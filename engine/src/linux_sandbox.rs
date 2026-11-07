@@ -300,6 +300,200 @@ unsafe fn terminate_and_reap_worker(worker_pid: libc::pid_t) -> ! {
     unsafe { libc::_exit(127) }
 }
 
+/// Install the initial x86_64 executor syscall allowlist in the current
+/// process. Call from the clean worker host after exec and before loading the
+/// query library or creating threads. Unsupported architectures fail closed.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub fn install_worker_seccomp_filter() -> io::Result<()> {
+    #[repr(C)]
+    struct SockFilter {
+        code: u16,
+        jt: u8,
+        jf: u8,
+        k: u32,
+    }
+    #[repr(C)]
+    struct SockFprog {
+        len: u16,
+        filter: *const SockFilter,
+    }
+    #[repr(C)]
+    struct SeccompData {
+        nr: i32,
+        arch: u32,
+        instruction_pointer: u64,
+        args: [u64; 6],
+    }
+
+    const AUDIT_ARCH_X86_64: u32 = 0xc000_003e;
+    const BPF_LD_W_ABS: u16 = 0x20;
+    const BPF_JMP_JEQ_K: u16 = 0x15;
+    const BPF_RET_K: u16 = 0x06;
+    const SECCOMP_RET_KILL_PROCESS: u32 = 0x8000_0000;
+    const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
+    const SECCOMP_SET_MODE_FILTER: libc::c_long = 1;
+    const SECCOMP_FILTER_FLAG_TSYNC: libc::c_long = 1;
+
+    // This list supports the current Rust/libc worker, dynamic loading, and
+    // inherited Unix IPC streams. New worker or SDK behavior must update this
+    // list deliberately and add a positive/negative syscall regression.
+    const ALLOWED_SYSCALLS: &[libc::c_long] = &[
+        libc::SYS_read,
+        libc::SYS_write,
+        libc::SYS_readv,
+        libc::SYS_writev,
+        libc::SYS_close,
+        libc::SYS_fstat,
+        libc::SYS_newfstatat,
+        libc::SYS_statx,
+        libc::SYS_lseek,
+        libc::SYS_openat,
+        libc::SYS_readlink,
+        libc::SYS_readlinkat,
+        libc::SYS_access,
+        libc::SYS_faccessat,
+        libc::SYS_faccessat2,
+        libc::SYS_pread64,
+        libc::SYS_mmap,
+        libc::SYS_mprotect,
+        libc::SYS_munmap,
+        libc::SYS_mremap,
+        libc::SYS_brk,
+        libc::SYS_madvise,
+        libc::SYS_fcntl,
+        libc::SYS_dup,
+        libc::SYS_dup2,
+        libc::SYS_dup3,
+        libc::SYS_ioctl,
+        libc::SYS_rt_sigaction,
+        libc::SYS_rt_sigprocmask,
+        libc::SYS_rt_sigreturn,
+        libc::SYS_sigaltstack,
+        libc::SYS_sched_yield,
+        libc::SYS_futex,
+        libc::SYS_set_robust_list,
+        libc::SYS_rseq,
+        libc::SYS_clock_gettime,
+        libc::SYS_clock_getres,
+        libc::SYS_clock_nanosleep,
+        libc::SYS_nanosleep,
+        libc::SYS_getpid,
+        libc::SYS_gettid,
+        libc::SYS_getuid,
+        libc::SYS_geteuid,
+        libc::SYS_getgid,
+        libc::SYS_getegid,
+        libc::SYS_getrandom,
+        libc::SYS_uname,
+        libc::SYS_getcwd,
+        libc::SYS_poll,
+        libc::SYS_ppoll,
+        libc::SYS_select,
+        libc::SYS_pselect6,
+        libc::SYS_epoll_create1,
+        libc::SYS_epoll_ctl,
+        libc::SYS_epoll_wait,
+        libc::SYS_epoll_pwait,
+        libc::SYS_recvfrom,
+        libc::SYS_sendto,
+        libc::SYS_recvmsg,
+        libc::SYS_sendmsg,
+        libc::SYS_getsockopt,
+        libc::SYS_getsockname,
+        libc::SYS_getpeername,
+        libc::SYS_shutdown,
+        libc::SYS_arch_prctl,
+        libc::SYS_set_tid_address,
+        libc::SYS_restart_syscall,
+        libc::SYS_exit,
+        libc::SYS_exit_group,
+    ];
+
+    let mut filters = Vec::with_capacity(4 + ALLOWED_SYSCALLS.len() * 2);
+    filters.push(SockFilter {
+        code: BPF_LD_W_ABS,
+        jt: 0,
+        jf: 0,
+        k: std::mem::offset_of!(SeccompData, arch) as u32,
+    });
+    filters.push(SockFilter {
+        code: BPF_JMP_JEQ_K,
+        jt: 1,
+        jf: 0,
+        k: AUDIT_ARCH_X86_64,
+    });
+    filters.push(SockFilter {
+        code: BPF_RET_K,
+        jt: 0,
+        jf: 0,
+        k: SECCOMP_RET_KILL_PROCESS,
+    });
+    filters.push(SockFilter {
+        code: BPF_LD_W_ABS,
+        jt: 0,
+        jf: 0,
+        k: std::mem::offset_of!(SeccompData, nr) as u32,
+    });
+    for syscall_number in ALLOWED_SYSCALLS {
+        filters.push(SockFilter {
+            code: BPF_JMP_JEQ_K,
+            jt: 0,
+            jf: 1,
+            k: *syscall_number as u32,
+        });
+        filters.push(SockFilter {
+            code: BPF_RET_K,
+            jt: 0,
+            jf: 0,
+            k: SECCOMP_RET_ALLOW,
+        });
+    }
+    filters.push(SockFilter {
+        code: BPF_RET_K,
+        jt: 0,
+        jf: 0,
+        k: SECCOMP_RET_KILL_PROCESS,
+    });
+    let program = SockFprog {
+        len: filters.len() as u16,
+        filter: filters.as_ptr(),
+    };
+
+    // SAFETY: prctl receives scalar arguments; setting no_new_privs is
+    // required before installing an unprivileged seccomp filter.
+    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // TSYNC applies the filter to every existing thread. The worker must
+    // install it before artifact initialization; future threads inherit it.
+    // SAFETY: program and its filter vector remain alive for the syscall.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_seccomp,
+            SECCOMP_SET_MODE_FILTER,
+            SECCOMP_FILTER_FLAG_TSYNC,
+            &program,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else if result < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Err(io::Error::other(format!(
+            "seccomp TSYNC could not filter worker thread {result}"
+        )))
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+pub fn install_worker_seccomp_filter() -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "the worker syscall profile is currently defined only for Linux x86_64",
+    ))
+}
+
 #[cfg(target_os = "linux")]
 fn write_proc_file(path: &'static [u8], contents: &[u8]) -> io::Result<()> {
     // SAFETY: path is a static NUL-terminated byte string.
