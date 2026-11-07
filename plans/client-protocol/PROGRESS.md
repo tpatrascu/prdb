@@ -14,3 +14,9 @@
 - Changed code and contract: [client session state](../../engine/src/client_protocol.rs) and [HELLO/AUTH mode rules](../../specs/client-protocol.md).
 - Verification: repository Nix-shell formatting, workspace build, warning-denied Clippy, and `git diff --check` pass. Tests were not run.
 - Remaining: strict JSON/base64 wire decoding and TCP listener/service integration.
+
+## NP-2 verification: real-redb session revocation
+
+- Evidence: the focused commit integration test authenticates a seeded token, checks HELLO/AUTH ordering and query mode, revalidates a protected request, then revokes the credential and confirms the next protected request fails while the session ID remains stable.
+- Test: [real-redb session regression](../../engine/tests/commit.rs).
+- Remaining: wire JSON/base64 decoding and network listener integration.

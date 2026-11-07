@@ -971,4 +971,11 @@
 - Behavior: successful storage AUTH now generates the opaque connection/session ID, and its identity context creates a staging owner bound to that ID and the storage-resolved principal. Callers cannot construct staging owners from arbitrary principal IDs outside the engine crate.
 - Changed code and contracts: [storage authentication and session identity](../../engine/src/storage_manager.rs), [staging owner](../../engine/src/supervisor.rs), [storage access contract](../../specs/storage-manager.md), and [client AUTH contract](../../specs/client-protocol.md).
 - Verification: Nix-shell formatting, workspace build, warning-denied Clippy, and `git diff --check` pass. Tests were not run.
-- Remaining: implement strict HELLO/AUTH request decoding and connect the authenticated session to a gateway TCP connection; revalidate authority on every execution and control request.
+- Remaining: implement strict HELLO/AUTH request decoding and connect the authenticated session to a gateway TCP connection.
+
+## SU-1 dependency: real-redb AUTH session and revocation regression
+
+- Behavior: a query connection authenticates against a real redb catalog, receives a stable nonzero session identity and staging owner, and revalidates before a protected operation. Revoking the token causes the next operation to fail authentication without changing the connection ID.
+- Changed fixture: [client session AUTH regression](../../engine/tests/commit.rs).
+- Verification: focused `cargo test -p prdb-engine --test commit client_session_authenticates_and_revalidates_before_operations --locked` passed in the repository Nix shell; formatting, workspace build, and warning-denied Clippy passed after the session implementation.
+- Remaining: strict JSON/AUTH wire decoding, live gateway TCP service, supervisor process provisioning, and sandboxed end-to-end persistence/reconciliation evidence.

@@ -7405,6 +7405,86 @@ fn token_admission_checks_expiry_secret_revocation_and_commit_guards()
 }
 
 #[test]
+fn client_session_authenticates_and_revalidates_before_operations()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::client_protocol::{ClientConnectionSession, ClientMode, ClientSessionError};
+    use prdb_engine::transaction::TransactionError;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
+    let user_id = id(0x70);
+    let token_id = id(0x71);
+    let secret = [0x31; 32];
+    let credential = credential_verifier_write(
+        token_id,
+        user_id,
+        &secret,
+        now - 1_000_000,
+        now + 60_000_000,
+        None,
+        1,
+    );
+    let credential_value = credential.payload.clone().unwrap();
+    commit_catalog_and_audit(
+        &database,
+        id(0x72),
+        id(9),
+        now + 3_600_000_000,
+        &[
+            principal_write_with_name(user_id, 1, 1, "session_user"),
+            object_write_with_name(user_id, 8, "session_user"),
+            credential,
+        ],
+        &[audit_event(0x72)],
+    )?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+
+    let mut session = ClientConnectionSession::default();
+    assert!(session.permits_request_kind(1));
+    assert!(!session.permits_request_kind(2));
+    session.accept_hello(ClientMode::Query, "integration-test")?;
+    assert!(session.permits_request_kind(2));
+    assert!(!session.permits_request_kind(3));
+    let authenticated = session.authenticate(&storage, token_id, &secret)?;
+    let session_id = authenticated.connection_id();
+    assert_ne!(session_id, [0; 16]);
+    assert_eq!(authenticated.principal_id(), user_id);
+    assert!(authenticated.role_ids().is_empty());
+    assert!(session.staging_owner().is_ok());
+    assert!(session.permits_request_kind(3));
+    session.authorize_request(&storage, 3)?;
+    assert_eq!(session.session_id()?, session_id);
+
+    let mut revoked = credential_verifier_write(
+        token_id,
+        user_id,
+        &secret,
+        now - 1_000_000,
+        now + 60_000_000,
+        Some(now),
+        2,
+    );
+    revoked.expected_value = Some(credential_value);
+    storage.commit_catalog_and_audit(
+        id(0x73),
+        id(9),
+        now + 3_600_000_000,
+        &[revoked],
+        &[audit_event(0x73)],
+    )?;
+    assert!(matches!(
+        session.authorize_request(&storage, 8),
+        Err(ClientSessionError::Storage(
+            TransactionError::AuthenticationFailed
+        ))
+    ));
+    assert_eq!(session.session_id()?, session_id);
+    Ok(())
+}
+
+#[test]
 fn storage_manager_issues_and_revokes_tokens_for_manage_users()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::storage_manager::{TokenIssueRequest, TokenLifecycleError};
