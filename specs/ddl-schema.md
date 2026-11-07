@@ -14,6 +14,8 @@ Initially one database per storage-manager instance, containing named schemas. `
 
 `CREATE SCHEMA` is available through the v1 `schemas.create` authenticated control operation for normalized lowercase ASCII names of at most 128 bytes, with an existing user or role assigned as owner. The caller must have inherited database-scoped `CREATE_SCHEMA` or be a database administrator. Creation publishes the schema record, owned object record, audit event, and operation outcome in one commit. The control operation accepts structured arguments rather than SQL text; quoted mixed-case names, rename, ownership transfer, and drop remain unimplemented.
 
+The storage manager's initial `create_table` path accepts a structured schema ID, normalized table name, and 1–4096 ordered columns. Each column has a normalized name, one built-in scalar type, nullability, and optional UUID generated-identity mode. It requires inherited `CREATE` on the schema or database-administrator membership, publishes the table, ordered columns, owned-child dependencies, audit event, and outcome atomically, and rejects a duplicate table name in that schema. New tables receive no data grants. Built-in system schemas are reserved. This storage API is not yet exposed as an authenticated control-channel operation; SQL parsing, defaults, constraints in the same CREATE statement, and SDK integration remain separate work. Add constraints through the existing authorized constraint DDL path.
+
 ```sql
 CREATE SCHEMA app AUTHORIZATION app_owner;
 ALTER SCHEMA app RENAME TO application;

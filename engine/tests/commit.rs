@@ -558,6 +558,173 @@ fn storage_manager_creates_schema_atomically_for_privileged_actor()
     Ok(())
 }
 
+#[test]
+fn storage_manager_creates_typed_table_for_schema_create_grant()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::storage_manager::{
+        CreateTableRequest, TableColumnDefinition, TableLifecycleError,
+    };
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let admin_role = builtin_owner_id();
+    let actor = id(0xd1);
+    let denied = id(0xd2);
+    let schema_id = id(0xd3);
+    let setup = vec![
+        principal_write_with_name(actor, 1, 1, "table_creator"),
+        object_write_with_name(actor, 8, "table_creator"),
+        principal_write_with_name(denied, 1, 1, "table_denied"),
+        object_write_with_name(denied, 8, "table_denied"),
+        object_write_with_parent_and_owner_and_name(schema_id, 1, None, admin_role, "table_schema"),
+        schema_write(schema_id),
+        grant_write(actor, schema_id, 7, 1, schema_id, admin_role),
+        dependency_write(actor, schema_id, 5),
+    ];
+    let mut setup_audit = identity_audit_event(0xd4, admin_role, id(0xd4));
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage
+        .commit_catalog_and_audit(id(0xd4), admin_role, 9_999, &setup, &[setup_audit])
+        .map_err(|error| format!("setup failed: {error:?}"))?;
+
+    let denied_invocation = id(0xd5);
+    let mut denied_audit = identity_audit_event(0xd5, denied, id(0xd6));
+    denied_audit.correlation_id = denied_invocation;
+    let denied_result = storage.create_table(CreateTableRequest {
+        invocation_id: denied_invocation,
+        authenticated_actor_id: denied,
+        schema_id,
+        name: "ledger".to_owned(),
+        columns: vec![TableColumnDefinition {
+            name: "id".to_owned(),
+            scalar_type: ScalarType::Uuid,
+            nullable: false,
+            generated_uuid_identity: true,
+        }],
+        retention_deadline_us: 9_999,
+        audit_event: denied_audit,
+    });
+    assert!(matches!(
+        denied_result,
+        Err(TableLifecycleError::Unauthorized)
+    ));
+
+    let reserved_invocation = id(0xdb);
+    let mut reserved_audit = identity_audit_event(0xdb, actor, id(0xdc));
+    reserved_audit.correlation_id = reserved_invocation;
+    let reserved_result = storage.create_table(CreateTableRequest {
+        invocation_id: reserved_invocation,
+        authenticated_actor_id: actor,
+        schema_id: builtin_id(1),
+        name: "forbidden_table".to_owned(),
+        columns: vec![TableColumnDefinition {
+            name: "id".to_owned(),
+            scalar_type: ScalarType::Uuid,
+            nullable: false,
+            generated_uuid_identity: false,
+        }],
+        retention_deadline_us: 9_999,
+        audit_event: reserved_audit,
+    });
+    assert!(matches!(
+        reserved_result,
+        Err(TableLifecycleError::Unauthorized)
+    ));
+
+    let invocation_id = id(0xd7);
+    let mut audit = identity_audit_event(0xd7, actor, id(0xd8));
+    audit.correlation_id = invocation_id;
+    let created = storage
+        .create_table(CreateTableRequest {
+            invocation_id,
+            authenticated_actor_id: actor,
+            schema_id,
+            name: "ledger".to_owned(),
+            columns: vec![
+                TableColumnDefinition {
+                    name: "id".to_owned(),
+                    scalar_type: ScalarType::Uuid,
+                    nullable: false,
+                    generated_uuid_identity: true,
+                },
+                TableColumnDefinition {
+                    name: "label".to_owned(),
+                    scalar_type: ScalarType::Text,
+                    nullable: true,
+                    generated_uuid_identity: false,
+                },
+            ],
+            retention_deadline_us: 9_999,
+            audit_event: audit,
+        })
+        .map_err(|error| format!("table creation failed: {error:?}"))?;
+    assert_eq!(created.column_ids.len(), 2);
+    assert_eq!(created.commit_sequence, 2);
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    let table_record = catalog
+        .get(id_catalog_key(5, created.table_id).as_slice())?
+        .ok_or("missing table record")?;
+    let table = decode_registered_envelope(table_record.value())?;
+    assert_eq!(table.family_code, 5);
+    for (ordinal, column_id) in created.column_ids.iter().enumerate() {
+        let column_record = catalog
+            .get(id_catalog_key(6, *column_id).as_slice())?
+            .ok_or("missing column record")?;
+        let column = decode_registered_envelope(column_record.value())?;
+        assert_eq!(column.family_code, 6);
+        assert_eq!(
+            u32::from_le_bytes(
+                column
+                    .fields
+                    .iter()
+                    .find(|field| field.tag == 2)
+                    .unwrap()
+                    .payload
+                    .as_slice()
+                    .try_into()?
+            ),
+            ordinal as u32
+        );
+    }
+    assert_eq!(
+        lookup_outcome(&database, invocation_id, actor, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Committed
+    );
+
+    let duplicate_invocation = id(0xd9);
+    let mut duplicate_audit = identity_audit_event(0xd9, actor, id(0xda));
+    duplicate_audit.correlation_id = duplicate_invocation;
+    let duplicate = storage.create_table(CreateTableRequest {
+        invocation_id: duplicate_invocation,
+        authenticated_actor_id: actor,
+        schema_id,
+        name: "ledger".to_owned(),
+        columns: vec![TableColumnDefinition {
+            name: "id".to_owned(),
+            scalar_type: ScalarType::Uuid,
+            nullable: false,
+            generated_uuid_identity: true,
+        }],
+        retention_deadline_us: 9_999,
+        audit_event: duplicate_audit,
+    });
+    assert!(matches!(
+        duplicate,
+        Err(TableLifecycleError::Commit(CommitError::InvalidCatalog))
+    ));
+    assert_eq!(
+        lookup_outcome(&database, duplicate_invocation, actor, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Aborted
+    );
+    Ok(())
+}
+
 fn row(
     database: &Database,
     key: &[u8; 32],
