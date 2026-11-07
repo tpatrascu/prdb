@@ -65,8 +65,8 @@ pub struct GatewayAdmissionConfig {
 }
 
 /// Route one client operation over a provisioned gateway IPC connection.
-/// HELLO mode is established by the gateway when it provisions the per-client
-/// service context; all identity and staging ownership remain server-derived.
+/// HELLO establishes the per-client mode on this channel; all identity and
+/// staging ownership remain server-derived.
 pub fn dispatch_gateway_client_request<'db>(
     role: ServiceRole,
     manager: &StorageManager<'db>,
@@ -85,6 +85,9 @@ pub fn dispatch_gateway_client_request<'db>(
         payload,
     };
     let response = match operation {
+        Operation::OpenClientSession => session
+            .handle_handshake_request(manager, frame(1, request.payload.clone()))
+            .map_err(GatewayRequestError::Client)?,
         Operation::AuthenticateSession => session
             .handle_handshake_request(manager, frame(2, request.payload.clone()))
             .map_err(GatewayRequestError::Client)?,

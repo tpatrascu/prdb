@@ -7481,13 +7481,11 @@ fn client_session_authenticates_and_revalidates_before_operations()
 fn client_handshake_requires_hello_first_and_sequences_responses()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::client_protocol::{ClientConnectionSession, ClientFrame, ClientSessionError};
-    use prdb_engine::ipc::{IpcFrame, Operation, ServiceRole, read_frame, write_frame};
+    use prdb_engine::ipc::{IpcFrame, Operation, read_frame, write_frame};
     use prdb_engine::supervisor::{
         StagingLimits, StagingStore, SubmissionMetadata, SubmissionMetadataValidator,
     };
-    use prdb_engine::supervisor_ipc::{
-        GatewayAdmissionConfig, GatewayClientDispatch, dispatch_gateway_client_request,
-    };
+    use prdb_engine::supervisor_ipc::GatewayAdmissionConfig;
     use sha2::{Digest, Sha256};
     use std::os::unix::net::UnixStream;
     use std::sync::Arc;
@@ -7544,20 +7542,6 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
         ),
         Err(ClientSessionError::UnsupportedRequest)
     ));
-    let hello = session.handle_handshake_request(
-        &storage,
-        ClientFrame {
-            kind: 1,
-            request_id: 2,
-            response_sequence: 0,
-            payload: br#"{"mode":"query","client_name":"test"}"#.to_vec(),
-        },
-    )?;
-    assert_eq!(hello.kind, 100);
-    assert_eq!(hello.request_id, 2);
-    assert_eq!(hello.response_sequence, 0);
-    assert!(std::str::from_utf8(&hello.payload)?.contains("\"mode\":\"query\""));
-
     let staging = StagingStore::new(StagingLimits::default(), Arc::new(AcceptUpload))?;
     let admission = GatewayAdmissionConfig {
         retention_deadline_us: now + 3_600_000_000,
@@ -7572,33 +7556,6 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
     let token_secret_base64 = "A".repeat(43) + "=";
     let auth_payload =
         format!("{{\"token_id\":\"{token_id_hex}\",\"token_secret\":\"{token_secret_base64}\"}}");
-    let auth = match dispatch_gateway_client_request(
-        ServiceRole::Gateway,
-        &storage,
-        &staging,
-        &mut session,
-        &IpcFrame {
-            operation: Operation::AuthenticateSession as u16,
-            request_id: 3,
-            payload: auth_payload.into_bytes(),
-        },
-        admission,
-    )
-    .unwrap()
-    {
-        GatewayClientDispatch::Response(response) => response,
-        GatewayClientDispatch::Started { .. } => panic!("AUTH unexpectedly started"),
-    };
-    assert_eq!(auth.operation, Operation::AuthenticateSession as u16);
-    assert!(std::str::from_utf8(&auth.payload)?.contains("\"authenticated\":true"));
-    let session_id = session.session_id()?;
-    let encoded_session_id = session_id
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    assert!(std::str::from_utf8(&auth.payload)?.contains(&encoded_session_id));
-
-    let owner = session.staging_owner()?;
     let artifact = b"upload";
     let artifact_hash = Sha256::digest(artifact)
         .iter()
@@ -7617,6 +7574,7 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
         let service_thread = scope.spawn(move || {
             let mut service_session = session;
             let mut active_invocation = None;
+            let mut staging_owner = None;
             loop {
                 match prdb_engine::supervisor_ipc::serve_gateway_client_session(
                     &mut service,
@@ -7633,6 +7591,19 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
                         ..
                     } => {
                         assert_eq!(submission.artifact(), artifact);
+                        staging_owner =
+                            Some(service_session.staging_owner().map_err(|error| {
+                                format!("session owner unavailable: {error:?}")
+                            })?);
+                        assert_eq!(
+                            staging_ref
+                                .status(
+                                    staging_owner.expect("owner was just recorded"),
+                                    invocation.invocation_id()
+                                )
+                                .map_err(|error| format!("staging status failed: {error:?}"))?,
+                            prdb_engine::supervisor::SubmissionState::Started
+                        );
                         active_invocation = Some(invocation);
                     }
                     prdb_engine::supervisor_ipc::GatewayClientServiceEvent::Disconnected => {
@@ -7645,6 +7616,8 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
                             ))
                         ));
                         let invocation_id = invocation.invocation_id();
+                        let owner = staging_owner
+                            .ok_or_else(|| "START lost its staging owner".to_owned())?;
                         staging_ref
                             .finish_started(owner, invocation_id)
                             .map_err(|error| format!("staging cleanup failed: {error:?}"))?;
@@ -7667,6 +7640,24 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
                 read_frame(&mut gateway)?.ok_or("missing gateway IPC response")?
             }};
         }
+
+        let hello = round_trip!(
+            Operation::OpenClientSession,
+            2,
+            br#"{"mode":"query","client_name":"test"}"#.to_vec()
+        );
+        assert_eq!(hello.operation, Operation::OpenClientSession as u16);
+        assert!(std::str::from_utf8(&hello.payload)?.contains("\"mode\":\"query\""));
+        let auth = round_trip!(Operation::AuthenticateSession, 3, auth_payload.into_bytes());
+        assert_eq!(auth.operation, Operation::AuthenticateSession as u16);
+        assert!(std::str::from_utf8(&auth.payload)?.contains("\"authenticated\":true"));
+        let auth_response = std::str::from_utf8(&auth.payload)?;
+        let session_id = auth_response
+            .split("\"session_id\":\"")
+            .nth(1)
+            .and_then(|value| value.get(..32))
+            .ok_or("AUTH response omitted its session ID")?;
+        assert_eq!(session_id.len(), 32);
 
         let prepare = round_trip!(
             Operation::PrepareSubmission,
@@ -7706,10 +7697,6 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
             format!("{{\"invocation_id\":\"{invocation_hex}\"}}").into_bytes()
         );
         assert_eq!(accepted.payload, b"{\"state\":\"accepted\"}");
-        assert_eq!(
-            staging.status(owner, invocation_id)?,
-            prdb_engine::supervisor::SubmissionState::Started
-        );
         let cancel = round_trip!(
             Operation::ClientCancelInvocation,
             9,

@@ -1094,6 +1094,14 @@
 - Verification: focused UnixStream test covers AUTH, PREPARE, artifact chunk, SEAL, STATUS, START, active CANCEL, EOF cleanup, and durable ABORTED outcome.
 - Remaining: bind sockets to authenticated gateway process identity/generation and monitor network disconnects while workers execute; the TCP listener, launcher, sandbox, and result relay remain absent.
 
+## SU-1 / IPC-6 dependency: HELLO over gateway session IPC
+
+- Behavior: the first request on a provisioned per-client gateway stream is `OpenClientSession` (`0x140a`), which runs the strict HELLO handler and binds the selected mode to the stream's session before AUTH or submission operations. Identity and staging ownership continue to come from authenticated server-side state.
+- Contract and implementation: [gateway IPC protocol](../../specs/ipc-protocol.md), [operation authorization and dispatch](../../engine/src/ipc.rs), and [gateway service dispatcher](../../engine/src/supervisor_ipc.rs).
+- Changed regression: [UnixStream handshake and upload lifecycle](../../engine/tests/commit.rs) exercises HELLO, AUTH, PREPARE, upload, SEAL, STATUS, START, and CANCEL through the real service loop.
+- Commands actually run in the configured Nix shell: `cargo fmt --all`; focused `cargo test -p prdb-engine --test commit --locked client_handshake_requires_hello_first_and_sequences_responses`; and `cargo fmt --all -- --check && cargo build --workspace --locked && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && git diff --check`. All passed.
+- Remaining: provision authenticated socket identity/generation, monitor network disconnects during worker execution, and implement the TCP listener, launcher, sandbox, and result relay.
+
 ## SU-1 / IPC-6 dependency: gateway submission IPC dispatcher
 
 - Behavior: a role-checked gateway dispatcher maps AUTH, PREPARE, chunk, SEAL, START, STATUS, and CANCEL operation tags to the strict per-client session handlers. Chunk IPC prepends an explicit artifact/parameter kind byte. START returns the network acknowledgement plus a typed storage invocation and immutable submission handle to trusted supervisor code; those authority-bearing objects are never serialized.

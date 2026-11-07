@@ -48,6 +48,7 @@ pub enum Operation {
     ClientGetInvocationStatus = 0x1407,
     ClientCancelInvocation = 0x1408,
     SubmitAdministrativeOperation = 0x1409,
+    OpenClientSession = 0x140a,
     CommitAdministrativeDdl = 0x1501,
     IssueCredential = 0x1502,
     RevokeCredential = 0x1503,
@@ -82,6 +83,7 @@ impl Operation {
             0x1407 => Ok(Self::ClientGetInvocationStatus),
             0x1408 => Ok(Self::ClientCancelInvocation),
             0x1409 => Ok(Self::SubmitAdministrativeOperation),
+            0x140a => Ok(Self::OpenClientSession),
             0x1501 => Ok(Self::CommitAdministrativeDdl),
             0x1502 => Ok(Self::IssueCredential),
             0x1503 => Ok(Self::RevokeCredential),
@@ -148,6 +150,7 @@ pub fn authorize_operation(role: ServiceRole, operation: Operation) -> Result<()
                 | Operation::StartSubmission
                 | Operation::ClientGetInvocationStatus
                 | Operation::ClientCancelInvocation
+                | Operation::OpenClientSession
                 | Operation::SubmitAdministrativeOperation
         ),
         ServiceRole::AdminControl => matches!(
