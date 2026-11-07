@@ -10544,6 +10544,52 @@ fn storage_manager_separates_foreign_key_alter_and_references_authority()
     source_table_add.expected_value = table_write(source_table_id, schema_id).payload;
     let mut target_table_add = table_write_with_versions(target_table_id, schema_id, 1, 2);
     target_table_add.expected_value = table_write(target_table_id, schema_id).payload;
+    let stale_source_invocation = id(0x76);
+    let stale_source_row = id(0x78);
+    let mut stale_source_writer = storage.begin_invocation(
+        stale_source_invocation,
+        alter_and_reference_user,
+        9_999,
+        1,
+        1024,
+    )?;
+    let stale_source_schema = stale_source_writer.load_catalog_table_schema(source_table_id)?;
+    stale_source_writer.load_catalog_indexes(&stale_source_schema)?;
+    let stale_source_tuple = encode_tuple(
+        &stale_source_schema.columns,
+        stale_source_schema.schema_version,
+        &[Some(ScalarValue::Bytea(b"before foreign key".to_vec()))],
+    )?;
+    stale_source_writer.stage_put(
+        prdb_engine::overlay::RowId {
+            table: source_table_id,
+            row: stale_source_row,
+        },
+        &stale_source_tuple,
+    )?;
+    let stale_target_invocation = id(0x77);
+    let stale_target_row = id(0x79);
+    let mut stale_target_writer = storage.begin_invocation(
+        stale_target_invocation,
+        alter_and_reference_user,
+        9_999,
+        1,
+        1024,
+    )?;
+    let stale_target_schema = stale_target_writer.load_catalog_table_schema(target_table_id)?;
+    stale_target_writer.load_catalog_indexes(&stale_target_schema)?;
+    let stale_target_tuple = encode_tuple(
+        &stale_target_schema.columns,
+        stale_target_schema.schema_version,
+        &[Some(ScalarValue::Bytea(b"before foreign key".to_vec()))],
+    )?;
+    stale_target_writer.stage_put(
+        prdb_engine::overlay::RowId {
+            table: target_table_id,
+            row: stale_target_row,
+        },
+        &stale_target_tuple,
+    )?;
     let mut alter_only_audit = audit_event(0x71);
     alter_only_audit.actor_id = Some(alter_only_user);
     assert_eq!(
@@ -10580,6 +10626,42 @@ fn storage_manager_separates_foreign_key_alter_and_references_authority()
             &[alter_reference_audit],
         )?,
         3
+    );
+    assert!(matches!(
+        stale_source_writer.commit(),
+        Err(prdb_engine::transaction::TransactionError::Commit(
+            CommitError::Conflict
+        ))
+    ));
+    assert!(row(&database, &table_row_key(source_table_id, stale_source_row))?.is_none());
+    assert_eq!(
+        lookup_outcome(
+            &database,
+            stale_source_invocation,
+            alter_and_reference_user,
+            1
+        )?
+        .ok_or("missing stale source-table FK writer outcome")?
+        .status,
+        OutcomeStatus::Aborted
+    );
+    assert!(matches!(
+        stale_target_writer.commit(),
+        Err(prdb_engine::transaction::TransactionError::Commit(
+            CommitError::Conflict
+        ))
+    ));
+    assert!(row(&database, &table_row_key(target_table_id, stale_target_row))?.is_none());
+    assert_eq!(
+        lookup_outcome(
+            &database,
+            stale_target_invocation,
+            alter_and_reference_user,
+            1
+        )?
+        .ok_or("missing target-table FK writer outcome")?
+        .status,
+        OutcomeStatus::Aborted
     );
 
     let mut removed_foreign_key = foreign_key_definition.clone();
@@ -10649,6 +10731,16 @@ fn storage_manager_separates_foreign_key_alter_and_references_authority()
         (id(0x72), alter_and_reference_user, OutcomeStatus::Committed),
         (id(0x73), alter_only_user, OutcomeStatus::Committed),
         (id(0x74), reference_only_user, OutcomeStatus::Aborted),
+        (
+            stale_source_invocation,
+            alter_and_reference_user,
+            OutcomeStatus::Aborted,
+        ),
+        (
+            stale_target_invocation,
+            alter_and_reference_user,
+            OutcomeStatus::Aborted,
+        ),
     ] {
         assert_eq!(
             lookup_outcome(&database, invocation_id, principal_id, 1)?

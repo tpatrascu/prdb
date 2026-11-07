@@ -548,9 +548,9 @@
 
 - `StorageManager::commit_authorized_foreign_key_ddl` accepts add/drop batches for foreign keys on existing tables. Source authority is table ownership or inherited `ALTER` on the table/schema. Creation separately requires inherited `REFERENCES` on the target table or every referenced key column; drop requires only source `ALTER`.
 - The route requires paired constraint/object/target-dependency records and write-epoch advances for both source and referenced tables. It guards the authenticated actor, full membership graph, source/target table and schema records, referenced key/column records, and applicable authority grants through publication. Request, membership, column, and grant-lookup work is bounded.
-- A real-redb regression covers column-level `REFERENCES` with table `ALTER`, denial when either permission is missing, removal without target `REFERENCES`, durable outcomes, and atomic source/target epoch publication.
+- Real-redb regressions cover column-level `REFERENCES` with table `ALTER`, denial when either permission is missing, removal without target `REFERENCES`, durable outcomes, and atomic source/target epoch publication. The same authorized DDL test stages writers against both source and referenced tables before adding the FK, then verifies both old writers conflict and publish no rows after the paired epoch increments.
 - Contracts: [schema DDL](../../specs/ddl-schema.md) and [permission DDL](../../specs/ddl-permissions.md).
-- Verification: the prescribed Nix-shell workspace build, formatting check, Clippy with warnings denied, and workspace tests passed; all 211 tests across 18 test targets passed. Changed Markdown local links and `git diff --check` passed.
+- Verification: focused real-redb FK authority and stale-writer regression passed. In the configured Nix shell, workspace build, format check, warning-denied Clippy, all workspace tests, and `git diff --check` passed for the race assertions. Tool versions were Rust/Cargo 1.95.0, rustfmt 1.9.0, Clippy 0.1.95, and TinyCC 0.9.27-unstable-2025-01-06.
 - Remaining: authorization routes for NOT NULL, CHECK, PRIMARY KEY, and UNIQUE DDL; deterministic authorization-change race coverage; and authenticated control-channel integration remain open.
 
 ## SM-5 dependency: bounded NOT NULL validation — in progress
