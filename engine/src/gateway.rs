@@ -71,6 +71,23 @@ pub struct TcpGatewayListener {
     listener: TcpListener,
 }
 
+pub trait GatewayClientStream: Read + Write {
+    fn set_gateway_read_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()>;
+}
+
+impl GatewayClientStream for TcpStream {
+    fn set_gateway_read_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()> {
+        self.set_read_timeout(timeout)
+    }
+}
+
+#[cfg(unix)]
+impl GatewayClientStream for std::os::unix::net::UnixStream {
+    fn set_gateway_read_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()> {
+        self.set_read_timeout(timeout)
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct GatewayRuntimeConfig {
     pub worker_count: usize,
@@ -244,14 +261,23 @@ impl TcpGatewayListener {
 /// Forward one TCP client connection over its already-provisioned private
 /// gateway service stream. Callers must configure read/write deadlines and
 /// connection limits before serving untrusted peers.
-pub fn serve_tcp_client_connection<C: Read + Write, S: Read + Write>(
+pub fn serve_tcp_client_connection<C: GatewayClientStream, S: Read + Write>(
     client: &mut C,
     service: &mut S,
+) -> Result<(), GatewayConnectionError> {
+    serve_tcp_client_connection_inner(client, service, None)
+}
+
+fn serve_tcp_client_connection_inner<C: GatewayClientStream, S: Read + Write>(
+    client: &mut C,
+    service: &mut S,
+    frame_timeout: Option<Duration>,
 ) -> Result<(), GatewayConnectionError> {
     let mut decoder = crate::client_protocol::ClientFrameDecoder::default();
     let mut input = [0u8; 8192];
     loop {
-        let Some(request) = read_client_request(client, &mut decoder, &mut input)? else {
+        let Some(request) = read_client_request(client, &mut decoder, &mut input, frame_timeout)?
+        else {
             return Ok(());
         };
         let (operation, payload) = client_request_to_ipc(request.kind, request.payload)?;
@@ -308,7 +334,7 @@ pub fn serve_tcp_client_connection_with_timeout(
     service
         .set_write_timeout(Some(idle_timeout))
         .map_err(GatewayConnectionError::Io)?;
-    serve_tcp_client_connection(client, service)
+    serve_tcp_client_connection_inner(client, service, Some(idle_timeout))
 }
 
 /// Run a fixed worker pool with a bounded pending-connection queue. The
@@ -438,12 +464,26 @@ pub(crate) fn unix_peer_uid(_stream: &std::os::unix::net::UnixStream) -> io::Res
     ))
 }
 
-fn read_client_request<R: Read>(
-    client: &mut R,
+fn read_client_request<C: GatewayClientStream>(
+    client: &mut C,
     decoder: &mut crate::client_protocol::ClientFrameDecoder,
     input: &mut [u8],
+    frame_timeout: Option<Duration>,
 ) -> Result<Option<crate::client_protocol::ClientFrame>, GatewayConnectionError> {
+    let deadline = frame_timeout.and_then(|timeout| std::time::Instant::now().checked_add(timeout));
     loop {
+        if let Some(deadline) = deadline {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(GatewayConnectionError::Io(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "client frame deadline expired",
+                )));
+            }
+            client
+                .set_gateway_read_timeout(Some(remaining))
+                .map_err(GatewayConnectionError::Io)?;
+        }
         let count = match client.read(input) {
             Ok(count) => count,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,

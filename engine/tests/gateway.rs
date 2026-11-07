@@ -283,3 +283,26 @@ fn gateway_binary_rejects_plaintext_wildcard_without_opt_in() {
     let error = String::from_utf8(output.stderr).unwrap();
     assert!(error.contains("requires explicit opt-in"));
 }
+
+#[test]
+fn incomplete_tcp_client_frame_hits_absolute_read_deadline() {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let (mut gateway_service, _supervisor_service) =
+        std::os::unix::net::UnixStream::pair().unwrap();
+    let gateway = std::thread::spawn(move || {
+        let (mut client, _) = listener.accept().unwrap();
+        prdb_engine::gateway::serve_tcp_client_connection_with_timeout(
+            &mut client,
+            &mut gateway_service,
+            std::time::Duration::from_millis(100),
+        )
+    });
+    let mut client = std::net::TcpStream::connect(address).unwrap();
+    client.write_all(b"P").unwrap();
+    let started = std::time::Instant::now();
+    let result = gateway.join().unwrap();
+
+    assert!(result.is_err());
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+}

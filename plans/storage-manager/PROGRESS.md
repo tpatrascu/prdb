@@ -1127,7 +1127,7 @@
 - Changed implementation and regression: [listener limits and timeout bridge](../../engine/src/gateway.rs) and [shared connection-cap test](../../engine/tests/gateway.rs).
 - Observed red: the focused test initially failed to compile because the shared limiter and bounded accept API were absent; a subsequent compile exposed and corrected the test's tuple destructuring.
 - Commands actually run in the configured Nix shell: `cargo fmt --all`; focused `cargo test -p prdb-engine --test gateway --locked` (5 passed); and `cargo fmt --all -- --check && cargo build --workspace --locked && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && git diff --check`. All passed.
-- Remaining: add absolute pre-auth deadlines and per-IP rate limits. The fixed bounded listener worker pool is recorded in the following entry.
+- Remaining: add an absolute deadline across the complete pre-authentication phase and per-IP rate limits. Per-frame deadlines and the fixed bounded listener worker pool are implemented in later entries.
 
 ## GW-1 / GW-2 dependency: bounded TCP gateway worker pool
 
@@ -1168,6 +1168,14 @@
 - Observed red: the focused listener test failed to compile because the listener configuration, binder, and accept loop did not exist.
 - Commands actually run in the configured Nix shell: `cargo fmt --all`; focused `cargo test -p prdb-engine --test commit --locked gateway_service_listener_binds_peer_and_serves_hello` passed; and `cargo fmt --all -- --check && cargo build --workspace --locked && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && git diff --check`. All passed.
 - Remaining: bind both sides to a gateway generation and connection ID, exercise listener through `prdb-gateway` in a separate process, and implement worker scheduling/result relay/control ADMIN.
+
+## GW-1 dependency: absolute client-frame deadline
+
+- Behavior: when serving a network connection with configured timeouts, the TCP adapter bounds each complete request frame by an absolute deadline, resetting the deadline only after a complete request has been processed. Partial-frame clients cannot extend the deadline by sending occasional bytes.
+- Changed implementation and regression: [gateway frame reader](../../engine/src/gateway.rs) and [slow partial-frame test](../../engine/tests/gateway.rs).
+- Observed red: focused slow-client coverage was added before the deadline path; it previously had only idle socket timeouts and no whole-frame deadline.
+- Commands actually run in the configured Nix shell: focused `cargo test -p prdb-engine --test gateway --locked incomplete_tcp_client_frame_hits_absolute_read_deadline` passed; and `cargo fmt --all -- --check && cargo build --workspace --locked && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && git diff --check`. All passed.
+- Remaining: enforce one absolute unauthenticated phase deadline across HELLO/AUTH, and rate-limit by source address.
 
 ## SU-1 / IPC-6 dependency: gateway submission IPC dispatcher
 
