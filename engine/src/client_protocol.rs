@@ -166,6 +166,9 @@ enum PendingAdminAction {
         identity_id: [u8; 16],
         name: String,
     },
+    DropIdentity {
+        identity_id: [u8; 16],
+    },
     SetUserLogin {
         user_id: [u8; 16],
         enabled: bool,
@@ -222,6 +225,9 @@ pub enum ClientAdminCommand {
     PrepareRenameIdentity {
         identity_id: [u8; 16],
         name: String,
+    },
+    PrepareDropIdentity {
+        identity_id: [u8; 16],
     },
     PrepareSetUserLogin {
         user_id: [u8; 16],
@@ -423,6 +429,12 @@ pub fn decode_client_admin_command(
         Some("prepare") if version == Some(1) && operation.as_deref() == Some("roles.rename") => {
             decode_identity_rename_prepare(arguments, operation_id, seen.len(), "role_id")
         }
+        Some("prepare") if version == Some(1) && operation.as_deref() == Some("users.drop") => {
+            decode_identity_drop_prepare(arguments, operation_id, seen.len(), "user_id")
+        }
+        Some("prepare") if version == Some(1) && operation.as_deref() == Some("roles.drop") => {
+            decode_identity_drop_prepare(arguments, operation_id, seen.len(), "role_id")
+        }
         Some("prepare") if version == Some(1) && operation.as_deref() == Some("users.login") => {
             decode_user_login_prepare(arguments, operation_id, seen.len())
         }
@@ -611,6 +623,27 @@ fn decode_user_login_prepare(
         return Err(ClientControlError::UnknownKey);
     }
     Ok(ClientAdminCommand::PrepareSetUserLogin { user_id, enabled })
+}
+
+fn decode_identity_drop_prepare(
+    arguments: Option<HashMap<String, String>>,
+    operation_id: Option<String>,
+    seen_len: usize,
+    id_field: &str,
+) -> Result<ClientAdminCommand, ClientControlError> {
+    if operation_id.is_some() || seen_len != 4 {
+        return Err(ClientControlError::UnknownKey);
+    }
+    let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
+    let identity_id = decode_lower_hex_id(
+        &args
+            .remove(id_field)
+            .ok_or(ClientControlError::MissingKey)?,
+    )?;
+    if !args.is_empty() {
+        return Err(ClientControlError::UnknownKey);
+    }
+    Ok(ClientAdminCommand::PrepareDropIdentity { identity_id })
 }
 
 fn is_canonical_admin_principal_name(name: &str) -> bool {
@@ -1749,6 +1782,9 @@ impl ClientConnectionSession {
             ClientAdminCommand::PrepareRenameIdentity { identity_id, name } => {
                 self.prepare_identity_rename(request.request_id, identity_id, name)
             }
+            ClientAdminCommand::PrepareDropIdentity { identity_id } => {
+                self.prepare_identity_drop(request.request_id, identity_id)
+            }
             ClientAdminCommand::PrepareSetUserLogin { user_id, enabled } => {
                 self.prepare_user_login(request.request_id, user_id, enabled)
             }
@@ -1893,6 +1929,33 @@ impl ClientConnectionSession {
                                 actor_id,
                                 identity_id,
                                 &name,
+                                retention_deadline_us,
+                                crate::audit::AuditEvent {
+                                    event_id,
+                                    actor_id: Some(actor_id),
+                                    correlation_id: operation_id,
+                                    occurred_at_us: now_us,
+                                    action: crate::audit::AuditAction::Ddl,
+                                    result: crate::audit::AuditResult::Succeeded,
+                                    target_ids: Vec::new(),
+                                },
+                            )
+                            .map_err(ClientSessionError::IdentityLifecycle)?;
+                        self.json_response(
+                            request.request_id,
+                            format!(
+                                "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"commit_sequence\":\"{sequence}\"}}",
+                                encode_lower_hex_id(operation_id)
+                            )
+                            .into_bytes(),
+                        )
+                    }
+                    PendingAdminAction::DropIdentity { identity_id } => {
+                        let sequence = storage
+                            .drop_identity(
+                                operation_id,
+                                actor_id,
+                                identity_id,
                                 retention_deadline_us,
                                 crate::audit::AuditEvent {
                                     event_id,
@@ -2232,6 +2295,36 @@ impl ClientConnectionSession {
         self.pending_admin_operation = Some(PendingAdminOperation {
             operation_id,
             action: PendingAdminAction::SetUserLogin { user_id, enabled },
+        });
+        self.json_response(
+            request_id,
+            format!(
+                "{{\"operation_id\":\"{}\",\"state\":\"prepared\"}}",
+                encode_lower_hex_id(operation_id)
+            )
+            .into_bytes(),
+        )
+    }
+
+    fn prepare_identity_drop(
+        &mut self,
+        request_id: u64,
+        identity_id: [u8; 16],
+    ) -> Result<ClientFrame, ClientSessionError> {
+        if self.pending_admin_operation.is_some() {
+            return Err(ClientSessionError::WrongMode);
+        }
+        let mut operation_id = [0; 16];
+        getrandom::fill(&mut operation_id)
+            .map_err(|_| ClientSessionError::Storage(TransactionError::RandomnessUnavailable))?;
+        if operation_id == [0; 16] {
+            return Err(ClientSessionError::Storage(
+                TransactionError::RandomnessUnavailable,
+            ));
+        }
+        self.pending_admin_operation = Some(PendingAdminOperation {
+            operation_id,
+            action: PendingAdminAction::DropIdentity { identity_id },
         });
         self.json_response(
             request_id,

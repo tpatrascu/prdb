@@ -1343,3 +1343,10 @@
 - Contract and implementation: [login-state protocol](../../specs/client-protocol.md), [storage-manager contract](../../specs/storage-manager.md), [identity lifecycle](../../engine/src/storage_manager.rs), and [ADMIN dispatch](../../engine/src/client_protocol.rs).
 - Regression evidence: decoder coverage checks the strict boolean-string schema. A real-redb identity lifecycle regression verifies that disabling a user revokes its active token atomically, and that a change cannot remove the last login-enabled administrator.
 - Remaining: DROP ADMIN operations, remaining ADMIN operations, and separate supervisor/worker process integration.
+
+## SM-5 / DDL-identity dependency: user and role DROP ADMIN operations
+
+- Behavior: `users.drop` and `roles.drop` use connection-owned PREPARE/START and delegate RESTRICT validation to the authorized identity commit path. User drops revoke outstanding credentials, delete the principal/object pair, and add a permanent tombstone atomically.
+- Contract and implementation: [DROP ADMIN protocol](../../specs/client-protocol.md), [storage-manager contract](../../specs/storage-manager.md), [identity lifecycle](../../engine/src/storage_manager.rs), and [ADMIN dispatch](../../engine/src/client_protocol.rs).
+- Regression evidence: decoder coverage checks both strict operation schemas. Real-redb tests exercise successful user/role drops, user credential revocation and tombstones, plus rejection of a drop while a privilege grant references the user.
+- Remaining: remaining ADMIN operations and separate supervisor/worker process integration.

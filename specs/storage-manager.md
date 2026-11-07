@@ -64,6 +64,8 @@ The administrative system-privilege lifecycle grants or revokes database-scoped 
 
 `set_user_login_enabled` changes a LOGIN user's enabled state and authority epoch. Disabling LOGIN scans the bounded credential family and revokes every outstanding verifier in the same authorized commit; enabling LOGIN never unrevokes credentials. The commit path retains the final login-enabled administrator check.
 
+`drop_identity` removes a user or role only when the authorized identity DDL validator confirms no object ownership/parent, membership, grant, policy, or dependency references remain. It atomically deletes the principal and named object and adds a permanent tombstone; user token verifiers are revoked in that same commit.
+
 Token issue, revoke, and inventory requests use a monotonic 60-second sliding window per authenticated actor, with a default cap of 30 requests. Administrative cancellation has a separate per-actor limiter with the same default. Live manager handles for one redb `Database` object share each limiter; each actor-history map is capped at 4,096 entries and expired histories are pruned. If a map is full, requests for new actors fail closed. The [gateway](client-gateway.md) separately reserves and limits failed token-authentication attempts per source IP because storage does not receive a network source identity; IP is never used as database authority.
 
 ## Resource and Process Boundaries

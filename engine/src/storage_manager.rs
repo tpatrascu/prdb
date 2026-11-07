@@ -2112,6 +2112,156 @@ impl<'db> StorageManager<'db> {
         })
     }
 
+    /// Drop a user or role only when the authorized identity DDL path finds no
+    /// remaining references. User credentials are revoked in the same commit.
+    pub fn drop_identity(
+        &self,
+        invocation_id: [u8; 16],
+        authenticated_actor_id: [u8; 16],
+        identity_id: [u8; 16],
+        retention_deadline_us: i64,
+        mut audit_event: AuditEvent,
+    ) -> Result<u64, IdentityLifecycleError> {
+        if invocation_id == [0; 16]
+            || authenticated_actor_id == [0; 16]
+            || identity_id == [0; 16]
+            || retention_deadline_us <= 0
+        {
+            return Err(IdentityLifecycleError::InvalidRequest);
+        }
+        if audit_event.actor_id != Some(authenticated_actor_id)
+            || audit_event.correlation_id != invocation_id
+            || audit_event.action != AuditAction::Ddl
+            || audit_event.result != AuditResult::Succeeded
+        {
+            return Err(IdentityLifecycleError::InvalidAudit);
+        }
+        let principal_key = principal_catalog_key(identity_id);
+        let object_key = identity_object_catalog_key(identity_id);
+        let tombstone_key = identity_tombstone_catalog_key(identity_id);
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|_| IdentityLifecycleError::Storage)?;
+        let catalog = read
+            .open_table(CATALOG)
+            .map_err(|_| IdentityLifecycleError::Storage)?;
+        let principal_current = catalog
+            .get(principal_key.as_slice())
+            .map_err(|_| IdentityLifecycleError::Storage)?
+            .map(|value| value.value().to_vec())
+            .ok_or(IdentityLifecycleError::InvalidRequest)?;
+        let object_current = catalog
+            .get(object_key.as_slice())
+            .map_err(|_| IdentityLifecycleError::Storage)?
+            .map(|value| value.value().to_vec())
+            .ok_or(IdentityLifecycleError::Storage)?;
+        if catalog
+            .get(tombstone_key.as_slice())
+            .map_err(|_| IdentityLifecycleError::Storage)?
+            .is_some()
+        {
+            return Err(IdentityLifecycleError::InvalidRequest);
+        }
+        let principal = decode_registered_envelope(&principal_current)
+            .map_err(|_| IdentityLifecycleError::Storage)?;
+        let kind = principal
+            .fields
+            .iter()
+            .find(|field| field.tag == 1 && field.wire_type == WireType::U16)
+            .and_then(|field| <[u8; 2]>::try_from(field.payload.as_slice()).ok())
+            .map(u16::from_le_bytes)
+            .filter(|kind| matches!(kind, 1 | 2))
+            .ok_or(IdentityLifecycleError::Storage)?;
+        let expected_object_kind = if kind == 1 { 8 } else { 9 };
+        let object = decode_registered_envelope(&object_current)
+            .map_err(|_| IdentityLifecycleError::Storage)?;
+        if object
+            .fields
+            .iter()
+            .find(|field| field.tag == 1 && field.wire_type == WireType::U16)
+            .and_then(|field| <[u8; 2]>::try_from(field.payload.as_slice()).ok())
+            .map(u16::from_le_bytes)
+            != Some(expected_object_kind)
+        {
+            return Err(IdentityLifecycleError::Storage);
+        }
+        let mut writes = vec![
+            CatalogWrite {
+                key: principal_key,
+                expected_value: Some(principal_current),
+                payload: None,
+            },
+            CatalogWrite {
+                key: object_key,
+                expected_value: Some(object_current),
+                payload: None,
+            },
+            CatalogWrite {
+                key: tombstone_key.clone(),
+                expected_value: None,
+                payload: Some(
+                    encode_envelope(
+                        &family_schema(17).ok_or(IdentityLifecycleError::Storage)?,
+                        &tombstone_key,
+                        &[],
+                    )
+                    .map_err(|_| IdentityLifecycleError::Storage)?,
+                ),
+            },
+        ];
+        if kind == 1 {
+            let revoked_at_us = now_unix_micros().ok_or(IdentityLifecycleError::InvalidRequest)?;
+            let prefix = 16u16.to_be_bytes();
+            let mut count = 0usize;
+            for entry in catalog
+                .range(prefix.as_slice()..)
+                .map_err(|_| IdentityLifecycleError::Storage)?
+            {
+                let (key, value) = entry.map_err(|_| IdentityLifecycleError::Storage)?;
+                let key = key.value().to_vec();
+                if !key.starts_with(&prefix) {
+                    break;
+                }
+                count += 1;
+                if count > MAX_CATALOG_FAMILY_SCAN || key.len() != 19 || key[2] != 1 {
+                    return Err(IdentityLifecycleError::Storage);
+                }
+                let current = value.value().to_vec();
+                let record = decode_registered_envelope(&current)
+                    .map_err(|_| IdentityLifecycleError::Storage)?;
+                let verifier =
+                    decode_verifier_record(&record).map_err(|_| IdentityLifecycleError::Storage)?;
+                if verifier.user_id == identity_id && !verifier.revoked {
+                    let payload = encode_revoked_verifier_record(
+                        &record,
+                        revoked_at_us.max(verifier.issued_at_us),
+                    )
+                    .map_err(|_| IdentityLifecycleError::Storage)?;
+                    writes.push(CatalogWrite {
+                        key,
+                        expected_value: Some(current),
+                        payload: Some(payload),
+                    });
+                }
+            }
+        }
+        drop(catalog);
+        drop(read);
+        audit_event.target_ids = vec![identity_id];
+        self.commit_authorized_identity_ddl(
+            invocation_id,
+            authenticated_actor_id,
+            retention_deadline_us,
+            &writes,
+            &[audit_event],
+        )
+        .map_err(|error| match error {
+            CommitError::DdlAuthorizationDenied => IdentityLifecycleError::Unauthorized,
+            error => IdentityLifecycleError::Commit(error),
+        })
+    }
+
     fn create_identity(
         &self,
         invocation_id: [u8; 16],

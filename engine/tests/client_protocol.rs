@@ -187,6 +187,22 @@ fn admin_read_decoder_accepts_token_inventory_and_rejects_mutation_shapes() {
 fn admin_revoke_decoder_requires_prepare_then_start_schemas() {
     assert_eq!(
         decode_client_admin_command(
+            br#"{"phase":"prepare","operation_version":1,"operation":"users.drop","arguments":{"user_id":"000102030405060708090a0b0c0d0e0f"}}"#
+        ),
+        Ok(ClientAdminCommand::PrepareDropIdentity {
+            identity_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        })
+    );
+    assert_eq!(
+        decode_client_admin_command(
+            br#"{"phase":"prepare","operation_version":1,"operation":"roles.drop","arguments":{"role_id":"000102030405060708090a0b0c0d0e0f"}}"#
+        ),
+        Ok(ClientAdminCommand::PrepareDropIdentity {
+            identity_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        })
+    );
+    assert_eq!(
+        decode_client_admin_command(
             br#"{"phase":"prepare","operation_version":1,"operation":"users.login","arguments":{"user_id":"000102030405060708090a0b0c0d0e0f","enabled":"false"}}"#
         ),
         Ok(ClientAdminCommand::PrepareSetUserLogin {

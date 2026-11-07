@@ -4200,7 +4200,76 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         },
     )?;
     assert!(matches!(
-        delegated_role,
+        &delegated_role,
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response)
+            if String::from_utf8_lossy(&response.payload).contains("\"outcome\":\"committed\"")
+    ));
+    let delegated_role_response = match &delegated_role {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => {
+            String::from_utf8_lossy(&response.payload)
+        }
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => unreachable!(),
+    };
+    let delegated_role_id = delegated_role_response
+        .split("\"role_id\":\"")
+        .nth(1)
+        .ok_or("missing delegated role ID")?
+        .get(..32)
+        .ok_or("invalid delegated role ID")?;
+    let drop_role_prepare = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut delegated_admin,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 3,
+            payload: format!(
+                "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"roles.drop\",\"arguments\":{{\"role_id\":\"{delegated_role_id}\"}}}}"
+            )
+            .into_bytes(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_deadline_us,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )?;
+    let drop_role_prepare = match drop_role_prepare {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => {
+            String::from_utf8(response.payload)?
+        }
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
+            return Err("ADMIN role-drop prepare unexpectedly started an invocation".into());
+        }
+    };
+    let drop_role_operation_id = drop_role_prepare
+        .split("\"operation_id\":\"")
+        .nth(1)
+        .ok_or("missing delegated role-drop operation ID")?
+        .get(..32)
+        .ok_or("invalid delegated role-drop operation ID")?;
+    let drop_role = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut delegated_admin,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 4,
+            payload: format!(
+                "{{\"phase\":\"start\",\"operation_id\":\"{drop_role_operation_id}\"}}"
+            )
+            .into_bytes(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_deadline_us,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )?;
+    assert!(matches!(
+        drop_role,
         prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response)
             if String::from_utf8_lossy(&response.payload).contains("\"outcome\":\"committed\"")
     ));
@@ -6442,16 +6511,17 @@ fn identity_ddl_drops_unreferenced_user_and_revokes_tokens_atomically()
         ),
         Err(CommitError::DdlAuthorizationDenied)
     );
-    let mut drop_audit = identity_audit_event(0xd5, admin_user, dropped_user);
-    drop_audit.target_ids = vec![dropped_user, dropped_token, dropped_role];
-    let drop_result = storage.commit_authorized_identity_ddl(
-        id(0xd5),
-        admin_user,
-        9_999,
-        &drop_writes,
-        &[drop_audit],
-    );
+    let mut drop_user_audit = identity_audit_event(0xd5, admin_user, dropped_user);
+    drop_user_audit.correlation_id = id(0xd5);
+    let drop_result =
+        storage.drop_identity(id(0xd5), admin_user, dropped_user, 9_999, drop_user_audit);
     assert_eq!(drop_result, Ok(2));
+    let mut drop_role_audit = identity_audit_event(0xd8, admin_user, dropped_role);
+    drop_role_audit.correlation_id = id(0xd8);
+    assert_eq!(
+        storage.drop_identity(id(0xd8), admin_user, dropped_role, 9_999, drop_role_audit)?,
+        3
+    );
     let read = database.begin_read()?;
     let catalog = read.open_table(CATALOG)?;
     assert!(
@@ -6489,7 +6559,7 @@ fn identity_ddl_drops_unreferenced_user_and_revokes_tokens_atomically()
             .get(id_catalog_key(16, dropped_token).as_slice())?
             .is_some()
     );
-    assert_eq!(commit_sequence(&database)?, 2);
+    assert_eq!(commit_sequence(&database)?, 3);
     prdb_engine::startup::validate_persisted_records(&database)?;
     Ok(())
 }
@@ -6540,66 +6610,15 @@ fn identity_ddl_restricts_user_drop_when_a_grant_references_the_user()
         ],
         &[seed_audit],
     )?;
-    let read = database.begin_read()?;
-    let catalog = read.open_table(CATALOG)?;
-    let object = catalog
-        .get(id_catalog_key(2, dropped_user).as_slice())?
-        .ok_or("missing user object")?
-        .value()
-        .to_vec();
-    let principal = catalog
-        .get(id_catalog_key(10, dropped_user).as_slice())?
-        .ok_or("missing user principal")?
-        .value()
-        .to_vec();
-    let token = catalog
-        .get(id_catalog_key(16, dropped_token).as_slice())?
-        .ok_or("missing target token")?
-        .value()
-        .to_vec();
     let grant = grant_write(dropped_user, database_id, 12, 1, database_id, admin_role);
     let mut drop_audit = identity_audit_event(0xe5, admin_user, dropped_user);
-    drop_audit.target_ids = vec![dropped_user, dropped_token];
+    drop_audit.correlation_id = id(0xe5);
     assert_eq!(
-        storage.commit_authorized_identity_ddl(
-            id(0xe5),
-            admin_user,
-            9_999,
-            &[
-                catalog_delete(
-                    CatalogWrite {
-                        key: id_catalog_key(2, dropped_user),
-                        expected_value: None,
-                        payload: None,
-                    },
-                    object,
-                ),
-                catalog_delete(
-                    CatalogWrite {
-                        key: id_catalog_key(10, dropped_user),
-                        expected_value: None,
-                        payload: None,
-                    },
-                    principal,
-                ),
-                identity_tombstone_write(dropped_user),
-                catalog_expect(
-                    credential_verifier_write(
-                        dropped_token,
-                        dropped_user,
-                        &[0xe4; 32],
-                        1,
-                        i64::MAX,
-                        Some(2),
-                        2,
-                    ),
-                    token,
-                ),
-            ],
-            &[drop_audit],
-        ),
-        Err(CommitError::DdlAuthorizationDenied)
+        storage.drop_identity(id(0xe5), admin_user, dropped_user, 9_999, drop_audit,),
+        Err(prdb_engine::storage_manager::IdentityLifecycleError::Unauthorized)
     );
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
     assert!(catalog.get(grant.key.as_slice())?.is_some());
     assert_eq!(commit_sequence(&database)?, 1);
     Ok(())
