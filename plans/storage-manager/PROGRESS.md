@@ -1467,3 +1467,12 @@
 - TDD note: the new stale-writer assertion first failed because the pinned write committed successfully at sequence 3 after index publication; it passes after index DDL began incrementing the table write epoch.
 - Verification: focused real-redb create/drop and rebuild stale-writer regressions passed. In the configured Nix shell, workspace build, format check, warning-denied Clippy, all workspace tests, and `git diff --check` passed after the create/drop fix. Tool versions were Rust/Cargo 1.95.0, rustfmt 1.9.0, Clippy 0.1.95, and TinyCC 0.9.27-unstable-2025-01-06.
 - Remaining: separate supervisor/gateway process integration and broader DDL acceptance evidence.
+
+## DS-5 / DS-7: CHECK constraint publication versus a pinned writer — verified
+
+- Behavior and normative contracts: [schema DDL](../../specs/ddl-schema.md), [MVCC concurrency](../../specs/concurrency-mvcc.md), and [storage manager](../../specs/storage-manager.md). A writer pinned before a CHECK constraint is published must not commit using the older table constraint epoch.
+- Regression evidence: the real-redb authorized constraint lifecycle stages a tuple against the existing table schema, publishes a CHECK constraint and table write-epoch increment, then verifies the staged writer conflicts, publishes no row, and records an ABORTED outcome.
+- Implementation: no code change was needed; the existing serialized constraint DDL path and explicit table epoch update reject the stale commit.
+- TDD note: the focused race regression passed against the current implementation.
+- Verification: focused regression passed. In the configured Nix shell, workspace build, format check, warning-denied Clippy, all workspace tests, and `git diff --check` passed for this increment. Tool versions were Rust/Cargo 1.95.0, rustfmt 1.9.0, Clippy 0.1.95, and TinyCC 0.9.27-unstable-2025-01-06.
+- Remaining: other constraint variants and separate supervisor/gateway process integration.

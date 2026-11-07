@@ -4308,6 +4308,24 @@ fn storage_manager_authorizes_constraint_ddl_by_table_alter()
             .status,
         OutcomeStatus::Aborted
     );
+    let stale_check_invocation = id(0xb7);
+    let stale_check_row = id(0xb8);
+    let mut stale_check_writer =
+        storage.begin_invocation(stale_check_invocation, admin, 9_999, 1, 1024)?;
+    let stale_check_schema = stale_check_writer.load_catalog_table_schema(table_id)?;
+    stale_check_writer.load_catalog_indexes(&stale_check_schema)?;
+    let stale_check_tuple = encode_tuple(
+        &stale_check_schema.columns,
+        stale_check_schema.schema_version,
+        &[Some(ScalarValue::Bytea(b"pinned before CHECK".to_vec()))],
+    )?;
+    stale_check_writer.stage_put(
+        prdb_engine::overlay::RowId {
+            table: table_id,
+            row: stale_check_row,
+        },
+        &stale_check_tuple,
+    )?;
     let check_audit = identity_audit_event(0xb3, table_owner, check_constraint_id);
     assert_eq!(
         storage.commit_authorized_constraint_ddl(
@@ -4318,6 +4336,19 @@ fn storage_manager_authorizes_constraint_ddl_by_table_alter()
             &[check_audit],
         )?,
         7
+    );
+    assert!(matches!(
+        stale_check_writer.commit(),
+        Err(prdb_engine::transaction::TransactionError::Commit(
+            CommitError::Conflict
+        ))
+    ));
+    assert!(row(&database, &table_row_key(table_id, stale_check_row))?.is_none());
+    assert_eq!(
+        lookup_outcome(&database, stale_check_invocation, admin, 1)?
+            .ok_or("missing stale CHECK constraint writer outcome")?
+            .status,
+        OutcomeStatus::Aborted
     );
     StorageManager::new(&database, Duration::from_millis(100))?;
 
