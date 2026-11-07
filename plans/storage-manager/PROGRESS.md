@@ -1269,7 +1269,7 @@
 - Behavior: ADMIN PREPARE reserves one random operation ID and token ID on the control connection; START must present that ID on the same connection. START consumes the reservation before calling the audited `StorageManager::revoke_token` path. The storage layer performs the current `MANAGE_USERS` check and commits the revocation with its audit and durable operation outcome. Unknown, already revoked, and unauthorized tokens retain the storage API's shared failure.
 - Contract and implementation: [tokens.revoke ADMIN contract](../../specs/client-protocol.md), [strict ADMIN command decoder and per-session operation reservation](../../engine/src/client_protocol.rs), and gateway operation dispatch.
 - Regression evidence: decoder tests cover both phase schemas; a real-redb gateway-dispatch regression uses a separate `MANAGE_USERS` principal to prepare/start revocation and confirms the target metadata becomes revoked.
-- Remaining: other ADMIN operations, operation reservation cleanup/status details after uncertain failures, and the separate supervisor/worker process remain open.
+- Remaining: reservation behavior after failures before a durable outcome, other ADMIN operations, and the separate supervisor/worker process remain open.
 
 ## SU-1 / GW-2 dependency: sanitized client ERROR responses
 
@@ -1283,11 +1283,17 @@
 - Behavior: `tokens.issue` uses the connection-owned PREPARE/START reservation. START revalidates the session and invokes audited `StorageManager::issue_token`. The committed response returns token ID and padded base64 secret once; the encoding, JSON construction buffer, TCP frame buffer, and gateway-service response buffer are zeroized after handoff.
 - Contract and implementation: [one-time issuance contract](../../specs/client-protocol.md), [strict command schema and issuance handler](../../engine/src/client_protocol.rs), [service response cleanup](../../engine/src/supervisor_ipc.rs), and [TCP frame cleanup](../../engine/src/gateway.rs).
 - Regression evidence: the real-redb ADMIN dispatch issues a credential, decodes it through the regular AUTH schema, authenticates a new session with it, and confirms stored inventory contains metadata only.
-- Remaining: test lost-response reconciliation, add other ADMIN operations, and integrate a separate supervisor/worker process.
+- Remaining at that increment: lost-response reconciliation for token mutations is recorded below; other ADMIN operations and separate supervisor/worker integration remain open.
 
 ## SM-5 / NP-5 dependency: administrator live invocation pages
 
 - Behavior: control-mode ADMIN accepts `runtime.invocations.list` with a bounded page limit and an opaque cursor bound to the current administrator and process-local registry generation. Every page revalidates the control session and database-administrator authority. Results expose bounded invocation metadata and best-effort consistency; cursors become invalid after registry changes or restart.
 - Contract and implementation: [runtime listing protocol](../../specs/client-protocol.md), [cursor encoding and bounded storage page](../../engine/src/storage_manager.rs), and [ADMIN decoder and response handler](../../engine/src/client_protocol.rs).
 - Regression evidence: decoder coverage round-trips a canonical cursor. The real-redb test exercises first and second ADMIN pages through gateway dispatch, checks the next invocation and cancellation state, and separately covers unauthorized callers, stale cursors, page limits, and terminal status.
-- Remaining: lost-response reconciliation for mutations, remaining ADMIN operations, and separate supervisor/worker process integration.
+- Remaining: remaining ADMIN operations and separate supervisor/worker process integration.
+
+## SM-5 / NP-5 dependency: reconcile a lost ADMIN mutation reply
+
+- Behavior: after a prepared token revocation commits, an authorized database administrator can query STATUS with the operation ID and retrieve its durable committed outcome. The client does not repeat START when the original response is unavailable.
+- Regression evidence: the real-redb ADMIN lifecycle test discards the revocation response payload, then queries the operation ID from a separate administrator control session and receives `committed`.
+- Remaining: operation-status authorization for non-database-admin mutation actors, other ADMIN operations, and separate supervisor/worker process integration.

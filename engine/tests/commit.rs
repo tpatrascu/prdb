@@ -3706,14 +3706,23 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         },
     )?;
     let revoke = match revoke {
-        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => {
-            String::from_utf8(response.payload)?
-        }
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => response.payload,
         prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
             return Err("ADMIN revoke start returned a worker invocation".into());
         }
     };
-    assert!(revoke.contains("\"outcome\":\"committed\""));
+    drop(revoke);
+    let reconciled_revoke = control.handle_status_request(
+        &storage,
+        &staging,
+        ClientFrame {
+            kind: 8,
+            request_id: 8,
+            response_sequence: 0,
+            payload: format!("{{\"invocation_id\":\"{operation_id}\"}}").into_bytes(),
+        },
+    )?;
+    assert_eq!(reconciled_revoke.payload, b"{\"state\":\"committed\"}");
     assert!(
         storage
             .list_tokens(admin_id, user_manager_id)?
