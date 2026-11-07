@@ -1401,6 +1401,221 @@ fn storage_manager_drop_table_removes_owned_catalog_and_rows()
 }
 
 #[test]
+fn storage_manager_drop_table_index_entry_limit_aborts_atomically()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::storage_manager::TableLifecycleError;
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let actor = id(0x90);
+    let admin_role = builtin_owner_id();
+    let mut setup_audit = identity_audit_event(0x91, admin_role, actor);
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(
+        id(0x91),
+        admin_role,
+        9_999,
+        &[
+            principal_write_with_name(actor, 1, 1, "drop_index_limit_owner"),
+            object_write_with_name(actor, 8, "drop_index_limit_owner"),
+            membership_write(actor, admin_role),
+            dependency_write(actor, admin_role, 5),
+        ],
+        &[setup_audit],
+    )?;
+    let index_id = id(0x88);
+    let (index_key, index_payload) = index_definition(index_id, id(16));
+    assert_eq!(
+        storage.commit_catalog_and_audit(
+            id(0x92),
+            id(9),
+            9_999,
+            &[
+                CatalogWrite {
+                    key: index_key.clone(),
+                    expected_value: None,
+                    payload: Some(index_payload),
+                },
+                object_write(index_id, 7),
+            ],
+            &[audit_event(0x92)],
+        )?,
+        2
+    );
+
+    let payload = bytea_tuple(b"index cleanup limit");
+    let make_batch = |start: u64, end: u64| {
+        let mut rows = Vec::with_capacity((end - start + 1) as usize);
+        let mut indexes = Vec::with_capacity((end - start + 1) as usize * 2);
+        for row_number in start..=end {
+            let mut row_id = [0; 16];
+            row_id[8..].copy_from_slice(&row_number.to_be_bytes());
+            let row_key = table_row_key(id(16), row_id);
+            let first = typed_bytea_index_key(id(0x44), &row_key, &payload);
+            let second = typed_bytea_index_key(index_id, &row_key, &payload);
+            rows.push(RowWrite {
+                key: row_key,
+                expected_version: None,
+                payload: Some(payload.clone()),
+            });
+            for derived in [first, second] {
+                indexes.push(IndexWrite {
+                    key: derived.key,
+                    row_key,
+                    expected_version: None,
+                    present: true,
+                    unique: false,
+                    null_exempt: false,
+                });
+            }
+        }
+        (rows, indexes)
+    };
+    let (first_rows, first_indexes) = make_batch(1, 32_768);
+    assert_eq!(first_indexes.len(), 65_536);
+    assert_eq!(
+        commit_rows_and_indexes(
+            &database,
+            id(0x93),
+            actor,
+            9_999,
+            &first_rows,
+            &first_indexes,
+        )?,
+        3
+    );
+    let (last_rows, last_indexes) = make_batch(32_769, 32_769);
+    assert_eq!(
+        commit_rows_and_indexes(&database, id(0x94), actor, 9_999, &last_rows, &last_indexes,)?,
+        4
+    );
+
+    let over_limit_invocation = id(0x95);
+    let mut over_limit_audit = identity_audit_event(0x95, actor, id(16));
+    over_limit_audit.correlation_id = over_limit_invocation;
+    assert_eq!(
+        storage.drop_table(
+            over_limit_invocation,
+            actor,
+            id(16),
+            9_999,
+            over_limit_audit,
+        ),
+        Err(TableLifecycleError::Commit(
+            CommitError::IndexDdlLimitExceeded
+        ))
+    );
+    assert_eq!(commit_sequence(&database)?, 4);
+    assert_eq!(
+        lookup_outcome(&database, over_limit_invocation, actor, 1)?
+            .ok_or("missing table index-entry limit outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
+    let read = database.begin_read()?;
+    assert!(
+        read.open_table(CATALOG)?
+            .get(id_catalog_key(5, id(16)).as_slice())?
+            .is_some()
+    );
+    assert!(read.open_table(ROWS)?.get(&last_rows[0].key[..])?.is_some());
+    assert!(
+        read.open_table(schema::INDEXES)?
+            .get(&last_indexes[0].key[..])?
+            .is_some()
+    );
+    drop(read);
+
+    let last_row_key = last_rows[0].key;
+    let first_index_key = typed_bytea_index_key(id(0x44), &last_row_key, &payload).key;
+    let second_index_key = typed_bytea_index_key(index_id, &last_row_key, &payload).key;
+    assert_eq!(
+        commit_rows_and_indexes(
+            &database,
+            id(0x96),
+            actor,
+            9_999,
+            &[RowWrite {
+                key: last_row_key,
+                expected_version: Some(4),
+                payload: None,
+            }],
+            &[
+                IndexWrite {
+                    key: first_index_key,
+                    row_key: last_row_key,
+                    expected_version: Some(4),
+                    present: false,
+                    unique: false,
+                    null_exempt: false,
+                },
+                IndexWrite {
+                    key: second_index_key,
+                    row_key: last_row_key,
+                    expected_version: Some(4),
+                    present: false,
+                    unique: false,
+                    null_exempt: false,
+                },
+            ],
+        )?,
+        5
+    );
+    let boundary_invocation = id(0x97);
+    let mut boundary_audit = identity_audit_event(0x97, actor, id(16));
+    boundary_audit.correlation_id = boundary_invocation;
+    assert_eq!(
+        storage
+            .drop_table(boundary_invocation, actor, id(16), 9_999, boundary_audit,)?
+            .table_id,
+        id(16)
+    );
+    assert_eq!(commit_sequence(&database)?, 6);
+    assert_eq!(
+        lookup_outcome(&database, boundary_invocation, actor, 1)?
+            .ok_or("missing exact table index-entry boundary outcome")?
+            .status,
+        OutcomeStatus::Committed
+    );
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    assert!(catalog.get(id_catalog_key(5, id(16)).as_slice())?.is_none());
+    for dropped_index_id in [id(0x44), index_id] {
+        assert!(
+            catalog
+                .get(id_catalog_key(9, dropped_index_id).as_slice())?
+                .is_none()
+        );
+        assert!(
+            catalog
+                .get(id_catalog_key(2, dropped_index_id).as_slice())?
+                .is_none()
+        );
+    }
+    assert!(read.open_table(ROWS)?.get(&last_row_key[..])?.is_none());
+    for dropped_index_id in [id(0x44), index_id] {
+        assert!(
+            read.open_table(schema::INDEXES)?
+                .range(dropped_index_id.as_slice()..)?
+                .next()
+                .transpose()?
+                .is_none_or(|(key, _)| !key.value().starts_with(&dropped_index_id))
+        );
+    }
+    assert!(
+        read.open_table(schema::ROW_INDEXES)?
+            .range(id(16).as_slice()..)?
+            .next()
+            .transpose()?
+            .is_none_or(|(key, _)| !key.value().starts_with(&id(16)))
+    );
+    drop(read);
+    StorageManager::new(&database, Duration::from_millis(100))?;
+    Ok(())
+}
+
+#[test]
 fn storage_manager_renames_tables_and_drop_column_rewrites_rows()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::storage_manager::{CreateTableRequest, TableColumnDefinition};
