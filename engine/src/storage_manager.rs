@@ -381,6 +381,8 @@ pub struct SupervisorAdmissionRequest {
 struct SupervisorChannelState {
     active_worker_channels: usize,
     terminal_requested: bool,
+    worker_exit_observing: bool,
+    worker_exit_succeeded: bool,
 }
 
 struct SupervisorWorkerChannelLease {
@@ -391,6 +393,8 @@ struct SupervisorWorkerChannelLease {
 pub enum SupervisorInvocationError {
     Closed,
     WorkerChannelsActive,
+    WorkerExitNotObserved,
+    WorkerExitObservationActive,
     WorkerChannelIo(std::io::Error),
     WorkerProcessIo(std::io::Error),
     WorkerExited(std::process::ExitStatus),
@@ -444,7 +448,10 @@ impl SupervisorInvocation<'_> {
                 return Err(SupervisorInvocationError::Closed);
             }
         };
-        if channels.terminal_requested {
+        if channels.terminal_requested
+            || channels.worker_exit_observing
+            || channels.worker_exit_succeeded
+        {
             return Err(SupervisorInvocationError::Closed);
         }
         channels.active_worker_channels = channels
@@ -505,7 +512,7 @@ impl SupervisorInvocation<'_> {
         worker: &mut std::process::Child,
     ) -> Result<std::process::ExitStatus, SupervisorInvocationError> {
         {
-            let channels = match self.channels.lock() {
+            let mut channels = match self.channels.lock() {
                 Ok(channels) => channels,
                 Err(poisoned) => {
                     let mut channels = poisoned.into_inner();
@@ -517,15 +524,26 @@ impl SupervisorInvocation<'_> {
             if channels.terminal_requested {
                 return Err(SupervisorInvocationError::Closed);
             }
+            if channels.worker_exit_succeeded {
+                return Err(SupervisorInvocationError::Closed);
+            }
             if channels.active_worker_channels != 0 {
                 return Err(SupervisorInvocationError::WorkerChannelsActive);
             }
+            if channels.worker_exit_observing {
+                return Err(SupervisorInvocationError::WorkerExitObservationActive);
+            }
+            channels.worker_exit_observing = true;
         }
 
         loop {
             match worker.try_wait() {
-                Ok(Some(status)) if status.success() => return Ok(status),
+                Ok(Some(status)) if status.success() => {
+                    self.finish_worker_exit_observation(true)?;
+                    return Ok(status);
+                }
                 Ok(Some(status)) => {
+                    self.finish_worker_exit_observation(false)?;
                     self.abort_owned_invocation();
                     return Err(SupervisorInvocationError::WorkerExited(status));
                 }
@@ -533,11 +551,13 @@ impl SupervisorInvocation<'_> {
                     if let Err(error) = self.check_deadline() {
                         let _ = worker.kill();
                         let _ = worker.wait();
+                        self.finish_worker_exit_observation(false)?;
                         return Err(error);
                     }
                     std::thread::sleep(SUPERVISOR_IDLE_POLL_INTERVAL);
                 }
                 Err(error) => {
+                    self.finish_worker_exit_observation(false)?;
                     self.abort_owned_invocation();
                     let _ = worker.kill();
                     let _ = worker.wait();
@@ -545,6 +565,28 @@ impl SupervisorInvocation<'_> {
                 }
             }
         }
+    }
+
+    fn finish_worker_exit_observation(
+        &self,
+        succeeded: bool,
+    ) -> Result<(), SupervisorInvocationError> {
+        let mut channels = match self.channels.lock() {
+            Ok(channels) => channels,
+            Err(poisoned) => {
+                let mut channels = poisoned.into_inner();
+                channels.worker_exit_observing = false;
+                channels.terminal_requested = true;
+                self.abort_owned_invocation();
+                return Err(SupervisorInvocationError::Closed);
+            }
+        };
+        channels.worker_exit_observing = false;
+        channels.worker_exit_succeeded = succeeded;
+        if !succeeded {
+            channels.terminal_requested = true;
+        }
+        Ok(())
     }
 
     /// Serve provisioned planner and executor Unix streams concurrently.
@@ -714,6 +756,12 @@ impl SupervisorInvocation<'_> {
         }
         if channels.active_worker_channels != 0 {
             return Err(SupervisorInvocationError::WorkerChannelsActive);
+        }
+        if channels.worker_exit_observing {
+            return Err(SupervisorInvocationError::WorkerExitObservationActive);
+        }
+        if !channels.worker_exit_succeeded {
+            return Err(SupervisorInvocationError::WorkerExitNotObserved);
         }
         channels.terminal_requested = true;
         drop(channels);

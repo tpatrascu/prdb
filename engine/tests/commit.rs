@@ -7607,9 +7607,15 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
                                 .map_err(|error| format!("staging status failed: {error:?}"))?,
                             prdb_engine::supervisor::SubmissionState::Started
                         );
+                        let mut invocation = invocation;
+                        let mut worker = std::process::Command::new("true")
+                            .spawn()
+                            .map_err(|error| format!("worker spawn failed: {error:?}"))?;
+                        invocation
+                            .observe_worker_exit(&mut worker)
+                            .map_err(|error| format!("worker exit failed: {error:?}"))?;
                         send_gateway_result_data_event(&mut service, request_id, b"rows".to_vec())
                             .map_err(|error| format!("result event failed: {error:?}"))?;
-                        let mut invocation = invocation;
                         finalize_gateway_invocation_and_send_terminal(
                             &mut invocation,
                             &mut service,
@@ -7990,6 +7996,8 @@ fn gateway_terminal_event_requires_a_storage_confirmed_decision()
         2,
         64,
     )?;
+    let mut worker = std::process::Command::new("true").spawn()?;
+    invocation.observe_worker_exit(&mut worker)?;
     let (mut service, mut gateway) = UnixStream::pair()?;
     send_gateway_result_data_event(&mut service, 9, b"provisional".to_vec())?;
     finalize_gateway_invocation_and_send_terminal(
@@ -8021,9 +8029,11 @@ fn gateway_terminal_event_requires_a_storage_confirmed_decision()
 fn supervisor_drains_both_worker_channels_before_durable_finalize()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::ipc::{IpcFrame, Operation, encode_frame, read_frame};
+    use prdb_engine::storage_manager::SupervisorInvocationError;
     use prdb_engine::supervisor_ipc::SUPERVISOR_PAYLOAD_VERSION;
     use std::io::Cursor;
     use std::os::unix::net::UnixStream;
+    use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let fixture = Fixture::new();
@@ -8067,6 +8077,18 @@ fn supervisor_drains_both_worker_channels_before_durable_finalize()
     drop(planner_worker);
     drop(executor_worker);
     invocation.serve_worker_channels(planner_storage, executor_storage)?;
+
+    assert!(matches!(
+        invocation.serve_terminal(&mut Cursor::new(Vec::new())),
+        Err(SupervisorInvocationError::WorkerExitNotObserved)
+    ));
+    let mut worker = Command::new("true").spawn()?;
+    assert!(invocation.observe_worker_exit(&mut worker)?.success());
+    let (_executor_worker, mut executor_storage) = UnixStream::pair()?;
+    assert!(matches!(
+        invocation.serve_executor(&mut executor_storage),
+        Err(SupervisorInvocationError::Closed)
+    ));
 
     let terminal = IpcFrame {
         operation: Operation::FinalizeTransaction as u16,
