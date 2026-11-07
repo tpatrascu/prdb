@@ -7062,7 +7062,7 @@ fn commit_catalog_and_audit_with_fences_inner(
         Some(
             catalog_writes
                 .iter()
-                .find(|write| write.key.starts_with(&5u16.to_be_bytes()))
+                .find(|write| write.key.starts_with(&5u16.to_be_bytes()) && write.payload.is_none())
                 .and_then(|write| write.key.get(3..19))
                 .and_then(|bytes| <[u8; 16]>::try_from(bytes).ok())
                 .ok_or(CommitError::InvalidCatalog)?,
@@ -9469,15 +9469,19 @@ fn table_drop_ddl_authority_guards(
 ) -> Result<Vec<CatalogGuard>, CommitError> {
     let table_id = catalog_writes
         .iter()
-        .find(|write| write.key.starts_with(&5u16.to_be_bytes()))
+        .find(|write| write.key.starts_with(&5u16.to_be_bytes()) && write.payload.is_none())
         .and_then(|write| write.key.get(3..19))
         .and_then(|bytes| <[u8; 16]>::try_from(bytes).ok())
         .ok_or(CommitError::InvalidCatalog)?;
+    let table_key = id_catalog_key(5, table_id);
+    let object_key = id_catalog_key(2, table_id);
     if principal_id == [0; 16]
         || table_id == [0; 16]
         || catalog_writes.iter().any(|write| {
             write.expected_value.is_none()
-                || (write.payload.is_some() && !write.key.starts_with(&10u16.to_be_bytes()))
+                || (write.payload.is_some()
+                    && !write.key.starts_with(&10u16.to_be_bytes())
+                    && !write.key.starts_with(&5u16.to_be_bytes()))
         })
         || audit_events.is_empty()
         || audit_events.iter().any(|event| {
@@ -9489,8 +9493,6 @@ fn table_drop_ddl_authority_guards(
     {
         return Err(CommitError::DdlAuthorizationDenied);
     }
-    let table_key = id_catalog_key(5, table_id);
-    let object_key = id_catalog_key(2, table_id);
     let table_write = catalog_writes
         .iter()
         .find(|write| write.key == table_key)
@@ -9605,6 +9607,7 @@ fn table_drop_ddl_authority_guards(
     let mut typed_ids = HashSet::from([table_id]);
     let mut expression_ids = HashSet::new();
     let mut policy_ids = HashSet::new();
+    let mut referenced_table_ids = HashSet::new();
     for family in [6u16, 8, 9, 13] {
         let prefix = family.to_be_bytes();
         let mut scanned = 0usize;
@@ -9634,6 +9637,25 @@ fn table_drop_ddl_authority_guards(
                 policy_ids.insert(id);
             }
             let record = decode_catalog_record(key, &bytes)?;
+            if family == 8 && catalog_field_u16(key, &bytes, 8, 2)? == 5 {
+                let target_constraint_id: [u8; 16] = catalog_field_bytes(key, &bytes, 8, 5)?
+                    .try_into()
+                    .map_err(|_| CommitError::InvalidCatalog)?;
+                let target_key = id_catalog_key(8, target_constraint_id);
+                let target_bytes = catalog
+                    .get(target_key.as_slice())
+                    .map_err(storage_error)?
+                    .ok_or(CommitError::InvalidCatalog)?
+                    .value()
+                    .to_vec();
+                let target_table_id: [u8; 16] =
+                    catalog_field_bytes(&target_key, &target_bytes, 8, 1)?
+                        .try_into()
+                        .map_err(|_| CommitError::InvalidCatalog)?;
+                if target_table_id != table_id {
+                    referenced_table_ids.insert(target_table_id);
+                }
+            }
             for tag in match family {
                 6 => vec![7, 10],
                 8 => vec![4],
@@ -9764,7 +9786,8 @@ fn table_drop_ddl_authority_guards(
             .get(..2)
             .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
             .ok_or(CommitError::InvalidCatalog)?;
-        if write.expected_value.is_none() || (write.payload.is_some() && family != 10) {
+        if write.expected_value.is_none() || (write.payload.is_some() && !matches!(family, 10 | 5))
+        {
             return Err(CommitError::InvalidCatalog);
         }
         let id = write
@@ -9773,7 +9796,35 @@ fn table_drop_ddl_authority_guards(
             .and_then(|bytes| <[u8; 16]>::try_from(bytes).ok());
         let belongs = match family {
             2 => id.is_some_and(|id| owned_ids.contains(&id)),
-            5 => write.key == table_key,
+            5 => {
+                if write.key == table_key {
+                    write.payload.is_none()
+                } else if referenced_table_ids
+                    .iter()
+                    .any(|table_id| write.key == id_catalog_key(5, *table_id))
+                {
+                    let expected = write.expected_value.as_deref().unwrap();
+                    let next = write
+                        .payload
+                        .as_deref()
+                        .ok_or(CommitError::InvalidCatalog)?;
+                    let expected_fields = decode_catalog_record(&write.key, expected)?
+                        .fields
+                        .into_iter()
+                        .filter(|field| field.tag != 3)
+                        .collect::<Vec<_>>();
+                    let next_fields = decode_catalog_record(&write.key, next)?
+                        .fields
+                        .into_iter()
+                        .filter(|field| field.tag != 3)
+                        .collect::<Vec<_>>();
+                    expected_fields == next_fields
+                        && table_write_epoch(&write.key, expected)?.checked_add(1)
+                            == Some(table_write_epoch(&write.key, next)?)
+                } else {
+                    false
+                }
+            }
             6 | 8 | 9 | 13 => id.is_some_and(|id| typed_ids.contains(&id)),
             7 => id.is_some_and(|id| expression_ids.contains(&id)),
             12 => {
@@ -9822,6 +9873,7 @@ fn table_drop_ddl_authority_guards(
                     .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]])),
                 Some(2 | 5 | 6 | 7 | 8 | 9 | 13)
             ) && write.key.len() == 19
+                && write.payload.is_none()
         })
         .filter_map(|write| <[u8; 16]>::try_from(&write.key[3..19]).ok())
         .collect::<HashSet<_>>();

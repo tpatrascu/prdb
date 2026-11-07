@@ -2467,6 +2467,43 @@ impl<'db> StorageManager<'db> {
         for (key, bytes) in typed_records {
             deletes.insert(key, bytes);
         }
+        // Removing an owned foreign key changes the referenced table's
+        // constraint graph too, so advance that table's write epoch in the
+        // same transaction. The table being dropped is already removed.
+        let mut referenced_tables = HashSet::new();
+        for (key, bytes) in &deletes {
+            if key.starts_with(&8u16.to_be_bytes()) && read_catalog_u16(key, bytes, 8, 2)? == 5 {
+                let target_constraint_id = read_catalog_id(key, bytes, 8, 5)?;
+                let target_constraint_key = id_catalog_key(8, target_constraint_id);
+                let target_constraint_bytes = catalog
+                    .get(target_constraint_key.as_slice())
+                    .map_err(|_| TableLifecycleError::Storage)?
+                    .map(|value| value.value().to_vec())
+                    .ok_or(TableLifecycleError::Commit(CommitError::InvalidCatalog))?;
+                let target_table_id =
+                    read_catalog_id(&target_constraint_key, &target_constraint_bytes, 8, 1)?;
+                if target_table_id != table_id {
+                    referenced_tables.insert(target_table_id);
+                }
+            }
+        }
+        let mut table_epoch_updates = Vec::with_capacity(referenced_tables.len());
+        for referenced_table_id in referenced_tables {
+            let key = id_catalog_key(5, referenced_table_id);
+            let bytes = catalog
+                .get(key.as_slice())
+                .map_err(|_| TableLifecycleError::Storage)?
+                .map(|value| value.value().to_vec())
+                .ok_or(TableLifecycleError::Commit(CommitError::InvalidCatalog))?;
+            let next_epoch = read_catalog_u64(&key, &bytes, 5, 3)?
+                .checked_add(1)
+                .ok_or(TableLifecycleError::Commit(CommitError::InvalidCatalog))?;
+            table_epoch_updates.push(CatalogWrite {
+                key: key.clone(),
+                expected_value: Some(bytes.clone()),
+                payload: Some(rewrite_catalog_u64_field(&key, &bytes, 5, 3, next_epoch)?),
+            });
+        }
         for id in &expression_ids {
             let key = id_catalog_key(7, *id);
             if let Some(value) = catalog
@@ -2605,6 +2642,7 @@ impl<'db> StorageManager<'db> {
         }
         let writes = principal_updates
             .into_iter()
+            .chain(table_epoch_updates)
             .chain(
                 deletes
                     .into_iter()

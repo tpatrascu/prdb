@@ -5914,6 +5914,168 @@ fn foreign_key_catalog_writes(
 }
 
 #[test]
+fn storage_manager_drop_referencing_table_removes_owned_foreign_key()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let admin_role = builtin_owner_id();
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let mut foreign_key_writes = foreign_key_catalog_writes(true, true);
+    foreign_key_writes.extend([
+        constraint_write(id(88), id(82), 5, &[id(84)], Some(id(85)), &[id(83)], None),
+        object_write(id(88), 6),
+        dependency_write(id(88), id(85), 3),
+    ]);
+    let mut catalog_audit = identity_audit_event(0xa1, admin_role, id(0x80));
+    catalog_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(
+        id(0xa1),
+        admin_role,
+        9_999,
+        &foreign_key_writes,
+        &[catalog_audit],
+    )?;
+
+    let actor = id(0xa2);
+    let mut setup_audit = identity_audit_event(0xa3, admin_role, actor);
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(
+        id(0xa3),
+        admin_role,
+        9_999,
+        &[
+            principal_write_with_name(actor, 1, 1, "drop_referencing_table_admin"),
+            object_write_with_name(actor, 8, "drop_referencing_table_admin"),
+            membership_write(actor, admin_role),
+            dependency_write(actor, admin_role, 5),
+        ],
+        &[setup_audit],
+    )?;
+    let target_table_key = id_catalog_key(5, id(81));
+    let target_epoch_before = {
+        let read = database.begin_read()?;
+        let catalog = read.open_table(CATALOG)?;
+        let bytes = catalog
+            .get(target_table_key.as_slice())?
+            .ok_or("missing target table before drop")?
+            .value()
+            .to_vec();
+        let record = decode_registered_envelope(&bytes)?;
+        u64::from_le_bytes(
+            record
+                .fields
+                .iter()
+                .find(|field| field.tag == 3)
+                .ok_or("missing target write epoch")?
+                .payload
+                .as_slice()
+                .try_into()?,
+        )
+    };
+    let mut stale_target_writer = storage.begin_invocation(id(0xa6), admin_role, 9_999, 1, 1024)?;
+    let stale_target_schema = stale_target_writer.load_catalog_table_schema(id(81))?;
+    stale_target_writer.load_catalog_indexes(&stale_target_schema)?;
+    let stale_target_tuple = encode_tuple(
+        &stale_target_schema.columns,
+        stale_target_schema.schema_version,
+        &[Some(ScalarValue::Bytea(
+            b"staged before FK owner drop".to_vec(),
+        ))],
+    )?;
+    let stale_target_row = id(0xa7);
+    stale_target_writer.stage_put(
+        prdb_engine::overlay::RowId {
+            table: id(81),
+            row: stale_target_row,
+        },
+        &stale_target_tuple,
+    )?;
+
+    let invocation_id = id(0xa4);
+    let mut drop_audit = identity_audit_event(0xa5, actor, id(82));
+    drop_audit.correlation_id = invocation_id;
+    let dropped = storage.drop_table(invocation_id, actor, id(82), 9_999, drop_audit);
+    assert!(
+        dropped.is_ok(),
+        "dropping the FK owner table returned {dropped:?}"
+    );
+    assert_eq!(dropped.unwrap().table_id, id(82));
+    assert_eq!(
+        lookup_outcome(&database, invocation_id, actor, 1)?
+            .ok_or("missing referencing-table drop outcome")?
+            .status,
+        OutcomeStatus::Committed
+    );
+    assert!(matches!(
+        stale_target_writer.commit(),
+        Err(prdb_engine::transaction::TransactionError::Commit(
+            CommitError::Conflict
+        ))
+    ));
+    assert_eq!(
+        lookup_outcome(&database, id(0xa6), admin_role, 1)?
+            .ok_or("missing stale target-writer outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
+
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    for key in [
+        id_catalog_key(2, id(82)),
+        id_catalog_key(5, id(82)),
+        id_catalog_key(2, id(84)),
+        id_catalog_key(6, id(84)),
+        id_catalog_key(2, id(86)),
+        id_catalog_key(8, id(86)),
+        id_catalog_key(2, id(88)),
+        id_catalog_key(8, id(88)),
+        dependency_write(id(86), id(85), 3).key,
+        dependency_write(id(88), id(85), 3).key,
+    ] {
+        assert!(
+            catalog.get(key.as_slice())?.is_none(),
+            "record remained: {key:?}"
+        );
+    }
+    for key in [
+        id_catalog_key(2, id(81)),
+        id_catalog_key(5, id(81)),
+        id_catalog_key(8, id(85)),
+        id_catalog_key(9, id(87)),
+        dependency_write(id(85), id(87), 4).key,
+    ] {
+        assert!(
+            catalog.get(key.as_slice())?.is_some(),
+            "target record missing: {key:?}"
+        );
+    }
+    let target_bytes = catalog
+        .get(target_table_key.as_slice())?
+        .ok_or("target table missing after drop")?
+        .value()
+        .to_vec();
+    let target_epoch_after = u64::from_le_bytes(
+        decode_registered_envelope(&target_bytes)?
+            .fields
+            .iter()
+            .find(|field| field.tag == 3)
+            .ok_or("missing target write epoch after drop")?
+            .payload
+            .as_slice()
+            .try_into()?,
+    );
+    assert_eq!(target_epoch_after, target_epoch_before + 1);
+    assert!(
+        read.open_table(ROWS)?
+            .get(table_row_key(id(81), stale_target_row).as_slice())?
+            .is_none()
+    );
+    StorageManager::new(&database, Duration::from_millis(100))?;
+    Ok(())
+}
+
+#[test]
 fn catalog_commit_requires_foreign_key_target_dependency_edges()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
