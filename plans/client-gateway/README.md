@@ -10,7 +10,7 @@ Define listener configuration with loopback default and explicit non-loopback pl
 
 ## Increments
 
-The gateway foundation implements the loopback-default TCP bind policy, requires an explicit plaintext opt-in for non-loopback addresses, caps accepted connections through shared permits, and runs a fixed-size worker pool with a bounded pending queue and idle I/O timeouts. Each worker opens a per-client IPC stream through a Linux Unix-socket connector that checks the service peer UID. The `prdb-gateway` binary exposes bind, service socket/UID, worker, queue, and timeout configuration. The connection adapter currently covers HELLO, AUTH, submission operations, STATUS, CANCEL, and PING. Gateway generation/session binding, control ADMIN forwarding, and the supervisor-side service listener remain unimplemented.
+The gateway foundation implements the loopback-default TCP bind policy, requires an explicit plaintext opt-in for non-loopback addresses, caps accepted connections through shared permits, and runs a fixed-size worker pool with a bounded pending queue and idle I/O timeouts. Each worker opens a per-client IPC stream through a Linux Unix-socket connector that checks the service peer UID. The `prdb-gateway` binary exposes bind, service socket/UID, worker, queue, and timeout configuration. The supervisor-side Unix listener also checks the gateway UID, sets socket mode 0600, and caps timed client sessions. The connection adapter currently covers HELLO, AUTH, submission operations, STATUS, CANCEL, and PING. Gateway generation/session binding, control ADMIN forwarding, and a supervisor process wrapper remain unimplemented.
 
 | ID | Observable test first | Minimum implementation and evidence |
 | --- | --- | --- |

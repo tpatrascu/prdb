@@ -162,7 +162,7 @@ impl GatewayConnectionLimiter {
         self.inner.active.load(Ordering::Acquire)
     }
 
-    fn try_acquire(&self) -> Option<GatewayConnectionPermit> {
+    pub(crate) fn try_acquire(&self) -> Option<GatewayConnectionPermit> {
         let mut active = self.inner.active.load(Ordering::Relaxed);
         loop {
             if active >= self.inner.maximum.get() {
@@ -401,7 +401,7 @@ where
 }
 
 #[cfg(target_os = "linux")]
-fn unix_peer_uid(stream: &std::os::unix::net::UnixStream) -> io::Result<u32> {
+pub(crate) fn unix_peer_uid(stream: &std::os::unix::net::UnixStream) -> io::Result<u32> {
     use std::os::fd::AsRawFd;
     let mut credentials = std::mem::MaybeUninit::<libc::ucred>::uninit();
     let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
@@ -431,7 +431,7 @@ fn unix_peer_uid(stream: &std::os::unix::net::UnixStream) -> io::Result<u32> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn unix_peer_uid(_stream: &std::os::unix::net::UnixStream) -> io::Result<u32> {
+pub(crate) fn unix_peer_uid(_stream: &std::os::unix::net::UnixStream) -> io::Result<u32> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "Unix gateway service peer verification is supported only on Linux",

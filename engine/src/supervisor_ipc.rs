@@ -8,7 +8,14 @@ use crate::storage_manager::{
     InvocationStatusError, OwnerCancellationResult, StorageManager,
 };
 use crate::transaction::{InvocationTransaction, TransactionError};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+#[cfg(unix)]
+use std::os::unix::net::UnixListener;
 
 pub const SUPERVISOR_PAYLOAD_VERSION: u16 = 1;
 pub const MAX_SUPERVISOR_REQUESTS_PER_CONNECTION: usize = 16;
@@ -62,6 +69,163 @@ pub struct GatewayAdmissionConfig {
     pub retention_deadline_us: i64,
     pub max_rows: usize,
     pub max_bytes: usize,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug)]
+pub struct GatewayServiceListenerConfig {
+    pub expected_gateway_uid: u32,
+    pub max_connections: usize,
+    pub idle_timeout: Duration,
+    pub accept_poll_interval: Duration,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub enum GatewayServiceListenerError {
+    InvalidConfig,
+    Io(io::Error),
+    WorkerPanicked,
+}
+
+#[cfg(unix)]
+impl std::fmt::Display for GatewayServiceListenerError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "gateway service listener failed: {self:?}")
+    }
+}
+
+#[cfg(unix)]
+impl std::error::Error for GatewayServiceListenerError {}
+
+#[cfg(unix)]
+pub fn bind_gateway_service_socket(socket_path: impl AsRef<Path>) -> io::Result<UnixListener> {
+    use std::os::unix::fs::PermissionsExt;
+    let socket_path = socket_path.as_ref();
+    let listener = UnixListener::bind(socket_path)?;
+    if let Err(error) =
+        std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))
+    {
+        drop(listener);
+        let _ = std::fs::remove_file(socket_path);
+        return Err(error);
+    }
+    Ok(listener)
+}
+
+/// Accept bounded per-client Unix streams from the configured gateway UID.
+/// The START callback must hand invocation work to a trusted scheduler and
+/// return so the service thread can continue processing cancellation/status.
+#[cfg(unix)]
+pub fn serve_gateway_service_listener<'db, F>(
+    listener: UnixListener,
+    manager: &StorageManager<'db>,
+    staging: &crate::supervisor::StagingStore,
+    admission: GatewayAdmissionConfig,
+    config: GatewayServiceListenerConfig,
+    shutdown: Arc<AtomicBool>,
+    on_started: F,
+) -> Result<(), GatewayServiceListenerError>
+where
+    F: Fn(crate::storage_manager::SupervisorInvocation<'db>, crate::supervisor::SealedSubmission)
+        + Sync,
+{
+    if config.max_connections == 0
+        || config.idle_timeout.is_zero()
+        || config.accept_poll_interval.is_zero()
+    {
+        return Err(GatewayServiceListenerError::InvalidConfig);
+    }
+    listener
+        .set_nonblocking(true)
+        .map_err(GatewayServiceListenerError::Io)?;
+    let limiter = crate::gateway::GatewayConnectionLimiter::new(config.max_connections)
+        .map_err(|_| GatewayServiceListenerError::InvalidConfig)?;
+
+    std::thread::scope(|scope| {
+        let mut workers = Vec::new();
+        let mut accept_error = None;
+        while !shutdown.load(Ordering::Acquire) {
+            match listener.accept() {
+                Ok((mut stream, _peer)) => {
+                    let Some(permit) = limiter.try_acquire() else {
+                        continue;
+                    };
+                    let worker_manager = manager;
+                    let worker_staging = staging;
+                    let worker_started = &on_started;
+                    workers.push(scope.spawn(move || {
+                        let _permit = permit;
+                        if crate::gateway::unix_peer_uid(&stream).ok()
+                            != Some(config.expected_gateway_uid)
+                        {
+                            return;
+                        }
+                        if stream
+                            .set_read_timeout(Some(config.idle_timeout))
+                            .and_then(|()| stream.set_write_timeout(Some(config.idle_timeout)))
+                            .is_err()
+                        {
+                            return;
+                        }
+                        let mut session =
+                            crate::client_protocol::ClientConnectionSession::default();
+                        loop {
+                            match serve_gateway_client_session(
+                                &mut stream,
+                                worker_manager,
+                                worker_staging,
+                                &mut session,
+                                admission,
+                            ) {
+                                Ok(GatewayClientServiceEvent::Disconnected) => return,
+                                Ok(GatewayClientServiceEvent::Started {
+                                    invocation,
+                                    submission,
+                                    ..
+                                }) => worker_started(invocation, submission),
+                                Err(_) => return,
+                            }
+                        }
+                    }));
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(config.accept_poll_interval);
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => {
+                    accept_error = Some(error);
+                    break;
+                }
+            }
+            let mut index = 0;
+            while index < workers.len() {
+                if workers[index].is_finished() {
+                    let worker = workers.swap_remove(index);
+                    if worker.join().is_err() {
+                        accept_error = Some(io::Error::other("gateway service worker panicked"));
+                        break;
+                    }
+                } else {
+                    index += 1;
+                }
+            }
+            if accept_error.is_some() {
+                break;
+            }
+        }
+        let mut worker_panicked = false;
+        for worker in workers {
+            worker_panicked |= worker.join().is_err();
+        }
+        if worker_panicked {
+            Err(GatewayServiceListenerError::WorkerPanicked)
+        } else if let Some(error) = accept_error {
+            Err(GatewayServiceListenerError::Io(error))
+        } else {
+            Ok(())
+        }
+    })
 }
 
 /// Route one client operation over a provisioned gateway IPC connection.

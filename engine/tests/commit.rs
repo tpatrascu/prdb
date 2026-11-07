@@ -7854,6 +7854,88 @@ fn gateway_control_socket_serves_bounded_status_requests() -> Result<(), Box<dyn
 }
 
 #[test]
+fn gateway_service_listener_binds_peer_and_serves_hello() -> Result<(), Box<dyn std::error::Error>>
+{
+    use prdb_engine::ipc::{IpcFrame, Operation, read_frame, write_frame};
+    use prdb_engine::supervisor::{
+        StagingLimits, StagingStore, SubmissionMetadata, SubmissionMetadataValidator,
+    };
+    use prdb_engine::supervisor_ipc::{
+        GatewayAdmissionConfig, GatewayServiceListenerConfig, bind_gateway_service_socket,
+        serve_gateway_service_listener,
+    };
+    use std::os::unix::net::UnixStream;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct AcceptUpload;
+    impl SubmissionMetadataValidator for AcceptUpload {
+        fn supports_versions(&self, manifest_version: u32, scope_version: u32) -> bool {
+            manifest_version == 1 && scope_version == 1
+        }
+
+        fn validate(&self, _metadata: &SubmissionMetadata) -> bool {
+            true
+        }
+    }
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let staging = StagingStore::new(StagingLimits::default(), Arc::new(AcceptUpload))?;
+    let socket_path =
+        std::path::PathBuf::from(format!("{}.gateway.sock", fixture.path().display()));
+    let listener = bind_gateway_service_socket(&socket_path)?;
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let admission = GatewayAdmissionConfig {
+        retention_deadline_us: i64::MAX,
+        max_rows: 2,
+        max_bytes: 64,
+    };
+    std::thread::scope(|scope| {
+        let shutdown_server = Arc::clone(&shutdown);
+        let server = scope.spawn(move || {
+            serve_gateway_service_listener(
+                listener,
+                &storage,
+                &staging,
+                admission,
+                GatewayServiceListenerConfig {
+                    expected_gateway_uid: unsafe { libc::geteuid() },
+                    max_connections: 2,
+                    idle_timeout: Duration::from_secs(5),
+                    accept_poll_interval: Duration::from_millis(5),
+                },
+                shutdown_server,
+                |_invocation, _submission| {},
+            )
+        });
+
+        let mut gateway = UnixStream::connect(&socket_path)?;
+        write_frame(
+            &mut gateway,
+            &IpcFrame {
+                operation: Operation::OpenClientSession as u16,
+                request_id: 1,
+                payload: br#"{"mode":"query","client_name":"listener"}"#.to_vec(),
+            },
+        )?;
+        let response = read_frame(&mut gateway)?.ok_or("missing HELLO response")?;
+        assert_eq!(response.operation, Operation::OpenClientSession as u16);
+        assert_eq!(response.request_id, 1);
+        assert!(std::str::from_utf8(&response.payload)?.contains("\"mode\":\"query\""));
+        drop(gateway);
+        shutdown.store(true, Ordering::Release);
+        server
+            .join()
+            .map_err(|_| std::io::Error::other("gateway service listener panicked"))??;
+        Ok::<_, Box<dyn std::error::Error>>(())
+    })?;
+    std::fs::remove_file(socket_path)?;
+    Ok(())
+}
+
+#[test]
 fn supervisor_drains_both_worker_channels_before_durable_finalize()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::ipc::{IpcFrame, Operation, encode_frame, read_frame};

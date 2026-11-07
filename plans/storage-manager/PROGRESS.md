@@ -1159,7 +1159,15 @@
 - Changed binary and CLI regressions: [gateway process](../../engine/src/bin/prdb-gateway.rs) and [gateway CLI tests](../../engine/tests/gateway.rs).
 - Observed red: the CLI test initially failed to compile because Cargo had no `prdb-gateway` target.
 - Commands actually run in the configured Nix shell: `cargo fmt --all`; focused `cargo test -p prdb-engine --test gateway --locked` (9 passed); and `cargo fmt --all -- --check && cargo build --workspace --locked && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && git diff --check`. All passed.
-- Remaining: provide the supervisor-side Unix listener and bind gateway generation/session context; connect result relay and control ADMIN operations.
+- Remaining at that increment: provide the supervisor-side Unix listener and bind gateway generation/session context; connect result relay and control ADMIN operations. The listener is recorded in the following entry.
+
+## GW-2 dependency: bounded supervisor-side gateway service listener
+
+- Behavior: the supervisor binds a private mode-0600 Unix socket, accepts only the configured Linux peer UID, caps active sessions, applies idle read/write timeouts, creates a fresh `ClientConnectionSession` per stream, and returns to request handling after the START callback hands admission to trusted scheduling code.
+- Changed implementation and integration test: [supervisor gateway listener](../../engine/src/supervisor_ipc.rs) and [real-redb HELLO over the private listener](../../engine/tests/commit.rs).
+- Observed red: the focused listener test failed to compile because the listener configuration, binder, and accept loop did not exist.
+- Commands actually run in the configured Nix shell: `cargo fmt --all`; focused `cargo test -p prdb-engine --test commit --locked gateway_service_listener_binds_peer_and_serves_hello` passed; and `cargo fmt --all -- --check && cargo build --workspace --locked && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && git diff --check`. All passed.
+- Remaining: bind both sides to a gateway generation and connection ID, exercise listener through `prdb-gateway` in a separate process, and implement worker scheduling/result relay/control ADMIN.
 
 ## SU-1 / IPC-6 dependency: gateway submission IPC dispatcher
 
