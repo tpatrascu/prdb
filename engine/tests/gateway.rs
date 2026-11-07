@@ -1,5 +1,7 @@
 use prdb_engine::client_protocol::{ClientFrame, ClientFrameDecoder};
-use prdb_engine::gateway::{GatewayListenerConfig, GatewayListenerError, TcpGatewayListener};
+use prdb_engine::gateway::{
+    GatewayConnectionLimiter, GatewayListenerConfig, GatewayListenerError, TcpGatewayListener,
+};
 use prdb_engine::ipc::{IpcFrame, Operation, read_frame, write_frame};
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -119,4 +121,20 @@ fn tcp_client_hello_and_ping_bridge_over_the_gateway_service_channel() {
     client.shutdown(std::net::Shutdown::Write).unwrap();
     gateway.join().unwrap();
     supervisor.join().unwrap();
+}
+
+#[test]
+fn accepted_gateway_connections_obey_a_shared_limit() {
+    let listener = TcpGatewayListener::bind(GatewayListenerConfig::default()).unwrap();
+    let limiter = GatewayConnectionLimiter::new(1).unwrap();
+
+    let _client_one = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (_accepted_one, _, permit_one) = listener.accept_bounded(&limiter).unwrap();
+
+    let _client_two = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    assert!(listener.accept_bounded(&limiter).is_err());
+
+    drop(permit_one);
+    let _client_three = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    assert!(listener.accept_bounded(&limiter).is_ok());
 }

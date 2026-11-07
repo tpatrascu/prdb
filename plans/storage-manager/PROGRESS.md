@@ -1109,7 +1109,7 @@
 - Changed tests: [gateway listener policy](../../engine/tests/gateway.rs).
 - Observed red: focused compile failed because `prdb_engine::gateway` did not exist before the implementation.
 - Commands actually run in the configured Nix shell: `cargo fmt --all`; focused `cargo test -p prdb-engine --test gateway --locked` (3 passed); and `cargo fmt --all -- --check && cargo build --workspace --locked && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && git diff --check`. All passed.
-- Remaining at that increment: bounded accepted-connection handling, frame read/write deadlines, session processing, and a separately runnable gateway process. The service-channel forwarding slice is recorded in the following entry.
+- Remaining at that increment: bounded accepted-connection handling and frame read/write deadlines. Those controls are recorded in the later gateway resource entry; session processing and a separately runnable gateway process remain open.
 
 ## GW-2 / GW-3 dependency: TCP client to gateway-service frame bridge
 
@@ -1119,6 +1119,14 @@
 - Observed red: the initial focused test failed to compile because the TCP bridge and `PingClientSession` IPC operation were absent.
 - Commands actually run in the configured Nix shell: `cargo fmt --all`; focused `cargo test -p prdb-engine --test gateway --locked tcp_client_hello_and_ping_bridge_over_the_gateway_service_channel` passed; and `cargo fmt --all -- --check && cargo build --workspace --locked && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && git diff --check`. All passed.
 - Remaining: run bounded concurrent accepted connections with read/write deadlines; implement ADMIN and explicit sanitized ERROR responses; connect a separately runnable gateway process to authenticated service-channel provisioning and result relay.
+
+## GW-1 dependency: bounded gateway connection admission
+
+- Behavior: a shared atomic limiter issues RAII permits up to a positive configured connection maximum; bounded accept drops peers above that cap. The TCP/Unix stream serving helper sets positive idle read/write timeouts before frame processing.
+- Changed implementation and regression: [listener limits and timeout bridge](../../engine/src/gateway.rs) and [shared connection-cap test](../../engine/tests/gateway.rs).
+- Observed red: the focused test initially failed to compile because the shared limiter and bounded accept API were absent; a subsequent compile exposed and corrected the test's tuple destructuring.
+- Commands actually run in the configured Nix shell: `cargo fmt --all`; focused `cargo test -p prdb-engine --test gateway --locked` (5 passed); and `cargo fmt --all -- --check && cargo build --workspace --locked && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && git diff --check`. All passed.
+- Remaining: use permits/timeouts in a bounded listener worker pool; add absolute pre-auth deadlines and per-IP rate limits.
 
 ## SU-1 / IPC-6 dependency: gateway submission IPC dispatcher
 

@@ -6,7 +6,11 @@
 
 use std::io;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::num::NonZeroUsize;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GatewayListenerConfig {
@@ -28,6 +32,8 @@ impl Default for GatewayListenerConfig {
 #[derive(Debug)]
 pub enum GatewayListenerError {
     NonLoopbackPlaintextDisabled(SocketAddr),
+    InvalidConnectionLimit,
+    ConnectionLimitReached,
     Io(io::Error),
 }
 
@@ -38,6 +44,12 @@ impl std::fmt::Display for GatewayListenerError {
                 formatter,
                 "plaintext gateway binding to {address} requires explicit opt-in"
             ),
+            Self::InvalidConnectionLimit => {
+                write!(formatter, "gateway connection limit must be positive")
+            }
+            Self::ConnectionLimitReached => {
+                write!(formatter, "gateway connection limit reached")
+            }
             Self::Io(error) => write!(formatter, "gateway listener failed: {error}"),
         }
     }
@@ -46,7 +58,9 @@ impl std::fmt::Display for GatewayListenerError {
 impl std::error::Error for GatewayListenerError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::NonLoopbackPlaintextDisabled(_) => None,
+            Self::NonLoopbackPlaintextDisabled(_)
+            | Self::InvalidConnectionLimit
+            | Self::ConnectionLimitReached => None,
             Self::Io(error) => Some(error),
         }
     }
@@ -54,6 +68,66 @@ impl std::error::Error for GatewayListenerError {
 
 pub struct TcpGatewayListener {
     listener: TcpListener,
+}
+
+struct GatewayConnectionLimit {
+    maximum: NonZeroUsize,
+    active: AtomicUsize,
+}
+
+#[derive(Clone)]
+pub struct GatewayConnectionLimiter {
+    inner: Arc<GatewayConnectionLimit>,
+}
+
+pub struct GatewayConnectionPermit {
+    inner: Arc<GatewayConnectionLimit>,
+}
+
+impl GatewayConnectionLimiter {
+    pub fn new(maximum: usize) -> Result<Self, GatewayListenerError> {
+        let maximum =
+            NonZeroUsize::new(maximum).ok_or(GatewayListenerError::InvalidConnectionLimit)?;
+        Ok(Self {
+            inner: Arc::new(GatewayConnectionLimit {
+                maximum,
+                active: AtomicUsize::new(0),
+            }),
+        })
+    }
+
+    pub fn active_connections(&self) -> usize {
+        self.inner.active.load(Ordering::Acquire)
+    }
+
+    fn try_acquire(&self) -> Option<GatewayConnectionPermit> {
+        let mut active = self.inner.active.load(Ordering::Relaxed);
+        loop {
+            if active >= self.inner.maximum.get() {
+                return None;
+            }
+            match self.inner.active.compare_exchange_weak(
+                active,
+                active + 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    return Some(GatewayConnectionPermit {
+                        inner: Arc::clone(&self.inner),
+                    });
+                }
+                Err(current) => active = current,
+            }
+        }
+    }
+}
+
+impl Drop for GatewayConnectionPermit {
+    fn drop(&mut self) {
+        let previous = self.inner.active.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0);
+    }
 }
 
 #[derive(Debug)]
@@ -91,6 +165,17 @@ impl TcpGatewayListener {
 
     pub fn accept(&self) -> io::Result<(std::net::TcpStream, SocketAddr)> {
         self.listener.accept()
+    }
+
+    pub fn accept_bounded(
+        &self,
+        limiter: &GatewayConnectionLimiter,
+    ) -> Result<(TcpStream, SocketAddr, GatewayConnectionPermit), GatewayListenerError> {
+        let (stream, peer) = self.listener.accept().map_err(GatewayListenerError::Io)?;
+        let permit = limiter
+            .try_acquire()
+            .ok_or(GatewayListenerError::ConnectionLimitReached)?;
+        Ok((stream, peer, permit))
     }
 }
 
@@ -134,6 +219,34 @@ pub fn serve_tcp_client_connection<C: Read + Write, S: Read + Write>(
             .write_all(&response)
             .map_err(GatewayConnectionError::Io)?;
     }
+}
+
+/// Set idle I/O timeouts on a TCP connection and its private Unix service
+/// stream before running the bounded frame bridge.
+pub fn serve_tcp_client_connection_with_timeout(
+    client: &mut TcpStream,
+    service: &mut std::os::unix::net::UnixStream,
+    idle_timeout: Duration,
+) -> Result<(), GatewayConnectionError> {
+    if idle_timeout.is_zero() {
+        return Err(GatewayConnectionError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "gateway idle timeout must be positive",
+        )));
+    }
+    client
+        .set_read_timeout(Some(idle_timeout))
+        .map_err(GatewayConnectionError::Io)?;
+    client
+        .set_write_timeout(Some(idle_timeout))
+        .map_err(GatewayConnectionError::Io)?;
+    service
+        .set_read_timeout(Some(idle_timeout))
+        .map_err(GatewayConnectionError::Io)?;
+    service
+        .set_write_timeout(Some(idle_timeout))
+        .map_err(GatewayConnectionError::Io)?;
+    serve_tcp_client_connection(client, service)
 }
 
 fn read_client_request<R: Read>(
