@@ -11,7 +11,7 @@ use crate::commit::{
     commit_authorized_foreign_key_ddl_with_fences, commit_authorized_identity_ddl_with_fences,
     commit_authorized_index_ddl_with_fences, commit_authorized_membership_ddl_with_fences,
     commit_authorized_object_grant_ddl_with_fences, commit_authorized_policy_ddl_with_fences,
-    commit_authorized_schema_create_ddl_with_fences,
+    commit_authorized_schema_create_ddl_with_fences, commit_authorized_schema_drop_ddl_with_fences,
     commit_authorized_system_privilege_ddl_with_fences,
     commit_authorized_table_create_ddl_with_fences, commit_catalog_and_audit_with_fences,
 };
@@ -431,6 +431,12 @@ pub struct CreatedRole {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreatedSchema {
+    pub schema_id: [u8; 16],
+    pub commit_sequence: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DroppedSchema {
     pub schema_id: [u8; 16],
     pub commit_sequence: u64,
 }
@@ -1973,6 +1979,85 @@ impl<'db> StorageManager<'db> {
             error => SchemaLifecycleError::Commit(error),
         })?;
         Ok(CreatedSchema {
+            schema_id,
+            commit_sequence,
+        })
+    }
+
+    /// Drop an empty schema and its object record atomically. The schema owner
+    /// or a database administrator must authorize the operation.
+    pub fn drop_schema(
+        &self,
+        invocation_id: [u8; 16],
+        authenticated_actor_id: [u8; 16],
+        schema_id: [u8; 16],
+        retention_deadline_us: i64,
+        mut audit_event: AuditEvent,
+    ) -> Result<DroppedSchema, SchemaLifecycleError> {
+        if invocation_id == [0; 16]
+            || authenticated_actor_id == [0; 16]
+            || schema_id == [0; 16]
+            || retention_deadline_us <= 0
+        {
+            return Err(SchemaLifecycleError::InvalidRequest);
+        }
+        if audit_event.actor_id != Some(authenticated_actor_id)
+            || audit_event.correlation_id != invocation_id
+            || audit_event.action != AuditAction::Ddl
+            || audit_event.result != AuditResult::Succeeded
+        {
+            return Err(SchemaLifecycleError::InvalidAudit);
+        }
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|_| SchemaLifecycleError::Storage)?;
+        let catalog = read
+            .open_table(CATALOG)
+            .map_err(|_| SchemaLifecycleError::Storage)?;
+        let object_key = id_catalog_key(2, schema_id);
+        let schema_key = id_catalog_key(3, schema_id);
+        let object_bytes = catalog
+            .get(object_key.as_slice())
+            .map_err(|_| SchemaLifecycleError::Storage)?
+            .map(|value| value.value().to_vec())
+            .ok_or(SchemaLifecycleError::Commit(CommitError::InvalidCatalog))?;
+        let schema_bytes = catalog
+            .get(schema_key.as_slice())
+            .map_err(|_| SchemaLifecycleError::Storage)?
+            .map(|value| value.value().to_vec())
+            .ok_or(SchemaLifecycleError::Commit(CommitError::InvalidCatalog))?;
+        decode_registered_envelope(&object_bytes)
+            .map_err(|_| SchemaLifecycleError::Commit(CommitError::InvalidCatalog))?;
+        decode_registered_envelope(&schema_bytes)
+            .map_err(|_| SchemaLifecycleError::Commit(CommitError::InvalidCatalog))?;
+        audit_event.target_ids = vec![schema_id];
+        let writes = [
+            CatalogWrite {
+                key: object_key,
+                expected_value: Some(object_bytes),
+                payload: None,
+            },
+            CatalogWrite {
+                key: schema_key,
+                expected_value: Some(schema_bytes),
+                payload: None,
+            },
+        ];
+        let commit_sequence = commit_authorized_schema_drop_ddl_with_fences(
+            self.database,
+            &self.ddl_fences,
+            invocation_id,
+            authenticated_actor_id,
+            retention_deadline_us,
+            &writes,
+            &[audit_event],
+        )
+        .map_err(|error| match error {
+            CommitError::DdlAuthorizationDenied => SchemaLifecycleError::Unauthorized,
+            error => SchemaLifecycleError::Commit(error),
+        })?;
+        Ok(DroppedSchema {
             schema_id,
             commit_sequence,
         })

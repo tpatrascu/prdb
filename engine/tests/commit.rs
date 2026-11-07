@@ -62,6 +62,39 @@ fn id(n: u8) -> [u8; 16] {
     [n; 16]
 }
 
+fn admin_dispatch_json(
+    storage: &StorageManager,
+    staging: &prdb_engine::supervisor::StagingStore,
+    session: &mut prdb_engine::client_protocol::ClientConnectionSession,
+    request_id: u64,
+    payload: &str,
+    retention_deadline_us: i64,
+) -> Result<String, Box<dyn std::error::Error>> {
+    match prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        storage,
+        staging,
+        session,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id,
+            payload: payload.as_bytes().to_vec(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_deadline_us,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )? {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => {
+            Ok(String::from_utf8(response.payload)?)
+        }
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
+            Err("ADMIN DDL unexpectedly started a worker invocation".into())
+        }
+    }
+}
+
 fn id_catalog_key(family: u16, object_id: [u8; 16]) -> Vec<u8> {
     let mut key = family.to_be_bytes().to_vec();
     key.push(1);
@@ -457,7 +490,9 @@ fn initialize(path: &std::path::Path) -> Result<Database, Box<dyn std::error::Er
 #[test]
 fn storage_manager_creates_schema_atomically_for_privileged_actor()
 -> Result<(), Box<dyn std::error::Error>> {
-    use prdb_engine::storage_manager::SchemaLifecycleError;
+    use prdb_engine::storage_manager::{
+        CreateTableRequest, SchemaLifecycleError, TableColumnDefinition,
+    };
 
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
@@ -535,6 +570,25 @@ fn storage_manager_creates_schema_atomically_for_privileged_actor()
             .status,
         OutcomeStatus::Committed
     );
+    let denied_drop_invocation = id(0xf8);
+    let mut denied_drop_audit = identity_audit_event(0xf9, denied, id(0xfa));
+    denied_drop_audit.correlation_id = denied_drop_invocation;
+    assert!(matches!(
+        storage.drop_schema(
+            denied_drop_invocation,
+            denied,
+            created.schema_id,
+            9_999,
+            denied_drop_audit,
+        ),
+        Err(SchemaLifecycleError::Unauthorized)
+    ));
+    assert_eq!(
+        lookup_outcome(&database, denied_drop_invocation, denied, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Aborted
+    );
     let duplicate_id = id(0xe9);
     let mut duplicate_audit = identity_audit_event(0xea, actor, id(0xeb));
     duplicate_audit.correlation_id = duplicate_id;
@@ -555,6 +609,164 @@ fn storage_manager_creates_schema_atomically_for_privileged_actor()
             .status,
         OutcomeStatus::Aborted
     );
+    let drop_invocation = id(0xec);
+    let mut drop_audit = identity_audit_event(0xed, actor, id(0xee));
+    drop_audit.correlation_id = drop_invocation;
+    let dropped =
+        storage.drop_schema(drop_invocation, actor, created.schema_id, 9_999, drop_audit)?;
+    assert_eq!(dropped.schema_id, created.schema_id);
+    assert_eq!(dropped.commit_sequence, 3);
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    assert!(catalog.get(schema_key.as_slice())?.is_none());
+    assert!(catalog.get(object_key.as_slice())?.is_none());
+    assert_eq!(
+        lookup_outcome(&database, drop_invocation, actor, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Committed
+    );
+
+    let populated_schema_invocation = id(0xef);
+    let mut populated_schema_audit = identity_audit_event(0xf0, actor, id(0xf1));
+    populated_schema_audit.correlation_id = populated_schema_invocation;
+    let populated_schema = storage.create_schema(
+        populated_schema_invocation,
+        actor,
+        "populated_schema",
+        setup_admin,
+        9_999,
+        populated_schema_audit,
+    )?;
+    let create_table_invocation = id(0xf2);
+    let mut create_table_audit = identity_audit_event(0xf3, setup_admin, id(0xf4));
+    create_table_audit.correlation_id = create_table_invocation;
+    storage.create_table(CreateTableRequest {
+        invocation_id: create_table_invocation,
+        authenticated_actor_id: setup_admin,
+        schema_id: populated_schema.schema_id,
+        name: "present_child".to_owned(),
+        columns: vec![TableColumnDefinition {
+            name: "label".to_owned(),
+            scalar_type: ScalarType::Text,
+            nullable: true,
+            generated_uuid_identity: false,
+            default: None,
+        }],
+        retention_deadline_us: 9_999,
+        audit_event: create_table_audit,
+    })?;
+    let rejected_drop_invocation = id(0xf5);
+    let mut rejected_drop_audit = identity_audit_event(0xf6, setup_admin, id(0xf7));
+    rejected_drop_audit.correlation_id = rejected_drop_invocation;
+    assert!(matches!(
+        storage.drop_schema(
+            rejected_drop_invocation,
+            setup_admin,
+            populated_schema.schema_id,
+            9_999,
+            rejected_drop_audit,
+        ),
+        Err(SchemaLifecycleError::Commit(CommitError::SchemaNotEmpty))
+    ));
+    assert_eq!(
+        lookup_outcome(&database, rejected_drop_invocation, setup_admin, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Aborted
+    );
+    let read = database.begin_read()?;
+    assert!(
+        read.open_table(CATALOG)?
+            .get(id_catalog_key(3, populated_schema.schema_id).as_slice())?
+            .is_some()
+    );
+    Ok(())
+}
+
+#[test]
+fn schema_drop_racing_table_creation_never_leaves_an_orphan()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::storage_manager::{
+        CreateTableRequest, SchemaLifecycleError, TableColumnDefinition, TableLifecycleError,
+    };
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let admin_role = builtin_owner_id();
+    let actor = id(0xa1);
+    let setup = vec![
+        principal_write_with_name(actor, 1, 1, "schema_race_admin"),
+        object_write_with_name(actor, 8, "schema_race_admin"),
+        membership_write(actor, admin_role),
+        dependency_write(actor, admin_role, 5),
+    ];
+    let mut setup_audit = identity_audit_event(0xa2, admin_role, id(0xa2));
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(id(0xa2), admin_role, 9_999, &setup, &[setup_audit])?;
+    let mut create_schema_audit = identity_audit_event(0xa3, actor, id(0xa3));
+    create_schema_audit.correlation_id = id(0xa3);
+    let schema = storage.create_schema(
+        id(0xa3),
+        actor,
+        "schema_race",
+        actor,
+        9_999,
+        create_schema_audit,
+    )?;
+
+    let barrier = Arc::new(Barrier::new(3));
+    let (table_result, drop_result) = std::thread::scope(|scope| {
+        let create_barrier = barrier.clone();
+        let create_storage = &storage;
+        let create = scope.spawn(move || {
+            create_barrier.wait();
+            let invocation_id = id(0xa4);
+            let mut audit = identity_audit_event(0xa5, actor, id(0xa6));
+            audit.correlation_id = invocation_id;
+            create_storage.create_table(CreateTableRequest {
+                invocation_id,
+                authenticated_actor_id: actor,
+                schema_id: schema.schema_id,
+                name: "racing_child".to_owned(),
+                columns: vec![TableColumnDefinition {
+                    name: "value".to_owned(),
+                    scalar_type: ScalarType::Text,
+                    nullable: true,
+                    generated_uuid_identity: false,
+                    default: None,
+                }],
+                retention_deadline_us: 9_999,
+                audit_event: audit,
+            })
+        });
+        let drop_barrier = barrier.clone();
+        let drop_storage = &storage;
+        let drop_schema = scope.spawn(move || {
+            drop_barrier.wait();
+            let invocation_id = id(0xa7);
+            let mut audit = identity_audit_event(0xa8, actor, id(0xa9));
+            audit.correlation_id = invocation_id;
+            drop_storage.drop_schema(invocation_id, actor, schema.schema_id, 9_999, audit)
+        });
+        barrier.wait();
+        (create.join().unwrap(), drop_schema.join().unwrap())
+    });
+    match (table_result, drop_result) {
+        (Ok(_), Err(SchemaLifecycleError::Commit(CommitError::SchemaNotEmpty))) => {}
+        (
+            Err(
+                TableLifecycleError::Unauthorized
+                | TableLifecycleError::Commit(CommitError::Conflict),
+            ),
+            Ok(_),
+        ) => {}
+        (table, dropped) => {
+            panic!("invalid schema-drop/table-create race: {table:?} / {dropped:?}")
+        }
+    }
+    StorageManager::new(&database, Duration::from_millis(100))?;
     Ok(())
 }
 
@@ -4758,6 +4970,66 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
     assert!(table_create.contains("\"outcome\":\"committed\""));
     assert!(table_create.contains("\"table_id\":"));
     assert!(table_create.contains("\"column_ids\":[\""));
+    let admin_id_wire = admin_id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let empty_schema_prepare = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut control,
+        23,
+        &format!(
+            "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"schemas.create\",\"arguments\":{{\"name\":\"protocol_empty\",\"owner_id\":\"{admin_id_wire}\"}}}}"
+        ),
+        retention_deadline_us,
+    )?;
+    let empty_schema_create_id = empty_schema_prepare
+        .split("\"operation_id\":\"")
+        .nth(1)
+        .ok_or("missing empty-schema create operation ID")?
+        .get(..32)
+        .ok_or("invalid empty-schema create operation ID")?;
+    let empty_schema_create = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut control,
+        24,
+        &format!("{{\"phase\":\"start\",\"operation_id\":\"{empty_schema_create_id}\"}}"),
+        retention_deadline_us,
+    )?;
+    let empty_schema_id = empty_schema_create
+        .split("\"schema_id\":\"")
+        .nth(1)
+        .ok_or("missing empty schema ID")?
+        .get(..32)
+        .ok_or("invalid empty schema ID")?;
+    let empty_schema_drop_prepare = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut control,
+        25,
+        &format!(
+            "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"schemas.drop\",\"arguments\":{{\"schema_id\":\"{empty_schema_id}\"}}}}"
+        ),
+        retention_deadline_us,
+    )?;
+    let empty_schema_drop_id = empty_schema_drop_prepare
+        .split("\"operation_id\":\"")
+        .nth(1)
+        .ok_or("missing empty-schema drop operation ID")?
+        .get(..32)
+        .ok_or("invalid empty-schema drop operation ID")?;
+    let empty_schema_drop = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut control,
+        26,
+        &format!("{{\"phase\":\"start\",\"operation_id\":\"{empty_schema_drop_id}\"}}"),
+        retention_deadline_us,
+    )?;
+    assert!(empty_schema_drop.contains("\"outcome\":\"committed\""));
+    assert!(empty_schema_drop.contains(&format!("\"schema_id\":\"{empty_schema_id}\"")));
     assert!(storage.list_tokens(admin_id, created_user_id)?[0].revoked);
     assert!(
         storage

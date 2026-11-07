@@ -1350,3 +1350,13 @@
 - Contract and implementation: [DROP ADMIN protocol](../../specs/client-protocol.md), [storage-manager contract](../../specs/storage-manager.md), [identity lifecycle](../../engine/src/storage_manager.rs), and [ADMIN dispatch](../../engine/src/client_protocol.rs).
 - Regression evidence: decoder coverage checks both strict operation schemas. Real-redb tests exercise successful user/role drops, user credential revocation and tombstones, plus rejection of a drop while a privilege grant references the user.
 - Remaining: remaining ADMIN operations and separate supervisor/worker process integration.
+
+## DS-5 / SM-5: empty schema DROP RESTRICT — verified
+
+- Behavior and normative contracts: [schema DDL](../../specs/ddl-schema.md), [client protocol](../../specs/client-protocol.md), and [storage manager](../../specs/storage-manager.md). The owner, a member of an owning role, or a database administrator can remove an empty non-system schema. Child objects and remaining dependency edges reject the request. A second emptiness check runs under the serialized redb writer to linearize against concurrent table creation.
+- Red evidence: the new schema lifecycle test first called a compiling `drop_schema` stub and failed with `SchemaLifecycleError::InvalidRequest`.
+- Implementation: [authorized schema drop commit path](../../engine/src/commit.rs), [storage entry point](../../engine/src/storage_manager.rs), and connection-owned [`schemas.drop` PREPARE/START](../../engine/src/client_protocol.rs). Schema and object records, DDL audit, and durable outcome publish atomically.
+- Regression evidence: the real-redb lifecycle test covers owner success, unauthorized rejection, a populated-schema RESTRICT rejection with durable ABORTED outcome, and record deletion. A barrier-coordinated create/drop race accepts only a complete table-creation win or complete schema-drop win, then reopens through startup validation. The gateway ADMIN lifecycle test creates and drops an empty schema through PREPARE/START; the decoder test checks the strict schema-drop request.
+- Verification: in the configured Nix shell, `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` all passed. `git diff --check` passed.
+- Remaining: table/column rename, default and nullability changes, restricted table/column drops, schema ownership transfer, full constraint/admin wiring, and separate supervisor/gateway process integration remain incomplete.
+- Next smallest behavior: implement an authorized `tables.drop ... RESTRICT` path that removes only a table with no external references and atomically retires its owned catalog definitions and physical indexes.
