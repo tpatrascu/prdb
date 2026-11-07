@@ -951,3 +951,10 @@
 - Changed code and contract: [supervisor invocation API](../../engine/src/storage_manager.rs) and [storage-manager lifecycle contract](../../specs/storage-manager.md).
 - Verification: `cargo fmt --all`, workspace build, warning-denied Clippy, and `git diff --check` pass in the repository Nix shell. Tests were not run.
 - Remaining: an implemented supervisor scheduler must call this method while worker channels are idle; the storage API cannot make that scheduling call itself.
+
+## SU-5 dependency: paired worker-channel service loop
+
+- Behavior: `SupervisorInvocation::serve_worker_channels` serves provisioned planner and executor Unix streams on scoped threads, polls deadline/cancellation every 100 ms while waiting for messages, closes the sibling endpoint after handler failure or panic, aborts on a handler panic, and joins both handlers before returning.
+- Changed code and contract: [storage-side worker channel runner](../../engine/src/storage_manager.rs) and [storage-manager process boundary](../../specs/storage-manager.md).
+- Verification: workspace formatting, build, warning-denied Clippy, and `git diff --check` pass in the repository Nix shell. Tests were not run.
+- Remaining: the supervisor must create/provision these streams to the correct worker processes, observe worker exits, and request the terminal decision only after a successful worker result.

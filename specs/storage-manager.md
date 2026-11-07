@@ -62,6 +62,8 @@ Bound active redb snapshots, transaction age, private overlay bytes, scans, outp
 
 Only the gateway handles client TCP. Only the supervisor launches and owns executor processes. The executor receives local scoped IPC and sanitized values, never redb handles/descriptors. The optimizer receives authorized schema and scoped estimates, never raw database tables.
 
+The supervisor may pass preprovisioned planner and executor `UnixStream`s to `SupervisorInvocation::serve_worker_channels`. Storage serves both channels concurrently, polls cancellation and age every 100 ms while either handler is idle, shuts down the sibling channel after a handler failure, aborts if a handler panics, and returns after both handlers drain. This helper does not launch or confine workers; the supervisor remains responsible for providing the streams only to the admitted processes and for resolving their exit status before requesting a terminal decision.
+
 ## Validation
 
 Test redb snapshot/overlay semantics, concurrent staging and serialized finalization, same-row conflicts, distinct-row commits, write skew, atomic row/index/catalog/outcome updates, policy changes racing commit, hidden-field preservation, restart/outcome reconciliation, malformed IPC, long-reader pressure, and identical authorization behavior for scans and index lookups.

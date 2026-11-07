@@ -30,6 +30,7 @@ use zeroize::Zeroize;
 
 const TOKEN_REQUEST_WINDOW: Duration = Duration::from_secs(60);
 const MAX_TRACKED_TOKEN_REQUEST_ACTORS: usize = 4096;
+const SUPERVISOR_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 pub const MAX_OWN_INVOCATION_PAGE: usize = 128;
 pub const MAX_ADMIN_INVOCATION_PAGE: usize = 128;
 static TOKEN_REQUEST_LIMITERS: OnceLock<Mutex<HashMap<usize, Weak<TokenRequestLimiter>>>> =
@@ -335,6 +336,8 @@ struct SupervisorWorkerChannelLease {
 pub enum SupervisorInvocationError {
     Closed,
     WorkerChannelsActive,
+    WorkerChannelIo(std::io::Error),
+    WorkerHandlerPanicked,
     Deadline(TransactionError),
     Executor(crate::executor_ipc::ExecutorConnectionError),
     Planner(crate::planner_ipc::PlannerConnectionError),
@@ -423,6 +426,137 @@ impl SupervisorInvocation<'_> {
         transaction
             .check_deadline()
             .map_err(SupervisorInvocationError::Deadline)
+    }
+
+    /// Serve provisioned planner and executor Unix streams concurrently.
+    /// Poll cancellation/deadline while either stream is idle, stop its peer
+    /// after a handler error, and return only after both handlers have drained.
+    pub fn serve_worker_channels(
+        &self,
+        mut planner_stream: std::os::unix::net::UnixStream,
+        mut executor_stream: std::os::unix::net::UnixStream,
+    ) -> Result<(), SupervisorInvocationError> {
+        use std::net::Shutdown;
+
+        let stop_planner = match planner_stream.try_clone() {
+            Ok(stream) => stream,
+            Err(error) => {
+                self.abort_owned_invocation();
+                return Err(SupervisorInvocationError::WorkerChannelIo(error));
+            }
+        };
+        let stop_executor = match executor_stream.try_clone() {
+            Ok(stream) => stream,
+            Err(error) => {
+                self.abort_owned_invocation();
+                return Err(SupervisorInvocationError::WorkerChannelIo(error));
+            }
+        };
+        let planner_peer = match stop_executor.try_clone() {
+            Ok(stream) => stream,
+            Err(error) => {
+                self.abort_owned_invocation();
+                return Err(SupervisorInvocationError::WorkerChannelIo(error));
+            }
+        };
+        let executor_peer = match stop_planner.try_clone() {
+            Ok(stream) => stream,
+            Err(error) => {
+                self.abort_owned_invocation();
+                return Err(SupervisorInvocationError::WorkerChannelIo(error));
+            }
+        };
+
+        std::thread::scope(|scope| {
+            let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+            let planner_completed = completed_tx.clone();
+            let planner = scope.spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.serve_planner(&mut planner_stream)
+                }))
+                .unwrap_or(Err(SupervisorInvocationError::WorkerHandlerPanicked));
+                if result.is_err() {
+                    let _ = planner_peer.shutdown(Shutdown::Both);
+                }
+                let _ = planner_completed.send((true, result));
+            });
+            let executor_completed = completed_tx.clone();
+            let executor = scope.spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.serve_executor(&mut executor_stream)
+                }))
+                .unwrap_or(Err(SupervisorInvocationError::WorkerHandlerPanicked));
+                if result.is_err() {
+                    let _ = executor_peer.shutdown(Shutdown::Both);
+                }
+                let _ = executor_completed.send((false, result));
+            });
+            drop(completed_tx);
+
+            let mut planner_result = None;
+            let mut executor_result = None;
+            let mut completed = 0;
+            let mut deadline_error = None;
+            while completed < 2 {
+                match completed_rx.recv_timeout(SUPERVISOR_IDLE_POLL_INTERVAL) {
+                    Ok((is_planner, result)) => {
+                        completed += 1;
+                        if is_planner {
+                            planner_result = Some(result);
+                        } else {
+                            executor_result = Some(result);
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        if let Err(error) = self.check_deadline() {
+                            deadline_error = Some(error);
+                            let _ = stop_planner.shutdown(Shutdown::Both);
+                            let _ = stop_executor.shutdown(Shutdown::Both);
+                            break;
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+            while completed < 2 {
+                let Ok((is_planner, result)) = completed_rx.recv() else {
+                    break;
+                };
+                completed += 1;
+                if is_planner {
+                    planner_result = Some(result);
+                } else {
+                    executor_result = Some(result);
+                }
+            }
+
+            let planner_panicked = planner.join().is_err();
+            let executor_panicked = executor.join().is_err();
+            if planner_panicked || executor_panicked {
+                self.abort_owned_invocation();
+                return Err(SupervisorInvocationError::WorkerHandlerPanicked);
+            }
+            if let Some(error) = deadline_error {
+                return Err(error);
+            }
+            if planner_result.as_ref().is_some_and(|result| {
+                matches!(
+                    result,
+                    Err(SupervisorInvocationError::WorkerHandlerPanicked)
+                )
+            }) || executor_result.as_ref().is_some_and(|result| {
+                matches!(
+                    result,
+                    Err(SupervisorInvocationError::WorkerHandlerPanicked)
+                )
+            }) {
+                self.abort_owned_invocation();
+                return Err(SupervisorInvocationError::WorkerHandlerPanicked);
+            }
+            planner_result.unwrap_or(Err(SupervisorInvocationError::Closed))?;
+            executor_result.unwrap_or(Err(SupervisorInvocationError::Closed))?;
+            Ok(())
+        })
     }
 
     pub fn serve_planner<S: std::io::Read + std::io::Write>(
