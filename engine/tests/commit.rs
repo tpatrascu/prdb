@@ -3246,8 +3246,10 @@ fn storage_manager_lists_only_owner_live_invocations_with_generation_bound_pages
 #[test]
 fn storage_manager_lists_runtime_invocations_only_to_database_admins()
 -> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::client_protocol::{ClientConnectionSession, ClientFrame, ClientMode};
     use prdb_engine::storage_manager::{
-        AdministrativeInvocationListError, InvocationStatusConsistency, MAX_ADMIN_INVOCATION_PAGE,
+        AdministrativeInvocationListError, InvocationStatus, InvocationStatusConsistency,
+        MAX_ADMIN_INVOCATION_PAGE,
     };
 
     let fixture = Fixture::new();
@@ -3269,6 +3271,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         membership_write_with_grantor(backup_admin_id, admin_role, admin_role),
         dependency_write(backup_admin_id, admin_role, 5),
         credential_verifier_write(id(236), backup_admin_id, &[0x6a; 32], 1, i64::MAX, None, 1),
+        credential_verifier_write(id(237), admin_id, &[0x5a; 32], 1, i64::MAX, None, 1),
     ];
     let mut setup_audit = audit_event(216);
     setup_audit.actor_id = Some(admin_role);
@@ -3306,6 +3309,18 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
     assert_eq!(second_page.invocations.len(), 1);
     assert_eq!(second_page.invocations[0].invocation_id, id(233));
     assert_eq!(second_page.invocations[0].principal_id, ordinary_id);
+    assert!(matches!(
+        storage.get_administrative_invocation_status(admin_id, id(233), now_us)?,
+        Some(snapshot) if matches!(snapshot.status, InvocationStatus::Active { .. })
+    ));
+    assert!(matches!(
+        storage.get_administrative_invocation_status(ordinary_id, id(233), now_us),
+        Err(AdministrativeInvocationListError::Unauthorized)
+    ));
+    assert_eq!(
+        storage.get_administrative_invocation_status(admin_id, id(239), now_us)?,
+        None
+    );
 
     let stale = storage
         .list_runtime_invocations(admin_id, now_us, 1, None)?
@@ -3325,6 +3340,60 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
             .list_runtime_invocations(admin_id, now_us, MAX_ADMIN_INVOCATION_PAGE + 1, None)
             .is_err()
     );
+
+    third.abort()?;
+    assert!(matches!(
+        storage.get_administrative_invocation_status(admin_id, id(234), now_us)?,
+        Some(snapshot) if matches!(&snapshot.status, InvocationStatus::Terminal(outcome)
+            if outcome.status == OutcomeStatus::Aborted)
+    ));
+
+    struct AcceptMetadata;
+    impl prdb_engine::supervisor::SubmissionMetadataValidator for AcceptMetadata {
+        fn supports_versions(&self, manifest_version: u32, scope_version: u32) -> bool {
+            manifest_version == 1 && scope_version == 1
+        }
+
+        fn validate(&self, _metadata: &prdb_engine::supervisor::SubmissionMetadata) -> bool {
+            true
+        }
+    }
+    let staging = prdb_engine::supervisor::StagingStore::new(
+        prdb_engine::supervisor::StagingLimits::default(),
+        std::sync::Arc::new(AcceptMetadata),
+    )?;
+    let mut control = ClientConnectionSession::default();
+    control.accept_hello(ClientMode::Control, "runtime-status")?;
+    control.authenticate(&storage, id(237), &[0x5a; 32])?;
+    let encode_invocation_id = |invocation_id: [u8; 16]| {
+        let mut encoded = String::with_capacity(32);
+        for byte in invocation_id {
+            encoded.push_str(&format!("{byte:02x}"));
+        }
+        format!("{{\"invocation_id\":\"{encoded}\"}}").into_bytes()
+    };
+    let active_status = control.handle_status_request(
+        &storage,
+        &staging,
+        ClientFrame {
+            kind: 8,
+            request_id: 1,
+            response_sequence: 0,
+            payload: encode_invocation_id(id(233)),
+        },
+    )?;
+    assert_eq!(active_status.payload, b"{\"state\":\"active\"}");
+    let terminal_status = control.handle_status_request(
+        &storage,
+        &staging,
+        ClientFrame {
+            kind: 8,
+            request_id: 2,
+            response_sequence: 0,
+            payload: encode_invocation_id(id(234)),
+        },
+    )?;
+    assert_eq!(terminal_status.payload, b"{\"state\":\"aborted\"}");
 
     let revocation_cursor = storage
         .list_runtime_invocations(admin_id, now_us, 1, None)?
@@ -3377,7 +3446,6 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         Err(AdministrativeInvocationListError::Unauthorized)
     ));
 
-    third.abort()?;
     second.abort()?;
     first.abort()?;
     Ok(())

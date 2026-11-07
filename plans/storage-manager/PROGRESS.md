@@ -1240,3 +1240,11 @@
 - Regression evidence: deterministic limiter tests verify threshold, source-map cap, and expiry; a real TCP/Unix-socket gateway regression confirms the second failed AUTH is closed before reaching the supervisor service. The CLI exposes the configured limit.
 - Verification: focused limiter, live gateway, and CLI tests passed. Full configured Nix-shell validation passed: format check, workspace build, warning-denied Clippy, all workspace tests, and `git diff --check`.
 - Remaining: gateway restart loses in-memory throttle history; invalid-authentication throttling is per source address, while network-level denial-of-service protection remains a deployment concern. The gateway/supervisor process startup and sandboxed worker launch are still incomplete.
+
+## SM-5 / NP-5 dependency: administrator point status
+
+- Behavior: a storage administrator can look up any invocation's live or retained terminal status after current database-administrator authority is checked from a fresh catalog snapshot. Ordinary owner lookup remains owner-scoped. Control-mode client STATUS uses this path; query-mode STATUS continues to consult only the caller's staging and storage state.
+- Contract and implementation: [storage status authority](../../specs/storage-manager.md), [control protocol status](../../specs/client-protocol.md), [StorageManager lookup](../../engine/src/storage_manager.rs), and [control-mode session handler](../../engine/src/client_protocol.rs).
+- Regression evidence: the real-redb administrative runtime test verifies a current administrator can see another owner's active invocation and retained ABORTED outcome, a non-administrator is denied, and a missing ID remains unavailable. The same test exercises both point statuses through an authenticated control-mode session.
+- Verification: focused real-redb test passed in the configured Nix shell.
+- Remaining: control-mode CANCEL is not yet wired to the audited administrative cancellation API; ADMIN operations, explicit sanitized ERROR responses, and process-separated service integration remain open.

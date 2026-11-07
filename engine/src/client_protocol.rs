@@ -72,6 +72,7 @@ pub enum ClientSessionError {
     InvalidControlPayload(ClientControlError),
     Staging(crate::supervisor::StagingError),
     Status(crate::storage_manager::InvocationStatusError),
+    AdministrativeStatus(crate::storage_manager::AdministrativeInvocationListError),
     Storage(TransactionError),
 }
 
@@ -948,12 +949,37 @@ impl ClientConnectionSession {
         staging: &crate::supervisor::StagingStore,
         request: ClientFrame,
     ) -> Result<ClientFrame, ClientSessionError> {
-        let invocation_id = self.validate_query_control_request(storage, &request, 8)?;
+        let invocation_id = self.validate_control_request(storage, &request, 8, false)?;
         let session = self
             .authenticated
             .as_ref()
             .ok_or(ClientSessionError::AuthenticationRequired)?;
         let now_us = current_unix_micros().ok_or(ClientSessionError::UnsupportedRequest)?;
+        if self.hello == Some(ClientMode::Control) {
+            let snapshot = storage
+                .get_administrative_invocation_status(session.principal_id(), invocation_id, now_us)
+                .map_err(ClientSessionError::AdministrativeStatus)?;
+            let payload = match snapshot.map(|snapshot| snapshot.status) {
+                Some(crate::storage_manager::InvocationStatus::Active { .. }) => {
+                    b"{\"state\":\"active\"}".to_vec()
+                }
+                Some(crate::storage_manager::InvocationStatus::Committing { .. }) => {
+                    b"{\"state\":\"committing\"}".to_vec()
+                }
+                Some(crate::storage_manager::InvocationStatus::Terminal(outcome)) => {
+                    match outcome.status {
+                        crate::outcome::OutcomeStatus::Committed => {
+                            b"{\"state\":\"committed\"}".to_vec()
+                        }
+                        crate::outcome::OutcomeStatus::Aborted => {
+                            b"{\"state\":\"aborted\"}".to_vec()
+                        }
+                    }
+                }
+                None => b"{\"state\":\"unknown\"}".to_vec(),
+            };
+            return self.json_response(request.request_id, payload);
+        }
         match staging.status(session.staging_owner(), invocation_id) {
             Ok(
                 crate::supervisor::SubmissionState::Uploading
@@ -999,7 +1025,7 @@ impl ClientConnectionSession {
         staging: &crate::supervisor::StagingStore,
         request: ClientFrame,
     ) -> Result<ClientFrame, ClientSessionError> {
-        let invocation_id = self.validate_query_control_request(storage, &request, 9)?;
+        let invocation_id = self.validate_control_request(storage, &request, 9, true)?;
         let session = self
             .authenticated
             .as_ref()
@@ -1038,11 +1064,12 @@ impl ClientConnectionSession {
         }
     }
 
-    fn validate_query_control_request(
+    fn validate_control_request(
         &mut self,
         storage: &StorageManager<'_>,
         request: &ClientFrame,
         kind: u16,
+        query_mode_required: bool,
     ) -> Result<[u8; 16], ClientSessionError> {
         if request.response_sequence != 0 || request.kind != kind {
             return Err(ClientSessionError::UnsupportedRequest);
@@ -1059,7 +1086,7 @@ impl ClientConnectionSession {
         }
         let invocation_id = decode_client_seal(&request.payload)
             .map_err(ClientSessionError::InvalidControlPayload)?;
-        if self.hello != Some(ClientMode::Query) {
+        if query_mode_required && self.hello != Some(ClientMode::Query) {
             return Err(ClientSessionError::WrongMode);
         }
         self.revalidate_storage(storage)?;

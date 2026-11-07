@@ -2119,6 +2119,85 @@ impl<'db> StorageManager<'db> {
         })
     }
 
+    /// Return one invocation's live or retained terminal status to a current
+    /// database administrator. Authorization is checked on a fresh catalog
+    /// snapshot before the invocation ID is inspected.
+    pub fn get_administrative_invocation_status(
+        &self,
+        authenticated_administrator_id: [u8; 16],
+        invocation_id: [u8; 16],
+        now_us: i64,
+    ) -> Result<Option<InvocationStatusSnapshot>, AdministrativeInvocationListError> {
+        if authenticated_administrator_id == [0; 16] || invocation_id == [0; 16] || now_us <= 0 {
+            return Err(AdministrativeInvocationListError::InvalidRequest);
+        }
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|_| AdministrativeInvocationListError::Storage)?;
+        let snapshot = RowSnapshot::new(read);
+        let is_administrator = database_admin_authority(&snapshot, authenticated_administrator_id)
+            .map_err(|error| match error {
+                TokenLifecycleError::TokenUnavailable => {
+                    AdministrativeInvocationListError::Unauthorized
+                }
+                _ => AdministrativeInvocationListError::Storage,
+            })?;
+        drop(snapshot);
+        if !is_administrator {
+            return Err(AdministrativeInvocationListError::Unauthorized);
+        }
+
+        if let Some(live) = self.admissions.status(invocation_id) {
+            let status = match live.phase {
+                LiveInvocationPhase::Active | LiveInvocationPhase::CancellationPending => {
+                    InvocationStatus::Active {
+                        started_at_us: live.started_at_us,
+                        deadline_at_us: live.deadline_at_us,
+                        cancellation_requested: live.cancellation_reason_code.is_some(),
+                    }
+                }
+                LiveInvocationPhase::Committing => InvocationStatus::Committing {
+                    started_at_us: live.started_at_us,
+                    deadline_at_us: live.deadline_at_us,
+                    cancellation_requested: live.cancellation_reason_code.is_some(),
+                },
+            };
+            return Ok(Some(InvocationStatusSnapshot {
+                observed_at_us: now_us,
+                consistency: InvocationStatusConsistency::BestEffort,
+                status,
+            }));
+        }
+
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|_| AdministrativeInvocationListError::Storage)?;
+        let bytes = read
+            .open_table(OUTCOMES)
+            .map_err(|_| AdministrativeInvocationListError::Storage)?
+            .get(&invocation_id[..])
+            .map_err(|_| AdministrativeInvocationListError::Storage)?
+            .map(|guard| guard.value().to_vec());
+        let Some(bytes) = bytes else {
+            return Ok(None);
+        };
+        let outcome = InvocationOutcome::decode(&bytes)
+            .map_err(|_| AdministrativeInvocationListError::Storage)?;
+        if outcome.invocation_id != invocation_id {
+            return Err(AdministrativeInvocationListError::Storage);
+        }
+        if now_us >= outcome.retention_deadline_us {
+            return Ok(None);
+        }
+        Ok(Some(InvocationStatusSnapshot {
+            observed_at_us: now_us,
+            consistency: InvocationStatusConsistency::BestEffort,
+            status: InvocationStatus::Terminal(outcome),
+        }))
+    }
+
     /// Request cancellation for an invocation owned by the authenticated
     /// principal. The commit transition and cancellation request are
     /// serialized by the admission registry; unknown and foreign IDs match.
