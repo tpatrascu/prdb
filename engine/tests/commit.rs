@@ -1476,6 +1476,234 @@ fn storage_manager_renames_tables_and_drop_column_rewrites_rows()
     Ok(())
 }
 
+#[test]
+fn storage_manager_sets_and_drops_not_null_with_existing_row_validation()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::storage_manager::{CreateTableRequest, TableColumnDefinition};
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let actor = id(0x31);
+    let admin_role = builtin_owner_id();
+    let setup = vec![
+        principal_write_with_name(actor, 1, 1, "nullability_owner"),
+        object_write_with_name(actor, 8, "nullability_owner"),
+        membership_write(actor, admin_role),
+        dependency_write(actor, admin_role, 5),
+    ];
+    let mut setup_audit = identity_audit_event(0x32, admin_role, id(0x33));
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(id(0x33), admin_role, 9_999, &setup, &[setup_audit])?;
+    let schema_invocation = id(0x34);
+    let mut schema_audit = identity_audit_event(0x35, actor, id(0x36));
+    schema_audit.correlation_id = schema_invocation;
+    let schema = storage.create_schema(
+        schema_invocation,
+        actor,
+        "nullability_schema",
+        actor,
+        9_999,
+        schema_audit,
+    )?;
+    let create_invocation = id(0x37);
+    let mut create_audit = identity_audit_event(0x38, actor, id(0x39));
+    create_audit.correlation_id = create_invocation;
+    let table = storage.create_table(CreateTableRequest {
+        invocation_id: create_invocation,
+        authenticated_actor_id: actor,
+        schema_id: schema.schema_id,
+        name: "nullable_table".to_owned(),
+        columns: vec![TableColumnDefinition {
+            name: "value".to_owned(),
+            scalar_type: ScalarType::Text,
+            nullable: true,
+            generated_uuid_identity: false,
+            default: None,
+        }],
+        retention_deadline_us: 9_999,
+        audit_event: create_audit,
+    })?;
+    let row_key = table_row_key(table.table_id, id(0x3a));
+    let null_tuple = encode_tuple(
+        &[ColumnSchema {
+            scalar_type: ScalarType::Text,
+            nullable: true,
+        }],
+        1,
+        &[None],
+    )?;
+    let null_row = RowRecord {
+        row_version: table.commit_sequence,
+        payload: null_tuple,
+    }
+    .encode()?;
+    let write = database.begin_write()?;
+    write
+        .open_table(ROWS)?
+        .insert(&row_key[..], &null_row[..])?;
+    write.commit()?;
+
+    let denied_invocation = id(0x3b);
+    let mut denied_audit = identity_audit_event(0x3c, actor, id(0x3d));
+    denied_audit.correlation_id = denied_invocation;
+    assert!(matches!(
+        storage.set_column_nullable(
+            denied_invocation,
+            actor,
+            table.table_id,
+            table.column_ids[0],
+            false,
+            9_999,
+            denied_audit,
+        ),
+        Err(prdb_engine::storage_manager::TableLifecycleError::Commit(
+            CommitError::NotNullViolation
+        ))
+    ));
+    assert_eq!(
+        lookup_outcome(&database, denied_invocation, actor, 1)?
+            .ok_or("missing NOT NULL rejection outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
+    let read = database.begin_read()?;
+    let column = decode_registered_envelope(
+        read.open_table(CATALOG)?
+            .get(id_catalog_key(6, table.column_ids[0]).as_slice())?
+            .ok_or("column missing after rejected NOT NULL")?
+            .value(),
+    )?;
+    assert_eq!(
+        column
+            .fields
+            .iter()
+            .find(|field| field.tag == 6)
+            .ok_or("nullable field missing")?
+            .payload,
+        [1]
+    );
+    drop(read);
+
+    let write = database.begin_write()?;
+    write.open_table(ROWS)?.remove(&row_key[..])?;
+    write.commit()?;
+    let set_invocation = id(0x3e);
+    let mut set_audit = identity_audit_event(0x3f, actor, id(0x40));
+    set_audit.correlation_id = set_invocation;
+    storage.set_column_nullable(
+        set_invocation,
+        actor,
+        table.table_id,
+        table.column_ids[0],
+        false,
+        9_999,
+        set_audit,
+    )?;
+    let not_null_constraint_key = {
+        let read = database.begin_read()?;
+        let catalog = read.open_table(CATALOG)?;
+        let prefix = 8u16.to_be_bytes();
+        let mut keys = Vec::new();
+        for entry in catalog.range(prefix.as_slice()..)? {
+            let (key, value) = entry?;
+            if !key.value().starts_with(&prefix) {
+                break;
+            }
+            let key = key.value().to_vec();
+            if key.len() != 19 {
+                continue;
+            }
+            let record = decode_registered_envelope(value.value())?;
+            if record
+                .fields
+                .iter()
+                .any(|field| field.tag == 1 && field.payload.as_slice() == table.table_id)
+                && record
+                    .fields
+                    .iter()
+                    .any(|field| field.tag == 2 && field.payload.as_slice() == 1u16.to_le_bytes())
+            {
+                keys.push(key);
+            }
+        }
+        assert_eq!(keys.len(), 1, "expected one NOT NULL constraint");
+        keys.pop()
+            .ok_or("NOT NULL constraint missing after SET NOT NULL")?
+    };
+    let drop_invocation = id(0x41);
+    let mut drop_audit = identity_audit_event(0x42, actor, id(0x43));
+    drop_audit.correlation_id = drop_invocation;
+    storage.set_column_nullable(
+        drop_invocation,
+        actor,
+        table.table_id,
+        table.column_ids[0],
+        true,
+        9_999,
+        drop_audit,
+    )?;
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    let column = decode_registered_envelope(
+        catalog
+            .get(id_catalog_key(6, table.column_ids[0]).as_slice())?
+            .ok_or("column missing after DROP NOT NULL")?
+            .value(),
+    )?;
+    assert_eq!(
+        column
+            .fields
+            .iter()
+            .find(|field| field.tag == 6)
+            .ok_or("nullable field missing")?
+            .payload,
+        [1]
+    );
+    let table_record = decode_registered_envelope(
+        catalog
+            .get(id_catalog_key(5, table.table_id).as_slice())?
+            .ok_or("table record missing")?
+            .value(),
+    )?;
+    assert_eq!(
+        u64::from_le_bytes(
+            table_record
+                .fields
+                .iter()
+                .find(|field| field.tag == 2)
+                .ok_or("schema version missing")?
+                .payload
+                .as_slice()
+                .try_into()?
+        ),
+        1
+    );
+    assert_eq!(
+        u64::from_le_bytes(
+            table_record
+                .fields
+                .iter()
+                .find(|field| field.tag == 3)
+                .ok_or("write epoch missing")?
+                .payload
+                .as_slice()
+                .try_into()?
+        ),
+        3
+    );
+    assert!(catalog.get(not_null_constraint_key.as_slice())?.is_none());
+    let constraint_id: [u8; 16] = not_null_constraint_key[3..19].try_into()?;
+    assert!(
+        catalog
+            .get(id_catalog_key(2, constraint_id).as_slice())?
+            .is_none()
+    );
+    drop(read);
+    StorageManager::new(&database, Duration::from_millis(100))?;
+    Ok(())
+}
+
 fn row(
     database: &Database,
     key: &[u8; 32],

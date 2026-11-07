@@ -10423,7 +10423,17 @@ fn constraint_ddl_authority_guards(
         }
     }
 
-    if constraint_changes.is_empty() {
+    let direct_nullable_drop = constraint_changes.is_empty()
+        && column_changes.len() == 1
+        && column_changes
+            .values()
+            .all(|(_, was_nullable, is_nullable)| !was_nullable && *is_nullable)
+        && object_changes.is_empty()
+        && index_definition_states.is_empty()
+        && index_details.is_empty()
+        && expression_changes.is_empty()
+        && dependency_changes.is_empty();
+    if constraint_changes.is_empty() && !direct_nullable_drop {
         return Err(CommitError::InvalidCatalog);
     }
 
@@ -10496,6 +10506,17 @@ fn constraint_ddl_authority_guards(
                 );
             }
             _ => return Err(CommitError::InvalidCatalog),
+        }
+    }
+    if direct_nullable_drop {
+        for (column_id, (table_id, was_nullable, is_nullable)) in &column_changes {
+            if expected_columns
+                .insert(*column_id, (*table_id, *was_nullable, *is_nullable))
+                .is_some()
+            {
+                return Err(CommitError::InvalidCatalog);
+            }
+            affected_tables.insert(*table_id);
         }
     }
     if check_expression_ids.len() != expression_changes.len() {

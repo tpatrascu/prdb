@@ -1387,3 +1387,12 @@
 - TDD note: the rename assertion first failed with `InvalidRequest` against the compiling storage stub; the storage path and authorized commit guard now pass it.
 - Verification: `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, and `git diff --check` all passed in the configured Nix shell; the focused storage and decoder tests passed as well.
 - Remaining: column/table rename gateway dispatch coverage, role-owner authorization regression, DDL stale-writer race, and other supported alterations remain open.
+
+## DS-5 / SM-5: column nullability changes — implemented
+
+- Behavior and normative contracts: [schema DDL](../../specs/ddl-schema.md), [client protocol](../../specs/client-protocol.md), and [storage-manager contract](../../specs/storage-manager.md). The table owner or a database administrator can set or drop NOT NULL through `tables.alter_column_nullability`. Storage keeps the tuple schema version, increments the table write epoch, validates persisted rows before setting NOT NULL, and adds/removes the internal constraint atomically under the table DDL fence.
+- Implementation: [authorized constraint DDL path](../../engine/src/commit.rs), [storage entry point](../../engine/src/storage_manager.rs), and connection-owned PREPARE/START in [client protocol](../../engine/src/client_protocol.rs).
+- Regression evidence: the real-redb test verifies that an existing NULL row rejects SET NOT NULL with a durable aborted outcome and leaves catalog nullability unchanged; after removing that row, SET then DROP NOT NULL updates the column, constraint/object records, and write epoch while preserving schema version. Startup validation succeeds afterward. The decoder accepts the strict operation shape and rejects an invalid nullable value.
+- TDD note: the storage behavior assertion initially failed against the stub returning `InvalidRequest`, then passed through the authorized storage manager path.
+- Verification: in the configured Nix shell, `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, and `git diff --check` all passed. The focused storage and protocol decoder regressions passed.
+- Remaining: DDL stale-writer race coverage, column rename/default changes, role-owner authorization regression, and separate supervisor/gateway process integration remain open.
