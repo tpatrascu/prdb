@@ -188,6 +188,11 @@ enum PendingAdminAction {
         column_id: [u8; 16],
         nullable: bool,
     },
+    AlterColumnDefault {
+        table_id: [u8; 16],
+        column_id: [u8; 16],
+        default: Option<crate::storage_manager::TableColumnDefault>,
+    },
     DropColumn {
         table_id: [u8; 16],
         column_id: [u8; 16],
@@ -281,6 +286,11 @@ pub enum ClientAdminCommand {
         column_id: [u8; 16],
         nullable: bool,
     },
+    PrepareAlterColumnDefault {
+        table_id: [u8; 16],
+        column_id: [u8; 16],
+        default: Option<crate::storage_manager::TableColumnDefault>,
+    },
     PrepareDropColumn {
         table_id: [u8; 16],
         column_id: [u8; 16],
@@ -360,6 +370,7 @@ pub fn decode_client_admin_command(
     let mut operation = None;
     let mut arguments = None;
     let mut table_columns = None;
+    let mut column_default = None;
     let mut operation_id = None;
     let mut seen = std::collections::HashSet::new();
     loop {
@@ -397,6 +408,9 @@ pub fn decode_client_admin_command(
                     if arg == "columns" && parser.text.get(parser.offset) == Some(&b'[') {
                         table_columns = Some(parser.parse_table_column_array()?);
                         args.insert(arg, "<structured-columns>".to_owned());
+                    } else if arg == "default" && parser.text.get(parser.offset) == Some(&b'{') {
+                        column_default = Some(parser.parse_table_column_default()?);
+                        args.insert(arg, "<structured-default>".to_owned());
                     } else {
                         args.insert(arg, parser.parse_string()?);
                     }
@@ -616,6 +630,64 @@ pub fn decode_client_admin_command(
                 table_id,
                 column_id,
                 nullable,
+            })
+        }
+        Some("prepare")
+            if version == Some(1) && operation.as_deref() == Some("tables.set_column_default") =>
+        {
+            if operation_id.is_some() || seen.len() != 4 {
+                return Err(ClientControlError::UnknownKey);
+            }
+            let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
+            let table_id = decode_lower_hex_id(
+                &args
+                    .remove("table_id")
+                    .ok_or(ClientControlError::MissingKey)?,
+            )?;
+            let column_id = decode_lower_hex_id(
+                &args
+                    .remove("column_id")
+                    .ok_or(ClientControlError::MissingKey)?,
+            )?;
+            let scalar_type = decode_table_scalar_type(
+                &args.remove("type").ok_or(ClientControlError::MissingKey)?,
+            )?;
+            if args.remove("default").as_deref() != Some("<structured-default>") || !args.is_empty()
+            {
+                return Err(ClientControlError::InvalidPrepare);
+            }
+            let (kind, value) = column_default.ok_or(ClientControlError::MissingKey)?;
+            let default = decode_table_column_default(&kind, value, scalar_type)?;
+            Ok(ClientAdminCommand::PrepareAlterColumnDefault {
+                table_id,
+                column_id,
+                default: Some(default),
+            })
+        }
+        Some("prepare")
+            if version == Some(1) && operation.as_deref() == Some("tables.drop_column_default") =>
+        {
+            if operation_id.is_some() || seen.len() != 4 {
+                return Err(ClientControlError::UnknownKey);
+            }
+            let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
+            let table_id = decode_lower_hex_id(
+                &args
+                    .remove("table_id")
+                    .ok_or(ClientControlError::MissingKey)?,
+            )?;
+            let column_id = decode_lower_hex_id(
+                &args
+                    .remove("column_id")
+                    .ok_or(ClientControlError::MissingKey)?,
+            )?;
+            if !args.is_empty() {
+                return Err(ClientControlError::UnknownKey);
+            }
+            Ok(ClientAdminCommand::PrepareAlterColumnDefault {
+                table_id,
+                column_id,
+                default: None,
             })
         }
         Some("prepare")
@@ -2482,6 +2554,40 @@ impl ClientConnectionSession {
                     .into_bytes(),
                 )
             }
+            ClientAdminCommand::PrepareAlterColumnDefault {
+                table_id,
+                column_id,
+                default,
+            } => {
+                if self.pending_admin_operation.is_some() {
+                    return Err(ClientSessionError::WrongMode);
+                }
+                let mut operation_id = [0; 16];
+                getrandom::fill(&mut operation_id).map_err(|_| {
+                    ClientSessionError::Storage(TransactionError::RandomnessUnavailable)
+                })?;
+                if operation_id == [0; 16] {
+                    return Err(ClientSessionError::Storage(
+                        TransactionError::RandomnessUnavailable,
+                    ));
+                }
+                self.pending_admin_operation = Some(PendingAdminOperation {
+                    operation_id,
+                    action: PendingAdminAction::AlterColumnDefault {
+                        table_id,
+                        column_id,
+                        default,
+                    },
+                });
+                self.json_response(
+                    request.request_id,
+                    format!(
+                        "{{\"operation_id\":\"{}\",\"state\":\"prepared\"}}",
+                        encode_lower_hex_id(operation_id)
+                    )
+                    .into_bytes(),
+                )
+            }
             ClientAdminCommand::PrepareDropColumn {
                 table_id,
                 column_id,
@@ -2996,6 +3102,44 @@ impl ClientConnectionSession {
                                 encode_lower_hex_id(table_id),
                                 encode_lower_hex_id(column_id),
                                 nullable,
+                                commit_sequence,
+                            )
+                            .into_bytes(),
+                        )
+                    }
+                    PendingAdminAction::AlterColumnDefault {
+                        table_id,
+                        column_id,
+                        default,
+                    } => {
+                        let commit_sequence = storage
+                            .alter_column_default(
+                                crate::storage_manager::AlterColumnDefaultRequest {
+                                    invocation_id: operation_id,
+                                    authenticated_actor_id: actor_id,
+                                    table_id,
+                                    column_id,
+                                    default,
+                                    retention_deadline_us,
+                                    audit_event: crate::audit::AuditEvent {
+                                        event_id,
+                                        actor_id: Some(actor_id),
+                                        correlation_id: operation_id,
+                                        occurred_at_us: now_us,
+                                        action: crate::audit::AuditAction::Ddl,
+                                        result: crate::audit::AuditResult::Succeeded,
+                                        target_ids: Vec::new(),
+                                    },
+                                },
+                            )
+                            .map_err(ClientSessionError::TableLifecycle)?;
+                        self.json_response(
+                            request.request_id,
+                            format!(
+                                "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"table_id\":\"{}\",\"column_id\":\"{}\",\"commit_sequence\":\"{}\"}}",
+                                encode_lower_hex_id(operation_id),
+                                encode_lower_hex_id(table_id),
+                                encode_lower_hex_id(column_id),
                                 commit_sequence,
                             )
                             .into_bytes(),

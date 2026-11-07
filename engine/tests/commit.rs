@@ -70,7 +70,7 @@ fn admin_dispatch_json(
     payload: &str,
     retention_deadline_us: i64,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    match prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+    let dispatch = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
         prdb_engine::ipc::ServiceRole::Gateway,
         storage,
         staging,
@@ -85,7 +85,8 @@ fn admin_dispatch_json(
             max_rows: 1,
             max_bytes: 1,
         },
-    )? {
+    );
+    match dispatch.map_err(|error| format!("ADMIN request {payload:?} failed: {error:?}"))? {
         prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => {
             Ok(String::from_utf8(response.payload)?)
         }
@@ -1282,19 +1283,23 @@ fn storage_manager_renames_tables_and_drop_column_rewrites_rows()
     let duplicate_rename_invocation = id(0x7c);
     let mut duplicate_rename_audit = identity_audit_event(0x7d, actor, id(0x7e));
     duplicate_rename_audit.correlation_id = duplicate_rename_invocation;
-    assert!(matches!(
-        storage.rename_table(
-            duplicate_rename_invocation,
-            actor,
-            table.table_id,
-            "occupied_table",
-            9_999,
-            duplicate_rename_audit,
+    let duplicate_rename = storage.rename_table(
+        duplicate_rename_invocation,
+        actor,
+        table.table_id,
+        "occupied_table",
+        9_999,
+        duplicate_rename_audit,
+    );
+    assert!(
+        matches!(
+            duplicate_rename,
+            Err(prdb_engine::storage_manager::TableLifecycleError::Commit(
+                prdb_engine::commit::CommitError::InvalidCatalog
+            ))
         ),
-        Err(prdb_engine::storage_manager::TableLifecycleError::Commit(
-            CommitError::InvalidCatalog
-        ))
-    ));
+        "duplicate rename returned {duplicate_rename:?}"
+    );
     assert_eq!(
         lookup_outcome(&database, duplicate_rename_invocation, actor, 1)?
             .ok_or("missing duplicate table-name outcome")?
@@ -1793,6 +1798,115 @@ fn storage_manager_sets_and_drops_not_null_with_existing_row_validation()
     );
     drop(read);
     StorageManager::new(&database, Duration::from_millis(100))?;
+    Ok(())
+}
+
+#[test]
+fn storage_manager_sets_replaces_and_drops_column_defaults()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::storage_manager::{
+        CreateTableRequest, TableColumnDefault, TableColumnDefinition,
+    };
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let actor = id(0x46);
+    let admin_role = builtin_owner_id();
+    let setup = vec![
+        principal_write_with_name(actor, 1, 1, "column_default_owner"),
+        object_write_with_name(actor, 8, "column_default_owner"),
+        membership_write(actor, admin_role),
+        dependency_write(actor, admin_role, 5),
+    ];
+    let mut setup_audit = identity_audit_event(0x47, admin_role, id(0x48));
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(id(0x48), admin_role, 9_999, &setup, &[setup_audit])?;
+    let schema_invocation = id(0x49);
+    let mut schema_audit = identity_audit_event(0x4a, actor, id(0x4b));
+    schema_audit.correlation_id = schema_invocation;
+    let schema = storage.create_schema(
+        schema_invocation,
+        actor,
+        "column_default_schema",
+        actor,
+        9_999,
+        schema_audit,
+    )?;
+    let create_invocation = id(0x4c);
+    let mut create_audit = identity_audit_event(0x4d, actor, id(0x4e));
+    create_audit.correlation_id = create_invocation;
+    let table = storage.create_table(CreateTableRequest {
+        invocation_id: create_invocation,
+        authenticated_actor_id: actor,
+        schema_id: schema.schema_id,
+        name: "default_table".to_owned(),
+        columns: vec![TableColumnDefinition {
+            name: "value".to_owned(),
+            scalar_type: ScalarType::Integer,
+            nullable: true,
+            generated_uuid_identity: false,
+            default: None,
+        }],
+        retention_deadline_us: 9_999,
+        audit_event: create_audit,
+    })?;
+    let set_invocation = id(0x4f);
+    let mut set_audit = identity_audit_event(0x50, actor, id(0x51));
+    set_audit.correlation_id = set_invocation;
+    let set_result =
+        storage.alter_column_default(prdb_engine::storage_manager::AlterColumnDefaultRequest {
+            invocation_id: set_invocation,
+            authenticated_actor_id: actor,
+            table_id: table.table_id,
+            column_id: table.column_ids[0],
+            default: Some(TableColumnDefault::Literal(Some(ScalarValue::Integer(42)))),
+            retention_deadline_us: 9_999,
+            audit_event: set_audit,
+        });
+    assert!(
+        set_result.is_ok(),
+        "setting a typed default failed: {set_result:?}"
+    );
+    let replace_invocation = id(0x52);
+    let mut replace_audit = identity_audit_event(0x53, actor, id(0x54));
+    replace_audit.correlation_id = replace_invocation;
+    storage.alter_column_default(prdb_engine::storage_manager::AlterColumnDefaultRequest {
+        invocation_id: replace_invocation,
+        authenticated_actor_id: actor,
+        table_id: table.table_id,
+        column_id: table.column_ids[0],
+        default: Some(TableColumnDefault::Literal(Some(ScalarValue::Integer(43)))),
+        retention_deadline_us: 9_999,
+        audit_event: replace_audit,
+    })?;
+    let drop_invocation = id(0x55);
+    let mut drop_audit = identity_audit_event(0x56, actor, id(0x57));
+    drop_audit.correlation_id = drop_invocation;
+    storage.alter_column_default(prdb_engine::storage_manager::AlterColumnDefaultRequest {
+        invocation_id: drop_invocation,
+        authenticated_actor_id: actor,
+        table_id: table.table_id,
+        column_id: table.column_ids[0],
+        default: None,
+        retention_deadline_us: 9_999,
+        audit_event: drop_audit,
+    })?;
+    let empty_drop_invocation = id(0x58);
+    let mut empty_drop_audit = identity_audit_event(0x59, actor, id(0x5a));
+    empty_drop_audit.correlation_id = empty_drop_invocation;
+    assert_eq!(
+        storage.alter_column_default(prdb_engine::storage_manager::AlterColumnDefaultRequest {
+            invocation_id: empty_drop_invocation,
+            authenticated_actor_id: actor,
+            table_id: table.table_id,
+            column_id: table.column_ids[0],
+            default: None,
+            retention_deadline_us: 9_999,
+            audit_event: empty_drop_audit,
+        }),
+        Err(prdb_engine::storage_manager::TableLifecycleError::InvalidRequest)
+    );
     Ok(())
 }
 
@@ -5813,11 +5927,66 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
     let first_column_id_wire = column_ids_wire
         .get(..32)
         .ok_or("invalid first ADMIN column ID")?;
-    let column_rename_prepare = admin_dispatch_json(
+    let default_column_id_wire = column_ids_wire
+        .split("\",\"")
+        .nth(1)
+        .and_then(|wire| wire.get(..32))
+        .ok_or("invalid second ADMIN column ID")?;
+    let default_prepare = admin_dispatch_json(
         &storage,
         &staging,
         &mut control,
         23,
+        &format!(
+            "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"tables.set_column_default\",\"arguments\":{{\"table_id\":\"{table_id_wire}\",\"column_id\":\"{default_column_id_wire}\",\"type\":\"text\",\"default\":{{\"kind\":\"literal\",\"value\":\"ready\"}}}}}}"
+        ),
+        retention_deadline_us,
+    )?;
+    let default_operation_id = default_prepare
+        .split("\"operation_id\":\"")
+        .nth(1)
+        .ok_or("missing ADMIN default operation ID")?
+        .get(..32)
+        .ok_or("invalid ADMIN default operation ID")?;
+    let default_set = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut control,
+        24,
+        &format!("{{\"phase\":\"start\",\"operation_id\":\"{default_operation_id}\"}}"),
+        retention_deadline_us,
+    )?;
+    assert!(default_set.contains("\"outcome\":\"committed\""));
+    let default_drop_prepare = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut control,
+        25,
+        &format!(
+            "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"tables.drop_column_default\",\"arguments\":{{\"table_id\":\"{table_id_wire}\",\"column_id\":\"{default_column_id_wire}\"}}}}"
+        ),
+        retention_deadline_us,
+    )?;
+    let default_drop_operation_id = default_drop_prepare
+        .split("\"operation_id\":\"")
+        .nth(1)
+        .ok_or("missing ADMIN default-drop operation ID")?
+        .get(..32)
+        .ok_or("invalid ADMIN default-drop operation ID")?;
+    let default_drop = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut control,
+        26,
+        &format!("{{\"phase\":\"start\",\"operation_id\":\"{default_drop_operation_id}\"}}"),
+        retention_deadline_us,
+    )?;
+    assert!(default_drop.contains("\"outcome\":\"committed\""));
+    let column_rename_prepare = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut control,
+        29,
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"tables.rename_column\",\"arguments\":{{\"table_id\":\"{table_id_wire}\",\"column_id\":\"{first_column_id_wire}\",\"name\":\"row_id\"}}}}"
         ),
@@ -5833,7 +6002,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &storage,
         &staging,
         &mut control,
-        24,
+        30,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{column_rename_id}\"}}"),
         retention_deadline_us,
     )?;
@@ -5844,7 +6013,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &storage,
         &staging,
         &mut control,
-        27,
+        31,
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"tables.drop\",\"arguments\":{{\"table_id\":\"{table_id_wire}\"}}}}"
         ),
@@ -5860,7 +6029,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &storage,
         &staging,
         &mut control,
-        28,
+        32,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{table_drop_id}\"}}"),
         retention_deadline_us,
     )?;
@@ -5874,7 +6043,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &storage,
         &staging,
         &mut control,
-        29,
+        33,
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"schemas.create\",\"arguments\":{{\"name\":\"protocol_empty\",\"owner_id\":\"{admin_id_wire}\"}}}}"
         ),
@@ -5890,7 +6059,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &storage,
         &staging,
         &mut control,
-        30,
+        34,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{empty_schema_create_id}\"}}"),
         retention_deadline_us,
     )?;
@@ -5904,7 +6073,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &storage,
         &staging,
         &mut control,
-        31,
+        35,
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"schemas.drop\",\"arguments\":{{\"schema_id\":\"{empty_schema_id}\"}}}}"
         ),
@@ -5920,7 +6089,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &storage,
         &staging,
         &mut control,
-        32,
+        36,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{empty_schema_drop_id}\"}}"),
         retention_deadline_us,
     )?;

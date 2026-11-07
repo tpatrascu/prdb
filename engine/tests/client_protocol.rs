@@ -374,6 +374,30 @@ fn admin_revoke_decoder_requires_prepare_then_start_schemas() {
     .is_err());
     assert_eq!(
         decode_client_admin_command(
+            br#"{"phase":"prepare","operation_version":1,"operation":"tables.set_column_default","arguments":{"table_id":"000102030405060708090a0b0c0d0e0f","column_id":"101112131415161718191a1b1c1d1e1f","type":"integer","default":{"kind":"literal","value":"42"}}}"#
+        ),
+        Ok(ClientAdminCommand::PrepareAlterColumnDefault {
+            table_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+            column_id: [16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31],
+            default: Some(
+                prdb_engine::storage_manager::TableColumnDefault::Literal(Some(
+                    prdb_engine::tuple::ScalarValue::Integer(42),
+                )),
+            ),
+        })
+    );
+    assert_eq!(
+        decode_client_admin_command(
+            br#"{"phase":"prepare","operation_version":1,"operation":"tables.drop_column_default","arguments":{"table_id":"000102030405060708090a0b0c0d0e0f","column_id":"101112131415161718191a1b1c1d1e1f"}}"#
+        ),
+        Ok(ClientAdminCommand::PrepareAlterColumnDefault {
+            table_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+            column_id: [16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31],
+            default: None,
+        })
+    );
+    assert_eq!(
+        decode_client_admin_command(
             br#"{"phase":"prepare","operation_version":1,"operation":"tables.drop_column","arguments":{"table_id":"000102030405060708090a0b0c0d0e0f","column_id":"101112131415161718191a1b1c1d1e1f"}}"#
         ),
         Ok(ClientAdminCommand::PrepareDropColumn {

@@ -3372,7 +3372,19 @@ fn validate_column_schema_epochs(
                     let rename_only = catalog_field_bytes(&write.key, current, 6, 3)?
                         != catalog_field_bytes(&write.key, next, 6, 3)?
                         && catalog_fields_equal_except(&current_record, &next_record, &[3]);
-                    nullability_only || rename_only
+                    let current_default = current_record
+                        .fields
+                        .iter()
+                        .find(|field| field.tag == 7)
+                        .map(|field| field.payload.as_slice());
+                    let next_default = next_record
+                        .fields
+                        .iter()
+                        .find(|field| field.tag == 7)
+                        .map(|field| field.payload.as_slice());
+                    let default_only = current_default != next_default
+                        && catalog_fields_equal_except(&current_record, &next_record, &[7]);
+                    nullability_only || rename_only || default_only
                 }
                 _ => false,
             };
@@ -10590,10 +10602,13 @@ fn constraint_ddl_authority_guards(
     let mut constraint_changes = HashMap::<[u8; 16], ConstraintChange>::new();
     let mut object_changes = HashMap::<[u8; 16], (u16, bool, bool)>::new();
     let mut column_changes = HashMap::<[u8; 16], ([u8; 16], bool, bool)>::new();
+    let mut default_column_changes =
+        HashMap::<[u8; 16], ([u8; 16], Option<[u8; 16]>, Option<[u8; 16]>)>::new();
     let mut table_changes = HashSet::<[u8; 16]>::new();
     let mut index_definition_states = HashMap::<[u8; 16], (bool, bool)>::new();
     let mut index_details = HashMap::<[u8; 16], ([u8; 16], Vec<[u8; 16]>, [u8; 16])>::new();
-    let mut expression_changes = HashMap::<[u8; 16], (bool, Vec<[u8; 16]>)>::new();
+    let mut expression_changes =
+        HashMap::<[u8; 16], (bool, Vec<[u8; 16]>, crate::expression::ExpressionPurpose)>::new();
     let mut dependency_changes = HashMap::<([u8; 16], [u8; 16]), (u16, bool, bool)>::new();
 
     for write in catalog_writes {
@@ -10673,29 +10688,61 @@ fn constraint_ddl_authority_guards(
                 let current_nullable = catalog_field_bytes(&write.key, current_bytes, 6, 6)?;
                 let next_nullable = catalog_field_bytes(&write.key, next_bytes, 6, 6)?;
                 let table_id = column_table_id(&write.key, current_bytes)?;
-                if current_nullable == next_nullable
-                    || !matches!(current_nullable.as_slice(), [0] | [1])
+                let current_record = decode_catalog_record(&write.key, current_bytes)?;
+                let next_record = decode_catalog_record(&write.key, next_bytes)?;
+                if !matches!(current_nullable.as_slice(), [0] | [1])
                     || !matches!(next_nullable.as_slice(), [0] | [1])
                     || column_table_id(&write.key, next_bytes)? != table_id
-                    || !catalog_fields_equal_except(
-                        &decode_catalog_record(&write.key, current_bytes)?,
-                        &decode_catalog_record(&write.key, next_bytes)?,
-                        &[6],
-                    )
                 {
                     return Err(CommitError::InvalidCatalog);
                 }
                 let column_id: [u8; 16] = write.key[3..19]
                     .try_into()
                     .map_err(|_| CommitError::InvalidCatalog)?;
-                if column_changes
-                    .insert(
-                        column_id,
-                        (table_id, current_nullable == [1], next_nullable == [1]),
-                    )
-                    .is_some()
-                {
-                    return Err(CommitError::InvalidCatalog);
+                if current_nullable != next_nullable {
+                    if !catalog_fields_equal_except(&current_record, &next_record, &[6])
+                        || column_changes
+                            .insert(
+                                column_id,
+                                (table_id, current_nullable == [1], next_nullable == [1]),
+                            )
+                            .is_some()
+                    {
+                        return Err(CommitError::InvalidCatalog);
+                    }
+                } else {
+                    let current_default = current_record
+                        .fields
+                        .iter()
+                        .find(|field| field.tag == 7)
+                        .map(|field| {
+                            field
+                                .payload
+                                .as_slice()
+                                .try_into()
+                                .map_err(|_| CommitError::InvalidCatalog)
+                        })
+                        .transpose()?;
+                    let next_default = next_record
+                        .fields
+                        .iter()
+                        .find(|field| field.tag == 7)
+                        .map(|field| {
+                            field
+                                .payload
+                                .as_slice()
+                                .try_into()
+                                .map_err(|_| CommitError::InvalidCatalog)
+                        })
+                        .transpose()?;
+                    if current_default == next_default
+                        || !catalog_fields_equal_except(&current_record, &next_record, &[7])
+                        || default_column_changes
+                            .insert(column_id, (table_id, current_default, next_default))
+                            .is_some()
+                    {
+                        return Err(CommitError::InvalidCatalog);
+                    }
                 }
             }
             8 => {
@@ -10801,7 +10848,13 @@ fn constraint_ddl_authority_guards(
                     .map_err(|_| CommitError::InvalidCatalog)?;
                 if expression_id == [0; 16]
                     || expression.expression_id != expression_id
-                    || expression.purpose != crate::expression::ExpressionPurpose::Check
+                    || !matches!(
+                        expression.purpose,
+                        crate::expression::ExpressionPurpose::Check
+                            | crate::expression::ExpressionPurpose::Default
+                    )
+                    || (expression.purpose == crate::expression::ExpressionPurpose::Default
+                        && !expression.dependencies.is_empty())
                 {
                     return Err(CommitError::InvalidCatalog);
                 }
@@ -10813,7 +10866,11 @@ fn constraint_ddl_authority_guards(
                     || expression_changes
                         .insert(
                             expression_id,
-                            (write.payload.is_some(), expression.dependencies),
+                            (
+                                write.payload.is_some(),
+                                expression.dependencies,
+                                expression.purpose,
+                            ),
                         )
                         .is_some()
                 {
@@ -10855,7 +10912,12 @@ fn constraint_ddl_authority_guards(
         && index_details.is_empty()
         && expression_changes.is_empty()
         && dependency_changes.is_empty();
-    if constraint_changes.is_empty() && !direct_nullable_drop {
+    let direct_default_change = constraint_changes.is_empty()
+        && default_column_changes.len() == 1
+        && column_changes.is_empty()
+        && index_definition_states.is_empty()
+        && index_details.is_empty();
+    if constraint_changes.is_empty() && !direct_nullable_drop && !direct_default_change {
         return Err(CommitError::InvalidCatalog);
     }
 
@@ -10890,9 +10952,12 @@ fn constraint_ddl_authority_guards(
             }
             4 => {
                 if !check_expression_ids.insert(change.subject_id)
-                    || expression_changes
-                        .get(&change.subject_id)
-                        .is_none_or(|(adding, _)| *adding != change.adding)
+                    || expression_changes.get(&change.subject_id).is_none_or(
+                        |(adding, _, purpose)| {
+                            *adding != change.adding
+                                || *purpose != crate::expression::ExpressionPurpose::Check
+                        },
+                    )
                 {
                     return Err(CommitError::InvalidCatalog);
                 }
@@ -10941,13 +11006,172 @@ fn constraint_ddl_authority_guards(
             affected_tables.insert(*table_id);
         }
     }
-    if check_expression_ids.len() != expression_changes.len() {
+    let mut default_expression_ids = HashSet::new();
+    if direct_default_change {
+        for (column_id, (table_id, old_default, next_default)) in &default_column_changes {
+            affected_tables.insert(*table_id);
+            let column_key = id_catalog_key(6, *column_id);
+            let column_write = catalog_writes
+                .iter()
+                .find(|write| write.key == column_key)
+                .ok_or(CommitError::InvalidCatalog)?;
+            let old_column = column_write
+                .expected_value
+                .as_deref()
+                .ok_or(CommitError::InvalidCatalog)?;
+            let next_column = column_write
+                .payload
+                .as_deref()
+                .ok_or(CommitError::InvalidCatalog)?;
+            let ordinal = catalog_field_u32(&column_key, old_column, 6, 2)?;
+            let type_id: [u8; 16] = catalog_field_bytes(&column_key, old_column, 6, 4)?
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?;
+            let type_parameters: [u8; 8] = catalog_field_bytes(&column_key, old_column, 6, 5)?
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)?;
+            let type_key = id_catalog_key(4, type_id);
+            let type_bytes = catalog
+                .get(type_key.as_slice())
+                .map_err(storage_error)?
+                .map(|value| value.value().to_vec())
+                .ok_or(CommitError::InvalidCatalog)?;
+            let type_record = decode_catalog_record(&type_key, &type_bytes)?;
+            let scalar_type = decode_builtin_scalar_type(&type_record, &type_parameters)
+                .map_err(|_| CommitError::InvalidCatalog)?;
+            let default_mask = catalog_field_u32(&type_key, &type_bytes, 4, 5)?;
+            for (expression_id, adding) in [
+                old_default.map(|id| (id, false)),
+                next_default.map(|id| (id, true)),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let expression_key = id_catalog_key(7, expression_id);
+                let expression_write = catalog_writes
+                    .iter()
+                    .find(|write| write.key == expression_key)
+                    .ok_or(CommitError::InvalidCatalog)?;
+                if expression_write.payload.is_some() != adding
+                    || (!adding && expression_write.expected_value.is_none())
+                    || (adding && expression_write.expected_value.is_some())
+                {
+                    return Err(CommitError::InvalidCatalog);
+                }
+                let expression_bytes = expression_write
+                    .payload
+                    .as_deref()
+                    .or(expression_write.expected_value.as_deref())
+                    .ok_or(CommitError::InvalidCatalog)?;
+                let expression_record = decode_catalog_record(&expression_key, expression_bytes)?;
+                let expression = decode_catalog_expression_record(&expression_record)
+                    .map_err(|_| CommitError::InvalidCatalog)?;
+                let allowed = match &expression.expression {
+                    crate::authorization::Expr::Literal(_) => default_mask & 1 != 0,
+                    crate::authorization::Expr::CurrentPrincipalId => {
+                        default_mask & 4 != 0 && scalar_type == crate::tuple::ScalarType::Uuid
+                    }
+                    _ => false,
+                };
+                if !allowed
+                    || expression.expression_id != expression_id
+                    || expression.purpose != crate::expression::ExpressionPurpose::Default
+                    || expression.result_type_id != type_id
+                    || expression.result_parameters != type_parameters
+                    || !expression.dependencies.is_empty()
+                    || column_table_id(&column_key, next_column)? != *table_id
+                {
+                    return Err(CommitError::InvalidCatalog);
+                }
+                if let crate::authorization::Expr::Literal(value) = &expression.expression
+                    && crate::tuple::encode_tuple(
+                        &[crate::tuple::ColumnSchema {
+                            scalar_type,
+                            nullable: true,
+                        }],
+                        1,
+                        std::slice::from_ref(value),
+                    )
+                    .is_err()
+                {
+                    return Err(CommitError::InvalidCatalog);
+                }
+                let expression_object_key = id_catalog_key(2, expression_id);
+                let expression_object_write = catalog_writes
+                    .iter()
+                    .find(|write| write.key == expression_object_key)
+                    .ok_or(CommitError::InvalidCatalog)?;
+                let expression_object_bytes = expression_object_write
+                    .payload
+                    .as_deref()
+                    .or(expression_object_write.expected_value.as_deref())
+                    .ok_or(CommitError::InvalidCatalog)?;
+                let expected_name = format!("default_{ordinal}");
+                if catalog_field_u16(&expression_object_key, expression_object_bytes, 2, 1)? != 5
+                    || catalog_field_bytes(&expression_object_key, expression_object_bytes, 2, 3)?
+                        != expected_name.as_bytes()
+                    || catalog_field_u64(&expression_object_key, expression_object_bytes, 2, 5)?
+                        != 1
+                    || catalog_field_u16(&expression_object_key, expression_object_bytes, 2, 6)?
+                        != 1
+                    || (adding
+                        && catalog_field_bytes(
+                            &expression_object_key,
+                            expression_object_bytes,
+                            2,
+                            4,
+                        )? != principal_id)
+                {
+                    return Err(CommitError::InvalidCatalog);
+                }
+            }
+            for (expression_id, adding) in [
+                old_default.map(|id| (id, false)),
+                next_default.map(|id| (id, true)),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if !default_expression_ids.insert(expression_id)
+                    || expression_changes.get(&expression_id).is_none_or(
+                        |(is_adding, _, purpose)| {
+                            *is_adding != adding
+                                || *purpose != crate::expression::ExpressionPurpose::Default
+                        },
+                    )
+                {
+                    return Err(CommitError::InvalidCatalog);
+                }
+                if expected_dependencies
+                    .insert((*column_id, expression_id), (2, !adding, adding))
+                    .is_some()
+                {
+                    return Err(CommitError::InvalidCatalog);
+                }
+            }
+        }
+    }
+    let check_expression_count = expression_changes
+        .values()
+        .filter(|(_, _, purpose)| *purpose == crate::expression::ExpressionPurpose::Check)
+        .count();
+    if check_expression_ids.len() != check_expression_count
+        || default_expression_ids.len()
+            != expression_changes
+                .len()
+                .saturating_sub(check_expression_count)
+    {
         return Err(CommitError::InvalidCatalog);
     }
-    for (expression_id, (adding, dependencies)) in &expression_changes {
+    for (expression_id, (adding, dependencies, purpose)) in &expression_changes {
         if expected_objects
             .insert(*expression_id, (5, !adding, *adding))
             .is_some()
+        {
+            return Err(CommitError::InvalidCatalog);
+        }
+        if *purpose == crate::expression::ExpressionPurpose::Default
+            && !default_expression_ids.contains(expression_id)
         {
             return Err(CommitError::InvalidCatalog);
         }
