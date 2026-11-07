@@ -157,6 +157,9 @@ enum PendingAdminAction {
     CreateUser {
         name: String,
     },
+    CreateRole {
+        name: String,
+    },
     Revoke {
         token_id: [u8; 16],
     },
@@ -191,6 +194,9 @@ pub enum ClientAdminCommand {
         cursor: Option<crate::storage_manager::AdministrativeInvocationCursor>,
     },
     PrepareCreateUser {
+        name: String,
+    },
+    PrepareCreateRole {
         name: String,
     },
     PrepareRevoke {
@@ -358,6 +364,17 @@ pub fn decode_client_admin_command(
                 return Err(ClientControlError::InvalidPrepare);
             }
             Ok(ClientAdminCommand::PrepareCreateUser { name })
+        }
+        Some("prepare") if version == Some(1) && operation.as_deref() == Some("roles.create") => {
+            if operation_id.is_some() || seen.len() != 4 {
+                return Err(ClientControlError::UnknownKey);
+            }
+            let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
+            let name = args.remove("name").ok_or(ClientControlError::MissingKey)?;
+            if !is_canonical_admin_principal_name(&name) || !args.is_empty() {
+                return Err(ClientControlError::InvalidPrepare);
+            }
+            Ok(ClientAdminCommand::PrepareCreateRole { name })
         }
         Some("prepare") if version == Some(1) && operation.as_deref() == Some("tokens.revoke") => {
             if operation_id.is_some() || seen.len() != 4 {
@@ -1521,6 +1538,32 @@ impl ClientConnectionSession {
                     .into_bytes(),
                 )
             }
+            ClientAdminCommand::PrepareCreateRole { name } => {
+                if self.pending_admin_operation.is_some() {
+                    return Err(ClientSessionError::WrongMode);
+                }
+                let mut operation_id = [0; 16];
+                getrandom::fill(&mut operation_id).map_err(|_| {
+                    ClientSessionError::Storage(TransactionError::RandomnessUnavailable)
+                })?;
+                if operation_id == [0; 16] {
+                    return Err(ClientSessionError::Storage(
+                        TransactionError::RandomnessUnavailable,
+                    ));
+                }
+                self.pending_admin_operation = Some(PendingAdminOperation {
+                    operation_id,
+                    action: PendingAdminAction::CreateRole { name },
+                });
+                self.json_response(
+                    request.request_id,
+                    format!(
+                        "{{\"operation_id\":\"{}\",\"state\":\"prepared\"}}",
+                        encode_lower_hex_id(operation_id)
+                    )
+                    .into_bytes(),
+                )
+            }
             ClientAdminCommand::PrepareRevoke { token_id } => {
                 if self.pending_admin_operation.is_some() {
                     return Err(ClientSessionError::WrongMode);
@@ -1609,6 +1652,35 @@ impl ClientConnectionSession {
                     ));
                 }
                 match pending.action {
+                    PendingAdminAction::CreateRole { name } => {
+                        let created = storage
+                            .create_role(
+                                operation_id,
+                                actor_id,
+                                &name,
+                                retention_deadline_us,
+                                crate::audit::AuditEvent {
+                                    event_id,
+                                    actor_id: Some(actor_id),
+                                    correlation_id: operation_id,
+                                    occurred_at_us: now_us,
+                                    action: crate::audit::AuditAction::Ddl,
+                                    result: crate::audit::AuditResult::Succeeded,
+                                    target_ids: Vec::new(),
+                                },
+                            )
+                            .map_err(ClientSessionError::IdentityLifecycle)?;
+                        self.json_response(
+                            request.request_id,
+                            format!(
+                                "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"role_id\":\"{}\",\"commit_sequence\":\"{}\"}}",
+                                encode_lower_hex_id(operation_id),
+                                encode_lower_hex_id(created.role_id),
+                                created.commit_sequence,
+                            )
+                            .into_bytes(),
+                        )
+                    }
                     PendingAdminAction::CreateUser { name } => {
                         let created = storage
                             .create_user(

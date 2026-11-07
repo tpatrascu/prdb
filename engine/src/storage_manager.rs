@@ -343,6 +343,18 @@ pub struct CreatedUser {
     pub commit_sequence: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreatedRole {
+    pub role_id: [u8; 16],
+    pub commit_sequence: u64,
+}
+
+#[derive(Clone, Copy)]
+enum NewPrincipalKind {
+    User,
+    Role,
+}
+
 #[derive(Clone, Debug)]
 pub struct TokenIssueRequest<'a> {
     pub invocation_id: [u8; 16],
@@ -1693,8 +1705,58 @@ impl<'db> StorageManager<'db> {
         authenticated_actor_id: [u8; 16],
         name: &str,
         retention_deadline_us: i64,
-        mut audit_event: AuditEvent,
+        audit_event: AuditEvent,
     ) -> Result<CreatedUser, IdentityLifecycleError> {
+        let (user_id, commit_sequence) = self.create_identity(
+            invocation_id,
+            authenticated_actor_id,
+            name,
+            NewPrincipalKind::User,
+            retention_deadline_us,
+            audit_event,
+        )?;
+        Ok(CreatedUser {
+            user_id,
+            commit_sequence,
+        })
+    }
+
+    /// Create a non-login role through the authorized identity DDL path.
+    pub fn create_role(
+        &self,
+        invocation_id: [u8; 16],
+        authenticated_actor_id: [u8; 16],
+        name: &str,
+        retention_deadline_us: i64,
+        audit_event: AuditEvent,
+    ) -> Result<CreatedRole, IdentityLifecycleError> {
+        let (role_id, commit_sequence) = self.create_identity(
+            invocation_id,
+            authenticated_actor_id,
+            name,
+            NewPrincipalKind::Role,
+            retention_deadline_us,
+            audit_event,
+        )?;
+        Ok(CreatedRole {
+            role_id,
+            commit_sequence,
+        })
+    }
+
+    fn create_identity(
+        &self,
+        invocation_id: [u8; 16],
+        authenticated_actor_id: [u8; 16],
+        name: &str,
+        kind: NewPrincipalKind,
+        retention_deadline_us: i64,
+        mut audit_event: AuditEvent,
+    ) -> Result<([u8; 16], u64), IdentityLifecycleError> {
+        let (principal_kind, login_enabled, object_kind) = match kind {
+            NewPrincipalKind::User => (1u16, true, 8u16),
+            NewPrincipalKind::Role => (2u16, false, 9u16),
+        };
         if invocation_id == [0; 16]
             || authenticated_actor_id == [0; 16]
             || retention_deadline_us <= 0
@@ -1720,7 +1782,7 @@ impl<'db> StorageManager<'db> {
                 CatalogField {
                     tag: 1,
                     wire_type: WireType::U16,
-                    payload: 1u16.to_le_bytes().to_vec(),
+                    payload: principal_kind.to_le_bytes().to_vec(),
                 },
                 CatalogField {
                     tag: 2,
@@ -1730,7 +1792,7 @@ impl<'db> StorageManager<'db> {
                 CatalogField {
                     tag: 3,
                     wire_type: WireType::Bool,
-                    payload: vec![1],
+                    payload: vec![u8::from(login_enabled)],
                 },
                 CatalogField {
                     tag: 4,
@@ -1747,7 +1809,7 @@ impl<'db> StorageManager<'db> {
                 CatalogField {
                     tag: 1,
                     wire_type: WireType::U16,
-                    payload: 8u16.to_le_bytes().to_vec(),
+                    payload: object_kind.to_le_bytes().to_vec(),
                 },
                 CatalogField {
                     tag: 3,
@@ -1797,10 +1859,7 @@ impl<'db> StorageManager<'db> {
                 CommitError::DdlAuthorizationDenied => IdentityLifecycleError::Unauthorized,
                 error => IdentityLifecycleError::Commit(error),
             })?;
-        Ok(CreatedUser {
-            user_id,
-            commit_sequence,
-        })
+        Ok((user_id, commit_sequence))
     }
 
     fn generate_identity_id(&self) -> Result<[u8; 16], IdentityLifecycleError> {

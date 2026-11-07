@@ -3902,6 +3902,101 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         },
     )?;
     assert_eq!(reconciled_revoke.payload, b"{\"state\":\"committed\"}");
+    let create_role_prepare = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut control,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 9,
+            payload: br#"{"phase":"prepare","operation_version":1,"operation":"roles.create","arguments":{"name":"runtime_readers"}}"#.to_vec(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_deadline_us,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )?;
+    let create_role_prepare = match create_role_prepare {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => {
+            String::from_utf8(response.payload)?
+        }
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
+            return Err("ADMIN role-create prepare unexpectedly started an invocation".into());
+        }
+    };
+    let create_role_operation_id = create_role_prepare
+        .split("\"operation_id\":\"")
+        .nth(1)
+        .ok_or("missing ADMIN role-create operation ID")?
+        .get(..32)
+        .ok_or("invalid ADMIN role-create operation ID")?;
+    let create_role = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut control,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 10,
+            payload: format!(
+                "{{\"phase\":\"start\",\"operation_id\":\"{create_role_operation_id}\"}}"
+            )
+            .into_bytes(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_deadline_us,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )?;
+    let create_role = match create_role {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => {
+            String::from_utf8(response.payload)?
+        }
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
+            return Err("ADMIN role-create start returned a worker invocation".into());
+        }
+    };
+    assert!(create_role.contains("\"outcome\":\"committed\""));
+    let created_role_id_wire = create_role
+        .split("\"role_id\":\"")
+        .nth(1)
+        .ok_or("missing created role ID")?
+        .get(..32)
+        .ok_or("invalid created role ID")?;
+    let created_role_id: [u8; 16] = std::array::from_fn(|index| {
+        u8::from_str_radix(&created_role_id_wire[index * 2..index * 2 + 2], 16).unwrap()
+    });
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    let role_bytes = catalog
+        .get(id_catalog_key(10, created_role_id).as_slice())?
+        .ok_or("created role principal is missing")?
+        .value()
+        .to_vec();
+    drop(catalog);
+    drop(read);
+    let role_record = decode_registered_envelope(&role_bytes)?;
+    assert_eq!(
+        role_record
+            .fields
+            .iter()
+            .find(|field| field.tag == 1)
+            .ok_or("created role has no kind")?
+            .payload,
+        2u16.to_le_bytes()
+    );
+    assert_eq!(
+        role_record
+            .fields
+            .iter()
+            .find(|field| field.tag == 3)
+            .ok_or("created role has no login state")?
+            .payload,
+        [0]
+    );
     assert!(
         storage
             .list_tokens(admin_id, user_manager_id)?

@@ -1304,4 +1304,12 @@
 - Contract and implementation: [identity DDL protocol](../../specs/client-protocol.md), [storage-manager identity lifecycle](../../engine/src/storage_manager.rs), and [ADMIN session handling](../../engine/src/client_protocol.rs).
 - Regression evidence: decoder tests accept canonical names and reject uppercase names. A real-redb `MANAGE_USERS` session creates the user, issues a token, authenticates a new query session with it, and confirms token inventory is attached to the created user.
 - Verification: format check, workspace build, warning-denied Clippy, all workspace tests, and `git diff --check` passed in the configured Nix shell.
-- Remaining: role creation, other user lifecycle DDL, remaining ADMIN operations, and separate supervisor/worker process integration.
+- Remaining at that increment: role creation is recorded below; other user lifecycle DDL, remaining ADMIN operations, and separate supervisor/worker process integration remain open.
+
+## SM-5 / DDL-identity dependency: prepared CREATE ROLE ADMIN operation
+
+- Behavior: `roles.create` uses connection-owned PREPARE/START. Storage checks `MANAGE_ROLES`/database-administrator authority and atomically writes a generated non-login role principal and matching named object with DDL audit/outcome. Roles start without memberships or privileges.
+- Contract and implementation: [identity DDL protocol](../../specs/client-protocol.md), [shared storage principal creation](../../engine/src/storage_manager.rs), and [ADMIN session handling](../../engine/src/client_protocol.rs).
+- Regression evidence: decoder accepts normalized role names. A real-redb database-administrator session creates the role, and the test reads its persisted principal record to verify role kind and disabled LOGIN state.
+- Verification: format check, workspace build, warning-denied Clippy, all workspace tests, and `git diff --check` passed in the configured Nix shell.
+- Remaining: role membership/grant DDL, other user lifecycle DDL, remaining ADMIN operations, and separate supervisor/worker process integration.

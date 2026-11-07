@@ -239,4 +239,12 @@ fn admin_revoke_decoder_requires_prepare_then_start_schemas() {
         br#"{"phase":"prepare","operation_version":1,"operation":"users.create","arguments":{"name":"NewUser"}}"#
     )
     .is_err());
+    assert_eq!(
+        decode_client_admin_command(
+            br#"{"phase":"prepare","operation_version":1,"operation":"roles.create","arguments":{"name":"reporting_role"}}"#
+        ),
+        Ok(ClientAdminCommand::PrepareCreateRole {
+            name: "reporting_role".into(),
+        })
+    );
 }
