@@ -283,6 +283,13 @@ pub struct TokenMetadata {
     pub revoked_at_us: Option<i64>,
 }
 
+/// A bounded page of token metadata ordered by token ID.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TokenMetadataPage {
+    pub tokens: Vec<TokenMetadata>,
+    pub next_after_token_id: Option<[u8; 16]>,
+}
+
 /// Non-secret identity context established by read-only gateway AUTH.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthenticatedQuerySession {
@@ -1840,6 +1847,30 @@ impl<'db> StorageManager<'db> {
             });
         }
         Ok(tokens)
+    }
+
+    /// Return at most 64 token records after an exclusive token ID cursor.
+    /// The scan and authorization semantics match `list_tokens`.
+    pub fn list_tokens_page(
+        &self,
+        authenticated_actor_id: [u8; 16],
+        user_id: [u8; 16],
+        after_token_id: Option<[u8; 16]>,
+    ) -> Result<TokenMetadataPage, TokenLifecycleError> {
+        const PAGE_SIZE: usize = 64;
+        let mut tokens = self.list_tokens(authenticated_actor_id, user_id)?;
+        if let Some(cursor) = after_token_id {
+            tokens.retain(|token| token.token_id > cursor);
+        }
+        let has_more = tokens.len() > PAGE_SIZE;
+        tokens.truncate(PAGE_SIZE);
+        let next_after_token_id = has_more
+            .then(|| tokens.last().map(|token| token.token_id))
+            .flatten();
+        Ok(TokenMetadataPage {
+            tokens,
+            next_after_token_id,
+        })
     }
 
     /// Trusted coordinated catalog publication with no actor authorization.

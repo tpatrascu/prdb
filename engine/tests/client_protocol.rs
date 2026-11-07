@@ -1,6 +1,7 @@
 use prdb_engine::client_protocol::{
-    CLIENT_MAX_CHUNK_BYTES, ClientControlError, ClientMode, decode_client_chunk,
-    decode_client_credentials, decode_client_hello, decode_client_prepare, decode_client_seal,
+    CLIENT_MAX_CHUNK_BYTES, ClientAdminRead, ClientControlError, ClientMode,
+    decode_client_admin_read, decode_client_chunk, decode_client_credentials, decode_client_hello,
+    decode_client_prepare, decode_client_seal,
 };
 
 #[test]
@@ -148,5 +149,36 @@ fn seal_decoder_accepts_only_one_nonzero_canonical_invocation_id() {
     assert_eq!(
         decode_client_seal(br#"{"invocation_id":"000102030405060708090a0b0c0d0e0f","extra":"x"}"#),
         Err(ClientControlError::UnknownKey)
+    );
+}
+
+#[test]
+fn admin_read_decoder_accepts_token_inventory_and_rejects_mutation_shapes() {
+    assert_eq!(
+        decode_client_admin_read(
+            br#"{"phase":"read","operation_version":1,"operation":"tokens.list","arguments":{"user_id":"000102030405060708090a0b0c0d0e0f","after_token_id":"101112131415161718191a1b1c1d1e1f"}}"#
+        ),
+        Ok(ClientAdminRead::ListTokens {
+            user_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+            after_token_id: Some([16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]),
+        })
+    );
+    assert_eq!(
+        decode_client_admin_read(
+            br#"{"phase":"prepare","operation_version":1,"operation":"tokens.list","arguments":{"user_id":"000102030405060708090a0b0c0d0e0f"}}"#
+        ),
+        Err(ClientControlError::UnsupportedAdminOperation)
+    );
+    assert_eq!(
+        decode_client_admin_read(
+            br#"{"phase":"read","operation_version":1,"operation":"tokens.list","arguments":{"user_id":"000102030405060708090a0b0c0d0e0f","extra":"x"}}"#
+        ),
+        Err(ClientControlError::UnknownKey)
+    );
+    assert_eq!(
+        decode_client_admin_read(
+            br#"{"phase":"read","operation_version":1,"operation":"tokens.list","arguments":{"user_id":"000102030405060708090a0b0c0d0e0f",}}"#
+        ),
+        Err(ClientControlError::InvalidJson)
     );
 }

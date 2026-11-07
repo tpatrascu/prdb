@@ -69,11 +69,13 @@ pub enum ClientSessionError {
     AuthenticationRequired,
     WrongMode,
     UnsupportedRequest,
+    ResourceLimit,
     InvalidControlPayload(ClientControlError),
     Staging(crate::supervisor::StagingError),
     Status(crate::storage_manager::InvocationStatusError),
     AdministrativeStatus(crate::storage_manager::AdministrativeInvocationListError),
     AdministrativeCancellation(crate::storage_manager::AdministrativeCancellationError),
+    TokenInventory(crate::storage_manager::TokenLifecycleError),
     Storage(TransactionError),
 }
 
@@ -104,6 +106,7 @@ pub enum ClientControlError {
     InvalidChunk,
     InvalidPrepare,
     InvalidInvocationId,
+    UnsupportedAdminOperation,
 }
 
 impl std::fmt::Display for ClientControlError {
@@ -145,6 +148,119 @@ pub struct ClientPrepare {
     pub requested_scope: Vec<u8>,
     pub deadline_ms: u64,
     pub workload_class: crate::supervisor::WorkloadClass,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClientAdminRead {
+    ListTokens {
+        user_id: [u8; 16],
+        after_token_id: Option<[u8; 16]>,
+    },
+}
+
+/// Decode the versioned, read-only ADMIN envelope and its first supported operation.
+pub fn decode_client_admin_read(payload: &[u8]) -> Result<ClientAdminRead, ClientControlError> {
+    if payload.len() > CLIENT_MAX_CONTROL_BYTES {
+        return Err(ClientControlError::InvalidJson);
+    }
+    let text = std::str::from_utf8(payload).map_err(|_| ClientControlError::InvalidJson)?;
+    let mut parser = JsonStringObjectParser {
+        text: text.as_bytes(),
+        offset: 0,
+    };
+    parser.skip_whitespace();
+    parser.expect(b'{')?;
+    let mut phase = None;
+    let mut version = None;
+    let mut operation = None;
+    let mut arguments = None;
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        parser.skip_whitespace();
+        if parser.consume(b'}') {
+            break;
+        }
+        let key = parser.parse_string()?;
+        if !seen.insert(key.clone()) {
+            return Err(ClientControlError::DuplicateKey);
+        }
+        parser.skip_whitespace();
+        parser.expect(b':')?;
+        parser.skip_whitespace();
+        match key.as_str() {
+            "phase" => phase = Some(parser.parse_string()?),
+            "operation_version" => version = Some(parser.parse_u64_number()?),
+            "operation" => operation = Some(parser.parse_string()?),
+            "arguments" => {
+                parser.expect(b'{')?;
+                let mut args = HashMap::new();
+                loop {
+                    parser.skip_whitespace();
+                    if parser.consume(b'}') {
+                        break;
+                    }
+                    let arg = parser.parse_string()?;
+                    if args.contains_key(&arg) {
+                        return Err(ClientControlError::DuplicateKey);
+                    }
+                    parser.skip_whitespace();
+                    parser.expect(b':')?;
+                    parser.skip_whitespace();
+                    args.insert(arg, parser.parse_string()?);
+                    parser.skip_whitespace();
+                    if !parser.consume(b',') {
+                        parser.expect(b'}')?;
+                        break;
+                    }
+                    parser.skip_whitespace();
+                    if parser.text.get(parser.offset) == Some(&b'}') {
+                        return Err(ClientControlError::InvalidJson);
+                    }
+                }
+                arguments = Some(args);
+            }
+            _ => return Err(ClientControlError::UnknownKey),
+        }
+        parser.skip_whitespace();
+        if !parser.consume(b',') {
+            parser.expect(b'}')?;
+            break;
+        }
+        parser.skip_whitespace();
+        if parser.text.get(parser.offset) == Some(&b'}') {
+            return Err(ClientControlError::InvalidJson);
+        }
+    }
+    parser.skip_whitespace();
+    if parser.offset != parser.text.len() {
+        return Err(ClientControlError::InvalidJson);
+    }
+    if phase.as_deref() != Some("read")
+        || version != Some(1)
+        || operation.as_deref() != Some("tokens.list")
+    {
+        return Err(ClientControlError::UnsupportedAdminOperation);
+    }
+    if seen.len() != 4 {
+        return Err(ClientControlError::MissingKey);
+    }
+    let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
+    let user_id = decode_lower_hex_id(
+        &args
+            .remove("user_id")
+            .ok_or(ClientControlError::MissingKey)?,
+    )?;
+    let after_token_id = args
+        .remove("after_token_id")
+        .map(|value| decode_lower_hex_id(&value))
+        .transpose()?;
+    if !args.is_empty() {
+        return Err(ClientControlError::UnknownKey);
+    }
+    Ok(ClientAdminRead::ListTokens {
+        user_id,
+        after_token_id,
+    })
 }
 
 impl Drop for ClientCredentials {
@@ -1018,6 +1134,77 @@ impl ClientConnectionSession {
         }
     }
 
+    /// Execute the read-only ADMIN `tokens.list` operation.
+    pub fn handle_admin_request(
+        &mut self,
+        storage: &StorageManager<'_>,
+        request: ClientFrame,
+    ) -> Result<ClientFrame, ClientSessionError> {
+        if request.response_sequence != 0 || request.kind != 10 {
+            return Err(ClientSessionError::UnsupportedRequest);
+        }
+        self.request_ids
+            .accept(&request)
+            .map_err(|_| ClientSessionError::UnsupportedRequest)?;
+        if !self.permits_request_kind(10) {
+            return Err(if self.authenticated.is_none() {
+                ClientSessionError::AuthenticationRequired
+            } else {
+                ClientSessionError::WrongMode
+            });
+        }
+        self.revalidate_storage(storage)?;
+        let ClientAdminRead::ListTokens {
+            user_id,
+            after_token_id,
+        } = decode_client_admin_read(&request.payload)
+            .map_err(ClientSessionError::InvalidControlPayload)?;
+        let actor_id = self
+            .authenticated
+            .as_ref()
+            .ok_or(ClientSessionError::AuthenticationRequired)?
+            .principal_id();
+        let page = storage
+            .list_tokens_page(actor_id, user_id, after_token_id)
+            .map_err(ClientSessionError::TokenInventory)?;
+        let mut payload = String::from("{\"tokens\":[");
+        for (index, token) in page.tokens.iter().enumerate() {
+            if index != 0 {
+                payload.push(',');
+            }
+            payload.push_str("{\"token_id\":\"");
+            payload.push_str(&encode_lower_hex_id(token.token_id));
+            payload.push_str("\",\"label\":\"");
+            push_json_string(&mut payload, &token.label);
+            payload.push_str("\",\"issued_at_us\":");
+            payload.push_str(&token.issued_at_us.to_string());
+            payload.push_str(" ,\"expires_at_us\":");
+            payload.push_str(&token.expires_at_us.to_string());
+            payload.push_str(" ,\"revoked\":");
+            payload.push_str(if token.revoked { "true" } else { "false" });
+            payload.push_str(" ,\"revoked_at_us\":");
+            if let Some(revoked_at) = token.revoked_at_us {
+                payload.push_str(&revoked_at.to_string());
+            } else {
+                payload.push_str("null");
+            }
+            payload.push('}');
+        }
+        payload.push_str("],\"next_after_token_id\":");
+        if let Some(cursor) = page.next_after_token_id {
+            payload.push('"');
+            payload.push_str(&encode_lower_hex_id(cursor));
+            payload.push('"');
+        } else {
+            payload.push_str("null");
+        }
+        payload.push('}');
+        if payload.len() > CLIENT_MAX_CONTROL_BYTES {
+            return Err(ClientSessionError::ResourceLimit);
+        }
+        self.json_response(request.request_id, payload.into_bytes())
+    }
+
     /// Cancel an unstarted reservation without creating a storage outcome.
     /// Started invocations require the supervisor's cancellation service.
     pub fn handle_cancel_prepared_request(
@@ -1347,6 +1534,25 @@ fn encode_lower_hex_id(id: [u8; 16]) -> String {
         encoded.push(HEX[(byte & 0x0f) as usize] as char);
     }
     encoded
+}
+
+fn push_json_string(output: &mut String, value: &str) {
+    for character in value.chars() {
+        match character {
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            '\u{08}' => output.push_str("\\b"),
+            '\u{0c}' => output.push_str("\\f"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            c if c <= '\u{1f}' => {
+                use std::fmt::Write as _;
+                let _ = write!(output, "\\u{:04x}", c as u32);
+            }
+            c => output.push(c),
+        }
+    }
 }
 
 fn current_unix_micros() -> Option<i64> {

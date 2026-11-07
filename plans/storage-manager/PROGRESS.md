@@ -1256,3 +1256,10 @@
 - Regression evidence: the real-redb control-mode test cancels a live invocation and confirms its administrative status exposes `cancellation_requested = true`.
 - Verification: focused test and full configured Nix-shell validation passed: format check, workspace build, warning-denied Clippy, all workspace tests, and `git diff --check`.
 - Remaining: `ADMIN` operation envelopes/dispatch, sanitized protocol ERROR responses, and the separate supervisor process remain open.
+
+## SM-5 / NP-5 dependency: read-only token inventory ADMIN operation
+
+- Behavior: control-mode ADMIN accepts the strict version-1 `tokens.list` read envelope, revalidates the connection before execution, checks owner/MANAGE_USERS/database-administrator authority in storage, and returns at most 64 token metadata records with an ID cursor. Verifier and bearer-secret material are omitted.
+- Contract and implementation: [client protocol](../../specs/client-protocol.md), [bounded token page](../../engine/src/storage_manager.rs), [ADMIN decoder and session handler](../../engine/src/client_protocol.rs), and gateway IPC kind mapping.
+- Regression evidence: decoder coverage rejects prepare-phase mutation envelopes and unknown arguments; a real-redb authenticated control-mode session test checks another user's token inventory and verifies secret material is absent.
+- Remaining: credential issue/revoke, other ADMIN read operations and mutation prepare/start, sanitized ERROR responses, and the separate supervisor process remain open.

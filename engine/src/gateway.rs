@@ -901,6 +901,7 @@ fn client_request_to_ipc(
         7 => Operation::StartSubmission,
         8 => Operation::ClientGetInvocationStatus,
         9 => Operation::ClientCancelInvocation,
+        10 => Operation::SubmitAdministrativeOperation,
         11 => Operation::PingClientSession,
         _ => return Err(GatewayConnectionError::UnsupportedClientKind(kind)),
     };

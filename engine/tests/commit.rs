@@ -3405,6 +3405,27 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         },
     )?;
     assert_eq!(cancelled.payload, b"{\"state\":\"accepted\"}");
+    let token_inventory = control.handle_admin_request(
+        &storage,
+        ClientFrame {
+            kind: 10,
+            request_id: 4,
+            response_sequence: 0,
+            payload: format!(
+                "{{\"phase\":\"read\",\"operation_version\":1,\"operation\":\"tokens.list\",\"arguments\":{{\"user_id\":\"{}\"}}}}",
+                id(235).iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+            ).into_bytes(),
+        },
+    )?;
+    let token_inventory = String::from_utf8(token_inventory.payload)?;
+    assert!(token_inventory.contains(&format!(
+        "\"token_id\":\"{}\"",
+        format!("{:02x}", 236).repeat(16)
+    )));
+    assert!(token_inventory.contains("test token"));
+    assert!(token_inventory.contains("\"revoked\":false"));
+    assert!(!token_inventory.contains("verifier"));
+    assert!(!token_inventory.contains("secret"));
     assert!(matches!(
         storage.get_administrative_invocation_status(admin_id, id(233), now_us)?,
         Some(snapshot) if matches!(snapshot.status,
