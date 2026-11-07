@@ -48,6 +48,8 @@ Schema, relation, column, all-schema table, and all-relation column continuation
 
 `InvocationTransaction::resolve_authorized_schema` performs exact, case-sensitive lookup over the same filtered pages. Hidden and nonexistent schema names both return no result; the returned ID is only a logical reference and grants no authority.
 
+`StorageManager::create_schema` creates one empty schema and its family-2 object atomically. It accepts normalized lowercase ASCII identifiers (128 bytes maximum) and a live user or role as initial owner. The authenticated actor must hold inherited database-scoped `CREATE_SCHEMA` or belong to `database_admin`; the owner assignment itself grants no data privileges. Storage validates the schema/object pair, rejects an existing schema name or reused ID, and commits audit and outcome with the records. Quoted mixed-case identifiers, schema rename/owner transfer/drop, and control-protocol dispatch remain future work.
+
 `InvocationTransaction::load_catalog_schema_usage_grants` derives only persisted schema USAGE grants for the admitted principal and pinned role closure. It guards the membership, grant, schema, and grantor records it reads so a later authority change invalidates a pending write.
 
 `InvocationTransaction::list_catalog_authorized_schemas` uses those pinned records to construct the metadata context internally and return bounded visible schema pages for the admitted invocation. The caller supplies neither identity nor grants.

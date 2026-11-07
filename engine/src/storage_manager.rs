@@ -11,6 +11,7 @@ use crate::commit::{
     commit_authorized_foreign_key_ddl_with_fences, commit_authorized_identity_ddl_with_fences,
     commit_authorized_index_ddl_with_fences, commit_authorized_membership_ddl_with_fences,
     commit_authorized_object_grant_ddl_with_fences, commit_authorized_policy_ddl_with_fences,
+    commit_authorized_schema_create_ddl_with_fences,
     commit_authorized_system_privilege_ddl_with_fences, commit_catalog_and_audit_with_fences,
 };
 use crate::credentials::{
@@ -396,6 +397,25 @@ impl std::fmt::Display for SystemPrivilegeLifecycleError {
 impl std::error::Error for SystemPrivilegeLifecycleError {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SchemaLifecycleError {
+    InvalidRequest,
+    InvalidAudit,
+    RandomnessUnavailable,
+    SchemaIdGenerationFailed,
+    Unauthorized,
+    Storage,
+    Commit(CommitError),
+}
+
+impl std::fmt::Display for SchemaLifecycleError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "schema lifecycle operation failed: {self:?}")
+    }
+}
+
+impl std::error::Error for SchemaLifecycleError {}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreatedUser {
     pub user_id: [u8; 16],
     pub commit_sequence: u64,
@@ -404,6 +424,12 @@ pub struct CreatedUser {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreatedRole {
     pub role_id: [u8; 16],
+    pub commit_sequence: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreatedSchema {
+    pub schema_id: [u8; 16],
     pub commit_sequence: u64,
 }
 
@@ -1760,6 +1786,141 @@ impl<'db> StorageManager<'db> {
             transaction: Arc::new(Mutex::new(Some(transaction))),
             channels: Arc::new(Mutex::new(SupervisorChannelState::default())),
             deadline: request.deadline,
+        })
+    }
+
+    /// Create a schema and assign its initial owner atomically. The actor must
+    /// hold CREATE_SCHEMA or database-administrator membership.
+    pub fn create_schema(
+        &self,
+        invocation_id: [u8; 16],
+        authenticated_actor_id: [u8; 16],
+        name: &str,
+        owner_id: [u8; 16],
+        retention_deadline_us: i64,
+        mut audit_event: AuditEvent,
+    ) -> Result<CreatedSchema, SchemaLifecycleError> {
+        if invocation_id == [0; 16]
+            || authenticated_actor_id == [0; 16]
+            || owner_id == [0; 16]
+            || retention_deadline_us <= 0
+            || !is_normalized_principal_name(name)
+        {
+            return Err(SchemaLifecycleError::InvalidRequest);
+        }
+        if audit_event.actor_id != Some(authenticated_actor_id)
+            || audit_event.correlation_id != invocation_id
+            || audit_event.action != AuditAction::Ddl
+            || audit_event.result != AuditResult::Succeeded
+        {
+            return Err(SchemaLifecycleError::InvalidAudit);
+        }
+        let mut schema_id = None;
+        for _ in 0..8 {
+            let mut candidate = [0; 16];
+            if getrandom::fill(&mut candidate).is_err() {
+                candidate.zeroize();
+                return Err(SchemaLifecycleError::RandomnessUnavailable);
+            }
+            if candidate == [0; 16] {
+                candidate.zeroize();
+                continue;
+            }
+            let mut conflict = false;
+            for family in [2, 3, 17] {
+                let key = id_catalog_key(family, candidate);
+                let read = self
+                    .database
+                    .begin_read()
+                    .map_err(|_| SchemaLifecycleError::Storage)?;
+                let catalog = read
+                    .open_table(CATALOG)
+                    .map_err(|_| SchemaLifecycleError::Storage)?;
+                conflict |= catalog
+                    .get(key.as_slice())
+                    .map_err(|_| SchemaLifecycleError::Storage)?
+                    .is_some();
+            }
+            if !conflict {
+                schema_id = Some(candidate);
+                break;
+            }
+            candidate.zeroize();
+        }
+        let schema_id = schema_id.ok_or(SchemaLifecycleError::SchemaIdGenerationFailed)?;
+        let object_key = id_catalog_key(2, schema_id);
+        let schema_key = id_catalog_key(3, schema_id);
+        let object_payload = encode_envelope(
+            &family_schema(2).ok_or(SchemaLifecycleError::Storage)?,
+            &object_key,
+            &[
+                CatalogField {
+                    tag: 1,
+                    wire_type: WireType::U16,
+                    payload: 1u16.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 3,
+                    wire_type: WireType::Text,
+                    payload: name.as_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 4,
+                    wire_type: WireType::Id,
+                    payload: owner_id.to_vec(),
+                },
+                CatalogField {
+                    tag: 5,
+                    wire_type: WireType::U64,
+                    payload: 1u64.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 6,
+                    wire_type: WireType::U16,
+                    payload: 1u16.to_le_bytes().to_vec(),
+                },
+            ],
+        )
+        .map_err(|_| SchemaLifecycleError::InvalidRequest)?;
+        let schema_payload = encode_envelope(
+            &family_schema(3).ok_or(SchemaLifecycleError::Storage)?,
+            &schema_key,
+            &[CatalogField {
+                tag: 1,
+                wire_type: WireType::Ids,
+                payload: 0u32.to_le_bytes().to_vec(),
+            }],
+        )
+        .map_err(|_| SchemaLifecycleError::InvalidRequest)?;
+        audit_event.target_ids = vec![schema_id];
+        let writes = [
+            CatalogWrite {
+                key: object_key,
+                expected_value: None,
+                payload: Some(object_payload),
+            },
+            CatalogWrite {
+                key: schema_key,
+                expected_value: None,
+                payload: Some(schema_payload),
+            },
+        ];
+        let commit_sequence = commit_authorized_schema_create_ddl_with_fences(
+            self.database,
+            &self.ddl_fences,
+            invocation_id,
+            authenticated_actor_id,
+            retention_deadline_us,
+            &writes,
+            &[audit_event],
+        )
+        .map_err(|error| match error {
+            CommitError::DdlAuthorizationDenied => SchemaLifecycleError::Unauthorized,
+            error => SchemaLifecycleError::Commit(error),
+        })?;
+        Ok(CreatedSchema {
+            schema_id,
+            commit_sequence,
         })
     }
 
@@ -3945,6 +4106,13 @@ fn principal_catalog_key(principal_id: [u8; 16]) -> Vec<u8> {
     let mut key = 10u16.to_be_bytes().to_vec();
     key.push(1);
     key.extend_from_slice(&principal_id);
+    key
+}
+
+fn id_catalog_key(family: u16, object_id: [u8; 16]) -> Vec<u8> {
+    let mut key = family.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&object_id);
     key
 }
 

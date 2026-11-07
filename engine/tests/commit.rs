@@ -454,6 +454,110 @@ fn initialize(path: &std::path::Path) -> Result<Database, Box<dyn std::error::Er
     Ok(database)
 }
 
+#[test]
+fn storage_manager_creates_schema_atomically_for_privileged_actor()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::storage_manager::SchemaLifecycleError;
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let setup_admin = id(0xe1);
+    let denied = id(0xe2);
+    let actor = id(0xe8);
+    let admin_role = builtin_owner_id();
+    let setup = vec![
+        principal_write_with_name(setup_admin, 1, 1, "schema_admin"),
+        object_write_with_name(setup_admin, 8, "schema_admin"),
+        membership_write(setup_admin, admin_role),
+        dependency_write(setup_admin, admin_role, 5),
+        principal_write_with_name(denied, 1, 1, "schema_denied"),
+        object_write_with_name(denied, 8, "schema_denied"),
+        principal_write_with_name(actor, 1, 1, "schema_creator"),
+        object_write_with_name(actor, 8, "schema_creator"),
+        grant_write(actor, id(0x33), 14, 1, id(0x33), admin_role),
+        dependency_write(actor, id(0x33), 5),
+    ];
+    let mut setup_audit = identity_audit_event(0xe3, admin_role, setup_admin);
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(id(0xe3), admin_role, 9_999, &setup, &[setup_audit])?;
+
+    let denied_id = id(0xe4);
+    let mut denied_audit = identity_audit_event(0xe4, denied, id(0xe5));
+    denied_audit.correlation_id = denied_id;
+    let denied_result = storage.create_schema(
+        denied_id,
+        denied,
+        "private_schema",
+        denied,
+        9_999,
+        denied_audit,
+    );
+    assert!(
+        matches!(denied_result, Err(SchemaLifecycleError::Unauthorized)),
+        "{denied_result:?}"
+    );
+    assert_eq!(commit_sequence(&database)?, 1);
+    assert_eq!(
+        lookup_outcome(&database, denied_id, denied, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Aborted
+    );
+
+    let invocation_id = id(0xe6);
+    let mut audit = identity_audit_event(0xe6, actor, id(0xe7));
+    audit.correlation_id = invocation_id;
+    let created = storage.create_schema(invocation_id, actor, "app_data", actor, 9_999, audit)?;
+    assert_eq!(created.commit_sequence, 2);
+    let schema_key = id_catalog_key(3, created.schema_id);
+    let object_key = id_catalog_key(2, created.schema_id);
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    assert!(catalog.get(schema_key.as_slice())?.is_some());
+    let object = catalog
+        .get(object_key.as_slice())?
+        .ok_or("missing schema object")?;
+    let record = decode_registered_envelope(object.value())?;
+    assert_eq!(record.family_code, 2);
+    assert_eq!(
+        record
+            .fields
+            .iter()
+            .find(|field| field.tag == 3)
+            .unwrap()
+            .payload,
+        b"app_data"
+    );
+    assert_eq!(
+        lookup_outcome(&database, invocation_id, actor, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Committed
+    );
+    let duplicate_id = id(0xe9);
+    let mut duplicate_audit = identity_audit_event(0xea, actor, id(0xeb));
+    duplicate_audit.correlation_id = duplicate_id;
+    assert!(matches!(
+        storage.create_schema(
+            duplicate_id,
+            actor,
+            "app_data",
+            actor,
+            9_999,
+            duplicate_audit
+        ),
+        Err(SchemaLifecycleError::Commit(CommitError::InvalidCatalog))
+    ));
+    assert_eq!(
+        lookup_outcome(&database, duplicate_id, actor, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Aborted
+    );
+    Ok(())
+}
+
 fn row(
     database: &Database,
     key: &[u8; 32],
@@ -615,6 +719,8 @@ fn object_write_with_parent_and_owner(
 ) -> CatalogWrite {
     let name = if object_id == builtin_owner_id() && kind == 9 {
         "database_admin".to_owned()
+    } else if kind == 1 {
+        format!("schema_{}", object_id[15])
     } else if matches!(kind, 8 | 9) {
         principal_test_name(object_id)
     } else {
