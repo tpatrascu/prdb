@@ -130,6 +130,7 @@ pub enum GatewayTerminalRelayError {
     Io(io::Error),
     Frame(crate::ipc::FrameError),
     Invocation(crate::storage_manager::SupervisorInvocationError),
+    Status(InvocationStatusError),
     InvalidStorageResponse,
     HandlerPanicked,
 }
@@ -239,6 +240,165 @@ pub fn finalize_gateway_invocation_and_send_terminal<'db, W: Write>(
         },
     )
     .map_err(GatewayTerminalRelayError::Frame)
+}
+
+/// Emit a terminal event only after an owner-scoped storage status confirms a
+/// retained durable outcome. This covers worker-failure aborts and ambiguous
+/// terminal replies without inventing an outcome from process or socket state.
+pub fn send_gateway_terminal_for_confirmed_outcome<'db, W: Write>(
+    manager: &StorageManager<'db>,
+    invocation: &crate::storage_manager::SupervisorInvocation<'_>,
+    result_stream: &mut W,
+    start_request_id: u64,
+    aborted_reason: GatewayAbortReason,
+) -> Result<GatewayTerminalDecision, GatewayTerminalRelayError> {
+    let now_us = crate::credentials::now_unix_micros()
+        .ok_or(GatewayTerminalRelayError::InvalidStorageResponse)?;
+    let snapshot = manager
+        .get_invocation_status(
+            invocation.invocation_id(),
+            invocation.principal_id(),
+            now_us,
+        )
+        .map_err(GatewayTerminalRelayError::Status)?
+        .ok_or(GatewayTerminalRelayError::InvalidStorageResponse)?;
+    let outcome = match snapshot.status {
+        InvocationStatus::Terminal(outcome) => outcome,
+        InvocationStatus::Active { .. } | InvocationStatus::Committing { .. } => {
+            return Err(GatewayTerminalRelayError::InvalidStorageResponse);
+        }
+    };
+    let decision = match outcome.status {
+        OutcomeStatus::Committed => GatewayTerminalDecision::Commit,
+        OutcomeStatus::Aborted => GatewayTerminalDecision::Abort(aborted_reason),
+    };
+    let reason_code = match decision {
+        GatewayTerminalDecision::Commit => "success",
+        GatewayTerminalDecision::Abort(reason) => gateway_abort_reason_code(reason),
+    };
+    let invocation_id = invocation
+        .invocation_id()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let outcome_name = match decision {
+        GatewayTerminalDecision::Commit => "committed",
+        GatewayTerminalDecision::Abort(_) => "aborted",
+    };
+    let payload = format!(
+        "{{\"invocation_id\":\"{invocation_id}\",\"outcome\":\"{outcome_name}\",\"reason_code\":\"{reason_code}\"}}"
+    )
+    .into_bytes();
+    crate::ipc::write_frame(
+        result_stream,
+        &IpcFrame {
+            operation: Operation::GatewayTerminal as u16,
+            request_id: start_request_id,
+            payload,
+        },
+    )
+    .map_err(GatewayTerminalRelayError::Frame)?;
+    Ok(decision)
+}
+
+/// Run the trusted worker/result/storage sequence and emit exactly the
+/// storage-confirmed terminal event. A nonzero worker exit, result relay error,
+/// cancellation, or commit rejection is reported as aborted only after a
+/// durable owner-scoped status lookup confirms ABORTED.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub fn observe_executor_relay_and_finalize_gateway<'db>(
+    manager: &StorageManager<'db>,
+    invocation: &mut crate::storage_manager::SupervisorInvocation<'_>,
+    executor: &mut crate::executor_launcher::RunningExecutor,
+    result_stream: &mut UnixStream,
+    start_request_id: u64,
+) -> Result<GatewayTerminalDecision, GatewayTerminalRelayError> {
+    let observation =
+        observe_executor_and_relay_results(executor, invocation, result_stream, start_request_id);
+    match observation {
+        Ok(status) if status.success() => {
+            match finalize_gateway_invocation_and_send_terminal(
+                invocation,
+                result_stream,
+                start_request_id,
+                GatewayTerminalDecision::Commit,
+            ) {
+                Ok(()) => Ok(GatewayTerminalDecision::Commit),
+                Err(commit_error) => {
+                    match send_gateway_terminal_for_confirmed_outcome(
+                        manager,
+                        invocation,
+                        result_stream,
+                        start_request_id,
+                        GatewayAbortReason::QueryError,
+                    ) {
+                        Ok(decision) => Ok(decision),
+                        Err(_) => Err(commit_error),
+                    }
+                }
+            }
+        }
+        Ok(_) => send_gateway_terminal_for_confirmed_outcome(
+            manager,
+            invocation,
+            result_stream,
+            start_request_id,
+            GatewayAbortReason::WorkerFailure,
+        ),
+        Err(error) => send_gateway_terminal_for_confirmed_outcome(
+            manager,
+            invocation,
+            result_stream,
+            start_request_id,
+            gateway_abort_reason_for_observation(&error),
+        ),
+    }
+}
+
+fn gateway_abort_reason_for_observation(
+    error: &crate::storage_manager::SupervisorInvocationError,
+) -> GatewayAbortReason {
+    match error {
+        crate::storage_manager::SupervisorInvocationError::WorkerExited(_) => {
+            GatewayAbortReason::WorkerFailure
+        }
+        crate::storage_manager::SupervisorInvocationError::Deadline(_) => {
+            GatewayAbortReason::Deadline
+        }
+        crate::storage_manager::SupervisorInvocationError::Executor(_)
+        | crate::storage_manager::SupervisorInvocationError::Planner(_) => {
+            GatewayAbortReason::QueryError
+        }
+        crate::storage_manager::SupervisorInvocationError::WorkerChannelIo(error)
+            if error.kind() == io::ErrorKind::InvalidData =>
+        {
+            GatewayAbortReason::ResourceLimit
+        }
+        crate::storage_manager::SupervisorInvocationError::WorkerCgroupIo(_) => {
+            GatewayAbortReason::ResourceLimit
+        }
+        crate::storage_manager::SupervisorInvocationError::WorkerChannelIo(_)
+        | crate::storage_manager::SupervisorInvocationError::WorkerProcessIo(_)
+        | crate::storage_manager::SupervisorInvocationError::WorkerHandlerPanicked
+        | crate::storage_manager::SupervisorInvocationError::WorkerChannelsActive
+        | crate::storage_manager::SupervisorInvocationError::WorkerExitNotObserved
+        | crate::storage_manager::SupervisorInvocationError::WorkerExitObservationActive
+        | crate::storage_manager::SupervisorInvocationError::Closed
+        | crate::storage_manager::SupervisorInvocationError::Supervisor(_) => {
+            GatewayAbortReason::InternalError
+        }
+    }
+}
+
+fn gateway_abort_reason_code(reason: GatewayAbortReason) -> &'static str {
+    match reason {
+        GatewayAbortReason::QueryError => "query_error",
+        GatewayAbortReason::WorkerFailure => "worker_failure",
+        GatewayAbortReason::Cancelled => "cancelled",
+        GatewayAbortReason::Deadline => "deadline",
+        GatewayAbortReason::ResourceLimit => "resource_limit",
+        GatewayAbortReason::InternalError => "internal_error",
+    }
 }
 
 #[cfg(unix)]

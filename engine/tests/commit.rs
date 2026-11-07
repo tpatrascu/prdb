@@ -14655,8 +14655,8 @@ fn gateway_disconnect_after_storage_commit_is_reconcilable()
     use prdb_engine::outcome::OutcomeStatus;
     use prdb_engine::storage_manager::InvocationStatus;
     use prdb_engine::supervisor_ipc::{
-        GatewayTerminalDecision, finalize_gateway_invocation_and_send_terminal,
-        send_gateway_result_data_event,
+        GatewayAbortReason, GatewayTerminalDecision, finalize_gateway_invocation_and_send_terminal,
+        send_gateway_result_data_event, send_gateway_terminal_for_confirmed_outcome,
     };
     use std::os::unix::net::UnixStream;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -14728,6 +14728,23 @@ fn gateway_disconnect_after_storage_commit_is_reconcilable()
             .status,
         InvocationStatus::Terminal(outcome) if outcome.status == OutcomeStatus::Committed
     ));
+    let (mut replay_service, mut replay_gateway) = UnixStream::pair()?;
+    assert_eq!(
+        send_gateway_terminal_for_confirmed_outcome(
+            &storage,
+            &invocation,
+            &mut replay_service,
+            9,
+            GatewayAbortReason::InternalError,
+        )?,
+        GatewayTerminalDecision::Commit
+    );
+    let reconciled_terminal = read_frame(&mut replay_gateway)?.ok_or("missing terminal replay")?;
+    assert_eq!(
+        reconciled_terminal.operation,
+        Operation::GatewayTerminal as u16
+    );
+    assert!(String::from_utf8(reconciled_terminal.payload)?.contains("\"outcome\":\"committed\""));
     Ok(())
 }
 
@@ -14823,8 +14840,13 @@ fn supervisor_drains_both_worker_channels_before_durable_finalize()
 #[test]
 fn supervisor_worker_exit_failure_is_reaped_and_durably_aborted()
 -> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::ipc::{Operation, read_frame};
     use prdb_engine::outcome::OutcomeStatus;
     use prdb_engine::storage_manager::SupervisorInvocationError;
+    use prdb_engine::supervisor_ipc::{
+        GatewayAbortReason, GatewayTerminalDecision, send_gateway_terminal_for_confirmed_outcome,
+    };
+    use std::io::Cursor;
     use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -14863,6 +14885,19 @@ fn supervisor_worker_exit_failure_is_reaped_and_durably_aborted()
         2,
         64,
     )?;
+    let mut terminal_stream = Cursor::new(Vec::new());
+    assert!(
+        send_gateway_terminal_for_confirmed_outcome(
+            &storage,
+            &invocation,
+            &mut terminal_stream,
+            9,
+            GatewayAbortReason::WorkerFailure,
+        )
+        .is_err()
+    );
+    assert!(terminal_stream.get_ref().is_empty());
+
     let mut worker = Command::new("sh").args(["-c", "exit 7"]).spawn()?;
     assert!(matches!(
         invocation.observe_worker_exit(&mut worker),
@@ -14876,6 +14911,21 @@ fn supervisor_worker_exit_failure_is_reaped_and_durably_aborted()
             .status,
         OutcomeStatus::Aborted
     );
+    assert_eq!(
+        send_gateway_terminal_for_confirmed_outcome(
+            &storage,
+            &invocation,
+            &mut terminal_stream,
+            9,
+            GatewayAbortReason::WorkerFailure,
+        )?,
+        GatewayTerminalDecision::Abort(GatewayAbortReason::WorkerFailure)
+    );
+    terminal_stream.set_position(0);
+    let terminal = read_frame(&mut terminal_stream)?.ok_or("missing aborted terminal")?;
+    assert_eq!(terminal.operation, Operation::GatewayTerminal as u16);
+    assert_eq!(terminal.request_id, 9);
+    assert!(String::from_utf8(terminal.payload)?.contains("\"outcome\":\"aborted\""));
     Ok(())
 }
 
