@@ -1709,6 +1709,199 @@ fn storage_manager_drop_table_removes_owned_catalog_and_rows()
 }
 
 #[test]
+fn storage_manager_drop_table_removes_owned_primary_and_unique_indexes()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::storage_manager::{CreateTableRequest, TableColumnDefinition};
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let actor = id(0x6e);
+    let admin_role = builtin_owner_id();
+    let mut setup_audit = identity_audit_event(0x6f, admin_role, actor);
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(
+        id(0x6f),
+        admin_role,
+        9_999,
+        &[
+            principal_write_with_name(actor, 1, 1, "unique_drop_owner"),
+            object_write_with_name(actor, 8, "unique_drop_owner"),
+            membership_write(actor, admin_role),
+            dependency_write(actor, admin_role, 5),
+        ],
+        &[setup_audit],
+    )?;
+    let schema_invocation = id(0x70);
+    let mut schema_audit = identity_audit_event(0x71, actor, id(0x72));
+    schema_audit.correlation_id = schema_invocation;
+    let schema = storage.create_schema(
+        schema_invocation,
+        actor,
+        "unique_drop_schema",
+        actor,
+        9_999,
+        schema_audit,
+    )?;
+    let create_invocation = id(0x73);
+    let mut create_audit = identity_audit_event(0x74, actor, id(0x75));
+    create_audit.correlation_id = create_invocation;
+    let table = storage.create_table(CreateTableRequest {
+        invocation_id: create_invocation,
+        authenticated_actor_id: actor,
+        schema_id: schema.schema_id,
+        name: "unique_drop_table".to_owned(),
+        columns: vec![TableColumnDefinition {
+            name: "value".to_owned(),
+            scalar_type: ScalarType::Integer,
+            nullable: false,
+            generated_uuid_identity: false,
+            default: None,
+        }],
+        retention_deadline_us: 9_999,
+        audit_event: create_audit,
+    })?;
+
+    let unique_constraint_id = id(0x76);
+    let unique_index_id = id(0x77);
+    let primary_constraint_id = id(0x7e);
+    let primary_index_id = id(0x7f);
+    let unique_constraint = constraint_write(
+        unique_constraint_id,
+        table.table_id,
+        3,
+        &table.column_ids,
+        None,
+        &[],
+        Some(unique_index_id),
+    );
+    let primary_constraint = constraint_write(
+        primary_constraint_id,
+        table.table_id,
+        2,
+        &table.column_ids,
+        None,
+        &[],
+        Some(primary_index_id),
+    );
+    let (unique_index_key, unique_index_payload) = owned_unique_index_definition(
+        unique_index_id,
+        table.table_id,
+        &table.column_ids,
+        unique_constraint_id,
+    );
+    let (primary_index_key, primary_index_payload) = owned_unique_index_definition(
+        primary_index_id,
+        table.table_id,
+        &table.column_ids,
+        primary_constraint_id,
+    );
+    let table_key = id_catalog_key(5, table.table_id);
+    let current_table = database
+        .begin_read()?
+        .open_table(CATALOG)?
+        .get(table_key.as_slice())?
+        .ok_or("unique table record missing before constraint add")?
+        .value()
+        .to_vec();
+    let mut table_epoch = table_write_with_versions(table.table_id, schema.schema_id, 1, 2);
+    table_epoch.expected_value = Some(current_table);
+    let constraint_invocation = id(0x78);
+    let mut constraint_audit = identity_audit_event(0x79, actor, unique_constraint_id);
+    constraint_audit.correlation_id = constraint_invocation;
+    storage.commit_authorized_constraint_ddl(
+        constraint_invocation,
+        actor,
+        9_999,
+        &[
+            unique_constraint,
+            object_write(unique_constraint_id, 6),
+            CatalogWrite {
+                key: unique_index_key.clone(),
+                expected_value: None,
+                payload: Some(unique_index_payload),
+            },
+            object_write(unique_index_id, 7),
+            dependency_write(unique_constraint_id, unique_index_id, 4),
+            primary_constraint,
+            object_write(primary_constraint_id, 6),
+            CatalogWrite {
+                key: primary_index_key.clone(),
+                expected_value: None,
+                payload: Some(primary_index_payload),
+            },
+            object_write(primary_index_id, 7),
+            dependency_write(primary_constraint_id, primary_index_id, 4),
+            table_epoch,
+        ],
+        &[constraint_audit],
+    )?;
+
+    let mut insert = storage.begin_invocation(id(0x7a), actor, 9_999, 1, 1024)?;
+    let table_schema = insert.load_catalog_table_schema(table.table_id)?;
+    insert.load_catalog_indexes(&table_schema)?;
+    let tuple = encode_tuple(
+        &table_schema.columns,
+        table_schema.schema_version,
+        &[Some(ScalarValue::Integer(42))],
+    )?;
+    let row_id = id(0x7b);
+    insert.stage_put(
+        prdb_engine::overlay::RowId {
+            table: table.table_id,
+            row: row_id,
+        },
+        &tuple,
+    )?;
+    insert.commit()?;
+    let row_key = table_row_key(table.table_id, row_id);
+    let (forward_count_before, reverse_count_before) = {
+        let read = database.begin_read()?;
+        let forward = read.open_table(schema::INDEXES)?;
+        let reverse = read.open_table(schema::ROW_INDEXES)?;
+        (forward.iter()?.count(), reverse.iter()?.count())
+    };
+    assert_eq!(forward_count_before, 2);
+    assert_eq!(reverse_count_before, 2);
+
+    let drop_invocation = id(0x7c);
+    let mut drop_audit = identity_audit_event(0x7d, actor, table.table_id);
+    drop_audit.correlation_id = drop_invocation;
+    storage.drop_table(drop_invocation, actor, table.table_id, 9_999, drop_audit)?;
+    assert_eq!(
+        lookup_outcome(&database, drop_invocation, actor, 1)?
+            .ok_or("missing primary/unique table-drop outcome")?
+            .status,
+        OutcomeStatus::Committed
+    );
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    for key in [
+        id_catalog_key(8, unique_constraint_id),
+        id_catalog_key(2, unique_constraint_id),
+        unique_index_key,
+        id_catalog_key(2, unique_index_id),
+        dependency_write(unique_constraint_id, unique_index_id, 4).key,
+        id_catalog_key(8, primary_constraint_id),
+        id_catalog_key(2, primary_constraint_id),
+        primary_index_key,
+        id_catalog_key(2, primary_index_id),
+        dependency_write(primary_constraint_id, primary_index_id, 4).key,
+    ] {
+        assert!(
+            catalog.get(key.as_slice())?.is_none(),
+            "owned primary/unique record remained: {key:?}"
+        );
+    }
+    assert!(read.open_table(ROWS)?.get(&row_key[..])?.is_none());
+    assert_eq!(read.open_table(schema::INDEXES)?.iter()?.count(), 0);
+    assert_eq!(read.open_table(schema::ROW_INDEXES)?.iter()?.count(), 0);
+    drop(read);
+    StorageManager::new(&database, Duration::from_millis(100))?;
+    Ok(())
+}
+
+#[test]
 fn storage_manager_drop_table_racing_invocation_leaves_no_orphan_row()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::storage_manager::{CreateTableRequest, TableColumnDefinition};
