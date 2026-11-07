@@ -62,3 +62,10 @@
 - Changed code and test: [START dispatcher](../../engine/src/client_protocol.rs) and [real-redb deadline/revocation regression](../../engine/tests/commit.rs).
 - Verification: focused real-redb START regression passes in the repository Nix shell.
 - Remaining: launch and supervise the worker before streaming RESULT_DATA and a trusted terminal.
+
+## NP-5 dependency: owner STATUS and prepared CANCEL
+
+- Behavior: query STATUS revalidates current authority and returns an owner's ephemeral prepared state or durable/in-process storage state, while keeping unknown, expired, and foreign IDs non-enumerable. Prepared CANCEL revalidates authority and frees staging without creating a transaction outcome.
+- Changed code and test: [owner status and staging cancellation dispatch](../../engine/src/client_protocol.rs) and [real-redb authenticated session flow](../../engine/tests/commit.rs).
+- Verification: focused authenticated status/cancel and handshake integration regressions pass in the repository Nix shell.
+- Remaining: active invocation cancellation, control-mode administrator operations, and gateway IPC/TCP service integration.

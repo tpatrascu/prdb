@@ -7590,6 +7590,7 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     let prepare = session.handle_prepare_request(
+        &storage,
         &staging,
         ClientFrame {
             kind: 3,
@@ -7619,6 +7620,7 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
     chunk_payload.extend_from_slice(&0u64.to_le_bytes());
     chunk_payload.extend_from_slice(artifact);
     let acknowledgement = session.handle_upload_request(
+        &storage,
         &staging,
         ClientFrame {
             kind: 4,
@@ -7635,6 +7637,7 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
     );
 
     let seal = session.handle_seal_request(
+        &storage,
         &staging,
         ClientFrame {
             kind: 6,
@@ -7649,11 +7652,45 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
         prdb_engine::supervisor::SubmissionState::Prepared
     );
 
+    let status = session.handle_status_request(
+        &storage,
+        &staging,
+        ClientFrame {
+            kind: 8,
+            request_id: 7,
+            response_sequence: 0,
+            payload: format!("{{\"invocation_id\":\"{invocation_hex}\"}}").into_bytes(),
+        },
+    )?;
+    assert_eq!(status.payload, b"{\"state\":\"prepared\"}");
+    let cancel = session.handle_cancel_prepared_request(
+        &storage,
+        &staging,
+        ClientFrame {
+            kind: 9,
+            request_id: 8,
+            response_sequence: 0,
+            payload: format!("{{\"invocation_id\":\"{invocation_hex}\"}}").into_bytes(),
+        },
+    )?;
+    assert_eq!(cancel.payload, b"{\"state\":\"accepted\"}");
+    let status_after_cancel = session.handle_status_request(
+        &storage,
+        &staging,
+        ClientFrame {
+            kind: 8,
+            request_id: 9,
+            response_sequence: 0,
+            payload: format!("{{\"invocation_id\":\"{invocation_hex}\"}}").into_bytes(),
+        },
+    )?;
+    assert_eq!(status_after_cancel.payload, b"{\"state\":\"unknown\"}");
+
     let ping = session.handle_handshake_request(
         &storage,
         ClientFrame {
             kind: 11,
-            request_id: 7,
+            request_id: 10,
             response_sequence: 0,
             payload: b"{}".to_vec(),
         },
@@ -7664,7 +7701,7 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
             &storage,
             ClientFrame {
                 kind: 1,
-                request_id: 8,
+                request_id: 11,
                 response_sequence: 0,
                 payload: br#"{"mode":"query","client_name":"again"}"#.to_vec(),
             },

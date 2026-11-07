@@ -1058,3 +1058,10 @@
 - Changed code and test: [START frame path](../../engine/src/client_protocol.rs) and [current-credential/deadline real-redb regression](../../engine/tests/commit.rs).
 - Verification: focused START regression passes in the repository Nix shell.
 - Remaining: process launch/exit observation, streamed result and trusted terminal delivery, and gateway integration.
+
+## NP-5 dependency: session-bound status and prepared cancellation
+
+- Behavior: protected staging and status requests revalidate the storage session on every operation. Owner STATUS consults bounded staging first, then storage's live/durable outcome lookup; prepared CANCEL releases only unstarted staging and creates no outcome. Foreign and unknown IDs share the same unavailable/unknown behavior.
+- Changed code and regression: [client status/cancel dispatch and revalidation](../../engine/src/client_protocol.rs), [real-redb authenticated flow](../../engine/tests/commit.rs).
+- Verification: focused authentication and handshake/status/cancel regressions pass in the repository Nix shell.
+- Remaining: owner-initiated active cancellation, admin control mode, TCP gateway and supervisor IPC, worker result/finalization lifecycle.

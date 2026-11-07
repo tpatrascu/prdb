@@ -70,6 +70,7 @@ pub enum ClientSessionError {
     UnsupportedRequest,
     InvalidControlPayload(ClientControlError),
     Staging(crate::supervisor::StagingError),
+    Status(crate::storage_manager::InvocationStatusError),
     Storage(TransactionError),
 }
 
@@ -756,6 +757,7 @@ impl ClientConnectionSession {
     /// the contiguous next offset.
     pub fn handle_upload_request(
         &mut self,
+        storage: &StorageManager<'_>,
         staging: &crate::supervisor::StagingStore,
         request: ClientFrame,
     ) -> Result<ClientFrame, ClientSessionError> {
@@ -772,6 +774,7 @@ impl ClientConnectionSession {
                 ClientSessionError::WrongMode
             });
         }
+        self.revalidate_storage(storage)?;
         let chunk = decode_client_chunk(&request.payload)
             .map_err(ClientSessionError::InvalidControlPayload)?;
         let kind = if request.kind == 4 {
@@ -800,6 +803,7 @@ impl ClientConnectionSession {
     /// request. No storage snapshot or executor is created by this operation.
     pub fn handle_prepare_request(
         &mut self,
+        storage: &StorageManager<'_>,
         staging: &crate::supervisor::StagingStore,
         request: ClientFrame,
     ) -> Result<ClientFrame, ClientSessionError> {
@@ -816,6 +820,7 @@ impl ClientConnectionSession {
                 ClientSessionError::WrongMode
             });
         }
+        self.revalidate_storage(storage)?;
         let prepare = decode_client_prepare(&request.payload)
             .map_err(ClientSessionError::InvalidControlPayload)?;
         let reservation = staging
@@ -851,6 +856,7 @@ impl ClientConnectionSession {
     /// then make the staged submission immutable.
     pub fn handle_seal_request(
         &mut self,
+        storage: &StorageManager<'_>,
         staging: &crate::supervisor::StagingStore,
         request: ClientFrame,
     ) -> Result<ClientFrame, ClientSessionError> {
@@ -867,6 +873,7 @@ impl ClientConnectionSession {
                 ClientSessionError::WrongMode
             });
         }
+        self.revalidate_storage(storage)?;
         let invocation_id = decode_client_seal(&request.payload)
             .map_err(ClientSessionError::InvalidControlPayload)?;
         staging
@@ -930,6 +937,137 @@ impl ClientConnectionSession {
             payload: b"{\"state\":\"accepted\"}".to_vec(),
         };
         Ok((response, invocation))
+    }
+
+    /// Report the caller-owned staging state or current storage outcome after
+    /// revalidating the connection's credential and role closure.
+    pub fn handle_status_request(
+        &mut self,
+        storage: &StorageManager<'_>,
+        staging: &crate::supervisor::StagingStore,
+        request: ClientFrame,
+    ) -> Result<ClientFrame, ClientSessionError> {
+        let invocation_id = self.validate_query_control_request(storage, &request, 8)?;
+        let session = self
+            .authenticated
+            .as_ref()
+            .ok_or(ClientSessionError::AuthenticationRequired)?;
+        let now_us = current_unix_micros().ok_or(ClientSessionError::UnsupportedRequest)?;
+        match staging.status(session.staging_owner(), invocation_id) {
+            Ok(
+                crate::supervisor::SubmissionState::Uploading
+                | crate::supervisor::SubmissionState::Sealing
+                | crate::supervisor::SubmissionState::Prepared
+                | crate::supervisor::SubmissionState::Starting,
+            ) => self.json_response(request.request_id, b"{\"state\":\"prepared\"}".to_vec()),
+            Ok(crate::supervisor::SubmissionState::Started)
+            | Err(crate::supervisor::StagingError::Unavailable) => {
+                let snapshot = storage
+                    .get_invocation_status(invocation_id, session.principal_id(), now_us)
+                    .map_err(ClientSessionError::Status)?;
+                let payload = match snapshot.map(|snapshot| snapshot.status) {
+                    Some(crate::storage_manager::InvocationStatus::Active { .. }) => {
+                        b"{\"state\":\"active\"}".to_vec()
+                    }
+                    Some(crate::storage_manager::InvocationStatus::Committing { .. }) => {
+                        b"{\"state\":\"committing\"}".to_vec()
+                    }
+                    Some(crate::storage_manager::InvocationStatus::Terminal(outcome)) => {
+                        match outcome.status {
+                            crate::outcome::OutcomeStatus::Committed => {
+                                b"{\"state\":\"committed\"}".to_vec()
+                            }
+                            crate::outcome::OutcomeStatus::Aborted => {
+                                b"{\"state\":\"aborted\"}".to_vec()
+                            }
+                        }
+                    }
+                    None => b"{\"state\":\"unknown\"}".to_vec(),
+                };
+                self.json_response(request.request_id, payload)
+            }
+            Err(error) => Err(ClientSessionError::Staging(error)),
+        }
+    }
+
+    /// Cancel an unstarted reservation without creating a storage outcome.
+    /// Started invocations require the supervisor's cancellation service.
+    pub fn handle_cancel_prepared_request(
+        &mut self,
+        storage: &StorageManager<'_>,
+        staging: &crate::supervisor::StagingStore,
+        request: ClientFrame,
+    ) -> Result<ClientFrame, ClientSessionError> {
+        let invocation_id = self.validate_query_control_request(storage, &request, 9)?;
+        let session = self
+            .authenticated
+            .as_ref()
+            .ok_or(ClientSessionError::AuthenticationRequired)?;
+        match staging.cancel_prepared(session.staging_owner(), invocation_id) {
+            Ok(()) => self.json_response(request.request_id, b"{\"state\":\"accepted\"}".to_vec()),
+            Err(crate::supervisor::StagingError::InvalidState) => {
+                Err(ClientSessionError::UnsupportedRequest)
+            }
+            Err(error) => Err(ClientSessionError::Staging(error)),
+        }
+    }
+
+    fn validate_query_control_request(
+        &mut self,
+        storage: &StorageManager<'_>,
+        request: &ClientFrame,
+        kind: u16,
+    ) -> Result<[u8; 16], ClientSessionError> {
+        if request.response_sequence != 0 || request.kind != kind {
+            return Err(ClientSessionError::UnsupportedRequest);
+        }
+        self.request_ids
+            .accept(request)
+            .map_err(|_| ClientSessionError::UnsupportedRequest)?;
+        if !self.permits_request_kind(kind) {
+            return Err(if self.authenticated.is_none() {
+                ClientSessionError::AuthenticationRequired
+            } else {
+                ClientSessionError::WrongMode
+            });
+        }
+        let invocation_id = decode_client_seal(&request.payload)
+            .map_err(ClientSessionError::InvalidControlPayload)?;
+        if self.hello != Some(ClientMode::Query) {
+            return Err(ClientSessionError::WrongMode);
+        }
+        self.revalidate_storage(storage)?;
+        Ok(invocation_id)
+    }
+
+    fn revalidate_storage(
+        &mut self,
+        storage: &StorageManager<'_>,
+    ) -> Result<(), ClientSessionError> {
+        let session = self
+            .authenticated
+            .as_mut()
+            .ok_or(ClientSessionError::AuthenticationRequired)?;
+        let mut secret = *self
+            .token_secret
+            .as_ref()
+            .ok_or(ClientSessionError::AuthenticationRequired)?;
+        let result = storage.revalidate_query_session(session, &secret);
+        secret.zeroize();
+        result.map_err(ClientSessionError::Storage)
+    }
+
+    fn json_response(
+        &self,
+        request_id: u64,
+        payload: Vec<u8>,
+    ) -> Result<ClientFrame, ClientSessionError> {
+        Ok(ClientFrame {
+            kind: 100,
+            request_id,
+            response_sequence: 0,
+            payload,
+        })
     }
 
     /// Accept the one HELLO for this connection before any AUTH request.
@@ -1104,6 +1242,13 @@ fn encode_lower_hex_id(id: [u8; 16]) -> String {
         encoded.push(HEX[(byte & 0x0f) as usize] as char);
     }
     encoded
+}
+
+fn current_unix_micros() -> Option<i64> {
+    let duration = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    i64::try_from(duration.as_micros()).ok()
 }
 
 impl Drop for ClientConnectionSession {
