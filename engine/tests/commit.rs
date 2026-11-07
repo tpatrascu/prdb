@@ -1248,6 +1248,25 @@ fn storage_manager_renames_tables_and_drop_column_rewrites_rows()
             b"retired"
         );
     }
+    let stale_writer_invocation = id(0x5b);
+    let stale_row_id = prdb_engine::overlay::RowId {
+        table: table.table_id,
+        row: id(0x5c),
+    };
+    let mut stale_writer =
+        storage.begin_invocation(stale_writer_invocation, actor, 9_999, 2, 64)?;
+    let pinned_schema = stale_writer.load_catalog_table_schema(table.table_id)?;
+    assert_eq!(pinned_schema.schema_version, 1);
+    stale_writer.load_catalog_indexes(&pinned_schema)?;
+    let stale_payload = prdb_engine::tuple::encode_tuple(
+        &pinned_schema.columns,
+        pinned_schema.schema_version,
+        &[
+            Some(ScalarValue::Integer(99)),
+            Some(ScalarValue::Text("stale".to_owned())),
+        ],
+    )?;
+    stale_writer.stage_put(stale_row_id, &stale_payload)?;
     let rename_invocation = id(0x76);
     let mut rename_audit = identity_audit_event(0x77, actor, id(0x78));
     rename_audit.correlation_id = rename_invocation;
@@ -1260,6 +1279,23 @@ fn storage_manager_renames_tables_and_drop_column_rewrites_rows()
         rename_audit,
     )?;
     assert!(rename_sequence > table.commit_sequence);
+    let stale_result = stale_writer.commit();
+    assert!(
+        matches!(
+            stale_result,
+            Err(prdb_engine::transaction::TransactionError::Commit(
+                CommitError::Conflict
+            ))
+        ),
+        "stale writer returned {stale_result:?}"
+    );
+    assert!(row(&database, &table_row_key(table.table_id, stale_row_id.row))?.is_none());
+    assert_eq!(
+        lookup_outcome(&database, stale_writer_invocation, actor, 1)?
+            .ok_or("missing stale-writer outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
     let duplicate_table = storage.create_table(CreateTableRequest {
         invocation_id: id(0x79),
         authenticated_actor_id: actor,

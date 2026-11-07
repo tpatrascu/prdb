@@ -1413,4 +1413,12 @@
 - Regression evidence: the real-redb storage regression exercises set, replacement, drop, and rejection of an absent-default drop. The strict decoder checks both command shapes; the gateway ADMIN lifecycle test runs set and drop through PREPARE/START.
 - TDD note: the first storage behavior assertion failed against the `InvalidRequest` stub; the catalog expression/object/dependency changes then passed through the serialized authorized DDL path.
 - Verification: `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, and `git diff --check` all passed in the configured Nix shell. Focused storage, decoder, and gateway ADMIN PREPARE/START regressions passed.
-- Remaining: stale-writer race coverage for DDL, role-owner authorization regression, and separate supervisor/gateway process integration remain open.
+- Remaining: stale-writer coverage across other DDL forms, role-owner authorization regression, and separate supervisor/gateway process integration remain open.
+
+## DS-5 / DS-7: table rename versus a pinned writer — verified
+
+- Behavior and normative contracts: [schema DDL](../../specs/ddl-schema.md), [MVCC concurrency](../../specs/concurrency-mvcc.md), and [storage manager](../../specs/storage-manager.md). A transaction that has loaded the table schema and indexes and staged a row against that snapshot must not commit after table rename advances the write epoch.
+- Regression evidence: the real-redb table lifecycle test stages a valid tuple under the pinned schema, renames the table, then verifies commit returns `CommitError::Conflict`, the row is absent, and the invocation has a durable ABORTED outcome.
+- Implementation: no code change was needed. The existing schema/object exact-byte guards and shared DDL fence reject the stale commit.
+- Verification: focused lifecycle regression passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, and `git diff --check` all passed in the configured Nix shell.
+- Remaining: stale-writer coverage for column rename, nullability/default changes, add/drop column, and index/constraint DDL; role-owner authorization regression; separate supervisor/gateway process integration.
