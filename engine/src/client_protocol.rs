@@ -81,6 +81,7 @@ pub enum ClientSessionError {
     IdentityLifecycle(crate::storage_manager::IdentityLifecycleError),
     MembershipLifecycle(crate::storage_manager::MembershipLifecycleError),
     SystemPrivilegeLifecycle(crate::storage_manager::SystemPrivilegeLifecycleError),
+    SchemaLifecycle(crate::storage_manager::SchemaLifecycleError),
     Storage(TransactionError),
 }
 
@@ -162,6 +163,10 @@ enum PendingAdminAction {
     CreateRole {
         name: String,
     },
+    CreateSchema {
+        name: String,
+        owner_id: [u8; 16],
+    },
     RenameIdentity {
         identity_id: [u8; 16],
         name: String,
@@ -221,6 +226,10 @@ pub enum ClientAdminCommand {
     },
     PrepareCreateRole {
         name: String,
+    },
+    PrepareCreateSchema {
+        name: String,
+        owner_id: [u8; 16],
     },
     PrepareRenameIdentity {
         identity_id: [u8; 16],
@@ -422,6 +431,22 @@ pub fn decode_client_admin_command(
                 return Err(ClientControlError::InvalidPrepare);
             }
             Ok(ClientAdminCommand::PrepareCreateRole { name })
+        }
+        Some("prepare") if version == Some(1) && operation.as_deref() == Some("schemas.create") => {
+            if operation_id.is_some() || seen.len() != 4 {
+                return Err(ClientControlError::UnknownKey);
+            }
+            let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
+            let name = args.remove("name").ok_or(ClientControlError::MissingKey)?;
+            let owner_id = decode_lower_hex_id(
+                &args
+                    .remove("owner_id")
+                    .ok_or(ClientControlError::MissingKey)?,
+            )?;
+            if !is_canonical_admin_principal_name(&name) || !args.is_empty() {
+                return Err(ClientControlError::InvalidPrepare);
+            }
+            Ok(ClientAdminCommand::PrepareCreateSchema { name, owner_id })
         }
         Some("prepare") if version == Some(1) && operation.as_deref() == Some("users.rename") => {
             decode_identity_rename_prepare(arguments, operation_id, seen.len(), "user_id")
@@ -1779,6 +1804,32 @@ impl ClientConnectionSession {
                     .into_bytes(),
                 )
             }
+            ClientAdminCommand::PrepareCreateSchema { name, owner_id } => {
+                if self.pending_admin_operation.is_some() {
+                    return Err(ClientSessionError::WrongMode);
+                }
+                let mut operation_id = [0; 16];
+                getrandom::fill(&mut operation_id).map_err(|_| {
+                    ClientSessionError::Storage(TransactionError::RandomnessUnavailable)
+                })?;
+                if operation_id == [0; 16] {
+                    return Err(ClientSessionError::Storage(
+                        TransactionError::RandomnessUnavailable,
+                    ));
+                }
+                self.pending_admin_operation = Some(PendingAdminOperation {
+                    operation_id,
+                    action: PendingAdminAction::CreateSchema { name, owner_id },
+                });
+                self.json_response(
+                    request.request_id,
+                    format!(
+                        "{{\"operation_id\":\"{}\",\"state\":\"prepared\"}}",
+                        encode_lower_hex_id(operation_id)
+                    )
+                    .into_bytes(),
+                )
+            }
             ClientAdminCommand::PrepareRenameIdentity { identity_id, name } => {
                 self.prepare_identity_rename(request.request_id, identity_id, name)
             }
@@ -2036,6 +2087,36 @@ impl ClientConnectionSession {
                             format!(
                                 "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"commit_sequence\":\"{sequence}\"}}",
                                 encode_lower_hex_id(operation_id)
+                            )
+                            .into_bytes(),
+                        )
+                    }
+                    PendingAdminAction::CreateSchema { name, owner_id } => {
+                        let created = storage
+                            .create_schema(
+                                operation_id,
+                                actor_id,
+                                &name,
+                                owner_id,
+                                retention_deadline_us,
+                                crate::audit::AuditEvent {
+                                    event_id,
+                                    actor_id: Some(actor_id),
+                                    correlation_id: operation_id,
+                                    occurred_at_us: now_us,
+                                    action: crate::audit::AuditAction::Ddl,
+                                    result: crate::audit::AuditResult::Succeeded,
+                                    target_ids: Vec::new(),
+                                },
+                            )
+                            .map_err(ClientSessionError::SchemaLifecycle)?;
+                        self.json_response(
+                            request.request_id,
+                            format!(
+                                "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"schema_id\":\"{}\",\"commit_sequence\":\"{}\"}}",
+                                encode_lower_hex_id(operation_id),
+                                encode_lower_hex_id(created.schema_id),
+                                created.commit_sequence,
                             )
                             .into_bytes(),
                         )

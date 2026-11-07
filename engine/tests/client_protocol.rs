@@ -310,6 +310,19 @@ fn admin_revoke_decoder_requires_prepare_then_start_schemas() {
             name: "reporting_role".into(),
         })
     );
+    assert_eq!(
+        decode_client_admin_command(
+            br#"{"phase":"prepare","operation_version":1,"operation":"schemas.create","arguments":{"name":"app_data","owner_id":"000102030405060708090a0b0c0d0e0f"}}"#
+        ),
+        Ok(ClientAdminCommand::PrepareCreateSchema {
+            name: "app_data".into(),
+            owner_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        })
+    );
+    assert!(decode_client_admin_command(
+        br#"{"phase":"prepare","operation_version":1,"operation":"schemas.create","arguments":{"name":"AppData","owner_id":"000102030405060708090a0b0c0d0e0f"}}"#
+    )
+    .is_err());
     let membership_request = format!(
         "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"roles.grant\",\"arguments\":{{\"member_id\":\"{}\",\"role_id\":\"{}\"}}}}",
         "01".repeat(16),

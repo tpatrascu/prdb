@@ -103,6 +103,8 @@ The first implemented read operation is `tokens.list`, with arguments `{ "user_i
 
 `roles.create` uses the same PREPARE/START envelope and normalized `name` argument. START checks current `MANAGE_ROLES`/database-administrator authority and atomically publishes a non-login role principal and matching role object with audit and durable outcome. The role receives no memberships or privileges. Success returns the operation ID, committed outcome, generated `role_id`, and commit sequence.
 
+`schemas.create` uses PREPARE/START with `{ "name": normalized_name, "owner_id": id }`. Names use the normalized lowercase ASCII profile. START requires inherited database-scoped `CREATE_SCHEMA` or database-administrator membership, verifies that the owner is a live user or role, and atomically publishes an empty schema and its owned object with audit and durable outcome. Success returns the operation ID, committed outcome, generated `schema_id`, and commit sequence. Schema ownership does not grant data privileges.
+
 `users.rename` and `roles.rename` use PREPARE/START with `{ "user_id": id, "name": normalized_name }` or `{ "role_id": id, "name": normalized_name }`. START requires the corresponding `MANAGE_USERS` or `MANAGE_ROLES` privilege, or current database-administrator authority. It atomically updates the principal name and authority epoch, matching named object and object version, audit, and durable outcome.
 
 `users.login` uses PREPARE/START with `{ "user_id": id, "enabled": "true" | "false" }`. START requires `MANAGE_USERS` or current database-administrator authority and changes the LOGIN flag and authority epoch atomically. Disabling LOGIN also revokes all outstanding user tokens in the same commit; enabling LOGIN does not restore revoked tokens.

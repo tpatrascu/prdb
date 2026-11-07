@@ -12,7 +12,7 @@ Each administrative submission contains one statement or an explicit atomic batc
 
 Initially one database per storage-manager instance, containing named schemas. `CREATE DATABASE`, federation, and cross-database references are future extensions.
 
-The initial trusted storage primitive supports `CREATE SCHEMA` for normalized lowercase ASCII names of at most 128 bytes, with an existing user or role assigned as owner. The caller must have inherited database-scoped `CREATE_SCHEMA` or be a database administrator. Creation publishes the schema record, owned object record, audit event, and operation outcome in one commit. This primitive does not yet parse SQL text or expose schema DDL through the external administrative protocol; quoted mixed-case names, rename, ownership transfer, and drop remain unimplemented.
+`CREATE SCHEMA` is available through the v1 `schemas.create` authenticated control operation for normalized lowercase ASCII names of at most 128 bytes, with an existing user or role assigned as owner. The caller must have inherited database-scoped `CREATE_SCHEMA` or be a database administrator. Creation publishes the schema record, owned object record, audit event, and operation outcome in one commit. The control operation accepts structured arguments rather than SQL text; quoted mixed-case names, rename, ownership transfer, and drop remain unimplemented.
 
 ```sql
 CREATE SCHEMA app AUTHORIZATION app_owner;
