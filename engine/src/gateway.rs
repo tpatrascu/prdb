@@ -506,18 +506,32 @@ fn serve_tcp_client_connection_inner<C: GatewayClientStream, S: Read + Write>(
         };
         let client_kind = request.kind;
         let auth_attempt = if client_kind == 2 {
-            auth_failure_limiter
+            match auth_failure_limiter
                 .zip(source_ip)
                 .map(|(limiter, source)| {
                     limiter
                         .begin_attempt(source)
                         .ok_or(GatewayConnectionError::AuthenticationRateLimited)
                 })
-                .transpose()?
+                .transpose()
+            {
+                Ok(attempt) => attempt,
+                Err(_) => {
+                    write_client_error(client, request.request_id, "unauthenticated")?;
+                    return Ok(());
+                }
+            }
         } else {
             None
         };
-        let (operation, payload) = client_request_to_ipc(client_kind, request.payload)?;
+        let (operation, payload) = match client_request_to_ipc(client_kind, request.payload) {
+            Ok(request) => request,
+            Err(GatewayConnectionError::UnsupportedClientKind(_)) => {
+                write_client_error(client, request.request_id, "invalid_request")?;
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
         let ipc_request = crate::ipc::IpcFrame {
             operation: operation as u16,
             request_id: request.request_id,
@@ -528,8 +542,7 @@ fn serve_tcp_client_connection_inner<C: GatewayClientStream, S: Read + Write>(
         let response = crate::ipc::read_frame(service)
             .map_err(GatewayConnectionError::ServiceFrame)?
             .ok_or(GatewayConnectionError::ServiceDisconnected)?;
-        if response.operation != ipc_request.operation || response.request_id != request.request_id
-        {
+        if response.request_id != request.request_id {
             return Err(GatewayConnectionError::MismatchedServiceResponse);
         }
         if client_kind == 2 {
@@ -543,6 +556,26 @@ fn serve_tcp_client_connection_inner<C: GatewayClientStream, S: Read + Write>(
             } else if let Some(attempt) = auth_attempt {
                 attempt.retain_failure();
             }
+        }
+        if response.operation == crate::ipc::Operation::GatewayClientError as u16 {
+            if response.payload.len() > crate::client_protocol::CLIENT_MAX_CONTROL_BYTES {
+                return Err(GatewayConnectionError::MismatchedServiceResponse);
+            }
+            let bytes = crate::client_protocol::ClientFrame {
+                kind: crate::client_protocol::CLIENT_ERROR_KIND,
+                request_id: response.request_id,
+                response_sequence: 0,
+                payload: response.payload,
+            }
+            .encode()
+            .map_err(GatewayConnectionError::ClientFrame)?;
+            client
+                .write_all(&bytes)
+                .map_err(GatewayConnectionError::Io)?;
+            return Ok(());
+        }
+        if response.operation != ipc_request.operation {
+            return Err(GatewayConnectionError::MismatchedServiceResponse);
         }
         let response = crate::client_protocol::ClientFrame {
             kind: 100,
@@ -559,6 +592,27 @@ fn serve_tcp_client_connection_inner<C: GatewayClientStream, S: Read + Write>(
             relay_gateway_result_events(client, service, request.request_id)?;
         }
     }
+}
+
+fn write_client_error<C: GatewayClientStream>(
+    client: &mut C,
+    request_id: u64,
+    code: &str,
+) -> Result<(), GatewayConnectionError> {
+    let message = match code {
+        "unauthenticated" => "Authentication is required.",
+        _ => "Request is invalid.",
+    };
+    let payload = format!("{{\"code\":\"{code}\",\"message\":\"{message}\"}}").into_bytes();
+    let bytes = crate::client_protocol::ClientFrame {
+        kind: crate::client_protocol::CLIENT_ERROR_KIND,
+        request_id,
+        response_sequence: 0,
+        payload,
+    }
+    .encode()
+    .map_err(GatewayConnectionError::ClientFrame)?;
+    client.write_all(&bytes).map_err(GatewayConnectionError::Io)
 }
 
 fn relay_gateway_result_events<C: GatewayClientStream, S: Read + Write>(

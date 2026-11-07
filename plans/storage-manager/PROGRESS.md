@@ -1262,4 +1262,11 @@
 - Behavior: control-mode ADMIN accepts the strict version-1 `tokens.list` read envelope, revalidates the connection before execution, checks owner/MANAGE_USERS/database-administrator authority in storage, and returns at most 64 token metadata records with an ID cursor. Verifier and bearer-secret material are omitted.
 - Contract and implementation: [client protocol](../../specs/client-protocol.md), [bounded token page](../../engine/src/storage_manager.rs), [ADMIN decoder and session handler](../../engine/src/client_protocol.rs), and gateway IPC kind mapping.
 - Regression evidence: decoder coverage rejects prepare-phase mutation envelopes and unknown arguments; a real-redb authenticated control-mode session test checks another user's token inventory and verifies secret material is absent.
-- Remaining: credential issue/revoke, other ADMIN read operations and mutation prepare/start, sanitized ERROR responses, and the separate supervisor process remain open.
+- Remaining: credential issue/revoke, other ADMIN read operations and mutation prepare/start, and the separate supervisor process remain open.
+
+## SU-1 / GW-2 dependency: sanitized client ERROR responses
+
+- Behavior: failed gateway request dispatches produce fixed-category, fixed-message ERROR payloads over a dedicated supervisor-to-gateway IPC response event. The gateway maps them to client frame kind 101 and closes the connection. Locally rejected client kinds and authentication throttles return similarly fixed responses. Raw internal errors are not serialized.
+- Contract and implementation: [client ERROR frame](../../specs/client-protocol.md), [gateway service event](../../specs/ipc-protocol.md), [gateway bridge](../../engine/src/gateway.rs), and [supervisor error classifier](../../engine/src/supervisor_ipc.rs).
+- Regression evidence: gateway bridge regression verifies the error kind, request ID, fixed payload, and close behavior.
+- Remaining: deliver errors for malformed frame headers where a trustworthy request ID is unavailable, map every transport failure category, and exercise real service errors across separate gateway/supervisor processes.

@@ -502,7 +502,14 @@ pub fn serve_gateway_client_session<'db, S: Read + Write>(
         ) {
             Ok(dispatched) => dispatched,
             Err(error) => {
+                let error_response = IpcFrame {
+                    operation: Operation::GatewayClientError as u16,
+                    request_id: request.request_id,
+                    payload: sanitized_gateway_error_payload(&error),
+                };
+                let write_result = crate::ipc::write_frame(stream, &error_response);
                 close_gateway_client_session(manager, staging, session)?;
+                write_result.map_err(SupervisorConnectionError::Frame)?;
                 return Err(SupervisorConnectionError::Gateway(error));
             }
         };
@@ -530,6 +537,40 @@ pub fn serve_gateway_client_session<'db, S: Read + Write>(
             }
         }
     }
+}
+
+fn sanitized_gateway_error_payload(error: &GatewayRequestError) -> Vec<u8> {
+    use crate::client_protocol::ClientSessionError;
+    let code = match error {
+        GatewayRequestError::InvalidPayload => "invalid_request",
+        GatewayRequestError::Dispatch(DispatchError::OperationNotAllowed { .. }) => "invalid_state",
+        GatewayRequestError::Dispatch(DispatchError::UnknownOperation(_)) => "invalid_request",
+        GatewayRequestError::Client(ClientSessionError::AuthenticationRequired) => {
+            "unauthenticated"
+        }
+        GatewayRequestError::Client(
+            ClientSessionError::WrongMode
+            | ClientSessionError::InvalidHello
+            | ClientSessionError::HelloAlreadyAccepted
+            | ClientSessionError::AuthenticationOutOfOrder
+            | ClientSessionError::AlreadyAuthenticated,
+        ) => "invalid_state",
+        GatewayRequestError::Client(
+            ClientSessionError::InvalidControlPayload(_) | ClientSessionError::UnsupportedRequest,
+        ) => "invalid_request",
+        GatewayRequestError::Client(ClientSessionError::ResourceLimit) => "resource_limit",
+        GatewayRequestError::Client(_)
+        | GatewayRequestError::Start(_)
+        | GatewayRequestError::Staging(_) => "unavailable",
+    };
+    let message = match code {
+        "invalid_request" => "Request is invalid.",
+        "invalid_state" => "Request is not valid in the current session state.",
+        "unauthenticated" => "Authentication is required.",
+        "resource_limit" => "Request exceeds a configured limit.",
+        _ => "Requested resource is unavailable.",
+    };
+    format!("{{\"code\":\"{code}\",\"message\":\"{message}\"}}").into_bytes()
 }
 
 fn close_gateway_client_session(

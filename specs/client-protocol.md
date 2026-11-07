@@ -99,6 +99,8 @@ The first implemented read operation is `tokens.list`, with arguments `{ "user_i
 
 PING has `{}` payload and returns `{ "alive": true }`; it is not a health/durability or authorization proof. ERROR has `code` and a sanitized message of at most 256 UTF-8 bytes. Initial code categories: invalid_frame, unsupported_version, unauthenticated, unavailable, invalid_state, invalid_request, resource_limit, cancelled, internal_error. Do not expose raw exceptions, SQL parameters, private names, paths, token details, or competing principals.
 
+ERROR is response kind 101, uses the failed request ID and response sequence zero, and has `{ "code": string, "message": string }`. The gateway closes the client connection after an ERROR response. Its message is selected from fixed public text by category and never copies an internal exception.
+
 ## Validation and Extension
 
 Test partial/coalesced frames, oversized lengths, malformed JSON/base64, duplicate IDs/keys, incorrect sequences, cross-session submissions, revoked credentials between upload/start, slow uploads without snapshot pins, upload substitution, forged worker terminal bytes, reconnect/status, and gateway death around commit. Test multiple concurrent connections while retaining one stream per connection.

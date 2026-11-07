@@ -11,6 +11,7 @@ pub const CLIENT_FRAME_HEADER_BYTES: usize = 32;
 pub const CLIENT_MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
 pub const CLIENT_MAX_CONTROL_BYTES: usize = 64 * 1024;
 pub const CLIENT_MAX_CHUNK_BYTES: usize = 256 * 1024;
+pub const CLIENT_ERROR_KIND: u16 = 101;
 const CLIENT_MAGIC: &[u8; 4] = b"PDBN";
 
 #[derive(Clone, Debug, Eq, PartialEq)]

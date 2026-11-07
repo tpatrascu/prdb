@@ -16,6 +16,8 @@ Readers accept arbitrary stream fragmentation and leave following coalesced fram
 
 Operation tags are fixed independently of their payload schemas. The channel's service role is assigned during trusted connection provisioning and is never selected by a frame field. `Operation::from_code` rejects unknown tags; framing rejects them before payload allocation. A role/operation mismatch is denied before the selected handler runs. Database-principal authorization remains a separate StorageManager check.
 
+`GatewayClientError` (`0x1412`) is a supervisor-to-gateway response event only. Its bounded UTF-8 JSON payload uses the public client ERROR `{ "code": string, "message": string }` schema. It must contain only a fixed category and fixed sanitized message; raw errors and principal or token details do not cross this boundary. A gateway MUST reject this operation as an inbound client request.
+
 | Role provisioned for the channel | Operation tags |
 | --- | --- |
 | Bootstrap | `0x0101` deliver setup credential; `0x0102` acknowledge delivery |

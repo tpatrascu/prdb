@@ -126,6 +126,66 @@ fn tcp_client_hello_and_ping_bridge_over_the_gateway_service_channel() {
 }
 
 #[test]
+fn gateway_bridge_returns_sanitized_supervisor_error_frames() {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let (mut gateway_service, mut supervisor_service) =
+        std::os::unix::net::UnixStream::pair().unwrap();
+    let supervisor = std::thread::spawn(move || {
+        let request = read_frame(&mut supervisor_service).unwrap().unwrap();
+        write_frame(
+            &mut supervisor_service,
+            &IpcFrame {
+                operation: Operation::GatewayClientError as u16,
+                request_id: request.request_id,
+                payload: br#"{"code":"invalid_request","message":"Request is invalid."}"#.to_vec(),
+            },
+        )
+        .unwrap();
+    });
+    let gateway = std::thread::spawn(move || {
+        let (mut client, _) = listener.accept().unwrap();
+        prdb_engine::gateway::serve_tcp_client_connection(&mut client, &mut gateway_service)
+            .unwrap();
+    });
+
+    let mut client = std::net::TcpStream::connect(address).unwrap();
+    client
+        .write_all(
+            &ClientFrame {
+                kind: 10,
+                request_id: 7,
+                response_sequence: 0,
+                payload: b"{}".to_vec(),
+            }
+            .encode()
+            .unwrap(),
+        )
+        .unwrap();
+    let mut decoder = ClientFrameDecoder::default();
+    let mut buffer = [0u8; 256];
+    let response = loop {
+        let count = client.read(&mut buffer).unwrap();
+        assert_ne!(count, 0);
+        if let Some(response) = decoder.push(&buffer[..count]).unwrap().pop() {
+            break response;
+        }
+    };
+    assert_eq!(
+        response.kind,
+        prdb_engine::client_protocol::CLIENT_ERROR_KIND
+    );
+    assert_eq!(response.request_id, 7);
+    assert_eq!(
+        response.payload,
+        br#"{"code":"invalid_request","message":"Request is invalid."}"#
+    );
+    assert_eq!(client.read(&mut buffer).unwrap(), 0);
+    gateway.join().unwrap();
+    supervisor.join().unwrap();
+}
+
+#[test]
 fn accepted_gateway_connections_obey_a_shared_limit() {
     let listener = TcpGatewayListener::bind(GatewayListenerConfig::default()).unwrap();
     let limiter = GatewayConnectionLimiter::new(1).unwrap();
@@ -457,6 +517,25 @@ fn gateway_stops_forwarding_auth_after_failed_attempt_budget() {
         )
         .unwrap();
     let mut byte = [0u8; 1];
+    let count = client.read(&mut byte).unwrap();
+    assert_ne!(count, 0);
+    let error = decoder.push(&byte[..count]).unwrap();
+    let mut response = error;
+    while response.is_empty() {
+        let count = client.read(&mut byte).unwrap();
+        assert_ne!(count, 0);
+        response.extend(decoder.push(&byte[..count]).unwrap());
+    }
+    assert_eq!(response.len(), 1);
+    assert_eq!(
+        response[0].kind,
+        prdb_engine::client_protocol::CLIENT_ERROR_KIND
+    );
+    assert_eq!(response[0].request_id, 3);
+    assert_eq!(
+        response[0].payload,
+        br#"{"code":"unauthenticated","message":"Authentication is required."}"#
+    );
     assert_eq!(client.read(&mut byte).unwrap(), 0);
 
     supervisor.join().unwrap();
