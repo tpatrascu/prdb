@@ -1946,6 +1946,189 @@ fn storage_manager_sets_replaces_and_drops_column_defaults()
     Ok(())
 }
 
+#[test]
+fn storage_manager_adds_column_and_backfills_existing_rows()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::storage_manager::{
+        AddTableColumnRequest, CreateTableRequest, TableColumnDefault, TableColumnDefinition,
+    };
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let actor = id(0x5d);
+    let admin_role = builtin_owner_id();
+    let setup = vec![
+        principal_write_with_name(actor, 1, 1, "add_column_owner"),
+        object_write_with_name(actor, 8, "add_column_owner"),
+        membership_write(actor, admin_role),
+        dependency_write(actor, admin_role, 5),
+    ];
+    let mut setup_audit = identity_audit_event(0x5e, admin_role, id(0x5f));
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(id(0x5f), admin_role, 9_999, &setup, &[setup_audit])?;
+    let schema_invocation = id(0x60);
+    let mut schema_audit = identity_audit_event(0x61, actor, id(0x62));
+    schema_audit.correlation_id = schema_invocation;
+    let schema = storage.create_schema(
+        schema_invocation,
+        actor,
+        "add_column_schema",
+        actor,
+        9_999,
+        schema_audit,
+    )?;
+    let create_invocation = id(0x63);
+    let mut create_audit = identity_audit_event(0x64, actor, id(0x65));
+    create_audit.correlation_id = create_invocation;
+    let table = storage.create_table(CreateTableRequest {
+        invocation_id: create_invocation,
+        authenticated_actor_id: actor,
+        schema_id: schema.schema_id,
+        name: "add_column_table".to_owned(),
+        columns: vec![TableColumnDefinition {
+            name: "number".to_owned(),
+            scalar_type: ScalarType::Integer,
+            nullable: false,
+            generated_uuid_identity: false,
+            default: None,
+        }],
+        retention_deadline_us: 9_999,
+        audit_event: create_audit,
+    })?;
+    let row_id = prdb_engine::overlay::RowId {
+        table: table.table_id,
+        row: id(0x66),
+    };
+    let mut insert = storage.begin_invocation(id(0x67), actor, 9_999, 2, 1024)?;
+    let old_schema = insert.load_catalog_table_schema(table.table_id)?;
+    insert.load_catalog_indexes(&old_schema)?;
+    let old_tuple = prdb_engine::tuple::encode_tuple(
+        &old_schema.columns,
+        old_schema.schema_version,
+        &[Some(ScalarValue::Integer(7))],
+    )?;
+    insert.stage_put(row_id, &old_tuple)?;
+    insert.commit()?;
+
+    let index_id = id(0x6b);
+    let (index_key, index_payload) =
+        index_definition_with_columns(index_id, table.table_id, &[table.column_ids[0]]);
+    let index_invocation = id(0x6c);
+    let mut index_audit = identity_audit_event(0x6d, actor, index_id);
+    index_audit.correlation_id = index_invocation;
+    storage.commit_authorized_index_ddl(
+        index_invocation,
+        actor,
+        9_999,
+        &[
+            CatalogWrite {
+                key: index_key.clone(),
+                expected_value: None,
+                payload: Some(index_payload),
+            },
+            object_write(index_id, 7),
+        ],
+        &[index_audit],
+    )?;
+
+    let add_invocation = id(0x68);
+    let mut add_audit = identity_audit_event(0x69, actor, id(0x6a));
+    add_audit.correlation_id = add_invocation;
+    let added_result = storage.add_table_column(AddTableColumnRequest {
+        invocation_id: add_invocation,
+        authenticated_actor_id: actor,
+        table_id: table.table_id,
+        column: TableColumnDefinition {
+            name: "label".to_owned(),
+            scalar_type: ScalarType::Text,
+            nullable: false,
+            generated_uuid_identity: false,
+            default: Some(TableColumnDefault::Literal(Some(ScalarValue::Text(
+                "ready".to_owned(),
+            )))),
+        },
+        retention_deadline_us: 9_999,
+        audit_event: add_audit,
+    });
+    assert!(
+        added_result.is_ok(),
+        "adding column failed: {added_result:?}"
+    );
+    let added = added_result?;
+    assert_eq!(added.schema_version, 2);
+    let stored = row(&database, &table_row_key(table.table_id, row_id.row))?
+        .ok_or("backfilled row is missing")?;
+    let tuple = prdb_engine::tuple::decode_tuple(
+        &[
+            prdb_engine::tuple::ColumnSchema {
+                scalar_type: ScalarType::Integer,
+                nullable: false,
+            },
+            prdb_engine::tuple::ColumnSchema {
+                scalar_type: ScalarType::Text,
+                nullable: false,
+            },
+        ],
+        added.schema_version,
+        &stored.payload,
+    )?;
+    assert_eq!(
+        tuple.values,
+        vec![
+            Some(ScalarValue::Integer(7)),
+            Some(ScalarValue::Text("ready".to_owned())),
+        ]
+    );
+    let added_schema_ids = [table.column_ids[0], added.column_id];
+    let added_schema_columns = [
+        prdb_engine::tuple::ColumnSchema {
+            scalar_type: ScalarType::Integer,
+            nullable: false,
+        },
+        prdb_engine::tuple::ColumnSchema {
+            scalar_type: ScalarType::Text,
+            nullable: false,
+        },
+    ];
+    let indexed_key = prdb_engine::index_key::derive_index_key(
+        index_id,
+        row_id.row,
+        added.schema_version,
+        &added_schema_ids,
+        &added_schema_columns,
+        &stored.payload,
+        &[table.column_ids[0]],
+    )?;
+    let read = database.begin_read()?;
+    let index_record = read
+        .open_table(CATALOG)?
+        .get(index_key.as_slice())?
+        .ok_or("index catalog record disappeared")?;
+    assert_eq!(
+        u64::from_le_bytes(
+            decode_registered_envelope(index_record.value())?
+                .fields
+                .iter()
+                .find(|field| field.tag == 10)
+                .ok_or("index schema version is missing")?
+                .payload
+                .as_slice()
+                .try_into()?
+        ),
+        added.schema_version
+    );
+    let locator = read
+        .open_table(schema::INDEXES)?
+        .get(indexed_key.key.as_slice())?
+        .ok_or("rewritten index entry is missing")?;
+    assert_eq!(
+        IndexLocator::decode_for_key(&indexed_key.key, locator.value())?.row_version,
+        stored.row_version
+    );
+    Ok(())
+}
+
 fn row(
     database: &Database,
     key: &[u8; 32],
@@ -5968,11 +6151,37 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         .nth(1)
         .and_then(|wire| wire.get(..32))
         .ok_or("invalid second ADMIN column ID")?;
-    let default_prepare = admin_dispatch_json(
+    let add_column_prepare = admin_dispatch_json(
         &storage,
         &staging,
         &mut control,
         23,
+        &format!(
+            "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"tables.add_column\",\"arguments\":{{\"table_id\":\"{table_id_wire}\",\"column\":{{\"name\":\"note\",\"type\":\"text\",\"nullable\":true,\"generated_uuid_identity\":false}}}}}}"
+        ),
+        retention_deadline_us,
+    )?;
+    let add_column_operation_id = add_column_prepare
+        .split("\"operation_id\":\"")
+        .nth(1)
+        .ok_or("missing ADMIN add-column operation ID")?
+        .get(..32)
+        .ok_or("invalid ADMIN add-column operation ID")?;
+    let add_column = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut control,
+        24,
+        &format!("{{\"phase\":\"start\",\"operation_id\":\"{add_column_operation_id}\"}}"),
+        retention_deadline_us,
+    )?;
+    assert!(add_column.contains("\"outcome\":\"committed\""));
+    assert!(add_column.contains("\"schema_version\":\"2\""));
+    let default_prepare = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut control,
+        25,
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"tables.set_column_default\",\"arguments\":{{\"table_id\":\"{table_id_wire}\",\"column_id\":\"{default_column_id_wire}\",\"type\":\"text\",\"default\":{{\"kind\":\"literal\",\"value\":\"ready\"}}}}}}"
         ),
@@ -5988,7 +6197,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &storage,
         &staging,
         &mut control,
-        24,
+        26,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{default_operation_id}\"}}"),
         retention_deadline_us,
     )?;
@@ -5997,7 +6206,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &storage,
         &staging,
         &mut control,
-        25,
+        27,
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"tables.drop_column_default\",\"arguments\":{{\"table_id\":\"{table_id_wire}\",\"column_id\":\"{default_column_id_wire}\"}}}}"
         ),
@@ -6013,7 +6222,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &storage,
         &staging,
         &mut control,
-        26,
+        28,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{default_drop_operation_id}\"}}"),
         retention_deadline_us,
     )?;
@@ -6022,7 +6231,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &storage,
         &staging,
         &mut control,
-        29,
+        33,
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"tables.rename_column\",\"arguments\":{{\"table_id\":\"{table_id_wire}\",\"column_id\":\"{first_column_id_wire}\",\"name\":\"row_id\"}}}}"
         ),
@@ -6038,7 +6247,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &storage,
         &staging,
         &mut control,
-        30,
+        34,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{column_rename_id}\"}}"),
         retention_deadline_us,
     )?;
@@ -6049,7 +6258,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &storage,
         &staging,
         &mut control,
-        31,
+        35,
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"tables.drop\",\"arguments\":{{\"table_id\":\"{table_id_wire}\"}}}}"
         ),
@@ -6065,7 +6274,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &storage,
         &staging,
         &mut control,
-        32,
+        36,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{table_drop_id}\"}}"),
         retention_deadline_us,
     )?;
@@ -6079,7 +6288,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &storage,
         &staging,
         &mut control,
-        33,
+        37,
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"schemas.create\",\"arguments\":{{\"name\":\"protocol_empty\",\"owner_id\":\"{admin_id_wire}\"}}}}"
         ),
@@ -6095,7 +6304,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &storage,
         &staging,
         &mut control,
-        34,
+        38,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{empty_schema_create_id}\"}}"),
         retention_deadline_us,
     )?;
@@ -6109,7 +6318,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &storage,
         &staging,
         &mut control,
-        35,
+        39,
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"schemas.drop\",\"arguments\":{{\"schema_id\":\"{empty_schema_id}\"}}}}"
         ),
@@ -6125,7 +6334,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &storage,
         &staging,
         &mut control,
-        36,
+        40,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{empty_schema_drop_id}\"}}"),
         retention_deadline_us,
     )?;

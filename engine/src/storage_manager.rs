@@ -494,9 +494,27 @@ pub struct AlterColumnDefaultRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AddTableColumnRequest {
+    pub invocation_id: [u8; 16],
+    pub authenticated_actor_id: [u8; 16],
+    pub table_id: [u8; 16],
+    pub column: TableColumnDefinition,
+    pub retention_deadline_us: i64,
+    pub audit_event: AuditEvent,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreatedTable {
     pub table_id: [u8; 16],
     pub column_ids: Vec<[u8; 16]>,
+    pub commit_sequence: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AddedTableColumn {
+    pub table_id: [u8; 16],
+    pub column_id: [u8; 16],
+    pub schema_version: u64,
     pub commit_sequence: u64,
 }
 
@@ -2357,6 +2375,335 @@ impl<'db> StorageManager<'db> {
         })?;
         Ok(DroppedTable {
             table_id,
+            commit_sequence,
+        })
+    }
+
+    /// Add one column and backfill every existing row from its immutable default.
+    pub fn add_table_column(
+        &self,
+        request: AddTableColumnRequest,
+    ) -> Result<AddedTableColumn, TableLifecycleError> {
+        let AddTableColumnRequest {
+            invocation_id,
+            authenticated_actor_id,
+            table_id,
+            column,
+            retention_deadline_us,
+            mut audit_event,
+        } = request;
+        if invocation_id == [0; 16]
+            || authenticated_actor_id == [0; 16]
+            || table_id == [0; 16]
+            || retention_deadline_us <= 0
+            || !is_normalized_principal_name(&column.name)
+            || column.generated_uuid_identity
+        {
+            return Err(TableLifecycleError::InvalidRequest);
+        }
+        if audit_event.actor_id != Some(authenticated_actor_id)
+            || audit_event.correlation_id != invocation_id
+            || audit_event.action != AuditAction::Ddl
+            || audit_event.result != AuditResult::Succeeded
+        {
+            return Err(TableLifecycleError::InvalidAudit);
+        }
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|_| TableLifecycleError::Storage)?;
+        let catalog = read
+            .open_table(CATALOG)
+            .map_err(|_| TableLifecycleError::Storage)?;
+        let table_key = id_catalog_key(5, table_id);
+        let table_bytes = catalog
+            .get(table_key.as_slice())
+            .map_err(|_| TableLifecycleError::Storage)?
+            .map(|value| value.value().to_vec())
+            .ok_or(TableLifecycleError::InvalidRequest)?;
+        let old_schema_version = read_catalog_u64(&table_key, &table_bytes, 5, 2)?;
+        let old_write_epoch = read_catalog_u64(&table_key, &table_bytes, 5, 3)?;
+        let next_schema_version = old_schema_version
+            .checked_add(1)
+            .ok_or(TableLifecycleError::Commit(CommitError::InvalidCatalog))?;
+        let next_write_epoch = old_write_epoch
+            .checked_add(1)
+            .ok_or(TableLifecycleError::Commit(CommitError::InvalidCatalog))?;
+        let column_prefix = 6u16.to_be_bytes();
+        let mut ordinal = 0usize;
+        let mut scanned = 0usize;
+        for entry in catalog
+            .range(column_prefix.as_slice()..)
+            .map_err(|_| TableLifecycleError::Storage)?
+        {
+            let (key, value) = entry.map_err(|_| TableLifecycleError::Storage)?;
+            let key = key.value().to_vec();
+            if !key.starts_with(&column_prefix) {
+                break;
+            }
+            scanned += 1;
+            if scanned > MAX_CATALOG_FAMILY_SCAN {
+                return Err(TableLifecycleError::Commit(CommitError::InvalidCatalog));
+            }
+            let bytes = value.value().to_vec();
+            if read_catalog_id(&key, &bytes, 6, 1)? != table_id {
+                continue;
+            }
+            if read_catalog_field(&key, &bytes, 6, 3)? == column.name.as_bytes() {
+                return Err(TableLifecycleError::InvalidRequest);
+            }
+            ordinal = ordinal
+                .checked_add(1)
+                .ok_or(TableLifecycleError::InvalidRequest)?;
+        }
+        if ordinal == 0 || ordinal >= crate::tuple::MAX_COLUMNS {
+            return Err(TableLifecycleError::InvalidRequest);
+        }
+        let type_definitions = load_builtin_type_definitions(self.database)?;
+        let type_kind = scalar_type_kind(column.scalar_type);
+        let (type_id, type_record) = type_definitions
+            .get(&type_kind)
+            .ok_or(TableLifecycleError::InvalidRequest)?;
+        let type_parameters = scalar_type_parameters(column.scalar_type);
+        decode_builtin_scalar_type(type_record, &type_parameters)
+            .map_err(|_| TableLifecycleError::InvalidRequest)?;
+        let default = match column.default.as_ref() {
+            Some(TableColumnDefault::Literal(value)) => {
+                let default_mask = u32::from_le_bytes(
+                    type_record
+                        .fields
+                        .iter()
+                        .find(|field| field.tag == 5)
+                        .ok_or(TableLifecycleError::Commit(CommitError::InvalidCatalog))?
+                        .payload
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| TableLifecycleError::Commit(CommitError::InvalidCatalog))?,
+                );
+                if default_mask & 1 == 0 {
+                    return Err(TableLifecycleError::InvalidRequest);
+                }
+                encode_tuple(
+                    &[ColumnSchema {
+                        scalar_type: column.scalar_type,
+                        nullable: column.nullable,
+                    }],
+                    1,
+                    std::slice::from_ref(value),
+                )
+                .map_err(|_| TableLifecycleError::InvalidRequest)?;
+                value.clone()
+            }
+            Some(TableColumnDefault::CurrentPrincipalId) => {
+                return Err(TableLifecycleError::InvalidRequest);
+            }
+            None if column.nullable => None,
+            None => return Err(TableLifecycleError::InvalidRequest),
+        };
+        let mut column_id = self.generate_table_object_id()?;
+        let expression_id = if column.default.is_some() {
+            let candidate = self.generate_table_object_id()?;
+            if candidate == column_id {
+                column_id.zeroize();
+                return Err(TableLifecycleError::ObjectIdGenerationFailed);
+            }
+            Some(candidate)
+        } else {
+            None
+        };
+        let column_key = id_catalog_key(6, column_id);
+        let object_key = id_catalog_key(2, column_id);
+        let mut writes = vec![
+            CatalogWrite {
+                key: table_key.clone(),
+                expected_value: Some(table_bytes.clone()),
+                payload: Some(rewrite_catalog_u64_fields(
+                    &table_key,
+                    &table_bytes,
+                    5,
+                    &[(2, next_schema_version), (3, next_write_epoch)],
+                )?),
+            },
+            CatalogWrite {
+                key: object_key.clone(),
+                expected_value: None,
+                payload: Some(
+                    encode_envelope(
+                        &family_schema(2).ok_or(TableLifecycleError::Storage)?,
+                        &object_key,
+                        &[
+                            CatalogField {
+                                tag: 1,
+                                wire_type: WireType::U16,
+                                payload: 4u16.to_le_bytes().to_vec(),
+                            },
+                            CatalogField {
+                                tag: 2,
+                                wire_type: WireType::Id,
+                                payload: table_id.to_vec(),
+                            },
+                            CatalogField {
+                                tag: 3,
+                                wire_type: WireType::Text,
+                                payload: column.name.as_bytes().to_vec(),
+                            },
+                            CatalogField {
+                                tag: 4,
+                                wire_type: WireType::Id,
+                                payload: authenticated_actor_id.to_vec(),
+                            },
+                            CatalogField {
+                                tag: 5,
+                                wire_type: WireType::U64,
+                                payload: 1u64.to_le_bytes().to_vec(),
+                            },
+                            CatalogField {
+                                tag: 6,
+                                wire_type: WireType::U16,
+                                payload: 1u16.to_le_bytes().to_vec(),
+                            },
+                        ],
+                    )
+                    .map_err(|_| TableLifecycleError::InvalidRequest)?,
+                ),
+            },
+        ];
+        let mut fields = vec![
+            CatalogField {
+                tag: 1,
+                wire_type: WireType::Id,
+                payload: table_id.to_vec(),
+            },
+            CatalogField {
+                tag: 2,
+                wire_type: WireType::U32,
+                payload: (ordinal as u32).to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 3,
+                wire_type: WireType::Text,
+                payload: column.name.as_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 4,
+                wire_type: WireType::Id,
+                payload: type_id.to_vec(),
+            },
+            CatalogField {
+                tag: 5,
+                wire_type: WireType::Bytes,
+                payload: type_parameters.to_vec(),
+            },
+            CatalogField {
+                tag: 6,
+                wire_type: WireType::Bool,
+                payload: vec![u8::from(column.nullable)],
+            },
+        ];
+        if let Some(expression_id) = expression_id {
+            fields.push(CatalogField {
+                tag: 7,
+                wire_type: WireType::Id,
+                payload: expression_id.to_vec(),
+            });
+        }
+        fields.extend([
+            CatalogField {
+                tag: 8,
+                wire_type: WireType::U16,
+                payload: 0u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 9,
+                wire_type: WireType::U64,
+                payload: next_schema_version.to_le_bytes().to_vec(),
+            },
+        ]);
+        if let Some(expression_id) = expression_id {
+            fields.push(CatalogField {
+                tag: 10,
+                wire_type: WireType::Id,
+                payload: expression_id.to_vec(),
+            });
+        }
+        writes.push(CatalogWrite {
+            key: column_key.clone(),
+            expected_value: None,
+            payload: Some(
+                encode_envelope(
+                    &family_schema(6).ok_or(TableLifecycleError::Storage)?,
+                    &column_key,
+                    &fields,
+                )
+                .map_err(|_| TableLifecycleError::InvalidRequest)?,
+            ),
+        });
+        writes.push(new_dependency_write(column_id, table_id, 1)?);
+        if let Some(expression_id) = expression_id {
+            writes.push(new_default_expression_object_write(
+                expression_id,
+                ordinal,
+                authenticated_actor_id,
+            )?);
+            writes.push(new_default_expression_write(
+                expression_id,
+                *type_id,
+                type_parameters,
+                crate::authorization::Expr::Literal(default),
+            )?);
+            writes.push(new_dependency_write(column_id, expression_id, 2)?);
+        }
+        let index_prefix = 9u16.to_be_bytes();
+        let mut index_scanned = 0usize;
+        for entry in catalog
+            .range(index_prefix.as_slice()..)
+            .map_err(|_| TableLifecycleError::Storage)?
+        {
+            let (key, value) = entry.map_err(|_| TableLifecycleError::Storage)?;
+            let key = key.value().to_vec();
+            if !key.starts_with(&index_prefix) {
+                break;
+            }
+            index_scanned += 1;
+            if index_scanned > MAX_CATALOG_FAMILY_SCAN {
+                column_id.zeroize();
+                return Err(TableLifecycleError::Commit(CommitError::InvalidCatalog));
+            }
+            let bytes = value.value().to_vec();
+            if read_catalog_id(&key, &bytes, 9, 1)? == table_id {
+                writes.push(CatalogWrite {
+                    key: key.clone(),
+                    expected_value: Some(bytes.clone()),
+                    payload: Some(rewrite_catalog_u64_field(
+                        &key,
+                        &bytes,
+                        9,
+                        10,
+                        next_schema_version,
+                    )?),
+                });
+            }
+        }
+        drop(catalog);
+        drop(read);
+        audit_event.target_ids = vec![table_id, column_id];
+        audit_event.target_ids.sort_unstable();
+        let commit_sequence = self
+            .commit_authorized_constraint_ddl(
+                invocation_id,
+                authenticated_actor_id,
+                retention_deadline_us,
+                &writes,
+                &[audit_event],
+            )
+            .map_err(|error| match error {
+                CommitError::DdlAuthorizationDenied => TableLifecycleError::Unauthorized,
+                error => TableLifecycleError::Commit(error),
+            })?;
+        Ok(AddedTableColumn {
+            table_id,
+            column_id,
+            schema_version: next_schema_version,
             commit_sequence,
         })
     }

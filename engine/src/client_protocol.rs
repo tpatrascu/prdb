@@ -197,6 +197,10 @@ enum PendingAdminAction {
         table_id: [u8; 16],
         column_id: [u8; 16],
     },
+    AddColumn {
+        table_id: [u8; 16],
+        column: crate::storage_manager::TableColumnDefinition,
+    },
     CreateTable {
         schema_id: [u8; 16],
         name: String,
@@ -295,6 +299,10 @@ pub enum ClientAdminCommand {
         table_id: [u8; 16],
         column_id: [u8; 16],
     },
+    PrepareAddColumn {
+        table_id: [u8; 16],
+        column: crate::storage_manager::TableColumnDefinition,
+    },
     PrepareCreateTable {
         schema_id: [u8; 16],
         name: String,
@@ -370,6 +378,7 @@ pub fn decode_client_admin_command(
     let mut operation = None;
     let mut arguments = None;
     let mut table_columns = None;
+    let mut table_column = None;
     let mut column_default = None;
     let mut operation_id = None;
     let mut seen = std::collections::HashSet::new();
@@ -408,6 +417,9 @@ pub fn decode_client_admin_command(
                     if arg == "columns" && parser.text.get(parser.offset) == Some(&b'[') {
                         table_columns = Some(parser.parse_table_column_array()?);
                         args.insert(arg, "<structured-columns>".to_owned());
+                    } else if arg == "column" && parser.text.get(parser.offset) == Some(&b'{') {
+                        table_column = Some(parser.parse_table_column_definition()?);
+                        args.insert(arg, "<structured-column>".to_owned());
                     } else if arg == "default" && parser.text.get(parser.offset) == Some(&b'{') {
                         column_default = Some(parser.parse_table_column_default()?);
                         args.insert(arg, "<structured-default>".to_owned());
@@ -689,6 +701,33 @@ pub fn decode_client_admin_command(
                 column_id,
                 default: None,
             })
+        }
+        Some("prepare")
+            if version == Some(1) && operation.as_deref() == Some("tables.add_column") =>
+        {
+            if operation_id.is_some() || seen.len() != 4 {
+                return Err(ClientControlError::UnknownKey);
+            }
+            let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
+            let table_id = decode_lower_hex_id(
+                &args
+                    .remove("table_id")
+                    .ok_or(ClientControlError::MissingKey)?,
+            )?;
+            if args.remove("column").as_deref() != Some("<structured-column>") || !args.is_empty() {
+                return Err(ClientControlError::InvalidPrepare);
+            }
+            let column = table_column.ok_or(ClientControlError::MissingKey)?;
+            if column.generated_uuid_identity
+                || (!column.nullable && column.default.is_none())
+                || matches!(
+                    column.default,
+                    Some(crate::storage_manager::TableColumnDefault::CurrentPrincipalId)
+                )
+            {
+                return Err(ClientControlError::InvalidPrepare);
+            }
+            Ok(ClientAdminCommand::PrepareAddColumn { table_id, column })
         }
         Some("prepare")
             if version == Some(1) && operation.as_deref() == Some("tables.drop_column") =>
@@ -1419,59 +1458,7 @@ impl JsonStringObjectParser<'_> {
             if columns.len() >= crate::tuple::MAX_COLUMNS {
                 return Err(ClientControlError::InvalidPrepare);
             }
-            self.skip_whitespace();
-            self.expect(b'{')?;
-            let mut fields = std::collections::HashSet::new();
-            let mut name = None;
-            let mut scalar_type = None;
-            let mut nullable = None;
-            let mut generated_uuid_identity = None;
-            let mut default = None;
-            self.skip_whitespace();
-            if self.consume(b'}') {
-                return Err(ClientControlError::InvalidPrepare);
-            }
-            loop {
-                self.skip_whitespace();
-                let key = self.parse_string()?;
-                if !fields.insert(key.clone()) {
-                    return Err(ClientControlError::DuplicateKey);
-                }
-                self.skip_whitespace();
-                self.expect(b':')?;
-                self.skip_whitespace();
-                match key.as_str() {
-                    "name" => name = Some(self.parse_string()?),
-                    "type" => scalar_type = Some(decode_table_scalar_type(&self.parse_string()?)?),
-                    "nullable" => nullable = Some(self.parse_boolean()?),
-                    "generated_uuid_identity" => {
-                        generated_uuid_identity = Some(self.parse_boolean()?)
-                    }
-                    "default" => default = Some(self.parse_table_column_default()?),
-                    _ => return Err(ClientControlError::UnknownKey),
-                }
-                self.skip_whitespace();
-                if self.consume(b'}') {
-                    break;
-                }
-                self.expect(b',')?;
-            }
-            let name = name.ok_or(ClientControlError::MissingKey)?;
-            let scalar_type = scalar_type.ok_or(ClientControlError::MissingKey)?;
-            let generated_uuid_identity =
-                generated_uuid_identity.ok_or(ClientControlError::MissingKey)?;
-            if generated_uuid_identity && default.is_some() {
-                return Err(ClientControlError::InvalidPrepare);
-            }
-            columns.push(crate::storage_manager::TableColumnDefinition {
-                name,
-                scalar_type,
-                nullable: nullable.ok_or(ClientControlError::MissingKey)?,
-                generated_uuid_identity,
-                default: default
-                    .map(|(kind, value)| decode_table_column_default(&kind, value, scalar_type))
-                    .transpose()?,
-            });
+            columns.push(self.parse_table_column_definition()?);
             self.skip_whitespace();
             if self.consume(b']') {
                 break;
@@ -1479,6 +1466,61 @@ impl JsonStringObjectParser<'_> {
             self.expect(b',')?;
         }
         Ok(columns)
+    }
+
+    fn parse_table_column_definition(
+        &mut self,
+    ) -> Result<crate::storage_manager::TableColumnDefinition, ClientControlError> {
+        self.expect(b'{')?;
+        let mut fields = std::collections::HashSet::new();
+        let mut name = None;
+        let mut scalar_type = None;
+        let mut nullable = None;
+        let mut generated_uuid_identity = None;
+        let mut default = None;
+        self.skip_whitespace();
+        if self.consume(b'}') {
+            return Err(ClientControlError::InvalidPrepare);
+        }
+        loop {
+            self.skip_whitespace();
+            let key = self.parse_string()?;
+            if !fields.insert(key.clone()) {
+                return Err(ClientControlError::DuplicateKey);
+            }
+            self.skip_whitespace();
+            self.expect(b':')?;
+            self.skip_whitespace();
+            match key.as_str() {
+                "name" => name = Some(self.parse_string()?),
+                "type" => scalar_type = Some(decode_table_scalar_type(&self.parse_string()?)?),
+                "nullable" => nullable = Some(self.parse_boolean()?),
+                "generated_uuid_identity" => generated_uuid_identity = Some(self.parse_boolean()?),
+                "default" => default = Some(self.parse_table_column_default()?),
+                _ => return Err(ClientControlError::UnknownKey),
+            }
+            self.skip_whitespace();
+            if self.consume(b'}') {
+                break;
+            }
+            self.expect(b',')?;
+        }
+        let name = name.ok_or(ClientControlError::MissingKey)?;
+        let scalar_type = scalar_type.ok_or(ClientControlError::MissingKey)?;
+        let generated_uuid_identity =
+            generated_uuid_identity.ok_or(ClientControlError::MissingKey)?;
+        if generated_uuid_identity && default.is_some() {
+            return Err(ClientControlError::InvalidPrepare);
+        }
+        Ok(crate::storage_manager::TableColumnDefinition {
+            name,
+            scalar_type,
+            nullable: nullable.ok_or(ClientControlError::MissingKey)?,
+            generated_uuid_identity,
+            default: default
+                .map(|(kind, value)| decode_table_column_default(&kind, value, scalar_type))
+                .transpose()?,
+        })
     }
 
     fn parse_table_column_default(
@@ -2588,6 +2630,32 @@ impl ClientConnectionSession {
                     .into_bytes(),
                 )
             }
+            ClientAdminCommand::PrepareAddColumn { table_id, column } => {
+                if self.pending_admin_operation.is_some() {
+                    return Err(ClientSessionError::WrongMode);
+                }
+                let mut operation_id = [0; 16];
+                getrandom::fill(&mut operation_id).map_err(|_| {
+                    ClientSessionError::Storage(TransactionError::RandomnessUnavailable)
+                })?;
+                if operation_id == [0; 16] {
+                    return Err(ClientSessionError::Storage(
+                        TransactionError::RandomnessUnavailable,
+                    ));
+                }
+                self.pending_admin_operation = Some(PendingAdminOperation {
+                    operation_id,
+                    action: PendingAdminAction::AddColumn { table_id, column },
+                });
+                self.json_response(
+                    request.request_id,
+                    format!(
+                        "{{\"operation_id\":\"{}\",\"state\":\"prepared\"}}",
+                        encode_lower_hex_id(operation_id)
+                    )
+                    .into_bytes(),
+                )
+            }
             ClientAdminCommand::PrepareDropColumn {
                 table_id,
                 column_id,
@@ -3141,6 +3209,38 @@ impl ClientConnectionSession {
                                 encode_lower_hex_id(table_id),
                                 encode_lower_hex_id(column_id),
                                 commit_sequence,
+                            )
+                            .into_bytes(),
+                        )
+                    }
+                    PendingAdminAction::AddColumn { table_id, column } => {
+                        let added = storage
+                            .add_table_column(crate::storage_manager::AddTableColumnRequest {
+                                invocation_id: operation_id,
+                                authenticated_actor_id: actor_id,
+                                table_id,
+                                column,
+                                retention_deadline_us,
+                                audit_event: crate::audit::AuditEvent {
+                                    event_id,
+                                    actor_id: Some(actor_id),
+                                    correlation_id: operation_id,
+                                    occurred_at_us: now_us,
+                                    action: crate::audit::AuditAction::Ddl,
+                                    result: crate::audit::AuditResult::Succeeded,
+                                    target_ids: Vec::new(),
+                                },
+                            })
+                            .map_err(ClientSessionError::TableLifecycle)?;
+                        self.json_response(
+                            request.request_id,
+                            format!(
+                                "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"table_id\":\"{}\",\"column_id\":\"{}\",\"schema_version\":\"{}\",\"commit_sequence\":\"{}\"}}",
+                                encode_lower_hex_id(operation_id),
+                                encode_lower_hex_id(added.table_id),
+                                encode_lower_hex_id(added.column_id),
+                                added.schema_version,
+                                added.commit_sequence,
                             )
                             .into_bytes(),
                         )
