@@ -90,6 +90,12 @@ pub enum ClientSessionError {
 pub enum ClientStartError {
     Session(ClientSessionError),
     Start(crate::supervisor::StartError<TransactionError>),
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    ExecutorStart(
+        crate::supervisor::StartError<
+            crate::executor_launcher::ExecutorStartError<TransactionError>,
+        >,
+    ),
 }
 
 impl std::fmt::Display for ClientStartError {
@@ -2217,6 +2223,60 @@ impl ClientConnectionSession {
         Ok((response, invocation))
     }
 
+    /// Accept START through the configured executor launch path. The host
+    /// profile and cgroup are established before storage admission; the
+    /// executor is spawned only after its artifact and confinement command
+    /// have been prepared.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    pub fn handle_start_request_with_executor<'db>(
+        &mut self,
+        storage: &StorageManager<'db>,
+        staging: &crate::supervisor::StagingStore,
+        request: ClientFrame,
+        admission: crate::supervisor_ipc::GatewayAdmissionConfig,
+        executor: &crate::supervisor_ipc::GatewayExecutorConfig,
+    ) -> Result<
+        (
+            ClientFrame,
+            crate::storage_manager::SupervisorInvocation<'db>,
+            crate::executor_launcher::RunningExecutor,
+        ),
+        ClientStartError,
+    > {
+        if request.response_sequence != 0 || request.kind != 7 {
+            return Err(ClientStartError::Session(
+                ClientSessionError::UnsupportedRequest,
+            ));
+        }
+        self.request_ids
+            .accept(&request)
+            .map_err(|_| ClientStartError::Session(ClientSessionError::UnsupportedRequest))?;
+        if !self.permits_request_kind(request.kind) {
+            return Err(ClientStartError::Session(if self.authenticated.is_none() {
+                ClientSessionError::AuthenticationRequired
+            } else {
+                ClientSessionError::WrongMode
+            }));
+        }
+        let invocation_id = decode_client_seal(&request.payload).map_err(|error| {
+            ClientStartError::Session(ClientSessionError::InvalidControlPayload(error))
+        })?;
+        let (invocation, worker) = self.start_submission_with_executor(
+            storage,
+            staging,
+            invocation_id,
+            admission,
+            executor,
+        )?;
+        let response = ClientFrame {
+            kind: 100,
+            request_id: request.request_id,
+            response_sequence: 0,
+            payload: b"{\"state\":\"accepted\"}".to_vec(),
+        };
+        Ok((response, invocation, worker))
+    }
+
     /// Report the caller-owned staging state or current storage outcome after
     /// revalidating the connection's credential and role closure.
     pub fn handle_status_request(
@@ -4192,6 +4252,63 @@ impl ClientConnectionSession {
         });
         token_secret.zeroize();
         result.map_err(ClientStartError::Start)
+    }
+
+    /// Revalidate token authority and run the one-shot storage plus executor
+    /// launch sequence for a sealed query.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    pub fn start_submission_with_executor<'db>(
+        &mut self,
+        storage: &StorageManager<'db>,
+        staging: &crate::supervisor::StagingStore,
+        invocation_id: [u8; 16],
+        admission: crate::supervisor_ipc::GatewayAdmissionConfig,
+        executor: &crate::supervisor_ipc::GatewayExecutorConfig,
+    ) -> Result<
+        (
+            crate::storage_manager::SupervisorInvocation<'db>,
+            crate::executor_launcher::RunningExecutor,
+        ),
+        ClientStartError,
+    > {
+        let owner = self.staging_owner().map_err(ClientStartError::Session)?;
+        let authenticated = self
+            .authenticated
+            .as_ref()
+            .ok_or(ClientStartError::Session(
+                ClientSessionError::AuthenticationRequired,
+            ))?;
+        let token_id = authenticated.token_id();
+        let mut token_secret = *self.token_secret.as_ref().ok_or(ClientStartError::Session(
+            ClientSessionError::AuthenticationRequired,
+        ))?;
+        let result = crate::executor_launcher::start_and_launch_executor(
+            staging,
+            owner,
+            invocation_id,
+            &executor.cgroup_parent,
+            executor.resource_limits,
+            &executor.launch,
+            |submission| {
+                let duration = std::time::Duration::from_millis(submission.metadata().deadline_ms);
+                let deadline = std::time::Instant::now()
+                    .checked_add(duration)
+                    .ok_or(TransactionError::InvalidContext)?;
+                storage.admit_supervisor_invocation_with_deadline(
+                    crate::storage_manager::SupervisorAdmissionRequest {
+                        invocation_id: submission.invocation_id(),
+                        token_id,
+                        retention_deadline_us: admission.retention_deadline_us,
+                        max_rows: admission.max_rows,
+                        max_bytes: admission.max_bytes,
+                        deadline: Some(deadline),
+                    },
+                    &token_secret,
+                )
+            },
+        );
+        token_secret.zeroize();
+        result.map_err(ClientStartError::ExecutorStart)
     }
 
     /// Enforce the v1 mode and pre-authentication operation allowlists.

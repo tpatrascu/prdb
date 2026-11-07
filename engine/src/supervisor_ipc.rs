@@ -53,6 +53,8 @@ pub enum GatewayClientDispatch<'db> {
         response: IpcFrame,
         invocation: crate::storage_manager::SupervisorInvocation<'db>,
         submission: crate::supervisor::SealedSubmission,
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        executor: Option<Box<crate::executor_launcher::RunningExecutor>>,
     },
 }
 
@@ -62,6 +64,8 @@ pub enum GatewayClientServiceEvent<'db> {
         request_id: u64,
         invocation: crate::storage_manager::SupervisorInvocation<'db>,
         submission: crate::supervisor::SealedSubmission,
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        executor: Option<Box<crate::executor_launcher::RunningExecutor>>,
     },
 }
 
@@ -70,6 +74,22 @@ pub struct GatewayAdmissionConfig {
     pub retention_deadline_us: i64,
     pub max_rows: usize,
     pub max_bytes: usize,
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[derive(Clone, Debug)]
+pub struct GatewayExecutorConfig {
+    pub cgroup_parent: std::path::PathBuf,
+    pub resource_limits: crate::linux_sandbox::WorkerResourceLimits,
+    pub launch: crate::executor_launcher::ExecutorLaunchConfig,
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[derive(Clone, Debug)]
+pub struct GatewayServiceRuntimeConfig {
+    pub admission: GatewayAdmissionConfig,
+    pub executor: GatewayExecutorConfig,
+    pub listener: GatewayServiceListenerConfig,
 }
 
 #[cfg(unix)]
@@ -249,13 +269,12 @@ pub fn bind_gateway_service_socket(socket_path: impl AsRef<Path>) -> io::Result<
 /// Accept bounded per-client Unix streams from the configured gateway UID.
 /// The START callback owns trusted scheduling and event emission for that
 /// invocation; status/cancel control remains available through other sessions.
-#[cfg(unix)]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub fn serve_gateway_service_listener<'db, F>(
     listener: UnixListener,
     manager: &StorageManager<'db>,
     staging: &crate::supervisor::StagingStore,
-    admission: GatewayAdmissionConfig,
-    config: GatewayServiceListenerConfig,
+    runtime: GatewayServiceRuntimeConfig,
     shutdown: Arc<AtomicBool>,
     on_started: F,
 ) -> Result<(), GatewayServiceListenerError>
@@ -265,18 +284,19 @@ where
             &mut UnixStream,
             crate::storage_manager::SupervisorInvocation<'db>,
             crate::supervisor::SealedSubmission,
+            crate::executor_launcher::RunningExecutor,
         ) + Sync,
 {
-    if config.max_connections == 0
-        || config.idle_timeout.is_zero()
-        || config.accept_poll_interval.is_zero()
+    if runtime.listener.max_connections == 0
+        || runtime.listener.idle_timeout.is_zero()
+        || runtime.listener.accept_poll_interval.is_zero()
     {
         return Err(GatewayServiceListenerError::InvalidConfig);
     }
     listener
         .set_nonblocking(true)
         .map_err(GatewayServiceListenerError::Io)?;
-    let limiter = crate::gateway::GatewayConnectionLimiter::new(config.max_connections)
+    let limiter = crate::gateway::GatewayConnectionLimiter::new(runtime.listener.max_connections)
         .map_err(|_| GatewayServiceListenerError::InvalidConfig)?;
 
     std::thread::scope(|scope| {
@@ -291,16 +311,19 @@ where
                     let worker_manager = manager;
                     let worker_staging = staging;
                     let worker_started = &on_started;
+                    let worker_runtime = &runtime;
                     workers.push(scope.spawn(move || {
                         let _permit = permit;
                         if crate::gateway::unix_peer_uid(&stream).ok()
-                            != Some(config.expected_gateway_uid)
+                            != Some(worker_runtime.listener.expected_gateway_uid)
                         {
                             return;
                         }
                         if stream
-                            .set_read_timeout(Some(config.idle_timeout))
-                            .and_then(|()| stream.set_write_timeout(Some(config.idle_timeout)))
+                            .set_read_timeout(Some(worker_runtime.listener.idle_timeout))
+                            .and_then(|()| {
+                                stream.set_write_timeout(Some(worker_runtime.listener.idle_timeout))
+                            })
                             .is_err()
                         {
                             return;
@@ -308,28 +331,35 @@ where
                         let mut session =
                             crate::client_protocol::ClientConnectionSession::default();
                         loop {
-                            match serve_gateway_client_session(
+                            match serve_gateway_client_session_with_executor(
                                 &mut stream,
                                 worker_manager,
                                 worker_staging,
                                 &mut session,
-                                admission,
+                                worker_runtime.admission,
+                                &worker_runtime.executor,
                             ) {
                                 Ok(GatewayClientServiceEvent::Disconnected) => return,
                                 Ok(GatewayClientServiceEvent::Started {
                                     request_id,
                                     invocation,
                                     submission,
-                                }) => {
-                                    worker_started(request_id, &mut stream, invocation, submission)
-                                }
+                                    executor: Some(executor),
+                                }) => worker_started(
+                                    request_id,
+                                    &mut stream,
+                                    invocation,
+                                    submission,
+                                    *executor,
+                                ),
+                                Ok(GatewayClientServiceEvent::Started { .. }) => return,
                                 Err(_) => return,
                             }
                         }
                     }));
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(config.accept_poll_interval);
+                    std::thread::sleep(runtime.listener.accept_poll_interval);
                 }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                 Err(error) => {
@@ -378,6 +408,50 @@ pub fn dispatch_gateway_client_request<'db>(
     request: &IpcFrame,
     admission: GatewayAdmissionConfig,
 ) -> Result<GatewayClientDispatch<'db>, GatewayRequestError> {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        dispatch_gateway_client_request_inner(
+            role, manager, staging, session, request, admission, None,
+        )
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    {
+        dispatch_gateway_client_request_inner(role, manager, staging, session, request, admission)
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub fn dispatch_gateway_client_request_with_executor<'db>(
+    role: ServiceRole,
+    manager: &StorageManager<'db>,
+    staging: &crate::supervisor::StagingStore,
+    session: &mut crate::client_protocol::ClientConnectionSession,
+    request: &IpcFrame,
+    admission: GatewayAdmissionConfig,
+    executor: &GatewayExecutorConfig,
+) -> Result<GatewayClientDispatch<'db>, GatewayRequestError> {
+    dispatch_gateway_client_request_inner(
+        role,
+        manager,
+        staging,
+        session,
+        request,
+        admission,
+        Some(executor),
+    )
+}
+
+fn dispatch_gateway_client_request_inner<'db>(
+    role: ServiceRole,
+    manager: &StorageManager<'db>,
+    staging: &crate::supervisor::StagingStore,
+    session: &mut crate::client_protocol::ClientConnectionSession,
+    request: &IpcFrame,
+    admission: GatewayAdmissionConfig,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))] executor: Option<
+        &GatewayExecutorConfig,
+    >,
+) -> Result<GatewayClientDispatch<'db>, GatewayRequestError> {
     let operation =
         Operation::from_code(request.operation).map_err(GatewayRequestError::Dispatch)?;
     authorize_operation(role, operation).map_err(GatewayRequestError::Dispatch)?;
@@ -422,6 +496,36 @@ pub fn dispatch_gateway_client_request<'db>(
                         crate::client_protocol::ClientSessionError::InvalidControlPayload(error),
                     )
                 })?;
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            if let Some(executor) = executor {
+                let (response, invocation, worker) = session
+                    .handle_start_request_with_executor(
+                        manager,
+                        staging,
+                        frame(7, request.payload.clone()),
+                        admission,
+                        executor,
+                    )
+                    .map_err(GatewayRequestError::Start)?;
+                let submission = staging
+                    .started_submission(
+                        session
+                            .staging_owner()
+                            .map_err(GatewayRequestError::Client)?,
+                        invocation_id,
+                    )
+                    .map_err(GatewayRequestError::Staging)?;
+                return Ok(GatewayClientDispatch::Started {
+                    response: IpcFrame {
+                        operation: request.operation,
+                        request_id: response.request_id,
+                        payload: response.payload,
+                    },
+                    invocation,
+                    submission,
+                    executor: Some(Box::new(worker)),
+                });
+            }
             let (response, invocation) = session
                 .handle_start_request(
                     manager,
@@ -448,6 +552,8 @@ pub fn dispatch_gateway_client_request<'db>(
                 },
                 invocation,
                 submission,
+                #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+                executor: None,
             });
         }
         Operation::ClientGetInvocationStatus => session
@@ -484,6 +590,38 @@ pub fn serve_gateway_client_session<'db, S: Read + Write>(
     session: &mut crate::client_protocol::ClientConnectionSession,
     admission: GatewayAdmissionConfig,
 ) -> Result<GatewayClientServiceEvent<'db>, SupervisorConnectionError> {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        serve_gateway_client_session_inner(stream, manager, staging, session, admission, None)
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    {
+        serve_gateway_client_session_inner(stream, manager, staging, session, admission)
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub fn serve_gateway_client_session_with_executor<'db, S: Read + Write>(
+    stream: &mut S,
+    manager: &StorageManager<'db>,
+    staging: &crate::supervisor::StagingStore,
+    session: &mut crate::client_protocol::ClientConnectionSession,
+    admission: GatewayAdmissionConfig,
+    executor: &GatewayExecutorConfig,
+) -> Result<GatewayClientServiceEvent<'db>, SupervisorConnectionError> {
+    serve_gateway_client_session_inner(stream, manager, staging, session, admission, Some(executor))
+}
+
+fn serve_gateway_client_session_inner<'db, S: Read + Write>(
+    stream: &mut S,
+    manager: &StorageManager<'db>,
+    staging: &crate::supervisor::StagingStore,
+    session: &mut crate::client_protocol::ClientConnectionSession,
+    admission: GatewayAdmissionConfig,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))] executor: Option<
+        &GatewayExecutorConfig,
+    >,
+) -> Result<GatewayClientServiceEvent<'db>, SupervisorConnectionError> {
     loop {
         let request = match crate::ipc::read_frame(stream) {
             Ok(Some(request)) => request,
@@ -497,13 +635,15 @@ pub fn serve_gateway_client_session<'db, S: Read + Write>(
                 return Err(SupervisorConnectionError::Frame(error));
             }
         };
-        let dispatched = match dispatch_gateway_client_request(
+        let dispatched = match dispatch_gateway_client_request_inner(
             ServiceRole::Gateway,
             manager,
             staging,
             session,
             &request,
             admission,
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            executor,
         ) {
             Ok(dispatched) => dispatched,
             Err(error) => {
@@ -535,6 +675,8 @@ pub fn serve_gateway_client_session<'db, S: Read + Write>(
                 response,
                 invocation,
                 submission,
+                #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+                executor,
             } => {
                 if let Err(error) = crate::ipc::write_frame(stream, &response) {
                     close_gateway_client_session(manager, staging, session)?;
@@ -544,6 +686,8 @@ pub fn serve_gateway_client_session<'db, S: Read + Write>(
                     request_id: response.request_id,
                     invocation,
                     submission,
+                    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+                    executor,
                 });
             }
         }

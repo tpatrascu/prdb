@@ -14270,6 +14270,7 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
                         request_id,
                         invocation,
                         submission,
+                        executor: None,
                     } => {
                         assert_eq!(submission.artifact(), artifact);
                         let owner = service_session
@@ -14302,6 +14303,10 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
                             .map_err(|error| format!("staging cleanup failed: {error:?}"))?;
                         started = true;
                     }
+                    prdb_engine::supervisor_ipc::GatewayClientServiceEvent::Started {
+                        executor: Some(_),
+                        ..
+                    } => unreachable!("legacy session unexpectedly launched an executor"),
                     prdb_engine::supervisor_ipc::GatewayClientServiceEvent::Disconnected => {
                         if !started {
                             return Err("disconnect before START".to_owned());
@@ -14580,6 +14585,8 @@ fn gateway_service_listener_binds_peer_and_serves_hello() -> Result<(), Box<dyn 
         max_rows: 2,
         max_bytes: 64,
     };
+    let executor_path = std::env::current_exe()?;
+    let cgroup_parent = fixture.path().parent().unwrap().to_path_buf();
     std::thread::scope(|scope| {
         let shutdown_server = Arc::clone(&shutdown);
         let server = scope.spawn(move || {
@@ -14587,15 +14594,33 @@ fn gateway_service_listener_binds_peer_and_serves_hello() -> Result<(), Box<dyn 
                 listener,
                 &storage,
                 &staging,
-                admission,
-                GatewayServiceListenerConfig {
-                    expected_gateway_uid: unsafe { libc::geteuid() },
-                    max_connections: 2,
-                    idle_timeout: Duration::from_secs(5),
-                    accept_poll_interval: Duration::from_millis(5),
+                prdb_engine::supervisor_ipc::GatewayServiceRuntimeConfig {
+                    admission,
+                    executor: prdb_engine::supervisor_ipc::GatewayExecutorConfig {
+                        cgroup_parent: cgroup_parent.clone(),
+                        resource_limits: prdb_engine::linux_sandbox::WorkerResourceLimits {
+                            cpu_quota_micros: 100_000,
+                            cpu_period_micros: 100_000,
+                            memory_max_bytes: 64 * 1024 * 1024,
+                            max_processes: 16,
+                        },
+                        launch: prdb_engine::executor_launcher::ExecutorLaunchConfig {
+                            executor_path: executor_path.clone(),
+                            scratch_parent: std::env::temp_dir(),
+                            runtime_read_execute: Vec::new(),
+                            runtime_read_only: Vec::new(),
+                            cleanup_timeout: Duration::from_millis(100),
+                        },
+                    },
+                    listener: GatewayServiceListenerConfig {
+                        expected_gateway_uid: unsafe { libc::geteuid() },
+                        max_connections: 2,
+                        idle_timeout: Duration::from_secs(5),
+                        accept_poll_interval: Duration::from_millis(5),
+                    },
                 },
                 shutdown_server,
-                |_request_id, _stream, _invocation, _submission| {},
+                |_request_id, _stream, _invocation, _submission, _executor| {},
             )
         });
 
@@ -15126,6 +15151,66 @@ fn sealed_start_admits_only_current_credentials_and_enforces_request_deadline()
         artifact,
     )?;
     staging.seal(owner, second.invocation_id)?;
+    let second_invocation_hex = second
+        .invocation_id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let cgroup_parent =
+        std::env::temp_dir().join(format!("prdb-start-cgroup-{}", std::process::id()));
+    std::fs::create_dir_all(&cgroup_parent)?;
+    let executor = prdb_engine::supervisor_ipc::GatewayExecutorConfig {
+        cgroup_parent: cgroup_parent.clone(),
+        resource_limits: prdb_engine::linux_sandbox::WorkerResourceLimits {
+            cpu_quota_micros: 100_000,
+            cpu_period_micros: 100_000,
+            memory_max_bytes: 64 * 1024 * 1024,
+            max_processes: 16,
+        },
+        launch: prdb_engine::executor_launcher::ExecutorLaunchConfig {
+            executor_path: std::env::current_exe()?,
+            scratch_parent: std::env::temp_dir(),
+            runtime_read_execute: Vec::new(),
+            runtime_read_only: Vec::new(),
+            cleanup_timeout: Duration::from_millis(100),
+        },
+    };
+    assert!(matches!(
+        prdb_engine::supervisor_ipc::dispatch_gateway_client_request_with_executor(
+            prdb_engine::ipc::ServiceRole::Gateway,
+            &storage,
+            &staging,
+            &mut client,
+            &prdb_engine::ipc::IpcFrame {
+                operation: prdb_engine::ipc::Operation::StartSubmission as u16,
+                request_id: 3,
+                payload: format!("{{\"invocation_id\":\"{second_invocation_hex}\"}}").into_bytes(),
+            },
+            prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+                retention_deadline_us: now + 3_600_000_000,
+                max_rows: 2,
+                max_bytes: 64,
+            },
+            &executor,
+        ),
+        Err(prdb_engine::supervisor_ipc::GatewayRequestError::Start(
+            ClientStartError::ExecutorStart(prdb_engine::supervisor::StartError::Sandbox(_))
+        ))
+    ));
+    assert_eq!(
+        staging.status(owner, second.invocation_id)?,
+        prdb_engine::supervisor::SubmissionState::Prepared
+    );
+    assert_eq!(
+        storage.get_invocation_status(second.invocation_id, user_id, now)?,
+        None
+    );
+    assert_eq!(
+        lookup_outcome(&database, second.invocation_id, user_id, now)?,
+        None
+    );
+    std::fs::remove_dir_all(cgroup_parent)?;
+
     let mut revoked = credential_verifier_write(
         token_id,
         user_id,
