@@ -1037,3 +1037,10 @@
 - Verification: focused `sealed_start_admits_only_current_credentials_and_enforces_request_deadline` passes in the repository Nix shell.
 - Remaining: launch/reap a confined worker, require its successful exit before finalization, and connect real gateway result/status flow.
 - Full verification: `cargo fmt --all -- --check`, workspace build, warning-denied Clippy, full `cargo test --workspace --locked`, and `git diff --check` pass in the repository Nix shell.
+
+## NP-3 dependency: frame upload into authenticated staging
+
+- Behavior: after storage AUTH, binary artifact and parameter chunk frames are bound to the session's staging owner; chunk IDs, offsets, data lengths, and acknowledgements follow the v1 wire contract.
+- Changed code and tests: [frame dispatcher](../../engine/src/client_protocol.rs), [protocol bounds](../../engine/tests/client_protocol.rs), and [real-redb auth/upload integration](../../engine/tests/commit.rs).
+- Verification: focused protocol and handshake/upload tests pass.
+- Remaining: wire PREPARE/SEAL schemas to staging and expose the flow through a live gateway connection.

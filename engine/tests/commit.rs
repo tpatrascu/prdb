@@ -7481,7 +7481,24 @@ fn client_session_authenticates_and_revalidates_before_operations()
 fn client_handshake_requires_hello_first_and_sequences_responses()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::client_protocol::{ClientConnectionSession, ClientFrame, ClientSessionError};
+    use prdb_engine::supervisor::{
+        PrepareSubmission, StagingLimits, StagingStore, SubmissionMetadata,
+        SubmissionMetadataValidator, WorkloadClass,
+    };
+    use sha2::{Digest, Sha256};
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct AcceptUpload;
+    impl SubmissionMetadataValidator for AcceptUpload {
+        fn supports_versions(&self, manifest_version: u32, scope_version: u32) -> bool {
+            manifest_version == 1 && scope_version == 1
+        }
+
+        fn validate(&self, _metadata: &SubmissionMetadata) -> bool {
+            true
+        }
+    }
 
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
@@ -7562,11 +7579,48 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
         .collect::<String>();
     assert!(std::str::from_utf8(&auth.payload)?.contains(&encoded_session_id));
 
+    let staging = StagingStore::new(StagingLimits::default(), Arc::new(AcceptUpload))?;
+    let owner = session.staging_owner()?;
+    let artifact = b"upload";
+    let reservation = staging.prepare(
+        owner,
+        PrepareSubmission {
+            manifest_version: 1,
+            manifest: b"m".to_vec(),
+            artifact_bytes: artifact.len() as u64,
+            artifact_sha256: Sha256::digest(artifact).into(),
+            scope_version: 1,
+            requested_scope: b"s".to_vec(),
+            parameter_bytes: 0,
+            parameter_sha256: Sha256::digest([]).into(),
+            deadline_ms: 30_000,
+            workload_class: WorkloadClass::Operational,
+        },
+    )?;
+    let mut chunk_payload = reservation.invocation_id.to_vec();
+    chunk_payload.extend_from_slice(&0u64.to_le_bytes());
+    chunk_payload.extend_from_slice(artifact);
+    let acknowledgement = session.handle_upload_request(
+        &staging,
+        ClientFrame {
+            kind: 4,
+            request_id: 4,
+            response_sequence: 0,
+            payload: chunk_payload,
+        },
+    )?;
+    assert_eq!(acknowledgement.request_id, 4);
+    assert_eq!(acknowledgement.payload, b"{\"next_offset\":\"6\"}");
+    assert_eq!(
+        staging.status(owner, reservation.invocation_id)?,
+        prdb_engine::supervisor::SubmissionState::Uploading
+    );
+
     let ping = session.handle_handshake_request(
         &storage,
         ClientFrame {
             kind: 11,
-            request_id: 4,
+            request_id: 5,
             response_sequence: 0,
             payload: b"{}".to_vec(),
         },
@@ -7577,7 +7631,7 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
             &storage,
             ClientFrame {
                 kind: 1,
-                request_id: 5,
+                request_id: 6,
                 response_sequence: 0,
                 payload: br#"{"mode":"query","client_name":"again"}"#.to_vec(),
             },

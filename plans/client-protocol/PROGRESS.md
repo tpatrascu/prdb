@@ -41,3 +41,10 @@
 - Test: [real-redb HELLO/AUTH/PING frame flow](../../engine/tests/commit.rs).
 - Verification: focused handshake regression passes; workspace formatting, build, warning-denied Clippy, and diff checks pass.
 - Remaining: network listener and gateway-service IPC integration.
+
+## NP-3 dependency: authenticated binary chunk dispatch
+
+- Behavior: chunk payloads decode only for nonzero invocation IDs and 1–256 KiB data, preserving the little-endian offset. Authenticated query frames route artifact versus parameter chunks through the connection-bound staging owner and return the next accepted offset.
+- Changed code and tests: [chunk decoder and dispatcher](../../engine/src/client_protocol.rs), [boundary tests](../../engine/tests/client_protocol.rs), and [real-redb AUTH/upload stream test](../../engine/tests/commit.rs).
+- Verification: focused chunk decoder and handshake/upload tests pass in the repository Nix shell.
+- Remaining: strict PREPARE/SEAL/START JSON schemas, TCP listener, and gateway-service IPC integration.

@@ -1,5 +1,6 @@
 use prdb_engine::client_protocol::{
-    ClientControlError, ClientMode, decode_client_credentials, decode_client_hello,
+    CLIENT_MAX_CHUNK_BYTES, ClientControlError, ClientMode, decode_client_chunk,
+    decode_client_credentials, decode_client_hello,
 };
 
 #[test]
@@ -66,4 +67,31 @@ fn control_json_rejects_trailing_bytes_and_unpaired_surrogates() {
         decode_client_hello(br#"{"mode":"query","client_name":"\uD800"}"#),
         Err(ClientControlError::InvalidJson)
     );
+}
+
+#[test]
+fn binary_chunks_validate_id_offset_and_data_bounds() {
+    let mut payload = vec![0x11; 16];
+    payload.extend_from_slice(&0x0807_0605_0403_0201u64.to_le_bytes());
+    payload.extend_from_slice(b"chunk");
+    let chunk = decode_client_chunk(&payload).unwrap();
+    assert_eq!(chunk.invocation_id, [0x11; 16]);
+    assert_eq!(chunk.offset, 0x0807_0605_0403_0201);
+    assert_eq!(chunk.data, b"chunk");
+
+    assert!(matches!(
+        decode_client_chunk(&[0x11; 24]),
+        Err(ClientControlError::InvalidChunk)
+    ));
+    let mut zero_id = vec![0; 16];
+    zero_id.extend_from_slice(&0u64.to_le_bytes());
+    zero_id.push(1);
+    assert!(matches!(
+        decode_client_chunk(&zero_id),
+        Err(ClientControlError::InvalidChunk)
+    ));
+    assert!(matches!(
+        decode_client_chunk(&vec![0x11; CLIENT_MAX_CHUNK_BYTES + 25]),
+        Err(ClientControlError::InvalidChunk)
+    ));
 }

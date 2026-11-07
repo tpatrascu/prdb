@@ -69,6 +69,7 @@ pub enum ClientSessionError {
     WrongMode,
     UnsupportedRequest,
     InvalidControlPayload(ClientControlError),
+    Staging(crate::supervisor::StagingError),
     Storage(TransactionError),
 }
 
@@ -96,6 +97,7 @@ pub enum ClientControlError {
     InvalidClientName,
     InvalidTokenId,
     InvalidTokenSecret,
+    InvalidChunk,
 }
 
 impl std::fmt::Display for ClientControlError {
@@ -116,6 +118,13 @@ pub struct ClientHello {
 pub struct ClientCredentials {
     pub token_id: [u8; 16],
     pub token_secret: [u8; TOKEN_SECRET_BYTES],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClientChunk {
+    pub invocation_id: [u8; 16],
+    pub offset: u64,
+    pub data: Vec<u8>,
 }
 
 impl Drop for ClientCredentials {
@@ -155,6 +164,34 @@ pub fn decode_client_credentials(payload: &[u8]) -> Result<ClientCredentials, Cl
     Ok(ClientCredentials {
         token_id,
         token_secret,
+    })
+}
+
+/// Decode ARTIFACT_CHUNK/PARAMETER_CHUNK as invocation ID, little-endian
+/// contiguous offset, and 1–256 KiB of opaque data.
+pub fn decode_client_chunk(payload: &[u8]) -> Result<ClientChunk, ClientControlError> {
+    if !(25..=24 + CLIENT_MAX_CHUNK_BYTES).contains(&payload.len()) {
+        return Err(ClientControlError::InvalidChunk);
+    }
+    let invocation_id: [u8; 16] = payload[..16]
+        .try_into()
+        .map_err(|_| ClientControlError::InvalidChunk)?;
+    if invocation_id == [0; 16] {
+        return Err(ClientControlError::InvalidChunk);
+    }
+    let offset = u64::from_le_bytes(
+        payload[16..24]
+            .try_into()
+            .map_err(|_| ClientControlError::InvalidChunk)?,
+    );
+    let mut data = Vec::new();
+    data.try_reserve_exact(payload.len() - 24)
+        .map_err(|_| ClientControlError::InvalidChunk)?;
+    data.extend_from_slice(&payload[24..]);
+    Ok(ClientChunk {
+        invocation_id,
+        offset,
+        data,
     })
 }
 
@@ -480,6 +517,51 @@ impl ClientConnectionSession {
             request_id: request.request_id,
             response_sequence: 0,
             payload,
+        })
+    }
+
+    /// Route one artifact/parameter chunk frame to the staging store using
+    /// this connection's storage-authenticated owner, and acknowledge only
+    /// the contiguous next offset.
+    pub fn handle_upload_request(
+        &mut self,
+        staging: &crate::supervisor::StagingStore,
+        request: ClientFrame,
+    ) -> Result<ClientFrame, ClientSessionError> {
+        if request.response_sequence != 0 || !matches!(request.kind, 4 | 5) {
+            return Err(ClientSessionError::UnsupportedRequest);
+        }
+        self.request_ids
+            .accept(&request)
+            .map_err(|_| ClientSessionError::UnsupportedRequest)?;
+        if !self.permits_request_kind(request.kind) {
+            return Err(if self.authenticated.is_none() {
+                ClientSessionError::AuthenticationRequired
+            } else {
+                ClientSessionError::WrongMode
+            });
+        }
+        let chunk = decode_client_chunk(&request.payload)
+            .map_err(ClientSessionError::InvalidControlPayload)?;
+        let kind = if request.kind == 4 {
+            crate::supervisor::ChunkKind::Artifact
+        } else {
+            crate::supervisor::ChunkKind::Parameters
+        };
+        let next_offset = staging
+            .upload_chunk(
+                self.staging_owner()?,
+                chunk.invocation_id,
+                kind,
+                chunk.offset,
+                &chunk.data,
+            )
+            .map_err(ClientSessionError::Staging)?;
+        Ok(ClientFrame {
+            kind: 100,
+            request_id: request.request_id,
+            response_sequence: 0,
+            payload: format!("{{\"next_offset\":\"{next_offset}\"}}").into_bytes(),
         })
     }
 
