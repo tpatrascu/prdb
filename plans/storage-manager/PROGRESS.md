@@ -1021,3 +1021,11 @@
 - Changed code and contract: [staging request state](../../engine/src/supervisor.rs) and [supervisor resource policy](../../specs/supervisor.md).
 - Verification: focused staging test rejects an over-ceiling deadline and observes the accepted analytical class and deadline at START.
 - Remaining: apply admission budgets to live worker and planner scheduling.
+
+## SM-6 / SU-3 dependency: failed pre-execution admission has no outcome
+
+- Behavior: failed token authentication during invocation admission now releases its snapshot and admission slot without persisting ABORTED. Revocation after successful admission remains guarded through commit and conflicts durably.
+- Changed code and contracts: [transaction admission cleanup](../../engine/src/transaction.rs), [storage admission](../../engine/src/storage_manager.rs), [client START contract](../../specs/client-protocol.md), and [token admission contract](../../specs/ddl-identity.md).
+- Verification: focused `token_admission_checks_expiry_secret_revocation_and_commit_guards` passes in the repository Nix shell, confirming no outcome for rejected admissions and durable abort after post-admission revocation.
+- Remaining: exercise the no-outcome rule through the sealed submission START flow and gateway status path.
+- Verification: `cargo fmt --all -- --check`, workspace build, warning-denied Clippy, full `cargo test --workspace --locked`, and `git diff --check` pass in the repository Nix shell.

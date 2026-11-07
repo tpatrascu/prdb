@@ -7348,10 +7348,8 @@ fn token_admission_checks_expiry_secret_revocation_and_commit_guards()
             Err(TransactionError::AuthenticationFailed)
         ));
         assert_eq!(
-            lookup_outcome(&database, invocation_id, user_id, now)?
-                .unwrap()
-                .status,
-            OutcomeStatus::Aborted
+            lookup_outcome(&database, invocation_id, user_id, now)?,
+            None
         );
     }
 
@@ -7394,12 +7392,7 @@ fn token_admission_checks_expiry_secret_revocation_and_commit_guards()
         ),
         Err(TransactionError::AuthenticationFailed)
     ));
-    assert_eq!(
-        lookup_outcome(&database, id(80), user_id, now)?
-            .unwrap()
-            .status,
-        OutcomeStatus::Aborted
-    );
+    assert_eq!(lookup_outcome(&database, id(80), user_id, now)?, None);
     assert!(prdb_engine::startup::validate_persisted_records(&database).is_ok());
     Ok(())
 }

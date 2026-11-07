@@ -3211,11 +3211,27 @@ impl<'db> InvocationTransaction<'db> {
             Ok(roles) => Ok(roles),
             Err(error) => {
                 if !self.aborted {
-                    self.abort()?;
+                    self.discard_unstarted_admission();
                 }
                 Err(error)
             }
         }
+    }
+
+    /// Reject an admission attempt before execution without publishing an
+    /// ABORTED outcome. A client that failed START has no transaction result.
+    pub(crate) fn discard_unstarted_admission(&mut self) {
+        self.overlay.abort();
+        self.base_versions.clear();
+        self.index_writes.clear();
+        self.catalog_guards.clear();
+        self.loaded_schemas.clear();
+        self.loaded_indexes.clear();
+        self.loaded_foreign_keys.clear();
+        self.snapshot.take();
+        self.aborted = true;
+        self.outcome_recorded = true;
+        self.coordination._admission_permit.take();
     }
 
     /// Resolve a table's current schema from its pinned catalog snapshot.

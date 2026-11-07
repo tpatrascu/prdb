@@ -67,7 +67,7 @@ Chunk payloads are binary: invocation ID[16], offset u64 little-endian, then 1â€
 
 SEAL `{ "invocation_id": id }` verifies both byte counts/digests and manifest compatibility, then makes staged bytes immutable. RESPONSE reports `state: "prepared"`. Hash agreement does not establish artifact safety. No untrusted library is loaded during validation.
 
-START `{ "invocation_id": id }` is permitted once for that sealed reservation, on its owning query connection. The supervisor revalidates admission and atomically transitions it to execution, then returns RESPONSE sequence 0 with `state: "accepted"`. Execution may start before that response is received. Repeated START is rejected, not replayed; this live-reservation guard is not durable submission deduplication. A rejected pre-execution start returns ERROR and has no transaction effects.
+START `{ "invocation_id": id }` is permitted once for that sealed reservation, on its owning query connection. The supervisor revalidates admission and atomically transitions it to execution, then returns RESPONSE sequence 0 with `state: "accepted"`. Execution may start before that response is received. Repeated START is rejected, not replayed; this live-reservation guard is not durable submission deduplication. A rejected pre-execution start returns ERROR, releases any temporary admission snapshot, and creates no durable outcome or other transaction effects.
 
 Disconnect before START discards staging. After any START transmission with an uncertain reply, use STATUS; never automatically repeat START or submit a fresh invocation. Reservations are not durable across supervisor restart, and missing status cannot establish safe retry. Upload-resume and detached execution are outside v1.
 

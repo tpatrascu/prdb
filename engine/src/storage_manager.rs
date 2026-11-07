@@ -1264,8 +1264,8 @@ impl<'db> StorageManager<'db> {
             max_bytes,
         )?;
         let Some(now_us) = now_unix_micros() else {
-            transaction.abort()?;
-            return Err(TransactionError::AuthenticationFailed);
+            transaction.discard_unstarted_admission();
+            return Err(TransactionError::ClockUnavailable);
         };
         let roles = transaction.authenticate_credential_token(token_id, token_secret, now_us)?;
         Ok((transaction, roles))
