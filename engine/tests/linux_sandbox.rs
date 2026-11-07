@@ -146,6 +146,104 @@ fn sandbox_probe_rejects_regular_directory_as_cgroup_v2_mount() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn worker_command_enters_private_namespaces_without_capabilities() {
+    use std::process::Command;
+
+    fn resolve(name: &str) -> std::path::PathBuf {
+        std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|directory| directory.join(name))
+            .find(|candidate| candidate.is_file())
+            .unwrap()
+    }
+
+    let namespace_link = |name: &str| fs::read_link(format!("/proc/self/ns/{name}")).unwrap();
+    let parent_namespaces = [
+        namespace_link("user"),
+        namespace_link("mnt"),
+        namespace_link("net"),
+        namespace_link("pid"),
+    ];
+    let readlink = resolve("readlink");
+    let awk = resolve("awk");
+    let script = r#"
+        "$1" /proc/self/ns/user
+        "$1" /proc/self/ns/mnt
+        "$1" /proc/self/ns/net
+        "$1" /proc/self/ns/pid
+        printf '%s\n' "$$"
+        "$2" '/^CapEff:/ {eff=$2} /^CapBnd:/ {bnd=$2} /^NoNewPrivs:/ {nnp=$2} END {print eff, bnd, nnp}' /proc/self/status
+        test ! -d "/proc/$3" || exit 12
+        printf '%s\n' isolated
+    "#;
+    let cgroup_fixture = Fixture::new();
+    let host_pid = std::process::id().to_string();
+    let mut command = Command::new("/bin/sh");
+    command
+        .env_clear()
+        .args([
+            "-c",
+            script,
+            "worker",
+            readlink.to_str().unwrap(),
+            awk.to_str().unwrap(),
+            host_pid.as_str(),
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    linux_sandbox::attach_command_before_exec(&cgroup_fixture.0, &mut command).unwrap();
+    linux_sandbox::attach_namespaces_before_exec(&mut command).unwrap();
+
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "namespace setup failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lines = String::from_utf8(output.stdout).unwrap();
+    let lines = lines.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 7);
+    for (index, parent_namespace) in parent_namespaces.iter().enumerate() {
+        assert_ne!(std::path::Path::new(lines[index]), parent_namespace);
+    }
+    assert_eq!(lines[4], "1", "worker must be PID 1 in its PID namespace");
+    assert_eq!(
+        lines[5], "0000000000000000 0000000000000000 1",
+        "worker capability sets must be empty and no_new_privs enabled"
+    );
+    assert_eq!(
+        lines[6], "isolated",
+        "the worker proc mount must not expose the supervisor PID"
+    );
+    assert!(
+        fs::read_to_string(cgroup_fixture.0.join("cgroup.procs"))
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap()
+            > 0,
+        "cgroup placement hook must run before namespace setup"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn namespace_command_spawn_returns_after_worker_exec() {
+    use std::process::Command;
+
+    let mut command = Command::new("/bin/sh");
+    command.args(["-c", "sleep 2"]);
+    linux_sandbox::attach_namespaces_before_exec(&mut command).unwrap();
+
+    let mut child = command.spawn().unwrap();
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "Command::spawn waited for the worker to exit"
+    );
+    assert!(child.wait().unwrap().success());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn landlock_blocks_unlisted_filesystem_reads_before_exec() {
     use prdb_engine::linux_sandbox::{LandlockPolicy, LandlockRuleset};
     use std::process::{Command, Stdio};

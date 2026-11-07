@@ -32,3 +32,11 @@
 - Regression: a confined shell can write its marker in an allowed directory while `cat /etc/passwd` is denied before worker code can read it.
 - Verification: the focused Landlock regression passed. Full Nix-shell validation passed: format check, workspace build, warning-denied Clippy, workspace tests, and `git diff --check`.
 - Remaining: this Landlock setup is not yet integrated with a clean executor launcher, namespaces, descriptor scrubbing, network isolation, or seccomp. Full hostile-artifact launch validation remains outstanding.
+
+## SB-2 dependency: rootless worker namespaces — implemented
+
+- Behavior: `attach_namespaces_before_exec` creates a one-ID-mapped user namespace, denies setgroups, enters private mount/network/PID namespaces, marks mount propagation private, mounts a fresh PID-scoped `/proc`, clears capability and bounding sets, and sets `no_new_privs` before the final executable image runs. It forks a trusted outer reaper for PID namespace semantics; the reaper closes its inherited descriptors before waiting, while the worker child proceeds through later pre-exec hooks.
+- Ordering: attach the invocation cgroup first, then namespaces, then Landlock and seccomp. The command handle tracks the reaper; the invocation cgroup is required to terminate the entire worker tree.
+- Regression: [Linux namespace tests](../../engine/tests/linux_sandbox.rs) check distinct user/mount/network/PID namespace handles, worker PID 1, zero effective and bounding capabilities, `NoNewPrivs`, isolation from the supervisor PID in `/proc`, cgroup-hook ordering, and that `Command::spawn` returns before worker exit.
+- Observed runtime: both focused namespace tests passed on the configured Linux host. They launch only harmless shell probes; no query artifact is loaded.
+- Remaining: wire the hook chain into a clean executor launcher, scrub inherited worker descriptors/environment, install seccomp before artifact loading, provision filesystem/runtime resources, and exercise the full profile with a delegated cgroup parent and hostile fixtures.

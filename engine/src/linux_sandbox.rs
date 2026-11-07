@@ -139,6 +139,313 @@ impl LandlockRuleset {
     }
 }
 
+/// Place a command in private rootless user, mount, network, and PID
+/// namespaces before its executable image starts. Register cgroup placement
+/// before this hook and Landlock/seccomp hooks after it. PID namespace setup
+/// forks a small trusted reaper; callers must manage the command in its
+/// per-invocation cgroup so killing the reaper also cleans up the worker.
+#[cfg(target_os = "linux")]
+pub fn attach_namespaces_before_exec(command: &mut std::process::Command) -> io::Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    // Capture IDs before entering the child user namespace. The root mapping
+    // in the new namespace maps only these host IDs.
+    // SAFETY: getuid and getgid have no pointer arguments and do not mutate state.
+    let host_uid = unsafe { libc::getuid() };
+    let host_gid = unsafe { libc::getgid() };
+    // SAFETY: the child hook uses direct syscalls, stack buffers, and
+    // async-signal-safe libc calls after Command forks.
+    unsafe {
+        command.pre_exec(move || enter_worker_namespaces(host_uid, host_gid));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn attach_namespaces_before_exec(_command: &mut std::process::Command) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "worker namespaces are supported only on Linux",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn enter_worker_namespaces(host_uid: libc::uid_t, host_gid: libc::gid_t) -> io::Result<()> {
+    // SAFETY: unshare receives only a fixed namespace flag mask.
+    if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    write_proc_file(b"/proc/self/setgroups\0", b"deny\n")?;
+    write_id_map(b"/proc/self/uid_map\0", host_uid)?;
+    write_id_map(b"/proc/self/gid_map\0", host_gid)?;
+
+    let namespace_flags = libc::CLONE_NEWNS | libc::CLONE_NEWNET | libc::CLONE_NEWPID;
+    // SAFETY: the new user namespace owns the mount, network, and PID namespaces.
+    if unsafe { libc::unshare(namespace_flags) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // Stop mount events in this namespace from propagating to the host or
+    // other mount namespaces before any caller-specific mounts are made.
+    // SAFETY: pointers are null or static NUL-terminated path; this changes
+    // mount propagation only within the new mount namespace.
+    if unsafe {
+        libc::mount(
+            std::ptr::null(),
+            c"/".as_ptr(),
+            std::ptr::null(),
+            libc::MS_REC | libc::MS_PRIVATE,
+            std::ptr::null(),
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+
+    // A process created after CLONE_NEWPID becomes PID 1 in the new namespace.
+    // Its parent remains a trusted reaper outside that PID namespace.
+    // SAFETY: fork is called once in the single-threaded post-fork child.
+    let worker_pid = unsafe { libc::fork() };
+    if worker_pid < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if worker_pid > 0 {
+        if drop_worker_bounding_capabilities().is_err() || clear_worker_capabilities().is_err() {
+            // SAFETY: discard the worker if the trusted reaper cannot shed its
+            // own namespace capabilities before waiting.
+            unsafe { terminate_and_reap_worker(worker_pid) };
+        }
+        // The outer Command child inherited Rust's exec-error pipe as well as
+        // the worker's descriptors. Close its copy before waiting so
+        // Command::spawn can observe successful exec in the worker promptly.
+        // The worker fork retains its own descriptors and applies the later
+        // confinement hooks before exec.
+        // SAFETY: close_range receives a valid inclusive FD range and flags 0.
+        if unsafe { libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) } != 0 {
+            // SAFETY: terminate the inner process if the trusted reaper cannot
+            // close the inherited descriptors required by the launch protocol.
+            unsafe { terminate_and_reap_worker(worker_pid) };
+        }
+        let mut status = 0;
+        loop {
+            // SAFETY: waitpid observes the direct child and writes to a valid
+            // stack status word.
+            let waited = unsafe { libc::waitpid(worker_pid, &mut status, 0) };
+            if waited == worker_pid {
+                break;
+            }
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EINTR) {
+                unsafe { terminate_and_reap_worker(worker_pid) };
+            }
+        }
+        let exit_code = if libc::WIFEXITED(status) {
+            libc::WEXITSTATUS(status)
+        } else if libc::WIFSIGNALED(status) {
+            128 + libc::WTERMSIG(status)
+        } else {
+            127
+        };
+        // SAFETY: _exit terminates the trusted namespace reaper without
+        // running inherited Rust destructors after fork.
+        unsafe { libc::_exit(exit_code) };
+    }
+
+    // Mount procfs only after entering the new PID namespace. Reusing the
+    // supervisor's proc mount would expose host process IDs despite the PID
+    // namespace.
+    // SAFETY: the process is PID 1 in the new PID namespace and holds
+    // CAP_SYS_ADMIN only in its owning user namespace; the mount is scoped to
+    // the private mount namespace created above.
+    if unsafe {
+        libc::mount(
+            c"proc".as_ptr(),
+            c"/proc".as_ptr(),
+            c"proc".as_ptr(),
+            libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+            std::ptr::null(),
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    drop_worker_bounding_capabilities()?;
+    clear_worker_capabilities()?;
+
+    // Prevent privilege gain across the executable image transition.
+    // SAFETY: prctl uses scalar arguments and no pointers for this option.
+    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn terminate_and_reap_worker(worker_pid: libc::pid_t) -> ! {
+    // SAFETY: worker_pid is the direct namespace child returned by fork.
+    unsafe { libc::kill(worker_pid, libc::SIGKILL) };
+    let mut ignored_status = 0;
+    loop {
+        // SAFETY: waitpid observes the direct child and writes to a valid
+        // stack status word.
+        let waited = unsafe { libc::waitpid(worker_pid, &mut ignored_status, 0) };
+        if waited == worker_pid {
+            break;
+        }
+        if io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            break;
+        }
+    }
+    // SAFETY: this is a post-fork child; do not run inherited Rust destructors.
+    unsafe { libc::_exit(127) }
+}
+
+#[cfg(target_os = "linux")]
+fn write_proc_file(path: &'static [u8], contents: &[u8]) -> io::Result<()> {
+    // SAFETY: path is a static NUL-terminated byte string.
+    let fd = unsafe { libc::open(path.as_ptr().cast(), libc::O_WRONLY | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let result = write_fd_all(fd, contents);
+    // SAFETY: fd is the descriptor returned by open above.
+    unsafe { libc::close(fd) };
+    result
+}
+
+#[cfg(target_os = "linux")]
+fn write_id_map(path: &'static [u8], host_id: u32) -> io::Result<()> {
+    let mut line = [0u8; 32];
+    let mut cursor = 0;
+    line[cursor] = b'0';
+    cursor += 1;
+    line[cursor] = b' ';
+    cursor += 1;
+    cursor += write_decimal(&mut line[cursor..], host_id);
+    line[cursor] = b' ';
+    cursor += 1;
+    line[cursor] = b'1';
+    cursor += 1;
+    line[cursor] = b'\n';
+    cursor += 1;
+    write_proc_file(path, &line[..cursor])
+}
+
+#[cfg(target_os = "linux")]
+fn write_decimal(buffer: &mut [u8], mut value: u32) -> usize {
+    let mut digits = [0u8; 10];
+    let mut count = 0;
+    loop {
+        digits[count] = b'0' + (value % 10) as u8;
+        count += 1;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    for index in 0..count {
+        buffer[index] = digits[count - index - 1];
+    }
+    count
+}
+
+#[cfg(target_os = "linux")]
+fn write_fd_all(fd: libc::c_int, bytes: &[u8]) -> io::Result<()> {
+    let mut written = 0;
+    while written < bytes.len() {
+        // SAFETY: bytes is valid for the remaining length and fd was opened by
+        // the caller for this bounded procfs write.
+        let result = unsafe {
+            libc::write(
+                fd,
+                bytes.as_ptr().add(written).cast(),
+                bytes.len() - written,
+            )
+        };
+        if result < 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(error);
+        }
+        if result == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "short write while configuring worker ID map",
+            ));
+        }
+        written += result as usize;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn clear_worker_capabilities() -> io::Result<()> {
+    #[repr(C)]
+    struct CapHeader {
+        version: u32,
+        pid: i32,
+    }
+    #[repr(C)]
+    struct CapData {
+        effective: u32,
+        permitted: u32,
+        inheritable: u32,
+    }
+    const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+
+    let header = CapHeader {
+        version: LINUX_CAPABILITY_VERSION_3,
+        pid: 0,
+    };
+    let data = [
+        CapData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        },
+        CapData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        },
+    ];
+    // SAFETY: header and data match the Linux capset v3 ABI and remain valid
+    // for the duration of the syscall.
+    let result = unsafe { libc::syscall(libc::SYS_capset, &header, data.as_ptr()) };
+    if result < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn drop_worker_bounding_capabilities() -> io::Result<()> {
+    // Linux capability numbers are currently bounded by the 64-bit capability
+    // masks. Probe each number so the launcher also handles newer kernels.
+    for capability in 0..64u32 {
+        // SAFETY: PR_CAPBSET_READ takes one scalar capability number.
+        let state = unsafe { libc::prctl(libc::PR_CAPBSET_READ, capability, 0, 0, 0) };
+        if state < 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINVAL) {
+                break;
+            }
+            return Err(error);
+        }
+        if state == 1 {
+            // SAFETY: PR_CAPBSET_DROP takes one scalar capability number; the
+            // process still has CAP_SETPCAP in its newly created user namespace.
+            if unsafe { libc::prctl(libc::PR_CAPBSET_DROP, capability, 0, 0, 0) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 #[repr(C)]
 struct LandlockRulesetAttr {
