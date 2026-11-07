@@ -397,6 +397,36 @@ where
     })
 }
 
+/// Observe one executor while relaying its provisional result bytes to the
+/// gateway service stream. This emits only data events; the caller must send a
+/// terminal event after the storage-owned transaction decision is confirmed.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub fn observe_executor_and_relay_results(
+    executor: &mut crate::executor_launcher::RunningExecutor,
+    invocation: &crate::storage_manager::SupervisorInvocation<'_>,
+    service: &mut UnixStream,
+    start_request_id: u64,
+) -> Result<std::process::ExitStatus, crate::storage_manager::SupervisorInvocationError> {
+    executor.observe_exit_with_results(invocation, |payload| {
+        write_gateway_result_data_event(service, start_request_id, payload)
+    })
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn write_gateway_result_data_event(
+    service: &mut impl Write,
+    start_request_id: u64,
+    payload: &[u8],
+) -> io::Result<()> {
+    let frame = IpcFrame {
+        operation: Operation::GatewayResultData as u16,
+        request_id: start_request_id,
+        payload: payload.to_vec(),
+    };
+    crate::ipc::write_frame(service, &frame)
+        .map_err(|error| io::Error::new(io::ErrorKind::BrokenPipe, error.to_string()))
+}
+
 /// Route one client operation over a provisioned gateway IPC connection.
 /// HELLO establishes the per-client mode on this channel; all identity and
 /// staging ownership remain server-derived.
@@ -1193,4 +1223,27 @@ fn abort_invocation(
             .map_err(SupervisorConnectionError::Abort)?;
     }
     Ok(())
+}
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+mod worker_result_event_tests {
+    use super::write_gateway_result_data_event;
+    use crate::ipc::{IpcFrame, Operation, read_frame};
+    use std::io::Cursor;
+
+    #[test]
+    fn result_relay_emits_only_correlated_gateway_data_events() {
+        let mut encoded = Cursor::new(Vec::new());
+        write_gateway_result_data_event(&mut encoded, 17, b"provisional").unwrap();
+        encoded.set_position(0);
+        assert_eq!(
+            read_frame(&mut encoded).unwrap(),
+            Some(IpcFrame {
+                operation: Operation::GatewayResultData as u16,
+                request_id: 17,
+                payload: b"provisional".to_vec(),
+            })
+        );
+        assert_eq!(read_frame(&mut encoded).unwrap(), None);
+    }
 }

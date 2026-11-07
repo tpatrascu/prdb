@@ -9,7 +9,7 @@ use crate::linux_sandbox::{
 use crate::storage_manager::{SupervisorInvocation, SupervisorInvocationError};
 use crate::supervisor::SealedSubmission;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
@@ -47,8 +47,9 @@ impl std::fmt::Display for ExecutorLaunchError {
 
 impl std::error::Error for ExecutorLaunchError {}
 
-/// A started executor and its private artifact directory. Use
-/// `observe_exit` only after planner and executor channels have drained.
+/// A started executor and its private artifact directory. `observe_exit`
+/// serves storage channels and drains provisional result data before exit
+/// observation; use `observe_exit_with_results` when those bytes need relay.
 pub struct RunningExecutor {
     child: Child,
     cgroup: Option<WorkerCgroup>,
@@ -127,7 +128,110 @@ impl RunningExecutor {
         &mut self,
         invocation: &SupervisorInvocation<'_>,
     ) -> Result<ExitStatus, SupervisorInvocationError> {
-        if self.worker_channels.is_some()
+        self.observe_exit_with_results(invocation, |_| Ok(()))
+    }
+
+    /// Concurrently serves storage channels and bounded provisional output.
+    /// The callback runs on the supervisor thread and must not make a storage
+    /// terminal decision based on output bytes.
+    pub fn observe_exit_with_results<F>(
+        &mut self,
+        invocation: &SupervisorInvocation<'_>,
+        mut on_result: F,
+    ) -> Result<ExitStatus, SupervisorInvocationError>
+    where
+        F: FnMut(&[u8]) -> io::Result<()>,
+    {
+        let result_stream = self.result_stream.take();
+        let mut primary_error = None;
+        if let Some(result_stream) = result_stream {
+            let (result_tx, result_rx) = std::sync::mpsc::sync_channel(4);
+            std::thread::scope(|scope| {
+                let result_thread =
+                    scope.spawn(move || drain_result_stream(result_stream, result_tx));
+                let storage_task = self.worker_channels.take().map(|(planner, executor)| {
+                    let (storage_tx, storage_rx) = std::sync::mpsc::channel();
+                    let storage_thread = scope.spawn(move || {
+                        let result = invocation.serve_worker_channels(planner, executor);
+                        let _ = storage_tx.send(result);
+                    });
+                    (storage_thread, storage_rx)
+                });
+
+                let mut result_done = false;
+                let mut storage_done = storage_task.is_none();
+                while !result_done || !storage_done {
+                    if primary_error.is_none()
+                        && let Err(error) = invocation.check_deadline()
+                    {
+                        primary_error = Some(error);
+                    }
+                    match result_rx.recv_timeout(Duration::from_millis(50)) {
+                        Ok(Ok(chunk)) => {
+                            if primary_error.is_none()
+                                && let Err(error) = on_result(&chunk)
+                            {
+                                primary_error =
+                                    Some(SupervisorInvocationError::WorkerChannelIo(error));
+                            }
+                        }
+                        Ok(Err(error)) => {
+                            primary_error
+                                .get_or_insert(SupervisorInvocationError::WorkerChannelIo(error));
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            result_done = true;
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    }
+
+                    if let Some((storage_thread, storage_rx)) = &storage_task
+                        && !storage_done
+                        && storage_thread.is_finished()
+                    {
+                        storage_done = true;
+                        match storage_rx.try_recv() {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => {
+                                primary_error.get_or_insert(error);
+                            }
+                            Err(_) => {
+                                primary_error.get_or_insert(
+                                    SupervisorInvocationError::WorkerHandlerPanicked,
+                                );
+                            }
+                        }
+                    }
+
+                    if primary_error.is_some() {
+                        if let Some(cgroup) = self.cgroup.as_ref() {
+                            let _ = cgroup.kill_all();
+                        }
+                        let _ = self.child.kill();
+                    }
+                    if result_done && !storage_done {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+
+                match result_thread.join() {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        primary_error
+                            .get_or_insert(SupervisorInvocationError::WorkerChannelIo(error));
+                    }
+                    Err(_) => {
+                        primary_error
+                            .get_or_insert(SupervisorInvocationError::WorkerHandlerPanicked);
+                    }
+                }
+                if let Some((storage_thread, _)) = storage_task
+                    && storage_thread.join().is_err()
+                {
+                    primary_error.get_or_insert(SupervisorInvocationError::WorkerHandlerPanicked);
+                }
+            });
+        } else if self.worker_channels.is_some()
             && let Err(error) = self.serve_worker_channels(invocation)
         {
             self.kill_reap_and_cleanup();
@@ -144,12 +248,17 @@ impl RunningExecutor {
             let _ = self.child.wait();
         }
         self.artifact_directory.take();
-        result
+        match (primary_error, result) {
+            (Some(_), Err(error @ SupervisorInvocationError::WorkerCgroupIo(_))) => Err(error),
+            (Some(_), Err(error @ SupervisorInvocationError::WorkerProcessIo(_))) => Err(error),
+            (Some(error), _) => Err(error),
+            (None, result) => result,
+        }
     }
 
     /// Serve the invocation's planner and executor endpoints concurrently.
-    /// `observe_exit` calls this automatically if the caller has not already
-    /// started the channel service.
+    /// Callers that use this directly must also drain results concurrently;
+    /// `observe_exit` handles both streams together.
     pub fn serve_worker_channels(
         &mut self,
         invocation: &SupervisorInvocation<'_>,
@@ -159,13 +268,6 @@ impl RunningExecutor {
             .take()
             .ok_or(SupervisorInvocationError::Closed)?;
         invocation.serve_worker_channels(planner, executor)
-    }
-
-    /// Transfer the supervisor endpoint to the trusted result relay.
-    pub fn take_result_stream(&mut self) -> Result<UnixStream, SupervisorInvocationError> {
-        self.result_stream
-            .take()
-            .ok_or(SupervisorInvocationError::Closed)
     }
 
     fn kill_reap_and_cleanup(&mut self) {
@@ -196,6 +298,78 @@ impl Drop for RunningExecutor {
         self.worker_channels.take();
         self.result_stream.take();
     }
+}
+
+fn drain_result_stream(
+    mut stream: UnixStream,
+    sender: std::sync::mpsc::SyncSender<Result<Vec<u8>, io::Error>>,
+) -> io::Result<()> {
+    let mut total_bytes = 0u64;
+    loop {
+        let mut first = [0u8; 1];
+        match stream.read(&mut first) {
+            Ok(0) => return Ok(()),
+            Ok(1) => {}
+            Ok(_) => unreachable!("one-byte read returned more than one byte"),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return send_result_error(&sender, error),
+        }
+        let mut rest = [0u8; 3];
+        if let Err(error) = stream.read_exact(&mut rest) {
+            return send_result_error(&sender, error);
+        }
+        let len = u32::from_be_bytes([first[0], rest[0], rest[1], rest[2]]) as u64;
+        if len == 0 || len > crate::query_abi::MAX_RESULT_CHUNK_BYTES {
+            return send_result_error(
+                &sender,
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid worker result chunk size",
+                ),
+            );
+        }
+        let Some(next_total) = total_bytes.checked_add(len) else {
+            return send_result_error(
+                &sender,
+                io::Error::new(io::ErrorKind::InvalidData, "worker result size overflow"),
+            );
+        };
+        if next_total > crate::query_abi::MAX_TOTAL_RESULT_BYTES {
+            return send_result_error(
+                &sender,
+                io::Error::new(io::ErrorKind::InvalidData, "worker result quota exceeded"),
+            );
+        }
+        total_bytes = next_total;
+        let Ok(len) = usize::try_from(len) else {
+            return send_result_error(
+                &sender,
+                io::Error::new(io::ErrorKind::InvalidData, "worker result size overflow"),
+            );
+        };
+        let mut chunk = Vec::new();
+        if let Err(error) = chunk.try_reserve_exact(len) {
+            return send_result_error(
+                &sender,
+                io::Error::other(format!("cannot reserve worker result buffer: {error}")),
+            );
+        }
+        chunk.resize(len, 0);
+        if let Err(error) = stream.read_exact(&mut chunk) {
+            return send_result_error(&sender, error);
+        }
+        if sender.send(Ok(chunk)).is_err() {
+            return Ok(());
+        }
+    }
+}
+
+fn send_result_error(
+    sender: &std::sync::mpsc::SyncSender<Result<Vec<u8>, io::Error>>,
+    error: io::Error,
+) -> io::Result<()> {
+    let _ = sender.send(Err(io::Error::new(error.kind(), error.to_string())));
+    Ok(())
 }
 
 /// Materialize staged inputs and configure confinement before storage
@@ -447,9 +621,12 @@ fn create_sealed_parameters(parameters: &[u8]) -> io::Result<File> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PrivateArtifactDirectory, WorkerChannelPair, create_sealed_parameters};
-    use std::io::{Read, Seek, SeekFrom, Write};
+    use super::{
+        PrivateArtifactDirectory, WorkerChannelPair, create_sealed_parameters, drain_result_stream,
+    };
+    use std::io::{self, Read, Seek, SeekFrom, Write};
     use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixStream;
 
     #[test]
     fn staged_artifact_is_private_read_only_and_removed_on_drop() {
@@ -524,5 +701,31 @@ mod tests {
         assert_eq!(&planner_request, b"planner");
         assert_eq!(&executor_request, b"executor");
         assert_eq!(&result, b"result");
+    }
+
+    #[test]
+    fn result_stream_enforces_chunk_and_cumulative_bounds() {
+        use std::io::Write;
+
+        let (mut worker, supervisor) = UnixStream::pair().unwrap();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        worker.write_all(&3u32.to_be_bytes()).unwrap();
+        worker.write_all(b"abc").unwrap();
+        drop(worker);
+        drain_result_stream(supervisor, sender).unwrap();
+        assert_eq!(receiver.recv().unwrap().unwrap(), b"abc");
+        assert!(receiver.recv().is_err());
+
+        let (mut worker, supervisor) = UnixStream::pair().unwrap();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        worker
+            .write_all(&((crate::query_abi::MAX_RESULT_CHUNK_BYTES as u32) + 1).to_be_bytes())
+            .unwrap();
+        drop(worker);
+        drain_result_stream(supervisor, sender).unwrap();
+        assert_eq!(
+            receiver.recv().unwrap().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 }

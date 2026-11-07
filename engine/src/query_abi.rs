@@ -1,7 +1,5 @@
-//! Initial versioned C entry-point contract for query libraries.
-//!
-//! This ABI currently carries invocation parameters only. Storage, planning,
-//! result, and cancellation callbacks will be added by a later ABI version.
+//! Versioned C entry-point contracts for query libraries. V1 carries only
+//! parameters; v2 adds bounded role-bound IPC and provisional result callbacks.
 
 use std::ffi::c_int;
 
