@@ -1448,4 +1448,13 @@
 - Regression evidence: real-redb coverage transfers the schema, checks owner/version, rejects the previous non-admin owner's drop with a durable ABORTED outcome, verifies the successor can create and drop a table, and confirms no table data grants were added. Decoder and gateway ADMIN lifecycle tests cover the exact request and committed result.
 - TDD note: the schema transfer assertion first failed with `InvalidRequest` against the compiling storage-manager stub; it passes through the serialized owner guard.
 - Verification: focused real-redb, decoder, and gateway lifecycle tests passed. Workspace build, format check, warning-denied Clippy, all workspace tests, and `git diff --check` passed in the configured Nix shell. Tool versions were Rust/Cargo 1.95.0, rustfmt 1.9.0, Clippy 0.1.95, and TinyCC 0.9.27-unstable-2025-01-06.
-- Remaining: schema rename, role-owner transfer regression, additional stale-writer and limit boundary evidence, and separate supervisor/gateway process integration.
+- Remaining at this milestone: role-owner transfer regression, additional stale-writer and limit boundary evidence, and separate supervisor/gateway process integration.
+
+## DS-5: schema rename — implemented
+
+- Behavior and normative contracts: [schema DDL](../../specs/ddl-schema.md), [client protocol](../../specs/client-protocol.md), and [storage-manager contract](../../specs/storage-manager.md). The schema owner or a database administrator can rename a non-system schema. Storage preserves the schema ID, schema record, and child objects while updating the owned object name and version atomically. Final name uniqueness is checked by the serialized catalog writer.
+- Implementation: `StorageManager::rename_schema` and its authorized commit guard update only the schema object. The `schemas.rename` operation uses connection-owned ADMIN PREPARE/START.
+- Regression evidence: the real-redb lifecycle test verifies duplicate-name rejection, successful rename with a stable schema ID and incremented object version, and denial to the previous non-admin owner. Decoder and gateway lifecycle tests cover the exact request and committed result.
+- TDD note: the schema rename assertion first failed with `InvalidRequest` against the compiling storage stub; the rename and uniqueness checks now pass through the serialized authorized DDL path.
+- Verification: focused real-redb, decoder, and gateway lifecycle tests passed. Workspace build, format check, warning-denied Clippy, all workspace tests, and `git diff --check` passed in the configured Nix shell. Tool versions were Rust/Cargo 1.95.0, rustfmt 1.9.0, Clippy 0.1.95, and TinyCC 0.9.27-unstable-2025-01-06.
+- Remaining: role-owner transfer regression, additional stale-writer and limit boundary evidence, and separate supervisor/gateway process integration.

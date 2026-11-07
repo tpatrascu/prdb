@@ -718,6 +718,98 @@ fn storage_manager_creates_schema_atomically_for_privileged_actor()
             .status,
         OutcomeStatus::Aborted
     );
+    let rename_target_invocation = id(0xcb);
+    let mut rename_target_audit = identity_audit_event(0xcc, actor, id(0xcd));
+    rename_target_audit.correlation_id = rename_target_invocation;
+    let rename_target = storage.create_schema(
+        rename_target_invocation,
+        actor,
+        "rename_target",
+        actor,
+        9_999,
+        rename_target_audit,
+    )?;
+    let duplicate_rename_invocation = id(0xce);
+    let mut duplicate_rename_audit = identity_audit_event(0xcf, successor_owner, created.schema_id);
+    duplicate_rename_audit.correlation_id = duplicate_rename_invocation;
+    assert!(matches!(
+        storage.rename_schema(
+            duplicate_rename_invocation,
+            successor_owner,
+            created.schema_id,
+            "rename_target",
+            9_999,
+            duplicate_rename_audit,
+        ),
+        Err(SchemaLifecycleError::Commit(CommitError::InvalidCatalog))
+    ));
+    assert_eq!(
+        lookup_outcome(&database, duplicate_rename_invocation, successor_owner, 1)?
+            .ok_or("missing duplicate schema-name outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
+    let rename_invocation = id(0xd0);
+    let mut rename_audit = identity_audit_event(0xd1, successor_owner, created.schema_id);
+    rename_audit.correlation_id = rename_invocation;
+    let renamed_schema = storage.rename_schema(
+        rename_invocation,
+        successor_owner,
+        created.schema_id,
+        "app_archive",
+        9_999,
+        rename_audit,
+    );
+    assert!(
+        renamed_schema.is_ok(),
+        "schema rename failed: {renamed_schema:?}"
+    );
+    assert_eq!(renamed_schema?, 7);
+    let renamed_object_bytes = {
+        let read = database.begin_read()?;
+        read.open_table(CATALOG)?
+            .get(object_key.as_slice())?
+            .ok_or("renamed schema object missing")?
+            .value()
+            .to_vec()
+    };
+    let renamed_object = decode_registered_envelope(&renamed_object_bytes)?;
+    assert_eq!(
+        renamed_object
+            .fields
+            .iter()
+            .find(|field| field.tag == 3)
+            .unwrap()
+            .payload,
+        b"app_archive"
+    );
+    assert_eq!(
+        u64::from_le_bytes(
+            renamed_object
+                .fields
+                .iter()
+                .find(|field| field.tag == 5)
+                .unwrap()
+                .payload
+                .as_slice()
+                .try_into()?
+        ),
+        3
+    );
+    let old_owner_rename_invocation = id(0xd2);
+    let mut old_owner_rename_audit = identity_audit_event(0xd3, actor, created.schema_id);
+    old_owner_rename_audit.correlation_id = old_owner_rename_invocation;
+    assert!(matches!(
+        storage.rename_schema(
+            old_owner_rename_invocation,
+            actor,
+            created.schema_id,
+            "old_owner_name",
+            9_999,
+            old_owner_rename_audit,
+        ),
+        Err(SchemaLifecycleError::Unauthorized)
+    ));
     let drop_invocation = id(0xec);
     let mut drop_audit = identity_audit_event(0xed, successor_owner, id(0xee));
     drop_audit.correlation_id = drop_invocation;
@@ -729,7 +821,7 @@ fn storage_manager_creates_schema_atomically_for_privileged_actor()
         drop_audit,
     )?;
     assert_eq!(dropped.schema_id, created.schema_id);
-    assert_eq!(dropped.commit_sequence, 6);
+    assert_eq!(dropped.commit_sequence, 8);
     let read = database.begin_read()?;
     let catalog = read.open_table(CATALOG)?;
     assert!(catalog.get(schema_key.as_slice())?.is_none());
@@ -740,6 +832,16 @@ fn storage_manager_creates_schema_atomically_for_privileged_actor()
             .status,
         OutcomeStatus::Committed
     );
+    let drop_target_invocation = id(0xd4);
+    let mut drop_target_audit = identity_audit_event(0xd5, actor, rename_target.schema_id);
+    drop_target_audit.correlation_id = drop_target_invocation;
+    storage.drop_schema(
+        drop_target_invocation,
+        actor,
+        rename_target.schema_id,
+        9_999,
+        drop_target_audit,
+    )?;
 
     let populated_schema_invocation = id(0xef);
     let mut populated_schema_audit = identity_audit_event(0xf0, actor, id(0xf1));
@@ -6607,11 +6709,37 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
     )?;
     assert!(schema_owner_transfer.contains("\"outcome\":\"committed\""));
     assert!(schema_owner_transfer.contains(&format!("\"owner_id\":\"{created_user_id_wire}\"")));
-    let empty_schema_drop_prepare = admin_dispatch_json(
+    let schema_rename_prepare = admin_dispatch_json(
         &storage,
         &staging,
         &mut control,
         43,
+        &format!(
+            "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"schemas.rename\",\"arguments\":{{\"schema_id\":\"{empty_schema_id}\",\"name\":\"protocol_renamed\"}}}}"
+        ),
+        retention_deadline_us,
+    )?;
+    let schema_rename_operation_id = schema_rename_prepare
+        .split("\"operation_id\":\"")
+        .nth(1)
+        .ok_or("missing ADMIN schema-rename operation ID")?
+        .get(..32)
+        .ok_or("invalid ADMIN schema-rename operation ID")?;
+    let schema_rename = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut control,
+        44,
+        &format!("{{\"phase\":\"start\",\"operation_id\":\"{schema_rename_operation_id}\"}}"),
+        retention_deadline_us,
+    )?;
+    assert!(schema_rename.contains("\"outcome\":\"committed\""));
+    assert!(schema_rename.contains("\"name\":\"protocol_renamed\""));
+    let empty_schema_drop_prepare = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut control,
+        45,
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"schemas.drop\",\"arguments\":{{\"schema_id\":\"{empty_schema_id}\"}}}}"
         ),
@@ -6627,7 +6755,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &storage,
         &staging,
         &mut control,
-        44,
+        46,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{empty_schema_drop_id}\"}}"),
         retention_deadline_us,
     )?;
