@@ -8,7 +8,61 @@ use std::ffi::c_int;
 pub const QUERY_ABI_VERSION: u32 = 1;
 pub const QUERY_DESCRIPTOR_SYMBOL: &str = "prdb_query_descriptor_v1";
 pub const QUERY_ENTRY_SYMBOL: &str = "prdb_query_main_v1";
+pub const QUERY_ABI_V2_VERSION: u32 = 2;
+pub const QUERY_DESCRIPTOR_V2_SYMBOL: &str = "prdb_query_descriptor_v2";
+pub const QUERY_ENTRY_V2_SYMBOL: &str = "prdb_query_main_v2";
 pub const MAX_PARAMETER_BYTES: u64 = 1024 * 1024;
+pub const MAX_IPC_REQUEST_BYTES: u64 = 1024 * 1024;
+pub const MAX_RESULT_CHUNK_BYTES: u64 = 16 * 1024;
+
+/// Generic bounded callback for one request on a role-bound IPC channel.
+/// The channel determines authority; the operation remains subject to the
+/// server-side role allowlist and payload decoder.
+pub type QueryIpcRequestV2 = unsafe extern "C" fn(
+    context: *mut std::ffi::c_void,
+    operation: u16,
+    request: *const u8,
+    request_len: u64,
+    response: *mut u8,
+    response_capacity: u64,
+    response_len: *mut u64,
+) -> i32;
+
+/// Bounded provisional application output callback. This never emits a
+/// storage terminal decision.
+pub type QueryWriteResultV2 =
+    unsafe extern "C" fn(context: *mut std::ffi::c_void, bytes: *const u8, bytes_len: u64) -> i32;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct HostApiV2 {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub context: *mut std::ffi::c_void,
+    pub executor_request: Option<QueryIpcRequestV2>,
+    pub planner_request: Option<QueryIpcRequestV2>,
+    pub write_result: Option<QueryWriteResultV2>,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvocationV2 {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub parameters: *const u8,
+    pub parameters_len: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct QueryDescriptorV2 {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub host_api_size: u32,
+    pub invocation_size: u32,
+}
+
+pub type QueryMainV2 = unsafe extern "C" fn(*const HostApiV2, *const InvocationV2) -> c_int;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -91,6 +145,14 @@ pub enum DescriptorError {
     InvocationSize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DescriptorV2Error {
+    StructSize,
+    AbiVersion,
+    HostApiSize,
+    InvocationSize,
+}
+
 /// Check the descriptor exported by a query library against this host's v1
 /// layouts before looking up or calling the entry point.
 pub fn validate_descriptor_v1(descriptor: &QueryDescriptorV1) -> Result<(), DescriptorError> {
@@ -105,6 +167,23 @@ pub fn validate_descriptor_v1(descriptor: &QueryDescriptorV1) -> Result<(), Desc
     }
     if descriptor.invocation_size != std::mem::size_of::<InvocationV1>() as u32 {
         return Err(DescriptorError::InvocationSize);
+    }
+    Ok(())
+}
+
+/// Check the exported v2 descriptor before resolving its entry point.
+pub fn validate_descriptor_v2(descriptor: &QueryDescriptorV2) -> Result<(), DescriptorV2Error> {
+    if descriptor.struct_size != std::mem::size_of::<QueryDescriptorV2>() as u32 {
+        return Err(DescriptorV2Error::StructSize);
+    }
+    if descriptor.abi_version != QUERY_ABI_V2_VERSION {
+        return Err(DescriptorV2Error::AbiVersion);
+    }
+    if descriptor.host_api_size != std::mem::size_of::<HostApiV2>() as u32 {
+        return Err(DescriptorV2Error::HostApiSize);
+    }
+    if descriptor.invocation_size != std::mem::size_of::<InvocationV2>() as u32 {
+        return Err(DescriptorV2Error::InvocationSize);
     }
     Ok(())
 }
