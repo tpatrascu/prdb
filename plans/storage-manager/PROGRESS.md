@@ -1065,3 +1065,10 @@
 - Changed code and regressions: [client request revalidation and dispatch](../../engine/src/client_protocol.rs), [owner cancellation transition](../../engine/src/storage_manager.rs), and [real-redb authenticated flow](../../engine/tests/commit.rs).
 - Verification: focused status/cancel and active cancellation regressions plus warning-denied Clippy pass in the repository Nix shell.
 - Remaining: admin control mode, TCP gateway and supervisor IPC, worker process/result/finalization lifecycle.
+
+## IPC-6 dependency: gateway-role status/cancel dispatch
+
+- Behavior: the storage-side dispatcher accepts only gateway-authorized client status/cancel operation tags, binds identity from trusted channel setup, and preserves non-enumerating unknown/foreign responses. Executor role use is rejected.
+- Changed code and regression: [gateway control dispatcher](../../engine/src/supervisor_ipc.rs) and [real-redb IPC role test](../../engine/tests/commit.rs).
+- Verification: focused role/status/cancel regression and warning-denied Clippy pass in the repository Nix shell.
+- Remaining: provision channels and sessions over Unix sockets; route PREPARE/chunks/SEAL/START through IPC; build the TCP gateway and worker lifecycle.

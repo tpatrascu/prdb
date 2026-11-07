@@ -7712,6 +7712,63 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
 }
 
 #[test]
+fn gateway_ipc_status_and_cancel_keep_unknown_ids_non_enumerating()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::ipc::{IpcFrame, Operation, ServiceRole};
+    use prdb_engine::supervisor_ipc::{
+        SUPERVISOR_PAYLOAD_VERSION, dispatch_client_control_request,
+    };
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let mut payload = SUPERVISOR_PAYLOAD_VERSION.to_be_bytes().to_vec();
+    payload.extend_from_slice(&id(0x61));
+    let status = dispatch_client_control_request(
+        ServiceRole::Gateway,
+        &storage,
+        id(0x62),
+        &IpcFrame {
+            operation: Operation::ClientGetInvocationStatus as u16,
+            request_id: 1,
+            payload: payload.clone(),
+        },
+    )?;
+    assert_eq!(
+        status.payload,
+        [SUPERVISOR_PAYLOAD_VERSION.to_be_bytes().as_slice(), &[0]].concat()
+    );
+    let cancellation = dispatch_client_control_request(
+        ServiceRole::Gateway,
+        &storage,
+        id(0x62),
+        &IpcFrame {
+            operation: Operation::ClientCancelInvocation as u16,
+            request_id: 2,
+            payload: payload.clone(),
+        },
+    )?;
+    assert_eq!(
+        cancellation.payload,
+        [SUPERVISOR_PAYLOAD_VERSION.to_be_bytes().as_slice(), &[3]].concat()
+    );
+    assert!(
+        dispatch_client_control_request(
+            ServiceRole::Executor,
+            &storage,
+            id(0x62),
+            &IpcFrame {
+                operation: Operation::ClientGetInvocationStatus as u16,
+                request_id: 3,
+                payload,
+            },
+        )
+        .is_err()
+    );
+    Ok(())
+}
+
+#[test]
 fn supervisor_drains_both_worker_channels_before_durable_finalize()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::ipc::{IpcFrame, Operation, encode_frame, read_frame};

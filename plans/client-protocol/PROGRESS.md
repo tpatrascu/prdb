@@ -69,3 +69,10 @@
 - Changed code and tests: [owner status and cancellation dispatch](../../engine/src/client_protocol.rs), [storage admission cancellation](../../engine/src/storage_manager.rs), and [real-redb authenticated lifecycle](../../engine/tests/commit.rs).
 - Verification: focused authenticated status/cancel, active cancellation, and handshake regressions pass; warning-denied Clippy passes in the repository Nix shell.
 - Remaining: control-mode administrator operations and gateway IPC/TCP service integration.
+
+## NP-5 / IPC-6 dependency: gateway-role owner control dispatch
+
+- Behavior: versioned gateway-role IPC status/cancel operations bind the principal from trusted channel setup, perform owner-scoped storage lookups, and return the same unknown result for unknown or foreign IDs. Executor channels are denied these operations.
+- Changed code and regression: [gateway control IPC dispatcher](../../engine/src/supervisor_ipc.rs) and [role/non-enumeration test](../../engine/tests/commit.rs).
+- Verification: focused real-redb dispatch test and warning-denied Clippy pass in the repository Nix shell.
+- Remaining: provisioned gateway-service socket/session lifecycle and TCP connection server.

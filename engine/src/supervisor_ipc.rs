@@ -5,7 +5,7 @@ use crate::ipc::{DispatchError, IpcFrame, Operation, ServiceRole, authorize_oper
 use crate::outcome::OutcomeStatus;
 use crate::storage_manager::{
     AdministrativeCancellationError, AdministrativeCancellationResult, InvocationStatus,
-    InvocationStatusError, StorageManager,
+    InvocationStatusError, OwnerCancellationResult, StorageManager,
 };
 use crate::transaction::{InvocationTransaction, TransactionError};
 use std::io::{Read, Write};
@@ -110,6 +110,72 @@ pub fn dispatch_supervisor_control_request(
         request_id: request.request_id,
         payload,
     })
+}
+
+/// Dispatch owner-scoped client status/cancel operations on a trusted
+/// gateway-service channel. The principal is bound by channel setup and is
+/// never accepted from the IPC payload.
+pub fn dispatch_client_control_request(
+    role: ServiceRole,
+    manager: &StorageManager<'_>,
+    authenticated_principal_id: [u8; 16],
+    request: &IpcFrame,
+) -> Result<IpcFrame, SupervisorRequestError> {
+    let operation =
+        Operation::from_code(request.operation).map_err(SupervisorRequestError::Dispatch)?;
+    authorize_operation(role, operation).map_err(SupervisorRequestError::Dispatch)?;
+    if !matches!(
+        operation,
+        Operation::ClientGetInvocationStatus | Operation::ClientCancelInvocation
+    ) || request.payload.len() != 18
+        || u16::from_be_bytes([request.payload[0], request.payload[1]])
+            != SUPERVISOR_PAYLOAD_VERSION
+    {
+        return Err(SupervisorRequestError::InvalidPayload);
+    }
+    let invocation_id: [u8; 16] = request.payload[2..]
+        .try_into()
+        .map_err(|_| SupervisorRequestError::InvalidPayload)?;
+    let now_us = crate::credentials::now_unix_micros().ok_or(
+        SupervisorRequestError::Transaction(TransactionError::ClockUnavailable),
+    )?;
+    let payload = match operation {
+        Operation::ClientGetInvocationStatus => {
+            let snapshot = manager
+                .get_invocation_status(invocation_id, authenticated_principal_id, now_us)
+                .map_err(SupervisorRequestError::Status)?;
+            encode_supervisor_status(snapshot.as_ref())?
+        }
+        Operation::ClientCancelInvocation => {
+            let result = manager
+                .cancel_owned_invocation(authenticated_principal_id, invocation_id, now_us)
+                .map_err(SupervisorRequestError::Status)?;
+            encode_owner_cancellation_result(result)
+        }
+        _ => unreachable!("operation was checked above"),
+    };
+    Ok(IpcFrame {
+        operation: request.operation,
+        request_id: request.request_id,
+        payload,
+    })
+}
+
+fn encode_owner_cancellation_result(result: OwnerCancellationResult) -> Vec<u8> {
+    match result {
+        OwnerCancellationResult::Accepted => {
+            encode_cancellation_result(AdministrativeCancellationResult::Accepted)
+        }
+        OwnerCancellationResult::TooLate => {
+            encode_cancellation_result(AdministrativeCancellationResult::TooLate)
+        }
+        OwnerCancellationResult::Terminal(outcome) => {
+            encode_cancellation_result(AdministrativeCancellationResult::Terminal(outcome))
+        }
+        OwnerCancellationResult::Unknown => {
+            encode_cancellation_result(AdministrativeCancellationResult::Unknown)
+        }
+    }
 }
 
 fn encode_cancellation_result(result: AdministrativeCancellationResult) -> Vec<u8> {
