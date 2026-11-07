@@ -35,3 +35,10 @@
 - Changed code and contract: [staging metadata](../../engine/src/supervisor.rs) and [supervisor admission contract](../../specs/supervisor.md).
 - Verification: staging tests cover deadline ceiling rejection and preservation of the accepted class/deadline through START.
 - Remaining: use these fields in scheduler quotas and launch configuration.
+
+## SU-3 dependency: token-bound START and deadline enforcement
+
+- Behavior: a sealed owner-scoped submission invokes storage token admission exactly once; the storage invocation receives the submitted deadline, rechecks it during idle-channel polling, and commits no effects for a revoked pre-START credential.
+- Changed code and fixture: [client START callback](../../engine/src/client_protocol.rs), [storage deadline owner](../../engine/src/storage_manager.rs), and [START regression](../../engine/tests/commit.rs).
+- Verification: focused real-redb test covers no snapshot/status before START, deadline ABORT after admission, and revoked token rejection with no outcome.
+- Remaining: actual worker process launch, process exit observation, and result relay.

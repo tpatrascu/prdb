@@ -20,6 +20,8 @@ Executor mutations accept only connection-local relation/row handles and typed f
 
 `StorageManager::authenticate_query_session` verifies a database token and the principal's current login/role closure on one read snapshot without creating an invocation or durable outcome. It returns a non-secret identity context and a server-generated opaque connection ID. The context creates staging owners bound to that connection ID and authenticated principal; clients cannot supply principal IDs. Execution START must revalidate the token through `admit_supervisor_invocation`; successful AUTH does not freeze later authority changes.
 
+`admit_supervisor_invocation_with_deadline` adds the sealed submission's requested execution deadline to the storage manager's configured maximum age. The supervisor must poll `SupervisorInvocation::check_deadline` while planner and executor channels are idle; expiration durably aborts an admitted invocation and releases its snapshot. The client session's `start_submission` invokes token-bound admission only inside the one-shot sealed staging transition.
+
 ## Commit and Concurrent Invocations
 
 Allow concurrent redb read transactions and concurrent engine staging. Do not hold a redb write transaction across user execution or individual SQL statements. At successful library return, the supervisor requests finalization; storage obtains the serialized writer, validates all conflicts/constraints/authority, applies data/index/catalog/audit/outcome changes in one redb write transaction, and commits using the selected durable mode.

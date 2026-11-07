@@ -1029,3 +1029,11 @@
 - Verification: focused `token_admission_checks_expiry_secret_revocation_and_commit_guards` passes in the repository Nix shell, confirming no outcome for rejected admissions and durable abort after post-admission revocation.
 - Remaining: exercise the no-outcome rule through the sealed submission START flow and gateway status path.
 - Verification: `cargo fmt --all -- --check`, workspace build, warning-denied Clippy, full `cargo test --workspace --locked`, and `git diff --check` pass in the repository Nix shell.
+
+## SU-3 dependency: bind sealed START to token admission and deadline
+
+- Behavior: query `start_submission` moves a sealed staging reservation through its one-shot START callback, revalidates the token, then opens a storage invocation with the sealed deadline. Scheduler polling aborts an expired invocation. Revoked credentials reject START, delete staged bytes, and create no invocation status or durable outcome.
+- Changed code and fixture: [client start integration](../../engine/src/client_protocol.rs), [deadline-bound storage admission](../../engine/src/storage_manager.rs), and [real-redb staging/start regression](../../engine/tests/commit.rs).
+- Verification: focused `sealed_start_admits_only_current_credentials_and_enforces_request_deadline` passes in the repository Nix shell.
+- Remaining: launch/reap a confined worker, require its successful exit before finalization, and connect real gateway result/status flow.
+- Full verification: `cargo fmt --all -- --check`, workspace build, warning-denied Clippy, full `cargo test --workspace --locked`, and `git diff --check` pass in the repository Nix shell.

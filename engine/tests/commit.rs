@@ -7663,6 +7663,191 @@ fn supervisor_drains_both_worker_channels_before_durable_finalize()
 }
 
 #[test]
+fn sealed_start_admits_only_current_credentials_and_enforces_request_deadline()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::client_protocol::{ClientConnectionSession, ClientMode, ClientStartError};
+    use prdb_engine::supervisor::{
+        ChunkKind, PrepareSubmission, StagingError, StagingLimits, StagingStore,
+        SubmissionMetadata, SubmissionMetadataValidator, WorkloadClass,
+    };
+    use prdb_engine::transaction::TransactionError;
+    use sha2::{Digest, Sha256};
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct AcceptPrepared;
+    impl SubmissionMetadataValidator for AcceptPrepared {
+        fn supports_versions(&self, manifest_version: u32, scope_version: u32) -> bool {
+            manifest_version == 1 && scope_version == 1
+        }
+
+        fn validate(&self, metadata: &SubmissionMetadata) -> bool {
+            metadata.manifest == b"m" && metadata.requested_scope == b"s"
+        }
+    }
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
+    let user_id = id(0x70);
+    let token_id = id(0x71);
+    let secret = [0x31; 32];
+    let credential = credential_verifier_write(
+        token_id,
+        user_id,
+        &secret,
+        now - 1_000_000,
+        now + 60_000_000,
+        None,
+        1,
+    );
+    let credential_value = credential.payload.clone().unwrap();
+    commit_catalog_and_audit(
+        &database,
+        id(0x72),
+        id(9),
+        now + 3_600_000_000,
+        &[
+            principal_write_with_name(user_id, 1, 1, "start_user"),
+            object_write_with_name(user_id, 8, "start_user"),
+            credential,
+        ],
+        &[audit_event(0x72)],
+    )?;
+    let mut client = ClientConnectionSession::default();
+    client.accept_hello(ClientMode::Query, "start-test")?;
+    client.authenticate(&storage, token_id, &secret)?;
+    let staging = StagingStore::new(StagingLimits::default(), Arc::new(AcceptPrepared))?;
+    let owner = client.staging_owner()?;
+
+    let artifact = b"x";
+    let first = staging.prepare(
+        owner,
+        PrepareSubmission {
+            manifest_version: 1,
+            manifest: b"m".to_vec(),
+            artifact_bytes: artifact.len() as u64,
+            artifact_sha256: Sha256::digest(artifact).into(),
+            scope_version: 1,
+            requested_scope: b"s".to_vec(),
+            parameter_bytes: 0,
+            parameter_sha256: Sha256::digest([]).into(),
+            deadline_ms: 10,
+            workload_class: WorkloadClass::Operational,
+        },
+    )?;
+    staging.upload_chunk(owner, first.invocation_id, ChunkKind::Artifact, 0, artifact)?;
+    staging.seal(owner, first.invocation_id)?;
+    assert_eq!(
+        storage.get_invocation_status(first.invocation_id, user_id, now)?,
+        None
+    );
+    assert_eq!(
+        lookup_outcome(&database, first.invocation_id, user_id, now)?,
+        None
+    );
+
+    let admitted = client.start_submission(
+        &storage,
+        &staging,
+        first.invocation_id,
+        now + 3_600_000_000,
+        2,
+        64,
+    )?;
+    assert!(
+        storage
+            .get_invocation_status(first.invocation_id, user_id, now)?
+            .is_some()
+    );
+    std::thread::sleep(Duration::from_millis(20));
+    assert!(matches!(
+        admitted.check_deadline(),
+        Err(
+            prdb_engine::storage_manager::SupervisorInvocationError::Deadline(
+                TransactionError::Expired
+            )
+        )
+    ));
+    assert_eq!(
+        lookup_outcome(&database, first.invocation_id, user_id, now)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Aborted
+    );
+    staging.finish_started(owner, first.invocation_id)?;
+    drop(admitted);
+
+    let second = staging.prepare(
+        owner,
+        PrepareSubmission {
+            manifest_version: 1,
+            manifest: b"m".to_vec(),
+            artifact_bytes: artifact.len() as u64,
+            artifact_sha256: Sha256::digest(artifact).into(),
+            scope_version: 1,
+            requested_scope: b"s".to_vec(),
+            parameter_bytes: 0,
+            parameter_sha256: Sha256::digest([]).into(),
+            deadline_ms: 10_000,
+            workload_class: WorkloadClass::Operational,
+        },
+    )?;
+    staging.upload_chunk(
+        owner,
+        second.invocation_id,
+        ChunkKind::Artifact,
+        0,
+        artifact,
+    )?;
+    staging.seal(owner, second.invocation_id)?;
+    let mut revoked = credential_verifier_write(
+        token_id,
+        user_id,
+        &secret,
+        now - 1_000_000,
+        now + 60_000_000,
+        Some(now),
+        2,
+    );
+    revoked.expected_value = Some(credential_value);
+    storage.commit_catalog_and_audit(
+        id(0x73),
+        id(9),
+        now + 3_600_000_000,
+        &[revoked],
+        &[audit_event(0x73)],
+    )?;
+    assert!(matches!(
+        client.start_submission(
+            &storage,
+            &staging,
+            second.invocation_id,
+            now + 3_600_000_000,
+            2,
+            64,
+        ),
+        Err(ClientStartError::Start(
+            prdb_engine::supervisor::StartError::Admission(TransactionError::AuthenticationFailed)
+        ))
+    ));
+    assert_eq!(
+        lookup_outcome(&database, second.invocation_id, user_id, now)?,
+        None
+    );
+    assert_eq!(
+        storage.get_invocation_status(second.invocation_id, user_id, now)?,
+        None
+    );
+    assert_eq!(
+        staging.status(owner, second.invocation_id),
+        Err(StagingError::Unavailable)
+    );
+    Ok(())
+}
+
+#[test]
 fn storage_manager_issues_and_revokes_tokens_for_manage_users()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::storage_manager::{TokenIssueRequest, TokenLifecycleError};

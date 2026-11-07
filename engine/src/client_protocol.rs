@@ -72,6 +72,20 @@ pub enum ClientSessionError {
     Storage(TransactionError),
 }
 
+#[derive(Debug)]
+pub enum ClientStartError {
+    Session(ClientSessionError),
+    Start(crate::supervisor::StartError<TransactionError>),
+}
+
+impl std::fmt::Display for ClientStartError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "client START failed: {self:?}")
+    }
+}
+
+impl std::error::Error for ClientStartError {}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ClientControlError {
     InvalidJson,
@@ -573,6 +587,49 @@ impl ClientConnectionSession {
             .as_ref()
             .map(AuthenticatedQuerySession::staging_owner)
             .ok_or(ClientSessionError::AuthenticationRequired)
+    }
+
+    /// Revalidate authority and open the storage invocation only after a
+    /// sealed reservation wins the one-shot START transition.
+    pub fn start_submission<'db>(
+        &mut self,
+        storage: &StorageManager<'db>,
+        staging: &crate::supervisor::StagingStore,
+        invocation_id: [u8; 16],
+        retention_deadline_us: i64,
+        max_rows: usize,
+        max_bytes: usize,
+    ) -> Result<crate::storage_manager::SupervisorInvocation<'db>, ClientStartError> {
+        let owner = self.staging_owner().map_err(ClientStartError::Session)?;
+        let authenticated = self
+            .authenticated
+            .as_ref()
+            .ok_or(ClientStartError::Session(
+                ClientSessionError::AuthenticationRequired,
+            ))?;
+        let token_id = authenticated.token_id();
+        let mut token_secret = *self.token_secret.as_ref().ok_or(ClientStartError::Session(
+            ClientSessionError::AuthenticationRequired,
+        ))?;
+        let result = staging.start_with(owner, invocation_id, |submission| {
+            let duration = std::time::Duration::from_millis(submission.metadata().deadline_ms);
+            let deadline = std::time::Instant::now()
+                .checked_add(duration)
+                .ok_or(TransactionError::InvalidContext)?;
+            storage.admit_supervisor_invocation_with_deadline(
+                crate::storage_manager::SupervisorAdmissionRequest {
+                    invocation_id: submission.invocation_id(),
+                    token_id,
+                    retention_deadline_us,
+                    max_rows,
+                    max_bytes,
+                    deadline: Some(deadline),
+                },
+                &token_secret,
+            )
+        });
+        token_secret.zeroize();
+        result.map_err(ClientStartError::Start)
     }
 
     /// Enforce the v1 mode and pre-authentication operation allowlists.
