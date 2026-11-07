@@ -49,6 +49,14 @@
 - Verification: focused regression passed with Rust/Cargo 1.95.0. Full Nix-shell validation passed: formatting, workspace build, warning-denied Clippy, all workspace tests, and `git diff --check`.
 - Remaining: wire this command setup into the clean executor launcher and validate that only the intended IPC descriptors are provisioned.
 
+## SB-2 / SB-3 dependency: ordered worker pre-exec configuration — implemented
+
+- Behavior: `configure_worker_command` registers cgroup placement, namespace entry, Landlock installation, and clean environment/descriptor setup in the required order. It fails immediately if any hook cannot be prepared.
+- Regression: the composed command test exercises the ordered setup chain with a worker shell, verifies an allowed scratch write, checks the environment is cleared, confirms an unlisted file read fails, and confirms the cgroup placement hook ran. Separate namespace tests inspect the namespace handles and PID view.
+- TDD evidence: the focused test first failed to compile because the ordering API was absent; it passed after the helper assembled the existing hooks.
+- Verification: focused composition regression passed with Rust/Cargo 1.95.0. Full Nix-shell validation passed: formatting, workspace build, warning-denied Clippy, all workspace tests, and `git diff --check`.
+- Remaining: create and own the real invocation cgroup, spawn the clean executor host, install seccomp post-exec, and run confined TinyCC artifacts through the full supported profile.
+
 ## SB-4 dependency: worker syscall filter — implemented for Linux x86_64
 
 - Behavior: `install_worker_seccomp_filter` installs an initial allowlist in the current clean worker host, checks the x86_64 audit architecture before syscall numbers, sets `no_new_privs`, applies the filter to existing threads with TSYNC, and kills the process tree for any unlisted syscall. Unsupported targets return `Unsupported`.

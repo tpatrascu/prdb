@@ -44,6 +44,8 @@ Register `WorkerCgroup::attach_command_before_exec` before the namespace hook, t
 
 `prepare_clean_worker_command` clears the environment and closes descriptors above stderr except an explicit IPC allowlist. Register its descriptor-closing hook after cgroup, namespace, and Landlock hooks so their setup descriptors remain usable. The helper requires Linux `close_range` and clears `FD_CLOEXEC` on preserved IPC descriptors in the child. Add only non-secret environment variables after calling it.
 
+`configure_worker_command` assembles those pre-exec steps as cgroup placement, namespaces, Landlock, and clean environment/descriptor setup. It does not create the cgroup, install seccomp, spawn the worker, or load an artifact; the clean executor host must install seccomp after exec and before artifact loading.
+
 These hooks establish ordering primitives only: they do not form a complete launcher, and no artifact may be opened until all required controls have been installed. The seccomp regression launches a test executable as a disposable child and checks an allowed runtime syscall plus process-kill behavior for an unlisted socket-creation syscall. It does not load user artifacts. Full cgroup/Landlock/seccomp executor launch remains unimplemented.
 
 The supervisor must clean up descendants and resources after crashes or timeouts and request transaction abort before commit. Killing a process does not undo a durable commit. Storage retains version pins until its own in-flight tasks drain. Sandbox limits do not replace storage-side request, write-set, and history-retention budgets.

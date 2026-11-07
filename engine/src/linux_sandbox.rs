@@ -238,6 +238,24 @@ pub fn prepare_clean_worker_command(
     }
 }
 
+/// Register the supported Linux worker pre-exec hooks in their required
+/// order: cgroup placement, namespaces, Landlock, then descriptor scrubbing.
+/// Add only non-secret environment values after this function returns. The
+/// caller must still install seccomp inside the clean worker host after exec
+/// and before loading any query library.
+#[cfg(target_os = "linux")]
+pub fn configure_worker_command(
+    command: &mut std::process::Command,
+    cgroup: impl AsRef<Path>,
+    landlock: &LandlockRuleset,
+    inherited_fds: &[i32],
+) -> io::Result<()> {
+    attach_command_before_exec(cgroup, command)?;
+    attach_namespaces_before_exec(command)?;
+    landlock.attach_command_before_exec(command)?;
+    prepare_clean_worker_command(command, inherited_fds)
+}
+
 #[cfg(target_os = "linux")]
 unsafe fn enter_worker_namespaces(host_uid: libc::uid_t, host_gid: libc::gid_t) -> io::Result<()> {
     // SAFETY: unshare receives only a fixed namespace flag mask.

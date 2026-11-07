@@ -304,31 +304,105 @@ fn prepare_clean_worker_command_scrubs_environment_and_descriptors() {
     use std::process::Command;
 
     let source = fs::File::open("/dev/null").unwrap();
-    // SAFETY: dup2 creates controlled descriptors in this test process; they
+    // SAFETY: fcntl duplicates the owned source descriptor; both duplicates
     // are explicitly closed after the child has been observed.
-    assert_eq!(unsafe { libc::dup2(source.as_raw_fd(), 100) }, 100);
-    assert_eq!(unsafe { libc::dup2(source.as_raw_fd(), 101) }, 101);
+    let hidden = unsafe { libc::fcntl(source.as_raw_fd(), libc::F_DUPFD, 64) };
+    assert!(hidden >= 64);
+    let preserved = unsafe { libc::fcntl(source.as_raw_fd(), libc::F_DUPFD, hidden + 1) };
+    assert!(preserved > hidden);
     assert_eq!(
-        unsafe { libc::fcntl(101, libc::F_SETFD, libc::FD_CLOEXEC) },
+        unsafe { libc::fcntl(preserved, libc::F_SETFD, libc::FD_CLOEXEC) },
         0
     );
+    let hidden = hidden.to_string();
+    let preserved = preserved.to_string();
 
     let mut command = Command::new("/bin/sh");
     command
         .env("PRDB_SUPERVISOR_SECRET", "must-not-inherit")
         .args([
             "-c",
-            "test -e /proc/self/fd/101 && test ! -e /proc/self/fd/100 && test -z \"${PRDB_SUPERVISOR_SECRET+x}\"",
+            "test -e \"/proc/self/fd/$1\" && test ! -e \"/proc/self/fd/$2\" && test -z \"${PRDB_SUPERVISOR_SECRET+x}\"",
+            "worker",
+            &preserved,
+            &hidden,
         ]);
-    linux_sandbox::prepare_clean_worker_command(&mut command, &[101]).unwrap();
+    linux_sandbox::prepare_clean_worker_command(&mut command, &[preserved.parse().unwrap()])
+        .unwrap();
 
     let status = command.status().unwrap();
     // SAFETY: these descriptors were created above and are no longer needed.
     unsafe {
-        libc::close(100);
-        libc::close(101);
+        libc::close(hidden.parse().unwrap());
+        libc::close(preserved.parse().unwrap());
     }
     assert!(status.success());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn configured_worker_command_applies_the_pre_exec_confinement_chain() {
+    use prdb_engine::linux_sandbox::{LandlockPolicy, LandlockRuleset};
+    use std::process::Command;
+
+    let fixture = Fixture::new();
+    let mut policy = LandlockPolicy::default();
+    for path in [
+        "/bin",
+        "/usr/bin",
+        "/lib",
+        "/lib64",
+        "/usr/lib",
+        "/usr/lib64",
+        "/nix/store",
+    ] {
+        if std::path::Path::new(path).exists() {
+            policy.allow_read_execute(path).unwrap();
+        }
+    }
+    if std::path::Path::new("/etc/ld.so.cache").exists() {
+        policy.allow_read("/etc/ld.so.cache").unwrap();
+    }
+    policy.allow_writable(&fixture.0).unwrap();
+    let ruleset = LandlockRuleset::new(&policy).unwrap();
+    let cat = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|directory| directory.join("cat"))
+        .find(|candidate| candidate.is_file())
+        .unwrap();
+    let mut command = Command::new("/bin/sh");
+    command
+        .env("PRDB_SUPERVISOR_SECRET", "must-not-inherit")
+        .args([
+            "-c",
+            "test -z \"${PRDB_SUPERVISOR_SECRET+x}\" || exit 20; printf '%s' \"$$\" > \"$1/worker-pid\"; \"$2\" /etc/passwd > \"$1/cat-output\" 2>&1; printf '%s' \"$?\" > \"$1/denied\"",
+            "worker",
+            fixture.0.to_str().unwrap(),
+            cat.to_str().unwrap(),
+        ]);
+
+    linux_sandbox::configure_worker_command(&mut command, &fixture.0, &ruleset, &[]).unwrap();
+    assert!(command.status().unwrap().success());
+    assert!(
+        fs::read_to_string(fixture.0.join("worker-pid"))
+            .unwrap()
+            .parse::<u32>()
+            .unwrap()
+            > 0
+    );
+    assert_ne!(fs::read_to_string(fixture.0.join("denied")).unwrap(), "0");
+    assert!(
+        fs::read_to_string(fixture.0.join("cat-output"))
+            .unwrap()
+            .contains("/etc/passwd")
+    );
+    assert!(
+        fs::read_to_string(fixture.0.join("cgroup.procs"))
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap()
+            > 0
+    );
 }
 
 #[cfg(target_os = "linux")]
