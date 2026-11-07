@@ -9,6 +9,8 @@ pub mod commit;
 pub mod credentials;
 pub mod ddl_fence;
 pub mod executor_ipc;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub mod executor_launcher;
 pub mod expression;
 pub mod gateway;
 pub mod index_key;

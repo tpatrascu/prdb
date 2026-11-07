@@ -58,3 +58,12 @@
 - Contract: [supervisor START lifecycle](../../specs/supervisor.md).
 - Verification: the focused regression passed. In the repository Nix shell, `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, all workspace tests, and `git diff --check` passed.
 - Remaining: connect the callback to executor command construction/spawn and process-exit observation; verify successful launch on a writable delegated cgroup host before treating the worker path as integrated.
+
+## SU-3 / EX-1: prepare and spawn the executor after admission — implemented, service wiring pending
+
+- Behavior: `start_and_launch_executor` creates the cgroup before consuming START, materializes the artifact privately, seals the parameter memfd, prepares Landlock and pre-exec restrictions, calls the supplied admission callback, then spawns only the trusted executor host. The returned `RunningExecutor` kills/reaps on drop and exposes process-exit observation that delegates cgroup emptiness and success authorization to `SupervisorInvocation`.
+- Regression: artifact staging checks read/execute-only permissions and directory removal; parameter tests verify all required memfd seals, rewind, and write denial. An unsupported cgroup profile rejects before the storage callback and retains the prepared reservation. No artifact was loaded.
+- Contract: [supervisor lifecycle](../../specs/supervisor.md) and [executor lifecycle](../../specs/query-worker.md).
+- Verification: workspace build, format check, warning-denied Clippy, all workspace tests, and `git diff --check` passed in the repository Nix shell.
+- Limitation: this machine's cgroup mount is read only, so successful process launch, real cgroup cleanup, and dynamic loading remain unverified. Runtime filesystem paths are explicit caller configuration and need a pinned deployment profile.
+- Remaining: route gateway START through this helper, provision planner/storage IPC, then validate a real launch on a writable delegated cgroup host before claiming process-level integration.

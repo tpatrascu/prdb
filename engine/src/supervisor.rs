@@ -996,6 +996,50 @@ mod tests {
     }
 
     #[test]
+    fn executor_start_rejects_unsupported_host_before_storage_admission() {
+        let store = store(Arc::new(AcceptMetadata));
+        let owner = make_owner(33, 34);
+        let invocation_id = upload_and_seal(&store, owner, b"artifact", b"params");
+        let cgroup_parent =
+            std::env::temp_dir().join(format!("prdb-executor-start-{}", std::process::id()));
+        std::fs::create_dir_all(&cgroup_parent).unwrap();
+        let admission_called = std::sync::atomic::AtomicBool::new(false);
+        let config = crate::executor_launcher::ExecutorLaunchConfig {
+            executor_path: std::path::PathBuf::from("/missing/prdb-executor"),
+            scratch_parent: std::env::temp_dir(),
+            runtime_read_execute: Vec::new(),
+            runtime_read_only: Vec::new(),
+            cleanup_timeout: std::time::Duration::from_millis(100),
+        };
+
+        let result = crate::executor_launcher::start_and_launch_executor(
+            &store,
+            owner,
+            invocation_id,
+            &cgroup_parent,
+            crate::linux_sandbox::WorkerResourceLimits {
+                cpu_quota_micros: 100_000,
+                cpu_period_micros: 100_000,
+                memory_max_bytes: 64 * 1024 * 1024,
+                max_processes: 16,
+            },
+            &config,
+            |_| {
+                admission_called.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok::<_, ()>(())
+            },
+        );
+
+        assert!(matches!(result, Err(StartError::Sandbox(_))));
+        assert!(!admission_called.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            store.status(owner, invocation_id).unwrap(),
+            SubmissionState::Prepared
+        );
+        std::fs::remove_dir_all(cgroup_parent).unwrap();
+    }
+
+    #[test]
     fn staging_rejects_cross_owner_and_noncontiguous_chunks() {
         let store = store(Arc::new(AcceptMetadata));
         let owner = make_owner(3, 4);
