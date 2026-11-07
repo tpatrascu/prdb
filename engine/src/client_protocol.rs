@@ -174,6 +174,10 @@ enum PendingAdminAction {
     DropTable {
         table_id: [u8; 16],
     },
+    RenameTable {
+        table_id: [u8; 16],
+        name: String,
+    },
     DropColumn {
         table_id: [u8; 16],
         column_id: [u8; 16],
@@ -252,6 +256,10 @@ pub enum ClientAdminCommand {
     },
     PrepareDropTable {
         table_id: [u8; 16],
+    },
+    PrepareRenameTable {
+        table_id: [u8; 16],
+        name: String,
     },
     PrepareDropColumn {
         table_id: [u8; 16],
@@ -514,6 +522,22 @@ pub fn decode_client_admin_command(
                 return Err(ClientControlError::UnknownKey);
             }
             Ok(ClientAdminCommand::PrepareDropTable { table_id })
+        }
+        Some("prepare") if version == Some(1) && operation.as_deref() == Some("tables.rename") => {
+            if operation_id.is_some() || seen.len() != 4 {
+                return Err(ClientControlError::UnknownKey);
+            }
+            let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
+            let table_id = decode_lower_hex_id(
+                &args
+                    .remove("table_id")
+                    .ok_or(ClientControlError::MissingKey)?,
+            )?;
+            let name = args.remove("name").ok_or(ClientControlError::MissingKey)?;
+            if !args.is_empty() || !is_canonical_admin_principal_name(&name) {
+                return Err(ClientControlError::InvalidPrepare);
+            }
+            Ok(ClientAdminCommand::PrepareRenameTable { table_id, name })
         }
         Some("prepare")
             if version == Some(1) && operation.as_deref() == Some("tables.drop_column") =>
@@ -2285,6 +2309,32 @@ impl ClientConnectionSession {
                     .into_bytes(),
                 )
             }
+            ClientAdminCommand::PrepareRenameTable { table_id, name } => {
+                if self.pending_admin_operation.is_some() {
+                    return Err(ClientSessionError::WrongMode);
+                }
+                let mut operation_id = [0; 16];
+                getrandom::fill(&mut operation_id).map_err(|_| {
+                    ClientSessionError::Storage(TransactionError::RandomnessUnavailable)
+                })?;
+                if operation_id == [0; 16] {
+                    return Err(ClientSessionError::Storage(
+                        TransactionError::RandomnessUnavailable,
+                    ));
+                }
+                self.pending_admin_operation = Some(PendingAdminOperation {
+                    operation_id,
+                    action: PendingAdminAction::RenameTable { table_id, name },
+                });
+                self.json_response(
+                    request.request_id,
+                    format!(
+                        "{{\"operation_id\":\"{}\",\"state\":\"prepared\"}}",
+                        encode_lower_hex_id(operation_id)
+                    )
+                    .into_bytes(),
+                )
+            }
             ClientAdminCommand::PrepareDropColumn {
                 table_id,
                 column_id,
@@ -2696,6 +2746,36 @@ impl ClientConnectionSession {
                                 encode_lower_hex_id(operation_id),
                                 encode_lower_hex_id(dropped.table_id),
                                 dropped.commit_sequence,
+                            )
+                            .into_bytes(),
+                        )
+                    }
+                    PendingAdminAction::RenameTable { table_id, name } => {
+                        let commit_sequence = storage
+                            .rename_table(
+                                operation_id,
+                                actor_id,
+                                table_id,
+                                &name,
+                                retention_deadline_us,
+                                crate::audit::AuditEvent {
+                                    event_id,
+                                    actor_id: Some(actor_id),
+                                    correlation_id: operation_id,
+                                    occurred_at_us: now_us,
+                                    action: crate::audit::AuditAction::Ddl,
+                                    result: crate::audit::AuditResult::Succeeded,
+                                    target_ids: Vec::new(),
+                                },
+                            )
+                            .map_err(ClientSessionError::TableLifecycle)?;
+                        self.json_response(
+                            request.request_id,
+                            format!(
+                                "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"table_id\":\"{}\",\"commit_sequence\":\"{}\"}}",
+                                encode_lower_hex_id(operation_id),
+                                encode_lower_hex_id(table_id),
+                                commit_sequence,
                             )
                             .into_bytes(),
                         )

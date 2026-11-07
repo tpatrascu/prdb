@@ -90,4 +90,6 @@ The supervisor may pass preprovisioned planner and executor `UnixStream`s to `Su
 
 ## Validation
 
+`StorageManager::rename_table` updates the table object's normalized name and version and increments the table write epoch in one authorized commit. The owner or a database administrator may rename a non-system table. Final schema-local name uniqueness is checked in the serialized writer; table identity, tuple schema version, rows, and index memberships remain unchanged. The `tables.rename` control operation uses connection-owned PREPARE/START and returns the table ID and commit sequence.
+
 Test redb snapshot/overlay semantics, concurrent staging and serialized finalization, same-row conflicts, distinct-row commits, write skew, atomic row/index/catalog/outcome updates, policy changes racing commit, hidden-field preservation, restart/outcome reconciliation, malformed IPC, long-reader pressure, and identical authorization behavior for scans and index lookups.

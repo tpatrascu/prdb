@@ -1094,11 +1094,12 @@ fn storage_manager_drop_table_removes_owned_catalog_and_rows()
             .status,
         OutcomeStatus::Committed
     );
+    StorageManager::new(&database, Duration::from_millis(100))?;
     Ok(())
 }
 
 #[test]
-fn storage_manager_drop_column_rewrites_rows_and_preserves_surviving_identity()
+fn storage_manager_renames_tables_and_drop_column_rewrites_rows()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::storage_manager::{CreateTableRequest, TableColumnDefinition};
 
@@ -1154,6 +1155,111 @@ fn storage_manager_drop_column_rewrites_rows_and_preserves_surviving_identity()
         retention_deadline_us: 9_999,
         audit_event: create_audit,
     })?;
+    let rename_invocation = id(0x76);
+    let mut rename_audit = identity_audit_event(0x77, actor, id(0x78));
+    rename_audit.correlation_id = rename_invocation;
+    let rename_sequence = storage.rename_table(
+        rename_invocation,
+        actor,
+        table.table_id,
+        "renamed_column_drop_me",
+        9_999,
+        rename_audit,
+    )?;
+    assert!(rename_sequence > table.commit_sequence);
+    let duplicate_table = storage.create_table(CreateTableRequest {
+        invocation_id: id(0x79),
+        authenticated_actor_id: actor,
+        schema_id: schema.schema_id,
+        name: "occupied_table".to_owned(),
+        columns: vec![TableColumnDefinition {
+            name: "value".to_owned(),
+            scalar_type: ScalarType::Text,
+            nullable: true,
+            generated_uuid_identity: false,
+            default: None,
+        }],
+        retention_deadline_us: 9_999,
+        audit_event: {
+            let mut event = identity_audit_event(0x7a, actor, id(0x7b));
+            event.correlation_id = id(0x79);
+            event
+        },
+    })?;
+    assert_ne!(duplicate_table.table_id, table.table_id);
+    let duplicate_rename_invocation = id(0x7c);
+    let mut duplicate_rename_audit = identity_audit_event(0x7d, actor, id(0x7e));
+    duplicate_rename_audit.correlation_id = duplicate_rename_invocation;
+    assert!(matches!(
+        storage.rename_table(
+            duplicate_rename_invocation,
+            actor,
+            table.table_id,
+            "occupied_table",
+            9_999,
+            duplicate_rename_audit,
+        ),
+        Err(prdb_engine::storage_manager::TableLifecycleError::Commit(
+            CommitError::InvalidCatalog
+        ))
+    ));
+    assert_eq!(
+        lookup_outcome(&database, duplicate_rename_invocation, actor, 1)?
+            .ok_or("missing duplicate table-name outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
+    {
+        let read = database.begin_read()?;
+        let catalog = read.open_table(CATALOG)?;
+        let table_object = decode_registered_envelope(
+            catalog
+                .get(id_catalog_key(2, table.table_id).as_slice())?
+                .ok_or("renamed table object missing")?
+                .value(),
+        )?;
+        assert_eq!(
+            table_object
+                .fields
+                .iter()
+                .find(|field| field.tag == 3)
+                .ok_or("table name missing")?
+                .payload,
+            b"renamed_column_drop_me"
+        );
+        let table_record = decode_registered_envelope(
+            catalog
+                .get(id_catalog_key(5, table.table_id).as_slice())?
+                .ok_or("renamed table record missing")?
+                .value(),
+        )?;
+        assert_eq!(
+            u64::from_le_bytes(
+                table_record
+                    .fields
+                    .iter()
+                    .find(|field| field.tag == 2)
+                    .ok_or("schema version missing")?
+                    .payload
+                    .as_slice()
+                    .try_into()?
+            ),
+            1
+        );
+        assert_eq!(
+            u64::from_le_bytes(
+                table_record
+                    .fields
+                    .iter()
+                    .find(|field| field.tag == 3)
+                    .ok_or("write epoch missing")?
+                    .payload
+                    .as_slice()
+                    .try_into()?
+            ),
+            2
+        );
+    }
     let row_key = table_row_key(table.table_id, id(0x69));
     let old_payload = encode_tuple(
         &[
@@ -1365,6 +1471,8 @@ fn storage_manager_drop_column_rewrites_rows_and_preserves_surviving_identity()
             .status,
         OutcomeStatus::Committed
     );
+    drop(read);
+    StorageManager::new(&database, Duration::from_millis(100))?;
     Ok(())
 }
 

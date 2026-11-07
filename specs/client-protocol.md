@@ -129,6 +129,8 @@ PING has `{}` payload and returns `{ "alive": true }`; it is not a health/durabi
 
 ERROR is response kind 101, uses the failed request ID and response sequence zero, and has `{ "code": string, "message": string }`. The gateway closes the client connection after an ERROR response. Its message is selected from fixed public text by category and never copies an internal exception.
 
+`tables.rename` uses PREPARE/START with `{ "table_id": id, "name": normalized_name }`. The table owner or a database administrator may rename a non-system table. START checks the final schema-local name set while serialized, keeps the table ID and tuple schema version, and increments the write epoch and object version. Success returns the operation ID, committed outcome, `table_id`, and commit sequence.
+
 ## Validation and Extension
 
 Test partial/coalesced frames, oversized lengths, malformed JSON/base64, duplicate IDs/keys, incorrect sequences, cross-session submissions, revoked credentials between upload/start, slow uploads without snapshot pins, upload substitution, forged worker terminal bytes, reconnect/status, and gateway death around commit. Test multiple concurrent connections while retaining one stream per connection.

@@ -1378,3 +1378,12 @@
 - TDD note: the behavior test first failed with `InvalidRequest` against the compiling storage-manager stub, then passed after the schema rewrite path was implemented.
 - Verification: `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, and `git diff --check` all passed in the configured Nix shell; the focused real-redb rewrite, RESTRICT, and index-locator regression passed as well.
 - Remaining: external-FK/constraint/policy dependency regressions, row/byte limit boundaries, DDL race coverage, and separate supervisor/gateway process integration remain open.
+
+## DS-5 / SM-5: table rename — implemented
+
+- Behavior and normative contracts: [schema DDL](../../specs/ddl-schema.md), [client protocol](../../specs/client-protocol.md), and [storage manager](../../specs/storage-manager.md). The table owner or a database administrator can rename a non-system table. The stable table ID and tuple schema version remain fixed; the table write epoch and object version advance. Schema-local name uniqueness is checked inside the serialized final catalog commit.
+- Implementation: [authorized table-rename commit path](../../engine/src/commit.rs), [storage entry point](../../engine/src/storage_manager.rs), and connection-owned [`tables.rename` PREPARE/START](../../engine/src/client_protocol.rs).
+- Regression evidence: the real-redb lifecycle test verifies name/object update, stable table identity, unchanged schema version, incremented write epoch, duplicate-name rejection with a durable aborted outcome, and subsequent row/index operations through a column drop. The strict decoder test accepts the exact table ID and normalized name shape.
+- TDD note: the rename assertion first failed with `InvalidRequest` against the compiling storage stub; the storage path and authorized commit guard now pass it.
+- Verification: `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, and `git diff --check` all passed in the configured Nix shell; the focused storage and decoder tests passed as well.
+- Remaining: column/table rename gateway dispatch coverage, role-owner authorization regression, DDL stale-writer race, and other supported alterations remain open.

@@ -20,6 +20,8 @@ The storage manager's initial `create_table` path accepts a structured schema ID
 
 `ALTER TABLE ... DROP COLUMN ... RESTRICT` is available through `tables.drop_column` with table and column IDs. The table owner (including inherited membership in an owning role) or a database administrator may request it; built-in system schemas are rejected. Constraints, expressions, indexes, and policies that reference the column block the operation. Storage removes the column's own default expression, dependent grant records, and dependency edges, compacts surviving column ordinals, increments schema version and write epoch, and rewrites persisted tuples and surviving index keys in one fenced commit. The row scan is bounded by 65,536 rows and 64 MiB of combined old and rewritten tuple payloads; larger drops fail without publication. Existing rows retain their surviving values and row identities.
 
+`ALTER TABLE ... RENAME TO ...` is available through `tables.rename` using a table ID and normalized new name. The table owner (including inherited membership in an owning role) or a database administrator may rename a non-system table. Name uniqueness within the schema is checked in the serialized final catalog. The stable table ID and tuple schema version do not change; storage increments the table write epoch and object version so stale writers are rejected while existing row tuples and index keys remain valid.
+
 ```sql
 CREATE SCHEMA app AUTHORIZATION app_owner;
 ALTER SCHEMA app RENAME TO application;

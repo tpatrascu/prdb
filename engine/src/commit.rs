@@ -159,6 +159,7 @@ enum CatalogAuthorizationMode {
     SchemaCreateDdl,
     SchemaDropDdl,
     TableDropDdl,
+    TableRenameDdl,
     ColumnDropDdl,
     TableCreateDdl,
     ObjectGrantDdl,
@@ -6099,6 +6100,30 @@ pub fn commit_authorized_table_drop_ddl_with_fences(
     )
 }
 
+/// Authorize a stable-ID table rename and validate the final schema-local name set.
+pub fn commit_authorized_table_rename_ddl_with_fences(
+    database: &Database,
+    ddl_fences: &DdlFenceCoordinator,
+    invocation_id: [u8; 16],
+    authenticated_principal_id: [u8; 16],
+    retention_deadline_us: i64,
+    catalog_writes: &[CatalogWrite],
+    audit_events: &[AuditEvent],
+) -> Result<u64, CommitError> {
+    commit_catalog_and_audit_with_fences_inner(
+        database,
+        ddl_fences,
+        CatalogCommitRequest {
+            invocation_id,
+            principal_id: authenticated_principal_id,
+            retention_deadline_us,
+            catalog_writes,
+            audit_events,
+        },
+        CatalogAuthorizationMode::TableRenameDdl,
+    )
+}
+
 /// Authorize and atomically remove a column, rewrite rows, and rebuild surviving indexes.
 pub fn commit_authorized_column_drop_ddl_with_fences(
     database: &Database,
@@ -6412,6 +6437,27 @@ fn commit_catalog_and_audit_with_fences_inner(
                 }
             }
         }
+        CatalogAuthorizationMode::TableRenameDdl => {
+            match table_rename_ddl_authority_guards(
+                database,
+                principal_id,
+                catalog_writes,
+                audit_events,
+            ) {
+                Ok(guards) => guards,
+                Err(error) => {
+                    if !matches!(error, CommitError::Storage(_)) {
+                        record_aborted_outcome(
+                            database,
+                            invocation_id,
+                            principal_id,
+                            retention_deadline_us,
+                        )?;
+                    }
+                    return Err(error);
+                }
+            }
+        }
         CatalogAuthorizationMode::ColumnDropDdl => {
             match column_drop_ddl_authority_guards(
                 database,
@@ -6571,7 +6617,10 @@ fn commit_catalog_and_audit_with_fences_inner(
         &catalog_guards,
         &backfill,
         require_usable_admin_credential,
-        matches!(authorization_mode, CatalogAuthorizationMode::TableCreateDdl),
+        matches!(
+            authorization_mode,
+            CatalogAuthorizationMode::TableCreateDdl | CatalogAuthorizationMode::TableRenameDdl
+        ),
     )
 }
 
@@ -8182,6 +8231,217 @@ fn validate_schema_drop_empty_snapshot<T: redb::ReadableTable<&'static [u8], &'s
         }
     }
     Ok(())
+}
+
+fn table_rename_ddl_authority_guards(
+    database: &Database,
+    principal_id: [u8; 16],
+    catalog_writes: &[CatalogWrite],
+    audit_events: &[AuditEvent],
+) -> Result<Vec<CatalogGuard>, CommitError> {
+    if principal_id == [0; 16] || catalog_writes.len() != 2 || audit_events.is_empty() {
+        return Err(CommitError::InvalidCatalog);
+    }
+    let table_write = catalog_writes
+        .iter()
+        .find(|write| write.key.starts_with(&5u16.to_be_bytes()))
+        .ok_or(CommitError::InvalidCatalog)?;
+    let table_id: [u8; 16] = table_write
+        .key
+        .get(3..19)
+        .ok_or(CommitError::InvalidCatalog)?
+        .try_into()
+        .map_err(|_| CommitError::InvalidCatalog)?;
+    let table_key = id_catalog_key(5, table_id);
+    let object_key = id_catalog_key(2, table_id);
+    let object_write = catalog_writes
+        .iter()
+        .find(|write| write.key == object_key)
+        .ok_or(CommitError::InvalidCatalog)?;
+    if table_write.key != table_key
+        || table_write.expected_value.is_none()
+        || table_write.payload.is_none()
+        || object_write.expected_value.is_none()
+        || object_write.payload.is_none()
+        || catalog_writes
+            .iter()
+            .any(|write| write.key != table_key && write.key != object_key)
+        || audit_events.iter().any(|event| {
+            event.actor_id != Some(principal_id)
+                || event.action != crate::audit::AuditAction::Ddl
+                || event.result != crate::audit::AuditResult::Succeeded
+                || event.target_ids.as_slice() != [table_id]
+        })
+    {
+        return Err(CommitError::InvalidAudit);
+    }
+    let (Some(old_table_bytes), Some(new_table_bytes)) = (
+        table_write.expected_value.as_deref(),
+        table_write.payload.as_deref(),
+    ) else {
+        return Err(CommitError::InvalidCatalog);
+    };
+    let (Some(old_object_bytes), Some(new_object_bytes)) = (
+        object_write.expected_value.as_deref(),
+        object_write.payload.as_deref(),
+    ) else {
+        return Err(CommitError::InvalidCatalog);
+    };
+    let old_table = decode_catalog_record(&table_key, old_table_bytes)?;
+    let new_table = decode_catalog_record(&table_key, new_table_bytes)?;
+    let old_object = decode_catalog_record(&object_key, old_object_bytes)?;
+    let new_object = decode_catalog_record(&object_key, new_object_bytes)?;
+    let schema_id: [u8; 16] = catalog_field_bytes(&table_key, old_table_bytes, 5, 1)?
+        .try_into()
+        .map_err(|_| CommitError::InvalidCatalog)?;
+    let old_name = catalog_field_bytes(&object_key, old_object_bytes, 2, 3)?;
+    let new_name = catalog_field_bytes(&object_key, new_object_bytes, 2, 3)?;
+    if old_table.family_code != 5
+        || new_table.family_code != 5
+        || old_object.family_code != 2
+        || new_object.family_code != 2
+        || catalog_field_bytes(&table_key, old_table_bytes, 5, 4)? != table_id
+        || catalog_field_bytes(&table_key, new_table_bytes, 5, 4)? != table_id
+        || !catalog_fields_equal_except(&old_table, &new_table, &[3])
+        || catalog_field_u16(&object_key, old_object_bytes, 2, 1)? != 3
+        || catalog_field_u16(&object_key, new_object_bytes, 2, 1)? != 3
+        || catalog_field_bytes(&object_key, old_object_bytes, 2, 2)? != schema_id
+        || catalog_field_bytes(&object_key, new_object_bytes, 2, 2)? != schema_id
+        || old_name == new_name
+        || !is_canonical_catalog_name(&new_name)
+        || catalog_field_u64(&object_key, new_object_bytes, 2, 5)?
+            != catalog_field_u64(&object_key, old_object_bytes, 2, 5)?
+                .checked_add(1)
+                .ok_or(CommitError::InvalidCatalog)?
+        || !catalog_fields_equal_except(&old_object, &new_object, &[3, 5])
+        || table_schema_version(&table_key, new_table_bytes)?
+            != table_schema_version(&table_key, old_table_bytes)?
+        || table_write_epoch(&table_key, new_table_bytes)?
+            != table_write_epoch(&table_key, old_table_bytes)?
+                .checked_add(1)
+                .ok_or(CommitError::InvalidCatalog)?
+    {
+        return Err(CommitError::InvalidCatalog);
+    }
+    let owner_id: [u8; 16] = catalog_field_bytes(&object_key, old_object_bytes, 2, 4)?
+        .try_into()
+        .map_err(|_| CommitError::InvalidCatalog)?;
+    let read = database.begin_read().map_err(storage_error)?;
+    let catalog = read.open_table(CATALOG).map_err(storage_error)?;
+    let actor_key = id_catalog_key(10, principal_id);
+    let actor_bytes = catalog
+        .get(actor_key.as_slice())
+        .map_err(storage_error)?
+        .map(|value| value.value().to_vec())
+        .ok_or(CommitError::DdlAuthorizationDenied)?;
+    if decode_principal_kind(&actor_key, &actor_bytes)? != 1
+        || catalog_field_bytes(&actor_key, &actor_bytes, 10, 3)? != [1]
+        || catalog_field_u64(&actor_key, &actor_bytes, 10, 4)? == 0
+    {
+        return Err(CommitError::DdlAuthorizationDenied);
+    }
+    let mut guards = HashMap::<Vec<u8>, Option<Vec<u8>>>::new();
+    add_catalog_guard(&mut guards, table_key, Some(old_table_bytes.to_vec()));
+    add_catalog_guard(&mut guards, object_key, Some(old_object_bytes.to_vec()));
+    add_catalog_guard(&mut guards, actor_key, Some(actor_bytes));
+    let membership_prefix = 11u16.to_be_bytes();
+    let mut memberships = Vec::new();
+    let mut subject_ids = HashSet::from([principal_id, owner_id]);
+    let mut scanned = 0usize;
+    for entry in catalog
+        .range(membership_prefix.as_slice()..)
+        .map_err(storage_error)?
+    {
+        let (key, value) = entry.map_err(storage_error)?;
+        let key = key.value().to_vec();
+        if !key.starts_with(&membership_prefix) {
+            break;
+        }
+        scanned += 1;
+        if scanned > MAX_MEMBERSHIP_EDGES {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let bytes = value.value().to_vec();
+        let edge = decode_membership_record(&key, &bytes)?;
+        subject_ids.extend([edge.member_id, edge.role_id]);
+        memberships.push(edge);
+        add_catalog_guard(&mut guards, key, Some(bytes));
+    }
+    let roles = resolve_role_closure(principal_id, &memberships)
+        .map_err(|_| CommitError::InvalidCatalog)?;
+    let mut admin_role_id = [0x80; 16];
+    admin_role_id[15] = 3;
+    if owner_id != principal_id && !roles.contains(&owner_id) && !roles.contains(&admin_role_id) {
+        return Err(CommitError::DdlAuthorizationDenied);
+    }
+    let metadata = read
+        .open_table(ENGINE_META)
+        .map_err(storage_error)?
+        .get(&b"format"[..])
+        .map_err(storage_error)?
+        .ok_or(CommitError::InvalidMetadata)?;
+    let database_id = EngineMetadata::decode(metadata.value())
+        .map_err(|_| CommitError::InvalidMetadata)?
+        .database_id;
+    let database_key = id_catalog_key(1, database_id);
+    let database_bytes = catalog
+        .get(database_key.as_slice())
+        .map_err(storage_error)?
+        .map(|value| value.value().to_vec())
+        .ok_or(CommitError::InvalidCatalog)?;
+    add_catalog_guard(
+        &mut guards,
+        database_key.clone(),
+        Some(database_bytes.clone()),
+    );
+    let builtins = catalog_field_bytes(&database_key, &database_bytes, 1, 3)?;
+    if builtins.len() < 4 {
+        return Err(CommitError::InvalidCatalog);
+    }
+    let builtin_count = u32::from_le_bytes(
+        builtins[..4]
+            .try_into()
+            .map_err(|_| CommitError::InvalidCatalog)?,
+    ) as usize;
+    if builtin_count > 256 || builtins.len() != 4 + builtin_count * 20 {
+        return Err(CommitError::InvalidCatalog);
+    }
+    if builtins[4..].chunks_exact(20).any(|entry| {
+        matches!(u16::from_le_bytes([entry[0], entry[1]]), 1 | 2) && entry[4..20] == schema_id
+    }) {
+        return Err(CommitError::DdlAuthorizationDenied);
+    }
+    subject_ids.extend(roles);
+    let role_subject_ids = memberships
+        .iter()
+        .map(|edge| edge.role_id)
+        .collect::<HashSet<_>>();
+    for subject in subject_ids {
+        let key = id_catalog_key(10, subject);
+        let bytes = catalog
+            .get(key.as_slice())
+            .map_err(storage_error)?
+            .map(|value| value.value().to_vec())
+            .ok_or(CommitError::InvalidCatalog)?;
+        let kind = decode_principal_kind(&key, &bytes)?;
+        if (role_subject_ids.contains(&subject)
+            && (kind != 2 || catalog_field_bytes(&key, &bytes, 10, 3)? != [0]))
+            || !matches!(kind, 1 | 2)
+            || catalog_field_u64(&key, &bytes, 10, 4)? == 0
+        {
+            return Err(CommitError::InvalidCatalog);
+        }
+        add_catalog_guard(&mut guards, key, Some(bytes));
+    }
+    let mut result = guards
+        .into_iter()
+        .map(|(key, expected_value)| CatalogGuard {
+            key,
+            expected_value,
+        })
+        .collect::<Vec<_>>();
+    result.sort_by(|left, right| left.key.cmp(&right.key));
+    Ok(result)
 }
 
 fn table_drop_ddl_authority_guards(

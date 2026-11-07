@@ -15,7 +15,7 @@ use crate::commit::{
     commit_authorized_schema_drop_ddl_with_fences,
     commit_authorized_system_privilege_ddl_with_fences,
     commit_authorized_table_create_ddl_with_fences, commit_authorized_table_drop_ddl_with_fences,
-    commit_catalog_and_audit_with_fences,
+    commit_authorized_table_rename_ddl_with_fences, commit_catalog_and_audit_with_fences,
 };
 use crate::credentials::{
     MAX_TOKEN_LABEL_BYTES, TOKEN_SECRET_BYTES, decode_verifier_record, encode_new_verifier_record,
@@ -2625,6 +2625,106 @@ impl<'db> StorageManager<'db> {
             table_id,
             column_id,
             commit_sequence,
+        })
+    }
+
+    /// Rename a table while preserving its stable object ID.
+    pub fn rename_table(
+        &self,
+        invocation_id: [u8; 16],
+        authenticated_actor_id: [u8; 16],
+        table_id: [u8; 16],
+        name: &str,
+        retention_deadline_us: i64,
+        mut audit_event: AuditEvent,
+    ) -> Result<u64, TableLifecycleError> {
+        if invocation_id == [0; 16]
+            || authenticated_actor_id == [0; 16]
+            || table_id == [0; 16]
+            || retention_deadline_us <= 0
+            || !is_normalized_principal_name(name)
+        {
+            return Err(TableLifecycleError::InvalidRequest);
+        }
+        if audit_event.actor_id != Some(authenticated_actor_id)
+            || audit_event.correlation_id != invocation_id
+            || audit_event.action != AuditAction::Ddl
+            || audit_event.result != AuditResult::Succeeded
+        {
+            return Err(TableLifecycleError::InvalidAudit);
+        }
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|_| TableLifecycleError::Storage)?;
+        let catalog = read
+            .open_table(CATALOG)
+            .map_err(|_| TableLifecycleError::Storage)?;
+        let table_key = id_catalog_key(5, table_id);
+        let object_key = id_catalog_key(2, table_id);
+        let table_current = catalog
+            .get(table_key.as_slice())
+            .map_err(|_| TableLifecycleError::Storage)?
+            .map(|value| value.value().to_vec())
+            .ok_or(TableLifecycleError::InvalidRequest)?;
+        let object_current = catalog
+            .get(object_key.as_slice())
+            .map_err(|_| TableLifecycleError::Storage)?
+            .map(|value| value.value().to_vec())
+            .ok_or(TableLifecycleError::InvalidRequest)?;
+        if read_catalog_u16(&object_key, &object_current, 2, 1)? != 3
+            || read_catalog_id(&object_key, &object_current, 2, 2)?
+                != read_catalog_id(&table_key, &table_current, 5, 1)?
+        {
+            return Err(TableLifecycleError::InvalidRequest);
+        }
+        let old_name = read_catalog_field(&object_key, &object_current, 2, 3)?;
+        if old_name == name.as_bytes() {
+            return Err(TableLifecycleError::InvalidRequest);
+        }
+        let table_epoch = read_catalog_u64(&table_key, &table_current, 5, 3)?
+            .checked_add(1)
+            .ok_or(TableLifecycleError::Commit(CommitError::InvalidCatalog))?;
+        let object_version = read_catalog_u64(&object_key, &object_current, 2, 5)?
+            .checked_add(1)
+            .ok_or(TableLifecycleError::Commit(CommitError::InvalidCatalog))?;
+        let table_payload =
+            rewrite_catalog_u64_field(&table_key, &table_current, 5, 3, table_epoch)?;
+        let object_payload = rewrite_catalog_fields(
+            &object_key,
+            &object_current,
+            2,
+            &[
+                (3, WireType::Text, name.as_bytes().to_vec()),
+                (5, WireType::U64, object_version.to_le_bytes().to_vec()),
+            ],
+        )?;
+        drop(catalog);
+        drop(read);
+        audit_event.target_ids = vec![table_id];
+        commit_authorized_table_rename_ddl_with_fences(
+            self.database,
+            &self.ddl_fences,
+            invocation_id,
+            authenticated_actor_id,
+            retention_deadline_us,
+            &[
+                CatalogWrite {
+                    key: table_key,
+                    expected_value: Some(table_current),
+                    payload: Some(table_payload),
+                },
+                CatalogWrite {
+                    key: object_key,
+                    expected_value: Some(object_current),
+                    payload: Some(object_payload),
+                },
+            ],
+            &[audit_event],
+        )
+        .map_err(|error| match error {
+            CommitError::DdlAuthorizationDenied => TableLifecycleError::Unauthorized,
+            error => TableLifecycleError::Commit(error),
         })
     }
 
@@ -5275,6 +5375,18 @@ fn read_catalog_u32(
 ) -> Result<u32, TableLifecycleError> {
     let value = read_catalog_field(key, bytes, family, tag)?;
     Ok(u32::from_le_bytes(value.as_slice().try_into().map_err(
+        |_| TableLifecycleError::Commit(CommitError::InvalidCatalog),
+    )?))
+}
+
+fn read_catalog_u16(
+    key: &[u8],
+    bytes: &[u8],
+    family: u16,
+    tag: u16,
+) -> Result<u16, TableLifecycleError> {
+    let value = read_catalog_field(key, bytes, family, tag)?;
+    Ok(u16::from_le_bytes(value.as_slice().try_into().map_err(
         |_| TableLifecycleError::Commit(CommitError::InvalidCatalog),
     )?))
 }
