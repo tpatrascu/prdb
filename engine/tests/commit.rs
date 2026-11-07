@@ -4129,6 +4129,128 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &created_user_credentials.token_secret,
     )?;
     assert!(!role_session.role_ids().contains(&created_role_id));
+    let privilege_prepare = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut control,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 15,
+            payload: format!(
+                "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"privileges.grant\",\"arguments\":{{\"grantee_id\":\"{created_user_id_wire}\",\"privilege\":\"manage_roles\"}}}}"
+            )
+            .into_bytes(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_deadline_us,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )?;
+    let privilege_prepare = match privilege_prepare {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => {
+            String::from_utf8(response.payload)?
+        }
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
+            return Err("ADMIN privilege grant prepare unexpectedly started an invocation".into());
+        }
+    };
+    let privilege_operation_id = privilege_prepare
+        .split("\"operation_id\":\"")
+        .nth(1)
+        .ok_or("missing ADMIN privilege operation ID")?
+        .get(..32)
+        .ok_or("invalid ADMIN privilege operation ID")?;
+    let privilege_grant = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut control,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 16,
+            payload: format!(
+                "{{\"phase\":\"start\",\"operation_id\":\"{privilege_operation_id}\"}}"
+            )
+            .into_bytes(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_deadline_us,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )?;
+    let privilege_grant = match privilege_grant {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => {
+            String::from_utf8(response.payload)?
+        }
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
+            return Err("ADMIN privilege grant start returned a worker invocation".into());
+        }
+    };
+    assert!(privilege_grant.contains("\"outcome\":\"committed\""));
+    let mut delegated_admin = ClientConnectionSession::default();
+    delegated_admin.accept_hello(ClientMode::Control, "delegated-role-manager")?;
+    delegated_admin.authenticate(
+        &storage,
+        created_user_credentials.token_id,
+        &created_user_credentials.token_secret,
+    )?;
+    let delegated_role_prepare = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut delegated_admin,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 1,
+            payload: br#"{"phase":"prepare","operation_version":1,"operation":"roles.create","arguments":{"name":"delegated_role"}}"#.to_vec(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_deadline_us,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )?;
+    let delegated_role_prepare = match delegated_role_prepare {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => {
+            String::from_utf8(response.payload)?
+        }
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
+            return Err("delegated role-create prepare unexpectedly started an invocation".into());
+        }
+    };
+    let delegated_role_operation_id = delegated_role_prepare
+        .split("\"operation_id\":\"")
+        .nth(1)
+        .ok_or("missing delegated role-create operation ID")?
+        .get(..32)
+        .ok_or("invalid delegated role-create operation ID")?;
+    let delegated_role = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut delegated_admin,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 2,
+            payload: format!(
+                "{{\"phase\":\"start\",\"operation_id\":\"{delegated_role_operation_id}\"}}"
+            )
+            .into_bytes(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_deadline_us,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )?;
+    assert!(matches!(
+        delegated_role,
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response)
+            if String::from_utf8_lossy(&response.payload).contains("\"outcome\":\"committed\"")
+    ));
     assert!(
         storage
             .list_tokens(admin_id, user_manager_id)?

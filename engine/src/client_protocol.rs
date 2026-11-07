@@ -80,6 +80,7 @@ pub enum ClientSessionError {
     TokenInventory(crate::storage_manager::TokenLifecycleError),
     IdentityLifecycle(crate::storage_manager::IdentityLifecycleError),
     MembershipLifecycle(crate::storage_manager::MembershipLifecycleError),
+    SystemPrivilegeLifecycle(crate::storage_manager::SystemPrivilegeLifecycleError),
     Storage(TransactionError),
 }
 
@@ -166,6 +167,11 @@ enum PendingAdminAction {
         role_id: [u8; 16],
         grant: bool,
     },
+    ChangeSystemPrivilege {
+        grantee_id: [u8; 16],
+        privilege: crate::storage_manager::AdministrativeSystemPrivilege,
+        grant: bool,
+    },
     Revoke {
         token_id: [u8; 16],
     },
@@ -212,6 +218,11 @@ pub enum ClientAdminCommand {
     PrepareRevokeRole {
         member_id: [u8; 16],
         role_id: [u8; 16],
+    },
+    PrepareSystemPrivilege {
+        grantee_id: [u8; 16],
+        privilege: crate::storage_manager::AdministrativeSystemPrivilege,
+        grant: bool,
     },
     PrepareRevoke {
         token_id: [u8; 16],
@@ -396,6 +407,16 @@ pub fn decode_client_admin_command(
         Some("prepare") if version == Some(1) && operation.as_deref() == Some("roles.revoke") => {
             decode_role_membership_prepare(arguments, operation_id, seen.len(), false)
         }
+        Some("prepare")
+            if version == Some(1) && operation.as_deref() == Some("privileges.grant") =>
+        {
+            decode_system_privilege_prepare(arguments, operation_id, seen.len(), true)
+        }
+        Some("prepare")
+            if version == Some(1) && operation.as_deref() == Some("privileges.revoke") =>
+        {
+            decode_system_privilege_prepare(arguments, operation_id, seen.len(), false)
+        }
         Some("prepare") if version == Some(1) && operation.as_deref() == Some("tokens.revoke") => {
             if operation_id.is_some() || seen.len() != 4 {
                 return Err(ClientControlError::UnknownKey);
@@ -478,6 +499,41 @@ fn decode_role_membership_prepare(
         ClientAdminCommand::PrepareGrantRole { member_id, role_id }
     } else {
         ClientAdminCommand::PrepareRevokeRole { member_id, role_id }
+    })
+}
+
+fn decode_system_privilege_prepare(
+    arguments: Option<HashMap<String, String>>,
+    operation_id: Option<String>,
+    seen_len: usize,
+    grant: bool,
+) -> Result<ClientAdminCommand, ClientControlError> {
+    if operation_id.is_some() || seen_len != 4 {
+        return Err(ClientControlError::UnknownKey);
+    }
+    let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
+    let grantee_id = decode_lower_hex_id(
+        &args
+            .remove("grantee_id")
+            .ok_or(ClientControlError::MissingKey)?,
+    )?;
+    let privilege = match args
+        .remove("privilege")
+        .ok_or(ClientControlError::MissingKey)?
+        .as_str()
+    {
+        "manage_users" => crate::storage_manager::AdministrativeSystemPrivilege::ManageUsers,
+        "manage_roles" => crate::storage_manager::AdministrativeSystemPrivilege::ManageRoles,
+        "create_schema" => crate::storage_manager::AdministrativeSystemPrivilege::CreateSchema,
+        _ => return Err(ClientControlError::InvalidPrepare),
+    };
+    if !args.is_empty() {
+        return Err(ClientControlError::UnknownKey);
+    }
+    Ok(ClientAdminCommand::PrepareSystemPrivilege {
+        grantee_id,
+        privilege,
+        grant,
     })
 }
 
@@ -1620,6 +1676,11 @@ impl ClientConnectionSession {
             ClientAdminCommand::PrepareRevokeRole { member_id, role_id } => {
                 self.prepare_role_membership(request.request_id, member_id, role_id, false)
             }
+            ClientAdminCommand::PrepareSystemPrivilege {
+                grantee_id,
+                privilege,
+                grant,
+            } => self.prepare_system_privilege(request.request_id, grantee_id, privilege, grant),
             ClientAdminCommand::PrepareRevoke { token_id } => {
                 if self.pending_admin_operation.is_some() {
                     return Err(ClientSessionError::WrongMode);
@@ -1734,6 +1795,41 @@ impl ClientConnectionSession {
                                 },
                             )
                             .map_err(ClientSessionError::MembershipLifecycle)?;
+                        self.json_response(
+                            request.request_id,
+                            format!(
+                                "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"commit_sequence\":\"{sequence}\"}}",
+                                encode_lower_hex_id(operation_id)
+                            )
+                            .into_bytes(),
+                        )
+                    }
+                    PendingAdminAction::ChangeSystemPrivilege {
+                        grantee_id,
+                        privilege,
+                        grant,
+                    } => {
+                        let sequence = storage
+                            .set_system_privilege(
+                                operation_id,
+                                actor_id,
+                                crate::storage_manager::SystemPrivilegeChange {
+                                    grantee_id,
+                                    privilege,
+                                    grant,
+                                },
+                                retention_deadline_us,
+                                crate::audit::AuditEvent {
+                                    event_id,
+                                    actor_id: Some(actor_id),
+                                    correlation_id: operation_id,
+                                    occurred_at_us: now_us,
+                                    action: crate::audit::AuditAction::AuthorityChange,
+                                    result: crate::audit::AuditResult::Succeeded,
+                                    target_ids: Vec::new(),
+                                },
+                            )
+                            .map_err(ClientSessionError::SystemPrivilegeLifecycle)?;
                         self.json_response(
                             request.request_id,
                             format!(
@@ -1900,6 +1996,42 @@ impl ClientConnectionSession {
         self.pending_admin_operation = Some(PendingAdminOperation {
             operation_id,
             action,
+        });
+        self.json_response(
+            request_id,
+            format!(
+                "{{\"operation_id\":\"{}\",\"state\":\"prepared\"}}",
+                encode_lower_hex_id(operation_id)
+            )
+            .into_bytes(),
+        )
+    }
+
+    fn prepare_system_privilege(
+        &mut self,
+        request_id: u64,
+        grantee_id: [u8; 16],
+        privilege: crate::storage_manager::AdministrativeSystemPrivilege,
+        grant: bool,
+    ) -> Result<ClientFrame, ClientSessionError> {
+        if self.pending_admin_operation.is_some() {
+            return Err(ClientSessionError::WrongMode);
+        }
+        let mut operation_id = [0; 16];
+        getrandom::fill(&mut operation_id)
+            .map_err(|_| ClientSessionError::Storage(TransactionError::RandomnessUnavailable))?;
+        if operation_id == [0; 16] {
+            return Err(ClientSessionError::Storage(
+                TransactionError::RandomnessUnavailable,
+            ));
+        }
+        self.pending_admin_operation = Some(PendingAdminOperation {
+            operation_id,
+            action: PendingAdminAction::ChangeSystemPrivilege {
+                grantee_id,
+                privilege,
+                grant,
+            },
         });
         self.json_response(
             request_id,

@@ -187,6 +187,26 @@ fn admin_read_decoder_accepts_token_inventory_and_rejects_mutation_shapes() {
 fn admin_revoke_decoder_requires_prepare_then_start_schemas() {
     assert_eq!(
         decode_client_admin_command(
+            br#"{"phase":"prepare","operation_version":1,"operation":"privileges.grant","arguments":{"grantee_id":"000102030405060708090a0b0c0d0e0f","privilege":"manage_roles"}}"#
+        ),
+        Ok(ClientAdminCommand::PrepareSystemPrivilege {
+            grantee_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+            privilege: prdb_engine::storage_manager::AdministrativeSystemPrivilege::ManageRoles,
+            grant: true,
+        })
+    );
+    assert_eq!(
+        decode_client_admin_command(
+            br#"{"phase":"prepare","operation_version":1,"operation":"privileges.revoke","arguments":{"grantee_id":"000102030405060708090a0b0c0d0e0f","privilege":"create_schema"}}"#
+        ),
+        Ok(ClientAdminCommand::PrepareSystemPrivilege {
+            grantee_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+            privilege: prdb_engine::storage_manager::AdministrativeSystemPrivilege::CreateSchema,
+            grant: false,
+        })
+    );
+    assert_eq!(
+        decode_client_admin_command(
             br#"{"phase":"prepare","operation_version":1,"operation":"tokens.revoke","arguments":{"token_id":"000102030405060708090a0b0c0d0e0f"}}"#
         ),
         Ok(ClientAdminCommand::PrepareRevoke {
@@ -263,4 +283,18 @@ fn admin_revoke_decoder_requires_prepare_then_start_schemas() {
         Ok(ClientAdminCommand::PrepareRevokeRole { member_id, role_id })
             if member_id == [1; 16] && role_id == [2; 16]
     ));
+    assert_eq!(
+        decode_client_admin_command(
+            format!(
+                "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"privileges.grant\",\"arguments\":{{\"grantee_id\":\"{}\",\"privilege\":\"manage_roles\"}}}}",
+                "03".repeat(16)
+            )
+            .as_bytes()
+        ),
+        Ok(ClientAdminCommand::PrepareSystemPrivilege {
+            grantee_id: [3; 16],
+            privilege: prdb_engine::storage_manager::AdministrativeSystemPrivilege::ManageRoles,
+            grant: true,
+        })
+    );
 }

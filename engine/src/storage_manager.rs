@@ -20,7 +20,7 @@ use crate::credentials::{
 use crate::ddl_fence::{DdlFenceCoordinator, DdlFenceManager};
 use crate::metadata::{EngineMetadata, Lifecycle};
 use crate::outcome::{InvocationOutcome, lookup_outcome};
-use crate::schema::{AUDIT, CATALOG, OUTCOMES};
+use crate::schema::{AUDIT, CATALOG, ENGINE_META, OUTCOMES};
 use crate::snapshot::{MAX_CATALOG_FAMILY_SCAN, RowSnapshot};
 use crate::startup::{StartupError, validate_persisted_records};
 use crate::transaction::{InvocationCoordination, InvocationTransaction, TransactionError};
@@ -353,6 +353,47 @@ impl std::fmt::Display for MembershipLifecycleError {
 }
 
 impl std::error::Error for MembershipLifecycleError {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdministrativeSystemPrivilege {
+    ManageUsers,
+    ManageRoles,
+    CreateSchema,
+}
+
+impl AdministrativeSystemPrivilege {
+    fn catalog_code(self) -> u16 {
+        match self {
+            Self::ManageUsers => 12,
+            Self::ManageRoles => 13,
+            Self::CreateSchema => 14,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SystemPrivilegeChange {
+    pub grantee_id: [u8; 16],
+    pub privilege: AdministrativeSystemPrivilege,
+    pub grant: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SystemPrivilegeLifecycleError {
+    InvalidRequest,
+    InvalidAudit,
+    Unauthorized,
+    Storage,
+    Commit(CommitError),
+}
+
+impl std::fmt::Display for SystemPrivilegeLifecycleError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "system privilege operation failed: {self:?}")
+    }
+}
+
+impl std::error::Error for SystemPrivilegeLifecycleError {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreatedUser {
@@ -2034,6 +2075,172 @@ impl<'db> StorageManager<'db> {
         .map_err(|error| match error {
             CommitError::DdlAuthorizationDenied => MembershipLifecycleError::Unauthorized,
             error => MembershipLifecycleError::Commit(error),
+        })
+    }
+
+    /// Grant or revoke one database-scoped system privilege as an administrator.
+    pub fn set_system_privilege(
+        &self,
+        invocation_id: [u8; 16],
+        authenticated_actor_id: [u8; 16],
+        change: SystemPrivilegeChange,
+        retention_deadline_us: i64,
+        mut audit_event: AuditEvent,
+    ) -> Result<u64, SystemPrivilegeLifecycleError> {
+        let SystemPrivilegeChange {
+            grantee_id,
+            privilege,
+            grant,
+        } = change;
+        if invocation_id == [0; 16]
+            || authenticated_actor_id == [0; 16]
+            || grantee_id == [0; 16]
+            || retention_deadline_us <= 0
+        {
+            return Err(SystemPrivilegeLifecycleError::InvalidRequest);
+        }
+        if audit_event.actor_id != Some(authenticated_actor_id)
+            || audit_event.correlation_id != invocation_id
+            || audit_event.action != AuditAction::AuthorityChange
+            || audit_event.result != AuditResult::Succeeded
+        {
+            return Err(SystemPrivilegeLifecycleError::InvalidAudit);
+        }
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|_| SystemPrivilegeLifecycleError::Storage)?;
+        let metadata_bytes = read
+            .open_table(ENGINE_META)
+            .map_err(|_| SystemPrivilegeLifecycleError::Storage)?
+            .get(&b"format"[..])
+            .map_err(|_| SystemPrivilegeLifecycleError::Storage)?
+            .ok_or(SystemPrivilegeLifecycleError::Storage)?
+            .value()
+            .to_vec();
+        let metadata = EngineMetadata::decode(&metadata_bytes)
+            .map_err(|_| SystemPrivilegeLifecycleError::Storage)?;
+        if metadata.lifecycle != Lifecycle::Ready || !metadata.supports_current_formats() {
+            return Err(SystemPrivilegeLifecycleError::Storage);
+        }
+        let database_id = metadata.database_id;
+        let key = system_privilege_catalog_key(grantee_id, database_id, privilege.catalog_code());
+        let dependency_key = dependency_catalog_key(grantee_id, database_id, 5);
+        let grantee_key = principal_catalog_key(grantee_id);
+        let catalog = read
+            .open_table(CATALOG)
+            .map_err(|_| SystemPrivilegeLifecycleError::Storage)?;
+        let current = catalog
+            .get(key.as_slice())
+            .map_err(|_| SystemPrivilegeLifecycleError::Storage)?
+            .map(|value| value.value().to_vec());
+        let dependency_current = catalog
+            .get(dependency_key.as_slice())
+            .map_err(|_| SystemPrivilegeLifecycleError::Storage)?
+            .map(|value| value.value().to_vec());
+        let grantee_current = catalog
+            .get(grantee_key.as_slice())
+            .map_err(|_| SystemPrivilegeLifecycleError::Storage)?
+            .map(|value| value.value().to_vec())
+            .ok_or(SystemPrivilegeLifecycleError::InvalidRequest)?;
+        drop(catalog);
+        drop(read);
+        if current.is_some() != dependency_current.is_some() {
+            return Err(SystemPrivilegeLifecycleError::Storage);
+        }
+        let (payload, dependency_payload) = if grant {
+            if current.is_some() {
+                return Err(SystemPrivilegeLifecycleError::InvalidRequest);
+            }
+            let payload = Some(
+                encode_envelope(
+                    &family_schema(12).ok_or(SystemPrivilegeLifecycleError::Storage)?,
+                    &key,
+                    &[
+                        CatalogField {
+                            tag: 1,
+                            wire_type: WireType::Id,
+                            payload: authenticated_actor_id.to_vec(),
+                        },
+                        CatalogField {
+                            tag: 2,
+                            wire_type: WireType::U64,
+                            payload: 1u64.to_le_bytes().to_vec(),
+                        },
+                    ],
+                )
+                .map_err(|_| SystemPrivilegeLifecycleError::InvalidRequest)?,
+            );
+            let dependency_payload = Some(
+                encode_envelope(
+                    &family_schema(15).ok_or(SystemPrivilegeLifecycleError::Storage)?,
+                    &dependency_key,
+                    &[],
+                )
+                .map_err(|_| SystemPrivilegeLifecycleError::InvalidRequest)?,
+            );
+            (payload, dependency_payload)
+        } else {
+            if current.is_none() {
+                return Err(SystemPrivilegeLifecycleError::InvalidRequest);
+            }
+            (None, None)
+        };
+        let mut grantee_record = decode_registered_envelope(&grantee_current)
+            .map_err(|_| SystemPrivilegeLifecycleError::Storage)?;
+        let epoch_field = grantee_record
+            .fields
+            .iter_mut()
+            .find(|field| field.tag == 4 && field.wire_type == WireType::U64)
+            .ok_or(SystemPrivilegeLifecycleError::Storage)?;
+        let current_epoch = u64::from_le_bytes(
+            epoch_field
+                .payload
+                .as_slice()
+                .try_into()
+                .map_err(|_| SystemPrivilegeLifecycleError::Storage)?,
+        );
+        let next_epoch = current_epoch
+            .checked_add(1)
+            .filter(|epoch| *epoch != 0)
+            .ok_or(SystemPrivilegeLifecycleError::InvalidRequest)?;
+        epoch_field.payload = next_epoch.to_le_bytes().to_vec();
+        let grantee_payload = encode_envelope(
+            &family_schema(10).ok_or(SystemPrivilegeLifecycleError::Storage)?,
+            &grantee_key,
+            &grantee_record.fields,
+        )
+        .map_err(|_| SystemPrivilegeLifecycleError::Storage)?;
+        audit_event.target_ids = vec![database_id, grantee_id];
+        audit_event.target_ids.sort_unstable();
+        audit_event.target_ids.dedup();
+        let writes = [
+            CatalogWrite {
+                key,
+                expected_value: current,
+                payload,
+            },
+            CatalogWrite {
+                key: dependency_key,
+                expected_value: dependency_current,
+                payload: dependency_payload,
+            },
+            CatalogWrite {
+                key: grantee_key,
+                expected_value: Some(grantee_current),
+                payload: Some(grantee_payload),
+            },
+        ];
+        self.commit_authorized_system_privilege_ddl(
+            invocation_id,
+            authenticated_actor_id,
+            retention_deadline_us,
+            &writes,
+            &[audit_event],
+        )
+        .map_err(|error| match error {
+            CommitError::DdlAuthorizationDenied => SystemPrivilegeLifecycleError::Unauthorized,
+            error => SystemPrivilegeLifecycleError::Commit(error),
         })
     }
 
