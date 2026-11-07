@@ -1232,3 +1232,11 @@
 - Changed code and integration regression: [gateway request dispatcher](../../engine/src/supervisor_ipc.rs) and [real-redb full submission path](../../engine/tests/commit.rs).
 - Verification: focused real-redb HELLO/AUTH and IPC submission lifecycle test passes in the repository Nix shell.
 - Remaining: run this dispatcher from a provisioned, bounded Unix service loop and keep launch/results in a separate supervisor process.
+
+## SU-1 dependency: gateway failed-authentication throttling
+
+- Behavior: the gateway allows a configurable number of failed AUTH attempts per source IP in a rolling 60-second window (default 10). It reserves in-flight attempts before forwarding AUTH, releases reservations only on successful authentication, caps retained source histories at 4,096, and fails closed when the cap is full. The source address is only a throttle key; credential bytes are not retained.
+- Contract and implementation: [gateway authentication and connection limits](../../specs/client-gateway.md), [storage authentication boundary](../../specs/storage-manager.md), [gateway limiter and runtime](../../engine/src/gateway.rs), and [gateway configuration](../../engine/src/bin/prdb-gateway.rs).
+- Regression evidence: deterministic limiter tests verify threshold, source-map cap, and expiry; a real TCP/Unix-socket gateway regression confirms the second failed AUTH is closed before reaching the supervisor service. The CLI exposes the configured limit.
+- Verification: focused limiter, live gateway, and CLI tests passed. Full configured Nix-shell validation passed: format check, workspace build, warning-denied Clippy, all workspace tests, and `git diff --check`.
+- Remaining: gateway restart loses in-memory throttle history; invalid-authentication throttling is per source address, while network-level denial-of-service protection remains a deployment concern. The gateway/supervisor process startup and sandboxed worker launch are still incomplete.

@@ -1,7 +1,8 @@
 use prdb_engine::client_protocol::{ClientFrame, ClientFrameDecoder};
 use prdb_engine::gateway::{
-    GatewayConnectionLimiter, GatewayListenerConfig, GatewayListenerError, GatewayPeerRateLimiter,
-    GatewayRuntimeConfig, TcpGatewayListener, run_gateway,
+    GatewayAuthFailureLimiter, GatewayConnectionLimiter, GatewayListenerConfig,
+    GatewayListenerError, GatewayPeerRateLimiter, GatewayRuntimeConfig, TcpGatewayListener,
+    run_gateway,
 };
 use prdb_engine::ipc::{IpcFrame, Operation, read_frame, write_frame};
 use std::io::{Read, Write};
@@ -152,6 +153,7 @@ fn gateway_worker_pool_opens_one_service_stream_per_client() {
             worker_count: 1,
             queue_capacity: 1,
             connections_per_ip_per_minute: 60,
+            auth_failures_per_ip_per_minute: 10,
             idle_timeout: std::time::Duration::from_secs(5),
             pre_auth_timeout: std::time::Duration::from_secs(2),
             accept_poll_interval: std::time::Duration::from_millis(5),
@@ -265,6 +267,7 @@ fn gateway_binary_exposes_its_explicit_listener_and_service_options() {
     assert!(help.contains("--bind"));
     assert!(help.contains("--service-socket"));
     assert!(help.contains("--service-uid"));
+    assert!(help.contains("--auth-failures-per-ip"));
 }
 
 #[test]
@@ -325,6 +328,140 @@ fn per_ip_gateway_rate_limit_is_bounded_and_expires() {
     assert!(!limiter.admit_at(other_ip, now + Duration::from_secs(2)));
     assert!(limiter.admit_at(other_ip, now + Duration::from_secs(61)));
     assert!(!limiter.admit_at(first_ip, now + Duration::from_secs(61)));
+}
+
+#[test]
+fn failed_auth_budget_is_bounded_per_ip_and_expires() {
+    use std::time::{Duration, Instant};
+
+    let limiter = GatewayAuthFailureLimiter::new(2, 1, Duration::from_secs(60)).unwrap();
+    let now = Instant::now();
+    let source = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let other = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 4));
+
+    assert!(limiter.allows_attempt_at(source, now));
+    assert!(limiter.record_failure_at(source, now));
+    assert!(limiter.allows_attempt_at(source, now + Duration::from_secs(1)));
+    assert!(limiter.record_failure_at(source, now + Duration::from_secs(1)));
+    assert!(!limiter.allows_attempt_at(source, now + Duration::from_secs(2)));
+    assert!(!limiter.allows_attempt_at(other, now + Duration::from_secs(2)));
+    assert!(limiter.allows_attempt_at(other, now + Duration::from_secs(61)));
+}
+
+#[test]
+fn gateway_stops_forwarding_auth_after_failed_attempt_budget() {
+    use std::time::Duration;
+
+    let listener = TcpGatewayListener::bind(GatewayListenerConfig::default()).unwrap();
+    let address = listener.local_addr().unwrap();
+    let (service_tx, service_rx) = std::sync::mpsc::channel();
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let gateway_shutdown = std::sync::Arc::clone(&shutdown);
+    let gateway = std::thread::spawn(move || {
+        run_gateway(
+            listener,
+            GatewayRuntimeConfig {
+                worker_count: 1,
+                queue_capacity: 1,
+                connections_per_ip_per_minute: 60,
+                auth_failures_per_ip_per_minute: 1,
+                idle_timeout: Duration::from_secs(3),
+                pre_auth_timeout: Duration::from_secs(3),
+                accept_poll_interval: Duration::from_millis(5),
+            },
+            move || {
+                let (gateway_service, supervisor_service) = std::os::unix::net::UnixStream::pair()?;
+                service_tx.send(supervisor_service).map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, "test service closed")
+                })?;
+                Ok(gateway_service)
+            },
+            gateway_shutdown,
+        )
+        .unwrap();
+    });
+
+    let mut client = std::net::TcpStream::connect(address).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let mut service = service_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    let supervisor = std::thread::spawn(move || {
+        let hello = read_frame(&mut service).unwrap().unwrap();
+        write_frame(
+            &mut service,
+            &IpcFrame {
+                operation: hello.operation,
+                request_id: hello.request_id,
+                payload: br#"{"mode":"query"}"#.to_vec(),
+            },
+        )
+        .unwrap();
+        let auth = read_frame(&mut service).unwrap().unwrap();
+        assert_eq!(auth.operation, Operation::AuthenticateSession as u16);
+        write_frame(
+            &mut service,
+            &IpcFrame {
+                operation: auth.operation,
+                request_id: auth.request_id,
+                payload: br#"{"authenticated":false}"#.to_vec(),
+            },
+        )
+        .unwrap();
+        assert!(read_frame(&mut service).unwrap().is_none());
+    });
+
+    let mut decoder = ClientFrameDecoder::default();
+    let send_and_read =
+        |client: &mut std::net::TcpStream, decoder: &mut ClientFrameDecoder, kind, request_id| {
+            client
+                .write_all(
+                    &ClientFrame {
+                        kind,
+                        request_id,
+                        response_sequence: 0,
+                        payload: if kind == 1 {
+                            br#"{"mode":"query","client_name":"auth-limit"}"#.to_vec()
+                        } else {
+                            b"{}".to_vec()
+                        },
+                    }
+                    .encode()
+                    .unwrap(),
+                )
+                .unwrap();
+            let mut buffer = [0u8; 1024];
+            loop {
+                let count = client.read(&mut buffer).unwrap();
+                assert_ne!(count, 0, "gateway closed before the response");
+                if let Some(frame) = decoder.push(&buffer[..count]).unwrap().pop() {
+                    return frame;
+                }
+            }
+        };
+    assert_eq!(send_and_read(&mut client, &mut decoder, 1, 1).request_id, 1);
+    assert_eq!(
+        send_and_read(&mut client, &mut decoder, 2, 2).payload,
+        br#"{"authenticated":false}"#
+    );
+    client
+        .write_all(
+            &ClientFrame {
+                kind: 2,
+                request_id: 3,
+                response_sequence: 0,
+                payload: b"{}".to_vec(),
+            }
+            .encode()
+            .unwrap(),
+        )
+        .unwrap();
+    let mut byte = [0u8; 1];
+    assert_eq!(client.read(&mut byte).unwrap(), 0);
+
+    supervisor.join().unwrap();
+    shutdown.store(true, std::sync::atomic::Ordering::Release);
+    gateway.join().unwrap();
 }
 
 #[test]

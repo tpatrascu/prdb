@@ -94,6 +94,7 @@ pub struct GatewayRuntimeConfig {
     pub worker_count: usize,
     pub queue_capacity: usize,
     pub connections_per_ip_per_minute: usize,
+    pub auth_failures_per_ip_per_minute: usize,
     pub idle_timeout: Duration,
     pub pre_auth_timeout: Duration,
     pub accept_poll_interval: Duration,
@@ -105,6 +106,7 @@ impl Default for GatewayRuntimeConfig {
             worker_count: 32,
             queue_capacity: 64,
             connections_per_ip_per_minute: 60,
+            auth_failures_per_ip_per_minute: 10,
             idle_timeout: Duration::from_secs(30),
             pre_auth_timeout: Duration::from_secs(10),
             accept_poll_interval: Duration::from_millis(10),
@@ -166,6 +168,147 @@ impl GatewayPeerRateLimiter {
         }
         timestamps.push_back(now);
         true
+    }
+}
+
+/// Bounds failed AUTH requests by source without retaining credential bytes.
+type AuthFailureHistory = HashMap<IpAddr, VecDeque<(std::time::Instant, u64)>>;
+type SharedAuthFailureHistory = Arc<std::sync::Mutex<AuthFailureHistory>>;
+
+#[derive(Clone)]
+pub struct GatewayAuthFailureLimiter {
+    max_failures: NonZeroUsize,
+    max_sources: NonZeroUsize,
+    window: Duration,
+    failures: SharedAuthFailureHistory,
+    next_ticket: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl GatewayAuthFailureLimiter {
+    pub fn new(
+        max_failures: usize,
+        max_sources: usize,
+        window: Duration,
+    ) -> Result<Self, GatewayListenerError> {
+        if window.is_zero() {
+            return Err(GatewayListenerError::InvalidConnectionLimit);
+        }
+        Ok(Self {
+            max_failures: NonZeroUsize::new(max_failures)
+                .ok_or(GatewayListenerError::InvalidConnectionLimit)?,
+            max_sources: NonZeroUsize::new(max_sources)
+                .ok_or(GatewayListenerError::InvalidConnectionLimit)?,
+            window,
+            failures: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            next_ticket: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+        })
+    }
+
+    pub fn allows_attempt(&self, source: IpAddr) -> bool {
+        self.allows_attempt_at(source, std::time::Instant::now())
+    }
+
+    pub fn allows_attempt_at(&self, source: IpAddr, now: std::time::Instant) -> bool {
+        let mut failures = self
+            .failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.prune(&mut failures, now);
+        match failures.get(&source) {
+            Some(times) => times.len() < self.max_failures.get(),
+            None => failures.len() < self.max_sources.get(),
+        }
+    }
+
+    fn begin_attempt(&self, source: IpAddr) -> Option<GatewayAuthAttempt> {
+        self.begin_attempt_at(source, std::time::Instant::now())
+    }
+
+    fn begin_attempt_at(
+        &self,
+        source: IpAddr,
+        now: std::time::Instant,
+    ) -> Option<GatewayAuthAttempt> {
+        let mut failures = self.failures.lock().ok()?;
+        self.prune(&mut failures, now);
+        if failures
+            .get(&source)
+            .is_some_and(|times| times.len() >= self.max_failures.get())
+            || (!failures.contains_key(&source) && failures.len() >= self.max_sources.get())
+        {
+            return None;
+        }
+        let ticket = self
+            .next_ticket
+            .fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |ticket| ticket.checked_add(1),
+            )
+            .ok()?;
+        failures.entry(source).or_default().push_back((now, ticket));
+        Some(GatewayAuthAttempt {
+            limiter: self.clone(),
+            source,
+            ticket,
+            keep_failure: false,
+        })
+    }
+
+    /// Record an unsuccessful AUTH. `false` means a full source map prevented
+    /// recording; callers must close the connection and the next attempt from
+    /// a new source is denied until an existing history expires.
+    pub fn record_failure(&self, source: IpAddr) -> bool {
+        self.record_failure_at(source, std::time::Instant::now())
+    }
+
+    pub fn record_failure_at(&self, source: IpAddr, now: std::time::Instant) -> bool {
+        let Some(attempt) = self.begin_attempt_at(source, now) else {
+            return false;
+        };
+        attempt.retain_failure();
+        true
+    }
+
+    fn prune(&self, failures: &mut AuthFailureHistory, now: std::time::Instant) {
+        for times in failures.values_mut() {
+            while times
+                .front()
+                .is_some_and(|(time, _)| now.saturating_duration_since(*time) >= self.window)
+            {
+                times.pop_front();
+            }
+        }
+        failures.retain(|_, times| !times.is_empty());
+    }
+}
+
+struct GatewayAuthAttempt {
+    limiter: GatewayAuthFailureLimiter,
+    source: IpAddr,
+    ticket: u64,
+    keep_failure: bool,
+}
+
+impl GatewayAuthAttempt {
+    fn retain_failure(mut self) {
+        self.keep_failure = true;
+    }
+}
+
+impl Drop for GatewayAuthAttempt {
+    fn drop(&mut self) {
+        if self.keep_failure {
+            return;
+        }
+        if let Ok(mut failures) = self.limiter.failures.lock()
+            && let Some(times) = failures.get_mut(&self.source)
+        {
+            times.retain(|(_, ticket)| *ticket != self.ticket);
+            if times.is_empty() {
+                failures.remove(&self.source);
+            }
+        }
     }
 }
 
@@ -280,6 +423,7 @@ pub enum GatewayConnectionError {
     ServiceDisconnected,
     MismatchedServiceResponse,
     UnexpectedServiceEvent,
+    AuthenticationRateLimited,
 }
 
 impl std::fmt::Display for GatewayConnectionError {
@@ -328,7 +472,7 @@ pub fn serve_tcp_client_connection<C: GatewayClientStream, S: Read + Write>(
     client: &mut C,
     service: &mut S,
 ) -> Result<(), GatewayConnectionError> {
-    serve_tcp_client_connection_inner(client, service, None, None)
+    serve_tcp_client_connection_inner(client, service, None, None, None, None)
 }
 
 fn serve_tcp_client_connection_inner<C: GatewayClientStream, S: Read + Write>(
@@ -336,6 +480,8 @@ fn serve_tcp_client_connection_inner<C: GatewayClientStream, S: Read + Write>(
     service: &mut S,
     frame_timeout: Option<Duration>,
     pre_auth_timeout: Option<Duration>,
+    auth_failure_limiter: Option<&GatewayAuthFailureLimiter>,
+    source_ip: Option<IpAddr>,
 ) -> Result<(), GatewayConnectionError> {
     let mut decoder = crate::client_protocol::ClientFrameDecoder::default();
     let mut input = [0u8; 8192];
@@ -359,6 +505,18 @@ fn serve_tcp_client_connection_inner<C: GatewayClientStream, S: Read + Write>(
             return Ok(());
         };
         let client_kind = request.kind;
+        let auth_attempt = if client_kind == 2 {
+            auth_failure_limiter
+                .zip(source_ip)
+                .map(|(limiter, source)| {
+                    limiter
+                        .begin_attempt(source)
+                        .ok_or(GatewayConnectionError::AuthenticationRateLimited)
+                })
+                .transpose()?
+        } else {
+            None
+        };
         let (operation, payload) = client_request_to_ipc(client_kind, request.payload)?;
         let ipc_request = crate::ipc::IpcFrame {
             operation: operation as u16,
@@ -374,13 +532,17 @@ fn serve_tcp_client_connection_inner<C: GatewayClientStream, S: Read + Write>(
         {
             return Err(GatewayConnectionError::MismatchedServiceResponse);
         }
-        if client_kind == 2
-            && response
+        if client_kind == 2 {
+            let authenticated_response = response
                 .payload
                 .windows(b"\"authenticated\":true".len())
-                .any(|part| part == b"\"authenticated\":true")
-        {
-            authenticated = true;
+                .any(|part| part == b"\"authenticated\":true");
+            if authenticated_response {
+                authenticated = true;
+                drop(auth_attempt);
+            } else if let Some(attempt) = auth_attempt {
+                attempt.retain_failure();
+            }
         }
         let response = crate::client_protocol::ClientFrame {
             kind: 100,
@@ -474,7 +636,50 @@ pub fn serve_tcp_client_connection_with_timeouts(
     service
         .set_write_timeout(Some(idle_timeout))
         .map_err(GatewayConnectionError::Io)?;
-    serve_tcp_client_connection_inner(client, service, Some(idle_timeout), Some(pre_auth_timeout))
+    serve_tcp_client_connection_inner(
+        client,
+        service,
+        Some(idle_timeout),
+        Some(pre_auth_timeout),
+        None,
+        None,
+    )
+}
+
+fn serve_tcp_client_connection_with_limits(
+    client: &mut TcpStream,
+    service: &mut std::os::unix::net::UnixStream,
+    idle_timeout: Duration,
+    pre_auth_timeout: Duration,
+    auth_failure_limiter: &GatewayAuthFailureLimiter,
+    source_ip: IpAddr,
+) -> Result<(), GatewayConnectionError> {
+    if idle_timeout.is_zero() || pre_auth_timeout.is_zero() {
+        return Err(GatewayConnectionError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "gateway idle and pre-auth timeouts must be positive",
+        )));
+    }
+    client
+        .set_read_timeout(Some(idle_timeout))
+        .map_err(GatewayConnectionError::Io)?;
+    client
+        .set_write_timeout(Some(idle_timeout))
+        .map_err(GatewayConnectionError::Io)?;
+    service
+        .set_read_timeout(Some(idle_timeout))
+        .map_err(GatewayConnectionError::Io)?;
+    service
+        .set_write_timeout(Some(idle_timeout))
+        .map_err(GatewayConnectionError::Io)?;
+    serve_tcp_client_connection_inner(
+        client,
+        service,
+        Some(idle_timeout),
+        Some(pre_auth_timeout),
+        Some(auth_failure_limiter),
+        Some(source_ip),
+    )
 }
 
 /// Run a fixed worker pool with a bounded pending-connection queue. The
@@ -492,6 +697,7 @@ where
     if config.worker_count == 0
         || config.queue_capacity == 0
         || config.connections_per_ip_per_minute == 0
+        || config.auth_failures_per_ip_per_minute == 0
         || config.idle_timeout.is_zero()
         || config.pre_auth_timeout.is_zero()
         || config.accept_poll_interval.is_zero()
@@ -503,7 +709,8 @@ where
         .set_nonblocking(true)
         .map_err(GatewayRuntimeError::Io)?;
 
-    let (sender, receiver) = std::sync::mpsc::sync_channel::<TcpStream>(config.queue_capacity);
+    let (sender, receiver) =
+        std::sync::mpsc::sync_channel::<(TcpStream, IpAddr)>(config.queue_capacity);
     let receiver = Arc::new(std::sync::Mutex::new(receiver));
     let connector = Arc::new(connect_service);
     let rate_limiter = GatewayPeerRateLimiter::new(
@@ -512,10 +719,17 @@ where
         Duration::from_secs(60),
     )
     .map_err(|_| GatewayRuntimeError::InvalidConfig)?;
+    let auth_failure_limiter = GatewayAuthFailureLimiter::new(
+        config.auth_failures_per_ip_per_minute,
+        4096,
+        Duration::from_secs(60),
+    )
+    .map_err(|_| GatewayRuntimeError::InvalidConfig)?;
     let mut workers = Vec::with_capacity(config.worker_count);
     for _ in 0..config.worker_count {
         let receiver = Arc::clone(&receiver);
         let connector = Arc::clone(&connector);
+        let auth_failure_limiter = auth_failure_limiter.clone();
         let idle_timeout = config.idle_timeout;
         let pre_auth_timeout = config.pre_auth_timeout;
         workers.push(
@@ -527,17 +741,19 @@ where
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .recv();
-                        let Ok(mut client) = client else {
+                        let Ok((mut client, source_ip)) = client else {
                             break;
                         };
                         let Ok(mut service) = connector() else {
                             continue;
                         };
-                        let _ = serve_tcp_client_connection_with_timeouts(
+                        let _ = serve_tcp_client_connection_with_limits(
                             &mut client,
                             &mut service,
                             idle_timeout,
                             pre_auth_timeout,
+                            &auth_failure_limiter,
+                            source_ip,
                         );
                     }
                 })
@@ -554,7 +770,7 @@ where
                 if !rate_limiter.admit(peer.ip()) {
                     continue;
                 }
-                match sender.try_send(client) {
+                match sender.try_send((client, peer.ip())) {
                     Ok(()) | Err(std::sync::mpsc::TrySendError::Full(_)) => {}
                     Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
                         break Err(GatewayRuntimeError::WorkerPanicked);

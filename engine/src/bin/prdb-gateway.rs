@@ -24,6 +24,7 @@ fn main() {
              --workers COUNT                     default 32\n\
              --queue-capacity COUNT              default 64\n\
              --connections-per-ip COUNT           default 60 per minute\n\
+             --auth-failures-per-ip COUNT         default 10 per minute\n\
              --idle-timeout-ms DURATION          default 30000\n\
              --pre-auth-timeout-ms DURATION      default 10000\n\
              --allow-plaintext-non-loopback      explicit plaintext bind opt-in"
@@ -43,6 +44,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut worker_count = 32usize;
     let mut queue_capacity = 64usize;
     let mut connections_per_ip_per_minute = 60usize;
+    let mut auth_failures_per_ip_per_minute = 10usize;
     let mut idle_timeout = Duration::from_secs(30);
     let mut pre_auth_timeout = Duration::from_secs(10);
     let mut allow_non_loopback_plaintext = false;
@@ -68,6 +70,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "--connections-per-ip" => {
                 connections_per_ip_per_minute =
                     value(&mut arguments, "--connections-per-ip")?.parse()?;
+            }
+            "--auth-failures-per-ip" => {
+                auth_failures_per_ip_per_minute =
+                    value(&mut arguments, "--auth-failures-per-ip")?.parse()?;
             }
             "--idle-timeout-ms" => {
                 idle_timeout =
@@ -107,6 +113,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             worker_count,
             queue_capacity,
             connections_per_ip_per_minute,
+            auth_failures_per_ip_per_minute,
             idle_timeout,
             pre_auth_timeout,
             ..GatewayRuntimeConfig::default()
