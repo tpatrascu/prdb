@@ -116,3 +116,20 @@ fn worker_cgroup_creation_removes_partial_leaf_when_kernel_controls_are_missing(
     );
     assert!(!leaf.exists());
 }
+
+#[test]
+fn worker_command_is_attached_to_cgroup_before_exec() {
+    use std::process::Command;
+
+    let fixture = Fixture::new();
+    let process_file = fixture.0.join("cgroup.procs");
+    let mut command = Command::new("sh");
+    command
+        .args(["-c", "cat \"$1\"", "worker", process_file.to_str().unwrap()])
+        .stdout(std::process::Stdio::piped());
+    linux_sandbox::attach_command_before_exec(&fixture.0, &mut command).unwrap();
+    let output = command.output().unwrap();
+    assert!(output.status.success());
+    let pid = String::from_utf8(output.stdout).unwrap();
+    assert!(pid.trim().parse::<u32>().unwrap() > 0);
+}

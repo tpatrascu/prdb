@@ -73,6 +73,17 @@ impl WorkerCgroup {
         attach_process(&self.path, pid)
     }
 
+    /// Register cgroup placement in the child's pre-exec setup, before the
+    /// executable receives control. Add this before hooks that drop the
+    /// privilege needed to write `cgroup.procs`.
+    #[cfg(unix)]
+    pub fn attach_command_before_exec(
+        &self,
+        command: &mut std::process::Command,
+    ) -> io::Result<()> {
+        attach_command_before_exec(&self.path, command)
+    }
+
     pub fn kill_all(&self) -> io::Result<()> {
         kill_all(&self.path)
     }
@@ -176,6 +187,78 @@ pub fn attach_process(cgroup: impl AsRef<Path>, pid: u32) -> io::Result<()> {
         ));
     }
     write_control(cgroup.as_ref().join("cgroup.procs"), pid.to_string())
+}
+
+/// Register process placement in `Command`'s child-side pre-exec hooks. The
+/// callback performs only `getpid` and `write`, which are async-signal-safe;
+/// its file descriptor is opened in the parent and closes on exec.
+#[cfg(unix)]
+pub fn attach_command_before_exec(
+    cgroup: impl AsRef<Path>,
+    command: &mut std::process::Command,
+) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+
+    let process_file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(cgroup.as_ref().join("cgroup.procs"))?;
+    let process_fd = process_file.as_raw_fd();
+    // SAFETY: the hook uses only async-signal-safe getpid/write calls and
+    // stack memory after fork. The captured file remains alive in Command and
+    // is close-on-exec; the parent opened the cgroup control before spawning.
+    unsafe {
+        command.pre_exec(move || {
+            let _keep_process_file_open = &process_file;
+            let pid = libc::getpid();
+            if pid <= 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut digits = [0u8; 10];
+            let mut value = pid as u32;
+            let mut count = 0usize;
+            loop {
+                digits[count] = b'0' + (value % 10) as u8;
+                count += 1;
+                value /= 10;
+                if value == 0 {
+                    break;
+                }
+            }
+            let mut bytes = [0u8; 11];
+            for index in 0..count {
+                bytes[index] = digits[count - index - 1];
+            }
+            bytes[count] = b'\n';
+            let length = count + 1;
+            let mut written = 0usize;
+            while written < length {
+                // SAFETY: both pointers reference valid stack/file data for
+                // the requested remaining length, and the FD was opened above.
+                let result = libc::write(
+                    process_fd,
+                    bytes.as_ptr().add(written).cast(),
+                    length - written,
+                );
+                if result < 0 {
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error() == Some(libc::EINTR) {
+                        continue;
+                    }
+                    return Err(error);
+                }
+                if result == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "failed to attach worker to its cgroup",
+                    ));
+                }
+                written += result as usize;
+            }
+            Ok(())
+        });
+    }
+    Ok(())
 }
 
 /// Ask cgroup v2 to kill every process in the invocation cgroup and its
