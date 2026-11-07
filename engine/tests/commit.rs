@@ -1373,6 +1373,151 @@ fn storage_manager_drop_table_removes_owned_catalog_and_rows()
         ],
         &[policy_audit],
     )?;
+    let check_constraint_id = id(0x60);
+    let check_expression_id = id(0x61);
+    let check_constraint_key = id_catalog_key(8, check_constraint_id);
+    let check_constraint_payload = encode_envelope(
+        &family_schema(8).unwrap(),
+        &check_constraint_key,
+        &[
+            CatalogField {
+                tag: 1,
+                wire_type: WireType::Id,
+                payload: created.table_id.to_vec(),
+            },
+            CatalogField {
+                tag: 2,
+                wire_type: WireType::U16,
+                payload: 4u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 3,
+                wire_type: WireType::Ids,
+                payload: 0u32.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 4,
+                wire_type: WireType::Id,
+                payload: check_expression_id.to_vec(),
+            },
+            CatalogField {
+                tag: 6,
+                wire_type: WireType::Ids,
+                payload: 0u32.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 7,
+                wire_type: WireType::U16,
+                payload: 0u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 8,
+                wire_type: WireType::U16,
+                payload: 0u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 9,
+                wire_type: WireType::U16,
+                payload: 0u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 10,
+                wire_type: WireType::U16,
+                payload: 1u16.to_le_bytes().to_vec(),
+            },
+        ],
+    )?;
+    let check_constraint_object = object_write_with_parent_and_owner_and_name(
+        check_constraint_id,
+        6,
+        None,
+        actor,
+        "drop_table_check",
+    );
+    let check_expression_key = id_catalog_key(7, check_expression_id);
+    let check_expression = CatalogWrite {
+        key: check_expression_key.clone(),
+        expected_value: None,
+        payload: Some(encode_envelope(
+            &family_schema(7).unwrap(),
+            &check_expression_key,
+            &[
+                CatalogField {
+                    tag: 1,
+                    wire_type: WireType::U16,
+                    payload: 2u16.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 2,
+                    wire_type: WireType::U32,
+                    payload: 1u32.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 3,
+                    wire_type: WireType::Id,
+                    payload: builtin_id(101).to_vec(),
+                },
+                CatalogField {
+                    tag: 4,
+                    wire_type: WireType::Bytes,
+                    payload: vec![0; 8],
+                },
+                CatalogField {
+                    tag: 5,
+                    wire_type: WireType::Bytes,
+                    payload: prdb_engine::expression::encode_expression(&Expr::Literal(Some(
+                        ScalarValue::Boolean(true),
+                    )))?,
+                },
+                CatalogField {
+                    tag: 6,
+                    wire_type: WireType::Ids,
+                    payload: 0u32.to_le_bytes().to_vec(),
+                },
+            ],
+        )?),
+    };
+    let check_expression_object = object_write_with_parent_and_owner_and_name(
+        check_expression_id,
+        5,
+        None,
+        actor,
+        "drop_table_check_expression",
+    );
+    let check_expression_edge = dependency_write(check_constraint_id, check_expression_id, 2);
+    let mut table_constraint_epoch =
+        table_write_with_versions(created.table_id, schema.schema_id, 1, 3);
+    table_constraint_epoch.expected_value = Some(
+        database
+            .begin_read()?
+            .open_table(CATALOG)?
+            .get(id_catalog_key(5, created.table_id).as_slice())?
+            .ok_or("table missing before CHECK setup")?
+            .value()
+            .to_vec(),
+    );
+    let constraint_invocation = id(0x62);
+    let mut constraint_audit = identity_audit_event(0x63, actor, check_constraint_id);
+    constraint_audit.correlation_id = constraint_invocation;
+    constraint_audit.target_ids = vec![check_constraint_id];
+    storage.commit_authorized_constraint_ddl(
+        constraint_invocation,
+        actor,
+        9_999,
+        &[
+            CatalogWrite {
+                key: check_constraint_key.clone(),
+                expected_value: None,
+                payload: Some(check_constraint_payload),
+            },
+            check_constraint_object,
+            check_expression,
+            check_expression_object,
+            check_expression_edge.clone(),
+            table_constraint_epoch,
+        ],
+        &[constraint_audit],
+    )?;
     let payload = encode_tuple(
         &[ColumnSchema {
             scalar_type: ScalarType::Text,
@@ -1525,6 +1670,11 @@ fn storage_manager_drop_table_removes_owned_catalog_and_rows()
         policy_target.key,
         policy_expression_edge.key,
         policy_target_edge.key,
+        check_constraint_key,
+        id_catalog_key(2, check_constraint_id),
+        id_catalog_key(7, check_expression_id),
+        id_catalog_key(2, check_expression_id),
+        check_expression_edge.key,
     ] {
         assert!(
             catalog.get(key.as_slice())?.is_none(),
