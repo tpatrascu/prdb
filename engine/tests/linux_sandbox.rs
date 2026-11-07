@@ -98,7 +98,7 @@ fn worker_cgroup_creation_rejects_undelegated_parent_before_creating_leaf() {
 }
 
 #[test]
-fn worker_cgroup_creation_removes_partial_leaf_when_kernel_controls_are_missing() {
+fn worker_cgroup_creation_rejects_regular_directory_before_creating_leaf() {
     let fixture = Fixture::new();
     fs::write(fixture.0.join("cgroup.controllers"), "cpu memory pids").unwrap();
     fs::write(fixture.0.join("cgroup.subtree_control"), "cpu memory pids").unwrap();
@@ -132,4 +132,14 @@ fn worker_command_is_attached_to_cgroup_before_exec() {
     assert!(output.status.success());
     let pid = String::from_utf8(output.stdout).unwrap();
     assert!(pid.trim().parse::<u32>().unwrap() > 0);
+}
+
+#[test]
+fn sandbox_probe_rejects_regular_directory_as_cgroup_v2_mount() {
+    let fixture = Fixture::new();
+    fs::write(fixture.0.join("cgroup.controllers"), "cpu memory pids").unwrap();
+    fs::write(fixture.0.join("cgroup.subtree_control"), "cpu memory pids").unwrap();
+    let report = linux_sandbox::probe(&fixture.0);
+    assert!(!report.cgroup_v2_mounted);
+    assert!(report.missing_requirements().contains(&"cgroup v2 mount"));
 }

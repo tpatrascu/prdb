@@ -38,6 +38,9 @@ impl WorkerCgroup {
             ));
         }
         let parent = parent.as_ref();
+        probe(parent)
+            .require_supported()
+            .map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error))?;
         validate_delegated_parent(parent)?;
         let name = invocation_id
             .iter()
@@ -368,7 +371,8 @@ pub fn probe(cgroup_parent: impl AsRef<Path>) -> SandboxCapabilityReport {
     let enabled_path = cgroup_parent.join("cgroup.subtree_control");
     let cgroup_controllers = read_words(&controllers_path);
     let cgroup_enabled_controllers = read_words(&enabled_path);
-    let cgroup_v2_mounted = cgroup_parent.join("cgroup.controllers").is_file();
+    let cgroup_v2_mounted =
+        is_cgroup_v2_mount(&cgroup_parent) && cgroup_parent.join("cgroup.controllers").is_file();
     let cgroup_parent_writable = cgroup_v2_mounted && directory_is_writable(&cgroup_parent);
 
     SandboxCapabilityReport {
@@ -381,6 +385,28 @@ pub fn probe(cgroup_parent: impl AsRef<Path>) -> SandboxCapabilityReport {
         cgroup_enabled_controllers,
         cgroup_parent,
     }
+}
+
+#[cfg(target_os = "linux")]
+fn is_cgroup_v2_mount(path: &Path) -> bool {
+    const CGROUP2_SUPER_MAGIC: libc::c_long = 0x6367_7270;
+    use std::os::unix::ffi::OsStrExt;
+
+    let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: `path` is NUL-terminated and `stats` points to valid writable
+    // storage for the statfs result.
+    unsafe {
+        let mut stats = std::mem::zeroed::<libc::statfs>();
+        libc::statfs(path.as_ptr(), &mut stats) == 0
+            && stats.f_type as libc::c_long == CGROUP2_SUPER_MAGIC
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_cgroup_v2_mount(_path: &Path) -> bool {
+    false
 }
 
 #[cfg(target_os = "linux")]

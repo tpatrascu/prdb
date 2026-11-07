@@ -34,7 +34,7 @@ The TinyCC-produced C library, prebuilt C SDK, libc dependencies, and Rust execu
 
 ## Capability Detection and Failure
 
-Verify the minimum supported feature profile before launch. Capability presence does not prove that namespace, Landlock, seccomp, or cgroup setup will succeed for a particular worker; each setup step must be checked at launch before transferring control to the executor. Fail closed when required restrictions are unavailable; never silently run with weaker isolation. Rootless deployment feasibility and cgroup delegation depend on the host configuration and require explicit validation.
+Verify the minimum supported feature profile before launch. The capability probe verifies cgroup v2 using the filesystem type, not just a `cgroup.controllers` filename. Capability presence does not prove that namespace, Landlock, seccomp, or cgroup setup will succeed for a particular worker; each setup step must be checked at launch before transferring control to the executor. Fail closed when required restrictions are unavailable; never silently run with weaker isolation. Rootless deployment feasibility and cgroup delegation depend on the host configuration and require explicit validation.
 
 The supervisor must clean up descendants and resources after crashes or timeouts and request transaction abort before commit. Killing a process does not undo a durable commit. Storage retains version pins until its own in-flight tasks drain. Sandbox limits do not replace storage-side request, write-set, and history-retention budgets.
 
