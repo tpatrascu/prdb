@@ -1102,6 +1102,15 @@
 - Commands actually run in the configured Nix shell: `cargo fmt --all`; focused `cargo test -p prdb-engine --test commit --locked client_handshake_requires_hello_first_and_sequences_responses`; and `cargo fmt --all -- --check && cargo build --workspace --locked && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && git diff --check`. All passed.
 - Remaining: provision authenticated socket identity/generation, monitor network disconnects during worker execution, and implement the TCP listener, launcher, sandbox, and result relay.
 
+## GW-1 dependency: loopback-default TCP listener
+
+- Behavior: `TcpGatewayListener` binds loopback by default and refuses a non-loopback plaintext address unless `allow_non_loopback_plaintext` is explicitly enabled. Its API exposes the bound address and TCP accept operation without storage access.
+- Contract and implementation: [gateway deployment boundary](../../specs/client-gateway.md), [client gateway plan](../client-gateway/README.md), and [listener](../../engine/src/gateway.rs).
+- Changed tests: [gateway listener policy](../../engine/tests/gateway.rs).
+- Observed red: focused compile failed because `prdb_engine::gateway` did not exist before the implementation.
+- Commands actually run in the configured Nix shell: `cargo fmt --all`; focused `cargo test -p prdb-engine --test gateway --locked` (3 passed); and `cargo fmt --all -- --check && cargo build --workspace --locked && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && git diff --check`. All passed.
+- Remaining: bounded accepted-connection handling, frame read/write deadlines, session processing, service-channel forwarding, and a separately runnable gateway process.
+
 ## SU-1 / IPC-6 dependency: gateway submission IPC dispatcher
 
 - Behavior: a role-checked gateway dispatcher maps AUTH, PREPARE, chunk, SEAL, START, STATUS, and CANCEL operation tags to the strict per-client session handlers. Chunk IPC prepends an explicit artifact/parameter kind byte. START returns the network acknowledgement plus a typed storage invocation and immutable submission handle to trusted supervisor code; those authority-bearing objects are never serialized.

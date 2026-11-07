@@ -10,6 +10,8 @@ Define listener configuration with loopback default and explicit non-loopback pl
 
 ## Increments
 
+The first gateway foundation increment implements the loopback-default TCP bind policy and requires an explicit plaintext opt-in for non-loopback addresses. The returned listener exposes TCP accept; connection framing, limits, and the supervisor service bridge remain unimplemented.
+
 | ID | Observable test first | Minimum implementation and evidence |
 | --- | --- | --- |
 | GW-1 | Default listener accepts loopback only and malformed/slow unauthenticated peers stay within limits | One asynchronous process serving multiple connections; strict framing, idle deadlines and bounded allocations |
