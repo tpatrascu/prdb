@@ -1097,6 +1097,173 @@ fn storage_manager_drop_table_removes_owned_catalog_and_rows()
     Ok(())
 }
 
+#[test]
+fn storage_manager_drop_column_rewrites_rows_and_preserves_surviving_identity()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::storage_manager::{CreateTableRequest, TableColumnDefinition};
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let admin_role = builtin_owner_id();
+    let actor = id(0x60);
+    let setup = vec![
+        principal_write_with_name(actor, 1, 1, "column_drop_owner"),
+        object_write_with_name(actor, 8, "column_drop_owner"),
+        membership_write(actor, admin_role),
+        dependency_write(actor, admin_role, 5),
+    ];
+    let mut setup_audit = identity_audit_event(0x61, admin_role, id(0x62));
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(id(0x62), admin_role, 9_999, &setup, &[setup_audit])?;
+    let schema_invocation = id(0x63);
+    let mut schema_audit = identity_audit_event(0x64, actor, id(0x65));
+    schema_audit.correlation_id = schema_invocation;
+    let schema = storage.create_schema(
+        schema_invocation,
+        actor,
+        "column_drop_schema",
+        actor,
+        9_999,
+        schema_audit,
+    )?;
+    let create_invocation = id(0x66);
+    let mut create_audit = identity_audit_event(0x67, actor, id(0x68));
+    create_audit.correlation_id = create_invocation;
+    let table = storage.create_table(CreateTableRequest {
+        invocation_id: create_invocation,
+        authenticated_actor_id: actor,
+        schema_id: schema.schema_id,
+        name: "column_drop_me".to_owned(),
+        columns: vec![
+            TableColumnDefinition {
+                name: "obsolete".to_owned(),
+                scalar_type: ScalarType::Integer,
+                nullable: false,
+                generated_uuid_identity: false,
+                default: None,
+            },
+            TableColumnDefinition {
+                name: "kept".to_owned(),
+                scalar_type: ScalarType::Text,
+                nullable: false,
+                generated_uuid_identity: false,
+                default: None,
+            },
+        ],
+        retention_deadline_us: 9_999,
+        audit_event: create_audit,
+    })?;
+    let row_key = table_row_key(table.table_id, id(0x69));
+    let old_payload = encode_tuple(
+        &[
+            ColumnSchema {
+                scalar_type: ScalarType::Integer,
+                nullable: false,
+            },
+            ColumnSchema {
+                scalar_type: ScalarType::Text,
+                nullable: false,
+            },
+        ],
+        1,
+        &[
+            Some(ScalarValue::Integer(73)),
+            Some(ScalarValue::Text("preserved".to_owned())),
+        ],
+    )?;
+    let row_record = RowRecord {
+        row_version: table.commit_sequence,
+        payload: old_payload,
+    }
+    .encode()?;
+    let write = database.begin_write()?;
+    write
+        .open_table(ROWS)?
+        .insert(&row_key[..], &row_record[..])?;
+    write.commit()?;
+
+    let drop_invocation = id(0x6a);
+    let mut drop_audit = identity_audit_event(0x6b, actor, id(0x6c));
+    drop_audit.correlation_id = drop_invocation;
+    let dropped = storage.drop_column(
+        drop_invocation,
+        actor,
+        table.table_id,
+        table.column_ids[0],
+        9_999,
+        drop_audit,
+    )?;
+    assert_eq!(dropped.column_id, table.column_ids[0]);
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    assert!(
+        catalog
+            .get(id_catalog_key(6, table.column_ids[0]).as_slice())?
+            .is_none()
+    );
+    let surviving = decode_registered_envelope(
+        catalog
+            .get(id_catalog_key(6, table.column_ids[1]).as_slice())?
+            .ok_or("surviving column missing")?
+            .value(),
+    )?;
+    assert_eq!(
+        u32::from_le_bytes(
+            surviving
+                .fields
+                .iter()
+                .find(|field| field.tag == 2)
+                .ok_or("surviving ordinal missing")?
+                .payload
+                .as_slice()
+                .try_into()?
+        ),
+        0
+    );
+    let table_record = decode_registered_envelope(
+        catalog
+            .get(id_catalog_key(5, table.table_id).as_slice())?
+            .ok_or("table record missing")?
+            .value(),
+    )?;
+    assert_eq!(
+        u64::from_le_bytes(
+            table_record
+                .fields
+                .iter()
+                .find(|field| field.tag == 2)
+                .ok_or("schema version missing")?
+                .payload
+                .as_slice()
+                .try_into()?
+        ),
+        2
+    );
+    let stored = RowRecord::decode(
+        read.open_table(ROWS)?
+            .get(&row_key[..])?
+            .ok_or("row missing")?
+            .value(),
+    )?;
+    let new_schema = [ColumnSchema {
+        scalar_type: ScalarType::Text,
+        nullable: false,
+    }];
+    let tuple = prdb_engine::tuple::decode_tuple(&new_schema, 2, &stored.payload)?;
+    assert_eq!(
+        tuple.values,
+        vec![Some(ScalarValue::Text("preserved".to_owned()))]
+    );
+    assert_eq!(
+        lookup_outcome(&database, drop_invocation, actor, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Committed
+    );
+    Ok(())
+}
+
 fn row(
     database: &Database,
     key: &[u8; 32],

@@ -1358,8 +1358,8 @@
 - Implementation: [authorized schema drop commit path](../../engine/src/commit.rs), [storage entry point](../../engine/src/storage_manager.rs), and connection-owned [`schemas.drop` PREPARE/START](../../engine/src/client_protocol.rs). Schema and object records, DDL audit, and durable outcome publish atomically.
 - Regression evidence: the real-redb lifecycle test covers owner success, unauthorized rejection, a populated-schema RESTRICT rejection with durable ABORTED outcome, and record deletion. A barrier-coordinated create/drop race accepts only a complete table-creation win or complete schema-drop win, then reopens through startup validation. The gateway ADMIN lifecycle test creates and drops an empty schema through PREPARE/START; the decoder test checks the strict schema-drop request.
 - Verification: in the configured Nix shell, `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` all passed. `git diff --check` passed.
-- Remaining: table/column rename, default and nullability changes, restricted column drops, schema ownership transfer, full constraint/admin wiring, and separate supervisor/gateway process integration remain incomplete.
-- Next smallest behavior: implement restricted column drop with dependent constraint/expression validation and row schema projection.
+- Remaining: table/column rename, default and nullability changes, schema ownership transfer, full constraint/admin wiring, and separate supervisor/gateway process integration remain incomplete.
+- Next smallest behavior: implement one supported table or column alteration with snapshot/fence validation.
 
 ## DS-5 / SM-5: table DROP RESTRICT — implemented
 
@@ -1369,3 +1369,12 @@
 - Verification: in the configured Nix shell, workspace build, format check, warning-denied Clippy, full workspace tests, and `git diff --check` passed. The focused table-drop, decoder, and gateway lifecycle tests also passed after the final commit-path hardening.
 - TDD note: the behavior test was added after the first implementation pass, so this increment has no observed failing behavior-test run to record.
 - Remaining: an independent external-FK RESTRICT regression, table-drop race coverage, row/index cleanup at the configured limits, full grant-removal and policy/constraint coverage, and separate supervisor/gateway process integration remain open.
+
+## DS-5 / SM-5: column DROP RESTRICT — implemented
+
+- Behavior and normative contracts: [schema DDL](../../specs/ddl-schema.md), [client protocol](../../specs/client-protocol.md), and [storage manager](../../specs/storage-manager.md). The table owner or a database administrator can drop an unreferenced column from a non-system table. Expressions, constraints, indexes, and policies that reference the column block the operation. Storage removes the column and its default expression/grants/dependency edges, compacts ordinals, advances schema version and write epoch, rewrites tuples, and rebuilds surviving index keys in one bounded fenced commit.
+- Implementation: [authorized column-drop commit path](../../engine/src/commit.rs), [storage entry point](../../engine/src/storage_manager.rs), and connection-owned [`tables.drop_column` PREPARE/START](../../engine/src/client_protocol.rs).
+- Regression evidence: a real-redb test inserts an existing two-column row, drops the first column, and verifies the deleted column, ordinal compaction, schema version bump, retained value, and committed outcome. A strict ADMIN decoder test checks the two-ID request.
+- TDD note: the behavior test first failed with `InvalidRequest` against the compiling storage-manager stub, then passed after the schema rewrite path was implemented.
+- Focused verification: workspace check and the focused real-redb rewrite and protocol tests passed in the configured Nix shell. Full workspace validation remains to run.
+- Remaining: add explicit referenced-column RESTRICT and indexed-column rekey regressions, full workspace checks, and separate supervisor/gateway process integration.
