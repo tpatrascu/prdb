@@ -966,6 +966,137 @@ fn storage_manager_creates_typed_table_for_schema_create_grant()
     Ok(())
 }
 
+#[test]
+fn storage_manager_drop_table_removes_owned_catalog_and_rows()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::storage_manager::{
+        CreateTableRequest, TableColumnDefault, TableColumnDefinition, TableLifecycleError,
+    };
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let admin_role = builtin_owner_id();
+    let actor = id(0x40);
+    let setup = vec![
+        principal_write_with_name(actor, 1, 1, "table_drop_owner"),
+        object_write_with_name(actor, 8, "table_drop_owner"),
+        membership_write(actor, admin_role),
+        dependency_write(actor, admin_role, 5),
+    ];
+    let mut setup_audit = identity_audit_event(0x40, admin_role, id(0x4f));
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(id(0x4f), admin_role, 9_999, &setup, &[setup_audit])?;
+    let schema_invocation = id(0x41);
+    let mut schema_audit = identity_audit_event(0x42, actor, id(0x43));
+    schema_audit.correlation_id = schema_invocation;
+    let schema = storage.create_schema(
+        schema_invocation,
+        actor,
+        "drop_table_schema",
+        actor,
+        9_999,
+        schema_audit,
+    )?;
+    let create_invocation = id(0x44);
+    let mut create_audit = identity_audit_event(0x45, actor, id(0x46));
+    create_audit.correlation_id = create_invocation;
+    let created = storage.create_table(CreateTableRequest {
+        invocation_id: create_invocation,
+        authenticated_actor_id: actor,
+        schema_id: schema.schema_id,
+        name: "drop_me".to_owned(),
+        columns: vec![TableColumnDefinition {
+            name: "label".to_owned(),
+            scalar_type: ScalarType::Text,
+            nullable: true,
+            generated_uuid_identity: false,
+            default: Some(TableColumnDefault::Literal(Some(ScalarValue::Text(
+                "default".to_owned(),
+            )))),
+        }],
+        retention_deadline_us: 9_999,
+        audit_event: create_audit,
+    })?;
+    let row_key = table_row_key(created.table_id, id(0x47));
+    let payload = encode_tuple(
+        &[ColumnSchema {
+            scalar_type: ScalarType::Text,
+            nullable: true,
+        }],
+        1,
+        &[Some(ScalarValue::Text("stored".to_owned()))],
+    )?;
+    let encoded_row = RowRecord {
+        row_version: 11,
+        payload,
+    }
+    .encode()?;
+    let read = database.begin_read()?;
+    let column_record = read
+        .open_table(CATALOG)?
+        .get(id_catalog_key(6, created.column_ids[0]).as_slice())?
+        .ok_or("created column missing")?;
+    let column = decode_registered_envelope(column_record.value())?;
+    let expression_id: [u8; 16] = column
+        .fields
+        .iter()
+        .find(|field| field.tag == 7)
+        .ok_or("default expression missing")?
+        .payload
+        .as_slice()
+        .try_into()?;
+    drop(read);
+    let write = database.begin_write()?;
+    write
+        .open_table(ROWS)?
+        .insert(&row_key[..], &encoded_row[..])?;
+    write.commit()?;
+
+    let denied_invocation = id(0x48);
+    let mut denied_audit = identity_audit_event(0x4b, id(0x4c), id(0x4e));
+    denied_audit.correlation_id = denied_invocation;
+    let denied = storage.drop_table(
+        denied_invocation,
+        id(0x4c),
+        created.table_id,
+        9_999,
+        denied_audit,
+    );
+    assert!(matches!(denied, Err(TableLifecycleError::Unauthorized)));
+
+    let drop_invocation = id(0x50);
+    let mut drop_audit = identity_audit_event(0x49, actor, id(0x4a));
+    drop_audit.correlation_id = drop_invocation;
+    let dropped = storage
+        .drop_table(drop_invocation, actor, created.table_id, 9_999, drop_audit)
+        .map_err(|error| format!("table drop failed: {error:?}"))?;
+    assert_eq!(dropped.table_id, created.table_id);
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    for key in [
+        id_catalog_key(2, created.table_id),
+        id_catalog_key(5, created.table_id),
+        id_catalog_key(2, created.column_ids[0]),
+        id_catalog_key(6, created.column_ids[0]),
+        id_catalog_key(2, expression_id),
+        id_catalog_key(7, expression_id),
+    ] {
+        assert!(
+            catalog.get(key.as_slice())?.is_none(),
+            "record remained: {key:?}"
+        );
+    }
+    assert!(read.open_table(ROWS)?.get(&row_key[..])?.is_none());
+    assert_eq!(
+        lookup_outcome(&database, drop_invocation, actor, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Committed
+    );
+    Ok(())
+}
+
 fn row(
     database: &Database,
     key: &[u8; 32],
@@ -4970,6 +5101,38 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
     assert!(table_create.contains("\"outcome\":\"committed\""));
     assert!(table_create.contains("\"table_id\":"));
     assert!(table_create.contains("\"column_ids\":[\""));
+    let table_id_wire = table_create
+        .split("\"table_id\":\"")
+        .nth(1)
+        .ok_or("missing ADMIN table ID")?
+        .get(..32)
+        .ok_or("invalid ADMIN table ID")?;
+    let table_drop_prepare = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut control,
+        27,
+        &format!(
+            "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"tables.drop\",\"arguments\":{{\"table_id\":\"{table_id_wire}\"}}}}"
+        ),
+        retention_deadline_us,
+    )?;
+    let table_drop_id = table_drop_prepare
+        .split("\"operation_id\":\"")
+        .nth(1)
+        .ok_or("missing ADMIN table-drop operation ID")?
+        .get(..32)
+        .ok_or("invalid ADMIN table-drop operation ID")?;
+    let table_drop = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut control,
+        28,
+        &format!("{{\"phase\":\"start\",\"operation_id\":\"{table_drop_id}\"}}"),
+        retention_deadline_us,
+    )?;
+    assert!(table_drop.contains("\"outcome\":\"committed\""));
+    assert!(table_drop.contains(&format!("\"table_id\":\"{table_id_wire}\"")));
     let admin_id_wire = admin_id
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -4978,7 +5141,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &storage,
         &staging,
         &mut control,
-        23,
+        29,
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"schemas.create\",\"arguments\":{{\"name\":\"protocol_empty\",\"owner_id\":\"{admin_id_wire}\"}}}}"
         ),
@@ -4994,7 +5157,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &storage,
         &staging,
         &mut control,
-        24,
+        30,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{empty_schema_create_id}\"}}"),
         retention_deadline_us,
     )?;
@@ -5008,7 +5171,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &storage,
         &staging,
         &mut control,
-        25,
+        31,
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"schemas.drop\",\"arguments\":{{\"schema_id\":\"{empty_schema_id}\"}}}}"
         ),
@@ -5024,7 +5187,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &storage,
         &staging,
         &mut control,
-        26,
+        32,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{empty_schema_drop_id}\"}}"),
         retention_deadline_us,
     )?;

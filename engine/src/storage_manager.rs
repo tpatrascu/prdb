@@ -13,7 +13,8 @@ use crate::commit::{
     commit_authorized_object_grant_ddl_with_fences, commit_authorized_policy_ddl_with_fences,
     commit_authorized_schema_create_ddl_with_fences, commit_authorized_schema_drop_ddl_with_fences,
     commit_authorized_system_privilege_ddl_with_fences,
-    commit_authorized_table_create_ddl_with_fences, commit_catalog_and_audit_with_fences,
+    commit_authorized_table_create_ddl_with_fences, commit_authorized_table_drop_ddl_with_fences,
+    commit_catalog_and_audit_with_fences,
 };
 use crate::credentials::{
     MAX_TOKEN_LABEL_BYTES, TOKEN_SECRET_BYTES, decode_verifier_record, encode_new_verifier_record,
@@ -438,6 +439,12 @@ pub struct CreatedSchema {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DroppedSchema {
     pub schema_id: [u8; 16],
+    pub commit_sequence: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DroppedTable {
+    pub table_id: [u8; 16],
     pub commit_sequence: u64,
 }
 
@@ -2059,6 +2066,278 @@ impl<'db> StorageManager<'db> {
         })?;
         Ok(DroppedSchema {
             schema_id,
+            commit_sequence,
+        })
+    }
+
+    /// Drop a table with RESTRICT semantics, removing owned definitions and rows atomically.
+    pub fn drop_table(
+        &self,
+        invocation_id: [u8; 16],
+        authenticated_actor_id: [u8; 16],
+        table_id: [u8; 16],
+        retention_deadline_us: i64,
+        mut audit_event: AuditEvent,
+    ) -> Result<DroppedTable, TableLifecycleError> {
+        if invocation_id == [0; 16]
+            || authenticated_actor_id == [0; 16]
+            || table_id == [0; 16]
+            || retention_deadline_us <= 0
+        {
+            return Err(TableLifecycleError::InvalidRequest);
+        }
+        if audit_event.actor_id != Some(authenticated_actor_id)
+            || audit_event.correlation_id != invocation_id
+            || audit_event.action != AuditAction::Ddl
+            || audit_event.result != AuditResult::Succeeded
+        {
+            return Err(TableLifecycleError::InvalidAudit);
+        }
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|_| TableLifecycleError::Storage)?;
+        let catalog = read
+            .open_table(CATALOG)
+            .map_err(|_| TableLifecycleError::Storage)?;
+        let mut deletes = HashMap::<Vec<u8>, Vec<u8>>::new();
+        let mut owned_ids = HashSet::from([table_id]);
+        let mut typed_records = Vec::<(Vec<u8>, Vec<u8>)>::new();
+        for family in [5u16, 6, 8, 9, 13] {
+            let prefix = family.to_be_bytes();
+            let mut scanned = 0usize;
+            for entry in catalog
+                .range(prefix.as_slice()..)
+                .map_err(|_| TableLifecycleError::Storage)?
+            {
+                let (key, value) = entry.map_err(|_| TableLifecycleError::Storage)?;
+                let key = key.value().to_vec();
+                if !key.starts_with(&prefix) {
+                    break;
+                }
+                scanned += 1;
+                if scanned > MAX_CATALOG_FAMILY_SCAN {
+                    return Err(TableLifecycleError::Commit(CommitError::InvalidCatalog));
+                }
+                let bytes = value.value().to_vec();
+                let record = decode_registered_envelope(&bytes)
+                    .map_err(|_| TableLifecycleError::Commit(CommitError::InvalidCatalog))?;
+                let belongs = family == 5 && key == id_catalog_key(5, table_id)
+                    || family != 5
+                        && record
+                            .fields
+                            .iter()
+                            .any(|field| field.tag == 1 && field.payload.as_slice() == table_id);
+                if belongs {
+                    if key.len() != 19 {
+                        return Err(TableLifecycleError::Commit(CommitError::InvalidCatalog));
+                    }
+                    owned_ids.insert(
+                        key[3..19].try_into().map_err(|_| {
+                            TableLifecycleError::Commit(CommitError::InvalidCatalog)
+                        })?,
+                    );
+                    typed_records.push((key, bytes));
+                }
+            }
+        }
+        if typed_records
+            .iter()
+            .all(|(key, _)| key != &id_catalog_key(5, table_id))
+        {
+            return Err(TableLifecycleError::Commit(CommitError::InvalidCatalog));
+        }
+        let mut expression_ids = HashSet::<[u8; 16]>::new();
+        let mut policy_ids = HashSet::<[u8; 16]>::new();
+        for (key, bytes) in &typed_records {
+            let family = u16::from_be_bytes([key[0], key[1]]);
+            let record = decode_registered_envelope(bytes)
+                .map_err(|_| TableLifecycleError::Commit(CommitError::InvalidCatalog))?;
+            for field in &record.fields {
+                if ((family == 6 && matches!(field.tag, 7 | 10))
+                    || (family == 8 && field.tag == 4)
+                    || (family == 13 && matches!(field.tag, 5 | 6)))
+                    && field.payload.len() == 16
+                {
+                    let id: [u8; 16] = field.payload.as_slice().try_into().unwrap();
+                    expression_ids.insert(id);
+                    owned_ids.insert(id);
+                }
+            }
+            if family == 13 {
+                policy_ids.insert(
+                    key[3..19]
+                        .try_into()
+                        .map_err(|_| TableLifecycleError::Commit(CommitError::InvalidCatalog))?,
+                );
+            }
+        }
+        // Include object records for the table's typed children and their defaults.
+        let object_prefix = 2u16.to_be_bytes();
+        let mut changed = true;
+        while changed {
+            changed = false;
+            let mut scanned = 0usize;
+            for entry in catalog
+                .range(object_prefix.as_slice()..)
+                .map_err(|_| TableLifecycleError::Storage)?
+            {
+                let (key, value) = entry.map_err(|_| TableLifecycleError::Storage)?;
+                let key = key.value().to_vec();
+                if !key.starts_with(&object_prefix) {
+                    break;
+                }
+                scanned += 1;
+                if scanned > MAX_CATALOG_FAMILY_SCAN {
+                    return Err(TableLifecycleError::Commit(CommitError::InvalidCatalog));
+                }
+                if key.len() != 19 {
+                    return Err(TableLifecycleError::Commit(CommitError::InvalidCatalog));
+                }
+                let id: [u8; 16] = key[3..19].try_into().unwrap();
+                let bytes = value.value().to_vec();
+                let record = decode_registered_envelope(&bytes)
+                    .map_err(|_| TableLifecycleError::Commit(CommitError::InvalidCatalog))?;
+                let parent = record
+                    .fields
+                    .iter()
+                    .find(|field| field.tag == 2)
+                    .and_then(|field| <[u8; 16]>::try_from(field.payload.as_slice()).ok());
+                if owned_ids.contains(&id)
+                    || parent.is_some_and(|parent| owned_ids.contains(&parent))
+                {
+                    if owned_ids.insert(id) {
+                        changed = true;
+                    }
+                    deletes.insert(key, bytes);
+                }
+            }
+        }
+        for (key, bytes) in typed_records {
+            deletes.insert(key, bytes);
+        }
+        for id in &expression_ids {
+            let key = id_catalog_key(7, *id);
+            if let Some(value) = catalog
+                .get(key.as_slice())
+                .map_err(|_| TableLifecycleError::Storage)?
+            {
+                deletes.insert(key, value.value().to_vec());
+            }
+        }
+        let policy_target_prefix = 14u16.to_be_bytes();
+        let mut scanned = 0usize;
+        for entry in catalog
+            .range(policy_target_prefix.as_slice()..)
+            .map_err(|_| TableLifecycleError::Storage)?
+        {
+            let (key, value) = entry.map_err(|_| TableLifecycleError::Storage)?;
+            let key = key.value().to_vec();
+            if !key.starts_with(&policy_target_prefix) {
+                break;
+            }
+            scanned += 1;
+            if scanned > MAX_CATALOG_FAMILY_SCAN {
+                return Err(TableLifecycleError::Commit(CommitError::InvalidCatalog));
+            }
+            let bytes = value.value().to_vec();
+            let record = decode_registered_envelope(&bytes)
+                .map_err(|_| TableLifecycleError::Commit(CommitError::InvalidCatalog))?;
+            if record.fields.iter().any(|field| {
+                if field.tag != 1 || field.payload.len() != 16 {
+                    return false;
+                }
+                let policy_id: [u8; 16] = field.payload.as_slice().try_into().unwrap();
+                policy_ids.contains(&policy_id)
+            }) {
+                deletes.insert(key, bytes);
+            }
+        }
+        // Remove grants on owned objects and their matching authority dependency edges.
+        let grants_prefix = 12u16.to_be_bytes();
+        let mut scanned = 0usize;
+        let mut grant_pairs = Vec::new();
+        for entry in catalog
+            .range(grants_prefix.as_slice()..)
+            .map_err(|_| TableLifecycleError::Storage)?
+        {
+            let (key, value) = entry.map_err(|_| TableLifecycleError::Storage)?;
+            let key = key.value().to_vec();
+            if !key.starts_with(&grants_prefix) {
+                break;
+            }
+            scanned += 1;
+            if scanned > MAX_CATALOG_FAMILY_SCAN {
+                return Err(TableLifecycleError::Commit(CommitError::InvalidCatalog));
+            }
+            let object_id = key
+                .get(20..36)
+                .and_then(|bytes| <[u8; 16]>::try_from(bytes).ok());
+            if key.len() == 59 && object_id.is_some_and(|object_id| owned_ids.contains(&object_id))
+            {
+                let grantee: [u8; 16] = key[3..19].try_into().unwrap();
+                let target: [u8; 16] = key[43..59].try_into().unwrap();
+                grant_pairs.push((grantee, target));
+                deletes.insert(key, value.value().to_vec());
+            }
+        }
+        for (grantee, target) in grant_pairs {
+            let key = dependency_catalog_key(grantee, target, 5);
+            if let Some(value) = catalog
+                .get(key.as_slice())
+                .map_err(|_| TableLifecycleError::Storage)?
+            {
+                deletes.insert(key, value.value().to_vec());
+            }
+        }
+        let dependency_prefix = 15u16.to_be_bytes();
+        let mut scanned = 0usize;
+        for entry in catalog
+            .range(dependency_prefix.as_slice()..)
+            .map_err(|_| TableLifecycleError::Storage)?
+        {
+            let (key, value) = entry.map_err(|_| TableLifecycleError::Storage)?;
+            let key = key.value().to_vec();
+            if !key.starts_with(&dependency_prefix) {
+                break;
+            }
+            scanned += 1;
+            if scanned > MAX_CATALOG_FAMILY_SCAN {
+                return Err(TableLifecycleError::Commit(CommitError::InvalidCatalog));
+            }
+            let dependent: [u8; 16] = key
+                .get(3..19)
+                .ok_or(TableLifecycleError::Commit(CommitError::InvalidCatalog))?
+                .try_into()
+                .map_err(|_| TableLifecycleError::Commit(CommitError::InvalidCatalog))?;
+            if owned_ids.contains(&dependent) {
+                deletes.insert(key, value.value().to_vec());
+            }
+        }
+        let writes = deletes
+            .into_iter()
+            .map(|(key, expected_value)| CatalogWrite {
+                key,
+                expected_value: Some(expected_value),
+                payload: None,
+            })
+            .collect::<Vec<_>>();
+        audit_event.target_ids = vec![table_id];
+        let commit_sequence = commit_authorized_table_drop_ddl_with_fences(
+            self.database,
+            &self.ddl_fences,
+            invocation_id,
+            authenticated_actor_id,
+            retention_deadline_us,
+            &writes,
+            &[audit_event],
+        )
+        .map_err(|error| match error {
+            CommitError::DdlAuthorizationDenied => TableLifecycleError::Unauthorized,
+            error => TableLifecycleError::Commit(error),
+        })?;
+        Ok(DroppedTable {
+            table_id,
             commit_sequence,
         })
     }
