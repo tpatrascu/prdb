@@ -12445,6 +12445,59 @@ fn storage_manager_separates_foreign_key_alter_and_references_authority()
         );
     }
 
+    let stale_source_drop_invocation = id(0x80);
+    let stale_source_drop_row = id(0x82);
+    let mut stale_source_drop_writer = storage.begin_invocation(
+        stale_source_drop_invocation,
+        alter_and_reference_user,
+        9_999,
+        1,
+        1024,
+    )?;
+    let stale_source_drop_schema =
+        stale_source_drop_writer.load_catalog_table_schema(source_table_id)?;
+    stale_source_drop_writer.load_catalog_indexes(&stale_source_drop_schema)?;
+    let stale_source_drop_tuple = encode_tuple(
+        &stale_source_drop_schema.columns,
+        stale_source_drop_schema.schema_version,
+        &[Some(ScalarValue::Bytea(
+            b"before foreign key drop".to_vec(),
+        ))],
+    )?;
+    stale_source_drop_writer.stage_put(
+        prdb_engine::overlay::RowId {
+            table: source_table_id,
+            row: stale_source_drop_row,
+        },
+        &stale_source_drop_tuple,
+    )?;
+    let stale_target_drop_invocation = id(0x81);
+    let stale_target_drop_row = id(0x83);
+    let mut stale_target_drop_writer = storage.begin_invocation(
+        stale_target_drop_invocation,
+        alter_and_reference_user,
+        9_999,
+        1,
+        1024,
+    )?;
+    let stale_target_drop_schema =
+        stale_target_drop_writer.load_catalog_table_schema(target_table_id)?;
+    stale_target_drop_writer.load_catalog_indexes(&stale_target_drop_schema)?;
+    let stale_target_drop_tuple = encode_tuple(
+        &stale_target_drop_schema.columns,
+        stale_target_drop_schema.schema_version,
+        &[Some(ScalarValue::Bytea(
+            b"before foreign key drop".to_vec(),
+        ))],
+    )?;
+    stale_target_drop_writer.stage_put(
+        prdb_engine::overlay::RowId {
+            table: target_table_id,
+            row: stale_target_drop_row,
+        },
+        &stale_target_drop_tuple,
+    )?;
+
     let mut removed_foreign_key = foreign_key_definition.clone();
     removed_foreign_key.expected_value = foreign_key_definition.payload.clone();
     removed_foreign_key.payload = None;
@@ -12478,6 +12531,36 @@ fn storage_manager_separates_foreign_key_alter_and_references_authority()
         )?,
         4
     );
+    for (writer, invocation_id, table_id, row_id, label) in [
+        (
+            stale_source_drop_writer,
+            stale_source_drop_invocation,
+            source_table_id,
+            stale_source_drop_row,
+            "source",
+        ),
+        (
+            stale_target_drop_writer,
+            stale_target_drop_invocation,
+            target_table_id,
+            stale_target_drop_row,
+            "target",
+        ),
+    ] {
+        assert!(matches!(
+            writer.commit(),
+            Err(prdb_engine::transaction::TransactionError::Commit(
+                CommitError::Conflict
+            ))
+        ));
+        assert!(row(&database, &table_row_key(table_id, row_id))?.is_none());
+        assert_eq!(
+            lookup_outcome(&database, invocation_id, alter_and_reference_user, 1)?
+                .ok_or_else(|| format!("missing stale {label}-table FK-drop outcome"))?
+                .status,
+            OutcomeStatus::Aborted
+        );
+    }
 
     let mut reference_only_audit = audit_event(0x74);
     reference_only_audit.actor_id = Some(reference_only_user);
@@ -12512,6 +12595,16 @@ fn storage_manager_separates_foreign_key_alter_and_references_authority()
         (id(0x72), alter_and_reference_user, OutcomeStatus::Committed),
         (id(0x73), alter_only_user, OutcomeStatus::Committed),
         (id(0x74), reference_only_user, OutcomeStatus::Aborted),
+        (
+            stale_source_drop_invocation,
+            alter_and_reference_user,
+            OutcomeStatus::Aborted,
+        ),
+        (
+            stale_target_drop_invocation,
+            alter_and_reference_user,
+            OutcomeStatus::Aborted,
+        ),
         (restricted_table_drop, ddl_admin, OutcomeStatus::Aborted),
         (
             stale_source_invocation,

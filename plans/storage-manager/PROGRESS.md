@@ -1510,3 +1510,11 @@
 - Implementation: no production change was needed; the existing serialized constraint DDL path advances the table write epoch and the commit guard rejects the stale writer.
 - Verification: the focused regression passed in the configured Nix shell.
 - Remaining: separate supervisor/gateway process integration and broader DDL acceptance evidence remain open.
+
+## DS-5 / DS-7: FOREIGN KEY removal versus pinned source and target writers — verified
+
+- Behavior: removing a FOREIGN KEY advances both the source and referenced table write epochs, so writers pinned to the prior relationship graph cannot publish rows afterward.
+- Regression: the real-redb [FK authority lifecycle test](../../engine/tests/commit.rs) stages one row on each table before authorized FK removal; both writers receive `Conflict`, publish no row, and record ABORTED outcomes.
+- Implementation: no production change was needed; the existing serialized foreign-key DDL path protects both table epochs.
+- Verification: the focused real-redb FK authority regression passed in the configured Nix shell.
+- Remaining: separate supervisor/gateway process integration and broader DDL acceptance evidence remain open.
