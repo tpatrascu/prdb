@@ -11167,6 +11167,209 @@ fn storage_manager_drop_column_row_limit_aborts_atomically()
 }
 
 #[test]
+fn storage_manager_drop_column_byte_limit_aborts_atomically()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::storage_manager::{
+        CreateTableRequest, TableColumnDefinition, TableLifecycleError,
+    };
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let actor = id(0x9b);
+    let admin_role = builtin_owner_id();
+    let mut setup_audit = identity_audit_event(0x9c, admin_role, actor);
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(
+        id(0x9c),
+        admin_role,
+        9_999,
+        &[
+            principal_write_with_name(actor, 1, 1, "column_drop_bytes_owner"),
+            object_write_with_name(actor, 8, "column_drop_bytes_owner"),
+            membership_write(actor, admin_role),
+            dependency_write(actor, admin_role, 5),
+        ],
+        &[setup_audit],
+    )?;
+    let schema_invocation = id(0x9d);
+    let mut schema_audit = identity_audit_event(0x9e, actor, id(0x9f));
+    schema_audit.correlation_id = schema_invocation;
+    let schema = storage.create_schema(
+        schema_invocation,
+        actor,
+        "column_drop_bytes_schema",
+        actor,
+        9_999,
+        schema_audit,
+    )?;
+    let create_invocation = id(0xa0);
+    let mut create_audit = identity_audit_event(0xa1, actor, id(0xa2));
+    create_audit.correlation_id = create_invocation;
+    let table = storage.create_table(CreateTableRequest {
+        invocation_id: create_invocation,
+        authenticated_actor_id: actor,
+        schema_id: schema.schema_id,
+        name: "bounded_drop_bytes_table".to_owned(),
+        columns: vec![
+            TableColumnDefinition {
+                name: "removed".to_owned(),
+                scalar_type: ScalarType::Text,
+                nullable: false,
+                generated_uuid_identity: false,
+                default: None,
+            },
+            TableColumnDefinition {
+                name: "retained".to_owned(),
+                scalar_type: ScalarType::Text,
+                nullable: false,
+                generated_uuid_identity: false,
+                default: None,
+            },
+        ],
+        retention_deadline_us: 9_999,
+        audit_event: create_audit,
+    })?;
+    let old_columns = [
+        ColumnSchema {
+            scalar_type: ScalarType::Text,
+            nullable: false,
+        },
+        ColumnSchema {
+            scalar_type: ScalarType::Text,
+            nullable: false,
+        },
+    ];
+    let new_columns = [ColumnSchema {
+        scalar_type: ScalarType::Text,
+        nullable: false,
+    }];
+    let retained_text = "r".repeat(400_000);
+    let retained_tuple = encode_tuple(
+        &new_columns,
+        2,
+        &[Some(ScalarValue::Text(retained_text.clone()))],
+    )?;
+    let empty_removed_tuple = encode_tuple(
+        &old_columns,
+        1,
+        &[
+            Some(ScalarValue::Text(String::new())),
+            Some(ScalarValue::Text(retained_text.clone())),
+        ],
+    )?;
+    let target_reject_bytes = 1024 * 1024;
+    let removed_len = target_reject_bytes - retained_tuple.len() - empty_removed_tuple.len();
+    let make_rows = |one_byte_over: bool| -> Result<Vec<RowWrite>, Box<dyn std::error::Error>> {
+        (1u64..=64)
+            .map(|row_number| {
+                let extra = usize::from(one_byte_over && row_number == 64);
+                let old_tuple = encode_tuple(
+                    &old_columns,
+                    1,
+                    &[
+                        Some(ScalarValue::Text("x".repeat(removed_len + extra))),
+                        Some(ScalarValue::Text(retained_text.clone())),
+                    ],
+                )?;
+                let combined = old_tuple.len() + retained_tuple.len();
+                assert_eq!(combined, target_reject_bytes + extra);
+                let mut row_suffix = [0; 16];
+                row_suffix[8..].copy_from_slice(&row_number.to_be_bytes());
+                Ok(RowWrite {
+                    key: table_row_key(table.table_id, row_suffix),
+                    expected_version: None,
+                    payload: Some(old_tuple),
+                })
+            })
+            .collect()
+    };
+    let rejected_rows = make_rows(true)?;
+    let rejected_total = rejected_rows
+        .iter()
+        .map(|row| row.payload.as_ref().unwrap().len() + retained_tuple.len())
+        .sum::<usize>();
+    assert_eq!(rejected_total, 64 * 1024 * 1024 + 1);
+    let rows_invocation = id(0xa3);
+    let before_drop = commit_rows(&database, rows_invocation, actor, 9_999, &rejected_rows)?;
+    let drop_invocation = id(0xa4);
+    let mut drop_audit = identity_audit_event(0xa5, actor, id(0xa6));
+    drop_audit.correlation_id = drop_invocation;
+    assert_eq!(
+        storage.drop_column(
+            drop_invocation,
+            actor,
+            table.table_id,
+            table.column_ids[0],
+            9_999,
+            drop_audit,
+        ),
+        Err(TableLifecycleError::Commit(
+            CommitError::TableDropLimitExceeded
+        ))
+    );
+    assert_eq!(commit_sequence(&database)?, before_drop);
+    assert_eq!(
+        lookup_outcome(&database, drop_invocation, actor, 1)?
+            .ok_or("missing DROP COLUMN byte-limit outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
+    let remove_rows = rejected_rows
+        .iter()
+        .map(|row| RowWrite {
+            key: row.key,
+            expected_version: Some(before_drop),
+            payload: None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        commit_rows(&database, id(0xa7), actor, 9_999, &remove_rows)?,
+        before_drop + 1
+    );
+    let boundary_rows = make_rows(false)?;
+    let boundary_total = boundary_rows
+        .iter()
+        .map(|row| row.payload.as_ref().unwrap().len() + retained_tuple.len())
+        .sum::<usize>();
+    assert_eq!(boundary_total, 64 * 1024 * 1024);
+    let boundary_rows_invocation = id(0xa8);
+    let before_boundary = commit_rows(
+        &database,
+        boundary_rows_invocation,
+        actor,
+        9_999,
+        &boundary_rows,
+    )?;
+    let boundary_invocation = id(0xa9);
+    let mut boundary_audit = identity_audit_event(0xaa, actor, id(0xab));
+    boundary_audit.correlation_id = boundary_invocation;
+    let dropped = storage.drop_column(
+        boundary_invocation,
+        actor,
+        table.table_id,
+        table.column_ids[0],
+        9_999,
+        boundary_audit,
+    )?;
+    assert_eq!(dropped.commit_sequence, before_boundary + 1);
+    let mut first_row_suffix = [0; 16];
+    first_row_suffix[8..].copy_from_slice(&1u64.to_be_bytes());
+    let first_row_key = table_row_key(table.table_id, first_row_suffix);
+    let retained_row = row(&database, &first_row_key)?.ok_or("row missing after DROP COLUMN")?;
+    let decoded = decode_tuple(&new_columns, 2, &retained_row.payload)?;
+    assert_eq!(decoded.values, vec![Some(ScalarValue::Text(retained_text))]);
+    assert_eq!(
+        lookup_outcome(&database, boundary_invocation, actor, 1)?
+            .ok_or("missing exact-bound DROP COLUMN outcome")?
+            .status,
+        OutcomeStatus::Committed
+    );
+    StorageManager::new(&database, Duration::from_millis(100))?;
+    Ok(())
+}
+
+#[test]
 fn storage_manager_add_column_byte_limit_aborts_atomically()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::storage_manager::{

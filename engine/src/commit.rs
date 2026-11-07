@@ -4509,13 +4509,13 @@ fn build_index_ddl_plan(
                 return Err(CommitError::TableDropLimitExceeded);
             }
             let old_bytes = value.value().to_vec();
+            let row = RowRecord::decode(&old_bytes).map_err(|_| CommitError::InvalidRow)?;
             total_bytes = total_bytes
-                .checked_add(old_bytes.len())
+                .checked_add(row.payload.len())
                 .ok_or(CommitError::TableDropLimitExceeded)?;
             if total_bytes > MAX_INDEX_DDL_BYTES_PER_COMMIT {
                 return Err(CommitError::TableDropLimitExceeded);
             }
-            let row = RowRecord::decode(&old_bytes).map_err(|_| CommitError::InvalidRow)?;
             let row_key: [u8; 32] = key.try_into().map_err(|_| CommitError::InvalidRow)?;
             if row_key[16..] == [0; 16] {
                 return Err(CommitError::InvalidRow);
