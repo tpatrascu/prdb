@@ -1044,3 +1044,10 @@
 - Changed code and tests: [frame dispatcher](../../engine/src/client_protocol.rs), [protocol bounds](../../engine/tests/client_protocol.rs), and [real-redb auth/upload integration](../../engine/tests/commit.rs).
 - Verification: focused protocol and handshake/upload tests pass.
 - Remaining: wire PREPARE/SEAL schemas to staging and expose the flow through a live gateway connection.
+
+## NP-3 dependency: prepare and seal through the authenticated session
+
+- Behavior: strict PREPARE decoding validates exact fields, u32 version fields, byte declarations, canonical lowercase SHA-256/base64, workload class, and metadata bounds before staging reservation. SEAL validates a canonical invocation ID and drives staging digest, count, and admission-metadata checks before returning `prepared`.
+- Changed code and tests: [client request handlers](../../engine/src/client_protocol.rs), [protocol regressions](../../engine/tests/client_protocol.rs), and [real-redb handshake/upload integration](../../engine/tests/commit.rs).
+- Verification: focused protocol suite and real-redb HELLO/AUTH/PREPARE/chunk/SEAL regression pass in the repository Nix shell.
+- Remaining: START frame dispatch, actual supervisor/gateway IPC, TCP transport, worker process lifecycle, and sandboxed execution evidence.

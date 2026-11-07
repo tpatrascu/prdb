@@ -7482,8 +7482,7 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::client_protocol::{ClientConnectionSession, ClientFrame, ClientSessionError};
     use prdb_engine::supervisor::{
-        PrepareSubmission, StagingLimits, StagingStore, SubmissionMetadata,
-        SubmissionMetadataValidator, WorkloadClass,
+        StagingLimits, StagingStore, SubmissionMetadata, SubmissionMetadataValidator,
     };
     use sha2::{Digest, Sha256};
     use std::sync::Arc;
@@ -7582,45 +7581,79 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
     let staging = StagingStore::new(StagingLimits::default(), Arc::new(AcceptUpload))?;
     let owner = session.staging_owner()?;
     let artifact = b"upload";
-    let reservation = staging.prepare(
-        owner,
-        PrepareSubmission {
-            manifest_version: 1,
-            manifest: b"m".to_vec(),
-            artifact_bytes: artifact.len() as u64,
-            artifact_sha256: Sha256::digest(artifact).into(),
-            scope_version: 1,
-            requested_scope: b"s".to_vec(),
-            parameter_bytes: 0,
-            parameter_sha256: Sha256::digest([]).into(),
-            deadline_ms: 30_000,
-            workload_class: WorkloadClass::Operational,
+    let artifact_hash = Sha256::digest(artifact)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let empty_hash = Sha256::digest([])
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let prepare = session.handle_prepare_request(
+        &staging,
+        ClientFrame {
+            kind: 3,
+            request_id: 4,
+            response_sequence: 0,
+            payload: format!(
+                "{{\"manifest_version\":1,\"manifest\":\"bQ==\",\"artifact_bytes\":\"6\",\"artifact_sha256\":\"{artifact_hash}\",\"parameter_bytes\":\"0\",\"parameter_sha256\":\"{empty_hash}\",\"scope_version\":1,\"requested_scope\":\"cw==\",\"deadline_ms\":\"30000\",\"workload_class\":\"operational\"}}"
+            )
+            .into_bytes(),
         },
     )?;
-    let mut chunk_payload = reservation.invocation_id.to_vec();
+    let prepare_response = std::str::from_utf8(&prepare.payload)?;
+    let invocation_hex = prepare_response
+        .split("\"invocation_id\":\"")
+        .nth(1)
+        .and_then(|value| value.get(..32))
+        .ok_or("PREPARE response omitted invocation ID")?;
+    let invocation_id = prdb_engine::client_protocol::decode_client_seal(
+        format!("{{\"invocation_id\":\"{invocation_hex}\"}}").as_bytes(),
+    )?;
+    assert_eq!(prepare.request_id, 4);
+    assert_eq!(
+        staging.status(owner, invocation_id)?,
+        prdb_engine::supervisor::SubmissionState::Uploading
+    );
+    let mut chunk_payload = invocation_id.to_vec();
     chunk_payload.extend_from_slice(&0u64.to_le_bytes());
     chunk_payload.extend_from_slice(artifact);
     let acknowledgement = session.handle_upload_request(
         &staging,
         ClientFrame {
             kind: 4,
-            request_id: 4,
+            request_id: 5,
             response_sequence: 0,
             payload: chunk_payload,
         },
     )?;
-    assert_eq!(acknowledgement.request_id, 4);
+    assert_eq!(acknowledgement.request_id, 5);
     assert_eq!(acknowledgement.payload, b"{\"next_offset\":\"6\"}");
     assert_eq!(
-        staging.status(owner, reservation.invocation_id)?,
+        staging.status(owner, invocation_id)?,
         prdb_engine::supervisor::SubmissionState::Uploading
+    );
+
+    let seal = session.handle_seal_request(
+        &staging,
+        ClientFrame {
+            kind: 6,
+            request_id: 6,
+            response_sequence: 0,
+            payload: format!("{{\"invocation_id\":\"{invocation_hex}\"}}").into_bytes(),
+        },
+    )?;
+    assert_eq!(seal.payload, b"{\"state\":\"prepared\"}");
+    assert_eq!(
+        staging.status(owner, invocation_id)?,
+        prdb_engine::supervisor::SubmissionState::Prepared
     );
 
     let ping = session.handle_handshake_request(
         &storage,
         ClientFrame {
             kind: 11,
-            request_id: 5,
+            request_id: 7,
             response_sequence: 0,
             payload: b"{}".to_vec(),
         },
@@ -7631,7 +7664,7 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
             &storage,
             ClientFrame {
                 kind: 1,
-                request_id: 6,
+                request_id: 8,
                 response_sequence: 0,
                 payload: br#"{"mode":"query","client_name":"again"}"#.to_vec(),
             },

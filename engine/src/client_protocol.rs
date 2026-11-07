@@ -98,6 +98,8 @@ pub enum ClientControlError {
     InvalidTokenId,
     InvalidTokenSecret,
     InvalidChunk,
+    InvalidPrepare,
+    InvalidInvocationId,
 }
 
 impl std::fmt::Display for ClientControlError {
@@ -125,6 +127,20 @@ pub struct ClientChunk {
     pub invocation_id: [u8; 16],
     pub offset: u64,
     pub data: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClientPrepare {
+    pub manifest_version: u32,
+    pub manifest: Vec<u8>,
+    pub artifact_bytes: u64,
+    pub artifact_sha256: [u8; 32],
+    pub parameter_bytes: u64,
+    pub parameter_sha256: [u8; 32],
+    pub scope_version: u32,
+    pub requested_scope: Vec<u8>,
+    pub deadline_ms: u64,
+    pub workload_class: crate::supervisor::WorkloadClass,
 }
 
 impl Drop for ClientCredentials {
@@ -193,6 +209,195 @@ pub fn decode_client_chunk(payload: &[u8]) -> Result<ClientChunk, ClientControlE
         offset,
         data,
     })
+}
+
+/// Decode the exact PREPARE JSON schema, validating declared sizes and all
+/// canonical representations before allocating decoded metadata buffers.
+pub fn decode_client_prepare(payload: &[u8]) -> Result<ClientPrepare, ClientControlError> {
+    let mut fields = parse_scalar_object(payload)?;
+    let manifest_version = take_number(&mut fields, "manifest_version")?
+        .try_into()
+        .map_err(|_| ClientControlError::InvalidPrepare)?;
+    let manifest_text = take_string(&mut fields, "manifest")?;
+    let artifact_bytes = take_decimal_string(&mut fields, "artifact_bytes")?;
+    let artifact_sha256 = decode_lower_hex_hash(&take_string(&mut fields, "artifact_sha256")?)?;
+    let parameter_bytes = take_decimal_string(&mut fields, "parameter_bytes")?;
+    let parameter_sha256 = decode_lower_hex_hash(&take_string(&mut fields, "parameter_sha256")?)?;
+    let scope_version = take_number(&mut fields, "scope_version")?
+        .try_into()
+        .map_err(|_| ClientControlError::InvalidPrepare)?;
+    let scope_text = take_string(&mut fields, "requested_scope")?;
+    let deadline_ms = take_decimal_string(&mut fields, "deadline_ms")?;
+    let workload_class = match take_string(&mut fields, "workload_class")?.as_str() {
+        "operational" => crate::supervisor::WorkloadClass::Operational,
+        "analytical" => crate::supervisor::WorkloadClass::Analytical,
+        _ => return Err(ClientControlError::InvalidPrepare),
+    };
+    reject_unknown_scalars(fields)?;
+    if artifact_bytes == 0
+        || artifact_bytes > crate::supervisor::MAX_ARTIFACT_BYTES
+        || parameter_bytes > crate::supervisor::MAX_PARAMETER_BYTES
+        || deadline_ms == 0
+        || manifest_text.len() > crate::supervisor::MAX_MANIFEST_BYTES.div_ceil(3) * 4
+        || scope_text.len() > crate::supervisor::MAX_SCOPE_BYTES.div_ceil(3) * 4
+    {
+        return Err(ClientControlError::InvalidPrepare);
+    }
+    let manifest = decode_base64_bytes(&manifest_text)
+        .filter(|bytes| !bytes.is_empty() && bytes.len() <= crate::supervisor::MAX_MANIFEST_BYTES)
+        .ok_or(ClientControlError::InvalidPrepare)?;
+    let requested_scope = decode_base64_bytes(&scope_text)
+        .filter(|bytes| !bytes.is_empty() && bytes.len() <= crate::supervisor::MAX_SCOPE_BYTES)
+        .ok_or(ClientControlError::InvalidPrepare)?;
+    Ok(ClientPrepare {
+        manifest_version,
+        manifest,
+        artifact_bytes,
+        artifact_sha256,
+        parameter_bytes,
+        parameter_sha256,
+        scope_version,
+        requested_scope,
+        deadline_ms,
+        workload_class,
+    })
+}
+
+pub fn decode_client_seal(payload: &[u8]) -> Result<[u8; 16], ClientControlError> {
+    let mut fields = parse_string_object(payload)?;
+    let invocation_id = decode_lower_hex_id(&take_required(&mut fields, "invocation_id")?)
+        .map_err(|_| ClientControlError::InvalidInvocationId)?;
+    reject_unknown_fields(fields)?;
+    Ok(invocation_id)
+}
+
+#[derive(Debug)]
+enum JsonScalar {
+    String(String),
+    Number(u64),
+}
+
+fn parse_scalar_object(payload: &[u8]) -> Result<HashMap<String, JsonScalar>, ClientControlError> {
+    if payload.len() > CLIENT_MAX_CONTROL_BYTES {
+        return Err(ClientControlError::InvalidJson);
+    }
+    let text = std::str::from_utf8(payload).map_err(|_| ClientControlError::InvalidJson)?;
+    let mut parser = JsonStringObjectParser {
+        text: text.as_bytes(),
+        offset: 0,
+    };
+    parser.skip_whitespace();
+    parser.expect(b'{')?;
+    let mut fields = HashMap::new();
+    parser.skip_whitespace();
+    if !parser.consume(b'}') {
+        loop {
+            parser.skip_whitespace();
+            let key = parser.parse_string()?;
+            parser.skip_whitespace();
+            parser.expect(b':')?;
+            parser.skip_whitespace();
+            let value = if parser.text.get(parser.offset) == Some(&b'"') {
+                JsonScalar::String(parser.parse_string()?)
+            } else {
+                JsonScalar::Number(parser.parse_u64_number()?)
+            };
+            if fields.insert(key, value).is_some() {
+                return Err(ClientControlError::DuplicateKey);
+            }
+            parser.skip_whitespace();
+            if parser.consume(b'}') {
+                break;
+            }
+            parser.expect(b',')?;
+        }
+    }
+    parser.skip_whitespace();
+    if parser.offset != parser.text.len() {
+        return Err(ClientControlError::InvalidJson);
+    }
+    Ok(fields)
+}
+
+fn take_string(
+    fields: &mut HashMap<String, JsonScalar>,
+    key: &str,
+) -> Result<String, ClientControlError> {
+    match fields.remove(key).ok_or(ClientControlError::MissingKey)? {
+        JsonScalar::String(value) => Ok(value),
+        JsonScalar::Number(_) => Err(ClientControlError::InvalidPrepare),
+    }
+}
+
+fn take_number(
+    fields: &mut HashMap<String, JsonScalar>,
+    key: &str,
+) -> Result<u64, ClientControlError> {
+    match fields.remove(key).ok_or(ClientControlError::MissingKey)? {
+        JsonScalar::Number(value) => Ok(value),
+        JsonScalar::String(_) => Err(ClientControlError::InvalidPrepare),
+    }
+}
+
+fn take_decimal_string(
+    fields: &mut HashMap<String, JsonScalar>,
+    key: &str,
+) -> Result<u64, ClientControlError> {
+    let value = take_string(fields, key)?;
+    if value.is_empty()
+        || (value.len() > 1 && value.starts_with('0'))
+        || !value.bytes().all(|b| b.is_ascii_digit())
+    {
+        return Err(ClientControlError::InvalidPrepare);
+    }
+    value
+        .parse()
+        .map_err(|_| ClientControlError::InvalidPrepare)
+}
+
+fn decode_lower_hex_hash(text: &str) -> Result<[u8; 32], ClientControlError> {
+    if text.len() != 64 {
+        return Err(ClientControlError::InvalidPrepare);
+    }
+    let mut hash = [0; 32];
+    for (index, pair) in text.as_bytes().chunks_exact(2).enumerate() {
+        hash[index] = (lower_hex_nibble(pair[0]).ok_or(ClientControlError::InvalidPrepare)? << 4)
+            | lower_hex_nibble(pair[1]).ok_or(ClientControlError::InvalidPrepare)?;
+    }
+    Ok(hash)
+}
+
+fn decode_base64_bytes(text: &str) -> Option<Vec<u8>> {
+    let input = text.as_bytes();
+    if input.is_empty() || !input.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut output = Vec::new();
+    output.try_reserve_exact(input.len() / 4 * 3).ok()?;
+    for (index, chunk) in input.chunks_exact(4).enumerate() {
+        let last = index + 1 == input.len() / 4;
+        let a = base64_value(chunk[0])?;
+        let b = base64_value(chunk[1])?;
+        output.push((a << 2) | (b >> 4));
+        match (chunk[2], chunk[3]) {
+            (b'=', b'=') if last && b & 0x0f == 0 => (),
+            (c, b'=') if last => {
+                let c = base64_value(c)?;
+                if c & 0x03 != 0 {
+                    return None;
+                }
+                output.push((b << 4) | (c >> 2));
+            }
+            (c, d) if c != b'=' && d != b'=' => {
+                let c = base64_value(c)?;
+                let d = base64_value(d)?;
+                output.push((b << 4) | (c >> 2));
+                output.push((c << 6) | d);
+            }
+            _ => return None,
+        }
+    }
+    Some(output)
 }
 
 fn parse_string_object(payload: &[u8]) -> Result<HashMap<String, String>, ClientControlError> {
@@ -268,6 +473,24 @@ impl JsonStringObjectParser<'_> {
         self.consume(expected)
             .then_some(())
             .ok_or(ClientControlError::InvalidJson)
+    }
+
+    fn parse_u64_number(&mut self) -> Result<u64, ClientControlError> {
+        let start = self.offset;
+        while self.text.get(self.offset).is_some_and(u8::is_ascii_digit) {
+            self.offset += 1;
+        }
+        let digits = self
+            .text
+            .get(start..self.offset)
+            .ok_or(ClientControlError::InvalidJson)?;
+        if digits.is_empty() || (digits.len() > 1 && digits[0] == b'0') {
+            return Err(ClientControlError::InvalidJson);
+        }
+        std::str::from_utf8(digits)
+            .map_err(|_| ClientControlError::InvalidJson)?
+            .parse()
+            .map_err(|_| ClientControlError::InvalidJson)
     }
 
     fn parse_string(&mut self) -> Result<String, ClientControlError> {
@@ -365,6 +588,14 @@ fn take_required(
 }
 
 fn reject_unknown_fields(fields: HashMap<String, String>) -> Result<(), ClientControlError> {
+    if fields.is_empty() {
+        Ok(())
+    } else {
+        Err(ClientControlError::UnknownKey)
+    }
+}
+
+fn reject_unknown_scalars(fields: HashMap<String, JsonScalar>) -> Result<(), ClientControlError> {
     if fields.is_empty() {
         Ok(())
     } else {
@@ -562,6 +793,90 @@ impl ClientConnectionSession {
             request_id: request.request_id,
             response_sequence: 0,
             payload: format!("{{\"next_offset\":\"{next_offset}\"}}").into_bytes(),
+        })
+    }
+
+    /// Reserve bounded supervisor staging from a fully validated PREPARE
+    /// request. No storage snapshot or executor is created by this operation.
+    pub fn handle_prepare_request(
+        &mut self,
+        staging: &crate::supervisor::StagingStore,
+        request: ClientFrame,
+    ) -> Result<ClientFrame, ClientSessionError> {
+        if request.response_sequence != 0 || request.kind != 3 {
+            return Err(ClientSessionError::UnsupportedRequest);
+        }
+        self.request_ids
+            .accept(&request)
+            .map_err(|_| ClientSessionError::UnsupportedRequest)?;
+        if !self.permits_request_kind(request.kind) {
+            return Err(if self.authenticated.is_none() {
+                ClientSessionError::AuthenticationRequired
+            } else {
+                ClientSessionError::WrongMode
+            });
+        }
+        let prepare = decode_client_prepare(&request.payload)
+            .map_err(ClientSessionError::InvalidControlPayload)?;
+        let reservation = staging
+            .prepare(
+                self.staging_owner()?,
+                crate::supervisor::PrepareSubmission {
+                    manifest_version: prepare.manifest_version,
+                    manifest: prepare.manifest,
+                    artifact_bytes: prepare.artifact_bytes,
+                    artifact_sha256: prepare.artifact_sha256,
+                    scope_version: prepare.scope_version,
+                    requested_scope: prepare.requested_scope,
+                    parameter_bytes: prepare.parameter_bytes,
+                    parameter_sha256: prepare.parameter_sha256,
+                    deadline_ms: prepare.deadline_ms,
+                    workload_class: prepare.workload_class,
+                },
+            )
+            .map_err(ClientSessionError::Staging)?;
+        let invocation_id = encode_lower_hex_id(reservation.invocation_id);
+        Ok(ClientFrame {
+            kind: 100,
+            request_id: request.request_id,
+            response_sequence: 0,
+            payload: format!(
+                "{{\"invocation_id\":\"{invocation_id}\",\"artifact_chunk_bytes\":{CLIENT_MAX_CHUNK_BYTES},\"parameter_chunk_bytes\":{CLIENT_MAX_CHUNK_BYTES}}}"
+            )
+            .into_bytes(),
+        })
+    }
+
+    /// Verify uploaded lengths, hashes, and versioned admission metadata,
+    /// then make the staged submission immutable.
+    pub fn handle_seal_request(
+        &mut self,
+        staging: &crate::supervisor::StagingStore,
+        request: ClientFrame,
+    ) -> Result<ClientFrame, ClientSessionError> {
+        if request.response_sequence != 0 || request.kind != 6 {
+            return Err(ClientSessionError::UnsupportedRequest);
+        }
+        self.request_ids
+            .accept(&request)
+            .map_err(|_| ClientSessionError::UnsupportedRequest)?;
+        if !self.permits_request_kind(request.kind) {
+            return Err(if self.authenticated.is_none() {
+                ClientSessionError::AuthenticationRequired
+            } else {
+                ClientSessionError::WrongMode
+            });
+        }
+        let invocation_id = decode_client_seal(&request.payload)
+            .map_err(ClientSessionError::InvalidControlPayload)?;
+        staging
+            .seal(self.staging_owner()?, invocation_id)
+            .map_err(ClientSessionError::Staging)?;
+        Ok(ClientFrame {
+            kind: 100,
+            request_id: request.request_id,
+            response_sequence: 0,
+            payload: b"{\"state\":\"prepared\"}".to_vec(),
         })
     }
 

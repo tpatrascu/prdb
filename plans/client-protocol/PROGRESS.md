@@ -48,3 +48,10 @@
 - Changed code and tests: [chunk decoder and dispatcher](../../engine/src/client_protocol.rs), [boundary tests](../../engine/tests/client_protocol.rs), and [real-redb AUTH/upload stream test](../../engine/tests/commit.rs).
 - Verification: focused chunk decoder and handshake/upload tests pass in the repository Nix shell.
 - Remaining: strict PREPARE/SEAL/START JSON schemas, TCP listener, and gateway-service IPC integration.
+
+## NP-3 dependency: PREPARE and SEAL dispatch
+
+- Behavior: PREPARE enforces exact scalar fields, canonical u64 strings, lowercase SHA-256, canonical base64, protocol byte ceilings, and a supported workload name before reserving authenticated staging. SEAL accepts only one canonical invocation ID and returns `prepared` after staging verifies lengths, digests, and versioned metadata.
+- Changed code and tests: [PREPARE/SEAL decoders and handlers](../../engine/src/client_protocol.rs), [schema regressions](../../engine/tests/client_protocol.rs), and [real-redb session upload lifecycle](../../engine/tests/commit.rs).
+- Verification: focused protocol tests and HELLO/AUTH/PREPARE/chunk/SEAL integration regression pass in the repository Nix shell.
+- Remaining: START frame response dispatch, STATUS/CANCEL, TCP listener, and gateway-service IPC integration.

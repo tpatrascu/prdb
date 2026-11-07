@@ -1,6 +1,6 @@
 use prdb_engine::client_protocol::{
     CLIENT_MAX_CHUNK_BYTES, ClientControlError, ClientMode, decode_client_chunk,
-    decode_client_credentials, decode_client_hello,
+    decode_client_credentials, decode_client_hello, decode_client_prepare, decode_client_seal,
 };
 
 #[test]
@@ -94,4 +94,59 @@ fn binary_chunks_validate_id_offset_and_data_bounds() {
         decode_client_chunk(&vec![0x11; CLIENT_MAX_CHUNK_BYTES + 25]),
         Err(ClientControlError::InvalidChunk)
     ));
+}
+
+#[test]
+fn prepare_decoder_enforces_exact_canonical_schema_and_limits() {
+    let hash = "00".repeat(32);
+    let payload = format!(
+        "{{\"manifest_version\":1,\"manifest\":\"bQ==\",\"artifact_bytes\":\"3\",\"artifact_sha256\":\"{hash}\",\"parameter_bytes\":\"0\",\"parameter_sha256\":\"{hash}\",\"scope_version\":1,\"requested_scope\":\"cw==\",\"deadline_ms\":\"30000\",\"workload_class\":\"analytical\"}}"
+    );
+    let prepare = decode_client_prepare(payload.as_bytes()).unwrap();
+    assert_eq!(prepare.manifest, b"m");
+    assert_eq!(prepare.requested_scope, b"s");
+    assert_eq!(prepare.artifact_bytes, 3);
+    assert_eq!(prepare.parameter_bytes, 0);
+    assert_eq!(
+        prepare.workload_class,
+        prdb_engine::supervisor::WorkloadClass::Analytical
+    );
+
+    let leading_zero = payload.replace("\"artifact_bytes\":\"3\"", "\"artifact_bytes\":\"03\"");
+    assert_eq!(
+        decode_client_prepare(leading_zero.as_bytes()),
+        Err(ClientControlError::InvalidPrepare)
+    );
+    let duplicate = payload.replace(
+        "\"scope_version\":1",
+        "\"scope_version\":1,\"scope_version\":1",
+    );
+    assert_eq!(
+        decode_client_prepare(duplicate.as_bytes()),
+        Err(ClientControlError::DuplicateKey)
+    );
+    let unknown = payload.replace(
+        "\"workload_class\":\"analytical\"",
+        "\"workload_class\":\"analytical\",\"principal\":\"x\"",
+    );
+    assert_eq!(
+        decode_client_prepare(unknown.as_bytes()),
+        Err(ClientControlError::UnknownKey)
+    );
+}
+
+#[test]
+fn seal_decoder_accepts_only_one_nonzero_canonical_invocation_id() {
+    assert_eq!(
+        decode_client_seal(br#"{"invocation_id":"000102030405060708090a0b0c0d0e0f"}"#),
+        Ok([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
+    );
+    assert_eq!(
+        decode_client_seal(br#"{"invocation_id":"00000000000000000000000000000000"}"#),
+        Err(ClientControlError::InvalidInvocationId)
+    );
+    assert_eq!(
+        decode_client_seal(br#"{"invocation_id":"000102030405060708090a0b0c0d0e0f","extra":"x"}"#),
+        Err(ClientControlError::UnknownKey)
+    );
 }
