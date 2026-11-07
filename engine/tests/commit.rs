@@ -1325,12 +1325,17 @@ fn storage_manager_renames_tables_and_drop_column_rewrites_rows()
     let admin_role = builtin_owner_id();
     let actor = id(0x60);
     let successor_owner = id(0xd0);
+    let successor_role = id(0xd6);
     let outsider = id(0xd7);
     let setup = vec![
         principal_write_with_name(actor, 1, 1, "column_drop_owner"),
         object_write_with_name(actor, 8, "column_drop_owner"),
         principal_write_with_name(successor_owner, 1, 1, "successor_owner"),
         object_write_with_name(successor_owner, 8, "successor_owner"),
+        principal_write_with_name(successor_role, 2, 1, "successor_role"),
+        object_write_with_name(successor_role, 9, "successor_role"),
+        membership_write(successor_owner, successor_role),
+        dependency_write(successor_owner, successor_role, 5),
         principal_write_with_name(outsider, 1, 1, "table_ddl_outsider"),
         object_write_with_name(outsider, 8, "table_ddl_outsider"),
         membership_write(actor, admin_role),
@@ -1848,7 +1853,7 @@ fn storage_manager_renames_tables_and_drop_column_rewrites_rows()
         transfer_invocation,
         actor,
         table.table_id,
-        successor_owner,
+        successor_role,
         9_999,
         transfer_audit,
     );
@@ -1893,11 +1898,11 @@ fn storage_manager_renames_tables_and_drop_column_rewrites_rows()
                 .find(|field| field.tag == 4)
                 .ok_or("table owner field missing")?
                 .payload,
-            successor_owner
+            successor_role
         );
         let mut successor_grants_prefix = 12u16.to_be_bytes().to_vec();
         successor_grants_prefix.push(1);
-        successor_grants_prefix.extend_from_slice(&successor_owner);
+        successor_grants_prefix.extend_from_slice(&successor_role);
         assert!(
             catalog
                 .range(successor_grants_prefix.as_slice()..)?

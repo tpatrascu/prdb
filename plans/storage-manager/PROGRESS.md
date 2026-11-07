@@ -1436,10 +1436,10 @@
 
 - Behavior and normative contracts: [schema DDL](../../specs/ddl-schema.md), [client protocol](../../specs/client-protocol.md), and [storage manager](../../specs/storage-manager.md). The current owner or a database administrator can transfer a non-system table to an existing user or role. The table object owner/version and table write epoch update atomically; tuple schema, rows, indexes, and grants stay unchanged. The new owner receives table DDL authority without data privileges.
 - Implementation: the storage entry point and serialized authority guard update only the table object and table record, validate the target principal, reject system schemas, and guard actor/owner/membership inputs. `tables.set_owner` uses connection-owned ADMIN PREPARE/START.
-- Regression evidence: the real-redb lifecycle transfers to a non-admin user, checks there are no data-grant records, confirms that user's rename succeeds, rejects an unrelated user's transfer with a durable ABORTED outcome, and verifies a writer pinned before the transfer aborts with `Conflict` and publishes no row. The gateway ADMIN lifecycle and strict request decoder cover PREPARE/START and the exact argument shape.
+- Regression evidence: the real-redb lifecycle transfers to a role, checks there are no table data-grant records for that role, confirms an inherited member can rename the table, rejects an unrelated user's transfer with a durable ABORTED outcome, and verifies a writer pinned before the transfer aborts with `Conflict` and publishes no row. The gateway ADMIN lifecycle and strict request decoder cover PREPARE/START and the exact argument shape.
 - TDD note: the ownership behavior assertion first failed with `InvalidRequest` against a compiling storage-manager stub; it passes through the authorized DDL path.
 - Verification: focused real-redb, decoder, and gateway lifecycle tests passed. Workspace build, format check, warning-denied Clippy, all workspace tests, and `git diff --check` passed in the configured Nix shell. Tool versions were Rust/Cargo 1.95.0, rustfmt 1.9.0, Clippy 0.1.95, and TinyCC 0.9.27-unstable-2025-01-06.
-- Remaining: schema ownership transfer, role-owned table transfer regression, DDL limit boundaries, other stale-writer races, and separate supervisor/gateway process integration.
+- Remaining: role-owned schema transfer regression, DDL limit boundaries, other stale-writer races, and separate supervisor/gateway process integration.
 
 ## DS-5: schema ownership transfer — implemented
 
@@ -1448,7 +1448,7 @@
 - Regression evidence: real-redb coverage transfers the schema, checks owner/version, rejects the previous non-admin owner's drop with a durable ABORTED outcome, verifies the successor can create and drop a table, and confirms no table data grants were added. Decoder and gateway ADMIN lifecycle tests cover the exact request and committed result.
 - TDD note: the schema transfer assertion first failed with `InvalidRequest` against the compiling storage-manager stub; it passes through the serialized owner guard.
 - Verification: focused real-redb, decoder, and gateway lifecycle tests passed. Workspace build, format check, warning-denied Clippy, all workspace tests, and `git diff --check` passed in the configured Nix shell. Tool versions were Rust/Cargo 1.95.0, rustfmt 1.9.0, Clippy 0.1.95, and TinyCC 0.9.27-unstable-2025-01-06.
-- Remaining at this milestone: role-owner transfer regression, additional stale-writer and limit boundary evidence, and separate supervisor/gateway process integration.
+- Remaining at this milestone: role-owned schema transfer regression, additional stale-writer and limit boundary evidence, and separate supervisor/gateway process integration.
 
 ## DS-5: schema rename — implemented
 
