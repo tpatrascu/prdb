@@ -691,3 +691,235 @@ fn generate_invocation_id(state: &StagingState) -> Result<[u8; 16], StagingError
     }
     Err(StagingError::RandomnessUnavailable)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Barrier;
+
+    struct AcceptMetadata;
+
+    impl SubmissionMetadataValidator for AcceptMetadata {
+        fn supports_versions(&self, manifest_version: u32, scope_version: u32) -> bool {
+            manifest_version == 1 && scope_version == 1
+        }
+
+        fn validate(&self, metadata: &SubmissionMetadata) -> bool {
+            metadata.manifest == b"manifest" && metadata.requested_scope == b"scope"
+        }
+    }
+
+    struct BlockingMetadata {
+        entered: Barrier,
+        resume: Barrier,
+    }
+
+    impl SubmissionMetadataValidator for BlockingMetadata {
+        fn supports_versions(&self, manifest_version: u32, scope_version: u32) -> bool {
+            manifest_version == 1 && scope_version == 1
+        }
+
+        fn validate(&self, _metadata: &SubmissionMetadata) -> bool {
+            self.entered.wait();
+            self.resume.wait();
+            true
+        }
+    }
+
+    fn make_owner(connection: u8, principal: u8) -> StagingOwner {
+        StagingOwner::authenticated([connection; 16], [principal; 16])
+    }
+
+    fn request(artifact: &[u8], parameters: &[u8]) -> PrepareSubmission {
+        PrepareSubmission {
+            manifest_version: 1,
+            manifest: b"manifest".to_vec(),
+            artifact_bytes: artifact.len() as u64,
+            artifact_sha256: Sha256::digest(artifact).into(),
+            scope_version: 1,
+            requested_scope: b"scope".to_vec(),
+            parameter_bytes: parameters.len() as u64,
+            parameter_sha256: Sha256::digest(parameters).into(),
+        }
+    }
+
+    fn store(validator: Arc<dyn SubmissionMetadataValidator>) -> StagingStore {
+        StagingStore::new(StagingLimits::default(), validator).unwrap()
+    }
+
+    fn upload_and_seal(
+        store: &StagingStore,
+        owner: StagingOwner,
+        artifact: &[u8],
+        parameters: &[u8],
+    ) -> [u8; 16] {
+        let reservation = store.prepare(owner, request(artifact, parameters)).unwrap();
+        store
+            .upload_chunk(
+                owner,
+                reservation.invocation_id,
+                ChunkKind::Artifact,
+                0,
+                artifact,
+            )
+            .unwrap();
+        if !parameters.is_empty() {
+            store
+                .upload_chunk(
+                    owner,
+                    reservation.invocation_id,
+                    ChunkKind::Parameters,
+                    0,
+                    parameters,
+                )
+                .unwrap();
+        }
+        store.seal(owner, reservation.invocation_id).unwrap();
+        reservation.invocation_id
+    }
+
+    #[test]
+    fn sealed_submission_starts_once_and_releases_quota_at_finish() {
+        let store = store(Arc::new(AcceptMetadata));
+        let owner = make_owner(1, 2);
+        let invocation_id = upload_and_seal(&store, owner, b"artifact", b"params");
+        assert_eq!(
+            store.status(owner, invocation_id).unwrap(),
+            SubmissionState::Prepared
+        );
+        let started = store
+            .start_with(owner, invocation_id, |submission| {
+                assert_eq!(submission.artifact(), b"artifact");
+                assert_eq!(submission.parameters(), b"params");
+                Ok::<_, ()>(submission.invocation_id())
+            })
+            .unwrap();
+        assert_eq!(started, invocation_id);
+        assert_eq!(
+            store.status(owner, invocation_id).unwrap(),
+            SubmissionState::Started
+        );
+        assert!(matches!(
+            store.start_with(owner, invocation_id, |_| Ok::<_, ()>(())),
+            Err(StartError::Staging(StagingError::InvalidState))
+        ));
+        store.finish_started(owner, invocation_id).unwrap();
+        assert_eq!(
+            store.status(owner, invocation_id),
+            Err(StagingError::Unavailable)
+        );
+        let replacement = store.prepare(owner, request(b"x", b""));
+        assert!(replacement.is_ok());
+    }
+
+    #[test]
+    fn staging_rejects_cross_owner_and_noncontiguous_chunks() {
+        let store = store(Arc::new(AcceptMetadata));
+        let owner = make_owner(3, 4);
+        let reservation = store.prepare(owner, request(b"artifact", b"")).unwrap();
+        assert_eq!(
+            store.upload_chunk(
+                make_owner(5, 4),
+                reservation.invocation_id,
+                ChunkKind::Artifact,
+                0,
+                b"artifact",
+            ),
+            Err(StagingError::Unavailable)
+        );
+        assert_eq!(
+            store.upload_chunk(
+                owner,
+                reservation.invocation_id,
+                ChunkKind::Artifact,
+                1,
+                b"artifact",
+            ),
+            Err(StagingError::InvalidChunk)
+        );
+        assert_eq!(
+            store.upload_chunk(
+                owner,
+                reservation.invocation_id,
+                ChunkKind::Artifact,
+                0,
+                b"artifact",
+            ),
+            Ok(8)
+        );
+        store.seal(owner, reservation.invocation_id).unwrap();
+        assert_eq!(
+            store.cancel_prepared(owner, reservation.invocation_id),
+            Ok(())
+        );
+        assert_eq!(
+            store.status(owner, reservation.invocation_id),
+            Err(StagingError::Unavailable)
+        );
+    }
+
+    #[test]
+    fn cancellation_during_metadata_validation_discards_the_seal() {
+        let validator = Arc::new(BlockingMetadata {
+            entered: Barrier::new(2),
+            resume: Barrier::new(2),
+        });
+        let store = Arc::new(store(validator.clone()));
+        let owner = make_owner(6, 7);
+        let reservation = store.prepare(owner, request(b"artifact", b"")).unwrap();
+        store
+            .upload_chunk(
+                owner,
+                reservation.invocation_id,
+                ChunkKind::Artifact,
+                0,
+                b"artifact",
+            )
+            .unwrap();
+
+        let sealer_store = Arc::clone(&store);
+        let invocation_id = reservation.invocation_id;
+        let sealer = std::thread::spawn(move || sealer_store.seal(owner, invocation_id));
+        validator.entered.wait();
+        store.cancel_prepared(owner, invocation_id).unwrap();
+        validator.resume.wait();
+        assert_eq!(sealer.join().unwrap(), Err(StagingError::Unavailable));
+        assert_eq!(
+            store.status(owner, invocation_id),
+            Err(StagingError::Unavailable)
+        );
+    }
+
+    #[test]
+    fn disconnect_and_expiry_reclaim_unstarted_reservations() {
+        let validator = Arc::new(AcceptMetadata);
+        let store = store(validator.clone());
+        let owner = make_owner(8, 9);
+        let reservation = store.prepare(owner, request(b"artifact", b"")).unwrap();
+        assert_eq!(
+            store.close_connection(owner).unwrap(),
+            ConnectionClose::Discarded(vec![reservation.invocation_id])
+        );
+        assert_eq!(
+            store.status(owner, reservation.invocation_id),
+            Err(StagingError::Unavailable)
+        );
+
+        let mut limits = StagingLimits::default();
+        limits.reservation_ttl = Duration::from_millis(1);
+        let expiring_store = StagingStore::new(limits, validator).unwrap();
+        let expiring_owner = make_owner(10, 9);
+        let expiring = expiring_store
+            .prepare(expiring_owner, request(b"artifact", b""))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        assert_eq!(
+            expiring_store.reap_expired().unwrap(),
+            vec![expiring.invocation_id]
+        );
+        assert_eq!(
+            expiring_store.status(expiring_owner, expiring.invocation_id),
+            Err(StagingError::Unavailable)
+        );
+    }
+}

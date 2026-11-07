@@ -1000,3 +1000,10 @@
 - Changed code and fixture: [client handshake state](../../engine/src/client_protocol.rs) and [Unix-stream/storage integration regressions](../../engine/tests/commit.rs).
 - Verification: full `cargo test --workspace --locked` passes; `cargo fmt --all -- --check`, workspace build, warning-denied Clippy, and `git diff --check` pass in the repository Nix shell.
 - Remaining: implement TCP/gateway service and trusted gateway-to-supervisor IPC; launch confined worker processes and reconcile their outcomes.
+
+## SU-2 validation: staging lifecycle and cancellation race
+
+- Evidence: four unit tests cover chunk/owner rejection, immutable sealing, one-shot START, release, cancellation during metadata validation, disconnect and expiry cleanup.
+- Test: [staging state-machine tests](../../engine/src/supervisor.rs).
+- Verification: `cargo test -p prdb-engine --lib supervisor::tests --locked` passed.
+- Remaining: live gateway upload flow and concurrency/quota stress under multiple sessions.

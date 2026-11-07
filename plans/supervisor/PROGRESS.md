@@ -21,3 +21,10 @@
 - Evidence: a real-redb test closes planner/executor Unix peers, serves both channels, then sends FINALIZE through the supervisor-only terminal stream and verifies the durable owner outcome is COMMITTED.
 - Test: [paired worker drain and terminal commit](../../engine/tests/commit.rs).
 - Remaining: worker process launch/exit observation must decide whether successful user return justifies FINALIZE; clean socket EOF by itself is not evidence of process success.
+
+## SU-2 verification: staging state-machine lifecycle and races
+
+- Behavior: internal tests cover owner isolation, exact chunk offsets, seal digest/metadata acceptance, one-shot START, quota release after finish, prepared cancellation, disconnect and TTL reclamation, and cancellation while metadata validation is blocked outside the staging lock.
+- Changed fixture: [staging unit tests](../../engine/src/supervisor.rs).
+- Verification: `cargo test -p prdb-engine --lib supervisor::tests --locked` passed all 4 staging tests in the repository Nix shell.
+- Remaining: bind the authenticated gateway protocol to staging and exercise quota limits under concurrent connections.
