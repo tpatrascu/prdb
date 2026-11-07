@@ -2064,6 +2064,24 @@ fn storage_manager_sets_and_drops_not_null_with_existing_row_validation()
     let write = database.begin_write()?;
     write.open_table(ROWS)?.remove(&row_key[..])?;
     write.commit()?;
+    let stale_writer_invocation = id(0x44);
+    let stale_row_key = table_row_key(table.table_id, id(0x45));
+    let mut stale_writer =
+        storage.begin_invocation(stale_writer_invocation, actor, 9_999, 1, 1024)?;
+    let stale_schema = stale_writer.load_catalog_table_schema(table.table_id)?;
+    stale_writer.load_catalog_indexes(&stale_schema)?;
+    let stale_tuple = encode_tuple(
+        &stale_schema.columns,
+        stale_schema.schema_version,
+        &[Some(ScalarValue::Text("staged before NOT NULL".to_owned()))],
+    )?;
+    stale_writer.stage_put(
+        prdb_engine::overlay::RowId {
+            table: table.table_id,
+            row: id(0x45),
+        },
+        &stale_tuple,
+    )?;
     let set_invocation = id(0x3e);
     let mut set_audit = identity_audit_event(0x3f, actor, id(0x40));
     set_audit.correlation_id = set_invocation;
@@ -2076,6 +2094,20 @@ fn storage_manager_sets_and_drops_not_null_with_existing_row_validation()
         9_999,
         set_audit,
     )?;
+    let stale_result = stale_writer.commit();
+    assert!(matches!(
+        stale_result,
+        Err(prdb_engine::transaction::TransactionError::Commit(
+            CommitError::Conflict
+        ))
+    ));
+    assert!(row(&database, &stale_row_key)?.is_none());
+    assert_eq!(
+        lookup_outcome(&database, stale_writer_invocation, actor, 1)?
+            .ok_or("missing stale writer outcome after SET NOT NULL")?
+            .status,
+        OutcomeStatus::Aborted
+    );
     let not_null_constraint_key = {
         let read = database.begin_read()?;
         let catalog = read.open_table(CATALOG)?;
