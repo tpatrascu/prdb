@@ -17,7 +17,7 @@ use prdb_engine::schema::{self, CATALOG, ENGINE_META, ROWS};
 use prdb_engine::storage_manager::{
     StorageManager, StorageManagerConfig, StorageManagerInitError, TokenIssueRequest,
 };
-use prdb_engine::tuple::{ColumnSchema, ScalarType, ScalarValue, encode_tuple};
+use prdb_engine::tuple::{ColumnSchema, ScalarType, ScalarValue, decode_tuple, encode_tuple};
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
@@ -10970,6 +10970,195 @@ fn storage_manager_add_column_row_limit_aborts_atomically() -> Result<(), Box<dy
     assert_eq!(
         lookup_outcome(&database, boundary_invocation, actor, 1)?
             .ok_or("missing exact-bound add-column outcome")?
+            .status,
+        OutcomeStatus::Committed
+    );
+    StorageManager::new(&database, Duration::from_millis(100))?;
+    Ok(())
+}
+
+#[test]
+fn storage_manager_drop_column_row_limit_aborts_atomically()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::storage_manager::{
+        CreateTableRequest, TableColumnDefinition, TableLifecycleError,
+    };
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let actor = id(0x8b);
+    let admin_role = builtin_owner_id();
+    let mut setup_audit = identity_audit_event(0x8c, admin_role, actor);
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(
+        id(0x8c),
+        admin_role,
+        9_999,
+        &[
+            principal_write_with_name(actor, 1, 1, "column_drop_limit_owner"),
+            object_write_with_name(actor, 8, "column_drop_limit_owner"),
+            membership_write(actor, admin_role),
+            dependency_write(actor, admin_role, 5),
+        ],
+        &[setup_audit],
+    )?;
+    let schema_invocation = id(0x8d);
+    let mut schema_audit = identity_audit_event(0x8e, actor, id(0x8f));
+    schema_audit.correlation_id = schema_invocation;
+    let schema = storage.create_schema(
+        schema_invocation,
+        actor,
+        "column_drop_limit_schema",
+        actor,
+        9_999,
+        schema_audit,
+    )?;
+    let create_invocation = id(0x90);
+    let mut create_audit = identity_audit_event(0x91, actor, id(0x92));
+    create_audit.correlation_id = create_invocation;
+    let table = storage.create_table(CreateTableRequest {
+        invocation_id: create_invocation,
+        authenticated_actor_id: actor,
+        schema_id: schema.schema_id,
+        name: "bounded_drop_table".to_owned(),
+        columns: vec![
+            TableColumnDefinition {
+                name: "removed".to_owned(),
+                scalar_type: ScalarType::Integer,
+                nullable: false,
+                generated_uuid_identity: false,
+                default: None,
+            },
+            TableColumnDefinition {
+                name: "retained".to_owned(),
+                scalar_type: ScalarType::Integer,
+                nullable: false,
+                generated_uuid_identity: false,
+                default: None,
+            },
+        ],
+        retention_deadline_us: 9_999,
+        audit_event: create_audit,
+    })?;
+    let old_tuple = encode_tuple(
+        &[
+            ColumnSchema {
+                scalar_type: ScalarType::Integer,
+                nullable: false,
+            },
+            ColumnSchema {
+                scalar_type: ScalarType::Integer,
+                nullable: false,
+            },
+        ],
+        1,
+        &[Some(ScalarValue::Integer(1)), Some(ScalarValue::Integer(2))],
+    )?;
+    let rows = (1u64..=65_537)
+        .map(|row_number| {
+            let mut row_suffix = [0; 16];
+            row_suffix[8..].copy_from_slice(&row_number.to_be_bytes());
+            RowWrite {
+                key: table_row_key(table.table_id, row_suffix),
+                expected_version: None,
+                payload: Some(old_tuple.clone()),
+            }
+        })
+        .collect::<Vec<_>>();
+    let rows_invocation = id(0x93);
+    let before_drop = commit_rows(&database, rows_invocation, actor, 9_999, &rows)?;
+    let drop_invocation = id(0x94);
+    let mut drop_audit = identity_audit_event(0x95, actor, id(0x96));
+    drop_audit.correlation_id = drop_invocation;
+    assert_eq!(
+        storage.drop_column(
+            drop_invocation,
+            actor,
+            table.table_id,
+            table.column_ids[0],
+            9_999,
+            drop_audit,
+        ),
+        Err(TableLifecycleError::Commit(
+            CommitError::TableDropLimitExceeded
+        ))
+    );
+    assert_eq!(commit_sequence(&database)?, before_drop);
+    assert_eq!(
+        lookup_outcome(&database, drop_invocation, actor, 1)?
+            .ok_or("missing DROP COLUMN limit outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
+    let mut last_row_suffix = [0; 16];
+    last_row_suffix[8..].copy_from_slice(&65_537u64.to_be_bytes());
+    let last_row_key = table_row_key(table.table_id, last_row_suffix);
+    assert_eq!(
+        commit_rows(
+            &database,
+            id(0x97),
+            actor,
+            9_999,
+            &[RowWrite {
+                key: last_row_key,
+                expected_version: Some(before_drop),
+                payload: None,
+            }],
+        )?,
+        before_drop + 1
+    );
+    let boundary_invocation = id(0x98);
+    let mut boundary_audit = identity_audit_event(0x99, actor, id(0x9a));
+    boundary_audit.correlation_id = boundary_invocation;
+    let dropped = storage.drop_column(
+        boundary_invocation,
+        actor,
+        table.table_id,
+        table.column_ids[0],
+        9_999,
+        boundary_audit,
+    )?;
+    assert_eq!(dropped.column_id, table.column_ids[0]);
+    assert_eq!(dropped.commit_sequence, before_drop + 2);
+    let mut first_row_suffix = [0; 16];
+    first_row_suffix[8..].copy_from_slice(&1u64.to_be_bytes());
+    let first_row_key = table_row_key(table.table_id, first_row_suffix);
+    let remaining_row =
+        row(&database, &first_row_key)?.ok_or("row missing after exact-bound DROP COLUMN")?;
+    let decoded = decode_tuple(
+        &[ColumnSchema {
+            scalar_type: ScalarType::Integer,
+            nullable: false,
+        }],
+        2,
+        &remaining_row.payload,
+    )?;
+    assert_eq!(decoded.values, vec![Some(ScalarValue::Integer(2))]);
+    let table_record = decode_registered_envelope(
+        database
+            .begin_read()?
+            .open_table(CATALOG)?
+            .get(id_catalog_key(5, table.table_id).as_slice())?
+            .ok_or("table record missing after exact-bound DROP COLUMN")?
+            .value(),
+    )?;
+    assert_eq!(
+        u64::from_le_bytes(
+            table_record
+                .fields
+                .iter()
+                .find(|field| field.tag == 2)
+                .ok_or("table schema version missing")?
+                .payload
+                .as_slice()
+                .try_into()?
+        ),
+        2
+    );
+    assert_eq!(
+        lookup_outcome(&database, boundary_invocation, actor, 1)?
+            .ok_or("missing exact-bound DROP COLUMN outcome")?
             .status,
         OutcomeStatus::Committed
     );
