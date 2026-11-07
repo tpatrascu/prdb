@@ -4,9 +4,10 @@
 //! database files or accept a storage manager. Connection serving is layered
 //! on top of this bind policy.
 
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -92,6 +93,7 @@ impl GatewayClientStream for std::os::unix::net::UnixStream {
 pub struct GatewayRuntimeConfig {
     pub worker_count: usize,
     pub queue_capacity: usize,
+    pub connections_per_ip_per_minute: usize,
     pub idle_timeout: Duration,
     pub accept_poll_interval: Duration,
 }
@@ -101,9 +103,67 @@ impl Default for GatewayRuntimeConfig {
         Self {
             worker_count: 32,
             queue_capacity: 64,
+            connections_per_ip_per_minute: 60,
             idle_timeout: Duration::from_secs(30),
             accept_poll_interval: Duration::from_millis(10),
         }
+    }
+}
+
+#[derive(Clone)]
+pub struct GatewayPeerRateLimiter {
+    max_attempts: NonZeroUsize,
+    max_sources: NonZeroUsize,
+    window: Duration,
+    attempts: Arc<std::sync::Mutex<HashMap<IpAddr, VecDeque<std::time::Instant>>>>,
+}
+
+impl GatewayPeerRateLimiter {
+    pub fn new(
+        max_attempts: usize,
+        max_sources: usize,
+        window: Duration,
+    ) -> Result<Self, GatewayListenerError> {
+        if window.is_zero() {
+            return Err(GatewayListenerError::InvalidConnectionLimit);
+        }
+        Ok(Self {
+            max_attempts: NonZeroUsize::new(max_attempts)
+                .ok_or(GatewayListenerError::InvalidConnectionLimit)?,
+            max_sources: NonZeroUsize::new(max_sources)
+                .ok_or(GatewayListenerError::InvalidConnectionLimit)?,
+            window,
+            attempts: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        })
+    }
+
+    pub fn admit(&self, source: IpAddr) -> bool {
+        self.admit_at(source, std::time::Instant::now())
+    }
+
+    pub fn admit_at(&self, source: IpAddr, now: std::time::Instant) -> bool {
+        let mut attempts = self
+            .attempts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for timestamps in attempts.values_mut() {
+            while timestamps
+                .front()
+                .is_some_and(|timestamp| now.saturating_duration_since(*timestamp) >= self.window)
+            {
+                timestamps.pop_front();
+            }
+        }
+        attempts.retain(|_, timestamps| !timestamps.is_empty());
+        if !attempts.contains_key(&source) && attempts.len() >= self.max_sources.get() {
+            return false;
+        }
+        let timestamps = attempts.entry(source).or_default();
+        if timestamps.len() >= self.max_attempts.get() {
+            return false;
+        }
+        timestamps.push_back(now);
+        true
     }
 }
 
@@ -351,6 +411,7 @@ where
 {
     if config.worker_count == 0
         || config.queue_capacity == 0
+        || config.connections_per_ip_per_minute == 0
         || config.idle_timeout.is_zero()
         || config.accept_poll_interval.is_zero()
     {
@@ -364,6 +425,12 @@ where
     let (sender, receiver) = std::sync::mpsc::sync_channel::<TcpStream>(config.queue_capacity);
     let receiver = Arc::new(std::sync::Mutex::new(receiver));
     let connector = Arc::new(connect_service);
+    let rate_limiter = GatewayPeerRateLimiter::new(
+        config.connections_per_ip_per_minute,
+        4096,
+        Duration::from_secs(60),
+    )
+    .map_err(|_| GatewayRuntimeError::InvalidConfig)?;
     let mut workers = Vec::with_capacity(config.worker_count);
     for _ in 0..config.worker_count {
         let receiver = Arc::clone(&receiver);
@@ -400,12 +467,17 @@ where
             break Ok(());
         }
         match gateway.listener.accept() {
-            Ok((client, _peer)) => match sender.try_send(client) {
-                Ok(()) | Err(std::sync::mpsc::TrySendError::Full(_)) => {}
-                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
-                    break Err(GatewayRuntimeError::WorkerPanicked);
+            Ok((client, peer)) => {
+                if !rate_limiter.admit(peer.ip()) {
+                    continue;
                 }
-            },
+                match sender.try_send(client) {
+                    Ok(()) | Err(std::sync::mpsc::TrySendError::Full(_)) => {}
+                    Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                        break Err(GatewayRuntimeError::WorkerPanicked);
+                    }
+                }
+            }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 std::thread::sleep(config.accept_poll_interval);
             }

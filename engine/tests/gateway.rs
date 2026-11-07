@@ -1,7 +1,7 @@
 use prdb_engine::client_protocol::{ClientFrame, ClientFrameDecoder};
 use prdb_engine::gateway::{
-    GatewayConnectionLimiter, GatewayListenerConfig, GatewayListenerError, GatewayRuntimeConfig,
-    TcpGatewayListener, run_gateway,
+    GatewayConnectionLimiter, GatewayListenerConfig, GatewayListenerError, GatewayPeerRateLimiter,
+    GatewayRuntimeConfig, TcpGatewayListener, run_gateway,
 };
 use prdb_engine::ipc::{IpcFrame, Operation, read_frame, write_frame};
 use std::io::{Read, Write};
@@ -151,6 +151,7 @@ fn gateway_worker_pool_opens_one_service_stream_per_client() {
         let config = GatewayRuntimeConfig {
             worker_count: 1,
             queue_capacity: 1,
+            connections_per_ip_per_minute: 60,
             idle_timeout: std::time::Duration::from_secs(5),
             accept_poll_interval: std::time::Duration::from_millis(5),
         };
@@ -305,4 +306,22 @@ fn incomplete_tcp_client_frame_hits_absolute_read_deadline() {
 
     assert!(result.is_err());
     assert!(started.elapsed() < std::time::Duration::from_secs(2));
+}
+
+#[test]
+fn per_ip_gateway_rate_limit_is_bounded_and_expires() {
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::time::{Duration, Instant};
+
+    let limiter = GatewayPeerRateLimiter::new(2, 1, Duration::from_secs(60)).unwrap();
+    let now = Instant::now();
+    let first_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let other_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+
+    assert!(limiter.admit_at(first_ip, now));
+    assert!(limiter.admit_at(first_ip, now + Duration::from_secs(1)));
+    assert!(!limiter.admit_at(first_ip, now + Duration::from_secs(2)));
+    assert!(!limiter.admit_at(other_ip, now + Duration::from_secs(2)));
+    assert!(limiter.admit_at(other_ip, now + Duration::from_secs(61)));
+    assert!(!limiter.admit_at(first_ip, now + Duration::from_secs(61)));
 }

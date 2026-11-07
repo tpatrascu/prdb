@@ -23,6 +23,7 @@ fn main() {
              --service-uid UID                   required\n\
              --workers COUNT                     default 32\n\
              --queue-capacity COUNT              default 64\n\
+             --connections-per-ip COUNT           default 60 per minute\n\
              --idle-timeout-ms DURATION          default 30000\n\
              --allow-plaintext-non-loopback      explicit plaintext bind opt-in"
         );
@@ -40,6 +41,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut service_uid = None::<u32>;
     let mut worker_count = 32usize;
     let mut queue_capacity = 64usize;
+    let mut connections_per_ip_per_minute = 60usize;
     let mut idle_timeout = Duration::from_secs(30);
     let mut allow_non_loopback_plaintext = false;
     let mut arguments = std::env::args().skip(1);
@@ -60,6 +62,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "--workers" => worker_count = value(&mut arguments, "--workers")?.parse()?,
             "--queue-capacity" => {
                 queue_capacity = value(&mut arguments, "--queue-capacity")?.parse()?;
+            }
+            "--connections-per-ip" => {
+                connections_per_ip_per_minute =
+                    value(&mut arguments, "--connections-per-ip")?.parse()?;
             }
             "--idle-timeout-ms" => {
                 idle_timeout =
@@ -94,6 +100,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         GatewayRuntimeConfig {
             worker_count,
             queue_capacity,
+            connections_per_ip_per_minute,
             idle_timeout,
             ..GatewayRuntimeConfig::default()
         },
