@@ -562,7 +562,7 @@ fn storage_manager_creates_schema_atomically_for_privileged_actor()
 fn storage_manager_creates_typed_table_for_schema_create_grant()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::storage_manager::{
-        CreateTableRequest, TableColumnDefinition, TableLifecycleError,
+        CreateTableRequest, TableColumnDefault, TableColumnDefinition, TableLifecycleError,
     };
 
     let fixture = Fixture::new();
@@ -601,6 +601,7 @@ fn storage_manager_creates_typed_table_for_schema_create_grant()
             scalar_type: ScalarType::Uuid,
             nullable: false,
             generated_uuid_identity: true,
+            default: None,
         }],
         retention_deadline_us: 9_999,
         audit_event: denied_audit,
@@ -623,6 +624,7 @@ fn storage_manager_creates_typed_table_for_schema_create_grant()
             scalar_type: ScalarType::Uuid,
             nullable: false,
             generated_uuid_identity: false,
+            default: None,
         }],
         retention_deadline_us: 9_999,
         audit_event: reserved_audit,
@@ -647,19 +649,30 @@ fn storage_manager_creates_typed_table_for_schema_create_grant()
                     scalar_type: ScalarType::Uuid,
                     nullable: false,
                     generated_uuid_identity: true,
+                    default: None,
                 },
                 TableColumnDefinition {
                     name: "label".to_owned(),
                     scalar_type: ScalarType::Text,
                     nullable: true,
                     generated_uuid_identity: false,
+                    default: Some(TableColumnDefault::Literal(Some(ScalarValue::Text(
+                        "untitled".to_owned(),
+                    )))),
+                },
+                TableColumnDefinition {
+                    name: "created_by".to_owned(),
+                    scalar_type: ScalarType::Uuid,
+                    nullable: false,
+                    generated_uuid_identity: false,
+                    default: Some(TableColumnDefault::CurrentPrincipalId),
                 },
             ],
             retention_deadline_us: 9_999,
             audit_event: audit,
         })
         .map_err(|error| format!("table creation failed: {error:?}"))?;
-    assert_eq!(created.column_ids.len(), 2);
+    assert_eq!(created.column_ids.len(), 3);
     assert_eq!(created.commit_sequence, 2);
     let read = database.begin_read()?;
     let catalog = read.open_table(CATALOG)?;
@@ -674,6 +687,21 @@ fn storage_manager_creates_typed_table_for_schema_create_grant()
             .ok_or("missing column record")?;
         let column = decode_registered_envelope(column_record.value())?;
         assert_eq!(column.family_code, 6);
+        if ordinal > 0 {
+            let expression_id: [u8; 16] = column
+                .fields
+                .iter()
+                .find(|field| field.tag == 7)
+                .ok_or("missing column default reference")?
+                .payload
+                .as_slice()
+                .try_into()?;
+            let expression = catalog
+                .get(id_catalog_key(7, expression_id).as_slice())?
+                .ok_or("missing default expression")?;
+            let expression = decode_registered_envelope(expression.value())?;
+            assert_eq!(expression.family_code, 7);
+        }
         assert_eq!(
             u32::from_le_bytes(
                 column
@@ -708,6 +736,7 @@ fn storage_manager_creates_typed_table_for_schema_create_grant()
             scalar_type: ScalarType::Uuid,
             nullable: false,
             generated_uuid_identity: true,
+            default: None,
         }],
         retention_deadline_us: 9_999,
         audit_event: duplicate_audit,

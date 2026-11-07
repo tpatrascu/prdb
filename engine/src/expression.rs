@@ -126,7 +126,13 @@ pub fn validate_expression_binding(
         &mut remaining,
         1,
     )?;
-    if !type_compatible(expected_result_type, inferred) {
+    let decimal_default_literal = expression.purpose == ExpressionPurpose::Default
+        && matches!(
+            &expression.expression,
+            Expr::Literal(Some(ScalarValue::Decimal(_)))
+        )
+        && matches!(expected_result_type, ScalarType::Decimal { .. });
+    if !decimal_default_literal && !type_compatible(expected_result_type, inferred) {
         return Err(ExpressionCodecError::TypeMismatch);
     }
     let declared = expression

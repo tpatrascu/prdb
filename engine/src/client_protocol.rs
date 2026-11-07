@@ -1176,6 +1176,7 @@ impl JsonStringObjectParser<'_> {
             let mut scalar_type = None;
             let mut nullable = None;
             let mut generated_uuid_identity = None;
+            let mut default = None;
             self.skip_whitespace();
             if self.consume(b'}') {
                 return Err(ClientControlError::InvalidPrepare);
@@ -1196,6 +1197,7 @@ impl JsonStringObjectParser<'_> {
                     "generated_uuid_identity" => {
                         generated_uuid_identity = Some(self.parse_boolean()?)
                     }
+                    "default" => default = Some(self.parse_table_column_default()?),
                     _ => return Err(ClientControlError::UnknownKey),
                 }
                 self.skip_whitespace();
@@ -1204,12 +1206,21 @@ impl JsonStringObjectParser<'_> {
                 }
                 self.expect(b',')?;
             }
+            let name = name.ok_or(ClientControlError::MissingKey)?;
+            let scalar_type = scalar_type.ok_or(ClientControlError::MissingKey)?;
+            let generated_uuid_identity =
+                generated_uuid_identity.ok_or(ClientControlError::MissingKey)?;
+            if generated_uuid_identity && default.is_some() {
+                return Err(ClientControlError::InvalidPrepare);
+            }
             columns.push(crate::storage_manager::TableColumnDefinition {
-                name: name.ok_or(ClientControlError::MissingKey)?,
-                scalar_type: scalar_type.ok_or(ClientControlError::MissingKey)?,
+                name,
+                scalar_type,
                 nullable: nullable.ok_or(ClientControlError::MissingKey)?,
-                generated_uuid_identity: generated_uuid_identity
-                    .ok_or(ClientControlError::MissingKey)?,
+                generated_uuid_identity,
+                default: default
+                    .map(|(kind, value)| decode_table_column_default(&kind, value, scalar_type))
+                    .transpose()?,
             });
             self.skip_whitespace();
             if self.consume(b']') {
@@ -1218,6 +1229,46 @@ impl JsonStringObjectParser<'_> {
             self.expect(b',')?;
         }
         Ok(columns)
+    }
+
+    fn parse_table_column_default(
+        &mut self,
+    ) -> Result<(String, Option<String>), ClientControlError> {
+        self.expect(b'{')?;
+        let mut fields = std::collections::HashSet::new();
+        let mut kind = None;
+        let mut value = None;
+        self.skip_whitespace();
+        if self.consume(b'}') {
+            return Err(ClientControlError::InvalidPrepare);
+        }
+        loop {
+            self.skip_whitespace();
+            let key = self.parse_string()?;
+            if !fields.insert(key.clone()) {
+                return Err(ClientControlError::DuplicateKey);
+            }
+            self.skip_whitespace();
+            self.expect(b':')?;
+            self.skip_whitespace();
+            match key.as_str() {
+                "kind" => kind = Some(self.parse_string()?),
+                "value" => value = Some(self.parse_string()?),
+                _ => return Err(ClientControlError::UnknownKey),
+            }
+            self.skip_whitespace();
+            if self.consume(b'}') {
+                break;
+            }
+            self.expect(b',')?;
+        }
+        let kind = kind.ok_or(ClientControlError::MissingKey)?;
+        if (kind == "literal" && (fields.len() != 2 || value.is_none()))
+            || (kind != "literal" && (fields.len() != 1 || value.is_some()))
+        {
+            return Err(ClientControlError::InvalidPrepare);
+        }
+        Ok((kind, value))
     }
 
     fn parse_hex_quad(&mut self) -> Result<u16, ClientControlError> {
@@ -1289,6 +1340,111 @@ fn decode_table_scalar_type(text: &str) -> Result<crate::tuple::ScalarType, Clie
         _ => return Err(invalid()),
     };
     Ok(scalar_type)
+}
+
+fn decode_table_column_default(
+    kind: &str,
+    value: Option<String>,
+    scalar_type: crate::tuple::ScalarType,
+) -> Result<crate::storage_manager::TableColumnDefault, ClientControlError> {
+    use crate::storage_manager::TableColumnDefault;
+    use crate::tuple::{ScalarType, ScalarValue};
+    let invalid = || ClientControlError::InvalidPrepare;
+    match (kind, value) {
+        ("null", None) => Ok(TableColumnDefault::Literal(None)),
+        ("current_principal_id", None) if scalar_type == ScalarType::Uuid => {
+            Ok(TableColumnDefault::CurrentPrincipalId)
+        }
+        ("literal", Some(text)) => {
+            let value = match scalar_type {
+                ScalarType::Boolean => ScalarValue::Boolean(match text.as_str() {
+                    "true" => true,
+                    "false" => false,
+                    _ => return Err(invalid()),
+                }),
+                ScalarType::SmallInt => ScalarValue::SmallInt(parse_default_integer(&text)?),
+                ScalarType::Integer => ScalarValue::Integer(parse_default_integer(&text)?),
+                ScalarType::BigInt => ScalarValue::BigInt(parse_default_integer(&text)?),
+                ScalarType::Decimal { scale, .. } => {
+                    ScalarValue::Decimal(parse_default_decimal(&text, scale)?)
+                }
+                ScalarType::Text => ScalarValue::Text(text),
+                ScalarType::Varchar { .. } => ScalarValue::Varchar(text),
+                ScalarType::Bytea => ScalarValue::Bytea(decode_default_hex(&text)?),
+                ScalarType::Uuid => {
+                    ScalarValue::Uuid(decode_lower_hex_id(&text).map_err(|_| invalid())?)
+                }
+                ScalarType::Date => ScalarValue::Date(parse_default_integer(&text)?),
+                ScalarType::TimestampTz => ScalarValue::TimestampTz(parse_default_integer(&text)?),
+            };
+            Ok(TableColumnDefault::Literal(Some(value)))
+        }
+        _ => Err(invalid()),
+    }
+}
+
+fn parse_default_integer<T>(text: &str) -> Result<T, ClientControlError>
+where
+    T: std::str::FromStr,
+{
+    let digits = text.strip_prefix('-').unwrap_or(text);
+    if digits.is_empty()
+        || (digits.len() > 1 && digits.starts_with('0'))
+        || text == "-0"
+        || !digits.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(ClientControlError::InvalidPrepare);
+    }
+    text.parse().map_err(|_| ClientControlError::InvalidPrepare)
+}
+
+fn parse_default_decimal(text: &str, scale: u8) -> Result<i128, ClientControlError> {
+    let negative = text.starts_with('-');
+    let unsigned = text.strip_prefix('-').unwrap_or(text);
+    let (whole, fraction) = match unsigned.split_once('.') {
+        Some(parts) => parts,
+        None if scale == 0 => (unsigned, ""),
+        None => return Err(ClientControlError::InvalidPrepare),
+    };
+    if whole.is_empty()
+        || (whole.len() > 1 && whole.starts_with('0'))
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.len() != scale as usize
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+        || text == "-0"
+        || (negative && whole == "0" && fraction.bytes().all(|byte| byte == b'0'))
+    {
+        return Err(ClientControlError::InvalidPrepare);
+    }
+    let digits = format!("{whole}{fraction}");
+    let magnitude = digits
+        .parse::<i128>()
+        .map_err(|_| ClientControlError::InvalidPrepare)?;
+    if negative {
+        magnitude
+            .checked_neg()
+            .ok_or(ClientControlError::InvalidPrepare)
+    } else {
+        Ok(magnitude)
+    }
+}
+
+fn decode_default_hex(text: &str) -> Result<Vec<u8>, ClientControlError> {
+    if !text.len().is_multiple_of(2)
+        || !text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(ClientControlError::InvalidPrepare);
+    }
+    text.as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = hex_nibble(pair[0]).ok_or(ClientControlError::InvalidPrepare)?;
+            let low = hex_nibble(pair[1]).ok_or(ClientControlError::InvalidPrepare)?;
+            Ok((high << 4) | low)
+        })
+        .collect()
 }
 
 fn hex_nibble(byte: u8) -> Option<u8> {

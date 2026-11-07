@@ -6731,7 +6731,7 @@ fn table_create_ddl_authority_guards(
         return Err(CommitError::DdlAuthorizationDenied);
     }
     if catalog_writes.len() < 6
-        || catalog_writes.len() > crate::tuple::MAX_COLUMNS * 3 + 3
+        || catalog_writes.len() > crate::tuple::MAX_COLUMNS * 6 + 3
         || audit_events.is_empty()
         || audit_events.iter().any(|event| {
             event.actor_id != Some(principal_id)
@@ -6748,6 +6748,7 @@ fn table_create_ddl_authority_guards(
     let mut table_record_write = None;
     let mut object_writes = HashMap::<[u8; 16], &CatalogWrite>::new();
     let mut column_writes = Vec::<&CatalogWrite>::new();
+    let mut expression_writes = HashMap::<[u8; 16], &CatalogWrite>::new();
     let mut dependencies = HashSet::<([u8; 16], [u8; 16], u16)>::new();
     for write in catalog_writes {
         if write.expected_value.is_some() || write.payload.is_none() {
@@ -6769,13 +6770,21 @@ fn table_create_ddl_authority_guards(
             }
             5 if write.key.len() == 19 && table_record_write.replace(write).is_none() => {}
             6 if write.key.len() == 19 => column_writes.push(write),
+            7 if write.key.len() == 19 => {
+                let id = write.key[3..19]
+                    .try_into()
+                    .map_err(|_| CommitError::InvalidCatalog)?;
+                if expression_writes.insert(id, write).is_some() {
+                    return Err(CommitError::InvalidCatalog);
+                }
+            }
             15 => {
                 let bytes = write
                     .payload
                     .as_deref()
                     .ok_or(CommitError::InvalidCatalog)?;
                 let (dependent, referenced, kind) = decode_dependency_edge(&write.key, bytes)?;
-                if kind != 1 || !dependencies.insert((dependent, referenced, kind)) {
+                if !matches!(kind, 1 | 2) || !dependencies.insert((dependent, referenced, kind)) {
                     return Err(CommitError::InvalidCatalog);
                 }
             }
@@ -6787,9 +6796,7 @@ fn table_create_ddl_authority_guards(
         .try_into()
         .map_err(|_| CommitError::InvalidCatalog)?;
     if table_id == [0; 16]
-        || object_writes.len() != column_writes.len() + 1
         || column_writes.is_empty()
-        || dependencies.len() != column_writes.len() + 1
         || audit_events
             .iter()
             .any(|event| event.target_ids.as_slice() != [table_id])
@@ -6846,6 +6853,9 @@ fn table_create_ddl_authority_guards(
     ordered_columns.sort_by_key(|(ordinal, _)| *ordinal);
     let mut names = HashSet::<Vec<u8>>::new();
     let mut column_ids = HashSet::new();
+    let mut ordered_column_ids = Vec::with_capacity(ordered_columns.len());
+    let mut column_schemas = Vec::with_capacity(ordered_columns.len());
+    let mut default_bindings = Vec::new();
     let read = database.begin_read().map_err(storage_error)?;
     let catalog = read.open_table(CATALOG).map_err(storage_error)?;
     let schema_object_key = id_catalog_key(2, schema_id);
@@ -6904,12 +6914,12 @@ fn table_create_ddl_authority_guards(
             .map(|value| value.value().to_vec())
             .ok_or(CommitError::InvalidCatalog)?;
         let type_record = decode_catalog_record(&type_key, &type_bytes)?;
-        decode_builtin_scalar_type(
+        let scalar_type = decode_builtin_scalar_type(
             &type_record,
             &catalog_field_bytes(&column_write.key, column_bytes, 6, 5)?,
         )
         .map_err(|_| CommitError::InvalidCatalog)?;
-        add_catalog_guard(&mut guards, type_key, Some(type_bytes));
+        add_catalog_guard(&mut guards, type_key.clone(), Some(type_bytes.clone()));
         let nullable = match catalog_field_bytes(&column_write.key, column_bytes, 6, 6)?.as_slice()
         {
             [0] => false,
@@ -6917,6 +6927,19 @@ fn table_create_ddl_authority_guards(
             _ => return Err(CommitError::InvalidCatalog),
         };
         let generated_mode = catalog_field_u16(&column_write.key, column_bytes, 6, 8)?;
+        let column_record = decode_catalog_record(&column_write.key, column_bytes)?;
+        let default_expression_id = column_record
+            .fields
+            .iter()
+            .find(|field| field.tag == 7)
+            .map(|field| {
+                field
+                    .payload
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| CommitError::InvalidCatalog)
+            })
+            .transpose()?;
         if generated_mode > 1
             || (generated_mode == 1
                 && (decode_builtin_scalar_type(
@@ -6926,16 +6949,91 @@ fn table_create_ddl_authority_guards(
                 .map_err(|_| CommitError::InvalidCatalog)?
                     != crate::tuple::ScalarType::Uuid
                     || nullable))
-            || column_write.payload.as_ref().is_some_and(|bytes| {
-                decode_catalog_record(&column_write.key, bytes).is_ok_and(|record| {
-                    record
-                        .fields
-                        .iter()
-                        .any(|field| matches!(field.tag, 7 | 10))
-                })
-            })
+            || column_record.fields.iter().any(|field| field.tag == 10)
+            || (generated_mode == 1 && default_expression_id.is_some())
         {
             return Err(CommitError::InvalidCatalog);
+        }
+        ordered_column_ids.push(column_id);
+        column_schemas.push(ColumnSchema {
+            scalar_type,
+            nullable,
+        });
+        if let Some(expression_id) = default_expression_id {
+            let expression_write = expression_writes
+                .get(&expression_id)
+                .ok_or(CommitError::InvalidCatalog)?;
+            let expression_key = id_catalog_key(7, expression_id);
+            let expression_bytes = expression_write
+                .payload
+                .as_deref()
+                .ok_or(CommitError::InvalidCatalog)?;
+            let expression = decode_catalog_expression_record(&decode_catalog_record(
+                &expression_key,
+                expression_bytes,
+            )?)
+            .map_err(|_| CommitError::InvalidCatalog)?;
+            let default_mask = catalog_field_u32(&type_key, &type_bytes, 4, 5)?;
+            let permitted = match &expression.expression {
+                crate::authorization::Expr::Literal(_) => default_mask & 1 != 0,
+                crate::authorization::Expr::CurrentPrincipalId => default_mask & 4 != 0,
+                _ => false,
+            };
+            if !permitted
+                || expression.purpose != ExpressionPurpose::Default
+                || expression.expression_id != expression_id
+                || expression.result_type_id != type_id
+                || expression.result_parameters
+                    != <[u8; 8]>::try_from(catalog_field_bytes(
+                        &column_write.key,
+                        column_bytes,
+                        6,
+                        5,
+                    )?)
+                    .map_err(|_| CommitError::InvalidCatalog)?
+                || !expression.dependencies.is_empty()
+                || !dependencies.contains(&(column_id, expression_id, 2))
+            {
+                return Err(CommitError::InvalidCatalog);
+            }
+            if let crate::authorization::Expr::Literal(value) = &expression.expression
+                && crate::tuple::encode_tuple(
+                    std::slice::from_ref(&column_schemas[expected_ordinal]),
+                    1,
+                    std::slice::from_ref(value),
+                )
+                .is_err()
+            {
+                return Err(CommitError::InvalidCatalog);
+            }
+            let expression_object_key = id_catalog_key(2, expression_id);
+            let expression_object = object_writes
+                .get(&expression_id)
+                .and_then(|write| write.payload.as_deref())
+                .ok_or(CommitError::InvalidCatalog)?;
+            let expected_expression_name = format!("default_{expected_ordinal}");
+            if catalog_field_u16(&expression_object_key, expression_object, 2, 1)? != 5
+                || decode_registered_envelope(expression_object)
+                    .map_err(|_| CommitError::InvalidCatalog)?
+                    .fields
+                    .iter()
+                    .any(|field| field.tag == 2)
+                || catalog_field_bytes(&expression_object_key, expression_object, 2, 3)?
+                    != expected_expression_name.as_bytes()
+                || catalog_field_bytes(&expression_object_key, expression_object, 2, 4)?
+                    != principal_id
+                || catalog_field_u64(&expression_object_key, expression_object, 2, 5)? != 1
+                || catalog_field_u16(&expression_object_key, expression_object, 2, 6)? != 1
+            {
+                return Err(CommitError::InvalidCatalog);
+            }
+            default_bindings.push((
+                expression_id,
+                column_id,
+                expected_ordinal,
+                type_id,
+                expression,
+            ));
         }
         let object_key = id_catalog_key(2, column_id);
         let object_bytes = object_writes
@@ -6953,7 +7051,25 @@ fn table_create_ddl_authority_guards(
             return Err(CommitError::InvalidCatalog);
         }
     }
-    if object_writes.len() != column_ids.len() + 1 || dependencies.len() != column_ids.len() + 1 {
+    for (_, _, ordinal, type_id, expression) in &default_bindings {
+        validate_expression_binding(
+            expression,
+            &column_schemas,
+            &ordered_column_ids,
+            *type_id,
+            column_schemas[*ordinal].scalar_type,
+        )
+        .map_err(|_| CommitError::InvalidCatalog)?;
+    }
+    if object_writes.len() != column_ids.len() + default_bindings.len() + 1
+        || expression_writes.len() != default_bindings.len()
+        || dependencies.len() != column_ids.len() + 1 + default_bindings.len()
+        || default_bindings
+            .iter()
+            .any(|(expression_id, column_id, _, _, _)| {
+                !dependencies.contains(&(*column_id, *expression_id, 2))
+            })
+    {
         return Err(CommitError::InvalidCatalog);
     }
 

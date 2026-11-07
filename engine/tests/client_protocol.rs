@@ -325,7 +325,7 @@ fn admin_revoke_decoder_requires_prepare_then_start_schemas() {
     .is_err());
     assert_eq!(
         decode_client_admin_command(
-            br#"{"phase":"prepare","operation_version":1,"operation":"tables.create","arguments":{"schema_id":"000102030405060708090a0b0c0d0e0f","name":"events","columns":[{"name":"event_id","type":"uuid","nullable":false,"generated_uuid_identity":true},{"name":"amount","type":"decimal(12,2)","nullable":true,"generated_uuid_identity":false}]}}"#
+            br#"{"phase":"prepare","operation_version":1,"operation":"tables.create","arguments":{"schema_id":"000102030405060708090a0b0c0d0e0f","name":"events","columns":[{"name":"event_id","type":"uuid","nullable":false,"generated_uuid_identity":true},{"name":"amount","type":"decimal(12,2)","nullable":true,"generated_uuid_identity":false,"default":{"kind":"literal","value":"12.30"}}]}}"#
         ),
         Ok(ClientAdminCommand::PrepareCreateTable {
             schema_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
@@ -336,6 +336,7 @@ fn admin_revoke_decoder_requires_prepare_then_start_schemas() {
                     scalar_type: prdb_engine::tuple::ScalarType::Uuid,
                     nullable: false,
                     generated_uuid_identity: true,
+                    default: None,
                 },
                 prdb_engine::storage_manager::TableColumnDefinition {
                     name: "amount".into(),
@@ -345,6 +346,11 @@ fn admin_revoke_decoder_requires_prepare_then_start_schemas() {
                     },
                     nullable: true,
                     generated_uuid_identity: false,
+                    default: Some(
+                        prdb_engine::storage_manager::TableColumnDefault::Literal(Some(
+                            prdb_engine::tuple::ScalarValue::Decimal(1230),
+                        )),
+                    ),
                 },
             ],
         })
@@ -352,6 +358,7 @@ fn admin_revoke_decoder_requires_prepare_then_start_schemas() {
     for invalid in [
         br#"{"phase":"prepare","operation_version":1,"operation":"tables.create","arguments":{"schema_id":"000102030405060708090a0b0c0d0e0f","name":"events","columns":[{"name":"id","type":"uuid","nullable":false}]}}"#.as_slice(),
         br#"{"phase":"prepare","operation_version":1,"operation":"tables.create","arguments":{"schema_id":"000102030405060708090a0b0c0d0e0f","name":"events","columns":[{"name":"id","type":"custom","nullable":false,"generated_uuid_identity":false}]}}"#.as_slice(),
+        br#"{"phase":"prepare","operation_version":1,"operation":"tables.create","arguments":{"schema_id":"000102030405060708090a0b0c0d0e0f","name":"events","columns":[{"name":"id","type":"text","nullable":false,"generated_uuid_identity":false,"default":{"kind":"current_principal_id"}}]}}"#.as_slice(),
         br#"{"phase":"prepare","operation_version":1,"operation":"tables.create","arguments":{"schema_id":"000102030405060708090a0b0c0d0e0f","name":"events","columns":[]}}"#.as_slice(),
     ] {
         assert!(decode_client_admin_command(invalid).is_err());

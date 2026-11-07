@@ -441,6 +441,13 @@ pub struct TableColumnDefinition {
     pub scalar_type: ScalarType,
     pub nullable: bool,
     pub generated_uuid_identity: bool,
+    pub default: Option<TableColumnDefault>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TableColumnDefault {
+    Literal(Option<crate::tuple::ScalarValue>),
+    CurrentPrincipalId,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2008,17 +2015,32 @@ impl<'db> StorageManager<'db> {
             if !is_normalized_principal_name(&column.name)
                 || !column_names.insert(column.name.as_str())
                 || (column.generated_uuid_identity
-                    && (column.scalar_type != ScalarType::Uuid || column.nullable))
+                    && (column.scalar_type != ScalarType::Uuid
+                        || column.nullable
+                        || column.default.is_some()))
+                || matches!(
+                    column.default.as_ref(),
+                    Some(TableColumnDefault::CurrentPrincipalId)
+                        if column.scalar_type != ScalarType::Uuid
+                )
             {
                 return Err(TableLifecycleError::InvalidRequest);
             }
+            let (nullable, value) = match &column.default {
+                Some(TableColumnDefault::Literal(value)) => (column.nullable, value.clone()),
+                Some(TableColumnDefault::CurrentPrincipalId) => (
+                    column.nullable,
+                    Some(crate::tuple::ScalarValue::Uuid([1; 16])),
+                ),
+                None => (true, None),
+            };
             encode_tuple(
                 &[ColumnSchema {
                     scalar_type: column.scalar_type,
-                    nullable: true,
+                    nullable,
                 }],
                 1,
-                &[None],
+                &[value],
             )
             .map_err(|_| TableLifecycleError::InvalidRequest)?;
         }
@@ -2036,8 +2058,22 @@ impl<'db> StorageManager<'db> {
             }
             column_ids.push(column_id);
         }
+        let mut default_expression_ids = Vec::with_capacity(columns.len());
+        for column in &columns {
+            if column.default.is_some() {
+                let mut expression_id = self.generate_table_object_id()?;
+                if !used_ids.insert(expression_id) {
+                    expression_id.zeroize();
+                    return Err(TableLifecycleError::ObjectIdGenerationFailed);
+                }
+                default_expression_ids.push(Some(expression_id));
+            } else {
+                default_expression_ids.push(None);
+            }
+        }
 
-        let mut writes = Vec::with_capacity(3 + columns.len() * 3);
+        let default_count = default_expression_ids.iter().flatten().count();
+        let mut writes = Vec::with_capacity(3 + columns.len() * 3 + default_count * 3);
         let table_object_key = id_catalog_key(2, table_id);
         writes.push(CatalogWrite {
             key: table_object_key.clone(),
@@ -2124,7 +2160,19 @@ impl<'db> StorageManager<'db> {
         });
         writes.push(new_dependency_write(table_id, schema_id, 1)?);
 
-        for (ordinal, (column_id, column)) in column_ids.iter().zip(&columns).enumerate() {
+        let table_columns = columns
+            .iter()
+            .map(|column| ColumnSchema {
+                scalar_type: column.scalar_type,
+                nullable: column.nullable,
+            })
+            .collect::<Vec<_>>();
+        for (ordinal, ((column_id, column), default_expression_id)) in column_ids
+            .iter()
+            .zip(&columns)
+            .zip(&default_expression_ids)
+            .enumerate()
+        {
             let object_key = id_catalog_key(2, *column_id);
             writes.push(CatalogWrite {
                 key: object_key.clone(),
@@ -2176,7 +2224,98 @@ impl<'db> StorageManager<'db> {
             let type_parameters = scalar_type_parameters(column.scalar_type);
             decode_builtin_scalar_type(type_record, &type_parameters)
                 .map_err(|_| TableLifecycleError::InvalidRequest)?;
+            if let (Some(expression_id), Some(default)) = (default_expression_id, &column.default) {
+                let expression = match default {
+                    TableColumnDefault::Literal(value) => {
+                        crate::authorization::Expr::Literal(value.clone())
+                    }
+                    TableColumnDefault::CurrentPrincipalId => {
+                        crate::authorization::Expr::CurrentPrincipalId
+                    }
+                };
+                let catalog_expression = crate::expression::CatalogExpression {
+                    expression_id: *expression_id,
+                    purpose: crate::expression::ExpressionPurpose::Default,
+                    result_type_id: *type_id,
+                    result_parameters: type_parameters,
+                    dependencies: Vec::new(),
+                    expression: expression.clone(),
+                };
+                crate::expression::validate_expression_binding(
+                    &catalog_expression,
+                    &table_columns,
+                    &column_ids,
+                    *type_id,
+                    column.scalar_type,
+                )
+                .map_err(|_| TableLifecycleError::InvalidRequest)?;
+                writes.push(new_default_expression_object_write(
+                    *expression_id,
+                    ordinal,
+                    authenticated_actor_id,
+                )?);
+                writes.push(new_default_expression_write(
+                    *expression_id,
+                    *type_id,
+                    type_parameters,
+                    expression,
+                )?);
+                writes.push(new_dependency_write(*column_id, *expression_id, 2)?);
+            }
             let column_key = id_catalog_key(6, *column_id);
+            let mut column_fields = vec![
+                CatalogField {
+                    tag: 1,
+                    wire_type: WireType::Id,
+                    payload: table_id.to_vec(),
+                },
+                CatalogField {
+                    tag: 2,
+                    wire_type: WireType::U32,
+                    payload: (ordinal as u32).to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 3,
+                    wire_type: WireType::Text,
+                    payload: column.name.as_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 4,
+                    wire_type: WireType::Id,
+                    payload: type_id.to_vec(),
+                },
+                CatalogField {
+                    tag: 5,
+                    wire_type: WireType::Bytes,
+                    payload: type_parameters.to_vec(),
+                },
+                CatalogField {
+                    tag: 6,
+                    wire_type: WireType::Bool,
+                    payload: vec![u8::from(column.nullable)],
+                },
+            ];
+            if let Some(expression_id) = default_expression_id {
+                column_fields.push(CatalogField {
+                    tag: 7,
+                    wire_type: WireType::Id,
+                    payload: expression_id.to_vec(),
+                });
+            }
+            column_fields.extend([
+                CatalogField {
+                    tag: 8,
+                    wire_type: WireType::U16,
+                    payload: u16::from(column.generated_uuid_identity)
+                        .to_le_bytes()
+                        .to_vec(),
+                },
+                CatalogField {
+                    tag: 9,
+                    wire_type: WireType::U64,
+                    payload: 1u64.to_le_bytes().to_vec(),
+                },
+            ]);
             writes.push(CatalogWrite {
                 key: column_key.clone(),
                 expected_value: None,
@@ -2184,50 +2323,7 @@ impl<'db> StorageManager<'db> {
                     encode_envelope(
                         &family_schema(6).ok_or(TableLifecycleError::Storage)?,
                         &column_key,
-                        &[
-                            CatalogField {
-                                tag: 1,
-                                wire_type: WireType::Id,
-                                payload: table_id.to_vec(),
-                            },
-                            CatalogField {
-                                tag: 2,
-                                wire_type: WireType::U32,
-                                payload: (ordinal as u32).to_le_bytes().to_vec(),
-                            },
-                            CatalogField {
-                                tag: 3,
-                                wire_type: WireType::Text,
-                                payload: column.name.as_bytes().to_vec(),
-                            },
-                            CatalogField {
-                                tag: 4,
-                                wire_type: WireType::Id,
-                                payload: type_id.to_vec(),
-                            },
-                            CatalogField {
-                                tag: 5,
-                                wire_type: WireType::Bytes,
-                                payload: type_parameters.to_vec(),
-                            },
-                            CatalogField {
-                                tag: 6,
-                                wire_type: WireType::Bool,
-                                payload: vec![u8::from(column.nullable)],
-                            },
-                            CatalogField {
-                                tag: 8,
-                                wire_type: WireType::U16,
-                                payload: u16::from(column.generated_uuid_identity)
-                                    .to_le_bytes()
-                                    .to_vec(),
-                            },
-                            CatalogField {
-                                tag: 9,
-                                wire_type: WireType::U64,
-                                payload: 1u64.to_le_bytes().to_vec(),
-                            },
-                        ],
+                        &column_fields,
                     )
                     .map_err(|_| TableLifecycleError::InvalidRequest)?,
                 ),
@@ -4492,6 +4588,104 @@ fn new_dependency_write(
         &family_schema(15).ok_or(TableLifecycleError::Storage)?,
         &key,
         &[],
+    )
+    .map_err(|_| TableLifecycleError::InvalidRequest)?;
+    Ok(CatalogWrite {
+        key,
+        expected_value: None,
+        payload: Some(payload),
+    })
+}
+
+fn new_default_expression_object_write(
+    expression_id: [u8; 16],
+    ordinal: usize,
+    owner_id: [u8; 16],
+) -> Result<CatalogWrite, TableLifecycleError> {
+    let key = id_catalog_key(2, expression_id);
+    let payload = encode_envelope(
+        &family_schema(2).ok_or(TableLifecycleError::Storage)?,
+        &key,
+        &[
+            CatalogField {
+                tag: 1,
+                wire_type: WireType::U16,
+                payload: 5u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 3,
+                wire_type: WireType::Text,
+                payload: format!("default_{ordinal}").into_bytes(),
+            },
+            CatalogField {
+                tag: 4,
+                wire_type: WireType::Id,
+                payload: owner_id.to_vec(),
+            },
+            CatalogField {
+                tag: 5,
+                wire_type: WireType::U64,
+                payload: 1u64.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 6,
+                wire_type: WireType::U16,
+                payload: 1u16.to_le_bytes().to_vec(),
+            },
+        ],
+    )
+    .map_err(|_| TableLifecycleError::InvalidRequest)?;
+    Ok(CatalogWrite {
+        key,
+        expected_value: None,
+        payload: Some(payload),
+    })
+}
+
+fn new_default_expression_write(
+    expression_id: [u8; 16],
+    type_id: [u8; 16],
+    type_parameters: [u8; 8],
+    expression: crate::authorization::Expr,
+) -> Result<CatalogWrite, TableLifecycleError> {
+    let key = id_catalog_key(7, expression_id);
+    let ir = crate::expression::encode_expression(&expression)
+        .map_err(|_| TableLifecycleError::InvalidRequest)?;
+    let payload = encode_envelope(
+        &family_schema(7).ok_or(TableLifecycleError::Storage)?,
+        &key,
+        &[
+            CatalogField {
+                tag: 1,
+                wire_type: WireType::U16,
+                payload: 1u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 2,
+                wire_type: WireType::U32,
+                payload: 1u32.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 3,
+                wire_type: WireType::Id,
+                payload: type_id.to_vec(),
+            },
+            CatalogField {
+                tag: 4,
+                wire_type: WireType::Bytes,
+                payload: type_parameters.to_vec(),
+            },
+            CatalogField {
+                tag: 5,
+                wire_type: WireType::Bytes,
+                payload: ir,
+            },
+            CatalogField {
+                tag: 6,
+                wire_type: WireType::Ids,
+                payload: 0u32.to_le_bytes().to_vec(),
+            },
+        ],
     )
     .map_err(|_| TableLifecycleError::InvalidRequest)?;
     Ok(CatalogWrite {
