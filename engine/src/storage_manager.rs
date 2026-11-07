@@ -161,6 +161,60 @@ pub struct AdministrativeInvocationCursor {
     after_invocation_id: [u8; 16],
 }
 
+impl AdministrativeInvocationCursor {
+    /// Serialize the process-local page cursor as lowercase hexadecimal.
+    pub fn to_wire(&self) -> String {
+        let mut bytes = [0; 49];
+        bytes[0] = 1;
+        bytes[1..17].copy_from_slice(&self.administrator_id);
+        bytes[17..33].copy_from_slice(&self.registry_generation.to_be_bytes());
+        bytes[33..49].copy_from_slice(&self.after_invocation_id);
+        let mut output = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            output.push(char::from(b"0123456789abcdef"[(byte >> 4) as usize]));
+            output.push(char::from(b"0123456789abcdef"[(byte & 0x0f) as usize]));
+        }
+        output
+    }
+
+    /// Parse a canonical wire cursor. Authorization and generation freshness
+    /// are still checked by `list_runtime_invocations` on every page request.
+    pub fn from_wire(value: &str) -> Option<Self> {
+        if value.len() != 98 {
+            return None;
+        }
+        let mut bytes = [0; 49];
+        for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+            let high = lower_hex_value(pair[0])?;
+            let low = lower_hex_value(pair[1])?;
+            bytes[index] = high << 4 | low;
+        }
+        if bytes[0] != 1 {
+            return None;
+        }
+        let administrator_id = bytes[1..17].try_into().ok()?;
+        let registry_generation = u128::from_be_bytes(bytes[17..33].try_into().ok()?);
+        let after_invocation_id = bytes[33..49].try_into().ok()?;
+        if administrator_id == [0; 16] || registry_generation == 0 || after_invocation_id == [0; 16]
+        {
+            return None;
+        }
+        Some(Self {
+            administrator_id,
+            registry_generation,
+            after_invocation_id,
+        })
+    }
+}
+
+fn lower_hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdministrativeInvocationPage {
     pub observed_at_us: i64,

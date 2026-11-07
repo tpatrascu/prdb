@@ -1262,7 +1262,7 @@
 - Behavior: control-mode ADMIN accepts the strict version-1 `tokens.list` read envelope, revalidates the connection before execution, checks owner/MANAGE_USERS/database-administrator authority in storage, and returns at most 64 token metadata records with an ID cursor. Verifier and bearer-secret material are omitted.
 - Contract and implementation: [client protocol](../../specs/client-protocol.md), [bounded token page](../../engine/src/storage_manager.rs), [ADMIN decoder and session handler](../../engine/src/client_protocol.rs), and gateway IPC kind mapping.
 - Regression evidence: decoder coverage rejects prepare-phase mutation envelopes and unknown arguments; a real-redb authenticated control-mode session exercises the gateway IPC ADMIN dispatch for another user's inventory and verifies secret material is absent.
-- Remaining: other ADMIN read operations and mutations, and the separate supervisor process remain open.
+- Remaining at that increment: runtime invocation listing and other ADMIN operations, and the separate supervisor process remained open. Runtime invocation listing is recorded below.
 
 ## SM-5 / NP-5 dependency: prepared token revocation ADMIN operation
 
@@ -1284,3 +1284,10 @@
 - Contract and implementation: [one-time issuance contract](../../specs/client-protocol.md), [strict command schema and issuance handler](../../engine/src/client_protocol.rs), [service response cleanup](../../engine/src/supervisor_ipc.rs), and [TCP frame cleanup](../../engine/src/gateway.rs).
 - Regression evidence: the real-redb ADMIN dispatch issues a credential, decodes it through the regular AUTH schema, authenticates a new session with it, and confirms stored inventory contains metadata only.
 - Remaining: test lost-response reconciliation, add other ADMIN operations, and integrate a separate supervisor/worker process.
+
+## SM-5 / NP-5 dependency: administrator live invocation pages
+
+- Behavior: control-mode ADMIN accepts `runtime.invocations.list` with a bounded page limit and an opaque cursor bound to the current administrator and process-local registry generation. Every page revalidates the control session and database-administrator authority. Results expose bounded invocation metadata and best-effort consistency; cursors become invalid after registry changes or restart.
+- Contract and implementation: [runtime listing protocol](../../specs/client-protocol.md), [cursor encoding and bounded storage page](../../engine/src/storage_manager.rs), and [ADMIN decoder and response handler](../../engine/src/client_protocol.rs).
+- Regression evidence: decoder coverage round-trips a canonical cursor. The real-redb test exercises first and second ADMIN pages through gateway dispatch, checks the next invocation and cancellation state, and separately covers unauthorized callers, stale cursors, page limits, and terminal status.
+- Remaining: lost-response reconciliation for mutations, remaining ADMIN operations, and separate supervisor/worker process integration.

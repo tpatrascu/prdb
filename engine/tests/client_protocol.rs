@@ -213,4 +213,18 @@ fn admin_revoke_decoder_requires_prepare_then_start_schemas() {
             expires_at_us: 1_700_000_000_000_000,
         })
     );
+    let wire_cursor = format!(
+        "01{}{}{}",
+        "01".repeat(16),
+        "00".repeat(15) + "01",
+        "02".repeat(16)
+    );
+    let runtime_request = format!(
+        "{{\"phase\":\"read\",\"operation_version\":1,\"operation\":\"runtime.invocations.list\",\"arguments\":{{\"limit\":\"4\",\"cursor\":\"{wire_cursor}\"}}}}"
+    );
+    assert!(matches!(
+        decode_client_admin_command(runtime_request.as_bytes()),
+        Ok(ClientAdminCommand::ListRuntimeInvocations { page_limit: 4, cursor: Some(cursor) })
+            if cursor.to_wire() == wire_cursor
+    ));
 }

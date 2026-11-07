@@ -75,6 +75,7 @@ pub enum ClientSessionError {
     Staging(crate::supervisor::StagingError),
     Status(crate::storage_manager::InvocationStatusError),
     AdministrativeStatus(crate::storage_manager::AdministrativeInvocationListError),
+    AdministrativeRuntimeList(crate::storage_manager::AdministrativeInvocationListError),
     AdministrativeCancellation(crate::storage_manager::AdministrativeCancellationError),
     TokenInventory(crate::storage_manager::TokenLifecycleError),
     Storage(TransactionError),
@@ -181,6 +182,10 @@ pub enum ClientAdminCommand {
         user_id: [u8; 16],
         after_token_id: Option<[u8; 16]>,
     },
+    ListRuntimeInvocations {
+        page_limit: usize,
+        cursor: Option<crate::storage_manager::AdministrativeInvocationCursor>,
+    },
     PrepareRevoke {
         token_id: [u8; 16],
     },
@@ -208,7 +213,7 @@ pub fn decode_client_admin_read(payload: &[u8]) -> Result<ClientAdminRead, Clien
     }
 }
 
-/// Decode the currently supported ADMIN read and credential-revocation commands.
+/// Decode the currently supported ADMIN read and credential lifecycle commands.
 pub fn decode_client_admin_command(
     payload: &[u8],
 ) -> Result<ClientAdminCommand, ClientControlError> {
@@ -311,6 +316,30 @@ pub fn decode_client_admin_command(
                 user_id,
                 after_token_id,
             })
+        }
+        Some("read")
+            if version == Some(1) && operation.as_deref() == Some("runtime.invocations.list") =>
+        {
+            if operation_id.is_some() || seen.len() != 4 {
+                return Err(ClientControlError::UnknownKey);
+            }
+            let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
+            let page_limit = args.remove("limit").ok_or(ClientControlError::MissingKey)?;
+            let page_limit = parse_canonical_positive_i64(&page_limit)
+                .and_then(|value| usize::try_from(value).ok())
+                .filter(|value| *value <= crate::storage_manager::MAX_ADMIN_INVOCATION_PAGE)
+                .ok_or(ClientControlError::InvalidPrepare)?;
+            let cursor = args
+                .remove("cursor")
+                .map(|value| {
+                    crate::storage_manager::AdministrativeInvocationCursor::from_wire(&value)
+                        .ok_or(ClientControlError::InvalidPrepare)
+                })
+                .transpose()?;
+            if !args.is_empty() {
+                return Err(ClientControlError::UnknownKey);
+            }
+            Ok(ClientAdminCommand::ListRuntimeInvocations { page_limit, cursor })
         }
         Some("prepare") if version == Some(1) && operation.as_deref() == Some("tokens.revoke") => {
             if operation_id.is_some() || seen.len() != 4 {
@@ -1345,6 +1374,89 @@ impl ClientConnectionSession {
                 }
                 self.json_response(request.request_id, payload.into_bytes())
             }
+            ClientAdminCommand::ListRuntimeInvocations { page_limit, cursor } => {
+                let now_us = current_unix_micros().ok_or(ClientSessionError::UnsupportedRequest)?;
+                let page = storage
+                    .list_runtime_invocations(actor_id, now_us, page_limit, cursor.as_ref())
+                    .map_err(ClientSessionError::AdministrativeRuntimeList)?;
+                let mut payload = format!(
+                    "{{\"observed_at_us\":{},\"consistency\":\"best_effort\",\"invocations\":[",
+                    page.observed_at_us
+                );
+                for (index, invocation) in page.invocations.iter().enumerate() {
+                    if index != 0 {
+                        payload.push(',');
+                    }
+                    let (state, started_at_us, deadline_at_us, cancellation_requested) =
+                        match &invocation.status {
+                            crate::storage_manager::InvocationStatus::Active {
+                                started_at_us,
+                                deadline_at_us,
+                                cancellation_requested,
+                            } => (
+                                "active",
+                                Some(*started_at_us),
+                                *deadline_at_us,
+                                *cancellation_requested,
+                            ),
+                            crate::storage_manager::InvocationStatus::Committing {
+                                started_at_us,
+                                deadline_at_us,
+                                cancellation_requested,
+                            } => (
+                                "committing",
+                                Some(*started_at_us),
+                                *deadline_at_us,
+                                *cancellation_requested,
+                            ),
+                            crate::storage_manager::InvocationStatus::Terminal(outcome) => (
+                                match outcome.status {
+                                    crate::outcome::OutcomeStatus::Committed => "committed",
+                                    crate::outcome::OutcomeStatus::Aborted => "aborted",
+                                },
+                                None,
+                                None,
+                                false,
+                            ),
+                        };
+                    payload.push_str("{\"invocation_id\":\"");
+                    payload.push_str(&encode_lower_hex_id(invocation.invocation_id));
+                    payload.push_str("\",\"principal_id\":\"");
+                    payload.push_str(&encode_lower_hex_id(invocation.principal_id));
+                    payload.push_str("\",\"state\":\"");
+                    payload.push_str(state);
+                    payload.push_str("\",\"started_at_us\":");
+                    push_json_optional_i64(&mut payload, started_at_us);
+                    payload.push_str(" ,\"deadline_at_us\":");
+                    push_json_optional_i64(&mut payload, deadline_at_us);
+                    payload.push_str(" ,\"cancellation_requested\":");
+                    payload.push_str(if cancellation_requested {
+                        "true"
+                    } else {
+                        "false"
+                    });
+                    payload.push_str(" ,\"cancellation_reason_code\":");
+                    if let Some(reason) = invocation.cancellation_reason_code {
+                        payload.push_str(&reason.to_string());
+                    } else {
+                        payload.push_str("null");
+                    }
+                    payload.push('}');
+                }
+                payload.push_str("],\"next_cursor\":");
+                if let Some(cursor) = page.continuation {
+                    payload.push('"');
+                    payload.push_str(&cursor.to_wire());
+                    payload.push('"');
+                } else {
+                    payload.push_str("null");
+                }
+                payload.push('}');
+                if payload.len() > CLIENT_MAX_CONTROL_BYTES {
+                    return Err(ClientSessionError::ResourceLimit);
+                }
+                self.json_response(request.request_id, payload.into_bytes())
+            }
             ClientAdminCommand::PrepareRevoke { token_id } => {
                 if self.pending_admin_operation.is_some() {
                     return Err(ClientSessionError::WrongMode);
@@ -1853,6 +1965,14 @@ fn push_json_string(output: &mut String, value: &str) {
             }
             c => output.push(c),
         }
+    }
+}
+
+fn push_json_optional_i64(output: &mut String, value: Option<i64>) {
+    if let Some(value) = value {
+        output.push_str(&value.to_string());
+    } else {
+        output.push_str("null");
     }
 }
 

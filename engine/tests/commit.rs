@@ -3460,6 +3460,73 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
     assert!(token_inventory.contains("\"revoked\":false"));
     assert!(!token_inventory.contains("verifier"));
     assert!(!token_inventory.contains("secret"));
+    let runtime_page = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut control,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 5,
+            payload: b"{\"phase\":\"read\",\"operation_version\":1,\"operation\":\"runtime.invocations.list\",\"arguments\":{\"limit\":\"1\"}}".to_vec(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_deadline_us,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )?;
+    let runtime_page = match runtime_page {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => {
+            String::from_utf8(response.payload)?
+        }
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
+            return Err("ADMIN runtime listing unexpectedly started an invocation".into());
+        }
+    };
+    assert!(runtime_page.contains(&format!(
+        "\"invocation_id\":\"{}\"",
+        format!("{:02x}", 232).repeat(16)
+    )));
+    assert!(runtime_page.contains("\"consistency\":\"best_effort\""));
+    let runtime_cursor = runtime_page
+        .split("\"next_cursor\":\"")
+        .nth(1)
+        .ok_or("missing ADMIN runtime listing cursor")?
+        .get(..98)
+        .ok_or("invalid ADMIN runtime listing cursor")?;
+    let runtime_second_page = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut control,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 6,
+            payload: format!(
+                "{{\"phase\":\"read\",\"operation_version\":1,\"operation\":\"runtime.invocations.list\",\"arguments\":{{\"limit\":\"1\",\"cursor\":\"{runtime_cursor}\"}}}}"
+            )
+            .into_bytes(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_deadline_us,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )?;
+    let runtime_second_page = match runtime_second_page {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => {
+            String::from_utf8(response.payload)?
+        }
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
+            return Err("ADMIN runtime listing unexpectedly started an invocation".into());
+        }
+    };
+    assert!(runtime_second_page.contains(&format!(
+        "\"invocation_id\":\"{}\"",
+        format!("{:02x}", 233).repeat(16)
+    )));
+    assert!(runtime_second_page.contains("\"cancellation_requested\":true"));
     let mut user_manager_control = ClientConnectionSession::default();
     user_manager_control.accept_hello(ClientMode::Control, "token-manager")?;
     user_manager_control.authenticate(&storage, id(240), &[0x4b; 32])?;
@@ -3554,7 +3621,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &staging,
         ClientFrame {
             kind: 8,
-            request_id: 5,
+            request_id: 7,
             response_sequence: 0,
             payload: format!("{{\"invocation_id\":\"{issue_operation_id}\"}}").into_bytes(),
         },
