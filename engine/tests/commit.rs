@@ -1577,6 +1577,171 @@ fn storage_manager_drop_table_byte_limit_aborts_atomically()
 }
 
 #[test]
+fn storage_manager_drop_table_index_byte_limit_boundary_is_atomic()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::storage_manager::TableLifecycleError;
+    use prdb_engine::tuple::MAX_TUPLE_BYTES;
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let actor = id(0x92);
+    let admin_role = builtin_owner_id();
+    let mut setup_audit = identity_audit_event(0x93, admin_role, actor);
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(
+        id(0x93),
+        admin_role,
+        9_999,
+        &[
+            principal_write_with_name(actor, 1, 1, "drop_index_byte_limit_owner"),
+            object_write_with_name(actor, 8, "drop_index_byte_limit_owner"),
+            membership_write(actor, admin_role),
+            dependency_write(actor, admin_role, 5),
+        ],
+        &[setup_audit],
+    )?;
+
+    let columns = [ColumnSchema {
+        scalar_type: ScalarType::Bytea,
+        nullable: true,
+    }];
+    let row_count = 32u64;
+    let budget = 64 * 1024 * 1024;
+    let full_tuple = encode_tuple(
+        &columns,
+        1,
+        &[Some(ScalarValue::Bytea(vec![b'x'; MAX_TUPLE_BYTES - 25]))],
+    )?;
+    let full_key = {
+        let mut row_id = [0; 16];
+        row_id[8..].copy_from_slice(&1u64.to_be_bytes());
+        typed_bytea_index_key(id(0x44), &table_row_key(id(16), row_id), &full_tuple).key
+    };
+    let locator_bytes = [0; 32];
+    let full_contribution = full_tuple.len() + full_key.len() + locator_bytes.len();
+    let preceding_bytes = (row_count as usize - 1) * full_contribution;
+    assert!(preceding_bytes < budget);
+
+    let make_final_tuple = |target: usize, zero_count: usize| {
+        let value_length = (target - 92 - zero_count) / 2;
+        let mut value = vec![b'y'; value_length];
+        value[..zero_count].fill(0);
+        encode_tuple(&columns, 1, &[Some(ScalarValue::Bytea(value))]).unwrap()
+    };
+    let final_over_tuple = make_final_tuple(budget + 1 - preceding_bytes, 1);
+    let final_exact_tuple = make_final_tuple(budget - preceding_bytes, 0);
+
+    let make_write = |row_number: u64, payload: Vec<u8>, expected_version| {
+        let mut row_id = [0; 16];
+        row_id[8..].copy_from_slice(&row_number.to_be_bytes());
+        let row_key = table_row_key(id(16), row_id);
+        let index = typed_bytea_index_key(id(0x44), &row_key, &payload);
+        (
+            RowWrite {
+                key: row_key,
+                expected_version,
+                payload: Some(payload),
+            },
+            IndexWrite {
+                key: index.key,
+                row_key,
+                expected_version,
+                present: true,
+                unique: false,
+                null_exempt: false,
+            },
+        )
+    };
+    let mut rows = Vec::with_capacity(row_count as usize);
+    let mut indexes = Vec::with_capacity(row_count as usize);
+    for row_number in 1..row_count {
+        let (row, index) = make_write(row_number, full_tuple.clone(), None);
+        rows.push(row);
+        indexes.push(index);
+    }
+    let (final_row, final_index) = make_write(row_count, final_over_tuple, None);
+    let final_row_key = final_row.key;
+    rows.push(final_row);
+    indexes.push(final_index);
+    let accounted_bytes = |row_payload: &[u8], index_key: &[u8]| {
+        preceding_bytes + row_payload.len() + index_key.len() + locator_bytes.len()
+    };
+    assert_eq!(
+        accounted_bytes(
+            rows.last().unwrap().payload.as_deref().unwrap(),
+            indexes.last().unwrap().key.as_slice(),
+        ),
+        budget + 1
+    );
+    let seed_sequence =
+        commit_rows_and_indexes(&database, id(0x94), actor, 9_999, &rows, &indexes)?;
+    let over_limit_invocation = id(0x95);
+    let mut over_limit_audit = identity_audit_event(0x96, actor, id(16));
+    over_limit_audit.correlation_id = over_limit_invocation;
+    assert_eq!(
+        storage.drop_table(
+            over_limit_invocation,
+            actor,
+            id(16),
+            9_999,
+            over_limit_audit
+        ),
+        Err(TableLifecycleError::Commit(
+            CommitError::IndexDdlLimitExceeded
+        ))
+    );
+    assert_eq!(commit_sequence(&database)?, seed_sequence);
+    assert_eq!(
+        lookup_outcome(&database, over_limit_invocation, actor, 1)?
+            .ok_or("missing table-drop index-byte-limit outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
+    assert!(row(&database, &final_row_key)?.is_some());
+
+    let (updated_row, mut new_index) =
+        make_write(row_count, final_exact_tuple, Some(seed_sequence));
+    let old_key = indexes.last().unwrap().key.clone();
+    let updated_index = IndexWrite {
+        key: old_key,
+        row_key: final_row_key,
+        expected_version: Some(seed_sequence),
+        present: false,
+        unique: false,
+        null_exempt: false,
+    };
+    new_index.expected_version = None;
+    assert_ne!(updated_index.key, new_index.key);
+    let exact_sequence = commit_rows_and_indexes(
+        &database,
+        id(0x97),
+        actor,
+        9_999,
+        &[updated_row],
+        &[updated_index, new_index],
+    )?;
+    let exact_invocation = id(0x98);
+    let mut exact_audit = identity_audit_event(0x99, actor, id(16));
+    exact_audit.correlation_id = exact_invocation;
+    let dropped = storage.drop_table(exact_invocation, actor, id(16), 9_999, exact_audit);
+    assert!(
+        dropped.is_ok(),
+        "exact index byte-boundary drop returned {dropped:?}"
+    );
+    assert_eq!(commit_sequence(&database)?, exact_sequence + 1);
+    assert_eq!(
+        lookup_outcome(&database, exact_invocation, actor, 1)?
+            .ok_or("missing exact table-drop index-byte-boundary outcome")?
+            .status,
+        OutcomeStatus::Committed
+    );
+    assert!(row(&database, &final_row_key)?.is_none());
+    StorageManager::new(&database, Duration::from_millis(100))?;
+    Ok(())
+}
+
+#[test]
 fn storage_manager_drop_table_index_entry_limit_aborts_atomically()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::storage_manager::TableLifecycleError;
