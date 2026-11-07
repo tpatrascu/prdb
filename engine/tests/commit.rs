@@ -1183,6 +1183,76 @@ fn storage_manager_drop_column_rewrites_rows_and_preserves_surviving_identity()
         .insert(&row_key[..], &row_record[..])?;
     write.commit()?;
 
+    let index_id = id(0x70);
+    let (index_catalog_key, index_definition) =
+        index_definition_with_columns(index_id, table.table_id, &[table.column_ids[1]]);
+    let index_invocation = id(0x71);
+    let mut index_audit = identity_audit_event(0x72, actor, index_id);
+    index_audit.correlation_id = index_invocation;
+    storage.commit_authorized_index_ddl(
+        index_invocation,
+        actor,
+        9_999,
+        &[
+            CatalogWrite {
+                key: index_catalog_key.clone(),
+                expected_value: None,
+                payload: Some(index_definition),
+            },
+            object_write(index_id, 7),
+        ],
+        &[index_audit],
+    )?;
+    let old_index_key = prdb_engine::index_key::derive_index_key(
+        index_id,
+        row_key[16..].try_into()?,
+        1,
+        &table.column_ids,
+        &[
+            ColumnSchema {
+                scalar_type: ScalarType::Integer,
+                nullable: false,
+            },
+            ColumnSchema {
+                scalar_type: ScalarType::Text,
+                nullable: false,
+            },
+        ],
+        &RowRecord::decode(&row_record)?.payload,
+        &[table.column_ids[1]],
+    )?;
+    let old_index_row_version = {
+        let read = database.begin_read()?;
+        let indexes = read.open_table(schema::INDEXES)?;
+        let locator = indexes
+            .get(old_index_key.key.as_slice())?
+            .ok_or("index entry missing after index build")?;
+        IndexLocator::decode_for_key(&old_index_key.key, locator.value())?.row_version
+    };
+
+    let denied_drop_invocation = id(0x73);
+    let mut denied_drop_audit = identity_audit_event(0x74, actor, id(0x75));
+    denied_drop_audit.correlation_id = denied_drop_invocation;
+    assert!(matches!(
+        storage.drop_column(
+            denied_drop_invocation,
+            actor,
+            table.table_id,
+            table.column_ids[1],
+            9_999,
+            denied_drop_audit,
+        ),
+        Err(prdb_engine::storage_manager::TableLifecycleError::Commit(
+            CommitError::ColumnHasDependencies
+        ))
+    ));
+    assert_eq!(
+        lookup_outcome(&database, denied_drop_invocation, actor, 1)?
+            .ok_or("missing denied column-drop outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
+
     let drop_invocation = id(0x6a);
     let mut drop_audit = identity_audit_event(0x6b, actor, id(0x6c));
     drop_audit.correlation_id = drop_invocation;
@@ -1254,6 +1324,40 @@ fn storage_manager_drop_column_rewrites_rows_and_preserves_surviving_identity()
     assert_eq!(
         tuple.values,
         vec![Some(ScalarValue::Text("preserved".to_owned()))]
+    );
+    let rebuilt_index_key = prdb_engine::index_key::derive_index_key(
+        index_id,
+        row_key[16..].try_into()?,
+        2,
+        &[table.column_ids[1]],
+        &[ColumnSchema {
+            scalar_type: ScalarType::Text,
+            nullable: false,
+        }],
+        &stored.payload,
+        &[table.column_ids[1]],
+    )?;
+    let indexes = read.open_table(schema::INDEXES)?;
+    assert_eq!(old_index_key.key, rebuilt_index_key.key);
+    let rebuilt_locator = indexes
+        .get(rebuilt_index_key.key.as_slice())?
+        .ok_or("index entry missing after schema rewrite")?;
+    assert_eq!(
+        IndexLocator::decode_for_key(&rebuilt_index_key.key, rebuilt_locator.value())?.row_version,
+        stored.row_version,
+    );
+    assert_ne!(stored.row_version, old_index_row_version);
+    let mut old_reverse_key = row_key.to_vec();
+    old_reverse_key.extend_from_slice(&old_index_key.key[..old_index_key.key.len() - 16]);
+    let mut rebuilt_reverse_key = row_key.to_vec();
+    rebuilt_reverse_key
+        .extend_from_slice(&rebuilt_index_key.key[..rebuilt_index_key.key.len() - 16]);
+    let reverse_indexes = read.open_table(schema::ROW_INDEXES)?;
+    assert_eq!(old_reverse_key, rebuilt_reverse_key);
+    assert!(
+        reverse_indexes
+            .get(rebuilt_reverse_key.as_slice())?
+            .is_some()
     );
     assert_eq!(
         lookup_outcome(&database, drop_invocation, actor, 1)?
