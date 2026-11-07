@@ -1410,10 +1410,10 @@
 
 - Behavior and normative contracts: [schema DDL](../../specs/ddl-schema.md), [client protocol](../../specs/client-protocol.md), and [storage-manager contract](../../specs/storage-manager.md). Owners or database administrators can set, replace, or drop a non-generated column's current insert default on non-system tables. Typed literal, NULL, and UUID current-principal defaults use the create-table encoding. Existing rows and schema version remain unchanged; the table write epoch advances, and replaced/dropped expression catalog records and dependency edges are removed atomically. The immutable add-column default is preserved.
 - Implementation: [authorized constraint DDL guard](../../engine/src/commit.rs), [storage entry point](../../engine/src/storage_manager.rs), and connection-owned `tables.set_column_default` / `tables.drop_column_default` PREPARE/START in [client protocol](../../engine/src/client_protocol.rs).
-- Regression evidence: the real-redb storage regression exercises set, replacement, drop, and rejection of an absent-default drop. The strict decoder checks both command shapes; the gateway ADMIN lifecycle test runs set and drop through PREPARE/START.
+- Regression evidence: the real-redb storage regression exercises set, replacement, drop, and rejection of an absent-default drop. A writer staged before a default change conflicts, publishes no row, and records an aborted outcome. The strict decoder checks both command shapes; the gateway ADMIN lifecycle test runs set and drop through PREPARE/START.
 - TDD note: the first storage behavior assertion failed against the `InvalidRequest` stub; the catalog expression/object/dependency changes then passed through the serialized authorized DDL path.
 - Verification: `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, and `git diff --check` all passed in the configured Nix shell. Focused storage, decoder, and gateway ADMIN PREPARE/START regressions passed.
-- Remaining: stale-writer coverage across other DDL forms, role-owner authorization regression, and separate supervisor/gateway process integration remain open.
+- Remaining: stale-writer coverage for DROP COLUMN and index/constraint DDL, plus separate supervisor/gateway process integration.
 
 ## DS-5 / DS-7: table rename versus a pinned writer — verified
 

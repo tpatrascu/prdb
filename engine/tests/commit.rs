@@ -2309,6 +2309,21 @@ fn storage_manager_sets_replaces_and_drops_column_defaults()
         retention_deadline_us: 9_999,
         audit_event: create_audit,
     })?;
+    let stale_writer_invocation = id(0x5b);
+    let stale_row_id = prdb_engine::overlay::RowId {
+        table: table.table_id,
+        row: id(0x5c),
+    };
+    let mut stale_writer =
+        storage.begin_invocation(stale_writer_invocation, actor, 9_999, 1, 1024)?;
+    let stale_schema = stale_writer.load_catalog_table_schema(table.table_id)?;
+    stale_writer.load_catalog_indexes(&stale_schema)?;
+    let stale_tuple = encode_tuple(
+        &stale_schema.columns,
+        stale_schema.schema_version,
+        &[Some(ScalarValue::Integer(7))],
+    )?;
+    stale_writer.stage_put(stale_row_id, &stale_tuple)?;
     let set_invocation = id(0x4f);
     let mut set_audit = identity_audit_event(0x50, actor, id(0x51));
     set_audit.correlation_id = set_invocation;
@@ -2325,6 +2340,19 @@ fn storage_manager_sets_replaces_and_drops_column_defaults()
     assert!(
         set_result.is_ok(),
         "setting a typed default failed: {set_result:?}"
+    );
+    assert!(matches!(
+        stale_writer.commit(),
+        Err(prdb_engine::transaction::TransactionError::Commit(
+            CommitError::Conflict
+        ))
+    ));
+    assert!(row(&database, &table_row_key(table.table_id, stale_row_id.row))?.is_none());
+    assert_eq!(
+        lookup_outcome(&database, stale_writer_invocation, actor, 1)?
+            .ok_or("missing stale writer outcome after default change")?
+            .status,
+        OutcomeStatus::Aborted
     );
     let replace_invocation = id(0x52);
     let mut replace_audit = identity_audit_event(0x53, actor, id(0x54));
