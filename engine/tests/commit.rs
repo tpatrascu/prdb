@@ -2375,6 +2375,22 @@ fn storage_manager_adds_column_and_backfills_existing_rows()
         &[index_audit],
     )?;
 
+    let stale_writer_invocation = id(0x71);
+    let stale_row_id = prdb_engine::overlay::RowId {
+        table: table.table_id,
+        row: id(0x72),
+    };
+    let mut stale_writer =
+        storage.begin_invocation(stale_writer_invocation, actor, 9_999, 2, 1024)?;
+    let stale_schema = stale_writer.load_catalog_table_schema(table.table_id)?;
+    stale_writer.load_catalog_indexes(&stale_schema)?;
+    let stale_tuple = prdb_engine::tuple::encode_tuple(
+        &stale_schema.columns,
+        stale_schema.schema_version,
+        &[Some(ScalarValue::Integer(99))],
+    )?;
+    stale_writer.stage_put(stale_row_id, &stale_tuple)?;
+
     let add_invocation = id(0x68);
     let mut add_audit = identity_audit_event(0x69, actor, id(0x6a));
     add_audit.correlation_id = add_invocation;
@@ -2400,6 +2416,23 @@ fn storage_manager_adds_column_and_backfills_existing_rows()
     );
     let added = added_result?;
     assert_eq!(added.schema_version, 2);
+    let stale_result = stale_writer.commit();
+    assert!(
+        matches!(
+            stale_result,
+            Err(prdb_engine::transaction::TransactionError::Commit(
+                CommitError::Conflict
+            ))
+        ),
+        "stale writer returned {stale_result:?}"
+    );
+    assert!(row(&database, &table_row_key(table.table_id, stale_row_id.row))?.is_none());
+    assert_eq!(
+        lookup_outcome(&database, stale_writer_invocation, actor, 1)?
+            .ok_or("missing stale writer outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
     let stored = row(&database, &table_row_key(table.table_id, row_id.row))?
         .ok_or("backfilled row is missing")?;
     let tuple = prdb_engine::tuple::decode_tuple(
