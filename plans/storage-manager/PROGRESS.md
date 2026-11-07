@@ -1109,7 +1109,16 @@
 - Changed tests: [gateway listener policy](../../engine/tests/gateway.rs).
 - Observed red: focused compile failed because `prdb_engine::gateway` did not exist before the implementation.
 - Commands actually run in the configured Nix shell: `cargo fmt --all`; focused `cargo test -p prdb-engine --test gateway --locked` (3 passed); and `cargo fmt --all -- --check && cargo build --workspace --locked && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && git diff --check`. All passed.
-- Remaining: bounded accepted-connection handling, frame read/write deadlines, session processing, service-channel forwarding, and a separately runnable gateway process.
+- Remaining at that increment: bounded accepted-connection handling, frame read/write deadlines, session processing, and a separately runnable gateway process. The service-channel forwarding slice is recorded in the following entry.
+
+## GW-2 / GW-3 dependency: TCP client to gateway-service frame bridge
+
+- Behavior: the TCP adapter decodes bounded client frames, translates the supported HELLO/AUTH/PREPARE/chunk/SEAL/START/STATUS/CANCEL/PING kinds to the dedicated gateway IPC operation allowlist, adds an explicit chunk-kind byte, and returns only correlated sequence-zero RESPONSE frames. Unsupported kinds, malformed/pipelined frames, service EOF, and mismatched IPC responses return errors for the caller to handle by closing the connection.
+- Contract and implementation: [client protocol](../../specs/client-protocol.md), [gateway service IPC](../../specs/ipc-protocol.md), and [TCP adapter](../../engine/src/gateway.rs).
+- Changed regression: [loopback TCP to Unix IPC bridge](../../engine/tests/gateway.rs) checks HELLO and PING correlation across real sockets.
+- Observed red: the initial focused test failed to compile because the TCP bridge and `PingClientSession` IPC operation were absent.
+- Commands actually run in the configured Nix shell: `cargo fmt --all`; focused `cargo test -p prdb-engine --test gateway --locked tcp_client_hello_and_ping_bridge_over_the_gateway_service_channel` passed; and `cargo fmt --all -- --check && cargo build --workspace --locked && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && git diff --check`. All passed.
+- Remaining: run bounded concurrent accepted connections with read/write deadlines; implement ADMIN and explicit sanitized ERROR responses; connect a separately runnable gateway process to authenticated service-channel provisioning and result relay.
 
 ## SU-1 / IPC-6 dependency: gateway submission IPC dispatcher
 

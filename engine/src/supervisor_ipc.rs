@@ -88,6 +88,9 @@ pub fn dispatch_gateway_client_request<'db>(
         Operation::OpenClientSession => session
             .handle_handshake_request(manager, frame(1, request.payload.clone()))
             .map_err(GatewayRequestError::Client)?,
+        Operation::PingClientSession => session
+            .handle_handshake_request(manager, frame(11, request.payload.clone()))
+            .map_err(GatewayRequestError::Client)?,
         Operation::AuthenticateSession => session
             .handle_handshake_request(manager, frame(2, request.payload.clone()))
             .map_err(GatewayRequestError::Client)?,

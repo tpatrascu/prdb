@@ -10,7 +10,7 @@ Define listener configuration with loopback default and explicit non-loopback pl
 
 ## Increments
 
-The first gateway foundation increment implements the loopback-default TCP bind policy and requires an explicit plaintext opt-in for non-loopback addresses. The returned listener exposes TCP accept; connection framing, limits, and the supervisor service bridge remain unimplemented.
+The gateway foundation implements the loopback-default TCP bind policy, requires an explicit plaintext opt-in for non-loopback addresses, and forwards supported client frames over a provisioned per-client IPC stream. The connection adapter currently covers HELLO, AUTH, submission operations, STATUS, CANCEL, and PING. Connection quotas/deadlines, control ADMIN forwarding, and listener process orchestration remain unimplemented.
 
 | ID | Observable test first | Minimum implementation and evidence |
 | --- | --- | --- |

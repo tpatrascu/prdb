@@ -43,6 +43,7 @@ pub enum ClientFrameError {
     IncompleteFrame,
     RequestIdsNotIncreasing,
     UnexpectedResponseSequence,
+    PipelinedRequests,
 }
 
 impl std::fmt::Display for ClientFrameError {
