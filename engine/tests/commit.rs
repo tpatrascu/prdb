@@ -8196,6 +8196,19 @@ fn storage_manager_rebuilds_populated_indexes_atomically() -> Result<(), Box<dyn
         ),
         Err(CommitError::InvalidCatalog)
     );
+    let stale_writer_invocation = id(0x79);
+    let stale_row = id(0x7a);
+    let mut stale_writer =
+        storage.begin_invocation(stale_writer_invocation, id(9), 9_999, 1, 64)?;
+    let stale_schema = stale_writer.load_catalog_table_schema(id(16))?;
+    stale_writer.load_catalog_indexes(&stale_schema)?;
+    stale_writer.stage_put(
+        prdb_engine::overlay::RowId {
+            table: id(16),
+            row: stale_row,
+        },
+        &two_bytea_tuple(b"staged", b"before rebuild"),
+    )?;
     assert_eq!(
         storage.commit_catalog_and_audit(
             id(205),
@@ -8209,6 +8222,23 @@ fn storage_manager_rebuilds_populated_indexes_atomically() -> Result<(), Box<dyn
             &[audit_event(205)],
         )?,
         2
+    );
+    let stale_result = stale_writer.commit();
+    assert!(
+        matches!(
+            stale_result,
+            Err(prdb_engine::transaction::TransactionError::Commit(
+                CommitError::Conflict
+            ))
+        ),
+        "writer pinned before index rebuild returned {stale_result:?}"
+    );
+    assert!(row(&database, &table_row_key(id(16), stale_row))?.is_none());
+    assert_eq!(
+        lookup_outcome(&database, stale_writer_invocation, id(9), 1)?
+            .ok_or("missing stale index-rebuild writer outcome")?
+            .status,
+        OutcomeStatus::Aborted
     );
 
     let old_catalog = old_snapshot.open_table(CATALOG)?;
