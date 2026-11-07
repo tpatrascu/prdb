@@ -279,6 +279,7 @@ pub struct TokenMetadata {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthenticatedQuerySession {
     connection_id: [u8; 16],
+    token_id: [u8; 16],
     principal_id: [u8; 16],
     role_ids: HashSet<[u8; 16]>,
 }
@@ -1319,9 +1320,25 @@ impl<'db> StorageManager<'db> {
         let connection_id = generate_query_connection_id()?;
         Ok(AuthenticatedQuerySession {
             connection_id,
+            token_id,
             principal_id,
             role_ids,
         })
+    }
+
+    /// Refresh the current login and role closure before a new execution or
+    /// control operation, preserving this network connection's session ID.
+    pub fn revalidate_query_session(
+        &self,
+        session: &mut AuthenticatedQuerySession,
+        token_secret: &[u8; TOKEN_SECRET_BYTES],
+    ) -> Result<(), TransactionError> {
+        let refreshed = self.authenticate_query_session(session.token_id, token_secret)?;
+        if refreshed.principal_id != session.principal_id {
+            return Err(TransactionError::AuthenticationFailed);
+        }
+        session.role_ids = refreshed.role_ids;
+        Ok(())
     }
 
     /// Admit a token-authenticated invocation into the supervisor-owned

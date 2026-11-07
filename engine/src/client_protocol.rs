@@ -5,6 +5,7 @@ use crate::storage_manager::{AuthenticatedQuerySession, StorageManager};
 use crate::supervisor::StagingOwner;
 use crate::transaction::TransactionError;
 use std::collections::HashMap;
+use zeroize::Zeroize;
 
 pub const CLIENT_FRAME_HEADER_BYTES: usize = 32;
 pub const CLIENT_MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
@@ -78,11 +79,13 @@ impl std::fmt::Display for ClientSessionError {
 impl std::error::Error for ClientSessionError {}
 
 /// Per-connection authentication and mode state used by the gateway dispatcher.
-/// It holds no token secret and gives staging authority only after storage AUTH.
+/// It keeps the bearer secret only for this connection lifetime, zeroizes it
+/// on drop, and gives staging authority only after storage AUTH.
 #[derive(Default)]
 pub struct ClientConnectionSession {
     hello: Option<ClientMode>,
     authenticated: Option<AuthenticatedQuerySession>,
+    token_secret: Option<[u8; TOKEN_SECRET_BYTES]>,
 }
 
 impl ClientConnectionSession {
@@ -121,10 +124,41 @@ impl ClientConnectionSession {
             .authenticate_query_session(token_id, token_secret)
             .map_err(ClientSessionError::Storage)?;
         self.authenticated = Some(session);
+        self.token_secret = Some(*token_secret);
         Ok(self
             .authenticated
             .as_ref()
             .expect("session was just stored"))
+    }
+
+    /// Authorize a request kind and refresh token/login/role authority before
+    /// each execution, status, cancellation, or administrative operation.
+    pub fn authorize_request(
+        &mut self,
+        storage: &StorageManager<'_>,
+        kind: u16,
+    ) -> Result<(), ClientSessionError> {
+        if !self.permits_request_kind(kind) {
+            return if self.authenticated.is_none() {
+                Err(ClientSessionError::AuthenticationRequired)
+            } else {
+                Err(ClientSessionError::WrongMode)
+            };
+        }
+        if (3..=10).contains(&kind) {
+            let session = self
+                .authenticated
+                .as_mut()
+                .ok_or(ClientSessionError::AuthenticationRequired)?;
+            let secret = self
+                .token_secret
+                .as_ref()
+                .ok_or(ClientSessionError::AuthenticationRequired)?;
+            storage
+                .revalidate_query_session(session, secret)
+                .map_err(ClientSessionError::Storage)?;
+        }
+        Ok(())
     }
 
     pub fn session_id(&self) -> Result<[u8; 16], ClientSessionError> {
@@ -156,6 +190,14 @@ impl ClientConnectionSession {
         match mode {
             ClientMode::Query => (3..=9).contains(&kind) || kind == 11,
             ClientMode::Control => (8..=10).contains(&kind) || kind == 11,
+        }
+    }
+}
+
+impl Drop for ClientConnectionSession {
+    fn drop(&mut self) {
+        if let Some(secret) = &mut self.token_secret {
+            secret.zeroize();
         }
     }
 }

@@ -964,7 +964,7 @@
 - Behavior: `StorageManager::authenticate_query_session` verifies bearer-token validity and the current LOGIN/role closure on one read snapshot, returning a non-secret identity context without allocating an invocation or outcome. Execution START still revalidates through token-bound supervisor admission.
 - Changed code and contract: [storage-manager authentication path](../../engine/src/storage_manager.rs) and [access contract](../../specs/storage-manager.md).
 - Verification: workspace formatting, build, warning-denied Clippy, and `git diff --check` pass in the repository Nix shell. Tests were not run.
-- Remaining: connect the method to the gateway AUTH session; revalidate credentials and authority for each new execution and administrative request.
+- Remaining: connect the method to a live gateway TCP service.
 
 ## SU-1 / SU-2 dependency: bind staging owner to authenticated session
 

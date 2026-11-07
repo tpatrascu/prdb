@@ -10,7 +10,7 @@
 
 ## NP-2 dependency: per-connection HELLO/AUTH state
 
-- Behavior: `ClientConnectionSession` accepts one HELLO, requires storage authentication before authenticated operations, stores only the non-secret identity context, enforces query/control request-kind allowlists, and derives query staging ownership from storage-authenticated identity.
+- Behavior: `ClientConnectionSession` accepts one HELLO, requires storage authentication before authenticated operations, enforces query/control request-kind allowlists, derives query staging ownership from storage-authenticated identity, and revalidates token/login/role authority before each execution or control request. Its connection-scoped bearer-secret copy is zeroized on drop.
 - Changed code and contract: [client session state](../../engine/src/client_protocol.rs) and [HELLO/AUTH mode rules](../../specs/client-protocol.md).
 - Verification: repository Nix-shell formatting, workspace build, warning-denied Clippy, and `git diff --check` pass. Tests were not run.
-- Remaining: strict JSON/base64 wire decoding, TCP listener and service integration, and per-operation current-authority revalidation.
+- Remaining: strict JSON/base64 wire decoding and TCP listener/service integration.
