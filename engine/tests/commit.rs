@@ -1190,6 +1190,8 @@ fn storage_manager_creates_typed_table_for_schema_create_grant()
 #[test]
 fn storage_manager_drop_table_removes_owned_catalog_and_rows()
 -> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::authorization::Expr;
+    use prdb_engine::catalog::{PolicyTarget, encode_policy_target};
     use prdb_engine::storage_manager::{
         CreateTableRequest, TableColumnDefault, TableColumnDefinition, TableLifecycleError,
     };
@@ -1264,6 +1266,112 @@ fn storage_manager_drop_table_removes_owned_catalog_and_rows()
         9_999,
         &[table_grant.clone(), grant_edge.clone(), advanced_grantee],
         &[grant_audit],
+    )?;
+    let policy_id = id(0x5c);
+    let expression_id_for_policy = id(0x5d);
+    let policy_key = id_catalog_key(13, policy_id);
+    let policy_payload = encode_envelope(
+        &family_schema(13).unwrap(),
+        &policy_key,
+        &[
+            CatalogField {
+                tag: 1,
+                wire_type: WireType::Id,
+                payload: created.table_id.to_vec(),
+            },
+            CatalogField {
+                tag: 2,
+                wire_type: WireType::U16,
+                payload: 1u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 3,
+                wire_type: WireType::U16,
+                payload: 1u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 4,
+                wire_type: WireType::U16,
+                payload: 1u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 5,
+                wire_type: WireType::Id,
+                payload: expression_id_for_policy.to_vec(),
+            },
+            CatalogField {
+                tag: 7,
+                wire_type: WireType::U64,
+                payload: 1u64.to_le_bytes().to_vec(),
+            },
+        ],
+    )?;
+    let policy_object = object_write_with_parent_and_owner_and_name(
+        policy_id,
+        10,
+        None,
+        actor,
+        "drop_table_policy",
+    );
+    let policy_expression = expression_write(
+        expression_id_for_policy,
+        3,
+        &[],
+        &Expr::Literal(Some(ScalarValue::Boolean(true))),
+    );
+    let expression_object = object_write_with_parent_and_owner_and_name(
+        expression_id_for_policy,
+        5,
+        None,
+        actor,
+        "drop_table_policy_expression",
+    );
+    let policy_target_payload = encode_policy_target(&PolicyTarget {
+        policy_id,
+        kind: 2,
+        target_id: admin_role,
+    })?;
+    let policy_target = CatalogWrite {
+        key: policy_target_payload[32..].to_vec(),
+        expected_value: None,
+        payload: Some(policy_target_payload),
+    };
+    let policy_expression_edge = dependency_write(policy_id, expression_id_for_policy, 2);
+    let policy_target_edge = dependency_write(policy_id, admin_role, 5);
+    let mut table_epoch_update =
+        table_write_with_versions(created.table_id, schema.schema_id, 1, 2);
+    table_epoch_update.expected_value = Some(
+        database
+            .begin_read()?
+            .open_table(CATALOG)?
+            .get(id_catalog_key(5, created.table_id).as_slice())?
+            .ok_or("table missing before policy setup")?
+            .value()
+            .to_vec(),
+    );
+    let policy_invocation = id(0x5e);
+    let mut policy_audit = identity_audit_event(0x5f, actor, policy_id);
+    policy_audit.correlation_id = policy_invocation;
+    policy_audit.target_ids = vec![policy_id];
+    storage.commit_authorized_policy_ddl(
+        policy_invocation,
+        actor,
+        9_999,
+        &[
+            CatalogWrite {
+                key: policy_key.clone(),
+                expected_value: None,
+                payload: Some(policy_payload),
+            },
+            policy_object,
+            policy_expression,
+            expression_object,
+            policy_target.clone(),
+            policy_expression_edge.clone(),
+            policy_target_edge.clone(),
+            table_epoch_update,
+        ],
+        &[policy_audit],
     )?;
     let payload = encode_tuple(
         &[ColumnSchema {
@@ -1411,6 +1519,12 @@ fn storage_manager_drop_table_removes_owned_catalog_and_rows()
         id_catalog_key(7, expression_id),
         table_grant.key,
         grant_edge.key,
+        policy_key,
+        id_catalog_key(2, policy_id),
+        id_catalog_key(7, expression_id_for_policy),
+        policy_target.key,
+        policy_expression_edge.key,
+        policy_target_edge.key,
     ] {
         assert!(
             catalog.get(key.as_slice())?.is_none(),

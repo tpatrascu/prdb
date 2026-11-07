@@ -3,8 +3,8 @@
 use crate::audit::{AuditAction, AuditEvent, AuditResult};
 use crate::authorization::{MAX_MEMBERSHIP_EDGES, Membership, resolve_role_closure};
 use crate::catalog::{
-    CatalogField, CatalogRecord, WireType, decode_builtin_scalar_type, decode_registered_envelope,
-    encode_envelope, family_schema,
+    CatalogField, CatalogRecord, WireType, decode_builtin_scalar_type, decode_policy_target,
+    decode_registered_envelope, encode_envelope, family_schema,
 };
 use crate::commit::{
     CatalogWrite, CommitError, commit_authorized_column_drop_ddl_with_fences,
@@ -2492,15 +2492,9 @@ impl<'db> StorageManager<'db> {
                 return Err(TableLifecycleError::Commit(CommitError::InvalidCatalog));
             }
             let bytes = value.value().to_vec();
-            let record = decode_registered_envelope(&bytes)
+            let target = decode_policy_target(&bytes)
                 .map_err(|_| TableLifecycleError::Commit(CommitError::InvalidCatalog))?;
-            if record.fields.iter().any(|field| {
-                if field.tag != 1 || field.payload.len() != 16 {
-                    return false;
-                }
-                let policy_id: [u8; 16] = field.payload.as_slice().try_into().unwrap();
-                policy_ids.contains(&policy_id)
-            }) {
+            if policy_ids.contains(&target.policy_id) {
                 deletes.insert(key, bytes);
             }
         }
