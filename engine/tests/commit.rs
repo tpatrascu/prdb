@@ -3405,19 +3405,33 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         },
     )?;
     assert_eq!(cancelled.payload, b"{\"state\":\"accepted\"}");
-    let token_inventory = control.handle_admin_request(
+    let token_request = prdb_engine::ipc::IpcFrame {
+        operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+        request_id: 4,
+        payload: format!(
+            "{{\"phase\":\"read\",\"operation_version\":1,\"operation\":\"tokens.list\",\"arguments\":{{\"user_id\":\"{}\"}}}}",
+            id(235).iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+        ).into_bytes(),
+    };
+    let token_inventory = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
         &storage,
-        ClientFrame {
-            kind: 10,
-            request_id: 4,
-            response_sequence: 0,
-            payload: format!(
-                "{{\"phase\":\"read\",\"operation_version\":1,\"operation\":\"tokens.list\",\"arguments\":{{\"user_id\":\"{}\"}}}}",
-                id(235).iter().map(|byte| format!("{byte:02x}")).collect::<String>()
-            ).into_bytes(),
+        &staging,
+        &mut control,
+        &token_request,
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_deadline_us,
+            max_rows: 1,
+            max_bytes: 1,
         },
     )?;
-    let token_inventory = String::from_utf8(token_inventory.payload)?;
+    let token_inventory = match token_inventory {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => response.payload,
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
+            return Err("ADMIN read unexpectedly started an invocation".into());
+        }
+    };
+    let token_inventory = String::from_utf8(token_inventory)?;
     assert!(token_inventory.contains(&format!(
         "\"token_id\":\"{}\"",
         format!("{:02x}", 236).repeat(16)
