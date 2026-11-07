@@ -24,6 +24,7 @@ pub mod snapshot;
 pub mod startup;
 pub mod statistics;
 pub mod storage_manager;
+pub mod supervisor;
 pub mod supervisor_ipc;
 pub mod transaction;
 pub mod tuple;
