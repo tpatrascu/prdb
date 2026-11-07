@@ -10433,6 +10433,7 @@ fn storage_manager_separates_foreign_key_alter_and_references_authority()
     let alter_and_reference_user = id(0x90);
     let reference_only_user = id(0x91);
     let alter_only_user = id(0x92);
+    let ddl_admin = id(0x7e);
     let target_table_id = id(81);
     let source_table_id = id(82);
     let target_column_id = id(83);
@@ -10454,6 +10455,10 @@ fn storage_manager_separates_foreign_key_alter_and_references_authority()
         })
         .collect::<Vec<_>>();
     setup_writes.extend([
+        principal_write_with_name(ddl_admin, 1, 1, "column_drop_dba"),
+        object_write_with_name(ddl_admin, 8, "column_drop_dba"),
+        membership_write(ddl_admin, admin_role),
+        dependency_write(ddl_admin, admin_role, 5),
         principal_write_with_name(alter_and_reference_user, 1, 1, "alter_reference_user"),
         object_write_with_name(alter_and_reference_user, 8, "alter_reference_user"),
         principal_write_with_name(reference_only_user, 1, 1, "reference_only_user"),
@@ -10663,6 +10668,34 @@ fn storage_manager_separates_foreign_key_alter_and_references_authority()
         .status,
         OutcomeStatus::Aborted
     );
+
+    for (invocation_id, column_id) in [(id(0x7a), target_column_id), (id(0x7c), id(84))] {
+        let mut drop_audit = identity_audit_event(invocation_id[0], ddl_admin, column_id);
+        drop_audit.correlation_id = invocation_id;
+        assert_eq!(
+            storage.drop_column(
+                invocation_id,
+                ddl_admin,
+                if column_id == target_column_id {
+                    target_table_id
+                } else {
+                    source_table_id
+                },
+                column_id,
+                9_999,
+                drop_audit,
+            ),
+            Err(prdb_engine::storage_manager::TableLifecycleError::Commit(
+                CommitError::ColumnHasDependencies
+            ))
+        );
+        assert_eq!(
+            lookup_outcome(&database, invocation_id, ddl_admin, 1)?
+                .ok_or("missing FK-restricted column-drop outcome")?
+                .status,
+            OutcomeStatus::Aborted
+        );
+    }
 
     let mut removed_foreign_key = foreign_key_definition.clone();
     removed_foreign_key.expected_value = foreign_key_definition.payload.clone();
