@@ -95,6 +95,7 @@ pub struct GatewayRuntimeConfig {
     pub queue_capacity: usize,
     pub connections_per_ip_per_minute: usize,
     pub idle_timeout: Duration,
+    pub pre_auth_timeout: Duration,
     pub accept_poll_interval: Duration,
 }
 
@@ -105,6 +106,7 @@ impl Default for GatewayRuntimeConfig {
             queue_capacity: 64,
             connections_per_ip_per_minute: 60,
             idle_timeout: Duration::from_secs(30),
+            pre_auth_timeout: Duration::from_secs(10),
             accept_poll_interval: Duration::from_millis(10),
         }
     }
@@ -325,22 +327,38 @@ pub fn serve_tcp_client_connection<C: GatewayClientStream, S: Read + Write>(
     client: &mut C,
     service: &mut S,
 ) -> Result<(), GatewayConnectionError> {
-    serve_tcp_client_connection_inner(client, service, None)
+    serve_tcp_client_connection_inner(client, service, None, None)
 }
 
 fn serve_tcp_client_connection_inner<C: GatewayClientStream, S: Read + Write>(
     client: &mut C,
     service: &mut S,
     frame_timeout: Option<Duration>,
+    pre_auth_timeout: Option<Duration>,
 ) -> Result<(), GatewayConnectionError> {
     let mut decoder = crate::client_protocol::ClientFrameDecoder::default();
     let mut input = [0u8; 8192];
+    let pre_auth_deadline =
+        pre_auth_timeout.and_then(|timeout| std::time::Instant::now().checked_add(timeout));
+    let mut authenticated = false;
     loop {
-        let Some(request) = read_client_request(client, &mut decoder, &mut input, frame_timeout)?
-        else {
+        let now = std::time::Instant::now();
+        let frame_deadline = frame_timeout.and_then(|timeout| now.checked_add(timeout));
+        let deadline = if authenticated {
+            frame_deadline
+        } else {
+            match (frame_deadline, pre_auth_deadline) {
+                (Some(frame), Some(pre_auth)) => Some(frame.min(pre_auth)),
+                (Some(frame), None) => Some(frame),
+                (None, Some(pre_auth)) => Some(pre_auth),
+                (None, None) => None,
+            }
+        };
+        let Some(request) = read_client_request(client, &mut decoder, &mut input, deadline)? else {
             return Ok(());
         };
-        let (operation, payload) = client_request_to_ipc(request.kind, request.payload)?;
+        let client_kind = request.kind;
+        let (operation, payload) = client_request_to_ipc(client_kind, request.payload)?;
         let ipc_request = crate::ipc::IpcFrame {
             operation: operation as u16,
             request_id: request.request_id,
@@ -354,6 +372,14 @@ fn serve_tcp_client_connection_inner<C: GatewayClientStream, S: Read + Write>(
         if response.operation != ipc_request.operation || response.request_id != request.request_id
         {
             return Err(GatewayConnectionError::MismatchedServiceResponse);
+        }
+        if client_kind == 2
+            && response
+                .payload
+                .windows(b"\"authenticated\":true".len())
+                .any(|part| part == b"\"authenticated\":true")
+        {
+            authenticated = true;
         }
         let response = crate::client_protocol::ClientFrame {
             kind: 100,
@@ -376,10 +402,19 @@ pub fn serve_tcp_client_connection_with_timeout(
     service: &mut std::os::unix::net::UnixStream,
     idle_timeout: Duration,
 ) -> Result<(), GatewayConnectionError> {
-    if idle_timeout.is_zero() {
+    serve_tcp_client_connection_with_timeouts(client, service, idle_timeout, idle_timeout)
+}
+
+pub fn serve_tcp_client_connection_with_timeouts(
+    client: &mut TcpStream,
+    service: &mut std::os::unix::net::UnixStream,
+    idle_timeout: Duration,
+    pre_auth_timeout: Duration,
+) -> Result<(), GatewayConnectionError> {
+    if idle_timeout.is_zero() || pre_auth_timeout.is_zero() {
         return Err(GatewayConnectionError::Io(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "gateway idle timeout must be positive",
+            "gateway idle and pre-auth timeouts must be positive",
         )));
     }
     client
@@ -394,7 +429,7 @@ pub fn serve_tcp_client_connection_with_timeout(
     service
         .set_write_timeout(Some(idle_timeout))
         .map_err(GatewayConnectionError::Io)?;
-    serve_tcp_client_connection_inner(client, service, Some(idle_timeout))
+    serve_tcp_client_connection_inner(client, service, Some(idle_timeout), Some(pre_auth_timeout))
 }
 
 /// Run a fixed worker pool with a bounded pending-connection queue. The
@@ -413,6 +448,7 @@ where
         || config.queue_capacity == 0
         || config.connections_per_ip_per_minute == 0
         || config.idle_timeout.is_zero()
+        || config.pre_auth_timeout.is_zero()
         || config.accept_poll_interval.is_zero()
     {
         return Err(GatewayRuntimeError::InvalidConfig);
@@ -436,6 +472,7 @@ where
         let receiver = Arc::clone(&receiver);
         let connector = Arc::clone(&connector);
         let idle_timeout = config.idle_timeout;
+        let pre_auth_timeout = config.pre_auth_timeout;
         workers.push(
             std::thread::Builder::new()
                 .name("prdb-gateway-worker".to_owned())
@@ -451,10 +488,11 @@ where
                         let Ok(mut service) = connector() else {
                             continue;
                         };
-                        let _ = serve_tcp_client_connection_with_timeout(
+                        let _ = serve_tcp_client_connection_with_timeouts(
                             &mut client,
                             &mut service,
                             idle_timeout,
+                            pre_auth_timeout,
                         );
                     }
                 })
@@ -540,9 +578,8 @@ fn read_client_request<C: GatewayClientStream>(
     client: &mut C,
     decoder: &mut crate::client_protocol::ClientFrameDecoder,
     input: &mut [u8],
-    frame_timeout: Option<Duration>,
+    deadline: Option<std::time::Instant>,
 ) -> Result<Option<crate::client_protocol::ClientFrame>, GatewayConnectionError> {
-    let deadline = frame_timeout.and_then(|timeout| std::time::Instant::now().checked_add(timeout));
     loop {
         if let Some(deadline) = deadline {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());

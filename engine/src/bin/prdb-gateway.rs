@@ -25,6 +25,7 @@ fn main() {
              --queue-capacity COUNT              default 64\n\
              --connections-per-ip COUNT           default 60 per minute\n\
              --idle-timeout-ms DURATION          default 30000\n\
+             --pre-auth-timeout-ms DURATION      default 10000\n\
              --allow-plaintext-non-loopback      explicit plaintext bind opt-in"
         );
         return;
@@ -43,6 +44,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut queue_capacity = 64usize;
     let mut connections_per_ip_per_minute = 60usize;
     let mut idle_timeout = Duration::from_secs(30);
+    let mut pre_auth_timeout = Duration::from_secs(10);
     let mut allow_non_loopback_plaintext = false;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
@@ -70,6 +72,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "--idle-timeout-ms" => {
                 idle_timeout =
                     Duration::from_millis(value(&mut arguments, "--idle-timeout-ms")?.parse()?);
+            }
+            "--pre-auth-timeout-ms" => {
+                pre_auth_timeout =
+                    Duration::from_millis(value(&mut arguments, "--pre-auth-timeout-ms")?.parse()?);
             }
             "--allow-plaintext-non-loopback" => allow_non_loopback_plaintext = true,
             unknown => return Err(format!("unknown option {unknown}").into()),
@@ -102,6 +108,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             queue_capacity,
             connections_per_ip_per_minute,
             idle_timeout,
+            pre_auth_timeout,
             ..GatewayRuntimeConfig::default()
         },
         move || connector.connect(),

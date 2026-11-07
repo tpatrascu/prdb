@@ -1127,7 +1127,7 @@
 - Changed implementation and regression: [listener limits and timeout bridge](../../engine/src/gateway.rs) and [shared connection-cap test](../../engine/tests/gateway.rs).
 - Observed red: the focused test initially failed to compile because the shared limiter and bounded accept API were absent; a subsequent compile exposed and corrected the test's tuple destructuring.
 - Commands actually run in the configured Nix shell: `cargo fmt --all`; focused `cargo test -p prdb-engine --test gateway --locked` (5 passed); and `cargo fmt --all -- --check && cargo build --workspace --locked && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && git diff --check`. All passed.
-- Remaining: add an absolute deadline across the complete pre-authentication phase. Per-frame deadlines, per-IP connection rate limiting, and the fixed bounded listener worker pool are implemented in later entries.
+- Remaining at that increment: add an absolute deadline across the complete pre-authentication phase. Per-frame deadlines, per-IP connection rate limiting, and the fixed bounded listener worker pool are implemented in later entries; the phase deadline is recorded below.
 
 ## GW-1 / GW-2 dependency: bounded TCP gateway worker pool
 
@@ -1183,7 +1183,15 @@
 - Changed implementation and regression: [gateway peer limiter and runtime integration](../../engine/src/gateway.rs), [CLI option](../../engine/src/bin/prdb-gateway.rs), and [deterministic window/source-cap test](../../engine/tests/gateway.rs).
 - Observed red: focused test compilation failed because `GatewayPeerRateLimiter` did not exist. The first run then exposed a test expectation inconsistent with the one-source cap; the corrected test passes.
 - Commands actually run in the configured Nix shell: `cargo fmt --all`; focused `cargo test -p prdb-engine --test gateway --locked per_ip_gateway_rate_limit_is_bounded_and_expires` passed; and `cargo fmt --all -- --check && cargo build --workspace --locked && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && git diff --check`. All passed.
-- Remaining: add an absolute deadline across the complete unauthenticated HELLO/AUTH phase and track auth failures without retaining credentials.
+- Remaining at that increment: add an absolute deadline across the complete unauthenticated HELLO/AUTH phase and track auth failures without retaining credentials. The phase deadline is recorded in the following entry.
+
+## GW-1 dependency: absolute unauthenticated phase deadline
+
+- Behavior: the TCP bridge starts one deadline when client serving begins and applies it across HELLO, any pre-auth PING requests, and AUTH. Successful server-side AUTH ends this deadline; per-frame and idle limits continue afterward.
+- Changed implementation and regression: [gateway bridge pre-auth state](../../engine/src/gateway.rs) and [HELLO plus phase-expiry socket test](../../engine/tests/gateway.rs).
+- Observed red: the new regression failed to compile because the bridge had no combined idle/frame and pre-auth timeout API.
+- Commands actually run in the configured Nix shell: `cargo fmt --all`; focused `cargo test -p prdb-engine --test gateway --locked unauthenticated_gateway_phase_has_one_absolute_deadline` passed; and `cargo fmt --all -- --check && cargo build --workspace --locked && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && git diff --check`. All passed.
+- Remaining: rate-limit failed AUTH attempts separately and test gateway/service restarts with live sessions.
 
 ## SU-1 / IPC-6 dependency: gateway submission IPC dispatcher
 

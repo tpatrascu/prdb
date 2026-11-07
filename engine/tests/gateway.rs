@@ -153,6 +153,7 @@ fn gateway_worker_pool_opens_one_service_stream_per_client() {
             queue_capacity: 1,
             connections_per_ip_per_minute: 60,
             idle_timeout: std::time::Duration::from_secs(5),
+            pre_auth_timeout: std::time::Duration::from_secs(2),
             accept_poll_interval: std::time::Duration::from_millis(5),
         };
         run_gateway(
@@ -324,4 +325,62 @@ fn per_ip_gateway_rate_limit_is_bounded_and_expires() {
     assert!(!limiter.admit_at(other_ip, now + Duration::from_secs(2)));
     assert!(limiter.admit_at(other_ip, now + Duration::from_secs(61)));
     assert!(!limiter.admit_at(first_ip, now + Duration::from_secs(61)));
+}
+
+#[test]
+fn unauthenticated_gateway_phase_has_one_absolute_deadline() {
+    use std::time::Duration;
+
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let (mut gateway_service, mut supervisor_service) =
+        std::os::unix::net::UnixStream::pair().unwrap();
+    let supervisor = std::thread::spawn(move || {
+        let hello = read_frame(&mut supervisor_service).unwrap().unwrap();
+        write_frame(
+            &mut supervisor_service,
+            &IpcFrame {
+                operation: hello.operation,
+                request_id: hello.request_id,
+                payload: br#"{"mode":"query"}"#.to_vec(),
+            },
+        )
+        .unwrap();
+        assert!(read_frame(&mut supervisor_service).unwrap().is_none());
+    });
+    let gateway = std::thread::spawn(move || {
+        let (mut client, _) = listener.accept().unwrap();
+        prdb_engine::gateway::serve_tcp_client_connection_with_timeouts(
+            &mut client,
+            &mut gateway_service,
+            Duration::from_secs(1),
+            Duration::from_millis(100),
+        )
+    });
+    let mut client = std::net::TcpStream::connect(address).unwrap();
+    client
+        .write_all(
+            &ClientFrame {
+                kind: 1,
+                request_id: 1,
+                response_sequence: 0,
+                payload: br#"{"mode":"query","client_name":"deadline"}"#.to_vec(),
+            }
+            .encode()
+            .unwrap(),
+        )
+        .unwrap();
+    let mut decoder = ClientFrameDecoder::default();
+    let mut buffer = [0u8; 256];
+    loop {
+        let count = client.read(&mut buffer).unwrap();
+        assert_ne!(count, 0);
+        if !decoder.push(&buffer[..count]).unwrap().is_empty() {
+            break;
+        }
+    }
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(client.read(&mut buffer).unwrap(), 0);
+    assert!(gateway.join().unwrap().is_err());
+    supervisor.join().unwrap();
 }
