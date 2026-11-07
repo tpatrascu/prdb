@@ -3,9 +3,71 @@
 //! This module only reports whether the host exposes the required primitives.
 //! It does not establish confinement or permit loading a worker artifact.
 
+use std::io;
 use std::path::{Path, PathBuf};
 
 const REQUIRED_CGROUP_CONTROLLERS: [&str; 3] = ["cpu", "memory", "pids"];
+
+/// Per-invocation resource ceilings for a non-root cgroup v2 leaf.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkerResourceLimits {
+    pub cpu_quota_micros: u64,
+    pub cpu_period_micros: u64,
+    pub memory_max_bytes: u64,
+    pub max_processes: u64,
+}
+
+impl WorkerResourceLimits {
+    /// Apply hard CPU, memory, and process-count limits to a prepared cgroup.
+    /// Callers must not start the worker unless every write succeeds.
+    pub fn apply(self, cgroup: impl AsRef<Path>) -> io::Result<()> {
+        if self.cpu_quota_micros == 0
+            || self.cpu_period_micros == 0
+            || self.memory_max_bytes == 0
+            || self.max_processes == 0
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "worker cgroup limits must be positive",
+            ));
+        }
+        let cgroup = cgroup.as_ref();
+        if !cgroup.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "worker cgroup directory does not exist",
+            ));
+        }
+        write_control(
+            cgroup.join("cpu.max"),
+            format!("{} {}", self.cpu_quota_micros, self.cpu_period_micros),
+        )?;
+        write_control(cgroup.join("memory.max"), self.memory_max_bytes.to_string())?;
+        write_control(cgroup.join("pids.max"), self.max_processes.to_string())
+    }
+}
+
+/// Place a process in its invocation cgroup. The supervisor must arrange
+/// this before the process can execute untrusted code.
+pub fn attach_process(cgroup: impl AsRef<Path>, pid: u32) -> io::Result<()> {
+    if pid == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "worker process ID must be nonzero",
+        ));
+    }
+    write_control(cgroup.as_ref().join("cgroup.procs"), pid.to_string())
+}
+
+/// Ask cgroup v2 to kill every process in the invocation cgroup and its
+/// descendants. Failure must be treated as incomplete worker cleanup.
+pub fn kill_all(cgroup: impl AsRef<Path>) -> io::Result<()> {
+    write_control(cgroup.as_ref().join("cgroup.kill"), "1")
+}
+
+fn write_control(path: PathBuf, value: impl AsRef<[u8]>) -> io::Result<()> {
+    std::fs::write(path, value)
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SandboxCapabilityReport {

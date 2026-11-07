@@ -15,3 +15,12 @@
 - Changed code: [probe binary](../../engine/src/bin/prdb-sandbox-probe.rs).
 - Verification: Nix-shell formatting, workspace build, and warning-denied Clippy pass. Running `cargo run -p prdb-engine --bin prdb-sandbox-probe` reports Landlock ABI 7, user namespaces and seccomp available, cgroup v2 mounted with `cpu`, `memory`, and `pids` enabled, but rejects the host because `/sys/fs/cgroup` is not writable. Exit code is 1 as required for this unsupported launch profile; `git diff --check` passes.
 - Remaining: this diagnostic is not a launch gate until the supervisor calls the same preflight and performs the full confinement setup.
+
+## SB-5 dependency: cgroup v2 worker resource controls
+
+- Behavior: positive per-worker CPU quota/period, memory maximum, and process-count limits are written to a prepared cgroup v2 leaf; process placement rejects PID zero, and descendant cleanup writes the cgroup v2 kill control. A failed control write must prevent launch or resource release.
+- Contract and implementation: [cgroup worker limits](../../specs/linux-sandbox.md) and [Linux sandbox resource helpers](../../engine/src/linux_sandbox.rs).
+- Changed regression: [fake cgroup control files verify encodings, validation, placement and kill request](../../engine/tests/linux_sandbox.rs).
+- Observed red: the focused target initially failed to compile because `WorkerResourceLimits` and cgroup helper functions were absent.
+- Verification: both focused cgroup tests pass. Full configured Nix-shell validation passed: `cargo fmt --all -- --check`, `cargo build --workspace --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, and `git diff --check`.
+- Remaining: create and own the cgroup leaf, probe the required controls, place the process before exec, verify descendant cleanup, and integrate the cgroup with timeout/cancellation and terminal storage decisions.

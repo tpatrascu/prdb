@@ -38,6 +38,8 @@ Verify the minimum supported feature profile before launch. Capability presence 
 
 The supervisor must clean up descendants and resources after crashes or timeouts and request transaction abort before commit. Killing a process does not undo a durable commit. Storage retains version pins until its own in-flight tasks drain. Sandbox limits do not replace storage-side request, write-set, and history-retention budgets.
 
+Use one non-root cgroup v2 leaf per invocation. Before execution, configure positive `cpu.max`, `memory.max`, and `pids.max` values from the admitted resource budget, then place the worker in `cgroup.procs` before it can execute untrusted code. On timeout, cancellation, or worker failure, write `1` to `cgroup.kill` and verify cleanup before releasing invocation resources. A missing control file or failed write is a launch/cleanup failure; do not continue without the corresponding limit. The current Rust helpers configure a prepared cgroup and expose process placement and descendant termination, but do not yet create the leaf or integrate placement with a confined launch.
+
 ## Validation and Limits
 
 Use malicious client-built query libraries to attempt filesystem reads, network access, descriptor discovery, process inspection, privilege changes, spawning, memory exhaustion, and unbounded output. Exercise constructor-time attacks and every supported deployment profile.
