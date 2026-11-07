@@ -1286,6 +1286,27 @@ fn storage_manager_drop_table_removes_owned_catalog_and_rows()
     );
     assert!(matches!(denied, Err(TableLifecycleError::Unauthorized)));
 
+    let stale_writer_invocation = id(0x52);
+    let stale_row_id = id(0x53);
+    let mut stale_writer =
+        storage.begin_invocation(stale_writer_invocation, actor, 9_999, 1, 1024)?;
+    let stale_schema = stale_writer.load_catalog_table_schema(created.table_id)?;
+    stale_writer.load_catalog_indexes(&stale_schema)?;
+    let stale_payload = encode_tuple(
+        &stale_schema.columns,
+        stale_schema.schema_version,
+        &[Some(ScalarValue::Text(
+            "staged before table drop".to_owned(),
+        ))],
+    )?;
+    stale_writer.stage_put(
+        prdb_engine::overlay::RowId {
+            table: created.table_id,
+            row: stale_row_id,
+        },
+        &stale_payload,
+    )?;
+
     let drop_invocation = id(0x50);
     let mut drop_audit = identity_audit_event(0x49, actor, id(0x4a));
     drop_audit.correlation_id = drop_invocation;
@@ -1293,6 +1314,19 @@ fn storage_manager_drop_table_removes_owned_catalog_and_rows()
         .drop_table(drop_invocation, actor, created.table_id, 9_999, drop_audit)
         .map_err(|error| format!("table drop failed: {error:?}"))?;
     assert_eq!(dropped.table_id, created.table_id);
+    assert!(matches!(
+        stale_writer.commit(),
+        Err(prdb_engine::transaction::TransactionError::Commit(
+            CommitError::Conflict
+        ))
+    ));
+    assert!(row(&database, &table_row_key(created.table_id, stale_row_id))?.is_none());
+    assert_eq!(
+        lookup_outcome(&database, stale_writer_invocation, actor, 1)?
+            .ok_or("missing stale table-drop writer outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
     let read = database.begin_read()?;
     let catalog = read.open_table(CATALOG)?;
     for key in [
