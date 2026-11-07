@@ -1239,7 +1239,6 @@ fn storage_manager_drop_table_removes_owned_catalog_and_rows()
         retention_deadline_us: 9_999,
         audit_event: create_audit,
     })?;
-    let row_key = table_row_key(created.table_id, id(0x47));
     let payload = encode_tuple(
         &[ColumnSchema {
             scalar_type: ScalarType::Text,
@@ -1248,11 +1247,18 @@ fn storage_manager_drop_table_removes_owned_catalog_and_rows()
         1,
         &[Some(ScalarValue::Text("stored".to_owned()))],
     )?;
-    let encoded_row = RowRecord {
-        row_version: 11,
-        payload,
-    }
-    .encode()?;
+    let row_writes = (1u64..=65_537)
+        .map(|row_number| {
+            let mut row_id = [0; 16];
+            row_id[8..].copy_from_slice(&row_number.to_be_bytes());
+            RowWrite {
+                key: table_row_key(created.table_id, row_id),
+                expected_version: None,
+                payload: Some(payload.clone()),
+            }
+        })
+        .collect::<Vec<_>>();
+    let row_key = row_writes[0].key;
     let read = database.begin_read()?;
     let column_record = read
         .open_table(CATALOG)?
@@ -1268,11 +1274,14 @@ fn storage_manager_drop_table_removes_owned_catalog_and_rows()
         .as_slice()
         .try_into()?;
     drop(read);
-    let write = database.begin_write()?;
-    write
-        .open_table(ROWS)?
-        .insert(&row_key[..], &encoded_row[..])?;
-    write.commit()?;
+    let before_drop_limit = commit_rows(&database, id(0x54), actor, 9_999, &row_writes[..65_536])?;
+    let over_limit_sequence = commit_rows(
+        &database,
+        id(0x55),
+        actor,
+        9_999,
+        &[row_writes[65_536].clone()],
+    )?;
 
     let denied_invocation = id(0x48);
     let mut denied_audit = identity_audit_event(0x4b, id(0x4c), id(0x4e));
@@ -1285,6 +1294,44 @@ fn storage_manager_drop_table_removes_owned_catalog_and_rows()
         denied_audit,
     );
     assert!(matches!(denied, Err(TableLifecycleError::Unauthorized)));
+
+    let over_limit_drop_invocation = id(0x56);
+    let mut over_limit_drop_audit = identity_audit_event(0x57, actor, created.table_id);
+    over_limit_drop_audit.correlation_id = over_limit_drop_invocation;
+    assert_eq!(
+        storage.drop_table(
+            over_limit_drop_invocation,
+            actor,
+            created.table_id,
+            9_999,
+            over_limit_drop_audit,
+        ),
+        Err(TableLifecycleError::Commit(
+            CommitError::TableDropLimitExceeded
+        ))
+    );
+    assert_eq!(commit_sequence(&database)?, over_limit_sequence);
+    assert_eq!(
+        lookup_outcome(&database, over_limit_drop_invocation, actor, 1)?
+            .ok_or("missing table-drop row-limit outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
+    let last_row_key = row_writes[65_536].key;
+    assert_eq!(
+        commit_rows(
+            &database,
+            id(0x58),
+            actor,
+            9_999,
+            &[RowWrite {
+                key: last_row_key,
+                expected_version: Some(over_limit_sequence),
+                payload: None,
+            }],
+        )?,
+        before_drop_limit + 2
+    );
 
     let stale_writer_invocation = id(0x52);
     let stale_row_id = id(0x53);
