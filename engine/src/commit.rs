@@ -160,6 +160,7 @@ enum CatalogAuthorizationMode {
     SchemaDropDdl,
     TableDropDdl,
     TableRenameDdl,
+    TableOwnerTransferDdl,
     ColumnRenameDdl,
     ColumnDropDdl,
     TableCreateDdl,
@@ -6382,6 +6383,30 @@ pub fn commit_authorized_table_rename_ddl_with_fences(
     )
 }
 
+/// Authorize a table ownership transfer while preserving its stable ID.
+pub fn commit_authorized_table_owner_ddl_with_fences(
+    database: &Database,
+    ddl_fences: &DdlFenceCoordinator,
+    invocation_id: [u8; 16],
+    authenticated_principal_id: [u8; 16],
+    retention_deadline_us: i64,
+    catalog_writes: &[CatalogWrite],
+    audit_events: &[AuditEvent],
+) -> Result<u64, CommitError> {
+    commit_catalog_and_audit_with_fences_inner(
+        database,
+        ddl_fences,
+        CatalogCommitRequest {
+            invocation_id,
+            principal_id: authenticated_principal_id,
+            retention_deadline_us,
+            catalog_writes,
+            audit_events,
+        },
+        CatalogAuthorizationMode::TableOwnerTransferDdl,
+    )
+}
+
 /// Authorize a stable-ID column rename and validate final table-local names.
 pub fn commit_authorized_column_rename_ddl_with_fences(
     database: &Database,
@@ -6725,6 +6750,29 @@ fn commit_catalog_and_audit_with_fences_inner(
                 principal_id,
                 catalog_writes,
                 audit_events,
+                false,
+            ) {
+                Ok(guards) => guards,
+                Err(error) => {
+                    if !matches!(error, CommitError::Storage(_)) {
+                        record_aborted_outcome(
+                            database,
+                            invocation_id,
+                            principal_id,
+                            retention_deadline_us,
+                        )?;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        CatalogAuthorizationMode::TableOwnerTransferDdl => {
+            match table_rename_ddl_authority_guards(
+                database,
+                principal_id,
+                catalog_writes,
+                audit_events,
+                true,
             ) {
                 Ok(guards) => guards,
                 Err(error) => {
@@ -6924,6 +6972,7 @@ fn commit_catalog_and_audit_with_fences_inner(
             authorization_mode,
             CatalogAuthorizationMode::TableCreateDdl
                 | CatalogAuthorizationMode::TableRenameDdl
+                | CatalogAuthorizationMode::TableOwnerTransferDdl
                 | CatalogAuthorizationMode::ColumnRenameDdl
         ),
         matches!(
@@ -8547,6 +8596,7 @@ fn table_rename_ddl_authority_guards(
     principal_id: [u8; 16],
     catalog_writes: &[CatalogWrite],
     audit_events: &[AuditEvent],
+    owner_transfer: bool,
 ) -> Result<Vec<CatalogGuard>, CommitError> {
     if principal_id == [0; 16] || catalog_writes.len() != 2 || audit_events.is_empty() {
         return Err(CommitError::InvalidCatalog);
@@ -8605,6 +8655,21 @@ fn table_rename_ddl_authority_guards(
         .map_err(|_| CommitError::InvalidCatalog)?;
     let old_name = catalog_field_bytes(&object_key, old_object_bytes, 2, 3)?;
     let new_name = catalog_field_bytes(&object_key, new_object_bytes, 2, 3)?;
+    let old_owner_id: [u8; 16] = catalog_field_bytes(&object_key, old_object_bytes, 2, 4)?
+        .try_into()
+        .map_err(|_| CommitError::InvalidCatalog)?;
+    let new_owner_id: [u8; 16] = catalog_field_bytes(&object_key, new_object_bytes, 2, 4)?
+        .try_into()
+        .map_err(|_| CommitError::InvalidCatalog)?;
+    let object_mutation_valid = if owner_transfer {
+        old_owner_id != new_owner_id
+            && old_name == new_name
+            && catalog_fields_equal_except(&old_object, &new_object, &[4, 5])
+    } else {
+        old_name != new_name
+            && is_canonical_catalog_name(&new_name)
+            && catalog_fields_equal_except(&old_object, &new_object, &[3, 5])
+    };
     if old_table.family_code != 5
         || new_table.family_code != 5
         || old_object.family_code != 2
@@ -8616,13 +8681,11 @@ fn table_rename_ddl_authority_guards(
         || catalog_field_u16(&object_key, new_object_bytes, 2, 1)? != 3
         || catalog_field_bytes(&object_key, old_object_bytes, 2, 2)? != schema_id
         || catalog_field_bytes(&object_key, new_object_bytes, 2, 2)? != schema_id
-        || old_name == new_name
-        || !is_canonical_catalog_name(&new_name)
+        || !object_mutation_valid
         || catalog_field_u64(&object_key, new_object_bytes, 2, 5)?
             != catalog_field_u64(&object_key, old_object_bytes, 2, 5)?
                 .checked_add(1)
                 .ok_or(CommitError::InvalidCatalog)?
-        || !catalog_fields_equal_except(&old_object, &new_object, &[3, 5])
         || table_schema_version(&table_key, new_table_bytes)?
             != table_schema_version(&table_key, old_table_bytes)?
         || table_write_epoch(&table_key, new_table_bytes)?
@@ -8632,9 +8695,7 @@ fn table_rename_ddl_authority_guards(
     {
         return Err(CommitError::InvalidCatalog);
     }
-    let owner_id: [u8; 16] = catalog_field_bytes(&object_key, old_object_bytes, 2, 4)?
-        .try_into()
-        .map_err(|_| CommitError::InvalidCatalog)?;
+    let owner_id = old_owner_id;
     let read = database.begin_read().map_err(storage_error)?;
     let catalog = read.open_table(CATALOG).map_err(storage_error)?;
     let actor_key = id_catalog_key(10, principal_id);
@@ -8655,7 +8716,7 @@ fn table_rename_ddl_authority_guards(
     add_catalog_guard(&mut guards, actor_key, Some(actor_bytes));
     let membership_prefix = 11u16.to_be_bytes();
     let mut memberships = Vec::new();
-    let mut subject_ids = HashSet::from([principal_id, owner_id]);
+    let mut subject_ids = HashSet::from([principal_id, owner_id, new_owner_id]);
     let mut scanned = 0usize;
     for entry in catalog
         .range(membership_prefix.as_slice()..)

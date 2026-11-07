@@ -15,7 +15,8 @@ use crate::commit::{
     commit_authorized_schema_create_ddl_with_fences, commit_authorized_schema_drop_ddl_with_fences,
     commit_authorized_system_privilege_ddl_with_fences,
     commit_authorized_table_create_ddl_with_fences, commit_authorized_table_drop_ddl_with_fences,
-    commit_authorized_table_rename_ddl_with_fences, commit_catalog_and_audit_with_fences,
+    commit_authorized_table_owner_ddl_with_fences, commit_authorized_table_rename_ddl_with_fences,
+    commit_catalog_and_audit_with_fences,
 };
 use crate::credentials::{
     MAX_TOKEN_LABEL_BYTES, TOKEN_SECRET_BYTES, decode_verifier_record, encode_new_verifier_record,
@@ -3061,6 +3062,128 @@ impl<'db> StorageManager<'db> {
         drop(read);
         audit_event.target_ids = vec![table_id];
         commit_authorized_table_rename_ddl_with_fences(
+            self.database,
+            &self.ddl_fences,
+            invocation_id,
+            authenticated_actor_id,
+            retention_deadline_us,
+            &[
+                CatalogWrite {
+                    key: table_key,
+                    expected_value: Some(table_current),
+                    payload: Some(table_payload),
+                },
+                CatalogWrite {
+                    key: object_key,
+                    expected_value: Some(object_current),
+                    payload: Some(object_payload),
+                },
+            ],
+            &[audit_event],
+        )
+        .map_err(|error| match error {
+            CommitError::DdlAuthorizationDenied => TableLifecycleError::Unauthorized,
+            error => TableLifecycleError::Commit(error),
+        })
+    }
+
+    /// Transfer a table's DDL ownership without granting data privileges.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_table_owner(
+        &self,
+        invocation_id: [u8; 16],
+        authenticated_actor_id: [u8; 16],
+        table_id: [u8; 16],
+        new_owner_id: [u8; 16],
+        retention_deadline_us: i64,
+        mut audit_event: AuditEvent,
+    ) -> Result<u64, TableLifecycleError> {
+        if invocation_id == [0; 16]
+            || authenticated_actor_id == [0; 16]
+            || table_id == [0; 16]
+            || new_owner_id == [0; 16]
+            || retention_deadline_us <= 0
+        {
+            return Err(TableLifecycleError::InvalidRequest);
+        }
+        if audit_event.actor_id != Some(authenticated_actor_id)
+            || audit_event.correlation_id != invocation_id
+            || audit_event.action != AuditAction::Ddl
+            || audit_event.result != AuditResult::Succeeded
+        {
+            return Err(TableLifecycleError::InvalidAudit);
+        }
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|_| TableLifecycleError::Storage)?;
+        let catalog = read
+            .open_table(CATALOG)
+            .map_err(|_| TableLifecycleError::Storage)?;
+        let table_key = id_catalog_key(5, table_id);
+        let object_key = id_catalog_key(2, table_id);
+        let owner_key = id_catalog_key(10, new_owner_id);
+        let table_current = catalog
+            .get(table_key.as_slice())
+            .map_err(|_| TableLifecycleError::Storage)?
+            .map(|value| value.value().to_vec())
+            .ok_or(TableLifecycleError::InvalidRequest)?;
+        let object_current = catalog
+            .get(object_key.as_slice())
+            .map_err(|_| TableLifecycleError::Storage)?
+            .map(|value| value.value().to_vec())
+            .ok_or(TableLifecycleError::InvalidRequest)?;
+        let owner_current = catalog
+            .get(owner_key.as_slice())
+            .map_err(|_| TableLifecycleError::Storage)?
+            .map(|value| value.value().to_vec())
+            .ok_or(TableLifecycleError::InvalidRequest)?;
+        let table_schema_id = read_catalog_id(&table_key, &table_current, 5, 1)?;
+        if read_catalog_u16(&object_key, &object_current, 2, 1)? != 3
+            || read_catalog_id(&object_key, &object_current, 2, 2)? != table_schema_id
+            || read_catalog_id(&object_key, &object_current, 2, 4)? == new_owner_id
+        {
+            return Err(TableLifecycleError::InvalidRequest);
+        }
+        let owner_record = decode_registered_envelope(&owner_current)
+            .map_err(|_| TableLifecycleError::InvalidRequest)?;
+        let owner_kind = owner_record
+            .fields
+            .iter()
+            .find(|field| field.tag == 1 && field.wire_type == WireType::U16)
+            .and_then(|field| <[u8; 2]>::try_from(field.payload.as_slice()).ok())
+            .map(u16::from_le_bytes);
+        let owner_epoch = owner_record
+            .fields
+            .iter()
+            .find(|field| field.tag == 4 && field.wire_type == WireType::U64)
+            .and_then(|field| <[u8; 8]>::try_from(field.payload.as_slice()).ok())
+            .map(u64::from_le_bytes)
+            .unwrap_or_default();
+        if !matches!(owner_kind, Some(1 | 2)) || owner_epoch == 0 {
+            return Err(TableLifecycleError::InvalidRequest);
+        }
+        let next_epoch = read_catalog_u64(&table_key, &table_current, 5, 3)?
+            .checked_add(1)
+            .ok_or(TableLifecycleError::Commit(CommitError::InvalidCatalog))?;
+        let next_object_version = read_catalog_u64(&object_key, &object_current, 2, 5)?
+            .checked_add(1)
+            .ok_or(TableLifecycleError::Commit(CommitError::InvalidCatalog))?;
+        let table_payload =
+            rewrite_catalog_u64_field(&table_key, &table_current, 5, 3, next_epoch)?;
+        let object_payload = rewrite_catalog_fields(
+            &object_key,
+            &object_current,
+            2,
+            &[
+                (4, WireType::Id, new_owner_id.to_vec()),
+                (5, WireType::U64, next_object_version.to_le_bytes().to_vec()),
+            ],
+        )?;
+        drop(catalog);
+        drop(read);
+        audit_event.target_ids = vec![table_id];
+        commit_authorized_table_owner_ddl_with_fences(
             self.database,
             &self.ddl_fences,
             invocation_id,

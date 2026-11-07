@@ -1109,9 +1109,15 @@ fn storage_manager_renames_tables_and_drop_column_rewrites_rows()
     let storage = StorageManager::new(&database, Duration::from_millis(100))?;
     let admin_role = builtin_owner_id();
     let actor = id(0x60);
+    let successor_owner = id(0xd0);
+    let outsider = id(0xd7);
     let setup = vec![
         principal_write_with_name(actor, 1, 1, "column_drop_owner"),
         object_write_with_name(actor, 8, "column_drop_owner"),
+        principal_write_with_name(successor_owner, 1, 1, "successor_owner"),
+        object_write_with_name(successor_owner, 8, "successor_owner"),
+        principal_write_with_name(outsider, 1, 1, "table_ddl_outsider"),
+        object_write_with_name(outsider, 8, "table_ddl_outsider"),
         membership_write(actor, admin_role),
         dependency_write(actor, admin_role, 5),
     ];
@@ -1605,6 +1611,128 @@ fn storage_manager_renames_tables_and_drop_column_rewrites_rows()
         OutcomeStatus::Committed
     );
     drop(read);
+    let stale_owner_writer_invocation = id(0xdb);
+    let stale_owner_row = prdb_engine::overlay::RowId {
+        table: table.table_id,
+        row: id(0xda),
+    };
+    let mut stale_owner_writer =
+        storage.begin_invocation(stale_owner_writer_invocation, actor, 9_999, 2, 64)?;
+    let stale_owner_schema = stale_owner_writer.load_catalog_table_schema(table.table_id)?;
+    stale_owner_writer.load_catalog_indexes(&stale_owner_schema)?;
+    let stale_owner_tuple = prdb_engine::tuple::encode_tuple(
+        &stale_owner_schema.columns,
+        stale_owner_schema.schema_version,
+        &[Some(ScalarValue::Text("stale".to_owned()))],
+    )?;
+    stale_owner_writer.stage_put(stale_owner_row, &stale_owner_tuple)?;
+    let transfer_invocation = id(0xd1);
+    let mut transfer_audit = identity_audit_event(0xd2, actor, table.table_id);
+    transfer_audit.correlation_id = transfer_invocation;
+    let transfer_result = storage.set_table_owner(
+        transfer_invocation,
+        actor,
+        table.table_id,
+        successor_owner,
+        9_999,
+        transfer_audit,
+    );
+    assert!(
+        transfer_result.is_ok(),
+        "table owner transfer failed: {transfer_result:?}"
+    );
+    let transfer_sequence = transfer_result?;
+    assert!(transfer_sequence > table.commit_sequence);
+    assert!(matches!(
+        stale_owner_writer.commit(),
+        Err(prdb_engine::transaction::TransactionError::Commit(
+            CommitError::Conflict
+        ))
+    ));
+    assert!(
+        row(
+            &database,
+            &table_row_key(table.table_id, stale_owner_row.row)
+        )?
+        .is_none()
+    );
+    assert_eq!(
+        lookup_outcome(&database, stale_owner_writer_invocation, actor, 1)?
+            .ok_or("missing stale ownership-transfer writer outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
+    {
+        let read = database.begin_read()?;
+        let catalog = read.open_table(CATALOG)?;
+        let object = decode_registered_envelope(
+            catalog
+                .get(id_catalog_key(2, table.table_id).as_slice())?
+                .ok_or("table object disappeared after ownership transfer")?
+                .value(),
+        )?;
+        assert_eq!(
+            object
+                .fields
+                .iter()
+                .find(|field| field.tag == 4)
+                .ok_or("table owner field missing")?
+                .payload,
+            successor_owner
+        );
+        let mut successor_grants_prefix = 12u16.to_be_bytes().to_vec();
+        successor_grants_prefix.push(1);
+        successor_grants_prefix.extend_from_slice(&successor_owner);
+        assert!(
+            catalog
+                .range(successor_grants_prefix.as_slice()..)?
+                .next()
+                .transpose()?
+                .is_none_or(|(key, _)| !key.value().starts_with(&successor_grants_prefix))
+        );
+    }
+    let outsider_transfer_invocation = id(0xd8);
+    let mut outsider_transfer_audit = identity_audit_event(0xd9, outsider, table.table_id);
+    outsider_transfer_audit.correlation_id = outsider_transfer_invocation;
+    assert!(matches!(
+        storage.set_table_owner(
+            outsider_transfer_invocation,
+            outsider,
+            table.table_id,
+            actor,
+            9_999,
+            outsider_transfer_audit,
+        ),
+        Err(prdb_engine::storage_manager::TableLifecycleError::Unauthorized)
+    ));
+    assert_eq!(
+        lookup_outcome(&database, outsider_transfer_invocation, outsider, 1)?
+            .ok_or("missing unauthorized ownership-transfer outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
+    let successor_rename_invocation = id(0xd3);
+    let mut successor_rename_audit = identity_audit_event(0xd4, successor_owner, table.table_id);
+    successor_rename_audit.correlation_id = successor_rename_invocation;
+    storage.rename_table(
+        successor_rename_invocation,
+        successor_owner,
+        table.table_id,
+        "successor_owned_table",
+        9_999,
+        successor_rename_audit,
+    )?;
+    let return_invocation = id(0xd5);
+    let mut return_audit = identity_audit_event(0xd6, actor, table.table_id);
+    return_audit.correlation_id = return_invocation;
+    storage.set_table_owner(
+        return_invocation,
+        actor,
+        table.table_id,
+        actor,
+        9_999,
+        return_audit,
+    )?;
     StorageManager::new(&database, Duration::from_millis(100))?;
     Ok(())
 }
@@ -6254,11 +6382,37 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
     assert!(column_rename.contains("\"outcome\":\"committed\""));
     assert!(column_rename.contains(&format!("\"column_id\":\"{first_column_id_wire}\"")));
     assert!(column_rename.contains("\"name\":\"row_id\""));
-    let table_drop_prepare = admin_dispatch_json(
+    let owner_transfer_prepare = admin_dispatch_json(
         &storage,
         &staging,
         &mut control,
         35,
+        &format!(
+            "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"tables.set_owner\",\"arguments\":{{\"table_id\":\"{table_id_wire}\",\"owner_id\":\"{created_user_id_wire}\"}}}}"
+        ),
+        retention_deadline_us,
+    )?;
+    let owner_transfer_id = owner_transfer_prepare
+        .split("\"operation_id\":\"")
+        .nth(1)
+        .ok_or("missing ADMIN table-owner transfer operation ID")?
+        .get(..32)
+        .ok_or("invalid ADMIN table-owner transfer operation ID")?;
+    let owner_transfer = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut control,
+        36,
+        &format!("{{\"phase\":\"start\",\"operation_id\":\"{owner_transfer_id}\"}}"),
+        retention_deadline_us,
+    )?;
+    assert!(owner_transfer.contains("\"outcome\":\"committed\""));
+    assert!(owner_transfer.contains(&format!("\"owner_id\":\"{created_user_id_wire}\"")));
+    let table_drop_prepare = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut control,
+        37,
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"tables.drop\",\"arguments\":{{\"table_id\":\"{table_id_wire}\"}}}}"
         ),
@@ -6274,7 +6428,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &storage,
         &staging,
         &mut control,
-        36,
+        38,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{table_drop_id}\"}}"),
         retention_deadline_us,
     )?;
@@ -6288,7 +6442,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &storage,
         &staging,
         &mut control,
-        37,
+        39,
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"schemas.create\",\"arguments\":{{\"name\":\"protocol_empty\",\"owner_id\":\"{admin_id_wire}\"}}}}"
         ),
@@ -6304,7 +6458,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &storage,
         &staging,
         &mut control,
-        38,
+        40,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{empty_schema_create_id}\"}}"),
         retention_deadline_us,
     )?;
@@ -6318,7 +6472,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &storage,
         &staging,
         &mut control,
-        39,
+        41,
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"schemas.drop\",\"arguments\":{{\"schema_id\":\"{empty_schema_id}\"}}}}"
         ),
@@ -6334,7 +6488,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &storage,
         &staging,
         &mut control,
-        40,
+        42,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{empty_schema_drop_id}\"}}"),
         retention_deadline_us,
     )?;
