@@ -1079,3 +1079,10 @@
 - Changed code and regression: [control socket loop](../../engine/src/supervisor_ipc.rs) and [UnixStream service test](../../engine/tests/commit.rs).
 - Verification: focused real-socket test and warning-denied Clippy pass in the repository Nix shell.
 - Remaining: credential-bound session setup/generation, staging operations over IPC, and the independent TCP listener process.
+
+## SU-3 dependency: immutable submission handoff after START
+
+- Behavior: the staging store returns artifact and parameter bytes only as an owner-checked sealed handle after START succeeds. The handle shares immutable buffers and does not load or execute native code.
+- Changed code and regression: [started submission handoff](../../engine/src/supervisor.rs) and [real-redb START lifecycle](../../engine/tests/commit.rs).
+- Verification: focused START/handoff regression passes in the repository Nix shell.
+- Remaining: pass the handle to a supervisor process launcher that establishes the required sandbox before loading the artifact.

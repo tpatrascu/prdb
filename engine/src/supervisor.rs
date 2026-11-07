@@ -589,6 +589,31 @@ impl StagingStore {
         }
     }
 
+    /// Return immutable submission bytes only after the owning reservation
+    /// has crossed the one-shot START transition. This handle is for trusted
+    /// supervisor launch code; it does not load or execute the artifact.
+    pub fn started_submission(
+        &self,
+        owner: StagingOwner,
+        invocation_id: [u8; 16],
+    ) -> Result<SealedSubmission, StagingError> {
+        let mut state = self.state.lock().map_err(|_| StagingError::Poisoned)?;
+        reap_expired(&mut state, self.limits.reservation_ttl, Instant::now());
+        let reservation = owned_reservation_mut(&mut state, owner, invocation_id)?;
+        if reservation.state != ReservationState::Started {
+            return Err(StagingError::InvalidState);
+        }
+        let data = reservation
+            .sealed
+            .as_ref()
+            .cloned()
+            .ok_or(StagingError::InvalidState)?;
+        Ok(SealedSubmission {
+            invocation_id,
+            data,
+        })
+    }
+
     /// Reap expired reservations that have not started and return their IDs.
     /// A trusted supervisor should call this periodically as well as relying
     /// on the opportunistic reaping performed by mutating operations.

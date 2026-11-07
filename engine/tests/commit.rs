@@ -7987,6 +7987,10 @@ fn sealed_start_admits_only_current_credentials_and_enforces_request_deadline()
     )?;
     assert_eq!(accepted.payload, b"{\"state\":\"accepted\"}");
     assert_eq!(accepted.request_id, 1);
+    let started_submission = staging.started_submission(owner, first.invocation_id)?;
+    assert_eq!(started_submission.invocation_id(), first.invocation_id);
+    assert_eq!(started_submission.artifact(), artifact);
+    assert!(started_submission.parameters().is_empty());
     let cancelled = client.handle_cancel_prepared_request(
         &storage,
         &staging,
