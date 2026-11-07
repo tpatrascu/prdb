@@ -275,6 +275,23 @@ pub struct TokenMetadata {
     pub revoked_at_us: Option<i64>,
 }
 
+/// Non-secret identity context established by read-only gateway AUTH.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthenticatedQuerySession {
+    principal_id: [u8; 16],
+    role_ids: HashSet<[u8; 16]>,
+}
+
+impl AuthenticatedQuerySession {
+    pub fn principal_id(&self) -> [u8; 16] {
+        self.principal_id
+    }
+
+    pub fn role_ids(&self) -> &HashSet<[u8; 16]> {
+        &self.role_ids
+    }
+}
+
 /// Newly issued bearer token. Call [`Self::take_secret`] once to transfer the
 /// secret to the protected caller; any secret still held here is zeroized on
 /// drop. This type intentionally has no `Debug` implementation.
@@ -1237,6 +1254,58 @@ impl<'db> StorageManager<'db> {
         };
         let roles = transaction.authenticate_credential_token(token_id, token_secret, now_us)?;
         Ok((transaction, roles))
+    }
+
+    /// Authenticate a database token for a query/control gateway session using
+    /// one read snapshot. This does not allocate an invocation or durable
+    /// outcome; START must revalidate through token-bound admission.
+    pub fn authenticate_query_session(
+        &self,
+        token_id: [u8; 16],
+        token_secret: &[u8; TOKEN_SECRET_BYTES],
+    ) -> Result<AuthenticatedQuerySession, TransactionError> {
+        if token_id == [0; 16] {
+            return Err(TransactionError::AuthenticationFailed);
+        }
+        let Some(now_us) = now_unix_micros() else {
+            return Err(TransactionError::ClockUnavailable);
+        };
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|error| TransactionError::Storage(error.to_string()))?;
+        let key = credential_catalog_key(token_id);
+        let bytes = {
+            let catalog = read
+                .open_table(CATALOG)
+                .map_err(|error| TransactionError::Storage(error.to_string()))?;
+            catalog
+                .get(key.as_slice())
+                .map_err(|error| TransactionError::Storage(error.to_string()))?
+                .map(|value| value.value().to_vec())
+                .ok_or(TransactionError::AuthenticationFailed)?
+        };
+        let record = decode_registered_envelope(&bytes)
+            .map_err(|_| TransactionError::AuthenticationFailed)?;
+        if record.logical_key != key {
+            return Err(TransactionError::AuthenticationFailed);
+        }
+        let credential =
+            decode_verifier_record(&record).map_err(|_| TransactionError::AuthenticationFailed)?;
+        if !credential.is_valid_at(now_us) || !credential.matches_secret(token_secret) {
+            return Err(TransactionError::AuthenticationFailed);
+        }
+        let principal_id = credential.user_id;
+        let snapshot = RowSnapshot::new(read);
+        let role_ids = token_actor_roles(&snapshot, principal_id).map_err(|error| match error {
+            TokenLifecycleError::TokenUnavailable => TransactionError::AuthenticationFailed,
+            TokenLifecycleError::Storage(message) => TransactionError::Storage(message),
+            _ => TransactionError::AuthenticationFailed,
+        })?;
+        Ok(AuthenticatedQuerySession {
+            principal_id,
+            role_ids,
+        })
     }
 
     /// Admit a token-authenticated invocation into the supervisor-owned

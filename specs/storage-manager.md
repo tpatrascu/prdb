@@ -18,6 +18,8 @@ Executor mutations accept only connection-local relation/row handles and typed f
 
 `ExecutorMetadataConnection::open_relation_scan` revalidates a resolved user-relation handle and issues a connection-local 16-byte cursor with its own kind byte and CSPRNG bytes. `next_relation_scan_page` consumes each cursor once, revalidates the relation handle, derives catalog authorization again, and returns a fresh continuation when more rows may remain. Cross-connection, replayed, modified, and wrong-kind cursors are rejected. Closing a cursor releases the active row-scan slot; closing its relation handle also invalidates an associated scan. Built-in `information_schema` relations are not physical row scans and are rejected by this path.
 
+`StorageManager::authenticate_query_session` verifies a database token and the principal's current login/role closure on one read snapshot without creating an invocation or durable outcome. The returned identity context contains no credential secret. Execution START must revalidate the token through `admit_supervisor_invocation`; successful AUTH does not freeze later authority changes.
+
 ## Commit and Concurrent Invocations
 
 Allow concurrent redb read transactions and concurrent engine staging. Do not hold a redb write transaction across user execution or individual SQL statements. At successful library return, the supervisor requests finalization; storage obtains the serialized writer, validates all conflicts/constraints/authority, applies data/index/catalog/audit/outcome changes in one redb write transaction, and commits using the selected durable mode.
