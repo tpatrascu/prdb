@@ -1401,6 +1401,182 @@ fn storage_manager_drop_table_removes_owned_catalog_and_rows()
 }
 
 #[test]
+fn storage_manager_drop_table_byte_limit_aborts_atomically()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::storage_manager::{
+        CreateTableRequest, TableColumnDefinition, TableLifecycleError,
+    };
+    use prdb_engine::tuple::MAX_TUPLE_BYTES;
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let actor = id(0x93);
+    let admin_role = builtin_owner_id();
+    let mut setup_audit = identity_audit_event(0x94, admin_role, actor);
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(
+        id(0x94),
+        admin_role,
+        9_999,
+        &[
+            principal_write_with_name(actor, 1, 1, "drop_byte_limit_owner"),
+            object_write_with_name(actor, 8, "drop_byte_limit_owner"),
+            membership_write(actor, admin_role),
+            dependency_write(actor, admin_role, 5),
+        ],
+        &[setup_audit],
+    )?;
+    let schema_invocation = id(0x95);
+    let mut schema_audit = identity_audit_event(0x96, actor, id(0x97));
+    schema_audit.correlation_id = schema_invocation;
+    let schema = storage.create_schema(
+        schema_invocation,
+        actor,
+        "drop_byte_limit_schema",
+        actor,
+        9_999,
+        schema_audit,
+    )?;
+    let create_invocation = id(0x98);
+    let mut create_audit = identity_audit_event(0x99, actor, id(0x9a));
+    create_audit.correlation_id = create_invocation;
+    let table = storage.create_table(CreateTableRequest {
+        invocation_id: create_invocation,
+        authenticated_actor_id: actor,
+        schema_id: schema.schema_id,
+        name: "bounded_drop_bytes".to_owned(),
+        columns: vec![TableColumnDefinition {
+            name: "value".to_owned(),
+            scalar_type: ScalarType::Bytea,
+            nullable: false,
+            generated_uuid_identity: false,
+            default: None,
+        }],
+        retention_deadline_us: 9_999,
+        audit_event: create_audit,
+    })?;
+    let columns = [ColumnSchema {
+        scalar_type: ScalarType::Bytea,
+        nullable: false,
+    }];
+    let empty_tuple = encode_tuple(&columns, 1, &[Some(ScalarValue::Bytea(Vec::new()))])?;
+    let full_tuple = encode_tuple(
+        &columns,
+        1,
+        &[Some(ScalarValue::Bytea(vec![
+            b'x';
+            MAX_TUPLE_BYTES
+                - empty_tuple.len()
+        ]))],
+    )?;
+    let one_byte_over_tuple = encode_tuple(
+        &columns,
+        1,
+        &[Some(ScalarValue::Bytea(vec![
+            b'y';
+            1_281 - empty_tuple.len()
+        ]))],
+    )?;
+    let exact_boundary_tuple = encode_tuple(
+        &columns,
+        1,
+        &[Some(ScalarValue::Bytea(vec![
+            b'z';
+            1_280 - empty_tuple.len()
+        ]))],
+    )?;
+    assert_eq!(full_tuple.len(), MAX_TUPLE_BYTES);
+    assert_eq!(one_byte_over_tuple.len(), 1_281);
+    assert_eq!(exact_boundary_tuple.len(), 1_280);
+    assert_eq!(
+        64 * full_tuple.len() + one_byte_over_tuple.len(),
+        64 * 1024 * 1024 + 1
+    );
+    assert_eq!(
+        64 * full_tuple.len() + exact_boundary_tuple.len(),
+        64 * 1024 * 1024
+    );
+    let mut rows = (1u64..=64)
+        .map(|row_number| {
+            let mut row_id = [0; 16];
+            row_id[8..].copy_from_slice(&row_number.to_be_bytes());
+            RowWrite {
+                key: table_row_key(table.table_id, row_id),
+                expected_version: None,
+                payload: Some(full_tuple.clone()),
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut final_row_id = [0; 16];
+    final_row_id[8..].copy_from_slice(&65u64.to_be_bytes());
+    let final_row_key = table_row_key(table.table_id, final_row_id);
+    rows.push(RowWrite {
+        key: final_row_key,
+        expected_version: None,
+        payload: Some(one_byte_over_tuple),
+    });
+    let first_row_key = rows[0].key;
+    let rows_invocation = id(0x9b);
+    let before_drop = commit_rows(&database, rows_invocation, actor, 9_999, &rows)?;
+    let over_limit_invocation = id(0x9c);
+    let mut over_limit_audit = identity_audit_event(0x9d, actor, table.table_id);
+    over_limit_audit.correlation_id = over_limit_invocation;
+    assert_eq!(
+        storage.drop_table(
+            over_limit_invocation,
+            actor,
+            table.table_id,
+            9_999,
+            over_limit_audit,
+        ),
+        Err(TableLifecycleError::Commit(
+            CommitError::TableDropLimitExceeded
+        ))
+    );
+    assert_eq!(commit_sequence(&database)?, before_drop);
+    assert_eq!(
+        lookup_outcome(&database, over_limit_invocation, actor, 1)?
+            .ok_or("missing table-drop byte-limit outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
+    assert!(row(&database, &final_row_key)?.is_some());
+    let exact_row_update = RowWrite {
+        key: final_row_key,
+        expected_version: Some(before_drop),
+        payload: Some(exact_boundary_tuple),
+    };
+    let update_result = commit_rows(&database, id(0x9e), actor, 9_999, &[exact_row_update]);
+    assert_eq!(update_result, Ok(before_drop + 1));
+    let boundary_invocation = id(0x9f);
+    let mut boundary_audit = identity_audit_event(0xa0, actor, table.table_id);
+    boundary_audit.correlation_id = boundary_invocation;
+    let drop_result = storage.drop_table(
+        boundary_invocation,
+        actor,
+        table.table_id,
+        9_999,
+        boundary_audit,
+    );
+    assert!(
+        drop_result.is_ok(),
+        "exact byte-boundary drop returned {drop_result:?}"
+    );
+    assert_eq!(drop_result.unwrap().table_id, table.table_id);
+    assert_eq!(commit_sequence(&database)?, before_drop + 2);
+    assert_eq!(
+        lookup_outcome(&database, boundary_invocation, actor, 1)?
+            .ok_or("missing exact table-drop byte-boundary outcome")?
+            .status,
+        OutcomeStatus::Committed
+    );
+    assert!(row(&database, &first_row_key)?.is_none());
+    StorageManager::new(&database, Duration::from_millis(100))?;
+    Ok(())
+}
+
+#[test]
 fn storage_manager_drop_table_index_entry_limit_aborts_atomically()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::storage_manager::TableLifecycleError;

@@ -4405,6 +4405,7 @@ fn build_index_ddl_plan(
                 return Err(CommitError::InvalidRow);
             }
             let bytes = value.value().to_vec();
+            let row = RowRecord::decode(&bytes).map_err(|_| CommitError::InvalidRow)?;
             if !rows_already_accounted {
                 total_rows = total_rows
                     .checked_add(1)
@@ -4413,13 +4414,12 @@ fn build_index_ddl_plan(
                     return Err(CommitError::TableDropLimitExceeded);
                 }
                 total_bytes = total_bytes
-                    .checked_add(bytes.len())
+                    .checked_add(row.payload.len())
                     .ok_or(CommitError::TableDropLimitExceeded)?;
                 if total_bytes > MAX_INDEX_DDL_BYTES_PER_COMMIT {
                     return Err(CommitError::TableDropLimitExceeded);
                 }
             }
-            let row = RowRecord::decode(&bytes).map_err(|_| CommitError::InvalidRow)?;
             let row_key: [u8; 32] = key.try_into().map_err(|_| CommitError::InvalidRow)?;
             if row_key[16..] == [0; 16] {
                 return Err(CommitError::InvalidRow);
@@ -4964,15 +4964,20 @@ fn validate_index_ddl_snapshot(
                 return Err(CommitError::InvalidRow);
             }
             total_rows = total_rows.checked_add(1).ok_or(CommitError::Conflict)?;
+            let row = RowRecord::decode(value.value()).map_err(|_| CommitError::InvalidRow)?;
+            let accounted_row_bytes = if plan.table_drop_id == Some(*table_id) {
+                row.payload.len()
+            } else {
+                value.value().len()
+            };
             total_bytes = total_bytes
-                .checked_add(value.value().len())
+                .checked_add(accounted_row_bytes)
                 .ok_or(CommitError::Conflict)?;
             if total_rows > MAX_INDEX_DDL_ROWS_PER_COMMIT
                 || total_bytes > MAX_INDEX_DDL_BYTES_PER_COMMIT
             {
                 return Err(CommitError::Conflict);
             }
-            let row = RowRecord::decode(value.value()).map_err(|_| CommitError::InvalidRow)?;
             actual_rows.push((
                 key.try_into().map_err(|_| CommitError::InvalidRow)?,
                 row.row_version,
