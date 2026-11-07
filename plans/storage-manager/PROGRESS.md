@@ -1153,6 +1153,14 @@
 - Full configured Nix-shell checks: `cargo fmt --all -- --check && cargo build --workspace --locked && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && git diff --check` all passed.
 - Remaining: worker process launch/reap, result data and terminal relay, sandbox enforcement, and status reconciliation after gateway/process failure.
 
+## GW-1 dependency: runnable gateway process wrapper
+
+- Behavior: `prdb-gateway` parses a loopback-default bind address, requires a private service socket and expected peer UID, configures bounded worker/queue/idle values, installs graceful SIGINT/SIGTERM shutdown, and refuses plaintext wildcard binding without an explicit flag.
+- Changed binary and CLI regressions: [gateway process](../../engine/src/bin/prdb-gateway.rs) and [gateway CLI tests](../../engine/tests/gateway.rs).
+- Observed red: the CLI test initially failed to compile because Cargo had no `prdb-gateway` target.
+- Commands actually run in the configured Nix shell: `cargo fmt --all`; focused `cargo test -p prdb-engine --test gateway --locked` (9 passed); and `cargo fmt --all -- --check && cargo build --workspace --locked && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && git diff --check`. All passed.
+- Remaining: provide the supervisor-side Unix listener and bind gateway generation/session context; connect result relay and control ADMIN operations.
+
 ## SU-1 / IPC-6 dependency: gateway submission IPC dispatcher
 
 - Behavior: a role-checked gateway dispatcher maps AUTH, PREPARE, chunk, SEAL, START, STATUS, and CANCEL operation tags to the strict per-client session handlers. Chunk IPC prepends an explicit artifact/parameter kind byte. START returns the network acknowledgement plus a typed storage invocation and immutable submission handle to trusted supervisor code; those authority-bearing objects are never serialized.

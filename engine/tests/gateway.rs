@@ -250,3 +250,36 @@ fn unix_gateway_connector_checks_peer_uid() {
     drop(accept_thread.join().unwrap());
     std::fs::remove_file(&rejected_path).unwrap();
 }
+
+#[test]
+fn gateway_binary_exposes_its_explicit_listener_and_service_options() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_prdb-gateway"))
+        .arg("--help")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(help.contains("--bind"));
+    assert!(help.contains("--service-socket"));
+    assert!(help.contains("--service-uid"));
+}
+
+#[test]
+fn gateway_binary_rejects_plaintext_wildcard_without_opt_in() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_prdb-gateway"))
+        .args([
+            "--bind",
+            "0.0.0.0:0",
+            "--service-socket",
+            "/tmp/prdb-unused.sock",
+            "--service-uid",
+            "0",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.contains("requires explicit opt-in"));
+}
