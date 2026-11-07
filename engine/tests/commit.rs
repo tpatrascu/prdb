@@ -10626,6 +10626,419 @@ fn catalog_index_backfill_limit_fails_without_publishing_catalog()
 }
 
 #[test]
+fn storage_manager_add_column_row_limit_aborts_atomically() -> Result<(), Box<dyn std::error::Error>>
+{
+    use prdb_engine::storage_manager::{
+        AddTableColumnRequest, CreateTableRequest, TableColumnDefinition, TableLifecycleError,
+    };
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let actor = id(0x8b);
+    let admin_role = builtin_owner_id();
+    let mut setup_audit = identity_audit_event(0x8c, admin_role, actor);
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(
+        id(0x8c),
+        admin_role,
+        9_999,
+        &[
+            principal_write_with_name(actor, 1, 1, "column_limit_owner"),
+            object_write_with_name(actor, 8, "column_limit_owner"),
+            membership_write(actor, admin_role),
+            dependency_write(actor, admin_role, 5),
+        ],
+        &[setup_audit],
+    )?;
+    let schema_invocation = id(0x8d);
+    let mut schema_audit = identity_audit_event(0x8e, actor, id(0x8f));
+    schema_audit.correlation_id = schema_invocation;
+    let schema = storage.create_schema(
+        schema_invocation,
+        actor,
+        "column_limit_schema",
+        actor,
+        9_999,
+        schema_audit,
+    )?;
+    let create_invocation = id(0x90);
+    let mut create_audit = identity_audit_event(0x91, actor, id(0x92));
+    create_audit.correlation_id = create_invocation;
+    let table = storage.create_table(CreateTableRequest {
+        invocation_id: create_invocation,
+        authenticated_actor_id: actor,
+        schema_id: schema.schema_id,
+        name: "bounded_table".to_owned(),
+        columns: vec![TableColumnDefinition {
+            name: "value".to_owned(),
+            scalar_type: ScalarType::Integer,
+            nullable: false,
+            generated_uuid_identity: false,
+            default: None,
+        }],
+        retention_deadline_us: 9_999,
+        audit_event: create_audit,
+    })?;
+    let old_tuple = encode_tuple(
+        &[ColumnSchema {
+            scalar_type: ScalarType::Integer,
+            nullable: false,
+        }],
+        1,
+        &[Some(ScalarValue::Integer(1))],
+    )?;
+    let rows = (1u64..=65_537)
+        .map(|row_number| {
+            let mut row_suffix = [0; 16];
+            row_suffix[8..].copy_from_slice(&row_number.to_be_bytes());
+            RowWrite {
+                key: table_row_key(table.table_id, row_suffix),
+                expected_version: None,
+                payload: Some(old_tuple.clone()),
+            }
+        })
+        .collect::<Vec<_>>();
+    let rows_invocation = id(0x93);
+    let before_add = commit_rows(&database, rows_invocation, actor, 9_999, &rows)?;
+    let add_invocation = id(0x94);
+    let mut add_audit = identity_audit_event(0x95, actor, id(0x96));
+    add_audit.correlation_id = add_invocation;
+    assert_eq!(
+        storage.add_table_column(AddTableColumnRequest {
+            invocation_id: add_invocation,
+            authenticated_actor_id: actor,
+            table_id: table.table_id,
+            column: TableColumnDefinition {
+                name: "extra".to_owned(),
+                scalar_type: ScalarType::Text,
+                nullable: true,
+                generated_uuid_identity: false,
+                default: None,
+            },
+            retention_deadline_us: 9_999,
+            audit_event: add_audit,
+        }),
+        Err(TableLifecycleError::Commit(
+            CommitError::ColumnAddLimitExceeded
+        ))
+    );
+    assert_eq!(commit_sequence(&database)?, before_add);
+    assert_eq!(
+        lookup_outcome(&database, add_invocation, actor, 1)?
+            .ok_or("missing add-column limit outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
+    let read = database.begin_read()?;
+    let table_record = decode_registered_envelope(
+        read.open_table(CATALOG)?
+            .get(id_catalog_key(5, table.table_id).as_slice())?
+            .ok_or("table record missing after add-column limit")?
+            .value(),
+    )?;
+    assert_eq!(
+        u64::from_le_bytes(
+            table_record
+                .fields
+                .iter()
+                .find(|field| field.tag == 2)
+                .ok_or("table schema version missing")?
+                .payload
+                .as_slice()
+                .try_into()?
+        ),
+        1
+    );
+    let mut scanned_columns = 0;
+    for entry in read
+        .open_table(CATALOG)?
+        .range(6u16.to_be_bytes().as_slice()..)?
+    {
+        let (key, value) = entry?;
+        let key = key.value();
+        if !key.starts_with(&6u16.to_be_bytes()) {
+            break;
+        }
+        let record = decode_registered_envelope(value.value())?;
+        if record
+            .fields
+            .iter()
+            .any(|field| field.tag == 1 && field.payload.as_slice() == table.table_id)
+        {
+            scanned_columns += 1;
+        }
+    }
+    assert_eq!(scanned_columns, 1);
+    drop(read);
+
+    let mut last_row_suffix = [0; 16];
+    last_row_suffix[8..].copy_from_slice(&65_537u64.to_be_bytes());
+    let last_row_key = table_row_key(table.table_id, last_row_suffix);
+    let remove_last_row_invocation = id(0x97);
+    assert_eq!(
+        commit_rows(
+            &database,
+            remove_last_row_invocation,
+            actor,
+            9_999,
+            &[RowWrite {
+                key: last_row_key,
+                expected_version: Some(before_add),
+                payload: None,
+            }],
+        )?,
+        before_add + 1
+    );
+    let boundary_invocation = id(0x98);
+    let mut boundary_audit = identity_audit_event(0x99, actor, id(0x9a));
+    boundary_audit.correlation_id = boundary_invocation;
+    let boundary_add = storage.add_table_column(AddTableColumnRequest {
+        invocation_id: boundary_invocation,
+        authenticated_actor_id: actor,
+        table_id: table.table_id,
+        column: TableColumnDefinition {
+            name: "extra".to_owned(),
+            scalar_type: ScalarType::Text,
+            nullable: true,
+            generated_uuid_identity: false,
+            default: None,
+        },
+        retention_deadline_us: 9_999,
+        audit_event: boundary_audit,
+    })?;
+    assert_eq!(boundary_add.schema_version, 2);
+    assert_eq!(boundary_add.commit_sequence, before_add + 2);
+    assert_eq!(
+        lookup_outcome(&database, boundary_invocation, actor, 1)?
+            .ok_or("missing exact-bound add-column outcome")?
+            .status,
+        OutcomeStatus::Committed
+    );
+    StorageManager::new(&database, Duration::from_millis(100))?;
+    Ok(())
+}
+
+#[test]
+fn storage_manager_add_column_byte_limit_aborts_atomically()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::storage_manager::{
+        AddTableColumnRequest, CreateTableRequest, TableColumnDefault, TableColumnDefinition,
+        TableLifecycleError,
+    };
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let actor = id(0x9b);
+    let admin_role = builtin_owner_id();
+    let mut setup_audit = identity_audit_event(0x9c, admin_role, actor);
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(
+        id(0x9c),
+        admin_role,
+        9_999,
+        &[
+            principal_write_with_name(actor, 1, 1, "column_bytes_owner"),
+            object_write_with_name(actor, 8, "column_bytes_owner"),
+            membership_write(actor, admin_role),
+            dependency_write(actor, admin_role, 5),
+        ],
+        &[setup_audit],
+    )?;
+    let schema_invocation = id(0x9d);
+    let mut schema_audit = identity_audit_event(0x9e, actor, id(0x9f));
+    schema_audit.correlation_id = schema_invocation;
+    let schema = storage.create_schema(
+        schema_invocation,
+        actor,
+        "column_bytes_schema",
+        actor,
+        9_999,
+        schema_audit,
+    )?;
+    let create_invocation = id(0xa0);
+    let mut create_audit = identity_audit_event(0xa1, actor, id(0xa2));
+    create_audit.correlation_id = create_invocation;
+    let table = storage.create_table(CreateTableRequest {
+        invocation_id: create_invocation,
+        authenticated_actor_id: actor,
+        schema_id: schema.schema_id,
+        name: "bounded_bytes_table".to_owned(),
+        columns: vec![TableColumnDefinition {
+            name: "value".to_owned(),
+            scalar_type: ScalarType::Text,
+            nullable: false,
+            generated_uuid_identity: false,
+            default: None,
+        }],
+        retention_deadline_us: 9_999,
+        audit_event: create_audit,
+    })?;
+
+    let mut rows = Vec::with_capacity(33);
+    let mut combined_bytes = 0usize;
+    for row_number in 1u64..=33 {
+        let value_bytes = if row_number == 33 {
+            1_016_779
+        } else {
+            1_016_763
+        };
+        let value = String::from_utf8(vec![b'x'; value_bytes])?;
+        let payload = encode_tuple(
+            &[ColumnSchema {
+                scalar_type: ScalarType::Text,
+                nullable: false,
+            }],
+            1,
+            &[Some(ScalarValue::Text(value))],
+        )?;
+        combined_bytes += 2 * payload.len() + 25;
+        let mut row_suffix = [0; 16];
+        row_suffix[8..].copy_from_slice(&row_number.to_be_bytes());
+        rows.push(RowWrite {
+            key: table_row_key(table.table_id, row_suffix),
+            expected_version: None,
+            payload: Some(payload),
+        });
+    }
+    assert_eq!(combined_bytes, 64 * 1024 * 1024 + 1);
+    let rows_invocation = id(0xa3);
+    let before_add = commit_rows(&database, rows_invocation, actor, 9_999, &rows)?;
+    let add_invocation = id(0xa4);
+    let mut add_audit = identity_audit_event(0xa5, actor, id(0xa6));
+    add_audit.correlation_id = add_invocation;
+    assert_eq!(
+        storage.add_table_column(AddTableColumnRequest {
+            invocation_id: add_invocation,
+            authenticated_actor_id: actor,
+            table_id: table.table_id,
+            column: TableColumnDefinition {
+                name: "extra".to_owned(),
+                scalar_type: ScalarType::Text,
+                nullable: true,
+                generated_uuid_identity: false,
+                default: None,
+            },
+            retention_deadline_us: 9_999,
+            audit_event: add_audit,
+        }),
+        Err(TableLifecycleError::Commit(
+            CommitError::ColumnAddLimitExceeded
+        ))
+    );
+    assert_eq!(commit_sequence(&database)?, before_add);
+    assert_eq!(
+        lookup_outcome(&database, add_invocation, actor, 1)?
+            .ok_or("missing add-column byte-limit outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
+    let read = database.begin_read()?;
+    let table_record = decode_registered_envelope(
+        read.open_table(CATALOG)?
+            .get(id_catalog_key(5, table.table_id).as_slice())?
+            .ok_or("table record missing after add-column byte limit")?
+            .value(),
+    )?;
+    assert_eq!(
+        u64::from_le_bytes(
+            table_record
+                .fields
+                .iter()
+                .find(|field| field.tag == 2)
+                .ok_or("table schema version missing")?
+                .payload
+                .as_slice()
+                .try_into()?
+        ),
+        1
+    );
+    drop(read);
+
+    let remove_rows_invocation = id(0xa7);
+    let remove_rows = rows
+        .iter()
+        .map(|row| RowWrite {
+            key: row.key,
+            expected_version: Some(before_add),
+            payload: None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        commit_rows(
+            &database,
+            remove_rows_invocation,
+            actor,
+            9_999,
+            &remove_rows,
+        )?,
+        before_add + 1
+    );
+
+    let mut boundary_rows = Vec::with_capacity(34);
+    let mut boundary_combined_bytes = 0usize;
+    for row_number in 1u64..=34 {
+        let value_bytes = if row_number > 32 { 986_858 } else { 986_857 };
+        let value = String::from_utf8(vec![b'x'; value_bytes])?;
+        let payload = encode_tuple(
+            &[ColumnSchema {
+                scalar_type: ScalarType::Text,
+                nullable: false,
+            }],
+            1,
+            &[Some(ScalarValue::Text(value))],
+        )?;
+        boundary_combined_bytes += 2 * payload.len() + 26;
+        let mut row_suffix = [0; 16];
+        row_suffix[8..].copy_from_slice(&row_number.to_be_bytes());
+        boundary_rows.push(RowWrite {
+            key: table_row_key(table.table_id, row_suffix),
+            expected_version: None,
+            payload: Some(payload),
+        });
+    }
+    assert_eq!(boundary_combined_bytes, 64 * 1024 * 1024);
+    let boundary_rows_invocation = id(0xa8);
+    let before_boundary_add = commit_rows(
+        &database,
+        boundary_rows_invocation,
+        actor,
+        9_999,
+        &boundary_rows,
+    )?;
+    let boundary_invocation = id(0xa9);
+    let mut boundary_audit = identity_audit_event(0xaa, actor, id(0xab));
+    boundary_audit.correlation_id = boundary_invocation;
+    let boundary_add = storage.add_table_column(AddTableColumnRequest {
+        invocation_id: boundary_invocation,
+        authenticated_actor_id: actor,
+        table_id: table.table_id,
+        column: TableColumnDefinition {
+            name: "extra".to_owned(),
+            scalar_type: ScalarType::Text,
+            nullable: true,
+            generated_uuid_identity: false,
+            default: Some(TableColumnDefault::Literal(Some(ScalarValue::Text(
+                "x".to_owned(),
+            )))),
+        },
+        retention_deadline_us: 9_999,
+        audit_event: boundary_audit,
+    })?;
+    assert_eq!(boundary_add.schema_version, 2);
+    assert_eq!(boundary_add.commit_sequence, before_boundary_add + 1);
+    assert_eq!(
+        lookup_outcome(&database, boundary_invocation, actor, 1)?
+            .ok_or("missing exact byte-bound add-column outcome")?
+            .status,
+        OutcomeStatus::Committed
+    );
+    StorageManager::new(&database, Duration::from_millis(100))?;
+    Ok(())
+}
+
+#[test]
 fn catalog_commit_rejects_removing_a_mapped_builtin_type() -> Result<(), Box<dyn std::error::Error>>
 {
     let fixture = Fixture::new();
