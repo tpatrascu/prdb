@@ -1279,6 +1279,37 @@ impl<'db> StorageManager<'db> {
         token_id: [u8; 16],
         token_secret: &[u8; TOKEN_SECRET_BYTES],
     ) -> Result<AuthenticatedQuerySession, TransactionError> {
+        let (principal_id, role_ids) = self.resolve_query_identity(token_id, token_secret)?;
+        let connection_id = generate_query_connection_id()?;
+        Ok(AuthenticatedQuerySession {
+            connection_id,
+            token_id,
+            principal_id,
+            role_ids,
+        })
+    }
+
+    /// Refresh the current login and role closure before a new execution or
+    /// control operation, preserving this network connection's session ID.
+    pub fn revalidate_query_session(
+        &self,
+        session: &mut AuthenticatedQuerySession,
+        token_secret: &[u8; TOKEN_SECRET_BYTES],
+    ) -> Result<(), TransactionError> {
+        let (principal_id, role_ids) =
+            self.resolve_query_identity(session.token_id, token_secret)?;
+        if principal_id != session.principal_id {
+            return Err(TransactionError::AuthenticationFailed);
+        }
+        session.role_ids = role_ids;
+        Ok(())
+    }
+
+    fn resolve_query_identity(
+        &self,
+        token_id: [u8; 16],
+        token_secret: &[u8; TOKEN_SECRET_BYTES],
+    ) -> Result<([u8; 16], HashSet<[u8; 16]>), TransactionError> {
         if token_id == [0; 16] {
             return Err(TransactionError::AuthenticationFailed);
         }
@@ -1317,28 +1348,7 @@ impl<'db> StorageManager<'db> {
             TokenLifecycleError::Storage(message) => TransactionError::Storage(message),
             _ => TransactionError::AuthenticationFailed,
         })?;
-        let connection_id = generate_query_connection_id()?;
-        Ok(AuthenticatedQuerySession {
-            connection_id,
-            token_id,
-            principal_id,
-            role_ids,
-        })
-    }
-
-    /// Refresh the current login and role closure before a new execution or
-    /// control operation, preserving this network connection's session ID.
-    pub fn revalidate_query_session(
-        &self,
-        session: &mut AuthenticatedQuerySession,
-        token_secret: &[u8; TOKEN_SECRET_BYTES],
-    ) -> Result<(), TransactionError> {
-        let refreshed = self.authenticate_query_session(session.token_id, token_secret)?;
-        if refreshed.principal_id != session.principal_id {
-            return Err(TransactionError::AuthenticationFailed);
-        }
-        session.role_ids = refreshed.role_ids;
-        Ok(())
+        Ok((principal_id, role_ids))
     }
 
     /// Admit a token-authenticated invocation into the supervisor-owned
