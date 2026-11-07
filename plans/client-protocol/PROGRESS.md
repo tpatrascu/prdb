@@ -27,3 +27,10 @@
 - Changed code and fixtures: [HELLO/AUTH decoder](../../engine/src/client_protocol.rs) and [control decoder regressions](../../engine/tests/client_protocol.rs).
 - Verification: focused protocol suite passed: 4 tests, including duplicate/unknown keys, escapes, trailing bytes, unpaired surrogates, lowercase IDs, and canonical base64.
 - Remaining: decode other operation payloads and connect the session state to a live gateway TCP listener/service.
+
+## NP-2 dependency: handshake frame dispatcher
+
+- Behavior: the connection session accepts HELLO as the first request, validates increasing request IDs, answers HELLO/AUTH/PING with bounded sequence-zero responses, and rejects pre-HELLO PING and repeated/out-of-order operations.
+- Changed code: [handshake dispatcher](../../engine/src/client_protocol.rs) and [client session integration regression](../../engine/tests/commit.rs).
+- Verification: focused real-redb handshake regression passes in the repository Nix shell.
+- Remaining: dispatch query/control operation schemas and connect to TCP and the supervisor service channel.

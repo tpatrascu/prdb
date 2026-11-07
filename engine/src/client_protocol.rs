@@ -67,6 +67,7 @@ pub enum ClientSessionError {
     AlreadyAuthenticated,
     AuthenticationRequired,
     WrongMode,
+    UnsupportedRequest,
     InvalidControlPayload(ClientControlError),
     Storage(TransactionError),
 }
@@ -409,9 +410,65 @@ pub struct ClientConnectionSession {
     hello: Option<ClientMode>,
     authenticated: Option<AuthenticatedQuerySession>,
     token_secret: Option<[u8; TOKEN_SECRET_BYTES]>,
+    request_ids: ClientRequestIds,
 }
 
 impl ClientConnectionSession {
+    /// Process the protocol handshake and PING requests. The TCP adapter must
+    /// decode bounded frames first and close the connection on framing errors.
+    pub fn handle_handshake_request(
+        &mut self,
+        storage: &StorageManager<'_>,
+        request: ClientFrame,
+    ) -> Result<ClientFrame, ClientSessionError> {
+        if request.response_sequence != 0 {
+            return Err(ClientSessionError::UnsupportedRequest);
+        }
+        self.request_ids
+            .accept(&request)
+            .map_err(|_| ClientSessionError::UnsupportedRequest)?;
+        if !self.permits_request_kind(request.kind) {
+            return Err(if self.hello.is_none() || request.kind == 1 {
+                ClientSessionError::UnsupportedRequest
+            } else if self.authenticated.is_none() {
+                ClientSessionError::AuthenticationRequired
+            } else {
+                ClientSessionError::WrongMode
+            });
+        }
+        let payload = match request.kind {
+            1 => {
+                let hello = decode_client_hello(&request.payload)
+                    .map_err(ClientSessionError::InvalidControlPayload)?;
+                let mode_text = match hello.mode {
+                    ClientMode::Query => "query",
+                    ClientMode::Control => "control",
+                };
+                self.accept_hello(hello.mode, &hello.client_name)?;
+                format!(
+                    "{{\"major\":1,\"minor\":0,\"mode\":\"{mode_text}\",\"limits\":{{\"payload_bytes\":{CLIENT_MAX_PAYLOAD_BYTES},\"control_bytes\":{CLIENT_MAX_CONTROL_BYTES},\"chunk_bytes\":{CLIENT_MAX_CHUNK_BYTES}}},\"transport\":\"plaintext_tcp\"}}"
+                )
+                .into_bytes()
+            }
+            2 => {
+                let credentials = decode_client_credentials(&request.payload)
+                    .map_err(ClientSessionError::InvalidControlPayload)?;
+                let session =
+                    self.authenticate(storage, credentials.token_id, &credentials.token_secret)?;
+                let session_id = encode_lower_hex_id(session.connection_id());
+                format!("{{\"session_id\":\"{session_id}\",\"authenticated\":true}}").into_bytes()
+            }
+            11 if request.payload == b"{}" => b"{\"alive\":true}".to_vec(),
+            _ => return Err(ClientSessionError::UnsupportedRequest),
+        };
+        Ok(ClientFrame {
+            kind: 100,
+            request_id: request.request_id,
+            response_sequence: 0,
+            payload,
+        })
+    }
+
     /// Accept the one HELLO for this connection before any AUTH request.
     pub fn accept_hello(
         &mut self,
@@ -521,7 +578,7 @@ impl ClientConnectionSession {
     /// Enforce the v1 mode and pre-authentication operation allowlists.
     pub fn permits_request_kind(&self, kind: u16) -> bool {
         let Some(mode) = self.hello else {
-            return kind == 1 || kind == 11;
+            return kind == 1;
         };
         let Some(_) = self.authenticated else {
             return kind == 2 || kind == 11;
@@ -531,6 +588,16 @@ impl ClientConnectionSession {
             ClientMode::Control => (8..=10).contains(&kind) || kind == 11,
         }
     }
+}
+
+fn encode_lower_hex_id(id: [u8; 16]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(32);
+    for byte in id {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
 }
 
 impl Drop for ClientConnectionSession {

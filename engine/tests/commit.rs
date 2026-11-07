@@ -7485,6 +7485,66 @@ fn client_session_authenticates_and_revalidates_before_operations()
 }
 
 #[test]
+fn client_handshake_requires_hello_first_and_sequences_responses()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::client_protocol::{ClientConnectionSession, ClientFrame, ClientSessionError};
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let mut session = ClientConnectionSession::default();
+    assert!(matches!(
+        session.handle_handshake_request(
+            &storage,
+            ClientFrame {
+                kind: 11,
+                request_id: 1,
+                response_sequence: 0,
+                payload: b"{}".to_vec(),
+            },
+        ),
+        Err(ClientSessionError::UnsupportedRequest)
+    ));
+    let hello = session.handle_handshake_request(
+        &storage,
+        ClientFrame {
+            kind: 1,
+            request_id: 2,
+            response_sequence: 0,
+            payload: br#"{"mode":"query","client_name":"test"}"#.to_vec(),
+        },
+    )?;
+    assert_eq!(hello.kind, 100);
+    assert_eq!(hello.request_id, 2);
+    assert_eq!(hello.response_sequence, 0);
+    assert!(std::str::from_utf8(&hello.payload)?.contains("\"mode\":\"query\""));
+
+    let ping = session.handle_handshake_request(
+        &storage,
+        ClientFrame {
+            kind: 11,
+            request_id: 3,
+            response_sequence: 0,
+            payload: b"{}".to_vec(),
+        },
+    )?;
+    assert_eq!(ping.payload, b"{\"alive\":true}");
+    assert!(matches!(
+        session.handle_handshake_request(
+            &storage,
+            ClientFrame {
+                kind: 1,
+                request_id: 4,
+                response_sequence: 0,
+                payload: br#"{"mode":"query","client_name":"again"}"#.to_vec(),
+            },
+        ),
+        Err(ClientSessionError::UnsupportedRequest)
+    ));
+    Ok(())
+}
+
+#[test]
 fn storage_manager_issues_and_revokes_tokens_for_manage_users()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::storage_manager::{TokenIssueRequest, TokenLifecycleError};
