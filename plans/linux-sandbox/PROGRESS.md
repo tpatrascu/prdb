@@ -39,7 +39,7 @@
 - Ordering: attach the invocation cgroup first, then namespaces, then Landlock and seccomp. The command handle tracks the reaper; the invocation cgroup is required to terminate the entire worker tree.
 - Regression: [Linux namespace tests](../../engine/tests/linux_sandbox.rs) check distinct user/mount/network/PID namespace handles, worker PID 1, zero effective and bounding capabilities, `NoNewPrivs`, isolation from the supervisor PID in `/proc`, cgroup-hook ordering, and that `Command::spawn` returns before worker exit.
 - Observed runtime: both focused namespace tests passed on the configured Linux host. They launch only harmless shell probes; no query artifact is loaded.
-- Remaining: wire the hook chain into a clean executor launcher, provision filesystem/runtime resources, and exercise the full profile with a delegated cgroup parent and hostile fixtures.
+- Remaining: wire the hook chain and `prdb-executor` host into the supervisor, provision filesystem/runtime resources, and exercise the full profile with a delegated cgroup parent and hostile fixtures.
 
 ## SB-2 dependency: clean worker exec environment — implemented
 
@@ -47,7 +47,7 @@
 - Ordering: call after cgroup, namespace, and Landlock hooks have registered their setup work; add only non-secret environment values after this helper. It runs before the worker's final `exec`.
 - Regression: [clean worker command test](../../engine/tests/linux_sandbox.rs) verifies a kept close-on-exec descriptor survives, an unlisted descriptor is absent, and a supervisor environment variable is stripped.
 - Verification: focused regression passed with Rust/Cargo 1.95.0. Full Nix-shell validation passed: formatting, workspace build, warning-denied Clippy, all workspace tests, and `git diff --check`.
-- Remaining: wire this command setup into the clean executor launcher and validate that only the intended IPC descriptors are provisioned.
+- Remaining: call this command setup from the supervisor and validate that only the intended IPC descriptors are provisioned.
 
 ## SB-2 / SB-3 dependency: ordered worker pre-exec configuration — implemented
 
@@ -55,7 +55,7 @@
 - Regression: the composed command test exercises the ordered setup chain with a worker shell, verifies an allowed scratch write, checks the environment is cleared, confirms an unlisted file read fails, and confirms the cgroup placement hook ran. Separate namespace tests inspect the namespace handles and PID view.
 - TDD evidence: the focused test first failed to compile because the ordering API was absent; it passed after the helper assembled the existing hooks.
 - Verification: focused composition regression passed with Rust/Cargo 1.95.0. Full Nix-shell validation passed: formatting, workspace build, warning-denied Clippy, all workspace tests, and `git diff --check`.
-- Remaining: create and own the real invocation cgroup, spawn the clean executor host, install seccomp post-exec, and run confined TinyCC artifacts through the full supported profile.
+- Remaining: create and own the real invocation cgroup, spawn the clean executor host from the supervisor, and run confined TinyCC artifacts through the full supported profile.
 
 ## SB-4 dependency: worker syscall filter — implemented for Linux x86_64
 
@@ -63,4 +63,4 @@
 - Ordering: call after the worker host's final `exec` and before loading the query library or creating threads. Do not install it in the supervisor or before the namespace hook's final exec.
 - Regression: a disposable copy of the test executable confirms `getpid` remains available and a new socket syscall terminates the child with `SIGSYS`.
 - Verification: the focused seccomp regression passed with Rust/Cargo 1.95.0. Full Nix-shell validation passed: formatting, workspace build, warning-denied Clippy, all workspace tests, and `git diff --check`.
-- Remaining: integrate with the clean executor launcher, validate the allowlist against the supported Rust/libc/SDK runtime and admitted query behavior, and run hostile artifact fixtures only in that sandbox. This host still lacks the writable delegated cgroup parent needed for a complete launch.
+- Remaining: wire the clean executor host into the supervisor, validate the allowlist against the supported Rust/libc/SDK runtime and admitted query behavior, and run hostile artifact fixtures only in that sandbox. This host still lacks the writable delegated cgroup parent needed for a complete launch.

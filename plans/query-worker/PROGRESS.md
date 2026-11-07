@@ -8,3 +8,12 @@
 - TDD evidence: the focused Rust ABI test first failed to compile because the `query_abi` module did not exist; it passes against the implemented records and validator.
 - Verification: focused Rust tests passed (3/3). TinyCC 0.9.27-unstable-2025-01-06 compiled `query_abi_v1_layout.c` to an ELF object. The object was not linked into or loaded by a process. Full workspace formatting, build, warning-denied Clippy, all tests, TinyCC header compilation, and `git diff --check` passed after the bounded marshalling addition.
 - Remaining: implement the clean executor host and confined load/descriptor/entry validation, define storage/result callbacks, and exercise compatible/mismatch artifacts only through the full sandbox harness.
+
+## EX-1 dependency: clean post-exec worker host — implemented, artifact launch pending
+
+- Behavior: `prdb-executor --library ABSOLUTE_PATH --parameters-fd FD` verifies PID 1, `no_new_privs`, and empty effective/permitted/inheritable/bounding capability sets; then it installs seccomp, opens the library, validates the v1 descriptor, resolves `prdb_query_main_v1`, reads parameters with a 1 MiB cap, and calls the entry point. It retains the mapping and exits the process without unloading arbitrary code. `--self-check` exercises startup and seccomp without loading a library.
+- Changed code: [executor host binary](../../engine/src/bin/prdb-executor.rs), [ABI contract](../../engine/src/query_abi.rs), and [Linux hook configuration](../../engine/src/linux_sandbox.rs).
+- Regression: [executor host tests](../../engine/tests/linux_sandbox.rs) launch `--self-check` through namespaces, Landlock, clean descriptors/environment, and a test cgroup hook; direct unconfined invocation is rejected before loading.
+- Observed limit: these tests do not load a query library and do not use a real delegated cgroup. This host's cgroup parent is read-only; the artifact loader's real dynamic-loader, constructor, descriptor mismatch, and entry-point path remain unverified until the complete profile is available.
+- Verification: the focused executor tests passed (2/2); full workspace formatting, build, warning-denied Clippy, and tests passed. The artifact-loading path was not invoked.
+- Remaining: wire cgroup creation and command spawning into the supervisor, establish a writable delegated cgroup parent, then load compatible and mismatch fixtures only through the full sandbox harness. Add storage, planning, result, and cancellation host callbacks in a later ABI.

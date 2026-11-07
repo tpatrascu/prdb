@@ -407,6 +407,55 @@ fn configured_worker_command_applies_the_pre_exec_confinement_chain() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn executor_host_self_check_installs_seccomp_after_exec() {
+    use prdb_engine::linux_sandbox::{LandlockPolicy, LandlockRuleset};
+    use std::process::Command;
+
+    let fixture = Fixture::new();
+    let executable = std::path::PathBuf::from(env!("CARGO_BIN_EXE_prdb-executor"));
+    let mut policy = LandlockPolicy::default();
+    policy
+        .allow_read_execute(executable.parent().unwrap())
+        .unwrap();
+    for path in ["/lib", "/lib64", "/usr/lib", "/usr/lib64", "/nix/store"] {
+        if std::path::Path::new(path).exists() {
+            policy.allow_read_execute(path).unwrap();
+        }
+    }
+    policy.allow_writable(&fixture.0).unwrap();
+    let ruleset = LandlockRuleset::new(&policy).unwrap();
+    let mut command = Command::new(executable);
+    command.arg("--self-check");
+    linux_sandbox::configure_worker_command(&mut command, &fixture.0, &ruleset, &[]).unwrap();
+
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "executor self-check failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn executor_host_rejects_direct_unconfined_launch_before_library_loading() {
+    use std::process::Command;
+
+    let executable = env!("CARGO_BIN_EXE_prdb-executor");
+    let output = Command::new(executable)
+        .args(["--library", "/etc/passwd", "--parameters-fd", "3"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("PID 1 in its private PID namespace"),
+        "unexpected rejection: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn landlock_blocks_unlisted_filesystem_reads_before_exec() {
     use prdb_engine::linux_sandbox::{LandlockPolicy, LandlockRuleset};
     use std::process::{Command, Stdio};
