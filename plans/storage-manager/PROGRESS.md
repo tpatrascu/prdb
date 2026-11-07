@@ -1247,4 +1247,12 @@
 - Contract and implementation: [storage status authority](../../specs/storage-manager.md), [control protocol status](../../specs/client-protocol.md), [StorageManager lookup](../../engine/src/storage_manager.rs), and [control-mode session handler](../../engine/src/client_protocol.rs).
 - Regression evidence: the real-redb administrative runtime test verifies a current administrator can see another owner's active invocation and retained ABORTED outcome, a non-administrator is denied, and a missing ID remains unavailable. The same test exercises both point statuses through an authenticated control-mode session.
 - Verification: focused real-redb test passed in the configured Nix shell.
-- Remaining: control-mode CANCEL is not yet wired to the audited administrative cancellation API; ADMIN operations, explicit sanitized ERROR responses, and process-separated service integration remain open.
+- Remaining at that increment: control-mode CANCEL was still unwired; the following increment records its audited implementation. ADMIN operations, explicit sanitized ERROR responses, and process-separated service integration remain open.
+
+## SM-5 / NP-5 dependency: administrator control-mode cancellation
+
+- Behavior: control-mode CANCEL revalidates the authenticated session, creates a fresh audit event, and delegates to `StorageManager::cancel_invocation`, which checks current administrator authority, applies the per-actor request limit, serializes against COMMITTING, and persists the cancellation decision. Query-mode prepared/owner cancellation keeps its existing owner-scoped path.
+- Contract and implementation: [client cancellation semantics](../../specs/client-protocol.md), [audited storage cancellation](../../specs/storage-manager.md), and [control session handler](../../engine/src/client_protocol.rs).
+- Regression evidence: the real-redb control-mode test cancels a live invocation and confirms its administrative status exposes `cancellation_requested = true`.
+- Verification: focused test and full configured Nix-shell validation passed: format check, workspace build, warning-denied Clippy, all workspace tests, and `git diff --check`.
+- Remaining: `ADMIN` operation envelopes/dispatch, sanitized protocol ERROR responses, and the separate supervisor process remain open.

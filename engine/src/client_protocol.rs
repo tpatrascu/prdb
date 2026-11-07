@@ -73,6 +73,7 @@ pub enum ClientSessionError {
     Staging(crate::supervisor::StagingError),
     Status(crate::storage_manager::InvocationStatusError),
     AdministrativeStatus(crate::storage_manager::AdministrativeInvocationListError),
+    AdministrativeCancellation(crate::storage_manager::AdministrativeCancellationError),
     Storage(TransactionError),
 }
 
@@ -1025,11 +1026,62 @@ impl ClientConnectionSession {
         staging: &crate::supervisor::StagingStore,
         request: ClientFrame,
     ) -> Result<ClientFrame, ClientSessionError> {
-        let invocation_id = self.validate_control_request(storage, &request, 9, true)?;
+        let invocation_id = self.validate_control_request(storage, &request, 9, false)?;
         let session = self
             .authenticated
             .as_ref()
             .ok_or(ClientSessionError::AuthenticationRequired)?;
+        if self.hello == Some(ClientMode::Control) {
+            let now_us = current_unix_micros().ok_or(ClientSessionError::UnsupportedRequest)?;
+            let mut event_id = [0; 16];
+            getrandom::fill(&mut event_id).map_err(|_| {
+                ClientSessionError::Storage(TransactionError::RandomnessUnavailable)
+            })?;
+            if event_id == [0; 16] {
+                return Err(ClientSessionError::Storage(
+                    TransactionError::RandomnessUnavailable,
+                ));
+            }
+            let result = storage
+                .cancel_invocation(
+                    session.principal_id(),
+                    invocation_id,
+                    1,
+                    now_us,
+                    crate::audit::AuditEvent {
+                        event_id,
+                        actor_id: Some(session.principal_id()),
+                        correlation_id: invocation_id,
+                        occurred_at_us: now_us,
+                        action: crate::audit::AuditAction::AdministrativeCancellation,
+                        result: crate::audit::AuditResult::Accepted,
+                        target_ids: vec![invocation_id],
+                    },
+                )
+                .map_err(ClientSessionError::AdministrativeCancellation)?;
+            let payload = match result {
+                crate::storage_manager::AdministrativeCancellationResult::Accepted => {
+                    b"{\"state\":\"accepted\"}".to_vec()
+                }
+                crate::storage_manager::AdministrativeCancellationResult::TooLate => {
+                    b"{\"state\":\"too_late\"}".to_vec()
+                }
+                crate::storage_manager::AdministrativeCancellationResult::Terminal(outcome) => {
+                    match outcome.status {
+                        crate::outcome::OutcomeStatus::Committed => {
+                            b"{\"state\":\"committed\"}".to_vec()
+                        }
+                        crate::outcome::OutcomeStatus::Aborted => {
+                            b"{\"state\":\"aborted\"}".to_vec()
+                        }
+                    }
+                }
+                crate::storage_manager::AdministrativeCancellationResult::Unknown => {
+                    b"{\"state\":\"unknown\"}".to_vec()
+                }
+            };
+            return self.json_response(request.request_id, payload);
+        }
         match staging.cancel_prepared(session.staging_owner(), invocation_id) {
             Ok(()) => self.json_response(request.request_id, b"{\"state\":\"accepted\"}".to_vec()),
             Err(crate::supervisor::StagingError::InvalidState) => {

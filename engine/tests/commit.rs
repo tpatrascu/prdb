@@ -3394,6 +3394,22 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         },
     )?;
     assert_eq!(terminal_status.payload, b"{\"state\":\"aborted\"}");
+    let cancelled = control.handle_cancel_prepared_request(
+        &storage,
+        &staging,
+        ClientFrame {
+            kind: 9,
+            request_id: 3,
+            response_sequence: 0,
+            payload: encode_invocation_id(id(233)),
+        },
+    )?;
+    assert_eq!(cancelled.payload, b"{\"state\":\"accepted\"}");
+    assert!(matches!(
+        storage.get_administrative_invocation_status(admin_id, id(233), now_us)?,
+        Some(snapshot) if matches!(snapshot.status,
+            InvocationStatus::Active { cancellation_requested: true, .. })
+    ));
 
     let revocation_cursor = storage
         .list_runtime_invocations(admin_id, now_us, 1, None)?
