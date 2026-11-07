@@ -19,10 +19,10 @@ Use user, mount, network, and PID namespaces, filesystem restrictions, Landlock,
 ## Launch Ordering
 
 1. A trusted launch path creates the execution environment and scoped channels.
-2. Establish filesystem/process/network isolation and resource controls. Register cgroup placement first, then install Landlock in a child-side pre-exec hook; both must succeed before `exec`.
-3. Remove inherited descriptors, environment secrets, capabilities, and unwanted access.
-4. Apply required restrictions before transferring control to any untrusted code.
-5. In the clean executor host, load the admitted immutable query.so and supported dependencies only inside that confinement, then invoke its entry point.
+2. Establish filesystem/process/network isolation and resource controls. Register cgroup placement first, then namespaces, then Landlock in child-side pre-exec hooks; all must succeed before `exec`.
+3. Clear the inherited environment and close descriptors above stderr except the explicit IPC allowlist, after setup hooks have consumed their descriptors. Fail launch if descriptor closure is unavailable or any allowlisted descriptor is invalid.
+4. Drop capabilities and apply required restrictions before transferring control to any untrusted code.
+5. In the clean executor host, install the seccomp profile, then load the admitted immutable query.so and supported dependencies only inside that confinement, then invoke its entry point.
 
 Implementation must resolve loader/runtime syscall needs without an unconstrained startup window. Library constructors count as untrusted execution. Do not fork a worker from a secret-bearing storage address space and execute user code in the inherited image; use a clean execution image before user code runs.
 
@@ -40,7 +40,9 @@ Verify the minimum supported feature profile before launch. The capability probe
 
 `attach_namespaces_before_exec` enters a new rootless user namespace with one UID/GID mapping to the invoking host IDs, denies later group changes, then creates private mount, network, and PID namespaces. Mount propagation becomes private; the PID 1 worker mounts a new `/proc` view for its PID namespace before its effective, permitted, inheritable, and bounding capability sets are cleared. This ordering prevents the old host `/proc` mount from exposing host process IDs. Capabilities are cleared before the final executable image starts. Since `CLONE_NEWPID` applies to children, the hook forks a trusted outer reaper; it closes its inherited descriptors before waiting, while the worker child continues through later pre-exec hooks. The reaper's `Child` handle does not terminate the inner worker by itself, so launchers must place the process tree in the per-invocation cgroup and use cgroup kill/cleanup for cancellation and timeout.
 
-Register `WorkerCgroup::attach_command_before_exec` before the namespace hook, then register Landlock and seccomp hooks after it. `install_worker_seccomp_filter` currently provides an initial Linux x86_64 syscall allowlist for the clean Rust executor host. It checks the audit architecture before syscall numbers, kills the process tree for unlisted syscalls, sets `no_new_privs`, and uses TSYNC to apply the filter to existing threads. Install it in the worker host after `exec` and before opening the query library; do not install it in the supervisor or before the worker's final `exec`. Other architectures fail closed as unsupported. The profile must be extended deliberately when the worker runtime changes.
+Register `WorkerCgroup::attach_command_before_exec` before the namespace hook, then register Landlock after it. `install_worker_seccomp_filter` currently provides an initial Linux x86_64 syscall allowlist for the clean Rust executor host. It checks the audit architecture before syscall numbers, kills the process tree for unlisted syscalls, sets `no_new_privs`, and uses TSYNC to apply the filter to existing threads. Install it in the worker host after `exec` and before opening the query library; do not install it in the supervisor or before the worker's final `exec`. Other architectures fail closed as unsupported. The profile must be extended deliberately when the worker runtime changes.
+
+`prepare_clean_worker_command` clears the environment and closes descriptors above stderr except an explicit IPC allowlist. Register its descriptor-closing hook after cgroup, namespace, and Landlock hooks so their setup descriptors remain usable. The helper requires Linux `close_range` and clears `FD_CLOEXEC` on preserved IPC descriptors in the child. Add only non-secret environment variables after calling it.
 
 These hooks establish ordering primitives only: they do not form a complete launcher, and no artifact may be opened until all required controls have been installed. The seccomp regression launches a test executable as a disposable child and checks an allowed runtime syscall plus process-kill behavior for an unlisted socket-creation syscall. It does not load user artifacts. Full cgroup/Landlock/seccomp executor launch remains unimplemented.
 

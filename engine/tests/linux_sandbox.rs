@@ -299,6 +299,40 @@ fn worker_seccomp_filter_allows_runtime_calls_and_kills_unlisted_syscalls() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn prepare_clean_worker_command_scrubs_environment_and_descriptors() {
+    use std::os::fd::AsRawFd;
+    use std::process::Command;
+
+    let source = fs::File::open("/dev/null").unwrap();
+    // SAFETY: dup2 creates controlled descriptors in this test process; they
+    // are explicitly closed after the child has been observed.
+    assert_eq!(unsafe { libc::dup2(source.as_raw_fd(), 100) }, 100);
+    assert_eq!(unsafe { libc::dup2(source.as_raw_fd(), 101) }, 101);
+    assert_eq!(
+        unsafe { libc::fcntl(101, libc::F_SETFD, libc::FD_CLOEXEC) },
+        0
+    );
+
+    let mut command = Command::new("/bin/sh");
+    command
+        .env("PRDB_SUPERVISOR_SECRET", "must-not-inherit")
+        .args([
+            "-c",
+            "test -e /proc/self/fd/101 && test ! -e /proc/self/fd/100 && test -z \"${PRDB_SUPERVISOR_SECRET+x}\"",
+        ]);
+    linux_sandbox::prepare_clean_worker_command(&mut command, &[101]).unwrap();
+
+    let status = command.status().unwrap();
+    // SAFETY: these descriptors were created above and are no longer needed.
+    unsafe {
+        libc::close(100);
+        libc::close(101);
+    }
+    assert!(status.success());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn landlock_blocks_unlisted_filesystem_reads_before_exec() {
     use prdb_engine::linux_sandbox::{LandlockPolicy, LandlockRuleset};
     use std::process::{Command, Stdio};

@@ -39,7 +39,15 @@
 - Ordering: attach the invocation cgroup first, then namespaces, then Landlock and seccomp. The command handle tracks the reaper; the invocation cgroup is required to terminate the entire worker tree.
 - Regression: [Linux namespace tests](../../engine/tests/linux_sandbox.rs) check distinct user/mount/network/PID namespace handles, worker PID 1, zero effective and bounding capabilities, `NoNewPrivs`, isolation from the supervisor PID in `/proc`, cgroup-hook ordering, and that `Command::spawn` returns before worker exit.
 - Observed runtime: both focused namespace tests passed on the configured Linux host. They launch only harmless shell probes; no query artifact is loaded.
-- Remaining: wire the hook chain into a clean executor launcher, scrub inherited worker descriptors/environment, provision filesystem/runtime resources, and exercise the full profile with a delegated cgroup parent and hostile fixtures.
+- Remaining: wire the hook chain into a clean executor launcher, provision filesystem/runtime resources, and exercise the full profile with a delegated cgroup parent and hostile fixtures.
+
+## SB-2 dependency: clean worker exec environment — implemented
+
+- Behavior: `prepare_clean_worker_command` clears inherited environment variables and registers a child hook that closes all descriptors above stderr except explicit IPC descriptors. It clears `FD_CLOEXEC` on preserved descriptors and fails spawn if a preserved descriptor is invalid or Linux `close_range` is unavailable.
+- Ordering: call after cgroup, namespace, and Landlock hooks have registered their setup work; add only non-secret environment values after this helper. It runs before the worker's final `exec`.
+- Regression: [clean worker command test](../../engine/tests/linux_sandbox.rs) verifies a kept close-on-exec descriptor survives, an unlisted descriptor is absent, and a supervisor environment variable is stripped.
+- Verification: focused regression passed with Rust/Cargo 1.95.0. Full Nix-shell validation passed: formatting, workspace build, warning-denied Clippy, all workspace tests, and `git diff --check`.
+- Remaining: wire this command setup into the clean executor launcher and validate that only the intended IPC descriptors are provisioned.
 
 ## SB-4 dependency: worker syscall filter — implemented for Linux x86_64
 

@@ -169,6 +169,75 @@ pub fn attach_namespaces_before_exec(_command: &mut std::process::Command) -> io
     ))
 }
 
+/// Clear inherited environment variables and close every descriptor above
+/// stderr except the explicit worker IPC descriptors before `exec`.
+///
+/// Register this after cgroup, namespace, and Landlock pre-exec hooks so their
+/// setup descriptors remain available until installed. The caller may then
+/// add only non-secret environment values with `Command::env`.
+/// Preserved descriptors have `FD_CLOEXEC` cleared in the child so they survive
+/// the final exec. Linux `close_range` support is required; failure aborts spawn.
+pub fn prepare_clean_worker_command(
+    command: &mut std::process::Command,
+    inherited_fds: &[i32],
+) -> io::Result<()> {
+    if inherited_fds.iter().any(|fd| *fd < 3) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "worker IPC descriptors must be greater than stderr",
+        ));
+    }
+    command.env_clear();
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+
+        let mut preserved = inherited_fds.to_vec();
+        preserved.sort_unstable();
+        preserved.dedup();
+        let mut close_ranges = Vec::with_capacity(preserved.len() + 1);
+        let mut next = 3u32;
+        for fd in &preserved {
+            let fd = *fd as u32;
+            if next < fd {
+                close_ranges.push((next, fd - 1));
+            }
+            next = fd + 1;
+        }
+        close_ranges.push((next, u32::MAX));
+
+        // SAFETY: the pre-exec closure uses only async-signal-safe syscalls and
+        // owned scalar/vector data prepared before fork.
+        unsafe {
+            command.pre_exec(move || {
+                for fd in &preserved {
+                    let flags = libc::fcntl(*fd, libc::F_GETFD);
+                    if flags < 0 || libc::fcntl(*fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+                for (first, last) in &close_ranges {
+                    if libc::syscall(libc::SYS_close_range, *first, *last, 0u32) < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = inherited_fds;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "clean worker descriptor setup requires Linux close_range",
+        ))
+    }
+}
+
 #[cfg(target_os = "linux")]
 unsafe fn enter_worker_namespaces(host_uid: libc::uid_t, host_gid: libc::gid_t) -> io::Result<()> {
     // SAFETY: unshare receives only a fixed namespace flag mask.
