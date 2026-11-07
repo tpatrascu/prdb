@@ -1401,6 +1401,131 @@ fn storage_manager_drop_table_removes_owned_catalog_and_rows()
 }
 
 #[test]
+fn storage_manager_drop_table_racing_invocation_leaves_no_orphan_row()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::storage_manager::{CreateTableRequest, TableColumnDefinition};
+    use prdb_engine::transaction::TransactionError;
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let actor = id(0x31);
+    let admin_role = builtin_owner_id();
+    let mut setup_audit = identity_audit_event(0x32, admin_role, actor);
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(
+        id(0x32),
+        admin_role,
+        9_999,
+        &[
+            principal_write_with_name(actor, 1, 1, "drop_race_owner"),
+            object_write_with_name(actor, 8, "drop_race_owner"),
+            membership_write(actor, admin_role),
+            dependency_write(actor, admin_role, 5),
+        ],
+        &[setup_audit],
+    )?;
+    let schema_invocation = id(0x33);
+    let mut schema_audit = identity_audit_event(0x34, actor, id(0x35));
+    schema_audit.correlation_id = schema_invocation;
+    let schema = storage.create_schema(
+        schema_invocation,
+        actor,
+        "drop_race_schema",
+        actor,
+        9_999,
+        schema_audit,
+    )?;
+    let create_invocation = id(0x36);
+    let mut create_audit = identity_audit_event(0x37, actor, id(0x38));
+    create_audit.correlation_id = create_invocation;
+    let table = storage.create_table(CreateTableRequest {
+        invocation_id: create_invocation,
+        authenticated_actor_id: actor,
+        schema_id: schema.schema_id,
+        name: "racing_drop".to_owned(),
+        columns: vec![TableColumnDefinition {
+            name: "value".to_owned(),
+            scalar_type: ScalarType::Text,
+            nullable: true,
+            generated_uuid_identity: false,
+            default: None,
+        }],
+        retention_deadline_us: 9_999,
+        audit_event: create_audit,
+    })?;
+
+    let writer_invocation = id(0x39);
+    let staged_row_id = id(0x3a);
+    let mut writer = storage.begin_invocation(writer_invocation, actor, 9_999, 1, 1024)?;
+    let table_schema = writer.load_catalog_table_schema(table.table_id)?;
+    writer.load_catalog_indexes(&table_schema)?;
+    let payload = encode_tuple(
+        &table_schema.columns,
+        table_schema.schema_version,
+        &[Some(ScalarValue::Text("racing commit".to_owned()))],
+    )?;
+    writer.stage_put(
+        prdb_engine::overlay::RowId {
+            table: table.table_id,
+            row: staged_row_id,
+        },
+        &payload,
+    )?;
+
+    let barrier = Arc::new(Barrier::new(3));
+    let drop_invocation = id(0x3b);
+    let (commit_result, drop_result) = std::thread::scope(|scope| {
+        let commit_barrier = barrier.clone();
+        let commit = scope.spawn(move || {
+            commit_barrier.wait();
+            writer.commit()
+        });
+        let drop_barrier = barrier.clone();
+        let drop_storage = &storage;
+        let drop = scope.spawn(move || {
+            let mut audit = identity_audit_event(0x3c, actor, table.table_id);
+            audit.correlation_id = drop_invocation;
+            drop_barrier.wait();
+            drop_storage.drop_table(drop_invocation, actor, table.table_id, 9_999, audit)
+        });
+        barrier.wait();
+        (commit.join().unwrap(), drop.join().unwrap())
+    });
+
+    let writer_status = match commit_result {
+        Ok(_) => OutcomeStatus::Committed,
+        Err(TransactionError::Commit(CommitError::Conflict)) => OutcomeStatus::Aborted,
+        other => panic!("unexpected table-drop race writer result: {other:?}"),
+    };
+    assert!(
+        drop_result.is_ok(),
+        "table drop lost race unexpectedly: {drop_result:?}"
+    );
+    assert_eq!(
+        lookup_outcome(&database, writer_invocation, actor, 1)?
+            .ok_or("missing racing writer outcome")?
+            .status,
+        writer_status
+    );
+    assert_eq!(
+        lookup_outcome(&database, drop_invocation, actor, 1)?
+            .ok_or("missing racing table-drop outcome")?
+            .status,
+        OutcomeStatus::Committed
+    );
+    assert!(row(&database, &table_row_key(table.table_id, staged_row_id))?.is_none());
+    let read = database.begin_read()?;
+    assert!(
+        read.open_table(CATALOG)?
+            .get(id_catalog_key(5, table.table_id).as_slice())?
+            .is_none()
+    );
+    StorageManager::new(&database, Duration::from_millis(100))?;
+    Ok(())
+}
+
+#[test]
 fn storage_manager_drop_table_byte_limit_aborts_atomically()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::storage_manager::{
