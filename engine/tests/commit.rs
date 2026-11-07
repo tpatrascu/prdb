@@ -10696,6 +10696,37 @@ fn storage_manager_separates_foreign_key_alter_and_references_authority()
             OutcomeStatus::Aborted
         );
     }
+    let restricted_table_drop = id(0x7f);
+    let mut restricted_table_drop_audit = identity_audit_event(0x7f, ddl_admin, target_table_id);
+    restricted_table_drop_audit.correlation_id = restricted_table_drop;
+    assert_eq!(
+        storage.drop_table(
+            restricted_table_drop,
+            ddl_admin,
+            target_table_id,
+            9_999,
+            restricted_table_drop_audit,
+        ),
+        Err(prdb_engine::storage_manager::TableLifecycleError::Commit(
+            CommitError::TableHasDependencies
+        ))
+    );
+    assert_eq!(
+        lookup_outcome(&database, restricted_table_drop, ddl_admin, 1)?
+            .ok_or("missing FK-restricted table-drop outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
+    {
+        let read = database.begin_read()?;
+        let catalog = read.open_table(CATALOG)?;
+        assert!(catalog.get(foreign_key_key.as_slice())?.is_some());
+        assert!(
+            catalog
+                .get(id_catalog_key(5, target_table_id).as_slice())?
+                .is_some()
+        );
+    }
 
     let mut removed_foreign_key = foreign_key_definition.clone();
     removed_foreign_key.expected_value = foreign_key_definition.payload.clone();
@@ -10764,6 +10795,7 @@ fn storage_manager_separates_foreign_key_alter_and_references_authority()
         (id(0x72), alter_and_reference_user, OutcomeStatus::Committed),
         (id(0x73), alter_only_user, OutcomeStatus::Committed),
         (id(0x74), reference_only_user, OutcomeStatus::Aborted),
+        (restricted_table_drop, ddl_admin, OutcomeStatus::Aborted),
         (
             stale_source_invocation,
             alter_and_reference_user,
