@@ -1262,7 +1262,14 @@
 - Behavior: control-mode ADMIN accepts the strict version-1 `tokens.list` read envelope, revalidates the connection before execution, checks owner/MANAGE_USERS/database-administrator authority in storage, and returns at most 64 token metadata records with an ID cursor. Verifier and bearer-secret material are omitted.
 - Contract and implementation: [client protocol](../../specs/client-protocol.md), [bounded token page](../../engine/src/storage_manager.rs), [ADMIN decoder and session handler](../../engine/src/client_protocol.rs), and gateway IPC kind mapping.
 - Regression evidence: decoder coverage rejects prepare-phase mutation envelopes and unknown arguments; a real-redb authenticated control-mode session exercises the gateway IPC ADMIN dispatch for another user's inventory and verifies secret material is absent.
-- Remaining: credential issue/revoke, other ADMIN read operations and mutation prepare/start, and the separate supervisor process remain open.
+- Remaining: credential issuance, other ADMIN read operations and mutations, and the separate supervisor process remain open.
+
+## SM-5 / NP-5 dependency: prepared token revocation ADMIN operation
+
+- Behavior: ADMIN PREPARE reserves one random operation ID and token ID on the control connection; START must present that ID on the same connection. START consumes the reservation before calling the audited `StorageManager::revoke_token` path. The storage layer performs the current `MANAGE_USERS` check and commits the revocation with its audit and durable operation outcome. Unknown, already revoked, and unauthorized tokens retain the storage API's shared failure.
+- Contract and implementation: [tokens.revoke ADMIN contract](../../specs/client-protocol.md), [strict ADMIN command decoder and per-session operation reservation](../../engine/src/client_protocol.rs), and gateway operation dispatch.
+- Regression evidence: decoder tests cover both phase schemas; a real-redb gateway-dispatch regression uses a separate `MANAGE_USERS` principal to prepare/start revocation and confirms the target metadata becomes revoked.
+- Remaining: credential issuance, other ADMIN operations, operation reservation cleanup/status details after uncertain failures, and the separate supervisor/worker process remain open.
 
 ## SU-1 / GW-2 dependency: sanitized client ERROR responses
 

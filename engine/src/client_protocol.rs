@@ -159,8 +159,38 @@ pub enum ClientAdminRead {
     },
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClientAdminCommand {
+    ListTokens {
+        user_id: [u8; 16],
+        after_token_id: Option<[u8; 16]>,
+    },
+    PrepareRevoke {
+        token_id: [u8; 16],
+    },
+    Start {
+        operation_id: [u8; 16],
+    },
+}
+
 /// Decode the versioned, read-only ADMIN envelope and its first supported operation.
 pub fn decode_client_admin_read(payload: &[u8]) -> Result<ClientAdminRead, ClientControlError> {
+    match decode_client_admin_command(payload)? {
+        ClientAdminCommand::ListTokens {
+            user_id,
+            after_token_id,
+        } => Ok(ClientAdminRead::ListTokens {
+            user_id,
+            after_token_id,
+        }),
+        _ => Err(ClientControlError::UnsupportedAdminOperation),
+    }
+}
+
+/// Decode the currently supported ADMIN read and credential-revocation commands.
+pub fn decode_client_admin_command(
+    payload: &[u8],
+) -> Result<ClientAdminCommand, ClientControlError> {
     if payload.len() > CLIENT_MAX_CONTROL_BYTES {
         return Err(ClientControlError::InvalidJson);
     }
@@ -175,6 +205,7 @@ pub fn decode_client_admin_read(payload: &[u8]) -> Result<ClientAdminRead, Clien
     let mut version = None;
     let mut operation = None;
     let mut arguments = None;
+    let mut operation_id = None;
     let mut seen = std::collections::HashSet::new();
     loop {
         parser.skip_whitespace();
@@ -192,6 +223,7 @@ pub fn decode_client_admin_read(payload: &[u8]) -> Result<ClientAdminRead, Clien
             "phase" => phase = Some(parser.parse_string()?),
             "operation_version" => version = Some(parser.parse_u64_number()?),
             "operation" => operation = Some(parser.parse_string()?),
+            "operation_id" => operation_id = Some(parser.parse_string()?),
             "arguments" => {
                 parser.expect(b'{')?;
                 let mut args = HashMap::new();
@@ -236,32 +268,54 @@ pub fn decode_client_admin_read(payload: &[u8]) -> Result<ClientAdminRead, Clien
     if parser.offset != parser.text.len() {
         return Err(ClientControlError::InvalidJson);
     }
-    if phase.as_deref() != Some("read")
-        || version != Some(1)
-        || operation.as_deref() != Some("tokens.list")
-    {
-        return Err(ClientControlError::UnsupportedAdminOperation);
+    match phase.as_deref() {
+        Some("read") if version == Some(1) && operation.as_deref() == Some("tokens.list") => {
+            if operation_id.is_some() || seen.len() != 4 {
+                return Err(ClientControlError::UnknownKey);
+            }
+            let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
+            let user_id = decode_lower_hex_id(
+                &args
+                    .remove("user_id")
+                    .ok_or(ClientControlError::MissingKey)?,
+            )?;
+            let after_token_id = args
+                .remove("after_token_id")
+                .map(|value| decode_lower_hex_id(&value))
+                .transpose()?;
+            if !args.is_empty() {
+                return Err(ClientControlError::UnknownKey);
+            }
+            Ok(ClientAdminCommand::ListTokens {
+                user_id,
+                after_token_id,
+            })
+        }
+        Some("prepare") if version == Some(1) && operation.as_deref() == Some("tokens.revoke") => {
+            if operation_id.is_some() || seen.len() != 4 {
+                return Err(ClientControlError::UnknownKey);
+            }
+            let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
+            let token_id = decode_lower_hex_id(
+                &args
+                    .remove("token_id")
+                    .ok_or(ClientControlError::MissingKey)?,
+            )?;
+            if !args.is_empty() {
+                return Err(ClientControlError::UnknownKey);
+            }
+            Ok(ClientAdminCommand::PrepareRevoke { token_id })
+        }
+        Some("start") if version.is_none() && operation.is_none() => {
+            if arguments.is_some() || seen.len() != 2 {
+                return Err(ClientControlError::UnknownKey);
+            }
+            let operation_id =
+                decode_lower_hex_id(&operation_id.ok_or(ClientControlError::MissingKey)?)?;
+            Ok(ClientAdminCommand::Start { operation_id })
+        }
+        _ => Err(ClientControlError::UnsupportedAdminOperation),
     }
-    if seen.len() != 4 {
-        return Err(ClientControlError::MissingKey);
-    }
-    let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
-    let user_id = decode_lower_hex_id(
-        &args
-            .remove("user_id")
-            .ok_or(ClientControlError::MissingKey)?,
-    )?;
-    let after_token_id = args
-        .remove("after_token_id")
-        .map(|value| decode_lower_hex_id(&value))
-        .transpose()?;
-    if !args.is_empty() {
-        return Err(ClientControlError::UnknownKey);
-    }
-    Ok(ClientAdminRead::ListTokens {
-        user_id,
-        after_token_id,
-    })
 }
 
 impl Drop for ClientCredentials {
@@ -814,6 +868,7 @@ pub struct ClientConnectionSession {
     authenticated: Option<AuthenticatedQuerySession>,
     token_secret: Option<[u8; TOKEN_SECRET_BYTES]>,
     request_ids: ClientRequestIds,
+    pending_admin_revoke: Option<([u8; 16], [u8; 16])>,
 }
 
 impl ClientConnectionSession {
@@ -1135,11 +1190,12 @@ impl ClientConnectionSession {
         }
     }
 
-    /// Execute the read-only ADMIN `tokens.list` operation.
+    /// Execute supported ADMIN reads and connection-owned prepare/start operations.
     pub fn handle_admin_request(
         &mut self,
         storage: &StorageManager<'_>,
         request: ClientFrame,
+        retention_deadline_us: i64,
     ) -> Result<ClientFrame, ClientSessionError> {
         if request.response_sequence != 0 || request.kind != 10 {
             return Err(ClientSessionError::UnsupportedRequest);
@@ -1155,55 +1211,126 @@ impl ClientConnectionSession {
             });
         }
         self.revalidate_storage(storage)?;
-        let ClientAdminRead::ListTokens {
-            user_id,
-            after_token_id,
-        } = decode_client_admin_read(&request.payload)
+        let command = decode_client_admin_command(&request.payload)
             .map_err(ClientSessionError::InvalidControlPayload)?;
         let actor_id = self
             .authenticated
             .as_ref()
             .ok_or(ClientSessionError::AuthenticationRequired)?
             .principal_id();
-        let page = storage
-            .list_tokens_page(actor_id, user_id, after_token_id)
-            .map_err(ClientSessionError::TokenInventory)?;
-        let mut payload = String::from("{\"tokens\":[");
-        for (index, token) in page.tokens.iter().enumerate() {
-            if index != 0 {
-                payload.push(',');
+        match command {
+            ClientAdminCommand::ListTokens {
+                user_id,
+                after_token_id,
+            } => {
+                let page = storage
+                    .list_tokens_page(actor_id, user_id, after_token_id)
+                    .map_err(ClientSessionError::TokenInventory)?;
+                let mut payload = String::from("{\"tokens\":[");
+                for (index, token) in page.tokens.iter().enumerate() {
+                    if index != 0 {
+                        payload.push(',');
+                    }
+                    payload.push_str("{\"token_id\":\"");
+                    payload.push_str(&encode_lower_hex_id(token.token_id));
+                    payload.push_str("\",\"label\":\"");
+                    push_json_string(&mut payload, &token.label);
+                    payload.push_str("\",\"issued_at_us\":");
+                    payload.push_str(&token.issued_at_us.to_string());
+                    payload.push_str(" ,\"expires_at_us\":");
+                    payload.push_str(&token.expires_at_us.to_string());
+                    payload.push_str(" ,\"revoked\":");
+                    payload.push_str(if token.revoked { "true" } else { "false" });
+                    payload.push_str(" ,\"revoked_at_us\":");
+                    if let Some(revoked_at) = token.revoked_at_us {
+                        payload.push_str(&revoked_at.to_string());
+                    } else {
+                        payload.push_str("null");
+                    }
+                    payload.push('}');
+                }
+                payload.push_str("],\"next_after_token_id\":");
+                if let Some(cursor) = page.next_after_token_id {
+                    payload.push('"');
+                    payload.push_str(&encode_lower_hex_id(cursor));
+                    payload.push('"');
+                } else {
+                    payload.push_str("null");
+                }
+                payload.push('}');
+                if payload.len() > CLIENT_MAX_CONTROL_BYTES {
+                    return Err(ClientSessionError::ResourceLimit);
+                }
+                self.json_response(request.request_id, payload.into_bytes())
             }
-            payload.push_str("{\"token_id\":\"");
-            payload.push_str(&encode_lower_hex_id(token.token_id));
-            payload.push_str("\",\"label\":\"");
-            push_json_string(&mut payload, &token.label);
-            payload.push_str("\",\"issued_at_us\":");
-            payload.push_str(&token.issued_at_us.to_string());
-            payload.push_str(" ,\"expires_at_us\":");
-            payload.push_str(&token.expires_at_us.to_string());
-            payload.push_str(" ,\"revoked\":");
-            payload.push_str(if token.revoked { "true" } else { "false" });
-            payload.push_str(" ,\"revoked_at_us\":");
-            if let Some(revoked_at) = token.revoked_at_us {
-                payload.push_str(&revoked_at.to_string());
-            } else {
-                payload.push_str("null");
+            ClientAdminCommand::PrepareRevoke { token_id } => {
+                if self.pending_admin_revoke.is_some() {
+                    return Err(ClientSessionError::WrongMode);
+                }
+                let mut operation_id = [0; 16];
+                getrandom::fill(&mut operation_id).map_err(|_| {
+                    ClientSessionError::Storage(TransactionError::RandomnessUnavailable)
+                })?;
+                if operation_id == [0; 16] {
+                    return Err(ClientSessionError::Storage(
+                        TransactionError::RandomnessUnavailable,
+                    ));
+                }
+                self.pending_admin_revoke = Some((operation_id, token_id));
+                self.json_response(
+                    request.request_id,
+                    format!(
+                        "{{\"operation_id\":\"{}\",\"state\":\"prepared\"}}",
+                        encode_lower_hex_id(operation_id)
+                    )
+                    .into_bytes(),
+                )
             }
-            payload.push('}');
+            ClientAdminCommand::Start { operation_id } => {
+                let Some((pending_id, token_id)) = self.pending_admin_revoke else {
+                    return Err(ClientSessionError::WrongMode);
+                };
+                if pending_id != operation_id {
+                    return Err(ClientSessionError::WrongMode);
+                }
+                self.pending_admin_revoke = None;
+                let now_us = current_unix_micros().ok_or(ClientSessionError::UnsupportedRequest)?;
+                let mut event_id = [0; 16];
+                getrandom::fill(&mut event_id).map_err(|_| {
+                    ClientSessionError::Storage(TransactionError::RandomnessUnavailable)
+                })?;
+                if event_id == [0; 16] {
+                    return Err(ClientSessionError::Storage(
+                        TransactionError::RandomnessUnavailable,
+                    ));
+                }
+                let sequence = storage
+                    .revoke_token(
+                        operation_id,
+                        actor_id,
+                        token_id,
+                        retention_deadline_us,
+                        crate::audit::AuditEvent {
+                            event_id,
+                            actor_id: Some(actor_id),
+                            correlation_id: operation_id,
+                            occurred_at_us: now_us,
+                            action: crate::audit::AuditAction::TokenLifecycle,
+                            result: crate::audit::AuditResult::Succeeded,
+                            target_ids: vec![token_id],
+                        },
+                    )
+                    .map_err(ClientSessionError::TokenInventory)?;
+                self.json_response(
+                    request.request_id,
+                    format!(
+                        "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"commit_sequence\":\"{sequence}\"}}",
+                        encode_lower_hex_id(operation_id)
+                    )
+                    .into_bytes(),
+                )
+            }
         }
-        payload.push_str("],\"next_after_token_id\":");
-        if let Some(cursor) = page.next_after_token_id {
-            payload.push('"');
-            payload.push_str(&encode_lower_hex_id(cursor));
-            payload.push('"');
-        } else {
-            payload.push_str("null");
-        }
-        payload.push('}');
-        if payload.len() > CLIENT_MAX_CONTROL_BYTES {
-            return Err(ClientSessionError::ResourceLimit);
-        }
-        self.json_response(request.request_id, payload.into_bytes())
     }
 
     /// Cancel an unstarted reservation without creating a storage outcome.

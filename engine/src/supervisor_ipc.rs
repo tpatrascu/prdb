@@ -456,7 +456,11 @@ pub fn dispatch_gateway_client_request<'db>(
             .handle_cancel_prepared_request(manager, staging, frame(9, request.payload.clone()))
             .map_err(GatewayRequestError::Client)?,
         Operation::SubmitAdministrativeOperation => session
-            .handle_admin_request(manager, frame(10, request.payload.clone()))
+            .handle_admin_request(
+                manager,
+                frame(10, request.payload.clone()),
+                admission.retention_deadline_us,
+            )
             .map_err(GatewayRequestError::Client)?,
         _ => return Err(GatewayRequestError::InvalidPayload),
     };

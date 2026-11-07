@@ -3258,6 +3258,9 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
     let admin_id = id(230);
     let ordinary_id = id(231);
     let backup_admin_id = id(235);
+    let user_manager_id = id(238);
+    let manage_users_role = id(239);
+    let database_id = id(0x33);
     let admin_role = builtin_owner_id();
     let records = [
         principal_write_with_name(admin_id, 1, 1, "runtime_admin"),
@@ -3266,12 +3269,28 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         object_write_with_name(ordinary_id, 8, "runtime_user"),
         principal_write_with_name(backup_admin_id, 1, 1, "backup_admin"),
         object_write_with_name(backup_admin_id, 8, "backup_admin"),
+        principal_write_with_name(user_manager_id, 1, 1, "token_manager"),
+        object_write_with_name(user_manager_id, 8, "token_manager"),
+        principal_write_with_name(manage_users_role, 2, 1, "manage_users"),
+        object_write_with_name(manage_users_role, 9, "manage_users"),
         membership_write_with_grantor(admin_id, admin_role, admin_role),
         dependency_write(admin_id, admin_role, 5),
         membership_write_with_grantor(backup_admin_id, admin_role, admin_role),
         dependency_write(backup_admin_id, admin_role, 5),
+        membership_write_with_grantor(user_manager_id, manage_users_role, admin_role),
+        dependency_write(user_manager_id, manage_users_role, 5),
+        grant_write(
+            manage_users_role,
+            database_id,
+            12,
+            1,
+            database_id,
+            admin_role,
+        ),
+        dependency_write(manage_users_role, database_id, 5),
         credential_verifier_write(id(236), backup_admin_id, &[0x6a; 32], 1, i64::MAX, None, 1),
         credential_verifier_write(id(237), admin_id, &[0x5a; 32], 1, i64::MAX, None, 1),
+        credential_verifier_write(id(240), user_manager_id, &[0x4b; 32], 1, i64::MAX, None, 1),
     ];
     let mut setup_audit = audit_event(216);
     setup_audit.actor_id = Some(admin_role);
@@ -3440,6 +3459,101 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
     assert!(token_inventory.contains("\"revoked\":false"));
     assert!(!token_inventory.contains("verifier"));
     assert!(!token_inventory.contains("secret"));
+    let mut user_manager_control = ClientConnectionSession::default();
+    user_manager_control.accept_hello(ClientMode::Control, "token-manager")?;
+    user_manager_control.authenticate(&storage, id(240), &[0x4b; 32])?;
+    let prepare_revoke = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut user_manager_control,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 1,
+            payload: format!(
+                "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"tokens.revoke\",\"arguments\":{{\"token_id\":\"{}\"}}}}",
+                id(240).iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+            ).into_bytes(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_deadline_us,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )?;
+    let prepare_revoke = match prepare_revoke {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => {
+            String::from_utf8(response.payload)?
+        }
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
+            return Err("ADMIN revoke prepare unexpectedly started".into());
+        }
+    };
+    let operation_id = prepare_revoke
+        .split("\"operation_id\":\"")
+        .nth(1)
+        .ok_or("missing ADMIN operation ID")?
+        .get(..32)
+        .ok_or("invalid ADMIN operation ID")?;
+    assert!(prepare_revoke.ends_with("\",\"state\":\"prepared\"}"));
+    let wrong_operation = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut user_manager_control,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 2,
+            payload: format!(
+                "{{\"phase\":\"start\",\"operation_id\":\"{}\"}}",
+                format!("{:02x}", 241).repeat(16)
+            )
+            .into_bytes(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_deadline_us,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    );
+    assert!(matches!(
+        wrong_operation,
+        Err(prdb_engine::supervisor_ipc::GatewayRequestError::Client(
+            prdb_engine::client_protocol::ClientSessionError::WrongMode
+        ))
+    ));
+    let revoke = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut user_manager_control,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 3,
+            payload: format!("{{\"phase\":\"start\",\"operation_id\":\"{operation_id}\"}}")
+                .into_bytes(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_deadline_us,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )?;
+    let revoke = match revoke {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => {
+            String::from_utf8(response.payload)?
+        }
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
+            return Err("ADMIN revoke start returned a worker invocation".into());
+        }
+    };
+    assert!(revoke.contains("\"outcome\":\"committed\""));
+    assert!(
+        storage
+            .list_tokens(admin_id, user_manager_id)?
+            .iter()
+            .any(|token| token.token_id == id(240) && token.revoked)
+    );
     assert!(matches!(
         storage.get_administrative_invocation_status(admin_id, id(233), now_us)?,
         Some(snapshot) if matches!(snapshot.status,
