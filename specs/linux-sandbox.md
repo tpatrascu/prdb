@@ -14,7 +14,7 @@ Contain arbitrary native worker code using Linux OS mechanisms without a VM. The
 - Only explicitly provisioned descriptors and approved runtime resources.
 - Bounded CPU, memory, process count, output, and wall time.
 
-Use namespaces, filesystem restrictions, and a narrow seccomp allowlist as complementary mechanisms. Evaluate Landlock as an additional layer. Resource controls may combine cgroups, resource limits, and supervisor enforcement; exact mechanisms and required privileges remain to be selected.
+Use user, mount, network, and PID namespaces, filesystem restrictions, Landlock, and a narrow seccomp allowlist as complementary mechanisms. The initial launch profile requires Landlock ABI 1 or newer, seccomp filter support with `KILL_PROCESS`, and a writable delegated cgroup v2 parent with the `cpu`, `memory`, and `pids` controllers enabled. The `prdb-engine::linux_sandbox::probe` report is a preflight only; the launcher must still establish each restriction for the worker and fail closed if any setup operation fails. This profile requires rootless user namespaces and delegated cgroup v2 control; there is no weaker launch fallback.
 
 ## Launch Ordering
 
@@ -34,7 +34,7 @@ The TinyCC-produced C library, prebuilt C SDK, libc dependencies, and Rust execu
 
 ## Capability Detection and Failure
 
-Specify a minimum supported feature profile and verify it at launch. Fail closed when required restrictions are unavailable; never silently run with weaker isolation. Rootless deployment feasibility and cgroup delegation depend on the host configuration and require explicit validation.
+Verify the minimum supported feature profile before launch. Capability presence does not prove that namespace, Landlock, seccomp, or cgroup setup will succeed for a particular worker; each setup step must be checked at launch before transferring control to the executor. Fail closed when required restrictions are unavailable; never silently run with weaker isolation. Rootless deployment feasibility and cgroup delegation depend on the host configuration and require explicit validation.
 
 The supervisor must clean up descendants and resources after crashes or timeouts and request transaction abort before commit. Killing a process does not undo a durable commit. Storage retains version pins until its own in-flight tasks drain. Sandbox limits do not replace storage-side request, write-set, and history-retention budgets.
 

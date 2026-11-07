@@ -12,6 +12,7 @@ pub mod expression;
 pub mod index_key;
 pub mod index_locator;
 pub mod ipc;
+pub mod linux_sandbox;
 pub mod metadata;
 pub mod metadata_discovery;
 pub mod outcome;
