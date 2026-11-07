@@ -1086,3 +1086,11 @@
 - Changed code and regression: [started submission handoff](../../engine/src/supervisor.rs) and [real-redb START lifecycle](../../engine/tests/commit.rs).
 - Verification: focused START/handoff regression passes in the repository Nix shell.
 - Remaining: pass the handle to a supervisor process launcher that establishes the required sandbox before loading the artifact.
+
+## SU-1 / IPC-6 dependency: gateway submission IPC dispatcher
+
+- Behavior: a role-checked gateway dispatcher maps AUTH, PREPARE, chunk, SEAL, START, STATUS, and CANCEL operation tags to the strict per-client session handlers. Chunk IPC prepends an explicit artifact/parameter kind byte. START returns the network acknowledgement plus a typed storage invocation and immutable submission handle to trusted supervisor code; those authority-bearing objects are never serialized.
+- Contract: [gateway submission IPC payloads](../../specs/ipc-protocol.md).
+- Changed code and integration regression: [gateway request dispatcher](../../engine/src/supervisor_ipc.rs) and [real-redb full submission path](../../engine/tests/commit.rs).
+- Verification: focused real-redb HELLO/AUTH and IPC submission lifecycle test passes in the repository Nix shell.
+- Remaining: run this dispatcher from a provisioned, bounded Unix service loop and keep launch/results in a separate supervisor process.

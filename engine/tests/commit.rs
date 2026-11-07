@@ -7481,8 +7481,12 @@ fn client_session_authenticates_and_revalidates_before_operations()
 fn client_handshake_requires_hello_first_and_sequences_responses()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::client_protocol::{ClientConnectionSession, ClientFrame, ClientSessionError};
+    use prdb_engine::ipc::{IpcFrame, Operation, ServiceRole};
     use prdb_engine::supervisor::{
         StagingLimits, StagingStore, SubmissionMetadata, SubmissionMetadataValidator,
+    };
+    use prdb_engine::supervisor_ipc::{
+        GatewayAdmissionConfig, GatewayClientDispatch, dispatch_gateway_client_request,
     };
     use sha2::{Digest, Sha256};
     use std::sync::Arc;
@@ -7553,6 +7557,13 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
     assert_eq!(hello.response_sequence, 0);
     assert!(std::str::from_utf8(&hello.payload)?.contains("\"mode\":\"query\""));
 
+    let staging = StagingStore::new(StagingLimits::default(), Arc::new(AcceptUpload))?;
+    let admission = GatewayAdmissionConfig {
+        retention_deadline_us: now + 3_600_000_000,
+        max_rows: 2,
+        max_bytes: 64,
+    };
+
     let token_id_hex = token_id
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -7560,16 +7571,24 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
     let token_secret_base64 = "A".repeat(43) + "=";
     let auth_payload =
         format!("{{\"token_id\":\"{token_id_hex}\",\"token_secret\":\"{token_secret_base64}\"}}");
-    let auth = session.handle_handshake_request(
+    let auth = match dispatch_gateway_client_request(
+        ServiceRole::Gateway,
         &storage,
-        ClientFrame {
-            kind: 2,
+        &staging,
+        &mut session,
+        &IpcFrame {
+            operation: Operation::AuthenticateSession as u16,
             request_id: 3,
-            response_sequence: 0,
             payload: auth_payload.into_bytes(),
         },
-    )?;
-    assert_eq!(auth.kind, 100);
+        admission,
+    )
+    .unwrap()
+    {
+        GatewayClientDispatch::Response(response) => response,
+        GatewayClientDispatch::Started { .. } => panic!("AUTH unexpectedly started"),
+    };
+    assert_eq!(auth.operation, Operation::AuthenticateSession as u16);
     assert!(std::str::from_utf8(&auth.payload)?.contains("\"authenticated\":true"));
     let session_id = session.session_id()?;
     let encoded_session_id = session_id
@@ -7578,7 +7597,6 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
         .collect::<String>();
     assert!(std::str::from_utf8(&auth.payload)?.contains(&encoded_session_id));
 
-    let staging = StagingStore::new(StagingLimits::default(), Arc::new(AcceptUpload))?;
     let owner = session.staging_owner()?;
     let artifact = b"upload";
     let artifact_hash = Sha256::digest(artifact)
@@ -7589,19 +7607,26 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    let prepare = session.handle_prepare_request(
+    let prepare = match dispatch_gateway_client_request(
+        ServiceRole::Gateway,
         &storage,
         &staging,
-        ClientFrame {
-            kind: 3,
+        &mut session,
+        &IpcFrame {
+            operation: Operation::PrepareSubmission as u16,
             request_id: 4,
-            response_sequence: 0,
             payload: format!(
                 "{{\"manifest_version\":1,\"manifest\":\"bQ==\",\"artifact_bytes\":\"6\",\"artifact_sha256\":\"{artifact_hash}\",\"parameter_bytes\":\"0\",\"parameter_sha256\":\"{empty_hash}\",\"scope_version\":1,\"requested_scope\":\"cw==\",\"deadline_ms\":\"30000\",\"workload_class\":\"operational\"}}"
             )
             .into_bytes(),
         },
-    )?;
+        admission,
+    )
+    .unwrap()
+    {
+        GatewayClientDispatch::Response(response) => response,
+        GatewayClientDispatch::Started { .. } => panic!("PREPARE unexpectedly started"),
+    };
     let prepare_response = std::str::from_utf8(&prepare.payload)?;
     let invocation_hex = prepare_response
         .split("\"invocation_id\":\"")
@@ -7619,16 +7644,25 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
     let mut chunk_payload = invocation_id.to_vec();
     chunk_payload.extend_from_slice(&0u64.to_le_bytes());
     chunk_payload.extend_from_slice(artifact);
-    let acknowledgement = session.handle_upload_request(
+    let mut ipc_chunk_payload = vec![4];
+    ipc_chunk_payload.extend_from_slice(&chunk_payload);
+    let acknowledgement = match dispatch_gateway_client_request(
+        ServiceRole::Gateway,
         &storage,
         &staging,
-        ClientFrame {
-            kind: 4,
+        &mut session,
+        &IpcFrame {
+            operation: Operation::UploadSubmissionChunk as u16,
             request_id: 5,
-            response_sequence: 0,
-            payload: chunk_payload,
+            payload: ipc_chunk_payload,
         },
-    )?;
+        admission,
+    )
+    .unwrap()
+    {
+        GatewayClientDispatch::Response(response) => response,
+        GatewayClientDispatch::Started { .. } => panic!("chunk upload unexpectedly started"),
+    };
     assert_eq!(acknowledgement.request_id, 5);
     assert_eq!(acknowledgement.payload, b"{\"next_offset\":\"6\"}");
     assert_eq!(
@@ -7636,55 +7670,97 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
         prdb_engine::supervisor::SubmissionState::Uploading
     );
 
-    let seal = session.handle_seal_request(
+    let seal = match dispatch_gateway_client_request(
+        ServiceRole::Gateway,
         &storage,
         &staging,
-        ClientFrame {
-            kind: 6,
+        &mut session,
+        &IpcFrame {
+            operation: Operation::SealSubmission as u16,
             request_id: 6,
-            response_sequence: 0,
             payload: format!("{{\"invocation_id\":\"{invocation_hex}\"}}").into_bytes(),
         },
-    )?;
+        admission,
+    )
+    .unwrap()
+    {
+        GatewayClientDispatch::Response(response) => response,
+        GatewayClientDispatch::Started { .. } => panic!("SEAL unexpectedly started"),
+    };
     assert_eq!(seal.payload, b"{\"state\":\"prepared\"}");
     assert_eq!(
         staging.status(owner, invocation_id)?,
         prdb_engine::supervisor::SubmissionState::Prepared
     );
 
-    let status = session.handle_status_request(
+    let status = match dispatch_gateway_client_request(
+        ServiceRole::Gateway,
         &storage,
         &staging,
-        ClientFrame {
-            kind: 8,
+        &mut session,
+        &IpcFrame {
+            operation: Operation::ClientGetInvocationStatus as u16,
             request_id: 7,
-            response_sequence: 0,
             payload: format!("{{\"invocation_id\":\"{invocation_hex}\"}}").into_bytes(),
         },
-    )?;
+        admission,
+    )
+    .unwrap()
+    {
+        GatewayClientDispatch::Response(response) => response,
+        GatewayClientDispatch::Started { .. } => panic!("STATUS unexpectedly started"),
+    };
     assert_eq!(status.payload, b"{\"state\":\"prepared\"}");
-    let cancel = session.handle_cancel_prepared_request(
+    let (accepted, invocation, started_submission) = match dispatch_gateway_client_request(
+        ServiceRole::Gateway,
         &storage,
         &staging,
-        ClientFrame {
-            kind: 9,
+        &mut session,
+        &IpcFrame {
+            operation: Operation::StartSubmission as u16,
             request_id: 8,
-            response_sequence: 0,
             payload: format!("{{\"invocation_id\":\"{invocation_hex}\"}}").into_bytes(),
         },
-    )?;
-    assert_eq!(cancel.payload, b"{\"state\":\"accepted\"}");
-    let status_after_cancel = session.handle_status_request(
+        admission,
+    )
+    .unwrap()
+    {
+        GatewayClientDispatch::Started {
+            response,
+            invocation,
+            submission,
+        } => (response, invocation, submission),
+        GatewayClientDispatch::Response(_) => panic!("START omitted its invocation"),
+    };
+    assert_eq!(accepted.payload, b"{\"state\":\"accepted\"}");
+    assert_eq!(started_submission.artifact(), artifact);
+    let cancel = match dispatch_gateway_client_request(
+        ServiceRole::Gateway,
         &storage,
         &staging,
-        ClientFrame {
-            kind: 8,
+        &mut session,
+        &IpcFrame {
+            operation: Operation::ClientCancelInvocation as u16,
             request_id: 9,
-            response_sequence: 0,
             payload: format!("{{\"invocation_id\":\"{invocation_hex}\"}}").into_bytes(),
         },
-    )?;
-    assert_eq!(status_after_cancel.payload, b"{\"state\":\"unknown\"}");
+        admission,
+    )
+    .unwrap()
+    {
+        GatewayClientDispatch::Response(response) => response,
+        GatewayClientDispatch::Started { .. } => panic!("CANCEL unexpectedly started"),
+    };
+    assert_eq!(cancel.payload, b"{\"state\":\"accepted\"}");
+    assert!(matches!(
+        invocation.check_deadline(),
+        Err(
+            prdb_engine::storage_manager::SupervisorInvocationError::Deadline(
+                prdb_engine::transaction::TransactionError::CancellationRequested
+            )
+        )
+    ));
+    staging.finish_started(owner, invocation_id)?;
 
     let ping = session.handle_handshake_request(
         &storage,

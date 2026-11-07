@@ -10,6 +10,8 @@ Server-provisioned connections bind role, invocation, identity and grant. Messag
 
 The frame envelope is implemented in Rust: fixed 20-byte v1 header, big-endian fields, 1 MiB payload cap, and nonzero operation/request IDs. Rust also defines fixed v1 operation tags, rejects unknown tags during frame decoding, and provides a bootstrap/executor/planner/supervisor/gateway/admin-control allowlist. The protected bootstrap handoff uses the role check; the other roles are not yet connected to provisioned socket handlers, so server-bound enforcement and context lifecycle checks remain open. Error tags, bounded expression IR, collection/nesting sizes, outstanding requests/cursors, handle generations and request-ID rules also remain open. Sanitized value/batch encodings still need explicit VALUE/NULL/REDACTED states and initialized padding.
 
+The gateway submission payload mapping is now specified in [IPC protocol](../../specs/ipc-protocol.md): one service context per client connection, bounded JSON forwarded without TCP headers, and a one-byte chunk-kind prefix. The role-checked dispatcher exists; channel provisioning and the service listener remain unimplemented.
+
 ## Increments
 
 | ID | Observable test first | Minimum implementation and evidence |
@@ -20,6 +22,13 @@ The frame envelope is implemented in Rust: fixed 20-byte v1 header, big-endian f
 | IPC-4 | Serialized batches omit invisible rows and every hidden payload byte/length/offset | Encode sanitized owned buffers after storage authorization; bounded next/close semantics, initialized capacity and reference-evaluator comparison |
 | IPC-5 | Overlapping streams, disconnect, partial mutation and cancellation cannot commit a prefix | Enforce one invocation stream/cursor advancement at a time, terminal statement errors, drain pins and supervisor-only finalization |
 | IPC-6 | Malformed requests, blocked readers and planner channel loss remain bounded across real processes | Add decoder/state-machine fuzzing, queue limits and deadlines; separately version gateway-service encoding rather than exposing arbitrary IPC tunneling |
+
+## IPC-6 dependency: gateway submission dispatcher
+
+- Behavior: gateway role authorizes each submission operation; strict AUTH, PREPARE, chunk, SEAL, START, STATUS, and CANCEL session handlers are invoked with per-connection state. START returns an in-process supervisor invocation/submission event while only the correlated acceptance payload is eligible for response encoding.
+- Contract and implementation: [gateway submission payloads](../../specs/ipc-protocol.md) and [dispatcher](../../engine/src/supervisor_ipc.rs).
+- Verification: real-redb submission lifecycle test passes through the operation dispatcher; warning-denied Clippy passes in the repository Nix shell.
+- Remaining: provision per-client contexts, run the dispatcher on Unix streams, add bounded responses/errors, and launch/reap a confined worker.
 
 ## Acceptance and Handoff
 

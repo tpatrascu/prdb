@@ -29,6 +29,14 @@ The storage-side Supervisor handler accepts `0x1301` finalize and `0x1302` abort
 
 The administrative-control channel is bound to an already authenticated actor; its service role does not confer database privileges. Gateway operations go to the supervisor service and cannot be forwarded as arbitrary internal operation codes. The protected bootstrap socket accepts only its credential-delivery and acknowledgement operations. Executor and planner roles are distinct: only the planner receives estimate operations, and neither role can finalize or administer.
 
+### Gateway Submission Service Payloads
+
+Each gateway-service channel is provisioned for one client connection and one HELLO-selected mode. The mode and gateway generation are channel context; neither is supplied in request payloads. The gateway copies the client request ID into the IPC frame and permits only one outstanding client operation on the channel. The service owns the corresponding `ClientConnectionSession`, revalidates storage authority, and derives staging ownership from the authenticated session.
+
+For `0x1401`, `0x1403`, `0x1405`, `0x1407`, and `0x1408`, the payload is the corresponding bounded client JSON payload without its TCP frame header. `0x1404` begins with one byte selecting client kind 4 (artifact) or 5 (parameters), followed by the unchanged binary chunk payload. `0x1406` carries the client START JSON payload. Responses preserve the operation and request ID and contain the client RESPONSE JSON payload.
+
+START has an additional trusted in-process result: the supervisor-side dispatcher retains the admitted `SupervisorInvocation` and owner-checked immutable `SealedSubmission` handle for launch code while returning the sequence-zero `accepted` response. Those Rust objects are never serialized over gateway IPC. A failed START returns an error and does not expose staged bytes or a storage transaction. Result relay and terminal messages remain separate supervisor-generated events.
+
 ## Administrative Control
 
 Authenticated clients submit bounded schema/user/permission DDL or structured equivalents on a dedicated control channel. Storage validates both definitions and current actor authority. Administrative operations may be atomically batched, but cannot be mixed with executor DML/native code. Request IDs, budgets, durable outcomes, and status lookup apply to DDL too.

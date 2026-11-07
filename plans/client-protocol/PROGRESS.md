@@ -76,3 +76,10 @@
 - Changed code and regression: [gateway control IPC dispatcher](../../engine/src/supervisor_ipc.rs) and [role/non-enumeration test](../../engine/tests/commit.rs).
 - Verification: focused real-redb dispatch test and warning-denied Clippy pass in the repository Nix shell.
 - Remaining: provisioned gateway-service socket/session lifecycle and TCP connection server.
+
+## NP-3/NP-4/NP-5 integration: submission operations through gateway IPC
+
+- Behavior: the gateway IPC adapter carries AUTH, PREPARE, typed artifact/parameter chunks, SEAL, START, STATUS, and CANCEL through one client-bound session. START returns a typed trusted launch event and only exposes the accepted response for network delivery.
+- Changed code and spec: [gateway IPC adapter](../../engine/src/supervisor_ipc.rs) and [payload mapping](../../specs/ipc-protocol.md).
+- Verification: the real-redb handshake/submission regression covers the dispatcher lifecycle.
+- Remaining: real service socket provisioning, TCP listener, result relay, and process lifecycle.

@@ -22,6 +22,131 @@ pub enum SupervisorRequestError {
     Transaction(TransactionError),
 }
 
+#[derive(Debug)]
+pub enum GatewayRequestError {
+    InvalidPayload,
+    Dispatch(DispatchError),
+    Client(crate::client_protocol::ClientSessionError),
+    Start(crate::client_protocol::ClientStartError),
+    Staging(crate::supervisor::StagingError),
+}
+
+impl std::fmt::Display for GatewayRequestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "gateway request failed: {self:?}")
+    }
+}
+
+impl std::error::Error for GatewayRequestError {}
+
+pub enum GatewayClientDispatch<'db> {
+    Response(IpcFrame),
+    Started {
+        response: IpcFrame,
+        invocation: crate::storage_manager::SupervisorInvocation<'db>,
+        submission: crate::supervisor::SealedSubmission,
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct GatewayAdmissionConfig {
+    pub retention_deadline_us: i64,
+    pub max_rows: usize,
+    pub max_bytes: usize,
+}
+
+/// Route one client operation over a provisioned gateway IPC connection.
+/// HELLO mode is established by the gateway when it provisions the per-client
+/// service context; all identity and staging ownership remain server-derived.
+pub fn dispatch_gateway_client_request<'db>(
+    role: ServiceRole,
+    manager: &StorageManager<'db>,
+    staging: &crate::supervisor::StagingStore,
+    session: &mut crate::client_protocol::ClientConnectionSession,
+    request: &IpcFrame,
+    admission: GatewayAdmissionConfig,
+) -> Result<GatewayClientDispatch<'db>, GatewayRequestError> {
+    let operation =
+        Operation::from_code(request.operation).map_err(GatewayRequestError::Dispatch)?;
+    authorize_operation(role, operation).map_err(GatewayRequestError::Dispatch)?;
+    let frame = |kind, payload| crate::client_protocol::ClientFrame {
+        kind,
+        request_id: request.request_id,
+        response_sequence: 0,
+        payload,
+    };
+    let response = match operation {
+        Operation::AuthenticateSession => session
+            .handle_handshake_request(manager, frame(2, request.payload.clone()))
+            .map_err(GatewayRequestError::Client)?,
+        Operation::PrepareSubmission => session
+            .handle_prepare_request(manager, staging, frame(3, request.payload.clone()))
+            .map_err(GatewayRequestError::Client)?,
+        Operation::UploadSubmissionChunk => {
+            let (&kind, payload) = request
+                .payload
+                .split_first()
+                .ok_or(GatewayRequestError::InvalidPayload)?;
+            if !matches!(kind, 4 | 5) {
+                return Err(GatewayRequestError::InvalidPayload);
+            }
+            session
+                .handle_upload_request(manager, staging, frame(u16::from(kind), payload.to_vec()))
+                .map_err(GatewayRequestError::Client)?
+        }
+        Operation::SealSubmission => session
+            .handle_seal_request(manager, staging, frame(6, request.payload.clone()))
+            .map_err(GatewayRequestError::Client)?,
+        Operation::StartSubmission => {
+            let invocation_id = crate::client_protocol::decode_client_seal(&request.payload)
+                .map_err(|error| {
+                    GatewayRequestError::Client(
+                        crate::client_protocol::ClientSessionError::InvalidControlPayload(error),
+                    )
+                })?;
+            let (response, invocation) = session
+                .handle_start_request(
+                    manager,
+                    staging,
+                    frame(7, request.payload.clone()),
+                    admission.retention_deadline_us,
+                    admission.max_rows,
+                    admission.max_bytes,
+                )
+                .map_err(GatewayRequestError::Start)?;
+            let submission = staging
+                .started_submission(
+                    session
+                        .staging_owner()
+                        .map_err(GatewayRequestError::Client)?,
+                    invocation_id,
+                )
+                .map_err(GatewayRequestError::Staging)?;
+            return Ok(GatewayClientDispatch::Started {
+                response: IpcFrame {
+                    operation: request.operation,
+                    request_id: response.request_id,
+                    payload: response.payload,
+                },
+                invocation,
+                submission,
+            });
+        }
+        Operation::ClientGetInvocationStatus => session
+            .handle_status_request(manager, staging, frame(8, request.payload.clone()))
+            .map_err(GatewayRequestError::Client)?,
+        Operation::ClientCancelInvocation => session
+            .handle_cancel_prepared_request(manager, staging, frame(9, request.payload.clone()))
+            .map_err(GatewayRequestError::Client)?,
+        _ => return Err(GatewayRequestError::InvalidPayload),
+    };
+    Ok(GatewayClientDispatch::Response(IpcFrame {
+        operation: request.operation,
+        request_id: response.request_id,
+        payload: response.payload,
+    }))
+}
+
 impl std::fmt::Display for SupervisorRequestError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "supervisor request failed: {self:?}")
