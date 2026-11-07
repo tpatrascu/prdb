@@ -5,8 +5,8 @@ use crate::authorization::{
     resolve_role_closure, validate_membership_graph,
 };
 use crate::catalog::{
-    CatalogRecord, decode_builtin_scalar_type, decode_policy_target, decode_registered_envelope,
-    validate_builtin_type_profile,
+    CatalogRecord, WireType, decode_builtin_scalar_type, decode_policy_target,
+    decode_registered_envelope, encode_envelope, family_schema, validate_builtin_type_profile,
 };
 use crate::credentials::decode_verifier_record;
 use crate::ddl_fence::DdlFenceCoordinator;
@@ -6052,6 +6052,7 @@ fn commit_catalog_and_audit_with_index_ddl(
             audit_events,
         );
     }
+    let catalog_writes = add_index_ddl_table_epoch_writes(database, catalog_writes, backfill)?;
     commit_storage_changes_with_index_ddl(
         database,
         CommitRequest {
@@ -6062,7 +6063,7 @@ fn commit_catalog_and_audit_with_index_ddl(
             indexes: &backfill.writes,
             foreign_keys: &[],
             catalog_guards,
-            catalog: catalog_writes,
+            catalog: &catalog_writes,
             audit: audit_events,
         },
         backfill,
@@ -6070,6 +6071,62 @@ fn commit_catalog_and_audit_with_index_ddl(
         check_table_name_uniqueness,
         check_column_name_uniqueness,
     )
+}
+
+fn add_index_ddl_table_epoch_writes(
+    database: &Database,
+    catalog_writes: &[CatalogWrite],
+    backfill: &IndexDdlPlan,
+) -> Result<Vec<CatalogWrite>, CommitError> {
+    let table_ids = backfill
+        .index_tables
+        .values()
+        .copied()
+        .collect::<HashSet<_>>();
+    if table_ids.is_empty() {
+        return Ok(catalog_writes.to_vec());
+    }
+    let read = database.begin_read().map_err(storage_error)?;
+    let catalog = read.open_table(CATALOG).map_err(storage_error)?;
+    let mut result = Vec::with_capacity(catalog_writes.len() + table_ids.len());
+    result.extend_from_slice(catalog_writes);
+    for table_id in table_ids {
+        let table_key = id_catalog_key(5, table_id);
+        if catalog_writes.iter().any(|write| write.key == table_key) {
+            continue;
+        }
+        let current = catalog
+            .get(table_key.as_slice())
+            .map_err(storage_error)?
+            .map(|value| value.value().to_vec())
+            .ok_or(CommitError::InvalidCatalog)?;
+        let next_epoch = table_write_epoch(&table_key, &current)?
+            .checked_add(1)
+            .ok_or(CommitError::InvalidCatalog)?;
+        let mut record = decode_catalog_record(&table_key, &current)?;
+        let epoch_field = record
+            .fields
+            .iter_mut()
+            .find(|field| field.tag == 3)
+            .ok_or(CommitError::InvalidCatalog)?;
+        if epoch_field.wire_type != WireType::U64 || epoch_field.payload.len() != 8 {
+            return Err(CommitError::InvalidCatalog);
+        }
+        epoch_field.payload = next_epoch.to_le_bytes().to_vec();
+        let payload = encode_envelope(
+            &family_schema(5).ok_or(CommitError::InvalidCatalog)?,
+            &table_key,
+            &record.fields,
+        )
+        .map_err(|_| CommitError::InvalidCatalog)?;
+        result.push(CatalogWrite {
+            key: table_key,
+            expected_value: Some(current),
+            payload: Some(payload),
+        });
+    }
+    result.sort_by(|left, right| left.key.cmp(&right.key));
+    Ok(result)
 }
 
 /// Trusted coordinated catalog publication that does not authorize the actor.

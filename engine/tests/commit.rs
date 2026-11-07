@@ -7919,6 +7919,39 @@ fn storage_manager_builds_and_drops_populated_indexes_atomically()
 
     let (new_index_key, new_index_payload) = index_definition(id(0x88), id(16));
     let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let table_epoch_before_build = {
+        let read = database.begin_read()?;
+        let record = decode_registered_envelope(
+            read.open_table(CATALOG)?
+                .get(id_catalog_key(5, id(16)).as_slice())?
+                .ok_or("table record missing before index build")?
+                .value(),
+        )?;
+        u64::from_le_bytes(
+            record
+                .fields
+                .iter()
+                .find(|field| field.tag == 3)
+                .ok_or("table write epoch missing before index build")?
+                .payload
+                .as_slice()
+                .try_into()?,
+        )
+    };
+    let stale_writer_invocation = id(0x7c);
+    let stale_row_key = table_row_key(id(16), id(0x7d));
+    let mut stale_writer =
+        storage.begin_invocation(stale_writer_invocation, id(9), 9_999, 1, 64)?;
+    let stale_schema = stale_writer.load_catalog_table_schema(id(16))?;
+    stale_writer.load_catalog_indexes(&stale_schema)?;
+    let stale_payload = bytea_tuple(b"staged before index build");
+    stale_writer.stage_put(
+        prdb_engine::overlay::RowId {
+            table: id(16),
+            row: id(0x7d),
+        },
+        &stale_payload,
+    )?;
     assert_eq!(
         storage.commit_catalog_and_audit(
             id(77),
@@ -7935,6 +7968,43 @@ fn storage_manager_builds_and_drops_populated_indexes_atomically()
             &[audit_event(77)],
         )?,
         2
+    );
+    let table_epoch_after_build = {
+        let read = database.begin_read()?;
+        let record = decode_registered_envelope(
+            read.open_table(CATALOG)?
+                .get(id_catalog_key(5, id(16)).as_slice())?
+                .ok_or("table record missing after index build")?
+                .value(),
+        )?;
+        u64::from_le_bytes(
+            record
+                .fields
+                .iter()
+                .find(|field| field.tag == 3)
+                .ok_or("table write epoch missing after index build")?
+                .payload
+                .as_slice()
+                .try_into()?,
+        )
+    };
+    assert_eq!(table_epoch_after_build, table_epoch_before_build + 1);
+    let stale_result = stale_writer.commit();
+    assert!(
+        matches!(
+            stale_result,
+            Err(prdb_engine::transaction::TransactionError::Commit(
+                CommitError::Conflict
+            ))
+        ),
+        "writer pinned before index publication returned {stale_result:?}"
+    );
+    assert!(row(&database, &stale_row_key)?.is_none());
+    assert_eq!(
+        lookup_outcome(&database, stale_writer_invocation, id(9), 1)?
+            .ok_or("missing stale index-build writer outcome")?
+            .status,
+        OutcomeStatus::Aborted
     );
 
     let expected = typed_bytea_index_key(id(0x88), &row_key, &payload);
@@ -8009,6 +8079,26 @@ fn storage_manager_builds_and_drops_populated_indexes_atomically()
         )?,
         3
     );
+    let table_epoch_after_drop = {
+        let read = database.begin_read()?;
+        let record = decode_registered_envelope(
+            read.open_table(CATALOG)?
+                .get(id_catalog_key(5, id(16)).as_slice())?
+                .ok_or("table record missing after index drop")?
+                .value(),
+        )?;
+        u64::from_le_bytes(
+            record
+                .fields
+                .iter()
+                .find(|field| field.tag == 3)
+                .ok_or("table write epoch missing after index drop")?
+                .payload
+                .as_slice()
+                .try_into()?,
+        )
+    };
+    assert_eq!(table_epoch_after_drop, table_epoch_after_build + 1);
     assert!(
         read.open_table(schema::INDEXES)?
             .get(expected.key.as_slice())?

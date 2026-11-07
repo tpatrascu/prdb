@@ -1458,3 +1458,12 @@
 - TDD note: the schema rename assertion first failed with `InvalidRequest` against the compiling storage stub; the rename and uniqueness checks now pass through the serialized authorized DDL path.
 - Verification: focused real-redb, decoder, and gateway lifecycle tests passed. Workspace build, format check, warning-denied Clippy, all workspace tests, and `git diff --check` passed in the configured Nix shell. Tool versions were Rust/Cargo 1.95.0, rustfmt 1.9.0, Clippy 0.1.95, and TinyCC 0.9.27-unstable-2025-01-06.
 - Remaining: role-owner transfer regression, additional stale-writer and limit boundary evidence, and separate supervisor/gateway process integration.
+
+## DS-5 / DS-7: index publication versus a pinned writer — verified
+
+- Behavior and normative contracts: [schema DDL](../../specs/ddl-schema.md), [MVCC concurrency](../../specs/concurrency-mvcc.md), and [storage manager](../../specs/storage-manager.md). Standalone index create, drop, and rebuild advance each affected table's write epoch without changing tuple schema version, so writers pinned to an older index set cannot publish after DDL.
+- Implementation: [`commit.rs`](../../engine/src/commit.rs) appends expected-byte table-record epoch updates to the same serialized DDL commit for affected tables that do not already have a table-record update. Combined schema rewrites retain their existing single epoch increment.
+- Regression evidence: the real-redb populated-index lifecycle stages a row write before index creation, confirms it conflicts with a durable ABORTED outcome and publishes no row, and checks exact epoch increments on index creation and removal. Existing assertions verify the forward and reverse index memberships remain snapshot-consistent.
+- TDD note: the new stale-writer assertion first failed because the pinned write committed successfully at sequence 3 after index publication; it passes after index DDL began incrementing the table write epoch.
+- Verification: the focused real-redb lifecycle regression passed. In the configured Nix shell, workspace build, format check, warning-denied Clippy, all workspace tests, and `git diff --check` passed. Tool versions were Rust/Cargo 1.95.0, rustfmt 1.9.0, Clippy 0.1.95, and TinyCC 0.9.27-unstable-2025-01-06.
+- Remaining: separate supervisor/gateway process integration and broader DDL acceptance evidence.
