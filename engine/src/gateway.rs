@@ -8,6 +8,7 @@ use std::io;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::num::NonZeroUsize;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -116,6 +117,33 @@ pub struct GatewayConnectionLimiter {
 
 pub struct GatewayConnectionPermit {
     inner: Arc<GatewayConnectionLimit>,
+}
+
+#[derive(Clone, Debug)]
+pub struct UnixGatewayServiceConnector {
+    socket_path: PathBuf,
+    expected_peer_uid: u32,
+}
+
+impl UnixGatewayServiceConnector {
+    pub fn new(socket_path: impl AsRef<Path>, expected_peer_uid: u32) -> Self {
+        Self {
+            socket_path: socket_path.as_ref().to_path_buf(),
+            expected_peer_uid,
+        }
+    }
+
+    pub fn connect(&self) -> io::Result<std::os::unix::net::UnixStream> {
+        let stream = std::os::unix::net::UnixStream::connect(&self.socket_path)?;
+        let peer_uid = unix_peer_uid(&stream)?;
+        if peer_uid != self.expected_peer_uid {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "gateway service peer has an unexpected UID",
+            ));
+        }
+        Ok(stream)
+    }
 }
 
 impl GatewayConnectionLimiter {
@@ -370,6 +398,44 @@ where
     } else {
         accept_result
     }
+}
+
+#[cfg(target_os = "linux")]
+fn unix_peer_uid(stream: &std::os::unix::net::UnixStream) -> io::Result<u32> {
+    use std::os::fd::AsRawFd;
+    let mut credentials = std::mem::MaybeUninit::<libc::ucred>::uninit();
+    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: getsockopt writes at most `length` bytes to the valid ucred
+    // output buffer and does not retain the pointer.
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            credentials.as_mut_ptr().cast(),
+            &mut length,
+        )
+    };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if usize::try_from(length).ok() != Some(std::mem::size_of::<libc::ucred>()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "gateway service peer credentials have an invalid size",
+        ));
+    }
+    // SAFETY: getsockopt succeeded and reported the full ucred size.
+    let credentials = unsafe { credentials.assume_init() };
+    Ok(credentials.uid)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn unix_peer_uid(_stream: &std::os::unix::net::UnixStream) -> io::Result<u32> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Unix gateway service peer verification is supported only on Linux",
+    ))
 }
 
 fn read_client_request<R: Read>(

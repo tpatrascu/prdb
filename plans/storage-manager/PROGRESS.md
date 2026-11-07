@@ -1134,7 +1134,15 @@
 - Changed implementation and integration regression: [gateway runtime](../../engine/src/gateway.rs) and [TCP/Unix worker-pool test](../../engine/tests/gateway.rs).
 - Observed red: initial runtime test compilation failed because `GatewayRuntimeConfig` and `run_gateway` were absent.
 - Commands actually run in the configured Nix shell: `cargo fmt --all`; focused `cargo test -p prdb-engine --test gateway --locked gateway_worker_pool_opens_one_service_stream_per_client` passed; and `cargo fmt --all -- --check && cargo build --workspace --locked && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && git diff --check`. All passed.
-- Remaining: bind the Unix service connector to verified peer identity and generation; add pre-auth absolute deadlines, rate limits, ADMIN forwarding, result relay, and process startup configuration.
+- Remaining at that increment: verify the Unix service peer and bind service connections to gateway generation; add pre-auth absolute deadlines, rate limits, ADMIN forwarding, result relay, and process startup configuration. Peer UID verification is recorded in the following entry.
+
+## GW-2 dependency: Linux Unix-service peer UID verification
+
+- Behavior: `UnixGatewayServiceConnector` connects only when Linux `SO_PEERCRED` reports the configured expected UID; mismatched peers fail with `PermissionDenied` before the connection is handed to the frame bridge.
+- Changed implementation and regression: [peer-checked Unix connector](../../engine/src/gateway.rs) and [local Unix socket identity test](../../engine/tests/gateway.rs).
+- Observed red: the focused test did not compile before the connector API existed. A later compile caught a test assertion using equality on `std::os::unix::net::SocketAddr`; the assertion was removed because successful connector verification is the behavior under test.
+- Commands actually run in the configured Nix shell: `cargo fmt --all`; focused `cargo test -p prdb-engine --test gateway --locked unix_gateway_connector_checks_peer_uid` passed; and `cargo fmt --all -- --check && cargo build --workspace --locked && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && git diff --check`. All passed.
+- Remaining: bind service connections to gateway generation and per-client connection ID; verify socket filesystem ownership/mode; add authenticated handoff on non-Linux platforms if they enter the supported profile.
 
 ## SU-1 / IPC-6 dependency: gateway submission IPC dispatcher
 

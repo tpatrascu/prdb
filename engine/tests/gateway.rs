@@ -212,3 +212,41 @@ fn gateway_worker_pool_opens_one_service_stream_per_client() {
     shutdown.store(true, std::sync::atomic::Ordering::Release);
     gateway.join().unwrap();
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn unix_gateway_connector_checks_peer_uid() {
+    use prdb_engine::gateway::UnixGatewayServiceConnector;
+    use std::os::unix::net::UnixListener;
+    use std::path::PathBuf;
+
+    fn socket_path(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "prdb-gateway-{label}-{}-{nonce}.sock",
+            std::process::id()
+        ))
+    }
+
+    let expected_uid = unsafe { libc::geteuid() };
+    let accepted_path = socket_path("peer-ok");
+    let accepted_listener = UnixListener::bind(&accepted_path).unwrap();
+    let accept_thread = std::thread::spawn(move || accepted_listener.accept().unwrap().0);
+    let connector = UnixGatewayServiceConnector::new(&accepted_path, expected_uid);
+    let stream = connector.connect().unwrap();
+    let peer = accept_thread.join().unwrap();
+    drop(stream);
+    drop(peer);
+    std::fs::remove_file(&accepted_path).unwrap();
+
+    let rejected_path = socket_path("peer-denied");
+    let rejected_listener = UnixListener::bind(&rejected_path).unwrap();
+    let accept_thread = std::thread::spawn(move || rejected_listener.accept().unwrap().0);
+    let connector = UnixGatewayServiceConnector::new(&rejected_path, expected_uid.wrapping_add(1));
+    assert!(connector.connect().is_err());
+    drop(accept_thread.join().unwrap());
+    std::fs::remove_file(&rejected_path).unwrap();
+}

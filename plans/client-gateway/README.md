@@ -10,7 +10,7 @@ Define listener configuration with loopback default and explicit non-loopback pl
 
 ## Increments
 
-The gateway foundation implements the loopback-default TCP bind policy, requires an explicit plaintext opt-in for non-loopback addresses, caps accepted connections through shared permits, and runs a fixed-size worker pool with a bounded pending queue and idle I/O timeouts. Each worker opens a provisioned per-client IPC stream. The connection adapter currently covers HELLO, AUTH, submission operations, STATUS, CANCEL, and PING. Control ADMIN forwarding, authenticated service-channel provisioning, and a runnable process wrapper remain unimplemented.
+The gateway foundation implements the loopback-default TCP bind policy, requires an explicit plaintext opt-in for non-loopback addresses, caps accepted connections through shared permits, and runs a fixed-size worker pool with a bounded pending queue and idle I/O timeouts. Each worker opens a per-client IPC stream through a Linux Unix-socket connector that checks the service peer UID. The connection adapter currently covers HELLO, AUTH, submission operations, STATUS, CANCEL, and PING. Gateway generation/session binding, control ADMIN forwarding, and a runnable process wrapper remain unimplemented.
 
 | ID | Observable test first | Minimum implementation and evidence |
 | --- | --- | --- |
