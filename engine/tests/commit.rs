@@ -501,6 +501,7 @@ fn storage_manager_creates_schema_atomically_for_privileged_actor()
     let setup_admin = id(0xe1);
     let denied = id(0xe2);
     let actor = id(0xe8);
+    let successor_owner = id(0xea);
     let admin_role = builtin_owner_id();
     let setup = vec![
         principal_write_with_name(setup_admin, 1, 1, "schema_admin"),
@@ -511,6 +512,8 @@ fn storage_manager_creates_schema_atomically_for_privileged_actor()
         object_write_with_name(denied, 8, "schema_denied"),
         principal_write_with_name(actor, 1, 1, "schema_creator"),
         object_write_with_name(actor, 8, "schema_creator"),
+        principal_write_with_name(successor_owner, 1, 1, "schema_successor"),
+        object_write_with_name(successor_owner, 8, "schema_successor"),
         grant_write(actor, id(0x33), 14, 1, id(0x33), admin_role),
         dependency_write(actor, id(0x33), 5),
     ];
@@ -571,6 +574,111 @@ fn storage_manager_creates_schema_atomically_for_privileged_actor()
             .status,
         OutcomeStatus::Committed
     );
+    let transfer_invocation = id(0xc1);
+    let mut transfer_audit = identity_audit_event(0xc2, actor, created.schema_id);
+    transfer_audit.correlation_id = transfer_invocation;
+    let transfer_result = storage.set_schema_owner(
+        transfer_invocation,
+        actor,
+        created.schema_id,
+        successor_owner,
+        9_999,
+        transfer_audit,
+    );
+    assert!(
+        transfer_result.is_ok(),
+        "schema ownership transfer failed: {transfer_result:?}"
+    );
+    assert_eq!(transfer_result?, 3);
+    {
+        let read = database.begin_read()?;
+        let object = decode_registered_envelope(
+            read.open_table(CATALOG)?
+                .get(object_key.as_slice())?
+                .ok_or("schema object disappeared after ownership transfer")?
+                .value(),
+        )?;
+        assert_eq!(
+            object
+                .fields
+                .iter()
+                .find(|field| field.tag == 4)
+                .unwrap()
+                .payload,
+            successor_owner
+        );
+        assert_eq!(
+            u64::from_le_bytes(
+                object
+                    .fields
+                    .iter()
+                    .find(|field| field.tag == 5)
+                    .unwrap()
+                    .payload
+                    .as_slice()
+                    .try_into()?
+            ),
+            2
+        );
+    }
+    let owned_table_invocation = id(0xc5);
+    let mut owned_table_audit = identity_audit_event(0xc6, successor_owner, id(0xc7));
+    owned_table_audit.correlation_id = owned_table_invocation;
+    let owned_table = storage.create_table(CreateTableRequest {
+        invocation_id: owned_table_invocation,
+        authenticated_actor_id: successor_owner,
+        schema_id: created.schema_id,
+        name: "successor_table".to_owned(),
+        columns: vec![TableColumnDefinition {
+            name: "value".to_owned(),
+            scalar_type: ScalarType::Text,
+            nullable: true,
+            generated_uuid_identity: false,
+            default: None,
+        }],
+        retention_deadline_us: 9_999,
+        audit_event: owned_table_audit,
+    })?;
+    let child_grant_prefix = {
+        let mut prefix = 12u16.to_be_bytes().to_vec();
+        prefix.push(1);
+        prefix.extend_from_slice(&successor_owner);
+        prefix
+    };
+    {
+        let read = database.begin_read()?;
+        let catalog = read.open_table(CATALOG)?;
+        assert!(
+            catalog
+                .range(child_grant_prefix.as_slice()..)?
+                .next()
+                .transpose()?
+                .is_none_or(|(key, _)| !key.value().starts_with(&child_grant_prefix))
+        );
+    }
+    let owned_table_drop_invocation = id(0xc8);
+    let mut owned_table_drop_audit = identity_audit_event(0xc9, successor_owner, id(0xca));
+    owned_table_drop_audit.correlation_id = owned_table_drop_invocation;
+    storage.drop_table(
+        owned_table_drop_invocation,
+        successor_owner,
+        owned_table.table_id,
+        9_999,
+        owned_table_drop_audit,
+    )?;
+    let old_owner_drop = id(0xc3);
+    let mut old_owner_drop_audit = identity_audit_event(0xc4, actor, created.schema_id);
+    old_owner_drop_audit.correlation_id = old_owner_drop;
+    assert!(matches!(
+        storage.drop_schema(
+            old_owner_drop,
+            actor,
+            created.schema_id,
+            9_999,
+            old_owner_drop_audit,
+        ),
+        Err(SchemaLifecycleError::Unauthorized)
+    ));
     let denied_drop_invocation = id(0xf8);
     let mut denied_drop_audit = identity_audit_event(0xf9, denied, id(0xfa));
     denied_drop_audit.correlation_id = denied_drop_invocation;
@@ -611,18 +719,23 @@ fn storage_manager_creates_schema_atomically_for_privileged_actor()
         OutcomeStatus::Aborted
     );
     let drop_invocation = id(0xec);
-    let mut drop_audit = identity_audit_event(0xed, actor, id(0xee));
+    let mut drop_audit = identity_audit_event(0xed, successor_owner, id(0xee));
     drop_audit.correlation_id = drop_invocation;
-    let dropped =
-        storage.drop_schema(drop_invocation, actor, created.schema_id, 9_999, drop_audit)?;
+    let dropped = storage.drop_schema(
+        drop_invocation,
+        successor_owner,
+        created.schema_id,
+        9_999,
+        drop_audit,
+    )?;
     assert_eq!(dropped.schema_id, created.schema_id);
-    assert_eq!(dropped.commit_sequence, 3);
+    assert_eq!(dropped.commit_sequence, 6);
     let read = database.begin_read()?;
     let catalog = read.open_table(CATALOG)?;
     assert!(catalog.get(schema_key.as_slice())?.is_none());
     assert!(catalog.get(object_key.as_slice())?.is_none());
     assert_eq!(
-        lookup_outcome(&database, drop_invocation, actor, 1)?
+        lookup_outcome(&database, drop_invocation, successor_owner, 1)?
             .unwrap()
             .status,
         OutcomeStatus::Committed
@@ -6468,11 +6581,37 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         .ok_or("missing empty schema ID")?
         .get(..32)
         .ok_or("invalid empty schema ID")?;
-    let empty_schema_drop_prepare = admin_dispatch_json(
+    let schema_owner_prepare = admin_dispatch_json(
         &storage,
         &staging,
         &mut control,
         41,
+        &format!(
+            "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"schemas.set_owner\",\"arguments\":{{\"schema_id\":\"{empty_schema_id}\",\"owner_id\":\"{created_user_id_wire}\"}}}}"
+        ),
+        retention_deadline_us,
+    )?;
+    let schema_owner_operation_id = schema_owner_prepare
+        .split("\"operation_id\":\"")
+        .nth(1)
+        .ok_or("missing ADMIN schema-owner transfer operation ID")?
+        .get(..32)
+        .ok_or("invalid ADMIN schema-owner transfer operation ID")?;
+    let schema_owner_transfer = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut control,
+        42,
+        &format!("{{\"phase\":\"start\",\"operation_id\":\"{schema_owner_operation_id}\"}}"),
+        retention_deadline_us,
+    )?;
+    assert!(schema_owner_transfer.contains("\"outcome\":\"committed\""));
+    assert!(schema_owner_transfer.contains(&format!("\"owner_id\":\"{created_user_id_wire}\"")));
+    let empty_schema_drop_prepare = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut control,
+        43,
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"schemas.drop\",\"arguments\":{{\"schema_id\":\"{empty_schema_id}\"}}}}"
         ),
@@ -6488,7 +6627,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &storage,
         &staging,
         &mut control,
-        42,
+        44,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{empty_schema_drop_id}\"}}"),
         retention_deadline_us,
     )?;

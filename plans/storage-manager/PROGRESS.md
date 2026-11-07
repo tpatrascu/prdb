@@ -1440,3 +1440,12 @@
 - TDD note: the ownership behavior assertion first failed with `InvalidRequest` against a compiling storage-manager stub; it passes through the authorized DDL path.
 - Verification: focused real-redb, decoder, and gateway lifecycle tests passed. Workspace build, format check, warning-denied Clippy, all workspace tests, and `git diff --check` passed in the configured Nix shell. Tool versions were Rust/Cargo 1.95.0, rustfmt 1.9.0, Clippy 0.1.95, and TinyCC 0.9.27-unstable-2025-01-06.
 - Remaining: schema ownership transfer, role-owned table transfer regression, DDL limit boundaries, other stale-writer races, and separate supervisor/gateway process integration.
+
+## DS-5: schema ownership transfer — implemented
+
+- Behavior and normative contracts: [schema DDL](../../specs/ddl-schema.md), [client protocol](../../specs/client-protocol.md), and [storage manager](../../specs/storage-manager.md). A schema owner or database administrator can transfer a non-system schema to a live user or role. The owner object and version update atomically; schema contents stay unchanged. Schema owners can create tables and manage the schema without gaining table data privileges.
+- Implementation: the storage entry point updates the schema object; its serialized authorization guard validates actor and target principals, role membership, system-schema mappings, schema record, and audit. The `schemas.set_owner` operation uses connection-owned ADMIN PREPARE/START. Table creation now recognizes current schema ownership as DDL authority.
+- Regression evidence: real-redb coverage transfers the schema, checks owner/version, rejects the previous non-admin owner's drop with a durable ABORTED outcome, verifies the successor can create and drop a table, and confirms no table data grants were added. Decoder and gateway ADMIN lifecycle tests cover the exact request and committed result.
+- TDD note: the schema transfer assertion first failed with `InvalidRequest` against the compiling storage-manager stub; it passes through the serialized owner guard.
+- Verification: focused real-redb, decoder, and gateway lifecycle tests passed. Workspace build, format check, warning-denied Clippy, all workspace tests, and `git diff --check` passed in the configured Nix shell. Tool versions were Rust/Cargo 1.95.0, rustfmt 1.9.0, Clippy 0.1.95, and TinyCC 0.9.27-unstable-2025-01-06.
+- Remaining: schema rename, role-owner transfer regression, additional stale-writer and limit boundary evidence, and separate supervisor/gateway process integration.

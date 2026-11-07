@@ -333,6 +333,15 @@ fn admin_revoke_decoder_requires_prepare_then_start_schemas() {
     );
     assert_eq!(
         decode_client_admin_command(
+            br#"{"phase":"prepare","operation_version":1,"operation":"schemas.set_owner","arguments":{"schema_id":"000102030405060708090a0b0c0d0e0f","owner_id":"101112131415161718191a1b1c1d1e1f"}}"#
+        ),
+        Ok(ClientAdminCommand::PrepareSetSchemaOwner {
+            schema_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+            owner_id: [16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31],
+        })
+    );
+    assert_eq!(
+        decode_client_admin_command(
             br#"{"phase":"prepare","operation_version":1,"operation":"tables.drop","arguments":{"table_id":"000102030405060708090a0b0c0d0e0f"}}"#
         ),
         Ok(ClientAdminCommand::PrepareDropTable {

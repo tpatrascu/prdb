@@ -13,6 +13,7 @@ use crate::commit::{
     commit_authorized_index_ddl_with_fences, commit_authorized_membership_ddl_with_fences,
     commit_authorized_object_grant_ddl_with_fences, commit_authorized_policy_ddl_with_fences,
     commit_authorized_schema_create_ddl_with_fences, commit_authorized_schema_drop_ddl_with_fences,
+    commit_authorized_schema_owner_ddl_with_fences,
     commit_authorized_system_privilege_ddl_with_fences,
     commit_authorized_table_create_ddl_with_fences, commit_authorized_table_drop_ddl_with_fences,
     commit_authorized_table_owner_ddl_with_fences, commit_authorized_table_rename_ddl_with_fences,
@@ -419,6 +420,14 @@ impl std::fmt::Display for SchemaLifecycleError {
 }
 
 impl std::error::Error for SchemaLifecycleError {}
+
+fn schema_lifecycle_from_table_error(error: TableLifecycleError) -> SchemaLifecycleError {
+    match error {
+        TableLifecycleError::Commit(error) => SchemaLifecycleError::Commit(error),
+        TableLifecycleError::Storage => SchemaLifecycleError::Storage,
+        _ => SchemaLifecycleError::Commit(CommitError::InvalidCatalog),
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreatedUser {
@@ -2105,6 +2114,119 @@ impl<'db> StorageManager<'db> {
         Ok(DroppedSchema {
             schema_id,
             commit_sequence,
+        })
+    }
+
+    /// Transfer a schema's ownership without adding table data privileges.
+    pub fn set_schema_owner(
+        &self,
+        invocation_id: [u8; 16],
+        authenticated_actor_id: [u8; 16],
+        schema_id: [u8; 16],
+        new_owner_id: [u8; 16],
+        retention_deadline_us: i64,
+        mut audit_event: AuditEvent,
+    ) -> Result<u64, SchemaLifecycleError> {
+        if invocation_id == [0; 16]
+            || authenticated_actor_id == [0; 16]
+            || schema_id == [0; 16]
+            || new_owner_id == [0; 16]
+            || retention_deadline_us <= 0
+        {
+            return Err(SchemaLifecycleError::InvalidRequest);
+        }
+        if audit_event.actor_id != Some(authenticated_actor_id)
+            || audit_event.correlation_id != invocation_id
+            || audit_event.action != AuditAction::Ddl
+            || audit_event.result != AuditResult::Succeeded
+        {
+            return Err(SchemaLifecycleError::InvalidAudit);
+        }
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|_| SchemaLifecycleError::Storage)?;
+        let catalog = read
+            .open_table(CATALOG)
+            .map_err(|_| SchemaLifecycleError::Storage)?;
+        let object_key = id_catalog_key(2, schema_id);
+        let schema_key = id_catalog_key(3, schema_id);
+        let owner_key = id_catalog_key(10, new_owner_id);
+        let object_current = catalog
+            .get(object_key.as_slice())
+            .map_err(|_| SchemaLifecycleError::Storage)?
+            .map(|value| value.value().to_vec())
+            .ok_or(SchemaLifecycleError::InvalidRequest)?;
+        let _schema_current = catalog
+            .get(schema_key.as_slice())
+            .map_err(|_| SchemaLifecycleError::Storage)?
+            .map(|value| value.value().to_vec())
+            .ok_or(SchemaLifecycleError::InvalidRequest)?;
+        let owner_current = catalog
+            .get(owner_key.as_slice())
+            .map_err(|_| SchemaLifecycleError::Storage)?
+            .map(|value| value.value().to_vec())
+            .ok_or(SchemaLifecycleError::InvalidRequest)?;
+        if read_catalog_u16(&object_key, &object_current, 2, 1)
+            .map_err(schema_lifecycle_from_table_error)?
+            != 1
+            || read_catalog_id(&object_key, &object_current, 2, 4)
+                .map_err(schema_lifecycle_from_table_error)?
+                == new_owner_id
+        {
+            return Err(SchemaLifecycleError::InvalidRequest);
+        }
+        let owner_record = decode_registered_envelope(&owner_current)
+            .map_err(|_| SchemaLifecycleError::InvalidRequest)?;
+        let owner_kind = owner_record
+            .fields
+            .iter()
+            .find(|field| field.tag == 1 && field.wire_type == WireType::U16)
+            .and_then(|field| <[u8; 2]>::try_from(field.payload.as_slice()).ok())
+            .map(u16::from_le_bytes);
+        let owner_epoch = owner_record
+            .fields
+            .iter()
+            .find(|field| field.tag == 4 && field.wire_type == WireType::U64)
+            .and_then(|field| <[u8; 8]>::try_from(field.payload.as_slice()).ok())
+            .map(u64::from_le_bytes)
+            .unwrap_or_default();
+        if !matches!(owner_kind, Some(1 | 2)) || owner_epoch == 0 {
+            return Err(SchemaLifecycleError::InvalidRequest);
+        }
+        let next_object_version = read_catalog_u64(&object_key, &object_current, 2, 5)
+            .map_err(schema_lifecycle_from_table_error)?
+            .checked_add(1)
+            .ok_or(SchemaLifecycleError::Commit(CommitError::InvalidCatalog))?;
+        let object_payload = rewrite_catalog_fields(
+            &object_key,
+            &object_current,
+            2,
+            &[
+                (4, WireType::Id, new_owner_id.to_vec()),
+                (5, WireType::U64, next_object_version.to_le_bytes().to_vec()),
+            ],
+        )
+        .map_err(schema_lifecycle_from_table_error)?;
+        drop(catalog);
+        drop(read);
+        audit_event.target_ids = vec![schema_id];
+        commit_authorized_schema_owner_ddl_with_fences(
+            self.database,
+            &self.ddl_fences,
+            invocation_id,
+            authenticated_actor_id,
+            retention_deadline_us,
+            &[CatalogWrite {
+                key: object_key,
+                expected_value: Some(object_current),
+                payload: Some(object_payload),
+            }],
+            &[audit_event],
+        )
+        .map_err(|error| match error {
+            CommitError::DdlAuthorizationDenied => SchemaLifecycleError::Unauthorized,
+            error => SchemaLifecycleError::Commit(error),
         })
     }
 

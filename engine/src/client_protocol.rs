@@ -171,6 +171,10 @@ enum PendingAdminAction {
     DropSchema {
         schema_id: [u8; 16],
     },
+    SetSchemaOwner {
+        schema_id: [u8; 16],
+        owner_id: [u8; 16],
+    },
     DropTable {
         table_id: [u8; 16],
     },
@@ -276,6 +280,10 @@ pub enum ClientAdminCommand {
     },
     PrepareDropSchema {
         schema_id: [u8; 16],
+    },
+    PrepareSetSchemaOwner {
+        schema_id: [u8; 16],
+        owner_id: [u8; 16],
     },
     PrepareDropTable {
         table_id: [u8; 16],
@@ -561,6 +569,31 @@ pub fn decode_client_admin_command(
                 return Err(ClientControlError::UnknownKey);
             }
             Ok(ClientAdminCommand::PrepareDropSchema { schema_id })
+        }
+        Some("prepare")
+            if version == Some(1) && operation.as_deref() == Some("schemas.set_owner") =>
+        {
+            if operation_id.is_some() || seen.len() != 4 {
+                return Err(ClientControlError::UnknownKey);
+            }
+            let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
+            let schema_id = decode_lower_hex_id(
+                &args
+                    .remove("schema_id")
+                    .ok_or(ClientControlError::MissingKey)?,
+            )?;
+            let owner_id = decode_lower_hex_id(
+                &args
+                    .remove("owner_id")
+                    .ok_or(ClientControlError::MissingKey)?,
+            )?;
+            if !args.is_empty() {
+                return Err(ClientControlError::UnknownKey);
+            }
+            Ok(ClientAdminCommand::PrepareSetSchemaOwner {
+                schema_id,
+                owner_id,
+            })
         }
         Some("prepare") if version == Some(1) && operation.as_deref() == Some("tables.drop") => {
             if operation_id.is_some() || seen.len() != 4 {
@@ -2506,6 +2539,38 @@ impl ClientConnectionSession {
                     .into_bytes(),
                 )
             }
+            ClientAdminCommand::PrepareSetSchemaOwner {
+                schema_id,
+                owner_id,
+            } => {
+                if self.pending_admin_operation.is_some() {
+                    return Err(ClientSessionError::WrongMode);
+                }
+                let mut operation_id = [0; 16];
+                getrandom::fill(&mut operation_id).map_err(|_| {
+                    ClientSessionError::Storage(TransactionError::RandomnessUnavailable)
+                })?;
+                if operation_id == [0; 16] {
+                    return Err(ClientSessionError::Storage(
+                        TransactionError::RandomnessUnavailable,
+                    ));
+                }
+                self.pending_admin_operation = Some(PendingAdminOperation {
+                    operation_id,
+                    action: PendingAdminAction::SetSchemaOwner {
+                        schema_id,
+                        owner_id,
+                    },
+                });
+                self.json_response(
+                    request.request_id,
+                    format!(
+                        "{{\"operation_id\":\"{}\",\"state\":\"prepared\"}}",
+                        encode_lower_hex_id(operation_id)
+                    )
+                    .into_bytes(),
+                )
+            }
             ClientAdminCommand::PrepareDropTable { table_id } => {
                 if self.pending_admin_operation.is_some() {
                     return Err(ClientSessionError::WrongMode);
@@ -3094,6 +3159,40 @@ impl ClientConnectionSession {
                                 encode_lower_hex_id(operation_id),
                                 encode_lower_hex_id(dropped.schema_id),
                                 dropped.commit_sequence,
+                            )
+                            .into_bytes(),
+                        )
+                    }
+                    PendingAdminAction::SetSchemaOwner {
+                        schema_id,
+                        owner_id,
+                    } => {
+                        let commit_sequence = storage
+                            .set_schema_owner(
+                                operation_id,
+                                actor_id,
+                                schema_id,
+                                owner_id,
+                                retention_deadline_us,
+                                crate::audit::AuditEvent {
+                                    event_id,
+                                    actor_id: Some(actor_id),
+                                    correlation_id: operation_id,
+                                    occurred_at_us: now_us,
+                                    action: crate::audit::AuditAction::Ddl,
+                                    result: crate::audit::AuditResult::Succeeded,
+                                    target_ids: Vec::new(),
+                                },
+                            )
+                            .map_err(ClientSessionError::SchemaLifecycle)?;
+                        self.json_response(
+                            request.request_id,
+                            format!(
+                                "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"schema_id\":\"{}\",\"owner_id\":\"{}\",\"commit_sequence\":\"{}\"}}",
+                                encode_lower_hex_id(operation_id),
+                                encode_lower_hex_id(schema_id),
+                                encode_lower_hex_id(owner_id),
+                                commit_sequence,
                             )
                             .into_bytes(),
                         )
