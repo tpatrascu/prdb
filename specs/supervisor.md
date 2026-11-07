@@ -37,6 +37,8 @@ Bound CPU, memory, process count, wall time, output bytes, and storage work attr
 
 Reject execution if required sandbox features cannot be established. Worker crashes must fail only that execution; disconnects and supervisor cancellation must trigger storage cleanup. Before redb write-transaction commit begins, required channel loss, cancellation, expired deadlines, and invocation-wide resource exhaustion abort the transaction; they cannot be converted into heuristic planning or a fresh context by user code.
 
+`StagingStore::start_with_sandbox_preflight` probes the configured cgroup parent and rejects a host that lacks any required profile capability before invoking its storage-admission callback. A preflight rejection leaves the sealed reservation prepared and creates no snapshot. Passing preflight only describes host capability; the callback must still establish namespace, Landlock, seccomp, cgroup, and descriptor restrictions before it opens or executes any artifact. Do not treat this preflight helper as a worker launcher or as evidence that confinement is active.
+
 ## Workload Admission
 
 Assign bounded operational/analytical resource classes under the caller's allowance. Reserve progress for WAL/commit, point reads, cancellation, and reclamation; limit analytical prefetch, cache pollution, snapshot age, and output. Client labels cannot bypass quotas. Follow [workload profile](workload-profile.md) and keep I/O-backend capability fallback separate from fail-closed sandbox requirements.

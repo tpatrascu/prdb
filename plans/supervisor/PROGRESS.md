@@ -42,3 +42,11 @@
 - Changed code and fixture: [client START callback](../../engine/src/client_protocol.rs), [storage deadline owner](../../engine/src/storage_manager.rs), and [START regression](../../engine/tests/commit.rs).
 - Verification: focused real-redb test covers no snapshot/status before START, deadline ABORT after admission, and revoked token rejection with no outcome.
 - Remaining: actual worker process launch, process exit observation, and result relay.
+
+## SU-3 / SB-1: sandbox capability preflight before storage admission — implemented
+
+- Behavior: `StagingStore::start_with_sandbox_preflight` probes the configured cgroup parent and checks the complete required sandbox profile before calling storage admission. If the profile is unsupported, the callback is not entered, no storage snapshot is created, and the sealed reservation remains prepared for a later retry.
+- Regression: [supervisor staging test](../../engine/src/supervisor.rs) points the preflight at an ordinary temporary directory and verifies it rejects before the callback and preserves the prepared state.
+- Contract: [supervisor START lifecycle](../../specs/supervisor.md) distinguishes capability preflight from installing confinement.
+- Verification: focused `sandbox_preflight_rejects_before_storage_admission` test passed in the configured Nix shell.
+- Remaining: the real START path does not yet use a worker launcher; passing this probe alone does not establish confinement. Implement namespace, Landlock, seccomp, cgroup, clean descriptor/environment setup, and process launch before opening any artifact.

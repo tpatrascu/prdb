@@ -212,6 +212,7 @@ impl std::error::Error for StagingError {}
 #[derive(Debug)]
 pub enum StartError<E> {
     Staging(StagingError),
+    Sandbox(crate::linux_sandbox::SandboxCapabilityError),
     Admission(E),
 }
 
@@ -521,6 +522,22 @@ impl StagingStore {
                 Err(StartError::Admission(error))
             }
         }
+    }
+
+    /// Check the configured host profile before entering storage admission.
+    /// The callback must still establish confinement and provision worker
+    /// resources before opening or executing the sealed artifact.
+    pub fn start_with_sandbox_preflight<T, E>(
+        &self,
+        owner: StagingOwner,
+        invocation_id: [u8; 16],
+        cgroup_parent: impl AsRef<std::path::Path>,
+        revalidate_and_start: impl FnOnce(&SealedSubmission) -> Result<T, E>,
+    ) -> Result<T, StartError<E>> {
+        crate::linux_sandbox::probe(cgroup_parent)
+            .require_supported()
+            .map_err(StartError::Sandbox)?;
+        self.start_with(owner, invocation_id, revalidate_and_start)
     }
 
     /// Release sealed bytes and quota after the invocation reaches a durable
@@ -864,6 +881,31 @@ mod tests {
         );
         let replacement = store.prepare(owner, request(b"x", b""));
         assert!(replacement.is_ok());
+    }
+
+    #[test]
+    fn sandbox_preflight_rejects_before_storage_admission() {
+        let store = store(Arc::new(AcceptMetadata));
+        let owner = make_owner(21, 22);
+        let invocation_id = upload_and_seal(&store, owner, b"artifact", b"params");
+        let cgroup_parent =
+            std::env::temp_dir().join(format!("prdb-sandbox-preflight-{}", std::process::id()));
+        std::fs::create_dir_all(&cgroup_parent).unwrap();
+        let callback_called = std::sync::atomic::AtomicBool::new(false);
+
+        let result =
+            store.start_with_sandbox_preflight(owner, invocation_id, &cgroup_parent, |_| {
+                callback_called.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok::<_, ()>(())
+            });
+
+        assert!(matches!(result, Err(StartError::Sandbox(_))));
+        assert!(!callback_called.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            store.status(owner, invocation_id).unwrap(),
+            SubmissionState::Prepared
+        );
+        std::fs::remove_dir_all(cgroup_parent).unwrap();
     }
 
     #[test]
