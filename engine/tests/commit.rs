@@ -1760,6 +1760,25 @@ fn storage_manager_renames_tables_and_drop_column_rewrites_rows()
         OutcomeStatus::Aborted
     );
 
+    let stale_drop_invocation = id(0x88);
+    let stale_drop_row = prdb_engine::overlay::RowId {
+        table: table.table_id,
+        row: id(0x89),
+    };
+    let mut stale_drop_writer =
+        storage.begin_invocation(stale_drop_invocation, actor, 9_999, 1, 1024)?;
+    let stale_drop_schema = stale_drop_writer.load_catalog_table_schema(table.table_id)?;
+    stale_drop_writer.load_catalog_indexes(&stale_drop_schema)?;
+    let stale_drop_tuple = encode_tuple(
+        &stale_drop_schema.columns,
+        stale_drop_schema.schema_version,
+        &[
+            Some(ScalarValue::Integer(23)),
+            Some(ScalarValue::Text("staged before drop".to_owned())),
+        ],
+    )?;
+    stale_drop_writer.stage_put(stale_drop_row, &stale_drop_tuple)?;
+
     let drop_invocation = id(0x6a);
     let mut drop_audit = identity_audit_event(0x6b, actor, id(0x6c));
     drop_audit.correlation_id = drop_invocation;
@@ -1772,6 +1791,25 @@ fn storage_manager_renames_tables_and_drop_column_rewrites_rows()
         drop_audit,
     )?;
     assert_eq!(dropped.column_id, table.column_ids[0]);
+    assert!(matches!(
+        stale_drop_writer.commit(),
+        Err(prdb_engine::transaction::TransactionError::Commit(
+            CommitError::Conflict
+        ))
+    ));
+    assert!(
+        row(
+            &database,
+            &table_row_key(table.table_id, stale_drop_row.row)
+        )?
+        .is_none()
+    );
+    assert_eq!(
+        lookup_outcome(&database, stale_drop_invocation, actor, 1)?
+            .ok_or("missing stale DROP COLUMN writer outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
     let read = database.begin_read()?;
     let catalog = read.open_table(CATALOG)?;
     assert!(
