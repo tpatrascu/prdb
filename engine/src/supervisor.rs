@@ -23,7 +23,7 @@ pub struct StagingOwner {
 impl StagingOwner {
     /// Bind staging authority to a connection after gateway authentication.
     /// Never construct this value from client-supplied identity fields.
-    pub fn authenticated(connection_id: [u8; 16], principal_id: [u8; 16]) -> Self {
+    pub(crate) fn authenticated(connection_id: [u8; 16], principal_id: [u8; 16]) -> Self {
         Self {
             connection_id,
             principal_id,

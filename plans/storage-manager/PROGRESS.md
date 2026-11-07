@@ -965,3 +965,10 @@
 - Changed code and contract: [storage-manager authentication path](../../engine/src/storage_manager.rs) and [access contract](../../specs/storage-manager.md).
 - Verification: workspace formatting, build, warning-denied Clippy, and `git diff --check` pass in the repository Nix shell. Tests were not run.
 - Remaining: connect the method to the gateway AUTH session; revalidate credentials and authority for each new execution and administrative request.
+
+## SU-1 / SU-2 dependency: bind staging owner to authenticated session
+
+- Behavior: successful storage AUTH now generates the opaque connection/session ID, and its identity context creates a staging owner bound to that ID and the storage-resolved principal. Callers cannot construct staging owners from arbitrary principal IDs outside the engine crate.
+- Changed code and contracts: [storage authentication and session identity](../../engine/src/storage_manager.rs), [staging owner](../../engine/src/supervisor.rs), [storage access contract](../../specs/storage-manager.md), and [client AUTH contract](../../specs/client-protocol.md).
+- Verification: Nix-shell formatting, workspace build, warning-denied Clippy, and `git diff --check` pass. Tests were not run.
+- Remaining: implement strict HELLO/AUTH request decoding and connect the authenticated session to a gateway TCP connection; revalidate authority on every execution and control request.
