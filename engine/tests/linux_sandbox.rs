@@ -79,3 +79,40 @@ fn worker_resource_limits_reject_zero_values_before_touching_cgroup() {
         ""
     );
 }
+
+#[test]
+fn worker_cgroup_creation_rejects_undelegated_parent_before_creating_leaf() {
+    let fixture = Fixture::new();
+    let invocation_id = [0x42; 16];
+    let limits = WorkerResourceLimits {
+        cpu_quota_micros: 100_000,
+        cpu_period_micros: 100_000,
+        memory_max_bytes: 128 * 1024 * 1024,
+        max_processes: 4,
+    };
+    let leaf = fixture.0.join(format!("prdb-{}", "42".repeat(16)));
+    let error = prdb_engine::linux_sandbox::WorkerCgroup::create(&fixture.0, invocation_id, limits)
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    assert!(!leaf.exists());
+}
+
+#[test]
+fn worker_cgroup_creation_removes_partial_leaf_when_kernel_controls_are_missing() {
+    let fixture = Fixture::new();
+    fs::write(fixture.0.join("cgroup.controllers"), "cpu memory pids").unwrap();
+    fs::write(fixture.0.join("cgroup.subtree_control"), "cpu memory pids").unwrap();
+    let invocation_id = [0x43; 16];
+    let leaf = fixture.0.join(format!("prdb-{}", "43".repeat(16)));
+    let limits = WorkerResourceLimits {
+        cpu_quota_micros: 100_000,
+        cpu_period_micros: 100_000,
+        memory_max_bytes: 128 * 1024 * 1024,
+        max_processes: 4,
+    };
+    assert!(
+        prdb_engine::linux_sandbox::WorkerCgroup::create(&fixture.0, invocation_id, limits,)
+            .is_err()
+    );
+    assert!(!leaf.exists());
+}

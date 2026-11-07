@@ -17,6 +17,125 @@ pub struct WorkerResourceLimits {
     pub max_processes: u64,
 }
 
+/// A private cgroup v2 leaf assigned to one invocation.
+#[derive(Debug)]
+pub struct WorkerCgroup {
+    path: PathBuf,
+}
+
+impl WorkerCgroup {
+    /// Create and configure a per-invocation leaf under an already delegated
+    /// cgroup parent. The worker must not be spawned if this fails.
+    pub fn create(
+        parent: impl AsRef<Path>,
+        invocation_id: [u8; 16],
+        limits: WorkerResourceLimits,
+    ) -> io::Result<Self> {
+        if invocation_id.iter().all(|byte| *byte == 0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invocation ID must be nonzero",
+            ));
+        }
+        let parent = parent.as_ref();
+        validate_delegated_parent(parent)?;
+        let name = invocation_id
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let path = parent.join(format!("prdb-{name}"));
+        std::fs::create_dir(&path)?;
+        let configured = (|| {
+            limits.apply(&path)?;
+            for control in ["cgroup.procs", "pids.current", "cgroup.kill"] {
+                if !path.join(control).exists() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        format!("required cgroup v2 control {control} is unavailable"),
+                    ));
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = configured {
+            let _ = std::fs::remove_dir(&path);
+            return Err(error);
+        }
+        Ok(Self { path })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Attach a stopped worker before allowing it to execute untrusted code.
+    pub fn attach_process(&self, pid: u32) -> io::Result<()> {
+        attach_process(&self.path, pid)
+    }
+
+    pub fn kill_all(&self) -> io::Result<()> {
+        kill_all(&self.path)
+    }
+
+    /// Kill descendants and remove the cgroup only after the kernel reports
+    /// that the leaf is empty. On timeout, leave it in place for the caller
+    /// to continue cleanup or report an operational failure.
+    pub fn cleanup(self, timeout: std::time::Duration) -> io::Result<()> {
+        self.kill_all()?;
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let current = std::fs::read_to_string(self.path.join("pids.current"))?;
+            let current = current.trim().parse::<u64>().map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid cgroup pids.current value",
+                )
+            })?;
+            if current == 0 {
+                return std::fs::remove_dir(&self.path);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "worker cgroup remained populated after kill request",
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+}
+
+impl Drop for WorkerCgroup {
+    fn drop(&mut self) {
+        let _ = kill_all(&self.path);
+    }
+}
+
+fn validate_delegated_parent(parent: &Path) -> io::Result<()> {
+    if !parent.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "cgroup v2 parent directory does not exist",
+        ));
+    }
+    let controllers = read_words(&parent.join("cgroup.controllers"));
+    let enabled = read_words(&parent.join("cgroup.subtree_control"));
+    let has_required = |values: &[String]| {
+        REQUIRED_CGROUP_CONTROLLERS.iter().all(|required| {
+            values
+                .iter()
+                .any(|value| value.trim_start_matches('+') == *required)
+        })
+    };
+    if !has_required(&controllers) || !has_required(&enabled) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "cgroup parent must delegate and enable cpu, memory, and pids",
+        ));
+    }
+    Ok(())
+}
+
 impl WorkerResourceLimits {
     /// Apply hard CPU, memory, and process-count limits to a prepared cgroup.
     /// Callers must not start the worker unless every write succeeds.
@@ -66,6 +185,12 @@ pub fn kill_all(cgroup: impl AsRef<Path>) -> io::Result<()> {
 }
 
 fn write_control(path: PathBuf, value: impl AsRef<[u8]>) -> io::Result<()> {
+    if !path.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("required cgroup control {} is unavailable", path.display()),
+        ));
+    }
     std::fs::write(path, value)
 }
 
