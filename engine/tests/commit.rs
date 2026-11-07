@@ -2469,6 +2469,107 @@ fn storage_manager_adds_column_and_backfills_existing_rows()
         IndexLocator::decode_for_key(&indexed_key.key, locator.value())?.row_version,
         stored.row_version
     );
+
+    let nullable_add_invocation = id(0x6e);
+    let mut nullable_add_audit = identity_audit_event(0x6f, actor, id(0x70));
+    nullable_add_audit.correlation_id = nullable_add_invocation;
+    let nullable_added = storage.add_table_column(AddTableColumnRequest {
+        invocation_id: nullable_add_invocation,
+        authenticated_actor_id: actor,
+        table_id: table.table_id,
+        column: TableColumnDefinition {
+            name: "comment".to_owned(),
+            scalar_type: ScalarType::Text,
+            nullable: true,
+            generated_uuid_identity: false,
+            default: None,
+        },
+        retention_deadline_us: 9_999,
+        audit_event: nullable_add_audit,
+    })?;
+    assert_eq!(nullable_added.schema_version, 3);
+    let stored = row(&database, &table_row_key(table.table_id, row_id.row))?
+        .ok_or("row backfilled with NULL is missing")?;
+    let nullable_tuple = prdb_engine::tuple::decode_tuple(
+        &[
+            prdb_engine::tuple::ColumnSchema {
+                scalar_type: ScalarType::Integer,
+                nullable: false,
+            },
+            prdb_engine::tuple::ColumnSchema {
+                scalar_type: ScalarType::Text,
+                nullable: false,
+            },
+            prdb_engine::tuple::ColumnSchema {
+                scalar_type: ScalarType::Text,
+                nullable: true,
+            },
+        ],
+        nullable_added.schema_version,
+        &stored.payload,
+    )?;
+    assert_eq!(
+        nullable_tuple.values,
+        vec![
+            Some(ScalarValue::Integer(7)),
+            Some(ScalarValue::Text("ready".to_owned())),
+            None,
+        ]
+    );
+    let nullable_schema_ids = [
+        table.column_ids[0],
+        added.column_id,
+        nullable_added.column_id,
+    ];
+    let nullable_schema_columns = [
+        prdb_engine::tuple::ColumnSchema {
+            scalar_type: ScalarType::Integer,
+            nullable: false,
+        },
+        prdb_engine::tuple::ColumnSchema {
+            scalar_type: ScalarType::Text,
+            nullable: false,
+        },
+        prdb_engine::tuple::ColumnSchema {
+            scalar_type: ScalarType::Text,
+            nullable: true,
+        },
+    ];
+    let nullable_indexed_key = prdb_engine::index_key::derive_index_key(
+        index_id,
+        row_id.row,
+        nullable_added.schema_version,
+        &nullable_schema_ids,
+        &nullable_schema_columns,
+        &stored.payload,
+        &[table.column_ids[0]],
+    )?;
+    let read = database.begin_read()?;
+    let index_record = read
+        .open_table(CATALOG)?
+        .get(index_key.as_slice())?
+        .ok_or("index catalog record disappeared after NULL backfill")?;
+    assert_eq!(
+        u64::from_le_bytes(
+            decode_registered_envelope(index_record.value())?
+                .fields
+                .iter()
+                .find(|field| field.tag == 10)
+                .ok_or("index schema version is missing after NULL backfill")?
+                .payload
+                .as_slice()
+                .try_into()?
+        ),
+        nullable_added.schema_version
+    );
+    let locator = read
+        .open_table(schema::INDEXES)?
+        .get(nullable_indexed_key.key.as_slice())?
+        .ok_or("rewritten index entry is missing after NULL backfill")?;
+    assert_eq!(
+        IndexLocator::decode_for_key(&nullable_indexed_key.key, locator.value())?.row_version,
+        stored.row_version
+    );
     Ok(())
 }
 
