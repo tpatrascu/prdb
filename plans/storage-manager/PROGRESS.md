@@ -1336,3 +1336,10 @@
 - Contract and implementation: [identity ADMIN protocol](../../specs/client-protocol.md), [storage-manager contract](../../specs/storage-manager.md), [identity lifecycle](../../engine/src/storage_manager.rs), and [ADMIN dispatch](../../engine/src/client_protocol.rs).
 - Regression evidence: strict decoder tests cover both operation schemas. The real-redb identity lifecycle test exercises `StorageManager::rename_identity` under `MANAGE_USERS`, alongside the authorization path's existing rename validation.
 - Remaining: login-state and DROP ADMIN operations, remaining ADMIN operations, and separate supervisor/worker process integration.
+
+## SM-5 / DDL-identity dependency: user LOGIN state ADMIN operation
+
+- Behavior: `users.login` uses connection-owned PREPARE/START and changes the LOGIN flag and authority epoch. Disabling LOGIN revokes every outstanding token in the same commit; enabling LOGIN does not restore tokens.
+- Contract and implementation: [login-state protocol](../../specs/client-protocol.md), [storage-manager contract](../../specs/storage-manager.md), [identity lifecycle](../../engine/src/storage_manager.rs), and [ADMIN dispatch](../../engine/src/client_protocol.rs).
+- Regression evidence: decoder coverage checks the strict boolean-string schema. A real-redb identity lifecycle regression verifies that disabling a user revokes its active token atomically, and that a change cannot remove the last login-enabled administrator.
+- Remaining: DROP ADMIN operations, remaining ADMIN operations, and separate supervisor/worker process integration.

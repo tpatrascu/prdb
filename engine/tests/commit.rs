@@ -4204,6 +4204,62 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response)
             if String::from_utf8_lossy(&response.payload).contains("\"outcome\":\"committed\"")
     ));
+    let login_prepare = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut control,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 17,
+            payload: format!(
+                "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"users.login\",\"arguments\":{{\"user_id\":\"{created_user_id_wire}\",\"enabled\":\"false\"}}}}"
+            )
+            .into_bytes(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_deadline_us,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )?;
+    let login_prepare = match login_prepare {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => {
+            String::from_utf8(response.payload)?
+        }
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
+            return Err("ADMIN user-login prepare unexpectedly started an invocation".into());
+        }
+    };
+    let login_operation_id = login_prepare
+        .split("\"operation_id\":\"")
+        .nth(1)
+        .ok_or("missing ADMIN user-login operation ID")?
+        .get(..32)
+        .ok_or("invalid ADMIN user-login operation ID")?;
+    let login_change = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut control,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 18,
+            payload: format!("{{\"phase\":\"start\",\"operation_id\":\"{login_operation_id}\"}}")
+                .into_bytes(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_deadline_us,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )?;
+    assert!(matches!(
+        login_change,
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response)
+            if String::from_utf8_lossy(&response.payload).contains("\"outcome\":\"committed\"")
+    ));
+    assert!(storage.list_tokens(admin_id, created_user_id)?[0].revoked);
     assert!(
         storage
             .list_tokens(admin_id, user_manager_id)?
@@ -6719,7 +6775,6 @@ fn storage_manager_authorizes_identity_ddl_and_preserves_a_login_admin()
         None,
         1,
     );
-    let active_user_token_payload = active_user_token.payload.clone().unwrap();
     let mut token_audit = identity_audit_event(0x8b, user_manager, created_user);
     token_audit.target_ids = vec![created_user, id(0x8b)];
     storage.commit_catalog_and_audit(
@@ -6743,30 +6798,20 @@ fn storage_manager_authorizes_identity_ddl_and_preserves_a_login_admin()
         Err(CommitError::InvalidCatalog),
     );
 
-    let mut revoked_user_token = credential_verifier_write(
-        id(0x8b),
-        created_user,
-        &user_token_secret,
-        1,
-        i64::MAX,
-        Some(2),
-        2,
-    );
-    revoked_user_token.expected_value = Some(active_user_token_payload);
-    let mut disable_and_revoke = disable_user;
-    disable_and_revoke.expected_value = Some(current_value(&disable_and_revoke.key)?);
-    let mut revoke_audit = identity_audit_event(0x8c, user_manager, created_user);
-    revoke_audit.target_ids = vec![created_user, id(0x8b)];
+    let mut disable_audit = identity_audit_event(0x8c, user_manager, created_user);
+    disable_audit.correlation_id = id(0x8c);
     assert_eq!(
-        storage.commit_authorized_identity_ddl(
+        storage.set_user_login_enabled(
             id(0x8c),
             user_manager,
+            created_user,
+            false,
             9_999,
-            &[disable_and_revoke, revoked_user_token],
-            &[revoke_audit],
+            disable_audit,
         )?,
         7
     );
+    assert!(storage.list_tokens(user_manager, created_user)?[0].revoked);
 
     let mut disable_last_admin =
         principal_write_with_login(admin_user, 1, false, 2, "identity_admin");

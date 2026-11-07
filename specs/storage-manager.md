@@ -62,6 +62,8 @@ The administrative system-privilege lifecycle grants or revokes database-scoped 
 
 `rename_identity` renames a live user or role through the authorized identity DDL path. It updates the family-10 principal name and authority epoch together with the family-2 object name and object version. Authorization is selected from the principal kind (`MANAGE_USERS` for users, `MANAGE_ROLES` for roles), with database administrators allowed to rename either kind.
 
+`set_user_login_enabled` changes a LOGIN user's enabled state and authority epoch. Disabling LOGIN scans the bounded credential family and revokes every outstanding verifier in the same authorized commit; enabling LOGIN never unrevokes credentials. The commit path retains the final login-enabled administrator check.
+
 Token issue, revoke, and inventory requests use a monotonic 60-second sliding window per authenticated actor, with a default cap of 30 requests. Administrative cancellation has a separate per-actor limiter with the same default. Live manager handles for one redb `Database` object share each limiter; each actor-history map is capped at 4,096 entries and expired histories are pruned. If a map is full, requests for new actors fail closed. The [gateway](client-gateway.md) separately reserves and limits failed token-authentication attempts per source IP because storage does not receive a network source identity; IP is never used as database authority.
 
 ## Resource and Process Boundaries

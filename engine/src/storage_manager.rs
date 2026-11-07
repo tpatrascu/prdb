@@ -1968,6 +1968,150 @@ impl<'db> StorageManager<'db> {
         })
     }
 
+    /// Change a user's LOGIN state through the authorized identity DDL path.
+    /// Disabling LOGIN revokes every outstanding token in the same commit.
+    pub fn set_user_login_enabled(
+        &self,
+        invocation_id: [u8; 16],
+        authenticated_actor_id: [u8; 16],
+        user_id: [u8; 16],
+        enabled: bool,
+        retention_deadline_us: i64,
+        mut audit_event: AuditEvent,
+    ) -> Result<u64, IdentityLifecycleError> {
+        if invocation_id == [0; 16]
+            || authenticated_actor_id == [0; 16]
+            || user_id == [0; 16]
+            || retention_deadline_us <= 0
+        {
+            return Err(IdentityLifecycleError::InvalidRequest);
+        }
+        if audit_event.actor_id != Some(authenticated_actor_id)
+            || audit_event.correlation_id != invocation_id
+            || audit_event.action != AuditAction::Ddl
+            || audit_event.result != AuditResult::Succeeded
+        {
+            return Err(IdentityLifecycleError::InvalidAudit);
+        }
+        let principal_key = principal_catalog_key(user_id);
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|_| IdentityLifecycleError::Storage)?;
+        let catalog = read
+            .open_table(CATALOG)
+            .map_err(|_| IdentityLifecycleError::Storage)?;
+        let principal_current = catalog
+            .get(principal_key.as_slice())
+            .map_err(|_| IdentityLifecycleError::Storage)?
+            .map(|value| value.value().to_vec())
+            .ok_or(IdentityLifecycleError::InvalidRequest)?;
+        let mut principal = decode_registered_envelope(&principal_current)
+            .map_err(|_| IdentityLifecycleError::Storage)?;
+        let kind = principal
+            .fields
+            .iter()
+            .find(|field| field.tag == 1 && field.wire_type == WireType::U16)
+            .and_then(|field| <[u8; 2]>::try_from(field.payload.as_slice()).ok())
+            .map(u16::from_le_bytes);
+        if kind != Some(1) {
+            return Err(IdentityLifecycleError::InvalidRequest);
+        }
+        let login_field = principal
+            .fields
+            .iter_mut()
+            .find(|field| field.tag == 3 && field.wire_type == WireType::Bool)
+            .ok_or(IdentityLifecycleError::Storage)?;
+        let current_enabled = match login_field.payload.as_slice() {
+            [0] => false,
+            [1] => true,
+            _ => return Err(IdentityLifecycleError::Storage),
+        };
+        if current_enabled == enabled {
+            return Err(IdentityLifecycleError::InvalidRequest);
+        }
+        login_field.payload = vec![u8::from(enabled)];
+        let epoch_field = principal
+            .fields
+            .iter_mut()
+            .find(|field| field.tag == 4 && field.wire_type == WireType::U64)
+            .ok_or(IdentityLifecycleError::Storage)?;
+        let current_epoch = u64::from_le_bytes(
+            epoch_field
+                .payload
+                .as_slice()
+                .try_into()
+                .map_err(|_| IdentityLifecycleError::Storage)?,
+        );
+        epoch_field.payload = current_epoch
+            .checked_add(1)
+            .filter(|next| *next != 0)
+            .ok_or(IdentityLifecycleError::InvalidRequest)?
+            .to_le_bytes()
+            .to_vec();
+        let principal_payload = encode_envelope(
+            &family_schema(10).ok_or(IdentityLifecycleError::Storage)?,
+            &principal_key,
+            &principal.fields,
+        )
+        .map_err(|_| IdentityLifecycleError::Storage)?;
+        let mut writes = vec![CatalogWrite {
+            key: principal_key,
+            expected_value: Some(principal_current),
+            payload: Some(principal_payload),
+        }];
+        if !enabled {
+            let revoked_at_us = now_unix_micros().ok_or(IdentityLifecycleError::InvalidRequest)?;
+            let prefix = 16u16.to_be_bytes();
+            let mut count = 0usize;
+            for entry in catalog
+                .range(prefix.as_slice()..)
+                .map_err(|_| IdentityLifecycleError::Storage)?
+            {
+                let (key, value) = entry.map_err(|_| IdentityLifecycleError::Storage)?;
+                let key = key.value().to_vec();
+                if !key.starts_with(&prefix) {
+                    break;
+                }
+                count += 1;
+                if count > MAX_CATALOG_FAMILY_SCAN || key.len() != 19 || key[2] != 1 {
+                    return Err(IdentityLifecycleError::Storage);
+                }
+                let current = value.value().to_vec();
+                let record = decode_registered_envelope(&current)
+                    .map_err(|_| IdentityLifecycleError::Storage)?;
+                let verifier =
+                    decode_verifier_record(&record).map_err(|_| IdentityLifecycleError::Storage)?;
+                if verifier.user_id == user_id && !verifier.revoked {
+                    let payload = encode_revoked_verifier_record(
+                        &record,
+                        revoked_at_us.max(verifier.issued_at_us),
+                    )
+                    .map_err(|_| IdentityLifecycleError::Storage)?;
+                    writes.push(CatalogWrite {
+                        key,
+                        expected_value: Some(current),
+                        payload: Some(payload),
+                    });
+                }
+            }
+        }
+        drop(catalog);
+        drop(read);
+        audit_event.target_ids = vec![user_id];
+        self.commit_authorized_identity_ddl(
+            invocation_id,
+            authenticated_actor_id,
+            retention_deadline_us,
+            &writes,
+            &[audit_event],
+        )
+        .map_err(|error| match error {
+            CommitError::DdlAuthorizationDenied => IdentityLifecycleError::Unauthorized,
+            error => IdentityLifecycleError::Commit(error),
+        })
+    }
+
     fn create_identity(
         &self,
         invocation_id: [u8; 16],
