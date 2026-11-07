@@ -131,6 +131,8 @@ ERROR is response kind 101, uses the failed request ID and response sequence zer
 
 `tables.rename` uses PREPARE/START with `{ "table_id": id, "name": normalized_name }`. The table owner or a database administrator may rename a non-system table. START checks the final schema-local name set while serialized, keeps the table ID and tuple schema version, and increments the write epoch and object version. Success returns the operation ID, committed outcome, `table_id`, and commit sequence.
 
+`tables.rename_column` uses PREPARE/START with `{ "table_id": id, "column_id": id, "name": normalized_name }`. The table owner or a database administrator may rename a column on a non-system table. START updates the family 6 column name and matching family 2 object name, increments the column object version and table write epoch, and checks final table-local name uniqueness while serialized. Success returns the operation ID, committed outcome, `table_id`, `column_id`, new `name`, and commit sequence.
+
 `tables.alter_column_nullability` uses PREPARE/START with `{ "table_id": id, "column_id": id, "nullable": "true" | "false" }`. The table owner or a database administrator may change nullability on a non-system table. Setting `nullable` to "false" validates persisted rows under the table DDL fence and returns a constraint violation if any value is NULL; setting it to "true" drops the matching internal NOT NULL constraint when present. Success returns the operation ID, committed outcome, table and column IDs, the resulting nullable value, and commit sequence.
 
 ## Validation and Extension

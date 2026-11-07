@@ -8,11 +8,11 @@ use crate::catalog::{
 };
 use crate::commit::{
     CatalogWrite, CommitError, commit_authorized_column_drop_ddl_with_fences,
-    commit_authorized_constraint_ddl_with_fences, commit_authorized_foreign_key_ddl_with_fences,
-    commit_authorized_identity_ddl_with_fences, commit_authorized_index_ddl_with_fences,
-    commit_authorized_membership_ddl_with_fences, commit_authorized_object_grant_ddl_with_fences,
-    commit_authorized_policy_ddl_with_fences, commit_authorized_schema_create_ddl_with_fences,
-    commit_authorized_schema_drop_ddl_with_fences,
+    commit_authorized_column_rename_ddl_with_fences, commit_authorized_constraint_ddl_with_fences,
+    commit_authorized_foreign_key_ddl_with_fences, commit_authorized_identity_ddl_with_fences,
+    commit_authorized_index_ddl_with_fences, commit_authorized_membership_ddl_with_fences,
+    commit_authorized_object_grant_ddl_with_fences, commit_authorized_policy_ddl_with_fences,
+    commit_authorized_schema_create_ddl_with_fences, commit_authorized_schema_drop_ddl_with_fences,
     commit_authorized_system_privilege_ddl_with_fences,
     commit_authorized_table_create_ddl_with_fences, commit_authorized_table_drop_ddl_with_fences,
     commit_authorized_table_rename_ddl_with_fences, commit_catalog_and_audit_with_fences,
@@ -2713,6 +2713,129 @@ impl<'db> StorageManager<'db> {
                     key: table_key,
                     expected_value: Some(table_current),
                     payload: Some(table_payload),
+                },
+                CatalogWrite {
+                    key: object_key,
+                    expected_value: Some(object_current),
+                    payload: Some(object_payload),
+                },
+            ],
+            &[audit_event],
+        )
+        .map_err(|error| match error {
+            CommitError::DdlAuthorizationDenied => TableLifecycleError::Unauthorized,
+            error => TableLifecycleError::Commit(error),
+        })
+    }
+
+    /// Rename a column while preserving its stable ID and tuple position.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rename_column(
+        &self,
+        invocation_id: [u8; 16],
+        authenticated_actor_id: [u8; 16],
+        table_id: [u8; 16],
+        column_id: [u8; 16],
+        name: &str,
+        retention_deadline_us: i64,
+        mut audit_event: AuditEvent,
+    ) -> Result<u64, TableLifecycleError> {
+        if invocation_id == [0; 16]
+            || authenticated_actor_id == [0; 16]
+            || table_id == [0; 16]
+            || column_id == [0; 16]
+            || retention_deadline_us <= 0
+            || !is_normalized_principal_name(name)
+        {
+            return Err(TableLifecycleError::InvalidRequest);
+        }
+        if audit_event.actor_id != Some(authenticated_actor_id)
+            || audit_event.correlation_id != invocation_id
+            || audit_event.action != AuditAction::Ddl
+            || audit_event.result != AuditResult::Succeeded
+        {
+            return Err(TableLifecycleError::InvalidAudit);
+        }
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|_| TableLifecycleError::Storage)?;
+        let catalog = read
+            .open_table(CATALOG)
+            .map_err(|_| TableLifecycleError::Storage)?;
+        let table_key = id_catalog_key(5, table_id);
+        let column_key = id_catalog_key(6, column_id);
+        let object_key = id_catalog_key(2, column_id);
+        let table_current = catalog
+            .get(table_key.as_slice())
+            .map_err(|_| TableLifecycleError::Storage)?
+            .map(|value| value.value().to_vec())
+            .ok_or(TableLifecycleError::InvalidRequest)?;
+        let column_current = catalog
+            .get(column_key.as_slice())
+            .map_err(|_| TableLifecycleError::Storage)?
+            .map(|value| value.value().to_vec())
+            .ok_or(TableLifecycleError::InvalidRequest)?;
+        let object_current = catalog
+            .get(object_key.as_slice())
+            .map_err(|_| TableLifecycleError::Storage)?
+            .map(|value| value.value().to_vec())
+            .ok_or(TableLifecycleError::InvalidRequest)?;
+        if read_catalog_id(&column_key, &column_current, 6, 1)? != table_id
+            || read_catalog_u16(&object_key, &object_current, 2, 1)? != 4
+            || read_catalog_id(&object_key, &object_current, 2, 2)? != table_id
+        {
+            return Err(TableLifecycleError::InvalidRequest);
+        }
+        let old_name = read_catalog_field(&column_key, &column_current, 6, 3)?;
+        if old_name == name.as_bytes()
+            || read_catalog_field(&object_key, &object_current, 2, 3)? != old_name
+        {
+            return Err(TableLifecycleError::InvalidRequest);
+        }
+        let table_epoch = read_catalog_u64(&table_key, &table_current, 5, 3)?
+            .checked_add(1)
+            .ok_or(TableLifecycleError::Commit(CommitError::InvalidCatalog))?;
+        let object_version = read_catalog_u64(&object_key, &object_current, 2, 5)?
+            .checked_add(1)
+            .ok_or(TableLifecycleError::Commit(CommitError::InvalidCatalog))?;
+        let table_payload =
+            rewrite_catalog_u64_field(&table_key, &table_current, 5, 3, table_epoch)?;
+        let column_payload = rewrite_catalog_fields(
+            &column_key,
+            &column_current,
+            6,
+            &[(3, WireType::Text, name.as_bytes().to_vec())],
+        )?;
+        let object_payload = rewrite_catalog_fields(
+            &object_key,
+            &object_current,
+            2,
+            &[
+                (3, WireType::Text, name.as_bytes().to_vec()),
+                (5, WireType::U64, object_version.to_le_bytes().to_vec()),
+            ],
+        )?;
+        drop(catalog);
+        drop(read);
+        audit_event.target_ids = vec![table_id, column_id];
+        audit_event.target_ids.sort_unstable();
+        commit_authorized_column_rename_ddl_with_fences(
+            self.database,
+            &self.ddl_fences,
+            invocation_id,
+            authenticated_actor_id,
+            retention_deadline_us,
+            &[
+                CatalogWrite {
+                    key: table_key,
+                    expected_value: Some(table_current),
+                    payload: Some(table_payload),
+                },
+                CatalogWrite {
+                    key: column_key,
+                    expected_value: Some(column_current),
+                    payload: Some(column_payload),
                 },
                 CatalogWrite {
                     key: object_key,

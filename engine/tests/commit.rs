@@ -1155,6 +1155,98 @@ fn storage_manager_renames_tables_and_drop_column_rewrites_rows()
         retention_deadline_us: 9_999,
         audit_event: create_audit,
     })?;
+    let rejected_column_rename = id(0x80);
+    let mut rejected_column_rename_audit = identity_audit_event(0x81, actor, id(0x82));
+    rejected_column_rename_audit.correlation_id = rejected_column_rename;
+    let duplicate_column_rename = storage.rename_column(
+        rejected_column_rename,
+        actor,
+        table.table_id,
+        table.column_ids[0],
+        "kept",
+        9_999,
+        rejected_column_rename_audit,
+    );
+    assert!(
+        matches!(
+            duplicate_column_rename,
+            Err(prdb_engine::storage_manager::TableLifecycleError::Commit(
+                CommitError::InvalidCatalog
+            ))
+        ),
+        "unexpected duplicate column rename result: {duplicate_column_rename:?}"
+    );
+    assert_eq!(
+        lookup_outcome(&database, rejected_column_rename, actor, 1)?
+            .ok_or("missing duplicate column-name outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
+    let column_rename = id(0x83);
+    let mut column_rename_audit = identity_audit_event(0x84, actor, id(0x85));
+    column_rename_audit.correlation_id = column_rename;
+    let column_rename_result = storage.rename_column(
+        column_rename,
+        actor,
+        table.table_id,
+        table.column_ids[0],
+        "retired",
+        9_999,
+        column_rename_audit,
+    );
+    assert!(
+        column_rename_result.is_ok(),
+        "column rename failed: {column_rename_result:?}"
+    );
+    let column_rename_sequence = column_rename_result?;
+    assert!(column_rename_sequence > table.commit_sequence);
+    {
+        let read = database.begin_read()?;
+        let catalog = read.open_table(CATALOG)?;
+        let column_object = decode_registered_envelope(
+            catalog
+                .get(id_catalog_key(2, table.column_ids[0]).as_slice())?
+                .ok_or("renamed column object missing")?
+                .value(),
+        )?;
+        assert_eq!(
+            column_object
+                .fields
+                .iter()
+                .find(|field| field.tag == 3)
+                .ok_or("column object name missing")?
+                .payload,
+            b"retired"
+        );
+        assert_eq!(
+            u64::from_le_bytes(
+                column_object
+                    .fields
+                    .iter()
+                    .find(|field| field.tag == 5)
+                    .ok_or("column object version missing")?
+                    .payload
+                    .as_slice()
+                    .try_into()?
+            ),
+            2
+        );
+        let column_record = decode_registered_envelope(
+            catalog
+                .get(id_catalog_key(6, table.column_ids[0]).as_slice())?
+                .ok_or("renamed column record missing")?
+                .value(),
+        )?;
+        assert_eq!(
+            column_record
+                .fields
+                .iter()
+                .find(|field| field.tag == 3)
+                .ok_or("column record name missing")?
+                .payload,
+            b"retired"
+        );
+    }
     let rename_invocation = id(0x76);
     let mut rename_audit = identity_audit_event(0x77, actor, id(0x78));
     rename_audit.correlation_id = rename_invocation;
@@ -1257,7 +1349,7 @@ fn storage_manager_renames_tables_and_drop_column_rewrites_rows()
                     .as_slice()
                     .try_into()?
             ),
-            2
+            3
         );
     }
     let row_key = table_row_key(table.table_id, id(0x69));
@@ -5714,6 +5806,40 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         .ok_or("missing ADMIN table ID")?
         .get(..32)
         .ok_or("invalid ADMIN table ID")?;
+    let column_ids_wire = table_create
+        .split("\"column_ids\":[\"")
+        .nth(1)
+        .ok_or("missing ADMIN column IDs")?;
+    let first_column_id_wire = column_ids_wire
+        .get(..32)
+        .ok_or("invalid first ADMIN column ID")?;
+    let column_rename_prepare = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut control,
+        23,
+        &format!(
+            "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"tables.rename_column\",\"arguments\":{{\"table_id\":\"{table_id_wire}\",\"column_id\":\"{first_column_id_wire}\",\"name\":\"row_id\"}}}}"
+        ),
+        retention_deadline_us,
+    )?;
+    let column_rename_id = column_rename_prepare
+        .split("\"operation_id\":\"")
+        .nth(1)
+        .ok_or("missing ADMIN column-rename operation ID")?
+        .get(..32)
+        .ok_or("invalid ADMIN column-rename operation ID")?;
+    let column_rename = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut control,
+        24,
+        &format!("{{\"phase\":\"start\",\"operation_id\":\"{column_rename_id}\"}}"),
+        retention_deadline_us,
+    )?;
+    assert!(column_rename.contains("\"outcome\":\"committed\""));
+    assert!(column_rename.contains(&format!("\"column_id\":\"{first_column_id_wire}\"")));
+    assert!(column_rename.contains("\"name\":\"row_id\""));
     let table_drop_prepare = admin_dispatch_json(
         &storage,
         &staging,
