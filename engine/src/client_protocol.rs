@@ -82,6 +82,7 @@ pub enum ClientSessionError {
     MembershipLifecycle(crate::storage_manager::MembershipLifecycleError),
     SystemPrivilegeLifecycle(crate::storage_manager::SystemPrivilegeLifecycleError),
     SchemaLifecycle(crate::storage_manager::SchemaLifecycleError),
+    TableLifecycle(crate::storage_manager::TableLifecycleError),
     Storage(TransactionError),
 }
 
@@ -167,6 +168,11 @@ enum PendingAdminAction {
         name: String,
         owner_id: [u8; 16],
     },
+    CreateTable {
+        schema_id: [u8; 16],
+        name: String,
+        columns: Vec<crate::storage_manager::TableColumnDefinition>,
+    },
     RenameIdentity {
         identity_id: [u8; 16],
         name: String,
@@ -230,6 +236,11 @@ pub enum ClientAdminCommand {
     PrepareCreateSchema {
         name: String,
         owner_id: [u8; 16],
+    },
+    PrepareCreateTable {
+        schema_id: [u8; 16],
+        name: String,
+        columns: Vec<crate::storage_manager::TableColumnDefinition>,
     },
     PrepareRenameIdentity {
         identity_id: [u8; 16],
@@ -300,6 +311,7 @@ pub fn decode_client_admin_command(
     let mut version = None;
     let mut operation = None;
     let mut arguments = None;
+    let mut table_columns = None;
     let mut operation_id = None;
     let mut seen = std::collections::HashSet::new();
     loop {
@@ -334,7 +346,12 @@ pub fn decode_client_admin_command(
                     parser.skip_whitespace();
                     parser.expect(b':')?;
                     parser.skip_whitespace();
-                    args.insert(arg, parser.parse_string()?);
+                    if arg == "columns" && parser.text.get(parser.offset) == Some(&b'[') {
+                        table_columns = Some(parser.parse_table_column_array()?);
+                        args.insert(arg, "<structured-columns>".to_owned());
+                    } else {
+                        args.insert(arg, parser.parse_string()?);
+                    }
                     parser.skip_whitespace();
                     if !parser.consume(b',') {
                         parser.expect(b'}')?;
@@ -447,6 +464,35 @@ pub fn decode_client_admin_command(
                 return Err(ClientControlError::InvalidPrepare);
             }
             Ok(ClientAdminCommand::PrepareCreateSchema { name, owner_id })
+        }
+        Some("prepare") if version == Some(1) && operation.as_deref() == Some("tables.create") => {
+            if operation_id.is_some() || seen.len() != 4 {
+                return Err(ClientControlError::UnknownKey);
+            }
+            let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
+            let schema_id = decode_lower_hex_id(
+                &args
+                    .remove("schema_id")
+                    .ok_or(ClientControlError::MissingKey)?,
+            )?;
+            let name = args.remove("name").ok_or(ClientControlError::MissingKey)?;
+            let columns_value = args
+                .remove("columns")
+                .ok_or(ClientControlError::MissingKey)?;
+            let columns = table_columns.ok_or(ClientControlError::MissingKey)?;
+            if columns_value != "<structured-columns>"
+                || !is_canonical_admin_principal_name(&name)
+                || columns.is_empty()
+                || columns.len() > crate::tuple::MAX_COLUMNS
+                || !args.is_empty()
+            {
+                return Err(ClientControlError::InvalidPrepare);
+            }
+            Ok(ClientAdminCommand::PrepareCreateTable {
+                schema_id,
+                name,
+                columns,
+            })
         }
         Some("prepare") if version == Some(1) && operation.as_deref() == Some("users.rename") => {
             decode_identity_rename_prepare(arguments, operation_id, seen.len(), "user_id")
@@ -1098,6 +1144,82 @@ impl JsonStringObjectParser<'_> {
         }
     }
 
+    fn parse_boolean(&mut self) -> Result<bool, ClientControlError> {
+        if self.text[self.offset..].starts_with(b"true") {
+            self.offset += 4;
+            Ok(true)
+        } else if self.text[self.offset..].starts_with(b"false") {
+            self.offset += 5;
+            Ok(false)
+        } else {
+            Err(ClientControlError::InvalidJson)
+        }
+    }
+
+    fn parse_table_column_array(
+        &mut self,
+    ) -> Result<Vec<crate::storage_manager::TableColumnDefinition>, ClientControlError> {
+        self.expect(b'[')?;
+        self.skip_whitespace();
+        let mut columns = Vec::new();
+        if self.consume(b']') {
+            return Ok(columns);
+        }
+        loop {
+            if columns.len() >= crate::tuple::MAX_COLUMNS {
+                return Err(ClientControlError::InvalidPrepare);
+            }
+            self.skip_whitespace();
+            self.expect(b'{')?;
+            let mut fields = std::collections::HashSet::new();
+            let mut name = None;
+            let mut scalar_type = None;
+            let mut nullable = None;
+            let mut generated_uuid_identity = None;
+            self.skip_whitespace();
+            if self.consume(b'}') {
+                return Err(ClientControlError::InvalidPrepare);
+            }
+            loop {
+                self.skip_whitespace();
+                let key = self.parse_string()?;
+                if !fields.insert(key.clone()) {
+                    return Err(ClientControlError::DuplicateKey);
+                }
+                self.skip_whitespace();
+                self.expect(b':')?;
+                self.skip_whitespace();
+                match key.as_str() {
+                    "name" => name = Some(self.parse_string()?),
+                    "type" => scalar_type = Some(decode_table_scalar_type(&self.parse_string()?)?),
+                    "nullable" => nullable = Some(self.parse_boolean()?),
+                    "generated_uuid_identity" => {
+                        generated_uuid_identity = Some(self.parse_boolean()?)
+                    }
+                    _ => return Err(ClientControlError::UnknownKey),
+                }
+                self.skip_whitespace();
+                if self.consume(b'}') {
+                    break;
+                }
+                self.expect(b',')?;
+            }
+            columns.push(crate::storage_manager::TableColumnDefinition {
+                name: name.ok_or(ClientControlError::MissingKey)?,
+                scalar_type: scalar_type.ok_or(ClientControlError::MissingKey)?,
+                nullable: nullable.ok_or(ClientControlError::MissingKey)?,
+                generated_uuid_identity: generated_uuid_identity
+                    .ok_or(ClientControlError::MissingKey)?,
+            });
+            self.skip_whitespace();
+            if self.consume(b']') {
+                break;
+            }
+            self.expect(b',')?;
+        }
+        Ok(columns)
+    }
+
     fn parse_hex_quad(&mut self) -> Result<u16, ClientControlError> {
         let end = self
             .offset
@@ -1117,6 +1239,56 @@ impl JsonStringObjectParser<'_> {
         self.offset = end;
         Ok(value)
     }
+}
+
+fn decode_table_scalar_type(text: &str) -> Result<crate::tuple::ScalarType, ClientControlError> {
+    use crate::tuple::ScalarType;
+    let invalid = || ClientControlError::InvalidPrepare;
+    let parameter = |value: &str| -> Result<u32, ClientControlError> {
+        if value.is_empty()
+            || (value.len() > 1 && value.starts_with('0'))
+            || !value.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Err(invalid());
+        }
+        value.parse().map_err(|_| invalid())
+    };
+    let scalar_type = match text {
+        "boolean" => ScalarType::Boolean,
+        "smallint" => ScalarType::SmallInt,
+        "integer" => ScalarType::Integer,
+        "bigint" => ScalarType::BigInt,
+        "text" => ScalarType::Text,
+        "bytea" => ScalarType::Bytea,
+        "uuid" => ScalarType::Uuid,
+        "date" => ScalarType::Date,
+        "timestamptz" => ScalarType::TimestampTz,
+        _ if text.starts_with("decimal(") && text.ends_with(')') => {
+            let params = &text[8..text.len() - 1];
+            let (precision, scale) = params.split_once(',').ok_or_else(invalid)?;
+            if scale.contains(',') {
+                return Err(invalid());
+            }
+            let precision = parameter(precision)?;
+            let scale = parameter(scale)?;
+            if !(1..=38).contains(&precision) || scale > precision {
+                return Err(invalid());
+            }
+            ScalarType::Decimal {
+                precision: precision as u8,
+                scale: scale as u8,
+            }
+        }
+        _ if text.starts_with("varchar(") && text.ends_with(')') => {
+            let max_chars = parameter(&text[8..text.len() - 1])?;
+            if max_chars == 0 {
+                return Err(invalid());
+            }
+            ScalarType::Varchar { max_chars }
+        }
+        _ => return Err(invalid()),
+    };
+    Ok(scalar_type)
 }
 
 fn hex_nibble(byte: u8) -> Option<u8> {
@@ -1830,6 +2002,40 @@ impl ClientConnectionSession {
                     .into_bytes(),
                 )
             }
+            ClientAdminCommand::PrepareCreateTable {
+                schema_id,
+                name,
+                columns,
+            } => {
+                if self.pending_admin_operation.is_some() {
+                    return Err(ClientSessionError::WrongMode);
+                }
+                let mut operation_id = [0; 16];
+                getrandom::fill(&mut operation_id).map_err(|_| {
+                    ClientSessionError::Storage(TransactionError::RandomnessUnavailable)
+                })?;
+                if operation_id == [0; 16] {
+                    return Err(ClientSessionError::Storage(
+                        TransactionError::RandomnessUnavailable,
+                    ));
+                }
+                self.pending_admin_operation = Some(PendingAdminOperation {
+                    operation_id,
+                    action: PendingAdminAction::CreateTable {
+                        schema_id,
+                        name,
+                        columns,
+                    },
+                });
+                self.json_response(
+                    request.request_id,
+                    format!(
+                        "{{\"operation_id\":\"{}\",\"state\":\"prepared\"}}",
+                        encode_lower_hex_id(operation_id)
+                    )
+                    .into_bytes(),
+                )
+            }
             ClientAdminCommand::PrepareRenameIdentity { identity_id, name } => {
                 self.prepare_identity_rename(request.request_id, identity_id, name)
             }
@@ -2120,6 +2326,52 @@ impl ClientConnectionSession {
                             )
                             .into_bytes(),
                         )
+                    }
+                    PendingAdminAction::CreateTable {
+                        schema_id,
+                        name,
+                        columns,
+                    } => {
+                        let created = storage
+                            .create_table(crate::storage_manager::CreateTableRequest {
+                                invocation_id: operation_id,
+                                authenticated_actor_id: actor_id,
+                                schema_id,
+                                name,
+                                columns,
+                                retention_deadline_us,
+                                audit_event: crate::audit::AuditEvent {
+                                    event_id,
+                                    actor_id: Some(actor_id),
+                                    correlation_id: operation_id,
+                                    occurred_at_us: now_us,
+                                    action: crate::audit::AuditAction::Ddl,
+                                    result: crate::audit::AuditResult::Succeeded,
+                                    target_ids: Vec::new(),
+                                },
+                            })
+                            .map_err(ClientSessionError::TableLifecycle)?;
+                        let mut payload = format!(
+                            "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"table_id\":\"{}\",\"column_ids\":[",
+                            encode_lower_hex_id(operation_id),
+                            encode_lower_hex_id(created.table_id),
+                        );
+                        for (index, column_id) in created.column_ids.iter().enumerate() {
+                            if index != 0 {
+                                payload.push(',');
+                            }
+                            payload.push('"');
+                            payload.push_str(&encode_lower_hex_id(*column_id));
+                            payload.push('"');
+                        }
+                        payload.push_str(&format!(
+                            "],\"commit_sequence\":\"{}\"}}",
+                            created.commit_sequence
+                        ));
+                        if payload.len() > CLIENT_MAX_CONTROL_BYTES {
+                            return Err(ClientSessionError::ResourceLimit);
+                        }
+                        self.json_response(request.request_id, payload.into_bytes())
                     }
                     PendingAdminAction::CreateRole { name } => {
                         let created = storage

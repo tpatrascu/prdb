@@ -4662,6 +4662,73 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
     };
     assert!(schema_create.contains("\"outcome\":\"committed\""));
     assert!(schema_create.contains("\"schema_id\":"));
+    let created_schema_id = schema_create
+        .split("\"schema_id\":\"")
+        .nth(1)
+        .ok_or("missing ADMIN schema ID")?
+        .get(..32)
+        .ok_or("invalid ADMIN schema ID")?;
+    let table_prepare = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut control,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 21,
+            payload: format!(
+                "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"tables.create\",\"arguments\":{{\"schema_id\":\"{created_schema_id}\",\"name\":\"protocol_table\",\"columns\":[{{\"name\":\"id\",\"type\":\"uuid\",\"nullable\":false,\"generated_uuid_identity\":true}},{{\"name\":\"label\",\"type\":\"text\",\"nullable\":true,\"generated_uuid_identity\":false}}]}}}}"
+            )
+            .into_bytes(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_deadline_us,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )?;
+    let table_prepare = match table_prepare {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => {
+            String::from_utf8(response.payload)?
+        }
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
+            return Err("ADMIN table-create prepare unexpectedly started an operation".into());
+        }
+    };
+    let table_operation_id = table_prepare
+        .split("\"operation_id\":\"")
+        .nth(1)
+        .ok_or("missing ADMIN table-create operation ID")?
+        .get(..32)
+        .ok_or("invalid ADMIN table-create operation ID")?;
+    let table_create = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut control,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 22,
+            payload: format!("{{\"phase\":\"start\",\"operation_id\":\"{table_operation_id}\"}}")
+                .into_bytes(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_deadline_us,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )?;
+    let table_create = match table_create {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => {
+            String::from_utf8(response.payload)?
+        }
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
+            return Err("ADMIN table-create start returned a worker invocation".into());
+        }
+    };
+    assert!(table_create.contains("\"outcome\":\"committed\""));
+    assert!(table_create.contains("\"table_id\":"));
+    assert!(table_create.contains("\"column_ids\":[\""));
     assert!(storage.list_tokens(admin_id, created_user_id)?[0].revoked);
     assert!(
         storage
