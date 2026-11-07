@@ -227,4 +227,16 @@ fn admin_revoke_decoder_requires_prepare_then_start_schemas() {
         Ok(ClientAdminCommand::ListRuntimeInvocations { page_limit: 4, cursor: Some(cursor) })
             if cursor.to_wire() == wire_cursor
     ));
+    assert_eq!(
+        decode_client_admin_command(
+            br#"{"phase":"prepare","operation_version":1,"operation":"users.create","arguments":{"name":"new_user_1"}}"#
+        ),
+        Ok(ClientAdminCommand::PrepareCreateUser {
+            name: "new_user_1".into(),
+        })
+    );
+    assert!(decode_client_admin_command(
+        br#"{"phase":"prepare","operation_version":1,"operation":"users.create","arguments":{"name":"NewUser"}}"#
+    )
+    .is_err());
 }

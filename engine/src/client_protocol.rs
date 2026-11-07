@@ -78,6 +78,7 @@ pub enum ClientSessionError {
     AdministrativeRuntimeList(crate::storage_manager::AdministrativeInvocationListError),
     AdministrativeCancellation(crate::storage_manager::AdministrativeCancellationError),
     TokenInventory(crate::storage_manager::TokenLifecycleError),
+    IdentityLifecycle(crate::storage_manager::IdentityLifecycleError),
     Storage(TransactionError),
 }
 
@@ -153,6 +154,9 @@ pub struct ClientPrepare {
 }
 
 enum PendingAdminAction {
+    CreateUser {
+        name: String,
+    },
     Revoke {
         token_id: [u8; 16],
     },
@@ -185,6 +189,9 @@ pub enum ClientAdminCommand {
     ListRuntimeInvocations {
         page_limit: usize,
         cursor: Option<crate::storage_manager::AdministrativeInvocationCursor>,
+    },
+    PrepareCreateUser {
+        name: String,
     },
     PrepareRevoke {
         token_id: [u8; 16],
@@ -341,6 +348,17 @@ pub fn decode_client_admin_command(
             }
             Ok(ClientAdminCommand::ListRuntimeInvocations { page_limit, cursor })
         }
+        Some("prepare") if version == Some(1) && operation.as_deref() == Some("users.create") => {
+            if operation_id.is_some() || seen.len() != 4 {
+                return Err(ClientControlError::UnknownKey);
+            }
+            let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
+            let name = args.remove("name").ok_or(ClientControlError::MissingKey)?;
+            if !is_canonical_admin_principal_name(&name) || !args.is_empty() {
+                return Err(ClientControlError::InvalidPrepare);
+            }
+            Ok(ClientAdminCommand::PrepareCreateUser { name })
+        }
         Some("prepare") if version == Some(1) && operation.as_deref() == Some("tokens.revoke") => {
             if operation_id.is_some() || seen.len() != 4 {
                 return Err(ClientControlError::UnknownKey);
@@ -394,6 +412,16 @@ pub fn decode_client_admin_command(
         }
         _ => Err(ClientControlError::UnsupportedAdminOperation),
     }
+}
+
+fn is_canonical_admin_principal_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 128
+        && (bytes[0].is_ascii_lowercase() || bytes[0] == b'_')
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_')
 }
 
 fn parse_canonical_positive_i64(value: &str) -> Option<i64> {
@@ -1467,6 +1495,32 @@ impl ClientConnectionSession {
                 }
                 self.json_response(request.request_id, payload.into_bytes())
             }
+            ClientAdminCommand::PrepareCreateUser { name } => {
+                if self.pending_admin_operation.is_some() {
+                    return Err(ClientSessionError::WrongMode);
+                }
+                let mut operation_id = [0; 16];
+                getrandom::fill(&mut operation_id).map_err(|_| {
+                    ClientSessionError::Storage(TransactionError::RandomnessUnavailable)
+                })?;
+                if operation_id == [0; 16] {
+                    return Err(ClientSessionError::Storage(
+                        TransactionError::RandomnessUnavailable,
+                    ));
+                }
+                self.pending_admin_operation = Some(PendingAdminOperation {
+                    operation_id,
+                    action: PendingAdminAction::CreateUser { name },
+                });
+                self.json_response(
+                    request.request_id,
+                    format!(
+                        "{{\"operation_id\":\"{}\",\"state\":\"prepared\"}}",
+                        encode_lower_hex_id(operation_id)
+                    )
+                    .into_bytes(),
+                )
+            }
             ClientAdminCommand::PrepareRevoke { token_id } => {
                 if self.pending_admin_operation.is_some() {
                     return Err(ClientSessionError::WrongMode);
@@ -1555,6 +1609,35 @@ impl ClientConnectionSession {
                     ));
                 }
                 match pending.action {
+                    PendingAdminAction::CreateUser { name } => {
+                        let created = storage
+                            .create_user(
+                                operation_id,
+                                actor_id,
+                                &name,
+                                retention_deadline_us,
+                                crate::audit::AuditEvent {
+                                    event_id,
+                                    actor_id: Some(actor_id),
+                                    correlation_id: operation_id,
+                                    occurred_at_us: now_us,
+                                    action: crate::audit::AuditAction::Ddl,
+                                    result: crate::audit::AuditResult::Succeeded,
+                                    target_ids: Vec::new(),
+                                },
+                            )
+                            .map_err(ClientSessionError::IdentityLifecycle)?;
+                        self.json_response(
+                            request.request_id,
+                            format!(
+                                "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"user_id\":\"{}\",\"commit_sequence\":\"{}\"}}",
+                                encode_lower_hex_id(operation_id),
+                                encode_lower_hex_id(created.user_id),
+                                created.commit_sequence,
+                            )
+                            .into_bytes(),
+                        )
+                    }
                     PendingAdminAction::Revoke { token_id } => {
                         let sequence = storage
                             .revoke_token(

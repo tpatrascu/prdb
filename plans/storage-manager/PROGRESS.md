@@ -1297,3 +1297,11 @@
 - Behavior: after a prepared token revocation commits, an authorized database administrator can query STATUS with the operation ID and retrieve its durable committed outcome. The client does not repeat START when the original response is unavailable.
 - Regression evidence: the real-redb ADMIN lifecycle test discards the revocation response payload, then queries the operation ID from both a separate token-manager session and a database-administrator control session; each receives `committed`.
 - Remaining: other ADMIN operations and separate supervisor/worker process integration.
+
+## SM-5 / DDL-identity dependency: prepared CREATE USER ADMIN operation
+
+- Behavior: `users.create` uses the connection-owned PREPARE/START flow. START creates a random stable user ID, atomically publishes its LOGIN principal and matching named object, records DDL audit/outcome, and returns the user ID. The user receives no data privileges or credential; `tokens.issue` provisions login separately.
+- Contract and implementation: [identity DDL protocol](../../specs/client-protocol.md), [storage-manager identity lifecycle](../../engine/src/storage_manager.rs), and [ADMIN session handling](../../engine/src/client_protocol.rs).
+- Regression evidence: decoder tests accept canonical names and reject uppercase names. A real-redb `MANAGE_USERS` session creates the user, issues a token, authenticates a new query session with it, and confirms token inventory is attached to the created user.
+- Verification: format check, workspace build, warning-denied Clippy, all workspace tests, and `git diff --check` passed in the configured Nix shell.
+- Remaining: role creation, other user lifecycle DDL, remaining ADMIN operations, and separate supervisor/worker process integration.

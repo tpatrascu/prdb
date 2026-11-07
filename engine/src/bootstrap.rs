@@ -41,6 +41,10 @@ const ADMIN_ROLE_ID: [u8; 16] = builtin_id(3);
 const MAX_BOOTSTRAP_RECORDS: usize = 65_536;
 type EncodedCatalogRecord = (Vec<u8>, Vec<u8>);
 
+pub(crate) const fn database_admin_role_id() -> [u8; 16] {
+    ADMIN_ROLE_ID
+}
+
 struct BootstrapIdentity {
     admin_user_id: [u8; 16],
     token_id: [u8; 16],

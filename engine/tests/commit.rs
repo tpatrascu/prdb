@@ -3730,6 +3730,167 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         owner_reconciled_revoke.payload,
         b"{\"state\":\"committed\"}"
     );
+    let create_user_prepare = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut manager_recovery_control,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 7,
+            payload: br#"{"phase":"prepare","operation_version":1,"operation":"users.create","arguments":{"name":"new_runtime_user"}}"#.to_vec(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_deadline_us,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )
+    .map_err(|error| format!("users.create PREPARE failed: {error:?}"))?;
+    let create_user_prepare = match create_user_prepare {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => {
+            String::from_utf8(response.payload)?
+        }
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
+            return Err("ADMIN user-create prepare unexpectedly started an invocation".into());
+        }
+    };
+    let create_user_operation_id = create_user_prepare
+        .split("\"operation_id\":\"")
+        .nth(1)
+        .ok_or("missing ADMIN user-create operation ID")?
+        .get(..32)
+        .ok_or("invalid ADMIN user-create operation ID")?;
+    let create_user = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut manager_recovery_control,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 8,
+            payload: format!(
+                "{{\"phase\":\"start\",\"operation_id\":\"{create_user_operation_id}\"}}"
+            )
+            .into_bytes(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_deadline_us,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )
+    .map_err(|error| format!("users.create START failed: {error:?}"))?;
+    let create_user = match create_user {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => {
+            String::from_utf8(response.payload)?
+        }
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
+            return Err("ADMIN user-create start returned a worker invocation".into());
+        }
+    };
+    assert!(create_user.contains("\"outcome\":\"committed\""));
+    let created_user_id_wire = create_user
+        .split("\"user_id\":\"")
+        .nth(1)
+        .ok_or("missing created user ID")?
+        .get(..32)
+        .ok_or("invalid created user ID")?;
+    let created_user_id: [u8; 16] = std::array::from_fn(|index| {
+        u8::from_str_radix(&created_user_id_wire[index * 2..index * 2 + 2], 16).unwrap()
+    });
+    let create_user_issue_prepare = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut manager_recovery_control,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 9,
+            payload: format!(
+                "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"tokens.issue\",\"arguments\":{{\"user_id\":\"{created_user_id_wire}\",\"label\":\"new user login\",\"expires_at_us\":\"{}\"}}}}",
+                now_us + 3_600_000_000
+            )
+            .into_bytes(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_deadline_us,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )
+    .map_err(|error| format!("new-user token PREPARE failed: {error:?}"))?;
+    let create_user_issue_prepare = match create_user_issue_prepare {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => {
+            String::from_utf8(response.payload)?
+        }
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
+            return Err("new-user token prepare unexpectedly started an invocation".into());
+        }
+    };
+    let create_user_issue_operation_id = create_user_issue_prepare
+        .split("\"operation_id\":\"")
+        .nth(1)
+        .ok_or("missing new-user token operation ID")?
+        .get(..32)
+        .ok_or("invalid new-user token operation ID")?;
+    let create_user_issue = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut manager_recovery_control,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 10,
+            payload: format!(
+                "{{\"phase\":\"start\",\"operation_id\":\"{create_user_issue_operation_id}\"}}"
+            )
+            .into_bytes(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_deadline_us,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )
+    .map_err(|error| format!("new-user token START failed: {error:?}"))?;
+    let mut create_user_issue = match create_user_issue {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => {
+            String::from_utf8(response.payload)?
+        }
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
+            return Err("new-user token start returned a worker invocation".into());
+        }
+    };
+    let created_user_credentials = Zeroizing::new(format!(
+        "{{\"token_id\":\"{}\",\"token_secret\":\"{}\"}}",
+        create_user_issue
+            .split("\"token_id\":\"")
+            .nth(1)
+            .ok_or("missing new-user token ID")?
+            .get(..32)
+            .ok_or("invalid new-user token ID")?,
+        create_user_issue
+            .split("\"token_secret\":\"")
+            .nth(1)
+            .ok_or("missing new-user token secret")?
+            .get(..44)
+            .ok_or("invalid new-user token secret")?
+    ));
+    let created_user_credentials = prdb_engine::client_protocol::decode_client_credentials(
+        created_user_credentials.as_bytes(),
+    )?;
+    let mut created_user_session = ClientConnectionSession::default();
+    created_user_session.accept_hello(ClientMode::Query, "new-runtime-user")?;
+    created_user_session
+        .authenticate(
+            &storage,
+            created_user_credentials.token_id,
+            &created_user_credentials.token_secret,
+        )
+        .map_err(|error| format!("new-user AUTH failed: {error:?}"))?;
+    assert_eq!(storage.list_tokens(admin_id, created_user_id)?.len(), 1);
+    create_user_issue.zeroize();
     let reconciled_revoke = control.handle_status_request(
         &storage,
         &staging,

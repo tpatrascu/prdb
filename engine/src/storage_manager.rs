@@ -2,7 +2,10 @@
 
 use crate::audit::{AuditAction, AuditEvent, AuditResult};
 use crate::authorization::{MAX_MEMBERSHIP_EDGES, Membership, resolve_role_closure};
-use crate::catalog::{CatalogRecord, decode_registered_envelope};
+use crate::catalog::{
+    CatalogField, CatalogRecord, WireType, decode_registered_envelope, encode_envelope,
+    family_schema,
+};
 use crate::commit::{
     CatalogWrite, CommitError, commit_authorized_constraint_ddl_with_fences,
     commit_authorized_foreign_key_ddl_with_fences, commit_authorized_identity_ddl_with_fences,
@@ -314,6 +317,31 @@ impl std::fmt::Display for TokenLifecycleError {
 }
 
 impl std::error::Error for TokenLifecycleError {}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum IdentityLifecycleError {
+    InvalidRequest,
+    InvalidAudit,
+    RandomnessUnavailable,
+    IdentityIdGenerationFailed,
+    Unauthorized,
+    Storage,
+    Commit(CommitError),
+}
+
+impl std::fmt::Display for IdentityLifecycleError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "identity lifecycle operation failed: {self:?}")
+    }
+}
+
+impl std::error::Error for IdentityLifecycleError {}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreatedUser {
+    pub user_id: [u8; 16],
+    pub commit_sequence: u64,
+}
 
 #[derive(Clone, Debug)]
 pub struct TokenIssueRequest<'a> {
@@ -1658,6 +1686,164 @@ impl<'db> StorageManager<'db> {
         })
     }
 
+    /// Create a LOGIN user through the authorized identity DDL path.
+    pub fn create_user(
+        &self,
+        invocation_id: [u8; 16],
+        authenticated_actor_id: [u8; 16],
+        name: &str,
+        retention_deadline_us: i64,
+        mut audit_event: AuditEvent,
+    ) -> Result<CreatedUser, IdentityLifecycleError> {
+        if invocation_id == [0; 16]
+            || authenticated_actor_id == [0; 16]
+            || retention_deadline_us <= 0
+            || !is_normalized_principal_name(name)
+        {
+            return Err(IdentityLifecycleError::InvalidRequest);
+        }
+        if audit_event.actor_id != Some(authenticated_actor_id)
+            || audit_event.correlation_id != invocation_id
+            || audit_event.action != AuditAction::Ddl
+            || audit_event.result != AuditResult::Succeeded
+        {
+            return Err(IdentityLifecycleError::InvalidAudit);
+        }
+
+        let user_id = self.generate_identity_id()?;
+        let principal_key = principal_catalog_key(user_id);
+        let object_key = identity_object_catalog_key(user_id);
+        let principal_payload = encode_envelope(
+            &family_schema(10).ok_or(IdentityLifecycleError::Storage)?,
+            &principal_key,
+            &[
+                CatalogField {
+                    tag: 1,
+                    wire_type: WireType::U16,
+                    payload: 1u16.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 2,
+                    wire_type: WireType::Text,
+                    payload: name.as_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 3,
+                    wire_type: WireType::Bool,
+                    payload: vec![1],
+                },
+                CatalogField {
+                    tag: 4,
+                    wire_type: WireType::U64,
+                    payload: 1u64.to_le_bytes().to_vec(),
+                },
+            ],
+        )
+        .map_err(|_| IdentityLifecycleError::InvalidRequest)?;
+        let object_payload = encode_envelope(
+            &family_schema(2).ok_or(IdentityLifecycleError::Storage)?,
+            &object_key,
+            &[
+                CatalogField {
+                    tag: 1,
+                    wire_type: WireType::U16,
+                    payload: 8u16.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 3,
+                    wire_type: WireType::Text,
+                    payload: name.as_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 4,
+                    wire_type: WireType::Id,
+                    payload: crate::bootstrap::database_admin_role_id().to_vec(),
+                },
+                CatalogField {
+                    tag: 5,
+                    wire_type: WireType::U64,
+                    payload: 1u64.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 6,
+                    wire_type: WireType::U16,
+                    payload: 1u16.to_le_bytes().to_vec(),
+                },
+            ],
+        )
+        .map_err(|_| IdentityLifecycleError::InvalidRequest)?;
+        audit_event.target_ids = vec![user_id];
+        let writes = [
+            CatalogWrite {
+                key: principal_key,
+                expected_value: None,
+                payload: Some(principal_payload),
+            },
+            CatalogWrite {
+                key: object_key,
+                expected_value: None,
+                payload: Some(object_payload),
+            },
+        ];
+        let commit_sequence = self
+            .commit_authorized_identity_ddl(
+                invocation_id,
+                authenticated_actor_id,
+                retention_deadline_us,
+                &writes,
+                &[audit_event],
+            )
+            .map_err(|error| match error {
+                CommitError::DdlAuthorizationDenied => IdentityLifecycleError::Unauthorized,
+                error => IdentityLifecycleError::Commit(error),
+            })?;
+        Ok(CreatedUser {
+            user_id,
+            commit_sequence,
+        })
+    }
+
+    fn generate_identity_id(&self) -> Result<[u8; 16], IdentityLifecycleError> {
+        for _ in 0..8 {
+            let mut user_id = [0; 16];
+            if getrandom::fill(&mut user_id).is_err() {
+                user_id.zeroize();
+                return Err(IdentityLifecycleError::RandomnessUnavailable);
+            }
+            if user_id == [0; 16] {
+                user_id.zeroize();
+                continue;
+            }
+            let principal_key = principal_catalog_key(user_id);
+            let object_key = identity_object_catalog_key(user_id);
+            let tombstone_key = identity_tombstone_catalog_key(user_id);
+            let read = self
+                .database
+                .begin_read()
+                .map_err(|_| IdentityLifecycleError::Storage)?;
+            let catalog = read
+                .open_table(CATALOG)
+                .map_err(|_| IdentityLifecycleError::Storage)?;
+            let conflict = catalog
+                .get(principal_key.as_slice())
+                .map_err(|_| IdentityLifecycleError::Storage)?
+                .is_some()
+                || catalog
+                    .get(object_key.as_slice())
+                    .map_err(|_| IdentityLifecycleError::Storage)?
+                    .is_some()
+                || catalog
+                    .get(tombstone_key.as_slice())
+                    .map_err(|_| IdentityLifecycleError::Storage)?
+                    .is_some();
+            if !conflict {
+                return Ok(user_id);
+            }
+            user_id.zeroize();
+        }
+        Err(IdentityLifecycleError::IdentityIdGenerationFailed)
+    }
+
     /// Issue one random bearer token for a LOGIN user through the authorized
     /// identity DDL path. The secret is returned once and only its verifier is
     /// written to the catalog and audit event.
@@ -2866,6 +3052,30 @@ fn principal_catalog_key(principal_id: [u8; 16]) -> Vec<u8> {
     key.push(1);
     key.extend_from_slice(&principal_id);
     key
+}
+
+fn identity_object_catalog_key(object_id: [u8; 16]) -> Vec<u8> {
+    let mut key = 2u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&object_id);
+    key
+}
+
+fn identity_tombstone_catalog_key(object_id: [u8; 16]) -> Vec<u8> {
+    let mut key = 17u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&object_id);
+    key
+}
+
+fn is_normalized_principal_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 128
+        && (bytes[0].is_ascii_lowercase() || bytes[0] == b'_')
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_')
 }
 
 fn system_privilege_catalog_key(
