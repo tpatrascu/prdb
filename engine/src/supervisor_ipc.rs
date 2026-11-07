@@ -412,6 +412,37 @@ pub fn serve_supervisor_control<S: Read + Write>(
     }
 }
 
+/// Serve the bounded gateway-to-storage status/cancel control channel. Role
+/// and authenticated principal are supplied by trusted socket provisioning.
+pub fn serve_client_control<S: Read + Write>(
+    stream: &mut S,
+    manager: &StorageManager<'_>,
+    authenticated_principal_id: [u8; 16],
+) -> Result<(), SupervisorConnectionError> {
+    let mut request_ids = std::collections::HashSet::new();
+    loop {
+        let request = match crate::ipc::read_frame(stream) {
+            Ok(Some(request)) => request,
+            Ok(None) => return Ok(()),
+            Err(error) => return Err(SupervisorConnectionError::Frame(error)),
+        };
+        if request_ids.len() >= MAX_SUPERVISOR_REQUESTS_PER_CONNECTION {
+            return Err(SupervisorConnectionError::RequestLimitExceeded);
+        }
+        if !request_ids.insert(request.request_id) {
+            return Err(SupervisorConnectionError::DuplicateRequestId);
+        }
+        let response = dispatch_client_control_request(
+            ServiceRole::Gateway,
+            manager,
+            authenticated_principal_id,
+            &request,
+        )
+        .map_err(SupervisorConnectionError::Request)?;
+        crate::ipc::write_frame(stream, &response).map_err(SupervisorConnectionError::Frame)?;
+    }
+}
+
 fn abort_invocation(
     invocation: &mut Option<InvocationTransaction<'_>>,
 ) -> Result<(), SupervisorConnectionError> {

@@ -1072,3 +1072,10 @@
 - Changed code and regression: [gateway control dispatcher](../../engine/src/supervisor_ipc.rs) and [real-redb IPC role test](../../engine/tests/commit.rs).
 - Verification: focused role/status/cancel regression and warning-denied Clippy pass in the repository Nix shell.
 - Remaining: provision channels and sessions over Unix sockets; route PREPARE/chunks/SEAL/START through IPC; build the TCP gateway and worker lifecycle.
+
+## IPC-6 dependency: bounded gateway control socket loop
+
+- Behavior: the trusted gateway control stream accepts at most 16 distinct request IDs, dispatches only the gateway's status/cancel operations, returns correlated frames, and closes cleanly at EOF.
+- Changed code and regression: [control socket loop](../../engine/src/supervisor_ipc.rs) and [UnixStream service test](../../engine/tests/commit.rs).
+- Verification: focused real-socket test and warning-denied Clippy pass in the repository Nix shell.
+- Remaining: credential-bound session setup/generation, staging operations over IPC, and the independent TCP listener process.

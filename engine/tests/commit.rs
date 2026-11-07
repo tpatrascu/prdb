@@ -7769,6 +7769,42 @@ fn gateway_ipc_status_and_cancel_keep_unknown_ids_non_enumerating()
 }
 
 #[test]
+fn gateway_control_socket_serves_bounded_status_requests() -> Result<(), Box<dyn std::error::Error>>
+{
+    use prdb_engine::ipc::{IpcFrame, Operation, read_frame, write_frame};
+    use prdb_engine::supervisor_ipc::{SUPERVISOR_PAYLOAD_VERSION, serve_client_control};
+    use std::os::unix::net::UnixStream;
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let (mut service, mut gateway) = UnixStream::pair()?;
+    let mut payload = SUPERVISOR_PAYLOAD_VERSION.to_be_bytes().to_vec();
+    payload.extend_from_slice(&id(0x63));
+    write_frame(
+        &mut gateway,
+        &IpcFrame {
+            operation: Operation::ClientGetInvocationStatus as u16,
+            request_id: 1,
+            payload,
+        },
+    )?;
+    gateway.shutdown(std::net::Shutdown::Write)?;
+    serve_client_control(&mut service, &storage, id(0x64)).unwrap();
+    let response = read_frame(&mut gateway)?.ok_or("missing gateway status response")?;
+    assert_eq!(
+        response.operation,
+        Operation::ClientGetInvocationStatus as u16
+    );
+    assert_eq!(response.request_id, 1);
+    assert_eq!(
+        response.payload,
+        [SUPERVISOR_PAYLOAD_VERSION.to_be_bytes().as_slice(), &[0]].concat()
+    );
+    Ok(())
+}
+
+#[test]
 fn supervisor_drains_both_worker_channels_before_durable_finalize()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::ipc::{IpcFrame, Operation, encode_frame, read_frame};
