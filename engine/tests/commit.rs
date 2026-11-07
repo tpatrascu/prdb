@@ -1754,13 +1754,58 @@ fn storage_manager_drop_table_removes_owned_primary_and_unique_indexes()
         columns: vec![TableColumnDefinition {
             name: "value".to_owned(),
             scalar_type: ScalarType::Integer,
-            nullable: false,
+            nullable: true,
             generated_uuid_identity: false,
             default: None,
         }],
         retention_deadline_us: 9_999,
         audit_event: create_audit,
     })?;
+
+    let not_null_invocation = id(0x80);
+    let mut not_null_audit = identity_audit_event(0x81, actor, table.column_ids[0]);
+    not_null_audit.correlation_id = not_null_invocation;
+    storage.set_column_nullable(
+        not_null_invocation,
+        actor,
+        table.table_id,
+        table.column_ids[0],
+        false,
+        9_999,
+        not_null_audit,
+    )?;
+    let not_null_constraint_id = {
+        let read = database.begin_read()?;
+        let catalog = read.open_table(CATALOG)?;
+        let prefix = 8u16.to_be_bytes();
+        let mut constraint_id = None;
+        for entry in catalog.range(prefix.as_slice()..)? {
+            let (key, value) = entry?;
+            if !key.value().starts_with(&prefix) {
+                break;
+            }
+            let record = decode_registered_envelope(value.value())?;
+            if record
+                .fields
+                .iter()
+                .any(|field| field.tag == 1 && field.payload.as_slice() == table.table_id)
+                && record
+                    .fields
+                    .iter()
+                    .any(|field| field.tag == 2 && field.payload.as_slice() == 1u16.to_le_bytes())
+                && record.fields.iter().any(|field| {
+                    field.tag == 3
+                        && field.payload[4..]
+                            .chunks_exact(16)
+                            .any(|id| id == table.column_ids[0])
+                })
+            {
+                constraint_id = Some(<[u8; 16]>::try_from(&key.value()[3..19])?);
+                break;
+            }
+        }
+        constraint_id.ok_or("missing generated NOT NULL constraint")?
+    };
 
     let unique_constraint_id = id(0x76);
     let unique_index_id = id(0x77);
@@ -1804,7 +1849,7 @@ fn storage_manager_drop_table_removes_owned_primary_and_unique_indexes()
         .ok_or("unique table record missing before constraint add")?
         .value()
         .to_vec();
-    let mut table_epoch = table_write_with_versions(table.table_id, schema.schema_id, 1, 2);
+    let mut table_epoch = table_write_with_versions(table.table_id, schema.schema_id, 1, 3);
     table_epoch.expected_value = Some(current_table);
     let constraint_invocation = id(0x78);
     let mut constraint_audit = identity_audit_event(0x79, actor, unique_constraint_id);
@@ -1887,6 +1932,10 @@ fn storage_manager_drop_table_removes_owned_primary_and_unique_indexes()
         primary_index_key,
         id_catalog_key(2, primary_index_id),
         dependency_write(primary_constraint_id, primary_index_id, 4).key,
+        id_catalog_key(8, not_null_constraint_id),
+        id_catalog_key(2, not_null_constraint_id),
+        id_catalog_key(6, table.column_ids[0]),
+        id_catalog_key(2, table.column_ids[0]),
     ] {
         assert!(
             catalog.get(key.as_slice())?.is_none(),

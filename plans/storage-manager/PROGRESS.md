@@ -1379,14 +1379,14 @@
 - Verification: the focused test passed. In the configured Nix shell, `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` passed; all 103 commit integration tests passed. `git diff --check` passed. Tool versions were Rust/Cargo 1.95.0, rustfmt 1.9.0, Clippy 0.1.95, and TinyCC 0.9.27-unstable-2025-01-06.
 - Remaining: other constraint variants and separate supervisor/gateway process integration remain open.
 
-## DS-5 / SM-5: owned PRIMARY KEY and UNIQUE cleanup on table drop — verified
+## DS-5 / SM-5: owned NOT NULL, PRIMARY KEY, and UNIQUE cleanup on table drop — verified
 
-- Behavior and normative contracts: [schema DDL](../../specs/ddl-schema.md) and [storage manager](../../specs/storage-manager.md). Dropping a table removes its owned PRIMARY KEY and UNIQUE definitions, backing index objects, kind-4 dependencies, and forward/reverse physical index memberships atomically with its rows.
+- Behavior and normative contracts: [schema DDL](../../specs/ddl-schema.md) and [storage manager](../../specs/storage-manager.md). Dropping a table removes its internally generated NOT NULL constraint and the column's nullable metadata, plus owned PRIMARY KEY and UNIQUE definitions, backing index objects, kind-4 dependencies, and forward/reverse physical index memberships atomically with its rows.
 - Red evidence: no behavioral failure was observed for this added coverage; the existing table-drop path already implemented index cleanup. The new acceptance test makes owned constraint/index cleanup observable against persisted physical memberships.
-- Regression evidence: [storage_manager_drop_table_removes_owned_primary_and_unique_indexes](../../engine/tests/commit.rs) adds both constraints to a non-null column, commits a row through `InvocationTransaction` so both physical index directions contain entries, drops the table, checks both sets of catalog records and dependencies are gone, verifies row and index memberships are removed, and reopens through startup validation.
+- Regression evidence: [storage_manager_drop_table_removes_owned_primary_and_unique_indexes](../../engine/tests/commit.rs) first makes a nullable column NOT NULL through the storage-manager lifecycle, then adds both key constraints. It commits a row through `InvocationTransaction` so both physical index directions contain entries, drops the table, checks all constraint/index/column records and dependencies are gone, verifies the row and memberships are removed, and reopens through startup validation.
 - Verification: the focused real-redb test passed. In the configured Nix shell, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` passed; all 104 commit integration tests passed. `git diff --check` passed.
 - Remaining: DROP TABLE coverage for remaining constraint combinations and separate supervisor/gateway process integration remain open.
-- Next smallest behavior: verify DROP TABLE cleanup of the internally generated NOT NULL constraint and the column's nullable metadata.
+- Next smallest behavior: cover table-drop cleanup of a self-referential foreign key, where the referenced table and the FK owner are the same table.
 
 ## DS-5 / SM-5: column DROP RESTRICT — implemented
 
