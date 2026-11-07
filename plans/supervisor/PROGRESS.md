@@ -28,3 +28,10 @@
 - Changed fixture: [staging unit tests](../../engine/src/supervisor.rs).
 - Verification: `cargo test -p prdb-engine --lib supervisor::tests --locked` passed all 4 staging tests in the repository Nix shell.
 - Remaining: bind the authenticated gateway protocol to staging and exercise quota limits under concurrent connections.
+
+## SU-2 dependency: preserve workload class and deadline
+
+- Behavior: PREPARE now stores `deadline_ms` and operational/analytical `workload_class` in the sealed submission metadata. It rejects zero or over-ceiling deadlines; the default ceiling is 15 minutes and is configurable.
+- Changed code and contract: [staging metadata](../../engine/src/supervisor.rs) and [supervisor admission contract](../../specs/supervisor.md).
+- Verification: staging tests cover deadline ceiling rejection and preservation of the accepted class/deadline through START.
+- Remaining: use these fields in scheduler quotas and launch configuration.

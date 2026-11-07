@@ -1014,3 +1014,10 @@
 - Changed code and test: [client protocol session dispatcher](../../engine/src/client_protocol.rs) and [real-redb AUTH handshake regression](../../engine/tests/commit.rs).
 - Verification: focused handshake regression, workspace format/build, warning-denied Clippy, and `git diff --check` pass.
 - Remaining: use the dispatcher in a real loopback TCP gateway and provision authenticated gateway-service IPC.
+
+## SU-2 storage dependency: retain admission budget fields
+
+- Behavior: staged submissions preserve client-requested workload class and deadline through sealing and one-shot START, with a positive configured ceiling.
+- Changed code and contract: [staging request state](../../engine/src/supervisor.rs) and [supervisor resource policy](../../specs/supervisor.md).
+- Verification: focused staging test rejects an over-ceiling deadline and observes the accepted analytical class and deadline at START.
+- Remaining: apply admission budgets to live worker and planner scheduling.

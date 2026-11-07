@@ -13,6 +13,7 @@ pub const MAX_PARAMETER_BYTES: u64 = 1024 * 1024;
 pub const MAX_MANIFEST_BYTES: usize = 16 * 1024;
 pub const MAX_SCOPE_BYTES: usize = 8 * 1024;
 pub const MAX_CHUNK_BYTES: usize = 256 * 1024;
+pub const DEFAULT_MAX_DEADLINE_MS: u64 = 15 * 60 * 1000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StagingOwner {
@@ -37,6 +38,7 @@ pub struct StagingLimits {
     pub max_principal_reserved_bytes: u64,
     pub max_artifact_bytes: u64,
     pub max_parameter_bytes: u64,
+    pub max_deadline_ms: u64,
     pub max_live_reservations: usize,
     pub reservation_ttl: Duration,
 }
@@ -51,6 +53,7 @@ impl Default for StagingLimits {
                 + MAX_SCOPE_BYTES as u64,
             max_artifact_bytes: MAX_ARTIFACT_BYTES,
             max_parameter_bytes: MAX_PARAMETER_BYTES,
+            max_deadline_ms: DEFAULT_MAX_DEADLINE_MS,
             max_live_reservations: 1024,
             reservation_ttl: Duration::from_secs(300),
         }
@@ -67,6 +70,14 @@ pub struct PrepareSubmission {
     pub requested_scope: Vec<u8>,
     pub parameter_bytes: u64,
     pub parameter_sha256: [u8; 32],
+    pub deadline_ms: u64,
+    pub workload_class: WorkloadClass,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkloadClass {
+    Operational,
+    Analytical,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -75,6 +86,8 @@ pub struct SubmissionMetadata {
     pub manifest: Vec<u8>,
     pub scope_version: u32,
     pub requested_scope: Vec<u8>,
+    pub deadline_ms: u64,
+    pub workload_class: WorkloadClass,
 }
 
 /// Trusted supervisor logic validates versioned metadata without loading the
@@ -223,6 +236,7 @@ impl StagingStore {
             || limits.max_artifact_bytes == 0
             || limits.max_artifact_bytes > MAX_ARTIFACT_BYTES
             || limits.max_parameter_bytes > MAX_PARAMETER_BYTES
+            || limits.max_deadline_ms == 0
             || limits.max_live_reservations == 0
             || limits.reservation_ttl.is_zero()
         {
@@ -253,6 +267,8 @@ impl StagingStore {
             || request.artifact_bytes == 0
             || request.artifact_bytes > self.limits.max_artifact_bytes
             || request.parameter_bytes > self.limits.max_parameter_bytes
+            || request.deadline_ms == 0
+            || request.deadline_ms > self.limits.max_deadline_ms
             || request.manifest.is_empty()
             || request.manifest.len() > MAX_MANIFEST_BYTES
             || request.requested_scope.is_empty()
@@ -306,6 +322,8 @@ impl StagingStore {
                     manifest: request.manifest,
                     scope_version: request.scope_version,
                     requested_scope: request.requested_scope,
+                    deadline_ms: request.deadline_ms,
+                    workload_class: request.workload_class,
                 },
                 artifact_bytes: request.artifact_bytes,
                 artifact_sha256: request.artifact_sha256,
@@ -740,6 +758,8 @@ mod tests {
             requested_scope: b"scope".to_vec(),
             parameter_bytes: parameters.len() as u64,
             parameter_sha256: Sha256::digest(parameters).into(),
+            deadline_ms: 30_000,
+            workload_class: WorkloadClass::Operational,
         }
     }
 
@@ -791,6 +811,11 @@ mod tests {
             .start_with(owner, invocation_id, |submission| {
                 assert_eq!(submission.artifact(), b"artifact");
                 assert_eq!(submission.parameters(), b"params");
+                assert_eq!(submission.metadata().deadline_ms, 30_000);
+                assert_eq!(
+                    submission.metadata().workload_class,
+                    WorkloadClass::Operational
+                );
                 Ok::<_, ()>(submission.invocation_id())
             })
             .unwrap();
@@ -923,5 +948,45 @@ mod tests {
             expiring_store.status(expiring_owner, expiring.invocation_id),
             Err(StagingError::Unavailable)
         );
+    }
+
+    #[test]
+    fn staging_preserves_workload_class_and_bounds_requested_deadline() {
+        let limits = StagingLimits {
+            max_deadline_ms: 10,
+            ..StagingLimits::default()
+        };
+        let store = StagingStore::new(limits, Arc::new(AcceptMetadata)).unwrap();
+        let owner = make_owner(11, 12);
+        let mut too_long = request(b"artifact", b"");
+        too_long.deadline_ms = 11;
+        assert!(matches!(
+            store.prepare(owner, too_long),
+            Err(StagingError::InvalidRequest)
+        ));
+        let mut accepted = request(b"artifact", b"");
+        accepted.deadline_ms = 10;
+        accepted.workload_class = WorkloadClass::Analytical;
+        let reservation = store.prepare(owner, accepted).unwrap();
+        store
+            .upload_chunk(
+                owner,
+                reservation.invocation_id,
+                ChunkKind::Artifact,
+                0,
+                b"artifact",
+            )
+            .unwrap();
+        store.seal(owner, reservation.invocation_id).unwrap();
+        store
+            .start_with(owner, reservation.invocation_id, |submission| {
+                assert_eq!(submission.metadata().deadline_ms, 10);
+                assert_eq!(
+                    submission.metadata().workload_class,
+                    WorkloadClass::Analytical
+                );
+                Ok::<_, ()>(())
+            })
+            .unwrap();
     }
 }
