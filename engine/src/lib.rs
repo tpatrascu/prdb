@@ -20,6 +20,8 @@ pub mod metadata_discovery;
 pub mod outcome;
 pub mod overlay;
 pub mod planner_ipc;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub mod query_abi;
 pub mod row_record;
 pub mod schema;
 pub mod snapshot;

@@ -18,7 +18,7 @@ Emit arbitrary application bytes only to the provisioned bounded local output ch
 
 ## Native Library ABI
 
-Proposed baseline: a versioned C ABI with C-linkage entry points, compatible data layouts, opaque handles, explicit lengths, ownership rules, and error codes. Do not expose Rust `String`, `Vec`, trait objects, or unspecified layouts across the library boundary. Do not allow language exceptions or panics to unwind across the ABI. Report failures and abort the transaction when possible; otherwise terminate the executor.
+The initial ABI is version 1 in [`prdb_query_abi_v1.h`](../engine/include/prdb_query_abi_v1.h): `prdb_query_descriptor_v1` declares the ABI and record sizes; `prdb_query_main_v1` accepts the sized host and invocation records. V1 carries immutable borrowed parameters and has no service callbacks yet. The entry point returns zero for success and nonzero for failure. The host must validate descriptor fields before invoking the entry point, but dynamic loading and constructors already occur inside the sandbox. Do not expose Rust `String`, `Vec`, trait objects, or unspecified layouts across the library boundary. Do not allow language exceptions or panics to unwind across the ABI. Report failures and abort the transaction when possible; otherwise terminate the executor.
 
 Pointers passed within a worker are local ABI details, never storage-manager addresses. Storage requests use serialized IPC. ABI misuse may crash the worker; it must not compromise storage.
 
@@ -32,4 +32,4 @@ Test hostile protocol clients, library constructors, crashes, infinite loops, ch
 
 ## Open Questions
 
-Choose the initial shared-library target architecture and runtime baseline, dynamic-library loading and dependency policy, ABI entry points, and permitted threading/syscall profile. The user query is dynamically loadable; the baseline links a prebuilt SQL SDK archive into it. A separately packaged SQL shared dependency and standalone executable support are future options. Shared-memory batches and process reuse are deferred.
+The initial ABI target is Linux x86_64. The clean executor host, dynamic loader/dependency policy, storage and result callbacks, and permitted threading profile remain open implementation work. The user query is dynamically loadable; the baseline links a prebuilt SQL SDK archive into it. A separately packaged SQL shared dependency and standalone executable support are future options. Shared-memory batches and process reuse are deferred.

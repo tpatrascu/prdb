@@ -54,7 +54,9 @@ Negotiate the client TCP protocol and gateway-service protocol independently fro
 
 ## Entry-Point Contract
 
-Conceptually, `query_main_v1(host_api, invocation_parameters)` executes one user invocation. Exact names/layouts are not finalized. The host table provides scoped storage, planning submission, bounded result emission, and cancellation services; parameters contain no credentials granting broader access.
+The initial Linux x86_64 entry-point ABI is defined by [`prdb_query_abi_v1.h`](../engine/include/prdb_query_abi_v1.h) and mirrored by Rust's `query_abi` module. A library exports `prdb_query_descriptor_v1` with `struct_size`, ABI version, host-table size, and invocation-record size, and exports `prdb_query_main_v1` with type `int32_t(const prdb_host_api_v1 *, const prdb_invocation_v1 *)`. The host checks the descriptor sizes and version before resolving/calling the entry point. ABI v1's sized host table currently contains only its size and version; storage, planning, result, and cancellation callbacks are reserved for a later ABI version.
+
+`prdb_invocation_v1` carries a borrowed parameter pointer and a `uint64_t` byte length, capped at 1 MiB by admission. The pointer may be NULL exactly when the length is zero; otherwise it points to the complete immutable parameter bytes and remains valid only for the entry-point call. The entry point returns zero for success and nonzero for failure. The host and library records use fixed-width fields and natural C alignment; on the supported x86_64 target, host table size/alignment are 8/4, invocation size/alignment are 24/8 with pointer and length at offsets 8 and 16, and descriptor size/alignment are 16/4. A query return code is not itself a transaction commit decision.
 
 Use C-compatible fixed-layout structures, explicit sizes/versions, opaque handles, and explicit buffer ownership. No Rust containers, Go-managed objects, language exceptions, or panics may cross the ABI. Native pointers refer only to executor memory. Calls to other processes use validated serialization.
 
