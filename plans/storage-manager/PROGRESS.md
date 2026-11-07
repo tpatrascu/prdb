@@ -1502,3 +1502,11 @@
 - TDD note: the focused race regression passed against the current implementation.
 - Verification: focused regression passed. In the configured Nix shell, workspace build, format check, warning-denied Clippy, all workspace tests, and `git diff --check` passed for this increment. Tool versions were Rust/Cargo 1.95.0, rustfmt 1.9.0, Clippy 0.1.95, and TinyCC 0.9.27-unstable-2025-01-06.
 - Remaining: other constraint variants and separate supervisor/gateway process integration.
+
+## DS-5 / DS-7: PRIMARY KEY and UNIQUE publication versus a pinned writer — verified
+
+- Behavior: a writer that loaded a table's schema and indexes before PRIMARY KEY and UNIQUE constraints were published cannot commit a row using the stale constraint graph.
+- Regression: the real-redb [constraint and table-drop lifecycle test](../../engine/tests/commit.rs) stages a row before the combined PK/UNIQUE catalog commit, then verifies the stale writer receives `Conflict`, publishes no row, and records an ABORTED outcome.
+- Implementation: no production change was needed; the existing serialized constraint DDL path advances the table write epoch and the commit guard rejects the stale writer.
+- Verification: the focused regression passed in the configured Nix shell.
+- Remaining: separate supervisor/gateway process integration and broader DDL acceptance evidence remain open.

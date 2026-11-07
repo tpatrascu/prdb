@@ -1841,6 +1841,25 @@ fn storage_manager_drop_table_removes_owned_primary_and_unique_indexes()
         &table.column_ids,
         primary_constraint_id,
     );
+    let stale_constraint_invocation = id(0x82);
+    let stale_constraint_row = id(0x83);
+    let mut stale_constraint_writer =
+        storage.begin_invocation(stale_constraint_invocation, actor, 9_999, 1, 1024)?;
+    let stale_constraint_schema =
+        stale_constraint_writer.load_catalog_table_schema(table.table_id)?;
+    stale_constraint_writer.load_catalog_indexes(&stale_constraint_schema)?;
+    let stale_constraint_tuple = encode_tuple(
+        &stale_constraint_schema.columns,
+        stale_constraint_schema.schema_version,
+        &[Some(ScalarValue::Integer(51))],
+    )?;
+    stale_constraint_writer.stage_put(
+        prdb_engine::overlay::RowId {
+            table: table.table_id,
+            row: stale_constraint_row,
+        },
+        &stale_constraint_tuple,
+    )?;
     let table_key = id_catalog_key(5, table.table_id);
     let current_table = database
         .begin_read()?
@@ -1881,6 +1900,25 @@ fn storage_manager_drop_table_removes_owned_primary_and_unique_indexes()
         ],
         &[constraint_audit],
     )?;
+    assert!(matches!(
+        stale_constraint_writer.commit(),
+        Err(prdb_engine::transaction::TransactionError::Commit(
+            CommitError::Conflict
+        ))
+    ));
+    assert!(
+        row(
+            &database,
+            &table_row_key(table.table_id, stale_constraint_row)
+        )?
+        .is_none()
+    );
+    assert_eq!(
+        lookup_outcome(&database, stale_constraint_invocation, actor, 1)?
+            .ok_or("missing stale PRIMARY KEY/UNIQUE writer outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
 
     let mut insert = storage.begin_invocation(id(0x7a), actor, 9_999, 1, 1024)?;
     let table_schema = insert.load_catalog_table_schema(table.table_id)?;
