@@ -1211,6 +1211,13 @@
 - Verification: focused worker-failure and worker-channel/terminal tests passed. Full configured Nix-shell validation passed after cgroup cleanup integration: `cargo fmt --all -- --check`, `cargo build --workspace --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, and `git diff --check`.
 - Remaining: launch a worker with a verified sandbox profile, bind worker channels to that process, relay its result bytes, and test cancellation/expiry during the process wait.
 
+## SU-6 validation: reconcile after terminal delivery loss
+
+- Behavior: storage commits before the supervisor writes TERMINAL; if the gateway side disconnects and terminal delivery fails, the durable COMMITTED outcome remains available to the authenticated owner through `get_invocation_status`.
+- Changed regression: [gateway disconnect after storage commit](../../engine/tests/commit.rs).
+- Verification: focused real-redb `gateway_disconnect_after_storage_commit_is_reconcilable` passed. Full configured Nix-shell validation passed: `cargo fmt --all -- --check`, `cargo build --workspace --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, and `git diff --check`.
+- Remaining: exercise the same reconciliation across separate gateway/supervisor processes and restart, and prove no automatic replay occurs.
+
 ## SU-1 / IPC-6 dependency: gateway submission IPC dispatcher
 
 - Behavior: a role-checked gateway dispatcher maps AUTH, PREPARE, chunk, SEAL, START, STATUS, and CANCEL operation tags to the strict per-client session handlers. Chunk IPC prepends an explicit artifact/parameter kind byte. START returns the network acknowledgement plus a typed storage invocation and immutable submission handle to trusted supervisor code; those authority-bearing objects are never serialized.

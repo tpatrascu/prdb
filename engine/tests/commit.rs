@@ -7950,10 +7950,11 @@ fn gateway_service_listener_binds_peer_and_serves_hello() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn gateway_terminal_event_requires_a_storage_confirmed_decision()
+fn gateway_disconnect_after_storage_commit_is_reconcilable()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::ipc::{Operation, read_frame};
     use prdb_engine::outcome::OutcomeStatus;
+    use prdb_engine::storage_manager::InvocationStatus;
     use prdb_engine::supervisor_ipc::{
         GatewayTerminalDecision, finalize_gateway_invocation_and_send_terminal,
         send_gateway_result_data_event,
@@ -8000,21 +8001,20 @@ fn gateway_terminal_event_requires_a_storage_confirmed_decision()
     invocation.observe_worker_exit(&mut worker)?;
     let (mut service, mut gateway) = UnixStream::pair()?;
     send_gateway_result_data_event(&mut service, 9, b"provisional".to_vec())?;
-    finalize_gateway_invocation_and_send_terminal(
-        &mut invocation,
-        &mut service,
-        9,
-        GatewayTerminalDecision::Commit,
-    )?;
-
     let data = read_frame(&mut gateway)?.ok_or("missing provisional event")?;
     assert_eq!(data.operation, Operation::GatewayResultData as u16);
     assert_eq!(data.request_id, 9);
     assert_eq!(data.payload, b"provisional");
-    let terminal = read_frame(&mut gateway)?.ok_or("missing terminal event")?;
-    assert_eq!(terminal.operation, Operation::GatewayTerminal as u16);
-    assert_eq!(terminal.request_id, 9);
-    assert!(std::str::from_utf8(&terminal.payload)?.contains("\"outcome\":\"committed\""));
+    drop(gateway);
+    assert!(
+        finalize_gateway_invocation_and_send_terminal(
+            &mut invocation,
+            &mut service,
+            9,
+            GatewayTerminalDecision::Commit,
+        )
+        .is_err()
+    );
     assert_eq!(
         storage
             .lookup_invocation_outcome(id(0x73), user_id, now + 1)?
@@ -8022,6 +8022,13 @@ fn gateway_terminal_event_requires_a_storage_confirmed_decision()
             .status,
         OutcomeStatus::Committed
     );
+    assert!(matches!(
+        storage
+            .get_invocation_status(id(0x73), user_id, now + 1)?
+            .unwrap()
+            .status,
+        InvocationStatus::Terminal(outcome) if outcome.status == OutcomeStatus::Committed
+    ));
     Ok(())
 }
 
