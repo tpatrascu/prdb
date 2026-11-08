@@ -26,6 +26,10 @@ use crate::credentials::{
 };
 use crate::ddl_fence::{DdlFenceCoordinator, DdlFenceManager};
 use crate::metadata::{EngineMetadata, Lifecycle};
+use crate::metadata_discovery::{
+    InformationSchemaColumnsScanPage, InformationSchemaSchemataPage,
+    InformationSchemaTablesScanPage,
+};
 use crate::outcome::{InvocationOutcome, lookup_outcome};
 use crate::schema::{AUDIT, CATALOG, ENGINE_META, OUTCOMES};
 use crate::snapshot::{MAX_CATALOG_FAMILY_SCAN, RowSnapshot};
@@ -719,6 +723,7 @@ pub enum SupervisorInvocationError {
     WorkerExited(std::process::ExitStatus),
     WorkerHandlerPanicked,
     Deadline(TransactionError),
+    Transaction(TransactionError),
     Executor(crate::executor_ipc::ExecutorConnectionError),
     Planner(crate::planner_ipc::PlannerConnectionError),
     Supervisor(crate::supervisor_ipc::SupervisorConnectionError),
@@ -753,6 +758,57 @@ impl SupervisorInvocation<'_> {
 
     pub fn role_ids(&self) -> &HashSet<[u8; 16]> {
         &self.role_ids
+    }
+
+    fn with_owned_transaction<T>(
+        &self,
+        operation: impl FnOnce(&mut InvocationTransaction<'_>) -> Result<T, TransactionError>,
+    ) -> Result<T, SupervisorInvocationError> {
+        let mut owner = match self.transaction.lock() {
+            Ok(owner) => owner,
+            Err(poisoned) => {
+                let mut owner = poisoned.into_inner();
+                if let Some(mut transaction) = owner.take() {
+                    let _ = transaction.abort();
+                }
+                return Err(SupervisorInvocationError::Closed);
+            }
+        };
+        let transaction = owner.as_mut().ok_or(SupervisorInvocationError::Closed)?;
+        operation(transaction).map_err(SupervisorInvocationError::Transaction)
+    }
+
+    /// Read one invocation-pinned page of schema metadata through the trusted
+    /// storage discovery API. Executor channels remain separate and opaque.
+    pub fn scan_information_schema_schemata(
+        &self,
+        page_limit: usize,
+    ) -> Result<InformationSchemaSchemataPage, SupervisorInvocationError> {
+        self.with_owned_transaction(|transaction| {
+            transaction.scan_information_schema_schemata(page_limit, None)
+        })
+    }
+
+    /// Read one invocation-pinned page of table metadata through trusted
+    /// storage discovery.
+    pub fn scan_information_schema_tables(
+        &self,
+        page_limit: usize,
+    ) -> Result<InformationSchemaTablesScanPage, SupervisorInvocationError> {
+        self.with_owned_transaction(|transaction| {
+            transaction.scan_information_schema_tables(page_limit, None)
+        })
+    }
+
+    /// Read one invocation-pinned page of column metadata through trusted
+    /// storage discovery.
+    pub fn scan_information_schema_columns(
+        &self,
+        page_limit: usize,
+    ) -> Result<InformationSchemaColumnsScanPage, SupervisorInvocationError> {
+        self.with_owned_transaction(|transaction| {
+            transaction.scan_information_schema_columns(page_limit, None)
+        })
     }
 
     fn enter_worker_channel(

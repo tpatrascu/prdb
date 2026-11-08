@@ -16784,6 +16784,31 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     )?;
     assert_eq!(accepted.payload, b"{\"state\":\"accepted\"}");
 
+    let expected_schema = invocation
+        .scan_information_schema_schemata(128)?
+        .rows
+        .into_iter()
+        .find(|row| row.schema_name == "information_schema")
+        .ok_or("metadata API omitted the public information_schema schema")?
+        .schema_name
+        .into_bytes();
+    let expected_table = invocation
+        .scan_information_schema_tables(128)?
+        .rows
+        .into_iter()
+        .find(|row| row.table_schema == "information_schema")
+        .ok_or("metadata API omitted the public information_schema tables")?
+        .table_name
+        .into_bytes();
+    let expected_column = invocation
+        .scan_information_schema_columns(128)?
+        .rows
+        .into_iter()
+        .find(|row| row.table_schema == "information_schema" && row.table_name == "columns")
+        .ok_or("metadata API omitted information_schema.columns metadata")?
+        .column_name
+        .into_bytes();
+
     let (mut service, mut gateway) = UnixStream::pair()?;
     gateway.set_read_timeout(Some(Duration::from_secs(10)))?;
     let decision = observe_executor_relay_and_finalize_gateway(
@@ -16815,15 +16840,15 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     let metadata = read_frame(&mut gateway)?.ok_or("missing SQL metadata result")?;
     assert_eq!(metadata.operation, Operation::GatewayResultData as u16);
     assert_eq!(metadata.request_id, accepted.request_id);
-    assert_eq!(metadata.payload, b"metadata-visible");
+    assert_eq!(metadata.payload, expected_schema);
     let tables = read_frame(&mut gateway)?.ok_or("missing SQL tables metadata result")?;
     assert_eq!(tables.operation, Operation::GatewayResultData as u16);
     assert_eq!(tables.request_id, accepted.request_id);
-    assert_eq!(tables.payload, b"metadata-tables-visible");
+    assert_eq!(tables.payload, expected_table);
     let columns = read_frame(&mut gateway)?.ok_or("missing SQL columns metadata result")?;
     assert_eq!(columns.operation, Operation::GatewayResultData as u16);
     assert_eq!(columns.request_id, accepted.request_id);
-    assert_eq!(columns.payload, b"metadata-columns-visible");
+    assert_eq!(columns.payload, expected_column);
     let updated = read_frame(&mut gateway)?.ok_or("missing UPDATE visibility result")?;
     assert_eq!(updated.operation, Operation::GatewayResultData as u16);
     assert_eq!(updated.request_id, accepted.request_id);

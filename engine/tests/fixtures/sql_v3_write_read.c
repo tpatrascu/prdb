@@ -88,7 +88,8 @@ static int32_t verify_information_schema_name(
                                            context->marker,
                                            context->marker_len);
     }
-    return 0;
+    return context->host->write_result(context->host->context, value.data,
+                                       value.data_len);
 }
 
 static int32_t report_failure(const prdb_host_api_v3 *host,
@@ -119,9 +120,6 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
     static const uint8_t first_information_schema_column[] = "table_schema";
     static const uint8_t integer_bytes[] = {0, 0, 0, 42};
     static const uint8_t inserted_marker[] = "insert-visible";
-    static const uint8_t metadata_marker[] = "metadata-visible";
-    static const uint8_t tables_marker[] = "metadata-tables-visible";
-    static const uint8_t columns_marker[] = "metadata-columns-visible";
     static const uint8_t updated_marker[] = "update-visible";
     uint8_t planner_response[1024] = {0};
     uint8_t executor_response[1024] = {0};
@@ -208,8 +206,8 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
     results.expected_state = PRDB_SDK_VALUE_STATE_VALUE;
     results.expected_value = information_schema;
     results.expected_value_len = sizeof(information_schema) - 1;
-    results.marker = metadata_marker;
-    results.marker_len = sizeof(metadata_marker) - 1;
+    results.marker = NULL;
+    results.marker_len = 0;
     results.row_count = 0;
     status = prdb_sdk_sql_execute_select_v2(
         host, information_schema, sizeof(information_schema) - 1,
@@ -227,8 +225,8 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
     results.expected_value = first_information_schema_table;
     results.expected_value_len = sizeof(first_information_schema_table) - 1;
     results.expected_ordinal = 1;
-    results.marker = tables_marker;
-    results.marker_len = sizeof(tables_marker) - 1;
+    results.marker = NULL;
+    results.marker_len = 0;
     results.row_count = 0;
     status = prdb_sdk_sql_execute_select_v2(
         host, information_schema, sizeof(information_schema) - 1,
@@ -284,8 +282,8 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
     results.expected_value = first_information_schema_column;
     results.expected_value_len = sizeof(first_information_schema_column) - 1;
     results.expected_ordinal = 2;
-    results.marker = columns_marker;
-    results.marker_len = sizeof(columns_marker) - 1;
+    results.marker = NULL;
+    results.marker_len = 0;
     results.row_count = 0;
     status = prdb_sdk_sql_execute_select_v2(
         host, information_schema, sizeof(information_schema) - 1,

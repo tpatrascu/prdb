@@ -412,6 +412,9 @@ fn gateway_abort_reason_for_observation(
         crate::storage_manager::SupervisorInvocationError::Deadline(_) => {
             GatewayAbortReason::Deadline
         }
+        crate::storage_manager::SupervisorInvocationError::Transaction(_) => {
+            GatewayAbortReason::QueryError
+        }
         crate::storage_manager::SupervisorInvocationError::Executor(_)
         | crate::storage_manager::SupervisorInvocationError::Planner(_) => {
             GatewayAbortReason::QueryError
