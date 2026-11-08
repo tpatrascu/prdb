@@ -4161,6 +4161,53 @@ fn invocation_sees_own_writes_and_commits_against_its_pinned_snapshot()
 }
 
 #[test]
+fn invocation_snapshot_hides_private_writes_and_keeps_repeated_reads_stable()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    stage_initial_row(&database)?;
+
+    let mut reader = InvocationTransaction::begin(&database, [20; 16], [9; 16], 9_999, 4, 64)?;
+    let mut writer = InvocationTransaction::begin(&database, [21; 16], [9; 16], 9_999, 4, 64)?;
+    assert_eq!(reader.read(id(1))?, Some(b"snapshot".to_vec()));
+    writer.stage_put(id(1), b"writer-private")?;
+    writer.stage_put(id(2), b"insert-private")?;
+    assert_eq!(writer.read(id(1))?, Some(b"writer-private".to_vec()));
+    assert_eq!(writer.read(id(2))?, Some(b"insert-private".to_vec()));
+
+    // Another invocation sees neither the writer's private update nor insert.
+    assert_eq!(reader.read(id(1))?, Some(b"snapshot".to_vec()));
+    assert_eq!(reader.read(id(2))?, None);
+
+    assert_eq!(writer.commit()?, 2);
+
+    // The already admitted reader retains the old snapshot after publication.
+    assert_eq!(reader.read(id(1))?, Some(b"snapshot".to_vec()));
+    assert_eq!(reader.read(id(2))?, None);
+    reader.abort()?;
+
+    // A new invocation admitted after commit observes both published writes.
+    let mut observer = InvocationTransaction::begin(&database, [22; 16], [9; 16], 9_999, 4, 64)?;
+    assert_eq!(observer.read(id(1))?, Some(b"writer-private".to_vec()));
+    assert_eq!(observer.read(id(2))?, Some(b"insert-private".to_vec()));
+    observer.abort()?;
+
+    let read = database.begin_read()?;
+    let outcomes = read.open_table(prdb_engine::schema::OUTCOMES)?;
+    for (invocation_id, expected_status) in [
+        ([20; 16], OutcomeStatus::Aborted),
+        ([21; 16], OutcomeStatus::Committed),
+        ([22; 16], OutcomeStatus::Aborted),
+    ] {
+        assert_eq!(
+            InvocationOutcome::decode(outcomes.get(&invocation_id[..])?.unwrap().value())?.status,
+            expected_status
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn authorized_row_scan_pages_over_the_pinned_snapshot_and_private_overlay()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();

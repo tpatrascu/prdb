@@ -80,7 +80,7 @@ Bound invocation age, private write-set bytes, pinned history, cursor buffers, a
 
 ## Required Validation
 
-- Concurrent readers/writers: no dirty reads, stable repeated reads, own-write visibility, and no partial multi-row commits.
+- Concurrent readers/writers: [`invocation_snapshot_hides_private_writes_and_keeps_repeated_reads_stable`](../engine/tests/transaction.rs) verifies that one invocation cannot see another writer's private update or insert, keeps its original values after that writer commits, and a later invocation sees the published values. Keep this alongside [`invocation_sees_own_writes_and_commits_against_its_pinned_snapshot`](../engine/tests/transaction.rs), the same-row conflict and write-skew regressions, and [`statement_error_aborts_earlier_writes_and_prevents_finalization`](../engine/tests/transaction.rs).
 - Two updates/deletes to one row: one conflicting transaction aborts; distinct-row writes can commit. The `snapshot_isolation_allows_documented_disjoint_row_write_skew` regression starts two invocations from one snapshot: each sees two `on-call` rows and takes a different row off call. Both disjoint writes may commit, leaving no one on call. This documents that snapshot isolation does not enforce cross-row invariants or promise serializability.
 - Policy/membership change racing with commit: stale write authorization aborts; unreadable cells remain undisclosed.
 - Multi-statement error, crash, or cancellation: all staged writes roll back before commit; committed decisions survive lost replies and restart.
