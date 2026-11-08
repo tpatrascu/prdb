@@ -1199,6 +1199,12 @@ fn install_relation_discovery_catalog(
         let (user_object_key, user_object_value) = principal_object_record_for([9; 16], 1);
         catalog.insert(&user_key[..], &user_value[..])?;
         catalog.insert(&user_object_key[..], &user_object_value[..])?;
+        let (restricted_user_key, restricted_user_value) =
+            principal_catalog_record_for([10; 16], 1, b"restricted_metadata_user", true, 1);
+        let (restricted_object_key, restricted_object_value) =
+            principal_object_record_for([10; 16], 1);
+        catalog.insert(&restricted_user_key[..], &restricted_user_value[..])?;
+        catalog.insert(&restricted_object_key[..], &restricted_object_value[..])?;
         for (object_id, privilege, target_scope, target_id) in [
             (schema_id, 1, 1, schema_id),
             (second_visible_schema_id, 1, 1, second_visible_schema_id),
@@ -1217,6 +1223,16 @@ fn install_relation_discovery_catalog(
             );
             catalog.insert(&grant_key[..], &grant_value[..])?;
         }
+        let (restricted_grant_key, restricted_grant_value) = grant_catalog_record(
+            [10; 16],
+            second_visible_schema_id,
+            1,
+            1,
+            second_visible_schema_id,
+            builtin_owner_id(),
+            1,
+        );
+        catalog.insert(&restricted_grant_key[..], &restricted_grant_value[..])?;
     }
     write.commit()?;
     Ok(())
@@ -2161,6 +2177,113 @@ fn information_schema_columns_scan_walks_visible_relation_pages()
         replay_invocation.scan_information_schema_columns(1, Some(first_cursor)),
         Err(TransactionError::InvalidMetadataRequest)
     ));
+    Ok(())
+}
+
+#[test]
+fn information_schema_scans_respect_each_principals_grants()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    install_relation_discovery_catalog(&database)?;
+    install_second_relation_column(&database)?;
+
+    let mut broader = InvocationTransaction::begin(&database, [218; 16], [9; 16], 9_999, 1, 64)?;
+    let mut restricted =
+        InvocationTransaction::begin(&database, [219; 16], [10; 16], 9_999, 1, 64)?;
+
+    let broader_schemata = broader
+        .scan_information_schema_schemata(128, None)?
+        .rows
+        .into_iter()
+        .map(|row| row.schema_name)
+        .collect::<Vec<_>>();
+    let restricted_schemata = restricted
+        .scan_information_schema_schemata(128, None)?
+        .rows
+        .into_iter()
+        .map(|row| row.schema_name)
+        .collect::<Vec<_>>();
+    assert_eq!(broader_schemata, ["information_schema", "app", "public"]);
+    assert_eq!(restricted_schemata, ["information_schema", "public"]);
+
+    let mut broader_tables = Vec::new();
+    let mut broader_table_cursor = None;
+    loop {
+        let page = broader.scan_information_schema_tables(128, broader_table_cursor)?;
+        broader_tables.extend(
+            page.rows
+                .into_iter()
+                .map(|row| (row.table_schema, row.table_name)),
+        );
+        broader_table_cursor = page.continuation;
+        if broader_table_cursor.is_none() {
+            break;
+        }
+    }
+    let mut restricted_tables = Vec::new();
+    let mut restricted_table_cursor = None;
+    loop {
+        let page = restricted.scan_information_schema_tables(128, restricted_table_cursor)?;
+        restricted_tables.extend(
+            page.rows
+                .into_iter()
+                .map(|row| (row.table_schema, row.table_name)),
+        );
+        restricted_table_cursor = page.continuation;
+        if restricted_table_cursor.is_none() {
+            break;
+        }
+    }
+    assert!(broader_tables.contains(&("app".to_owned(), "metrics".to_owned())));
+    assert!(broader_tables.contains(&("app".to_owned(), "secret".to_owned())));
+    assert_eq!(restricted_tables.len(), 3);
+    assert!(
+        restricted_tables
+            .iter()
+            .all(|(schema, _)| schema == "information_schema")
+    );
+
+    let mut broader_columns = Vec::new();
+    let mut broader_column_cursor = None;
+    loop {
+        let page = broader.scan_information_schema_columns(128, broader_column_cursor)?;
+        broader_columns.extend(
+            page.rows
+                .into_iter()
+                .map(|row| (row.table_schema, row.table_name, row.column_name)),
+        );
+        broader_column_cursor = page.continuation;
+        if broader_column_cursor.is_none() {
+            break;
+        }
+    }
+    let mut restricted_columns = Vec::new();
+    let mut restricted_column_cursor = None;
+    loop {
+        let page = restricted.scan_information_schema_columns(128, restricted_column_cursor)?;
+        restricted_columns.extend(
+            page.rows
+                .into_iter()
+                .map(|row| (row.table_schema, row.table_name, row.column_name)),
+        );
+        restricted_column_cursor = page.continuation;
+        if restricted_column_cursor.is_none() {
+            break;
+        }
+    }
+    assert!(broader_columns.iter().any(|(schema, table, column)| {
+        schema == "app" && table == "metrics" && column == "value2"
+    }));
+    assert!(broader_columns.iter().any(|(schema, table, column)| {
+        schema == "app" && table == "secret" && column == "secret_value"
+    }));
+    assert_eq!(restricted_columns.len(), 13);
+    assert!(
+        restricted_columns
+            .iter()
+            .all(|(schema, _, _)| schema == "information_schema")
+    );
     Ok(())
 }
 
