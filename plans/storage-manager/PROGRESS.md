@@ -1607,3 +1607,11 @@
 - Toolchain evidence: the configured TinyCC 0.9.27-unstable-2025-01-06 output for a shared object using `puts` contained `libc.so.6`, `ld-linux-x86-64.so.2`, both SysV/GNU hash tables, and the required ABI-named exports. A temporary Rust validation harness accepted it when the manifest and profile declared those dependencies.
 - Verification: manifest-focused tests and full workspace build, formatting, warning-denied Clippy, all workspace tests, and `git diff --check` passed. The engine library had 34 passing unit tests; the commit target had 109 passing and 2 pre-existing cgroup/TinyCC fixture tests ignored.
 - Remaining: supervisor executable integration and confined query execution acceptance remain open.
+
+## SU-6: release staging reservation after START callback — implemented
+
+- Behavior and normative contract: [supervisor lifecycle](../../specs/supervisor.md). Once the trusted START callback returns, the completed invocation's immutable artifact and parameters must stop consuming per-connection and per-principal staging quota before the same connection is serviced again.
+- Implementation: the gateway service captures the authenticated staging owner and invocation ID before handing control to the START callback, then calls `StagingStore::finish_started` on callback return. A staging cleanup error closes that service stream.
+- Red/green evidence: `started_callback_releases_reservation_before_same_session_resumes` first failed because a second PREPARE on the same connection returned `InvalidState`; after the callback cleanup path was added, the next PREPARE succeeds with a new invocation ID.
+- Verification: focused lifecycle regression passed. Workspace build, format check, warning-denied Clippy, all workspace tests, and `git diff --check` passed. The engine library had 35 passing unit tests; the commit target had 109 passing and 2 pre-existing cgroup/TinyCC fixture tests ignored.
+- Remaining: the production callback that runs the sandboxed executor and resolves its durable terminal outcome is still not provided by a supervisor executable.

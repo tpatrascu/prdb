@@ -536,13 +536,30 @@ where
                                     invocation,
                                     submission,
                                     executor: Some(executor),
-                                }) => worker_started(
-                                    request_id,
-                                    &mut stream,
-                                    invocation,
-                                    submission,
-                                    *executor,
-                                ),
+                                }) => {
+                                    let Ok(owner) = session.staging_owner() else {
+                                        return;
+                                    };
+                                    let invocation_id = submission.invocation_id();
+                                    if finish_started_after_callback(
+                                        worker_staging,
+                                        owner,
+                                        invocation_id,
+                                        || {
+                                            worker_started(
+                                                request_id,
+                                                &mut stream,
+                                                invocation,
+                                                submission,
+                                                *executor,
+                                            );
+                                        },
+                                    )
+                                    .is_err()
+                                    {
+                                        return;
+                                    }
+                                }
                                 Ok(GatewayClientServiceEvent::Started { .. }) => return,
                                 Err(_) => return,
                             }
@@ -590,6 +607,16 @@ where
             Ok(())
         }
     })
+}
+
+fn finish_started_after_callback(
+    staging: &crate::supervisor::StagingStore,
+    owner: crate::supervisor::StagingOwner,
+    invocation_id: [u8; 16],
+    callback: impl FnOnce(),
+) -> Result<(), crate::supervisor::StagingError> {
+    callback();
+    staging.finish_started(owner, invocation_id)
 }
 
 /// Own the StorageInstance/StorageManager lifecycle for a gateway service.
@@ -1484,12 +1511,87 @@ fn abort_invocation(
 
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
 mod worker_result_event_tests {
-    use super::write_gateway_result_data_event;
+    use super::{finish_started_after_callback, write_gateway_result_data_event};
     use crate::ipc::{IpcFrame, Operation, read_frame};
     use std::io::Cursor;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
+
+    #[test]
+    fn started_callback_releases_reservation_before_same_session_resumes() {
+        use crate::supervisor::{
+            ChunkKind, PrepareSubmission, StagingLimits, StagingOwner, StagingStore,
+        };
+        use sha2::{Digest, Sha256};
+
+        let staging = StagingStore::new(StagingLimits::default(), Arc::new(AcceptMetadata))
+            .expect("staging store");
+        let owner = StagingOwner::authenticated([3; 16], [4; 16]);
+        let artifact = b"a";
+        let parameters: &[u8] = b"";
+        let reservation = staging
+            .prepare(
+                owner,
+                PrepareSubmission {
+                    manifest_version: 1,
+                    manifest: b"manifest".to_vec(),
+                    artifact_bytes: artifact.len() as u64,
+                    artifact_sha256: Sha256::digest(artifact).into(),
+                    scope_version: 1,
+                    requested_scope: {
+                        let mut scope = b"PSC1\0\x01\x02\x02".to_vec();
+                        scope.extend([1; 16]);
+                        scope
+                    },
+                    parameter_bytes: 0,
+                    parameter_sha256: Sha256::digest(parameters).into(),
+                    deadline_ms: 1000,
+                    workload_class: crate::supervisor::WorkloadClass::Operational,
+                },
+            )
+            .expect("prepare");
+        staging
+            .upload_chunk(
+                owner,
+                reservation.invocation_id,
+                ChunkKind::Artifact,
+                0,
+                artifact,
+            )
+            .expect("upload");
+        staging
+            .seal(owner, reservation.invocation_id)
+            .expect("seal");
+        staging
+            .start_with(owner, reservation.invocation_id, |_| Ok::<_, ()>(()))
+            .expect("start");
+
+        finish_started_after_callback(&staging, owner, reservation.invocation_id, || {})
+            .expect("finish");
+        let next = staging
+            .prepare(
+                owner,
+                PrepareSubmission {
+                    manifest_version: 1,
+                    manifest: b"manifest".to_vec(),
+                    artifact_bytes: artifact.len() as u64,
+                    artifact_sha256: Sha256::digest(artifact).into(),
+                    scope_version: 1,
+                    requested_scope: {
+                        let mut scope = b"PSC1\0\x01\x02\x02".to_vec();
+                        scope.extend([1; 16]);
+                        scope
+                    },
+                    parameter_bytes: 0,
+                    parameter_sha256: Sha256::digest(parameters).into(),
+                    deadline_ms: 1000,
+                    workload_class: crate::supervisor::WorkloadClass::Operational,
+                },
+            )
+            .expect("connection can prepare another invocation");
+        assert_ne!(next.invocation_id, reservation.invocation_id);
+    }
 
     #[test]
     fn result_relay_emits_only_correlated_gateway_data_events() {
