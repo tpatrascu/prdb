@@ -14858,6 +14858,117 @@ fn process_exit_after_durable_commit_preserves_reconcilable_outcome()
 }
 
 #[test]
+fn process_exit_after_atomic_row_index_commit_preserves_publication()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const CHILD_DATABASE_ENV: &str = "PRDB_TEST_CRASH_AFTER_ROW_INDEX_COMMIT_DATABASE";
+    const INVOCATION_ID: [u8; 16] = [0xa2; 16];
+    const PRINCIPAL_ID: [u8; 16] = [9; 16];
+
+    if let Some(database_path) = std::env::var_os(CHILD_DATABASE_ENV) {
+        let database = Database::open(database_path)?;
+        let row_key = key(7);
+        let retention_deadline_us = i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)?
+                .as_micros()
+                .saturating_add(60_000_000),
+        )?;
+        let (catalog_key, catalog_payload) = dependency_record([6; 16], [7; 16], 1);
+        let indexed_key = index_key(&row_key);
+        commit_storage_changes(
+            &database,
+            CommitRequest {
+                invocation_id: INVOCATION_ID,
+                principal_id: PRINCIPAL_ID,
+                retention_deadline_us,
+                rows: &[RowWrite {
+                    key: row_key,
+                    expected_version: None,
+                    payload: Some(b"durable row".to_vec()),
+                }],
+                indexes: &[IndexWrite {
+                    key: indexed_key,
+                    row_key,
+                    expected_version: None,
+                    present: true,
+                    unique: false,
+                    null_exempt: false,
+                }],
+                foreign_keys: &[],
+                catalog_guards: &[],
+                catalog: &[
+                    object_write_with_parent([6; 16], 4, Some([7; 16])),
+                    object_write([7; 16], 3),
+                    column_write([6; 16], [7; 16], "object_6"),
+                    table_write([7; 16], builtin_id(1)),
+                    CatalogWrite {
+                        key: catalog_key,
+                        expected_value: None,
+                        payload: Some(catalog_payload),
+                    },
+                ],
+                audit: &[audit_event(0xa3)],
+            },
+        )?;
+        // Simulate process loss after durable publication and before a reply.
+        std::process::exit(0);
+    }
+
+    let fixture = Fixture::new();
+    drop(initialize(&fixture.path())?);
+    let child_status = Command::new(std::env::current_exe()?)
+        .arg("--exact")
+        .arg("process_exit_after_atomic_row_index_commit_preserves_publication")
+        .arg("--nocapture")
+        .env(CHILD_DATABASE_ENV, fixture.path())
+        .status()?;
+    assert!(
+        child_status.success(),
+        "row/index commit child exited with {child_status}"
+    );
+
+    let reopened = Database::open(fixture.path())?;
+    let row_key = key(7);
+    assert_eq!(row(&reopened, &row_key)?.unwrap().payload, b"durable row");
+    let indexed_key = index_key(&row_key);
+    let (catalog_key, _) = dependency_record([6; 16], [7; 16], 1);
+    let read = reopened.begin_read()?;
+    let indexes = read.open_table(schema::INDEXES)?;
+    let locator = indexes
+        .get(indexed_key.as_slice())?
+        .ok_or("index locator was not recovered after process exit")?
+        .value()
+        .to_vec();
+    assert_eq!(
+        IndexLocator::decode_for_key(&indexed_key, &locator)?.row_version,
+        1
+    );
+    assert!(
+        read.open_table(CATALOG)?
+            .get(catalog_key.as_slice())?
+            .is_some()
+    );
+    assert!(
+        read.open_table(schema::AUDIT)?
+            .get(&[0xa3; 16][..])?
+            .is_some()
+    );
+    let outcome = InvocationOutcome::decode(
+        read.open_table(schema::OUTCOMES)?
+            .get(&INVOCATION_ID[..])?
+            .ok_or("committed outcome was not recovered after process exit")?
+            .value(),
+    )?;
+    assert_eq!(outcome.status, OutcomeStatus::Committed);
+    assert_eq!(outcome.commit_sequence, 1);
+    assert_eq!(commit_sequence(&reopened)?, 1);
+    Ok(())
+}
+
+#[test]
 fn supervisor_drains_both_worker_channels_before_durable_finalize()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::ipc::{IpcFrame, Operation, encode_frame, read_frame};
