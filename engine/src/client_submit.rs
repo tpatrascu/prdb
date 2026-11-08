@@ -118,6 +118,24 @@ pub struct AdminTokenResult {
     pub commit_sequence: u64,
 }
 
+/// Database-scoped privileges that an administrator may grant or revoke.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdminSystemPrivilege {
+    ManageUsers,
+    ManageRoles,
+    CreateSchema,
+}
+
+impl AdminSystemPrivilege {
+    fn as_wire_name(self) -> &'static str {
+        match self {
+            Self::ManageUsers => "manage_users",
+            Self::ManageRoles => "manage_roles",
+            Self::CreateSchema => "create_schema",
+        }
+    }
+}
+
 impl AdminTokenResult {
     /// Borrow the one-time bearer secret for secure storage or immediate use.
     pub fn token_secret(&self) -> &[u8; TOKEN_SECRET_BYTES] {
@@ -969,6 +987,41 @@ impl AdminClient {
         self.execute_admin_operation(
             "tokens.revoke",
             format!("{{\"token_id\":\"{}\"}}", lower_hex(&token_id)),
+            None,
+        )
+        .map(|(result, _)| result)
+    }
+
+    pub fn grant_system_privilege(
+        &mut self,
+        grantee_id: [u8; 16],
+        privilege: AdminSystemPrivilege,
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        self.change_system_privilege("privileges.grant", grantee_id, privilege)
+    }
+
+    pub fn revoke_system_privilege(
+        &mut self,
+        grantee_id: [u8; 16],
+        privilege: AdminSystemPrivilege,
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        self.change_system_privilege("privileges.revoke", grantee_id, privilege)
+    }
+
+    fn change_system_privilege(
+        &mut self,
+        operation: &str,
+        grantee_id: [u8; 16],
+        privilege: AdminSystemPrivilege,
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        validate_admin_id(grantee_id)?;
+        self.execute_admin_operation(
+            operation,
+            format!(
+                "{{\"grantee_id\":\"{}\",\"privilege\":\"{}\"}}",
+                lower_hex(&grantee_id),
+                privilege.as_wire_name()
+            ),
             None,
         )
         .map(|(result, _)| result)

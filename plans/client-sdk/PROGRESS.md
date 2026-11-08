@@ -75,7 +75,15 @@
 - Implementation: `AdminClient` exposes user/role create, rename, and drop, user login enable/disable, and role membership grant/revoke. Creation returns the assigned identity ID and commit sequence; user creation does not issue a credential. IDs and canonical lowercase identity names are validated locally. Shared PREPARE/START decoding verifies the operation ID, committed outcome, exact result shape, and canonical commit sequence.
 - Regression: mock-TCP coverage checks all eight operation request schemas, PREPARE/START routing, identity result decoding, and existing lost-START reconciliation. Local validation tests cover identity names and nonzero IDs.
 - Verification: focused `client_admin` integration tests passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and the repeated `cargo test --workspace --locked` run passed in the Nix shell; the commit integration target reported 124 passed and 3 cgroup-dependent ignored. The first full-suite run hit the known intermittent `InvalidAudit` failure in the CHECK lifecycle test; that test passed alone and the complete rerun passed.
-- Remaining: typed helpers for administrative privileges, schemas, tables, constraints and foreign keys; CLI/credential-file lifecycle; and live ADMIN operations through the real multi-process gateway path remain open.
+- Remaining: typed helpers for schemas, tables, constraints and foreign keys; CLI/credential-file lifecycle; and live ADMIN operations through the real multi-process gateway path remain open.
+
+## SDK-5 dependency: typed system privilege AdminClient operations — implemented
+
+- Contract: [client protocol](../../specs/client-protocol.md) allowlists the closed database-scoped privilege set: `manage_users`, `manage_roles`, and `create_schema`.
+- Implementation: `AdminClient` exposes grant/revoke methods taking a typed `AdminSystemPrivilege`; the shared administrative operation path enforces exact START response fields and uncertain-outcome handling.
+- Regression: mock-TCP coverage verifies exact grant/revoke operation names and wire arguments for representative privilege values.
+- Verification: focused `client_admin` tests passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed in the Nix shell; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
+- Remaining: typed helpers for schemas, tables, constraints and foreign keys; CLI/credential-file lifecycle; and live ADMIN operations through the real multi-process gateway path remain open.
 
 ## SDK-5 dependency: typed token lifecycle AdminClient operations — implemented
 

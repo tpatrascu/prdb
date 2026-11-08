@@ -1,5 +1,5 @@
 use prdb_engine::client_protocol::{ClientFrame, ClientFrameDecoder};
-use prdb_engine::client_submit::{AdminClient, InvocationStatus};
+use prdb_engine::client_submit::{AdminClient, AdminSystemPrivilege, InvocationStatus};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
@@ -374,6 +374,70 @@ fn admin_client_issues_one_time_token_and_revokes_tokens() {
     assert_eq!(issued.token_secret(), &[0xa5; 32]);
     assert_eq!(issued.commit_sequence, 21);
     client.revoke_token(issued.token_id).unwrap();
+    server.join().unwrap();
+}
+
+#[test]
+fn admin_client_grants_and_revokes_database_system_privileges() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut decoder = ClientFrameDecoder::default();
+        establish_control_session(&mut stream, &mut decoder);
+        for (operation, arguments, operation_id) in [
+            (
+                "privileges.grant",
+                r#"{"grantee_id":"01010101010101010101010101010101","privilege":"manage_users"}"#,
+                [0x51; 16],
+            ),
+            (
+                "privileges.revoke",
+                r#"{"grantee_id":"01010101010101010101010101010101","privilege":"create_schema"}"#,
+                [0x52; 16],
+            ),
+        ] {
+            let prepare = read_frame(&mut stream, &mut decoder);
+            let payload = String::from_utf8(prepare.payload.clone()).unwrap();
+            assert!(payload.contains(&format!("\"operation\":\"{operation}\"")));
+            assert!(payload.contains(&format!("\"arguments\":{arguments}")));
+            respond(
+                &mut stream,
+                &prepare,
+                format!(
+                    "{{\"operation_id\":\"{}\",\"state\":\"prepared\"}}",
+                    hex(&operation_id)
+                )
+                .as_bytes(),
+            );
+            let start = read_frame(&mut stream, &mut decoder);
+            respond(
+                &mut stream,
+                &start,
+                format!(
+                    "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"commit_sequence\":\"{}\"}}",
+                    hex(&operation_id),
+                    if operation == "privileges.grant" { 31 } else { 32 }
+                )
+                .as_bytes(),
+            );
+        }
+    });
+
+    let mut secret = [5; 32];
+    let mut client = AdminClient::connect_authenticated_with_timeout(
+        address,
+        [6; 16],
+        &mut secret,
+        Duration::from_secs(3),
+    )
+    .unwrap();
+    client
+        .grant_system_privilege([1; 16], AdminSystemPrivilege::ManageUsers)
+        .unwrap();
+    client
+        .revoke_system_privilege([1; 16], AdminSystemPrivilege::CreateSchema)
+        .unwrap();
     server.join().unwrap();
 }
 
