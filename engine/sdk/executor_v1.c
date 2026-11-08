@@ -156,3 +156,22 @@ int32_t prdb_sdk_executor_close_cursor_v1(
     }
     return PRDB_SDK_EXECUTOR_OK;
 }
+
+int32_t prdb_sdk_executor_stage_delete_v1(
+    const prdb_host_api_v2 *host, const uint8_t row_handle[16],
+    uint8_t *response, uint64_t response_capacity, uint64_t *response_len) {
+    uint8_t request[18];
+    int32_t status;
+    if (row_handle == NULL || row_handle[0] != PRDB_SDK_BATCH_ROW_TOKEN_KIND) {
+        return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+    }
+    write_u16(request, 1);
+    memcpy(request + 2, row_handle, 16);
+    status = invoke(host, PRDB_SDK_EXECUTOR_OP_STAGE_DELETE, request,
+                    sizeof(request), response, response_capacity, response_len);
+    if (status != PRDB_SDK_EXECUTOR_OK) return status;
+    if (*response_len != 3 || read_u16(response) != 1 || response[2] != 0) {
+        return PRDB_SDK_EXECUTOR_INVALID_PAYLOAD;
+    }
+    return PRDB_SDK_EXECUTOR_OK;
+}

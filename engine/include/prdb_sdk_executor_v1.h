@@ -10,6 +10,7 @@
 #define PRDB_SDK_EXECUTOR_OP_OPEN_SCAN UINT16_C(0x1102)
 #define PRDB_SDK_EXECUTOR_OP_NEXT_BATCH UINT16_C(0x1103)
 #define PRDB_SDK_EXECUTOR_OP_CLOSE_CURSOR UINT16_C(0x1104)
+#define PRDB_SDK_EXECUTOR_OP_STAGE_DELETE UINT16_C(0x1112)
 
 #define PRDB_SDK_EXECUTOR_OK INT32_C(0)
 #define PRDB_SDK_EXECUTOR_UNAVAILABLE INT32_C(1)
@@ -52,6 +53,12 @@ int32_t prdb_sdk_executor_next_batch_v1(
 
 int32_t prdb_sdk_executor_close_cursor_v1(
     const prdb_host_api_v2 *host, const uint8_t cursor[16],
+    uint8_t *response, uint64_t response_capacity, uint64_t *response_len);
+
+/* Stages deletion of a connection-local row handle. Storage rechecks its
+ * invocation, snapshot, grant, policy and row-version authority. */
+int32_t prdb_sdk_executor_stage_delete_v1(
+    const prdb_host_api_v2 *host, const uint8_t row_handle[16],
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len);
 
 #endif

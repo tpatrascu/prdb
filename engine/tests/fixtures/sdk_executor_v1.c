@@ -130,6 +130,32 @@ int main(void) {
                &host, cursor, response, sizeof(response), &response_len) ==
            PRDB_SDK_EXECUTOR_OK);
     assert(mock.calls == 4);
+
+    uint8_t row_handle[16] = {8};
+    memset(row_handle + 1, 0x55, 15);
+    uint8_t delete_request[18] = {0, 1};
+    memcpy(delete_request + 2, row_handle, 16);
+    uint8_t mutation_reply[3] = {0, 1, 0};
+    mock.expected_operation = PRDB_SDK_EXECUTOR_OP_STAGE_DELETE;
+    mock.expected_request = delete_request;
+    mock.expected_request_len = sizeof(delete_request);
+    mock.reply = mutation_reply;
+    mock.reply_len = sizeof(mutation_reply);
+    assert(prdb_sdk_executor_stage_delete_v1(
+               &host, row_handle, response, sizeof(response), &response_len) ==
+           PRDB_SDK_EXECUTOR_OK);
+    assert(response_len == sizeof(mutation_reply) && mock.calls == 5);
+    mutation_reply[2] = 1;
+    assert(prdb_sdk_executor_stage_delete_v1(
+               &host, row_handle, response, sizeof(response), &response_len) ==
+           PRDB_SDK_EXECUTOR_INVALID_PAYLOAD);
+    assert(mock.calls == 6);
+    row_handle[0] = 7;
+    assert(prdb_sdk_executor_stage_delete_v1(
+               &host, row_handle, response, sizeof(response), &response_len) ==
+           PRDB_SDK_EXECUTOR_INVALID_ARGUMENT);
+    assert(mock.calls == 6);
+
     assert(prdb_sdk_executor_open_full_scan_v1(
                &host, cursor, response, sizeof(response), &response_len,
                cursor) == PRDB_SDK_EXECUTOR_INVALID_ARGUMENT);

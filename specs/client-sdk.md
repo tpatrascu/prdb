@@ -44,6 +44,8 @@ Typed accessors expose Boolean, SmallInt, Integer, BigInt, Date, and TimestampTz
 
 [`prdb_sdk_batch_v1`](../engine/include/prdb_sdk_batch_v1.h) opens the version-1 executor `next_batch` payload in place. Opening validates the complete payload, including its 1 MiB bound, optional continuation cursor kind, at most 128 rows, row-handle kind, at most 4096 cells per row, each cell representation, and exact end-of-payload. Row and cell iterators yield borrowed handles/value bytes without copying. The application retains the response buffer unchanged until all views and iterators are discarded; this API does not allocate a batch or provide a release function. A finished batch has no continuation cursor; otherwise it exposes the opaque 16-byte cursor for the next request. Row handles and cursors are opaque connection-scoped tokens, not row IDs or addresses.
 
+The executor SDK exposes `prdb_sdk_executor_stage_delete_v1` for a validated kind-8 row handle. It sends the version-1 `stage_delete` request and accepts only the three-byte version/status-0 acknowledgement. The function does not infer or bypass authority: storage revalidates invocation, snapshot, grant, policy, and row version and consumes the row handle after a successful mutation. INSERT and UPDATE C bridges remain to be added; their Rust IPC dispatch is already implemented.
+
 The SDK serves operational invocations first and also supports bounded analytical work. SQL analytical operators follow the [workload roadmap](workload-profile.md), run over authorized batches, and must not treat redaction as SQL null or omit denied inputs silently.
 
 ## Administrative SDK

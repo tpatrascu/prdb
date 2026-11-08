@@ -1,5 +1,12 @@
 # Storage Manager Progress
 
+## SM-6 dependency: C executor stage-delete bridge — partial
+
+- Contract: [IPC protocol](../../specs/ipc-protocol.md) mutation payload v1 and [client SDK](../../specs/client-sdk.md). A C query can submit a connection-local kind-8 row handle for deletion and must accept only the version/status-0 acknowledgement. Authority and row-version checks remain in trusted storage.
+- Red/green evidence: the maintained executor fixture first failed to compile because the operation constant and SDK function were absent. The bridge now encodes version plus the 16-byte handle, calls operation `0x1112`, and rejects malformed acknowledgements and non-row tokens.
+- Verification: `nix-shell -p rustc cargo clippy rustfmt tinycc --run 'make -f engine/sdk/Makefile test'` passed with TinyCC 0.9.27-unstable-2025-01-06. Base PATH lacked the toolchain; initial Nix access was denied by the sandbox and the authorized Nix shell command succeeded.
+- Limits/next: this is only the delete bridge; INSERT and UPDATE C encoders are still absent. The test uses a host callback fixture and does not claim a live IPC/storage or sandbox integration. Next implement full-shape INSERT with VALUE/NULL/DEFAULT encoding and response handle validation.
+
 ## Signed index components — in progress
 
 - Contract: [index-key encoding v1](../../specs/index-key-encoding.md), SQL tuple components and normative examples. Non-null signed 16/32/64-bit values use marker `01`, sign-bit normalization, and big-endian bytes. These bytes are comparable only within the same index definition.
