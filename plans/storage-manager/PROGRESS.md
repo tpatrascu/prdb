@@ -1737,4 +1737,11 @@
 - Regression: the real-redb [foundation test](../../engine/tests/redb_foundation.rs) pins an initial value, completes 64 Immediate/two-phase commits of 32 KiB replacements while that reader remains open, verifies the pinned reader still sees the original bytes, and confirms a new reader sees the latest committed value.
 - Verification: Rust 1.95.0 and redb 4.4.0; `cargo fmt --all -- --check` and `cargo test -p prdb-engine --test redb_foundation --locked` passed.
 - Scope: this validates redb snapshot stability and writer progress for this bounded workload. It does not establish the storage manager's admission limits under sustained pressure, physical reclamation/compaction behavior, or power-loss durability.
-- Remaining: process-level COMMITTED recovery after terminal loss, storage-file fault points and broader retained-reader pressure/reclamation evidence remain open.
+- Remaining: exercise COMMITTED terminal loss from a real sandboxed query, add storage-file fault points, and broaden retained-reader pressure/reclamation evidence.
+
+## SM-4 / SM-7: durable writer progress under a retained invocation snapshot — verified
+
+- Contract: [MVCC](../../specs/concurrency-mvcc.md) and [storage manager validation](05-validation-and-integration.md). A long-lived admitted invocation keeps its original read view while independent writers durably publish later versions.
+- Regression: the real-redb [transaction test](../../engine/tests/transaction.rs) holds one invocation snapshot while 32 other invocations each commit a 16 KiB replacement to the same row. The retained reader returns the original row after every commit; a new invocation reads the 32nd committed value.
+- Verification: `cargo fmt --all -- --check` and `cargo test -p prdb-engine --test transaction retained_invocation_snapshot_survives_a_durable_write_burst --locked` passed.
+- Scope: validates engine transaction behavior for a bounded single-row burst. It does not measure production reader scheduling, sustained write/analytical contention, file reclamation, or power-loss durability.

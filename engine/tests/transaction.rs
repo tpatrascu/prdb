@@ -4643,6 +4643,47 @@ fn invocation_snapshot_hides_private_writes_and_keeps_repeated_reads_stable()
 }
 
 #[test]
+fn retained_invocation_snapshot_survives_a_durable_write_burst()
+-> Result<(), Box<dyn std::error::Error>> {
+    const VALUE_BYTES: usize = 16 * 1024;
+    const WRITE_COUNT: u8 = 32;
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    stage_initial_row(&database)?;
+    let mut reader =
+        InvocationTransaction::begin(&database, [0x30; 16], [9; 16], 9_999, 4, 32 * 1024)?;
+    let original_value = reader.read(id(1))?.ok_or("initial row missing")?;
+
+    let mut latest_value = Vec::new();
+    for version in 0..WRITE_COUNT {
+        latest_value = vec![version; VALUE_BYTES];
+        let mut writer = InvocationTransaction::begin(
+            &database,
+            [0x40u8.wrapping_add(version); 16],
+            [9; 16],
+            9_999,
+            4,
+            32 * 1024,
+        )?;
+        writer.stage_put(id(1), &latest_value)?;
+        writer.commit()?;
+        assert_eq!(
+            reader.read(id(1))?,
+            Some(original_value.clone()),
+            "the pinned invocation must retain its original row after write {version}"
+        );
+    }
+    reader.abort()?;
+
+    let mut observer =
+        InvocationTransaction::begin(&database, [0x61; 16], [9; 16], 9_999, 4, 32 * 1024)?;
+    assert_eq!(observer.read(id(1))?, Some(latest_value));
+    observer.abort()?;
+    Ok(())
+}
+
+#[test]
 fn authorized_row_scan_pages_over_the_pinned_snapshot_and_private_overlay()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
