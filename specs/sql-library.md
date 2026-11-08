@@ -21,6 +21,20 @@ For example: `SELECT name FROM employees WHERE department_id = $1 LIMIT 100`.
 
 [Schema DDL](ddl-schema.md) defines initial scalar types and identifier rules. Remaining expression/coercion details, wire encodings, and exact parameter grammar must be fixed before implementation; the example is illustrative. Reject unsupported syntax explicitly. The required analytical follow-on adds inner equijoins, grouping, COUNT/SUM/MIN/MAX/AVG, sorting, and HAVING under the [workload profile](workload-profile.md); these are not yet part of the first parser slice. General subqueries, explicit transaction-control statements, and user-defined SQL functions remain deferred. Schema/user/permission DDL is supported through the separate administrative SDK channel and is rejected inside user invocations. Existing design discussions of aggregates describe future semantics, not initial language support.
 
+The first parser increment has a deliberately narrow, explicit grammar:
+
+```text
+select       := SELECT projection FROM identifier
+                [WHERE identifier comparison parameter]
+                [LIMIT unsigned_integer] [;]
+projection   := * | identifier (',' identifier)*
+comparison   := '=' | '!=' | '<>' | '<' | '<=' | '>' | '>='
+parameter    := '$' unsigned_integer
+identifier   := ASCII letter or '_' followed by ASCII letters, digits, or '_'
+```
+
+Keywords are case-insensitive; identifier spelling is preserved as source bytes for later binding. Whitespace is ASCII space, tab, CR, or LF. SQL input is bounded to 65,536 bytes, each identifier to 128 bytes, projection to 64 columns, parameter indices to 1–65,535, and LIMIT to 0–1,000,000. LIMIT 0 is valid. This increment accepts at most one simple comparison predicate and only a positional parameter on its right side; parameter values are bound separately. Comments, quoted identifiers, aliases, schema qualification, literals, Boolean combinations, multiple statements, and other statement kinds are rejected (a non-SELECT statement reports UNSUPPORTED). The AST stores source offsets/lengths into the caller-owned immutable SQL buffer and allocates no strings.
+
 ## Query Flow
 
 1. The client builds query.so with the SDK and submits the artifact plus parameters. The supervisor creates its context and launches the confined executor.
@@ -48,7 +62,7 @@ Any SQL/storage error aborts the invocation transaction in the baseline; catchin
 
 ## ABI and Host Services
 
-Expose a versioned C API for SQL initialization, statement execution, result consumption, cancellation notification, and cleanup. Keep it distinct from the user query entry-point ABI. Exact symbols and layouts remain open. Host services provide planning submission, scoped storage requests, result emission, and cancellation/deadline checks.
+The initial parser API is [`prdb_sdk_sql_v1.h`](../engine/include/prdb_sdk_sql_v1.h). `prdb_sdk_sql_parse_select_v1` returns a sized/versioned AST record with source spans into the caller-owned SQL bytes; it copies no identifier strings. The record describes only the first grammar increment above and is not a plan request or an executable SQL statement. Empty SQL returns `SYNTAX_ERROR`; null pointers or an undersized output record return `INVALID_ARGUMENT`. The API reports an error byte offset when provided and writes the output record only on success. Keep this SQL API distinct from the user query entry-point ABI. Statement execution, result consumption, cancellation notification, and cleanup APIs remain future work. Host services will provide planning submission, scoped storage requests, result emission, and cancellation/deadline checks.
 
 Use opaque handles, explicit buffer lengths/ownership, and compatible layouts; never exchange Rust-owned containers or trait objects across the ABI. No language exception or panic may unwind across the C boundary. Translate failures into reported transaction-aborting errors when possible; crashes or unrecoverable failures terminate the executor.
 
@@ -70,4 +84,4 @@ Allow sequential SQL calls within one user invocation under the same MVCC snapsh
 
 ## Open Decisions
 
-Parser implementation, precise SQL dialect/types, AST and physical-plan formats, result format, library entry points, and exact mutation expression support remain unresolved. The baseline abort-on-statement-error rule is fixed; savepoints are future work.
+This initial SELECT parser does not settle the rest of the SQL dialect, types, coercions, AST extension/compatibility rules, physical-plan format, result format, SDK execution entry points, or mutation expression support. The baseline abort-on-statement-error rule is fixed; savepoints are future work.
