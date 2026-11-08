@@ -32,7 +32,13 @@ Ship headers/bindings and prebuilt position-independent SQL/runtime libraries fo
 
 A separate SQL shared dependency is an optional packaging alternative, with explicit ABI/dependency matching. The baseline favors a statically linked SDK archive inside the dynamically loaded user artifact. Standard runtime dependencies must still be declared and supported; this is not a promise of a completely self-contained binary.
 
-The artifact manifest declares target OS/architecture, CPU baseline, native ABI version, protocol compatibility, SDK version, entry-point identity, and dependencies. Treat the manifest as untrusted. Pin immutable artifact bytes for admission/loading, bound size, and reject incompatible targets. Hashes identify artifacts; they do not establish trust or permission. Do not execute constructors or load the artifact in a trusted service to inspect it.
+### Artifact Manifest v1
+
+Manifest version 1 is canonical binary `PMF1`. Its 28-byte header is: magic[4], target OS:u8 (`1` Linux), target architecture:u8 (`1` x86_64), native ABI:u8 (`1` through `3`), flags:u8 (zero), client protocol major:u16 BE (`1`), minor:u16 BE (`0`), SDK release:u32 BE (nonzero), dependency count:u16 BE (0 through 32), then five u16 BE byte lengths for CPU baseline, runtime profile, compiler identity, descriptor symbol, and entry-point symbol. The body contains those five ASCII strings in that order, followed by dependency records of length:u16 BE and name bytes. The exact end of the last record must equal the manifest length.
+
+CPU and runtime profiles are nonempty identifier strings of at most 64 bytes and must exactly match the trusted service's configured compatibility profile. The SDK release must match that profile. ABI v1/v2/v3 requires the corresponding `prdb_query_descriptor_vN` and `prdb_query_main_vN` symbol pair. Compiler identity is printable ASCII, bounded to 128 bytes, and diagnostic only. Dependencies are at most 128 bytes each, use an ASCII SONAME basename, and appear in strict bytewise order without duplicates. The validator checks each declared dependency against the service's configured allowlist and parses the ELF64 PT_DYNAMIC table without loading or executing the artifact; its actual DT_NEEDED set must exactly match the manifest. DT_RPATH, DT_RUNPATH, DT_AUDIT, DT_DEPAUDIT, DT_FILTER, and DT_AUXILIARY are rejected. Malformed ELF, non-Linux-x86_64 ET_DYN files, unknown fields, and trailing data fail closed.
+
+Treat the manifest as untrusted. Pin immutable artifact bytes for admission/loading, bound size, and reject incompatible targets. Hashes identify artifacts; they do not establish trust or permission. Do not execute constructors or load the artifact in a trusted service to inspect it.
 
 ### Requested Capability Scope v1
 
@@ -109,4 +115,4 @@ Validate cross-version rejection, malformed manifests, missing symbols, hostile 
 
 ## Open Decisions
 
-Select exact TinyCC/Rust versions, initial target architecture, manifest encoding and libc/runtime baseline, plus remaining administrative operation schemas. Requested capability scope v1 is defined above. The initial artifact transport is the framed TCP upload protocol; secure transports are future adapters. Languages and the user compiler are fixed. Server-side native SQL-plan compilation and standalone executable submission are outside the initial path.
+Select exact TinyCC/Rust versions, the deployed CPU/runtime compatibility profile and dependency allowlist, plus remaining administrative operation schemas. Manifest encoding v1 and requested capability scope v1 are defined above. The initial artifact transport is the framed TCP upload protocol; secure transports are future adapters. Languages and the user compiler are fixed. Server-side native SQL-plan compilation and standalone executable submission are outside the initial path.

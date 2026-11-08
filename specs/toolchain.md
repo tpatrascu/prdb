@@ -31,7 +31,7 @@ Pin the exact TinyCC release/commit and distribution hashes. Select and test a L
 
 Keep the baseline of a prebuilt C SDK archive linked into the submitted shared library. Verify its shared-library relocation model with the pinned TinyCC linker; file suffixes or accepted flags do not prove loadability. Rust services are separate binaries, so normal query linking does not require consuming a Rust static archive. A Rust implementation of SDK SQL would be a later explicit change, not an implicit dependency.
 
-Publish manifests containing architecture, CPU baseline, libc/runtime dependencies, TinyCC build identity, SDK release, host ABI, and protocol/plan versions. Compiler identity is diagnostic metadata, not a trust credential. Constrain loader paths and dependency exports, and verify all dependencies fit the sandbox. No ambient library discovery or automatic dependency downloads occur inside execution.
+Publish canonical `PMF1` manifests as defined by the [client SDK contract](client-sdk.md), containing target, CPU/runtime profile, TinyCC build identity, SDK release, host ABI, protocol version, exported entry symbols, and dependencies. Compiler identity is diagnostic metadata, not a trust credential. SEAL validates the manifest against the service's configured profile and allowlist and checks the ELF dependency table without loading the library. The exact deployment CPU/runtime profile and dependency allowlist still require selection and validation. Constrain loader paths and dependency exports, and verify all dependencies fit the sandbox. No ambient library discovery or automatic dependency downloads occur inside execution.
 
 ## C/Rust ABI
 

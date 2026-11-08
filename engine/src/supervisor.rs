@@ -101,6 +101,12 @@ pub struct SubmissionMetadata {
 pub trait SubmissionMetadataValidator: Send + Sync {
     fn supports_versions(&self, manifest_version: u32, scope_version: u32) -> bool;
     fn validate(&self, metadata: &SubmissionMetadata) -> bool;
+
+    /// Validate metadata against the pinned artifact bytes without loading or
+    /// executing them. Simple test validators may keep the metadata-only rule.
+    fn validate_artifact(&self, metadata: &SubmissionMetadata, _artifact: &[u8]) -> bool {
+        self.validate(metadata)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -460,7 +466,8 @@ impl StagingStore {
             return Err(StagingError::InvalidMetadata);
         }
         let metadata_is_valid = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.metadata_validator.validate(&sealed_data.metadata)
+            self.metadata_validator
+                .validate_artifact(&sealed_data.metadata, &sealed_data.artifact)
         }))
         .unwrap_or(false);
         if !metadata_is_valid {
