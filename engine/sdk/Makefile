@@ -37,8 +37,10 @@ SDK_MANIFEST_TEST := $(BUILD_DIR)/sdk-manifest-v1
 SDK_SCOPE_TEST := $(BUILD_DIR)/sdk-scope-v1
 SQL_V3_CAUGHT_ERROR_QUERY := $(BUILD_DIR)/sql-v3-caught-error.so
 SQL_V3_WRITE_READ_QUERY := $(BUILD_DIR)/sql-v3-write-read.so
+SQL_V3_RESTRICTED_METADATA_QUERY := $(BUILD_DIR)/sql-v3-restricted-metadata.so
 SQL_V3_CAUGHT_ERROR_OBJECT := $(BUILD_DIR)/sql-v3-caught-error.o
 SQL_V3_WRITE_READ_OBJECT := $(BUILD_DIR)/sql-v3-write-read.o
+SQL_V3_RESTRICTED_METADATA_OBJECT := $(BUILD_DIR)/sql-v3-restricted-metadata.o
 
 .PHONY: all test
 
@@ -131,8 +133,15 @@ $(SQL_V3_WRITE_READ_OBJECT): engine/tests/fixtures/sql_v3_write_read.c $(INCLUDE
 $(SQL_V3_WRITE_READ_QUERY): $(SQL_V3_WRITE_READ_OBJECT) $(SDK_ARCHIVE) | $(BUILD_DIR)
 	$(CC) -shared -Wl,--no-eh-frame-hdr,-z,noexecstack "$<" "$(SDK_ARCHIVE)" -o "$@"
 
+# This is an untrusted query artifact; run it only with the sandbox acceptance test.
+$(SQL_V3_RESTRICTED_METADATA_OBJECT): engine/tests/fixtures/sql_v3_restricted_metadata.c $(INCLUDE_DIR)/prdb_query_abi_v3.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v2.h | $(BUILD_DIR)
+	$(TCC) -Wall -Wextra -Werror -fPIC -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
+
+$(SQL_V3_RESTRICTED_METADATA_QUERY): $(SQL_V3_RESTRICTED_METADATA_OBJECT) $(SDK_ARCHIVE) | $(BUILD_DIR)
+	$(CC) -shared -Wl,--no-eh-frame-hdr,-z,noexecstack "$<" "$(SDK_ARCHIVE)" -o "$@"
+
 .PHONY: sandbox-query-fixture
-sandbox-query-fixture: $(SQL_V3_CAUGHT_ERROR_QUERY) $(SQL_V3_WRITE_READ_QUERY)
+sandbox-query-fixture: $(SQL_V3_CAUGHT_ERROR_QUERY) $(SQL_V3_WRITE_READ_QUERY) $(SQL_V3_RESTRICTED_METADATA_QUERY)
 
 test: $(SDK_VALUE_TEST) $(SDK_BATCH_TEST) $(SDK_SQL_TEST) $(SDK_SQL_EXPRESSION_TEST) $(SDK_SQL_V2_TEST) $(SDK_PLANNER_TEST) $(SDK_EXECUTOR_TEST) $(SDK_SQL_EXEC_TEST) $(SDK_SQL_INFORMATION_SCHEMA_TEST) $(SDK_SQL_RESULT_TEST) $(SDK_SQL_DML_TEST) $(SDK_MANIFEST_TEST) $(SDK_SCOPE_TEST)
 	"$(SDK_VALUE_TEST)"

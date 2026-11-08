@@ -16150,16 +16150,28 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     let artifact_path = std::env::var_os("PRDB_TEST_WRITE_READ_QUERY_ARTIFACT")
         .map(PathBuf::from)
         .ok_or("PRDB_TEST_WRITE_READ_QUERY_ARTIFACT must name sql-v3-write-read.so")?;
-    if !cgroup_parent.is_absolute() || !artifact_path.is_absolute() {
+    let restricted_artifact_path = std::env::var_os("PRDB_TEST_RESTRICTED_METADATA_QUERY_ARTIFACT")
+        .map(PathBuf::from)
+        .ok_or(
+            "PRDB_TEST_RESTRICTED_METADATA_QUERY_ARTIFACT must name sql-v3-restricted-metadata.so",
+        )?;
+    if !cgroup_parent.is_absolute()
+        || !artifact_path.is_absolute()
+        || !restricted_artifact_path.is_absolute()
+    {
         return Err("sandbox test paths must be absolute".into());
     }
     let artifact = std::fs::read(&artifact_path)?;
+    let restricted_artifact = std::fs::read(&restricted_artifact_path)?;
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
     let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
     let user_id = id(0x7a);
     let token_id = id(0x7b);
     let secret = [0x42; 32];
+    let restricted_user_id = id(0xb0);
+    let restricted_token_id = id(0xb1);
+    let restricted_secret = [0x43; 32];
     let admin_role = builtin_owner_id();
     let mut setup_audit = identity_audit_event(0x7c, admin_role, user_id);
     setup_audit.action = AuditAction::AuthorityChange;
@@ -16176,6 +16188,17 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 token_id,
                 user_id,
                 &secret,
+                now - 1_000_000,
+                now + 60_000_000,
+                None,
+                1,
+            ),
+            principal_write_with_name(restricted_user_id, 1, 1, "sandbox_sql_restricted"),
+            object_write_with_name(restricted_user_id, 8, "sandbox_sql_restricted"),
+            credential_verifier_write(
+                restricted_token_id,
+                restricted_user_id,
+                &restricted_secret,
                 now - 1_000_000,
                 now + 60_000_000,
                 None,
@@ -16291,8 +16314,17 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             empty_schema.schema_id,
             user_id,
         ),
+        grant_write(
+            restricted_user_id,
+            empty_schema.schema_id,
+            1,
+            1,
+            empty_schema.schema_id,
+            user_id,
+        ),
         dependency_write(user_id, schema.schema_id, 5),
         dependency_write(user_id, empty_schema.schema_id, 5),
+        dependency_write(restricted_user_id, empty_schema.schema_id, 5),
         dependency_write(user_id, records_table.table_id, 5),
         dependency_write(user_id, records_table.column_ids[0], 5),
     ];
@@ -16316,7 +16348,12 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             user_id,
         )
     }));
-    let (old_user_record, old_token_record) = {
+    let (
+        old_user_record,
+        old_token_record,
+        old_restricted_user_record,
+        old_restricted_token_record,
+    ) = {
         let read = database.begin_read()?;
         let catalog = read.open_table(CATALOG)?;
         (
@@ -16328,6 +16365,16 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             catalog
                 .get(id_catalog_key(16, token_id).as_slice())?
                 .ok_or("sandbox SQL token record missing")?
+                .value()
+                .to_vec(),
+            catalog
+                .get(id_catalog_key(10, restricted_user_id).as_slice())?
+                .ok_or("restricted sandbox SQL user record missing")?
+                .value()
+                .to_vec(),
+            catalog
+                .get(id_catalog_key(16, restricted_token_id).as_slice())?
+                .ok_or("restricted sandbox SQL token record missing")?
                 .value()
                 .to_vec(),
         )
@@ -16346,6 +16393,21 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     );
     refreshed_token.expected_value = Some(old_token_record);
     authority_writes.push(refreshed_token);
+    let mut bumped_restricted_user =
+        principal_write_with_name(restricted_user_id, 1, 2, "sandbox_sql_restricted");
+    bumped_restricted_user.expected_value = Some(old_restricted_user_record);
+    authority_writes.push(bumped_restricted_user);
+    let mut refreshed_restricted_token = credential_verifier_write(
+        restricted_token_id,
+        restricted_user_id,
+        &restricted_secret,
+        now - 1_000_000,
+        now + 60_000_000,
+        None,
+        2,
+    );
+    refreshed_restricted_token.expected_value = Some(old_restricted_token_record);
+    authority_writes.push(refreshed_restricted_token);
     storage
         .commit_catalog_and_audit(
             authority_invocation,
@@ -17037,10 +17099,13 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     assert_eq!(user_column.operation, Operation::GatewayResultData as u16);
     assert_eq!(user_column.request_id, accepted.request_id);
     assert_eq!(user_column.payload, expected_user_column);
-    let empty_schema = read_frame(&mut gateway)?.ok_or("missing empty schema SQL result")?;
-    assert_eq!(empty_schema.operation, Operation::GatewayResultData as u16);
-    assert_eq!(empty_schema.request_id, accepted.request_id);
-    assert_eq!(empty_schema.payload, expected_empty_schema);
+    let empty_schema_result = read_frame(&mut gateway)?.ok_or("missing empty schema SQL result")?;
+    assert_eq!(
+        empty_schema_result.operation,
+        Operation::GatewayResultData as u16
+    );
+    assert_eq!(empty_schema_result.request_id, accepted.request_id);
+    assert_eq!(empty_schema_result.payload, expected_empty_schema);
     let updated = read_frame(&mut gateway)?.ok_or("missing UPDATE visibility result")?;
     assert_eq!(updated.operation, Operation::GatewayResultData as u16);
     assert_eq!(updated.request_id, accepted.request_id);
@@ -17053,6 +17118,181 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         storage
             .lookup_invocation_outcome(reservation.invocation_id, user_id, now + 1)?
             .ok_or("missing durable invocation outcome")?
+            .status,
+        OutcomeStatus::Committed
+    );
+
+    let restricted_scope = [
+        b"PSC1\0\x01".as_slice(),
+        &[1, 1],
+        empty_schema.schema_id.as_slice(),
+    ]
+    .concat();
+    let mut restricted_client = ClientConnectionSession::default();
+    restricted_client.accept_hello(ClientMode::Query, "sandbox-sql-restricted-metadata")?;
+    restricted_client.authenticate(&storage, restricted_token_id, &restricted_secret)?;
+    let restricted_owner = restricted_client.staging_owner()?;
+    let restricted_staging = StagingStore::new(
+        StagingLimits::default(),
+        Arc::new(AcceptFixture {
+            requested_scope: restricted_scope.clone(),
+        }),
+    )?;
+    let restricted_reservation = restricted_staging.prepare(
+        restricted_owner,
+        PrepareSubmission {
+            manifest_version: 1,
+            manifest: b"m".to_vec(),
+            artifact_bytes: u64::try_from(restricted_artifact.len())?,
+            artifact_sha256: Sha256::digest(&restricted_artifact).into(),
+            scope_version: 1,
+            requested_scope: restricted_scope,
+            parameter_bytes: 0,
+            parameter_sha256: Sha256::digest([]).into(),
+            deadline_ms: 30_000,
+            workload_class: WorkloadClass::Operational,
+        },
+    )?;
+    restricted_staging.upload_chunk(
+        restricted_owner,
+        restricted_reservation.invocation_id,
+        ChunkKind::Artifact,
+        0,
+        &restricted_artifact,
+    )?;
+    restricted_staging.seal(restricted_owner, restricted_reservation.invocation_id)?;
+    let restricted_invocation_hex = restricted_reservation
+        .invocation_id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let (restricted_accepted, mut restricted_invocation, mut restricted_executor) =
+        restricted_client.handle_start_request_with_executor(
+            &storage,
+            &restricted_staging,
+            ClientFrame {
+                kind: 7,
+                request_id: 2,
+                response_sequence: 0,
+                payload: format!("{{\"invocation_id\":\"{restricted_invocation_hex}\"}}")
+                    .into_bytes(),
+            },
+            GatewayAdmissionConfig {
+                retention_period_us: 3_600_000_000,
+                max_rows: 8,
+                max_bytes: 4096,
+            },
+            &runtime,
+        )?;
+    assert_eq!(restricted_accepted.payload, b"{\"state\":\"accepted\"}");
+
+    let restricted_schemata = restricted_invocation
+        .scan_information_schema_schemata(128)?
+        .rows;
+    assert!(
+        restricted_schemata
+            .iter()
+            .any(|row| row.schema_name == "information_schema")
+    );
+    assert!(
+        restricted_schemata
+            .iter()
+            .any(|row| row.schema_name == "empty_roundtrip")
+    );
+    assert!(
+        !restricted_schemata
+            .iter()
+            .any(|row| row.schema_name == "sql_roundtrip")
+    );
+    let mut restricted_tables = Vec::new();
+    let mut restricted_table_cursor = None;
+    loop {
+        let page =
+            restricted_invocation.scan_information_schema_tables(128, restricted_table_cursor)?;
+        restricted_tables.extend(page.rows);
+        restricted_table_cursor = page.continuation;
+        if restricted_table_cursor.is_none() {
+            break;
+        }
+    }
+    let mut restricted_columns = Vec::new();
+    let mut restricted_column_cursor = None;
+    loop {
+        let page =
+            restricted_invocation.scan_information_schema_columns(128, restricted_column_cursor)?;
+        restricted_columns.extend(page.rows);
+        restricted_column_cursor = page.continuation;
+        if restricted_column_cursor.is_none() {
+            break;
+        }
+    }
+    assert!(
+        !restricted_tables
+            .iter()
+            .any(|row| row.table_schema == "sql_roundtrip")
+    );
+    assert!(
+        !restricted_columns
+            .iter()
+            .any(|row| row.table_schema == "sql_roundtrip")
+    );
+
+    let (mut restricted_service, mut restricted_gateway) = UnixStream::pair()?;
+    restricted_gateway.set_read_timeout(Some(Duration::from_secs(10)))?;
+    let restricted_decision = observe_executor_relay_and_finalize_gateway(
+        &storage,
+        &mut restricted_invocation,
+        &mut restricted_executor,
+        &mut restricted_service,
+        restricted_accepted.request_id,
+    )?;
+    if restricted_decision != GatewayTerminalDecision::Commit {
+        let mut relayed = Vec::new();
+        while let Some(frame) = read_frame(&mut restricted_gateway)? {
+            let terminal = frame.operation == Operation::GatewayTerminal as u16;
+            relayed.push((
+                frame.operation,
+                String::from_utf8_lossy(&frame.payload).into_owned(),
+            ));
+            if terminal {
+                break;
+            }
+        }
+        panic!(
+            "restricted sandbox query aborted: {restricted_decision:?}; relayed frames: {relayed:?}"
+        );
+    }
+    restricted_staging.finish_started(restricted_owner, restricted_reservation.invocation_id)?;
+    let restricted_schema_result =
+        read_frame(&mut restricted_gateway)?.ok_or("missing restricted SQL metadata result")?;
+    assert_eq!(
+        restricted_schema_result.operation,
+        Operation::GatewayResultData as u16
+    );
+    assert_eq!(
+        restricted_schema_result.request_id,
+        restricted_accepted.request_id
+    );
+    assert_eq!(restricted_schema_result.payload, b"empty_roundtrip");
+    let restricted_terminal = read_frame(&mut restricted_gateway)?
+        .ok_or("missing restricted committed terminal event")?;
+    assert_eq!(
+        restricted_terminal.operation,
+        Operation::GatewayTerminal as u16
+    );
+    assert_eq!(
+        restricted_terminal.request_id,
+        restricted_accepted.request_id
+    );
+    assert!(String::from_utf8(restricted_terminal.payload)?.contains("\"outcome\":\"committed\""));
+    assert_eq!(
+        storage
+            .lookup_invocation_outcome(
+                restricted_reservation.invocation_id,
+                restricted_user_id,
+                now + 1,
+            )?
+            .ok_or("missing restricted durable invocation outcome")?
             .status,
         OutcomeStatus::Committed
     );
