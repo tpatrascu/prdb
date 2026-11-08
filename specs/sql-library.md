@@ -43,6 +43,8 @@ Comparison with SQL NULL yields UNKNOWN. REDACTED is not SQL NULL: any compariso
 
 The C SDK provides scalar comparison, `IS NULL`, Boolean-to-truth conversion, and pure AND/OR/NOT truth-table helpers in [`prdb_sdk_sql_v1.h`](../engine/include/prdb_sdk_sql_v1.h). The truth-table helpers combine already evaluated operands; they do not evaluate an expression tree or invoke a potentially skipped right operand. The parser does not yet emit Boolean-combination or `IS NULL` nodes, and the helpers are not yet connected to SQL statement execution.
 
+The first typed-parameter binding helper takes the parsed SELECT record, a caller-owned one-based array of `prdb_sdk_value_v1` views, and the resolved column type (plus Decimal precision and scale when applicable). Decimal metadata must satisfy `1 <= p <= 38` and `0 <= s <= p`; a value's signed coefficient magnitude must not exceed `10^p - 1`. It selects the AST's `$n` entry, validates its record and bytes, rejects REDACTED values and type mismatches, and returns a borrowed copy of the selected view. SQL NULL is accepted and retains the expected type only in the binder context; the value record itself carries no type for NULL. No implicit coercions occur. The parameter array and underlying bytes remain caller-owned and immutable for the call and any later evaluation.
+
 ## Query Flow
 
 1. The client builds query.so with the SDK and submits the artifact plus parameters. The supervisor creates its context and launches the confined executor.

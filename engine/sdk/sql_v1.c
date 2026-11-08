@@ -410,6 +410,109 @@ failed:
     return fail_at(&state, status);
 }
 
+static int decimal_fits_precision(const uint8_t *coefficient,
+                                  uint8_t precision) {
+    uint8_t magnitude[16];
+    uint8_t limit[16] = {0};
+    int negative = (coefficient[0] & 0x80) != 0;
+    uint16_t carry;
+
+    if (negative) {
+        carry = 1;
+        for (size_t index = 16; index > 0; --index) {
+            uint16_t value = (uint16_t)(uint8_t)~coefficient[index - 1] + carry;
+            magnitude[index - 1] = (uint8_t)value;
+            carry = value >> 8;
+        }
+    } else {
+        memcpy(magnitude, coefficient, sizeof(magnitude));
+    }
+
+    limit[15] = 1;
+    for (uint8_t digit = 0; digit < precision; ++digit) {
+        carry = 0;
+        for (size_t index = 16; index > 0; --index) {
+            uint16_t value = (uint16_t)limit[index - 1] * 10 + carry;
+            limit[index - 1] = (uint8_t)value;
+            carry = value >> 8;
+        }
+        if (carry != 0) {
+            return 0;
+        }
+    }
+    carry = 1;
+    for (size_t index = 16; index > 0 && carry != 0; --index) {
+        if (limit[index - 1] == 0) {
+            limit[index - 1] = 0xff;
+        } else {
+            --limit[index - 1];
+            carry = 0;
+        }
+    }
+    for (size_t index = 0; index < sizeof(magnitude); ++index) {
+        if (magnitude[index] < limit[index]) {
+            return 1;
+        }
+        if (magnitude[index] > limit[index]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+int32_t prdb_sdk_sql_bind_select_parameter_v1(
+    const prdb_sdk_select_v1 *statement,
+    const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
+    uint32_t expected_type, uint8_t expected_decimal_precision,
+    uint8_t expected_decimal_scale, prdb_sdk_value_v1 *out,
+    uint32_t out_capacity) {
+    const prdb_sdk_value_v1 *parameter;
+    int32_t status;
+
+    if (statement == NULL || out == NULL || out_capacity < sizeof(*out) ||
+        parameter_count > PRDB_SDK_SQL_MAX_PARAMETER_INDEX ||
+        (parameter_count != 0 && parameters == NULL) ||
+        statement->struct_size < sizeof(*statement) ||
+        statement->abi_version != PRDB_SDK_SQL_ABI_V1_VERSION ||
+        statement->has_where != 1 || statement->parameter_index == 0 ||
+        statement->parameter_index > PRDB_SDK_SQL_MAX_PARAMETER_INDEX ||
+        expected_type < PRDB_SDK_VALUE_TYPE_BOOLEAN ||
+        expected_type > PRDB_SDK_VALUE_TYPE_TIMESTAMPTZ ||
+        (expected_type == PRDB_SDK_VALUE_TYPE_DECIMAL &&
+         (expected_decimal_precision == 0 || expected_decimal_precision > 38 ||
+          expected_decimal_scale > expected_decimal_precision)) ||
+        (expected_type != PRDB_SDK_VALUE_TYPE_DECIMAL &&
+         (expected_decimal_precision != 0 || expected_decimal_scale != 0))) {
+        return PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT;
+    }
+    if (statement->parameter_index > parameter_count) {
+        return PRDB_SDK_SQL_EVAL_PARAMETER_MISSING;
+    }
+    parameter = &parameters[statement->parameter_index - 1];
+    status = prdb_sdk_value_validate_v1(parameter);
+    if (status == PRDB_SDK_VALUE_INVALID_ARGUMENT) {
+        return PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT;
+    }
+    if (status != PRDB_SDK_VALUE_VALID) {
+        return PRDB_SDK_SQL_EVAL_INVALID_VALUE;
+    }
+    if (parameter->state == PRDB_SDK_VALUE_STATE_REDACTED) {
+        return PRDB_SDK_SQL_EVAL_REDACTED_INPUT;
+    }
+    if (parameter->state == PRDB_SDK_VALUE_STATE_VALUE &&
+        parameter->type_code != expected_type) {
+        return PRDB_SDK_SQL_EVAL_TYPE_MISMATCH;
+    }
+    if (parameter->state == PRDB_SDK_VALUE_STATE_VALUE &&
+        expected_type == PRDB_SDK_VALUE_TYPE_DECIMAL &&
+        !decimal_fits_precision(parameter->data,
+                                expected_decimal_precision)) {
+        return PRDB_SDK_SQL_EVAL_INVALID_VALUE;
+    }
+    *out = *parameter;
+    return PRDB_SDK_SQL_EVAL_OK;
+}
+
 static int32_t validate_eval_value(const prdb_sdk_value_v1 *value) {
     int32_t status = prdb_sdk_value_validate_v1(value);
     if (status == PRDB_SDK_VALUE_INVALID_ARGUMENT) {

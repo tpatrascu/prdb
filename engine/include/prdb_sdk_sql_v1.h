@@ -34,6 +34,7 @@
 #define PRDB_SDK_SQL_EVAL_INVALID_VALUE INT32_C(2)
 #define PRDB_SDK_SQL_EVAL_TYPE_MISMATCH INT32_C(3)
 #define PRDB_SDK_SQL_EVAL_REDACTED_INPUT INT32_C(4)
+#define PRDB_SDK_SQL_EVAL_PARAMETER_MISSING INT32_C(5)
 
 typedef struct prdb_sdk_sql_span_v1 {
     uint32_t offset;
@@ -62,6 +63,12 @@ int32_t prdb_sdk_sql_parse_select_v1(const uint8_t *sql, uint64_t sql_len,
                                      prdb_sdk_select_v1 *out,
                                      uint32_t out_capacity,
                                      uint32_t *error_offset_out);
+int32_t prdb_sdk_sql_bind_select_parameter_v1(
+    const prdb_sdk_select_v1 *statement,
+    const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
+    uint32_t expected_type, uint8_t expected_decimal_precision,
+    uint8_t expected_decimal_scale, prdb_sdk_value_v1 *out,
+    uint32_t out_capacity);
 int32_t prdb_sdk_sql_compare_v1(const prdb_sdk_value_v1 *left,
                                 const prdb_sdk_value_v1 *right,
                                 uint32_t comparison, uint8_t left_decimal_scale,
