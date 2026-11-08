@@ -21,7 +21,7 @@ use prdb_engine::tuple::{ColumnSchema, ScalarType, ScalarValue, decode_tuple, en
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -7198,25 +7198,40 @@ fn storage_manager_reports_live_and_durable_invocation_status_to_the_owner()
         })
     ));
 
-    let committed = storage.begin_invocation(id(204), id(9), retention_deadline_us, 2, 64)?;
+    let mut pending_commit =
+        storage.begin_invocation(id(204), id(9), retention_deadline_us, 2, 64)?;
+    let cancelled_row_key = table_row_key(id(205), id(206));
+    pending_commit.stage_put(
+        prdb_engine::overlay::RowId {
+            table: id(205),
+            row: id(206),
+        },
+        b"must not commit",
+    )?;
     let writer = database.begin_write()?;
-    let commit_wait_deadline = Instant::now() + Duration::from_secs(2);
     std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
-        let commit_thread = scope.spawn(move || committed.commit());
-        loop {
-            let status = status_storage
+        let commit_thread = scope.spawn(move || pending_commit.commit());
+        assert_eq!(
+            storage.cancel_owned_invocation(id(9), id(204), now_us)?,
+            prdb_engine::storage_manager::OwnerCancellationResult::Accepted
+        );
+        assert!(matches!(
+            status_storage
                 .get_invocation_status(id(204), id(9), now_us)?
-                .unwrap();
-            if matches!(status.status, InvocationStatus::Committing { .. }) {
-                break;
+                .unwrap()
+                .status,
+            InvocationStatus::Active {
+                cancellation_requested: true,
+                ..
             }
-            assert!(Instant::now() < commit_wait_deadline);
-            std::thread::yield_now();
-        }
+        ));
         writer.abort()?;
-        commit_thread
-            .join()
-            .map_err(|_| std::io::Error::other("commit thread panicked"))??;
+        assert!(matches!(
+            commit_thread
+                .join()
+                .map_err(|_| std::io::Error::other("commit thread panicked"))?,
+            Err(prdb_engine::transaction::TransactionError::CancellationRequested)
+        ));
         Ok(())
     })?;
     assert!(matches!(
@@ -7225,10 +7240,13 @@ fn storage_manager_reports_live_and_durable_invocation_status_to_the_owner()
             .unwrap()
             .status,
         InvocationStatus::Terminal(InvocationOutcome {
-            status: OutcomeStatus::Committed,
+            status: OutcomeStatus::Aborted,
             ..
         })
     ));
+    assert!(row(&database, &cancelled_row_key)?.is_none());
+    let committed = storage.begin_invocation(id(207), id(9), retention_deadline_us, 2, 64)?;
+    committed.commit()?;
     drop(storage);
     drop(status_storage);
     drop(database);
@@ -7238,6 +7256,16 @@ fn storage_manager_reports_live_and_durable_invocation_status_to_the_owner()
     assert!(matches!(
         restarted_storage
             .get_invocation_status(id(204), id(9), now_us)?
+            .unwrap()
+            .status,
+        InvocationStatus::Terminal(InvocationOutcome {
+            status: OutcomeStatus::Aborted,
+            ..
+        })
+    ));
+    assert!(matches!(
+        restarted_storage
+            .get_invocation_status(id(207), id(9), now_us)?
             .unwrap()
             .status,
         InvocationStatus::Terminal(InvocationOutcome {

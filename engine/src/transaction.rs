@@ -8,7 +8,7 @@ use crate::authorization::{
 use crate::catalog::{CatalogRecord, decode_builtin_scalar_type, decode_registered_envelope};
 use crate::commit::{
     CatalogGuard, CommitError, CommitRequest, ForeignKeyCheck, IndexWrite, RowWrite,
-    commit_storage_changes, record_aborted_outcome,
+    commit_storage_changes_with_gate, record_aborted_outcome,
 };
 use crate::credentials::{TOKEN_SECRET_BYTES, decode_verifier_record};
 use crate::ddl_fence::DdlFenceCoordinator;
@@ -5446,10 +5446,7 @@ impl<'db> InvocationTransaction<'db> {
             if self.coordination.is_expired() {
                 return Err(CommitError::InvocationExpired);
             }
-            if !self.coordination.mark_committing() {
-                return Err(CommitError::InvocationCancelled);
-            }
-            commit_storage_changes(
+            commit_storage_changes_with_gate(
                 self.database,
                 CommitRequest {
                     invocation_id: self.invocation_id,
@@ -5462,6 +5459,7 @@ impl<'db> InvocationTransaction<'db> {
                     catalog: &[],
                     audit: &[],
                 },
+                || self.coordination.mark_committing(),
             )
         });
         match result {

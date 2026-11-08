@@ -5217,6 +5217,17 @@ pub fn commit_storage_changes(
     database: &Database,
     request: CommitRequest<'_>,
 ) -> Result<u64, CommitError> {
+    commit_storage_changes_with_gate(database, request, || true)
+}
+
+/// Publish storage changes only if `before_durable_commit` grants the
+/// irreversible commit transition. The callback runs after all validations
+/// and writes have been staged, immediately before redb commits them.
+pub(crate) fn commit_storage_changes_with_gate(
+    database: &Database,
+    request: CommitRequest<'_>,
+    before_durable_commit: impl FnOnce() -> bool,
+) -> Result<u64, CommitError> {
     let expected_rows =
         match build_constraint_validation_rows(database, request.catalog, request.rows) {
             Ok(rows) => rows,
@@ -5234,7 +5245,13 @@ pub fn commit_storage_changes(
         };
     if expected_rows.is_empty() {
         return commit_storage_changes_inner_with_admin_credential_check(
-            database, request, None, false, false, false,
+            database,
+            request,
+            None,
+            false,
+            false,
+            false,
+            before_durable_commit,
         );
     }
     let plan = IndexDdlPlan {
@@ -5248,6 +5265,7 @@ pub fn commit_storage_changes(
         false,
         false,
         false,
+        before_durable_commit,
     )
 }
 
@@ -5266,6 +5284,7 @@ fn commit_storage_changes_with_index_ddl(
         require_usable_admin_credential,
         check_table_name_uniqueness,
         check_column_name_uniqueness,
+        || true,
     )
 }
 
@@ -5276,6 +5295,7 @@ fn commit_storage_changes_inner_with_admin_credential_check(
     require_usable_admin_credential: bool,
     check_table_name_uniqueness: bool,
     check_column_name_uniqueness: bool,
+    before_durable_commit: impl FnOnce() -> bool,
 ) -> Result<u64, CommitError> {
     let CommitRequest {
         invocation_id,
@@ -5989,6 +6009,10 @@ fn commit_storage_changes_inner_with_admin_credential_check(
         table
             .insert(&invocation_id[..], &outcome[..])
             .map_err(storage_error)?;
+    }
+    if !before_durable_commit() {
+        transaction.abort().map_err(storage_error)?;
+        return Err(CommitError::InvocationCancelled);
     }
     transaction.commit().map_err(storage_error)?;
     Ok(next_sequence)
