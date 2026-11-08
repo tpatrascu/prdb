@@ -1911,3 +1911,10 @@
 - Regression: manager tests create and backfill a UNIQUE over existing rows and create a PRIMARY KEY, then remove each and verify catalog cleanup and startup integrity. Writers staged before UNIQUE and CHECK drops receive Conflict, publish no row, and record ABORTED. Dropping a PRIMARY KEY still referenced by an FK aborts without changing the commit sequence or catalog. The authenticated ADMIN integration creates and removes both key kinds after exercising CHECK and FK lifecycle; decoder tests verify the exact drop request shapes.
 - Verification: focused manager, decoder, authenticated gateway, dependency-rejection, and stale-writer regressions passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` passed under Rust 1.95.0; the commit integration target had 120 passed and 3 cgroup-dependent tests ignored.
 - Remaining: SQL `ALTER TABLE` parsing remains outside this control protocol.
+
+## SM-5 / DS-7: FK creation racing with referenced key removal — verified
+
+- Contract: foreign-key creation and PRIMARY KEY removal must serialize so the catalog never commits an FK with a missing referenced key or drops a key while a committed FK still depends on it.
+- Regression: `foreign_key_creation_racing_referenced_primary_key_drop_is_atomic` releases the authorized FK catalog commit and typed PK drop from a barrier. It accepts only one committed DDL operation, verifies both durable outcomes, checks the corresponding FK/key/dependency records, and runs startup integrity validation.
+- Evidence: the focused barrier-coordinated regression passed against real redb.
+- Verification: the focused barrier regression passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` passed under Rust 1.95.0; the commit integration target had 121 passed and 3 cgroup-dependent tests ignored.
