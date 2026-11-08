@@ -317,8 +317,24 @@ struct ResolvedRelationHandleState {
 struct ActiveExecutorScan {
     relation_handle: [u8; 16],
     selected_column_ordinals: Vec<usize>,
-    row_cursor: Option<RowScanCursor>,
-    pending_row: Option<(RowId, Vec<SanitizedCell>)>,
+    source: ExecutorScanSource,
+}
+
+#[derive(Clone)]
+enum ExecutorScanSource {
+    Physical {
+        row_cursor: Option<RowScanCursor>,
+        pending_row: Option<(RowId, Vec<SanitizedCell>)>,
+    },
+    InformationSchemaSchemata {
+        continuation: Option<SchemaScanCursor>,
+    },
+}
+
+impl ExecutorScanSource {
+    fn is_information_schema(&self) -> bool {
+        matches!(self, Self::InformationSchemaSchemata { .. })
+    }
 }
 
 struct CatalogTableProjection {
@@ -5717,6 +5733,34 @@ impl ExecutorMetadataConnection<'_, '_> {
         Ok(description)
     }
 
+    fn revalidate_scan_relation(
+        &mut self,
+        relation_handle: [u8; 16],
+    ) -> Result<AuthorizedRelationDescription, TransactionError> {
+        let state = self
+            .handles
+            .get(&relation_handle)
+            .cloned()
+            .ok_or(TransactionError::InvalidMetadataRequest)?;
+        if let Some(schema) = builtin_information_schema_relation_schema(state.relation_id) {
+            let relation = builtin_information_schema_relations()
+                .into_iter()
+                .find(|relation| relation.relation_id == state.relation_id)
+                .ok_or(TransactionError::InvalidMetadataRequest)?;
+            if state.schema_name != "information_schema" || relation.name != state.relation_name {
+                return Err(TransactionError::InvalidMetadataRequest);
+            }
+            return Ok(AuthorizedRelationDescription {
+                relation_id: schema.relation_id,
+                name: relation.name,
+                columns: schema.columns,
+            });
+        }
+        self.revalidate_relation_handle(&ResolvedRelationHandle {
+            token: relation_handle,
+        })
+    }
+
     /// Invalidate a relation handle before the connection closes.
     pub fn close_relation_handle(
         &mut self,
@@ -5735,18 +5779,18 @@ impl ExecutorMetadataConnection<'_, '_> {
             .map(|(token, scan)| (*token, scan.clone()))
         {
             self.scans.remove(&token);
-            if let Some(table_id) = scan
-                .row_cursor
-                .as_ref()
-                .map(|cursor| cursor.table_id)
-                .or_else(|| {
-                    self.transaction
-                        .active_scan
-                        .as_ref()
-                        .map(|active| active.table_id)
-                })
+            if scan.source.is_information_schema() {
+                self.transaction.active_schema_scan = None;
+            } else if let ExecutorScanSource::Physical {
+                row_cursor: Some(cursor),
+                ..
+            } = scan.source
             {
-                self.transaction.discard_active_scan_for_table(table_id);
+                self.transaction
+                    .discard_active_scan_for_table(cursor.table_id);
+            } else if let Some(active) = self.transaction.active_scan.as_ref() {
+                self.transaction
+                    .discard_active_scan_for_table(active.table_id);
             }
         }
         Ok(())
@@ -5760,7 +5804,10 @@ impl ExecutorMetadataConnection<'_, '_> {
         requested_column_ids: &[[u8; 16]],
     ) -> Result<ExecutorScanCursor, TransactionError> {
         let description = self.revalidate_relation_handle(handle)?;
-        if builtin_information_schema_relation_schema(description.relation_id).is_some() {
+        let is_information_schema_relation =
+            builtin_information_schema_relation_schema(description.relation_id).is_some();
+        let is_schemata = is_information_schema_relation && description.name == "schemata";
+        if is_information_schema_relation && !is_schemata {
             return Err(TransactionError::InvalidMetadataRequest);
         }
         if requested_column_ids.len() > crate::tuple::MAX_COLUMNS
@@ -5805,11 +5852,91 @@ impl ExecutorMetadataConnection<'_, '_> {
             ActiveExecutorScan {
                 relation_handle: handle.token,
                 selected_column_ordinals,
-                row_cursor: None,
-                pending_row: None,
+                source: if is_schemata {
+                    ExecutorScanSource::InformationSchemaSchemata { continuation: None }
+                } else {
+                    ExecutorScanSource::Physical {
+                        row_cursor: None,
+                        pending_row: None,
+                    }
+                },
             },
         );
         Ok(ExecutorScanCursor { token })
+    }
+
+    fn next_information_schema_schemata_page(
+        &mut self,
+        scan: ActiveExecutorScan,
+        max_scanned: usize,
+    ) -> Result<ExecutorAuthorizedRowScanPage, TransactionError> {
+        let ExecutorScanSource::InformationSchemaSchemata { continuation } = scan.source else {
+            return Err(TransactionError::InvalidMetadataRequest);
+        };
+        let page = self
+            .transaction
+            .scan_information_schema_schemata(max_scanned, continuation)?;
+        if self.used_row_tokens.len().saturating_add(page.rows.len()) > MAX_EXECUTOR_ROW_HANDLES {
+            self.transaction.abort()?;
+            return Err(TransactionError::RelationHandleLimitExceeded);
+        }
+        let mut rows = Vec::with_capacity(page.rows.len());
+        for row in page.rows {
+            let full_shape = [SanitizedCell::Value(ScalarValue::Text(row.schema_name))];
+            let cells = scan
+                .selected_column_ordinals
+                .iter()
+                .map(|ordinal| {
+                    full_shape
+                        .get(*ordinal)
+                        .cloned()
+                        .ok_or(TransactionError::InvalidMetadataRequest)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let token = match new_metadata_cursor_token(
+                &mut self.used_row_tokens,
+                EXECUTOR_ROW_HANDLE_TOKEN_KIND,
+            ) {
+                Ok(token) => token,
+                Err(error) => {
+                    self.transaction.abort()?;
+                    return Err(error);
+                }
+            };
+            // Virtual metadata rows can be selected but never staged for update
+            // or deletion; their opaque tokens are deliberately not row-map keys.
+            rows.push((ExecutorRowHandle { token }, cells));
+        }
+        let continuation = if let Some(continuation) = page.continuation {
+            if self.used_scan_tokens.len() >= MAX_RELATION_HANDLES {
+                self.transaction.abort()?;
+                return Err(TransactionError::RelationHandleLimitExceeded);
+            }
+            let token = match new_metadata_cursor_token(
+                &mut self.used_scan_tokens,
+                EXECUTOR_SCAN_CURSOR_TOKEN_KIND,
+            ) {
+                Ok(token) => token,
+                Err(error) => {
+                    self.transaction.abort()?;
+                    return Err(error);
+                }
+            };
+            self.scans.insert(
+                token,
+                ActiveExecutorScan {
+                    relation_handle: scan.relation_handle,
+                    selected_column_ordinals: scan.selected_column_ordinals,
+                    source: ExecutorScanSource::InformationSchemaSchemata {
+                        continuation: Some(continuation),
+                    },
+                },
+            );
+            Some(ExecutorScanCursor { token })
+        } else {
+            None
+        };
+        Ok(ExecutorAuthorizedRowScanPage { rows, continuation })
     }
 
     /// Consume one cursor and return the next authorized row page. A live
@@ -5824,13 +5951,19 @@ impl ExecutorMetadataConnection<'_, '_> {
             .scans
             .remove(&cursor.token)
             .ok_or(TransactionError::InvalidMetadataRequest)?;
-        let handle = ResolvedRelationHandle {
-            token: scan.relation_handle,
+        let description = self.revalidate_scan_relation(scan.relation_handle)?;
+        if matches!(
+            &scan.source,
+            ExecutorScanSource::InformationSchemaSchemata { .. }
+        ) {
+            return self.next_information_schema_schemata_page(scan, max_scanned);
+        }
+        let ExecutorScanSource::Physical { row_cursor, .. } = scan.source else {
+            return Err(TransactionError::InvalidMetadataRequest);
         };
-        let description = self.revalidate_relation_handle(&handle)?;
         let page = self.transaction.scan_catalog_authorized_rows(
             description.relation_id,
-            scan.row_cursor.as_ref(),
+            row_cursor.as_ref(),
             max_scanned,
         )?;
         if self.used_row_tokens.len().saturating_add(page.rows.len()) > MAX_EXECUTOR_ROW_HANDLES {
@@ -5886,8 +6019,10 @@ impl ExecutorMetadataConnection<'_, '_> {
                 ActiveExecutorScan {
                     relation_handle: scan.relation_handle,
                     selected_column_ordinals: scan.selected_column_ordinals,
-                    row_cursor: Some(row_cursor),
-                    pending_row: None,
+                    source: ExecutorScanSource::Physical {
+                        row_cursor: Some(row_cursor),
+                        pending_row: None,
+                    },
                 },
             );
             Some(ExecutorScanCursor { token })
@@ -5912,19 +6047,40 @@ impl ExecutorMetadataConnection<'_, '_> {
         {
             return Err(TransactionError::InvalidMetadataRequest);
         }
-        let mut scan = self
+        let scan = self
             .scans
             .remove(&cursor.token)
             .ok_or(TransactionError::InvalidMetadataRequest)?;
-        let handle = ResolvedRelationHandle {
-            token: scan.relation_handle,
+        let description = self.revalidate_scan_relation(scan.relation_handle)?;
+        if matches!(
+            &scan.source,
+            ExecutorScanSource::InformationSchemaSchemata { .. }
+        ) {
+            let page = self.next_information_schema_schemata_page(scan, max_scanned)?;
+            let encoded_bytes = page.rows.iter().try_fold(21usize, |bytes, (_, cells)| {
+                bytes
+                    .checked_add(executor_batch_row_encoded_size(cells)?)
+                    .ok_or(TransactionError::MetadataResultTooLarge)
+            })?;
+            if encoded_bytes > max_bytes {
+                self.transaction.abort()?;
+                return Err(TransactionError::MetadataResultTooLarge);
+            }
+            return Ok(page);
+        }
+        let ExecutorScanSource::Physical {
+            row_cursor,
+            pending_row,
+        } = scan.source
+        else {
+            return Err(TransactionError::InvalidMetadataRequest);
         };
-        let description = self.revalidate_relation_handle(&handle)?;
         // Reserve the larger header, which includes a continuation token.
         let mut encoded_bytes = 21usize;
         let mut scanned = 0usize;
         let mut rows = Vec::new();
-        let mut pending_row = scan.pending_row.take();
+        let mut row_cursor = row_cursor;
+        let mut pending_row = pending_row;
 
         while rows.len() < max_scanned {
             let candidate = if let Some(candidate) = pending_row.take() {
@@ -5932,17 +6088,17 @@ impl ExecutorMetadataConnection<'_, '_> {
             } else if scanned < max_scanned {
                 let page = self.transaction.scan_catalog_authorized_rows(
                     description.relation_id,
-                    scan.row_cursor.as_ref(),
+                    row_cursor.as_ref(),
                     1,
                 )?;
                 scanned += 1;
-                scan.row_cursor = page.continuation;
+                row_cursor = page.continuation;
                 page.rows.into_iter().next()
             } else {
                 None
             };
             let Some((row_id, cells)) = candidate else {
-                if scan.row_cursor.is_none() {
+                if row_cursor.is_none() {
                     break;
                 }
                 continue;
@@ -5989,7 +6145,7 @@ impl ExecutorMetadataConnection<'_, '_> {
             encoded_bytes += row_bytes;
         }
 
-        let continuation = if pending_row.is_some() || scan.row_cursor.is_some() {
+        let continuation = if pending_row.is_some() || row_cursor.is_some() {
             if self.used_scan_tokens.len() >= MAX_RELATION_HANDLES {
                 self.transaction.abort()?;
                 return Err(TransactionError::RelationHandleLimitExceeded);
@@ -6009,8 +6165,10 @@ impl ExecutorMetadataConnection<'_, '_> {
                 ActiveExecutorScan {
                     relation_handle: scan.relation_handle,
                     selected_column_ordinals: scan.selected_column_ordinals,
-                    row_cursor: scan.row_cursor,
-                    pending_row,
+                    source: ExecutorScanSource::Physical {
+                        row_cursor,
+                        pending_row,
+                    },
                 },
             );
             Some(ExecutorScanCursor { token })
@@ -6041,6 +6199,10 @@ impl ExecutorMetadataConnection<'_, '_> {
         values: &[InsertInput],
     ) -> Result<ExecutorRowHandle, TransactionError> {
         let description = self.revalidate_relation_handle(relation)?;
+        if builtin_information_schema_relation_schema(description.relation_id).is_some() {
+            self.transaction.abort()?;
+            return Err(TransactionError::InvalidContext);
+        }
         if self.used_row_tokens.len() >= MAX_EXECUTOR_ROW_HANDLES {
             self.transaction.abort()?;
             return Err(TransactionError::RelationHandleLimitExceeded);
@@ -6129,7 +6291,11 @@ impl ExecutorMetadataConnection<'_, '_> {
             .get(&scan.relation_handle)
             .map(|handle| handle.relation_id)
             .ok_or(TransactionError::InvalidMetadataRequest)?;
-        self.transaction.discard_active_scan_for_table(table_id);
+        if scan.source.is_information_schema() {
+            self.transaction.active_schema_scan = None;
+        } else {
+            self.transaction.discard_active_scan_for_table(table_id);
+        }
         Ok(())
     }
 }
@@ -6138,6 +6304,13 @@ impl Drop for ExecutorMetadataConnection<'_, '_> {
     fn drop(&mut self) {
         if self.detached {
             return;
+        }
+        if self
+            .scans
+            .values()
+            .any(|scan| scan.source.is_information_schema())
+        {
+            self.transaction.active_schema_scan = None;
         }
         let table_ids = self
             .handles

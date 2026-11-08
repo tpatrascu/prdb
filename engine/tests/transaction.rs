@@ -2164,6 +2164,79 @@ fn information_schema_columns_scan_walks_visible_relation_pages()
 }
 
 #[test]
+fn executor_scan_reads_filtered_information_schema_schemata()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    install_relation_discovery_catalog(&database)?;
+    let mut invocation = InvocationTransaction::begin(&database, [220; 16], [9; 16], 9_999, 1, 64)?;
+    let mut connection = invocation.open_executor_metadata_connection();
+    let (relation, description) = connection
+        .resolve_relation("information_schema", "schemata")?
+        .expect("public virtual relation resolves");
+    assert_eq!(description.columns.len(), 1);
+    assert_eq!(description.columns[0].name, "schema_name");
+
+    let mut cursor = connection.open_relation_scan(&relation, &[])?;
+    let mut names = Vec::new();
+    let mut page_number = 0;
+    let mut virtual_row_handle = None;
+    loop {
+        page_number += 1;
+        let consumed_cursor = cursor.clone();
+        let page = connection
+            .next_relation_scan_batch(&cursor, 1, 1024)
+            .map_err(|error| format!("batch {page_number} failed: {error:?}"))?;
+        for (handle, cells) in page.rows {
+            virtual_row_handle.get_or_insert(handle);
+            match cells.as_slice() {
+                [SanitizedCell::Value(ScalarValue::Text(name))] => names.push(name.clone()),
+                _ => return Err("virtual schema row did not have one text cell".into()),
+            }
+        }
+        assert!(matches!(
+            connection.next_relation_scan_batch(&consumed_cursor, 1, 1024),
+            Err(TransactionError::InvalidMetadataRequest)
+        ));
+        match page.continuation {
+            Some(continuation) => cursor = continuation,
+            None => break,
+        }
+    }
+    assert_eq!(names, ["information_schema", "app", "public"]);
+    assert!(matches!(
+        connection.stage_update(
+            virtual_row_handle
+                .as_ref()
+                .expect("virtual row handle was issued"),
+            &[FieldPatch {
+                ordinal: 0,
+                value: Some(ScalarValue::Text("forbidden".to_owned())),
+            }],
+        ),
+        Err(TransactionError::InvalidMetadataRequest)
+    ));
+    drop(connection);
+
+    let mut mutation_invocation =
+        InvocationTransaction::begin(&database, [221; 16], [9; 16], 9_999, 1, 64)?;
+    let mut mutation_connection = mutation_invocation.open_executor_metadata_connection();
+    let (virtual_relation, _) = mutation_connection
+        .resolve_relation("information_schema", "schemata")?
+        .expect("public virtual relation resolves for read-only rejection");
+    assert!(matches!(
+        mutation_connection.stage_insert(
+            &virtual_relation,
+            &[InsertInput::Value(Some(ScalarValue::Text(
+                "forbidden".to_owned()
+            )))],
+        ),
+        Err(TransactionError::InvalidContext)
+    ));
+    Ok(())
+}
+
+#[test]
 fn column_grants_can_discover_a_relation_and_pages_are_snapshot_scoped()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
