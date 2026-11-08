@@ -7626,7 +7626,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
     assert!(public_relations.contains("\"name\":\"columns\""));
     assert!(public_relations.contains("\"name\":\"schemata\""));
     assert!(public_relations.contains("\"name\":\"tables\""));
-    let unavailable_relations = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+    let public_columns = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
         prdb_engine::ipc::ServiceRole::Gateway,
         &storage,
         &staging,
@@ -7634,6 +7634,32 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &prdb_engine::ipc::IpcFrame {
             operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
             request_id: 3,
+            payload: br#"{"phase":"read","operation_version":1,"operation":"metadata.columns.list","arguments":{"schema_id":"80808080808080808080808080808002","relation_id":"81818181818181818181818181818101"}}"#.to_vec(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_period_us: 60_000_000,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )?;
+    let public_columns = match public_columns {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => response.payload,
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
+            return Err("column discovery unexpectedly started an invocation".into());
+        }
+    };
+    let public_columns = String::from_utf8(public_columns)?;
+    assert!(public_columns.contains("\"name\":\"table_schema\""));
+    assert!(public_columns.contains("\"scalar_type\":\"text\""));
+    assert!(public_columns.contains("\"nullable\":false"));
+    let unavailable_relations = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut discovery_control,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 4,
             payload: br#"{"phase":"read","operation_version":1,"operation":"metadata.relations.list","arguments":{"schema_id":"f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0"}}"#.to_vec(),
         },
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {

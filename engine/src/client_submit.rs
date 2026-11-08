@@ -66,6 +66,13 @@ pub struct SubmissionClient {
     max_chunk_bytes: usize,
 }
 
+/// Authenticated control-mode client for permission-filtered metadata reads.
+/// The same transport validates protocol limits and zeroizes AUTH payloads as
+/// the query submission client.
+pub struct MetadataClient {
+    transport: SubmissionClient,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InvocationStatus {
     Prepared,
@@ -128,6 +135,22 @@ impl SubmissionClient {
         token_secret: &mut [u8],
         timeout: Duration,
     ) -> Result<Self, ClientSubmitError> {
+        Self::connect_authenticated_mode(
+            address,
+            token_id,
+            token_secret,
+            timeout,
+            crate::client_protocol::ClientMode::Query,
+        )
+    }
+
+    fn connect_authenticated_mode(
+        address: SocketAddr,
+        token_id: [u8; 16],
+        token_secret: &mut [u8],
+        timeout: Duration,
+        mode: crate::client_protocol::ClientMode,
+    ) -> Result<Self, ClientSubmitError> {
         let secret = Zeroizing::new(token_secret.to_vec());
         token_secret.zeroize();
         if secret.len() != TOKEN_SECRET_BYTES || timeout.is_zero() {
@@ -147,7 +170,11 @@ impl SubmissionClient {
             max_chunk_bytes: CLIENT_MAX_CHUNK_BYTES,
         };
 
-        let hello = format!("{{\"mode\":\"query\",\"client_name\":\"{CLIENT_NAME}\"}}");
+        let mode_name = match mode {
+            crate::client_protocol::ClientMode::Query => "query",
+            crate::client_protocol::ClientMode::Control => "control",
+        };
+        let hello = format!("{{\"mode\":\"{mode_name}\",\"client_name\":\"{CLIENT_NAME}\"}}");
         let response = client.exchange(1, hello.into_bytes())?;
         let hello_fields = parse_flat_response(&response.payload)?;
         let limits = hello_fields
@@ -171,7 +198,7 @@ impl SubmissionClient {
         if hello_fields.len() != 5
             || hello_fields.get("major") != Some(&ResponseValue::Number(1))
             || hello_fields.get("minor") != Some(&ResponseValue::Number(0))
-            || take_string(&hello_fields, "mode").as_deref() != Some("query")
+            || take_string(&hello_fields, "mode").as_deref() != Some(mode_name)
             || take_string(&hello_fields, "transport").as_deref() != Some("plaintext_tcp")
             || limits.len() != 3
             || max_payload_bytes.is_none_or(|bytes| bytes == 0 || bytes > CLIENT_MAX_PAYLOAD_BYTES)
@@ -436,6 +463,207 @@ impl SubmissionClient {
     }
 }
 
+impl MetadataClient {
+    /// Connect over TCP, negotiate control mode, and authenticate. The caller's
+    /// credential buffer is zeroized on every return path.
+    pub fn connect_authenticated(
+        address: SocketAddr,
+        token_id: [u8; 16],
+        token_secret: &mut [u8],
+    ) -> Result<Self, ClientSubmitError> {
+        Self::connect_authenticated_with_timeout(address, token_id, token_secret, DEFAULT_TIMEOUT)
+    }
+
+    pub fn connect_authenticated_with_timeout(
+        address: SocketAddr,
+        token_id: [u8; 16],
+        token_secret: &mut [u8],
+        timeout: Duration,
+    ) -> Result<Self, ClientSubmitError> {
+        let transport = SubmissionClient::connect_authenticated_mode(
+            address,
+            token_id,
+            token_secret,
+            timeout,
+            crate::client_protocol::ClientMode::Control,
+        )?;
+        Ok(Self { transport })
+    }
+
+    /// Return schema records from the authenticated principal's visible set.
+    pub fn list_schemas(
+        &mut self,
+    ) -> Result<Vec<crate::metadata_discovery::VisibleSchema>, ClientSubmitError> {
+        let response = self.request_metadata("metadata.schemas.list", "{}".to_owned())?;
+        let records = discovery_records(response)?;
+        let mut schemas = Vec::with_capacity(records.len());
+        let mut previous_id = None;
+        for mut record in records {
+            if record.len() != 2 {
+                return Err(ClientSubmitError::InvalidResponse);
+            }
+            let schema_id = response_id(&record, "schema_id")?;
+            let name = response_string(&mut record, "name")?;
+            if name.is_empty() || previous_id.is_some_and(|previous| previous >= schema_id) {
+                return Err(ClientSubmitError::InvalidResponse);
+            }
+            previous_id = Some(schema_id);
+            schemas.push(crate::metadata_discovery::VisibleSchema { schema_id, name });
+        }
+        Ok(schemas)
+    }
+
+    /// Return grant-visible relations for one schema. An empty vector means
+    /// either an authorized empty schema or an unavailable schema.
+    pub fn list_relations(
+        &mut self,
+        schema_id: [u8; 16],
+    ) -> Result<Vec<crate::metadata_discovery::VisibleRelation>, ClientSubmitError> {
+        let response = self.request_metadata(
+            "metadata.relations.list",
+            format!("{{\"schema_id\":\"{}\"}}", lower_hex(&schema_id)),
+        )?;
+        let records = discovery_records(response)?;
+        let mut relations = Vec::with_capacity(records.len());
+        let mut previous_id = None;
+        for mut record in records {
+            if record.len() != 2 {
+                return Err(ClientSubmitError::InvalidResponse);
+            }
+            let relation_id = response_id(&record, "relation_id")?;
+            let name = response_string(&mut record, "name")?;
+            if name.is_empty() || previous_id.is_some_and(|previous| previous >= relation_id) {
+                return Err(ClientSubmitError::InvalidResponse);
+            }
+            previous_id = Some(relation_id);
+            relations.push(crate::metadata_discovery::VisibleRelation { relation_id, name });
+        }
+        Ok(relations)
+    }
+
+    /// Return the declared, grant-visible column shape for one relation.
+    pub fn list_columns(
+        &mut self,
+        schema_id: [u8; 16],
+        relation_id: [u8; 16],
+    ) -> Result<Vec<crate::metadata_discovery::VisibleColumn>, ClientSubmitError> {
+        let response = self.request_metadata(
+            "metadata.columns.list",
+            format!(
+                "{{\"schema_id\":\"{}\",\"relation_id\":\"{}\"}}",
+                lower_hex(&schema_id),
+                lower_hex(&relation_id)
+            ),
+        )?;
+        let records = discovery_records(response)?;
+        let mut columns = Vec::with_capacity(records.len());
+        let mut previous_ordinal = None;
+        for mut record in records {
+            if record.len() != 5 {
+                return Err(ClientSubmitError::InvalidResponse);
+            }
+            let column_id = response_id(&record, "column_id")?;
+            let name = response_string(&mut record, "name")?;
+            let ordinal = match record.remove("ordinal") {
+                Some(ResponseValue::Number(value)) => {
+                    u32::try_from(value).map_err(|_| ClientSubmitError::InvalidResponse)?
+                }
+                _ => return Err(ClientSubmitError::InvalidResponse),
+            };
+            let scalar_type_name = response_string(&mut record, "scalar_type")?;
+            let scalar_type = crate::client_protocol::decode_table_scalar_type(&scalar_type_name)
+                .map_err(|_| ClientSubmitError::InvalidResponse)?;
+            let nullable = match record.remove("nullable") {
+                Some(ResponseValue::Boolean(value)) => value,
+                _ => return Err(ClientSubmitError::InvalidResponse),
+            };
+            if column_id == [0; 16]
+                || name.is_empty()
+                || previous_ordinal.is_some_and(|previous| previous >= ordinal)
+            {
+                return Err(ClientSubmitError::InvalidResponse);
+            }
+            previous_ordinal = Some(ordinal);
+            columns.push(crate::metadata_discovery::VisibleColumn {
+                column_id,
+                name,
+                ordinal,
+                scalar_type,
+                nullable,
+            });
+        }
+        Ok(columns)
+    }
+
+    fn request_metadata(
+        &mut self,
+        operation: &str,
+        arguments: String,
+    ) -> Result<Vec<ResponseValue>, ClientSubmitError> {
+        let payload = format!(
+            "{{\"phase\":\"read\",\"operation_version\":1,\"operation\":\"{operation}\",\"arguments\":{arguments}}}"
+        );
+        let response = self.transport.exchange(10, payload.into_bytes())?;
+        discovery_records_value(&response.payload, operation)
+    }
+}
+
+fn discovery_records(
+    records: Vec<ResponseValue>,
+) -> Result<Vec<HashMap<String, ResponseValue>>, ClientSubmitError> {
+    records
+        .into_iter()
+        .map(|value| match value {
+            ResponseValue::Object(fields) => Ok(fields),
+            _ => Err(ClientSubmitError::InvalidResponse),
+        })
+        .collect()
+}
+
+fn discovery_records_value(
+    payload: &[u8],
+    operation: &str,
+) -> Result<Vec<ResponseValue>, ClientSubmitError> {
+    let key = match operation {
+        "metadata.schemas.list" => "schemas",
+        "metadata.relations.list" => "relations",
+        "metadata.columns.list" => "columns",
+        _ => return Err(ClientSubmitError::InvalidResponse),
+    };
+    let fields = parse_flat_response(payload)?;
+    if fields.len() != 1 {
+        return Err(ClientSubmitError::InvalidResponse);
+    }
+    fields
+        .get(key)
+        .and_then(ResponseValue::as_array)
+        .map(<[ResponseValue]>::to_vec)
+        .ok_or(ClientSubmitError::InvalidResponse)
+}
+
+fn response_string(
+    fields: &mut HashMap<String, ResponseValue>,
+    key: &str,
+) -> Result<String, ClientSubmitError> {
+    match fields.remove(key) {
+        Some(ResponseValue::String(value)) => Ok(value),
+        _ => Err(ClientSubmitError::InvalidResponse),
+    }
+}
+
+fn response_id(
+    fields: &HashMap<String, ResponseValue>,
+    key: &str,
+) -> Result<[u8; 16], ClientSubmitError> {
+    let id = fields
+        .get(key)
+        .and_then(ResponseValue::as_string)
+        .and_then(decode_hex_array::<16>)
+        .filter(|id| *id != [0; 16])
+        .ok_or(ClientSubmitError::InvalidResponse)?;
+    Ok(id)
+}
+
 impl StartedInvocation<'_> {
     /// Read one provisional data frame or a supervisor terminal envelope.
     /// Data is successful output only if a committed terminal event follows.
@@ -578,12 +806,14 @@ fn write_start_receipt(
     Ok(())
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum ResponseValue {
     String(String),
     Number(u64),
     Boolean(bool),
     Object(HashMap<String, ResponseValue>),
+    Array(Vec<ResponseValue>),
+    Null,
 }
 
 impl ResponseValue {
@@ -617,6 +847,13 @@ impl ResponseValue {
     fn as_object(&self) -> Option<&HashMap<String, ResponseValue>> {
         match self {
             Self::Object(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    fn as_array(&self) -> Option<&[ResponseValue]> {
+        match self {
+            Self::Array(value) => Some(value),
             _ => None,
         }
     }
@@ -667,25 +904,7 @@ fn parse_response_object(
             .expect(b':')
             .map_err(|_| ClientSubmitError::InvalidResponse)?;
         parser.skip_whitespace();
-        let value = match parser.text.get(parser.offset) {
-            Some(b'"') => ResponseValue::String(
-                parser
-                    .parse_string()
-                    .map_err(|_| ClientSubmitError::InvalidResponse)?,
-            ),
-            Some(b'{') => ResponseValue::Object(parse_response_object(parser, depth + 1)?),
-            Some(b't' | b'f') => ResponseValue::Boolean(
-                parser
-                    .parse_boolean()
-                    .map_err(|_| ClientSubmitError::InvalidResponse)?,
-            ),
-            Some(byte) if byte.is_ascii_digit() => ResponseValue::Number(
-                parser
-                    .parse_u64_number()
-                    .map_err(|_| ClientSubmitError::InvalidResponse)?,
-            ),
-            _ => return Err(ClientSubmitError::InvalidResponse),
-        };
+        let value = parse_response_value(parser, depth + 1)?;
         if fields.insert(key, value).is_some() {
             return Err(ClientSubmitError::InvalidResponse);
         }
@@ -696,6 +915,64 @@ fn parse_response_object(
         parser
             .expect(b',')
             .map_err(|_| ClientSubmitError::InvalidResponse)?;
+    }
+}
+
+fn parse_response_value(
+    parser: &mut JsonStringObjectParser<'_>,
+    depth: usize,
+) -> Result<ResponseValue, ClientSubmitError> {
+    if depth > 16 {
+        return Err(ClientSubmitError::InvalidResponse);
+    }
+    parser.skip_whitespace();
+    match parser.text.get(parser.offset) {
+        Some(b'"') => Ok(ResponseValue::String(
+            parser
+                .parse_string()
+                .map_err(|_| ClientSubmitError::InvalidResponse)?,
+        )),
+        Some(b'{') => Ok(ResponseValue::Object(parse_response_object(parser, depth)?)),
+        Some(b'[') => {
+            parser
+                .expect(b'[')
+                .map_err(|_| ClientSubmitError::InvalidResponse)?;
+            let mut values = Vec::new();
+            parser.skip_whitespace();
+            if parser.consume(b']') {
+                return Ok(ResponseValue::Array(values));
+            }
+            loop {
+                values.push(parse_response_value(parser, depth + 1)?);
+                parser.skip_whitespace();
+                if parser.consume(b']') {
+                    return Ok(ResponseValue::Array(values));
+                }
+                parser
+                    .expect(b',')
+                    .map_err(|_| ClientSubmitError::InvalidResponse)?;
+            }
+        }
+        Some(b't' | b'f') => Ok(ResponseValue::Boolean(
+            parser
+                .parse_boolean()
+                .map_err(|_| ClientSubmitError::InvalidResponse)?,
+        )),
+        Some(byte) if byte.is_ascii_digit() => Ok(ResponseValue::Number(
+            parser
+                .parse_u64_number()
+                .map_err(|_| ClientSubmitError::InvalidResponse)?,
+        )),
+        Some(b'n')
+            if parser
+                .text
+                .get(parser.offset..parser.offset.saturating_add(4))
+                == Some(b"null") =>
+        {
+            parser.offset += 4;
+            Ok(ResponseValue::Null)
+        }
+        _ => Err(ClientSubmitError::InvalidResponse),
     }
 }
 
@@ -764,7 +1041,10 @@ mod tests {
     fn response_decoder_rejects_duplicate_unknown_json_shapes_and_noncanonical_numbers() {
         assert!(parse_flat_response(br#"{"state":"prepared"}"#).is_ok());
         assert!(parse_flat_response(br#"{"state":"prepared","state":"prepared"}"#).is_err());
-        assert!(parse_flat_response(br#"{"nested":[]}"#).is_err());
+        assert_eq!(
+            parse_flat_response(br#"{"nested":[]}"#).unwrap()["nested"],
+            ResponseValue::Array(vec![])
+        );
         assert!(parse_flat_response(br#"{"nested":{"a":1,"a":2}}"#).is_err());
         assert!(parse_flat_response(br#"{"value":01}"#).is_err());
         assert_eq!(

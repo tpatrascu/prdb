@@ -223,6 +223,25 @@ fn admin_read_decoder_requires_exact_relation_discovery_arguments() {
 }
 
 #[test]
+fn admin_read_decoder_requires_schema_and_relation_for_column_discovery() {
+    assert_eq!(
+        decode_client_admin_read(
+            br#"{"phase":"read","operation_version":1,"operation":"metadata.columns.list","arguments":{"schema_id":"000102030405060708090a0b0c0d0e0f","relation_id":"101112131415161718191a1b1c1d1e1f"}}"#
+        ),
+        Ok(ClientAdminRead::ListColumns {
+            schema_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+            relation_id: [16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31],
+        })
+    );
+    assert_eq!(
+        decode_client_admin_read(
+            br#"{"phase":"read","operation_version":1,"operation":"metadata.columns.list","arguments":{"schema_id":"000102030405060708090a0b0c0d0e0f"}}"#
+        ),
+        Err(ClientControlError::MissingKey)
+    );
+}
+
+#[test]
 fn admin_revoke_decoder_requires_prepare_then_start_schemas() {
     assert_eq!(
         decode_client_admin_command(

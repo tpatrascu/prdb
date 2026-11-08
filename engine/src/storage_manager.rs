@@ -50,6 +50,8 @@ pub const MAX_DISCOVERED_SCHEMAS: usize = 4096;
 const MAX_DISCOVERED_SCHEMA_BYTES: usize = 1024 * 1024;
 pub const MAX_DISCOVERED_RELATIONS: usize = 4096;
 const MAX_DISCOVERED_RELATION_BYTES: usize = 1024 * 1024;
+pub const MAX_DISCOVERED_COLUMNS: usize = 4096;
+const MAX_DISCOVERED_COLUMN_BYTES: usize = 1024 * 1024;
 static TOKEN_REQUEST_LIMITERS: OnceLock<Mutex<HashMap<usize, Weak<TokenRequestLimiter>>>> =
     OnceLock::new();
 static ADMIN_CANCELLATION_LIMITERS: OnceLock<Mutex<HashMap<usize, Weak<TokenRequestLimiter>>>> =
@@ -2027,6 +2029,73 @@ impl<'db> StorageManager<'db> {
             continuation = page.continuation;
             if continuation.is_none() {
                 return Ok(Some(relations));
+            }
+        }
+    }
+
+    /// Describe every declared column for a relation visible to a
+    /// token-authenticated principal. Hidden and absent schema/relation pairs
+    /// return `None`; the public information_schema shapes are always visible.
+    /// The bounded read uses a single catalog snapshot and creates no
+    /// invocation admission or durable outcome.
+    pub fn discover_token_authorized_columns(
+        &self,
+        token_id: [u8; 16],
+        token_secret: &[u8; TOKEN_SECRET_BYTES],
+        schema_id: [u8; 16],
+        relation_id: [u8; 16],
+    ) -> Result<Option<Vec<crate::metadata_discovery::VisibleColumn>>, TransactionError> {
+        let principal_id = lookup_credential_principal(self.database, token_id)?;
+        let mut invocation_id = [0; 16];
+        getrandom::fill(&mut invocation_id)
+            .map_err(|_| TransactionError::Storage("randomness unavailable".into()))?;
+        if invocation_id == [0; 16] {
+            return Err(TransactionError::Storage("randomness unavailable".into()));
+        }
+        let mut transaction = InvocationTransaction::begin_inner(
+            self.database,
+            InvocationCoordination::uncoordinated(),
+            invocation_id,
+            principal_id,
+            i64::MAX,
+            1,
+            1,
+        )?;
+        let now_us = now_unix_micros().ok_or(TransactionError::ClockUnavailable)?;
+        transaction.authenticate_credential_token(token_id, token_secret, now_us)?;
+
+        let mut columns = Vec::new();
+        let mut encoded_bytes = 0usize;
+        let mut continuation = None;
+        loop {
+            let Some(page) = transaction.describe_catalog_authorized_columns_page(
+                schema_id,
+                relation_id,
+                crate::metadata_discovery::MAX_COLUMNS_PER_PAGE,
+                continuation,
+            )?
+            else {
+                return Ok(None);
+            };
+            if columns.len().saturating_add(page.columns.len()) > MAX_DISCOVERED_COLUMNS {
+                return Err(TransactionError::InvalidMetadataRequest);
+            }
+            for column in &page.columns {
+                encoded_bytes = encoded_bytes
+                    .saturating_add(16)
+                    .saturating_add(column.name.len())
+                    .saturating_add(
+                        crate::metadata_discovery::scalar_type_name(column.scalar_type).len(),
+                    )
+                    .saturating_add(5);
+                if encoded_bytes > MAX_DISCOVERED_COLUMN_BYTES {
+                    return Err(TransactionError::InvalidMetadataRequest);
+                }
+            }
+            columns.extend(page.columns);
+            continuation = page.continuation;
+            if continuation.is_none() {
+                return Ok(Some(columns));
             }
         }
     }

@@ -27,6 +27,25 @@ pub struct VisibleRelation {
     pub name: String,
 }
 
+/// Canonical scalar type spelling shared by metadata clients and control
+/// responses.
+pub fn scalar_type_name(scalar_type: crate::tuple::ScalarType) -> String {
+    use crate::tuple::ScalarType;
+    match scalar_type {
+        ScalarType::Boolean => "boolean".to_owned(),
+        ScalarType::SmallInt => "smallint".to_owned(),
+        ScalarType::Integer => "integer".to_owned(),
+        ScalarType::BigInt => "bigint".to_owned(),
+        ScalarType::Decimal { precision, scale } => format!("decimal({precision},{scale})"),
+        ScalarType::Text => "text".to_owned(),
+        ScalarType::Varchar { max_chars } => format!("varchar({max_chars})"),
+        ScalarType::Bytea => "bytea".to_owned(),
+        ScalarType::Uuid => "uuid".to_owned(),
+        ScalarType::Date => "date".to_owned(),
+        ScalarType::TimestampTz => "timestamptz".to_owned(),
+    }
+}
+
 /// Fixed public relations in the reserved information_schema namespace.
 pub fn information_schema_relations() -> [VisibleRelation; 3] {
     [

@@ -1197,6 +1197,66 @@ impl<'db> InvocationTransaction<'db> {
         )
     }
 
+    /// Describe a relation's declared columns using grants derived from the
+    /// pinned catalog. Both schema and relation IDs are references only.
+    pub fn describe_catalog_authorized_columns_page(
+        &mut self,
+        schema_id: [u8; 16],
+        table_id: [u8; 16],
+        page_limit: usize,
+        continuation: Option<ColumnScanCursor>,
+    ) -> Result<Option<VisibleColumnPage>, TransactionError> {
+        let result = (|| {
+            if page_limit == 0 || page_limit > MAX_COLUMNS_PER_PAGE {
+                return Err(TransactionError::InvalidMetadataRequest);
+            }
+            if schema_id == INFORMATION_SCHEMA_ID {
+                if continuation.is_some() {
+                    return Err(TransactionError::InvalidMetadataRequest);
+                }
+                let Some(description) = builtin_information_schema_relation_schema(table_id) else {
+                    return Ok(None);
+                };
+                if description.columns.len() > page_limit {
+                    return Err(TransactionError::InvalidMetadataRequest);
+                }
+                return Ok(Some(VisibleColumnPage {
+                    relation_id: table_id,
+                    columns: description.columns,
+                    continuation: None,
+                }));
+            }
+            if schema_id == [0; 16] {
+                return Err(TransactionError::InvalidMetadataRequest);
+            }
+            let principal_id = self.principal_id;
+            let (role_ids, grants) = self.load_catalog_relation_discovery_grants(schema_id)?;
+            let scope = self.scope_from_grants(&grants);
+            let context = AuthorizationContext {
+                principal_id,
+                role_ids,
+                scope,
+            };
+            self.describe_authorized_columns_page(
+                table_id,
+                page_limit,
+                continuation,
+                &context,
+                &grants,
+                &[],
+            )
+        })();
+        match result {
+            Ok(page) => Ok(page),
+            Err(error) => {
+                if !self.aborted {
+                    self.abort()?;
+                }
+                Err(error)
+            }
+        }
+    }
+
     fn list_catalog_authorized_relations_with_extra_bytes(
         &mut self,
         schema_id: [u8; 16],

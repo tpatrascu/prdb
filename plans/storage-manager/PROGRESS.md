@@ -1629,7 +1629,7 @@
 - Implementation: `StorageManager::discover_token_authorized_schemas` opens a request-scoped transaction snapshot, validates the token against that snapshot, derives catalog schema USAGE visibility, and consumes transaction-local pages internally. It caps full results at 4,096 records and 1 MiB, returns no partial result on overflow, and creates no invocation admission or durable outcome.
 - Regression: the credential lifecycle integration test now verifies that a valid token sees the public `information_schema` namespace and that a wrong secret is rejected.
 - Verification: the focused `token_admission_checks_expiry_secret_revocation_and_commit_guards` real-redb test passed in the prescribed Nix shell. Initial sandbox Nix access was denied; the authorized `nix-shell` invocation succeeded.
-- Remaining: add column-shape discovery for visible relations and test selected metadata scope construction end to end.
+- Remaining: exercise a complete selected-scope discovery from real gateway records and test the pre-admission selection path end to end.
 
 ## SM-6: expose schema discovery through the client control channel — implemented
 
@@ -1637,7 +1637,7 @@
 - Implementation: the versioned read decoder accepts only `phase=read`, operation version 1, operation `metadata.schemas.list`, and empty arguments. The connection-owned handler revalidates its token and emits bounded schema IDs/names from the storage snapshot API. Existing gateway administrative-operation dispatch carries this request over the control channel; no invocation is admitted.
 - Regression evidence: strict decoder tests reject arguments and mutation phase; the real-redb gateway dispatch test authenticates a non-admin control session and receives the public schema in the response.
 - Verification: focused decoder and real-redb gateway-dispatch regressions passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed. Commit integration had 109 passing and 2 cgroup-dependent tests ignored.
-- Remaining: add a Rust control client helper and column-shape discovery; schema/relation results are capped complete lists rather than resumable pages.
+- Remaining: complete selected-scope discovery with real gateway records; schema/relation results are capped complete lists rather than resumable pages.
 
 ## SM-6: authenticated relation discovery over the control channel — implemented
 
@@ -1645,4 +1645,12 @@
 - Implementation: `StorageManager::discover_token_authorized_relations` authenticates and filters under one request-scoped catalog snapshot, consumes the transaction-bound cursors internally, and bounds the complete result by record count and encoded ID/name bytes. The client read requires exactly one schema ID. Hidden and absent schemas serialize identically to an authorized empty schema.
 - Regression evidence: strict request decoding checks the schema ID and rejects extra arguments. The real-redb gateway dispatch path confirms the public `information_schema` names and stable-ID order are exposed to a non-admin client, while an unavailable schema returns the indistinguishable empty array; neither request starts an invocation.
 - Verification: focused decoder and real-redb gateway-dispatch regressions passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed. Commit integration had 109 passing and 2 cgroup-dependent tests ignored.
-- Remaining: demonstrate records for a grant-visible user schema on the wire, add column discovery and a client helper, then build selected-scope discovery end to end.
+- Remaining: demonstrate records for a grant-visible user schema on the wire and build selected-scope discovery end to end.
+
+## SM-6: authenticated column-shape discovery over the control channel — implemented
+
+- Behavior and normative contract: [metadata discovery](../../specs/metadata-discovery.md), declared columns; [client protocol](../../specs/client-protocol.md), `metadata.columns.list`.
+- Implementation: `InvocationTransaction::describe_catalog_authorized_columns_page` derives the scope and grant set from its pinned catalog; the storage-manager adapter authenticates the token in a request-scoped snapshot and consumes its pages. It exposes only stable column IDs, names, zero-based ordinals, canonical scalar type names, and nullability. Built-in `information_schema` descriptors share the same stable relation and column IDs as ordinary query metadata. `MetadataClient` negotiates control mode, authenticates, parses all three metadata response shapes into typed records, and provides those records directly to `RequestedScopeBuilder` callers.
+- Regression evidence: strict decoder checks require both schema and relation IDs. The real-redb gateway dispatch test obtains the public `information_schema.columns` shape through a non-admin control connection and confirms the `table_schema` text/non-null declaration.
+- Verification: the new `client_metadata` TCP test proves typed schema/relation/column decoding, secret zeroization, ordinal-gap preservation, and requested-scope construction. A real-redb transaction regression verifies column discovery through a column-level SELECT grant, and gateway dispatch verifies built-in columns. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed; commit integration had 109 passing and 2 cgroup-dependent tests ignored.
+- Remaining: test grant-visible user relation columns over the network. Discovery returns complete bounded lists without resumable network cursors; the 64 KiB control-frame cap can reject larger metadata sets without partial output.

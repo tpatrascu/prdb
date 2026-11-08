@@ -1663,6 +1663,16 @@ fn catalog_authorized_relation_listing_derives_the_invocation_scope()
     assert_eq!(first.relations.len(), 1);
     assert_eq!(first.relations[0].relation_id, [0x10; 16]);
     assert_eq!(first.relations[0].name, "metrics");
+    let columns = invocation
+        .describe_catalog_authorized_columns_page(schema_id, [0x10; 16], 128, None)?
+        .expect("table is discoverable through a column SELECT grant");
+    assert_eq!(columns.relation_id, [0x10; 16]);
+    assert_eq!(columns.columns.len(), 1);
+    assert_eq!(columns.columns[0].column_id, [0x66; 16]);
+    assert_eq!(columns.columns[0].name, "value");
+    assert_eq!(columns.columns[0].ordinal, 0);
+    assert_eq!(columns.columns[0].scalar_type, ScalarType::Bytea);
+    assert!(columns.columns[0].nullable);
     let continuation = first.continuation.expect("second granted relation follows");
     let second = invocation
         .list_catalog_authorized_relations(schema_id, 1, Some(continuation))?
