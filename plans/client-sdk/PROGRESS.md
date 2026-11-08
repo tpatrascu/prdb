@@ -203,3 +203,11 @@
 - Regression: parser tests reject unsupported non-null, identity, and multi-column add forms. The real gateway/supervisor integration now exercises nullable add, rename, and drop.
 - Verification: focused CLI and process tests passed; final workspace build, formatting, warning-denied Clippy, and all workspace tests passed. The commit integration target reported 124 passed and 3 cgroup-dependent ignored.
 - Remaining: CLI support for nullability/default operations, indexes, constraints, privileges, policies, more real-process DDL, and confined artifact execution remains open.
+
+## SDK-5: column nullability/default CLI and process coverage — implemented
+
+- Contract: the client exposes typed nullability/default changes through the authenticated ADMIN protocol; storage validates current rows and schema before commit.
+- Implementation: CLI commands set column nullability and set/drop defaults. Default literals are parsed using the declared scalar type, including SQL NULL, `current-principal-id`, decimal coefficients, lowercase BYTEA hex, UUIDs, dates, and timestamps.
+- Regression: parser tests cover decimal scaling and invalid scale, BYTEA decoding, principal UUID defaults, and type mismatch. The real-process ADMIN test exercises nullability changes and setting/dropping a literal default.
+- Verification: focused CLI and process tests passed; final workspace build, formatting, warning-denied Clippy, and full test suite passed after isolating and rerunning the known intermittent CHECK lifecycle test. Commit integration had 124 passed and 3 cgroup-dependent ignored.
+- Remaining: index, constraint, privilege, and policy CLI commands; broader live-process DDL coverage; and confined artifact execution remain open.

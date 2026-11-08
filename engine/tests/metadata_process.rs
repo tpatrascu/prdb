@@ -7,7 +7,8 @@ use prdb_engine::client_credentials::{
 };
 use prdb_engine::client_protocol::ClientCredentials;
 use prdb_engine::client_submit::{
-    AdminClient, AdminColumnDefinition, InvocationStatus, MetadataClient, SubmissionClient,
+    AdminClient, AdminColumnDefault, AdminColumnDefinition, InvocationStatus, MetadataClient,
+    SubmissionClient,
 };
 use prdb_engine::storage_manager::{CreateTableRequest, TableColumnDefinition, TokenIssueRequest};
 use prdb_engine::submission_manifest::{encode_manifest_v1, manifest_v1_from_elf};
@@ -489,6 +490,15 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
         admin.rename_column(created_table.table_id, added_column.column_id, "extra_v2")?;
     let dropped_column = admin.drop_column(created_table.table_id, added_column.column_id)?;
     assert!(dropped_column.commit_sequence > renamed_column.commit_sequence);
+    admin.alter_column_nullability(created_table.table_id, created_table.column_ids[0], false)?;
+    admin.alter_column_nullability(created_table.table_id, created_table.column_ids[0], true)?;
+    admin.set_column_default(
+        created_table.table_id,
+        created_table.column_ids[0],
+        ScalarType::Text,
+        AdminColumnDefault::Literal(prdb_engine::tuple::ScalarValue::Text("seed".to_owned())),
+    )?;
+    admin.drop_column_default(created_table.table_id, created_table.column_ids[0])?;
     let renamed_table = admin.rename_table(created_table.table_id, "process_admin_table_v2")?;
     let dropped_table = admin.drop_table(created_table.table_id)?;
     assert!(dropped_table.commit_sequence > renamed_table.commit_sequence);

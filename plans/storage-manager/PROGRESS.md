@@ -1992,3 +1992,11 @@
 - Regression: the parser rejects non-null or identity columns for the CLI add form and rejects multiple declarations. The authenticated gateway/supervisor process test exercises add, rename, and drop on the created table.
 - Verification: focused CLI parser and real-process tests passed. Workspace build, format, warning-denied Clippy, and full tests passed under the prescribed Nix shell; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
 - Remaining: nullability/default changes, indexes, constraints, privileges, policies, additional multi-process DDL coverage, and confined artifact submission remain open.
+
+## SDK-5: column nullability/default CLI and process coverage — implemented
+
+- Contract: column metadata changes use authenticated ADMIN operations and are validated against the current stored schema and row set before atomic publication.
+- Implementation: `prdb-client` now exposes nullable-state changes and column default set/drop. Default input is typed by an explicit scalar type and supports SQL NULL, current principal UUID, and typed scalar literals including bounded DECIMAL, VARCHAR, BYTEA hex, UUID, DATE epoch days, and TIMESTAMPTZ epoch microseconds.
+- Regression: parser checks cover decimal scaling, bytea decoding, UUID principal defaults, and type mismatches. The multi-process ADMIN test exercises nullability changes and a literal default set/drop through the gateway and supervisor.
+- Verification: focused parser and real-process tests passed. Build, formatting, and warning-denied Clippy passed. The first full-suite run hit the known intermittent CHECK lifecycle `InvalidAudit`; that test passed in isolation, and the complete rerun passed with 124 commit tests and 3 cgroup-dependent ignored.
+- Remaining: CLI commands for indexes, constraints, privileges, and policies; broader ADMIN process coverage; and confined artifact submission remain open.

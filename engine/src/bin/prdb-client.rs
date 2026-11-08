@@ -3,12 +3,12 @@ use prdb_engine::client_credentials::{read_client_credentials, write_client_cred
 use prdb_engine::client_protocol::ClientCredentials;
 use prdb_engine::client_submit::MetadataClient;
 use prdb_engine::client_submit::{
-    AdminClient, AdminColumnDefinition, ClientResultEvent, InvocationStatus, SubmissionClient,
-    TerminalOutcome,
+    AdminClient, AdminColumnDefault, AdminColumnDefinition, ClientResultEvent, InvocationStatus,
+    SubmissionClient, TerminalOutcome,
 };
 use prdb_engine::submission_scope::RequestedScopeBuilder;
 use prdb_engine::supervisor::{MAX_PARAMETER_BYTES, WorkloadClass};
-use prdb_engine::tuple::ScalarType;
+use prdb_engine::tuple::{ScalarType, ScalarValue};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -42,6 +42,9 @@ Token secrets are saved only to mode-0600 credential files and are never printed
   prdb-client column-add --address IP:PORT --credentials ADMIN_FILE --table-id HEX --column name:type:nullable\n\
   prdb-client column-rename --address IP:PORT --credentials ADMIN_FILE --table-id HEX --column-id HEX --name NAME\n\
   prdb-client column-drop --address IP:PORT --credentials ADMIN_FILE --table-id HEX --column-id HEX\n\n\
+  prdb-client column-nullability --address IP:PORT --credentials ADMIN_FILE --table-id HEX --column-id HEX --nullable true|false\n\
+  prdb-client column-default-set --address IP:PORT --credentials ADMIN_FILE --table-id HEX --column-id HEX --type TYPE --value VALUE\n\
+  prdb-client column-default-drop --address IP:PORT --credentials ADMIN_FILE --table-id HEX --column-id HEX\n\n\
 Column types: boolean, smallint, integer, bigint, decimal(P,S), text, varchar(N), bytea, uuid, date, timestamptz.\n\
 Column nullability is nullable or not-null; not-null columns require the UUID identity modifier.\n\n\
 Token secrets are saved only to mode-0600 credential files and are never printed.\n\
@@ -101,9 +104,12 @@ fn run() -> Result<(), String> {
         "token-revoke" => token_revoke(address, credentials_path, &mut fields),
         "schema-create" | "schema-rename" | "schema-drop" | "table-create" | "table-rename"
         | "table-drop" => schema_table_admin(&command, address, credentials_path, &mut fields),
-        "column-add" | "column-rename" | "column-drop" => {
-            column_admin(&command, address, credentials_path, &mut fields)
-        }
+        "column-add"
+        | "column-rename"
+        | "column-drop"
+        | "column-nullability"
+        | "column-default-set"
+        | "column-default-drop" => column_admin(&command, address, credentials_path, &mut fields),
         "user-create" | "user-rename" | "user-drop" | "user-login" | "role-create"
         | "role-rename" | "role-drop" | "role-grant" | "role-revoke" => {
             identity_admin(&command, address, credentials_path, &mut fields)
@@ -249,6 +255,46 @@ fn column_admin(
                 result.commit_sequence,
             );
         }
+        "column-nullability" => {
+            let column_id = parse_id(&take_text(fields, "--column-id")?)?;
+            let nullable = parse_boolean(&take_text(fields, "--nullable")?, "--nullable")?;
+            reject_unknown(fields)?;
+            let result = client
+                .alter_column_nullability(table_id, column_id, nullable)
+                .map_err(|error| error.to_string())?;
+            print_operation(
+                "changed column nullability",
+                &result.operation_id,
+                result.commit_sequence,
+            );
+        }
+        "column-default-set" => {
+            let column_id = parse_id(&take_text(fields, "--column-id")?)?;
+            let scalar_type = parse_scalar_type(&take_text(fields, "--type")?)?;
+            let value = take_text(fields, "--value")?;
+            let default = parse_column_default(&value, scalar_type)?;
+            reject_unknown(fields)?;
+            let result = client
+                .set_column_default(table_id, column_id, scalar_type, default)
+                .map_err(|error| error.to_string())?;
+            print_operation(
+                "set column default",
+                &result.operation_id,
+                result.commit_sequence,
+            );
+        }
+        "column-default-drop" => {
+            let column_id = parse_id(&take_text(fields, "--column-id")?)?;
+            reject_unknown(fields)?;
+            let result = client
+                .drop_column_default(table_id, column_id)
+                .map_err(|error| error.to_string())?;
+            print_operation(
+                "dropped column default",
+                &result.operation_id,
+                result.commit_sequence,
+            );
+        }
         _ => return Err(format!("unsupported column command {command}")),
     }
     Ok(())
@@ -260,6 +306,104 @@ fn parse_added_column(value: &str) -> Result<AdminColumnDefinition, String> {
         return Err("column-add accepts one nullable column without identity".to_owned());
     }
     Ok(columns.remove(0))
+}
+
+fn parse_column_default(
+    value: &str,
+    scalar_type: ScalarType,
+) -> Result<AdminColumnDefault, String> {
+    if value == "null" {
+        return Ok(AdminColumnDefault::Null);
+    }
+    if value == "current-principal-id" {
+        if scalar_type == ScalarType::Uuid {
+            return Ok(AdminColumnDefault::CurrentPrincipalId);
+        }
+        return Err("current-principal-id defaults require type uuid".to_owned());
+    }
+    let invalid = || format!("default value {value:?} does not match the declared type");
+    let literal = match scalar_type {
+        ScalarType::Boolean => ScalarValue::Boolean(parse_boolean(value, "--value")?),
+        ScalarType::SmallInt => ScalarValue::SmallInt(value.parse().map_err(|_| invalid())?),
+        ScalarType::Integer => ScalarValue::Integer(value.parse().map_err(|_| invalid())?),
+        ScalarType::BigInt => ScalarValue::BigInt(value.parse().map_err(|_| invalid())?),
+        ScalarType::Decimal { precision, scale } => ScalarValue::Decimal(
+            parse_decimal_coefficient(value, precision, scale).ok_or_else(invalid)?,
+        ),
+        ScalarType::Text => ScalarValue::Text(value.to_owned()),
+        ScalarType::Varchar { max_chars } => {
+            if value.chars().count() > max_chars as usize {
+                return Err(invalid());
+            }
+            ScalarValue::Varchar(value.to_owned())
+        }
+        ScalarType::Bytea => ScalarValue::Bytea(parse_hex_bytes(value).ok_or_else(invalid)?),
+        ScalarType::Uuid => ScalarValue::Uuid(parse_uuid_literal(value).ok_or_else(invalid)?),
+        ScalarType::Date => ScalarValue::Date(value.parse().map_err(|_| invalid())?),
+        ScalarType::TimestampTz => ScalarValue::TimestampTz(value.parse().map_err(|_| invalid())?),
+    };
+    Ok(AdminColumnDefault::Literal(literal))
+}
+
+fn parse_decimal_coefficient(value: &str, precision: u8, scale: u8) -> Option<i128> {
+    let (negative, unsigned) = value
+        .strip_prefix('-')
+        .map_or((false, value), |rest| (true, rest));
+    if unsigned.is_empty() || unsigned.starts_with('+') {
+        return None;
+    }
+    let (whole, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.len() > usize::from(scale)
+    {
+        return None;
+    }
+    let mut digits = String::with_capacity(whole.len() + usize::from(scale));
+    digits.push_str(whole);
+    digits.push_str(fraction);
+    digits.extend(std::iter::repeat_n(
+        '0',
+        usize::from(scale) - fraction.len(),
+    ));
+    let magnitude = digits.parse::<u128>().ok()?;
+    if magnitude >= 10u128.checked_pow(u32::from(precision))? {
+        return None;
+    }
+    let coefficient = i128::try_from(magnitude).ok()?;
+    Some(if negative { -coefficient } else { coefficient })
+}
+
+fn parse_hex_bytes(value: &str) -> Option<Vec<u8>> {
+    let digits = value.strip_prefix("hex:")?;
+    if digits.len() % 2 != 0
+        || !digits
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return None;
+    }
+    digits
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| Some((nibble(pair[0]).ok()? << 4) | nibble(pair[1]).ok()?))
+        .collect()
+}
+
+fn parse_uuid_literal(value: &str) -> Option<[u8; 16]> {
+    if value.len() != 32
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return None;
+    }
+    let mut id = [0; 16];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        id[index] = (nibble(pair[0]).ok()? << 4) | nibble(pair[1]).ok()?;
+    }
+    Some(id)
 }
 
 fn parse_column_definitions(value: &str) -> Result<Vec<AdminColumnDefinition>, String> {
@@ -1032,5 +1176,35 @@ mod tests {
         assert!(parse_added_column("extra:integer:nullable").is_ok());
         assert!(parse_added_column("id:integer:not-null:identity").is_err());
         assert!(parse_added_column("one:text:nullable;two:text:nullable").is_err());
+        assert_eq!(
+            parse_column_default(
+                "-12.30",
+                ScalarType::Decimal {
+                    precision: 5,
+                    scale: 2
+                }
+            )
+            .unwrap(),
+            AdminColumnDefault::Literal(ScalarValue::Decimal(-1230))
+        );
+        assert_eq!(
+            parse_column_default("current-principal-id", ScalarType::Uuid).unwrap(),
+            AdminColumnDefault::CurrentPrincipalId
+        );
+        assert_eq!(
+            parse_column_default("hex:00ff", ScalarType::Bytea).unwrap(),
+            AdminColumnDefault::Literal(ScalarValue::Bytea(vec![0, 255]))
+        );
+        assert!(
+            parse_column_default(
+                "1.234",
+                ScalarType::Decimal {
+                    precision: 4,
+                    scale: 2
+                }
+            )
+            .is_err()
+        );
+        assert!(parse_column_default("current-principal-id", ScalarType::Text).is_err());
     }
 }
