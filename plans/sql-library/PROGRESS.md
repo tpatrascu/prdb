@@ -38,6 +38,13 @@
 - Verification: `make -f engine/sdk/Makefile test`, `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, and `git diff --check` passed in the required Nix shell. The existing sandbox integration remains ignored because the host cgroup mount is read-only and not delegated.
 - Limits/next: this is one-row INSERT only. UPDATE/DELETE SQL grammar/execution, default-schema/catalog constraints, real storage IPC through the sandbox, and sequential read/write/read acceptance remain open. A host callback fixture verifies the client ABI bytes but is not live storage evidence.
 
+## SQL-4 dependency: bounded UPDATE parser — partial
+
+- Contract: [SQL library](../../specs/sql-library.md). Parse `UPDATE relation SET column = ($n|NULL)[, ...] WHERE predicate`; WHERE reuses the bounded v2 Boolean grammar. At most 64 assignments are accepted, duplicate column names are rejected case-insensitively, and omission of WHERE is not yet supported.
+- Red/green evidence: after adding the sized UPDATE AST contract, the fixture link failed because `prdb_sdk_sql_parse_update_v1` was absent. The parser reuses the bounded tokenizer and predicate-tree parser, and populates the assignment columns into the v2 binding projection so the execution layer can map them to ordinals. Tests check parameter/NULL assignments, Boolean predicate tree structure, case-folded duplicate rejection, zero parameter rejection, and output preservation on failure.
+- Verification: focused DML parser fixture passed under TinyCC 0.9.27-unstable-2025-01-06.
+- Limits/next: parser only; no scan, fixed target materialization, cursor closure before updates, or `stage_update` execution exists yet. Next bind assignment ordinals/values, capture matching row handles under the invocation view, close the scan, then stage patches within the IPC request budget.
+
 ## SQL-4 v2 schema column binding — implemented
 
 - Contract: `prdb_sdk_sql_bind_select_v2` receives the v2 statement, one already-resolved authorized relation name, and its declared column shape. It maps unquoted projection and predicate names to zero-based ordinals using ASCII case folding, and attaches scalar/Decimal metadata to predicate leaves.

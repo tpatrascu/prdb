@@ -218,7 +218,7 @@ static int32_t expect_identifier(parser *state, prdb_sdk_sql_span_v1 *out) {
         token_is_keyword(state, "OR") || token_is_keyword(state, "INSERT") ||
         token_is_keyword(state, "INTO") || token_is_keyword(state, "VALUES") ||
         token_is_keyword(state, "DEFAULT") || token_is_keyword(state, "UPDATE") ||
-        token_is_keyword(state, "DELETE")) {
+        token_is_keyword(state, "DELETE") || token_is_keyword(state, "SET")) {
         state->error_offset = state->current.offset;
         return PRDB_SDK_SQL_SYNTAX_ERROR;
     }
@@ -386,6 +386,167 @@ int32_t prdb_sdk_sql_parse_insert_v1(const uint8_t *sql, uint64_t sql_len,
     return PRDB_SDK_SQL_OK;
 
 failed_insert:
+    if (error_offset_out != NULL) *error_offset_out = state.error_offset;
+    return fail_at(&state, status);
+}
+
+static int spans_equal_ascii_case(const uint8_t *sql,
+                                  prdb_sdk_sql_span_v1 left,
+                                  prdb_sdk_sql_span_v1 right) {
+    if (left.length != right.length) return 0;
+    for (uint32_t index = 0; index < left.length; ++index) {
+        uint8_t a = sql[left.offset + index];
+        uint8_t b = sql[right.offset + index];
+        if (a >= 'A' && a <= 'Z') a = (uint8_t)(a - 'A' + 'a');
+        if (b >= 'A' && b <= 'Z') b = (uint8_t)(b - 'A' + 'a');
+        if (a != b) return 0;
+    }
+    return 1;
+}
+
+static int32_t parse_predicate_or_v2(parser *state,
+                                     prdb_sdk_select_v2 *statement,
+                                     uint32_t depth, uint32_t *index_out);
+
+int32_t prdb_sdk_sql_parse_update_v1(const uint8_t *sql, uint64_t sql_len,
+                                     prdb_sdk_update_v1 *out,
+                                     uint32_t out_capacity,
+                                     uint32_t *error_offset_out) {
+    parser state;
+    prdb_sdk_update_v1 result;
+    prdb_sdk_select_v2 *predicate;
+    int32_t status;
+
+    if (error_offset_out != NULL) *error_offset_out = 0;
+    if (sql == NULL || out == NULL || out_capacity < sizeof(*out)) {
+        return PRDB_SDK_SQL_INVALID_ARGUMENT;
+    }
+    if (sql_len == 0) return PRDB_SDK_SQL_SYNTAX_ERROR;
+    if (sql_len > PRDB_SDK_SQL_MAX_QUERY_BYTES) {
+        if (error_offset_out != NULL) {
+            *error_offset_out = (uint32_t)PRDB_SDK_SQL_MAX_QUERY_BYTES;
+        }
+        return PRDB_SDK_SQL_LIMIT_EXCEEDED;
+    }
+    state = (parser){sql, (uint32_t)sql_len, 0, {TOKEN_END, 0, 0}, 0,
+                     PRDB_SDK_SQL_OK};
+    result = (prdb_sdk_update_v1){0};
+    result.struct_size = sizeof(result);
+    result.abi_version = PRDB_SDK_SQL_DML_ABI_V1_VERSION;
+    result.sql = sql;
+    result.sql_len = sql_len;
+    predicate = &result.predicate_statement;
+    predicate->struct_size = sizeof(*predicate);
+    predicate->abi_version = PRDB_SDK_SQL_ABI_V2_VERSION;
+    predicate->sql = sql;
+    predicate->sql_len = sql_len;
+
+    status = advance(&state);
+    if (status != PRDB_SDK_SQL_OK) goto failed_update;
+    if (!token_is_keyword(&state, "UPDATE")) {
+        status = state.current.kind == TOKEN_IDENTIFIER
+                     ? PRDB_SDK_SQL_UNSUPPORTED_STATEMENT
+                     : PRDB_SDK_SQL_SYNTAX_ERROR;
+        state.error_offset = state.current.offset;
+        goto failed_update;
+    }
+    if (advance(&state) != PRDB_SDK_SQL_OK) {
+        status = state.error;
+        goto failed_update;
+    }
+    status = expect_identifier(&state, &result.relation);
+    if (status != PRDB_SDK_SQL_OK) goto failed_update;
+    predicate->relation = result.relation;
+    if (!token_is_keyword(&state, "SET")) {
+        status = PRDB_SDK_SQL_SYNTAX_ERROR;
+        state.error_offset = state.current.offset;
+        goto failed_update;
+    }
+    if (advance(&state) != PRDB_SDK_SQL_OK) {
+        status = state.error;
+        goto failed_update;
+    }
+
+    for (;;) {
+        prdb_sdk_sql_update_assignment_v1 *assignment;
+        if (result.assignment_count >= PRDB_SDK_SQL_MAX_UPDATE_ASSIGNMENTS) {
+            status = PRDB_SDK_SQL_LIMIT_EXCEEDED;
+            state.error_offset = state.current.offset;
+            goto failed_update;
+        }
+        assignment = &result.assignments[result.assignment_count];
+        status = expect_identifier(&state, &assignment->column);
+        if (status != PRDB_SDK_SQL_OK) goto failed_update;
+        for (uint32_t previous = 0; previous < result.assignment_count;
+             ++previous) {
+            if (spans_equal_ascii_case(sql, assignment->column,
+                                       result.assignments[previous].column)) {
+                status = PRDB_SDK_SQL_SYNTAX_ERROR;
+                state.error_offset = assignment->column.offset;
+                goto failed_update;
+            }
+        }
+        if (state.current.kind != TOKEN_EQUAL) {
+            status = PRDB_SDK_SQL_SYNTAX_ERROR;
+            state.error_offset = state.current.offset;
+            goto failed_update;
+        }
+        if (advance(&state) != PRDB_SDK_SQL_OK) {
+            status = state.error;
+            goto failed_update;
+        }
+        if (state.current.kind == TOKEN_PARAMETER) {
+            assignment->kind = PRDB_SDK_SQL_UPDATE_PARAMETER;
+            status = parse_unsigned(&state, state.current,
+                                    PRDB_SDK_SQL_MAX_PARAMETER_INDEX, 0,
+                                    &assignment->parameter_index);
+            if (status != PRDB_SDK_SQL_OK) goto failed_update;
+        } else if (token_is_keyword(&state, "NULL")) {
+            assignment->kind = PRDB_SDK_SQL_UPDATE_NULL;
+        } else {
+            status = PRDB_SDK_SQL_SYNTAX_ERROR;
+            state.error_offset = state.current.offset;
+            goto failed_update;
+        }
+        predicate->projection[result.assignment_count] = assignment->column;
+        ++result.assignment_count;
+        ++predicate->projection_count;
+        if (advance(&state) != PRDB_SDK_SQL_OK) {
+            status = state.error;
+            goto failed_update;
+        }
+        if (state.current.kind != TOKEN_COMMA) break;
+        if (advance(&state) != PRDB_SDK_SQL_OK) {
+            status = state.error;
+            goto failed_update;
+        }
+    }
+    if (!token_is_keyword(&state, "WHERE")) {
+        status = PRDB_SDK_SQL_SYNTAX_ERROR;
+        state.error_offset = state.current.offset;
+        goto failed_update;
+    }
+    if (advance(&state) != PRDB_SDK_SQL_OK) {
+        status = state.error;
+        goto failed_update;
+    }
+    status = parse_predicate_or_v2(&state, predicate, 0,
+                                   &predicate->predicate_root);
+    if (status != PRDB_SDK_SQL_OK) goto failed_update;
+    if (state.current.kind == TOKEN_SEMICOLON &&
+        advance(&state) != PRDB_SDK_SQL_OK) {
+        status = state.error;
+        goto failed_update;
+    }
+    if (state.current.kind != TOKEN_END) {
+        status = PRDB_SDK_SQL_SYNTAX_ERROR;
+        state.error_offset = state.current.offset;
+        goto failed_update;
+    }
+    *out = result;
+    return PRDB_SDK_SQL_OK;
+
+failed_update:
     if (error_offset_out != NULL) *error_offset_out = state.error_offset;
     return fail_at(&state, status);
 }
