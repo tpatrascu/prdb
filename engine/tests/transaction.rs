@@ -1334,6 +1334,7 @@ fn authorized_relation_listing_uses_schema_usage_and_data_grants()
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
     install_relation_discovery_catalog(&database)?;
+    install_second_relation_column(&database)?;
     let mut malformed_hidden_row_key = [0x20; 32];
     malformed_hidden_row_key[16..].fill(0xfe);
     let write = database.begin_write()?;
@@ -2169,6 +2170,7 @@ fn executor_scan_reads_filtered_information_schema_schemata()
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
     install_relation_discovery_catalog(&database)?;
+    install_second_relation_column(&database)?;
     let mut invocation = InvocationTransaction::begin(&database, [220; 16], [9; 16], 9_999, 1, 64)?;
     let mut connection = invocation.open_executor_metadata_connection();
     let (relation, description) = connection
@@ -2204,6 +2206,81 @@ fn executor_scan_reads_filtered_information_schema_schemata()
         }
     }
     assert_eq!(names, ["information_schema", "app", "public"]);
+
+    let (tables_relation, _) = connection
+        .resolve_relation("information_schema", "tables")?
+        .expect("public tables relation resolves");
+    let mut cursor = connection.open_relation_scan(&tables_relation, &[])?;
+    let mut tables = Vec::new();
+    loop {
+        let page = connection.next_relation_scan_batch(&cursor, 1, 1024)?;
+        for (_, cells) in page.rows {
+            tables.push(cells);
+        }
+        match page.continuation {
+            Some(continuation) => cursor = continuation,
+            None => break,
+        }
+    }
+    assert_eq!(tables.len(), 5);
+    assert!(matches!(
+        tables[0].as_slice(),
+        [
+            SanitizedCell::Value(ScalarValue::Text(schema)),
+            SanitizedCell::Value(ScalarValue::Text(table)),
+            SanitizedCell::Value(ScalarValue::Text(kind)),
+        ] if schema == "information_schema" && table == "columns" && kind == "VIEW"
+    ));
+    assert!(matches!(
+        tables[3].as_slice(),
+        [
+            SanitizedCell::Value(ScalarValue::Text(schema)),
+            SanitizedCell::Value(ScalarValue::Text(table)),
+            SanitizedCell::Value(ScalarValue::Text(kind)),
+        ] if schema == "app" && table == "metrics" && kind == "BASE TABLE"
+    ));
+
+    let (columns_relation, _) = connection
+        .resolve_relation("information_schema", "columns")?
+        .expect("public columns relation resolves");
+    let mut cursor = connection.open_relation_scan(&columns_relation, &[])?;
+    let mut columns = Vec::new();
+    loop {
+        let page = connection.next_relation_scan_batch(&cursor, 1, 1024)?;
+        for (_, cells) in page.rows {
+            columns.push(cells);
+        }
+        match page.continuation {
+            Some(continuation) => cursor = continuation,
+            None => break,
+        }
+    }
+    assert_eq!(columns.len(), 16);
+    assert!(matches!(
+        columns[0].as_slice(),
+        [
+            SanitizedCell::Value(ScalarValue::Text(schema)),
+            SanitizedCell::Value(ScalarValue::Text(table)),
+            SanitizedCell::Value(ScalarValue::Text(column)),
+            SanitizedCell::Value(ScalarValue::Integer(1)),
+            SanitizedCell::Value(ScalarValue::Text(data_type)),
+            SanitizedCell::Value(ScalarValue::Text(nullable)),
+            SanitizedCell::Null,
+            SanitizedCell::Null,
+            SanitizedCell::Null,
+        ] if schema == "information_schema" && table == "columns" && column == "table_schema"
+            && data_type == "TEXT" && nullable == "NO"
+    ));
+    assert!(matches!(
+        columns[14].as_slice(),
+        [
+            SanitizedCell::Value(ScalarValue::Text(schema)),
+            SanitizedCell::Value(ScalarValue::Text(table)),
+            SanitizedCell::Value(ScalarValue::Text(column)),
+            SanitizedCell::Value(ScalarValue::Integer(2)),
+            ..
+        ] if schema == "app" && table == "metrics" && column == "value2"
+    ));
     assert!(matches!(
         connection.stage_update(
             virtual_row_handle
