@@ -1960,4 +1960,12 @@
 - Implementation: `StorageManager::rebuild_index` accepts an index ID, ordered column IDs, and uniqueness profile. It captures the exact current index definition and table schema version, then rewrites the typed catalog fields and delegates the replacement build to `commit_authorized_index_ddl`.
 - Regression: `storage_manager_rebuilds_populated_indexes_atomically` now exercises the typed API with authenticated database-admin membership. It verifies old snapshot visibility, replacement forward/reverse memberships, and durable conflict of a writer pinned before the rebuild.
 - Verification: the focused real-redb rebuild regression passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` all passed in the prescribed Nix shell; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
-- Remaining: authenticated ADMIN operation dispatch for ordinary index create/drop/rebuild remains open.
+- Remaining: none for the typed StorageManager layer; authenticated ADMIN operation dispatch is tracked below.
+
+## SM-5 / CP-1: authenticated ADMIN dispatch for ordinary indexes — implemented
+
+- Contract: [client protocol](../../specs/client-protocol.md) exposes connection-owned PREPARE/START for index create, rebuild, and drop. START must revalidate the authenticated principal and delegate to action-specific storage authorization; a native query receives no administrative credentials.
+- Implementation: the strict ADMIN decoder accepts `indexes.create`, `indexes.rebuild`, and `indexes.drop`. PREPARE binds each request to the connection's pending operation ID; START revalidates session state and routes through the typed `StorageManager` request with an audit event correlated to that ID.
+- Regression: `admin_revoke_decoder_requires_prepare_then_start_schemas` checks all three canonical decoder shapes. `storage_manager_runtime_and_metadata_reads_enforce_authorization` exercises authenticated gateway PREPARE/START for create, rebuild, and drop and verifies committed responses; startup catalog validation succeeds after the broader DDL lifecycle.
+- Verification: focused decoder and authenticated gateway ADMIN lifecycle tests passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` all passed in the prescribed Nix shell; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
+- Remaining: SDK-facing SQL DDL compilation and a separately packaged TinyCC sandbox integration harness are still outside this increment.

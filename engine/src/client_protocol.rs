@@ -88,6 +88,7 @@ pub enum ClientSessionError {
     ForeignKeyLifecycle(crate::commit::CommitError),
     ForeignKeyCreateLifecycle(crate::storage_manager::TableLifecycleError),
     ConstraintLifecycle(crate::storage_manager::TableLifecycleError),
+    IndexLifecycle(crate::storage_manager::IndexLifecycleError),
     Storage(TransactionError),
 }
 
@@ -224,6 +225,20 @@ enum PendingAdminAction {
     },
     DropUniqueConstraint {
         constraint_id: [u8; 16],
+    },
+    CreateIndex {
+        table_id: [u8; 16],
+        name: String,
+        column_ids: Vec<[u8; 16]>,
+        unique: bool,
+    },
+    DropIndex {
+        index_id: [u8; 16],
+    },
+    RebuildIndex {
+        index_id: [u8; 16],
+        column_ids: Vec<[u8; 16]>,
+        unique: bool,
     },
     RenameTable {
         table_id: [u8; 16],
@@ -476,6 +491,20 @@ pub enum ClientAdminCommand {
     PrepareDropUniqueConstraint {
         constraint_id: [u8; 16],
     },
+    PrepareCreateIndex {
+        table_id: [u8; 16],
+        name: String,
+        column_ids: Vec<[u8; 16]>,
+        unique: bool,
+    },
+    PrepareDropIndex {
+        index_id: [u8; 16],
+    },
+    PrepareRebuildIndex {
+        index_id: [u8; 16],
+        column_ids: Vec<[u8; 16]>,
+        unique: bool,
+    },
     PrepareRenameTable {
         table_id: [u8; 16],
         name: String,
@@ -618,6 +647,7 @@ pub fn decode_client_admin_command(
     let mut table_columns = None;
     let mut foreign_key_source_columns = None;
     let mut constraint_column_ids = None;
+    let mut index_unique = None;
     let mut check_dependency_column_ids = None;
     let mut table_column = None;
     let mut column_default = None;
@@ -671,6 +701,9 @@ pub fn decode_client_admin_command(
                     {
                         check_dependency_column_ids = Some(parser.parse_id_array()?);
                         args.insert(arg, "<structured-ids>".to_owned());
+                    } else if arg == "unique" {
+                        index_unique = Some(parser.parse_boolean()?);
+                        args.insert(arg, "<boolean>".to_owned());
                     } else if arg == "column" && parser.text.get(parser.offset) == Some(&b'{') {
                         table_column = Some(parser.parse_table_column_definition()?);
                         args.insert(arg, "<structured-column>".to_owned());
@@ -1013,6 +1046,98 @@ pub fn decode_client_admin_command(
             Ok(ClientAdminCommand::PrepareCreateUniqueConstraint {
                 table_id,
                 column_ids,
+            })
+        }
+        Some("prepare") if version == Some(1) && operation.as_deref() == Some("indexes.create") => {
+            if operation_id.is_some() || seen.len() != 4 {
+                return Err(ClientControlError::UnknownKey);
+            }
+            let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
+            let table_id = decode_lower_hex_id(
+                &args
+                    .remove("table_id")
+                    .ok_or(ClientControlError::MissingKey)?,
+            )?;
+            let name = args.remove("name").ok_or(ClientControlError::MissingKey)?;
+            if args.remove("column_ids").as_deref() != Some("<structured-ids>") {
+                return Err(ClientControlError::MissingKey);
+            }
+            let column_ids = constraint_column_ids
+                .take()
+                .ok_or(ClientControlError::MissingKey)?;
+            if args.remove("unique").as_deref() != Some("<boolean>") || !args.is_empty() {
+                return Err(ClientControlError::UnknownKey);
+            }
+            let unique = index_unique.ok_or(ClientControlError::MissingKey)?;
+            if !is_canonical_admin_principal_name(&name)
+                || column_ids.is_empty()
+                || column_ids
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::HashSet<_>>()
+                    .len()
+                    != column_ids.len()
+            {
+                return Err(ClientControlError::InvalidPrepare);
+            }
+            Ok(ClientAdminCommand::PrepareCreateIndex {
+                table_id,
+                name,
+                column_ids,
+                unique,
+            })
+        }
+        Some("prepare") if version == Some(1) && operation.as_deref() == Some("indexes.drop") => {
+            if operation_id.is_some() || seen.len() != 4 {
+                return Err(ClientControlError::UnknownKey);
+            }
+            let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
+            let index_id = decode_lower_hex_id(
+                &args
+                    .remove("index_id")
+                    .ok_or(ClientControlError::MissingKey)?,
+            )?;
+            if !args.is_empty() {
+                return Err(ClientControlError::UnknownKey);
+            }
+            Ok(ClientAdminCommand::PrepareDropIndex { index_id })
+        }
+        Some("prepare")
+            if version == Some(1) && operation.as_deref() == Some("indexes.rebuild") =>
+        {
+            if operation_id.is_some() || seen.len() != 4 {
+                return Err(ClientControlError::UnknownKey);
+            }
+            let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
+            let index_id = decode_lower_hex_id(
+                &args
+                    .remove("index_id")
+                    .ok_or(ClientControlError::MissingKey)?,
+            )?;
+            if args.remove("column_ids").as_deref() != Some("<structured-ids>") {
+                return Err(ClientControlError::MissingKey);
+            }
+            let column_ids = constraint_column_ids
+                .take()
+                .ok_or(ClientControlError::MissingKey)?;
+            if args.remove("unique").as_deref() != Some("<boolean>") || !args.is_empty() {
+                return Err(ClientControlError::UnknownKey);
+            }
+            let unique = index_unique.ok_or(ClientControlError::MissingKey)?;
+            if column_ids.is_empty()
+                || column_ids
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::HashSet<_>>()
+                    .len()
+                    != column_ids.len()
+            {
+                return Err(ClientControlError::InvalidPrepare);
+            }
+            Ok(ClientAdminCommand::PrepareRebuildIndex {
+                index_id,
+                column_ids,
+                unique,
             })
         }
         Some("prepare")
@@ -3578,6 +3703,102 @@ impl ClientConnectionSession {
                     .into_bytes(),
                 )
             }
+            ClientAdminCommand::PrepareCreateIndex {
+                table_id,
+                name,
+                column_ids,
+                unique,
+            } => {
+                if self.pending_admin_operation.is_some() {
+                    return Err(ClientSessionError::WrongMode);
+                }
+                let mut operation_id = [0; 16];
+                getrandom::fill(&mut operation_id).map_err(|_| {
+                    ClientSessionError::Storage(TransactionError::RandomnessUnavailable)
+                })?;
+                if operation_id == [0; 16] {
+                    return Err(ClientSessionError::Storage(
+                        TransactionError::RandomnessUnavailable,
+                    ));
+                }
+                self.pending_admin_operation = Some(PendingAdminOperation {
+                    operation_id,
+                    action: PendingAdminAction::CreateIndex {
+                        table_id,
+                        name,
+                        column_ids,
+                        unique,
+                    },
+                });
+                self.json_response(
+                    request.request_id,
+                    format!(
+                        "{{\"operation_id\":\"{}\",\"state\":\"prepared\"}}",
+                        encode_lower_hex_id(operation_id)
+                    )
+                    .into_bytes(),
+                )
+            }
+            ClientAdminCommand::PrepareDropIndex { index_id } => {
+                if self.pending_admin_operation.is_some() {
+                    return Err(ClientSessionError::WrongMode);
+                }
+                let mut operation_id = [0; 16];
+                getrandom::fill(&mut operation_id).map_err(|_| {
+                    ClientSessionError::Storage(TransactionError::RandomnessUnavailable)
+                })?;
+                if operation_id == [0; 16] {
+                    return Err(ClientSessionError::Storage(
+                        TransactionError::RandomnessUnavailable,
+                    ));
+                }
+                self.pending_admin_operation = Some(PendingAdminOperation {
+                    operation_id,
+                    action: PendingAdminAction::DropIndex { index_id },
+                });
+                self.json_response(
+                    request.request_id,
+                    format!(
+                        "{{\"operation_id\":\"{}\",\"state\":\"prepared\"}}",
+                        encode_lower_hex_id(operation_id)
+                    )
+                    .into_bytes(),
+                )
+            }
+            ClientAdminCommand::PrepareRebuildIndex {
+                index_id,
+                column_ids,
+                unique,
+            } => {
+                if self.pending_admin_operation.is_some() {
+                    return Err(ClientSessionError::WrongMode);
+                }
+                let mut operation_id = [0; 16];
+                getrandom::fill(&mut operation_id).map_err(|_| {
+                    ClientSessionError::Storage(TransactionError::RandomnessUnavailable)
+                })?;
+                if operation_id == [0; 16] {
+                    return Err(ClientSessionError::Storage(
+                        TransactionError::RandomnessUnavailable,
+                    ));
+                }
+                self.pending_admin_operation = Some(PendingAdminOperation {
+                    operation_id,
+                    action: PendingAdminAction::RebuildIndex {
+                        index_id,
+                        column_ids,
+                        unique,
+                    },
+                });
+                self.json_response(
+                    request.request_id,
+                    format!(
+                        "{{\"operation_id\":\"{}\",\"state\":\"prepared\"}}",
+                        encode_lower_hex_id(operation_id)
+                    )
+                    .into_bytes(),
+                )
+            }
             ClientAdminCommand::PrepareCreatePrimaryKey {
                 table_id,
                 column_ids,
@@ -4487,6 +4708,107 @@ impl ClientConnectionSession {
                                 encode_lower_hex_id(created.constraint_id),
                                 encode_lower_hex_id(created.index_id),
                                 created.commit_sequence,
+                            )
+                            .into_bytes(),
+                        )
+                    }
+                    PendingAdminAction::CreateIndex {
+                        table_id,
+                        name,
+                        column_ids,
+                        unique,
+                    } => {
+                        let created = storage
+                            .create_index(crate::storage_manager::CreateIndexRequest {
+                                invocation_id: operation_id,
+                                authenticated_actor_id: actor_id,
+                                table_id,
+                                name,
+                                column_ids,
+                                unique,
+                                retention_deadline_us,
+                                audit_event: crate::audit::AuditEvent {
+                                    event_id,
+                                    actor_id: Some(actor_id),
+                                    correlation_id: operation_id,
+                                    occurred_at_us: now_us,
+                                    action: crate::audit::AuditAction::Ddl,
+                                    result: crate::audit::AuditResult::Succeeded,
+                                    target_ids: Vec::new(),
+                                },
+                            })
+                            .map_err(ClientSessionError::IndexLifecycle)?;
+                        self.json_response(
+                            request.request_id,
+                            format!(
+                                "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"index_id\":\"{}\",\"commit_sequence\":\"{}\"}}",
+                                encode_lower_hex_id(operation_id),
+                                encode_lower_hex_id(created.index_id),
+                                created.commit_sequence,
+                            )
+                            .into_bytes(),
+                        )
+                    }
+                    PendingAdminAction::DropIndex { index_id } => {
+                        let dropped = storage
+                            .drop_index(crate::storage_manager::DropIndexRequest {
+                                invocation_id: operation_id,
+                                authenticated_actor_id: actor_id,
+                                index_id,
+                                retention_deadline_us,
+                                audit_event: crate::audit::AuditEvent {
+                                    event_id,
+                                    actor_id: Some(actor_id),
+                                    correlation_id: operation_id,
+                                    occurred_at_us: now_us,
+                                    action: crate::audit::AuditAction::Ddl,
+                                    result: crate::audit::AuditResult::Succeeded,
+                                    target_ids: Vec::new(),
+                                },
+                            })
+                            .map_err(ClientSessionError::IndexLifecycle)?;
+                        self.json_response(
+                            request.request_id,
+                            format!(
+                                "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"index_id\":\"{}\",\"commit_sequence\":\"{}\"}}",
+                                encode_lower_hex_id(operation_id),
+                                encode_lower_hex_id(dropped.index_id),
+                                dropped.commit_sequence,
+                            )
+                            .into_bytes(),
+                        )
+                    }
+                    PendingAdminAction::RebuildIndex {
+                        index_id,
+                        column_ids,
+                        unique,
+                    } => {
+                        let rebuilt = storage
+                            .rebuild_index(crate::storage_manager::RebuildIndexRequest {
+                                invocation_id: operation_id,
+                                authenticated_actor_id: actor_id,
+                                index_id,
+                                column_ids,
+                                unique,
+                                retention_deadline_us,
+                                audit_event: crate::audit::AuditEvent {
+                                    event_id,
+                                    actor_id: Some(actor_id),
+                                    correlation_id: operation_id,
+                                    occurred_at_us: now_us,
+                                    action: crate::audit::AuditAction::Ddl,
+                                    result: crate::audit::AuditResult::Succeeded,
+                                    target_ids: Vec::new(),
+                                },
+                            })
+                            .map_err(ClientSessionError::IndexLifecycle)?;
+                        self.json_response(
+                            request.request_id,
+                            format!(
+                                "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"index_id\":\"{}\",\"commit_sequence\":\"{}\"}}",
+                                encode_lower_hex_id(operation_id),
+                                encode_lower_hex_id(rebuilt.index_id),
+                                rebuilt.commit_sequence,
                             )
                             .into_bytes(),
                         )

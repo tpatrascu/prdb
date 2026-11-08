@@ -11673,11 +11673,93 @@ fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
         60_000_000,
     )?;
     assert!(unique_drop.contains("\"outcome\":\"committed\""));
+    let index_create_prepare = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut foreign_key_control,
+        63,
+        &format!(
+            "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"indexes.create\",\"arguments\":{{\"table_id\":\"{unique_table_id_wire}\",\"name\":\"protocol_lookup\",\"column_ids\":[\"{unique_column_id_wire}\"],\"unique\":false}}}}"
+        ),
+        60_000_000,
+    )?;
+    let index_create_operation_id = index_create_prepare
+        .split("\"operation_id\":\"")
+        .nth(1)
+        .ok_or("missing ADMIN index-create operation ID")?
+        .get(..32)
+        .ok_or("invalid ADMIN index-create operation ID")?;
+    let index_create = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut foreign_key_control,
+        64,
+        &format!("{{\"phase\":\"start\",\"operation_id\":\"{index_create_operation_id}\"}}"),
+        60_000_000,
+    )?;
+    assert!(index_create.contains("\"outcome\":\"committed\""));
+    let index_id_wire = index_create
+        .split("\"index_id\":\"")
+        .nth(1)
+        .ok_or("missing created ordinary index ID")?
+        .get(..32)
+        .ok_or("invalid created ordinary index ID")?;
+    let index_rebuild_prepare = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut foreign_key_control,
+        65,
+        &format!(
+            "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"indexes.rebuild\",\"arguments\":{{\"index_id\":\"{index_id_wire}\",\"column_ids\":[\"{unique_column_id_wire}\"],\"unique\":true}}}}"
+        ),
+        60_000_000,
+    )?;
+    let index_rebuild_operation_id = index_rebuild_prepare
+        .split("\"operation_id\":\"")
+        .nth(1)
+        .ok_or("missing ADMIN index-rebuild operation ID")?
+        .get(..32)
+        .ok_or("invalid ADMIN index-rebuild operation ID")?;
+    let index_rebuild = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut foreign_key_control,
+        66,
+        &format!("{{\"phase\":\"start\",\"operation_id\":\"{index_rebuild_operation_id}\"}}"),
+        60_000_000,
+    )?;
+    assert!(index_rebuild.contains("\"outcome\":\"committed\""));
+    let index_drop_prepare = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut foreign_key_control,
+        67,
+        &format!(
+            "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"indexes.drop\",\"arguments\":{{\"index_id\":\"{index_id_wire}\"}}}}"
+        ),
+        60_000_000,
+    )?;
+    let index_drop_operation_id = index_drop_prepare
+        .split("\"operation_id\":\"")
+        .nth(1)
+        .ok_or("missing ADMIN index-drop operation ID")?
+        .get(..32)
+        .ok_or("invalid ADMIN index-drop operation ID")?;
+    let index_drop = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut foreign_key_control,
+        68,
+        &format!("{{\"phase\":\"start\",\"operation_id\":\"{index_drop_operation_id}\"}}"),
+        60_000_000,
+    )?;
+    assert!(index_drop.contains("\"outcome\":\"committed\""));
+    assert!(index_drop.contains(&format!("\"index_id\":\"{index_id_wire}\"")));
     let primary_drop_prepare = admin_dispatch_json(
         &storage,
         &staging,
         &mut foreign_key_control,
-        61,
+        69,
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"constraints.drop_primary_key\",\"arguments\":{{\"constraint_id\":\"{primary_constraint_id_wire}\"}}}}"
         ),
@@ -11693,7 +11775,7 @@ fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
         &storage,
         &staging,
         &mut foreign_key_control,
-        62,
+        70,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{primary_drop_operation_id}\"}}"),
         60_000_000,
     )?;

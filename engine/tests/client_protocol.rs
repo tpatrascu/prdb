@@ -558,6 +558,35 @@ fn admin_revoke_decoder_requires_prepare_then_start_schemas() {
             ],
         })
     );
+    assert_eq!(
+        decode_client_admin_command(
+            br#"{"phase":"prepare","operation_version":1,"operation":"indexes.create","arguments":{"table_id":"000102030405060708090a0b0c0d0e0f","name":"user_lookup","column_ids":["101112131415161718191a1b1c1d1e1f"],"unique":true}}"#
+        ),
+        Ok(ClientAdminCommand::PrepareCreateIndex {
+            table_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+            name: "user_lookup".to_owned(),
+            column_ids: vec![[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]],
+            unique: true,
+        })
+    );
+    assert_eq!(
+        decode_client_admin_command(
+            br#"{"phase":"prepare","operation_version":1,"operation":"indexes.drop","arguments":{"index_id":"000102030405060708090a0b0c0d0e0f"}}"#
+        ),
+        Ok(ClientAdminCommand::PrepareDropIndex {
+            index_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        })
+    );
+    assert_eq!(
+        decode_client_admin_command(
+            br#"{"phase":"prepare","operation_version":1,"operation":"indexes.rebuild","arguments":{"index_id":"000102030405060708090a0b0c0d0e0f","column_ids":["101112131415161718191a1b1c1d1e1f"],"unique":false}}"#
+        ),
+        Ok(ClientAdminCommand::PrepareRebuildIndex {
+            index_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+            column_ids: vec![[16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]],
+            unique: false,
+        })
+    );
     assert!(decode_client_admin_command(
         br#"{"phase":"prepare","operation_version":1,"operation":"constraints.create_unique","arguments":{"table_id":"000102030405060708090a0b0c0d0e0f","column_ids":["101112131415161718191a1b1c1d1e1f"],"nullable":"true"}}"#
     )
