@@ -7205,6 +7205,140 @@ fn storage_manager_creates_foreign_key_and_advances_both_table_epochs()
 }
 
 #[test]
+fn foreign_key_creation_racing_orphan_child_insert_is_atomic()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::storage_manager::{CreateForeignKeyRequest, TableLifecycleError};
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(500))?;
+    let admin_role = builtin_owner_id();
+    let actor = id(0xe9);
+    let fk_edge = dependency_write(id(86), id(85), 3).key;
+    let mut setup_writes = foreign_key_catalog_writes(false, true)
+        .into_iter()
+        .filter(|write| {
+            write.key != id_catalog_key(8, id(86))
+                && write.key != id_catalog_key(2, id(86))
+                && write.key != fk_edge
+        })
+        .collect::<Vec<_>>();
+    setup_writes.extend([
+        principal_write_with_name(actor, 1, 1, "fk_insert_race_admin"),
+        object_write_with_name(actor, 8, "fk_insert_race_admin"),
+        membership_write(actor, admin_role),
+        dependency_write(actor, admin_role, 5),
+        grant_write(actor, id(81), 6, 1, id(81), admin_role),
+        dependency_write(actor, id(81), 5),
+    ]);
+    let mut setup_audit = identity_audit_event(0xea, admin_role, id(80));
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(id(0xea), admin_role, 9_999, &setup_writes, &[setup_audit])?;
+
+    let insert_invocation = id(0xeb);
+    let insert_row = id(0xec);
+    let mut insert = storage.begin_invocation(insert_invocation, actor, 9_999, 1, 1024)?;
+    let source_schema = insert.load_catalog_table_schema(id(82))?;
+    insert.load_catalog_indexes(&source_schema)?;
+    let orphan = encode_tuple(
+        &source_schema.columns,
+        source_schema.schema_version,
+        &[Some(ScalarValue::Bytea(b"missing parent".to_vec()))],
+    )?;
+    insert.stage_put(
+        prdb_engine::overlay::RowId {
+            table: id(82),
+            row: insert_row,
+        },
+        &orphan,
+    )?;
+
+    let fk_invocation = id(0xed);
+    let before_race = commit_sequence(&database)?;
+    let barrier = Arc::new(Barrier::new(3));
+    let (insert_result, fk_result) = std::thread::scope(|scope| {
+        let insert_barrier = barrier.clone();
+        let insert_thread = scope.spawn(move || {
+            insert_barrier.wait();
+            insert.commit()
+        });
+        let fk_barrier = barrier.clone();
+        let fk_storage = &storage;
+        let fk_thread = scope.spawn(move || {
+            let mut audit = identity_audit_event(0xee, actor, id(82));
+            audit.correlation_id = fk_invocation;
+            fk_barrier.wait();
+            fk_storage.create_foreign_key(CreateForeignKeyRequest {
+                invocation_id: fk_invocation,
+                authenticated_actor_id: actor,
+                source_table_id: id(82),
+                source_column_ids: vec![id(84)],
+                target_constraint_id: id(85),
+                retention_deadline_us: 9_999,
+                audit_event: audit,
+            })
+        });
+        barrier.wait();
+        (
+            insert_thread
+                .join()
+                .expect("FK race insert thread panicked"),
+            fk_thread.join().expect("FK race DDL thread panicked"),
+        )
+    });
+
+    let (insert_status, fk_status, created_fk) = match (insert_result, fk_result) {
+        (Ok(_), Err(TableLifecycleError::Commit(CommitError::ForeignKeyViolation))) => {
+            (OutcomeStatus::Committed, OutcomeStatus::Aborted, None)
+        }
+        (
+            Err(prdb_engine::transaction::TransactionError::Commit(CommitError::Conflict)),
+            Ok(created),
+        ) => (
+            OutcomeStatus::Aborted,
+            OutcomeStatus::Committed,
+            Some(created.foreign_key_id),
+        ),
+        (insert, fk) => panic!("unexpected FK-create/orphan-insert race: {insert:?} / {fk:?}"),
+    };
+    assert_eq!(commit_sequence(&database)?, before_race + 1);
+    assert_eq!(
+        lookup_outcome(&database, insert_invocation, actor, 1)?
+            .ok_or("missing FK-race insert outcome")?
+            .status,
+        insert_status
+    );
+    assert_eq!(
+        lookup_outcome(&database, fk_invocation, actor, 1)?
+            .ok_or("missing FK-race DDL outcome")?
+            .status,
+        fk_status
+    );
+    assert_eq!(
+        row(&database, &table_row_key(id(82), insert_row))?.is_some(),
+        insert_status == OutcomeStatus::Committed
+    );
+    if let Some(foreign_key_id) = created_fk {
+        let read = database.begin_read()?;
+        assert!(
+            read.open_table(CATALOG)?
+                .get(id_catalog_key(8, foreign_key_id).as_slice())?
+                .is_some()
+        );
+        drop(read);
+        storage.drop_foreign_key(
+            id(0xef),
+            actor,
+            foreign_key_id,
+            9_999,
+            identity_audit_event(0xf0, actor, foreign_key_id),
+        )?;
+    }
+    prdb_engine::startup::validate_persisted_records(&database)?;
+    Ok(())
+}
+
+#[test]
 fn storage_manager_creates_unique_constraint_and_backfills_existing_rows()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
