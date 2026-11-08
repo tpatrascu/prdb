@@ -245,13 +245,13 @@
 - Verification: focused parser and process regressions, CLI help inspection, full workspace build, format, warning-denied Clippy, and tests passed under Rust/Cargo 1.95.0; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
 - Remaining: policy CLI, additional live ADMIN DDL coverage, and confined artifact execution remain open.
 
-## SDK-5: foreign-key create/drop CLI — partial
+## SDK-5: foreign-key create/drop CLI — implemented
 
 - Contract: foreign-key administration uses ordered, distinct source column IDs and a target PRIMARY KEY/UNIQUE constraint ID; storage validates column correspondence, types, authority, existing rows, and dependencies.
 - Implementation: prdb-client exposes foreign-key-create and foreign-key-drop through typed AdminClient calls and reports the generated foreign-key ID.
-- Regression: foreign-key source IDs use the same strict nonempty, distinct ID-list parser as key constraints. Process-level success coverage requires a target REFERENCES grant, but the object-grant ADMIN command path is not exposed yet.
-- Verification: strict ID-list parser and CLI help checks passed. Full workspace build, format, warning-denied Clippy, and tests passed under Rust/Cargo 1.95.0; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
-- Remaining: expose object-grant ADMIN operations before claiming a usable multi-process foreign-key lifecycle; CHECK constraint CLI, policy CLI, broader live ADMIN DDL coverage, and confined artifact execution remain open.
+- Regression: foreign-key source IDs use the same strict nonempty, distinct ID-list parser as key constraints. The real gateway/supervisor process test grants column-level REFERENCES, creates and drops the foreign key, then revokes REFERENCES.
+- Verification: focused decoder, parser, CLI help, and real-process checks passed. The full workspace build, format check, warning-denied Clippy, and rerun of the full test suite passed; the commit integration target reported 124 passed and 3 cgroup-dependent ignored. The first full test run had one intermittent existing CHECK lifecycle `InvalidAudit` failure, and that test passed alone.
+- Remaining: policy CLI, broader live ADMIN DDL coverage, and confined artifact execution remain open.
 
 ## SDK-5: CHECK constraint CLI — implemented
 
@@ -259,4 +259,4 @@
 - Implementation: prdb-client exposes check-create and check-drop. It decodes strict lowercase even-length hex locally, accepts an empty dependency list for constant expressions, then delegates typed validation and publication to AdminClient.
 - Regression: parser coverage accepts canonical hex and empty dependencies while rejecting empty/odd/uppercase/nonhex input. The real gateway/supervisor ADMIN lifecycle creates and drops a constant-true CHECK after column addition.
 - Verification: focused parser and real-process tests, CLI help inspection, format check, full workspace build, warning-denied Clippy, and tests passed under Rust/Cargo 1.95.0; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
-- Remaining: policy CLI, object-grant ADMIN commands needed to exercise FK creation, broader live ADMIN DDL coverage, and confined artifact execution remain open.
+- Remaining: policy CLI, broader live ADMIN DDL coverage, and confined artifact execution remain open.

@@ -7,8 +7,8 @@ use prdb_engine::client_credentials::{
 };
 use prdb_engine::client_protocol::ClientCredentials;
 use prdb_engine::client_submit::{
-    AdminClient, AdminColumnDefault, AdminColumnDefinition, AdminSystemPrivilege, InvocationStatus,
-    MetadataClient, SubmissionClient,
+    AdminClient, AdminColumnDefault, AdminColumnDefinition, AdminObjectGrantTarget,
+    AdminObjectPrivilege, AdminSystemPrivilege, InvocationStatus, MetadataClient, SubmissionClient,
 };
 use prdb_engine::storage_manager::{CreateTableRequest, TableColumnDefinition, TokenIssueRequest};
 use prdb_engine::submission_manifest::{encode_manifest_v1, manifest_v1_from_elf};
@@ -494,6 +494,41 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
     let unique_constraint = admin
         .create_unique_constraint(created_table.table_id, &created_table.column_ids)
         .map_err(|error| format!("process ADMIN create_unique_constraint failed: {error}"))?;
+    let source_table = admin.create_table(
+        created_schema.identity_id,
+        "process_admin_source",
+        &[AdminColumnDefinition {
+            name: "payload".to_owned(),
+            scalar_type: ScalarType::Text,
+            nullable: true,
+            generated_uuid_identity: false,
+            default: None,
+        }],
+    )?;
+    let references_grant = admin.grant_object_privilege(
+        admin_user_id,
+        created_table.table_id,
+        AdminObjectPrivilege::References,
+        AdminObjectGrantTarget::Column(created_table.column_ids[0]),
+    )?;
+    let foreign_key = admin
+        .create_foreign_key(
+            source_table.table_id,
+            &source_table.column_ids,
+            unique_constraint.constraint_id,
+        )
+        .map_err(|error| format!("process ADMIN create_foreign_key failed: {error}"))?;
+    let dropped_foreign_key = admin
+        .drop_foreign_key(foreign_key.foreign_key_id)
+        .map_err(|error| format!("process ADMIN drop_foreign_key failed: {error}"))?;
+    assert!(dropped_foreign_key.commit_sequence > foreign_key.commit_sequence);
+    let revoked_references = admin.revoke_object_privilege(
+        admin_user_id,
+        created_table.table_id,
+        AdminObjectPrivilege::References,
+        AdminObjectGrantTarget::Column(created_table.column_ids[0]),
+    )?;
+    assert!(revoked_references.commit_sequence > references_grant.commit_sequence);
     let dropped_unique = admin
         .drop_unique_constraint(unique_constraint.constraint_id)
         .map_err(|error| format!("process ADMIN drop_unique_constraint failed: {error}"))?;
@@ -542,8 +577,10 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
     assert!(repeated_rebuild.commit_sequence > rebuilt_index.commit_sequence);
     assert!(dropped_index.commit_sequence > repeated_rebuild.commit_sequence);
     let renamed_table = admin.rename_table(created_table.table_id, "process_admin_table_v2")?;
+    let dropped_source_table = admin.drop_table(source_table.table_id)?;
     let dropped_table = admin.drop_table(created_table.table_id)?;
-    assert!(dropped_table.commit_sequence > renamed_table.commit_sequence);
+    assert!(dropped_source_table.commit_sequence > renamed_table.commit_sequence);
+    assert!(dropped_table.commit_sequence > dropped_source_table.commit_sequence);
     let dropped_schema = admin.drop_schema(created_schema.identity_id)?;
     assert!(dropped_schema.commit_sequence > dropped_table.commit_sequence);
 

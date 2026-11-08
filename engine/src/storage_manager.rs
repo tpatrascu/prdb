@@ -544,6 +544,58 @@ pub struct CreatePrimaryKeyRequest {
     pub audit_event: AuditEvent,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ObjectGrantPrivilege {
+    Usage,
+    Select,
+    Insert,
+    Update,
+    Delete,
+    References,
+    Create,
+    Alter,
+    Index,
+    ManagePolicies,
+    ManageGrants,
+}
+
+impl ObjectGrantPrivilege {
+    fn code(self) -> u16 {
+        match self {
+            Self::Usage => 1,
+            Self::Select => 2,
+            Self::Insert => 3,
+            Self::Update => 4,
+            Self::Delete => 5,
+            Self::References => 6,
+            Self::Create => 7,
+            Self::Alter => 8,
+            Self::Index => 9,
+            Self::ManagePolicies => 10,
+            Self::ManageGrants => 11,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ObjectGrantTarget {
+    Object,
+    Column([u8; 16]),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetObjectGrantRequest {
+    pub invocation_id: [u8; 16],
+    pub authenticated_actor_id: [u8; 16],
+    pub grantee_id: [u8; 16],
+    pub object_id: [u8; 16],
+    pub privilege: ObjectGrantPrivilege,
+    pub target: ObjectGrantTarget,
+    pub grant: bool,
+    pub retention_deadline_us: i64,
+    pub audit_event: AuditEvent,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreateCheckConstraintRequest {
     pub invocation_id: [u8; 16],
@@ -8291,6 +8343,210 @@ impl<'db> StorageManager<'db> {
         )
     }
 
+    /// Add or remove one direct schema/table/column object grant using the
+    /// authenticated ADMIN path. Authority and catalog dependencies are
+    /// revalidated by the serialized commit validator.
+    pub fn set_object_grant(&self, mut request: SetObjectGrantRequest) -> Result<u64, CommitError> {
+        let SetObjectGrantRequest {
+            invocation_id,
+            authenticated_actor_id,
+            grantee_id,
+            object_id,
+            privilege,
+            target,
+            grant,
+            retention_deadline_us,
+            ref mut audit_event,
+        } = request;
+        if invocation_id == [0; 16]
+            || authenticated_actor_id == [0; 16]
+            || grantee_id == [0; 16]
+            || object_id == [0; 16]
+            || retention_deadline_us <= 0
+            || audit_event.actor_id != Some(authenticated_actor_id)
+            || audit_event.correlation_id != invocation_id
+            || audit_event.action != AuditAction::AuthorityChange
+            || audit_event.result != AuditResult::Succeeded
+        {
+            return Err(
+                if audit_event.action != AuditAction::AuthorityChange
+                    || audit_event.result != AuditResult::Succeeded
+                    || audit_event.actor_id != Some(authenticated_actor_id)
+                    || audit_event.correlation_id != invocation_id
+                {
+                    CommitError::InvalidAudit
+                } else {
+                    CommitError::InvalidWrite
+                },
+            );
+        }
+
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|error| CommitError::Storage(error.to_string()))?;
+        let catalog = read
+            .open_table(CATALOG)
+            .map_err(|error| CommitError::Storage(error.to_string()))?;
+        let principal_key = id_catalog_key(10, grantee_id);
+        let principal_bytes = catalog
+            .get(principal_key.as_slice())
+            .map_err(|error| CommitError::Storage(error.to_string()))?
+            .map(|value| value.value().to_vec())
+            .ok_or(CommitError::InvalidCatalog)?;
+        let principal_kind = read_catalog_u16(&principal_key, &principal_bytes, 10, 1)
+            .map_err(table_lifecycle_commit_error)?;
+        if !matches!(principal_kind, 1 | 2) {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let principal_epoch = read_catalog_u64(&principal_key, &principal_bytes, 10, 4)
+            .map_err(table_lifecycle_commit_error)?;
+        let next_principal_epoch = principal_epoch
+            .checked_add(1)
+            .ok_or(CommitError::InvalidCatalog)?;
+
+        let object_key = id_catalog_key(2, object_id);
+        let object_bytes = catalog
+            .get(object_key.as_slice())
+            .map_err(|error| CommitError::Storage(error.to_string()))?
+            .map(|value| value.value().to_vec())
+            .ok_or(CommitError::InvalidCatalog)?;
+        let object_kind = read_catalog_u16(&object_key, &object_bytes, 2, 1)
+            .map_err(table_lifecycle_commit_error)?;
+        let (scope, target_id) = match target {
+            ObjectGrantTarget::Object => (1u16, object_id),
+            ObjectGrantTarget::Column(column_id) => {
+                if object_kind != 3 || column_id == [0; 16] {
+                    return Err(CommitError::InvalidCatalog);
+                }
+                let column_key = id_catalog_key(6, column_id);
+                let column_bytes = catalog
+                    .get(column_key.as_slice())
+                    .map_err(|error| CommitError::Storage(error.to_string()))?
+                    .map(|value| value.value().to_vec())
+                    .ok_or(CommitError::InvalidCatalog)?;
+                if read_catalog_id(&column_key, &column_bytes, 6, 1)
+                    .map_err(table_lifecycle_commit_error)?
+                    != object_id
+                {
+                    return Err(CommitError::InvalidCatalog);
+                }
+                (2, column_id)
+            }
+        };
+        let code = privilege.code();
+        let valid_scope = matches!(
+            (object_kind, code, scope),
+            (1, 1 | 7 | 8 | 10 | 11, 1) | (3, 2..=4 | 6, 1 | 2) | (3, 5 | 8 | 9 | 10 | 11, 1)
+        );
+        if !valid_scope {
+            return Err(CommitError::InvalidCatalog);
+        }
+
+        let grant_key = object_grant_catalog_key(grantee_id, object_id, code, scope, target_id);
+        let current_grant = catalog
+            .get(grant_key.as_slice())
+            .map_err(|error| CommitError::Storage(error.to_string()))?
+            .map(|value| value.value().to_vec());
+        if grant == current_grant.is_some() {
+            return Err(CommitError::InvalidWrite);
+        }
+        let dependency_key = dependency_catalog_key(grantee_id, target_id, 5);
+        let current_dependency = catalog
+            .get(dependency_key.as_slice())
+            .map_err(|error| CommitError::Storage(error.to_string()))?
+            .map(|value| value.value().to_vec());
+        let mut writes = vec![CatalogWrite {
+            key: grant_key,
+            expected_value: current_grant.clone(),
+            payload: if grant {
+                Some(
+                    encode_envelope(
+                        &family_schema(12).ok_or(CommitError::InvalidCatalog)?,
+                        &object_grant_catalog_key(grantee_id, object_id, code, scope, target_id),
+                        &[
+                            CatalogField {
+                                tag: 1,
+                                wire_type: WireType::Id,
+                                payload: authenticated_actor_id.to_vec(),
+                            },
+                            CatalogField {
+                                tag: 2,
+                                wire_type: WireType::U64,
+                                payload: 1u64.to_le_bytes().to_vec(),
+                            },
+                        ],
+                    )
+                    .map_err(|_| CommitError::InvalidCatalog)?,
+                )
+            } else {
+                None
+            },
+        }];
+
+        let needs_dependency = if grant {
+            current_dependency.is_none()
+        } else {
+            let prefix = 12u16.to_be_bytes();
+            let mut another_grant = false;
+            for entry in catalog
+                .range(prefix.as_slice()..)
+                .map_err(|error| CommitError::Storage(error.to_string()))?
+            {
+                let (key, _) = entry.map_err(|error| CommitError::Storage(error.to_string()))?;
+                let key = key.value();
+                if !key.starts_with(&prefix) {
+                    break;
+                }
+                if key.len() == 59
+                    && key[2] == 1
+                    && key[3..19] == grantee_id
+                    && key[43..59] == target_id
+                    && key != writes[0].key.as_slice()
+                {
+                    another_grant = true;
+                    break;
+                }
+            }
+            current_dependency.is_some() && !another_grant
+        };
+        if needs_dependency {
+            let edge = new_dependency_write(grantee_id, target_id, 5)
+                .map_err(table_lifecycle_commit_error)?;
+            writes.push(CatalogWrite {
+                expected_value: current_dependency,
+                payload: if grant { edge.payload } else { None },
+                ..edge
+            });
+        }
+        let updated_principal = rewrite_catalog_u64_field(
+            &principal_key,
+            &principal_bytes,
+            10,
+            4,
+            next_principal_epoch,
+        )
+        .map_err(table_lifecycle_commit_error)?;
+        writes.push(CatalogWrite {
+            key: principal_key,
+            expected_value: Some(principal_bytes),
+            payload: Some(updated_principal),
+        });
+        drop(catalog);
+        drop(read);
+
+        audit_event.target_ids = vec![grantee_id, object_id, target_id];
+        audit_event.target_ids.sort_unstable();
+        audit_event.target_ids.dedup();
+        self.commit_authorized_object_grant_ddl(
+            invocation_id,
+            authenticated_actor_id,
+            retention_deadline_us,
+            &writes,
+            std::slice::from_ref(audit_event),
+        )
+    }
+
     /// Resolve a retained terminal outcome for an already authenticated owner.
     /// Unknown, mismatched, and expired records all return `None`.
     pub fn lookup_invocation_outcome(
@@ -9516,6 +9772,27 @@ fn dependency_catalog_key(
     key.extend_from_slice(&referenced_id);
     key.push(1);
     key.extend_from_slice(&dependency_kind.to_be_bytes());
+    key
+}
+
+fn object_grant_catalog_key(
+    grantee_id: [u8; 16],
+    object_id: [u8; 16],
+    privilege: u16,
+    target_scope: u16,
+    target_id: [u8; 16],
+) -> Vec<u8> {
+    let mut key = 12u16.to_be_bytes().to_vec();
+    key.push(1);
+    key.extend_from_slice(&grantee_id);
+    key.push(1);
+    key.extend_from_slice(&object_id);
+    key.push(1);
+    key.extend_from_slice(&privilege.to_be_bytes());
+    key.push(1);
+    key.extend_from_slice(&target_scope.to_be_bytes());
+    key.push(1);
+    key.extend_from_slice(&target_id);
     key
 }
 

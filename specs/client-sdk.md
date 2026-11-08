@@ -126,7 +126,9 @@ The CLI also exposes `unique-create` and `primary-key-create` with a table ID an
 
 The system-privilege-grant and system-privilege-revoke commands take a nonzero --grantee-id and one closed --privilege value: manage_users, manage_roles, or create_schema. These commands use the authenticated ADMIN channel; only a current database administrator can change these grants.
 
-The foreign-key-create CLI command takes a source table ID, ordered and distinct source column IDs, and a target unique or primary-key constraint ID; foreign-key-drop takes the generated foreign-key ID. The authenticated storage path checks column correspondence, types, both tables' authority, existing rows, and dependency rules. Creation also requires a pre-existing REFERENCES grant on the target table or columns; object-grant ADMIN commands are not exposed by this CLI yet.
+The AdminClient object grant/revoke methods and object-grant/object-revoke CLI commands accept a grantee, schema/table object, one closed object privilege, and either object or column target scope. They use the authenticated ADMIN channel; storage checks current ownership, inherited MANAGE_GRANTS, or database-administrator authority. REFERENCES grants may target a whole table or individual columns and are required before foreign-key creation.
+
+The foreign-key-create CLI command takes a source table ID, ordered and distinct source column IDs, and a target unique or primary-key constraint ID; foreign-key-drop takes the generated foreign-key ID. The authenticated storage path checks column correspondence, types, both tables' authority, existing rows, and dependency rules. Creation also requires a pre-existing REFERENCES grant on the target table or columns; `object-grant` and `object-revoke` provide that grant lifecycle.
 
 The check-create CLI command accepts canonical lowercase hex containing one EIR1 row-local expression, plus an explicit dependency-column list; the list may be empty for a constant expression. check-drop takes the generated constraint ID. The client decodes EIR1 before sending it, and storage validates field bindings, Boolean result type, current rows, and authority.
 

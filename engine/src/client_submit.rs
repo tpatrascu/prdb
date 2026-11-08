@@ -191,6 +191,46 @@ impl AdminSystemPrivilege {
     }
 }
 
+/// Object-scoped grant values accepted by authenticated ADMIN.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdminObjectPrivilege {
+    Usage,
+    Select,
+    Insert,
+    Update,
+    Delete,
+    References,
+    Create,
+    Alter,
+    Index,
+    ManagePolicies,
+    ManageGrants,
+}
+
+impl AdminObjectPrivilege {
+    fn as_wire_name(self) -> &'static str {
+        match self {
+            Self::Usage => "usage",
+            Self::Select => "select",
+            Self::Insert => "insert",
+            Self::Update => "update",
+            Self::Delete => "delete",
+            Self::References => "references",
+            Self::Create => "create",
+            Self::Alter => "alter",
+            Self::Index => "index",
+            Self::ManagePolicies => "manage_policies",
+            Self::ManageGrants => "manage_grants",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdminObjectGrantTarget {
+    Object,
+    Column([u8; 16]),
+}
+
 impl AdminTokenResult {
     /// Borrow the one-time bearer secret for secure storage or immediate use.
     pub fn token_secret(&self) -> &[u8; TOKEN_SECRET_BYTES] {
@@ -1061,6 +1101,58 @@ impl AdminClient {
         privilege: AdminSystemPrivilege,
     ) -> Result<AdminOperationResult, ClientSubmitError> {
         self.change_system_privilege("privileges.revoke", grantee_id, privilege)
+    }
+
+    pub fn grant_object_privilege(
+        &mut self,
+        grantee_id: [u8; 16],
+        object_id: [u8; 16],
+        privilege: AdminObjectPrivilege,
+        target: AdminObjectGrantTarget,
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        self.change_object_privilege("objects.grant", grantee_id, object_id, privilege, target)
+    }
+
+    pub fn revoke_object_privilege(
+        &mut self,
+        grantee_id: [u8; 16],
+        object_id: [u8; 16],
+        privilege: AdminObjectPrivilege,
+        target: AdminObjectGrantTarget,
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        self.change_object_privilege("objects.revoke", grantee_id, object_id, privilege, target)
+    }
+
+    fn change_object_privilege(
+        &mut self,
+        operation: &str,
+        grantee_id: [u8; 16],
+        object_id: [u8; 16],
+        privilege: AdminObjectPrivilege,
+        target: AdminObjectGrantTarget,
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        validate_admin_id(grantee_id)?;
+        validate_admin_id(object_id)?;
+        let (target_scope, target_id) = match target {
+            AdminObjectGrantTarget::Object => ("object", object_id),
+            AdminObjectGrantTarget::Column(column_id) => {
+                validate_admin_id(column_id)?;
+                ("column", column_id)
+            }
+        };
+        self.execute_admin_operation(
+            operation,
+            format!(
+                "{{\"grantee_id\":\"{}\",\"object_id\":\"{}\",\"privilege\":\"{}\",\"target_scope\":\"{}\",\"target_id\":\"{}\"}}",
+                lower_hex(&grantee_id),
+                lower_hex(&object_id),
+                privilege.as_wire_name(),
+                target_scope,
+                lower_hex(&target_id)
+            ),
+            None,
+        )
+        .map(|(result, _)| result)
     }
 
     fn change_system_privilege(

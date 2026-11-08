@@ -2024,3 +2024,11 @@
 - Cause and fix: the generated family-9 index used the table schema version in its format-version field and hardcoded its schema-version field to 1. The builder now writes fixed format version 1 and the current schema version separately.
 - Regression: the real gateway/supervisor lifecycle creates and drops a unique constraint after column addition; the scenario passes after the fix.
 - Verification: the focused process regression and complete workspace build, format, warning-denied Clippy, and tests passed; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
+
+## SM-5: typed object grant/revoke lifecycle — implemented
+
+- Contract: object grants use the stable family-12 key and envelope format, validate privilege/object/scope combinations against the live catalog, and publish the grant, first/last authority dependency edge, grantee epoch, audit, and durable outcome atomically.
+- Implementation: `StorageManager::set_object_grant` accepts typed schema/table/column targets and the closed object privilege set. It rejects duplicate grants and absent revokes, verifies that a column belongs to its table and that the grantee is a live user or role, and delegates publication to the authorized grant DDL validator.
+- Regression: the gateway/supervisor process test uses the typed AdminClient grant path to grant column-level REFERENCES, create/drop a foreign key, and revoke REFERENCES. Decoder tests cover table/column request shapes and reject an unknown privilege; CLI parsing accepts only the closed privilege set.
+- Verification: focused decoder, process, parser, and CLI help checks passed. The full workspace build, format check, warning-denied Clippy, and rerun of the full test suite passed under Rust 1.95.0; the commit integration target reported 124 passed and 3 cgroup-dependent ignored. The first full test run had one intermittent `InvalidAudit` in the existing CHECK lifecycle test, and that test passed alone.
+- Remaining: add direct storage regressions for first/last dependency edge behavior; policy CLI and broader authenticated ADMIN coverage remain open.

@@ -3,8 +3,9 @@ use prdb_engine::client_credentials::{read_client_credentials, write_client_cred
 use prdb_engine::client_protocol::ClientCredentials;
 use prdb_engine::client_submit::MetadataClient;
 use prdb_engine::client_submit::{
-    AdminClient, AdminColumnDefault, AdminColumnDefinition, AdminSystemPrivilege,
-    ClientResultEvent, InvocationStatus, SubmissionClient, TerminalOutcome,
+    AdminClient, AdminColumnDefault, AdminColumnDefinition, AdminObjectGrantTarget,
+    AdminObjectPrivilege, AdminSystemPrivilege, ClientResultEvent, InvocationStatus,
+    SubmissionClient, TerminalOutcome,
 };
 use prdb_engine::submission_scope::RequestedScopeBuilder;
 use prdb_engine::supervisor::{MAX_PARAMETER_BYTES, WorkloadClass};
@@ -57,6 +58,8 @@ Token secrets are saved only to mode-0600 credential files and are never printed
   prdb-client check-create --address IP:PORT --credentials ADMIN_FILE \\
     --table-id HEX --expression-eir1 HEX --columns HEX,... (empty for constants)\n\
   prdb-client check-drop --address IP:PORT --credentials ADMIN_FILE --constraint-id HEX\n\n\
+  prdb-client object-grant|object-revoke --address IP:PORT --credentials ADMIN_FILE \\
+    --grantee-id HEX --object-id HEX --privilege NAME --target-scope object|column --target-id HEX\n\n\
   prdb-client system-privilege-grant|system-privilege-revoke --address IP:PORT \\
     --credentials ADMIN_FILE --grantee-id HEX --privilege manage_users|manage_roles|create_schema\n\n\
 Column types: boolean, smallint, integer, bigint, decimal(P,S), text, varchar(N), bytea, uuid, date, timestamptz.\n\
@@ -138,6 +141,9 @@ fn run() -> Result<(), String> {
         }
         "check-create" | "check-drop" => {
             check_constraint_admin(&command, address, credentials_path, &mut fields)
+        }
+        "object-grant" | "object-revoke" => {
+            object_grant_admin(&command, address, credentials_path, &mut fields)
         }
         "user-create" | "user-rename" | "user-drop" | "user-login" | "role-create"
         | "role-rename" | "role-drop" | "role-grant" | "role-revoke" => {
@@ -522,6 +528,67 @@ fn system_privilege_admin(
             "granted system privilege"
         } else {
             "revoked system privilege"
+        },
+        &result.operation_id,
+        result.commit_sequence,
+    );
+    Ok(())
+}
+
+fn parse_object_privilege(value: &str) -> Result<AdminObjectPrivilege, String> {
+    match value {
+        "usage" => Ok(AdminObjectPrivilege::Usage),
+        "select" => Ok(AdminObjectPrivilege::Select),
+        "insert" => Ok(AdminObjectPrivilege::Insert),
+        "update" => Ok(AdminObjectPrivilege::Update),
+        "delete" => Ok(AdminObjectPrivilege::Delete),
+        "references" => Ok(AdminObjectPrivilege::References),
+        "create" => Ok(AdminObjectPrivilege::Create),
+        "alter" => Ok(AdminObjectPrivilege::Alter),
+        "index" => Ok(AdminObjectPrivilege::Index),
+        "manage_policies" => Ok(AdminObjectPrivilege::ManagePolicies),
+        "manage_grants" => Ok(AdminObjectPrivilege::ManageGrants),
+        _ => Err("--privilege is not a supported object privilege".to_owned()),
+    }
+}
+
+fn object_grant_admin(
+    command: &str,
+    address: SocketAddr,
+    credentials_path: PathBuf,
+    fields: &mut HashMap<String, std::ffi::OsString>,
+) -> Result<(), String> {
+    let grantee_id = parse_id(&take_text(fields, "--grantee-id")?)?;
+    let object_id = parse_id(&take_text(fields, "--object-id")?)?;
+    let privilege = parse_object_privilege(&take_text(fields, "--privilege")?)?;
+    let target_scope = take_text(fields, "--target-scope")?;
+    let target_id = parse_id(&take_text(fields, "--target-id")?)?;
+    let target = match target_scope.as_str() {
+        "object" if target_id == object_id => AdminObjectGrantTarget::Object,
+        "column" => AdminObjectGrantTarget::Column(target_id),
+        "object" => return Err("--target-id must equal --object-id for object scope".to_owned()),
+        _ => return Err("--target-scope must be object or column".to_owned()),
+    };
+    reject_unknown(fields)?;
+    let mut administrator =
+        read_client_credentials(credentials_path).map_err(|error| error.to_string())?;
+    let mut client = AdminClient::connect_authenticated(
+        address,
+        administrator.token_id,
+        &mut administrator.token_secret,
+    )
+    .map_err(|error| error.to_string())?;
+    let result = if command == "object-grant" {
+        client.grant_object_privilege(grantee_id, object_id, privilege, target)
+    } else {
+        client.revoke_object_privilege(grantee_id, object_id, privilege, target)
+    }
+    .map_err(|error| error.to_string())?;
+    print_operation(
+        if command == "object-grant" {
+            "granted object privilege"
+        } else {
+            "revoked object privilege"
         },
         &result.operation_id,
         result.commit_sequence,
@@ -1496,6 +1563,27 @@ mod tests {
         );
         assert!(parse_system_privilege("MANAGE_USERS").is_err());
         assert!(parse_system_privilege("manage_tables").is_err());
+    }
+
+    #[test]
+    fn object_privilege_parser_accepts_only_catalog_privileges() {
+        for name in [
+            "usage",
+            "select",
+            "insert",
+            "update",
+            "delete",
+            "references",
+            "create",
+            "alter",
+            "index",
+            "manage_policies",
+            "manage_grants",
+        ] {
+            assert!(parse_object_privilege(name).is_ok(), "{name}");
+        }
+        assert!(parse_object_privilege("all").is_err());
+        assert!(parse_object_privilege("REFERENCES").is_err());
     }
 
     #[test]

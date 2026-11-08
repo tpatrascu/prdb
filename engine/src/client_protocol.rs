@@ -83,6 +83,7 @@ pub enum ClientSessionError {
     IdentityLifecycle(crate::storage_manager::IdentityLifecycleError),
     MembershipLifecycle(crate::storage_manager::MembershipLifecycleError),
     SystemPrivilegeLifecycle(crate::storage_manager::SystemPrivilegeLifecycleError),
+    ObjectGrantLifecycle(crate::commit::CommitError),
     SchemaLifecycle(crate::storage_manager::SchemaLifecycleError),
     TableLifecycle(crate::storage_manager::TableLifecycleError),
     ForeignKeyLifecycle(crate::commit::CommitError),
@@ -295,6 +296,13 @@ enum PendingAdminAction {
     ChangeSystemPrivilege {
         grantee_id: [u8; 16],
         privilege: crate::storage_manager::AdministrativeSystemPrivilege,
+        grant: bool,
+    },
+    ChangeObjectGrant {
+        grantee_id: [u8; 16],
+        object_id: [u8; 16],
+        privilege: crate::storage_manager::ObjectGrantPrivilege,
+        target: crate::storage_manager::ObjectGrantTarget,
         grant: bool,
     },
     Revoke {
@@ -563,6 +571,13 @@ pub enum ClientAdminCommand {
     PrepareSystemPrivilege {
         grantee_id: [u8; 16],
         privilege: crate::storage_manager::AdministrativeSystemPrivilege,
+        grant: bool,
+    },
+    PrepareObjectGrant {
+        grantee_id: [u8; 16],
+        object_id: [u8; 16],
+        privilege: crate::storage_manager::ObjectGrantPrivilege,
+        target: crate::storage_manager::ObjectGrantTarget,
         grant: bool,
     },
     PrepareRevoke {
@@ -1509,6 +1524,12 @@ pub fn decode_client_admin_command(
         {
             decode_system_privilege_prepare(arguments, operation_id, seen.len(), false)
         }
+        Some("prepare") if version == Some(1) && operation.as_deref() == Some("objects.grant") => {
+            decode_object_grant_prepare(arguments, operation_id, seen.len(), true)
+        }
+        Some("prepare") if version == Some(1) && operation.as_deref() == Some("objects.revoke") => {
+            decode_object_grant_prepare(arguments, operation_id, seen.len(), false)
+        }
         Some("prepare") if version == Some(1) && operation.as_deref() == Some("tokens.revoke") => {
             if operation_id.is_some() || seen.len() != 4 {
                 return Err(ClientControlError::UnknownKey);
@@ -1625,6 +1646,69 @@ fn decode_system_privilege_prepare(
     Ok(ClientAdminCommand::PrepareSystemPrivilege {
         grantee_id,
         privilege,
+        grant,
+    })
+}
+
+fn decode_object_grant_prepare(
+    arguments: Option<HashMap<String, String>>,
+    operation_id: Option<String>,
+    seen_len: usize,
+    grant: bool,
+) -> Result<ClientAdminCommand, ClientControlError> {
+    if operation_id.is_some() || seen_len != 4 {
+        return Err(ClientControlError::UnknownKey);
+    }
+    let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
+    let grantee_id = decode_lower_hex_id(
+        &args
+            .remove("grantee_id")
+            .ok_or(ClientControlError::MissingKey)?,
+    )?;
+    let object_id = decode_lower_hex_id(
+        &args
+            .remove("object_id")
+            .ok_or(ClientControlError::MissingKey)?,
+    )?;
+    let privilege = match args
+        .remove("privilege")
+        .ok_or(ClientControlError::MissingKey)?
+        .as_str()
+    {
+        "usage" => crate::storage_manager::ObjectGrantPrivilege::Usage,
+        "select" => crate::storage_manager::ObjectGrantPrivilege::Select,
+        "insert" => crate::storage_manager::ObjectGrantPrivilege::Insert,
+        "update" => crate::storage_manager::ObjectGrantPrivilege::Update,
+        "delete" => crate::storage_manager::ObjectGrantPrivilege::Delete,
+        "references" => crate::storage_manager::ObjectGrantPrivilege::References,
+        "create" => crate::storage_manager::ObjectGrantPrivilege::Create,
+        "alter" => crate::storage_manager::ObjectGrantPrivilege::Alter,
+        "index" => crate::storage_manager::ObjectGrantPrivilege::Index,
+        "manage_policies" => crate::storage_manager::ObjectGrantPrivilege::ManagePolicies,
+        "manage_grants" => crate::storage_manager::ObjectGrantPrivilege::ManageGrants,
+        _ => return Err(ClientControlError::InvalidPrepare),
+    };
+    let target_scope = args
+        .remove("target_scope")
+        .ok_or(ClientControlError::MissingKey)?;
+    let target_id = decode_lower_hex_id(
+        &args
+            .remove("target_id")
+            .ok_or(ClientControlError::MissingKey)?,
+    )?;
+    if !args.is_empty() {
+        return Err(ClientControlError::UnknownKey);
+    }
+    let target = match target_scope.as_str() {
+        "object" if target_id == object_id => crate::storage_manager::ObjectGrantTarget::Object,
+        "column" => crate::storage_manager::ObjectGrantTarget::Column(target_id),
+        _ => return Err(ClientControlError::InvalidPrepare),
+    };
+    Ok(ClientAdminCommand::PrepareObjectGrant {
+        grantee_id,
+        object_id,
+        privilege,
+        target,
         grant,
     })
 }
@@ -4131,6 +4215,20 @@ impl ClientConnectionSession {
                 privilege,
                 grant,
             } => self.prepare_system_privilege(request.request_id, grantee_id, privilege, grant),
+            ClientAdminCommand::PrepareObjectGrant {
+                grantee_id,
+                object_id,
+                privilege,
+                target,
+                grant,
+            } => self.prepare_object_grant(
+                request.request_id,
+                grantee_id,
+                object_id,
+                privilege,
+                target,
+                grant,
+            ),
             ClientAdminCommand::PrepareRevoke { token_id } => {
                 if self.pending_admin_operation.is_some() {
                     return Err(ClientSessionError::WrongMode);
@@ -4363,6 +4461,43 @@ impl ClientConnectionSession {
                                 },
                             )
                             .map_err(ClientSessionError::SystemPrivilegeLifecycle)?;
+                        self.json_response(
+                            request.request_id,
+                            format!(
+                                "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"commit_sequence\":\"{sequence}\"}}",
+                                encode_lower_hex_id(operation_id)
+                            )
+                            .into_bytes(),
+                        )
+                    }
+                    PendingAdminAction::ChangeObjectGrant {
+                        grantee_id,
+                        object_id,
+                        privilege,
+                        target,
+                        grant,
+                    } => {
+                        let sequence = storage
+                            .set_object_grant(crate::storage_manager::SetObjectGrantRequest {
+                                invocation_id: operation_id,
+                                authenticated_actor_id: actor_id,
+                                grantee_id,
+                                object_id,
+                                privilege,
+                                target,
+                                grant,
+                                retention_deadline_us,
+                                audit_event: crate::audit::AuditEvent {
+                                    event_id,
+                                    actor_id: Some(actor_id),
+                                    correlation_id: operation_id,
+                                    occurred_at_us: now_us,
+                                    action: crate::audit::AuditAction::AuthorityChange,
+                                    result: crate::audit::AuditResult::Succeeded,
+                                    target_ids: Vec::new(),
+                                },
+                            })
+                            .map_err(ClientSessionError::ObjectGrantLifecycle)?;
                         self.json_response(
                             request.request_id,
                             format!(
@@ -5361,6 +5496,46 @@ impl ClientConnectionSession {
             action: PendingAdminAction::ChangeSystemPrivilege {
                 grantee_id,
                 privilege,
+                grant,
+            },
+        });
+        self.json_response(
+            request_id,
+            format!(
+                "{{\"operation_id\":\"{}\",\"state\":\"prepared\"}}",
+                encode_lower_hex_id(operation_id)
+            )
+            .into_bytes(),
+        )
+    }
+
+    fn prepare_object_grant(
+        &mut self,
+        request_id: u64,
+        grantee_id: [u8; 16],
+        object_id: [u8; 16],
+        privilege: crate::storage_manager::ObjectGrantPrivilege,
+        target: crate::storage_manager::ObjectGrantTarget,
+        grant: bool,
+    ) -> Result<ClientFrame, ClientSessionError> {
+        if self.pending_admin_operation.is_some() {
+            return Err(ClientSessionError::WrongMode);
+        }
+        let mut operation_id = [0; 16];
+        getrandom::fill(&mut operation_id)
+            .map_err(|_| ClientSessionError::Storage(TransactionError::RandomnessUnavailable))?;
+        if operation_id == [0; 16] {
+            return Err(ClientSessionError::Storage(
+                TransactionError::RandomnessUnavailable,
+            ));
+        }
+        self.pending_admin_operation = Some(PendingAdminOperation {
+            operation_id,
+            action: PendingAdminAction::ChangeObjectGrant {
+                grantee_id,
+                object_id,
+                privilege,
+                target,
                 grant,
             },
         });

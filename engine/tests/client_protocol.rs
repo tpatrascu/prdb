@@ -413,6 +413,36 @@ fn admin_revoke_decoder_requires_prepare_then_start_schemas() {
     );
     assert_eq!(
         decode_client_admin_command(
+            br#"{"phase":"prepare","operation_version":1,"operation":"objects.grant","arguments":{"grantee_id":"000102030405060708090a0b0c0d0e0f","object_id":"101112131415161718191a1b1c1d1e1f","privilege":"references","target_scope":"column","target_id":"202122232425262728292a2b2c2d2e2f"}}"#
+        ),
+        Ok(ClientAdminCommand::PrepareObjectGrant {
+            grantee_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+            object_id: [16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31],
+            privilege: prdb_engine::storage_manager::ObjectGrantPrivilege::References,
+            target: prdb_engine::storage_manager::ObjectGrantTarget::Column([
+                32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
+            ]),
+            grant: true,
+        })
+    );
+    assert_eq!(
+        decode_client_admin_command(
+            br#"{"phase":"prepare","operation_version":1,"operation":"objects.revoke","arguments":{"grantee_id":"000102030405060708090a0b0c0d0e0f","object_id":"101112131415161718191a1b1c1d1e1f","privilege":"references","target_scope":"object","target_id":"101112131415161718191a1b1c1d1e1f"}}"#
+        ),
+        Ok(ClientAdminCommand::PrepareObjectGrant {
+            grantee_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+            object_id: [16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31],
+            privilege: prdb_engine::storage_manager::ObjectGrantPrivilege::References,
+            target: prdb_engine::storage_manager::ObjectGrantTarget::Object,
+            grant: false,
+        })
+    );
+    assert!(decode_client_admin_command(
+        br#"{"phase":"prepare","operation_version":1,"operation":"objects.grant","arguments":{"grantee_id":"000102030405060708090a0b0c0d0e0f","object_id":"101112131415161718191a1b1c1d1e1f","privilege":"all","target_scope":"object","target_id":"101112131415161718191a1b1c1d1e1f"}}"#
+    )
+    .is_err());
+    assert_eq!(
+        decode_client_admin_command(
             br#"{"phase":"prepare","operation_version":1,"operation":"tokens.revoke","arguments":{"token_id":"000102030405060708090a0b0c0d0e0f"}}"#
         ),
         Ok(ClientAdminCommand::PrepareRevoke {
