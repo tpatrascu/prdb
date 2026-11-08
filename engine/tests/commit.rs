@@ -110,7 +110,7 @@ fn admin_dispatch_json(
     session: &mut prdb_engine::client_protocol::ClientConnectionSession,
     request_id: u64,
     payload: &str,
-    retention_deadline_us: i64,
+    retention_period_us: i64,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let dispatch = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
         prdb_engine::ipc::ServiceRole::Gateway,
@@ -123,7 +123,7 @@ fn admin_dispatch_json(
             payload: payload.as_bytes().to_vec(),
         },
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-            retention_deadline_us,
+            retention_period_us,
             max_rows: 1,
             max_bytes: 1,
         },
@@ -7586,7 +7586,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &mut control,
         &token_request,
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-            retention_deadline_us,
+            retention_period_us: 60_000_000,
             max_rows: 1,
             max_bytes: 1,
         },
@@ -7617,7 +7617,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
             payload: b"{\"phase\":\"read\",\"operation_version\":1,\"operation\":\"runtime.invocations.list\",\"arguments\":{\"limit\":\"1\"}}".to_vec(),
         },
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-            retention_deadline_us,
+            retention_period_us: 60_000_000,
             max_rows: 1,
             max_bytes: 1,
         },
@@ -7655,7 +7655,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
             .into_bytes(),
         },
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-            retention_deadline_us,
+            retention_period_us: 60_000_000,
             max_rows: 1,
             max_bytes: 1,
         },
@@ -7692,7 +7692,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
             .into_bytes(),
         },
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-            retention_deadline_us,
+            retention_period_us: 60_000_000,
             max_rows: 1,
             max_bytes: 1,
         },
@@ -7723,7 +7723,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
                 .into_bytes(),
         },
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-            retention_deadline_us,
+            retention_period_us: 60_000_000,
             max_rows: 1,
             max_bytes: 1,
         },
@@ -7788,7 +7788,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
             ).into_bytes(),
         },
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-            retention_deadline_us,
+            retention_period_us: 60_000_000,
             max_rows: 1,
             max_bytes: 1,
         },
@@ -7823,7 +7823,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
             .into_bytes(),
         },
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-            retention_deadline_us,
+            retention_period_us: 60_000_000,
             max_rows: 1,
             max_bytes: 1,
         },
@@ -7846,7 +7846,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
                 .into_bytes(),
         },
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-            retention_deadline_us,
+            retention_period_us: 60_000_000,
             max_rows: 1,
             max_bytes: 1,
         },
@@ -7886,7 +7886,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
             payload: br#"{"phase":"prepare","operation_version":1,"operation":"users.create","arguments":{"name":"new_runtime_user"}}"#.to_vec(),
         },
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-            retention_deadline_us,
+            retention_period_us: 60_000_000,
             max_rows: 1,
             max_bytes: 1,
         },
@@ -7920,7 +7920,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
             .into_bytes(),
         },
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-            retention_deadline_us,
+            retention_period_us: 60_000_000,
             max_rows: 1,
             max_bytes: 1,
         },
@@ -7959,7 +7959,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
             .into_bytes(),
         },
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-            retention_deadline_us,
+            retention_period_us: 60_000_000,
             max_rows: 1,
             max_bytes: 1,
         },
@@ -7993,7 +7993,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
             .into_bytes(),
         },
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-            retention_deadline_us,
+            retention_period_us: 60_000_000,
             max_rows: 1,
             max_bytes: 1,
         },
@@ -8058,7 +8058,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
             payload: br#"{"phase":"prepare","operation_version":1,"operation":"roles.create","arguments":{"name":"runtime_readers"}}"#.to_vec(),
         },
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-            retention_deadline_us,
+            retention_period_us: 60_000_000,
             max_rows: 1,
             max_bytes: 1,
         },
@@ -8091,7 +8091,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
             .into_bytes(),
         },
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-            retention_deadline_us,
+            retention_period_us: 60_000_000,
             max_rows: 1,
             max_bytes: 1,
         },
@@ -8156,7 +8156,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
             .into_bytes(),
         },
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-            retention_deadline_us,
+            retention_period_us: 60_000_000,
             max_rows: 1,
             max_bytes: 1,
         },
@@ -8189,7 +8189,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
             .into_bytes(),
         },
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-            retention_deadline_us,
+            retention_period_us: 60_000_000,
             max_rows: 1,
             max_bytes: 1,
         },
@@ -8222,7 +8222,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
             .into_bytes(),
         },
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-            retention_deadline_us,
+            retention_period_us: 60_000_000,
             max_rows: 1,
             max_bytes: 1,
         },
@@ -8255,7 +8255,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
             .into_bytes(),
         },
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-            retention_deadline_us,
+            retention_period_us: 60_000_000,
             max_rows: 1,
             max_bytes: 1,
         },
@@ -8288,7 +8288,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
             .into_bytes(),
         },
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-            retention_deadline_us,
+            retention_period_us: 60_000_000,
             max_rows: 1,
             max_bytes: 1,
         },
@@ -8321,7 +8321,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
             .into_bytes(),
         },
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-            retention_deadline_us,
+            retention_period_us: 60_000_000,
             max_rows: 1,
             max_bytes: 1,
         },
@@ -8353,7 +8353,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
             payload: br#"{"phase":"prepare","operation_version":1,"operation":"roles.create","arguments":{"name":"delegated_role"}}"#.to_vec(),
         },
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-            retention_deadline_us,
+            retention_period_us: 60_000_000,
             max_rows: 1,
             max_bytes: 1,
         },
@@ -8386,7 +8386,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
             .into_bytes(),
         },
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-            retention_deadline_us,
+            retention_period_us: 60_000_000,
             max_rows: 1,
             max_bytes: 1,
         },
@@ -8422,7 +8422,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
             .into_bytes(),
         },
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-            retention_deadline_us,
+            retention_period_us: 60_000_000,
             max_rows: 1,
             max_bytes: 1,
         },
@@ -8455,7 +8455,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
             .into_bytes(),
         },
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-            retention_deadline_us,
+            retention_period_us: 60_000_000,
             max_rows: 1,
             max_bytes: 1,
         },
@@ -8479,7 +8479,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
             .into_bytes(),
         },
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-            retention_deadline_us,
+            retention_period_us: 60_000_000,
             max_rows: 1,
             max_bytes: 1,
         },
@@ -8510,7 +8510,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
                 .into_bytes(),
         },
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-            retention_deadline_us,
+            retention_period_us: 60_000_000,
             max_rows: 1,
             max_bytes: 1,
         },
@@ -8535,7 +8535,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
             .into_bytes(),
         },
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-            retention_deadline_us,
+            retention_period_us: 60_000_000,
             max_rows: 1,
             max_bytes: 1,
         },
@@ -8566,7 +8566,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
                 .into_bytes(),
         },
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-            retention_deadline_us,
+            retention_period_us: 60_000_000,
             max_rows: 1,
             max_bytes: 1,
         },
@@ -8601,7 +8601,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
             .into_bytes(),
         },
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-            retention_deadline_us,
+            retention_period_us: 60_000_000,
             max_rows: 1,
             max_bytes: 1,
         },
@@ -8632,7 +8632,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
                 .into_bytes(),
         },
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-            retention_deadline_us,
+            retention_period_us: 60_000_000,
             max_rows: 1,
             max_bytes: 1,
         },
@@ -8674,7 +8674,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"tables.add_column\",\"arguments\":{{\"table_id\":\"{table_id_wire}\",\"column\":{{\"name\":\"note\",\"type\":\"text\",\"nullable\":true,\"generated_uuid_identity\":false}}}}}}"
         ),
-        retention_deadline_us,
+        60_000_000,
     )?;
     let add_column_operation_id = add_column_prepare
         .split("\"operation_id\":\"")
@@ -8688,7 +8688,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &mut control,
         24,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{add_column_operation_id}\"}}"),
-        retention_deadline_us,
+        60_000_000,
     )?;
     assert!(add_column.contains("\"outcome\":\"committed\""));
     assert!(add_column.contains("\"schema_version\":\"2\""));
@@ -8700,7 +8700,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"tables.set_column_default\",\"arguments\":{{\"table_id\":\"{table_id_wire}\",\"column_id\":\"{default_column_id_wire}\",\"type\":\"text\",\"default\":{{\"kind\":\"literal\",\"value\":\"ready\"}}}}}}"
         ),
-        retention_deadline_us,
+        60_000_000,
     )?;
     let default_operation_id = default_prepare
         .split("\"operation_id\":\"")
@@ -8714,7 +8714,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &mut control,
         26,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{default_operation_id}\"}}"),
-        retention_deadline_us,
+        60_000_000,
     )?;
     assert!(default_set.contains("\"outcome\":\"committed\""));
     let default_drop_prepare = admin_dispatch_json(
@@ -8725,7 +8725,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"tables.drop_column_default\",\"arguments\":{{\"table_id\":\"{table_id_wire}\",\"column_id\":\"{default_column_id_wire}\"}}}}"
         ),
-        retention_deadline_us,
+        60_000_000,
     )?;
     let default_drop_operation_id = default_drop_prepare
         .split("\"operation_id\":\"")
@@ -8739,7 +8739,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &mut control,
         28,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{default_drop_operation_id}\"}}"),
-        retention_deadline_us,
+        60_000_000,
     )?;
     assert!(default_drop.contains("\"outcome\":\"committed\""));
     let column_rename_prepare = admin_dispatch_json(
@@ -8750,7 +8750,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"tables.rename_column\",\"arguments\":{{\"table_id\":\"{table_id_wire}\",\"column_id\":\"{first_column_id_wire}\",\"name\":\"row_id\"}}}}"
         ),
-        retention_deadline_us,
+        60_000_000,
     )?;
     let column_rename_id = column_rename_prepare
         .split("\"operation_id\":\"")
@@ -8764,7 +8764,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &mut control,
         34,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{column_rename_id}\"}}"),
-        retention_deadline_us,
+        60_000_000,
     )?;
     assert!(column_rename.contains("\"outcome\":\"committed\""));
     assert!(column_rename.contains(&format!("\"column_id\":\"{first_column_id_wire}\"")));
@@ -8777,7 +8777,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"tables.set_owner\",\"arguments\":{{\"table_id\":\"{table_id_wire}\",\"owner_id\":\"{created_user_id_wire}\"}}}}"
         ),
-        retention_deadline_us,
+        60_000_000,
     )?;
     let owner_transfer_id = owner_transfer_prepare
         .split("\"operation_id\":\"")
@@ -8791,7 +8791,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &mut control,
         36,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{owner_transfer_id}\"}}"),
-        retention_deadline_us,
+        60_000_000,
     )?;
     assert!(owner_transfer.contains("\"outcome\":\"committed\""));
     assert!(owner_transfer.contains(&format!("\"owner_id\":\"{created_user_id_wire}\"")));
@@ -8803,7 +8803,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"tables.drop\",\"arguments\":{{\"table_id\":\"{table_id_wire}\"}}}}"
         ),
-        retention_deadline_us,
+        60_000_000,
     )?;
     let table_drop_id = table_drop_prepare
         .split("\"operation_id\":\"")
@@ -8817,7 +8817,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &mut control,
         38,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{table_drop_id}\"}}"),
-        retention_deadline_us,
+        60_000_000,
     )?;
     assert!(table_drop.contains("\"outcome\":\"committed\""));
     assert!(table_drop.contains(&format!("\"table_id\":\"{table_id_wire}\"")));
@@ -8833,7 +8833,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"schemas.create\",\"arguments\":{{\"name\":\"protocol_empty\",\"owner_id\":\"{admin_id_wire}\"}}}}"
         ),
-        retention_deadline_us,
+        60_000_000,
     )?;
     let empty_schema_create_id = empty_schema_prepare
         .split("\"operation_id\":\"")
@@ -8847,7 +8847,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &mut control,
         40,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{empty_schema_create_id}\"}}"),
-        retention_deadline_us,
+        60_000_000,
     )?;
     let empty_schema_id = empty_schema_create
         .split("\"schema_id\":\"")
@@ -8863,7 +8863,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"schemas.set_owner\",\"arguments\":{{\"schema_id\":\"{empty_schema_id}\",\"owner_id\":\"{created_user_id_wire}\"}}}}"
         ),
-        retention_deadline_us,
+        60_000_000,
     )?;
     let schema_owner_operation_id = schema_owner_prepare
         .split("\"operation_id\":\"")
@@ -8877,7 +8877,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &mut control,
         42,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{schema_owner_operation_id}\"}}"),
-        retention_deadline_us,
+        60_000_000,
     )?;
     assert!(schema_owner_transfer.contains("\"outcome\":\"committed\""));
     assert!(schema_owner_transfer.contains(&format!("\"owner_id\":\"{created_user_id_wire}\"")));
@@ -8889,7 +8889,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"schemas.rename\",\"arguments\":{{\"schema_id\":\"{empty_schema_id}\",\"name\":\"protocol_renamed\"}}}}"
         ),
-        retention_deadline_us,
+        60_000_000,
     )?;
     let schema_rename_operation_id = schema_rename_prepare
         .split("\"operation_id\":\"")
@@ -8903,7 +8903,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &mut control,
         44,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{schema_rename_operation_id}\"}}"),
-        retention_deadline_us,
+        60_000_000,
     )?;
     assert!(schema_rename.contains("\"outcome\":\"committed\""));
     assert!(schema_rename.contains("\"name\":\"protocol_renamed\""));
@@ -8915,7 +8915,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"schemas.drop\",\"arguments\":{{\"schema_id\":\"{empty_schema_id}\"}}}}"
         ),
-        retention_deadline_us,
+        60_000_000,
     )?;
     let empty_schema_drop_id = empty_schema_drop_prepare
         .split("\"operation_id\":\"")
@@ -8929,7 +8929,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &mut control,
         46,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{empty_schema_drop_id}\"}}"),
-        retention_deadline_us,
+        60_000_000,
     )?;
     assert!(empty_schema_drop.contains("\"outcome\":\"committed\""));
     assert!(empty_schema_drop.contains(&format!("\"schema_id\":\"{empty_schema_id}\"")));
@@ -9240,7 +9240,7 @@ fn admin_cancellation_sync_failure_quarantines_until_reopen()
         )?;
         let runtime = prdb_engine::supervisor_ipc::GatewayServiceRuntimeConfig {
             admission: prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-                retention_deadline_us: i64::MAX,
+                retention_period_us: i64::MAX,
                 max_rows: 1,
                 max_bytes: 64,
             },
@@ -14473,7 +14473,7 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
     ));
     let staging = StagingStore::new(StagingLimits::default(), Arc::new(AcceptUpload))?;
     let admission = GatewayAdmissionConfig {
-        retention_deadline_us: now + 3_600_000_000,
+        retention_period_us: 3_600_000_000,
         max_rows: 2,
         max_bytes: 64,
     };
@@ -14833,7 +14833,7 @@ fn gateway_service_listener_binds_peer_and_serves_hello() -> Result<(), Box<dyn 
     let listener = bind_gateway_service_socket(&socket_path)?;
     let shutdown = Arc::new(AtomicBool::new(false));
     let admission = GatewayAdmissionConfig {
-        retention_deadline_us: i64::MAX,
+        retention_period_us: i64::MAX,
         max_rows: 2,
         max_bytes: 64,
     };
@@ -15514,7 +15514,7 @@ fn sandboxed_v3_sql_error_latches_failure_and_durably_aborts_after_partial_outpu
             .into_bytes(),
         },
         GatewayAdmissionConfig {
-            retention_deadline_us: now + 3_600_000_000,
+            retention_period_us: 3_600_000_000,
             max_rows: 2,
             max_bytes: 1024,
         },
@@ -15734,7 +15734,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             payload: format!("{{\"invocation_id\":\"{invocation_hex}\"}}").into_bytes(),
         },
         GatewayAdmissionConfig {
-            retention_deadline_us: now + 3_600_000_000,
+            retention_period_us: 3_600_000_000,
             max_rows: 8,
             max_bytes: 4096,
         },
@@ -16085,7 +16085,7 @@ fn sealed_start_admits_only_current_credentials_and_enforces_request_deadline()
                 payload: format!("{{\"invocation_id\":\"{second_invocation_hex}\"}}").into_bytes(),
             },
             prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
-                retention_deadline_us: now + 3_600_000_000,
+                retention_period_us: 3_600_000_000,
                 max_rows: 2,
                 max_bytes: 64,
             },

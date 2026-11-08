@@ -33,6 +33,7 @@ pub enum SupervisorRequestError {
 #[derive(Debug)]
 pub enum GatewayRequestError {
     InvalidPayload,
+    ClockUnavailable,
     Dispatch(DispatchError),
     Client(crate::client_protocol::ClientSessionError),
     Start(crate::client_protocol::ClientStartError),
@@ -71,9 +72,31 @@ pub enum GatewayClientServiceEvent<'db> {
 
 #[derive(Clone, Copy, Debug)]
 pub struct GatewayAdmissionConfig {
-    pub retention_deadline_us: i64,
+    /// Outcome retention interval from each START or ADMIN request, in
+    /// microseconds. `i64::MAX` retains outcomes indefinitely.
+    pub retention_period_us: i64,
     pub max_rows: usize,
     pub max_bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RetentionDeadlineError {
+    InvalidPeriod,
+    ClockUnavailable,
+}
+
+impl GatewayAdmissionConfig {
+    pub fn retention_deadline_us(self) -> Result<i64, RetentionDeadlineError> {
+        if self.retention_period_us <= 0 {
+            return Err(RetentionDeadlineError::InvalidPeriod);
+        }
+        if self.retention_period_us == i64::MAX {
+            return Ok(i64::MAX);
+        }
+        crate::credentials::now_unix_micros()
+            .and_then(|now| now.checked_add(self.retention_period_us))
+            .ok_or(RetentionDeadlineError::ClockUnavailable)
+    }
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -474,6 +497,7 @@ where
     if runtime.listener.max_connections == 0
         || runtime.listener.idle_timeout.is_zero()
         || runtime.listener.accept_poll_interval.is_zero()
+        || runtime.admission.retention_period_us <= 0
     {
         return Err(GatewayServiceListenerError::InvalidConfig);
     }
@@ -852,7 +876,9 @@ fn dispatch_gateway_client_request_inner<'db>(
                     manager,
                     staging,
                     frame(7, request.payload.clone()),
-                    admission.retention_deadline_us,
+                    admission
+                        .retention_deadline_us()
+                        .map_err(|_| GatewayRequestError::ClockUnavailable)?,
                     admission.max_rows,
                     admission.max_bytes,
                 )
@@ -887,7 +913,9 @@ fn dispatch_gateway_client_request_inner<'db>(
             .handle_admin_request(
                 manager,
                 frame(10, request.payload.clone()),
-                admission.retention_deadline_us,
+                admission
+                    .retention_deadline_us()
+                    .map_err(|_| GatewayRequestError::ClockUnavailable)?,
             )
             .map_err(GatewayRequestError::Client)?,
         _ => return Err(GatewayRequestError::InvalidPayload),
@@ -1019,6 +1047,7 @@ fn sanitized_gateway_error_payload(error: &GatewayRequestError) -> Vec<u8> {
     use crate::client_protocol::ClientSessionError;
     let code = match error {
         GatewayRequestError::InvalidPayload => "invalid_request",
+        GatewayRequestError::ClockUnavailable => "unavailable",
         GatewayRequestError::Dispatch(DispatchError::OperationNotAllowed { .. }) => "invalid_state",
         GatewayRequestError::Dispatch(DispatchError::UnknownOperation(_)) => "invalid_request",
         GatewayRequestError::Client(ClientSessionError::AuthenticationRequired) => {
@@ -1526,6 +1555,35 @@ mod worker_result_event_tests {
     use std::time::Duration;
 
     #[test]
+    fn outcome_retention_period_is_applied_from_each_request_time() {
+        let before = crate::credentials::now_unix_micros().expect("clock");
+        let config = super::GatewayAdmissionConfig {
+            retention_period_us: 1_000_000,
+            max_rows: 1,
+            max_bytes: 1,
+        };
+        let deadline = config.retention_deadline_us().expect("retention deadline");
+        assert!(deadline >= before + 1_000_000);
+        assert!(deadline < before + 1_100_000);
+        assert_eq!(
+            super::GatewayAdmissionConfig {
+                retention_period_us: 0,
+                ..config
+            }
+            .retention_deadline_us(),
+            Err(super::RetentionDeadlineError::InvalidPeriod)
+        );
+        assert_eq!(
+            super::GatewayAdmissionConfig {
+                retention_period_us: i64::MAX,
+                ..config
+            }
+            .retention_deadline_us(),
+            Ok(i64::MAX)
+        );
+    }
+
+    #[test]
     fn started_callback_releases_reservation_before_same_session_resumes() {
         use crate::supervisor::{
             ChunkKind, PrepareSubmission, StagingLimits, StagingOwner, StagingStore,
@@ -1668,7 +1726,7 @@ mod worker_result_event_tests {
         .expect("build staging store");
         let runtime = super::GatewayServiceRuntimeConfig {
             admission: super::GatewayAdmissionConfig {
-                retention_deadline_us: i64::MAX,
+                retention_period_us: i64::MAX,
                 max_rows: 1,
                 max_bytes: 64,
             },
@@ -1785,7 +1843,7 @@ mod worker_result_event_tests {
         });
         let runtime = super::GatewayServiceRuntimeConfig {
             admission: super::GatewayAdmissionConfig {
-                retention_deadline_us: i64::MAX,
+                retention_period_us: i64::MAX,
                 max_rows: 1,
                 max_bytes: 64,
             },

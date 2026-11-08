@@ -4307,7 +4307,9 @@ impl ClientConnectionSession {
                     crate::storage_manager::SupervisorAdmissionRequest {
                         invocation_id: submission.invocation_id(),
                         token_id,
-                        retention_deadline_us: admission.retention_deadline_us,
+                        retention_deadline_us: admission
+                            .retention_deadline_us()
+                            .map_err(|_| TransactionError::InvalidContext)?,
                         max_rows: admission.max_rows,
                         max_bytes: admission.max_bytes,
                         deadline: Some(deadline),
