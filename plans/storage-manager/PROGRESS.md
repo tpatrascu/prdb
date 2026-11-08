@@ -1889,3 +1889,11 @@
 - Regression: `storage_manager_creates_unique_constraint_and_backfills_existing_rows` inserts two unique values before DDL, creates the constraint, checks stale writer conflict and durable ABORTED outcome, and validates startup. Decoder coverage checks ordered ID arrays and exact arguments; the authenticated control integration creates a UNIQUE constraint before creating/dropping an FK.
 - Verification: focused manager, decoder, and authenticated ADMIN control-path tests passed. Workspace build, format check, warning-denied Clippy, and full tests passed under Rust 1.95.0; the commit integration target had 117 passed and 3 delegated-cgroup tests ignored.
 - Remaining: PRIMARY KEY and CHECK creation/removal need equivalent structured manager and ADMIN operations; SQL `ALTER TABLE` parsing remains outside this control protocol.
+
+## SM-5: structured PRIMARY KEY creation through StorageManager and ADMIN — implemented
+
+- Contract: [schema DDL](../../specs/ddl-schema.md) requires PRIMARY KEY columns to be non-nullable and the owned unique index to be validated/backfilled before publication.
+- Implementation: `StorageManager::create_primary_key` shares the fenced key-constraint catalog path with UNIQUE while writing the PRIMARY KEY kind. Authenticated ADMIN `constraints.create_primary_key` exposes the structured request through connection-owned PREPARE/START and returns the generated constraint and index IDs.
+- Regression: real-redb coverage creates a PRIMARY KEY on a non-null column and validates its owned index and startup integrity. Decoder coverage checks the exact ordered-column request, and the authenticated control integration creates a PRIMARY KEY before creating a UNIQUE and exercising FK lifecycle.
+- Verification: the focused manager, decoder, and authenticated gateway regressions passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` passed under Rust 1.95.0; the commit integration target had 118 passed and 3 cgroup-dependent tests ignored.
+- Remaining: CHECK creation/removal and SQL `ALTER TABLE` parsing remain open.

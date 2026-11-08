@@ -535,6 +535,16 @@ pub struct CreateUniqueConstraintRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreatePrimaryKeyRequest {
+    pub invocation_id: [u8; 16],
+    pub authenticated_actor_id: [u8; 16],
+    pub table_id: [u8; 16],
+    pub column_ids: Vec<[u8; 16]>,
+    pub retention_deadline_us: i64,
+    pub audit_event: AuditEvent,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AlterColumnDefaultRequest {
     pub invocation_id: [u8; 16],
     pub authenticated_actor_id: [u8; 16],
@@ -570,6 +580,13 @@ pub struct CreatedForeignKey {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreatedUniqueConstraint {
+    pub constraint_id: [u8; 16],
+    pub index_id: [u8; 16],
+    pub commit_sequence: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreatedPrimaryKey {
     pub constraint_id: [u8; 16],
     pub index_id: [u8; 16],
     pub commit_sequence: u64,
@@ -6658,6 +6675,38 @@ impl<'db> StorageManager<'db> {
         &self,
         request: CreateUniqueConstraintRequest,
     ) -> Result<CreatedUniqueConstraint, TableLifecycleError> {
+        self.create_key_constraint(request, 3)
+    }
+
+    /// Add a PRIMARY KEY and its owned unique index. Existing rows are
+    /// validated and the index is backfilled while the table DDL fence is held.
+    pub fn create_primary_key(
+        &self,
+        request: CreatePrimaryKeyRequest,
+    ) -> Result<CreatedPrimaryKey, TableLifecycleError> {
+        let created = self.create_key_constraint(
+            CreateUniqueConstraintRequest {
+                invocation_id: request.invocation_id,
+                authenticated_actor_id: request.authenticated_actor_id,
+                table_id: request.table_id,
+                column_ids: request.column_ids,
+                retention_deadline_us: request.retention_deadline_us,
+                audit_event: request.audit_event,
+            },
+            2,
+        )?;
+        Ok(CreatedPrimaryKey {
+            constraint_id: created.constraint_id,
+            index_id: created.index_id,
+            commit_sequence: created.commit_sequence,
+        })
+    }
+
+    fn create_key_constraint(
+        &self,
+        request: CreateUniqueConstraintRequest,
+        constraint_kind: u16,
+    ) -> Result<CreatedUniqueConstraint, TableLifecycleError> {
         let CreateUniqueConstraintRequest {
             invocation_id,
             authenticated_actor_id,
@@ -6740,7 +6789,7 @@ impl<'db> StorageManager<'db> {
             CatalogField {
                 tag: 2,
                 wire_type: WireType::U16,
-                payload: 3u16.to_le_bytes().to_vec(),
+                payload: constraint_kind.to_le_bytes().to_vec(),
             },
             CatalogField {
                 tag: 3,
@@ -6900,13 +6949,29 @@ impl<'db> StorageManager<'db> {
                 expected_value: None,
                 payload: Some(constraint_payload),
             },
-            make_object_write(constraint_id, 6, "unique_constraint")?,
+            make_object_write(
+                constraint_id,
+                6,
+                if constraint_kind == 2 {
+                    "primary_key_constraint"
+                } else {
+                    "unique_constraint"
+                },
+            )?,
             CatalogWrite {
                 key: index_key,
                 expected_value: None,
                 payload: Some(index_payload),
             },
-            make_object_write(index_id, 7, "unique_index")?,
+            make_object_write(
+                index_id,
+                7,
+                if constraint_kind == 2 {
+                    "primary_key_index"
+                } else {
+                    "unique_index"
+                },
+            )?,
             new_dependency_write(constraint_id, index_id, 4)?,
             CatalogWrite {
                 key: table_key.clone(),

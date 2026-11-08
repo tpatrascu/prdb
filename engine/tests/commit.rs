@@ -7202,6 +7202,75 @@ fn storage_manager_creates_unique_constraint_and_backfills_existing_rows()
 }
 
 #[test]
+fn storage_manager_creates_primary_key_with_owned_unique_index()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let admin_role = builtin_owner_id();
+    let actor = id(0xf2);
+    let foreign_key_edge = dependency_write(id(86), id(85), 3).key;
+    let mut setup_writes = foreign_key_catalog_writes(false, true)
+        .into_iter()
+        .filter(|write| {
+            write.key != id_catalog_key(6, id(84))
+                && write.key != id_catalog_key(8, id(86))
+                && write.key != id_catalog_key(2, id(86))
+                && write.key != foreign_key_edge
+        })
+        .collect::<Vec<_>>();
+    setup_writes.extend([
+        column_write_not_null(id(84), id(82), "object_84"),
+        principal_write_with_name(actor, 1, 1, "primary_create_admin"),
+        object_write_with_name(actor, 8, "primary_create_admin"),
+        membership_write(actor, admin_role),
+        dependency_write(actor, admin_role, 5),
+    ]);
+    let mut setup_audit = identity_audit_event(0xf3, admin_role, id(80));
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(id(0xf3), admin_role, 9_999, &setup_writes, &[setup_audit])?;
+
+    let invocation_id = id(0xf4);
+    let mut audit = identity_audit_event(0xf5, actor, id(82));
+    audit.correlation_id = invocation_id;
+    let created = storage
+        .create_primary_key(prdb_engine::storage_manager::CreatePrimaryKeyRequest {
+            invocation_id,
+            authenticated_actor_id: actor,
+            table_id: id(82),
+            column_ids: vec![id(84)],
+            retention_deadline_us: 9_999,
+            audit_event: audit,
+        })
+        .map_err(|error| format!("PRIMARY KEY creation failed: {error:?}"))?;
+    assert_eq!(created.commit_sequence, 2);
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    let constraint = catalog
+        .get(id_catalog_key(8, created.constraint_id).as_slice())?
+        .ok_or("missing created PRIMARY KEY")?;
+    let decoded = decode_registered_envelope(constraint.value())?;
+    let kind = decoded
+        .fields
+        .iter()
+        .find(|field| field.tag == 2)
+        .ok_or("missing PRIMARY KEY kind")?
+        .payload
+        .as_slice()
+        .try_into()?;
+    assert_eq!(u16::from_le_bytes(kind), 2);
+    assert!(
+        catalog
+            .get(id_catalog_key(9, created.index_id).as_slice())?
+            .is_some()
+    );
+    drop(catalog);
+    drop(read);
+    prdb_engine::startup::validate_persisted_records(&database)?;
+    Ok(())
+}
+
+#[test]
 fn storage_manager_drop_referencing_table_removes_owned_foreign_key()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
@@ -10438,12 +10507,17 @@ fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
 
     let mut foreign_key_setup_audit = identity_audit_event(0xd1, admin_role, id(80));
     foreign_key_setup_audit.action = AuditAction::AuthorityChange;
+    let mut fk_setup_writes = foreign_key_catalog_writes(true, true)
+        .into_iter()
+        .filter(|write| write.key != id_catalog_key(6, id(84)))
+        .collect::<Vec<_>>();
+    fk_setup_writes.push(column_write_not_null(id(84), id(82), "object_84"));
     storage
         .commit_catalog_and_audit(
             id(0xd2),
             admin_role,
             60_000_000,
-            &foreign_key_catalog_writes(true, true),
+            &fk_setup_writes,
             &[foreign_key_setup_audit],
         )
         .map_err(|error| format!("FK ADMIN fixture setup failed: {error:?}"))?;
@@ -10489,11 +10563,37 @@ fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    let unique_prepare = admin_dispatch_json(
+    let primary_prepare = admin_dispatch_json(
         &storage,
         &staging,
         &mut foreign_key_control,
         47,
+        &format!(
+            "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"constraints.create_primary_key\",\"arguments\":{{\"table_id\":\"{unique_table_id_wire}\",\"column_ids\":[\"{unique_column_id_wire}\"]}}}}"
+        ),
+        60_000_000,
+    )?;
+    let primary_operation_id = primary_prepare
+        .split("\"operation_id\":\"")
+        .nth(1)
+        .ok_or("missing ADMIN PRIMARY KEY operation ID")?
+        .get(..32)
+        .ok_or("invalid ADMIN PRIMARY KEY operation ID")?;
+    let primary_create = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut foreign_key_control,
+        48,
+        &format!("{{\"phase\":\"start\",\"operation_id\":\"{primary_operation_id}\"}}"),
+        60_000_000,
+    )?;
+    assert!(primary_create.contains("\"outcome\":\"committed\""));
+    assert!(primary_create.contains("\"index_id\":"));
+    let unique_prepare = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut foreign_key_control,
+        49,
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"constraints.create_unique\",\"arguments\":{{\"table_id\":\"{unique_table_id_wire}\",\"column_ids\":[\"{unique_column_id_wire}\"]}}}}"
         ),
@@ -10509,7 +10609,7 @@ fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
         &storage,
         &staging,
         &mut foreign_key_control,
-        48,
+        50,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{unique_operation_id}\"}}"),
         60_000_000,
     )?;
@@ -10519,7 +10619,7 @@ fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
         &storage,
         &staging,
         &mut foreign_key_control,
-        49,
+        51,
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"foreign_keys.create\",\"arguments\":{{\"source_table_id\":\"{source_table_id_wire}\",\"source_column_ids\":[\"{source_column_id_wire}\"],\"target_constraint_id\":\"{target_constraint_id_wire}\"}}}}"
         ),
@@ -10535,7 +10635,7 @@ fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
         &storage,
         &staging,
         &mut foreign_key_control,
-        50,
+        52,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{foreign_key_create_operation_id}\"}}"),
         60_000_000,
     )?;
@@ -10550,7 +10650,7 @@ fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
         &storage,
         &staging,
         &mut foreign_key_control,
-        51,
+        53,
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"foreign_keys.drop\",\"arguments\":{{\"foreign_key_id\":\"{foreign_key_id_wire}\"}}}}"
         ),
@@ -10566,7 +10666,7 @@ fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
         &storage,
         &staging,
         &mut foreign_key_control,
-        52,
+        54,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{foreign_key_drop_operation_id}\"}}"),
         60_000_000,
     )?;
