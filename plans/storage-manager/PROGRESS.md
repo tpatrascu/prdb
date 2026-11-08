@@ -1850,3 +1850,10 @@
 - Regression: `foreign_key_creation_racing_referenced_table_drop_is_atomic` releases an authorized FK add and target-table `DROP ... RESTRICT` together from a barrier. It accepts only one committed DDL operation, checks both durable outcomes and the single commit-sequence advance, validates the resulting catalog shape, and reopens through `validate_persisted_records`.
 - Verification: the focused race test passed. Workspace build, formatting check, warning-denied Clippy, and full workspace tests passed with Rust 1.95.0; the commit integration target had 111 passed and 3 delegated-cgroup tests ignored.
 - Scope: one barrier-coordinated schedule per run; repeated stress and races with other external constraint/policy changes remain open.
+
+## SM-5 / DS-5: UNIQUE backfill racing with duplicate insertion — verified
+
+- Contract: [schema DDL](../../specs/ddl-schema.md) requires unique constraint validation against the serialized final table state; a concurrent insert and constraint backfill cannot both publish duplicate values.
+- Regression: `unique_constraint_backfill_racing_duplicate_insert_is_atomic` stages a duplicate-value insert while adding an owned UNIQUE constraint and its backing index, then releases both commits from a barrier. It accepts only either a committed insert with aborted backfill or committed backfill with the stale insert aborted. It verifies both outcomes, exactly one commit-sequence advance, matching row/index presence, and startup integrity.
+- Verification: the focused race test passed. Workspace build, formatting check, warning-denied Clippy, and full workspace tests passed with Rust 1.95.0; the commit integration target had 112 passed and 3 delegated-cgroup tests ignored.
+- Scope: one barrier-coordinated schedule per run; repeated race stress and races involving other constraint and policy changes remain open.

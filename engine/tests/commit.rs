@@ -2031,6 +2031,242 @@ fn storage_manager_drop_table_removes_owned_primary_and_unique_indexes()
 }
 
 #[test]
+fn unique_constraint_backfill_racing_duplicate_insert_is_atomic()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::storage_manager::{CreateTableRequest, TableColumnDefinition};
+    use prdb_engine::transaction::TransactionError;
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(500))?;
+    let actor = id(0xbc);
+    let admin_role = builtin_owner_id();
+    let mut setup_audit = identity_audit_event(0xbd, admin_role, actor);
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(
+        id(0xbd),
+        admin_role,
+        9_999,
+        &[
+            principal_write_with_name(actor, 1, 1, "unique_constraint_race_owner"),
+            object_write_with_name(actor, 8, "unique_constraint_race_owner"),
+            membership_write(actor, admin_role),
+            dependency_write(actor, admin_role, 5),
+        ],
+        &[setup_audit],
+    )?;
+    let schema_invocation = id(0xbe);
+    let mut schema_audit = identity_audit_event(0xbf, actor, id(0xc0));
+    schema_audit.correlation_id = schema_invocation;
+    let schema = storage.create_schema(
+        schema_invocation,
+        actor,
+        "unique_race_schema",
+        actor,
+        9_999,
+        schema_audit,
+    )?;
+    let create_invocation = id(0xc1);
+    let mut create_audit = identity_audit_event(0xc2, actor, id(0xc3));
+    create_audit.correlation_id = create_invocation;
+    let table = storage.create_table(CreateTableRequest {
+        invocation_id: create_invocation,
+        authenticated_actor_id: actor,
+        schema_id: schema.schema_id,
+        name: "unique_race_table".to_owned(),
+        columns: vec![TableColumnDefinition {
+            name: "value".to_owned(),
+            scalar_type: ScalarType::Integer,
+            nullable: true,
+            generated_uuid_identity: false,
+            default: None,
+        }],
+        retention_deadline_us: 9_999,
+        audit_event: create_audit,
+    })?;
+
+    let existing_invocation = id(0xc4);
+    let existing_row_id = id(0xc5);
+    let mut existing_writer =
+        storage.begin_invocation(existing_invocation, actor, 9_999, 2, 1024)?;
+    let table_schema = existing_writer.load_catalog_table_schema(table.table_id)?;
+    existing_writer.load_catalog_indexes(&table_schema)?;
+    let duplicate_tuple = encode_tuple(
+        &table_schema.columns,
+        table_schema.schema_version,
+        &[Some(ScalarValue::Integer(37))],
+    )?;
+    existing_writer.stage_put(
+        prdb_engine::overlay::RowId {
+            table: table.table_id,
+            row: existing_row_id,
+        },
+        &duplicate_tuple,
+    )?;
+    existing_writer.commit()?;
+
+    let writer_invocation = id(0xc6);
+    let duplicate_row_id = id(0xc7);
+    let mut pending_writer = storage.begin_invocation(writer_invocation, actor, 9_999, 2, 1024)?;
+    let pending_schema = pending_writer.load_catalog_table_schema(table.table_id)?;
+    pending_writer.load_catalog_indexes(&pending_schema)?;
+    let pending_tuple = encode_tuple(
+        &pending_schema.columns,
+        pending_schema.schema_version,
+        &[Some(ScalarValue::Integer(37))],
+    )?;
+    pending_writer.stage_put(
+        prdb_engine::overlay::RowId {
+            table: table.table_id,
+            row: duplicate_row_id,
+        },
+        &pending_tuple,
+    )?;
+
+    let constraint_id = id(0xc8);
+    let index_id = id(0xc9);
+    let constraint = constraint_write(
+        constraint_id,
+        table.table_id,
+        3,
+        &table.column_ids,
+        None,
+        &[],
+        Some(index_id),
+    );
+    let (index_key, index_payload) =
+        owned_unique_index_definition(index_id, table.table_id, &table.column_ids, constraint_id);
+    let table_key = id_catalog_key(5, table.table_id);
+    let table_bytes = {
+        let read = database.begin_read()?;
+        read.open_table(CATALOG)?
+            .get(table_key.as_slice())?
+            .ok_or("table record missing before unique constraint race")?
+            .value()
+            .to_vec()
+    };
+    let current_record = decode_registered_envelope(&table_bytes)?;
+    let current_epoch = u64::from_le_bytes(
+        current_record
+            .fields
+            .iter()
+            .find(|field| field.tag == 3)
+            .ok_or("table write epoch missing before unique constraint race")?
+            .payload
+            .as_slice()
+            .try_into()?,
+    );
+    let mut table_epoch = table_write_with_versions(
+        table.table_id,
+        schema.schema_id,
+        table_schema.schema_version,
+        current_epoch + 1,
+    );
+    table_epoch.expected_value = Some(table_bytes);
+    let constraint_invocation = id(0xca);
+    let before_race = commit_sequence(&database)?;
+    let barrier = Arc::new(Barrier::new(3));
+    let (writer_result, constraint_result) = std::thread::scope(|scope| {
+        let writer_barrier = barrier.clone();
+        let writer = scope.spawn(move || {
+            writer_barrier.wait();
+            pending_writer.commit()
+        });
+        let constraint_barrier = barrier.clone();
+        let constraint_storage = &storage;
+        let constraint = scope.spawn(move || {
+            let mut audit = identity_audit_event(0xcb, actor, constraint_id);
+            audit.correlation_id = constraint_invocation;
+            constraint_barrier.wait();
+            constraint_storage.commit_authorized_constraint_ddl(
+                constraint_invocation,
+                actor,
+                9_999,
+                &[
+                    constraint,
+                    object_write(constraint_id, 6),
+                    CatalogWrite {
+                        key: index_key,
+                        expected_value: None,
+                        payload: Some(index_payload),
+                    },
+                    object_write(index_id, 7),
+                    dependency_write(constraint_id, index_id, 4),
+                    table_epoch,
+                ],
+                &[audit],
+            )
+        });
+        barrier.wait();
+        (writer.join().unwrap(), constraint.join().unwrap())
+    });
+
+    let (writer_status, constraint_status) = match (writer_result, constraint_result) {
+        (Ok(_), Err(CommitError::UniqueViolation)) => {
+            (OutcomeStatus::Committed, OutcomeStatus::Aborted)
+        }
+        (Err(TransactionError::Commit(CommitError::Conflict)), Ok(_)) => {
+            (OutcomeStatus::Aborted, OutcomeStatus::Committed)
+        }
+        (writer, constraint) => {
+            panic!(
+                "unexpected duplicate-insert/unique-constraint race: {writer:?} / {constraint:?}"
+            )
+        }
+    };
+    assert_eq!(commit_sequence(&database)?, before_race + 1);
+    assert_eq!(
+        lookup_outcome(&database, writer_invocation, actor, 1)?
+            .ok_or("missing duplicate-writer race outcome")?
+            .status,
+        writer_status
+    );
+    assert_eq!(
+        lookup_outcome(&database, constraint_invocation, actor, 1)?
+            .ok_or("missing unique-constraint race outcome")?
+            .status,
+        constraint_status
+    );
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    let rows = read.open_table(ROWS)?;
+    let indexes = read.open_table(schema::INDEXES)?;
+    let reverse_indexes = read.open_table(schema::ROW_INDEXES)?;
+    if constraint_status == OutcomeStatus::Committed {
+        assert!(
+            catalog
+                .get(id_catalog_key(8, constraint_id).as_slice())?
+                .is_some()
+        );
+        assert!(
+            rows.get(table_row_key(table.table_id, duplicate_row_id).as_slice())?
+                .is_none()
+        );
+        assert_eq!(indexes.iter()?.count(), 1);
+        assert_eq!(reverse_indexes.iter()?.count(), 1);
+    } else {
+        assert!(
+            catalog
+                .get(id_catalog_key(8, constraint_id).as_slice())?
+                .is_none()
+        );
+        assert!(
+            rows.get(table_row_key(table.table_id, duplicate_row_id).as_slice())?
+                .is_some()
+        );
+        assert_eq!(indexes.iter()?.count(), 0);
+        assert_eq!(reverse_indexes.iter()?.count(), 0);
+    }
+    drop(reverse_indexes);
+    drop(indexes);
+    drop(rows);
+    drop(catalog);
+    drop(read);
+    prdb_engine::startup::validate_persisted_records(&database)?;
+    Ok(())
+}
+
+#[test]
 fn storage_manager_drop_table_racing_invocation_leaves_no_orphan_row()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::storage_manager::{CreateTableRequest, TableColumnDefinition};
