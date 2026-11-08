@@ -1737,7 +1737,7 @@
 - Regression: the real-redb [foundation test](../../engine/tests/redb_foundation.rs) pins an initial value, completes 64 Immediate/two-phase commits of 32 KiB replacements while that reader remains open, verifies the pinned reader still sees the original bytes, and confirms a new reader sees the latest committed value.
 - Verification: Rust 1.95.0 and redb 4.4.0; `cargo fmt --all -- --check` and `cargo test -p prdb-engine --test redb_foundation --locked` passed.
 - Scope: this validates redb snapshot stability and writer progress for this bounded workload. It does not establish the storage manager's admission limits under sustained pressure, physical reclamation/compaction behavior, or power-loss durability.
-- Remaining: add additional storage-file fault points and measure pressure beyond the bounded retained-reader and reclamation workloads below.
+- Remaining: power-loss durability and production-duration contention remain unverified; bounded retained-reader, concurrent-writer, and reclamation workloads are recorded below.
 
 ## SM-4 / SM-7: durable writer progress under a retained invocation snapshot — verified
 
@@ -1780,7 +1780,7 @@
 - Verification: the acceptance passed again with `/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service`, whose `cpu`, `memory`, and `pids` controllers are enabled. This NixOS profile used the pinned loader/libc paths and an empty `PRDB_TEST_RUNTIME_READ_ONLY` list because no additional read-only runtime files were required.
 - Terminal-loss regression: `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` now completes the real worker and relays every provisional SQL result, closes the gateway before terminal delivery, requires the terminal frame write to fail, and then verifies the durable outcome is COMMITTED. The restricted-principal query still follows the normal terminal path.
 - Verification: the terminal-loss acceptance passed under the delegated `user@1000.service` cgroup. The confined metadata submission, caught-query-error abort, disconnected gateway restart, and SQL DML/terminal-loss acceptances all passed with the same NixOS runtime profile. Default workspace build, format, warning-denied Clippy, and tests passed; three delegated-cgroup tests remain ignored by the default suite.
-- Remaining: add additional storage-file fault points; measure longer-duration mixed reader/writer pressure beyond the bounded sequential and concurrent workloads above.
+- Remaining: the five redb backend callbacks now have injected failure coverage, and bounded mixed reader/writer pressure is covered above. Power-loss durability, production-duration contention, and other supported platform/filesystem profiles remain unverified.
 
 ## SM-1 / SM-7: recover an injected redb storage write error — verified
 
@@ -1799,3 +1799,9 @@
 - Regression: `redb_compaction_resize_error_preserves_reopenable_data` injects a backend `set_len` failure during redb compaction. Compaction returns the storage error; after reopen, all live rows remain and deleted rows stay deleted.
 - Verification: the focused library test passed on redb 4.4.0.
 - Scope: bounded compaction-resize recovery only; other file operations, power loss, and platform/durability profiles remain untested.
+
+### Truncated redb image fails closed at service startup — verified
+
+- Regression: `storage_open_rejects_a_truncated_redb_image_and_releases_the_instance_lock` creates a READY instance, truncates its committed redb file to one byte, and verifies `StorageInstance::open` refuses admission. It restores the original image and verifies a subsequent open and full persisted-record validation succeed, proving the failed attempt releases the instance lock.
+- Verification: the focused bootstrap integration test passed with the pinned Nix toolchain.
+- Scope: fail-closed behavior for a severely truncated local image; it does not simulate torn writes, arbitrary page corruption, or power loss.

@@ -154,6 +154,36 @@ fn bootstrap_handoff_stays_initializing_and_resume_rotates_secret() {
 }
 
 #[test]
+fn storage_open_rejects_a_truncated_redb_image_and_releases_the_instance_lock() {
+    let fixture = Fixture::new();
+    let mut session = initialize(&fixture.0, "corruption_admin", expiry()).unwrap();
+    let mut secret = session.take_secret().unwrap();
+    secret.zeroize();
+    drop(session.acknowledge().unwrap());
+
+    let database_path = fixture.0.join("storage.redb");
+    let valid_image = std::fs::read(&database_path).unwrap();
+    assert!(valid_image.len() > 1);
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&database_path)
+        .unwrap();
+    file.set_len(1).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+
+    assert!(
+        StorageInstance::open(&fixture.0).is_err(),
+        "a truncated redb image must not admit a storage instance"
+    );
+
+    std::fs::write(&database_path, valid_image).unwrap();
+    let reopened = StorageInstance::open(&fixture.0)
+        .expect("failed open must release the lock so a restored image can be reopened");
+    assert!(validate_persisted_records(reopened.database()).is_ok());
+}
+
+#[test]
 fn bootstrap_cannot_publish_ready_before_secret_transfer() {
     let fixture = Fixture::new();
     let session = initialize(&fixture.0, "first_admin", expiry()).unwrap();
