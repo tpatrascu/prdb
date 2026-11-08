@@ -14009,18 +14009,22 @@ mod durable_commit_gate_tests {
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
     #[derive(Debug)]
-    struct FailNextSyncBackend {
+    struct FaultInjectedBackend {
         inner: redb::backends::FileBackend,
         fail_next_sync: Arc<AtomicBool>,
         fail_next_write: Arc<AtomicBool>,
+        fail_next_read: Arc<AtomicBool>,
     }
 
-    impl StorageBackend for FailNextSyncBackend {
+    impl StorageBackend for FaultInjectedBackend {
         fn len(&self) -> Result<u64, std::io::Error> {
             self.inner.len()
         }
 
         fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+            if self.fail_next_read.swap(false, Ordering::SeqCst) {
+                return Err(std::io::Error::other("injected storage read failure"));
+            }
             self.inner.read(offset, out)
         }
 
@@ -14171,10 +14175,11 @@ mod durable_commit_gate_tests {
             .write(true)
             .open(&path)?;
         let fail_next_sync = Arc::new(AtomicBool::new(false));
-        let database = Database::builder().create_with_backend(FailNextSyncBackend {
+        let database = Database::builder().create_with_backend(FaultInjectedBackend {
             inner: redb::backends::FileBackend::new(file)?,
             fail_next_sync: fail_next_sync.clone(),
             fail_next_write: Arc::new(AtomicBool::new(false)),
+            fail_next_read: Arc::new(AtomicBool::new(false)),
         })?;
         let storage =
             StorageManager::from_validated_database(&database, StorageManagerConfig::default())?;
@@ -14305,10 +14310,11 @@ mod durable_commit_gate_tests {
             .write(true)
             .open(&path)?;
         let fail_next_write = Arc::new(AtomicBool::new(false));
-        let database = Database::builder().create_with_backend(FailNextSyncBackend {
+        let database = Database::builder().create_with_backend(FaultInjectedBackend {
             inner: redb::backends::FileBackend::new(file)?,
             fail_next_sync: Arc::new(AtomicBool::new(false)),
             fail_next_write: fail_next_write.clone(),
+            fail_next_read: Arc::new(AtomicBool::new(false)),
         })?;
         let storage =
             StorageManager::from_validated_database(&database, StorageManagerConfig::default())?;
@@ -14379,6 +14385,55 @@ mod durable_commit_gate_tests {
     }
 
     #[test]
+    fn redb_storage_read_error_rejects_database_open() -> Result<(), Box<dyn std::error::Error>> {
+        let fixture_id = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "prdb-storage-read-error-{}-{fixture_id}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory)?;
+        let path = directory.join("read-error.redb");
+        {
+            let database = Database::create(&path)?;
+            let mut write = database.begin_write()?;
+            write.set_durability(redb::Durability::Immediate)?;
+            write.set_two_phase_commit(true);
+            schema::create_tables(&write)?;
+            let metadata = EngineMetadata {
+                database_id: [0x33; 16],
+                catalog_version: 2,
+                expression_version: 1,
+                builtin_semantics_version: 1,
+                commit_sequence: 0,
+                lifecycle: Lifecycle::Ready,
+            }
+            .encode()?;
+            write
+                .open_table(ENGINE_META)?
+                .insert(&b"format"[..], &metadata[..])?;
+            write.commit()?;
+        }
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)?;
+        let fail_next_read = Arc::new(AtomicBool::new(false));
+        fail_next_read.store(true, Ordering::SeqCst);
+        let opened = Database::builder().create_with_backend(FaultInjectedBackend {
+            inner: redb::backends::FileBackend::new(file)?,
+            fail_next_sync: Arc::new(AtomicBool::new(false)),
+            fail_next_write: Arc::new(AtomicBool::new(false)),
+            fail_next_read: fail_next_read.clone(),
+        });
+        assert!(opened.is_err());
+        assert!(!fail_next_read.load(Ordering::SeqCst));
+
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[test]
     fn outcome_prune_commit_error_quarantines_database() -> Result<(), Box<dyn std::error::Error>> {
         let fixture_id = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
         let directory = std::env::temp_dir().join(format!(
@@ -14424,10 +14479,11 @@ mod durable_commit_gate_tests {
             .write(true)
             .open(&path)?;
         let fail_next_sync = Arc::new(AtomicBool::new(false));
-        let database = Database::builder().create_with_backend(FailNextSyncBackend {
+        let database = Database::builder().create_with_backend(FaultInjectedBackend {
             inner: redb::backends::FileBackend::new(file)?,
             fail_next_sync: fail_next_sync.clone(),
             fail_next_write: Arc::new(AtomicBool::new(false)),
+            fail_next_read: Arc::new(AtomicBool::new(false)),
         })?;
         let storage =
             StorageManager::from_validated_database(&database, StorageManagerConfig::default())?;

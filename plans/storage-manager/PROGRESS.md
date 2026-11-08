@@ -1781,3 +1781,9 @@
 - Regression: `redb_storage_write_error_quarantines_and_recovers_atomically` injects an error from the redb backend's `write` callback during a managed row commit. It verifies the live manager rejects new admissions after the error, then closes and reopens the database and checks that the row, outcome, and commit sequence are either all present or all absent.
 - Verification: the focused test passed. Full workspace build, format, warning-denied Clippy, tests, and `git diff --check` passed; the commit integration target had 109 passing tests and 3 delegated-cgroup tests ignored.
 - Scope: adds a backend-write failure point alongside the existing injected sync failure. Power loss, other storage-file operations, and other platform/durability profiles remain untested.
+
+### Backend read failure at database open — verified
+
+- Regression: `redb_storage_read_error_rejects_database_open` injects a one-shot backend read failure while redb opens an existing database image and verifies open is rejected before a storage manager can be constructed.
+- Verification: the focused library test passed.
+- Scope: read-path fail-closed evidence at startup; additional file operations and platform/durability profiles remain untested.
