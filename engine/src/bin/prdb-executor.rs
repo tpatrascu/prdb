@@ -10,12 +10,14 @@ mod worker {
         IpcFrame, Operation, ServiceRole, authorize_operation, read_frame, write_frame,
     };
     use prdb_engine::query_abi::{
-        BorrowedInvocationV1, HostApiV1, HostApiV2, InvocationV2, MAX_IPC_REQUEST_BYTES,
-        MAX_RESULT_CHUNK_BYTES, MAX_TOTAL_RESULT_BYTES, QUERY_ABI_V2_VERSION, QUERY_ABI_VERSION,
-        QUERY_DESCRIPTOR_SYMBOL, QUERY_DESCRIPTOR_V2_SYMBOL, QUERY_ENTRY_SYMBOL,
-        QUERY_ENTRY_V2_SYMBOL, QueryDescriptorV1, QueryDescriptorV2, QueryIpcRequestV2,
-        QueryMainV1, QueryMainV2, QueryWriteResultV2, validate_descriptor_v1,
-        validate_descriptor_v2,
+        BorrowedInvocationV1, HostApiV1, HostApiV2, HostApiV3, InvocationV2, InvocationV3,
+        MAX_IPC_REQUEST_BYTES, MAX_RESULT_CHUNK_BYTES, MAX_TOTAL_RESULT_BYTES,
+        QUERY_ABI_V2_VERSION, QUERY_ABI_V3_VERSION, QUERY_ABI_VERSION, QUERY_DESCRIPTOR_SYMBOL,
+        QUERY_DESCRIPTOR_V2_SYMBOL, QUERY_DESCRIPTOR_V3_SYMBOL, QUERY_ENTRY_SYMBOL,
+        QUERY_ENTRY_V2_SYMBOL, QUERY_ENTRY_V3_SYMBOL, QUERY_STATEMENT_FAILURE_SQL,
+        QueryDescriptorV1, QueryDescriptorV2, QueryDescriptorV3, QueryIpcRequestV2, QueryMainV1,
+        QueryMainV2, QueryMainV3, QueryStatementFailureV3, QueryWriteResultV2,
+        validate_descriptor_v1, validate_descriptor_v2, validate_descriptor_v3,
     };
     use std::ffi::{CStr, CString, OsStr, c_void};
     use std::io::{self, Read, Write};
@@ -24,7 +26,7 @@ mod worker {
     use std::os::unix::net::UnixStream;
     use std::path::PathBuf;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     const EXIT_ERROR: i32 = 70;
     const CAPABILITY_VERSION_3: u32 = 0x2008_0522;
@@ -208,8 +210,12 @@ mod worker {
             return Err(dynamic_loader_error("dlopen"));
         }
 
-        // Prefer v2 when present. An invalid v2 descriptor is rejected rather
-        // than falling back to a second ABI exported by the same library.
+        // Prefer v3, then v2. An invalid descriptor is rejected rather than
+        // falling back to a second ABI exported by the same library.
+        let v3_descriptor_symbol = CString::new(QUERY_DESCRIPTOR_V3_SYMBOL).expect("static symbol");
+        if let Some(descriptor_address) = lookup_optional_symbol(handle, &v3_descriptor_symbol)? {
+            return unsafe { execute_v3_library(handle, descriptor_address, args) };
+        }
         let v2_descriptor_symbol = CString::new(QUERY_DESCRIPTOR_V2_SYMBOL).expect("static symbol");
         if let Some(descriptor_address) = lookup_optional_symbol(handle, &v2_descriptor_symbol)? {
             return unsafe { execute_v2_library(handle, descriptor_address, args) };
@@ -265,6 +271,75 @@ mod worker {
         // library finalizers must not run during host cleanup.
         let _ = handle;
         Ok(status)
+    }
+
+    unsafe fn execute_v3_library(
+        handle: *mut libc::c_void,
+        descriptor_address: *mut libc::c_void,
+        args: WorkerArgs,
+    ) -> io::Result<i32> {
+        if !(descriptor_address as usize).is_multiple_of(std::mem::align_of::<QueryDescriptorV3>())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "query v3 descriptor has invalid alignment",
+            ));
+        }
+        // SAFETY: malformed native records can fault only this disposable,
+        // confined worker. Copy before validation to avoid retaining a library pointer.
+        let descriptor = unsafe { descriptor_address.cast::<QueryDescriptorV3>().read() };
+        validate_descriptor_v3(&descriptor).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("query ABI v3 descriptor rejected: {error:?}"),
+            )
+        })?;
+
+        let entry_symbol = CString::new(QUERY_ENTRY_V3_SYMBOL).expect("static symbol");
+        let entry_address = lookup_symbol(handle, &entry_symbol)?;
+        // SAFETY: the validated descriptor declares this ABI and entry point.
+        let entry: QueryMainV3 = unsafe { std::mem::transmute(entry_address) };
+
+        let parameters = read_parameters(args.parameters_fd)?;
+        let parameters_len = u64::try_from(parameters.len()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "parameters length overflow")
+        })?;
+        let parameters_ptr = if parameters.is_empty() {
+            std::ptr::null()
+        } else {
+            parameters.as_ptr()
+        };
+        let invocation = InvocationV3 {
+            struct_size: std::mem::size_of::<InvocationV3>() as u32,
+            abi_version: QUERY_ABI_V3_VERSION,
+            parameters: parameters_ptr,
+            parameters_len,
+        };
+        // SAFETY: the trusted launcher supplied distinct inherited socket fds.
+        let context = unsafe {
+            CallbackContext::from_raw_fds(args.planner_fd, args.executor_fd, args.result_fd)
+        };
+        // Keep callback state alive until the worker's immediate `_exit`, even
+        // if hostile library code retains the context pointer on another thread.
+        let context = Box::leak(Box::new(context));
+        let host = HostApiV3 {
+            struct_size: std::mem::size_of::<HostApiV3>() as u32,
+            abi_version: QUERY_ABI_V3_VERSION,
+            context: (context as *mut CallbackContext).cast(),
+            executor_request: Some(executor_request_v2 as QueryIpcRequestV2),
+            planner_request: Some(planner_request_v2 as QueryIpcRequestV2),
+            write_result: Some(write_result_v2 as QueryWriteResultV2),
+            statement_failure: Some(statement_failure_v3 as QueryStatementFailureV3),
+        };
+        // SAFETY: all host and invocation storage remains alive through the call.
+        let status = unsafe { entry(&host, &invocation) };
+        let latched_statement_failure = context.statement_failed.load(Ordering::SeqCst);
+        let _ = handle;
+        Ok(query_exit_status(status, latched_statement_failure))
+    }
+
+    fn query_exit_status(entry_status: i32, statement_failed: bool) -> i32 {
+        if statement_failed { 1 } else { entry_status }
     }
 
     unsafe fn execute_v2_library(
@@ -410,6 +485,7 @@ mod worker {
         planner: IpcChannel,
         result: Mutex<UnixStream>,
         total_result_bytes: AtomicU64,
+        statement_failed: AtomicBool,
     }
 
     impl CallbackContext {
@@ -426,8 +502,22 @@ mod worker {
                 planner,
                 result: Mutex::new(result),
                 total_result_bytes: AtomicU64::new(0),
+                statement_failed: AtomicBool::new(false),
             }
         }
+    }
+
+    unsafe extern "C" fn statement_failure_v3(context: *mut c_void, failure_code: u32) -> i32 {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if context.is_null() || failure_code != QUERY_STATEMENT_FAILURE_SQL {
+                return CALLBACK_INVALID_ARGUMENT;
+            }
+            // SAFETY: the host table exposes this only with its live callback context.
+            let context = unsafe { &*context.cast::<CallbackContext>() };
+            context.statement_failed.store(true, Ordering::SeqCst);
+            CALLBACK_OK
+        }))
+        .unwrap_or(CALLBACK_INTERNAL_ERROR)
     }
 
     unsafe extern "C" fn executor_request_v2(
@@ -812,6 +902,23 @@ mod worker {
             let status =
                 unsafe { write_result_v2(context_ptr, bytes.as_ptr(), bytes.len() as u64) };
             assert_eq!(status, CALLBACK_LIMIT_EXCEEDED);
+        }
+
+        #[test]
+        fn caught_statement_failure_forces_worker_failure() {
+            let (planner, _planner_peer) = UnixStream::pair().unwrap();
+            let (executor, _executor_peer) = UnixStream::pair().unwrap();
+            let (result, _result_peer) = UnixStream::pair().unwrap();
+            let context = callback_context(planner, executor, result);
+            let context_ptr = (&context as *const CallbackContext).cast_mut().cast();
+            // SAFETY: the host-owned callback context is live and valid.
+            assert_eq!(unsafe { statement_failure_v3(context_ptr, 1) }, CALLBACK_OK);
+            assert!(context.statement_failed.load(Ordering::SeqCst));
+            // A query may catch the SDK return and report success. The trusted
+            // worker still converts the sticky failure into process failure.
+            assert_eq!(query_exit_status(0, true), 1);
+            assert_eq!(query_exit_status(17, true), 1);
+            assert_eq!(query_exit_status(0, false), 0);
         }
     }
 }

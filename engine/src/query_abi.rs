@@ -1,5 +1,6 @@
 //! Versioned C entry-point contracts for query libraries. V1 carries only
-//! parameters; v2 adds bounded role-bound IPC and provisional result callbacks.
+//! parameters; v2 adds bounded role-bound IPC/results, and v3 adds a sticky
+//! statement-failure callback.
 
 use std::ffi::c_int;
 
@@ -9,6 +10,10 @@ pub const QUERY_ENTRY_SYMBOL: &str = "prdb_query_main_v1";
 pub const QUERY_ABI_V2_VERSION: u32 = 2;
 pub const QUERY_DESCRIPTOR_V2_SYMBOL: &str = "prdb_query_descriptor_v2";
 pub const QUERY_ENTRY_V2_SYMBOL: &str = "prdb_query_main_v2";
+pub const QUERY_ABI_V3_VERSION: u32 = 3;
+pub const QUERY_DESCRIPTOR_V3_SYMBOL: &str = "prdb_query_descriptor_v3";
+pub const QUERY_ENTRY_V3_SYMBOL: &str = "prdb_query_main_v3";
+pub const QUERY_STATEMENT_FAILURE_SQL: u32 = 1;
 pub const MAX_PARAMETER_BYTES: u64 = 1024 * 1024;
 pub const MAX_IPC_REQUEST_BYTES: u64 = 1024 * 1024;
 pub const MAX_RESULT_CHUNK_BYTES: u64 = 16 * 1024;
@@ -32,6 +37,11 @@ pub type QueryIpcRequestV2 = unsafe extern "C" fn(
 pub type QueryWriteResultV2 =
     unsafe extern "C" fn(context: *mut std::ffi::c_void, bytes: *const u8, bytes_len: u64) -> i32;
 
+/// Sticky notification that a SQL statement failed. The host records this
+/// independently of the query entry-point return value.
+pub type QueryStatementFailureV3 =
+    unsafe extern "C" fn(context: *mut std::ffi::c_void, failure_code: u32) -> i32;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct HostApiV2 {
@@ -42,6 +52,20 @@ pub struct HostApiV2 {
     pub planner_request: Option<QueryIpcRequestV2>,
     pub write_result: Option<QueryWriteResultV2>,
 }
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct HostApiV3 {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub context: *mut std::ffi::c_void,
+    pub executor_request: Option<QueryIpcRequestV2>,
+    pub planner_request: Option<QueryIpcRequestV2>,
+    pub write_result: Option<QueryWriteResultV2>,
+    pub statement_failure: Option<QueryStatementFailureV3>,
+}
+
+pub type InvocationV3 = InvocationV2;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -61,7 +85,17 @@ pub struct QueryDescriptorV2 {
     pub invocation_size: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct QueryDescriptorV3 {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub host_api_size: u32,
+    pub invocation_size: u32,
+}
+
 pub type QueryMainV2 = unsafe extern "C" fn(*const HostApiV2, *const InvocationV2) -> c_int;
+pub type QueryMainV3 = unsafe extern "C" fn(*const HostApiV3, *const InvocationV3) -> c_int;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -152,6 +186,8 @@ pub enum DescriptorV2Error {
     InvocationSize,
 }
 
+pub type DescriptorV3Error = DescriptorV2Error;
+
 /// Check the descriptor exported by a query library against this host's v1
 /// layouts before looking up or calling the entry point.
 pub fn validate_descriptor_v1(descriptor: &QueryDescriptorV1) -> Result<(), DescriptorError> {
@@ -182,6 +218,23 @@ pub fn validate_descriptor_v2(descriptor: &QueryDescriptorV2) -> Result<(), Desc
         return Err(DescriptorV2Error::HostApiSize);
     }
     if descriptor.invocation_size != std::mem::size_of::<InvocationV2>() as u32 {
+        return Err(DescriptorV2Error::InvocationSize);
+    }
+    Ok(())
+}
+
+/// Check the exported v3 descriptor before resolving its entry point.
+pub fn validate_descriptor_v3(descriptor: &QueryDescriptorV3) -> Result<(), DescriptorV3Error> {
+    if descriptor.struct_size != std::mem::size_of::<QueryDescriptorV3>() as u32 {
+        return Err(DescriptorV2Error::StructSize);
+    }
+    if descriptor.abi_version != QUERY_ABI_V3_VERSION {
+        return Err(DescriptorV2Error::AbiVersion);
+    }
+    if descriptor.host_api_size != std::mem::size_of::<HostApiV3>() as u32 {
+        return Err(DescriptorV2Error::HostApiSize);
+    }
+    if descriptor.invocation_size != std::mem::size_of::<InvocationV3>() as u32 {
         return Err(DescriptorV2Error::InvocationSize);
     }
     Ok(())

@@ -12,7 +12,15 @@ typedef struct mock_host {
     uint64_t batch_len;
     uint32_t planner_calls;
     uint32_t executor_calls;
+    uint32_t statement_failed;
 } mock_host;
+
+static int32_t statement_failure(void *context, uint32_t failure_code) {
+    mock_host *mock = (mock_host *)context;
+    assert(failure_code == PRDB_QUERY_STATEMENT_FAILURE_SQL);
+    mock->statement_failed = 1;
+    return PRDB_QUERY_CALLBACK_OK;
+}
 
 static int32_t planner_request(void *context, uint16_t operation,
                                const uint8_t *request, uint64_t request_len,
@@ -160,9 +168,10 @@ int main(void) {
                                          PRDB_SDK_PLANNER_TABLE_HANDLE_KIND, 0x99);
     uint32_t executor_len = make_relation(executor_payload, 6, 0x22);
     mock_host mock = {planner_payload, planner_len, executor_payload,
-                      executor_len, batch_payload, sizeof(batch_payload), 0, 0};
-    prdb_host_api_v2 host = {sizeof(host), PRDB_QUERY_ABI_V2_VERSION,
-                             &mock, executor_request, planner_request, NULL};
+                      executor_len, batch_payload, sizeof(batch_payload), 0, 0, 0};
+    prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
+                             &mock, executor_request, planner_request, NULL,
+                             statement_failure};
     prdb_sdk_value_v1 parameter = {sizeof(parameter),
                                    PRDB_SDK_VALUE_ABI_V1_VERSION,
                                    PRDB_SDK_VALUE_STATE_VALUE,
@@ -175,6 +184,9 @@ int main(void) {
     prdb_sdk_sql_column_shape_v2 executor_columns[1] = {{0}};
     prdb_sdk_value_v1 cell_scratch[1] = {{0}};
     result_state result = {0, 0};
+    assert(sizeof(prdb_host_api_v3) == 48);
+    assert(sizeof(prdb_query_descriptor_v3_record) == 16);
+    assert(sizeof(prdb_invocation_v3) == 24);
     assert(prdb_sdk_sql_execute_select_v2(
                &host, schema, sizeof(schema) - 1, sql, sizeof(sql) - 1,
                &parameter, 1, 1, 1024, planner_response,
@@ -185,6 +197,7 @@ int main(void) {
            PRDB_SDK_SQL_EXEC_OK);
     assert(mock.planner_calls == 1 && mock.executor_calls == 4);
     assert(result.calls == 1);
+    assert(mock.statement_failed == 0);
 
     mock.executor_calls = 0;
     result.calls = 0;
@@ -198,8 +211,10 @@ int main(void) {
                1, cell_scratch, 1, on_row, &result) ==
            PRDB_SDK_SQL_EXEC_RESULT_ERROR);
     assert(mock.executor_calls == 4 && result.calls == 1);
+    assert(mock.statement_failed == 1);
 
     mock.executor_calls = 0;
+    mock.statement_failed = 0;
     result.calls = 0;
     result.fail = 0;
     assert(prdb_sdk_sql_execute_select_v2(
@@ -211,6 +226,7 @@ int main(void) {
                1, cell_scratch, 1, on_row, &result) ==
            PRDB_SDK_SQL_EXEC_OK);
     assert(mock.executor_calls == 1 && result.calls == 0);
+    assert(mock.statement_failed == 0);
 
     parameter.type_code = PRDB_SDK_VALUE_TYPE_BIGINT;
     mock.executor_calls = 0;
@@ -225,5 +241,6 @@ int main(void) {
                1, cell_scratch, 1, on_row, &result) ==
            PRDB_SDK_SQL_EXEC_BIND_ERROR);
     assert(mock.executor_calls == 1 && result.calls == 0);
+    assert(mock.statement_failed == 1);
     return 0;
 }

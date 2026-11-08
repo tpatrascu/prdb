@@ -2,6 +2,7 @@
 #define PRDB_SDK_SQL_EXEC_V2_H
 
 #include "prdb_sdk_executor_v1.h"
+#include "prdb_query_abi_v3.h"
 
 #define PRDB_SDK_SQL_EXEC_V2_ABI_VERSION UINT32_C(1)
 #define PRDB_SDK_SQL_EXEC_MAX_NEXT_REQUESTS UINT32_C(253)
@@ -30,7 +31,7 @@ typedef int32_t (*prdb_sdk_sql_result_row_v2_fn)(
  * schema must be the invocation's admitted schema for this unqualified SQL
  * relation. No native allocation is performed. */
 int32_t prdb_sdk_sql_execute_select_v2(
-    const prdb_host_api_v2 *host,
+    const prdb_host_api_v3 *host,
     const uint8_t *schema, uint32_t schema_len,
     const uint8_t *sql, uint64_t sql_len,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,

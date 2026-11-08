@@ -2,6 +2,14 @@
 
 #include <string.h>
 
+static int32_t fail_statement(const prdb_host_api_v3 *host, int32_t status) {
+    if (status != PRDB_SDK_SQL_EXEC_OK) {
+        (void)host->statement_failure(host->context,
+                                      PRDB_QUERY_STATEMENT_FAILURE_SQL);
+    }
+    return status;
+}
+
 static int same_relation_shape(const prdb_sdk_planner_relation_v1 *planned,
                                const prdb_sdk_executor_relation_v1 *resolved,
                                const prdb_sdk_sql_column_shape_v2 *planned_columns,
@@ -22,7 +30,7 @@ static int same_relation_shape(const prdb_sdk_planner_relation_v1 *planned,
 }
 
 int32_t prdb_sdk_sql_execute_select_v2(
-    const prdb_host_api_v2 *host, const uint8_t *schema, uint32_t schema_len,
+    const prdb_host_api_v3 *host_v3, const uint8_t *schema, uint32_t schema_len,
     const uint8_t *sql, uint64_t sql_len,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     uint16_t max_candidates, uint32_t max_batch_bytes,
@@ -51,8 +59,21 @@ int32_t prdb_sdk_sql_execute_select_v2(
     int cursor_open = 0;
     int32_t status;
     int32_t final_status = PRDB_SDK_SQL_EXEC_OK;
+    prdb_host_api_v2 base_host;
+    const prdb_host_api_v2 *host;
 
-    if (host == NULL || schema == NULL || sql == NULL || planner_response == NULL ||
+    if (host_v3 == NULL || host_v3->struct_size < sizeof(*host_v3) ||
+        host_v3->abi_version != PRDB_QUERY_ABI_V3_VERSION ||
+        host_v3->statement_failure == NULL ||
+        host_v3->executor_request == NULL || host_v3->planner_request == NULL) {
+        return PRDB_SDK_SQL_EXEC_INVALID_ARGUMENT;
+    }
+    base_host = (prdb_host_api_v2){
+        sizeof(prdb_host_api_v2), PRDB_QUERY_ABI_V2_VERSION, host_v3->context,
+        host_v3->executor_request, host_v3->planner_request,
+        host_v3->write_result};
+    host = &base_host;
+    if (schema == NULL || sql == NULL || planner_response == NULL ||
         executor_response == NULL || batch_response == NULL || on_row == NULL ||
         planner_columns == NULL || executor_columns == NULL ||
         cell_scratch == NULL || planner_column_capacity == 0 ||
@@ -62,11 +83,13 @@ int32_t prdb_sdk_sql_execute_select_v2(
         max_candidates == 0 || max_candidates > PRDB_SDK_BATCH_MAX_ROWS ||
         max_batch_bytes < 8 || max_batch_bytes > PRDB_SDK_BATCH_MAX_BYTES ||
         (parameter_count != 0 && parameters == NULL)) {
-        return PRDB_SDK_SQL_EXEC_INVALID_ARGUMENT;
+        return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_INVALID_ARGUMENT);
     }
     status = prdb_sdk_sql_parse_select_v2(sql, sql_len, &statement,
                                           sizeof(statement), NULL);
-    if (status != PRDB_SDK_SQL_OK) return PRDB_SDK_SQL_EXEC_BIND_ERROR;
+    if (status != PRDB_SDK_SQL_OK) {
+        return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_BIND_ERROR);
+    }
 
     status = prdb_sdk_planner_describe_relation_v1(
         host, schema, schema_len, statement.sql + statement.relation.offset,
@@ -74,25 +97,29 @@ int32_t prdb_sdk_sql_execute_select_v2(
         &planner_response_len, &planned, sizeof(planned), planner_columns,
         planner_column_capacity);
     if (status != PRDB_SDK_PLANNER_REQUEST_OK) {
-        return PRDB_SDK_SQL_EXEC_PLANNER_ERROR;
+        return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_PLANNER_ERROR);
     }
     status = prdb_sdk_executor_resolve_relation_v1(
         host, schema, schema_len, statement.sql + statement.relation.offset,
         statement.relation.length, executor_response,
         executor_response_capacity, &executor_response_len, &resolved,
         sizeof(resolved), executor_columns, executor_column_capacity);
-    if (status != PRDB_SDK_EXECUTOR_OK) return PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR;
+    if (status != PRDB_SDK_EXECUTOR_OK) {
+        return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
+    }
     if (!same_relation_shape(&planned, &resolved, planner_columns,
                              executor_columns)) {
-        return PRDB_SDK_SQL_EXEC_SHAPE_MISMATCH;
+        return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_SHAPE_MISMATCH);
     }
     if (cell_scratch_capacity < resolved.column_count) {
-        return PRDB_SDK_SQL_EXEC_INVALID_ARGUMENT;
+        return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_INVALID_ARGUMENT);
     }
     status = prdb_sdk_sql_bind_select_v2(
         &statement, resolved.name, resolved.name_len, executor_columns,
         resolved.column_count, &binding, sizeof(binding));
-    if (status != PRDB_SDK_SQL_BIND_OK) return PRDB_SDK_SQL_EXEC_BIND_ERROR;
+    if (status != PRDB_SDK_SQL_BIND_OK) {
+        return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_BIND_ERROR);
+    }
     for (uint32_t index = 0; index < statement.predicate_count; ++index) {
         const prdb_sdk_predicate_node_v2 *node = &statement.predicates[index];
         if (node->node_kind == PRDB_SDK_SQL_PREDICATE_COMPARE) {
@@ -112,7 +139,7 @@ int32_t prdb_sdk_sql_execute_select_v2(
                 column->decimal_scale, &bound_parameter,
                 sizeof(bound_parameter));
             if (status != PRDB_SDK_SQL_EVAL_OK) {
-                return PRDB_SDK_SQL_EXEC_BIND_ERROR;
+                return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_BIND_ERROR);
             }
         }
     }
@@ -121,7 +148,9 @@ int32_t prdb_sdk_sql_execute_select_v2(
     status = prdb_sdk_executor_open_full_scan_v1(
         host, resolved.executor_handle, executor_response,
         executor_response_capacity, &executor_response_len, cursor);
-    if (status != PRDB_SDK_EXECUTOR_OK) return PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR;
+    if (status != PRDB_SDK_EXECUTOR_OK) {
+        return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
+    }
     cursor_open = 1;
 
     for (;;) {
@@ -185,5 +214,5 @@ int32_t prdb_sdk_sql_execute_select_v2(
             final_status = PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR;
         }
     }
-    return final_status;
+    return fail_statement(host_v3, final_status);
 }

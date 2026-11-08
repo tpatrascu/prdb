@@ -1,9 +1,10 @@
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
 use prdb_engine::query_abi::{
-    BorrowedInvocationV1, HostApiV1, HostApiV2, InvocationV1, InvocationV2, ParameterError,
-    QUERY_ABI_V2_VERSION, QUERY_ABI_VERSION, QueryDescriptorV1, QueryDescriptorV2,
-    validate_descriptor_v1, validate_descriptor_v2,
+    BorrowedInvocationV1, HostApiV1, HostApiV2, HostApiV3, InvocationV1, InvocationV2,
+    InvocationV3, ParameterError, QUERY_ABI_V2_VERSION, QUERY_ABI_V3_VERSION, QUERY_ABI_VERSION,
+    QueryDescriptorV1, QueryDescriptorV2, QueryDescriptorV3, validate_descriptor_v1,
+    validate_descriptor_v2, validate_descriptor_v3,
 };
 
 #[test]
@@ -32,6 +33,33 @@ fn query_abi_v2_layout_matches_the_x86_64_c_contract() {
     assert_eq!(std::mem::align_of::<InvocationV2>(), 8);
     assert_eq!(std::mem::offset_of!(InvocationV2, parameters), 8);
     assert_eq!(std::mem::offset_of!(InvocationV2, parameters_len), 16);
+}
+
+#[test]
+fn query_abi_v3_layout_and_descriptor_match_the_c_contract() {
+    assert_eq!(std::mem::size_of::<HostApiV3>(), 48);
+    assert_eq!(std::mem::align_of::<HostApiV3>(), 8);
+    assert_eq!(std::mem::offset_of!(HostApiV3, context), 8);
+    assert_eq!(std::mem::offset_of!(HostApiV3, executor_request), 16);
+    assert_eq!(std::mem::offset_of!(HostApiV3, planner_request), 24);
+    assert_eq!(std::mem::offset_of!(HostApiV3, write_result), 32);
+    assert_eq!(std::mem::offset_of!(HostApiV3, statement_failure), 40);
+    assert_eq!(std::mem::size_of::<QueryDescriptorV3>(), 16);
+    assert_eq!(std::mem::size_of::<InvocationV3>(), 24);
+
+    let valid = QueryDescriptorV3 {
+        struct_size: std::mem::size_of::<QueryDescriptorV3>() as u32,
+        abi_version: QUERY_ABI_V3_VERSION,
+        host_api_size: std::mem::size_of::<HostApiV3>() as u32,
+        invocation_size: std::mem::size_of::<InvocationV3>() as u32,
+    };
+    assert!(validate_descriptor_v3(&valid).is_ok());
+    let mut invalid = valid;
+    invalid.abi_version = QUERY_ABI_V2_VERSION;
+    assert!(validate_descriptor_v3(&invalid).is_err());
+    invalid = valid;
+    invalid.host_api_size -= 1;
+    assert!(validate_descriptor_v3(&invalid).is_err());
 }
 
 #[test]
