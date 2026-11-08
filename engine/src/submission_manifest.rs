@@ -499,8 +499,13 @@ mod tests {
         CLIENT_PROTOCOL_MINOR, MANIFEST_V1_HEADER_BYTES, MAX_MANIFEST_DEPENDENCIES, ManifestError,
         VersionedSubmissionMetadataValidator, decode_elf_needed_dependencies, decode_manifest_v1,
     };
-    use crate::supervisor::{SubmissionMetadata, SubmissionMetadataValidator, WorkloadClass};
+    use crate::supervisor::{
+        ChunkKind, PrepareSubmission, StagingError, StagingLimits, StagingOwner, StagingStore,
+        SubmissionMetadata, SubmissionMetadataValidator, WorkloadClass,
+    };
+    use sha2::{Digest, Sha256};
     use std::collections::HashSet;
+    use std::sync::Arc;
 
     fn manifest() -> ArtifactManifestV1 {
         ArtifactManifestV1 {
@@ -547,14 +552,16 @@ mod tests {
             manifest_version: 1,
             manifest,
             scope_version: 1,
-            requested_scope: {
-                let mut scope = b"PSC1\0\x01\x02\x02".to_vec();
-                scope.extend([1; 16]);
-                scope
-            },
+            requested_scope: requested_scope(),
             deadline_ms: 30_000,
             workload_class: WorkloadClass::Operational,
         }
+    }
+
+    fn requested_scope() -> Vec<u8> {
+        let mut scope = b"PSC1\0\x01\x02\x02".to_vec();
+        scope.extend([1; 16]);
+        scope
     }
 
     fn profile() -> ArtifactCompatibilityProfile {
@@ -771,5 +778,60 @@ mod tests {
         assert!(
             !validator.validate_artifact(&valid_metadata, &elf_with_dependencies(&["libc.so.6"]))
         );
+    }
+
+    #[test]
+    fn staging_seal_validates_manifest_against_its_pinned_artifact() {
+        let owner = StagingOwner::authenticated([1; 16], [2; 16]);
+        let validator = Arc::new(VersionedSubmissionMetadataValidator::new(profile()));
+
+        let accepts = elf_with_dependencies(&["libc.so.6", "libm.so.6"]);
+        let accept_store = StagingStore::new(StagingLimits::default(), validator.clone()).unwrap();
+        let accepted = prepare_and_upload(&accept_store, owner, &manifest(), &accepts);
+        assert_eq!(accept_store.seal(owner, accepted), Ok(()));
+
+        let mismatched = elf_with_dependencies(&["libc.so.6"]);
+        let reject_store = StagingStore::new(StagingLimits::default(), validator).unwrap();
+        let rejected = prepare_and_upload(&reject_store, owner, &manifest(), &mismatched);
+        assert_eq!(
+            reject_store.seal(owner, rejected),
+            Err(StagingError::InvalidMetadata)
+        );
+    }
+
+    fn prepare_and_upload(
+        store: &StagingStore,
+        owner: StagingOwner,
+        manifest: &ArtifactManifestV1,
+        artifact: &[u8],
+    ) -> [u8; 16] {
+        let parameter_digest = Sha256::digest([]).into();
+        let reservation = store
+            .prepare(
+                owner,
+                PrepareSubmission {
+                    manifest_version: 1,
+                    manifest: encode(manifest),
+                    artifact_bytes: artifact.len() as u64,
+                    artifact_sha256: Sha256::digest(artifact).into(),
+                    scope_version: 1,
+                    requested_scope: requested_scope(),
+                    parameter_bytes: 0,
+                    parameter_sha256: parameter_digest,
+                    deadline_ms: 30_000,
+                    workload_class: WorkloadClass::Operational,
+                },
+            )
+            .unwrap();
+        store
+            .upload_chunk(
+                owner,
+                reservation.invocation_id,
+                ChunkKind::Artifact,
+                0,
+                artifact,
+            )
+            .unwrap();
+        reservation.invocation_id
     }
 }

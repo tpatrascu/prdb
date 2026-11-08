@@ -1590,3 +1590,11 @@
 - Verification: Rust/Cargo 1.95.0, rustfmt 1.9.0, Clippy 0.1.95, TinyCC 0.9.27-unstable-2025-01-06 were verified in the prescribed Nix shell. Workspace build, format check, warning-denied Clippy, all workspace tests, and `git diff --check` passed. The engine library had 33 passing unit tests; the commit target had 109 passing and 2 pre-existing cgroup/TinyCC fixture tests ignored.
 - Decisions: manifest encoding uses the 28-byte `PMF1` header and bounded canonical body specified in the SDK contract. Deployment-specific CPU/runtime profile and dependency allowlist remain configuration inputs, since the repository has not selected its final TinyCC/runtime profile.
 - Remaining: supervisor executable integration, production profile configuration, and sandboxed scope-to-storage acceptance remain open.
+
+## SM-6: manifest validation through staging SEAL — verified
+
+- Behavior and normative contracts: [client protocol](../../specs/client-protocol.md), PREPARE/SEAL; [client SDK](../../specs/client-sdk.md), Artifact Manifest v1; and [supervisor staging](../../specs/supervisor.md). SEAL must validate the artifact bytes that were uploaded and pinned in that reservation.
+- Regression: [submission_manifest.rs](../../engine/src/submission_manifest.rs) now stages canonical metadata and ELF fixtures through `StagingStore::prepare`, `upload_chunk`, and `seal`. The matching dependency set seals successfully; an ELF missing a declared dependency is rejected as `InvalidMetadata`.
+- Red/green evidence: temporarily making SEAL call metadata-only `validate` caused the mismatch reservation to seal successfully and the new test failed at the expected assertion. Restoring `validate_artifact` makes it pass.
+- Verification: focused regression passed in the prescribed Nix shell. Workspace build, format check, warning-denied Clippy, all workspace tests, and `git diff --check` passed. The engine library had 34 passing unit tests; the commit target had 109 passing and 2 pre-existing cgroup/TinyCC fixture tests ignored.
+- Remaining: supervisor executable integration, production compatibility-profile configuration, and execution inside the sandbox remain open.
