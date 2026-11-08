@@ -1506,11 +1506,16 @@ impl InvocationAdmissionPermit {
     }
 
     pub(crate) fn try_mark_committing(&self) -> bool {
+        self.try_mark_committing_then(|| {})
+    }
+
+    fn try_mark_committing_then(&self, after_transition: impl FnOnce()) -> bool {
         let mut live = self
             .state
             .live
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut after_transition = Some(after_transition);
         loop {
             let phase = live
                 .entries
@@ -1525,6 +1530,10 @@ impl InvocationAdmissionPermit {
                     let principal_id = invocation.principal_id;
                     live.advance_owner_generation(principal_id);
                     self.state.changed.notify_all();
+                    drop(live);
+                    after_transition
+                        .take()
+                        .expect("commit transition hook is consumed once")();
                     return true;
                 }
                 Some((LiveInvocationPhase::CancellationPending, _)) => {
@@ -7296,4 +7305,65 @@ fn lookup_credential_principal(
     let credential =
         decode_verifier_record(&record).map_err(|_| TransactionError::AuthenticationFailed)?;
     Ok(credential.user_id)
+}
+
+#[cfg(test)]
+mod commit_cancellation_boundary_tests {
+    use super::{OwnerCancellationResult, StorageManager, StorageManagerConfig};
+    use redb::Database;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn cancellation_after_committing_transition_is_too_late()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture_id = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "prdb-cancel-boundary-{}-{fixture_id}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory)?;
+        let database = Database::create(directory.join("boundary.redb"))?;
+        let storage =
+            StorageManager::from_validated_database(&database, StorageManagerConfig::default())?;
+        let invocation_id = [0x73; 16];
+        let principal_id = [0x74; 16];
+        let permit = storage
+            .admissions
+            .acquire(invocation_id, principal_id, 1_000, Duration::from_secs(60))
+            .map_err(|error| {
+                std::io::Error::other(format!("unexpected admission error: {error:?}"))
+            })?;
+        let (transition_sender, transition_receiver) = mpsc::sync_channel(0);
+        let (resume_sender, resume_receiver) = mpsc::sync_channel(0);
+
+        std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+            let transition_thread = scope.spawn(move || {
+                permit.try_mark_committing_then(|| {
+                    transition_sender.send(()).unwrap();
+                    resume_receiver.recv().unwrap();
+                })
+            });
+            transition_receiver.recv()?;
+            assert_eq!(
+                storage.cancel_owned_invocation(principal_id, invocation_id, 1_001)?,
+                OwnerCancellationResult::TooLate
+            );
+            resume_sender.send(())?;
+            assert!(
+                transition_thread
+                    .join()
+                    .map_err(|_| std::io::Error::other("commit transition thread panicked"))?
+            );
+            Ok(())
+        })?;
+
+        drop(storage);
+        drop(database);
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
+    }
 }
