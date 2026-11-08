@@ -7326,13 +7326,10 @@ fn foreign_key_creation_racing_orphan_child_insert_is_atomic()
                 .is_some()
         );
         drop(read);
-        storage.drop_foreign_key(
-            id(0xef),
-            actor,
-            foreign_key_id,
-            9_999,
-            identity_audit_event(0xf0, actor, foreign_key_id),
-        )?;
+        let drop_invocation = id(0xef);
+        let mut drop_audit = identity_audit_event(0xf0, actor, foreign_key_id);
+        drop_audit.correlation_id = drop_invocation;
+        storage.drop_foreign_key(drop_invocation, actor, foreign_key_id, 9_999, drop_audit)?;
     }
     prdb_engine::startup::validate_persisted_records(&database)?;
     Ok(())
@@ -13307,6 +13304,185 @@ fn storage_manager_checks_index_ddl_authority_for_current_actor()
             .get(&[213; 16][..])?
             .is_none()
     );
+    Ok(())
+}
+
+#[test]
+fn index_ddl_racing_table_owner_transfer_rechecks_authority_at_commit()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::storage_manager::{
+        CreateTableRequest, SchemaLifecycleError, TableColumnDefinition, TableLifecycleError,
+    };
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(500))?;
+    let admin_role = builtin_owner_id();
+    let owner = id(0xb1);
+    let administrator = id(0xb2);
+    let successor = id(0xb3);
+    let mut setup_audit = identity_audit_event(0xb4, admin_role, owner);
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(
+        id(0xb4),
+        admin_role,
+        9_999,
+        &[
+            principal_write_with_name(owner, 1, 1, "index_race_owner"),
+            object_write_with_name(owner, 8, "index_race_owner"),
+            principal_write_with_name(administrator, 1, 1, "index_race_admin"),
+            object_write_with_name(administrator, 8, "index_race_admin"),
+            membership_write(administrator, admin_role),
+            dependency_write(administrator, admin_role, 5),
+            principal_write_with_name(successor, 1, 1, "index_race_successor"),
+            object_write_with_name(successor, 8, "index_race_successor"),
+        ],
+        &[setup_audit],
+    )?;
+    let schema_invocation = id(0xb5);
+    let mut schema_audit = identity_audit_event(0xb6, administrator, owner);
+    schema_audit.correlation_id = schema_invocation;
+    let schema = storage
+        .create_schema(
+            schema_invocation,
+            administrator,
+            "index_race_schema",
+            owner,
+            9_999,
+            schema_audit,
+        )
+        .map_err(|error: SchemaLifecycleError| format!("schema setup failed: {error:?}"))?;
+    let table_invocation = id(0xb7);
+    let mut table_audit = identity_audit_event(0xb8, owner, schema.schema_id);
+    table_audit.correlation_id = table_invocation;
+    let table = storage.create_table(CreateTableRequest {
+        invocation_id: table_invocation,
+        authenticated_actor_id: owner,
+        schema_id: schema.schema_id,
+        name: "indexed_table".to_owned(),
+        columns: vec![TableColumnDefinition {
+            name: "value".to_owned(),
+            scalar_type: ScalarType::Bytea,
+            nullable: true,
+            generated_uuid_identity: false,
+            default: None,
+        }],
+        retention_deadline_us: 9_999,
+        audit_event: table_audit,
+    })?;
+
+    let index_id = id(0xb9);
+    let (index_key, index_payload) =
+        index_definition_with_columns(index_id, table.table_id, &table.column_ids);
+    let index_key_for_commit = index_key.clone();
+    let index_invocation = id(0xba);
+    let transfer_invocation = id(0xbb);
+    let before_race = commit_sequence(&database)?;
+    let barrier = Arc::new(Barrier::new(3));
+    let (index_result, transfer_result) = std::thread::scope(|scope| {
+        let index_barrier = barrier.clone();
+        let index_storage = &storage;
+        let index = scope.spawn(move || {
+            let mut audit = identity_audit_event(0xbc, owner, table.table_id);
+            audit.correlation_id = index_invocation;
+            index_barrier.wait();
+            index_storage.commit_authorized_index_ddl(
+                index_invocation,
+                owner,
+                9_999,
+                &[
+                    CatalogWrite {
+                        key: index_key_for_commit,
+                        expected_value: None,
+                        payload: Some(index_payload),
+                    },
+                    object_write_with_owner(index_id, 7, owner),
+                ],
+                &[audit],
+            )
+        });
+        let transfer_barrier = barrier.clone();
+        let transfer_storage = &storage;
+        let transfer = scope.spawn(move || {
+            let mut audit = identity_audit_event(0xbd, administrator, table.table_id);
+            audit.correlation_id = transfer_invocation;
+            transfer_barrier.wait();
+            transfer_storage.set_table_owner(
+                transfer_invocation,
+                administrator,
+                table.table_id,
+                successor,
+                9_999,
+                audit,
+            )
+        });
+        barrier.wait();
+        (
+            index.join().expect("index DDL thread panicked"),
+            transfer.join().expect("owner transfer thread panicked"),
+        )
+    });
+
+    let (index_status, transfer_status) = match (index_result, transfer_result) {
+        (Ok(_), Ok(_)) => (OutcomeStatus::Committed, OutcomeStatus::Committed),
+        (Ok(_), Err(TableLifecycleError::Commit(CommitError::Conflict))) => {
+            (OutcomeStatus::Committed, OutcomeStatus::Aborted)
+        }
+        (Err(CommitError::DdlAuthorizationDenied), Ok(_)) => {
+            (OutcomeStatus::Aborted, OutcomeStatus::Committed)
+        }
+        (index, transfer) => {
+            panic!("unexpected index/owner-transfer race: index={index:?}, transfer={transfer:?}")
+        }
+    };
+    assert_eq!(
+        commit_sequence(&database)?,
+        before_race
+            + u64::from(index_status == OutcomeStatus::Committed)
+            + u64::from(transfer_status == OutcomeStatus::Committed)
+    );
+    assert_eq!(
+        lookup_outcome(&database, index_invocation, owner, 1)?
+            .ok_or("missing raced index outcome")?
+            .status,
+        index_status
+    );
+    assert_eq!(
+        lookup_outcome(&database, transfer_invocation, administrator, 1)?
+            .ok_or("missing raced owner-transfer outcome")?
+            .status,
+        transfer_status
+    );
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    assert_eq!(
+        catalog.get(index_key.as_slice())?.is_some(),
+        index_status == OutcomeStatus::Committed
+    );
+    let table_object = decode_registered_envelope(
+        catalog
+            .get(id_catalog_key(2, table.table_id).as_slice())?
+            .ok_or("table object missing after owner race")?
+            .value(),
+    )?;
+    let final_owner = table_object
+        .fields
+        .iter()
+        .find(|field| field.tag == 4)
+        .ok_or("table owner missing after owner race")?
+        .payload
+        .as_slice();
+    assert_eq!(
+        final_owner,
+        if transfer_status == OutcomeStatus::Committed {
+            successor.as_slice()
+        } else {
+            owner.as_slice()
+        }
+    );
+    drop(catalog);
+    drop(read);
+    prdb_engine::startup::validate_persisted_records(&database)?;
     Ok(())
 }
 
