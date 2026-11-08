@@ -19,7 +19,7 @@ mod service {
         observe_executor_relay_and_finalize_gateway, run_gateway_service_with_recovery,
     };
     use std::collections::HashSet;
-    use std::os::unix::fs::FileTypeExt;
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
     use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -159,8 +159,9 @@ mod service {
         install_signal_handlers()?;
         let shutdown = Arc::new(AtomicBool::new(false));
         let signal_shutdown = Arc::clone(&shutdown);
-        let socket_was_bound = Arc::new(AtomicBool::new(false));
-        let bind_socket_state = Arc::clone(&socket_was_bound);
+        let socket_identity = Arc::new(std::sync::Mutex::new(None));
+        let bind_socket_state = Arc::clone(&socket_identity);
+        let bind_socket_path = socket_path.clone();
         let signal_monitor = std::thread::spawn(move || {
             while !SIGNAL_REQUESTED.load(Ordering::Acquire)
                 && !signal_shutdown.load(Ordering::Acquire)
@@ -176,9 +177,16 @@ mod service {
             runtime,
             Arc::clone(&shutdown),
             move || {
-                let remove_own_stale_socket = bind_socket_state.swap(false, Ordering::AcqRel);
-                let listener = bind_private_socket(&socket_path, remove_own_stale_socket)?;
-                bind_socket_state.store(true, Ordering::Release);
+                let previous_identity = bind_socket_state
+                    .lock()
+                    .map_err(|_| std::io::Error::other("service socket identity lock poisoned"))?
+                    .take();
+                let listener = bind_private_socket(&bind_socket_path, previous_identity)?;
+                let metadata = std::fs::symlink_metadata(&bind_socket_path)?;
+                let mut identity = bind_socket_state
+                    .lock()
+                    .map_err(|_| std::io::Error::other("service socket identity lock poisoned"))?;
+                *identity = Some((metadata.dev(), metadata.ino()));
                 Ok(listener)
             },
             |manager, request_id, stream, mut invocation, _submission, mut executor| {
@@ -197,28 +205,57 @@ mod service {
         signal_monitor
             .join()
             .map_err(|_| "supervisor signal monitor panicked")?;
+        let identity = socket_identity
+            .lock()
+            .map_err(|_| "service socket identity lock poisoned")?
+            .take();
+        let cleanup_result = remove_owned_service_socket(&socket_path, identity);
         result?;
+        cleanup_result?;
         Ok(())
     }
 
     fn bind_private_socket(
         path: &std::path::Path,
-        remove_own_stale_socket: bool,
+        previously_owned: Option<(u64, u64)>,
     ) -> std::io::Result<UnixListener> {
         match std::fs::symlink_metadata(path) {
-            Ok(metadata) if metadata.file_type().is_socket() && remove_own_stale_socket => {
+            Ok(metadata)
+                if metadata.file_type().is_socket()
+                    && previously_owned == Some((metadata.dev(), metadata.ino())) =>
+            {
                 std::fs::remove_file(path)?;
             }
             Ok(_) => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::AlreadyExists,
-                    "service socket path exists and is not a socket",
+                    "service socket path exists and is not this supervisor's socket",
                 ));
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
         bind_gateway_service_socket(path)
+    }
+
+    fn remove_owned_service_socket(
+        path: &std::path::Path,
+        owned: Option<(u64, u64)>,
+    ) -> std::io::Result<()> {
+        let Some(owned) = owned else {
+            return Ok(());
+        };
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata)
+                if metadata.file_type().is_socket()
+                    && owned == (metadata.dev(), metadata.ino()) =>
+            {
+                std::fs::remove_file(path)
+            }
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     fn parse_options() -> Result<Options, Box<dyn std::error::Error>> {
