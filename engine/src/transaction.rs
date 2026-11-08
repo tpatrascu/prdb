@@ -53,6 +53,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 const MAX_INDEX_CHANGES_PER_ROW: usize = 256;
+pub const MAX_INVOCATION_SCAN_CANDIDATES: usize = 65_536;
 const INFORMATION_SCHEMA_ID: [u8; 16] = crate::metadata_discovery::INFORMATION_SCHEMA_SCHEMA_ID;
 const INFORMATION_SCHEMA_COLUMN_EXTRA_BYTES: usize =
     "TIMESTAMP WITH TIME ZONE".len() + "YES".len() + 4 + 3 * 5 + 16;
@@ -82,6 +83,7 @@ pub enum TransactionError {
     ConstraintViolation,
     IndexOverlayLimitExceeded,
     InvalidScanRequest,
+    ScanBudgetExceeded,
     CorruptRowKey,
     ScanStillActive,
     CorruptCatalog,
@@ -252,6 +254,8 @@ pub struct InvocationTransaction<'db> {
     aborted: bool,
     outcome_recorded: bool,
     active_scan: Option<ActiveRowScan>,
+    max_scan_candidates: usize,
+    scanned_candidates: usize,
     active_relation_scan: Option<ActiveRelationScan>,
     active_schema_scan: Option<ActiveSchemaScan>,
     active_column_scan: Option<ActiveColumnScan>,
@@ -493,6 +497,7 @@ pub(crate) struct InvocationCoordination {
     ddl_fences: Option<DdlFenceCoordinator>,
     _admission_permit: Option<InvocationAdmissionPermit>,
     max_age: Option<(Instant, Duration)>,
+    max_scan_candidates: usize,
 }
 
 impl InvocationCoordination {
@@ -501,6 +506,7 @@ impl InvocationCoordination {
             ddl_fences: None,
             _admission_permit: None,
             max_age: None,
+            max_scan_candidates: MAX_INVOCATION_SCAN_CANDIDATES,
         }
     }
 
@@ -509,6 +515,7 @@ impl InvocationCoordination {
             ddl_fences: Some(ddl_fences),
             _admission_permit: None,
             max_age: None,
+            max_scan_candidates: MAX_INVOCATION_SCAN_CANDIDATES,
         }
     }
 
@@ -516,11 +523,13 @@ impl InvocationCoordination {
         ddl_fences: DdlFenceCoordinator,
         admission_permit: InvocationAdmissionPermit,
         max_age: Duration,
+        max_scan_candidates: usize,
     ) -> Self {
         Self {
             ddl_fences: Some(ddl_fences),
             _admission_permit: Some(admission_permit),
             max_age: Some((Instant::now(), max_age)),
+            max_scan_candidates,
         }
     }
 
@@ -675,6 +684,8 @@ impl<'db> InvocationTransaction<'db> {
             principal_id,
             requested_scope: None,
             retention_deadline_us,
+            max_scan_candidates: coordination.max_scan_candidates,
+            scanned_candidates: 0,
             coordination,
             aborted: false,
             outcome_recorded: false,
@@ -863,6 +874,11 @@ impl<'db> InvocationTransaction<'db> {
             row_ids.sort_unstable();
             row_ids.dedup();
             row_ids.truncate(max_scanned);
+            self.scanned_candidates = self
+                .scanned_candidates
+                .checked_add(row_ids.len())
+                .filter(|scanned| *scanned <= self.max_scan_candidates)
+                .ok_or(TransactionError::ScanBudgetExceeded)?;
             let complete = snapshot_complete && overlay_complete && row_ids.len() < max_scanned;
             let after_row_id = row_ids.last().copied();
             let mut rows = Vec::with_capacity(row_ids.len());

@@ -1805,3 +1805,12 @@
 - Regression: `storage_open_rejects_a_truncated_redb_image_and_releases_the_instance_lock` creates a READY instance, truncates its committed redb file to one byte, and verifies `StorageInstance::open` refuses admission. It restores the original image and verifies a subsequent open and full persisted-record validation succeed, proving the failed attempt releases the instance lock.
 - Verification: the focused bootstrap integration test passed with the pinned Nix toolchain.
 - Scope: fail-closed behavior for a severely truncated local image; it does not simulate torn writes, arbitrary page corruption, or power loss.
+
+## SM-3 / SM-7: cumulative authorized row-scan work budget — implemented
+
+- Contract: [memory storage](../../specs/memory-storage.md) and [storage manager](../../specs/storage-manager.md). Per-page caps alone must not let one long-lived invocation scan unbounded candidate rows across repeated pages.
+- Implementation: `StorageManagerConfig::max_invocation_scan_candidates` defaults to 65,536. Managed transactions receive this cap; trusted low-level transactions use the same default. Candidate row identities are charged once per page after merging snapshot and overlay IDs, before authorization filtering. Exceeding the cap returns `ScanBudgetExceeded`, aborts the transaction, discards staged writes, and persists ABORTED.
+- Red evidence: disabling the cumulative cap made the new regression continue to a third page, so its expected `ScanBudgetExceeded` assertion failed. Restoring the cap makes the test pass.
+- Regression: `managed_scan_candidate_budget_is_cumulative_and_aborts_private_writes` configures a budget of two, consumes it across two one-row pages, then verifies the third page aborts, the staged write is absent, and the durable outcome is ABORTED. The storage-manager configuration test also rejects a zero budget.
+- Verification: the focused scan-budget transaction test and storage-manager configuration test passed under the pinned Nix toolchain.
+- Scope: bounds authorized row-scan candidates. Metadata discovery and other CPU/memory work still require separate cumulative accounting; this is not a complete invocation memory/work budget.

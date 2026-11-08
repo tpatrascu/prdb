@@ -4967,6 +4967,143 @@ fn authorized_row_scan_pages_over_the_pinned_snapshot_and_private_overlay()
         ),
         Err(TransactionError::InvalidScanRequest)
     ));
+
+    Ok(())
+}
+
+#[test]
+fn managed_scan_candidate_budget_is_cumulative_and_aborts_private_writes()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::storage_manager::{StorageManager, StorageManagerConfig};
+    use zeroize::Zeroize;
+
+    let fixture = Fixture::new();
+    let data_directory = fixture.0.join("data");
+    let mut bootstrap =
+        prdb_engine::bootstrap::initialize(&data_directory, "scan_admin", i64::MAX)?;
+    let mut secret = bootstrap.take_secret().ok_or("bootstrap secret missing")?;
+    secret.zeroize();
+    let instance = bootstrap.acknowledge()?;
+    let database = instance.database();
+    let storage = StorageManager::with_config(
+        database,
+        StorageManagerConfig {
+            max_invocation_scan_candidates: 2,
+            ..StorageManagerConfig::default()
+        },
+    )?;
+
+    let columns = [ColumnSchema {
+        scalar_type: ScalarType::Text,
+        nullable: false,
+    }];
+    let column_id = [0x22; 16];
+    let column_ids = [column_id];
+    let schema_id = [0x23; 16];
+    let table_id = id(0).table;
+    let mut seed = InvocationTransaction::begin(database, [0x31; 16], [9; 16], i64::MAX, 4, 512)?;
+    for row_id in 1..=3 {
+        let payload = encode_tuple(
+            &columns,
+            1,
+            &[Some(ScalarValue::Text(format!("row-{row_id}")))],
+        )?;
+        seed.stage_put(id(row_id), &payload)?;
+    }
+    seed.commit()?;
+
+    let context = AuthorizationContext {
+        principal_id: [9; 16],
+        role_ids: std::collections::HashSet::new(),
+        scope: std::collections::HashSet::from([
+            (Operation::Usage, AccessTarget::Schema(schema_id)),
+            (Operation::Select, AccessTarget::Table(table_id)),
+            (
+                Operation::Select,
+                AccessTarget::Column {
+                    table_id,
+                    column_id,
+                },
+            ),
+        ]),
+    };
+    let grants = [
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Usage,
+            target: AccessTarget::Schema(schema_id),
+        },
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Select,
+            target: AccessTarget::Column {
+                table_id,
+                column_id,
+            },
+        },
+    ];
+    let table_policy = Policy {
+        subjects: vec![Subject::Principal([9; 16])],
+        operation: Operation::Select,
+        target: AccessTarget::Table(table_id),
+        effect: Effect::Allow,
+        using: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+        with_check: None,
+    };
+    let cell_policy = Policy {
+        target: AccessTarget::Column {
+            table_id,
+            column_id,
+        },
+        ..table_policy.clone()
+    };
+    let policies = [table_policy, cell_policy];
+    let projection = AuthorizedProjection {
+        columns: &columns,
+        column_ids: &column_ids,
+        schema_version: 1,
+        schema_id,
+        context: &context,
+        grants: &grants,
+        policies: &policies,
+        checks: &[],
+        policy_driving_columns: &[],
+        dependencies: &[],
+    };
+
+    let invocation_id = [0x38; 16];
+    let mut invocation = storage.begin_invocation(invocation_id, [9; 16], i64::MAX, 4, 512)?;
+    let staged_id = prdb_engine::overlay::RowId {
+        table: [0x11; 16],
+        row: [0x12; 16],
+    };
+    invocation.stage_put(staged_id, b"discard after the scan budget is exceeded")?;
+    let first_page = invocation.scan_authorized(table_id, None, 1, &projection)?;
+    assert!(first_page.continuation.is_some());
+    let second_page =
+        invocation.scan_authorized(table_id, first_page.continuation.as_ref(), 1, &projection)?;
+    assert!(second_page.continuation.is_some());
+    assert!(matches!(
+        invocation.scan_authorized(table_id, second_page.continuation.as_ref(), 1, &projection,),
+        Err(TransactionError::ScanBudgetExceeded)
+    ));
+    assert!(matches!(
+        invocation.commit(),
+        Err(TransactionError::Aborted)
+    ));
+
+    let read = database.begin_read()?;
+    assert!(read.open_table(ROWS)?.get(&key(staged_id)[..])?.is_none());
+    assert_eq!(
+        InvocationOutcome::decode(
+            read.open_table(prdb_engine::schema::OUTCOMES)?
+                .get(&invocation_id[..])?
+                .ok_or("scan budget failure did not persist ABORTED")?
+                .value(),
+        )?
+        .status,
+        OutcomeStatus::Aborted
+    );
     Ok(())
 }
 

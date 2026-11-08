@@ -69,13 +69,16 @@ static UNCERTAIN_INVOCATION_REGISTRIES: OnceLock<
 /// Admission and coordination limits for one storage-manager handle.
 ///
 /// Defaults allow at most 128 simultaneous invocation snapshots, a 15-minute
-/// lifetime per managed invocation, and 30 token-lifecycle and administrative
-/// cancellation requests per actor per rolling minute.
+/// lifetime, and 65,536 row-scan candidates per managed invocation, plus 30
+/// token-lifecycle and administrative cancellation requests per actor per
+/// rolling minute.
 #[derive(Clone, Copy, Debug)]
 pub struct StorageManagerConfig {
     pub ddl_fence_timeout: Duration,
     pub max_active_invocations: usize,
     pub max_invocation_age: Duration,
+    /// Maximum row candidates scanned across all row-scan pages in one invocation.
+    pub max_invocation_scan_candidates: usize,
     pub max_token_lifecycle_requests_per_minute: usize,
     pub max_admin_cancellation_requests_per_minute: usize,
 }
@@ -86,6 +89,7 @@ impl Default for StorageManagerConfig {
             ddl_fence_timeout: Duration::from_secs(5),
             max_active_invocations: 128,
             max_invocation_age: Duration::from_secs(15 * 60),
+            max_invocation_scan_candidates: crate::transaction::MAX_INVOCATION_SCAN_CANDIDATES,
             max_token_lifecycle_requests_per_minute: 30,
             max_admin_cancellation_requests_per_minute: 30,
         }
@@ -96,6 +100,7 @@ impl Default for StorageManagerConfig {
 pub enum StorageManagerConfigError {
     ZeroActiveInvocationLimit,
     ZeroInvocationAge,
+    ZeroInvocationScanCandidateLimit,
     ZeroTokenLifecycleRequestLimit,
     ZeroAdminCancellationRequestLimit,
 }
@@ -675,6 +680,7 @@ pub struct StorageManager<'db> {
     token_requests: Arc<TokenRequestLimiter>,
     admin_cancellation_requests: Arc<TokenRequestLimiter>,
     max_invocation_age: Duration,
+    max_invocation_scan_candidates: usize,
 }
 
 /// One token-authenticated invocation owned by the trusted supervisor-facing
@@ -1808,6 +1814,11 @@ impl<'db> StorageManager<'db> {
                 StorageManagerConfigError::ZeroInvocationAge,
             ));
         }
+        if config.max_invocation_scan_candidates == 0 {
+            return Err(StorageManagerInitError::Config(
+                StorageManagerConfigError::ZeroInvocationScanCandidateLimit,
+            ));
+        }
         if config.max_token_lifecycle_requests_per_minute == 0 {
             return Err(StorageManagerInitError::Config(
                 StorageManagerConfigError::ZeroTokenLifecycleRequestLimit,
@@ -1836,6 +1847,7 @@ impl<'db> StorageManager<'db> {
             token_requests,
             admin_cancellation_requests,
             max_invocation_age: config.max_invocation_age,
+            max_invocation_scan_candidates: config.max_invocation_scan_candidates,
         })
     }
 
@@ -1847,6 +1859,10 @@ impl<'db> StorageManager<'db> {
 
     pub fn max_invocation_age(&self) -> Duration {
         self.max_invocation_age
+    }
+
+    pub fn max_invocation_scan_candidates(&self) -> usize {
+        self.max_invocation_scan_candidates
     }
 
     /// Whether a managed invocation hit an ambiguous redb commit error and
@@ -1890,6 +1906,7 @@ impl<'db> StorageManager<'db> {
                 self.ddl_fences.clone(),
                 admission_permit,
                 self.max_invocation_age,
+                self.max_invocation_scan_candidates,
             ),
             invocation_id,
             principal_id,
