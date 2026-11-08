@@ -15130,6 +15130,223 @@ fn sandboxed_v3_sql_error_latches_failure_and_durably_aborts_after_partial_outpu
     Ok(())
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+#[ignore = "requires a delegated cgroup and the built TinyCC SQL write/read fixture"]
+fn sandboxed_v3_sql_insert_is_visible_to_following_select_and_commits()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::client_protocol::{ClientConnectionSession, ClientFrame, ClientMode};
+    use prdb_engine::ipc::{Operation, read_frame};
+    use prdb_engine::outcome::OutcomeStatus;
+    use prdb_engine::storage_manager::{CreateTableRequest, TableColumnDefinition};
+    use prdb_engine::supervisor::{
+        ChunkKind, PrepareSubmission, StagingLimits, StagingStore, SubmissionMetadata,
+        SubmissionMetadataValidator, WorkloadClass,
+    };
+    use prdb_engine::supervisor_ipc::{
+        GatewayAdmissionConfig, GatewayExecutorConfig, GatewayTerminalDecision,
+        observe_executor_relay_and_finalize_gateway,
+    };
+    use prdb_engine::tuple::ScalarType;
+    use sha2::{Digest, Sha256};
+    use std::os::unix::net::UnixStream;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct AcceptFixture;
+    impl SubmissionMetadataValidator for AcceptFixture {
+        fn supports_versions(&self, manifest_version: u32, scope_version: u32) -> bool {
+            manifest_version == 1 && scope_version == 1
+        }
+
+        fn validate(&self, metadata: &SubmissionMetadata) -> bool {
+            metadata.manifest == b"m" && metadata.requested_scope == b"s"
+        }
+    }
+
+    fn required_paths(name: &str) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+        let value = std::env::var_os(name)
+            .ok_or_else(|| format!("{name} must list the sandbox runtime paths"))?;
+        let paths = std::env::split_paths(&value).collect::<Vec<_>>();
+        if paths.is_empty() || paths.iter().any(|path| !path.is_absolute()) {
+            return Err(format!("{name} must contain absolute paths").into());
+        }
+        Ok(paths)
+    }
+
+    let cgroup_parent = std::env::var_os("PRDB_TEST_CGROUP_PARENT")
+        .map(PathBuf::from)
+        .ok_or("PRDB_TEST_CGROUP_PARENT must name a delegated cgroup v2 parent")?;
+    let artifact_path = std::env::var_os("PRDB_TEST_WRITE_READ_QUERY_ARTIFACT")
+        .map(PathBuf::from)
+        .ok_or("PRDB_TEST_WRITE_READ_QUERY_ARTIFACT must name sql-v3-write-read.so")?;
+    if !cgroup_parent.is_absolute() || !artifact_path.is_absolute() {
+        return Err("sandbox test paths must be absolute".into());
+    }
+    let artifact = std::fs::read(&artifact_path)?;
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
+    let user_id = id(0x7a);
+    let token_id = id(0x7b);
+    let secret = [0x42; 32];
+    let admin_role = builtin_owner_id();
+    let mut setup_audit = identity_audit_event(0x7c, admin_role, user_id);
+    setup_audit.action = AuditAction::AuthorityChange;
+    setup_audit.correlation_id = id(0x7c);
+    let setup_invocation = id(0x7c);
+    StorageManager::new(&database, Duration::from_millis(100))?.commit_catalog_and_audit(
+        setup_invocation,
+        admin_role,
+        now + 3_600_000_000,
+        &[
+            principal_write_with_name(user_id, 1, 1, "sandbox_sql_roundtrip"),
+            object_write_with_name(user_id, 8, "sandbox_sql_roundtrip"),
+            credential_verifier_write(
+                token_id,
+                user_id,
+                &secret,
+                now - 1_000_000,
+                now + 60_000_000,
+                None,
+                1,
+            ),
+            membership_write(user_id, admin_role),
+            dependency_write(user_id, admin_role, 5),
+        ],
+        &[setup_audit],
+    )?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let schema_invocation = id(0x7d);
+    let mut schema_audit = identity_audit_event(0x7e, user_id, id(0x7f));
+    schema_audit.correlation_id = schema_invocation;
+    let schema = storage.create_schema(
+        schema_invocation,
+        user_id,
+        "sql_roundtrip",
+        user_id,
+        now + 3_600_000_000,
+        schema_audit,
+    )?;
+    let table_invocation = id(0x80);
+    let mut table_audit = identity_audit_event(0x81, user_id, id(0x82));
+    table_audit.correlation_id = table_invocation;
+    storage.create_table(CreateTableRequest {
+        invocation_id: table_invocation,
+        authenticated_actor_id: user_id,
+        schema_id: schema.schema_id,
+        name: "records".to_owned(),
+        columns: vec![TableColumnDefinition {
+            name: "id".to_owned(),
+            scalar_type: ScalarType::Integer,
+            nullable: true,
+            generated_uuid_identity: false,
+            default: None,
+        }],
+        retention_deadline_us: now + 3_600_000_000,
+        audit_event: table_audit,
+    })?;
+
+    let mut client = ClientConnectionSession::default();
+    client.accept_hello(ClientMode::Query, "sandbox-sql-write-read")?;
+    client.authenticate(&storage, token_id, &secret)?;
+    let owner = client.staging_owner()?;
+    let staging = StagingStore::new(StagingLimits::default(), Arc::new(AcceptFixture))?;
+    let reservation = staging.prepare(
+        owner,
+        PrepareSubmission {
+            manifest_version: 1,
+            manifest: b"m".to_vec(),
+            artifact_bytes: u64::try_from(artifact.len())?,
+            artifact_sha256: Sha256::digest(&artifact).into(),
+            scope_version: 1,
+            requested_scope: b"s".to_vec(),
+            parameter_bytes: 0,
+            parameter_sha256: Sha256::digest([]).into(),
+            deadline_ms: 30_000,
+            workload_class: WorkloadClass::Operational,
+        },
+    )?;
+    staging.upload_chunk(
+        owner,
+        reservation.invocation_id,
+        ChunkKind::Artifact,
+        0,
+        &artifact,
+    )?;
+    staging.seal(owner, reservation.invocation_id)?;
+
+    let invocation_hex = reservation
+        .invocation_id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let runtime = GatewayExecutorConfig {
+        cgroup_parent,
+        resource_limits: prdb_engine::linux_sandbox::WorkerResourceLimits {
+            cpu_quota_micros: 500_000,
+            cpu_period_micros: 100_000,
+            memory_max_bytes: 256 * 1024 * 1024,
+            max_processes: 32,
+        },
+        launch: prdb_engine::executor_launcher::ExecutorLaunchConfig {
+            executor_path: PathBuf::from(env!("CARGO_BIN_EXE_prdb-executor")),
+            scratch_parent: std::env::temp_dir(),
+            runtime_read_execute: required_paths("PRDB_TEST_RUNTIME_READ_EXECUTE")?,
+            runtime_read_only: required_paths("PRDB_TEST_RUNTIME_READ_ONLY")?,
+            cleanup_timeout: Duration::from_secs(2),
+        },
+    };
+    let (accepted, mut invocation, mut executor) = client.handle_start_request_with_executor(
+        &storage,
+        &staging,
+        ClientFrame {
+            kind: 7,
+            request_id: 1,
+            response_sequence: 0,
+            payload: format!("{{\"invocation_id\":\"{invocation_hex}\"}}").into_bytes(),
+        },
+        GatewayAdmissionConfig {
+            retention_deadline_us: now + 3_600_000_000,
+            max_rows: 8,
+            max_bytes: 4096,
+        },
+        &runtime,
+    )?;
+    assert_eq!(accepted.payload, b"{\"state\":\"accepted\"}");
+
+    let (mut service, mut gateway) = UnixStream::pair()?;
+    gateway.set_read_timeout(Some(Duration::from_secs(10)))?;
+    assert_eq!(
+        observe_executor_relay_and_finalize_gateway(
+            &storage,
+            &mut invocation,
+            &mut executor,
+            &mut service,
+            accepted.request_id,
+        )?,
+        GatewayTerminalDecision::Commit
+    );
+    staging.finish_started(owner, reservation.invocation_id)?;
+    let result = read_frame(&mut gateway)?.ok_or("missing read-after-write result")?;
+    assert_eq!(result.operation, Operation::GatewayResultData as u16);
+    assert_eq!(result.request_id, accepted.request_id);
+    assert_eq!(result.payload, b"read-after-insert");
+    let terminal = read_frame(&mut gateway)?.ok_or("missing committed terminal event")?;
+    assert_eq!(terminal.operation, Operation::GatewayTerminal as u16);
+    assert_eq!(terminal.request_id, accepted.request_id);
+    assert!(String::from_utf8(terminal.payload)?.contains("\"outcome\":\"committed\""));
+    assert_eq!(
+        storage
+            .lookup_invocation_outcome(reservation.invocation_id, user_id, now + 1)?
+            .ok_or("missing durable invocation outcome")?
+            .status,
+        OutcomeStatus::Committed
+    );
+    Ok(())
+}
+
 #[test]
 fn supervisor_cancellation_and_deadline_during_worker_wait_abort()
 -> Result<(), Box<dyn std::error::Error>> {

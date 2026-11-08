@@ -56,6 +56,14 @@
 - Verification: focused TinyCC parser and SQL execution fixtures pass; the full maintained TinyCC SDK fixture suite passes. Rust 1.95.0 build, `cargo fmt --all -- --check`, Clippy with warnings denied, and workspace tests pass. One sandboxed SQL integration test is ignored because delegated cgroup support is unavailable. No live sandbox/storage write evidence was produced.
 - Limits/next: host callback fixtures do not establish sandboxed executor or live Rust storage behavior. SQL INSERT/UPDATE/DELETE own-write sequencing, end-to-end write commit, and delegated-cgroup sandbox acceptance remain open.
 
+## SQL-4 sandboxed INSERT then SELECT acceptance path — prepared, not run
+
+- Artifact: [`sql_v3_write_read.c`](../../engine/tests/fixtures/sql_v3_write_read.c) calls the existing INSERT runner and then SELECT runner with the same v3 host callbacks. The SELECT callback checks that the inserted row is visible with SQL NULL and emits a result marker only after seeing that row.
+- Rust acceptance test: `sandboxed_v3_sql_insert_is_visible_to_following_select_and_commits` provisions an owner-scoped nullable Integer table, stages the TinyCC artifact through authenticated submission, runs it in the confined executor, and expects the provisional marker followed by a storage-confirmed COMMITTED terminal event.
+- Tooling: `make -f engine/sdk/Makefile sandbox-query-fixture` now builds this artifact alongside the caught-error fixture. [`SANDBOX_TEST.md`](SANDBOX_TEST.md) documents its environment variable and opt-in command.
+- Verification: the artifact builds with TinyCC and the new Rust integration test compiles. The integration test has not been executed because this host has no delegated cgroup; no live own-write or commit evidence is claimed. Run it with the declared runtime profile on a delegated-cgroup host.
+- Next: execute the integration on a conforming Linux host, then extend the real path to UPDATE/DELETE and verify transaction abort after a later statement error.
+
 ## SQL-4 v2 schema column binding — implemented
 
 - Contract: `prdb_sdk_sql_bind_select_v2` receives the v2 statement, one already-resolved authorized relation name, and its declared column shape. It maps unquoted projection and predicate names to zero-based ordinals using ASCII case folding, and attaches scalar/Decimal metadata to predicate leaves.

@@ -29,6 +29,7 @@ SDK_SQL_EXEC_TEST := $(BUILD_DIR)/sdk-sql-execute-v2
 SDK_SQL_RESULT_TEST := $(BUILD_DIR)/sdk-sql-result-v1
 SDK_SQL_DML_TEST := $(BUILD_DIR)/sdk-sql-dml-v1
 SQL_V3_CAUGHT_ERROR_QUERY := $(BUILD_DIR)/sql-v3-caught-error.so
+SQL_V3_WRITE_READ_QUERY := $(BUILD_DIR)/sql-v3-write-read.so
 
 .PHONY: all test
 
@@ -96,8 +97,12 @@ $(SDK_SQL_DML_TEST): engine/tests/fixtures/sdk_sql_dml_v1.c $(SDK_ARCHIVE) $(INC
 $(SQL_V3_CAUGHT_ERROR_QUERY): engine/tests/fixtures/sql_v3_caught_error.c $(SDK_ARCHIVE) $(INCLUDE_DIR)/prdb_query_abi_v3.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v2.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -shared -I"$(INCLUDE_DIR)" "$<" "$(SDK_ARCHIVE)" -o "$@"
 
+# This is an untrusted query artifact; run it only with the sandbox acceptance test.
+$(SQL_V3_WRITE_READ_QUERY): engine/tests/fixtures/sql_v3_write_read.c $(SDK_ARCHIVE) $(INCLUDE_DIR)/prdb_query_abi_v3.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v2.h | $(BUILD_DIR)
+	$(TCC) -Wall -Wextra -Werror -shared -I"$(INCLUDE_DIR)" "$<" "$(SDK_ARCHIVE)" -o "$@"
+
 .PHONY: sandbox-query-fixture
-sandbox-query-fixture: $(SQL_V3_CAUGHT_ERROR_QUERY)
+sandbox-query-fixture: $(SQL_V3_CAUGHT_ERROR_QUERY) $(SQL_V3_WRITE_READ_QUERY)
 
 test: $(SDK_VALUE_TEST) $(SDK_BATCH_TEST) $(SDK_SQL_TEST) $(SDK_SQL_EXPRESSION_TEST) $(SDK_SQL_V2_TEST) $(SDK_PLANNER_TEST) $(SDK_EXECUTOR_TEST) $(SDK_SQL_EXEC_TEST) $(SDK_SQL_RESULT_TEST) $(SDK_SQL_DML_TEST)
 	"$(SDK_VALUE_TEST)"
