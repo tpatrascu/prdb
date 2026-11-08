@@ -94,6 +94,21 @@ pub struct AdminIndexResult {
     pub commit_sequence: u64,
 }
 
+/// Result of creating a user or role through the control channel.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminIdentityResult {
+    pub operation_id: [u8; 16],
+    pub identity_id: [u8; 16],
+    pub commit_sequence: u64,
+}
+
+/// Result of an administrative operation that does not create an identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminOperationResult {
+    pub operation_id: [u8; 16],
+    pub commit_sequence: u64,
+}
+
 /// One bounded page from a permission-filtered metadata query.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MetadataPage<T> {
@@ -767,6 +782,219 @@ impl AdminClient {
         Ok(Self { transport })
     }
 
+    /// Create a login identity. New users have no credential until a token is issued.
+    pub fn create_user(&mut self, name: &str) -> Result<AdminIdentityResult, ClientSubmitError> {
+        self.create_identity("users.create", name, "user_id")
+    }
+
+    /// Create a role identity.
+    pub fn create_role(&mut self, name: &str) -> Result<AdminIdentityResult, ClientSubmitError> {
+        self.create_identity("roles.create", name, "role_id")
+    }
+
+    pub fn rename_user(
+        &mut self,
+        user_id: [u8; 16],
+        name: &str,
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        self.rename_identity("users.rename", "user_id", user_id, name)
+    }
+
+    pub fn rename_role(
+        &mut self,
+        role_id: [u8; 16],
+        name: &str,
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        self.rename_identity("roles.rename", "role_id", role_id, name)
+    }
+
+    pub fn drop_user(
+        &mut self,
+        user_id: [u8; 16],
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        self.drop_identity("users.drop", "user_id", user_id)
+    }
+
+    pub fn drop_role(
+        &mut self,
+        role_id: [u8; 16],
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        self.drop_identity("roles.drop", "role_id", role_id)
+    }
+
+    /// Enable or disable login for a user. Disabling login revokes that user's tokens.
+    pub fn set_user_login(
+        &mut self,
+        user_id: [u8; 16],
+        enabled: bool,
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        validate_admin_id(user_id)?;
+        self.execute_admin_operation(
+            "users.login",
+            format!(
+                "{{\"user_id\":\"{}\",\"enabled\":\"{enabled}\"}}",
+                lower_hex(&user_id)
+            ),
+            None,
+        )
+        .map(|(result, _)| result)
+    }
+
+    pub fn grant_role(
+        &mut self,
+        member_id: [u8; 16],
+        role_id: [u8; 16],
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        self.change_role_membership("roles.grant", member_id, role_id)
+    }
+
+    pub fn revoke_role(
+        &mut self,
+        member_id: [u8; 16],
+        role_id: [u8; 16],
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        self.change_role_membership("roles.revoke", member_id, role_id)
+    }
+
+    fn create_identity(
+        &mut self,
+        operation: &str,
+        name: &str,
+        id_field: &str,
+    ) -> Result<AdminIdentityResult, ClientSubmitError> {
+        validate_admin_name(name)?;
+        let (result, identity_id) = self.execute_admin_operation(
+            operation,
+            format!("{{\"name\":\"{name}\"}}"),
+            Some(id_field),
+        )?;
+        Ok(AdminIdentityResult {
+            operation_id: result.operation_id,
+            identity_id: identity_id.ok_or(ClientSubmitError::InvalidResponse)?,
+            commit_sequence: result.commit_sequence,
+        })
+    }
+
+    fn rename_identity(
+        &mut self,
+        operation: &str,
+        id_field: &str,
+        identity_id: [u8; 16],
+        name: &str,
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        validate_admin_id(identity_id)?;
+        validate_admin_name(name)?;
+        self.execute_admin_operation(
+            operation,
+            format!(
+                "{{\"{id_field}\":\"{}\",\"name\":\"{name}\"}}",
+                lower_hex(&identity_id)
+            ),
+            None,
+        )
+        .map(|(result, _)| result)
+    }
+
+    fn drop_identity(
+        &mut self,
+        operation: &str,
+        id_field: &str,
+        identity_id: [u8; 16],
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        validate_admin_id(identity_id)?;
+        self.execute_admin_operation(
+            operation,
+            format!("{{\"{id_field}\":\"{}\"}}", lower_hex(&identity_id)),
+            None,
+        )
+        .map(|(result, _)| result)
+    }
+
+    fn change_role_membership(
+        &mut self,
+        operation: &str,
+        member_id: [u8; 16],
+        role_id: [u8; 16],
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        validate_admin_id(member_id)?;
+        validate_admin_id(role_id)?;
+        if member_id == role_id {
+            return Err(ClientSubmitError::InvalidAdministrativeRequest);
+        }
+        self.execute_admin_operation(
+            operation,
+            format!(
+                "{{\"member_id\":\"{}\",\"role_id\":\"{}\"}}",
+                lower_hex(&member_id),
+                lower_hex(&role_id)
+            ),
+            None,
+        )
+        .map(|(result, _)| result)
+    }
+
+    fn execute_admin_operation(
+        &mut self,
+        operation: &str,
+        arguments: String,
+        created_id_field: Option<&str>,
+    ) -> Result<(AdminOperationResult, Option<[u8; 16]>), ClientSubmitError> {
+        let prepare = format!(
+            "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"{operation}\",\"arguments\":{arguments}}}"
+        );
+        let prepared = self.transport.exchange(10, prepare.into_bytes())?;
+        let fields = parse_flat_response(&prepared.payload)?;
+        let operation_id = response_id(&fields, "operation_id")?;
+        if fields.len() != 2 || take_string(&fields, "state").as_deref() != Some("prepared") {
+            return Err(ClientSubmitError::InvalidResponse);
+        }
+        let start = format!(
+            "{{\"phase\":\"start\",\"operation_id\":\"{}\"}}",
+            lower_hex(&operation_id)
+        );
+        let started = match self.transport.exchange(10, start.into_bytes()) {
+            Ok(response) => response,
+            Err(ClientSubmitError::ServerRejected(message)) => {
+                return Err(ClientSubmitError::AdministrativeOperationRejected {
+                    operation_id,
+                    message,
+                });
+            }
+            Err(_) => {
+                return Err(ClientSubmitError::AdministrativeOutcomeUncertain(
+                    operation_id,
+                ));
+            }
+        };
+        let fields = parse_flat_response(&started.payload)
+            .map_err(|_| ClientSubmitError::AdministrativeOutcomeUncertain(operation_id))?;
+        let response_operation_id = response_id(&fields, "operation_id").ok();
+        let outcome = fields.get("outcome").and_then(ResponseValue::as_string);
+        let sequence = fields
+            .get("commit_sequence")
+            .and_then(ResponseValue::as_string)
+            .and_then(|text| parse_canonical_positive_u64(text.to_owned()));
+        let created_id = created_id_field.and_then(|key| response_id(&fields, key).ok());
+        let expected_fields = 3 + usize::from(created_id_field.is_some());
+        if fields.len() != expected_fields
+            || response_operation_id != Some(operation_id)
+            || outcome != Some("committed")
+            || sequence.is_none()
+            || (created_id_field.is_some() && created_id.is_none())
+        {
+            return Err(ClientSubmitError::AdministrativeOutcomeUncertain(
+                operation_id,
+            ));
+        }
+        Ok((
+            AdminOperationResult {
+                operation_id,
+                commit_sequence: sequence.unwrap(),
+            },
+            created_id,
+        ))
+    }
+
     /// Create an ordinary index using the authenticated control connection.
     pub fn create_index(
         &mut self,
@@ -945,6 +1173,22 @@ fn is_normalized_index_name(name: &str) -> bool {
         && bytes
             .iter()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_')
+}
+
+fn validate_admin_name(name: &str) -> Result<(), ClientSubmitError> {
+    if is_normalized_index_name(name) {
+        Ok(())
+    } else {
+        Err(ClientSubmitError::InvalidAdministrativeRequest)
+    }
+}
+
+fn validate_admin_id(id: [u8; 16]) -> Result<(), ClientSubmitError> {
+    if id == [0; 16] {
+        Err(ClientSubmitError::InvalidAdministrativeRequest)
+    } else {
+        Ok(())
+    }
 }
 
 fn discovery_records(
@@ -1438,7 +1682,8 @@ fn hex_nibble(byte: u8) -> Option<u8> {
 mod tests {
     use super::{
         ClientSubmitError, ResponseValue, decode_hex_array, is_normalized_index_name,
-        parse_canonical_positive_u64, parse_flat_response, validate_index_request,
+        parse_canonical_positive_u64, parse_flat_response, validate_admin_id, validate_admin_name,
+        validate_index_request,
     };
 
     #[test]
@@ -1465,6 +1710,24 @@ mod tests {
         assert_eq!(parse_canonical_positive_u64("42".to_owned()), Some(42));
         assert_eq!(parse_canonical_positive_u64("0".to_owned()), None);
         assert_eq!(parse_canonical_positive_u64("042".to_owned()), None);
+    }
+
+    #[test]
+    fn administrative_identity_validation_matches_canonical_names_and_nonzero_ids() {
+        assert!(validate_admin_name("alice_9").is_ok());
+        assert!(matches!(
+            validate_admin_name("Alice"),
+            Err(ClientSubmitError::InvalidAdministrativeRequest)
+        ));
+        assert!(matches!(
+            validate_admin_name("has-dash"),
+            Err(ClientSubmitError::InvalidAdministrativeRequest)
+        ));
+        assert!(validate_admin_id([1; 16]).is_ok());
+        assert!(matches!(
+            validate_admin_id([0; 16]),
+            Err(ClientSubmitError::InvalidAdministrativeRequest)
+        ));
     }
 
     #[test]

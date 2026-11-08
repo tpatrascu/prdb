@@ -203,6 +203,110 @@ fn admin_client_returns_operation_id_when_start_reply_is_lost() {
     server.join().unwrap();
 }
 
+#[test]
+fn admin_client_sends_typed_user_and_role_lifecycle_requests() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut decoder = ClientFrameDecoder::default();
+        establish_control_session(&mut stream, &mut decoder);
+        let cases = [
+            ("users.create", r#"{"name":"alice"}"#, Some("user_id")),
+            ("roles.create", r#"{"name":"analyst"}"#, Some("role_id")),
+            (
+                "roles.grant",
+                r#"{"member_id":"01010101010101010101010101010101","role_id":"02020202020202020202020202020202"}"#,
+                None,
+            ),
+            (
+                "users.rename",
+                r#"{"user_id":"01010101010101010101010101010101","name":"alice_2"}"#,
+                None,
+            ),
+            (
+                "users.login",
+                r#"{"user_id":"01010101010101010101010101010101","enabled":"false"}"#,
+                None,
+            ),
+            (
+                "roles.revoke",
+                r#"{"member_id":"01010101010101010101010101010101","role_id":"02020202020202020202020202020202"}"#,
+                None,
+            ),
+            (
+                "users.drop",
+                r#"{"user_id":"01010101010101010101010101010101"}"#,
+                None,
+            ),
+            (
+                "roles.drop",
+                r#"{"role_id":"02020202020202020202020202020202"}"#,
+                None,
+            ),
+        ];
+        for (index, (operation, arguments, created_key)) in cases.into_iter().enumerate() {
+            let prepare = read_frame(&mut stream, &mut decoder);
+            assert_eq!(prepare.kind, 10);
+            let payload = String::from_utf8(prepare.payload.clone()).unwrap();
+            assert!(payload.contains(&format!("\"operation\":\"{operation}\"")));
+            assert!(payload.contains(&format!("\"arguments\":{arguments}")));
+            let operation_id = [0x30 + index as u8; 16];
+            respond(
+                &mut stream,
+                &prepare,
+                format!(
+                    "{{\"operation_id\":\"{}\",\"state\":\"prepared\"}}",
+                    hex(&operation_id)
+                )
+                .as_bytes(),
+            );
+            let start = read_frame(&mut stream, &mut decoder);
+            assert_eq!(start.kind, 10);
+            assert!(
+                String::from_utf8(start.payload.clone())
+                    .unwrap()
+                    .contains(&hex(&operation_id))
+            );
+            let identity = created_key
+                .map(|key| format!(",\"{key}\":\"{}\"", "a1".repeat(16)))
+                .unwrap_or_default();
+            respond(
+                &mut stream,
+                &start,
+                format!(
+                    "{{\"operation_id\":\"{}\",\"outcome\":\"committed\"{identity},\"commit_sequence\":\"{}\"}}",
+                    hex(&operation_id),
+                    index + 1
+                )
+                .as_bytes(),
+            );
+        }
+    });
+
+    let mut secret = [5; 32];
+    let mut client = AdminClient::connect_authenticated_with_timeout(
+        address,
+        [6; 16],
+        &mut secret,
+        Duration::from_secs(3),
+    )
+    .unwrap();
+    assert_eq!(secret, [0; 32]);
+    assert_eq!(client.create_user("alice").unwrap().identity_id, [0xa1; 16]);
+    assert_eq!(
+        client.create_role("analyst").unwrap().identity_id,
+        [0xa1; 16]
+    );
+    client.grant_role([1; 16], [2; 16]).unwrap();
+    client.rename_user([1; 16], "alice_2").unwrap();
+    client.set_user_login([1; 16], false).unwrap();
+    client.revoke_role([1; 16], [2; 16]).unwrap();
+    client.drop_user([1; 16]).unwrap();
+    client.drop_role([2; 16]).unwrap();
+    server.join().unwrap();
+}
+
 fn hex(id: &[u8; 16]) -> String {
     id.iter().map(|byte| format!("{byte:02x}")).collect()
 }
