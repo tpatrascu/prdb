@@ -51,6 +51,9 @@ Token secrets are saved only to mode-0600 credential files and are never printed
   prdb-client unique-create|primary-key-create --address IP:PORT --credentials ADMIN_FILE \\
     --table-id HEX --columns HEX,...\n\
   prdb-client unique-drop|primary-key-drop --address IP:PORT --credentials ADMIN_FILE --constraint-id HEX\n\n\
+  prdb-client foreign-key-create --address IP:PORT --credentials ADMIN_FILE \\
+    --source-table-id HEX --source-columns HEX,... --target-constraint-id HEX\n\
+  prdb-client foreign-key-drop --address IP:PORT --credentials ADMIN_FILE --foreign-key-id HEX\n\n\
   prdb-client system-privilege-grant|system-privilege-revoke --address IP:PORT \\
     --credentials ADMIN_FILE --grantee-id HEX --privilege manage_users|manage_roles|create_schema\n\n\
 Column types: boolean, smallint, integer, bigint, decimal(P,S), text, varchar(N), bytea, uuid, date, timestamptz.\n\
@@ -126,6 +129,9 @@ fn run() -> Result<(), String> {
         }
         "system-privilege-grant" | "system-privilege-revoke" => {
             system_privilege_admin(&command, address, credentials_path, &mut fields)
+        }
+        "foreign-key-create" | "foreign-key-drop" => {
+            foreign_key_admin(&command, address, credentials_path, &mut fields)
         }
         "user-create" | "user-rename" | "user-drop" | "user-login" | "role-create"
         | "role-rename" | "role-drop" | "role-grant" | "role-revoke" => {
@@ -489,6 +495,54 @@ fn system_privilege_admin(
         &result.operation_id,
         result.commit_sequence,
     );
+    Ok(())
+}
+
+fn foreign_key_admin(
+    command: &str,
+    address: SocketAddr,
+    credentials_path: PathBuf,
+    fields: &mut HashMap<String, std::ffi::OsString>,
+) -> Result<(), String> {
+    let mut administrator =
+        read_client_credentials(credentials_path).map_err(|error| error.to_string())?;
+    let mut client = AdminClient::connect_authenticated(
+        address,
+        administrator.token_id,
+        &mut administrator.token_secret,
+    )
+    .map_err(|error| error.to_string())?;
+    match command {
+        "foreign-key-create" => {
+            let source_table_id = parse_id(&take_text(fields, "--source-table-id")?)?;
+            let source_column_ids =
+                parse_constraint_columns(&take_text(fields, "--source-columns")?)?;
+            let target_constraint_id = parse_id(&take_text(fields, "--target-constraint-id")?)?;
+            reject_unknown(fields)?;
+            let result = client
+                .create_foreign_key(source_table_id, &source_column_ids, target_constraint_id)
+                .map_err(|error| error.to_string())?;
+            println!(
+                "created foreign key {} (operation {}, commit {})",
+                lower_hex(&result.foreign_key_id),
+                lower_hex(&result.operation_id),
+                result.commit_sequence
+            );
+        }
+        "foreign-key-drop" => {
+            let foreign_key_id = parse_id(&take_text(fields, "--foreign-key-id")?)?;
+            reject_unknown(fields)?;
+            let result = client
+                .drop_foreign_key(foreign_key_id)
+                .map_err(|error| error.to_string())?;
+            print_operation(
+                "dropped foreign key",
+                &result.operation_id,
+                result.commit_sequence,
+            );
+        }
+        _ => return Err(format!("unsupported foreign-key command {command}")),
+    }
     Ok(())
 }
 

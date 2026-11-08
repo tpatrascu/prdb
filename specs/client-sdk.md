@@ -126,6 +126,8 @@ The CLI also exposes `unique-create` and `primary-key-create` with a table ID an
 
 The system-privilege-grant and system-privilege-revoke commands take a nonzero --grantee-id and one closed --privilege value: manage_users, manage_roles, or create_schema. These commands use the authenticated ADMIN channel; only a current database administrator can change these grants.
 
+The foreign-key-create CLI command takes a source table ID, ordered and distinct source column IDs, and a target unique or primary-key constraint ID; foreign-key-drop takes the generated foreign-key ID. The authenticated storage path checks column correspondence, types, both tables' authority, existing rows, and dependency rules. Creation also requires a pre-existing REFERENCES grant on the target table or columns; object-grant ADMIN commands are not exposed by this CLI yet.
+
 The versioned C ABI is the interoperability boundary, not permission to use unspecified Rust layouts. C can corrupt the Rust executor host, so all trusted services remain outside that process. Other query languages/compilers are outside the initial supported SDK; artifact provenance never bypasses validation.
 
 ## Benchmark and Acceptance Plan

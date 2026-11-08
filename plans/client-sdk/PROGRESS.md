@@ -244,3 +244,11 @@
 - Regression: the parser accepts all three values and rejects case changes and unsupported privilege names. The real gateway/supervisor ADMIN lifecycle grants and revokes create_schema for a role.
 - Verification: focused parser and process regressions, CLI help inspection, full workspace build, format, warning-denied Clippy, and tests passed under Rust/Cargo 1.95.0; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
 - Remaining: policy CLI, CHECK/FK constraint CLI, additional live ADMIN DDL coverage, and confined artifact execution remain open.
+
+## SDK-5: foreign-key create/drop CLI — partial
+
+- Contract: foreign-key administration uses ordered, distinct source column IDs and a target PRIMARY KEY/UNIQUE constraint ID; storage validates column correspondence, types, authority, existing rows, and dependencies.
+- Implementation: prdb-client exposes foreign-key-create and foreign-key-drop through typed AdminClient calls and reports the generated foreign-key ID.
+- Regression: foreign-key source IDs use the same strict nonempty, distinct ID-list parser as key constraints. Process-level success coverage requires a target REFERENCES grant, but the object-grant ADMIN command path is not exposed yet.
+- Verification: strict ID-list parser and CLI help checks passed. Full workspace build, format, warning-denied Clippy, and tests passed under Rust/Cargo 1.95.0; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
+- Remaining: expose object-grant ADMIN operations before claiming a usable multi-process foreign-key lifecycle; CHECK constraint CLI, policy CLI, broader live ADMIN DDL coverage, and confined artifact execution remain open.
