@@ -29,6 +29,13 @@
 - Verification: the full maintained TinyCC SDK fixture suite and `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, and `git diff --check` passed.
 - Remaining: execute the maintained v3 artifact through the new integration harness on a host with a delegated cgroup and the declared runtime profile; this sandbox acceptance evidence is not available in this environment. Statement lifecycle integration, sequential statement/result lifetimes, cancellation/deadline notification, planner physical plans, and mutations also remain unimplemented. The runner enforces a bounded number of executor requests and closes the latest continuation cursor when it stops early.
 
+## SQL-4 dependency: bounded positional INSERT parser — partial
+
+- Contract: [SQL library](../../specs/sql-library.md). `INSERT INTO relation VALUES (...)` accepts a nonempty full-row positional list of `$n`, `NULL`, or `DEFAULT`, optionally followed by one semicolon. The AST borrows source SQL, stores no strings, caps at 4,096 entries, and rejects trailing statements. At execution the number of entries must equal the declared schema column count.
+- Red/green evidence: after adding the public AST header and fixture scaffolding, TinyCC link failed because `prdb_sdk_sql_parse_insert_v1` was missing. The implementation reuses the SELECT parser's bounded tokenizer and preserves the output-on-success-only rule. The regression checks identifier span, `$2`, DEFAULT, NULL, `$0`, second-statement rejection, and unsupported UPDATE.
+- Verification: `nix-shell -p rustc cargo clippy rustfmt tinycc --run 'make -f engine/sdk/Makefile target/sdk-v1/sdk-sql-dml-v1 && target/sdk-v1/sdk-sql-dml-v1'` passed with TinyCC 0.9.27-unstable-2025-01-06.
+- Limits/next: parser only; no typed binding or storage call yet, and UPDATE/DELETE parsers remain absent. Next connect INSERT AST and parameters to the planner shape, validate full-row typed values, and submit through `stage_insert` with sticky statement failure handling.
+
 ## SQL-4 v2 schema column binding — implemented
 
 - Contract: `prdb_sdk_sql_bind_select_v2` receives the v2 statement, one already-resolved authorized relation name, and its declared column shape. It maps unquoted projection and predicate names to zero-based ordinals using ASCII case folding, and attaches scalar/Decimal metadata to predicate leaves.

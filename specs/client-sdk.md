@@ -48,6 +48,8 @@ The executor SDK exposes `prdb_sdk_executor_stage_insert_v1`, `prdb_sdk_executor
 
 The SDK serves operational invocations first and also supports bounded analytical work. SQL analytical operators follow the [workload roadmap](workload-profile.md), run over authorized batches, and must not treat redaction as SQL null or omit denied inputs silently.
 
+The initial SQL DML AST API in [`prdb_sdk_sql_dml_v1.h`](../engine/include/prdb_sdk_sql_dml_v1.h) currently parses only positional single-row INSERT values (`$n`, `NULL`, `DEFAULT`). It does not itself bind schema types, invoke storage, or confer mutation authority.
+
 ## Administrative SDK
 
 Expose typed definitions/builders and text submission for [schema DDL](ddl-schema.md), [users/roles](ddl-identity.md), and [permission DDL](ddl-permissions.md). Administration occurs in the client over a separate authenticated control-mode gateway connection; user query libraries cannot inherit that connection or its tokens. Storage validates every definition and privilege independently. Do not embed credentials in compiled artifacts or logged SQL. Data SQL functions reject DDL in an invocation, even when its principal also has administrative privileges.
