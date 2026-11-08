@@ -7198,6 +7198,23 @@ fn storage_manager_creates_unique_constraint_and_backfills_existing_rows()
     drop(catalog);
     drop(read);
     prdb_engine::startup::validate_persisted_records(&database)?;
+    let mut stale_drop_writer = storage.begin_invocation(id(0xe6), actor, 9_999, 1, 1024)?;
+    let stale_drop_schema = stale_drop_writer.load_catalog_table_schema(id(82))?;
+    stale_drop_writer.load_catalog_indexes(&stale_drop_schema)?;
+    let stale_drop_tuple = encode_tuple(
+        &stale_drop_schema.columns,
+        stale_drop_schema.schema_version,
+        &[Some(ScalarValue::Bytea(
+            b"stale after UNIQUE drop".to_vec(),
+        ))],
+    )?;
+    stale_drop_writer.stage_put(
+        prdb_engine::overlay::RowId {
+            table: id(82),
+            row: id(0xe7),
+        },
+        &stale_drop_tuple,
+    )?;
     let drop_invocation_id = id(0xe2);
     let mut drop_audit = identity_audit_event(0xe3, actor, created.constraint_id);
     drop_audit.correlation_id = drop_invocation_id;
@@ -7212,6 +7229,19 @@ fn storage_manager_creates_unique_constraint_and_backfills_existing_rows()
             )
             .map_err(|error| format!("UNIQUE drop failed: {error:?}"))?,
         4
+    );
+    assert!(matches!(
+        stale_drop_writer.commit(),
+        Err(prdb_engine::transaction::TransactionError::Commit(
+            CommitError::Conflict
+        ))
+    ));
+    assert!(row(&database, &table_row_key(id(82), id(0xe7)))?.is_none());
+    assert_eq!(
+        lookup_outcome(&database, id(0xe6), actor, 1)?
+            .ok_or("missing stale UNIQUE-drop writer outcome")?
+            .status,
+        OutcomeStatus::Aborted
     );
     let read = database.begin_read()?;
     let catalog = read.open_table(CATALOG)?;
