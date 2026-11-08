@@ -95,3 +95,10 @@
 - Regression: covered in the TinyCC upload/status/cancel binary test. The fixture is compiled and sealed, then discarded without loading or execution.
 - Verification: the focused integration and full Rust/TinyCC validation pass. This proves the fail-closed boundary on an invalid host profile, not successful worker launch.
 - Remaining: successful cgroup provisioning, confinement installation, and execution still need a delegated-cgroup Linux host.
+
+## SU-5 / SM-6: metadata control reads across real service processes — verified
+
+- Behavior: an authenticated `MetadataClient` can read the public schema, relations, and column descriptions through separate `prdb-gateway` and `prdb-supervisor` processes backed by a READY storage instance.
+- Regression: [`metadata_process.rs`](../../engine/tests/metadata_process.rs) exercises the real binaries and bearer-token control path. It does not start or load a query worker.
+- Verification: `cargo test --locked --test metadata_process` passed in the configured Nix shell.
+- Remaining: this covers metadata control reads only; process-level query execution still depends on successful cgroup provisioning and the executor callback ABI path.
