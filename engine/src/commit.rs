@@ -13943,3 +13943,102 @@ pub(crate) fn record_aborted_outcome(
     }
     transaction.commit().map_err(storage_error)
 }
+
+#[cfg(test)]
+mod durable_commit_gate_tests {
+    use super::{CommitError, CommitRequest, RowWrite, commit_storage_changes_with_gate};
+    use crate::metadata::{EngineMetadata, Lifecycle};
+    use crate::schema::{self, ENGINE_META, OUTCOMES, ROWS};
+    use redb::{Database, ReadableDatabase};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn denied_gate_discards_staged_records_and_granted_gate_publishes_them()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture_id = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "prdb-commit-gate-{}-{fixture_id}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory)?;
+        let path = directory.join("gate.redb");
+        let database = Database::create(&path)?;
+        {
+            let mut write = database.begin_write()?;
+            write.set_durability(redb::Durability::Immediate)?;
+            write.set_two_phase_commit(true);
+            schema::create_tables(&write)?;
+            let metadata = EngineMetadata {
+                database_id: [0x33; 16],
+                catalog_version: 2,
+                expression_version: 1,
+                builtin_semantics_version: 1,
+                commit_sequence: 0,
+                lifecycle: Lifecycle::Ready,
+            }
+            .encode()?;
+            write
+                .open_table(ENGINE_META)?
+                .insert(&b"format"[..], &metadata[..])?;
+            write.commit()?;
+        }
+
+        let row_key = [0x44; 32];
+        let row_write = RowWrite {
+            key: row_key,
+            expected_version: None,
+            payload: Some(b"staged row".to_vec()),
+        };
+        let request = |invocation_id| CommitRequest {
+            invocation_id,
+            principal_id: [0x55; 16],
+            retention_deadline_us: 10_000,
+            rows: std::slice::from_ref(&row_write),
+            indexes: &[],
+            foreign_keys: &[],
+            catalog_guards: &[],
+            catalog: &[],
+            audit: &[],
+        };
+        let mut gate_calls = 0;
+        assert_eq!(
+            commit_storage_changes_with_gate(&database, request([0x66; 16]), || {
+                gate_calls += 1;
+                false
+            }),
+            Err(CommitError::InvocationCancelled)
+        );
+        assert_eq!(gate_calls, 1);
+        {
+            let read = database.begin_read()?;
+            assert!(read.open_table(ROWS)?.get(&row_key[..])?.is_none());
+            assert!(read.open_table(OUTCOMES)?.get(&[0x66; 16][..])?.is_none());
+            let metadata = read
+                .open_table(ENGINE_META)?
+                .get(&&b"format"[..])?
+                .ok_or("missing engine metadata")?;
+            assert_eq!(EngineMetadata::decode(metadata.value())?.commit_sequence, 0);
+        }
+
+        assert_eq!(
+            commit_storage_changes_with_gate(&database, request([0x77; 16]), || true),
+            Ok(1)
+        );
+        {
+            let read = database.begin_read()?;
+            assert!(read.open_table(ROWS)?.get(&row_key[..])?.is_some());
+            assert!(read.open_table(OUTCOMES)?.get(&[0x77; 16][..])?.is_some());
+            let metadata = read
+                .open_table(ENGINE_META)?
+                .get(&&b"format"[..])?
+                .ok_or("missing committed engine metadata")?;
+            assert_eq!(EngineMetadata::decode(metadata.value())?.commit_sequence, 1);
+        }
+
+        drop(database);
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+}
