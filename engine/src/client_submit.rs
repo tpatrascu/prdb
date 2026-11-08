@@ -29,10 +29,16 @@ pub enum ClientSubmitError {
     Frame(crate::client_protocol::ClientFrameError),
     InvalidCredentials,
     InvalidPackage,
+    InvalidAdministrativeRequest,
     InvalidMetadataPage,
     InvalidResponse,
     ServerRejected(String),
     OutcomeUncertain([u8; 16]),
+    AdministrativeOutcomeUncertain([u8; 16]),
+    AdministrativeOperationRejected {
+        operation_id: [u8; 16],
+        message: String,
+    },
 }
 
 impl std::fmt::Display for ClientSubmitError {
@@ -72,6 +78,20 @@ pub struct SubmissionClient {
 /// the query submission client.
 pub struct MetadataClient {
     transport: SubmissionClient,
+}
+
+/// Authenticated control-mode client for typed administrative DDL operations.
+/// It is separate from query packages and never exposes admin credentials to
+/// native executor code.
+pub struct AdminClient {
+    transport: SubmissionClient,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminIndexResult {
+    pub operation_id: [u8; 16],
+    pub index_id: [u8; 16],
+    pub commit_sequence: u64,
 }
 
 /// One bounded page from a permission-filtered metadata query.
@@ -720,6 +740,213 @@ impl MetadataClient {
     }
 }
 
+impl AdminClient {
+    /// Connect over TCP in control mode and authenticate. The caller's
+    /// credential buffer is zeroized on every return path.
+    pub fn connect_authenticated(
+        address: SocketAddr,
+        token_id: [u8; 16],
+        token_secret: &mut [u8],
+    ) -> Result<Self, ClientSubmitError> {
+        Self::connect_authenticated_with_timeout(address, token_id, token_secret, DEFAULT_TIMEOUT)
+    }
+
+    pub fn connect_authenticated_with_timeout(
+        address: SocketAddr,
+        token_id: [u8; 16],
+        token_secret: &mut [u8],
+        timeout: Duration,
+    ) -> Result<Self, ClientSubmitError> {
+        let transport = SubmissionClient::connect_authenticated_mode(
+            address,
+            token_id,
+            token_secret,
+            timeout,
+            crate::client_protocol::ClientMode::Control,
+        )?;
+        Ok(Self { transport })
+    }
+
+    /// Create an ordinary index using the authenticated control connection.
+    pub fn create_index(
+        &mut self,
+        table_id: [u8; 16],
+        name: &str,
+        column_ids: &[[u8; 16]],
+        unique: bool,
+    ) -> Result<AdminIndexResult, ClientSubmitError> {
+        validate_index_request(table_id, column_ids)?;
+        if !is_normalized_index_name(name) {
+            return Err(ClientSubmitError::InvalidAdministrativeRequest);
+        }
+        let columns = encode_id_array(column_ids);
+        let arguments = format!(
+            "{{\"table_id\":\"{}\",\"name\":\"{name}\",\"column_ids\":{columns},\"unique\":{unique}}}",
+            lower_hex(&table_id)
+        );
+        self.execute_index_ddl("indexes.create", arguments, None)
+    }
+
+    /// Rebuild an index definition and its memberships through the control
+    /// channel. An uncertain START result includes the server-issued
+    /// operation ID for status reconciliation; START is never retried.
+    pub fn rebuild_index(
+        &mut self,
+        index_id: [u8; 16],
+        column_ids: &[[u8; 16]],
+        unique: bool,
+    ) -> Result<AdminIndexResult, ClientSubmitError> {
+        validate_index_request(index_id, column_ids)?;
+        let arguments = format!(
+            "{{\"index_id\":\"{}\",\"column_ids\":{},\"unique\":{unique}}}",
+            lower_hex(&index_id),
+            encode_id_array(column_ids)
+        );
+        self.execute_index_ddl("indexes.rebuild", arguments, Some(index_id))
+    }
+
+    /// Drop an ordinary index through the authenticated control channel.
+    pub fn drop_index(
+        &mut self,
+        index_id: [u8; 16],
+    ) -> Result<AdminIndexResult, ClientSubmitError> {
+        if index_id == [0; 16] {
+            return Err(ClientSubmitError::InvalidAdministrativeRequest);
+        }
+        self.execute_index_ddl(
+            "indexes.drop",
+            format!("{{\"index_id\":\"{}\"}}", lower_hex(&index_id)),
+            Some(index_id),
+        )
+    }
+
+    /// Reconcile a prior administrative operation by operation ID. Use this
+    /// after reconnecting if START returned `AdministrativeOutcomeUncertain`.
+    pub fn status(
+        &mut self,
+        operation_id: [u8; 16],
+    ) -> Result<InvocationStatus, ClientSubmitError> {
+        if operation_id == [0; 16] {
+            return Err(ClientSubmitError::InvalidAdministrativeRequest);
+        }
+        let payload = format!("{{\"invocation_id\":\"{}\"}}", lower_hex(&operation_id));
+        let response = self.transport.exchange(8, payload.into_bytes())?;
+        let fields = parse_flat_response(&response.payload)?;
+        if fields.len() != 1 {
+            return Err(ClientSubmitError::InvalidResponse);
+        }
+        match take_string(&fields, "state").as_deref() {
+            Some("prepared") => Ok(InvocationStatus::Prepared),
+            Some("active") => Ok(InvocationStatus::Active),
+            Some("committing") => Ok(InvocationStatus::Committing),
+            Some("committed") => Ok(InvocationStatus::Committed),
+            Some("aborted") => Ok(InvocationStatus::Aborted),
+            Some("unknown") => Ok(InvocationStatus::Unknown),
+            Some("expired") => Ok(InvocationStatus::Expired),
+            _ => Err(ClientSubmitError::InvalidResponse),
+        }
+    }
+
+    fn execute_index_ddl(
+        &mut self,
+        operation: &str,
+        arguments: String,
+        expected_index_id: Option<[u8; 16]>,
+    ) -> Result<AdminIndexResult, ClientSubmitError> {
+        let prepare = format!(
+            "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"{operation}\",\"arguments\":{arguments}}}"
+        );
+        let prepared = self.transport.exchange(10, prepare.into_bytes())?;
+        let fields = parse_flat_response(&prepared.payload)?;
+        let operation_id = response_id(&fields, "operation_id")?;
+        if fields.len() != 2 || take_string(&fields, "state").as_deref() != Some("prepared") {
+            return Err(ClientSubmitError::InvalidResponse);
+        }
+
+        let start = format!(
+            "{{\"phase\":\"start\",\"operation_id\":\"{}\"}}",
+            lower_hex(&operation_id)
+        );
+        let started = match self.transport.exchange(10, start.into_bytes()) {
+            Ok(response) => response,
+            Err(ClientSubmitError::ServerRejected(message)) => {
+                return Err(ClientSubmitError::AdministrativeOperationRejected {
+                    operation_id,
+                    message,
+                });
+            }
+            Err(_) => {
+                return Err(ClientSubmitError::AdministrativeOutcomeUncertain(
+                    operation_id,
+                ));
+            }
+        };
+        let fields = parse_flat_response(&started.payload)
+            .map_err(|_| ClientSubmitError::AdministrativeOutcomeUncertain(operation_id))?;
+        let response_operation_id = response_id(&fields, "operation_id").ok();
+        let index_id = response_id(&fields, "index_id").ok();
+        let outcome = take_string(&fields, "outcome");
+        let sequence =
+            take_string(&fields, "commit_sequence").and_then(parse_canonical_positive_u64);
+        if fields.len() != 4
+            || response_operation_id != Some(operation_id)
+            || outcome.as_deref() != Some("committed")
+            || index_id.is_none()
+            || expected_index_id.is_some_and(|expected| index_id != Some(expected))
+            || sequence.is_none()
+        {
+            return Err(ClientSubmitError::AdministrativeOutcomeUncertain(
+                operation_id,
+            ));
+        }
+        Ok(AdminIndexResult {
+            operation_id,
+            index_id: index_id.ok_or(ClientSubmitError::InvalidResponse)?,
+            commit_sequence: sequence.ok_or(ClientSubmitError::InvalidResponse)?,
+        })
+    }
+}
+
+fn validate_index_request(
+    object_id: [u8; 16],
+    column_ids: &[[u8; 16]],
+) -> Result<(), ClientSubmitError> {
+    if object_id == [0; 16]
+        || column_ids.is_empty()
+        || column_ids.len() > 256
+        || column_ids.contains(&[0; 16])
+        || column_ids.iter().copied().collect::<HashSet<_>>().len() != column_ids.len()
+    {
+        return Err(ClientSubmitError::InvalidAdministrativeRequest);
+    }
+    Ok(())
+}
+
+fn parse_canonical_positive_u64(text: String) -> Option<u64> {
+    let value = text.parse::<u64>().ok()?;
+    (value > 0 && value.to_string() == text).then_some(value)
+}
+
+fn encode_id_array(ids: &[[u8; 16]]) -> String {
+    format!(
+        "[{}]",
+        ids.iter()
+            .map(|id| format!("\"{}\"", lower_hex(id)))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn is_normalized_index_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 128
+        && (bytes[0].is_ascii_lowercase() || bytes[0] == b'_')
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_')
+}
+
 fn discovery_records(
     records: Vec<ResponseValue>,
 ) -> Result<Vec<HashMap<String, ResponseValue>>, ClientSubmitError> {
@@ -1209,7 +1436,36 @@ fn hex_nibble(byte: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ResponseValue, decode_hex_array, parse_flat_response};
+    use super::{
+        ClientSubmitError, ResponseValue, decode_hex_array, is_normalized_index_name,
+        parse_canonical_positive_u64, parse_flat_response, validate_index_request,
+    };
+
+    #[test]
+    fn administrative_index_request_validation_rejects_invalid_ids_names_and_columns() {
+        assert!(matches!(
+            validate_index_request([0; 16], &[[1; 16]]),
+            Err(ClientSubmitError::InvalidAdministrativeRequest)
+        ));
+        assert!(matches!(
+            validate_index_request([1; 16], &[]),
+            Err(ClientSubmitError::InvalidAdministrativeRequest)
+        ));
+        assert!(matches!(
+            validate_index_request([1; 16], &[[2; 16], [2; 16]]),
+            Err(ClientSubmitError::InvalidAdministrativeRequest)
+        ));
+        assert!(matches!(
+            validate_index_request([1; 16], &[[0; 16]]),
+            Err(ClientSubmitError::InvalidAdministrativeRequest)
+        ));
+        assert!(is_normalized_index_name("_user_idx9"));
+        assert!(!is_normalized_index_name("UserIdx"));
+        assert!(!is_normalized_index_name("user-index"));
+        assert_eq!(parse_canonical_positive_u64("42".to_owned()), Some(42));
+        assert_eq!(parse_canonical_positive_u64("0".to_owned()), None);
+        assert_eq!(parse_canonical_positive_u64("042".to_owned()), None);
+    }
 
     #[test]
     fn response_decoder_rejects_duplicate_unknown_json_shapes_and_noncanonical_numbers() {
