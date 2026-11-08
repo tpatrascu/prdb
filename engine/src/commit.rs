@@ -14013,6 +14013,7 @@ mod durable_commit_gate_tests {
         inner: redb::backends::FileBackend,
         fail_next_sync: Arc<AtomicBool>,
         exit_after_sync: Arc<AtomicBool>,
+        exit_after_write: Arc<AtomicBool>,
         fail_next_write: Arc<AtomicBool>,
         fail_next_read: Arc<AtomicBool>,
         fail_next_set_len: Arc<AtomicBool>,
@@ -14056,7 +14057,11 @@ mod durable_commit_gate_tests {
             if self.fail_next_write.swap(false, Ordering::SeqCst) {
                 return Err(std::io::Error::other("injected storage write failure"));
             }
-            self.inner.write(offset, data)
+            self.inner.write(offset, data)?;
+            if self.exit_after_write.swap(false, Ordering::SeqCst) {
+                std::process::exit(87);
+            }
+            Ok(())
         }
 
         fn close(&self) -> Result<(), std::io::Error> {
@@ -14064,12 +14069,15 @@ mod durable_commit_gate_tests {
         }
     }
 
-    #[test]
-    fn process_crash_after_durable_sync_recovers_atomic_commit()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn run_process_crash_boundary(
+        boundary: &str,
+        expected_exit: i32,
+        child_test_name: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         use std::process::Command;
 
-        const CHILD_DATABASE_ENV: &str = "PRDB_TEST_EXIT_AFTER_DURABLE_SYNC_DATABASE";
+        const CHILD_DATABASE_ENV: &str = "PRDB_TEST_COMMIT_CRASH_DATABASE";
+        const CHILD_BOUNDARY_ENV: &str = "PRDB_TEST_COMMIT_CRASH_BOUNDARY";
         const INVOCATION_ID: [u8; 16] = [0x86; 16];
         const PRINCIPAL_ID: [u8; 16] = [0x87; 16];
         let row_key = [0x88; 16].into_iter().chain([0x89; 16]).collect::<Vec<_>>();
@@ -14080,10 +14088,12 @@ mod durable_commit_gate_tests {
                 .write(true)
                 .open(&database_path)?;
             let exit_after_sync = Arc::new(AtomicBool::new(false));
+            let exit_after_write = Arc::new(AtomicBool::new(false));
             let database = Database::builder().create_with_backend(FaultInjectedBackend {
                 inner: redb::backends::FileBackend::new(file)?,
                 fail_next_sync: Arc::new(AtomicBool::new(false)),
                 exit_after_sync: exit_after_sync.clone(),
+                exit_after_write: exit_after_write.clone(),
                 fail_next_write: Arc::new(AtomicBool::new(false)),
                 fail_next_read: Arc::new(AtomicBool::new(false)),
                 fail_next_set_len: Arc::new(AtomicBool::new(false)),
@@ -14102,7 +14112,11 @@ mod durable_commit_gate_tests {
                 },
                 b"crash-boundary row",
             )?;
-            exit_after_sync.store(true, Ordering::SeqCst);
+            match std::env::var(CHILD_BOUNDARY_ENV)?.as_str() {
+                "sync" => exit_after_sync.store(true, Ordering::SeqCst),
+                "write" => exit_after_write.store(true, Ordering::SeqCst),
+                other => return Err(format!("unknown crash boundary {other}").into()),
+            }
             invocation.commit()?;
             return Err("child commit returned without the injected process exit".into());
         }
@@ -14137,13 +14151,14 @@ mod durable_commit_gate_tests {
 
         let child_status = Command::new(std::env::current_exe()?)
             .arg("--exact")
-            .arg("commit::durable_commit_gate_tests::process_crash_after_durable_sync_recovers_atomic_commit")
+            .arg(child_test_name)
             .arg("--nocapture")
             .env(CHILD_DATABASE_ENV, &path)
+            .env(CHILD_BOUNDARY_ENV, boundary)
             .status()?;
         assert_eq!(
             child_status.code(),
-            Some(86),
+            Some(expected_exit),
             "unexpected child exit: {child_status}"
         );
 
@@ -14178,6 +14193,26 @@ mod durable_commit_gate_tests {
         drop(reopened);
         std::fs::remove_dir_all(directory)?;
         Ok(())
+    }
+
+    #[test]
+    fn process_crash_after_durable_sync_recovers_atomic_commit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        run_process_crash_boundary(
+            "sync",
+            86,
+            "commit::durable_commit_gate_tests::process_crash_after_durable_sync_recovers_atomic_commit",
+        )
+    }
+
+    #[test]
+    fn process_crash_during_backend_write_recovers_atomic_commit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        run_process_crash_boundary(
+            "write",
+            87,
+            "commit::durable_commit_gate_tests::process_crash_during_backend_write_recovers_atomic_commit",
+        )
     }
 
     #[test]
@@ -14308,6 +14343,7 @@ mod durable_commit_gate_tests {
             inner: redb::backends::FileBackend::new(file)?,
             fail_next_sync: fail_next_sync.clone(),
             exit_after_sync: Arc::new(AtomicBool::new(false)),
+            exit_after_write: Arc::new(AtomicBool::new(false)),
             fail_next_write: Arc::new(AtomicBool::new(false)),
             fail_next_read: Arc::new(AtomicBool::new(false)),
             fail_next_set_len: Arc::new(AtomicBool::new(false)),
@@ -14446,6 +14482,7 @@ mod durable_commit_gate_tests {
             inner: redb::backends::FileBackend::new(file)?,
             fail_next_sync: Arc::new(AtomicBool::new(false)),
             exit_after_sync: Arc::new(AtomicBool::new(false)),
+            exit_after_write: Arc::new(AtomicBool::new(false)),
             fail_next_write: fail_next_write.clone(),
             fail_next_read: Arc::new(AtomicBool::new(false)),
             fail_next_set_len: Arc::new(AtomicBool::new(false)),
@@ -14560,6 +14597,7 @@ mod durable_commit_gate_tests {
             inner: redb::backends::FileBackend::new(file)?,
             fail_next_sync: Arc::new(AtomicBool::new(false)),
             exit_after_sync: Arc::new(AtomicBool::new(false)),
+            exit_after_write: Arc::new(AtomicBool::new(false)),
             fail_next_write: Arc::new(AtomicBool::new(false)),
             fail_next_read: fail_next_read.clone(),
             fail_next_set_len: Arc::new(AtomicBool::new(false)),
@@ -14577,6 +14615,7 @@ mod durable_commit_gate_tests {
             inner: redb::backends::FileBackend::new(file)?,
             fail_next_sync: Arc::new(AtomicBool::new(false)),
             exit_after_sync: Arc::new(AtomicBool::new(false)),
+            exit_after_write: Arc::new(AtomicBool::new(false)),
             fail_next_write: Arc::new(AtomicBool::new(false)),
             fail_next_read: Arc::new(AtomicBool::new(false)),
             fail_next_set_len: Arc::new(AtomicBool::new(false)),
@@ -14655,6 +14694,7 @@ mod durable_commit_gate_tests {
             inner: redb::backends::FileBackend::new(file)?,
             fail_next_sync: Arc::new(AtomicBool::new(false)),
             exit_after_sync: Arc::new(AtomicBool::new(false)),
+            exit_after_write: Arc::new(AtomicBool::new(false)),
             fail_next_write: Arc::new(AtomicBool::new(false)),
             fail_next_read: Arc::new(AtomicBool::new(false)),
             fail_next_set_len: fail_next_set_len.clone(),
@@ -14743,6 +14783,7 @@ mod durable_commit_gate_tests {
             inner: redb::backends::FileBackend::new(file)?,
             fail_next_sync: fail_next_sync.clone(),
             exit_after_sync: Arc::new(AtomicBool::new(false)),
+            exit_after_write: Arc::new(AtomicBool::new(false)),
             fail_next_write: Arc::new(AtomicBool::new(false)),
             fail_next_read: Arc::new(AtomicBool::new(false)),
             fail_next_set_len: Arc::new(AtomicBool::new(false)),
