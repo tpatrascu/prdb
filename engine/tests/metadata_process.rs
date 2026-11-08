@@ -68,7 +68,48 @@ fn authenticated_metadata_reads_cross_gateway_and_supervisor_processes()
     let mut setup = initialize(&instance_dir, "metadata_process_admin", i64::MAX)?;
     let token_id = setup.token_id();
     let mut token_secret = setup.take_secret().ok_or("bootstrap secret missing")?;
-    drop(setup.acknowledge()?);
+    let committed_invocation_id = [0xa3; 16];
+    {
+        let instance = setup.acknowledge()?;
+        let storage = instance.storage_manager(Default::default())?;
+        let now_us = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
+        let retention_deadline_us = now_us.saturating_add(3_600_000_000);
+        let mut invocation = storage.admit_supervisor_invocation(
+            committed_invocation_id,
+            token_id,
+            &token_secret,
+            retention_deadline_us,
+            8,
+            4096,
+        )?;
+        let mut successful_worker = Command::new("true").spawn()?;
+        invocation.observe_worker_exit(&mut successful_worker)?;
+
+        let (mut terminal_writer, terminal_reader) = std::os::unix::net::UnixStream::pair()?;
+        drop(terminal_reader);
+        assert!(
+            prdb_engine::supervisor_ipc::finalize_gateway_invocation_and_send_terminal(
+                &mut invocation,
+                &mut terminal_writer,
+                1,
+                prdb_engine::supervisor_ipc::GatewayTerminalDecision::Commit,
+            )
+            .is_err(),
+            "closed terminal receiver must lose delivery after storage commits"
+        );
+        assert!(matches!(
+            storage
+                .get_invocation_status(
+                    committed_invocation_id,
+                    invocation.principal_id(),
+                    now_us,
+                )?
+                .map(|snapshot| snapshot.status),
+            Some(prdb_engine::storage_manager::InvocationStatus::Terminal(outcome))
+                if outcome.status == prdb_engine::outcome::OutcomeStatus::Committed
+        ));
+    }
+    let mut outcome_status_secret = token_secret;
 
     let socket_path = root.join("supervisor.sock");
     let uid = unsafe { libc::geteuid() };
@@ -181,6 +222,15 @@ fn authenticated_metadata_reads_cross_gateway_and_supervisor_processes()
     )?;
     assert!(!columns.is_empty());
     drop(metadata);
+
+    let mut outcome_status_client =
+        SubmissionClient::connect_authenticated(address, token_id, &mut outcome_status_secret)?;
+    assert_eq!(
+        outcome_status_client.status(committed_invocation_id)?,
+        InvocationStatus::Committed,
+        "the supervisor must recover a committed outcome after storage and terminal delivery end"
+    );
+    drop(outcome_status_client);
 
     assert!(gateway.stop()?.success());
     assert!(supervisor.stop()?.success());

@@ -1709,7 +1709,14 @@
 - Regression: [`metadata_process.rs`](../../engine/tests/metadata_process.rs) compiles a TinyCC ABI-v3 package, submits it through `SubmissionClient` to separate gateway and supervisor processes, kills the gateway after START acceptance, queries ABORTED through a replacement gateway, restarts the supervisor on the same database, then confirms STATUS still returns ABORTED through a new gateway.
 - Observed behavior: the supervisor reports a broken pipe while relaying the lost terminal frame; storage nevertheless persists ABORTED. An initial expectation of COMMITTED was rejected by the observed result and corrected to match the specified disconnect cancellation contract.
 - Verification: `cargo fmt --all -- --check`, `cargo clippy -p prdb-engine --test metadata_process --locked -- -D warnings`, and `cargo test -p prdb-engine --test metadata_process --locked` passed. The ignored sandbox test passed when run directly under `sudo -n` with the configured delegated cgroup and runtime paths. This is Linux x86_64 process-restart evidence, not power-loss evidence.
-- Remaining: add a process-restart case for COMMITTED status after the client loses terminal delivery at/after the irreversible commit boundary; add storage-file fault points and other supported durability profiles. The broader SQL, DDL, pressure and analytical stages remain open.
+- Remaining: exercise the lost-terminal COMMITTED case through a real sandboxed invocation reaching its irreversible commit boundary; add storage-file fault points and other supported durability profiles. The broader SQL, DDL, pressure and analytical stages remain open.
+
+## SM-6 / SU-5: recover COMMITTED status after terminal loss through gateway and supervisor processes — verified
+
+- Contract: [redb storage](../../specs/redb-storage.md), outcome recovery; [client protocol](../../specs/client-protocol.md), terminal delivery and STATUS.
+- Regression: `authenticated_metadata_reads_cross_gateway_and_supervisor_processes` creates a token-owned invocation in a real READY redb instance, observes a successful worker exit, commits through the production terminal helper with the receiving socket closed, closes the storage instance, then launches the actual supervisor and gateway binaries. An authenticated `SubmissionClient` STATUS returns COMMITTED after the database is reopened by the service process.
+- Verification: `cargo fmt --all -- --check` and `cargo test -p prdb-engine --test metadata_process --locked` passed (1 passed, 1 delegated-cgroup test ignored).
+- Scope: proves durable COMMITTED outcome recovery through process startup and the authenticated network status path after terminal delivery fails. It does not prove the commit boundary is reached by the sandboxed query worker; that acceptance remains open.
 
 ## SM-6 / MD-4: exercise virtual scans through executor IPC and the SQL consumer — verified
 
