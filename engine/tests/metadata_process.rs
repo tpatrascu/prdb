@@ -2,7 +2,11 @@
 
 use prdb_engine::audit::{AuditAction, AuditEvent, AuditResult};
 use prdb_engine::bootstrap::initialize;
-use prdb_engine::client_submit::{InvocationStatus, MetadataClient, SubmissionClient};
+use prdb_engine::client_credentials::{
+    read_client_credentials, remove_client_credentials, write_client_credentials,
+};
+use prdb_engine::client_protocol::ClientCredentials;
+use prdb_engine::client_submit::{AdminClient, InvocationStatus, MetadataClient, SubmissionClient};
 use prdb_engine::storage_manager::{CreateTableRequest, TableColumnDefinition, TokenIssueRequest};
 use prdb_engine::submission_manifest::{encode_manifest_v1, manifest_v1_from_elf};
 use prdb_engine::supervisor::WorkloadClass;
@@ -56,7 +60,7 @@ impl Drop for ChildGuard {
 }
 
 #[test]
-fn authenticated_metadata_reads_cross_gateway_and_supervisor_processes()
+fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_processes()
 -> Result<(), Box<dyn std::error::Error>> {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let root = std::env::temp_dir().join(format!(
@@ -361,6 +365,7 @@ fn authenticated_metadata_reads_cross_gateway_and_supervisor_processes()
         .ok_or("gateway listen line had an unexpected prefix")?
         .parse()?;
 
+    let mut admin_control_secret = token_secret;
     let mut metadata = MetadataClient::connect_authenticated(address, token_id, &mut token_secret)?;
     assert_eq!(token_secret, [0; 32]);
     let schemas = metadata.list_schemas()?;
@@ -443,6 +448,65 @@ fn authenticated_metadata_reads_cross_gateway_and_supervisor_processes()
             .is_empty()
     );
     drop(restricted_metadata);
+
+    let mut admin =
+        AdminClient::connect_authenticated(address, token_id, &mut admin_control_secret)?;
+    assert_eq!(admin_control_secret, [0; 32]);
+    let created_role = admin.create_role("process_admin_role")?;
+    assert_ne!(created_role.identity_id, [0; 16]);
+    let renamed = admin.rename_role(created_role.identity_id, "process_admin_role_v2")?;
+    assert!(renamed.commit_sequence > created_role.commit_sequence);
+    let dropped = admin.drop_role(created_role.identity_id)?;
+    assert!(dropped.commit_sequence > renamed.commit_sequence);
+
+    let created_user = admin.create_user("process_token_user")?;
+    let now_us = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
+    let issued = admin.issue_token(
+        created_user.identity_id,
+        "multi-process token",
+        now_us.saturating_add(60_000_000),
+    )?;
+    let issued_token_id = issued.token_id;
+    let credential_path = root.join("issued-token.cred");
+    let issued_credentials = ClientCredentials {
+        token_id: issued.token_id,
+        token_secret: *issued.token_secret(),
+    };
+    write_client_credentials(&credential_path, &issued_credentials)?;
+    drop(issued_credentials);
+    drop(issued);
+
+    let saved_credentials = read_client_credentials(&credential_path)?;
+    let mut issued_secret = saved_credentials.token_secret;
+    let mut issued_metadata = MetadataClient::connect_authenticated(
+        address,
+        saved_credentials.token_id,
+        &mut issued_secret,
+    )?;
+    assert_eq!(issued_secret, [0; 32]);
+    assert!(
+        issued_metadata
+            .list_schemas()?
+            .iter()
+            .any(|schema| schema.name == "information_schema")
+    );
+    drop(issued_metadata);
+    drop(saved_credentials);
+
+    admin.revoke_token(issued_token_id)?;
+    let revoked_credentials = read_client_credentials(&credential_path)?;
+    let mut revoked_secret = revoked_credentials.token_secret;
+    assert!(
+        MetadataClient::connect_authenticated(
+            address,
+            revoked_credentials.token_id,
+            &mut revoked_secret,
+        )
+        .is_err()
+    );
+    assert_eq!(revoked_secret, [0; 32]);
+    remove_client_credentials(&credential_path)?;
+    drop(admin);
 
     let mut outcome_status_client =
         SubmissionClient::connect_authenticated(address, token_id, &mut outcome_status_secret)?;

@@ -1969,3 +1969,10 @@
 - Regression: `admin_revoke_decoder_requires_prepare_then_start_schemas` checks all three canonical decoder shapes. `storage_manager_runtime_and_metadata_reads_enforce_authorization` exercises authenticated gateway PREPARE/START for create, rebuild, and drop and verifies committed responses; startup catalog validation succeeds after the broader DDL lifecycle.
 - Verification: focused decoder and authenticated gateway ADMIN lifecycle tests passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` all passed in the prescribed Nix shell; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
 - Remaining: SDK-facing SQL DDL compilation and a separately packaged TinyCC sandbox integration harness are still outside this increment.
+
+## SM-5 / SDK-5: cross-process authenticated ADMIN identity and token lifecycle — verified
+
+- Contract: client control operations must traverse the gateway and supervisor boundary, then reach storage's authorized DDL/token lifecycle instead of a test-only storage call.
+- Regression: the real-process metadata integration now issues role create/rename/drop, user creation, one-time token issue, credential-file save/load, fresh token-authenticated metadata discovery, and token revoke through `AdminClient`. A post-revocation authentication attempt is rejected. The test confirms one-time client secret buffers are zeroized.
+- Verification: the focused integration test passed and `cargo test --workspace --locked` passed with 124 commit tests and 3 cgroup-dependent ignored. Full build, format, and warning-denied Clippy passed.
+- Remaining: multi-process coverage for the other ADMIN DDL families and the confined artifact submission path remains open.

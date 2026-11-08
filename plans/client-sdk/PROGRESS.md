@@ -157,6 +157,13 @@
 - Verification: focused CLI tests passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed in the pinned Nix shell. The commit integration target reported 124 passed and 3 cgroup-dependent ignored. The initial full-suite attempt hit the intermittent CHECK lifecycle `InvalidAudit`; the isolated regression and full rerun passed. Final CLI help was inspected.
 - Remaining: table/schema/constraint/policy admin CLI commands and live ADMIN multi-process path tests remain open.
 
+## SDK-5 / CP-1: real multi-process ADMIN identity and token lifecycle — verified
+
+- Contract: the control-mode AdminClient must cross the dedicated gateway and supervisor process boundary; storage must independently enforce authority, token persistence, and revocation.
+- Regression: `authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_processes` now creates/renames/drops a role through `AdminClient`, creates a user, issues a token, writes and reloads the private credential file, authenticates a fresh MetadataClient through the processes, revokes the token, then proves that token cannot authenticate again. The test also checks secret input buffers are zeroized.
+- Verification: the focused real-process test passed. Full workspace build, format check, warning-denied Clippy, and tests passed; the commit integration target reported 124 passed and 3 cgroup-dependent ignored. One separate sandbox-dependent process test remains ignored.
+- Remaining: extend multi-process ADMIN coverage to schema/table/constraint/privilege DDL and add the remaining admin DDL CLI commands.
+
 ## SDK-5 dependency: typed schema rename AdminClient operation — implemented
 
 - Contract: [client protocol](../../specs/client-protocol.md) requires `schemas.rename` START to echo the stable schema ID and normalized new name.
