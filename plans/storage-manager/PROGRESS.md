@@ -1737,7 +1737,7 @@
 - Regression: the real-redb [foundation test](../../engine/tests/redb_foundation.rs) pins an initial value, completes 64 Immediate/two-phase commits of 32 KiB replacements while that reader remains open, verifies the pinned reader still sees the original bytes, and confirms a new reader sees the latest committed value.
 - Verification: Rust 1.95.0 and redb 4.4.0; `cargo fmt --all -- --check` and `cargo test -p prdb-engine --test redb_foundation --locked` passed.
 - Scope: this validates redb snapshot stability and writer progress for this bounded workload. It does not establish the storage manager's admission limits under sustained pressure, physical reclamation/compaction behavior, or power-loss durability.
-- Remaining: add additional storage-file fault points and broaden retained-reader pressure/reclamation evidence.
+- Remaining: add additional storage-file fault points and measure pressure beyond the bounded retained-reader and reclamation workloads below.
 
 ## SM-4 / SM-7: durable writer progress under a retained invocation snapshot — verified
 
@@ -1750,7 +1750,13 @@
 
 - Regression: expanded `retained_invocation_snapshot_survives_a_durable_write_burst` to hold one invocation snapshot open while 64 other invocations durably replace the same row with 32 KiB values (2 MiB of committed replacement payload). After every commit, the held snapshot still reads its original value; a fresh invocation reads the last replacement.
 - Verification: the focused transaction integration test passed with the pinned Nix toolchain.
-- Scope: bounded pressure evidence only; sustained contention, physical reclamation, and power-loss behavior remain unmeasured.
+- Scope: bounded invocation-write pressure only; sustained contention and power-loss behavior remain unmeasured. A separate single-reader compaction case follows.
+
+### Physical reclamation with a retained reader — verified
+
+- Regression: `retained_reader_blocks_compaction_until_release_then_reclaims_deleted_pages` writes 6.25 MiB of durable values, pins a read snapshot, deletes most rows, and verifies redb rejects compaction while the reader is open. The pinned snapshot still reads all original rows; after release, compaction shrinks the database file and the remaining rows are intact.
+- Verification: the focused redb foundation integration test passed on redb 4.4.0.
+- Scope: bounded single-reader reclamation evidence; sustained mixed read/write pressure and power-loss behavior remain unmeasured.
 
 ### Restricted-principal metadata filtering through gateway and supervisor — verified
 
@@ -1768,7 +1774,7 @@
 - Verification: this acceptance passed with the writable delegated-cgroup parent and declared runtime allowlists during the prior full sandbox validation. A rerun in the current app scope stopped at sandbox capability admission because that cgroup exposes `memory` and `pids` but lacks the required enabled `cpu` controller; the worker did not launch.
 - Terminal-loss regression: `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` now completes the real worker and relays every provisional SQL result, closes the gateway before terminal delivery, requires the terminal frame write to fail, and then verifies the durable outcome is COMMITTED. The restricted-principal query still follows the normal terminal path.
 - Verification: workspace build, format, warning-denied Clippy, and all default workspace tests passed; the changed commit integration target compiled and passed warning-denied Clippy. The ignored sandbox run could not launch in the current app scope because its cgroup lacks the enabled `cpu` controller required by sandbox admission.
-- Remaining: rerun the terminal-loss acceptance on a properly delegated cgroup; add storage-file fault points; broaden retained-reader pressure and reclamation evidence.
+- Remaining: rerun the terminal-loss acceptance on a properly delegated cgroup; add additional storage-file fault points; measure sustained mixed reader/writer pressure beyond the bounded workloads above.
 
 ## SM-1 / SM-7: recover an injected redb storage write error — verified
 

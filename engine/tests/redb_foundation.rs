@@ -1,5 +1,8 @@
 //! Disposable redb API experiments, not a storage-manager interface.
-use redb::{Database, Durability, ReadableDatabase, ReadableTable, TableDefinition};
+use redb::{
+    CompactionError, Database, Durability, ReadableDatabase, ReadableTable, ReadableTableMetadata,
+    TableDefinition,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("fixture");
@@ -139,5 +142,81 @@ fn retained_reader_allows_repeated_durable_writes_without_changing_its_snapshot(
             .value(),
         vec![(WRITE_COUNT - 1) as u8; VALUE_BYTES]
     );
+    Ok(())
+}
+
+#[test]
+fn retained_reader_blocks_compaction_until_release_then_reclaims_deleted_pages()
+-> Result<(), Box<dyn std::error::Error>> {
+    const ROW_COUNT: u32 = 64;
+    const DELETE_COUNT: u32 = 58;
+    const VALUE_BYTES: usize = 100 * 1024;
+
+    let fixture = Fixture::new();
+    let mut db = Database::create(fixture.path())?;
+    let value = vec![0x5a; VALUE_BYTES];
+    let mut write = db.begin_write()?;
+    write.set_durability(Durability::Immediate)?;
+    write.set_two_phase_commit(true);
+    {
+        let mut table = write.open_table(TABLE)?;
+        for key in 0..ROW_COUNT {
+            table.insert(&key.to_be_bytes()[..], value.as_slice())?;
+        }
+    }
+    write.commit()?;
+
+    let retained_reader = db.begin_read()?;
+    let mut write = db.begin_write()?;
+    write.set_durability(Durability::Immediate)?;
+    write.set_two_phase_commit(true);
+    {
+        let mut table = write.open_table(TABLE)?;
+        for key in 0..DELETE_COUNT {
+            table.remove(&key.to_be_bytes()[..])?;
+        }
+    }
+    write.commit()?;
+    let mut write = db.begin_write()?;
+    write.set_durability(Durability::Immediate)?;
+    write.set_two_phase_commit(true);
+    write.commit()?;
+
+    let old_table = retained_reader.open_table(TABLE)?;
+    assert_eq!(old_table.len()?, u64::from(ROW_COUNT));
+    assert_eq!(
+        old_table
+            .get(&0u32.to_be_bytes()[..])?
+            .ok_or("retained snapshot lost a deleted row")?
+            .value(),
+        value
+    );
+    drop(old_table);
+    assert!(matches!(
+        db.compact(),
+        Err(CompactionError::TransactionInProgress)
+    ));
+    drop(retained_reader);
+
+    let file_size_before = std::fs::metadata(fixture.path())?.len();
+    assert!(db.compact()?);
+    let file_size_after = std::fs::metadata(fixture.path())?.len();
+    assert!(
+        file_size_after < file_size_before,
+        "compaction did not reclaim deleted pages: {file_size_before} -> {file_size_after}"
+    );
+
+    let current_reader = db.begin_read()?;
+    let current_table = current_reader.open_table(TABLE)?;
+    assert_eq!(current_table.len()?, u64::from(ROW_COUNT - DELETE_COUNT));
+    for key in DELETE_COUNT..ROW_COUNT {
+        assert_eq!(
+            current_table
+                .get(&key.to_be_bytes()[..])?
+                .ok_or("compaction lost a retained row")?
+                .value(),
+            value
+        );
+    }
     Ok(())
 }
