@@ -1894,8 +1894,8 @@
 
 - Contract: [schema DDL](../../specs/ddl-schema.md) requires PRIMARY KEY columns to be non-nullable and the owned unique index to be validated/backfilled before publication.
 - Implementation: `StorageManager::create_primary_key` shares the fenced key-constraint catalog path with UNIQUE while writing the PRIMARY KEY kind. Authenticated ADMIN `constraints.create_primary_key` exposes the structured request through connection-owned PREPARE/START and returns the generated constraint and index IDs.
-- Regression: real-redb coverage creates a PRIMARY KEY on a non-null column and validates its owned index and startup integrity. Decoder coverage checks the exact ordered-column request, and the authenticated control integration creates a PRIMARY KEY before creating a UNIQUE and exercising FK lifecycle.
-- Verification: the focused manager, decoder, and authenticated gateway regressions passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` passed under Rust 1.95.0; the commit integration target had 118 passed and 3 cgroup-dependent tests ignored.
+- Regression: real-redb coverage creates a PRIMARY KEY on a non-null column, verifies its owned index and startup integrity, and proves a writer pinned before creation conflicts, publishes no row, and records ABORTED. Decoder coverage checks the exact ordered-column request, and the authenticated control integration creates a PRIMARY KEY before creating a UNIQUE and exercising FK lifecycle.
+- Verification: focused manager, decoder, authenticated gateway, and stale-writer regressions passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` passed in the prescribed Nix shell; the commit integration target reported 121 passed and 3 cgroup-dependent ignored.
 - Remaining: CHECK creation/removal and SQL `ALTER TABLE` parsing remain open.
 
 ## SM-5: structured CHECK lifecycle through StorageManager and ADMIN — implemented

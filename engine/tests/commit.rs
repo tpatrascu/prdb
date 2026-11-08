@@ -7414,6 +7414,22 @@ fn storage_manager_creates_primary_key_with_owned_unique_index()
     setup_audit.action = AuditAction::AuthorityChange;
     storage.commit_catalog_and_audit(id(0xf3), admin_role, 9_999, &setup_writes, &[setup_audit])?;
 
+    let mut stale_writer = storage.begin_invocation(id(0xd8), actor, 9_999, 1, 1024)?;
+    let stale_schema = stale_writer.load_catalog_table_schema(id(82))?;
+    stale_writer.load_catalog_indexes(&stale_schema)?;
+    let stale_tuple = encode_tuple(
+        &stale_schema.columns,
+        stale_schema.schema_version,
+        &[Some(ScalarValue::Bytea(
+            b"stale before PRIMARY KEY add".to_vec(),
+        ))],
+    )?;
+    let stale_row = prdb_engine::overlay::RowId {
+        table: id(82),
+        row: id(0xd9),
+    };
+    stale_writer.stage_put(stale_row, &stale_tuple)?;
+
     let invocation_id = id(0xf4);
     let mut audit = identity_audit_event(0xf5, actor, id(82));
     audit.correlation_id = invocation_id;
@@ -7428,6 +7444,19 @@ fn storage_manager_creates_primary_key_with_owned_unique_index()
         })
         .map_err(|error| format!("PRIMARY KEY creation failed: {error:?}"))?;
     assert_eq!(created.commit_sequence, 2);
+    assert!(matches!(
+        stale_writer.commit(),
+        Err(prdb_engine::transaction::TransactionError::Commit(
+            CommitError::Conflict
+        ))
+    ));
+    assert!(row(&database, &table_row_key(id(82), stale_row.row))?.is_none());
+    assert_eq!(
+        lookup_outcome(&database, id(0xd8), actor, 1)?
+            .ok_or("missing stale PRIMARY KEY-add writer outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
     let read = database.begin_read()?;
     let catalog = read.open_table(CATALOG)?;
     let constraint = catalog
