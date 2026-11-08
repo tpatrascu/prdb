@@ -102,13 +102,17 @@ Use C and TinyCC for user queries and SDK SQL/runtime code. Rust implements the 
 
 Distribute a pinned TinyCC toolchain and prebuilt C SDK archive; compile only user source per edit. Keep administrative helpers separate from executor runtime code. TinyCC runs in a bounded client subprocess and emits query.so without executing it. Engine Rust compilation is never part of the per-query path.
 
+The `prdb-packager` Rust client helper implements this compile-and-package step on Linux x86_64. It accepts one source file (at most 1 MiB), a prebuilt SDK archive (at most 128 MiB), an include directory, a canonical PSC1 requested-scope file (at most 8 KiB), and explicit ABI, SDK release, CPU baseline, runtime profile, and diagnostic compiler identity fields. TinyCC receives a cleared environment and is invoked with `-Wall -Wextra -Werror -shared`; it runs with 65 seconds of CPU, a 60-second wall limit, 2 GiB address space, 64 MiB output-file limit, no core dumps, and 64 file descriptors. The helper bounds captured diagnostics to 8 KiB, validates the output ELF and required ABI exports without loading it, and rejects artifacts above 64 MiB. The compiler's stdout and stderr are drained so output cannot fill a pipe.
+
+On success, the helper creates a new package directory containing `query.so`, canonical `manifest.pmf1`, validated `requested_scope.psc1`, and lowercase-hex `artifact.sha256`. Files are mode 0600 and the directory is mode 0700. The directory is published by an atomic no-replace rename, so an existing package is never overwritten and incomplete staging data is removed on ordinary errors. The helper does not upload the package, execute the artifact, grant the requested scope, or provide authorization credentials to TinyCC. This implementation does not yet provide a network submission client.
+
 The versioned C ABI is the interoperability boundary, not permission to use unspecified Rust layouts. C can corrupt the Rust executor host, so all trusted services remain outside that process. Other query languages/compilers are outside the initial supported SDK; artifact provenance never bypasses validation.
 
 ## Benchmark and Acceptance Plan
 
 Measure cold and warm compile-plus-link time, one-line-edit turnaround, artifact size, load/startup time, and compile-to-first-result latency. Include SQL wrapper queries, small native loops, and mixed SQL/native work. Measure execution throughput too; reduced compile time may trade off generated-code quality.
 
-Measure the selected TinyCC build and separate SDK release-build time from per-query compilation. Do not assume GCC-style optimization options produce equivalent results with TinyCC. Pin compiler versions, target, dependency packaging, and sandbox profile. No benchmark or toolchain implementation exists yet.
+Measure the selected TinyCC build and separate SDK release-build time from per-query compilation. Do not assume GCC-style optimization options produce equivalent results with TinyCC. The package helper is implemented, but exact TinyCC build distribution, dependency packaging, and the deployed runtime profile still need to be pinned; the local process resource limits do not replace a compiler sandbox.
 
 Validate cross-version rejection, malformed manifests, missing symbols, hostile constructors, dependency lookup restrictions, library crashes, protocol forgery, sequential-call budgets, and preservation of redaction states. Confirm SDK provenance never bypasses authorization.
 

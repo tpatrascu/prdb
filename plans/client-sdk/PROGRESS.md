@@ -26,7 +26,14 @@
 - Behavior: `manifest_v1_from_elf` walks the artifact's ELF data without loading it, validates the selected ABI's descriptor OBJECT and entry FUNC exports, derives strict sorted unique `DT_NEEDED` names, combines them with caller-supplied profile fields, and validates the result through the canonical PMF1 encoder.
 - Red/green evidence: the real TinyCC supervisor/gateway submission regression initially failed to compile because the manifest discovery API was absent; it now uses that API to build the PMF1 payload and successfully seals the same artifact. Unit coverage rejects unsupported ABI and malformed ELF.
 - Verification: the focused TinyCC TCP regression and complete Rust workspace build, formatting, warning-denied Clippy, and tests passed. The full maintained TinyCC archive/test/fixture build also passed.
-- Remaining: invoke the reusable TinyCC SDK archive from a bounded client compiler wrapper and persist a package containing query.so, PMF1, PSC1 and artifact digest.
+- Remaining: the separate bounded packaging dependency is tracked below; this ELF parser/encoder API remains reusable by the package helper and TCP admission path.
+
+## SDK-3 dependency: bounded TinyCC client packager — implemented
+
+- Behavior: `prdb-packager` compiles one C source against the prebuilt SDK archive in a cleared-environment subprocess with CPU, wall-time, address-space, output-file, core-dump, and descriptor limits. It validates PSC1, derives and encodes PMF1 from the compiled ELF, hashes the artifact, then atomically publishes `query.so`, `manifest.pmf1`, `requested_scope.psc1`, and `artifact.sha256` in a private new directory without loading the query.
+- Limits: source 1 MiB, SDK archive 128 MiB, PSC1 8 KiB, compiled artifact 64 MiB, diagnostic capture 8 KiB. Package files are mode 0600 and the directory is mode 0700. Existing output paths fail closed.
+- Red/green evidence: the end-to-end test builds the maintained TinyCC SDK archive, invokes the actual packager binary, decodes PMF1, verifies exact PSC1 and SHA-256 output, proves a constructor that aborts is not run, and checks that an existing package path is not overwritten.
+- Remaining: upload the generated package through the authenticated client protocol and connect scope generation to client-side discovery/selection; package generation alone does not grant authority.
 
 ## SDK-1 initial borrowed value view — implemented
 
