@@ -1945,3 +1945,11 @@
 - TDD evidence: the first real-redb run rejected the generated index object as `InvalidCatalog`; the accepted catalog shape requires a schema parent plus its matching kind-1 edge and the canonical database-admin owner.
 - Verification: the focused real-redb lifecycle regression passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` all passed in the prescribed Nix shell.
 - Remaining: typed StorageManager removal/rebuild requests and authenticated ADMIN operation dispatch remain open; the raw authorized index DDL commit path remains available for trusted internal callers.
+
+## SM-5: typed ordinary index removal through StorageManager — implemented
+
+- Contract: [storage manager](../../specs/storage-manager.md) requires index removal to authorize the current actor, remove the definition and physical memberships atomically, and advance the table write epoch.
+- Implementation: `StorageManager::drop_index` accepts an index ID and captures exact current bytes for the family-9 definition, family-2 object, and schema-parent kind-1 ownership edge. It removes all three through `commit_authorized_index_ddl`; that path removes forward and reverse memberships and rejects a drop that leaves an invalid dependent constraint.
+- Regression: `storage_manager_creates_named_unique_index_and_backfills_atomically` now continues through typed drop, checking durable COMMITTED status and removal of the definition, object, ownership edge, and all forward/reverse memberships.
+- Verification: the focused real-redb create/drop lifecycle regression passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` all passed in the prescribed Nix shell; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
+- Remaining: typed index rebuild and authenticated ADMIN operation dispatch remain open.

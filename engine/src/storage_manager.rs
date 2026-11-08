@@ -629,6 +629,21 @@ pub struct CreatedIndex {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DropIndexRequest {
+    pub invocation_id: [u8; 16],
+    pub authenticated_actor_id: [u8; 16],
+    pub index_id: [u8; 16],
+    pub retention_deadline_us: i64,
+    pub audit_event: AuditEvent,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DroppedIndex {
+    pub index_id: [u8; 16],
+    pub commit_sequence: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum IndexLifecycleError {
     InvalidRequest,
     InvalidAudit,
@@ -6594,6 +6609,104 @@ impl<'db> StorageManager<'db> {
             )
             .map_err(IndexLifecycleError::Commit)?;
         Ok(CreatedIndex {
+            index_id,
+            commit_sequence,
+        })
+    }
+
+    /// Remove an ordinary index and its schema ownership edge through the
+    /// authorized index DDL commit path. Physical memberships are removed by
+    /// that commit atomically with the catalog records.
+    pub fn drop_index(
+        &self,
+        request: DropIndexRequest,
+    ) -> Result<DroppedIndex, IndexLifecycleError> {
+        let DropIndexRequest {
+            invocation_id,
+            authenticated_actor_id,
+            index_id,
+            retention_deadline_us,
+            audit_event,
+        } = request;
+        if invocation_id == [0; 16]
+            || authenticated_actor_id == [0; 16]
+            || index_id == [0; 16]
+            || retention_deadline_us <= 0
+        {
+            return Err(IndexLifecycleError::InvalidRequest);
+        }
+        if audit_event.actor_id != Some(authenticated_actor_id)
+            || audit_event.correlation_id != invocation_id
+            || audit_event.action != AuditAction::Ddl
+            || audit_event.result != AuditResult::Succeeded
+        {
+            return Err(IndexLifecycleError::InvalidAudit);
+        }
+
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|_| IndexLifecycleError::Storage)?;
+        let catalog = read
+            .open_table(CATALOG)
+            .map_err(|_| IndexLifecycleError::Storage)?;
+        let index_key = id_catalog_key(9, index_id);
+        let index_bytes = catalog
+            .get(index_key.as_slice())
+            .map_err(|_| IndexLifecycleError::Storage)?
+            .map(|value| value.value().to_vec())
+            .ok_or(IndexLifecycleError::Commit(CommitError::InvalidCatalog))?;
+        read_catalog_record(&index_key, &index_bytes, 9).map_err(IndexLifecycleError::from)?;
+        let object_key = id_catalog_key(2, index_id);
+        let object_bytes = catalog
+            .get(object_key.as_slice())
+            .map_err(|_| IndexLifecycleError::Storage)?
+            .map(|value| value.value().to_vec())
+            .ok_or(IndexLifecycleError::Commit(CommitError::InvalidCatalog))?;
+        read_catalog_record(&object_key, &object_bytes, 2).map_err(IndexLifecycleError::from)?;
+        if read_catalog_u16(&object_key, &object_bytes, 2, 1).map_err(IndexLifecycleError::from)?
+            != 7
+        {
+            return Err(IndexLifecycleError::Commit(CommitError::InvalidCatalog));
+        }
+        let schema_id =
+            read_catalog_id(&object_key, &object_bytes, 2, 2).map_err(IndexLifecycleError::from)?;
+        let edge_key = dependency_catalog_key(index_id, schema_id, 1);
+        let edge_bytes = catalog
+            .get(edge_key.as_slice())
+            .map_err(|_| IndexLifecycleError::Storage)?
+            .map(|value| value.value().to_vec())
+            .ok_or(IndexLifecycleError::Commit(CommitError::InvalidCatalog))?;
+        drop(catalog);
+        drop(read);
+
+        let writes = [
+            CatalogWrite {
+                key: index_key,
+                expected_value: Some(index_bytes),
+                payload: None,
+            },
+            CatalogWrite {
+                key: object_key,
+                expected_value: Some(object_bytes),
+                payload: None,
+            },
+            CatalogWrite {
+                key: edge_key,
+                expected_value: Some(edge_bytes),
+                payload: None,
+            },
+        ];
+        let commit_sequence = self
+            .commit_authorized_index_ddl(
+                invocation_id,
+                authenticated_actor_id,
+                retention_deadline_us,
+                &writes,
+                &[audit_event],
+            )
+            .map_err(IndexLifecycleError::Commit)?;
+        Ok(DroppedIndex {
             index_id,
             commit_sequence,
         })

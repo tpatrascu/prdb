@@ -7471,6 +7471,48 @@ fn storage_manager_creates_named_unique_index_and_backfills_atomically()
     );
     assert_eq!(read.open_table(schema::INDEXES)?.iter()?.count(), 2);
     assert_eq!(read.open_table(schema::ROW_INDEXES)?.iter()?.count(), 2);
+    drop(index_record);
+    drop(catalog);
+    drop(read);
+    let drop_invocation = id(0xd9);
+    let mut drop_audit = identity_audit_event(0xda, actor, created.index_id);
+    drop_audit.correlation_id = drop_invocation;
+    let dropped = storage
+        .drop_index(prdb_engine::storage_manager::DropIndexRequest {
+            invocation_id: drop_invocation,
+            authenticated_actor_id: actor,
+            index_id: created.index_id,
+            retention_deadline_us: 9_999,
+            audit_event: drop_audit,
+        })
+        .map_err(|error| format!("named unique index drop failed: {error:?}"))?;
+    assert_eq!(dropped.index_id, created.index_id);
+    assert_eq!(dropped.commit_sequence, 4);
+    assert_eq!(
+        lookup_outcome(&database, drop_invocation, actor, 1)?
+            .ok_or("missing named-index drop outcome")?
+            .status,
+        OutcomeStatus::Committed
+    );
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    assert!(
+        catalog
+            .get(id_catalog_key(9, created.index_id).as_slice())?
+            .is_none()
+    );
+    assert!(
+        catalog
+            .get(id_catalog_key(2, created.index_id).as_slice())?
+            .is_none()
+    );
+    assert!(
+        catalog
+            .get(dependency_write(created.index_id, id(80), 1).key.as_slice())?
+            .is_none()
+    );
+    assert_eq!(read.open_table(schema::INDEXES)?.iter()?.count(), 0);
+    assert_eq!(read.open_table(schema::ROW_INDEXES)?.iter()?.count(), 0);
     drop(catalog);
     drop(read);
     prdb_engine::startup::validate_persisted_records(&database)?;
