@@ -5,6 +5,13 @@
 use crate::tuple::{ColumnSchema, ScalarType, ScalarValue, TupleError};
 use std::collections::{HashMap, HashSet};
 
+/// Maximum complete SQL secondary-index key accepted by the engine. A row
+/// record is capped at 1 MiB; BYTEA escaping can double tuple bytes, each of
+/// at most 4096 components can add one marker, and the index and row UUID
+/// prefixes add 32 bytes.
+pub const MAX_INDEX_KEY_BYTES: usize =
+    2 * crate::row_record::MAX_ROW_RECORD_BYTES + crate::tuple::MAX_COLUMNS + 32;
+
 /// Encode a complete SQL tuple using the pinned column types and v1 ordering.
 /// `TUP1` validation is reused to enforce nullability, scalar ranges, decimal
 /// precision, and VARCHAR character limits before emitting ordered bytes.

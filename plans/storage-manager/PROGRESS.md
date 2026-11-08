@@ -24,6 +24,14 @@
 
 - Added Boolean, UUID, and signed 128-bit coefficient encoding/decoding and signed 16/32/64-bit decoding. The focused test first failed against compiling placeholders, then passed. It checks decimal examples, integer extremes, malformed booleans, truncated payloads, and markers. Decimal precision/scale and complete-tuple validation belong to a schema-aware layer that does not yet exist.
 
+## SM-2: bounded persisted index keys — implemented
+
+- Contract: [index-key encoding v1](../../specs/index-key-encoding.md). Complete SQL secondary-index keys are capped at `2 * MAX_ROW_RECORD_BYTES + MAX_COLUMNS + 32` (2,101,280 bytes at the current limits), sufficient for worst-case escaping and fixed prefixes while bounded well below redb 4.4.0's 3 GiB key limit.
+- Regression: a compiling real-redb commit test first accepted a key one byte above the proposed limit and committed its row. It now verifies rejection as `InvalidIndex`, unchanged commit sequence, and no row publication.
+- Implementation: transaction staging and the serialized storage commit both reject over-limit keys, so direct trusted commit callers cannot bypass the logical bound. The low-level key composer remains an encoding helper and may construct bytes that cannot be persisted.
+- Verification: the focused real-redb regression passed both the over-limit rejection and exact-limit acceptance cases. The full TinyCC suite and `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, and `git diff --check` all passed in the configured Nix shell. The commit integration target passed all 106 tests.
+- Remaining: independent typed comparator properties and index-scan equivalence remain open.
+
 ## SM-3: bounded private overlay primitive — in progress
 
 - Contract: [memory storage](../../specs/memory-storage.md), Transaction Memory. A compiling placeholder failed both staging and limit tests; the implementation now copies staged values, counts distinct row IDs and encoded value bytes, and clears and terminally aborts after a limit failure. Replacement and deletion update accounting. Tests also check independent overlays and explicit abort.

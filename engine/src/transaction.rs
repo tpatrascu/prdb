@@ -5073,7 +5073,11 @@ impl<'db> InvocationTransaction<'db> {
             Some(StagedRow::Delete) if !present => {}
             _ => return Err(TransactionError::IndexRowNotStaged),
         }
-        if key.len() < 32 || (unique && key.len() == 32) || key[key.len() - 16..] != id.row {
+        if key.len() < 32
+            || key.len() > crate::index_key::MAX_INDEX_KEY_BYTES
+            || (unique && key.len() == 32)
+            || key[key.len() - 16..] != id.row
+        {
             return Err(TransactionError::Commit(CommitError::InvalidIndex));
         }
         if self

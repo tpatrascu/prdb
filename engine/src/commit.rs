@@ -5325,6 +5325,7 @@ fn commit_storage_changes_inner_with_admin_credential_check(
                 })
         });
         if index_write.key.len() < 33
+            || index_write.key.len() > crate::index_key::MAX_INDEX_KEY_BYTES
             || index_write.key[index_write.key.len() - 16..] != index_write.row_key[16..]
             || (row_write.is_none() && !is_index_ddl_write)
             || !unique_indexes.insert(index_write.key.as_slice())

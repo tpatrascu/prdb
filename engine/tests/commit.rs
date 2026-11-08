@@ -16865,6 +16865,73 @@ fn one_redb_commit_can_publish_rows_indexes_catalog_audit_and_outcome()
 }
 
 #[test]
+fn oversized_index_key_is_rejected_before_publication() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let row_key = key(7);
+    let mut index_key = vec![0x44; 16];
+    index_key.resize(prdb_engine::index_key::MAX_INDEX_KEY_BYTES + 1 - 16, 0x01);
+    index_key.extend_from_slice(&row_key[16..]);
+
+    assert_eq!(
+        commit_rows_and_indexes(
+            &database,
+            id(6),
+            id(9),
+            9_999,
+            &[RowWrite {
+                key: row_key,
+                expected_version: None,
+                payload: Some(b"row".to_vec()),
+            }],
+            &[IndexWrite {
+                key: index_key,
+                row_key,
+                expected_version: None,
+                present: true,
+                unique: false,
+                null_exempt: false,
+            }],
+        ),
+        Err(CommitError::InvalidIndex)
+    );
+    assert_eq!(commit_sequence(&database)?, 0);
+    assert!(row(&database, &row_key)?.is_none());
+
+    let mut boundary_key = vec![0x44; 16];
+    boundary_key.resize(prdb_engine::index_key::MAX_INDEX_KEY_BYTES - 16, 0x01);
+    boundary_key.extend_from_slice(&row_key[16..]);
+    assert_eq!(
+        boundary_key.len(),
+        prdb_engine::index_key::MAX_INDEX_KEY_BYTES
+    );
+    assert_eq!(
+        commit_rows_and_indexes(
+            &database,
+            id(7),
+            id(9),
+            9_999,
+            &[RowWrite {
+                key: row_key,
+                expected_version: None,
+                payload: Some(b"row".to_vec()),
+            }],
+            &[IndexWrite {
+                key: boundary_key,
+                row_key,
+                expected_version: None,
+                present: true,
+                unique: false,
+                null_exempt: false,
+            }],
+        )?,
+        1
+    );
+    assert!(row(&database, &row_key)?.is_some());
+    Ok(())
+}
+
+#[test]
 fn row_updates_refresh_retained_index_locator_versions() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
