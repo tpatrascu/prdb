@@ -58,7 +58,7 @@ Return an opaque invocation ID at admission and provide an authenticated status 
 
 ## Durability and Recovery
 
-Use redb durable write transactions from the writable milestone. A successful acknowledgement requires commit under the selected redb durability mode. Recovery is redb-owned; logical rows, indexes, catalog, required audit and outcome must be written atomically. An ambiguous commit result requires recovery/status reconciliation.
+Use redb durable write transactions from the writable milestone. A successful acknowledgement requires commit under the selected redb durability mode. Recovery is redb-owned; logical rows, indexes, catalog, required audit and outcome must be written atomically. An ambiguous commit result requires recovery/status reconciliation. [`process_exit_after_durable_commit_preserves_reconcilable_outcome`](../engine/tests/commit.rs) verifies a committed outcome remains queryable after the child process exits before replying and the parent reopens the database.
 
 ## Metadata Consistency Domains
 

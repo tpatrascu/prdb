@@ -14795,6 +14795,69 @@ fn gateway_disconnect_after_storage_commit_is_reconcilable()
 }
 
 #[test]
+fn process_exit_after_durable_commit_preserves_reconcilable_outcome()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::outcome::OutcomeStatus;
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const CHILD_DATABASE_ENV: &str = "PRDB_TEST_CRASH_AFTER_COMMIT_DATABASE";
+    const CHILD_INVOCATION_ID: [u8; 16] = [0xa1; 16];
+    const PRINCIPAL_ID: [u8; 16] = [9; 16];
+
+    if let Some(database_path) = std::env::var_os(CHILD_DATABASE_ENV) {
+        let database = Database::open(database_path)?;
+        let retention_deadline_us = i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)?
+                .as_micros()
+                .saturating_add(60_000_000),
+        )?;
+        commit_storage_changes(
+            &database,
+            CommitRequest {
+                invocation_id: CHILD_INVOCATION_ID,
+                principal_id: PRINCIPAL_ID,
+                retention_deadline_us,
+                rows: &[],
+                indexes: &[],
+                foreign_keys: &[],
+                catalog_guards: &[],
+                catalog: &[],
+                audit: &[],
+            },
+        )?;
+        // Simulate losing the supervisor reply and all process-local cleanup
+        // immediately after redb reports durable success.
+        std::process::exit(0);
+    }
+
+    let fixture = Fixture::new();
+    let database_path = fixture.path();
+    drop(initialize(&database_path)?);
+    let child_status = Command::new(std::env::current_exe()?)
+        .arg("--exact")
+        .arg("process_exit_after_durable_commit_preserves_reconcilable_outcome")
+        .arg("--nocapture")
+        .env(CHILD_DATABASE_ENV, &database_path)
+        .status()?;
+    assert!(
+        child_status.success(),
+        "commit child exited with {child_status}"
+    );
+
+    let reopened = Database::open(&database_path)?;
+    let storage = StorageManager::new(&reopened, Duration::from_millis(100))?;
+    let now_us = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
+    let outcome = storage
+        .lookup_invocation_outcome(CHILD_INVOCATION_ID, PRINCIPAL_ID, now_us)?
+        .ok_or("committed outcome was not recoverable after process exit")?;
+    assert_eq!(outcome.status, OutcomeStatus::Committed);
+    assert!(outcome.commit_sequence > 0);
+    Ok(())
+}
+
+#[test]
 fn supervisor_drains_both_worker_channels_before_durable_finalize()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::ipc::{IpcFrame, Operation, encode_frame, read_frame};
