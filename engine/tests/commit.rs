@@ -6730,6 +6730,192 @@ fn foreign_key_creation_racing_referenced_table_drop_is_atomic()
 }
 
 #[test]
+fn storage_manager_drops_foreign_key_and_advances_both_table_epochs()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let admin_role = builtin_owner_id();
+    let actor = id(0xcc);
+    let mut setup_writes = foreign_key_catalog_writes(true, true);
+    setup_writes.extend([
+        principal_write_with_name(actor, 1, 1, "foreign_key_drop_admin"),
+        object_write_with_name(actor, 8, "foreign_key_drop_admin"),
+        membership_write(actor, admin_role),
+        dependency_write(actor, admin_role, 5),
+    ]);
+    let mut setup_audit = identity_audit_event(0xcd, admin_role, id(80));
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(id(0xce), admin_role, 9_999, &setup_writes, &[setup_audit])?;
+
+    let mut stale_source_writer = storage.begin_invocation(id(0xd1), actor, 9_999, 1, 1024)?;
+    let stale_source_schema = stale_source_writer.load_catalog_table_schema(id(82))?;
+    stale_source_writer.load_catalog_indexes(&stale_source_schema)?;
+    let stale_source_tuple = encode_tuple(
+        &stale_source_schema.columns,
+        stale_source_schema.schema_version,
+        &[None],
+    )?;
+    stale_source_writer.stage_put(
+        prdb_engine::overlay::RowId {
+            table: id(82),
+            row: id(0xd2),
+        },
+        &stale_source_tuple,
+    )?;
+    let mut stale_target_writer = storage.begin_invocation(id(0xd3), actor, 9_999, 1, 1024)?;
+    let stale_target_schema = stale_target_writer.load_catalog_table_schema(id(81))?;
+    stale_target_writer.load_catalog_indexes(&stale_target_schema)?;
+    let stale_target_tuple = encode_tuple(
+        &stale_target_schema.columns,
+        stale_target_schema.schema_version,
+        &[Some(ScalarValue::Bytea(b"staged before FK drop".to_vec()))],
+    )?;
+    stale_target_writer.stage_put(
+        prdb_engine::overlay::RowId {
+            table: id(81),
+            row: id(0xd4),
+        },
+        &stale_target_tuple,
+    )?;
+
+    let invocation_id = id(0xcf);
+    let mut audit = identity_audit_event(0xd0, actor, id(86));
+    audit.correlation_id = invocation_id;
+    assert_eq!(
+        storage.drop_foreign_key(invocation_id, actor, id(86), 9_999, audit)?,
+        2
+    );
+    assert_eq!(
+        lookup_outcome(&database, invocation_id, actor, 1)?
+            .ok_or("missing foreign-key drop outcome")?
+            .status,
+        OutcomeStatus::Committed
+    );
+    assert!(matches!(
+        stale_source_writer.commit(),
+        Err(prdb_engine::transaction::TransactionError::Commit(
+            CommitError::Conflict
+        ))
+    ));
+    assert!(matches!(
+        stale_target_writer.commit(),
+        Err(prdb_engine::transaction::TransactionError::Commit(
+            CommitError::Conflict
+        ))
+    ));
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    for key in [
+        id_catalog_key(8, id(86)),
+        id_catalog_key(2, id(86)),
+        dependency_write(id(86), id(85), 3).key,
+    ] {
+        assert!(
+            catalog.get(key.as_slice())?.is_none(),
+            "record remains: {key:?}"
+        );
+    }
+    for table_id in [id(81), id(82)] {
+        let key = id_catalog_key(5, table_id);
+        let bytes = catalog
+            .get(key.as_slice())?
+            .ok_or("participating table disappeared during FK drop")?
+            .value()
+            .to_vec();
+        assert_eq!(
+            u64::from_le_bytes(
+                decode_registered_envelope(&bytes)?
+                    .fields
+                    .iter()
+                    .find(|field| field.tag == 3)
+                    .ok_or("missing table write epoch")?
+                    .payload
+                    .as_slice()
+                    .try_into()?
+            ),
+            2
+        );
+    }
+    drop(catalog);
+    drop(read);
+    prdb_engine::startup::validate_persisted_records(&database)?;
+    Ok(())
+}
+
+#[test]
+fn storage_manager_drops_self_referential_foreign_key_once_per_table()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let admin_role = builtin_owner_id();
+    let actor = id(0xe1);
+    let mut setup_writes = foreign_key_catalog_writes(false, true)
+        .into_iter()
+        .filter(|write| {
+            write.key != id_catalog_key(8, id(86)) && write.key != id_catalog_key(2, id(86))
+        })
+        .collect::<Vec<_>>();
+    setup_writes.extend([
+        constraint_write(id(86), id(81), 5, &[id(83)], Some(id(85)), &[id(83)], None),
+        object_write(id(86), 6),
+        dependency_write(id(86), id(85), 3),
+        principal_write_with_name(actor, 1, 1, "self_fk_remove_admin"),
+        object_write_with_name(actor, 8, "self_fk_remove_admin"),
+        membership_write(actor, admin_role),
+        dependency_write(actor, admin_role, 5),
+    ]);
+    let mut setup_audit = identity_audit_event(0xe2, admin_role, id(80));
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(id(0xe2), admin_role, 9_999, &setup_writes, &[setup_audit])?;
+
+    let invocation_id = id(0xe3);
+    let mut audit = identity_audit_event(0xe4, actor, id(86));
+    audit.correlation_id = invocation_id;
+    assert_eq!(
+        storage.drop_foreign_key(invocation_id, actor, id(86), 9_999, audit)?,
+        2
+    );
+
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    assert!(catalog.get(id_catalog_key(8, id(86)).as_slice())?.is_none());
+    let table = catalog
+        .get(id_catalog_key(5, id(81)).as_slice())?
+        .ok_or("self-referencing table disappeared during FK drop")?
+        .value()
+        .to_vec();
+    let epoch = decode_registered_envelope(&table)?
+        .fields
+        .iter()
+        .find(|field| field.tag == 3)
+        .ok_or("missing self-referencing table write epoch")?
+        .payload
+        .as_slice()
+        .try_into()?;
+    assert_eq!(u64::from_le_bytes(epoch), 2);
+    let other_table = catalog
+        .get(id_catalog_key(5, id(82)).as_slice())?
+        .ok_or("unrelated table disappeared during FK drop")?
+        .value()
+        .to_vec();
+    let other_epoch = decode_registered_envelope(&other_table)?
+        .fields
+        .iter()
+        .find(|field| field.tag == 3)
+        .ok_or("missing unrelated table write epoch")?
+        .payload
+        .as_slice()
+        .try_into()?;
+    assert_eq!(u64::from_le_bytes(other_epoch), 1);
+    drop(catalog);
+    drop(read);
+    prdb_engine::startup::validate_persisted_records(&database)?;
+    Ok(())
+}
+
+#[test]
 fn storage_manager_drop_referencing_table_removes_owned_foreign_key()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
@@ -9963,6 +10149,48 @@ fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
     )?;
     assert!(empty_schema_drop.contains("\"outcome\":\"committed\""));
     assert!(empty_schema_drop.contains(&format!("\"schema_id\":\"{empty_schema_id}\"")));
+
+    let mut foreign_key_setup_audit = identity_audit_event(0xd1, admin_role, id(80));
+    foreign_key_setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(
+        id(0xd2),
+        admin_role,
+        60_000_000,
+        &foreign_key_catalog_writes(true, true),
+        &[foreign_key_setup_audit],
+    )?;
+    let foreign_key_id_wire = id(86)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let foreign_key_drop_prepare = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut control,
+        47,
+        &format!(
+            "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"foreign_keys.drop\",\"arguments\":{{\"foreign_key_id\":\"{foreign_key_id_wire}\"}}}}"
+        ),
+        60_000_000,
+    )?;
+    let foreign_key_drop_operation_id = foreign_key_drop_prepare
+        .split("\"operation_id\":\"")
+        .nth(1)
+        .ok_or("missing ADMIN foreign-key-drop operation ID")?
+        .get(..32)
+        .ok_or("invalid ADMIN foreign-key-drop operation ID")?;
+    let foreign_key_drop = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut control,
+        48,
+        &format!("{{\"phase\":\"start\",\"operation_id\":\"{foreign_key_drop_operation_id}\"}}"),
+        60_000_000,
+    )?;
+    assert!(foreign_key_drop.contains("\"outcome\":\"committed\""));
+    assert!(foreign_key_drop.contains(&format!("\"foreign_key_id\":\"{foreign_key_id_wire}\"")));
+    prdb_engine::startup::validate_persisted_records(&database)?;
+
     assert!(storage.list_tokens(admin_id, created_user_id)?[0].revoked);
     assert!(
         storage

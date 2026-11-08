@@ -568,6 +568,20 @@ impl std::fmt::Display for TableLifecycleError {
 
 impl std::error::Error for TableLifecycleError {}
 
+fn table_lifecycle_commit_error(error: TableLifecycleError) -> CommitError {
+    match error {
+        TableLifecycleError::InvalidAudit => CommitError::InvalidAudit,
+        TableLifecycleError::Unauthorized => CommitError::DdlAuthorizationDenied,
+        TableLifecycleError::Storage => {
+            CommitError::Storage("storage manager catalog read failed".to_owned())
+        }
+        TableLifecycleError::Commit(error) => error,
+        TableLifecycleError::InvalidRequest
+        | TableLifecycleError::RandomnessUnavailable
+        | TableLifecycleError::ObjectIdGenerationFailed => CommitError::InvalidWrite,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RoleMembershipChange {
     pub member_id: [u8; 16],
@@ -6344,6 +6358,144 @@ impl<'db> StorageManager<'db> {
             retention_deadline_us,
             catalog_writes,
             audit_events,
+        )
+    }
+
+    /// Drop one foreign-key constraint and its dependency edge atomically.
+    /// Both participating tables' write epochs advance so invocations pinned
+    /// to the old referential graph cannot publish afterward.
+    pub fn drop_foreign_key(
+        &self,
+        invocation_id: [u8; 16],
+        authenticated_principal_id: [u8; 16],
+        foreign_key_id: [u8; 16],
+        retention_deadline_us: i64,
+        mut audit_event: AuditEvent,
+    ) -> Result<u64, CommitError> {
+        if invocation_id == [0; 16]
+            || authenticated_principal_id == [0; 16]
+            || foreign_key_id == [0; 16]
+            || retention_deadline_us <= 0
+        {
+            return Err(CommitError::InvalidWrite);
+        }
+        if audit_event.actor_id != Some(authenticated_principal_id)
+            || audit_event.correlation_id != invocation_id
+            || audit_event.action != AuditAction::Ddl
+            || audit_event.result != AuditResult::Succeeded
+        {
+            return Err(CommitError::InvalidAudit);
+        }
+
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|error| CommitError::Storage(error.to_string()))?;
+        let catalog = read
+            .open_table(CATALOG)
+            .map_err(|error| CommitError::Storage(error.to_string()))?;
+        let foreign_key_key = id_catalog_key(8, foreign_key_id);
+        let foreign_key_bytes = catalog
+            .get(foreign_key_key.as_slice())
+            .map_err(|error| CommitError::Storage(error.to_string()))?
+            .map(|value| value.value().to_vec())
+            .ok_or(CommitError::InvalidCatalog)?;
+        if read_catalog_u16(&foreign_key_key, &foreign_key_bytes, 8, 2)
+            .map_err(table_lifecycle_commit_error)?
+            != 5
+        {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let source_table_id = read_catalog_id(&foreign_key_key, &foreign_key_bytes, 8, 1)
+            .map_err(table_lifecycle_commit_error)?;
+        let target_constraint_id = read_catalog_id(&foreign_key_key, &foreign_key_bytes, 8, 5)
+            .map_err(table_lifecycle_commit_error)?;
+        let target_constraint_key = id_catalog_key(8, target_constraint_id);
+        let target_constraint_bytes = catalog
+            .get(target_constraint_key.as_slice())
+            .map_err(|error| CommitError::Storage(error.to_string()))?
+            .map(|value| value.value().to_vec())
+            .ok_or(CommitError::InvalidCatalog)?;
+        if !matches!(
+            read_catalog_u16(&target_constraint_key, &target_constraint_bytes, 8, 2)
+                .map_err(table_lifecycle_commit_error)?,
+            2 | 3
+        ) {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let target_table_id =
+            read_catalog_id(&target_constraint_key, &target_constraint_bytes, 8, 1)
+                .map_err(table_lifecycle_commit_error)?;
+
+        let object_key = id_catalog_key(2, foreign_key_id);
+        let object_bytes = catalog
+            .get(object_key.as_slice())
+            .map_err(|error| CommitError::Storage(error.to_string()))?
+            .map(|value| value.value().to_vec())
+            .ok_or(CommitError::InvalidCatalog)?;
+        if read_catalog_u16(&object_key, &object_bytes, 2, 1)
+            .map_err(table_lifecycle_commit_error)?
+            != 6
+        {
+            return Err(CommitError::InvalidCatalog);
+        }
+        let dependency_key = dependency_catalog_key(foreign_key_id, target_constraint_id, 3);
+        let dependency_bytes = catalog
+            .get(dependency_key.as_slice())
+            .map_err(|error| CommitError::Storage(error.to_string()))?
+            .map(|value| value.value().to_vec())
+            .ok_or(CommitError::InvalidCatalog)?;
+
+        let mut writes = vec![
+            CatalogWrite {
+                key: foreign_key_key,
+                expected_value: Some(foreign_key_bytes),
+                payload: None,
+            },
+            CatalogWrite {
+                key: object_key,
+                expected_value: Some(object_bytes),
+                payload: None,
+            },
+            CatalogWrite {
+                key: dependency_key,
+                expected_value: Some(dependency_bytes),
+                payload: None,
+            },
+        ];
+        let mut table_ids = vec![source_table_id, target_table_id];
+        table_ids.sort_unstable();
+        table_ids.dedup();
+        for table_id in table_ids {
+            let table_key = id_catalog_key(5, table_id);
+            let table_bytes = catalog
+                .get(table_key.as_slice())
+                .map_err(|error| CommitError::Storage(error.to_string()))?
+                .map(|value| value.value().to_vec())
+                .ok_or(CommitError::InvalidCatalog)?;
+            let next_epoch = read_catalog_u64(&table_key, &table_bytes, 5, 3)
+                .map_err(table_lifecycle_commit_error)?
+                .checked_add(1)
+                .ok_or(CommitError::InvalidCatalog)?;
+            writes.push(CatalogWrite {
+                key: table_key.clone(),
+                expected_value: Some(table_bytes.clone()),
+                payload: Some(
+                    rewrite_catalog_u64_field(&table_key, &table_bytes, 5, 3, next_epoch)
+                        .map_err(table_lifecycle_commit_error)?,
+                ),
+            });
+        }
+        drop(catalog);
+        drop(read);
+
+        audit_event.target_ids = vec![foreign_key_id];
+        self.commit_authorized_foreign_key_ddl(
+            invocation_id,
+            authenticated_principal_id,
+            retention_deadline_us,
+            &writes,
+            &[audit_event],
         )
     }
 
