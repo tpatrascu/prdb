@@ -7982,15 +7982,12 @@ impl<'db> StorageManager<'db> {
             CatalogField {
                 tag: 9,
                 wire_type: WireType::U32,
-                payload: u32::try_from(schema_version)
-                    .map_err(|_| TableLifecycleError::InvalidRequest)?
-                    .to_le_bytes()
-                    .to_vec(),
+                payload: 1u32.to_le_bytes().to_vec(),
             },
             CatalogField {
                 tag: 10,
                 wire_type: WireType::U64,
-                payload: 1u64.to_le_bytes().to_vec(),
+                payload: schema_version.to_le_bytes().to_vec(),
             },
         ];
         let index_payload = encode_envelope(

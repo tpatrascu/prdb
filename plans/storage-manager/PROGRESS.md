@@ -2005,6 +2005,22 @@
 
 - Contract: authenticated index create/rebuild/drop requests use the existing typed AdminClient and server-side authorization/fencing path.
 - Implementation: the CLI exposes create, rebuild, and drop with canonical ordered column IDs; uniqueness defaults to false and is an optional boolean flag.
-- Regression: parser coverage checks canonical nonzero ID lists and duplicate rejection. The real-process ADMIN lifecycle covers index create and drop; existing typed-client and ADMIN dispatcher tests cover rebuild request construction and the authorized in-process path.
-- Verification: focused CLI parsing passed, and the focused multi-process create/drop lifecycle passed. Full workspace build, format check, warning-denied Clippy, and tests passed; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
-- Remaining: a real gateway/supervisor process `indexes.rebuild` START currently returns a sanitized `unavailable` rejection after successful create; diagnose that path before claiming multi-process rebuild coverage. Constraint, privilege, and policy CLI commands remain open.
+- Regression: parser coverage checks canonical nonzero ID lists and duplicate rejection. The real-process ADMIN lifecycle now covers index create, rebuild with a changed uniqueness profile, and drop; existing typed-client and ADMIN dispatcher tests cover rebuild request construction.
+- Verification: focused CLI parsing and real multi-process index lifecycle passed. Full workspace build, format check, warning-denied Clippy, and tests passed; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
+- Remaining: constraint, privilege, and policy CLI commands remain open; confined artifact execution still needs a delegated-cgroup integration environment.
+
+## SM-5 / DS-7: same-profile index rebuild — implemented
+
+- Contract: `indexes.rebuild` rebuilds and validates physical memberships even when the requested columns and uniqueness profile match the existing definition; it records audit/outcome and advances the table write epoch.
+- Red evidence: the focused real-redb populated-index regression initially failed with `Commit(InvalidCatalog)` when repeating the just-committed definition. The real gateway/supervisor test also showed the same behavior on an empty table.
+- Implementation: identical family-9 definition writes are now treated as explicit rebuild intent during table-fence discovery, index authorization, and backfill planning. Rebuilds with no rows still enter the authorized commit path and commit the durable audit/outcome plus table epoch.
+- Regression: the populated redb test repeats the same definition and checks the next commit sequence and COMMITTED outcome. The real-process ADMIN test now rebuilds first to a changed uniqueness profile, then repeats that profile through gateway/supervisor, and finally drops the index.
+- Verification: both focused regressions passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed under Rust/Cargo 1.95.0; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
+
+## SM-5: key constraints after schema evolution — fixed
+
+- Contract: typed unique and primary-key DDL must create a backing index compatible with the current table schema, including after column changes.
+- Red evidence: the multi-process ADMIN regression created a column, then unique constraint, and failed with `Commit(InvalidCatalog)`.
+- Cause and fix: the generated family-9 index used the table schema version in its format-version field and hardcoded its schema-version field to 1. The builder now writes fixed format version 1 and the current schema version separately.
+- Regression: the real gateway/supervisor lifecycle creates and drops a unique constraint after column addition; the scenario passes after the fix.
+- Verification: the focused process regression and complete workspace build, format, warning-denied Clippy, and tests passed; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.

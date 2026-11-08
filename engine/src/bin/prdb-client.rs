@@ -48,6 +48,9 @@ Token secrets are saved only to mode-0600 credential files and are never printed
   prdb-client index-create --address IP:PORT --credentials ADMIN_FILE --table-id HEX --name NAME --columns HEX,... [--unique true|false]\n\
   prdb-client index-rebuild --address IP:PORT --credentials ADMIN_FILE --index-id HEX --columns HEX,... [--unique true|false]\n\
   prdb-client index-drop --address IP:PORT --credentials ADMIN_FILE --index-id HEX\n\n\
+  prdb-client unique-create|primary-key-create --address IP:PORT --credentials ADMIN_FILE \\
+    --table-id HEX --columns HEX,...\n\
+  prdb-client unique-drop|primary-key-drop --address IP:PORT --credentials ADMIN_FILE --constraint-id HEX\n\n\
 Column types: boolean, smallint, integer, bigint, decimal(P,S), text, varchar(N), bytea, uuid, date, timestamptz.\n\
 Column nullability is nullable or not-null; not-null columns require the UUID identity modifier.\n\n\
 Token secrets are saved only to mode-0600 credential files and are never printed.\n\
@@ -115,6 +118,9 @@ fn run() -> Result<(), String> {
         | "column-default-drop" => column_admin(&command, address, credentials_path, &mut fields),
         "index-create" | "index-rebuild" | "index-drop" => {
             index_admin(&command, address, credentials_path, &mut fields)
+        }
+        "unique-create" | "primary-key-create" | "unique-drop" | "primary-key-drop" => {
+            key_constraint_admin(&command, address, credentials_path, &mut fields)
         }
         "user-create" | "user-rename" | "user-drop" | "user-login" | "role-create"
         | "role-rename" | "role-drop" | "role-grant" | "role-revoke" => {
@@ -366,6 +372,75 @@ fn index_admin(
         _ => return Err(format!("unsupported index command {command}")),
     }
     Ok(())
+}
+
+fn key_constraint_admin(
+    command: &str,
+    address: SocketAddr,
+    credentials_path: PathBuf,
+    fields: &mut HashMap<String, std::ffi::OsString>,
+) -> Result<(), String> {
+    let mut administrator =
+        read_client_credentials(credentials_path).map_err(|error| error.to_string())?;
+    let mut client = AdminClient::connect_authenticated(
+        address,
+        administrator.token_id,
+        &mut administrator.token_secret,
+    )
+    .map_err(|error| error.to_string())?;
+    match command {
+        "unique-create" | "primary-key-create" => {
+            let table_id = parse_id(&take_text(fields, "--table-id")?)?;
+            let column_ids = parse_constraint_columns(&take_text(fields, "--columns")?)?;
+            reject_unknown(fields)?;
+            let result = if command == "unique-create" {
+                client.create_unique_constraint(table_id, &column_ids)
+            } else {
+                client.create_primary_key(table_id, &column_ids)
+            }
+            .map_err(|error| error.to_string())?;
+            println!(
+                "created {} constraint {} with backing index {} (operation {}, commit {})",
+                if command == "unique-create" {
+                    "unique"
+                } else {
+                    "primary-key"
+                },
+                lower_hex(&result.constraint_id),
+                lower_hex(&result.index_id),
+                lower_hex(&result.operation_id),
+                result.commit_sequence
+            );
+        }
+        "unique-drop" | "primary-key-drop" => {
+            let constraint_id = parse_id(&take_text(fields, "--constraint-id")?)?;
+            reject_unknown(fields)?;
+            let result = if command == "unique-drop" {
+                client.drop_unique_constraint(constraint_id)
+            } else {
+                client.drop_primary_key(constraint_id)
+            }
+            .map_err(|error| error.to_string())?;
+            print_operation(
+                "dropped key constraint",
+                &result.operation_id,
+                result.commit_sequence,
+            );
+        }
+        _ => return Err(format!("unsupported key constraint command {command}")),
+    }
+    Ok(())
+}
+
+fn parse_constraint_columns(value: &str) -> Result<Vec<[u8; 16]>, String> {
+    let column_ids = parse_id_list(value, "--columns")?;
+    if column_ids.is_empty() || column_ids.len() > prdb_engine::tuple::MAX_COLUMNS {
+        return Err(format!(
+            "--columns must contain between 1 and {} IDs",
+            prdb_engine::tuple::MAX_COLUMNS
+        ));
+    }
+    Ok(column_ids)
 }
 
 fn parse_id_list(value: &str, option: &str) -> Result<Vec<[u8; 16]>, String> {
@@ -1195,6 +1270,28 @@ mod tests {
         assert!(split_names("id,name", "--columns").is_ok());
         assert!(split_names("id,id", "--columns").is_err());
         assert!(split_names("id,,name", "--columns").is_err());
+    }
+
+    #[test]
+    fn key_constraint_columns_require_ordered_distinct_nonzero_ids() {
+        assert_eq!(
+            parse_constraint_columns(
+                "00000000000000000000000000000001,00000000000000000000000000000002"
+            )
+            .unwrap(),
+            vec![
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
+            ]
+        );
+        assert!(parse_constraint_columns("").is_err());
+        assert!(
+            parse_constraint_columns(
+                "00000000000000000000000000000001,00000000000000000000000000000001"
+            )
+            .is_err()
+        );
+        assert!(parse_constraint_columns("00000000000000000000000000000000").is_err());
     }
 
     #[test]

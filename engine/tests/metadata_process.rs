@@ -486,6 +486,13 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
             default: None,
         },
     )?;
+    let unique_constraint = admin
+        .create_unique_constraint(created_table.table_id, &created_table.column_ids)
+        .map_err(|error| format!("process ADMIN create_unique_constraint failed: {error}"))?;
+    let dropped_unique = admin
+        .drop_unique_constraint(unique_constraint.constraint_id)
+        .map_err(|error| format!("process ADMIN drop_unique_constraint failed: {error}"))?;
+    assert!(dropped_unique.commit_sequence > unique_constraint.commit_sequence);
     let renamed_column =
         admin.rename_column(created_table.table_id, added_column.column_id, "extra_v2")?;
     let dropped_column = admin.drop_column(created_table.table_id, added_column.column_id)?;
@@ -507,10 +514,17 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
             false,
         )
         .map_err(|error| format!("process ADMIN create_index failed: {error}"))?;
+    let rebuilt_index = admin
+        .rebuild_index(created_index.index_id, &created_table.column_ids, true)
+        .map_err(|error| format!("process ADMIN rebuild_index failed: {error}"))?;
+    let repeated_rebuild = admin
+        .rebuild_index(created_index.index_id, &created_table.column_ids, true)
+        .map_err(|error| format!("process ADMIN repeated rebuild failed: {error}"))?;
     let dropped_index = admin
         .drop_index(created_index.index_id)
         .map_err(|error| format!("process ADMIN drop_index failed: {error}"))?;
-    assert!(dropped_index.commit_sequence > created_index.commit_sequence);
+    assert!(repeated_rebuild.commit_sequence > rebuilt_index.commit_sequence);
+    assert!(dropped_index.commit_sequence > repeated_rebuild.commit_sequence);
     let renamed_table = admin.rename_table(created_table.table_id, "process_admin_table_v2")?;
     let dropped_table = admin.drop_table(created_table.table_id)?;
     assert!(dropped_table.commit_sequence > renamed_table.commit_sequence);

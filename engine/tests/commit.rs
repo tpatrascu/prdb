@@ -13252,6 +13252,27 @@ fn storage_manager_rebuilds_populated_indexes_atomically() -> Result<(), Box<dyn
     );
     drop(current);
     drop(old_snapshot);
+    let mut repeat_rebuild_audit = audit_event(206);
+    repeat_rebuild_audit.actor_id = Some(index_admin);
+    repeat_rebuild_audit.correlation_id = id(206);
+    let repeat_rebuild = storage
+        .rebuild_index(prdb_engine::storage_manager::RebuildIndexRequest {
+            invocation_id: id(206),
+            authenticated_actor_id: index_admin,
+            index_id: id(0x44),
+            column_ids: vec![id(0x67)],
+            unique: true,
+            retention_deadline_us: 9_999,
+            audit_event: repeat_rebuild_audit,
+        })
+        .map_err(|error| format!("idempotent typed index rebuild failed: {error:?}"))?;
+    assert_eq!(repeat_rebuild.commit_sequence, 3);
+    assert_eq!(
+        lookup_outcome(&database, id(206), index_admin, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Committed
+    );
     StorageManager::new(&database, Duration::from_millis(100))?;
     Ok(())
 }

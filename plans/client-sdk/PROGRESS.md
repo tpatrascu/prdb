@@ -216,6 +216,23 @@
 
 - Contract: index administration stays on the authenticated AdminClient channel and uses ordered, distinct nonzero column IDs.
 - Implementation: CLI commands now expose ordinary index create, rebuild, and drop; the uniqueness flag defaults to false.
-- Regression: command parsing checks canonical IDs and duplicate detection. The real process test exercises create/drop; existing AdminClient mock and in-process ADMIN tests verify rebuild protocol/schema behavior.
-- Verification: focused CLI parser and multi-process create/drop tests passed; full workspace build, format, warning-denied Clippy, and tests passed. The commit integration target had 124 passed and 3 cgroup-dependent ignored.
-- Remaining: live multi-process rebuild currently receives the sanitized `unavailable` response. Constraint, privilege, and policy CLI operations are still pending.
+- Regression: command parsing checks canonical IDs and duplicate detection. The real process test exercises index create, rebuild to a changed uniqueness profile, and drop; typed-client and ADMIN dispatcher coverage also exercise rebuild.
+- Verification: focused CLI parser and real-process index lifecycle tests passed; full workspace build, format, warning-denied Clippy, and tests passed. The commit integration target had 124 passed and 3 cgroup-dependent ignored.
+- Remaining: constraint, privilege, and policy CLI operations remain pending.
+
+## SDK-5 / SM-5: repeat same-profile index rebuild — implemented
+
+- Contract: the typed `indexes.rebuild` operation is useful even when the replacement profile equals the existing one; it must validate and republish memberships under the authorized table fence.
+- Red evidence: repeating the same profile first returned a sanitized `unavailable` from the process path; the real-redb regression exposed `Commit(InvalidCatalog)`.
+- Implementation: explicit unchanged index-definition writes now flow through affected-table fencing, current-authority checks, membership rebuild, durable audit/outcome, and write-epoch advance.
+- Regression: a populated index is rebuilt twice with the same definition and checks its durable outcome/sequence. The real gateway/supervisor lifecycle also repeats an unchanged profile after changing uniqueness.
+- Verification: focused redb and process tests passed; full workspace build, format, warning-denied Clippy, and tests passed; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
+
+## SDK-5: unique and primary-key constraint CLI — implemented
+
+- Contract: key constraints use ordered, distinct nonzero column IDs and typed AdminClient PREPARE/START operations; storage remains authoritative for schema, nullability, authority, dependencies, backfill, and uniqueness.
+- Implementation: prdb-client exposes unique-create and primary-key-create with --table-id and --columns, and matching drop commands with --constraint-id. Creation reports generated constraint and backing-index IDs.
+- Red evidence: the first real-process run after column addition failed with `Commit(InvalidCatalog)`; the generated backing index had conflated its fixed format version with the table's schema version.
+- Regression: CLI parser coverage accepts ordered IDs and rejects empty, duplicate, and zero IDs. The real gateway/supervisor ADMIN lifecycle creates and drops a unique constraint after adding a column.
+- Verification: focused parser and process tests passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed under Rust/Cargo 1.95.0; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
+- Remaining: CHECK/FK constraint CLI, privilege and policy CLI, broader multi-process ADMIN DDL coverage, and confined artifact execution remain open.

@@ -4195,7 +4195,6 @@ fn build_index_ddl_plan(
             dropped_indexes.push((index_id, table_id));
         } else if let (Some(current), Some(payload)) =
             (current.as_deref(), write.payload.as_deref())
-            && current != payload
         {
             let (old_index_id, old_table_id) = decode_index_definition(&write.key, current)?;
             let (new_index_id, new_table_id) = decode_index_definition(&write.key, payload)?;
@@ -4708,6 +4707,13 @@ fn build_index_ddl_plan(
         if !seen_index_ids.insert(index_id) {
             return Err(CommitError::InvalidCatalog);
         }
+        let table_key = id_catalog_key(5, table_id);
+        let old_schema = load_final_table_schema(&catalog, &[], table_id)?;
+        let new_schema = load_final_table_schema(&catalog, catalog_writes, table_id)?;
+        let old_definition = decode_index_ddl_definition(&key, &old_bytes, &old_schema)?;
+        let new_definition = decode_index_ddl_definition(&key, &new_bytes, &new_schema)?;
+        plan.index_tables.insert(index_id, table_id);
+        plan.rebuilt_indexes.insert(index_id);
         let mut persisted_rows = Vec::new();
         for entry in rows.range(table_id.as_slice()..).map_err(storage_error)? {
             let (row_key, value) = entry.map_err(storage_error)?;
@@ -4739,9 +4745,20 @@ fn build_index_ddl_plan(
             persisted_rows.push((row_key, row));
         }
         if persisted_rows.is_empty() {
+            let index_prefix = index_id.to_vec();
+            if indexes
+                .range(index_prefix.as_slice()..)
+                .map_err(storage_error)?
+                .next()
+                .transpose()
+                .map_err(storage_error)?
+                .is_some_and(|(key, _)| key.value().starts_with(&index_prefix))
+            {
+                return Err(CommitError::InvalidIndex);
+            }
+            plan.expected_rows.insert(table_id, Vec::new());
             continue;
         }
-        let table_key = id_catalog_key(5, table_id);
         for write in catalog_writes {
             let family = write
                 .key
@@ -4768,12 +4785,6 @@ fn build_index_ddl_plan(
                 }
             }
         }
-        let old_schema = load_final_table_schema(&catalog, &[], table_id)?;
-        let new_schema = load_final_table_schema(&catalog, catalog_writes, table_id)?;
-        let old_definition = decode_index_ddl_definition(&key, &old_bytes, &old_schema)?;
-        let new_definition = decode_index_ddl_definition(&key, &new_bytes, &new_schema)?;
-        plan.index_tables.insert(index_id, table_id);
-        plan.rebuilt_indexes.insert(index_id);
         let mut expected_rows = Vec::with_capacity(persisted_rows.len());
         for (row_key, row) in persisted_rows {
             expected_rows.push((row_key, row.row_version));
@@ -7219,7 +7230,7 @@ fn index_ddl_authority_guards(
             .get(write.key.as_slice())
             .map_err(storage_error)?
             .map(|value| value.value().to_vec());
-        if current.as_deref() == write.payload.as_deref() {
+        if current.as_deref() == write.payload.as_deref() && family != 9 {
             continue;
         }
         match family {
@@ -13727,7 +13738,7 @@ fn affected_table_ids_for_catalog_writes(
             .get(write.key.as_slice())
             .map_err(storage_error)?
             .map(|value| value.value().to_vec());
-        if current == write.payload {
+        if current == write.payload && family != 9 {
             continue;
         }
         match family {
