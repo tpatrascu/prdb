@@ -14139,6 +14139,7 @@ mod durable_commit_gate_tests {
             live_status.status,
             InvocationStatus::Committing { .. }
         ));
+        assert!(storage.requires_reopen_after_commit_error());
         assert!(matches!(
             storage.begin_invocation([0x67; 16], principal_id, i64::MAX, 1, 1024),
             Err(TransactionError::Storage(_))
@@ -14148,6 +14149,9 @@ mod durable_commit_gate_tests {
 
         // redb requires a fresh handle after a non-poisoned commit I/O error.
         let reopened = Database::open(&path)?;
+        let recovered_storage =
+            StorageManager::from_validated_database(&reopened, StorageManagerConfig::default())?;
+        assert!(!recovered_storage.requires_reopen_after_commit_error());
         let read = reopened.begin_read()?;
         let outcome = read
             .open_table(OUTCOMES)?
@@ -14174,6 +14178,7 @@ mod durable_commit_gate_tests {
         }
 
         drop(read);
+        drop(recovered_storage);
         drop(reopened);
         std::fs::remove_dir_all(directory)?;
         Ok(())

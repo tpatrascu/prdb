@@ -1707,6 +1707,12 @@ impl<'db> StorageManager<'db> {
         self.max_invocation_age
     }
 
+    /// Whether a managed invocation hit an ambiguous redb commit error and
+    /// this database handle must be closed and reopened before more work.
+    pub fn requires_reopen_after_commit_error(&self) -> bool {
+        self.admissions.database_uncertain.load(Ordering::Acquire)
+    }
+
     /// Begin a managed invocation after a trusted caller has established its
     /// identity and performed the required admission checks. Service callers
     /// should use [`Self::begin_authenticated_invocation`] to validate the

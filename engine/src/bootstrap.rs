@@ -185,8 +185,10 @@ impl BootstrapSession {
         validate_initializing_records(&self.database).map_err(BootstrapError::Startup)?;
         publish_ready(&self.database, self.admin_user_id, self.token_id)?;
         validate_persisted_records(&self.database).map_err(BootstrapError::Startup)?;
+        let database_path = self.directory.join(DATABASE_FILE);
         Ok(StorageInstance {
             database: self.database,
+            database_path,
             _lock: self._lock,
         })
     }
@@ -366,6 +368,7 @@ impl Drop for OneTimeSecret {
 /// `StorageManager` borrows its database handle.
 pub struct StorageInstance {
     database: Database,
+    database_path: PathBuf,
     _lock: InstanceLock,
 }
 
@@ -383,12 +386,38 @@ impl StorageInstance {
         validate_persisted_records(&database).map_err(BootstrapError::Startup)?;
         Ok(Self {
             database,
+            database_path,
             _lock: lock,
         })
     }
 
     pub fn database(&self) -> &Database {
         &self.database
+    }
+
+    /// Close and reopen the redb handle while retaining the instance lock,
+    /// then validate the recovered READY image before returning it. Callers
+    /// must drop every `StorageManager` borrowing this instance first.
+    pub fn reopen(self) -> Result<Self, BootstrapError> {
+        let Self {
+            database,
+            database_path,
+            _lock,
+        } = self;
+        let directory = database_path
+            .parent()
+            .ok_or(BootstrapError::InvalidRequest)?;
+        validate_managed_directory(directory, true)?;
+        drop(database);
+        validate_managed_directory(directory, true)?;
+        validate_private_file(&database_path)?;
+        let database = Database::open(&database_path).map_err(|_| BootstrapError::Storage)?;
+        validate_persisted_records(&database).map_err(BootstrapError::Startup)?;
+        Ok(Self {
+            database,
+            database_path,
+            _lock,
+        })
     }
 
     /// Build a service manager from this already validated, locked instance.

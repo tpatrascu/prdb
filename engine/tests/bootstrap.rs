@@ -133,6 +133,18 @@ fn bootstrap_handoff_stays_initializing_and_resume_rotates_secret() {
     let manager = reopened
         .storage_manager(StorageManagerConfig::default())
         .unwrap();
+    assert!(!manager.requires_reopen_after_commit_error());
+    drop(manager);
+    let reopened = reopened.reopen().unwrap();
+    assert!(validate_persisted_records(reopened.database()).is_ok());
+    assert!(matches!(
+        StorageInstance::open(&fixture.0),
+        Err(BootstrapError::InstanceLocked)
+    ));
+    let manager = reopened
+        .storage_manager(StorageManagerConfig::default())
+        .unwrap();
+    assert!(!manager.requires_reopen_after_commit_error());
     drop(manager);
     drop(reopened);
     assert!(matches!(
