@@ -104,3 +104,11 @@
 - Regression: the binary test uses its private temporary directory as the deliberately invalid cgroup parent, making the preflight failure deterministic without depending on host cgroup permissions. The artifact is never loaded.
 - Verification: the focused real-binary test passes alongside full workspace build/format/Clippy/tests and maintained TinyCC SDK tests. Two positive sandbox START tests remain ignored pending writable cgroup delegation.
 - Remaining: successful sandboxed START and terminal outcome relay remain gated on a conforming delegated-cgroup host.
+
+## NP-6: authenticated ADMIN ordinary-index operations — implemented
+
+- Contract: [client protocol](../../specs/client-protocol.md) defines exact PREPARE/START argument schemas for ordinary index create, rebuild, and drop. Operations remain bound to one authenticated control connection and START must use current storage authorization.
+- Implementation: `ClientConnectionSession` strictly decodes `indexes.create`, `indexes.rebuild`, and `indexes.drop`, binds each PREPARE to a random pending operation ID, then routes START to the typed `StorageManager` index lifecycle methods with a correlated audit event.
+- Regression: decoder coverage checks canonical requests for all three operations. The real-redb authenticated gateway lifecycle test prepares, starts, and commits create/rebuild/drop through the gateway dispatch path, then validates persisted catalog state.
+- Verification: full workspace build, formatting, warning-denied Clippy, and tests passed in the configured Nix shell; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
+- Remaining: expose a user-facing client API for these ADMIN commands and verify them through the separately managed process boundary; that client work remains in the SDK and gateway plans.
