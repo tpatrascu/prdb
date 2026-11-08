@@ -128,6 +128,8 @@ The system-privilege-grant and system-privilege-revoke commands take a nonzero -
 
 The foreign-key-create CLI command takes a source table ID, ordered and distinct source column IDs, and a target unique or primary-key constraint ID; foreign-key-drop takes the generated foreign-key ID. The authenticated storage path checks column correspondence, types, both tables' authority, existing rows, and dependency rules. Creation also requires a pre-existing REFERENCES grant on the target table or columns; object-grant ADMIN commands are not exposed by this CLI yet.
 
+The check-create CLI command accepts canonical lowercase hex containing one EIR1 row-local expression, plus an explicit dependency-column list; the list may be empty for a constant expression. check-drop takes the generated constraint ID. The client decodes EIR1 before sending it, and storage validates field bindings, Boolean result type, current rows, and authority.
+
 The versioned C ABI is the interoperability boundary, not permission to use unspecified Rust layouts. C can corrupt the Rust executor host, so all trusted services remain outside that process. Other query languages/compilers are outside the initial supported SDK; artifact provenance never bypasses validation.
 
 ## Benchmark and Acceptance Plan

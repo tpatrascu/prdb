@@ -243,7 +243,7 @@
 - Implementation: prdb-client exposes system-privilege-grant and system-privilege-revoke with grantee ID and typed privilege value.
 - Regression: the parser accepts all three values and rejects case changes and unsupported privilege names. The real gateway/supervisor ADMIN lifecycle grants and revokes create_schema for a role.
 - Verification: focused parser and process regressions, CLI help inspection, full workspace build, format, warning-denied Clippy, and tests passed under Rust/Cargo 1.95.0; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
-- Remaining: policy CLI, CHECK/FK constraint CLI, additional live ADMIN DDL coverage, and confined artifact execution remain open.
+- Remaining: policy CLI, additional live ADMIN DDL coverage, and confined artifact execution remain open.
 
 ## SDK-5: foreign-key create/drop CLI — partial
 
@@ -252,3 +252,11 @@
 - Regression: foreign-key source IDs use the same strict nonempty, distinct ID-list parser as key constraints. Process-level success coverage requires a target REFERENCES grant, but the object-grant ADMIN command path is not exposed yet.
 - Verification: strict ID-list parser and CLI help checks passed. Full workspace build, format, warning-denied Clippy, and tests passed under Rust/Cargo 1.95.0; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
 - Remaining: expose object-grant ADMIN operations before claiming a usable multi-process foreign-key lifecycle; CHECK constraint CLI, policy CLI, broader live ADMIN DDL coverage, and confined artifact execution remain open.
+
+## SDK-5: CHECK constraint CLI — implemented
+
+- Contract: CHECK creation accepts a canonical EIR1 row-local Boolean expression and its declared dependency columns; storage validates binding, type, current rows, and authority.
+- Implementation: prdb-client exposes check-create and check-drop. It decodes strict lowercase even-length hex locally, accepts an empty dependency list for constant expressions, then delegates typed validation and publication to AdminClient.
+- Regression: parser coverage accepts canonical hex and empty dependencies while rejecting empty/odd/uppercase/nonhex input. The real gateway/supervisor ADMIN lifecycle creates and drops a constant-true CHECK after column addition.
+- Verification: focused parser and real-process tests, CLI help inspection, format check, full workspace build, warning-denied Clippy, and tests passed under Rust/Cargo 1.95.0; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
+- Remaining: policy CLI, object-grant ADMIN commands needed to exercise FK creation, broader live ADMIN DDL coverage, and confined artifact execution remain open.

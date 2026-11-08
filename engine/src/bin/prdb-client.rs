@@ -54,6 +54,9 @@ Token secrets are saved only to mode-0600 credential files and are never printed
   prdb-client foreign-key-create --address IP:PORT --credentials ADMIN_FILE \\
     --source-table-id HEX --source-columns HEX,... --target-constraint-id HEX\n\
   prdb-client foreign-key-drop --address IP:PORT --credentials ADMIN_FILE --foreign-key-id HEX\n\n\
+  prdb-client check-create --address IP:PORT --credentials ADMIN_FILE \\
+    --table-id HEX --expression-eir1 HEX --columns HEX,... (empty for constants)\n\
+  prdb-client check-drop --address IP:PORT --credentials ADMIN_FILE --constraint-id HEX\n\n\
   prdb-client system-privilege-grant|system-privilege-revoke --address IP:PORT \\
     --credentials ADMIN_FILE --grantee-id HEX --privilege manage_users|manage_roles|create_schema\n\n\
 Column types: boolean, smallint, integer, bigint, decimal(P,S), text, varchar(N), bytea, uuid, date, timestamptz.\n\
@@ -132,6 +135,9 @@ fn run() -> Result<(), String> {
         }
         "foreign-key-create" | "foreign-key-drop" => {
             foreign_key_admin(&command, address, credentials_path, &mut fields)
+        }
+        "check-create" | "check-drop" => {
+            check_constraint_admin(&command, address, credentials_path, &mut fields)
         }
         "user-create" | "user-rename" | "user-drop" | "user-login" | "role-create"
         | "role-rename" | "role-drop" | "role-grant" | "role-revoke" => {
@@ -454,6 +460,31 @@ fn parse_constraint_columns(value: &str) -> Result<Vec<[u8; 16]>, String> {
     Ok(column_ids)
 }
 
+fn parse_optional_constraint_columns(value: &str) -> Result<Vec<[u8; 16]>, String> {
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    parse_constraint_columns(value)
+}
+
+fn parse_lowercase_hex_bytes(value: &str) -> Result<Vec<u8>, String> {
+    if value.is_empty()
+        || !value.len().is_multiple_of(2)
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("hex input must be nonempty, even-length lowercase hexadecimal".to_owned());
+    }
+    (0..value.len())
+        .step_by(2)
+        .map(|offset| {
+            u8::from_str_radix(&value[offset..offset + 2], 16)
+                .map_err(|_| "hex input is malformed".to_owned())
+        })
+        .collect()
+}
+
 fn parse_system_privilege(value: &str) -> Result<AdminSystemPrivilege, String> {
     match value {
         "manage_users" => Ok(AdminSystemPrivilege::ManageUsers),
@@ -542,6 +573,58 @@ fn foreign_key_admin(
             );
         }
         _ => return Err(format!("unsupported foreign-key command {command}")),
+    }
+    Ok(())
+}
+
+fn check_constraint_admin(
+    command: &str,
+    address: SocketAddr,
+    credentials_path: PathBuf,
+    fields: &mut HashMap<String, std::ffi::OsString>,
+) -> Result<(), String> {
+    let mut administrator =
+        read_client_credentials(credentials_path).map_err(|error| error.to_string())?;
+    let mut client = AdminClient::connect_authenticated(
+        address,
+        administrator.token_id,
+        &mut administrator.token_secret,
+    )
+    .map_err(|error| error.to_string())?;
+    match command {
+        "check-create" => {
+            let table_id = parse_id(&take_text(fields, "--table-id")?)?;
+            let expression_bytes =
+                parse_lowercase_hex_bytes(&take_text(fields, "--expression-eir1")?)?;
+            let expression = prdb_engine::expression::decode_expression(&expression_bytes)
+                .map_err(|_| "--expression-eir1 must contain a valid EIR1 expression".to_owned())?;
+            let dependency_ids =
+                parse_optional_constraint_columns(&take_text(fields, "--columns")?)?;
+            reject_unknown(fields)?;
+            let result = client
+                .create_check_constraint(table_id, &expression, &dependency_ids)
+                .map_err(|error| error.to_string())?;
+            println!(
+                "created CHECK constraint {} with expression {} (operation {}, commit {})",
+                lower_hex(&result.constraint_id),
+                lower_hex(&result.expression_id),
+                lower_hex(&result.operation_id),
+                result.commit_sequence
+            );
+        }
+        "check-drop" => {
+            let constraint_id = parse_id(&take_text(fields, "--constraint-id")?)?;
+            reject_unknown(fields)?;
+            let result = client
+                .drop_check_constraint(constraint_id)
+                .map_err(|error| error.to_string())?;
+            print_operation(
+                "dropped CHECK constraint",
+                &result.operation_id,
+                result.commit_sequence,
+            );
+        }
+        _ => return Err(format!("unsupported CHECK command {command}")),
     }
     Ok(())
 }
@@ -1413,6 +1496,23 @@ mod tests {
         );
         assert!(parse_system_privilege("MANAGE_USERS").is_err());
         assert!(parse_system_privilege("manage_tables").is_err());
+    }
+
+    #[test]
+    fn check_expression_hex_parser_is_canonical_and_dependencies_may_be_empty() {
+        assert_eq!(
+            parse_lowercase_hex_bytes("0102ff").unwrap(),
+            vec![1, 2, 255]
+        );
+        assert!(parse_lowercase_hex_bytes("").is_err());
+        assert!(parse_lowercase_hex_bytes("0").is_err());
+        assert!(parse_lowercase_hex_bytes("0A").is_err());
+        assert!(parse_lowercase_hex_bytes("0g").is_err());
+        assert!(parse_optional_constraint_columns("").unwrap().is_empty());
+        assert_eq!(
+            parse_optional_constraint_columns("00000000000000000000000000000001").unwrap(),
+            vec![[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]]
+        );
     }
 
     #[test]

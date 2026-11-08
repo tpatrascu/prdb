@@ -498,6 +498,17 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
         .drop_unique_constraint(unique_constraint.constraint_id)
         .map_err(|error| format!("process ADMIN drop_unique_constraint failed: {error}"))?;
     assert!(dropped_unique.commit_sequence > unique_constraint.commit_sequence);
+    let check_constraint = admin.create_check_constraint(
+        created_table.table_id,
+        &prdb_engine::authorization::Expr::Literal(Some(prdb_engine::tuple::ScalarValue::Boolean(
+            true,
+        ))),
+        &[],
+    )?;
+    let dropped_check = admin
+        .drop_check_constraint(check_constraint.constraint_id)
+        .map_err(|error| format!("process ADMIN drop_check_constraint failed: {error}"))?;
+    assert!(dropped_check.commit_sequence > check_constraint.commit_sequence);
     let renamed_column =
         admin.rename_column(created_table.table_id, added_column.column_id, "extra_v2")?;
     let dropped_column = admin.drop_column(created_table.table_id, added_column.column_id)?;
