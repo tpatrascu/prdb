@@ -5,14 +5,14 @@
 - Behavior: `encode_manifest_v1` emits the canonical PMF1 representation only for supported ABI/symbol pairs and bounded fields with sorted, unique dependency names. It round-trips through the decoder to keep the public encoder aligned with admission constraints.
 - Regression: the manifest fixture round-trips through the public encoder/decoder and rejects unsorted dependency lists. The real TinyCC TCP submission regression uses the encoder to prepare a valid SEAL request.
 - Verification: the encoder unit test, full workspace build/format/Clippy/tests and maintained TinyCC SDK test suite passed.
-- Remaining: the C submission SDK and compiler wrapper still need to collect dependencies and encode manifests for client uploads.
+- Remaining: the current Rust packager handles client uploads; a C-side transport helper could reuse the encoder but is not implemented.
 
 ## SDK-1 dependency: bounded C PMF1 encoder — implemented
 
 - Behavior: `prdb_sdk_manifest_encode_v1` writes the canonical 28-byte PMF1 header and body into caller-owned storage, derives ABI symbols from the native ABI version, validates profile/compiler/dependency fields, and requires dependencies in strict bytewise order. It supports size queries and returns the required length without partial output when capacity is short.
 - Red/green evidence: the maintained fixture first failed to link because the encoder symbol was missing. It now compares ABI-v3 output byte-for-byte with a hand-checked 124-byte PMF1 fixture and covers size query, insufficient capacity, invalid ABI, empty SDK release, unsorted dependencies, and invalid arguments.
 - Verification: the focused fixture and full TinyCC SDK suite passed with the pinned Nix-shell TinyCC. The Rust manifest encoder test remains the independent decoder-roundtrip check.
-- Remaining: a client compiler wrapper must inspect the compiled ELF, collect dependencies and invoke the encoder before upload.
+- Remaining: the bounded Rust packager now inspects ELF and invokes the Rust encoder; the C encoder remains available to future C-side tooling.
 
 ## SDK-1 dependency: bounded C PSC1 scope encoder — implemented
 
@@ -33,7 +33,14 @@
 - Behavior: `prdb-packager` compiles one C source against the prebuilt SDK archive in a cleared-environment subprocess with CPU, wall-time, address-space, output-file, core-dump, and descriptor limits. It validates PSC1, derives and encodes PMF1 from the compiled ELF, hashes the artifact, then atomically publishes `query.so`, `manifest.pmf1`, `requested_scope.psc1`, and `artifact.sha256` in a private new directory without loading the query.
 - Limits: source 1 MiB, SDK archive 128 MiB, PSC1 8 KiB, compiled artifact 64 MiB, diagnostic capture 8 KiB. Package files are mode 0600 and the directory is mode 0700. Existing output paths fail closed.
 - Red/green evidence: the end-to-end test builds the maintained TinyCC SDK archive, invokes the actual packager binary, decodes PMF1, verifies exact PSC1 and SHA-256 output, proves a constructor that aborts is not run, and checks that an existing package path is not overwritten.
-- Remaining: upload the generated package through the authenticated client protocol and connect scope generation to client-side discovery/selection; package generation alone does not grant authority.
+- Remaining: connect scope generation to client-side discovery/selection; package generation alone does not grant authority.
+
+## SDK-3 dependency: authenticated upload and terminal client — implemented
+
+- Behavior: `SubmissionClient` negotiates query-mode protocol v1.0, authenticates with the token ID/secret, validates the private package, PREPAREs it, uploads artifact and parameter chunks in order, verifies every acknowledged offset, and SEALs it. It can then START once, persist a no-overwrite invocation receipt before transmission, stream provisional data, parse the matching supervisor terminal event, and query STATUS on a new authenticated connection after an uncertain START reply.
+- Security: caller token-secret memory and temporary AUTH frames are zeroized. Package inputs must be private regular files; PMF1, PSC1, sidecar digest, and size bounds are checked before the network request. START is never automatically replayed.
+- Regression: a mock TCP peer verifies handshake/auth, PMF1/PSC1 and SHA-256 preparation fields, a compiled query upload, 300 KB parameters split across chunks, exact offsets, SEAL, receipt-before-START ordering, coalesced START/data/terminal frames, committed status, and zeroized token-secret input. The existing real-binary TCP test remains the gateway/supervisor admission evidence.
+- Remaining: connect requested-scope selection to metadata discovery, expose a user-facing CLI and credential-file lifecycle, and exercise successful START through a delegated-cgroup sandbox on a host that supports it.
 
 ## SDK-1 initial borrowed value view — implemented
 
@@ -46,4 +53,4 @@
 - Typed accessors: value state, Boolean, signed 16/32/64-bit scalars, Date, TimestampTz and borrowed raw payload accessors validate state/type and preserve NULL versus REDACTED. Signed conversion handles negative values and minimum representable boundaries without out-of-range signed casts.
 - Regression: the expanded value fixture initially failed to compile because `prdb_sdk_value_state_v1` and the typed getters were absent; after implementation it passes against the TinyCC archive, including negative/minimum signed values, no-value statuses, type mismatch, and borrowed text bytes.
 - Query host ABI v3: [`prdb_query_abi_v3.h`](../../engine/include/prdb_query_abi_v3.h) adds a sticky SQL statement-failure callback while preserving v1/v2 entry points. The trusted executor latches the callback and forces a nonzero worker exit after user entry returns, so a caught SQL API error still reaches supervisor abort handling. Rust/C layout and descriptor checks and the SDK SELECT fixture cover the new boundary.
-- Remaining: add generated bindings and an owned batch-result lifetime API before claiming SDK-1 complete; complete the C SQL/runtime result format and cancellation surface; then implement the compiler wrapper, artifact manifest and client submission helper.
+- Remaining: add generated bindings and an owned batch-result lifetime API before claiming SDK-1 complete; complete the C SQL/runtime result format and client cancellation surface; connect requested-scope selection to metadata discovery.

@@ -6,6 +6,7 @@ pub mod bootstrap;
 pub mod catalog;
 pub mod client_package;
 pub mod client_protocol;
+pub mod client_submit;
 pub mod commit;
 pub mod credentials;
 pub mod ddl_fence;

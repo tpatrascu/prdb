@@ -1420,13 +1420,13 @@ fn parse_string_object(payload: &[u8]) -> Result<HashMap<String, String>, Client
     }
 }
 
-struct JsonStringObjectParser<'a> {
-    text: &'a [u8],
-    offset: usize,
+pub(crate) struct JsonStringObjectParser<'a> {
+    pub(crate) text: &'a [u8],
+    pub(crate) offset: usize,
 }
 
 impl JsonStringObjectParser<'_> {
-    fn skip_whitespace(&mut self) {
+    pub(crate) fn skip_whitespace(&mut self) {
         while self
             .text
             .get(self.offset)
@@ -1436,7 +1436,7 @@ impl JsonStringObjectParser<'_> {
         }
     }
 
-    fn consume(&mut self, expected: u8) -> bool {
+    pub(crate) fn consume(&mut self, expected: u8) -> bool {
         if self.text.get(self.offset) == Some(&expected) {
             self.offset += 1;
             true
@@ -1445,13 +1445,13 @@ impl JsonStringObjectParser<'_> {
         }
     }
 
-    fn expect(&mut self, expected: u8) -> Result<(), ClientControlError> {
+    pub(crate) fn expect(&mut self, expected: u8) -> Result<(), ClientControlError> {
         self.consume(expected)
             .then_some(())
             .ok_or(ClientControlError::InvalidJson)
     }
 
-    fn parse_u64_number(&mut self) -> Result<u64, ClientControlError> {
+    pub(crate) fn parse_u64_number(&mut self) -> Result<u64, ClientControlError> {
         let start = self.offset;
         while self.text.get(self.offset).is_some_and(u8::is_ascii_digit) {
             self.offset += 1;
@@ -1469,7 +1469,7 @@ impl JsonStringObjectParser<'_> {
             .map_err(|_| ClientControlError::InvalidJson)
     }
 
-    fn parse_string(&mut self) -> Result<String, ClientControlError> {
+    pub(crate) fn parse_string(&mut self) -> Result<String, ClientControlError> {
         self.expect(b'"')?;
         let mut output = Vec::new();
         loop {
@@ -1526,7 +1526,7 @@ impl JsonStringObjectParser<'_> {
         }
     }
 
-    fn parse_boolean(&mut self) -> Result<bool, ClientControlError> {
+    pub(crate) fn parse_boolean(&mut self) -> Result<bool, ClientControlError> {
         if self.text[self.offset..].starts_with(b"true") {
             self.offset += 4;
             Ok(true)
