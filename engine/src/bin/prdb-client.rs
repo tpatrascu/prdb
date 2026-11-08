@@ -3,8 +3,8 @@ use prdb_engine::client_credentials::{read_client_credentials, write_client_cred
 use prdb_engine::client_protocol::ClientCredentials;
 use prdb_engine::client_submit::MetadataClient;
 use prdb_engine::client_submit::{
-    AdminClient, AdminColumnDefault, AdminColumnDefinition, ClientResultEvent, InvocationStatus,
-    SubmissionClient, TerminalOutcome,
+    AdminClient, AdminColumnDefault, AdminColumnDefinition, AdminSystemPrivilege,
+    ClientResultEvent, InvocationStatus, SubmissionClient, TerminalOutcome,
 };
 use prdb_engine::submission_scope::RequestedScopeBuilder;
 use prdb_engine::supervisor::{MAX_PARAMETER_BYTES, WorkloadClass};
@@ -51,6 +51,8 @@ Token secrets are saved only to mode-0600 credential files and are never printed
   prdb-client unique-create|primary-key-create --address IP:PORT --credentials ADMIN_FILE \\
     --table-id HEX --columns HEX,...\n\
   prdb-client unique-drop|primary-key-drop --address IP:PORT --credentials ADMIN_FILE --constraint-id HEX\n\n\
+  prdb-client system-privilege-grant|system-privilege-revoke --address IP:PORT \\
+    --credentials ADMIN_FILE --grantee-id HEX --privilege manage_users|manage_roles|create_schema\n\n\
 Column types: boolean, smallint, integer, bigint, decimal(P,S), text, varchar(N), bytea, uuid, date, timestamptz.\n\
 Column nullability is nullable or not-null; not-null columns require the UUID identity modifier.\n\n\
 Token secrets are saved only to mode-0600 credential files and are never printed.\n\
@@ -121,6 +123,9 @@ fn run() -> Result<(), String> {
         }
         "unique-create" | "primary-key-create" | "unique-drop" | "primary-key-drop" => {
             key_constraint_admin(&command, address, credentials_path, &mut fields)
+        }
+        "system-privilege-grant" | "system-privilege-revoke" => {
+            system_privilege_admin(&command, address, credentials_path, &mut fields)
         }
         "user-create" | "user-rename" | "user-drop" | "user-login" | "role-create"
         | "role-rename" | "role-drop" | "role-grant" | "role-revoke" => {
@@ -441,6 +446,50 @@ fn parse_constraint_columns(value: &str) -> Result<Vec<[u8; 16]>, String> {
         ));
     }
     Ok(column_ids)
+}
+
+fn parse_system_privilege(value: &str) -> Result<AdminSystemPrivilege, String> {
+    match value {
+        "manage_users" => Ok(AdminSystemPrivilege::ManageUsers),
+        "manage_roles" => Ok(AdminSystemPrivilege::ManageRoles),
+        "create_schema" => Ok(AdminSystemPrivilege::CreateSchema),
+        _ => Err("--privilege must be manage_users, manage_roles, or create_schema".to_owned()),
+    }
+}
+
+fn system_privilege_admin(
+    command: &str,
+    address: SocketAddr,
+    credentials_path: PathBuf,
+    fields: &mut HashMap<String, std::ffi::OsString>,
+) -> Result<(), String> {
+    let grantee_id = parse_id(&take_text(fields, "--grantee-id")?)?;
+    let privilege = parse_system_privilege(&take_text(fields, "--privilege")?)?;
+    reject_unknown(fields)?;
+    let mut administrator =
+        read_client_credentials(credentials_path).map_err(|error| error.to_string())?;
+    let mut client = AdminClient::connect_authenticated(
+        address,
+        administrator.token_id,
+        &mut administrator.token_secret,
+    )
+    .map_err(|error| error.to_string())?;
+    let result = if command == "system-privilege-grant" {
+        client.grant_system_privilege(grantee_id, privilege)
+    } else {
+        client.revoke_system_privilege(grantee_id, privilege)
+    }
+    .map_err(|error| error.to_string())?;
+    print_operation(
+        if command == "system-privilege-grant" {
+            "granted system privilege"
+        } else {
+            "revoked system privilege"
+        },
+        &result.operation_id,
+        result.commit_sequence,
+    );
+    Ok(())
 }
 
 fn parse_id_list(value: &str, option: &str) -> Result<Vec<[u8; 16]>, String> {
@@ -1292,6 +1341,24 @@ mod tests {
             .is_err()
         );
         assert!(parse_constraint_columns("00000000000000000000000000000000").is_err());
+    }
+
+    #[test]
+    fn system_privilege_parser_accepts_only_the_closed_wire_enum() {
+        assert_eq!(
+            parse_system_privilege("manage_users").unwrap(),
+            AdminSystemPrivilege::ManageUsers
+        );
+        assert_eq!(
+            parse_system_privilege("manage_roles").unwrap(),
+            AdminSystemPrivilege::ManageRoles
+        );
+        assert_eq!(
+            parse_system_privilege("create_schema").unwrap(),
+            AdminSystemPrivilege::CreateSchema
+        );
+        assert!(parse_system_privilege("MANAGE_USERS").is_err());
+        assert!(parse_system_privilege("manage_tables").is_err());
     }
 
     #[test]

@@ -7,8 +7,8 @@ use prdb_engine::client_credentials::{
 };
 use prdb_engine::client_protocol::ClientCredentials;
 use prdb_engine::client_submit::{
-    AdminClient, AdminColumnDefault, AdminColumnDefinition, InvocationStatus, MetadataClient,
-    SubmissionClient,
+    AdminClient, AdminColumnDefault, AdminColumnDefinition, AdminSystemPrivilege, InvocationStatus,
+    MetadataClient, SubmissionClient,
 };
 use prdb_engine::storage_manager::{CreateTableRequest, TableColumnDefinition, TokenIssueRequest};
 use prdb_engine::submission_manifest::{encode_manifest_v1, manifest_v1_from_elf};
@@ -459,8 +459,13 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
     assert_ne!(created_role.identity_id, [0; 16]);
     let renamed = admin.rename_role(created_role.identity_id, "process_admin_role_v2")?;
     assert!(renamed.commit_sequence > created_role.commit_sequence);
+    let granted = admin
+        .grant_system_privilege(created_role.identity_id, AdminSystemPrivilege::CreateSchema)?;
+    let revoked = admin
+        .revoke_system_privilege(created_role.identity_id, AdminSystemPrivilege::CreateSchema)?;
+    assert!(revoked.commit_sequence > granted.commit_sequence);
     let dropped = admin.drop_role(created_role.identity_id)?;
-    assert!(dropped.commit_sequence > renamed.commit_sequence);
+    assert!(dropped.commit_sequence > revoked.commit_sequence);
 
     let created_schema = admin.create_schema("process_admin_schema", admin_user_id)?;
     let created_table = admin.create_table(

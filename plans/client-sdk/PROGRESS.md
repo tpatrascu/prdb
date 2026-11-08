@@ -236,3 +236,11 @@
 - Regression: CLI parser coverage accepts ordered IDs and rejects empty, duplicate, and zero IDs. The real gateway/supervisor ADMIN lifecycle creates and drops a unique constraint after adding a column.
 - Verification: focused parser and process tests passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed under Rust/Cargo 1.95.0; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
 - Remaining: CHECK/FK constraint CLI, privilege and policy CLI, broader multi-process ADMIN DDL coverage, and confined artifact execution remain open.
+
+## SDK-5: system privilege grant/revoke CLI — implemented
+
+- Contract: only the closed database-scoped privilege set (manage_users, manage_roles, create_schema) is accepted; the authenticated AdminClient and storage revalidate administrator authority.
+- Implementation: prdb-client exposes system-privilege-grant and system-privilege-revoke with grantee ID and typed privilege value.
+- Regression: the parser accepts all three values and rejects case changes and unsupported privilege names. The real gateway/supervisor ADMIN lifecycle grants and revokes create_schema for a role.
+- Verification: focused parser and process regressions, CLI help inspection, full workspace build, format, warning-denied Clippy, and tests passed under Rust/Cargo 1.95.0; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
+- Remaining: policy CLI, CHECK/FK constraint CLI, additional live ADMIN DDL coverage, and confined artifact execution remain open.

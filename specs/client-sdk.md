@@ -124,6 +124,8 @@ The admin CLI also exposes user and role create/rename/drop, user login enable/d
 
 The CLI also exposes `unique-create` and `primary-key-create` with a table ID and ordered, distinct comma-separated column IDs, plus `unique-drop` and `primary-key-drop` with the generated constraint ID. Storage checks primary-key nullability and all catalog, authority, dependency, and backfill rules.
 
+The system-privilege-grant and system-privilege-revoke commands take a nonzero --grantee-id and one closed --privilege value: manage_users, manage_roles, or create_schema. These commands use the authenticated ADMIN channel; only a current database administrator can change these grants.
+
 The versioned C ABI is the interoperability boundary, not permission to use unspecified Rust layouts. C can corrupt the Rust executor host, so all trusted services remain outside that process. Other query languages/compilers are outside the initial supported SDK; artifact provenance never bypasses validation.
 
 ## Benchmark and Acceptance Plan
