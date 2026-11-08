@@ -34,7 +34,7 @@ use crate::transaction::{InvocationCoordination, InvocationTransaction, Transact
 use crate::tuple::{ColumnSchema, ScalarType, encode_tuple};
 use redb::{Database, ReadableDatabase, ReadableTable};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 use zeroize::Zeroize;
@@ -1253,12 +1253,16 @@ struct LiveInvocation {
     started_at_us: i64,
     deadline_at_us: Option<i64>,
     phase: LiveInvocationPhase,
+    // Keep ambiguous commit outcomes visible as COMMITTING until a reopened
+    // Database handle resolves them from redb's recovered durable state.
+    commit_uncertain: bool,
     cancellation_reason_code: Option<u16>,
     owner_generation: u128,
 }
 
 struct InvocationAdmissionState {
     limit: AtomicUsize,
+    database_uncertain: AtomicBool,
     live: Mutex<LiveInvocationRegistry>,
     changed: Condvar,
 }
@@ -1289,6 +1293,7 @@ pub(crate) struct InvocationAdmissionPermit {
 enum AdmissionError {
     Limit,
     Duplicate,
+    DatabaseUncertain,
 }
 
 impl InvocationAdmissionState {
@@ -1303,6 +1308,9 @@ impl InvocationAdmissionState {
             .live
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.database_uncertain.load(Ordering::Acquire) {
+            return Err(AdmissionError::DatabaseUncertain);
+        }
         if live.entries.contains_key(&invocation_id) {
             return Err(AdmissionError::Duplicate);
         }
@@ -1319,6 +1327,7 @@ impl InvocationAdmissionState {
                 started_at_us,
                 deadline_at_us,
                 phase: LiveInvocationPhase::Active,
+                commit_uncertain: false,
                 cancellation_reason_code: None,
                 owner_generation: 0,
             },
@@ -1480,6 +1489,22 @@ impl InvocationAdmissionState {
 }
 
 impl InvocationAdmissionPermit {
+    pub(crate) fn mark_commit_uncertain(&self) {
+        let mut live = self
+            .state
+            .live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.state.database_uncertain.store(true, Ordering::Release);
+        if let Some(invocation) = live.entries.get_mut(&self.invocation_id) {
+            invocation.phase = LiveInvocationPhase::Committing;
+            invocation.commit_uncertain = true;
+            let principal_id = invocation.principal_id;
+            live.advance_owner_generation(principal_id);
+        }
+        self.state.changed.notify_all();
+    }
+
     pub(crate) fn may_continue(&self) -> bool {
         let mut live = self
             .state
@@ -1556,7 +1581,11 @@ impl Drop for InvocationAdmissionPermit {
             .live
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(invocation) = live.entries.remove(&self.invocation_id) {
+        let should_remove = live
+            .entries
+            .get(&self.invocation_id)
+            .is_some_and(|invocation| !invocation.commit_uncertain);
+        if should_remove && let Some(invocation) = live.entries.remove(&self.invocation_id) {
             live.advance_owner_generation(invocation.principal_id);
             self.state.changed.notify_all();
         }
@@ -1581,6 +1610,7 @@ fn shared_invocation_registry(
     }
     let invocations = Arc::new(InvocationAdmissionState {
         limit: AtomicUsize::new(configured_limit),
+        database_uncertain: AtomicBool::new(false),
         live: Mutex::new(LiveInvocationRegistry {
             generation: 1,
             entries: HashMap::new(),
@@ -1702,6 +1732,9 @@ impl<'db> StorageManager<'db> {
             .map_err(|error| match error {
                 AdmissionError::Limit => TransactionError::AdmissionLimitExceeded,
                 AdmissionError::Duplicate => TransactionError::DuplicateInvocation,
+                AdmissionError::DatabaseUncertain => TransactionError::Storage(
+                    "database requires reopen after an ambiguous commit error".into(),
+                ),
             })?;
         InvocationTransaction::begin_inner(
             self.database,

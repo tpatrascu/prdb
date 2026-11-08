@@ -1,4 +1,6 @@
 //! One invocation's pinned snapshot and private row overlay.
+use std::cell::Cell;
+
 use crate::authorization::{
     AccessTarget, AuthorityDependency, AuthorizationContext, AuthorizationError,
     AuthorizedProjection, Effect, Expr, Grant, Membership, Operation, Policy, SanitizedCell,
@@ -489,6 +491,12 @@ impl InvocationCoordination {
         self._admission_permit
             .as_ref()
             .is_none_or(|permit| permit.try_mark_committing())
+    }
+
+    fn mark_commit_uncertain(&self) {
+        if let Some(permit) = &self._admission_permit {
+            permit.mark_commit_uncertain();
+        }
     }
 }
 
@@ -5430,6 +5438,7 @@ impl<'db> InvocationTransaction<'db> {
                     .expect("row keys have fixed table ID width")
             })
             .collect::<Vec<[u8; 16]>>();
+        let commit_started = Cell::new(false);
         let result = index_validation.and_then(|()| {
             if self.coordination.is_expired() {
                 return Err(CommitError::InvocationExpired);
@@ -5459,7 +5468,13 @@ impl<'db> InvocationTransaction<'db> {
                     catalog: &[],
                     audit: &[],
                 },
-                || self.coordination.mark_committing(),
+                || {
+                    let started = self.coordination.mark_committing();
+                    if started {
+                        commit_started.set(true);
+                    }
+                    started
+                },
             )
         });
         match result {
@@ -5468,7 +5483,12 @@ impl<'db> InvocationTransaction<'db> {
                 error @ (CommitError::Storage(_)
                 | CommitError::OutcomeAlreadyExists
                 | CommitError::UnsupportedFormat),
-            ) => Err(error.into()),
+            ) => {
+                if matches!(error, CommitError::Storage(_)) && commit_started.get() {
+                    self.coordination.mark_commit_uncertain();
+                }
+                Err(error.into())
+            }
             Err(error) => {
                 // The commit transaction has been discarded. Some validation paths
                 // already recorded the abort; preserve that existing decision.

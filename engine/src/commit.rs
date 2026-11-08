@@ -13949,10 +13949,48 @@ mod durable_commit_gate_tests {
     use super::{CommitError, CommitRequest, RowWrite, commit_storage_changes_with_gate};
     use crate::metadata::{EngineMetadata, Lifecycle};
     use crate::schema::{self, ENGINE_META, OUTCOMES, ROWS};
-    use redb::{Database, ReadableDatabase};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use crate::storage_manager::{InvocationStatus, StorageManager, StorageManagerConfig};
+    use crate::transaction::TransactionError;
+    use redb::{Database, ReadableDatabase, StorageBackend};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+
+    #[derive(Debug)]
+    struct FailNextSyncBackend {
+        inner: redb::backends::FileBackend,
+        fail_next_sync: Arc<AtomicBool>,
+    }
+
+    impl StorageBackend for FailNextSyncBackend {
+        fn len(&self) -> Result<u64, std::io::Error> {
+            self.inner.len()
+        }
+
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+            self.inner.read(offset, out)
+        }
+
+        fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+            self.inner.set_len(len)
+        }
+
+        fn sync_data(&self) -> Result<(), std::io::Error> {
+            if self.fail_next_sync.swap(false, Ordering::SeqCst) {
+                return Err(std::io::Error::other("injected commit sync failure"));
+            }
+            self.inner.sync_data()
+        }
+
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+            self.inner.write(offset, data)
+        }
+
+        fn close(&self) -> Result<(), std::io::Error> {
+            self.inner.close()
+        }
+    }
 
     #[test]
     fn denied_gate_discards_staged_records_and_granted_gate_publishes_them()
@@ -14038,6 +14076,105 @@ mod durable_commit_gate_tests {
         }
 
         drop(database);
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[test]
+    fn ambiguous_redb_commit_error_requires_reopen_and_never_records_aborted()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture_id = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "prdb-commit-error-{}-{fixture_id}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory)?;
+        let path = directory.join("ambiguous.redb");
+        {
+            let database = Database::create(&path)?;
+            let mut write = database.begin_write()?;
+            write.set_durability(redb::Durability::Immediate)?;
+            write.set_two_phase_commit(true);
+            schema::create_tables(&write)?;
+            let metadata = EngineMetadata {
+                database_id: [0x33; 16],
+                catalog_version: 2,
+                expression_version: 1,
+                builtin_semantics_version: 1,
+                commit_sequence: 0,
+                lifecycle: Lifecycle::Ready,
+            }
+            .encode()?;
+            write
+                .open_table(ENGINE_META)?
+                .insert(&b"format"[..], &metadata[..])?;
+            write.commit()?;
+        }
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)?;
+        let fail_next_sync = Arc::new(AtomicBool::new(false));
+        let database = Database::builder().create_with_backend(FailNextSyncBackend {
+            inner: redb::backends::FileBackend::new(file)?,
+            fail_next_sync: fail_next_sync.clone(),
+        })?;
+        let storage =
+            StorageManager::from_validated_database(&database, StorageManagerConfig::default())?;
+        let invocation_id = [0x66; 16];
+        let principal_id = [0x55; 16];
+        let invocation =
+            storage.begin_invocation(invocation_id, principal_id, i64::MAX, 1, 1024)?;
+        fail_next_sync.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            invocation.commit(),
+            Err(TransactionError::Commit(CommitError::Storage(_)))
+        ));
+        assert!(!fail_next_sync.load(Ordering::SeqCst));
+        let live_status = storage
+            .get_invocation_status(invocation_id, principal_id, 1)?
+            .ok_or("ambiguous invocation status disappeared before reopen")?;
+        assert!(matches!(
+            live_status.status,
+            InvocationStatus::Committing { .. }
+        ));
+        assert!(matches!(
+            storage.begin_invocation([0x67; 16], principal_id, i64::MAX, 1, 1024),
+            Err(TransactionError::Storage(_))
+        ));
+        drop(storage);
+        drop(database);
+
+        // redb requires a fresh handle after a non-poisoned commit I/O error.
+        let reopened = Database::open(&path)?;
+        let read = reopened.begin_read()?;
+        let outcome = read
+            .open_table(OUTCOMES)?
+            .get(&invocation_id[..])?
+            .map(|value| crate::outcome::InvocationOutcome::decode(value.value()))
+            .transpose()?;
+        let metadata = read
+            .open_table(ENGINE_META)?
+            .get(&&b"format"[..])?
+            .ok_or("missing metadata after redb recovery")?;
+        let sequence = EngineMetadata::decode(metadata.value())?.commit_sequence;
+        match (outcome, sequence) {
+            (Some(outcome), 1) => {
+                assert_eq!(outcome.status, crate::outcome::OutcomeStatus::Committed);
+                assert_eq!(outcome.commit_sequence, 1);
+            }
+            (None, 0) => {}
+            (outcome, sequence) => {
+                return Err(format!(
+                    "redb recovery exposed a partial commit: outcome={outcome:?}, sequence={sequence}"
+                )
+                .into());
+            }
+        }
+
+        drop(read);
+        drop(reopened);
         std::fs::remove_dir_all(directory)?;
         Ok(())
     }
