@@ -4,6 +4,52 @@
 #include <stddef.h>
 #include <string.h>
 
+typedef struct resolver_context {
+    const prdb_sdk_value_v1 *id;
+    const prdb_sdk_value_v1 *salary;
+    const prdb_sdk_value_v1 *active;
+    uint32_t calls;
+} resolver_context;
+
+static prdb_sdk_value_v1 make_value(uint32_t state, uint32_t type,
+                                    const uint8_t *data, uint64_t data_len) {
+    prdb_sdk_value_v1 value = {sizeof(value), PRDB_SDK_VALUE_ABI_V1_VERSION,
+                               state, type, data, data_len};
+    return value;
+}
+
+static int32_t resolve_test_column(
+    void *opaque, const uint8_t *sql, uint64_t sql_len,
+    prdb_sdk_sql_span_v1 column, const prdb_sdk_value_v1 **value_out,
+    uint32_t *type_out, uint8_t *precision_out, uint8_t *scale_out) {
+    resolver_context *context = opaque;
+    const uint8_t *name;
+
+    ++context->calls;
+    if (column.offset > sql_len || column.length > sql_len - column.offset) {
+        return PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT;
+    }
+    name = sql + column.offset;
+    *precision_out = 0;
+    *scale_out = 0;
+    if (column.length == 2 && memcmp(name, "id", 2) == 0) {
+        *value_out = context->id;
+        *type_out = PRDB_SDK_VALUE_TYPE_INTEGER;
+        return PRDB_SDK_SQL_EVAL_OK;
+    }
+    if (column.length == 6 && memcmp(name, "salary", 6) == 0) {
+        *value_out = context->salary;
+        *type_out = PRDB_SDK_VALUE_TYPE_INTEGER;
+        return PRDB_SDK_SQL_EVAL_OK;
+    }
+    if (column.length == 6 && memcmp(name, "active", 6) == 0) {
+        *value_out = context->active;
+        *type_out = PRDB_SDK_VALUE_TYPE_BOOLEAN;
+        return PRDB_SDK_SQL_EVAL_OK;
+    }
+    return PRDB_SDK_SQL_EVAL_INVALID_VALUE;
+}
+
 int main(void) {
     static const uint8_t query[] =
         "SELECT name FROM employees WHERE department_id = $1 AND "
@@ -21,6 +67,18 @@ int main(void) {
     static const uint8_t and_separator[] = " AND ";
     static const uint8_t not_keyword[] = "NOT ";
     static const uint8_t simple_term[] = "id = $1";
+    static const uint8_t eval_query[] =
+        "SELECT id FROM t WHERE id = $1 AND "
+        "(salary >= $2 OR active IS NULL)";
+    static const uint8_t unknown_query[] =
+        "SELECT id FROM t WHERE salary >= $2 OR active IS NULL";
+    static const uint8_t unknown_and_false_query[] =
+        "SELECT id FROM t WHERE salary >= $2 AND active = $3";
+    static const uint8_t no_predicate_query[] = "SELECT id FROM t";
+    static const uint8_t positive_integer[] = {0, 0, 0, 2};
+    static const uint8_t negative_integer[] = {0xff, 0xff, 0xff, 0xfd};
+    static const uint8_t false_boolean[] = {0};
+    static const uint8_t true_boolean[] = {1};
     uint8_t too_many_nodes[1024];
     uint8_t at_depth_limit[512];
     uint8_t too_deep[512];
@@ -29,6 +87,28 @@ int main(void) {
     size_t too_deep_len = 0;
     uint32_t error_offset;
     prdb_sdk_select_v2 statement = {0};
+    prdb_sdk_select_v2 unknown_statement = {0};
+    prdb_sdk_select_v2 no_predicate_statement = {0};
+    prdb_sdk_value_v1 two = make_value(
+        PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_INTEGER,
+        positive_integer, sizeof(positive_integer));
+    prdb_sdk_value_v1 minus_three = make_value(
+        PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_INTEGER,
+        negative_integer, sizeof(negative_integer));
+    prdb_sdk_value_v1 null_value = make_value(PRDB_SDK_VALUE_STATE_NULL, 0,
+                                              NULL, 0);
+    prdb_sdk_value_v1 redacted = make_value(
+        PRDB_SDK_VALUE_STATE_REDACTED, 0, NULL, 0);
+    prdb_sdk_value_v1 false_value = make_value(
+        PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_BOOLEAN,
+        false_boolean, sizeof(false_boolean));
+    prdb_sdk_value_v1 true_value = make_value(
+        PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_BOOLEAN, true_boolean,
+        sizeof(true_boolean));
+    prdb_sdk_value_v1 parameters[] = {two, two};
+    prdb_sdk_value_v1 three_parameters[] = {two, two, true_value};
+    resolver_context context = {&minus_three, &redacted, &redacted, 0};
+    uint32_t truth;
 
     assert(prdb_sdk_sql_parse_select_v2(
                query, sizeof(query) - 1, &statement, sizeof(statement), NULL) ==
@@ -132,5 +212,84 @@ int main(void) {
                too_many_nodes, too_many_nodes_len, &statement,
                sizeof(statement), &error_offset) ==
            PRDB_SDK_SQL_LIMIT_EXCEEDED);
+
+    assert(prdb_sdk_sql_parse_select_v2(
+               eval_query, sizeof(eval_query) - 1, &statement,
+               sizeof(statement), NULL) == PRDB_SDK_SQL_OK);
+    assert(prdb_sdk_sql_eval_select_predicate_v2(
+               &statement, parameters, 2, resolve_test_column, &context,
+               &truth) == PRDB_SDK_SQL_EVAL_OK);
+    assert(truth == PRDB_SDK_SQL_TRUTH_FALSE);
+    assert(context.calls == 1);
+
+    context = (resolver_context){&two, &two, &redacted, 0};
+    assert(prdb_sdk_sql_eval_select_predicate_v2(
+               &statement, parameters, 2, resolve_test_column, &context,
+               &truth) == PRDB_SDK_SQL_EVAL_OK);
+    assert(truth == PRDB_SDK_SQL_TRUTH_TRUE);
+    assert(context.calls == 2);
+
+    context = (resolver_context){&two, &minus_three, &redacted, 0};
+    assert(prdb_sdk_sql_eval_select_predicate_v2(
+               &statement, parameters, 2, resolve_test_column, &context,
+               &truth) == PRDB_SDK_SQL_EVAL_REDACTED_INPUT);
+    assert(context.calls == 3);
+
+    context = (resolver_context){&two, &two, &false_value, 0};
+    assert(prdb_sdk_sql_parse_select_v2(
+               not_query, sizeof(not_query) - 1, &statement,
+               sizeof(statement), NULL) == PRDB_SDK_SQL_OK);
+    assert(prdb_sdk_sql_eval_select_predicate_v2(
+               &statement, parameters, 2, resolve_test_column, &context,
+               &truth) == PRDB_SDK_SQL_EVAL_OK);
+    assert(truth == PRDB_SDK_SQL_TRUTH_TRUE);
+    assert(context.calls == 1);
+
+    context = (resolver_context){&two, &null_value, &false_value, 0};
+    assert(prdb_sdk_sql_parse_select_v2(
+               unknown_query, sizeof(unknown_query) - 1, &unknown_statement,
+               sizeof(unknown_statement), NULL) == PRDB_SDK_SQL_OK);
+    assert(prdb_sdk_sql_eval_select_predicate_v2(
+               &unknown_statement, parameters, 2, resolve_test_column,
+               &context, &truth) == PRDB_SDK_SQL_EVAL_OK);
+    assert(truth == PRDB_SDK_SQL_TRUTH_UNKNOWN);
+    assert(context.calls == 2);
+
+    context = (resolver_context){&two, &null_value, &false_value, 0};
+    assert(prdb_sdk_sql_parse_select_v2(
+               unknown_and_false_query, sizeof(unknown_and_false_query) - 1,
+               &unknown_statement, sizeof(unknown_statement), NULL) ==
+           PRDB_SDK_SQL_OK);
+    assert(prdb_sdk_sql_eval_select_predicate_v2(
+               &unknown_statement, three_parameters, 3,
+               resolve_test_column, &context, &truth) == PRDB_SDK_SQL_EVAL_OK);
+    assert(truth == PRDB_SDK_SQL_TRUTH_FALSE);
+    assert(context.calls == 2);
+
+    context = (resolver_context){&two, &two, &redacted, 0};
+    assert(prdb_sdk_sql_parse_select_v2(
+               eval_query, sizeof(eval_query) - 1, &statement,
+               sizeof(statement), NULL) == PRDB_SDK_SQL_OK);
+    assert(prdb_sdk_sql_eval_select_predicate_v2(
+               &statement, parameters, 1, resolve_test_column, &context,
+               &truth) == PRDB_SDK_SQL_EVAL_PARAMETER_MISSING);
+    assert(context.calls == 1);
+
+    assert(prdb_sdk_sql_parse_select_v2(
+               no_predicate_query, sizeof(no_predicate_query) - 1,
+               &no_predicate_statement, sizeof(no_predicate_statement), NULL) ==
+           PRDB_SDK_SQL_OK);
+    assert(prdb_sdk_sql_eval_select_predicate_v2(
+               &no_predicate_statement, NULL, 0, NULL, NULL, &truth) ==
+           PRDB_SDK_SQL_EVAL_OK);
+    assert(truth == PRDB_SDK_SQL_TRUTH_TRUE);
+
+    statement.predicates[statement.predicate_root].left_child =
+        statement.predicate_root;
+    context.calls = 0;
+    assert(prdb_sdk_sql_eval_select_predicate_v2(
+               &statement, parameters, 2, resolve_test_column, &context,
+               &truth) == PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT);
+    assert(context.calls == 0);
     return 0;
 }

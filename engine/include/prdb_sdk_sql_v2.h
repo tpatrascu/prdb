@@ -40,10 +40,24 @@ typedef struct prdb_sdk_select_v2 {
     uint32_t limit;
 } prdb_sdk_select_v2;
 
+/* Resolves one predicate column to its already-authorized row-cell view and
+ * pinned schema type metadata. Return a PRDB_SDK_SQL_EVAL_* status. */
+typedef int32_t (*prdb_sdk_sql_resolve_column_v2)(
+    void *context, const uint8_t *sql, uint64_t sql_len,
+    prdb_sdk_sql_span_v1 column, const prdb_sdk_value_v1 **value_out,
+    uint32_t *type_out, uint8_t *decimal_precision_out,
+    uint8_t *decimal_scale_out);
+
 /* Version 2 preserves v1 and adds a bounded Boolean predicate tree. */
 int32_t prdb_sdk_sql_parse_select_v2(const uint8_t *sql, uint64_t sql_len,
                                      prdb_sdk_select_v2 *out,
                                      uint32_t out_capacity,
                                      uint32_t *error_offset_out);
+/* Evaluates only reached leaves; resolver results must be sanitized views. */
+int32_t prdb_sdk_sql_eval_select_predicate_v2(
+    const prdb_sdk_select_v2 *statement,
+    const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
+    prdb_sdk_sql_resolve_column_v2 resolve_column, void *resolver_context,
+    uint32_t *truth_out);
 
 #endif /* PRDB_SDK_SQL_V2_H */
