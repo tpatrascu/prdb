@@ -115,6 +115,15 @@ static int32_t executor_request(void *context, uint16_t operation,
         assert(sizeof(reply) <= capacity);
         memcpy(response, reply, sizeof(reply));
         *response_len = sizeof(reply);
+    } else if (operation == PRDB_SDK_EXECUTOR_OP_STAGE_DELETE) {
+        static const uint8_t expected[] = {
+            0, 1, 8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+        static const uint8_t reply[] = {0, 1, 0};
+        assert(request_len == sizeof(expected));
+        assert(memcmp(request, expected, sizeof(expected)) == 0);
+        assert(sizeof(reply) <= capacity);
+        memcpy(response, reply, sizeof(reply));
+        *response_len = sizeof(reply);
     } else if (operation == PRDB_SDK_EXECUTOR_OP_STAGE_INSERT) {
         static const uint8_t expected[] = {
             0, 1, 6, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
@@ -246,6 +255,7 @@ int main(void) {
         "INSERT INTO widgets VALUES ($1, NULL, DEFAULT)";
     static const uint8_t update_sql[] =
         "UPDATE widgets SET id = $1 WHERE id >= $1";
+    static const uint8_t delete_sql[] = "DELETE FROM widgets WHERE id >= $1";
     static const uint8_t schema[] = "app";
     static const uint8_t parameter_bytes[] = {0, 0, 0, 4};
     uint8_t planner_payload[256] = {0};
@@ -434,6 +444,43 @@ int main(void) {
                1, update_patches, 1, &updated_count) ==
            PRDB_SDK_SQL_EXEC_MATERIALIZATION_LIMIT);
     assert(updated_count == 777 && mock.planner_calls == 1 &&
+           mock.executor_calls == 4 && mock.statement_failed == 1);
+
+    mock.batch = batch_payload;
+    mock.batch_len = sizeof(batch_payload);
+    mock.planner_calls = 0;
+    mock.executor_calls = 0;
+    mock.statement_failed = 0;
+    uint32_t deleted_count = 0;
+    assert(prdb_sdk_sql_execute_delete_v1(
+               &host, schema, sizeof(schema) - 1, delete_sql,
+               sizeof(delete_sql) - 1, &parameter, 1, 1, 1024,
+               planner_response, sizeof(planner_response), executor_response,
+               sizeof(executor_response), batch_response,
+               sizeof(batch_response), planner_columns, 1, executor_columns,
+               1, &update_binding,
+               sizeof(update_binding), update_cell_scratch, 1, update_targets,
+               PRDB_SDK_SQL_EXEC_MAX_MUTATION_TARGETS, &deleted_count) ==
+           PRDB_SDK_SQL_EXEC_OK);
+    assert(deleted_count == 1 && mock.planner_calls == 1 &&
+           mock.executor_calls == 5 && mock.statement_failed == 0);
+
+    mock.batch = two_rows_batch;
+    mock.batch_len = two_rows_batch_len;
+    mock.planner_calls = 0;
+    mock.executor_calls = 0;
+    mock.statement_failed = 0;
+    deleted_count = 888;
+    assert(prdb_sdk_sql_execute_delete_v1(
+               &host, schema, sizeof(schema) - 1, delete_sql,
+               sizeof(delete_sql) - 1, &parameter, 1, 2, 1024,
+               planner_response, sizeof(planner_response), executor_response,
+               sizeof(executor_response), batch_response,
+               sizeof(batch_response), planner_columns, 1, executor_columns,
+               1, &update_binding,
+               sizeof(update_binding), update_cell_scratch, 1, update_targets,
+               1, &deleted_count) == PRDB_SDK_SQL_EXEC_MATERIALIZATION_LIMIT);
+    assert(deleted_count == 888 && mock.planner_calls == 1 &&
            mock.executor_calls == 4 && mock.statement_failed == 1);
     return 0;
 }

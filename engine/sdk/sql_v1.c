@@ -551,6 +551,95 @@ failed_update:
     return fail_at(&state, status);
 }
 
+int32_t prdb_sdk_sql_parse_delete_v1(const uint8_t *sql, uint64_t sql_len,
+                                     prdb_sdk_delete_v1 *out,
+                                     uint32_t out_capacity,
+                                     uint32_t *error_offset_out) {
+    parser state;
+    prdb_sdk_delete_v1 result;
+    prdb_sdk_select_v2 *predicate;
+    int32_t status;
+
+    if (error_offset_out != NULL) *error_offset_out = 0;
+    if (sql == NULL || out == NULL || out_capacity < sizeof(*out)) {
+        return PRDB_SDK_SQL_INVALID_ARGUMENT;
+    }
+    if (sql_len == 0) return PRDB_SDK_SQL_SYNTAX_ERROR;
+    if (sql_len > PRDB_SDK_SQL_MAX_QUERY_BYTES) {
+        if (error_offset_out != NULL) {
+            *error_offset_out = (uint32_t)PRDB_SDK_SQL_MAX_QUERY_BYTES;
+        }
+        return PRDB_SDK_SQL_LIMIT_EXCEEDED;
+    }
+    state = (parser){sql, (uint32_t)sql_len, 0, {TOKEN_END, 0, 0}, 0,
+                     PRDB_SDK_SQL_OK};
+    result = (prdb_sdk_delete_v1){0};
+    result.struct_size = sizeof(result);
+    result.abi_version = PRDB_SDK_SQL_DML_ABI_V1_VERSION;
+    result.sql = sql;
+    result.sql_len = sql_len;
+    predicate = &result.predicate_statement;
+    predicate->struct_size = sizeof(*predicate);
+    predicate->abi_version = PRDB_SDK_SQL_ABI_V2_VERSION;
+    predicate->sql = sql;
+    predicate->sql_len = sql_len;
+    predicate->projection_star = 1;
+
+    status = advance(&state);
+    if (status != PRDB_SDK_SQL_OK) goto failed_delete;
+    if (!token_is_keyword(&state, "DELETE")) {
+        status = state.current.kind == TOKEN_IDENTIFIER
+                     ? PRDB_SDK_SQL_UNSUPPORTED_STATEMENT
+                     : PRDB_SDK_SQL_SYNTAX_ERROR;
+        state.error_offset = state.current.offset;
+        goto failed_delete;
+    }
+    if (advance(&state) != PRDB_SDK_SQL_OK) {
+        status = state.error;
+        goto failed_delete;
+    }
+    if (!token_is_keyword(&state, "FROM")) {
+        status = PRDB_SDK_SQL_SYNTAX_ERROR;
+        state.error_offset = state.current.offset;
+        goto failed_delete;
+    }
+    if (advance(&state) != PRDB_SDK_SQL_OK) {
+        status = state.error;
+        goto failed_delete;
+    }
+    status = expect_identifier(&state, &result.relation);
+    if (status != PRDB_SDK_SQL_OK) goto failed_delete;
+    predicate->relation = result.relation;
+    if (!token_is_keyword(&state, "WHERE")) {
+        status = PRDB_SDK_SQL_SYNTAX_ERROR;
+        state.error_offset = state.current.offset;
+        goto failed_delete;
+    }
+    if (advance(&state) != PRDB_SDK_SQL_OK) {
+        status = state.error;
+        goto failed_delete;
+    }
+    status = parse_predicate_or_v2(&state, predicate, 0,
+                                   &predicate->predicate_root);
+    if (status != PRDB_SDK_SQL_OK) goto failed_delete;
+    if (state.current.kind == TOKEN_SEMICOLON &&
+        advance(&state) != PRDB_SDK_SQL_OK) {
+        status = state.error;
+        goto failed_delete;
+    }
+    if (state.current.kind != TOKEN_END) {
+        status = PRDB_SDK_SQL_SYNTAX_ERROR;
+        state.error_offset = state.current.offset;
+        goto failed_delete;
+    }
+    *out = result;
+    return PRDB_SDK_SQL_OK;
+
+failed_delete:
+    if (error_offset_out != NULL) *error_offset_out = state.error_offset;
+    return fail_at(&state, status);
+}
+
 static int32_t add_predicate_node(parser *state, prdb_sdk_select_v2 *statement,
                                   prdb_sdk_predicate_node_v2 node,
                                   uint32_t *index_out) {

@@ -18,8 +18,13 @@ int main(void) {
         "UPDATE widgets SET id = $1, ID = NULL WHERE id = $2";
     static const uint8_t malformed_update_sql[] =
         "UPDATE widgets SET id = $0 WHERE id = $1";
+    static const uint8_t delete_sql[] =
+        "DELETE FROM widgets WHERE id = $1 AND enabled IS NULL;";
+    static const uint8_t missing_delete_where_sql[] =
+        "DELETE FROM widgets";
     prdb_sdk_insert_v1 insert = {0};
     prdb_sdk_update_v1 update = {0};
+    prdb_sdk_delete_v1 delete_statement = {0};
     uint32_t error_offset = 0;
 
     assert(prdb_sdk_sql_parse_insert_v1(
@@ -71,6 +76,17 @@ int main(void) {
     assert(prdb_sdk_sql_parse_update_v1(
                malformed_update_sql, sizeof(malformed_update_sql) - 1,
                &update, sizeof(update), &error_offset) ==
+           PRDB_SDK_SQL_SYNTAX_ERROR);
+
+    assert(prdb_sdk_sql_parse_delete_v1(
+               delete_sql, sizeof(delete_sql) - 1, &delete_statement,
+               sizeof(delete_statement), &error_offset) == PRDB_SDK_SQL_OK);
+    assert(delete_statement.abi_version == PRDB_SDK_SQL_DML_ABI_V1_VERSION);
+    assert(delete_statement.predicate_statement.projection_star == 1);
+    assert(delete_statement.predicate_statement.predicate_count == 3);
+    assert(prdb_sdk_sql_parse_delete_v1(
+               missing_delete_where_sql, sizeof(missing_delete_where_sql) - 1,
+               &delete_statement, sizeof(delete_statement), &error_offset) ==
            PRDB_SDK_SQL_SYNTAX_ERROR);
     return 0;
 }

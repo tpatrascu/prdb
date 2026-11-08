@@ -92,4 +92,24 @@ int32_t prdb_sdk_sql_execute_update_v1(
     prdb_sdk_executor_update_patch_v1 *patches, uint32_t patch_capacity,
     uint32_t *updated_count_out);
 
+/* Executes DELETE from a fixed scan input: materializes matching opaque row
+ * handles, closes the scan, then stages the deletes. */
+int32_t prdb_sdk_sql_execute_delete_v1(
+    const prdb_host_api_v3 *host,
+    const uint8_t *schema, uint32_t schema_len,
+    const uint8_t *sql, uint64_t sql_len,
+    const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
+    uint16_t max_candidates, uint32_t max_batch_bytes,
+    uint8_t *planner_response, uint64_t planner_response_capacity,
+    uint8_t *executor_response, uint64_t executor_response_capacity,
+    uint8_t *batch_response, uint64_t batch_response_capacity,
+    prdb_sdk_sql_column_shape_v2 *planner_columns,
+    uint32_t planner_column_capacity,
+    prdb_sdk_sql_column_shape_v2 *executor_columns,
+    uint32_t executor_column_capacity,
+    prdb_sdk_select_binding_v2 *binding, uint32_t binding_capacity,
+    prdb_sdk_value_v1 *cell_scratch, uint32_t cell_scratch_capacity,
+    uint8_t *target_handles, uint32_t target_capacity,
+    uint32_t *deleted_count_out);
+
 #endif

@@ -47,12 +47,25 @@ typedef struct prdb_sdk_update_v1 {
     prdb_sdk_select_v2 predicate_statement;
 } prdb_sdk_update_v1;
 
+typedef struct prdb_sdk_delete_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    const uint8_t *sql;
+    uint64_t sql_len;
+    prdb_sdk_sql_span_v1 relation;
+    prdb_sdk_select_v2 predicate_statement;
+} prdb_sdk_delete_v1;
+
 int32_t prdb_sdk_sql_parse_insert_v1(const uint8_t *sql, uint64_t sql_len,
                                      prdb_sdk_insert_v1 *out,
                                      uint32_t out_capacity,
                                      uint32_t *error_offset_out);
 int32_t prdb_sdk_sql_parse_update_v1(const uint8_t *sql, uint64_t sql_len,
                                      prdb_sdk_update_v1 *out,
+                                     uint32_t out_capacity,
+                                     uint32_t *error_offset_out);
+int32_t prdb_sdk_sql_parse_delete_v1(const uint8_t *sql, uint64_t sql_len,
+                                     prdb_sdk_delete_v1 *out,
                                      uint32_t out_capacity,
                                      uint32_t *error_offset_out);
 
