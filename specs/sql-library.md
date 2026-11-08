@@ -84,7 +84,7 @@ Favor low-overhead point/range operations and small writes. Analytical operators
 
 ## Metadata Queries
 
-Treat the fixed `information_schema` relations as read-only virtual storage scans. The Rust storage manager filters metadata before sending rows; the C SDK cannot broaden discovery by evaluating predicates locally. They share the invocation catalog snapshot and do not expose private definitions, credential records, or live operational state. General user-created SQL views remain deferred.
+Treat the fixed `information_schema` relations as read-only virtual storage scans. `prdb_sdk_sql_execute_select_v2` receives the admitted schema separately from the unqualified relation in the SQL text, so a metadata query supplies `information_schema` as that schema and names `schemata`, `tables`, or `columns` in `FROM`. The Rust storage manager filters metadata before sending rows; the C SDK evaluates SQL predicates only over those authorized rows and cannot broaden discovery. These scans share the invocation catalog snapshot and do not expose private definitions, credential records, or live operational state. General user-created SQL views remain deferred.
 
 ## Transactional Execution
 

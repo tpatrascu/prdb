@@ -2808,6 +2808,158 @@ fn executor_relation_socket_loop_ends_session_without_finalizing()
 }
 
 #[test]
+fn information_schema_virtual_scans_round_trip_through_executor_ipc()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::executor_ipc::{
+        NextBatchRequest, NextBatchResponse, OpenScanRequest, OpenScanResponse,
+        ResolveRelationRequest, ResolveRelationResponse, serve_executor,
+    };
+    use prdb_engine::ipc::{IpcFrame, Operation, read_frame, write_frame};
+    use std::net::Shutdown;
+    use std::os::unix::net::UnixStream;
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    install_relation_discovery_catalog(&database)?;
+    install_second_relation_column(&database)?;
+
+    let mut invocation = InvocationTransaction::begin(&database, [222; 16], [9; 16], 9_999, 1, 64)?;
+    let (mut client, mut server) = UnixStream::pair()?;
+    let client_task = std::thread::spawn(move || {
+        let mut request_id = 1u64;
+        macro_rules! exchange {
+            ($operation:expr, $payload:expr) => {{
+                let request = IpcFrame {
+                    operation: $operation as u16,
+                    request_id,
+                    payload: $payload,
+                };
+                request_id += 1;
+                write_frame(&mut client, &request).unwrap();
+                read_frame(&mut client).unwrap().unwrap()
+            }};
+        }
+
+        let mut collected = Vec::new();
+        for relation_name in ["schemata", "tables", "columns"] {
+            let response = exchange!(
+                Operation::ResolveRelation,
+                ResolveRelationRequest {
+                    schema_name: "information_schema".to_owned(),
+                    relation_name: relation_name.to_owned(),
+                }
+                .encode()
+                .unwrap()
+            );
+            let ResolveRelationResponse::Resolved {
+                handle,
+                description,
+            } = ResolveRelationResponse::decode(&response.payload).unwrap()
+            else {
+                panic!("public information_schema relation resolves")
+            };
+            assert_eq!(description.name, relation_name);
+
+            let response = exchange!(
+                Operation::OpenScan,
+                OpenScanRequest {
+                    relation: handle,
+                    column_ids: Vec::new(),
+                }
+                .encode()
+                .unwrap()
+            );
+            let mut cursor = OpenScanResponse::decode(&response.payload).unwrap().cursor;
+            let mut relation_rows = Vec::new();
+            loop {
+                let response = exchange!(
+                    Operation::NextBatch,
+                    NextBatchRequest {
+                        cursor: cursor.clone(),
+                        max_scanned: 1,
+                        max_bytes: 4096,
+                    }
+                    .encode()
+                    .unwrap()
+                );
+                let page = NextBatchResponse::decode(&response.payload).unwrap();
+                relation_rows.extend(page.rows.into_iter().map(|row| row.cells));
+                match page.continuation {
+                    Some(next) => cursor = next,
+                    None => break,
+                }
+            }
+            collected.push((relation_name, relation_rows));
+        }
+        client.shutdown(Shutdown::Write).unwrap();
+        collected
+    });
+
+    serve_executor(&mut server, &mut invocation)?;
+    let collected = client_task
+        .join()
+        .expect("executor IPC scan sequence completes");
+
+    let schemata = &collected[0].1;
+    assert_eq!(
+        schemata,
+        &[
+            vec![SanitizedCell::Value(ScalarValue::Text(
+                "information_schema".to_owned(),
+            ))],
+            vec![SanitizedCell::Value(ScalarValue::Text("app".to_owned()))],
+            vec![SanitizedCell::Value(ScalarValue::Text("public".to_owned()))],
+        ]
+    );
+    let tables = &collected[1].1;
+    assert_eq!(tables.len(), 5);
+    assert_eq!(
+        tables[0],
+        [
+            SanitizedCell::Value(ScalarValue::Text("information_schema".to_owned())),
+            SanitizedCell::Value(ScalarValue::Text("columns".to_owned())),
+            SanitizedCell::Value(ScalarValue::Text("VIEW".to_owned())),
+        ]
+    );
+    assert_eq!(
+        tables[3],
+        [
+            SanitizedCell::Value(ScalarValue::Text("app".to_owned())),
+            SanitizedCell::Value(ScalarValue::Text("metrics".to_owned())),
+            SanitizedCell::Value(ScalarValue::Text("BASE TABLE".to_owned())),
+        ]
+    );
+
+    let columns = &collected[2].1;
+    assert_eq!(columns.len(), 16);
+    assert_eq!(
+        columns[0],
+        [
+            SanitizedCell::Value(ScalarValue::Text("information_schema".to_owned())),
+            SanitizedCell::Value(ScalarValue::Text("columns".to_owned())),
+            SanitizedCell::Value(ScalarValue::Text("table_schema".to_owned())),
+            SanitizedCell::Value(ScalarValue::Integer(1)),
+            SanitizedCell::Value(ScalarValue::Text("TEXT".to_owned())),
+            SanitizedCell::Value(ScalarValue::Text("NO".to_owned())),
+            SanitizedCell::Null,
+            SanitizedCell::Null,
+            SanitizedCell::Null,
+        ]
+    );
+    assert_eq!(
+        columns[14][..4],
+        [
+            SanitizedCell::Value(ScalarValue::Text("app".to_owned())),
+            SanitizedCell::Value(ScalarValue::Text("metrics".to_owned())),
+            SanitizedCell::Value(ScalarValue::Text("value2".to_owned())),
+            SanitizedCell::Value(ScalarValue::Integer(2)),
+        ]
+    );
+    invocation.abort()?;
+    Ok(())
+}
+
+#[test]
 fn catalog_authorized_scan_builds_its_projection_from_pinned_records()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::executor_ipc::{

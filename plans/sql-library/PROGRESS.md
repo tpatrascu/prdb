@@ -91,5 +91,6 @@
 
 - Contract: [SQL library](../../specs/sql-library.md), read-only virtual metadata relations, and [metadata discovery](../../specs/metadata-discovery.md). The executor's ordinary `open_scan`/`next_batch` operations read `schemata`, `tables`, and `columns` through invocation-pinned authorization-filtered scanners.
 - Regression: a real-redb transaction test pages all three relations through the executor batch API, verifies stable ordering, declared cell shapes and NULL fields, rejects cursor replay, and checks virtual handles cannot be updated or inserted into.
-- Verification: the focused transaction regression plus workspace build, format, warning-denied Clippy, and tests passed. Two delegated-cgroup sandbox tests remain ignored on this host.
-- Remaining: SQL API execution with a real query callback fixture and full API/SQL parity remain open. Sandboxed end-to-end execution still requires a delegated-cgroup host.
+- Regression: `sdk_sql_information_schema_v2.c` consumes a parameterized schemata query over sanitized rows, checks SQL predicate and LIMIT behavior, and verifies cursor closure. `information_schema_virtual_scans_round_trip_through_executor_ipc` independently checks the real Rust storage/IPC row stream for schemata, tables, and columns.
+- Verification: maintained TinyCC suite, workspace build, format, warning-denied Clippy, and workspace tests passed. The transaction target had 68 passing tests; commit integration had 109 passing and 2 delegated-cgroup tests ignored.
+- Remaining: the TinyCC fixture uses a test host callback and has not queried live storage rows inside the confined worker. Live SQL/API parity across all three virtual relations remains open until a delegated-cgroup host can run the worker integration.
