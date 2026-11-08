@@ -505,6 +505,12 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
             default: None,
         }],
     )?;
+    let select_grant = admin.grant_object_privilege(
+        admin_user_id,
+        created_table.table_id,
+        AdminObjectPrivilege::Select,
+        AdminObjectGrantTarget::Column(created_table.column_ids[0]),
+    )?;
     let references_grant = admin.grant_object_privilege(
         admin_user_id,
         created_table.table_id,
@@ -529,6 +535,13 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
         AdminObjectGrantTarget::Column(created_table.column_ids[0]),
     )?;
     assert!(revoked_references.commit_sequence > references_grant.commit_sequence);
+    let revoked_select = admin.revoke_object_privilege(
+        admin_user_id,
+        created_table.table_id,
+        AdminObjectPrivilege::Select,
+        AdminObjectGrantTarget::Column(created_table.column_ids[0]),
+    )?;
+    assert!(revoked_select.commit_sequence > select_grant.commit_sequence);
     let dropped_unique = admin
         .drop_unique_constraint(unique_constraint.constraint_id)
         .map_err(|error| format!("process ADMIN drop_unique_constraint failed: {error}"))?;
