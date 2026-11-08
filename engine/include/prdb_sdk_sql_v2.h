@@ -2,6 +2,7 @@
 #define PRDB_SDK_SQL_V2_H
 
 #include "prdb_sdk_sql_v1.h"
+#include "prdb_sdk_batch_v1.h"
 
 #define PRDB_SDK_SQL_ABI_V2_VERSION UINT32_C(2)
 #define PRDB_SDK_SQL_MAX_PREDICATE_NODES UINT32_C(64)
@@ -72,6 +73,7 @@ typedef struct prdb_sdk_select_binding_v2 {
     uint32_t projection_star;
     uint32_t projection_count;
     uint32_t projection_ordinals[PRDB_SDK_SQL_MAX_PROJECTION_COLUMNS];
+    uint32_t relation_column_count;
     uint32_t predicate_count;
     prdb_sdk_sql_bound_column_v2
         predicate_columns[PRDB_SDK_SQL_MAX_PREDICATE_NODES];
@@ -115,5 +117,15 @@ int32_t prdb_sdk_sql_eval_bound_select_predicate_v2(
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     prdb_sdk_sql_resolve_bound_column_v2 resolve_column,
     void *resolver_context, uint32_t *truth_out);
+/* Evaluates one complete-shape authorized row from an immutable decoded
+ * executor batch. Binding ordinals address declared order. Scratch must hold
+ * one value view per cell and must not overlap the statement, binding,
+ * parameters, row payload, or truth output. */
+int32_t prdb_sdk_sql_eval_bound_select_row_v2(
+    const prdb_sdk_select_v2 *statement,
+    const prdb_sdk_select_binding_v2 *binding,
+    const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
+    const prdb_sdk_row_v1 *row, prdb_sdk_value_v1 *cell_scratch,
+    uint32_t cell_scratch_capacity, uint32_t *truth_out);
 
 #endif /* PRDB_SDK_SQL_V2_H */

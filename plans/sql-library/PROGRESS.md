@@ -15,15 +15,17 @@
 - Regression: [`sdk_sql_select_v2.c`](../../engine/tests/fixtures/sdk_sql_select_v2.c) checks mixed precedence, grouping, comparison operators, null tests, parameter indices, malformed expressions, and both AST bounds. Before implementation it failed to link because the v2 parser entry point was missing.
 - Regression: the fixture uses a resolver that counts column reads; it proves AND/FALSE skips an entire branch, OR/TRUE skips a REDACTED leaf, reached REDACTED errors propagate, UNKNOWN combines correctly with FALSE, missing parameters fail, no-WHERE evaluates TRUE, and malformed tree edges are rejected. Before implementation it failed to link because the v2 evaluator symbol was absent.
 - Bound evaluation: `prdb_sdk_sql_eval_bound_select_predicate_v2` consumes the binding, resolves reached leaves by zero-based column ordinal, and takes type/Decimal metadata from the bound record. TinyCC regressions prove ordinal access, three-valued results, short-circuiting, callback error propagation and malformed-binding rejection before any row access. The first fixture run failed to link because the bound evaluator symbol was absent.
+- Planner-to-binding bridge: `prdb_sdk_planner_decode_relation_v1` validates the planner's binary `describe_relation` response and exposes borrowed names and SQL column shapes, including Decimal metadata. Its regression feeds the decoded shape directly to the v2 SQL binder; planner handles remain distinct from executor handles. The first TinyCC link failed because the decoder symbol was absent.
+- Batch-row evaluation: `prdb_sdk_sql_eval_bound_select_row_v2` decodes each cell of one full-shape authorized row into caller-supplied bounded scratch and evaluates using binding ordinals. Its fixture uses real version-1 batch bytes and checks SQL NULL, short-circuit over REDACTED, shape mismatch, and scratch bounds. The row and batch storage remain borrowed; the helper makes no row authorization decision.
 - Verification: the full maintained TinyCC SDK fixture suite and `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, and `git diff --check` passed.
-- Remaining: decode planner responses into the binder's relation/column shape and connect the ordinal callback to sanitized storage batch cell views.
+- Remaining: submit planner/executor requests through the host API, independently resolve the relation on the executor channel, iterate scan pages, and connect sequential SQL statement/result lifetimes to transaction abort semantics.
 
 ## SQL-4 v2 schema column binding — implemented
 
 - Contract: `prdb_sdk_sql_bind_select_v2` receives the v2 statement, one already-resolved authorized relation name, and its declared column shape. It maps unquoted projection and predicate names to zero-based ordinals using ASCII case folding, and attaches scalar/Decimal metadata to predicate leaves.
 - Failure behavior: relation mismatch, missing/ambiguous columns, malformed statement records, and malformed type metadata fail without changing the output record. `SELECT *` remains a star marker with no explicit ordinal list. The mapping grants no storage access.
 - Regression: the v2 fixture checks case-insensitive relation/column matching, projection and predicate ordinals, Decimal precision/scale, star binding, relation mismatch, missing/ambiguous columns, and invalid schema metadata. Before implementation it failed to link because the binder symbol was absent.
-- Remaining: decode planner responses into binder relation/column shapes and connect bound evaluation to sanitized storage batch cell views.
+- Remaining: drive planner response decoding and full-shape executor batches from the SQL call path; the conversion/evaluation primitives do not yet submit or iterate IPC requests.
 
 ## SQL-2 typed scalar comparison and truth primitives — implemented
 

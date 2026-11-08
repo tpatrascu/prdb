@@ -97,6 +97,22 @@ int main(void) {
         "SELECT Name FROM Employees WHERE salary >= $1 AND active IS NULL";
     static const uint8_t bound_eval_query[] =
         "SELECT id FROM t WHERE id = $1 AND active IS NULL";
+    static const uint8_t bound_row_batch_true[] = {
+        0x00, 0x01, 0x01, 0x00, 0x01,
+        0x08, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70,
+        0x80, 0x90, 0xa0, 0xb0, 0xc0, 0xd0, 0xe0, 0xf0,
+        0x00, 0x02,
+        0x00, PRDB_SDK_VALUE_TYPE_INTEGER, 0x00, 0x00, 0x00, 0x04,
+        0x00, 0x00, 0x00, 0x02,
+        0x01};
+    static const uint8_t bound_row_batch_short_circuit[] = {
+        0x00, 0x01, 0x01, 0x00, 0x01,
+        0x08, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70,
+        0x80, 0x90, 0xa0, 0xb0, 0xc0, 0xd0, 0xe0, 0xf0,
+        0x00, 0x02,
+        0x00, PRDB_SDK_VALUE_TYPE_INTEGER, 0x00, 0x00, 0x00, 0x04,
+        0xff, 0xff, 0xff, 0xfd,
+        0x02};
     static const uint8_t missing_column_query[] =
         "SELECT secret FROM employees";
     static const uint8_t star_query[] = "SELECT * FROM employees";
@@ -153,6 +169,10 @@ int main(void) {
     prdb_sdk_select_v2 bound_eval_statement = {0};
     prdb_sdk_select_binding_v2 binding = {0};
     prdb_sdk_select_binding_v2 bound_eval_binding = {0};
+    prdb_sdk_batch_v1 bound_row_batch = {0};
+    prdb_sdk_row_iterator_v1 bound_row_iterator = {0};
+    prdb_sdk_row_v1 bound_row = {0};
+    prdb_sdk_value_v1 bound_cell_scratch[2];
     prdb_sdk_value_v1 two = make_value(
         PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_INTEGER,
         positive_integer, sizeof(positive_integer));
@@ -237,6 +257,7 @@ int main(void) {
            PRDB_SDK_SQL_BIND_OK);
     assert(binding.abi_version == PRDB_SDK_SQL_ABI_V2_VERSION);
     assert(binding.projection_count == 1);
+    assert(binding.relation_column_count == 3);
     assert(binding.projection_ordinals[0] == 0);
     assert(binding.predicate_count == bind_statement.predicate_count);
     assert(binding.predicate_columns[0].ordinal == 1);
@@ -292,6 +313,51 @@ int main(void) {
            PRDB_SDK_SQL_EVAL_OK);
     assert(truth == PRDB_SDK_SQL_TRUTH_TRUE);
     assert(bound_context.calls == 2 && bound_context.last_ordinal == 1);
+    assert(prdb_sdk_batch_open_v1(
+               &bound_row_batch, sizeof(bound_row_batch), bound_row_batch_true,
+               sizeof(bound_row_batch_true)) == PRDB_SDK_BATCH_OK);
+    assert(prdb_sdk_batch_rows_begin_v1(&bound_row_batch,
+                                        &bound_row_iterator,
+                                        sizeof(bound_row_iterator)) ==
+           PRDB_SDK_BATCH_OK);
+    assert(prdb_sdk_batch_row_next_v1(&bound_row_iterator, &bound_row,
+                                      sizeof(bound_row)) == PRDB_SDK_BATCH_OK);
+    truth = PRDB_SDK_SQL_TRUTH_UNKNOWN;
+    assert(prdb_sdk_sql_eval_bound_select_row_v2(
+               &bound_eval_statement, &bound_eval_binding, parameters, 1,
+               &bound_row, bound_cell_scratch, 1, &truth) ==
+           PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT);
+    assert(truth == PRDB_SDK_SQL_TRUTH_UNKNOWN);
+    assert(prdb_sdk_sql_eval_bound_select_row_v2(
+               &bound_eval_statement, &bound_eval_binding, parameters, 1,
+               &bound_row, bound_cell_scratch, 2, &truth) ==
+           PRDB_SDK_SQL_EVAL_OK);
+    assert(truth == PRDB_SDK_SQL_TRUTH_TRUE);
+    assert(prdb_sdk_batch_open_v1(&bound_row_batch, sizeof(bound_row_batch),
+                                  bound_row_batch_short_circuit,
+                                  sizeof(bound_row_batch_short_circuit)) ==
+           PRDB_SDK_BATCH_OK);
+    assert(prdb_sdk_batch_rows_begin_v1(&bound_row_batch,
+                                        &bound_row_iterator,
+                                        sizeof(bound_row_iterator)) ==
+           PRDB_SDK_BATCH_OK);
+    assert(prdb_sdk_batch_row_next_v1(&bound_row_iterator, &bound_row,
+                                      sizeof(bound_row)) == PRDB_SDK_BATCH_OK);
+    assert(prdb_sdk_sql_eval_bound_select_row_v2(
+               &bound_eval_statement, &bound_eval_binding, parameters, 1,
+               &bound_row, bound_cell_scratch, 2, &truth) ==
+           PRDB_SDK_SQL_EVAL_OK);
+    assert(truth == PRDB_SDK_SQL_TRUTH_FALSE);
+    {
+        prdb_sdk_select_binding_v2 wrong_shape = bound_eval_binding;
+        wrong_shape.relation_column_count = 1;
+        truth = PRDB_SDK_SQL_TRUTH_UNKNOWN;
+        assert(prdb_sdk_sql_eval_bound_select_row_v2(
+                   &bound_eval_statement, &wrong_shape, parameters, 1,
+                   &bound_row, bound_cell_scratch, 2, &truth) ==
+               PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT);
+        assert(truth == PRDB_SDK_SQL_TRUTH_UNKNOWN);
+    }
     bound_context = (bound_resolver_context){{&minus_three, &redacted}, 0, 0};
     assert(prdb_sdk_sql_eval_bound_select_predicate_v2(
                &bound_eval_statement, &bound_eval_binding, parameters, 1,
@@ -321,7 +387,7 @@ int main(void) {
                    &bound_eval_statement, &invalid_ordinal_binding, parameters,
                    1, resolve_bound_test_column, &bound_context, &truth) ==
                PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT);
-        assert(bound_context.calls == 1 && bound_context.last_ordinal == 2);
+        assert(bound_context.calls == 0);
         assert(truth == PRDB_SDK_SQL_TRUTH_UNKNOWN);
     }
 
