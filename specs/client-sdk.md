@@ -50,6 +50,8 @@ The C SDK exposes `prdb_sdk_scope_encode_v1` to build PSC1 records. It validates
 
 The requested set is only a ceiling. At START storage intersects it with the current token-authenticated principal's catalog-derived grants in the pinned invocation context. It cannot create a grant, bypass a policy, or widen access after START. Every schema, relation, column, row, estimate, and mutation authorization path uses the narrowed scope. SEAL validates the encoding before making the upload immutable; START decodes it again before storage admission. Unsupported scope versions are rejected.
 
+The Rust `RequestedScopeBuilder` consumes permission-filtered `VisibleSchema`, `VisibleRelation`, and `VisibleColumn` records from metadata discovery. Selecting a relation operation produces a table capability; selecting a column operation produces a column capability. Both automatically include that schema's USAGE capability. It emits canonical PSC1 ordering, collapses repeated identical selections, and enforces the 200-capability limit atomically. It cannot discover objects itself or establish authority: callers must obtain records through the authorized discovery APIs, and storage validates every submitted ID and grant independently.
+
 ## Buffer Lifetime and Workload
 
 Borrow SDK result values from immutable authorized batches until explicit batch release; do not allocate/copy every cell by default. The C API must make ownership and invalidation visible, and copied input validation remains necessary at the trust boundary. Follow [memory storage](memory-storage.md); no API exposes disk-page pointers or ring buffers.
