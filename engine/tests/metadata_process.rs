@@ -6,7 +6,9 @@ use prdb_engine::client_credentials::{
     read_client_credentials, remove_client_credentials, write_client_credentials,
 };
 use prdb_engine::client_protocol::ClientCredentials;
-use prdb_engine::client_submit::{AdminClient, InvocationStatus, MetadataClient, SubmissionClient};
+use prdb_engine::client_submit::{
+    AdminClient, AdminColumnDefinition, InvocationStatus, MetadataClient, SubmissionClient,
+};
 use prdb_engine::storage_manager::{CreateTableRequest, TableColumnDefinition, TokenIssueRequest};
 use prdb_engine::submission_manifest::{encode_manifest_v1, manifest_v1_from_elf};
 use prdb_engine::supervisor::WorkloadClass;
@@ -458,6 +460,26 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
     assert!(renamed.commit_sequence > created_role.commit_sequence);
     let dropped = admin.drop_role(created_role.identity_id)?;
     assert!(dropped.commit_sequence > renamed.commit_sequence);
+
+    let created_schema = admin.create_schema("process_admin_schema", admin_user_id)?;
+    let created_table = admin.create_table(
+        created_schema.identity_id,
+        "process_admin_table",
+        &[AdminColumnDefinition {
+            name: "payload".to_owned(),
+            scalar_type: ScalarType::Text,
+            nullable: true,
+            generated_uuid_identity: false,
+            default: None,
+        }],
+    )?;
+    assert_ne!(created_table.table_id, [0; 16]);
+    assert_eq!(created_table.column_ids.len(), 1);
+    let renamed_table = admin.rename_table(created_table.table_id, "process_admin_table_v2")?;
+    let dropped_table = admin.drop_table(created_table.table_id)?;
+    assert!(dropped_table.commit_sequence > renamed_table.commit_sequence);
+    let dropped_schema = admin.drop_schema(created_schema.identity_id)?;
+    assert!(dropped_schema.commit_sequence > dropped_table.commit_sequence);
 
     let created_user = admin.create_user("process_token_user")?;
     let now_us = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;

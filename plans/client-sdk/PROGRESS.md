@@ -187,3 +187,11 @@
 - Regression: mock-TCP coverage verifies exact issue/revoke schemas, escaped label content, one-time secret decoding, token ID and sequence, plus malformed base64 rejection.
 - Verification: focused `client_admin` and secret-decoder tests passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and the repeated `cargo test --workspace --locked` run passed in the Nix shell; the commit integration target reported 124 passed and 3 cgroup-dependent ignored. The initial full-suite run hit the known intermittent `InvalidAudit` CHECK lifecycle failure; the test passed alone and the complete rerun passed.
 - Remaining: typed helpers for administrative privileges, schemas, tables, constraints and foreign keys; CLI/credential-file lifecycle; and live ADMIN operations through the real multi-process gateway path remain open.
+
+## SDK-5: schema/table DDL CLI and process coverage — implemented
+
+- Contract: the client SDK routes schema/table administration through authenticated `AdminClient` PREPARE/START operations; query packages never receive administrative credentials.
+- Implementation: `prdb-client` exposes schema create/rename/drop and table create/rename/drop. Table columns use a semicolon-separated typed declaration syntax, validated locally before the existing typed table-create request.
+- Regression: CLI tests check the parameterized type parser and invalid schema shapes. The real gateway/supervisor process test now creates a schema and table, renames and drops the table, then drops the schema.
+- Verification: focused CLI tests and the focused multi-process ADMIN lifecycle passed. The final locked workspace build, format check, warning-denied Clippy, and full tests passed; the commit integration target had 124 passed and 3 cgroup-dependent ignored. CLI help was inspected after correcting its continuation formatting.
+- Remaining: general DDL CLI commands for columns, constraints, indexes, privileges, and policies; additional multi-process coverage; and confined artifact submission remain open.

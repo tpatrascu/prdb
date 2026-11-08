@@ -3,10 +3,12 @@ use prdb_engine::client_credentials::{read_client_credentials, write_client_cred
 use prdb_engine::client_protocol::ClientCredentials;
 use prdb_engine::client_submit::MetadataClient;
 use prdb_engine::client_submit::{
-    AdminClient, ClientResultEvent, InvocationStatus, SubmissionClient, TerminalOutcome,
+    AdminClient, AdminColumnDefinition, ClientResultEvent, InvocationStatus, SubmissionClient,
+    TerminalOutcome,
 };
 use prdb_engine::submission_scope::RequestedScopeBuilder;
 use prdb_engine::supervisor::{MAX_PARAMETER_BYTES, WorkloadClass};
+use prdb_engine::tuple::ScalarType;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -31,6 +33,14 @@ Token secrets are saved only to mode-0600 credential files and are never printed
   prdb-client user-drop|role-drop --address IP:PORT --credentials ADMIN_FILE --id HEX\n\
   prdb-client user-login --address IP:PORT --credentials ADMIN_FILE --user-id HEX --enabled true|false\n\
   prdb-client role-grant|role-revoke --address IP:PORT --credentials ADMIN_FILE --member-id HEX --role-id HEX\n\n\
+  prdb-client schema-create --address IP:PORT --credentials ADMIN_FILE --name NAME --owner-id HEX\n\
+  prdb-client schema-rename --address IP:PORT --credentials ADMIN_FILE --id HEX --name NAME\n\
+  prdb-client schema-drop --address IP:PORT --credentials ADMIN_FILE --id HEX\n\
+  prdb-client table-create --address IP:PORT --credentials ADMIN_FILE --schema-id HEX --name NAME \\\n    --columns 'name:type:nullable[;name:type:nullable...]'\n\
+  prdb-client table-rename --address IP:PORT --credentials ADMIN_FILE --id HEX --name NAME\n\
+  prdb-client table-drop --address IP:PORT --credentials ADMIN_FILE --id HEX\n\n\
+Column types: boolean, smallint, integer, bigint, decimal(P,S), text, varchar(N), bytea, uuid, date, timestamptz.\n\
+Column nullability is nullable or not-null; not-null columns require the UUID identity modifier.\n\n\
 Token secrets are saved only to mode-0600 credential files and are never printed.\n\
 For rotation, save a replacement credential, verify it, then revoke the old token.";
 
@@ -86,11 +96,193 @@ fn run() -> Result<(), String> {
         "scope" => scope(address, credentials_path, &mut fields),
         "token-issue" => token_issue(address, credentials_path, &mut fields),
         "token-revoke" => token_revoke(address, credentials_path, &mut fields),
+        "schema-create" | "schema-rename" | "schema-drop" | "table-create" | "table-rename"
+        | "table-drop" => schema_table_admin(&command, address, credentials_path, &mut fields),
         "user-create" | "user-rename" | "user-drop" | "user-login" | "role-create"
         | "role-rename" | "role-drop" | "role-grant" | "role-revoke" => {
             identity_admin(&command, address, credentials_path, &mut fields)
         }
         _ => Err(format!("unknown command {command}\n{USAGE}")),
+    }
+}
+
+fn schema_table_admin(
+    command: &str,
+    address: SocketAddr,
+    credentials_path: PathBuf,
+    fields: &mut HashMap<String, std::ffi::OsString>,
+) -> Result<(), String> {
+    let mut administrator =
+        read_client_credentials(credentials_path).map_err(|error| error.to_string())?;
+    let mut client = AdminClient::connect_authenticated(
+        address,
+        administrator.token_id,
+        &mut administrator.token_secret,
+    )
+    .map_err(|error| error.to_string())?;
+    match command {
+        "schema-create" => {
+            let name = take_text(fields, "--name")?;
+            let owner_id = parse_id(&take_text(fields, "--owner-id")?)?;
+            reject_unknown(fields)?;
+            let result = client
+                .create_schema(&name, owner_id)
+                .map_err(|error| error.to_string())?;
+            println!(
+                "created schema {} (operation {}, commit {})",
+                lower_hex(&result.identity_id),
+                lower_hex(&result.operation_id),
+                result.commit_sequence
+            );
+        }
+        "schema-rename" | "table-rename" => {
+            let id = parse_id(&take_text(fields, "--id")?)?;
+            let name = take_text(fields, "--name")?;
+            reject_unknown(fields)?;
+            let result = if command == "schema-rename" {
+                client.rename_schema(id, &name)
+            } else {
+                client.rename_table(id, &name)
+            }
+            .map_err(|error| error.to_string())?;
+            print_operation(
+                "renamed object",
+                &result.operation_id,
+                result.commit_sequence,
+            );
+        }
+        "schema-drop" | "table-drop" => {
+            let id = parse_id(&take_text(fields, "--id")?)?;
+            reject_unknown(fields)?;
+            let result = if command == "schema-drop" {
+                client.drop_schema(id)
+            } else {
+                client.drop_table(id)
+            }
+            .map_err(|error| error.to_string())?;
+            print_operation(
+                "dropped object",
+                &result.operation_id,
+                result.commit_sequence,
+            );
+        }
+        "table-create" => {
+            let schema_id = parse_id(&take_text(fields, "--schema-id")?)?;
+            let name = take_text(fields, "--name")?;
+            let columns = parse_column_definitions(&take_text(fields, "--columns")?)?;
+            reject_unknown(fields)?;
+            let result = client
+                .create_table(schema_id, &name, &columns)
+                .map_err(|error| error.to_string())?;
+            println!(
+                "created table {} with {} columns (operation {}, commit {})",
+                lower_hex(&result.table_id),
+                result.column_ids.len(),
+                lower_hex(&result.operation_id),
+                result.commit_sequence
+            );
+        }
+        _ => return Err(format!("unsupported schema/table command {command}")),
+    }
+    Ok(())
+}
+
+fn parse_column_definitions(value: &str) -> Result<Vec<AdminColumnDefinition>, String> {
+    if value.is_empty() {
+        return Err("--columns must contain at least one column".to_owned());
+    }
+    let mut columns = Vec::new();
+    for definition in value.split(';') {
+        let parts = definition.split(':').collect::<Vec<_>>();
+        if !(3..=4).contains(&parts.len()) {
+            return Err("each column must be name:type:nullable|not-null[:identity]".to_owned());
+        }
+        let name = parts[0].trim();
+        let scalar_type = parse_scalar_type(parts[1].trim())?;
+        let nullable = match parts[2].trim() {
+            "nullable" => true,
+            "not-null" => false,
+            _ => return Err("column nullability must be nullable or not-null".to_owned()),
+        };
+        let generated_uuid_identity = match parts.get(3).map(|part| part.trim()) {
+            None => false,
+            Some("identity") => true,
+            Some(_) => return Err("the only supported column modifier is identity".to_owned()),
+        };
+        if !nullable && !generated_uuid_identity {
+            return Err("not-null columns require the identity modifier in this CLI".to_owned());
+        }
+        if generated_uuid_identity && scalar_type != ScalarType::Uuid {
+            return Err("identity columns must have type uuid".to_owned());
+        }
+        if generated_uuid_identity && nullable {
+            return Err("identity columns must be not-null".to_owned());
+        }
+        columns.push(AdminColumnDefinition {
+            name: name.to_owned(),
+            scalar_type,
+            nullable,
+            generated_uuid_identity,
+            default: None,
+        });
+    }
+    if columns.len() > prdb_engine::tuple::MAX_COLUMNS {
+        return Err("--columns exceeds the maximum column count".to_owned());
+    }
+    let names = columns
+        .iter()
+        .map(|column| column.name.as_str())
+        .collect::<Vec<_>>();
+    if names.iter().any(|name| name.is_empty()) {
+        return Err("column names must be nonempty".to_owned());
+    }
+    let mut unique = names.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    if unique.len() != names.len() {
+        return Err("--columns contains duplicate names".to_owned());
+    }
+    Ok(columns)
+}
+
+fn parse_scalar_type(value: &str) -> Result<ScalarType, String> {
+    let invalid = || format!("unsupported column type {value:?}");
+    if let Some(parameters) = value
+        .strip_prefix("decimal(")
+        .and_then(|v| v.strip_suffix(')'))
+    {
+        let (precision, scale) = parameters.split_once(',').ok_or_else(invalid)?;
+        if scale.contains(',') {
+            return Err(invalid());
+        }
+        let precision = precision.parse::<u8>().map_err(|_| invalid())?;
+        let scale = scale.parse::<u8>().map_err(|_| invalid())?;
+        if !(1..=38).contains(&precision) || scale > precision {
+            return Err(invalid());
+        }
+        return Ok(ScalarType::Decimal { precision, scale });
+    }
+    if let Some(length) = value
+        .strip_prefix("varchar(")
+        .and_then(|v| v.strip_suffix(')'))
+    {
+        let max_chars = length.parse::<u32>().map_err(|_| invalid())?;
+        if max_chars == 0 {
+            return Err(invalid());
+        }
+        return Ok(ScalarType::Varchar { max_chars });
+    }
+    match value {
+        "boolean" => Ok(ScalarType::Boolean),
+        "smallint" => Ok(ScalarType::SmallInt),
+        "integer" => Ok(ScalarType::Integer),
+        "bigint" => Ok(ScalarType::BigInt),
+        "text" => Ok(ScalarType::Text),
+        "bytea" => Ok(ScalarType::Bytea),
+        "uuid" => Ok(ScalarType::Uuid),
+        "date" => Ok(ScalarType::Date),
+        "timestamptz" => Ok(ScalarType::TimestampTz),
+        _ => Err(invalid()),
     }
 }
 
@@ -735,5 +927,32 @@ mod tests {
         assert!(!parse_boolean("false", "--enabled").unwrap());
         assert!(parse_boolean("yes", "--enabled").is_err());
         assert!(parse_boolean("TRUE", "--enabled").is_err());
+    }
+
+    #[test]
+    fn table_column_parser_validates_types_nullability_and_names() {
+        let columns = parse_column_definitions(
+            "id:uuid:not-null:identity;name:varchar(80):nullable;amount:decimal(12,2):nullable",
+        )
+        .unwrap();
+        assert_eq!(columns.len(), 3);
+        assert!(columns[0].generated_uuid_identity);
+        assert_eq!(
+            columns[1].scalar_type,
+            ScalarType::Varchar { max_chars: 80 }
+        );
+        assert_eq!(
+            columns[2].scalar_type,
+            ScalarType::Decimal {
+                precision: 12,
+                scale: 2
+            }
+        );
+        assert!(parse_column_definitions("id:integer:nullable;id:text:nullable").is_err());
+        assert!(parse_column_definitions("id:integer:not-null").is_err());
+        assert!(parse_column_definitions("id:text:nullable:identity").is_err());
+        assert!(parse_column_definitions("id:uuid:nullable:identity").is_err());
+        assert!(parse_column_definitions("id:decimal(2,3):nullable").is_err());
+        assert!(parse_column_definitions("id:varchar(0):nullable").is_err());
     }
 }
