@@ -464,6 +464,9 @@ fn disconnected_submission_is_reconciled_after_gateway_restart()
 -> Result<(), Box<dyn std::error::Error>> {
     fn required_paths(name: &str) -> Result<Vec<std::path::PathBuf>, Box<dyn std::error::Error>> {
         let value = std::env::var_os(name).ok_or(format!("{name} is required"))?;
+        if name == "PRDB_TEST_RUNTIME_READ_ONLY" && value.is_empty() {
+            return Ok(Vec::new());
+        }
         let paths = std::env::split_paths(&value).collect::<Vec<_>>();
         if paths.is_empty() || paths.iter().any(|path| !path.is_absolute()) {
             return Err(format!("{name} must contain absolute paths").into());

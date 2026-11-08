@@ -16002,6 +16002,9 @@ fn sandboxed_v3_sql_error_latches_failure_and_durably_aborts_after_partial_outpu
     fn required_paths(name: &str) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
         let value = std::env::var_os(name)
             .ok_or_else(|| format!("{name} must list the sandbox runtime paths"))?;
+        if name == "PRDB_TEST_RUNTIME_READ_ONLY" && value.is_empty() {
+            return Ok(Vec::new());
+        }
         let paths = std::env::split_paths(&value).collect::<Vec<_>>();
         if paths.is_empty() || paths.iter().any(|path| !path.is_absolute()) {
             return Err(format!("{name} must contain absolute paths").into());
@@ -16183,6 +16186,9 @@ fn sandboxed_v3_metadata_submission_commits_over_tcp() -> Result<(), Box<dyn std
     fn required_paths(name: &str) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
         let value = std::env::var_os(name)
             .ok_or_else(|| format!("{name} must list the sandbox runtime paths"))?;
+        if name == "PRDB_TEST_RUNTIME_READ_ONLY" && value.is_empty() {
+            return Ok(Vec::new());
+        }
         let paths = std::env::split_paths(&value).collect::<Vec<_>>();
         if paths.is_empty() || paths.iter().any(|path| !path.is_absolute()) {
             return Err(format!("{name} must contain absolute paths").into());
@@ -16607,6 +16613,9 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     fn required_paths(name: &str) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
         let value = std::env::var_os(name)
             .ok_or_else(|| format!("{name} must list the sandbox runtime paths"))?;
+        if name == "PRDB_TEST_RUNTIME_READ_ONLY" && value.is_empty() {
+            return Ok(Vec::new());
+        }
         let paths = std::env::split_paths(&value).collect::<Vec<_>>();
         if paths.is_empty() || paths.iter().any(|path| !path.is_absolute()) {
             return Err(format!("{name} must contain absolute paths").into());
