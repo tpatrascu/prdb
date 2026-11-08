@@ -44,6 +44,10 @@ const MAX_TRACKED_TOKEN_REQUEST_ACTORS: usize = 4096;
 const SUPERVISOR_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 pub const MAX_OWN_INVOCATION_PAGE: usize = 128;
 pub const MAX_ADMIN_INVOCATION_PAGE: usize = 128;
+/// Maximum number of schema records returned by one authenticated discovery
+/// snapshot. Clients can request a fresh snapshot when this bound is reached.
+pub const MAX_DISCOVERED_SCHEMAS: usize = 4096;
+const MAX_DISCOVERED_SCHEMA_BYTES: usize = 1024 * 1024;
 static TOKEN_REQUEST_LIMITERS: OnceLock<Mutex<HashMap<usize, Weak<TokenRequestLimiter>>>> =
     OnceLock::new();
 static ADMIN_CANCELLATION_LIMITERS: OnceLock<Mutex<HashMap<usize, Weak<TokenRequestLimiter>>>> =
@@ -1903,6 +1907,61 @@ impl<'db> StorageManager<'db> {
             principal_id,
             role_ids,
         })
+    }
+
+    /// Discover every schema visible to a token-authenticated principal from
+    /// one request-scoped catalog snapshot. This read does not register an
+    /// invocation or write a durable outcome. The bounded result is suitable
+    /// for client-side requested-scope construction.
+    pub fn discover_token_authorized_schemas(
+        &self,
+        token_id: [u8; 16],
+        token_secret: &[u8; TOKEN_SECRET_BYTES],
+    ) -> Result<Vec<crate::metadata_discovery::VisibleSchema>, TransactionError> {
+        let principal_id = lookup_credential_principal(self.database, token_id)?;
+        let mut invocation_id = [0; 16];
+        getrandom::fill(&mut invocation_id)
+            .map_err(|_| TransactionError::Storage("randomness unavailable".into()))?;
+        if invocation_id == [0; 16] {
+            return Err(TransactionError::Storage("randomness unavailable".into()));
+        }
+        let mut transaction = InvocationTransaction::begin_inner(
+            self.database,
+            InvocationCoordination::uncoordinated(),
+            invocation_id,
+            principal_id,
+            i64::MAX,
+            1,
+            1,
+        )?;
+        let now_us = now_unix_micros().ok_or(TransactionError::ClockUnavailable)?;
+        transaction.authenticate_credential_token(token_id, token_secret, now_us)?;
+
+        let mut schemas = Vec::new();
+        let mut encoded_bytes = 0usize;
+        let mut continuation = None;
+        loop {
+            let page = transaction.list_catalog_authorized_schemas(
+                crate::metadata_discovery::MAX_SCHEMAS_PER_PAGE,
+                continuation,
+            )?;
+            if schemas.len().saturating_add(page.schemas.len()) > MAX_DISCOVERED_SCHEMAS {
+                return Err(TransactionError::InvalidMetadataRequest);
+            }
+            for schema in &page.schemas {
+                encoded_bytes = encoded_bytes
+                    .saturating_add(16)
+                    .saturating_add(schema.name.len());
+                if encoded_bytes > MAX_DISCOVERED_SCHEMA_BYTES {
+                    return Err(TransactionError::InvalidMetadataRequest);
+                }
+            }
+            schemas.extend(page.schemas);
+            continuation = page.continuation;
+            if continuation.is_none() {
+                return Ok(schemas);
+            }
+        }
     }
 
     /// Refresh the current login and role closure before a new execution or

@@ -1622,3 +1622,11 @@
 - Implementation: `serve_gateway_service_listener` and `run_gateway_service_with_recovery` pass the current `StorageManager` reference into their START callback. When storage reports an ambiguous commit and the recovery loop reopens the database, later callbacks receive the new validated manager rather than reopening a second database handle.
 - Regression/build evidence: all in-repository listener and recovery callback call sites compile against the new signature; focused supervisor IPC unit tests passed. Workspace build, format check, warning-denied Clippy, all workspace tests, and `git diff --check` passed. The engine library had 35 passing unit tests; the commit target had 109 passing and 2 existing cgroup/TinyCC sandbox tests ignored.
 - Remaining: provide a supervisor executable that wires the callback to executor result relay, durable finalization, and its configured compatibility profile; exercise the gateway/supervisor boundary across processes.
+
+## SM-6: authenticated pre-invocation schema discovery — implemented
+
+- Behavior and normative contract: [metadata discovery](../../specs/metadata-discovery.md). A client can build a requested scope before invocation admission from schemas visible to its authenticated principal.
+- Implementation: `StorageManager::discover_token_authorized_schemas` opens a request-scoped transaction snapshot, validates the token against that snapshot, derives catalog schema USAGE visibility, and consumes transaction-local pages internally. It caps full results at 4,096 records and 1 MiB, returns no partial result on overflow, and creates no invocation admission or durable outcome.
+- Regression: the credential lifecycle integration test now verifies that a valid token sees the public `information_schema` namespace and that a wrong secret is rejected.
+- Verification: the focused `token_admission_checks_expiry_secret_revocation_and_commit_guards` real-redb test passed in the prescribed Nix shell. Initial sandbox Nix access was denied; the authorized `nix-shell` invocation succeeded.
+- Remaining: expose the storage call through a versioned client request, add relation discovery for visible schemas, and test grant-filtered multi-page discovery end to end.

@@ -449,7 +449,7 @@ pub(crate) struct InvocationCoordination {
 }
 
 impl InvocationCoordination {
-    fn uncoordinated() -> Self {
+    pub(crate) fn uncoordinated() -> Self {
         Self {
             ddl_fences: None,
             _admission_permit: None,

@@ -14249,6 +14249,13 @@ fn token_admission_checks_expiry_secret_revocation_and_commit_guards()
 
     let storage = StorageManager::new(&database, Duration::from_millis(10))
         .map_err(|error| format!("validate seeded credential records: {error:?}"))?;
+    let discovered = storage.discover_token_authorized_schemas(id(71), &active_secret)?;
+    assert_eq!(discovered.len(), 1);
+    assert_eq!(discovered[0].name, "information_schema");
+    assert!(matches!(
+        storage.discover_token_authorized_schemas(id(71), &[0xFF; 32]),
+        Err(TransactionError::AuthenticationFailed)
+    ));
     let (admitted, roles) = storage.begin_token_authenticated_invocation(
         id(75),
         id(71),
