@@ -1484,9 +1484,32 @@ impl<'db> InvocationTransaction<'db> {
             if schema.family_code != 3 {
                 return Err(TransactionError::CorruptCatalog);
             }
-            let mut table_ids = catalog_id_list(&schema, 1)?;
-            if table_ids.contains(&[0; 16]) {
-                return Err(TransactionError::CorruptCatalog);
+            // Schema rows store the schema definition, while table membership
+            // is represented by each relation's schema_id field. Discover
+            // relations by scanning the table family so schemas created by
+            // normal DDL expose their tables consistently.
+            let table_records = self
+                .pinned_snapshot()?
+                .scan_catalog_family(5, crate::snapshot::MAX_CATALOG_FAMILY_SCAN)
+                .map_err(|error| TransactionError::Storage(error.to_string()))?;
+            let mut table_ids = Vec::new();
+            for table_record in table_records {
+                if table_record.family_code != 5 {
+                    return Err(TransactionError::CorruptCatalog);
+                }
+                if catalog_id(&table_record, 1)? != schema_id {
+                    continue;
+                }
+                let table_id = table_record
+                    .logical_key
+                    .get(3..19)
+                    .ok_or(TransactionError::CorruptCatalog)?
+                    .try_into()
+                    .map_err(|_| TransactionError::CorruptCatalog)?;
+                if table_id == [0; 16] {
+                    return Err(TransactionError::CorruptCatalog);
+                }
+                table_ids.push(table_id);
             }
             table_ids.sort_unstable();
             if table_ids.windows(2).any(|pair| pair[0] == pair[1]) {
@@ -4072,12 +4095,30 @@ impl<'db> InvocationTransaction<'db> {
             }
 
             self.read_discovery_schema(schema_id)?;
-            let schema_record = self
-                .read_catalog_record(&catalog_id_key(3, schema_id))?
-                .ok_or(TransactionError::CorruptCatalog)?;
-            let mut table_ids = catalog_id_list(&schema_record, 1)?;
+            let table_records = self
+                .pinned_snapshot()?
+                .scan_catalog_family(5, crate::snapshot::MAX_CATALOG_FAMILY_SCAN)
+                .map_err(|error| TransactionError::Storage(error.to_string()))?;
+            let mut table_ids = Vec::new();
+            for table_record in table_records {
+                if table_record.family_code != 5 {
+                    return Err(TransactionError::CorruptCatalog);
+                }
+                if catalog_id(&table_record, 1)? == schema_id {
+                    let table_id = table_record
+                        .logical_key
+                        .get(3..19)
+                        .ok_or(TransactionError::CorruptCatalog)?
+                        .try_into()
+                        .map_err(|_| TransactionError::CorruptCatalog)?;
+                    if table_id == [0; 16] {
+                        return Err(TransactionError::CorruptCatalog);
+                    }
+                    table_ids.push(table_id);
+                }
+            }
             table_ids.sort_unstable();
-            if table_ids.contains(&[0; 16]) || table_ids.windows(2).any(|pair| pair[0] == pair[1]) {
+            if table_ids.windows(2).any(|pair| pair[0] == pair[1]) {
                 return Err(TransactionError::CorruptCatalog);
             }
 

@@ -7389,7 +7389,7 @@ fn storage_manager_lists_only_owner_live_invocations_with_generation_bound_pages
 }
 
 #[test]
-fn storage_manager_lists_runtime_invocations_only_to_database_admins()
+fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::client_protocol::{ClientConnectionSession, ClientFrame, ClientMode};
     use prdb_engine::storage_manager::{
@@ -7436,6 +7436,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         dependency_write(manage_users_role, database_id, 5),
         credential_verifier_write(id(236), backup_admin_id, &[0x6a; 32], 1, i64::MAX, None, 1),
         credential_verifier_write(id(237), admin_id, &[0x5a; 32], 1, i64::MAX, None, 1),
+        credential_verifier_write(id(242), ordinary_id, &[0x6b; 32], 1, i64::MAX, None, 1),
         credential_verifier_write(id(240), user_manager_id, &[0x4b; 32], 1, i64::MAX, None, 1),
         credential_verifier_write(id(241), user_manager_id, &[0x3c; 32], 1, i64::MAX, None, 1),
     ];
@@ -7528,6 +7529,127 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         prdb_engine::supervisor::StagingLimits::default(),
         std::sync::Arc::new(AcceptMetadata),
     )?;
+
+    use prdb_engine::storage_manager::{CreateTableRequest, TableColumnDefinition};
+    let visible_schema_invocation = id(243);
+    let mut visible_schema_audit = identity_audit_event(0xf0, admin_id, id(0xf1));
+    visible_schema_audit.correlation_id = visible_schema_invocation;
+    let visible_schema = storage.create_schema(
+        visible_schema_invocation,
+        admin_id,
+        "visible_app",
+        admin_id,
+        retention_deadline_us,
+        visible_schema_audit,
+    )?;
+    let hidden_schema_invocation = id(244);
+    let mut hidden_schema_audit = identity_audit_event(0xf2, admin_id, id(0xf3));
+    hidden_schema_audit.correlation_id = hidden_schema_invocation;
+    let hidden_schema = storage.create_schema(
+        hidden_schema_invocation,
+        admin_id,
+        "hidden_app",
+        admin_id,
+        retention_deadline_us,
+        hidden_schema_audit,
+    )?;
+    let table_invocation = id(245);
+    let mut table_audit = identity_audit_event(0xf4, admin_id, id(0xf5));
+    table_audit.correlation_id = table_invocation;
+    let visible_table = storage.create_table(CreateTableRequest {
+        invocation_id: table_invocation,
+        authenticated_actor_id: admin_id,
+        schema_id: visible_schema.schema_id,
+        name: "metrics".to_owned(),
+        columns: vec![TableColumnDefinition {
+            name: "reading".to_owned(),
+            scalar_type: ScalarType::Integer,
+            nullable: false,
+            generated_uuid_identity: false,
+            default: None,
+        }],
+        retention_deadline_us,
+        audit_event: table_audit,
+    })?;
+    let ungranted_table_invocation = id(248);
+    let mut ungranted_table_audit = identity_audit_event(0xf9, admin_id, id(0xfa));
+    ungranted_table_audit.correlation_id = ungranted_table_invocation;
+    let _ungranted_table = storage.create_table(CreateTableRequest {
+        invocation_id: ungranted_table_invocation,
+        authenticated_actor_id: admin_id,
+        schema_id: visible_schema.schema_id,
+        name: "ungranted_metrics".to_owned(),
+        columns: vec![TableColumnDefinition {
+            name: "secret".to_owned(),
+            scalar_type: ScalarType::Text,
+            nullable: true,
+            generated_uuid_identity: false,
+            default: None,
+        }],
+        retention_deadline_us,
+        audit_event: ungranted_table_audit,
+    })?;
+    let hidden_table_invocation = id(246);
+    let mut hidden_table_audit = identity_audit_event(0xf6, admin_id, id(0xf7));
+    hidden_table_audit.correlation_id = hidden_table_invocation;
+    let _hidden_table = storage.create_table(CreateTableRequest {
+        invocation_id: hidden_table_invocation,
+        authenticated_actor_id: admin_id,
+        schema_id: hidden_schema.schema_id,
+        name: "secrets".to_owned(),
+        columns: vec![TableColumnDefinition {
+            name: "value".to_owned(),
+            scalar_type: ScalarType::Text,
+            nullable: true,
+            generated_uuid_identity: false,
+            default: None,
+        }],
+        retention_deadline_us,
+        audit_event: hidden_table_audit,
+    })?;
+    let read = database.begin_read()?;
+    let mut ordinary_epoch = principal_write_with_name(ordinary_id, 1, 2, "runtime_user");
+    ordinary_epoch.expected_value = Some(
+        read.open_table(CATALOG)?
+            .get(id_catalog_key(10, ordinary_id).as_slice())?
+            .ok_or("ordinary metadata principal is missing")?
+            .value()
+            .to_vec(),
+    );
+    drop(read);
+    let usage_grant = grant_write(
+        ordinary_id,
+        visible_schema.schema_id,
+        1,
+        1,
+        visible_schema.schema_id,
+        admin_id,
+    );
+    let select_grant = grant_write(
+        ordinary_id,
+        visible_table.table_id,
+        2,
+        1,
+        visible_table.table_id,
+        admin_id,
+    );
+    let metadata_grant_invocation = id(247);
+    let mut metadata_grant_audit = identity_audit_event(0xf8, admin_id, visible_table.table_id);
+    metadata_grant_audit.action = AuditAction::AuthorityChange;
+    metadata_grant_audit.correlation_id = metadata_grant_invocation;
+    storage.commit_authorized_object_grant_ddl(
+        metadata_grant_invocation,
+        admin_id,
+        retention_deadline_us,
+        &[
+            usage_grant,
+            dependency_write(ordinary_id, visible_schema.schema_id, 5),
+            select_grant,
+            dependency_write(ordinary_id, visible_table.table_id, 5),
+            ordinary_epoch,
+        ],
+        &[metadata_grant_audit],
+    )?;
     let mut control = ClientConnectionSession::default();
     control.accept_hello(ClientMode::Control, "runtime-status")?;
     control.authenticate(&storage, id(237), &[0x5a; 32])?;
@@ -7573,7 +7695,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
     assert_eq!(cancelled.payload, b"{\"state\":\"accepted\"}");
     let mut discovery_control = ClientConnectionSession::default();
     discovery_control.accept_hello(ClientMode::Control, "schema-discovery")?;
-    discovery_control.authenticate(&storage, id(237), &[0x5a; 32])?;
+    discovery_control.authenticate(&storage, id(242), &[0x6b; 32])?;
     let schema_discovery = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
         prdb_engine::ipc::ServiceRole::Gateway,
         &storage,
@@ -7599,6 +7721,8 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
     let schema_discovery = String::from_utf8(schema_discovery)?;
     assert!(schema_discovery.contains("\"schemas\":["));
     assert!(schema_discovery.contains("\"name\":\"information_schema\""));
+    assert!(schema_discovery.contains("\"name\":\"visible_app\""));
+    assert!(!schema_discovery.contains("\"name\":\"hidden_app\""));
     let public_relations =
         prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
             prdb_engine::ipc::ServiceRole::Gateway,
@@ -7652,6 +7776,105 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
     assert!(public_columns.contains("\"name\":\"table_schema\""));
     assert!(public_columns.contains("\"scalar_type\":\"text\""));
     assert!(public_columns.contains("\"nullable\":false"));
+    let hex_id = |value: [u8; 16]| {
+        value
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    let visible_relations = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut discovery_control,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 5,
+            payload: format!(
+                "{{\"phase\":\"read\",\"operation_version\":1,\"operation\":\"metadata.relations.list\",\"arguments\":{{\"schema_id\":\"{}\"}}}}",
+                hex_id(visible_schema.schema_id)
+            )
+            .into_bytes(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_period_us: 60_000_000,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )?;
+    let visible_relations = match visible_relations {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => {
+            String::from_utf8(response.payload)?
+        }
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
+            return Err("granted relation discovery unexpectedly started an invocation".into());
+        }
+    };
+    assert!(
+        visible_relations.contains("\"name\":\"metrics\""),
+        "{visible_relations}"
+    );
+    assert!(!visible_relations.contains("\"name\":\"ungranted_metrics\""));
+    let visible_columns = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut discovery_control,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 6,
+            payload: format!(
+                "{{\"phase\":\"read\",\"operation_version\":1,\"operation\":\"metadata.columns.list\",\"arguments\":{{\"schema_id\":\"{}\",\"relation_id\":\"{}\"}}}}",
+                hex_id(visible_schema.schema_id),
+                hex_id(visible_table.table_id)
+            )
+            .into_bytes(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_period_us: 60_000_000,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )
+    .map_err(|error| format!("visible column gateway dispatch: {error:?}"))?;
+    let visible_columns = match visible_columns {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => {
+            String::from_utf8(response.payload)?
+        }
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
+            return Err("granted column discovery unexpectedly started an invocation".into());
+        }
+    };
+    assert!(visible_columns.contains("\"name\":\"reading\""));
+    assert!(visible_columns.contains("\"scalar_type\":\"integer\""));
+    let hidden_relations = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut discovery_control,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 7,
+            payload: format!(
+                "{{\"phase\":\"read\",\"operation_version\":1,\"operation\":\"metadata.relations.list\",\"arguments\":{{\"schema_id\":\"{}\"}}}}",
+                hex_id(hidden_schema.schema_id)
+            )
+            .into_bytes(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_period_us: 60_000_000,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )
+    .map_err(|error| format!("hidden relation gateway dispatch: {error:?}"))?;
+    let hidden_relations = match hidden_relations {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => response.payload,
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
+            return Err("ungranted relation discovery unexpectedly started an invocation".into());
+        }
+    };
+    assert_eq!(hidden_relations, br#"{"relations":[]}"#);
     let unavailable_relations = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
         prdb_engine::ipc::ServiceRole::Gateway,
         &storage,
@@ -7659,7 +7882,7 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         &mut discovery_control,
         &prdb_engine::ipc::IpcFrame {
             operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
-            request_id: 4,
+            request_id: 8,
             payload: br#"{"phase":"read","operation_version":1,"operation":"metadata.relations.list","arguments":{"schema_id":"f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0"}}"#.to_vec(),
         },
         prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
