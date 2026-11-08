@@ -6311,6 +6311,65 @@ fn foreign_key_catalog_writes(
 }
 
 #[test]
+fn storage_manager_drop_table_restricts_external_foreign_key_dependencies()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::storage_manager::TableLifecycleError;
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let admin_role = builtin_owner_id();
+    let actor = id(0xb4);
+    let mut setup_writes = foreign_key_catalog_writes(true, true);
+    setup_writes.extend([
+        principal_write_with_name(actor, 1, 1, "external_fk_drop_admin"),
+        object_write_with_name(actor, 8, "external_fk_drop_admin"),
+        membership_write(actor, admin_role),
+        dependency_write(actor, admin_role, 5),
+    ]);
+    let mut setup_audit = identity_audit_event(0xb0, admin_role, id(80));
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(id(0xb1), admin_role, 9_999, &setup_writes, &[setup_audit])?;
+
+    let before_drop = commit_sequence(&database)?;
+    let drop_invocation = id(0xb2);
+    let mut drop_audit = identity_audit_event(0xb3, actor, id(81));
+    drop_audit.correlation_id = drop_invocation;
+    assert_eq!(
+        storage.drop_table(drop_invocation, actor, id(81), 9_999, drop_audit),
+        Err(TableLifecycleError::Commit(
+            CommitError::TableHasDependencies
+        ))
+    );
+
+    assert_eq!(commit_sequence(&database)?, before_drop);
+    assert_eq!(
+        lookup_outcome(&database, drop_invocation, actor, 1)?
+            .ok_or("missing rejected table-drop outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    for key in [
+        id_catalog_key(5, id(81)),
+        id_catalog_key(5, id(82)),
+        id_catalog_key(8, id(85)),
+        id_catalog_key(8, id(86)),
+        dependency_write(id(86), id(85), 3).key,
+    ] {
+        assert!(
+            catalog.get(key.as_slice())?.is_some(),
+            "record removed: {key:?}"
+        );
+    }
+    drop(catalog);
+    drop(read);
+    prdb_engine::startup::validate_persisted_records(&database)?;
+    Ok(())
+}
+
+#[test]
 fn storage_manager_drop_referencing_table_removes_owned_foreign_key()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();

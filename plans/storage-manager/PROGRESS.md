@@ -1836,3 +1836,10 @@
 - Regression: `storage_open_rejects_single_byte_page_corruption_and_releases_the_instance_lock` flips one byte at the same offset in successive 4 KiB pages of a READY redb image until open rejects a corrupted page. It restores the valid image and confirms the instance can reopen and persisted records validate.
 - Verification: the focused bootstrap regression passed. The workspace build, formatting check, warning-denied Clippy, and full workspace tests passed with Rust 1.95.0; the commit integration target had 109 passing tests and 3 delegated-cgroup tests ignored.
 - Scope: detects the tested redb page corruption through the pinned local open/validation path. It does not prove every byte/page corruption is detected, simulate torn writes or power loss, or establish recovery across other platforms and durability profiles.
+
+## SM-5 / DS-5: external foreign-key RESTRICT on table drop — verified
+
+- Contract: [schema DDL](../../specs/ddl-schema.md) requires an external dependency to block `DROP TABLE ... RESTRICT`; failed DDL must leave catalog state unchanged and record a durable ABORTED outcome.
+- Regression: `storage_manager_drop_table_restricts_external_foreign_key_dependencies` creates a source FK referencing a target table, attempts to drop the target through `StorageManager`, and verifies `TableHasDependencies`, unchanged commit sequence and both tables/FK edge, an ABORTED outcome, and successful persisted-record validation.
+- Verification: the focused commit integration test and full workspace build, formatting check, warning-denied Clippy, and test suite passed under Rust 1.95.0. The commit integration target had 110 passed and 3 delegated-cgroup tests ignored.
+- Scope: verifies the referenced-table RESTRICT path and durable failure behavior. The source-table path, which owns and removes its FK, has separate coverage; broader external constraint/policy and DDL race coverage remain open.
