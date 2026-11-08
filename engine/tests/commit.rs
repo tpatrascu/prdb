@@ -6916,6 +6916,89 @@ fn storage_manager_drops_self_referential_foreign_key_once_per_table()
 }
 
 #[test]
+fn storage_manager_creates_foreign_key_and_advances_both_table_epochs()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let admin_role = builtin_owner_id();
+    let actor = id(0xe5);
+    let mut setup_writes = foreign_key_catalog_writes(false, true)
+        .into_iter()
+        .filter(|write| {
+            write.key != id_catalog_key(8, id(86)) && write.key != id_catalog_key(2, id(86))
+        })
+        .collect::<Vec<_>>();
+    setup_writes.extend([
+        principal_write_with_name(actor, 1, 1, "fk_create_admin"),
+        object_write_with_name(actor, 8, "fk_create_admin"),
+        membership_write(actor, admin_role),
+        dependency_write(actor, admin_role, 5),
+        grant_write(actor, id(81), 6, 1, id(81), admin_role),
+        dependency_write(actor, id(81), 5),
+    ]);
+    let mut setup_audit = identity_audit_event(0xe6, admin_role, id(80));
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(id(0xe6), admin_role, 9_999, &setup_writes, &[setup_audit])?;
+
+    let invocation_id = id(0xe7);
+    let mut audit = identity_audit_event(0xe8, actor, id(82));
+    audit.correlation_id = invocation_id;
+    let created = storage
+        .create_foreign_key(prdb_engine::storage_manager::CreateForeignKeyRequest {
+            invocation_id,
+            authenticated_actor_id: actor,
+            source_table_id: id(82),
+            source_column_ids: vec![id(84)],
+            target_constraint_id: id(85),
+            retention_deadline_us: 9_999,
+            audit_event: audit,
+        })
+        .map_err(|error| format!("foreign-key create failed: {error:?}"))?;
+    assert_ne!(created.foreign_key_id, [0; 16]);
+    assert_eq!(created.commit_sequence, 2);
+    assert_eq!(
+        lookup_outcome(&database, invocation_id, actor, 1)?
+            .ok_or("missing foreign-key create outcome")?
+            .status,
+        OutcomeStatus::Committed
+    );
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    for key in [
+        id_catalog_key(8, created.foreign_key_id),
+        id_catalog_key(2, created.foreign_key_id),
+        dependency_write(created.foreign_key_id, id(85), 3).key,
+    ] {
+        assert!(
+            catalog.get(key.as_slice())?.is_some(),
+            "missing record: {key:?}"
+        );
+    }
+    for table_id in [id(81), id(82)] {
+        let key = id_catalog_key(5, table_id);
+        let bytes = catalog
+            .get(key.as_slice())?
+            .ok_or("participating table disappeared during FK create")?
+            .value()
+            .to_vec();
+        let epoch = decode_registered_envelope(&bytes)?
+            .fields
+            .iter()
+            .find(|field| field.tag == 3)
+            .ok_or("missing participating table write epoch")?
+            .payload
+            .as_slice()
+            .try_into()?;
+        assert_eq!(u64::from_le_bytes(epoch), 2);
+    }
+    drop(catalog);
+    drop(read);
+    prdb_engine::startup::validate_persisted_records(&database)?;
+    Ok(())
+}
+
+#[test]
 fn storage_manager_drop_referencing_table_removes_owned_foreign_key()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
