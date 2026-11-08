@@ -34,6 +34,12 @@ A separate SQL shared dependency is an optional packaging alternative, with expl
 
 The artifact manifest declares target OS/architecture, CPU baseline, native ABI version, protocol compatibility, SDK version, entry-point identity, and dependencies. Treat the manifest as untrusted. Pin immutable artifact bytes for admission/loading, bound size, and reject incompatible targets. Hashes identify artifacts; they do not establish trust or permission. Do not execute constructors or load the artifact in a trusted service to inspect it.
 
+### Requested Capability Scope v1
+
+`requested_scope` version 1 is canonical binary `PSC1`: four magic bytes, a big-endian u16 capability count from 1 through 200, then that many strictly increasing records. Each record starts with operation:u8 and target-kind:u8, followed by a 16-byte object ID for schema/table targets or two 16-byte IDs for a column target (`table_id`, then `column_id`). Operations are USAGE=1, SELECT=2, INSERT=3, UPDATE=4, DELETE=5; targets are schema=1, table=2, column=3. USAGE is valid only for schemas; data operations are valid only for tables and columns. IDs must be nonzero. Duplicate, unsorted, truncated, trailing, unknown, and empty records are invalid. The largest encoding is 6,806 bytes, within the 8 KiB transport bound.
+
+The requested set is only a ceiling. At START storage intersects it with the current token-authenticated principal's catalog-derived grants in the pinned invocation context. It cannot create a grant, bypass a policy, or widen access after START. Every schema, relation, column, row, estimate, and mutation authorization path uses the narrowed scope. SEAL validates the encoding before making the upload immutable; START decodes it again before storage admission. Unsupported scope versions are rejected.
+
 ## Buffer Lifetime and Workload
 
 Borrow SDK result values from immutable authorized batches until explicit batch release; do not allocate/copy every cell by default. The C API must make ownership and invalidation visible, and copied input validation remains necessary at the trust boundary. Follow [memory storage](memory-storage.md); no API exposes disk-page pointers or ring buffers.
@@ -103,4 +109,4 @@ Validate cross-version rejection, malformed manifests, missing symbols, hostile 
 
 ## Open Decisions
 
-Select exact TinyCC/Rust versions, initial target architecture, manifest encoding, libc/runtime baseline, and exact versioned manifest/scope/administrative operation schemas. The initial artifact transport is the framed TCP upload protocol; secure transports are future adapters. Languages and the user compiler are fixed. Server-side native SQL-plan compilation and standalone executable submission are outside the initial path.
+Select exact TinyCC/Rust versions, initial target architecture, manifest encoding and libc/runtime baseline, plus remaining administrative operation schemas. Requested capability scope v1 is defined above. The initial artifact transport is the framed TCP upload protocol; secure transports are future adapters. Languages and the user compiler are fixed. Server-side native SQL-plan compilation and standalone executable submission are outside the initial path.

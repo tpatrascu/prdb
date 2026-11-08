@@ -98,6 +98,12 @@ fn id(n: u8) -> [u8; 16] {
     [n; 16]
 }
 
+fn requested_scope_fixture() -> Vec<u8> {
+    let mut bytes = b"PSC1\0\x01\x02\x02".to_vec();
+    bytes.extend([1; 16]);
+    bytes
+}
+
 fn admin_dispatch_json(
     storage: &StorageManager,
     staging: &prdb_engine::supervisor::StagingStore,
@@ -14618,7 +14624,7 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
         let prepare = round_trip!(
             3,
             4,
-            format!("{{\"manifest_version\":1,\"manifest\":\"bQ==\",\"artifact_bytes\":\"6\",\"artifact_sha256\":\"{artifact_hash}\",\"parameter_bytes\":\"0\",\"parameter_sha256\":\"{empty_hash}\",\"scope_version\":1,\"requested_scope\":\"cw==\",\"deadline_ms\":\"30000\",\"workload_class\":\"operational\"}}").into_bytes()
+            format!("{{\"manifest_version\":1,\"manifest\":\"bQ==\",\"artifact_bytes\":\"6\",\"artifact_sha256\":\"{artifact_hash}\",\"parameter_bytes\":\"0\",\"parameter_sha256\":\"{empty_hash}\",\"scope_version\":1,\"requested_scope\":\"UFNDMQABAgIBAQEBAQEBAQEBAQEBAQEB\",\"deadline_ms\":\"30000\",\"workload_class\":\"operational\"}}").into_bytes()
         );
         let prepare_response = std::str::from_utf8(&prepare.payload)?;
         let invocation_hex = prepare_response
@@ -15392,7 +15398,7 @@ fn sandboxed_v3_sql_error_latches_failure_and_durably_aborts_after_partial_outpu
         }
 
         fn validate(&self, metadata: &SubmissionMetadata) -> bool {
-            metadata.manifest == b"m" && metadata.requested_scope == b"s"
+            metadata.manifest == b"m" && metadata.requested_scope == requested_scope_fixture()
         }
     }
 
@@ -15456,7 +15462,7 @@ fn sandboxed_v3_sql_error_latches_failure_and_durably_aborts_after_partial_outpu
             artifact_bytes: u64::try_from(artifact.len())?,
             artifact_sha256: Sha256::digest(&artifact).into(),
             scope_version: 1,
-            requested_scope: b"s".to_vec(),
+            requested_scope: requested_scope_fixture(),
             parameter_bytes: 0,
             parameter_sha256: Sha256::digest([]).into(),
             deadline_ms: 30_000,
@@ -15581,7 +15587,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         }
 
         fn validate(&self, metadata: &SubmissionMetadata) -> bool {
-            metadata.manifest == b"m" && metadata.requested_scope == b"s"
+            metadata.manifest == b"m" && metadata.requested_scope == requested_scope_fixture()
         }
     }
 
@@ -15681,7 +15687,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             artifact_bytes: u64::try_from(artifact.len())?,
             artifact_sha256: Sha256::digest(&artifact).into(),
             scope_version: 1,
-            requested_scope: b"s".to_vec(),
+            requested_scope: requested_scope_fixture(),
             parameter_bytes: 0,
             parameter_sha256: Sha256::digest([]).into(),
             deadline_ms: 30_000,
@@ -15897,7 +15903,7 @@ fn sealed_start_admits_only_current_credentials_and_enforces_request_deadline()
         }
 
         fn validate(&self, metadata: &SubmissionMetadata) -> bool {
-            metadata.manifest == b"m" && metadata.requested_scope == b"s"
+            metadata.manifest == b"m" && metadata.requested_scope == requested_scope_fixture()
         }
     }
 
@@ -15945,7 +15951,7 @@ fn sealed_start_admits_only_current_credentials_and_enforces_request_deadline()
             artifact_bytes: artifact.len() as u64,
             artifact_sha256: Sha256::digest(artifact).into(),
             scope_version: 1,
-            requested_scope: b"s".to_vec(),
+            requested_scope: requested_scope_fixture(),
             parameter_bytes: 0,
             parameter_sha256: Sha256::digest([]).into(),
             deadline_ms: 10_000,
@@ -16028,7 +16034,7 @@ fn sealed_start_admits_only_current_credentials_and_enforces_request_deadline()
             artifact_bytes: artifact.len() as u64,
             artifact_sha256: Sha256::digest(artifact).into(),
             scope_version: 1,
-            requested_scope: b"s".to_vec(),
+            requested_scope: requested_scope_fixture(),
             parameter_bytes: 0,
             parameter_sha256: Sha256::digest([]).into(),
             deadline_ms: 10_000,

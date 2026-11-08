@@ -449,6 +449,16 @@ impl StagingStore {
             discard_reservation(&mut state, invocation_id);
             return Err(StagingError::DigestMismatch);
         }
+        if sealed_data.metadata.scope_version == 1
+            && crate::submission_scope::decode_requested_scope_v1(
+                &sealed_data.metadata.requested_scope,
+            )
+            .is_err()
+        {
+            let mut state = self.state.lock().map_err(|_| StagingError::Poisoned)?;
+            discard_reservation(&mut state, invocation_id);
+            return Err(StagingError::InvalidMetadata);
+        }
         let metadata_is_valid = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.metadata_validator.validate(&sealed_data.metadata)
         }))
@@ -899,7 +909,8 @@ mod tests {
         }
 
         fn validate(&self, metadata: &SubmissionMetadata) -> bool {
-            metadata.manifest == b"manifest" && metadata.requested_scope == b"scope"
+            metadata.manifest == b"manifest"
+                && metadata.requested_scope == requested_scope_fixture()
         }
     }
 
@@ -924,6 +935,12 @@ mod tests {
         StagingOwner::authenticated([connection; 16], [principal; 16])
     }
 
+    fn requested_scope_fixture() -> Vec<u8> {
+        let mut bytes = b"PSC1\0\x01\x02\x02".to_vec();
+        bytes.extend([1; 16]);
+        bytes
+    }
+
     fn request(artifact: &[u8], parameters: &[u8]) -> PrepareSubmission {
         PrepareSubmission {
             manifest_version: 1,
@@ -931,7 +948,7 @@ mod tests {
             artifact_bytes: artifact.len() as u64,
             artifact_sha256: Sha256::digest(artifact).into(),
             scope_version: 1,
-            requested_scope: b"scope".to_vec(),
+            requested_scope: requested_scope_fixture(),
             parameter_bytes: parameters.len() as u64,
             parameter_sha256: Sha256::digest(parameters).into(),
             deadline_ms: 30_000,
@@ -1268,6 +1285,43 @@ mod tests {
             );
         }
         assert_eq!(store.reap_expired(0), Err(StagingError::InvalidRequest));
+    }
+
+    #[test]
+    fn sealing_rejects_invalid_v1_scope_even_when_custom_validator_accepts_it() {
+        struct AcceptEverything;
+        impl SubmissionMetadataValidator for AcceptEverything {
+            fn supports_versions(&self, manifest_version: u32, scope_version: u32) -> bool {
+                manifest_version == 1 && scope_version == 1
+            }
+
+            fn validate(&self, _metadata: &SubmissionMetadata) -> bool {
+                true
+            }
+        }
+
+        let store = store(Arc::new(AcceptEverything));
+        let owner = make_owner(13, 14);
+        let mut malformed_request = request(b"artifact", b"");
+        malformed_request.requested_scope = b"scope".to_vec();
+        let reservation = store.prepare(owner, malformed_request).unwrap();
+        store
+            .upload_chunk(
+                owner,
+                reservation.invocation_id,
+                ChunkKind::Artifact,
+                0,
+                b"artifact",
+            )
+            .unwrap();
+        assert_eq!(
+            store.seal(owner, reservation.invocation_id),
+            Err(StagingError::InvalidMetadata)
+        );
+        assert_eq!(
+            store.status(owner, reservation.invocation_id),
+            Err(StagingError::Unavailable)
+        );
     }
 
     #[test]

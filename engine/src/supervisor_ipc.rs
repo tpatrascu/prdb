@@ -1629,6 +1629,8 @@ mod worker_result_event_tests {
 
         let owner = StagingOwner::authenticated([1; 16], [2; 16]);
         let artifact = b"staged artifact";
+        let mut requested_scope = b"PSC1\0\x01\x02\x02".to_vec();
+        requested_scope.extend([1; 16]);
         let staging = StagingStore::new(
             StagingLimits {
                 reservation_ttl: Duration::from_millis(5),
@@ -1646,7 +1648,7 @@ mod worker_result_event_tests {
                     artifact_bytes: artifact.len() as u64,
                     artifact_sha256: Sha256::digest(artifact).into(),
                     scope_version: 1,
-                    requested_scope: b"scope".to_vec(),
+                    requested_scope,
                     parameter_bytes: 0,
                     parameter_sha256: Sha256::digest([]).into(),
                     deadline_ms: 30_000,

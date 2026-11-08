@@ -4238,7 +4238,11 @@ impl ClientConnectionSession {
             let deadline = std::time::Instant::now()
                 .checked_add(duration)
                 .ok_or(TransactionError::InvalidContext)?;
-            storage.admit_supervisor_invocation_with_deadline(
+            let requested_scope = crate::submission_scope::decode_requested_scope_v1(
+                &submission.metadata().requested_scope,
+            )
+            .map_err(|_| TransactionError::InvalidContext)?;
+            storage.admit_supervisor_invocation_with_deadline_and_scope(
                 crate::storage_manager::SupervisorAdmissionRequest {
                     invocation_id: submission.invocation_id(),
                     token_id,
@@ -4247,6 +4251,7 @@ impl ClientConnectionSession {
                     max_bytes,
                     deadline: Some(deadline),
                 },
+                requested_scope,
                 &token_secret,
             )
         });
@@ -4294,7 +4299,11 @@ impl ClientConnectionSession {
                 let deadline = std::time::Instant::now()
                     .checked_add(duration)
                     .ok_or(TransactionError::InvalidContext)?;
-                storage.admit_supervisor_invocation_with_deadline(
+                let requested_scope = crate::submission_scope::decode_requested_scope_v1(
+                    &submission.metadata().requested_scope,
+                )
+                .map_err(|_| TransactionError::InvalidContext)?;
+                storage.admit_supervisor_invocation_with_deadline_and_scope(
                     crate::storage_manager::SupervisorAdmissionRequest {
                         invocation_id: submission.invocation_id(),
                         token_id,
@@ -4303,6 +4312,7 @@ impl ClientConnectionSession {
                         max_bytes: admission.max_bytes,
                         deadline: Some(deadline),
                     },
+                    requested_scope,
                     &token_secret,
                 )
             },

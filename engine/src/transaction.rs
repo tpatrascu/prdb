@@ -248,6 +248,7 @@ pub struct InvocationTransaction<'db> {
     index_bytes: usize,
     invocation_id: [u8; 16],
     principal_id: [u8; 16],
+    requested_scope: Option<HashSet<(Operation, AccessTarget)>>,
     retention_deadline_us: i64,
     coordination: InvocationCoordination,
     aborted: bool,
@@ -501,6 +502,25 @@ impl InvocationCoordination {
 }
 
 impl<'db> InvocationTransaction<'db> {
+    pub(crate) fn restrict_to_requested_scope(
+        &mut self,
+        requested_scope: HashSet<(Operation, AccessTarget)>,
+    ) {
+        self.requested_scope = Some(requested_scope);
+    }
+
+    fn scope_from_grants(&self, grants: &[Grant]) -> HashSet<(Operation, AccessTarget)> {
+        grants
+            .iter()
+            .map(|grant| (grant.operation, grant.target))
+            .filter(|capability| {
+                self.requested_scope
+                    .as_ref()
+                    .is_none_or(|requested| requested.contains(capability))
+            })
+            .collect()
+    }
+
     /// Begin an uncoordinated invocation for trusted low-level use. Runtime
     /// callers should use `StorageManager::begin_invocation` so commits share
     /// table fences with DDL.
@@ -606,6 +626,7 @@ impl<'db> InvocationTransaction<'db> {
             index_bytes: 0,
             invocation_id,
             principal_id,
+            requested_scope: None,
             retention_deadline_us,
             coordination,
             aborted: false,
@@ -852,10 +873,7 @@ impl<'db> InvocationTransaction<'db> {
             let principal_id = self.principal_id;
             let (role_ids, grants) = self.load_catalog_grants(principal_id, &schema)?;
             let policies = self.load_catalog_policies(principal_id, &schema)?;
-            let scope = grants
-                .iter()
-                .map(|grant| (grant.operation, grant.target))
-                .collect();
+            let scope = self.scope_from_grants(&grants);
             let context = AuthorizationContext {
                 principal_id,
                 role_ids,
@@ -896,10 +914,7 @@ impl<'db> InvocationTransaction<'db> {
         let policies = self.load_catalog_policies(principal_id, &schema)?;
         let checks = self.load_catalog_check_constraints(&schema)?;
         self.load_catalog_indexes(&schema)?;
-        let scope = grants
-            .iter()
-            .map(|grant| (grant.operation, grant.target))
-            .collect();
+        let scope = self.scope_from_grants(&grants);
         let context = AuthorizationContext {
             principal_id,
             role_ids,
@@ -943,10 +958,7 @@ impl<'db> InvocationTransaction<'db> {
         let principal_id = self.principal_id;
         let (role_ids, grants) = self.load_catalog_grants(principal_id, &schema)?;
         let policies = self.load_catalog_policies(principal_id, &schema)?;
-        let scope = grants
-            .iter()
-            .map(|grant| (grant.operation, grant.target))
-            .collect();
+        let scope = self.scope_from_grants(&grants);
         let context = AuthorizationContext {
             principal_id,
             role_ids,
@@ -1200,10 +1212,7 @@ impl<'db> InvocationTransaction<'db> {
             }
             let principal_id = self.principal_id;
             let (role_ids, grants) = self.load_catalog_relation_discovery_grants(schema_id)?;
-            let scope = grants
-                .iter()
-                .map(|grant| (grant.operation, grant.target))
-                .collect();
+            let scope = self.scope_from_grants(&grants);
             let context = AuthorizationContext {
                 principal_id,
                 role_ids,
@@ -1250,10 +1259,7 @@ impl<'db> InvocationTransaction<'db> {
             let principal_id = self.principal_id;
             let (schema_roles, schema_grants) =
                 self.load_catalog_schema_usage_grants(principal_id)?;
-            let schema_scope = schema_grants
-                .iter()
-                .map(|grant| (grant.operation, grant.target))
-                .collect();
+            let schema_scope = self.scope_from_grants(&schema_grants);
             let schema_context = AuthorizationContext {
                 principal_id,
                 role_ids: schema_roles,
@@ -1277,10 +1283,7 @@ impl<'db> InvocationTransaction<'db> {
 
             let (relation_roles, relation_grants) =
                 self.load_catalog_relation_discovery_grants(schema.schema_id)?;
-            let relation_scope = relation_grants
-                .iter()
-                .map(|grant| (grant.operation, grant.target))
-                .collect();
+            let relation_scope = self.scope_from_grants(&relation_grants);
             let relation_context = AuthorizationContext {
                 principal_id,
                 role_ids: relation_roles,
@@ -1864,10 +1867,7 @@ impl<'db> InvocationTransaction<'db> {
             }
             let principal_id = self.principal_id;
             let (role_ids, grants) = self.load_catalog_schema_usage_grants(principal_id)?;
-            let scope = grants
-                .iter()
-                .map(|grant| (grant.operation, grant.target))
-                .collect();
+            let scope = self.scope_from_grants(&grants);
             let context = AuthorizationContext {
                 principal_id,
                 role_ids,
@@ -1922,10 +1922,7 @@ impl<'db> InvocationTransaction<'db> {
             }
             let principal_id = self.principal_id;
             let (role_ids, schema_grants) = self.load_catalog_schema_usage_grants(principal_id)?;
-            let scope = schema_grants
-                .iter()
-                .map(|grant| (grant.operation, grant.target))
-                .collect();
+            let scope = self.scope_from_grants(&schema_grants);
             let schema_context = AuthorizationContext {
                 principal_id,
                 role_ids,
@@ -2350,10 +2347,7 @@ impl<'db> InvocationTransaction<'db> {
             let principal_id = self.principal_id;
             let (schema_roles, schema_grants) =
                 self.load_catalog_schema_usage_grants(principal_id)?;
-            let schema_scope = schema_grants
-                .iter()
-                .map(|grant| (grant.operation, grant.target))
-                .collect();
+            let schema_scope = self.scope_from_grants(&schema_grants);
             let schema_context = AuthorizationContext {
                 principal_id,
                 role_ids: schema_roles,
@@ -2442,10 +2436,7 @@ impl<'db> InvocationTransaction<'db> {
             let principal_id = self.principal_id;
             let (relation_roles, relation_grants) =
                 self.load_catalog_relation_discovery_grants(schema.schema_id)?;
-            let relation_scope = relation_grants
-                .iter()
-                .map(|grant| (grant.operation, grant.target))
-                .collect();
+            let relation_scope = self.scope_from_grants(&relation_grants);
             let relation_context = AuthorizationContext {
                 principal_id,
                 role_ids: relation_roles,
@@ -6820,5 +6811,53 @@ mod information_schema_column_type_tests {
             information_schema_column_type(ScalarType::TimestampTz),
             ("TIMESTAMP WITH TIME ZONE", None, None, None)
         );
+    }
+}
+
+#[cfg(test)]
+mod requested_scope_tests {
+    use super::{AccessTarget, Grant, InvocationTransaction, Operation, Subject};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn invocation_scope_intersects_requested_capabilities_with_catalog_grants() {
+        static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "prdb-requested-scope-{}-{}",
+            std::process::id(),
+            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut bootstrap = crate::bootstrap::initialize(&root, "scope_admin", i64::MAX)
+            .expect("initialize scope fixture");
+        bootstrap.take_secret().expect("take bootstrap secret");
+        let instance = bootstrap.acknowledge().expect("publish scope fixture");
+        let mut invocation =
+            InvocationTransaction::begin(instance.database(), [7; 16], [8; 16], i64::MAX, 1, 64)
+                .expect("begin invocation");
+        let selected_table = AccessTarget::Table([1; 16]);
+        let other_table = AccessTarget::Table([2; 16]);
+        let grants = [
+            Grant {
+                subject: Subject::Principal([8; 16]),
+                operation: Operation::Select,
+                target: selected_table,
+            },
+            Grant {
+                subject: Subject::Principal([8; 16]),
+                operation: Operation::Delete,
+                target: other_table,
+            },
+        ];
+        invocation.restrict_to_requested_scope(
+            [(Operation::Select, selected_table)].into_iter().collect(),
+        );
+        assert_eq!(
+            invocation.scope_from_grants(&grants),
+            [(Operation::Select, selected_table)].into_iter().collect()
+        );
+        drop(invocation);
+        drop(instance);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

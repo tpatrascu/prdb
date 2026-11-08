@@ -1978,6 +1978,7 @@ impl<'db> StorageManager<'db> {
                 deadline: None,
             },
             token_secret,
+            None,
         )
     }
 
@@ -1991,16 +1992,31 @@ impl<'db> StorageManager<'db> {
         if request.deadline.is_none() {
             return Err(TransactionError::InvalidContext);
         }
-        self.admit_supervisor_invocation_inner(request, token_secret)
+        self.admit_supervisor_invocation_inner(request, token_secret, None)
+    }
+
+    /// Admit an invocation and intersect its catalog-derived authority with
+    /// the client's decoded requested capability set.
+    pub fn admit_supervisor_invocation_with_deadline_and_scope(
+        &self,
+        request: SupervisorAdmissionRequest,
+        requested_scope: crate::submission_scope::RequestedScope,
+        token_secret: &[u8; TOKEN_SECRET_BYTES],
+    ) -> Result<SupervisorInvocation<'db>, TransactionError> {
+        if request.deadline.is_none() {
+            return Err(TransactionError::InvalidContext);
+        }
+        self.admit_supervisor_invocation_inner(request, token_secret, Some(requested_scope))
     }
 
     fn admit_supervisor_invocation_inner(
         &self,
         request: SupervisorAdmissionRequest,
         token_secret: &[u8; TOKEN_SECRET_BYTES],
+        requested_scope: Option<crate::submission_scope::RequestedScope>,
     ) -> Result<SupervisorInvocation<'db>, TransactionError> {
         let principal_id = lookup_credential_principal(self.database, request.token_id)?;
-        let (transaction, role_ids) = self.begin_token_authenticated_invocation(
+        let (mut transaction, role_ids) = self.begin_token_authenticated_invocation(
             request.invocation_id,
             request.token_id,
             token_secret,
@@ -2008,6 +2024,9 @@ impl<'db> StorageManager<'db> {
             request.max_rows,
             request.max_bytes,
         )?;
+        if let Some(requested_scope) = requested_scope {
+            transaction.restrict_to_requested_scope(requested_scope);
+        }
         Ok(SupervisorInvocation {
             invocation_id: request.invocation_id,
             principal_id,
