@@ -7348,6 +7348,56 @@ fn storage_manager_creates_primary_key_with_owned_unique_index()
 }
 
 #[test]
+fn storage_manager_refuses_to_drop_primary_key_referenced_by_foreign_key()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::storage_manager::TableLifecycleError;
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let admin_role = builtin_owner_id();
+    let actor = id(0xe8);
+    let mut setup_writes = foreign_key_catalog_writes(true, true);
+    setup_writes.extend([
+        principal_write_with_name(actor, 1, 1, "referenced_key_drop_admin"),
+        object_write_with_name(actor, 8, "referenced_key_drop_admin"),
+        membership_write(actor, admin_role),
+        dependency_write(actor, admin_role, 5),
+    ]);
+    let mut setup_audit = identity_audit_event(0xe9, admin_role, id(80));
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(id(0xe9), admin_role, 9_999, &setup_writes, &[setup_audit])?;
+
+    let invocation_id = id(0xea);
+    let mut audit = identity_audit_event(0xeb, actor, id(85));
+    audit.correlation_id = invocation_id;
+    assert_eq!(
+        storage.drop_primary_key(invocation_id, actor, id(85), 9_999, audit),
+        Err(TableLifecycleError::Commit(CommitError::InvalidCatalog))
+    );
+    assert_eq!(commit_sequence(&database)?, 1);
+    assert_eq!(
+        lookup_outcome(&database, invocation_id, actor, 1)?
+            .ok_or("missing rejected referenced-key drop outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    for key in [
+        id_catalog_key(8, id(85)),
+        id_catalog_key(9, id(87)),
+        dependency_write(id(86), id(85), 3).key,
+    ] {
+        assert!(catalog.get(key.as_slice())?.is_some(), "missing {key:?}");
+    }
+    drop(catalog);
+    drop(read);
+    prdb_engine::startup::validate_persisted_records(&database)?;
+    Ok(())
+}
+
+#[test]
 fn storage_manager_creates_and_drops_check_constraint() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
