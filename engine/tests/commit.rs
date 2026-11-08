@@ -15560,6 +15560,54 @@ fn storage_manager_authorizes_policy_ddl_for_owners_and_inherited_manage_policie
         table_payload(5).as_slice()
     );
     assert!(catalog.get(added_policy_key.as_slice())?.is_none());
+    drop(catalog);
+    drop(read);
+    let mut create_policy_audit = policy_audit(0x87, table_owner);
+    create_policy_audit.correlation_id = id(0x87);
+    let created_policy =
+        storage.create_policy(prdb_engine::storage_manager::CreatePolicyRequest {
+            invocation_id: id(0x87),
+            authenticated_actor_id: table_owner,
+            table_id,
+            name: "typed_policy".to_owned(),
+            kind: prdb_engine::storage_manager::PolicyKind::Row,
+            operation: prdb_engine::authorization::Operation::Select,
+            effect: prdb_engine::authorization::Effect::Allow,
+            recipients: vec![prdb_engine::authorization::Subject::Role(manager_role)],
+            target_column_ids: Vec::new(),
+            using_expression: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+            with_check_expression: None,
+            retention_deadline_us: 9_999,
+            audit_event: create_policy_audit,
+        })?;
+    assert_ne!(created_policy.policy_id, [0; 16]);
+    assert!(created_policy.using_expression_id.is_some());
+    assert!(created_policy.with_check_expression_id.is_none());
+    assert_eq!(created_policy.commit_sequence, 6);
+    assert_eq!(commit_sequence(&database)?, 6);
+    assert_eq!(
+        lookup_outcome(&database, id(0x87), table_owner, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Committed
+    );
+    let mut drop_policy_audit = policy_audit(0x88, table_owner);
+    drop_policy_audit.correlation_id = id(0x88);
+    let drop_sequence = storage.drop_policy(prdb_engine::storage_manager::DropPolicyRequest {
+        invocation_id: id(0x88),
+        authenticated_actor_id: table_owner,
+        policy_id: created_policy.policy_id,
+        retention_deadline_us: 9_999,
+        audit_event: drop_policy_audit,
+    })?;
+    assert_eq!(drop_sequence, 7);
+    assert_eq!(commit_sequence(&database)?, 7);
+    assert_eq!(
+        lookup_outcome(&database, id(0x88), table_owner, 1)?
+            .unwrap()
+            .status,
+        OutcomeStatus::Committed
+    );
     Ok(())
 }
 
