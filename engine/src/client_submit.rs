@@ -142,6 +142,14 @@ pub struct AdminTableResult {
     pub commit_sequence: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminTableColumnResult {
+    pub operation_id: [u8; 16],
+    pub table_id: [u8; 16],
+    pub column_id: [u8; 16],
+    pub commit_sequence: u64,
+}
+
 /// Database-scoped privileges that an administrator may grant or revoke.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AdminSystemPrivilege {
@@ -1225,6 +1233,218 @@ impl AdminClient {
         })
     }
 
+    pub fn add_column(
+        &mut self,
+        table_id: [u8; 16],
+        column: &AdminColumnDefinition,
+    ) -> Result<AdminTableColumnResult, ClientSubmitError> {
+        validate_admin_id(table_id)?;
+        if column.generated_uuid_identity
+            || matches!(column.default, Some(AdminColumnDefault::CurrentPrincipalId))
+            || (!column.nullable && column.default.is_none())
+        {
+            return Err(ClientSubmitError::InvalidAdministrativeRequest);
+        }
+        let encoded = encode_admin_table_columns(std::slice::from_ref(column))?;
+        let column_json = &encoded[1..encoded.len() - 1];
+        let arguments = format!(
+            "{{\"table_id\":\"{}\",\"column\":{column_json}}}",
+            lower_hex(&table_id)
+        );
+        let (result, column_id) = self.execute_admin_operation_with_fields(
+            "tables.add_column",
+            arguments,
+            Some("column_id"),
+            &[
+                AdminExpectedResponseField::Id("table_id", table_id),
+                AdminExpectedResponseField::PositiveInteger("schema_version"),
+            ],
+        )?;
+        Ok(AdminTableColumnResult {
+            operation_id: result.operation_id,
+            table_id,
+            column_id: column_id.ok_or(ClientSubmitError::InvalidResponse)?,
+            commit_sequence: result.commit_sequence,
+        })
+    }
+
+    pub fn drop_column(
+        &mut self,
+        table_id: [u8; 16],
+        column_id: [u8; 16],
+    ) -> Result<AdminTableColumnResult, ClientSubmitError> {
+        validate_admin_id(table_id)?;
+        validate_admin_id(column_id)?;
+        let arguments = format!(
+            "{{\"table_id\":\"{}\",\"column_id\":\"{}\"}}",
+            lower_hex(&table_id),
+            lower_hex(&column_id)
+        );
+        let (result, response_column_id) = self.execute_admin_operation_with_fields(
+            "tables.drop_column",
+            arguments,
+            Some("column_id"),
+            &[AdminExpectedResponseField::Id("table_id", table_id)],
+        )?;
+        if response_column_id != Some(column_id) {
+            return Err(ClientSubmitError::AdministrativeOutcomeUncertain(
+                result.operation_id,
+            ));
+        }
+        Ok(AdminTableColumnResult {
+            operation_id: result.operation_id,
+            table_id,
+            column_id,
+            commit_sequence: result.commit_sequence,
+        })
+    }
+
+    pub fn rename_column(
+        &mut self,
+        table_id: [u8; 16],
+        column_id: [u8; 16],
+        name: &str,
+    ) -> Result<AdminTableColumnResult, ClientSubmitError> {
+        validate_admin_id(table_id)?;
+        validate_admin_id(column_id)?;
+        validate_admin_name(name)?;
+        let arguments = format!(
+            "{{\"table_id\":\"{}\",\"column_id\":\"{}\",\"name\":\"{name}\"}}",
+            lower_hex(&table_id),
+            lower_hex(&column_id)
+        );
+        let (result, response_column_id) = self.execute_admin_operation_with_fields(
+            "tables.rename_column",
+            arguments,
+            Some("column_id"),
+            &[
+                AdminExpectedResponseField::Id("table_id", table_id),
+                AdminExpectedResponseField::String("name", name),
+            ],
+        )?;
+        if response_column_id != Some(column_id) {
+            return Err(ClientSubmitError::AdministrativeOutcomeUncertain(
+                result.operation_id,
+            ));
+        }
+        Ok(AdminTableColumnResult {
+            operation_id: result.operation_id,
+            table_id,
+            column_id,
+            commit_sequence: result.commit_sequence,
+        })
+    }
+
+    pub fn set_table_owner(
+        &mut self,
+        table_id: [u8; 16],
+        owner_id: [u8; 16],
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        validate_admin_id(table_id)?;
+        validate_admin_id(owner_id)?;
+        self.execute_admin_operation_with_fields(
+            "tables.set_owner",
+            format!(
+                "{{\"table_id\":\"{}\",\"owner_id\":\"{}\"}}",
+                lower_hex(&table_id),
+                lower_hex(&owner_id)
+            ),
+            None,
+            &[
+                AdminExpectedResponseField::Id("table_id", table_id),
+                AdminExpectedResponseField::Id("owner_id", owner_id),
+            ],
+        )
+        .map(|(result, _)| result)
+    }
+
+    pub fn alter_column_nullability(
+        &mut self,
+        table_id: [u8; 16],
+        column_id: [u8; 16],
+        nullable: bool,
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        validate_admin_id(table_id)?;
+        validate_admin_id(column_id)?;
+        self.execute_admin_operation_with_fields(
+            "tables.alter_column_nullability",
+            format!(
+                "{{\"table_id\":\"{}\",\"column_id\":\"{}\",\"nullable\":\"{nullable}\"}}",
+                lower_hex(&table_id),
+                lower_hex(&column_id)
+            ),
+            None,
+            &[
+                AdminExpectedResponseField::Id("table_id", table_id),
+                AdminExpectedResponseField::Id("column_id", column_id),
+                AdminExpectedResponseField::Boolean("nullable", nullable),
+            ],
+        )
+        .map(|(result, _)| result)
+    }
+
+    pub fn set_column_default(
+        &mut self,
+        table_id: [u8; 16],
+        column_id: [u8; 16],
+        scalar_type: crate::tuple::ScalarType,
+        default: AdminColumnDefault,
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        self.alter_column_default(table_id, column_id, scalar_type, Some(default))
+    }
+
+    pub fn drop_column_default(
+        &mut self,
+        table_id: [u8; 16],
+        column_id: [u8; 16],
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        self.alter_column_default(table_id, column_id, crate::tuple::ScalarType::Boolean, None)
+    }
+
+    fn alter_column_default(
+        &mut self,
+        table_id: [u8; 16],
+        column_id: [u8; 16],
+        scalar_type: crate::tuple::ScalarType,
+        default: Option<AdminColumnDefault>,
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        validate_admin_id(table_id)?;
+        validate_admin_id(column_id)?;
+        let (operation, arguments) = if let Some(default) = default {
+            let scalar_type_name = encode_admin_scalar_type(scalar_type)?;
+            let encoded_default = encode_admin_default_json(scalar_type, default)?;
+            (
+                "tables.set_column_default",
+                format!(
+                    "{{\"table_id\":\"{}\",\"column_id\":\"{}\",\"type\":{},{} }}",
+                    lower_hex(&table_id),
+                    lower_hex(&column_id),
+                    json_quote(&scalar_type_name),
+                    encoded_default
+                ),
+            )
+        } else {
+            (
+                "tables.drop_column_default",
+                format!(
+                    "{{\"table_id\":\"{}\",\"column_id\":\"{}\"}}",
+                    lower_hex(&table_id),
+                    lower_hex(&column_id)
+                ),
+            )
+        };
+        self.execute_admin_operation_with_fields(
+            operation,
+            arguments,
+            None,
+            &[
+                AdminExpectedResponseField::Id("table_id", table_id),
+                AdminExpectedResponseField::Id("column_id", column_id),
+            ],
+        )
+        .map(|(result, _)| result)
+    }
+
     fn create_identity(
         &mut self,
         operation: &str,
@@ -1308,7 +1528,7 @@ impl AdminClient {
         arguments: String,
         created_id_field: Option<&str>,
     ) -> Result<(AdminOperationResult, Option<[u8; 16]>), ClientSubmitError> {
-        self.execute_admin_operation_with_name_echo(operation, arguments, created_id_field, None)
+        self.execute_admin_operation_with_fields(operation, arguments, created_id_field, &[])
     }
 
     fn execute_admin_operation_with_name_echo(
@@ -1317,6 +1537,24 @@ impl AdminClient {
         arguments: String,
         created_id_field: Option<&str>,
         expected_name: Option<(&str, &str)>,
+    ) -> Result<(AdminOperationResult, Option<[u8; 16]>), ClientSubmitError> {
+        let expected_fields = expected_name
+            .map(|(key, value)| vec![AdminExpectedResponseField::String(key, value)])
+            .unwrap_or_default();
+        self.execute_admin_operation_with_fields(
+            operation,
+            arguments,
+            created_id_field,
+            &expected_fields,
+        )
+    }
+
+    fn execute_admin_operation_with_fields(
+        &mut self,
+        operation: &str,
+        arguments: String,
+        created_id_field: Option<&str>,
+        expected_response_fields: &[AdminExpectedResponseField<'_>],
     ) -> Result<(AdminOperationResult, Option<[u8; 16]>), ClientSubmitError> {
         let prepare = format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"{operation}\",\"arguments\":{arguments}}}"
@@ -1354,16 +1592,16 @@ impl AdminClient {
             .and_then(ResponseValue::as_string)
             .and_then(|text| parse_canonical_positive_u64(text.to_owned()));
         let created_id = created_id_field.and_then(|key| response_id(&fields, key).ok());
-        let expected_fields =
-            3 + usize::from(created_id_field.is_some()) + usize::from(expected_name.is_some());
-        if fields.len() != expected_fields
+        let expected_field_count =
+            3 + usize::from(created_id_field.is_some()) + expected_response_fields.len();
+        if fields.len() != expected_field_count
             || response_operation_id != Some(operation_id)
             || outcome != Some("committed")
             || sequence.is_none()
             || (created_id_field.is_some() && created_id.is_none())
-            || expected_name.is_some_and(|(key, value)| {
-                fields.get(key).and_then(ResponseValue::as_string) != Some(value)
-            })
+            || expected_response_fields
+                .iter()
+                .any(|expectation| !expectation.matches(&fields))
         {
             return Err(ClientSubmitError::AdministrativeOutcomeUncertain(
                 operation_id,
@@ -1656,6 +1894,31 @@ fn encode_admin_scalar_type(
         ScalarType::Date => Ok("date".into()),
         ScalarType::TimestampTz => Ok("timestamptz".into()),
     }
+}
+
+fn encode_admin_default_json(
+    scalar_type: crate::tuple::ScalarType,
+    default: AdminColumnDefault,
+) -> Result<String, ClientSubmitError> {
+    let encoded = encode_admin_table_columns(&[AdminColumnDefinition {
+        name: "_default".into(),
+        scalar_type,
+        nullable: true,
+        generated_uuid_identity: false,
+        default: Some(default),
+    }])?;
+    let column = encoded
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .ok_or(ClientSubmitError::InvalidAdministrativeRequest)?;
+    let start = column
+        .find(",\"default\":")
+        .map(|index| index + 1)
+        .ok_or(ClientSubmitError::InvalidAdministrativeRequest)?;
+    column
+        .get(start..column.len().saturating_sub(1))
+        .map(str::to_owned)
+        .ok_or(ClientSubmitError::InvalidAdministrativeRequest)
 }
 
 fn encode_admin_default_literal(
@@ -2030,6 +2293,33 @@ enum ResponseValue {
     Object(HashMap<String, ResponseValue>),
     Array(Vec<ResponseValue>),
     Null,
+}
+
+#[derive(Clone, Copy)]
+enum AdminExpectedResponseField<'a> {
+    Id(&'a str, [u8; 16]),
+    String(&'a str, &'a str),
+    Boolean(&'a str, bool),
+    PositiveInteger(&'a str),
+}
+
+impl AdminExpectedResponseField<'_> {
+    fn matches(self, fields: &HashMap<String, ResponseValue>) -> bool {
+        match self {
+            Self::Id(key, expected) => response_id(fields, key).ok() == Some(expected),
+            Self::String(key, expected) => {
+                fields.get(key).and_then(ResponseValue::as_string) == Some(expected)
+            }
+            Self::Boolean(key, expected) => {
+                fields.get(key) == Some(&ResponseValue::Boolean(expected))
+            }
+            Self::PositiveInteger(key) => fields
+                .get(key)
+                .and_then(ResponseValue::as_string)
+                .and_then(|text| parse_canonical_positive_u64(text.to_owned()))
+                .is_some(),
+        }
+    }
 }
 
 impl ResponseValue {

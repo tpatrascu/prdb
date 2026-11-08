@@ -83,7 +83,7 @@
 - Implementation: `AdminClient::create_schema` validates the normalized name and owner ID and returns the generated schema ID; `drop_schema` validates the target and checks the echoed schema ID in the committed result.
 - Regression: mock-TCP coverage verifies exact create/drop arguments, PREPARE/START flow, generated ID, and committed response decoding.
 - Verification: focused `client_admin` tests passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed in the Nix shell; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
-- Remaining: typed table alter, constraint and foreign-key helpers; CLI/credential-file lifecycle; and live ADMIN operations through the real multi-process gateway path remain open.
+- Remaining: typed constraint and foreign-key helpers; CLI/credential-file lifecycle; and live ADMIN operations through the real multi-process gateway path remain open.
 
 ## SDK-5 dependency: typed table create AdminClient operation — implemented
 
@@ -91,7 +91,15 @@
 - Implementation: `AdminClient::create_table` accepts typed column definitions with SQL scalar types and literal, NULL, or current-principal defaults. It validates names, duplicate columns, UUID identity rules, default type compatibility, decimal parameters, and varchar bounds, then encodes canonical protocol JSON. Its result decoder validates the exact operation response and preserves column ID order.
 - Regression: mock-TCP coverage checks an exact table-create request with generated UUID, escaped text default, fixed-scale decimal default, and current-principal UUID default; it checks the ordered returned IDs. Unit coverage rejects invalid column/default combinations.
 - Verification: focused `client_admin` and column-encoder tests passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed in the Nix shell; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
-- Remaining: typed table alter, constraint and foreign-key helpers; CLI/credential-file lifecycle; and live ADMIN operations through the real multi-process gateway path remain open.
+- Remaining: typed constraint and foreign-key helpers; CLI/credential-file lifecycle; and live ADMIN operations through the real multi-process gateway path remain open.
+
+## SDK-5 dependency: typed table alteration AdminClient operations — implemented
+
+- Contract: [client protocol](../../specs/client-protocol.md) defines separate owner, column add/rename/drop, nullability, and default operations, each with exact PREPARE arguments and durable START results.
+- Implementation: `AdminClient` exposes table-owner transfer, column add/rename/drop, nullability changes, and column-default set/drop. Column addition reuses typed column/default encoding while enforcing backfill restrictions. The generalized result validator checks echoed IDs, names, booleans, positive schema versions, operation IDs, and commit sequences.
+- Regression: mock-TCP coverage verifies exact wire arguments and START schemas for add/rename/drop column, owner transfer, nullability, and default set/drop. Existing table-create validation exercises the shared column/default encoder.
+- Verification: focused `client_admin` tests passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed in the Nix shell; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
+- Remaining: typed constraint and foreign-key helpers; CLI/credential-file lifecycle; and live ADMIN operations through the real multi-process gateway path remain open.
 
 ## SDK-5 dependency: typed table rename and drop AdminClient operations — implemented
 
@@ -99,7 +107,7 @@
 - Implementation: `AdminClient::rename_table` validates the normalized new name; `drop_table` validates the nonzero table ID. Both use the shared PREPARE/START path and reject success responses with mismatched table IDs.
 - Regression: mock-TCP coverage checks exact rename/drop argument shapes and typed committed-result validation.
 - Verification: focused `client_admin` tests passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed in the Nix shell; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
-- Remaining: typed table alter, constraint and foreign-key helpers; CLI/credential-file lifecycle; and live ADMIN operations through the real multi-process gateway path remain open.
+- Remaining: typed constraint and foreign-key helpers; CLI/credential-file lifecycle; and live ADMIN operations through the real multi-process gateway path remain open.
 
 ## SDK-5 dependency: typed schema rename AdminClient operation — implemented
 

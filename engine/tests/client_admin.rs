@@ -675,6 +675,205 @@ fn admin_client_creates_table_with_typed_columns_and_defaults() {
     server.join().unwrap();
 }
 
+#[test]
+fn admin_client_adds_renames_and_drops_columns() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut decoder = ClientFrameDecoder::default();
+        establish_control_session(&mut stream, &mut decoder);
+        let cases = [
+            (
+                "tables.add_column",
+                format!(
+                    r#"{{"table_id":"{}","column":{{"name":"label","type":"text","nullable":false,"generated_uuid_identity":false,"default":{{"kind":"literal","value":"new"}}}}}}"#,
+                    "a6".repeat(16)
+                ),
+                [0x91; 16],
+                format!(
+                    r#"{{"operation_id":"{}","outcome":"committed","table_id":"{}","column_id":"{}","schema_version":"2","commit_sequence":"71"}}"#,
+                    hex(&[0x91; 16]),
+                    "a6".repeat(16),
+                    "b6".repeat(16)
+                ),
+            ),
+            (
+                "tables.rename_column",
+                format!(
+                    r#"{{"table_id":"{}","column_id":"{}","name":"display_label"}}"#,
+                    "a6".repeat(16),
+                    "b6".repeat(16)
+                ),
+                [0x92; 16],
+                format!(
+                    r#"{{"operation_id":"{}","outcome":"committed","table_id":"{}","column_id":"{}","name":"display_label","commit_sequence":"72"}}"#,
+                    hex(&[0x92; 16]),
+                    "a6".repeat(16),
+                    "b6".repeat(16)
+                ),
+            ),
+            (
+                "tables.drop_column",
+                format!(
+                    r#"{{"table_id":"{}","column_id":"{}"}}"#,
+                    "a6".repeat(16),
+                    "b6".repeat(16)
+                ),
+                [0x93; 16],
+                format!(
+                    r#"{{"operation_id":"{}","outcome":"committed","table_id":"{}","column_id":"{}","commit_sequence":"73"}}"#,
+                    hex(&[0x93; 16]),
+                    "a6".repeat(16),
+                    "b6".repeat(16)
+                ),
+            ),
+        ];
+        for (operation, arguments, operation_id, result) in cases {
+            let prepare = read_frame(&mut stream, &mut decoder);
+            let payload = String::from_utf8(prepare.payload.clone()).unwrap();
+            assert!(payload.contains(&format!("\"operation\":\"{operation}\"")));
+            assert!(payload.contains(&format!("\"arguments\":{arguments}")));
+            respond(
+                &mut stream,
+                &prepare,
+                format!(
+                    r#"{{"operation_id":"{}","state":"prepared"}}"#,
+                    hex(&operation_id)
+                )
+                .as_bytes(),
+            );
+            let start = read_frame(&mut stream, &mut decoder);
+            respond(&mut stream, &start, result.as_bytes());
+        }
+    });
+
+    let column = AdminColumnDefinition {
+        name: "label".into(),
+        scalar_type: ScalarType::Text,
+        nullable: false,
+        generated_uuid_identity: false,
+        default: Some(AdminColumnDefault::Literal(ScalarValue::Text("new".into()))),
+    };
+    let mut secret = [5; 32];
+    let mut client = AdminClient::connect_authenticated_with_timeout(
+        address,
+        [6; 16],
+        &mut secret,
+        Duration::from_secs(3),
+    )
+    .unwrap();
+    let added = client.add_column([0xa6; 16], &column).unwrap();
+    assert_eq!(added.column_id, [0xb6; 16]);
+    client
+        .rename_column(added.table_id, added.column_id, "display_label")
+        .unwrap();
+    client.drop_column(added.table_id, added.column_id).unwrap();
+    server.join().unwrap();
+}
+
+#[test]
+fn admin_client_changes_table_owner_nullability_and_defaults() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut decoder = ClientFrameDecoder::default();
+        establish_control_session(&mut stream, &mut decoder);
+        let table_id = "a7".repeat(16);
+        let column_id = "b7".repeat(16);
+        let cases = [
+            (
+                "tables.set_owner",
+                format!(
+                    r#"{{"table_id":"{table_id}","owner_id":"{}"}}"#,
+                    "c7".repeat(16)
+                ),
+                [0xa1; 16],
+                format!(
+                    r#"{{"operation_id":"{}","outcome":"committed","table_id":"{table_id}","owner_id":"{}","commit_sequence":"81"}}"#,
+                    hex(&[0xa1; 16]),
+                    "c7".repeat(16)
+                ),
+            ),
+            (
+                "tables.alter_column_nullability",
+                format!(
+                    r#"{{"table_id":"{table_id}","column_id":"{column_id}","nullable":"true"}}"#
+                ),
+                [0xa2; 16],
+                format!(
+                    r#"{{"operation_id":"{}","outcome":"committed","table_id":"{table_id}","column_id":"{column_id}","nullable":true,"commit_sequence":"82"}}"#,
+                    hex(&[0xa2; 16])
+                ),
+            ),
+            (
+                "tables.set_column_default",
+                format!(
+                    r#"{{"table_id":"{table_id}","column_id":"{column_id}","type":"bigint","default":{{"kind":"literal","value":"5"}} }}"#
+                ),
+                [0xa3; 16],
+                format!(
+                    r#"{{"operation_id":"{}","outcome":"committed","table_id":"{table_id}","column_id":"{column_id}","commit_sequence":"83"}}"#,
+                    hex(&[0xa3; 16])
+                ),
+            ),
+            (
+                "tables.drop_column_default",
+                format!(r#"{{"table_id":"{table_id}","column_id":"{column_id}"}}"#),
+                [0xa4; 16],
+                format!(
+                    r#"{{"operation_id":"{}","outcome":"committed","table_id":"{table_id}","column_id":"{column_id}","commit_sequence":"84"}}"#,
+                    hex(&[0xa4; 16])
+                ),
+            ),
+        ];
+        for (operation, arguments, operation_id, result) in cases {
+            let prepare = read_frame(&mut stream, &mut decoder);
+            let payload = String::from_utf8(prepare.payload.clone()).unwrap();
+            assert!(payload.contains(&format!("\"operation\":\"{operation}\"")));
+            assert!(
+                payload.contains(&format!("\"arguments\":{arguments}")),
+                "{payload}"
+            );
+            respond(
+                &mut stream,
+                &prepare,
+                format!(
+                    r#"{{"operation_id":"{}","state":"prepared"}}"#,
+                    hex(&operation_id)
+                )
+                .as_bytes(),
+            );
+            let start = read_frame(&mut stream, &mut decoder);
+            respond(&mut stream, &start, result.as_bytes());
+        }
+    });
+
+    let mut secret = [5; 32];
+    let mut client = AdminClient::connect_authenticated_with_timeout(
+        address,
+        [6; 16],
+        &mut secret,
+        Duration::from_secs(3),
+    )
+    .unwrap();
+    client.set_table_owner([0xa7; 16], [0xc7; 16]).unwrap();
+    client
+        .alter_column_nullability([0xa7; 16], [0xb7; 16], true)
+        .unwrap();
+    client
+        .set_column_default(
+            [0xa7; 16],
+            [0xb7; 16],
+            ScalarType::BigInt,
+            AdminColumnDefault::Literal(ScalarValue::BigInt(5)),
+        )
+        .unwrap();
+    client.drop_column_default([0xa7; 16], [0xb7; 16]).unwrap();
+    server.join().unwrap();
+}
+
 fn hex(id: &[u8; 16]) -> String {
     id.iter().map(|byte| format!("{byte:02x}")).collect()
 }
