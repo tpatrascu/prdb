@@ -75,6 +75,8 @@ fn authenticated_metadata_reads_cross_gateway_and_supervisor_processes()
     let committed_invocation_id = [0xa3; 16];
     let restricted_token;
     let mut restricted_secret;
+    let owner_token;
+    let mut owner_secret;
     let restricted_schema_id;
     let restricted_table_id;
     {
@@ -83,11 +85,41 @@ fn authenticated_metadata_reads_cross_gateway_and_supervisor_processes()
         let now_us = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
         let retention_deadline_us = now_us.saturating_add(3_600_000_000);
 
+        let restricted_user = storage.create_user(
+            [0xa6; 16],
+            admin_user_id,
+            "metadata_reader",
+            retention_deadline_us,
+            AuditEvent {
+                event_id: [0xa7; 16],
+                actor_id: Some(admin_user_id),
+                correlation_id: [0xa6; 16],
+                occurred_at_us: now_us,
+                action: AuditAction::Ddl,
+                result: AuditResult::Succeeded,
+                target_ids: Vec::new(),
+            },
+        )?;
+        let owner_user = storage.create_user(
+            [0xac; 16],
+            admin_user_id,
+            "schema_owner",
+            retention_deadline_us,
+            AuditEvent {
+                event_id: [0xad; 16],
+                actor_id: Some(admin_user_id),
+                correlation_id: [0xac; 16],
+                occurred_at_us: now_us,
+                action: AuditAction::Ddl,
+                result: AuditResult::Succeeded,
+                target_ids: Vec::new(),
+            },
+        )?;
         let restricted_schema = storage.create_schema(
             [0xa4; 16],
             admin_user_id,
             "admin_private",
-            admin_user_id,
+            owner_user.user_id,
             retention_deadline_us,
             AuditEvent {
                 event_id: [0xa5; 16],
@@ -124,21 +156,6 @@ fn authenticated_metadata_reads_cross_gateway_and_supervisor_processes()
             },
         })?;
         restricted_table_id = private_table.table_id;
-        let restricted_user = storage.create_user(
-            [0xa6; 16],
-            admin_user_id,
-            "metadata_reader",
-            retention_deadline_us,
-            AuditEvent {
-                event_id: [0xa7; 16],
-                actor_id: Some(admin_user_id),
-                correlation_id: [0xa6; 16],
-                occurred_at_us: now_us,
-                action: AuditAction::Ddl,
-                result: AuditResult::Succeeded,
-                target_ids: Vec::new(),
-            },
-        )?;
         let mut issued = storage.issue_token(TokenIssueRequest {
             invocation_id: [0xa8; 16],
             authenticated_actor_id: admin_user_id,
@@ -160,6 +177,61 @@ fn authenticated_metadata_reads_cross_gateway_and_supervisor_processes()
         restricted_secret = issued
             .take_secret()
             .ok_or("restricted metadata token secret missing")?;
+        let mut owner_issued = storage.issue_token(TokenIssueRequest {
+            invocation_id: [0xb0; 16],
+            authenticated_actor_id: admin_user_id,
+            user_id: owner_user.user_id,
+            label: "schema owner",
+            expires_at_us: now_us.saturating_add(1_800_000_000),
+            retention_deadline_us,
+            audit_event: AuditEvent {
+                event_id: [0xb1; 16],
+                actor_id: Some(admin_user_id),
+                correlation_id: [0xb0; 16],
+                occurred_at_us: now_us,
+                action: AuditAction::TokenLifecycle,
+                result: AuditResult::Succeeded,
+                target_ids: vec![owner_user.user_id],
+            },
+        })?;
+        owner_token = owner_issued.token_id;
+        owner_secret = owner_issued
+            .take_secret()
+            .ok_or("schema owner token secret missing")?;
+
+        let (mut admin_query, _) = storage.begin_token_authenticated_invocation(
+            [0xb2; 16],
+            token_id,
+            &token_secret,
+            retention_deadline_us,
+            8,
+            4096,
+        )?;
+        assert!(
+            admin_query
+                .list_catalog_authorized_schemas(128, None)?
+                .schemas
+                .iter()
+                .all(|schema| schema.schema_id != restricted_schema_id)
+        );
+        admin_query.abort()?;
+
+        let (mut owner_query, _) = storage.begin_token_authenticated_invocation(
+            [0xb3; 16],
+            owner_token,
+            &owner_secret,
+            retention_deadline_us,
+            8,
+            4096,
+        )?;
+        assert!(
+            owner_query
+                .list_catalog_authorized_schemas(128, None)?
+                .schemas
+                .iter()
+                .all(|schema| schema.schema_id != restricted_schema_id)
+        );
+        owner_query.abort()?;
 
         let mut invocation = storage.admit_supervisor_invocation(
             committed_invocation_id,
@@ -296,6 +368,7 @@ fn authenticated_metadata_reads_cross_gateway_and_supervisor_processes()
         schema.schema_id == prdb_engine::metadata_discovery::INFORMATION_SCHEMA_SCHEMA_ID
             && schema.name == "information_schema"
     }));
+    assert!(schemas.iter().any(|schema| schema.name == "admin_private"));
     let relations =
         metadata.list_relations(prdb_engine::metadata_discovery::INFORMATION_SCHEMA_SCHEMA_ID)?;
     assert_eq!(relations.len(), 3);
@@ -308,7 +381,39 @@ fn authenticated_metadata_reads_cross_gateway_and_supervisor_processes()
             .relation_id,
     )?;
     assert!(!columns.is_empty());
+    assert!(
+        metadata
+            .list_relations(restricted_schema_id)?
+            .iter()
+            .any(|relation| relation.relation_id == restricted_table_id)
+    );
+    assert!(
+        !metadata
+            .list_columns(restricted_schema_id, restricted_table_id)?
+            .is_empty()
+    );
     drop(metadata);
+
+    let mut owner_metadata =
+        MetadataClient::connect_authenticated(address, owner_token, &mut owner_secret)?;
+    assert!(
+        owner_metadata
+            .list_schemas()?
+            .iter()
+            .any(|schema| schema.name == "admin_private")
+    );
+    assert!(
+        owner_metadata
+            .list_relations(restricted_schema_id)?
+            .iter()
+            .any(|relation| relation.relation_id == restricted_table_id)
+    );
+    assert!(
+        !owner_metadata
+            .list_columns(restricted_schema_id, restricted_table_id)?
+            .is_empty()
+    );
+    drop(owner_metadata);
 
     let mut restricted_metadata =
         MetadataClient::connect_authenticated(address, restricted_token, &mut restricted_secret)?;

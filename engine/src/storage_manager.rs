@@ -2021,9 +2021,27 @@ impl<'db> StorageManager<'db> {
             schemas.extend(page.schemas);
             continuation = page.continuation;
             if continuation.is_none() {
-                return Ok(schemas);
+                break;
             }
         }
+        for schema in transaction.list_catalog_administrative_schemas()? {
+            if !schemas
+                .iter()
+                .any(|existing| existing.schema_id == schema.schema_id)
+            {
+                encoded_bytes = encoded_bytes
+                    .saturating_add(16)
+                    .saturating_add(schema.name.len());
+                if schemas.len() >= MAX_DISCOVERED_SCHEMAS
+                    || encoded_bytes > MAX_DISCOVERED_SCHEMA_BYTES
+                {
+                    return Err(TransactionError::InvalidMetadataRequest);
+                }
+                schemas.push(schema);
+            }
+        }
+        schemas.sort_unstable_by_key(|schema| schema.schema_id);
+        Ok(schemas)
     }
 
     /// Discover relations for one schema visible to a token-authenticated
@@ -2058,6 +2076,9 @@ impl<'db> StorageManager<'db> {
             return Ok(Some(
                 crate::metadata_discovery::information_schema_relations().into(),
             ));
+        }
+        if let Some(relations) = transaction.list_catalog_administrative_relations(schema_id)? {
+            return Ok(Some(relations));
         }
 
         let mut relations = Vec::new();
@@ -2121,6 +2142,12 @@ impl<'db> StorageManager<'db> {
         )?;
         let now_us = now_unix_micros().ok_or(TransactionError::ClockUnavailable)?;
         transaction.authenticate_credential_token(token_id, token_secret, now_us)?;
+        if schema_id != crate::metadata_discovery::INFORMATION_SCHEMA_SCHEMA_ID
+            && let Some(columns) =
+                transaction.describe_catalog_administrative_columns(schema_id, relation_id)?
+        {
+            return Ok(Some(columns));
+        }
 
         let mut columns = Vec::new();
         let mut encoded_bytes = 0usize;

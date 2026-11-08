@@ -2016,6 +2016,160 @@ impl<'db> InvocationTransaction<'db> {
         }
     }
 
+    /// List schemas over which this authenticated control principal has
+    /// administrative metadata authority. This entry point is separate from
+    /// invocation discovery so database administration and schema ownership
+    /// never widen executor or SQL query grants.
+    pub(crate) fn list_catalog_administrative_schemas(
+        &mut self,
+    ) -> Result<Vec<VisibleSchema>, TransactionError> {
+        let roles = self.load_catalog_role_closure(self.principal_id)?;
+        let database_admin = roles.contains(&crate::bootstrap::database_admin_role_id());
+        let records = self
+            .pinned_snapshot()?
+            .scan_catalog_family(2, MAX_CATALOG_FAMILY_SCAN)
+            .map_err(|error| TransactionError::Storage(error.to_string()))?;
+        let mut schemas = Vec::new();
+        let mut encoded_bytes = 0usize;
+        for record in records {
+            if record.family_code != 2 || catalog_u16(&record, 1)? != 1 {
+                continue;
+            }
+            if record.logical_key.len() != 19
+                || record.logical_key[2] != 1
+                || record.logical_key[..2] != 2u16.to_be_bytes()
+            {
+                return Err(TransactionError::CorruptCatalog);
+            }
+            let schema_id: [u8; 16] = record.logical_key[3..19]
+                .try_into()
+                .map_err(|_| TransactionError::CorruptCatalog)?;
+            let owner_id = catalog_id(&record, 4)?;
+            if !database_admin && owner_id != self.principal_id && !roles.contains(&owner_id) {
+                continue;
+            }
+            let schema = self.read_discovery_schema(schema_id)?;
+            encoded_bytes = encoded_bytes
+                .saturating_add(16)
+                .saturating_add(schema.name.len());
+            if schemas.len() >= 4096 || encoded_bytes > 1024 * 1024 {
+                return Err(TransactionError::InvalidMetadataRequest);
+            }
+            schemas.push(schema);
+        }
+        schemas.push(VisibleSchema {
+            schema_id: INFORMATION_SCHEMA_ID,
+            name: "information_schema".to_owned(),
+        });
+        schemas.sort_unstable_by_key(|schema| schema.schema_id);
+        schemas.dedup_by_key(|schema| schema.schema_id);
+        Ok(schemas)
+    }
+
+    /// List relations in a schema administratively visible to this control
+    /// principal. `None` means the schema is outside the principal's
+    /// administrative authority; callers may then apply ordinary grants.
+    pub(crate) fn list_catalog_administrative_relations(
+        &mut self,
+        schema_id: [u8; 16],
+    ) -> Result<Option<Vec<VisibleRelation>>, TransactionError> {
+        let roles = self.load_catalog_role_closure(self.principal_id)?;
+        if !self.has_schema_metadata_authority(schema_id, &roles)? {
+            return Ok(None);
+        }
+        let records = self
+            .pinned_snapshot()?
+            .scan_catalog_family(5, MAX_CATALOG_FAMILY_SCAN)
+            .map_err(|error| TransactionError::Storage(error.to_string()))?;
+        let mut relations = Vec::new();
+        let mut encoded_bytes = 0usize;
+        for record in records {
+            if record.family_code != 5 || catalog_id(&record, 1)? != schema_id {
+                continue;
+            }
+            if record.logical_key.len() != 19
+                || record.logical_key[2] != 1
+                || record.logical_key[..2] != 5u16.to_be_bytes()
+            {
+                return Err(TransactionError::CorruptCatalog);
+            }
+            let relation_id: [u8; 16] = record.logical_key[3..19]
+                .try_into()
+                .map_err(|_| TransactionError::CorruptCatalog)?;
+            let relation = self.read_discovery_relation(schema_id, relation_id)?;
+            encoded_bytes = encoded_bytes
+                .saturating_add(16)
+                .saturating_add(relation.name.len());
+            if relations.len() >= 4096 || encoded_bytes > 1024 * 1024 {
+                return Err(TransactionError::InvalidMetadataRequest);
+            }
+            relations.push(relation);
+        }
+        Ok(Some(relations))
+    }
+
+    /// Describe the declared shape of a relation in a schema administratively
+    /// visible to this control principal. `None` means ordinary grant checks
+    /// must decide whether the pair is visible.
+    pub(crate) fn describe_catalog_administrative_columns(
+        &mut self,
+        schema_id: [u8; 16],
+        relation_id: [u8; 16],
+    ) -> Result<Option<Vec<VisibleColumn>>, TransactionError> {
+        let roles = self.load_catalog_role_closure(self.principal_id)?;
+        if !self.has_schema_metadata_authority(schema_id, &roles)? {
+            return Ok(None);
+        }
+        let table_key = catalog_id_key(5, relation_id);
+        let Some(table) = self.read_catalog_record(&table_key)? else {
+            return Ok(None);
+        };
+        if table.family_code != 5 {
+            return Err(TransactionError::CorruptCatalog);
+        }
+        if catalog_id(&table, 1)? != schema_id {
+            return Ok(None);
+        }
+        self.read_discovery_relation(schema_id, relation_id)?;
+        let schema = self.load_catalog_table_schema(relation_id)?;
+        let mut columns = Vec::with_capacity(schema.columns.len());
+        let mut encoded_bytes = 0usize;
+        for ordinal in 0..schema.columns.len() {
+            let column = self.read_visible_column(relation_id, &schema, ordinal)?;
+            encoded_bytes = encoded_bytes
+                .saturating_add(24)
+                .saturating_add(column.name.len())
+                .saturating_add(
+                    crate::metadata_discovery::scalar_type_name(column.scalar_type).len(),
+                );
+            if columns.len() >= 4096 || encoded_bytes > 1024 * 1024 {
+                return Err(TransactionError::InvalidMetadataRequest);
+            }
+            columns.push(column);
+        }
+        Ok(Some(columns))
+    }
+
+    fn has_schema_metadata_authority(
+        &mut self,
+        schema_id: [u8; 16],
+        roles: &HashSet<[u8; 16]>,
+    ) -> Result<bool, TransactionError> {
+        let Some(object) = self.read_catalog_record(&catalog_id_key(2, schema_id))? else {
+            return Ok(false);
+        };
+        if object.family_code != 2 || catalog_u16(&object, 1)? != 1 {
+            return Err(TransactionError::CorruptCatalog);
+        }
+        if roles.contains(&crate::bootstrap::database_admin_role_id()) {
+            self.read_discovery_schema(schema_id)?;
+            return Ok(true);
+        }
+        self.read_discovery_schema(schema_id)?;
+        let owner_id = catalog_id(&object, 4)?;
+        Ok(owner_id == self.principal_id || roles.contains(&owner_id))
+    }
+
     /// Return the authorized rows exposed by `information_schema.schemata`.
     pub fn scan_information_schema_schemata(
         &mut self,

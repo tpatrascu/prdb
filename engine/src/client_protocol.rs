@@ -289,6 +289,24 @@ impl MetadataPageRows {
             Self::Columns(rows) => rows.len(),
         }
     }
+
+    fn has_same_object_ids(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Schemas(left), Self::Schemas(right)) => left
+                .iter()
+                .map(|schema| schema.schema_id)
+                .eq(right.iter().map(|schema| schema.schema_id)),
+            (Self::Relations(left), Self::Relations(right)) => left
+                .iter()
+                .map(|relation| relation.relation_id)
+                .eq(right.iter().map(|relation| relation.relation_id)),
+            (Self::Columns(left), Self::Columns(right)) => left
+                .iter()
+                .map(|column| column.column_id)
+                .eq(right.iter().map(|column| column.column_id)),
+            _ => false,
+        }
+    }
 }
 
 struct ActiveMetadataPageSnapshot {
@@ -4388,6 +4406,41 @@ impl ClientConnectionSession {
                     && snapshot.page_limit == page_limit
             });
             if !valid_cursor {
+                return Err(ClientSessionError::InvalidControlPayload(
+                    ClientControlError::InvalidMetadataCursor,
+                ));
+            }
+            let current_rows = match &query {
+                MetadataPageQuery::Schemas => MetadataPageRows::Schemas(
+                    storage
+                        .discover_token_authorized_schemas(token_id, &secret)
+                        .map_err(ClientSessionError::Storage)?,
+                ),
+                MetadataPageQuery::Relations(schema_id) => MetadataPageRows::Relations(
+                    storage
+                        .discover_token_authorized_relations(token_id, &secret, *schema_id)
+                        .map_err(ClientSessionError::Storage)?
+                        .unwrap_or_default(),
+                ),
+                MetadataPageQuery::Columns {
+                    schema_id,
+                    relation_id,
+                } => MetadataPageRows::Columns(
+                    storage
+                        .discover_token_authorized_columns(
+                            token_id,
+                            &secret,
+                            *schema_id,
+                            *relation_id,
+                        )
+                        .map_err(ClientSessionError::Storage)?
+                        .unwrap_or_default(),
+                ),
+            };
+            if !current_snapshot
+                .is_some_and(|snapshot| snapshot.rows.has_same_object_ids(&current_rows))
+            {
+                self.metadata_page_snapshot = None;
                 return Err(ClientSessionError::InvalidControlPayload(
                     ClientControlError::InvalidMetadataCursor,
                 ));

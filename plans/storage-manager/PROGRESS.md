@@ -1752,9 +1752,14 @@
 - Verification: the focused transaction integration test passed with the pinned Nix toolchain.
 - Scope: bounded pressure evidence only; sustained contention, physical reclamation, and power-loss behavior remain unmeasured.
 
-### Distinct-principal metadata filtering through gateway and supervisor — verified
+### Restricted-principal metadata filtering through gateway and supervisor — verified
 
-- Regression: `authenticated_metadata_reads_cross_gateway_and_supervisor_processes` creates an admin-owned `admin_private` schema and `private_records` table, plus a separate login user/token without grants. Through the actual gateway and supervisor processes, the restricted token still discovers `information_schema` but does not receive the private schema, relations, or columns, including when it supplies the known private schema/table IDs.
+- Regression: `authenticated_metadata_reads_cross_gateway_and_supervisor_processes` creates an owner-owned `admin_private` schema and `private_records` table, plus a separate login user/token without grants. Through the actual gateway and supervisor processes, the restricted token still discovers `information_schema` but does not receive the private schema, relations, or columns, including when it supplies the known private schema/table IDs.
 - Verification: the focused process test passed in the prescribed Nix toolchain. Workspace build, format, warning-denied Clippy, all workspace tests, and `git diff --check` passed; the commit integration target had 109 passed and 3 delegated-cgroup tests ignored.
-- Gap: the bootstrap administrator also cannot discover its owned schema through this token metadata path. The [metadata-discovery contract](../../specs/metadata-discovery.md) allows administrative discovery where the actor has authority; add an explicit authority-aware control path without widening invocation or SQL query grants.
-- Remaining: implement administrative metadata visibility, then exercise distinct-principal filtering through confined SQL artifacts.
+### Administrative metadata visibility through the control path — implemented
+
+- Implementation: authenticated control metadata now adds schemas owned by the principal/active owner roles and all schemas for database administrators; relation and column control reads use the same authority check. These checks are isolated from invocation-bound schema grants. Metadata page continuations compare current visible object IDs before serving retained pages, while stable-ID renames preserve the original page snapshot.
+- Regression: the process integration authenticates database-admin, schema-owner, and ungranted-reader tokens through the actual gateway and supervisor. The administrator sees the owner-created schema and relation; the owner can inspect declared columns without an explicit USAGE/data grant; the unrelated reader sees none of the private schema, relation, or columns even when supplying known IDs.
+- Boundary: the same administrator and schema-owner credentials, when admitted as ordinary invocation transactions, still do not see the schema through grant-filtered `list_catalog_authorized_schemas`.
+- Verification: `authenticated_metadata_reads_cross_gateway_and_supervisor_processes` and `storage_manager_runtime_and_metadata_reads_enforce_authorization` passed. Workspace build, format, warning-denied Clippy, all tests, and `git diff --check` passed; the commit target had 109 passed and 3 delegated-cgroup tests ignored.
+- Remaining: add explicit cursor invalidation-on-revocation coverage and exercise distinct-principal filtering through confined SQL artifacts.
