@@ -1629,7 +1629,7 @@
 - Implementation: `StorageManager::discover_token_authorized_schemas` opens a request-scoped transaction snapshot, validates the token against that snapshot, derives catalog schema USAGE visibility, and consumes transaction-local pages internally. It caps full results at 4,096 records and 1 MiB, returns no partial result on overflow, and creates no invocation admission or durable outcome.
 - Regression: the credential lifecycle integration test now verifies that a valid token sees the public `information_schema` namespace and that a wrong secret is rejected.
 - Verification: the focused `token_admission_checks_expiry_secret_revocation_and_commit_guards` real-redb test passed in the prescribed Nix shell. Initial sandbox Nix access was denied; the authorized `nix-shell` invocation succeeded.
-- Remaining: exercise a complete selected-scope discovery from real gateway records and test the pre-admission selection path end to end.
+- Later verified by the selected-scope TCP and metadata paging increments below.
 
 ## SM-6: expose schema discovery through the client control channel — implemented
 
@@ -1637,7 +1637,7 @@
 - Implementation: the versioned read decoder accepts only `phase=read`, operation version 1, operation `metadata.schemas.list`, and empty arguments. The connection-owned handler revalidates its token and emits bounded schema IDs/names from the storage snapshot API. Existing gateway administrative-operation dispatch carries this request over the control channel; no invocation is admitted.
 - Regression evidence: strict decoder tests reject arguments and mutation phase; the real-redb gateway dispatch test authenticates a non-admin control session and receives the public schema in the response.
 - Verification: focused decoder and real-redb gateway-dispatch regressions passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed. Commit integration had 109 passing and 2 cgroup-dependent tests ignored.
-- Remaining: schema/relation results are capped complete lists rather than resumable pages.
+- Later extended with session-bound network pages; see the metadata paging increment below.
 
 ## SM-6: authenticated relation discovery over the control channel — implemented
 
@@ -1645,7 +1645,7 @@
 - Implementation: `StorageManager::discover_token_authorized_relations` authenticates and filters under one request-scoped catalog snapshot, consumes the transaction-bound cursors internally, and bounds the complete result by record count and encoded ID/name bytes. The client read requires exactly one schema ID. Hidden and absent schemas serialize identically to an authorized empty schema.
 - Regression evidence: strict request decoding checks the schema ID and rejects extra arguments. Real-redb gateway dispatch authenticates an ordinary principal, returns only its granted `visible_app` schema, exposes the granted `metrics` relation, and returns its `reading` column shape. A second table in the visible schema without a data grant is omitted; an ungranted schema containing a table and an absent schema both return the indistinguishable empty relation array. The reads do not start invocations.
 - Verification: focused decoder and real-redb gateway-dispatch regressions passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed. Commit integration had 109 passing and 2 cgroup-dependent tests ignored.
-- Remaining: complete results still use bounded full-list responses rather than resumable network pages.
+- Later extended with session-bound network pages; see the metadata paging increment below.
 
 ## SM-6: authenticated column-shape discovery over the control channel — implemented
 
@@ -1653,7 +1653,7 @@
 - Implementation: `InvocationTransaction::describe_catalog_authorized_columns_page` derives the scope and grant set from its pinned catalog; the storage-manager adapter authenticates the token in a request-scoped snapshot and consumes its pages. It exposes only stable column IDs, names, zero-based ordinals, canonical scalar type names, and nullability. Built-in `information_schema` descriptors share the same stable relation and column IDs as ordinary query metadata. `MetadataClient` negotiates control mode, authenticates, parses all three metadata response shapes into typed records, and provides those records directly to `RequestedScopeBuilder` callers.
 - Regression evidence: strict decoder checks require both schema and relation IDs. Real-redb gateway dispatch obtains the public `information_schema.columns` shape and the granted user table's `reading` integer column through an ordinary principal's control connection.
 - Verification: the new `client_metadata` TCP test proves typed schema/relation/column decoding, secret zeroization, ordinal-gap preservation, and requested-scope construction. A real-redb transaction regression verifies column discovery through a column-level SELECT grant, and gateway dispatch verifies built-in columns. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed; commit integration had 109 passing and 2 cgroup-dependent tests ignored.
-- Remaining: discovery returns complete bounded lists without resumable network cursors; the 64 KiB control-frame cap can reject larger metadata sets without partial output.
+- Later extended with session-bound network pages; complete snapshots remain bounded by the storage adapter's 1 MiB cap.
 
 ## SM-6: align relation discovery with table catalog membership — fixed
 
@@ -1661,11 +1661,20 @@
 - Red evidence: the gateway regression initially authenticated with an admin token and could not prove ordinary-principal filtering. After switching to an ordinary principal with explicit schema USAGE and table SELECT grants, the test showed schema discovery worked but relation discovery returned an empty list. The table catalog held the relation and grant, while schema records had no relation ID list.
 - Implementation: both relation enumeration and relation-grant loading now scan the pinned table catalog and select records whose stored schema ID matches the requested schema. The regression verifies the granted schema, relation, and column over the real gateway path; an ungranted table within that visible schema and a second schema with no USAGE grant remain hidden.
 - Verification: the focused real-redb gateway regression passed. Rust 1.95.0, Cargo 1.95.0, rustfmt 1.9.0, Clippy 0.1.95, and TinyCC 0.9.27-unstable-2025-01-06 were verified in the prescribed Nix shell. Workspace build, format check, warning-denied Clippy, all workspace tests, and `git diff --check` passed; the commit integration target had 109 passing tests and 2 cgroup-dependent tests ignored.
-- Remaining: complete results still use bounded full-list responses and the 64 KiB control-frame cap.
+- Later extended with session-bound network pages; complete snapshots remain bounded by the storage adapter's 1 MiB cap.
 
 ## SM-6: build requested scope from authenticated TCP discovery — implemented
 
 - Behavior and normative contract: [client SDK](../../specs/client-sdk.md), Requested Capability Scope v1 and `MetadataClient`; [metadata discovery](../../specs/metadata-discovery.md); [storage manager](../../specs/storage-manager.md), token-authenticated pre-invocation reads.
 - Regression: the real-redb authorization integration test now runs `MetadataClient` over loopback TCP against a `ClientConnectionSession` backed by the real `StorageManager`. An ordinary user's bearer token returns only the granted schema and relation, then the declared granted column. `RequestedScopeBuilder` produces and decodes PSC1 with schema USAGE and the selected column SELECT capability. The same fixture omits an ungranted relation in the visible schema and a separate schema without USAGE.
 - Evidence: the focused `storage_manager_runtime_and_metadata_reads_enforce_authorization` integration test passed. Existing gateway-dispatch checks in that fixture independently verify the versioned gateway ADMIN read route and no-invocation behavior. Workspace build, format check, warning-denied Clippy, and all workspace tests passed; commit integration had 109 passing tests and 2 cgroup-dependent tests ignored.
-- Remaining: metadata methods return bounded full lists; resumable network pages with cross-request snapshot consistency are unimplemented.
+- Later implemented by the resumable metadata paging increment below. The storage methods still return bounded full lists; pagination is owned by the connection session.
+
+## SM-6: resumable metadata pages across control requests — implemented
+
+- Behavior and normative contract: [client protocol](../../specs/client-protocol.md), metadata `limit`/`cursor`; [metadata discovery](../../specs/metadata-discovery.md); [client SDK](../../specs/client-sdk.md), `MetadataClient` page methods.
+- Implementation: paged schema, relation, and column reads capture each bounded complete result from one token-authenticated storage snapshot in the connection-owned `ClientConnectionSession`. The session retains at most one result (bounded by the 1 MiB storage cap), emits at most 128 records per page, returns one-use random 16-byte cursors, and expires continuations after 60 seconds idle. Cursors bind the operation, filter, limit, principal, and role closure. New metadata queries replace an outstanding cursor; role changes, replay, filter/limit substitution, and cross-connection use reject.
+- Client behavior: `MetadataClient::list_*_page` exposes cursor pages, while existing `list_*` methods follow pages with a default size of 64 and validate ordering across page boundaries.
+- Regression evidence: the real-redb TCP integration test pages all three record kinds, rejects query substitution, cursor replay, and cross-connection cursor use, preserves the old column name across a concurrent rename, and observes the renamed column on a fresh query. Decoder tests cover canonical limits and cursor encodings.
+- Verification: Rust 1.95.0, Cargo 1.95.0, rustfmt 1.9.0, Clippy 0.1.95, and TinyCC 0.9.27-unstable-2025-01-06 were verified in the prescribed Nix shell. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` passed. Commit integration had 109 passing tests and 2 cgroup/TinyCC fixture tests ignored; `git diff --check` passed.
+- Remaining: server-side snapshots are connection-local and process-local; complete result snapshots remain bounded at 1 MiB, and control-session memory is retained until completion, replacement, connection close, or an attempted continuation after expiry.

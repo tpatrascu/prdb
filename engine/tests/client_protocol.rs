@@ -218,7 +218,56 @@ fn admin_read_decoder_requires_exact_relation_discovery_arguments() {
         decode_client_admin_read(
             br#"{"phase":"read","operation_version":1,"operation":"metadata.relations.list","arguments":{"schema_id":"000102030405060708090a0b0c0d0e0f","cursor":"x"}}"#
         ),
-        Err(ClientControlError::UnknownKey)
+        Err(ClientControlError::InvalidMetadataCursor)
+    );
+}
+
+#[test]
+fn metadata_page_decoders_validate_limits_and_session_cursor_shape() {
+    let cursor = "d30102030405060708090a0b0c0d0e0f";
+    assert_eq!(
+        decode_client_admin_read(
+            format!("{{\"phase\":\"read\",\"operation_version\":1,\"operation\":\"metadata.schemas.list\",\"arguments\":{{\"limit\":\"2\",\"cursor\":\"{cursor}\"}}}}")
+                .as_bytes()
+        ),
+        Ok(ClientAdminRead::ListSchemasPage {
+            page_limit: 2,
+            cursor: Some([0xd3, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]),
+        })
+    );
+    assert_eq!(
+        decode_client_admin_read(
+            br#"{"phase":"read","operation_version":1,"operation":"metadata.relations.list","arguments":{"schema_id":"000102030405060708090a0b0c0d0e0f","limit":"128"}}"#
+        ),
+        Ok(ClientAdminRead::ListRelationsPage {
+            schema_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+            page_limit: 128,
+            cursor: None,
+        })
+    );
+    assert_eq!(
+        decode_client_admin_read(
+            br#"{"phase":"read","operation_version":1,"operation":"metadata.schemas.list","arguments":{"limit":"0"}}"#
+        ),
+        Err(ClientControlError::InvalidMetadataPageLimit)
+    );
+    assert_eq!(
+        decode_client_admin_read(
+            br#"{"phase":"read","operation_version":1,"operation":"metadata.schemas.list","arguments":{"limit":"01"}}"#
+        ),
+        Err(ClientControlError::InvalidMetadataPageLimit)
+    );
+    assert_eq!(
+        decode_client_admin_read(
+            br#"{"phase":"read","operation_version":1,"operation":"metadata.schemas.list","arguments":{"limit":"129"}}"#
+        ),
+        Err(ClientControlError::InvalidMetadataPageLimit)
+    );
+    assert_eq!(
+        decode_client_admin_read(
+            br#"{"phase":"read","operation_version":1,"operation":"metadata.schemas.list","arguments":{"limit":"1","cursor":"000102030405060708090a0b0c0d0e0f"}}"#
+        ),
+        Err(ClientControlError::InvalidMetadataCursor)
     );
 }
 

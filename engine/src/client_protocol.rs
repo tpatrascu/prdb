@@ -13,6 +13,8 @@ pub const CLIENT_MAX_CONTROL_BYTES: usize = 64 * 1024;
 pub const CLIENT_MAX_CHUNK_BYTES: usize = 256 * 1024;
 pub const CLIENT_ERROR_KIND: u16 = 101;
 const CLIENT_MAGIC: &[u8; 4] = b"PDBN";
+const CLIENT_METADATA_CURSOR_KIND: u8 = 0xd3;
+pub const CLIENT_METADATA_MAX_PAGE: usize = 128;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClientFrame {
@@ -120,6 +122,8 @@ pub enum ClientControlError {
     InvalidPrepare,
     InvalidInvocationId,
     UnsupportedAdminOperation,
+    InvalidMetadataCursor,
+    InvalidMetadataPageLimit,
 }
 
 impl std::fmt::Display for ClientControlError {
@@ -261,14 +265,72 @@ struct PendingAdminOperation {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+enum MetadataPageQuery {
+    Schemas,
+    Relations([u8; 16]),
+    Columns {
+        schema_id: [u8; 16],
+        relation_id: [u8; 16],
+    },
+}
+
+#[derive(Clone, Debug)]
+enum MetadataPageRows {
+    Schemas(Vec<crate::metadata_discovery::VisibleSchema>),
+    Relations(Vec<crate::metadata_discovery::VisibleRelation>),
+    Columns(Vec<crate::metadata_discovery::VisibleColumn>),
+}
+
+impl MetadataPageRows {
+    fn len(&self) -> usize {
+        match self {
+            Self::Schemas(rows) => rows.len(),
+            Self::Relations(rows) => rows.len(),
+            Self::Columns(rows) => rows.len(),
+        }
+    }
+}
+
+struct ActiveMetadataPageSnapshot {
+    query: MetadataPageQuery,
+    rows: MetadataPageRows,
+    principal_id: [u8; 16],
+    role_ids: std::collections::HashSet<[u8; 16]>,
+    page_limit: usize,
+    next_index: usize,
+    current_cursor: Option<[u8; 16]>,
+    expires_at: std::time::Instant,
+}
+
+struct MetadataPagination {
+    page_limit: usize,
+    cursor: Option<[u8; 16]>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ClientAdminRead {
     ListSchemas,
+    ListSchemasPage {
+        page_limit: usize,
+        cursor: Option<[u8; 16]>,
+    },
     ListRelations {
         schema_id: [u8; 16],
+    },
+    ListRelationsPage {
+        schema_id: [u8; 16],
+        page_limit: usize,
+        cursor: Option<[u8; 16]>,
     },
     ListColumns {
         schema_id: [u8; 16],
         relation_id: [u8; 16],
+    },
+    ListColumnsPage {
+        schema_id: [u8; 16],
+        relation_id: [u8; 16],
+        page_limit: usize,
+        cursor: Option<[u8; 16]>,
     },
     ListTokens {
         user_id: [u8; 16],
@@ -279,12 +341,27 @@ pub enum ClientAdminRead {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ClientAdminCommand {
     ListSchemas,
+    ListSchemasPage {
+        page_limit: usize,
+        cursor: Option<[u8; 16]>,
+    },
     ListRelations {
         schema_id: [u8; 16],
+    },
+    ListRelationsPage {
+        schema_id: [u8; 16],
+        page_limit: usize,
+        cursor: Option<[u8; 16]>,
     },
     ListColumns {
         schema_id: [u8; 16],
         relation_id: [u8; 16],
+    },
+    ListColumnsPage {
+        schema_id: [u8; 16],
+        relation_id: [u8; 16],
+        page_limit: usize,
+        cursor: Option<[u8; 16]>,
     },
     ListTokens {
         user_id: [u8; 16],
@@ -395,15 +472,38 @@ pub enum ClientAdminCommand {
 pub fn decode_client_admin_read(payload: &[u8]) -> Result<ClientAdminRead, ClientControlError> {
     match decode_client_admin_command(payload)? {
         ClientAdminCommand::ListSchemas => Ok(ClientAdminRead::ListSchemas),
+        ClientAdminCommand::ListSchemasPage { page_limit, cursor } => {
+            Ok(ClientAdminRead::ListSchemasPage { page_limit, cursor })
+        }
         ClientAdminCommand::ListRelations { schema_id } => {
             Ok(ClientAdminRead::ListRelations { schema_id })
         }
+        ClientAdminCommand::ListRelationsPage {
+            schema_id,
+            page_limit,
+            cursor,
+        } => Ok(ClientAdminRead::ListRelationsPage {
+            schema_id,
+            page_limit,
+            cursor,
+        }),
         ClientAdminCommand::ListColumns {
             schema_id,
             relation_id,
         } => Ok(ClientAdminRead::ListColumns {
             schema_id,
             relation_id,
+        }),
+        ClientAdminCommand::ListColumnsPage {
+            schema_id,
+            relation_id,
+            page_limit,
+            cursor,
+        } => Ok(ClientAdminRead::ListColumnsPage {
+            schema_id,
+            relation_id,
+            page_limit,
+            cursor,
         }),
         ClientAdminCommand::ListTokens {
             user_id,
@@ -518,11 +618,18 @@ pub fn decode_client_admin_command(
             if operation_id.is_some() || seen.len() != 4 {
                 return Err(ClientControlError::UnknownKey);
             }
-            let args = arguments.ok_or(ClientControlError::MissingKey)?;
+            let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
+            let pagination = decode_metadata_pagination(&mut args)?;
             if !args.is_empty() {
                 return Err(ClientControlError::UnknownKey);
             }
-            Ok(ClientAdminCommand::ListSchemas)
+            Ok(match pagination {
+                Some(pagination) => ClientAdminCommand::ListSchemasPage {
+                    page_limit: pagination.page_limit,
+                    cursor: pagination.cursor,
+                },
+                None => ClientAdminCommand::ListSchemas,
+            })
         }
         Some("read")
             if version == Some(1) && operation.as_deref() == Some("metadata.relations.list") =>
@@ -536,10 +643,18 @@ pub fn decode_client_admin_command(
                     .remove("schema_id")
                     .ok_or(ClientControlError::MissingKey)?,
             )?;
+            let pagination = decode_metadata_pagination(&mut args)?;
             if !args.is_empty() {
                 return Err(ClientControlError::UnknownKey);
             }
-            Ok(ClientAdminCommand::ListRelations { schema_id })
+            Ok(match pagination {
+                Some(pagination) => ClientAdminCommand::ListRelationsPage {
+                    schema_id,
+                    page_limit: pagination.page_limit,
+                    cursor: pagination.cursor,
+                },
+                None => ClientAdminCommand::ListRelations { schema_id },
+            })
         }
         Some("read")
             if version == Some(1) && operation.as_deref() == Some("metadata.columns.list") =>
@@ -558,12 +673,21 @@ pub fn decode_client_admin_command(
                     .remove("relation_id")
                     .ok_or(ClientControlError::MissingKey)?,
             )?;
+            let pagination = decode_metadata_pagination(&mut args)?;
             if !args.is_empty() {
                 return Err(ClientControlError::UnknownKey);
             }
-            Ok(ClientAdminCommand::ListColumns {
-                schema_id,
-                relation_id,
+            Ok(match pagination {
+                Some(pagination) => ClientAdminCommand::ListColumnsPage {
+                    schema_id,
+                    relation_id,
+                    page_limit: pagination.page_limit,
+                    cursor: pagination.cursor,
+                },
+                None => ClientAdminCommand::ListColumns {
+                    schema_id,
+                    relation_id,
+                },
             })
         }
         Some("read") if version == Some(1) && operation.as_deref() == Some("tokens.list") => {
@@ -1963,6 +2087,37 @@ fn decode_lower_hex_id(text: &str) -> Result<[u8; 16], ClientControlError> {
     Ok(id)
 }
 
+fn decode_metadata_pagination(
+    arguments: &mut HashMap<String, String>,
+) -> Result<Option<MetadataPagination>, ClientControlError> {
+    let Some(limit) = arguments.remove("limit") else {
+        return if arguments.contains_key("cursor") {
+            Err(ClientControlError::InvalidMetadataCursor)
+        } else {
+            Ok(None)
+        };
+    };
+    let page_limit = limit
+        .parse::<usize>()
+        .ok()
+        .filter(|value| {
+            (1..=CLIENT_METADATA_MAX_PAGE).contains(value) && value.to_string() == limit
+        })
+        .ok_or(ClientControlError::InvalidMetadataPageLimit)?;
+    let cursor = arguments
+        .remove("cursor")
+        .map(|encoded| {
+            let cursor = decode_lower_hex_id(&encoded)
+                .map_err(|_| ClientControlError::InvalidMetadataCursor)?;
+            if cursor[0] != CLIENT_METADATA_CURSOR_KIND {
+                return Err(ClientControlError::InvalidMetadataCursor);
+            }
+            Ok(cursor)
+        })
+        .transpose()?;
+    Ok(Some(MetadataPagination { page_limit, cursor }))
+}
+
 fn lower_hex_nibble(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),
@@ -2061,6 +2216,7 @@ pub struct ClientConnectionSession {
     token_secret: Option<[u8; TOKEN_SECRET_BYTES]>,
     request_ids: ClientRequestIds,
     pending_admin_operation: Option<PendingAdminOperation>,
+    metadata_page_snapshot: Option<ActiveMetadataPageSnapshot>,
 }
 
 impl ClientConnectionSession {
@@ -2474,6 +2630,14 @@ impl ClientConnectionSession {
             .as_ref()
             .ok_or(ClientSessionError::AuthenticationRequired)?
             .principal_id();
+        if matches!(
+            &command,
+            ClientAdminCommand::ListSchemas
+                | ClientAdminCommand::ListRelations { .. }
+                | ClientAdminCommand::ListColumns { .. }
+        ) {
+            self.metadata_page_snapshot = None;
+        }
         match command {
             ClientAdminCommand::ListSchemas => {
                 let token_id = self
@@ -2505,6 +2669,14 @@ impl ClientConnectionSession {
                 }
                 self.json_response(request.request_id, payload.into_bytes())
             }
+            ClientAdminCommand::ListSchemasPage { page_limit, cursor } => self
+                .handle_metadata_discovery_page(
+                    storage,
+                    request.request_id,
+                    MetadataPageQuery::Schemas,
+                    page_limit,
+                    cursor,
+                ),
             ClientAdminCommand::ListRelations { schema_id } => {
                 let token_id = self
                     .authenticated
@@ -2537,6 +2709,17 @@ impl ClientConnectionSession {
                 }
                 self.json_response(request.request_id, payload.into_bytes())
             }
+            ClientAdminCommand::ListRelationsPage {
+                schema_id,
+                page_limit,
+                cursor,
+            } => self.handle_metadata_discovery_page(
+                storage,
+                request.request_id,
+                MetadataPageQuery::Relations(schema_id),
+                page_limit,
+                cursor,
+            ),
             ClientAdminCommand::ListColumns {
                 schema_id,
                 relation_id,
@@ -2586,6 +2769,21 @@ impl ClientConnectionSession {
                 }
                 self.json_response(request.request_id, payload.into_bytes())
             }
+            ClientAdminCommand::ListColumnsPage {
+                schema_id,
+                relation_id,
+                page_limit,
+                cursor,
+            } => self.handle_metadata_discovery_page(
+                storage,
+                request.request_id,
+                MetadataPageQuery::Columns {
+                    schema_id,
+                    relation_id,
+                },
+                page_limit,
+                cursor,
+            ),
             ClientAdminCommand::ListTokens {
                 user_id,
                 after_token_id,
@@ -4144,6 +4342,137 @@ impl ClientConnectionSession {
 
     /// Cancel an unstarted reservation without creating a storage outcome.
     /// Started invocations require the supervisor's cancellation service.
+    fn handle_metadata_discovery_page(
+        &mut self,
+        storage: &StorageManager<'_>,
+        request_id: u64,
+        query: MetadataPageQuery,
+        page_limit: usize,
+        cursor: Option<[u8; 16]>,
+    ) -> Result<ClientFrame, ClientSessionError> {
+        if !(1..=CLIENT_METADATA_MAX_PAGE).contains(&page_limit) {
+            return Err(ClientSessionError::InvalidControlPayload(
+                ClientControlError::InvalidMetadataPageLimit,
+            ));
+        }
+        let session = self
+            .authenticated
+            .as_ref()
+            .ok_or(ClientSessionError::AuthenticationRequired)?;
+        let token_id = session.token_id();
+        let principal_id = session.principal_id();
+        let role_ids = session.role_ids().clone();
+        let secret = Zeroizing::new(
+            *self
+                .token_secret
+                .as_ref()
+                .ok_or(ClientSessionError::AuthenticationRequired)?,
+        );
+
+        let mut snapshot = if let Some(cursor) = cursor {
+            let current_snapshot = self.metadata_page_snapshot.as_ref();
+            let expired = current_snapshot
+                .is_some_and(|snapshot| snapshot.expires_at <= std::time::Instant::now());
+            let identity_changed = current_snapshot.is_some_and(|snapshot| {
+                snapshot.principal_id != principal_id || snapshot.role_ids != role_ids
+            });
+            if expired || identity_changed {
+                self.metadata_page_snapshot = None;
+                return Err(ClientSessionError::InvalidControlPayload(
+                    ClientControlError::InvalidMetadataCursor,
+                ));
+            }
+            let valid_cursor = current_snapshot.is_some_and(|snapshot| {
+                snapshot.current_cursor == Some(cursor)
+                    && snapshot.query == query
+                    && snapshot.page_limit == page_limit
+            });
+            if !valid_cursor {
+                return Err(ClientSessionError::InvalidControlPayload(
+                    ClientControlError::InvalidMetadataCursor,
+                ));
+            }
+            self.metadata_page_snapshot
+                .take()
+                .ok_or(ClientSessionError::InvalidControlPayload(
+                    ClientControlError::InvalidMetadataCursor,
+                ))?
+        } else {
+            self.metadata_page_snapshot = None;
+            let rows = match &query {
+                MetadataPageQuery::Schemas => MetadataPageRows::Schemas(
+                    storage
+                        .discover_token_authorized_schemas(token_id, &secret)
+                        .map_err(ClientSessionError::Storage)?,
+                ),
+                MetadataPageQuery::Relations(schema_id) => MetadataPageRows::Relations(
+                    storage
+                        .discover_token_authorized_relations(token_id, &secret, *schema_id)
+                        .map_err(ClientSessionError::Storage)?
+                        .unwrap_or_default(),
+                ),
+                MetadataPageQuery::Columns {
+                    schema_id,
+                    relation_id,
+                } => MetadataPageRows::Columns(
+                    storage
+                        .discover_token_authorized_columns(
+                            token_id,
+                            &secret,
+                            *schema_id,
+                            *relation_id,
+                        )
+                        .map_err(ClientSessionError::Storage)?
+                        .unwrap_or_default(),
+                ),
+            };
+            ActiveMetadataPageSnapshot {
+                query,
+                rows,
+                principal_id,
+                role_ids,
+                page_limit,
+                next_index: 0,
+                current_cursor: None,
+                expires_at: std::time::Instant::now() + std::time::Duration::from_secs(60),
+            }
+        };
+
+        let start = snapshot.next_index;
+        let end = start
+            .saturating_add(snapshot.page_limit)
+            .min(snapshot.rows.len());
+        let next_cursor = if end < snapshot.rows.len() {
+            let mut token = [0; 16];
+            loop {
+                getrandom::fill(&mut token).map_err(|_| {
+                    ClientSessionError::Storage(TransactionError::RandomnessUnavailable)
+                })?;
+                token[0] = CLIENT_METADATA_CURSOR_KIND;
+                if Some(token) != cursor {
+                    break;
+                }
+            }
+            Some(token)
+        } else {
+            None
+        };
+        let payload = encode_metadata_page(&snapshot, start, end, next_cursor)?;
+        if payload.len() > CLIENT_MAX_CONTROL_BYTES {
+            return Err(ClientSessionError::ResourceLimit);
+        }
+
+        if let Some(next_cursor) = next_cursor {
+            snapshot.next_index = end;
+            snapshot.current_cursor = Some(next_cursor);
+            snapshot.expires_at = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            self.metadata_page_snapshot = Some(snapshot);
+        } else {
+            self.metadata_page_snapshot = None;
+        }
+        self.json_response(request_id, payload)
+    }
+
     pub fn handle_cancel_prepared_request(
         &mut self,
         storage: &StorageManager<'_>,
@@ -4567,6 +4896,71 @@ fn push_json_optional_i64(output: &mut String, value: Option<i64>) {
     } else {
         output.push_str("null");
     }
+}
+
+fn encode_metadata_page(
+    snapshot: &ActiveMetadataPageSnapshot,
+    start: usize,
+    end: usize,
+    next_cursor: Option<[u8; 16]>,
+) -> Result<Vec<u8>, ClientSessionError> {
+    let mut output = match &snapshot.query {
+        MetadataPageQuery::Schemas => String::from("{\"schemas\":["),
+        MetadataPageQuery::Relations(_) => String::from("{\"relations\":["),
+        MetadataPageQuery::Columns { .. } => String::from("{\"columns\":["),
+    };
+    for index in start..end {
+        if index != start {
+            output.push(',');
+        }
+        match (&snapshot.query, &snapshot.rows) {
+            (MetadataPageQuery::Schemas, MetadataPageRows::Schemas(rows)) => {
+                let row = rows.get(index).ok_or(ClientSessionError::ResourceLimit)?;
+                output.push_str("{\"schema_id\":\"");
+                output.push_str(&encode_lower_hex_id(row.schema_id));
+                output.push_str("\",\"name\":\"");
+                push_json_string(&mut output, &row.name);
+                output.push_str("\"}");
+            }
+            (MetadataPageQuery::Relations(_), MetadataPageRows::Relations(rows)) => {
+                let row = rows.get(index).ok_or(ClientSessionError::ResourceLimit)?;
+                output.push_str("{\"relation_id\":\"");
+                output.push_str(&encode_lower_hex_id(row.relation_id));
+                output.push_str("\",\"name\":\"");
+                push_json_string(&mut output, &row.name);
+                output.push_str("\"}");
+            }
+            (MetadataPageQuery::Columns { .. }, MetadataPageRows::Columns(rows)) => {
+                let row = rows.get(index).ok_or(ClientSessionError::ResourceLimit)?;
+                output.push_str("{\"column_id\":\"");
+                output.push_str(&encode_lower_hex_id(row.column_id));
+                output.push_str("\",\"name\":\"");
+                push_json_string(&mut output, &row.name);
+                output.push_str("\",\"ordinal\":");
+                output.push_str(&row.ordinal.to_string());
+                output.push_str(" ,\"scalar_type\":\"");
+                push_json_string(
+                    &mut output,
+                    &crate::metadata_discovery::scalar_type_name(row.scalar_type),
+                );
+                output.push_str("\",\"nullable\":");
+                output.push_str(if row.nullable { "true" } else { "false" });
+                output.push('}');
+            }
+            _ => return Err(ClientSessionError::ResourceLimit),
+        }
+    }
+    output.push_str("],\"next_cursor\":");
+    match next_cursor {
+        Some(cursor) => {
+            output.push('"');
+            output.push_str(&encode_lower_hex_id(cursor));
+            output.push('"');
+        }
+        None => output.push_str("null"),
+    }
+    output.push('}');
+    Ok(output.into_bytes())
 }
 
 fn current_unix_micros() -> Option<i64> {

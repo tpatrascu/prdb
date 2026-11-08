@@ -29,6 +29,7 @@ pub enum ClientSubmitError {
     Frame(crate::client_protocol::ClientFrameError),
     InvalidCredentials,
     InvalidPackage,
+    InvalidMetadataPage,
     InvalidResponse,
     ServerRejected(String),
     OutcomeUncertain([u8; 16]),
@@ -72,6 +73,15 @@ pub struct SubmissionClient {
 pub struct MetadataClient {
     transport: SubmissionClient,
 }
+
+/// One bounded page from a permission-filtered metadata query.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MetadataPage<T> {
+    pub records: Vec<T>,
+    pub next_cursor: Option<String>,
+}
+
+pub const DEFAULT_METADATA_PAGE_SIZE: usize = 64;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InvocationStatus {
@@ -494,8 +504,37 @@ impl MetadataClient {
     pub fn list_schemas(
         &mut self,
     ) -> Result<Vec<crate::metadata_discovery::VisibleSchema>, ClientSubmitError> {
-        let response = self.request_metadata("metadata.schemas.list", "{}".to_owned())?;
-        let records = discovery_records(response)?;
+        let mut schemas = Vec::new();
+        let mut cursor = None;
+        let mut previous_id = None;
+        loop {
+            let page = self.list_schemas_page(DEFAULT_METADATA_PAGE_SIZE, cursor.as_deref())?;
+            for schema in &page.records {
+                if previous_id.is_some_and(|previous| previous >= schema.schema_id) {
+                    return Err(ClientSubmitError::InvalidResponse);
+                }
+                previous_id = Some(schema.schema_id);
+            }
+            schemas.extend(page.records);
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                return Ok(schemas);
+            }
+        }
+    }
+
+    /// Return one ordered page of visible schemas. Continuations are opaque,
+    /// session-bound cursors issued by the authenticated control connection.
+    pub fn list_schemas_page(
+        &mut self,
+        page_limit: usize,
+        cursor: Option<&str>,
+    ) -> Result<MetadataPage<crate::metadata_discovery::VisibleSchema>, ClientSubmitError> {
+        validate_metadata_page_request(page_limit, cursor)?;
+        let arguments = metadata_page_arguments(page_limit, cursor);
+        let (records, next_cursor) =
+            self.request_metadata_page("metadata.schemas.list", arguments)?;
+        let records = discovery_records(records)?;
         let mut schemas = Vec::with_capacity(records.len());
         let mut previous_id = None;
         for mut record in records {
@@ -510,7 +549,10 @@ impl MetadataClient {
             previous_id = Some(schema_id);
             schemas.push(crate::metadata_discovery::VisibleSchema { schema_id, name });
         }
-        Ok(schemas)
+        Ok(MetadataPage {
+            records: schemas,
+            next_cursor,
+        })
     }
 
     /// Return grant-visible relations for one schema. An empty vector means
@@ -519,11 +561,42 @@ impl MetadataClient {
         &mut self,
         schema_id: [u8; 16],
     ) -> Result<Vec<crate::metadata_discovery::VisibleRelation>, ClientSubmitError> {
-        let response = self.request_metadata(
-            "metadata.relations.list",
-            format!("{{\"schema_id\":\"{}\"}}", lower_hex(&schema_id)),
-        )?;
-        let records = discovery_records(response)?;
+        let mut relations = Vec::new();
+        let mut cursor = None;
+        let mut previous_id = None;
+        loop {
+            let page =
+                self.list_relations_page(schema_id, DEFAULT_METADATA_PAGE_SIZE, cursor.as_deref())?;
+            for relation in &page.records {
+                if previous_id.is_some_and(|previous| previous >= relation.relation_id) {
+                    return Err(ClientSubmitError::InvalidResponse);
+                }
+                previous_id = Some(relation.relation_id);
+            }
+            relations.extend(page.records);
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                return Ok(relations);
+            }
+        }
+    }
+
+    /// Return one grant-filtered relation page for a schema.
+    pub fn list_relations_page(
+        &mut self,
+        schema_id: [u8; 16],
+        page_limit: usize,
+        cursor: Option<&str>,
+    ) -> Result<MetadataPage<crate::metadata_discovery::VisibleRelation>, ClientSubmitError> {
+        validate_metadata_page_request(page_limit, cursor)?;
+        let arguments = format!(
+            "{{\"schema_id\":\"{}\",{}}}",
+            lower_hex(&schema_id),
+            metadata_page_arguments_fields(page_limit, cursor)
+        );
+        let (records, next_cursor) =
+            self.request_metadata_page("metadata.relations.list", arguments)?;
+        let records = discovery_records(records)?;
         let mut relations = Vec::with_capacity(records.len());
         let mut previous_id = None;
         for mut record in records {
@@ -538,7 +611,10 @@ impl MetadataClient {
             previous_id = Some(relation_id);
             relations.push(crate::metadata_discovery::VisibleRelation { relation_id, name });
         }
-        Ok(relations)
+        Ok(MetadataPage {
+            records: relations,
+            next_cursor,
+        })
     }
 
     /// Return the declared, grant-visible column shape for one relation.
@@ -547,15 +623,48 @@ impl MetadataClient {
         schema_id: [u8; 16],
         relation_id: [u8; 16],
     ) -> Result<Vec<crate::metadata_discovery::VisibleColumn>, ClientSubmitError> {
-        let response = self.request_metadata(
-            "metadata.columns.list",
-            format!(
-                "{{\"schema_id\":\"{}\",\"relation_id\":\"{}\"}}",
-                lower_hex(&schema_id),
-                lower_hex(&relation_id)
-            ),
-        )?;
-        let records = discovery_records(response)?;
+        let mut columns = Vec::new();
+        let mut cursor = None;
+        let mut previous_ordinal = None;
+        loop {
+            let page = self.list_columns_page(
+                schema_id,
+                relation_id,
+                DEFAULT_METADATA_PAGE_SIZE,
+                cursor.as_deref(),
+            )?;
+            for column in &page.records {
+                if previous_ordinal.is_some_and(|previous| previous >= column.ordinal) {
+                    return Err(ClientSubmitError::InvalidResponse);
+                }
+                previous_ordinal = Some(column.ordinal);
+            }
+            columns.extend(page.records);
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                return Ok(columns);
+            }
+        }
+    }
+
+    /// Return one ordinal-ordered declared-column page for a relation.
+    pub fn list_columns_page(
+        &mut self,
+        schema_id: [u8; 16],
+        relation_id: [u8; 16],
+        page_limit: usize,
+        cursor: Option<&str>,
+    ) -> Result<MetadataPage<crate::metadata_discovery::VisibleColumn>, ClientSubmitError> {
+        validate_metadata_page_request(page_limit, cursor)?;
+        let arguments = format!(
+            "{{\"schema_id\":\"{}\",\"relation_id\":\"{}\",{}}}",
+            lower_hex(&schema_id),
+            lower_hex(&relation_id),
+            metadata_page_arguments_fields(page_limit, cursor)
+        );
+        let (records, next_cursor) =
+            self.request_metadata_page("metadata.columns.list", arguments)?;
+        let records = discovery_records(records)?;
         let mut columns = Vec::with_capacity(records.len());
         let mut previous_ordinal = None;
         for mut record in records {
@@ -592,19 +701,22 @@ impl MetadataClient {
                 nullable,
             });
         }
-        Ok(columns)
+        Ok(MetadataPage {
+            records: columns,
+            next_cursor,
+        })
     }
 
-    fn request_metadata(
+    fn request_metadata_page(
         &mut self,
         operation: &str,
         arguments: String,
-    ) -> Result<Vec<ResponseValue>, ClientSubmitError> {
+    ) -> Result<(Vec<ResponseValue>, Option<String>), ClientSubmitError> {
         let payload = format!(
             "{{\"phase\":\"read\",\"operation_version\":1,\"operation\":\"{operation}\",\"arguments\":{arguments}}}"
         );
         let response = self.transport.exchange(10, payload.into_bytes())?;
-        discovery_records_value(&response.payload, operation)
+        discovery_page_value(&response.payload, operation)
     }
 }
 
@@ -620,25 +732,87 @@ fn discovery_records(
         .collect()
 }
 
-fn discovery_records_value(
+fn validate_metadata_page_request(
+    page_limit: usize,
+    cursor: Option<&str>,
+) -> Result<(), ClientSubmitError> {
+    if !(1..=crate::client_protocol::CLIENT_METADATA_MAX_PAGE).contains(&page_limit) {
+        return Err(ClientSubmitError::InvalidMetadataPage);
+    }
+    if let Some(cursor) = cursor {
+        decode_metadata_cursor(cursor).map_err(|_| ClientSubmitError::InvalidMetadataPage)?;
+    }
+    Ok(())
+}
+
+fn metadata_page_arguments(page_limit: usize, cursor: Option<&str>) -> String {
+    format!("{{{}}}", metadata_page_arguments_fields(page_limit, cursor))
+}
+
+fn metadata_page_arguments_fields(page_limit: usize, cursor: Option<&str>) -> String {
+    let mut fields = format!("\"limit\":\"{page_limit}\"");
+    if let Some(cursor) = cursor {
+        fields.push_str(",\"cursor\":\"");
+        fields.push_str(cursor);
+        fields.push('"');
+    }
+    fields
+}
+
+fn decode_metadata_cursor(text: &str) -> Result<[u8; 16], ClientSubmitError> {
+    if text.len() != 32 {
+        return Err(ClientSubmitError::InvalidResponse);
+    }
+    let mut cursor = [0; 16];
+    for (index, pair) in text.as_bytes().chunks_exact(2).enumerate() {
+        let high = lower_hex_digit(pair[0]).ok_or(ClientSubmitError::InvalidResponse)?;
+        let low = lower_hex_digit(pair[1]).ok_or(ClientSubmitError::InvalidResponse)?;
+        cursor[index] = (high << 4) | low;
+    }
+    if cursor[0] != 0xd3 {
+        return Err(ClientSubmitError::InvalidResponse);
+    }
+    Ok(cursor)
+}
+
+fn lower_hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
+}
+
+fn discovery_page_value(
     payload: &[u8],
     operation: &str,
-) -> Result<Vec<ResponseValue>, ClientSubmitError> {
+) -> Result<(Vec<ResponseValue>, Option<String>), ClientSubmitError> {
     let key = match operation {
         "metadata.schemas.list" => "schemas",
         "metadata.relations.list" => "relations",
         "metadata.columns.list" => "columns",
         _ => return Err(ClientSubmitError::InvalidResponse),
     };
-    let fields = parse_flat_response(payload)?;
-    if fields.len() != 1 {
+    let mut fields = parse_flat_response(payload)?;
+    if !(fields.len() == 1 || fields.len() == 2) {
         return Err(ClientSubmitError::InvalidResponse);
     }
-    fields
-        .get(key)
-        .and_then(ResponseValue::as_array)
-        .map(<[ResponseValue]>::to_vec)
-        .ok_or(ClientSubmitError::InvalidResponse)
+    let records = fields
+        .remove(key)
+        .and_then(|value| value.as_array().map(<[ResponseValue]>::to_vec))
+        .ok_or(ClientSubmitError::InvalidResponse)?;
+    let cursor = match fields.remove("next_cursor") {
+        None | Some(ResponseValue::Null) => None,
+        Some(ResponseValue::String(value)) => {
+            decode_metadata_cursor(&value)?;
+            Some(value)
+        }
+        _ => return Err(ClientSubmitError::InvalidResponse),
+    };
+    if !fields.is_empty() {
+        return Err(ClientSubmitError::InvalidResponse);
+    }
+    Ok((records, cursor))
 }
 
 fn response_string(

@@ -7561,13 +7561,22 @@ fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
         authenticated_actor_id: admin_id,
         schema_id: visible_schema.schema_id,
         name: "metrics".to_owned(),
-        columns: vec![TableColumnDefinition {
-            name: "reading".to_owned(),
-            scalar_type: ScalarType::Integer,
-            nullable: false,
-            generated_uuid_identity: false,
-            default: None,
-        }],
+        columns: vec![
+            TableColumnDefinition {
+                name: "reading".to_owned(),
+                scalar_type: ScalarType::Integer,
+                nullable: false,
+                generated_uuid_identity: false,
+                default: None,
+            },
+            TableColumnDefinition {
+                name: "reading_extra".to_owned(),
+                scalar_type: ScalarType::Text,
+                nullable: true,
+                generated_uuid_identity: false,
+                default: None,
+            },
+        ],
         retention_deadline_us,
         audit_event: table_audit,
     })?;
@@ -7904,24 +7913,37 @@ fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
     std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
         let server = scope.spawn(|| {
             use std::io::{Read, Write};
-            let (mut stream, _) = metadata_listener.accept().unwrap();
-            let mut decoder = prdb_engine::client_protocol::ClientFrameDecoder::default();
-            let mut session = ClientConnectionSession::default();
-            let mut input = [0u8; 4096];
-            loop {
-                let count = stream.read(&mut input).unwrap();
-                if count == 0 {
-                    break;
-                }
-                for request in decoder.push(&input[..count]).unwrap() {
-                    let response = match request.kind {
-                        1 | 2 => session.handle_handshake_request(&storage, request).unwrap(),
-                        10 => session
-                            .handle_admin_request(&storage, request, retention_deadline_us)
-                            .unwrap(),
-                        kind => panic!("unexpected metadata client frame kind {kind}"),
-                    };
-                    stream.write_all(&response.encode().unwrap()).unwrap();
+            for _ in 0..2 {
+                let (mut stream, _) = metadata_listener.accept().unwrap();
+                let mut decoder = prdb_engine::client_protocol::ClientFrameDecoder::default();
+                let mut session = ClientConnectionSession::default();
+                let mut input = [0u8; 4096];
+                loop {
+                    let count = stream.read(&mut input).unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    for request in decoder.push(&input[..count]).unwrap() {
+                        let request_id = request.request_id;
+                        let result = match request.kind {
+                            1 | 2 => session.handle_handshake_request(&storage, request),
+                            10 => session.handle_admin_request(
+                                &storage,
+                                request,
+                                retention_deadline_us,
+                            ),
+                            kind => panic!("unexpected metadata client frame kind {kind}"),
+                        };
+                        let response = result.unwrap_or_else(|error| {
+                            prdb_engine::client_protocol::ClientFrame {
+                                kind: prdb_engine::client_protocol::CLIENT_ERROR_KIND,
+                                request_id,
+                                response_sequence: 0,
+                                payload: format!("{error:?}").into_bytes(),
+                            }
+                        });
+                        stream.write_all(&response.encode().unwrap()).unwrap();
+                    }
                 }
             }
         });
@@ -7935,11 +7957,46 @@ fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
             )?;
         assert_eq!(secret, [0; 32]);
         let schemas = metadata_client.list_schemas()?;
+        let schema_page = metadata_client.list_schemas_page(1, None)?;
+        assert_eq!(schema_page.records.len(), 1);
+        let schema_page_cursor = schema_page
+            .next_cursor
+            .as_deref()
+            .ok_or("expected multiple visible schemas")?;
+        assert!(matches!(
+            metadata_client.list_relations_page(
+                prdb_engine::metadata_discovery::INFORMATION_SCHEMA_SCHEMA_ID,
+                1,
+                Some(schema_page_cursor),
+            ),
+            Err(prdb_engine::client_submit::ClientSubmitError::ServerRejected(_))
+        ));
+        let final_schema_page = metadata_client.list_schemas_page(1, Some(schema_page_cursor))?;
+        assert_eq!(final_schema_page.records.len(), 1);
+        assert!(final_schema_page.next_cursor.is_none());
         let schema = schemas
             .iter()
             .find(|schema| schema.name == "visible_app")
             .ok_or("grant-visible schema missing through MetadataClient")?;
         assert!(!schemas.iter().any(|schema| schema.name == "hidden_app"));
+        let public_schema_id = prdb_engine::metadata_discovery::INFORMATION_SCHEMA_SCHEMA_ID;
+        let public_relation_page =
+            metadata_client.list_relations_page(public_schema_id, 1, None)?;
+        let public_cursor = public_relation_page
+            .next_cursor
+            .as_deref()
+            .ok_or("expected multiple public information_schema relations")?;
+        let second_public_relation =
+            metadata_client.list_relations_page(public_schema_id, 1, Some(public_cursor))?;
+        assert_eq!(second_public_relation.records.len(), 1);
+        let second_public_cursor = second_public_relation
+            .next_cursor
+            .as_deref()
+            .ok_or("expected third public information_schema relation")?;
+        let third_public_relation =
+            metadata_client.list_relations_page(public_schema_id, 1, Some(second_public_cursor))?;
+        assert_eq!(third_public_relation.records.len(), 1);
+        assert!(third_public_relation.next_cursor.is_none());
         let relations = metadata_client.list_relations(schema.schema_id)?;
         let relation = relations
             .iter()
@@ -7955,6 +8012,49 @@ fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
             .iter()
             .find(|column| column.name == "reading")
             .ok_or("grant-visible column missing through MetadataClient")?;
+        let first_column_page =
+            metadata_client.list_columns_page(schema.schema_id, relation.relation_id, 1, None)?;
+        assert_eq!(first_column_page.records[0].name, "reading");
+        let cursor = first_column_page
+            .next_cursor
+            .as_deref()
+            .ok_or("expected a second declared column page")?;
+        let rename_invocation = id(249);
+        let mut rename_audit = identity_audit_event(0xfb, admin_id, visible_table.column_ids[1]);
+        rename_audit.correlation_id = rename_invocation;
+        storage.rename_column(
+            rename_invocation,
+            admin_id,
+            visible_table.table_id,
+            visible_table.column_ids[1],
+            "reading_current",
+            retention_deadline_us,
+            rename_audit,
+        )?;
+        let second_column_page = metadata_client.list_columns_page(
+            schema.schema_id,
+            relation.relation_id,
+            1,
+            Some(cursor),
+        )?;
+        assert_eq!(second_column_page.records[0].name, "reading_extra");
+        assert!(second_column_page.next_cursor.is_none());
+        assert!(matches!(
+            metadata_client.list_columns_page(
+                schema.schema_id,
+                relation.relation_id,
+                1,
+                Some(cursor),
+            ),
+            Err(prdb_engine::client_submit::ClientSubmitError::ServerRejected(_))
+        ));
+        let current_columns =
+            metadata_client.list_columns(schema.schema_id, relation.relation_id)?;
+        assert!(
+            current_columns
+                .iter()
+                .any(|column| column.name == "reading_current")
+        );
         let mut requested_scope = prdb_engine::submission_scope::RequestedScopeBuilder::new();
         requested_scope
             .include_column(
@@ -7981,7 +8081,22 @@ fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
                 column_id: column.column_id,
             },
         )));
+        let foreign_cursor = metadata_client
+            .list_schemas_page(1, None)?
+            .next_cursor
+            .ok_or("expected a cursor for the cross-connection test")?;
         drop(metadata_client);
+        let mut second_secret = [0x6b; 32];
+        let mut second_client = prdb_engine::client_submit::MetadataClient::connect_authenticated(
+            metadata_address,
+            id(242),
+            &mut second_secret,
+        )?;
+        assert!(matches!(
+            second_client.list_schemas_page(1, Some(&foreign_cursor)),
+            Err(prdb_engine::client_submit::ClientSubmitError::ServerRejected(_))
+        ));
+        drop(second_client);
         server.join().map_err(|_| "metadata TCP server panicked")?;
         Ok(())
     })?;
