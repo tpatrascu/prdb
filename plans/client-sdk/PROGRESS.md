@@ -149,6 +149,14 @@
 - Verification: focused CLI/credential tests and the existing one-time `AdminClient` token issue/revoke mock-TCP regression passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed in the pinned Nix shell; the commit integration target reported 124 passed and 3 cgroup-dependent ignored. CLI help was inspected.
 - Remaining: general admin DDL CLI commands and live ADMIN multi-process path tests remain open.
 
+## SDK-5 dependency: identity and membership admin CLI — implemented
+
+- Contract: [client protocol](../../specs/client-protocol.md) defines user/role lifecycle, login state, and membership PREPARE/START operations; storage revalidates authority and protects the last usable administrator credential.
+- Implementation: `prdb-client` exposes user/role create, rename, and drop, user login enable/disable, and role membership grant/revoke. It uses typed `AdminClient` methods, validates IDs and boolean flags before sending, and reports generated IDs and durable operation metadata.
+- Regression: CLI parser tests cover canonical login booleans; existing mock-TCP integration covers each identity/membership operation shape and server response validation.
+- Verification: focused CLI tests passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed in the pinned Nix shell. The commit integration target reported 124 passed and 3 cgroup-dependent ignored. The initial full-suite attempt hit the intermittent CHECK lifecycle `InvalidAudit`; the isolated regression and full rerun passed. Final CLI help was inspected.
+- Remaining: table/schema/constraint/policy admin CLI commands and live ADMIN multi-process path tests remain open.
+
 ## SDK-5 dependency: typed schema rename AdminClient operation — implemented
 
 - Contract: [client protocol](../../specs/client-protocol.md) requires `schemas.rename` START to echo the stable schema ID and normalized new name.

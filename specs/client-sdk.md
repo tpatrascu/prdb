@@ -120,6 +120,8 @@ The `prdb-client` command exposes `scope`, `submit`, and `status`. `scope` disco
 
 `prdb-client token-issue` issues a credential through the authenticated `AdminClient` control channel and saves the returned secret to a new private credential file; it never prints the secret. The command requires a positive TTL in seconds and computes the absolute expiration timestamp locally. If issuance commits but file publication fails, the CLI reports the operation and token IDs and instructs the caller to revoke the unrecoverable token before retrying. Rotation is explicit: save a replacement file, verify it with a fresh authenticated request, then revoke the old token with `token-revoke`. The CLI never revokes the previous token automatically.
 
+The admin CLI also exposes user and role create/rename/drop, user login enable/disable, and role membership grant/revoke through typed `AdminClient` operations. User creation returns an identity only; use `token-issue` separately to create a credential. These commands require the corresponding storage authority and print generated identity IDs and operation/commit metadata, never bearer secrets.
+
 The versioned C ABI is the interoperability boundary, not permission to use unspecified Rust layouts. C can corrupt the Rust executor host, so all trusted services remain outside that process. Other query languages/compilers are outside the initial supported SDK; artifact provenance never bypasses validation.
 
 ## Benchmark and Acceptance Plan

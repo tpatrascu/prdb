@@ -26,6 +26,11 @@ Token secrets are saved only to mode-0600 credential files and are never printed
   prdb-client token-issue --address IP:PORT --credentials ADMIN_FILE --user-id HEX\n\
     --label TEXT --ttl-seconds N --output-credentials FILE\n\
   prdb-client token-revoke --address IP:PORT --credentials ADMIN_FILE --token-id HEX\n\n\
+  prdb-client user-create|role-create --address IP:PORT --credentials ADMIN_FILE --name NAME\n\
+  prdb-client user-rename|role-rename --address IP:PORT --credentials ADMIN_FILE --id HEX --name NAME\n\
+  prdb-client user-drop|role-drop --address IP:PORT --credentials ADMIN_FILE --id HEX\n\
+  prdb-client user-login --address IP:PORT --credentials ADMIN_FILE --user-id HEX --enabled true|false\n\
+  prdb-client role-grant|role-revoke --address IP:PORT --credentials ADMIN_FILE --member-id HEX --role-id HEX\n\n\
 Token secrets are saved only to mode-0600 credential files and are never printed.\n\
 For rotation, save a replacement credential, verify it, then revoke the old token.";
 
@@ -81,6 +86,10 @@ fn run() -> Result<(), String> {
         "scope" => scope(address, credentials_path, &mut fields),
         "token-issue" => token_issue(address, credentials_path, &mut fields),
         "token-revoke" => token_revoke(address, credentials_path, &mut fields),
+        "user-create" | "user-rename" | "user-drop" | "user-login" | "role-create"
+        | "role-rename" | "role-drop" | "role-grant" | "role-revoke" => {
+            identity_admin(&command, address, credentials_path, &mut fields)
+        }
         _ => Err(format!("unknown command {command}\n{USAGE}")),
     }
 }
@@ -421,6 +430,122 @@ fn token_revoke(
     Ok(())
 }
 
+fn identity_admin(
+    command: &str,
+    address: SocketAddr,
+    credentials_path: PathBuf,
+    fields: &mut HashMap<String, std::ffi::OsString>,
+) -> Result<(), String> {
+    let mut administrator =
+        read_client_credentials(credentials_path).map_err(|error| error.to_string())?;
+    let mut client = AdminClient::connect_authenticated(
+        address,
+        administrator.token_id,
+        &mut administrator.token_secret,
+    )
+    .map_err(|error| error.to_string())?;
+    match command {
+        "user-create" | "role-create" => {
+            let name = take_text(fields, "--name")?;
+            reject_unknown(fields)?;
+            let result = if command == "user-create" {
+                client.create_user(&name)
+            } else {
+                client.create_role(&name)
+            }
+            .map_err(|error| error.to_string())?;
+            let kind = if command == "user-create" {
+                "user"
+            } else {
+                "role"
+            };
+            println!(
+                "created {kind} {} (operation {}, commit {})",
+                lower_hex(&result.identity_id),
+                lower_hex(&result.operation_id),
+                result.commit_sequence
+            );
+        }
+        "user-rename" | "role-rename" => {
+            let id = parse_id(&take_text(fields, "--id")?)?;
+            let name = take_text(fields, "--name")?;
+            reject_unknown(fields)?;
+            let result = if command == "user-rename" {
+                client.rename_user(id, &name)
+            } else {
+                client.rename_role(id, &name)
+            }
+            .map_err(|error| error.to_string())?;
+            print_operation(
+                "renamed identity",
+                &result.operation_id,
+                result.commit_sequence,
+            );
+        }
+        "user-drop" | "role-drop" => {
+            let id = parse_id(&take_text(fields, "--id")?)?;
+            reject_unknown(fields)?;
+            let result = if command == "user-drop" {
+                client.drop_user(id)
+            } else {
+                client.drop_role(id)
+            }
+            .map_err(|error| error.to_string())?;
+            print_operation(
+                "dropped identity",
+                &result.operation_id,
+                result.commit_sequence,
+            );
+        }
+        "user-login" => {
+            let user_id = parse_id(&take_text(fields, "--user-id")?)?;
+            let enabled = parse_boolean(&take_text(fields, "--enabled")?, "--enabled")?;
+            reject_unknown(fields)?;
+            let result = client
+                .set_user_login(user_id, enabled)
+                .map_err(|error| error.to_string())?;
+            print_operation(
+                "changed user login",
+                &result.operation_id,
+                result.commit_sequence,
+            );
+        }
+        "role-grant" | "role-revoke" => {
+            let member_id = parse_id(&take_text(fields, "--member-id")?)?;
+            let role_id = parse_id(&take_text(fields, "--role-id")?)?;
+            reject_unknown(fields)?;
+            let result = if command == "role-grant" {
+                client.grant_role(member_id, role_id)
+            } else {
+                client.revoke_role(member_id, role_id)
+            }
+            .map_err(|error| error.to_string())?;
+            print_operation(
+                "changed role membership",
+                &result.operation_id,
+                result.commit_sequence,
+            );
+        }
+        _ => return Err(format!("unsupported identity command {command}")),
+    }
+    Ok(())
+}
+
+fn print_operation(label: &str, operation_id: &[u8; 16], commit_sequence: u64) {
+    println!(
+        "{label} (operation {}, commit {commit_sequence})",
+        lower_hex(operation_id)
+    );
+}
+
+fn parse_boolean(value: &str, option: &str) -> Result<bool, String> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(format!("{option} must be true or false")),
+    }
+}
+
 fn expiration_time(ttl_seconds: u64) -> Result<i64, String> {
     if ttl_seconds == 0 {
         return Err("--ttl-seconds must be positive".to_owned());
@@ -602,5 +727,13 @@ mod tests {
             .unwrap();
         assert!(expiry > now);
         assert!(expiration_time(u64::MAX).is_err());
+    }
+
+    #[test]
+    fn login_switch_parser_accepts_only_canonical_booleans() {
+        assert!(parse_boolean("true", "--enabled").unwrap());
+        assert!(!parse_boolean("false", "--enabled").unwrap());
+        assert!(parse_boolean("yes", "--enabled").is_err());
+        assert!(parse_boolean("TRUE", "--enabled").is_err());
     }
 }
