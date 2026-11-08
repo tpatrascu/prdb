@@ -1897,3 +1897,10 @@
 - Regression: real-redb coverage creates a PRIMARY KEY on a non-null column and validates its owned index and startup integrity. Decoder coverage checks the exact ordered-column request, and the authenticated control integration creates a PRIMARY KEY before creating a UNIQUE and exercising FK lifecycle.
 - Verification: the focused manager, decoder, and authenticated gateway regressions passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` passed under Rust 1.95.0; the commit integration target had 118 passed and 3 cgroup-dependent tests ignored.
 - Remaining: CHECK creation/removal and SQL `ALTER TABLE` parsing remain open.
+
+## SM-5: structured CHECK lifecycle through StorageManager — in progress
+
+- Implementation: typed `create_check_constraint` and `drop_check_constraint` operations generate/remove CHECK, expression, object, and dependency records and advance the table write epoch through the authorized, fenced constraint commit.
+- Regression: real-redb coverage creates a Boolean CHECK, verifies startup integrity, then removes the CHECK/expression. A row-local CHECK that rejects an existing row leaves no publication and records ABORTED; non-row-local identity expressions are rejected.
+- Verification: the focused lifecycle regression passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` passed under Rust 1.95.0; the commit integration target had 119 passed and 3 cgroup-dependent tests ignored.
+- Remaining: authenticated ADMIN create/drop routes and SQL `ALTER TABLE` parsing remain open.

@@ -7271,6 +7271,143 @@ fn storage_manager_creates_primary_key_with_owned_unique_index()
 }
 
 #[test]
+fn storage_manager_creates_and_drops_check_constraint() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let admin_role = builtin_owner_id();
+    let actor = id(0xf6);
+    let foreign_key_edge = dependency_write(id(86), id(85), 3).key;
+    let setup_writes = foreign_key_catalog_writes(false, true)
+        .into_iter()
+        .filter(|write| {
+            write.key != id_catalog_key(8, id(86))
+                && write.key != id_catalog_key(2, id(86))
+                && write.key != foreign_key_edge
+        })
+        .chain([
+            principal_write_with_name(actor, 1, 1, "check_create_admin"),
+            object_write_with_name(actor, 8, "check_create_admin"),
+            membership_write(actor, admin_role),
+            dependency_write(actor, admin_role, 5),
+        ])
+        .collect::<Vec<_>>();
+    let mut setup_audit = identity_audit_event(0xf7, admin_role, id(80));
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(id(0xf7), admin_role, 9_999, &setup_writes, &[setup_audit])?;
+
+    let mut insert = storage.begin_invocation(id(0xf8), actor, 9_999, 1, 1024)?;
+    let schema = insert.load_catalog_table_schema(id(82))?;
+    insert.load_catalog_indexes(&schema)?;
+    let tuple = encode_tuple(
+        &schema.columns,
+        schema.schema_version,
+        &[Some(ScalarValue::Bytea(b"check row".to_vec()))],
+    )?;
+    insert.stage_put(
+        prdb_engine::overlay::RowId {
+            table: id(82),
+            row: id(0xf9),
+        },
+        &tuple,
+    )?;
+    assert_eq!(insert.commit()?, 2);
+
+    let invocation_id = id(0xfa);
+    let mut invalid_audit = identity_audit_event(0xfb, actor, id(82));
+    invalid_audit.correlation_id = invocation_id;
+    assert!(matches!(
+        storage.create_check_constraint(
+            prdb_engine::storage_manager::CreateCheckConstraintRequest {
+                invocation_id,
+                authenticated_actor_id: actor,
+                table_id: id(82),
+                expression: prdb_engine::authorization::Expr::CurrentPrincipalId,
+                dependency_column_ids: vec![],
+                retention_deadline_us: 9_999,
+                audit_event: invalid_audit,
+            }
+        ),
+        Err(prdb_engine::storage_manager::TableLifecycleError::InvalidRequest)
+    ));
+
+    let invalid_row_check_id = id(0xfc);
+    let mut invalid_row_check_audit = identity_audit_event(0xfd, actor, id(82));
+    invalid_row_check_audit.correlation_id = invalid_row_check_id;
+    assert!(matches!(
+        storage.create_check_constraint(
+            prdb_engine::storage_manager::CreateCheckConstraintRequest {
+                invocation_id: invalid_row_check_id,
+                authenticated_actor_id: actor,
+                table_id: id(82),
+                expression: prdb_engine::authorization::Expr::IsNull(Box::new(
+                    prdb_engine::authorization::Expr::Field(0),
+                )),
+                dependency_column_ids: vec![id(84)],
+                retention_deadline_us: 9_999,
+                audit_event: invalid_row_check_audit,
+            }
+        ),
+        Err(prdb_engine::storage_manager::TableLifecycleError::Commit(
+            CommitError::CheckViolation
+        ))
+    ));
+    assert_eq!(
+        lookup_outcome(&database, invalid_row_check_id, actor, 1)?
+            .ok_or("missing rejected CHECK creation outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
+
+    let invocation_id = id(0xfe);
+    let mut create_audit = identity_audit_event(0xff, actor, id(82));
+    create_audit.correlation_id = invocation_id;
+    let created = storage
+        .create_check_constraint(prdb_engine::storage_manager::CreateCheckConstraintRequest {
+            invocation_id,
+            authenticated_actor_id: actor,
+            table_id: id(82),
+            expression: prdb_engine::authorization::Expr::Literal(Some(ScalarValue::Boolean(true))),
+            dependency_column_ids: vec![],
+            retention_deadline_us: 9_999,
+            audit_event: create_audit,
+        })
+        .map_err(|error| format!("CHECK constraint creation failed: {error:?}"))?;
+    assert_eq!(created.commit_sequence, 3);
+    prdb_engine::startup::validate_persisted_records(&database)?;
+
+    let drop_invocation_id = id(0xe1);
+    let mut drop_audit = identity_audit_event(0xe2, actor, created.constraint_id);
+    drop_audit.correlation_id = drop_invocation_id;
+    assert_eq!(
+        storage.drop_check_constraint(
+            drop_invocation_id,
+            actor,
+            created.constraint_id,
+            9_999,
+            drop_audit,
+        )?,
+        4
+    );
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    assert!(
+        catalog
+            .get(id_catalog_key(8, created.constraint_id).as_slice())?
+            .is_none()
+    );
+    assert!(
+        catalog
+            .get(id_catalog_key(7, created.expression_id).as_slice())?
+            .is_none()
+    );
+    drop(catalog);
+    drop(read);
+    prdb_engine::startup::validate_persisted_records(&database)?;
+    Ok(())
+}
+
+#[test]
 fn storage_manager_drop_referencing_table_removes_owned_foreign_key()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
