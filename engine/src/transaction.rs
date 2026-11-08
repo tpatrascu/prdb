@@ -781,26 +781,31 @@ impl<'db> InvocationTransaction<'db> {
         &mut self,
         family_code: u16,
     ) -> Result<Vec<CatalogRecord>, TransactionError> {
-        let remaining = self.max_scan_work.saturating_sub(self.scanned_work);
-        if remaining == 0 {
-            return Err(TransactionError::ScanBudgetExceeded);
+        let result = (|| {
+            let remaining = self.max_scan_work.saturating_sub(self.scanned_work);
+            if remaining == 0 {
+                return Err(TransactionError::ScanBudgetExceeded);
+            }
+            let family_limit = MAX_CATALOG_FAMILY_SCAN;
+            let records =
+                self.pinned_snapshot()?
+                    .scan_catalog_family_limited(family_code, remaining.min(family_limit))
+                    .map_err(|error| match error {
+                        SnapshotError::RecordLimitExceeded if remaining < family_limit => {
+                            TransactionError::ScanBudgetExceeded
+                        }
+                        SnapshotError::RecordLimitExceeded
+                        | SnapshotError::InvalidCatalogRecord => TransactionError::CorruptCatalog,
+                        SnapshotError::Storage(error) => TransactionError::Storage(error),
+                        _ => TransactionError::CorruptCatalog,
+                    })?;
+            self.charge_scan_work(records.len())?;
+            Ok(records)
+        })();
+        if matches!(&result, Err(TransactionError::ScanBudgetExceeded)) && !self.aborted {
+            self.abort()?;
         }
-        let family_limit = MAX_CATALOG_FAMILY_SCAN;
-        let records = self
-            .pinned_snapshot()?
-            .scan_catalog_family_limited(family_code, remaining.min(family_limit))
-            .map_err(|error| match error {
-                SnapshotError::RecordLimitExceeded if remaining < family_limit => {
-                    TransactionError::ScanBudgetExceeded
-                }
-                SnapshotError::RecordLimitExceeded | SnapshotError::InvalidCatalogRecord => {
-                    TransactionError::CorruptCatalog
-                }
-                SnapshotError::Storage(error) => TransactionError::Storage(error),
-                _ => TransactionError::CorruptCatalog,
-            })?;
-        self.charge_scan_work(records.len())?;
-        Ok(records)
+        result
     }
 
     pub fn read(&mut self, id: RowId) -> Result<Option<Vec<u8>>, TransactionError> {
