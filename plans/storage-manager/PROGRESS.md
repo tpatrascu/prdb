@@ -1843,3 +1843,10 @@
 - Regression: `storage_manager_drop_table_restricts_external_foreign_key_dependencies` creates a source FK referencing a target table, attempts to drop the target through `StorageManager`, and verifies `TableHasDependencies`, unchanged commit sequence and both tables/FK edge, an ABORTED outcome, and successful persisted-record validation.
 - Verification: the focused commit integration test and full workspace build, formatting check, warning-denied Clippy, and test suite passed under Rust 1.95.0. The commit integration target had 110 passed and 3 delegated-cgroup tests ignored.
 - Scope: verifies the referenced-table RESTRICT path and durable failure behavior. The source-table path, which owns and removes its FK, has separate coverage; broader external constraint/policy and DDL race coverage remain open.
+
+## SM-5 / DS-5: FK creation racing with referenced-table drop — verified
+
+- Contract: [schema DDL](../../specs/ddl-schema.md) requires FK creation and referenced-table removal to serialize so neither operation can publish a dangling reference or silently remove a committed constraint.
+- Regression: `foreign_key_creation_racing_referenced_table_drop_is_atomic` releases an authorized FK add and target-table `DROP ... RESTRICT` together from a barrier. It accepts only one committed DDL operation, checks both durable outcomes and the single commit-sequence advance, validates the resulting catalog shape, and reopens through `validate_persisted_records`.
+- Verification: the focused race test passed. Workspace build, formatting check, warning-denied Clippy, and full workspace tests passed with Rust 1.95.0; the commit integration target had 111 passed and 3 delegated-cgroup tests ignored.
+- Scope: one barrier-coordinated schedule per run; repeated stress and races with other external constraint/policy changes remain open.

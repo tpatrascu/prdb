@@ -6370,6 +6370,130 @@ fn storage_manager_drop_table_restricts_external_foreign_key_dependencies()
 }
 
 #[test]
+fn foreign_key_creation_racing_referenced_table_drop_is_atomic()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::storage_manager::TableLifecycleError;
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(500))?;
+    let admin_role = builtin_owner_id();
+    let actor = id(0xb5);
+    let foreign_key_key = id_catalog_key(8, id(86));
+    let foreign_key_object_key = id_catalog_key(2, id(86));
+    let target_edge = dependency_write(id(86), id(85), 3);
+    let target_edge_key = target_edge.key.clone();
+    let mut setup_writes = foreign_key_catalog_writes(false, true)
+        .into_iter()
+        .filter(|write| {
+            write.key != foreign_key_key
+                && write.key != foreign_key_object_key
+                && write.key != target_edge.key
+        })
+        .collect::<Vec<_>>();
+    setup_writes.extend([
+        principal_write_with_name(actor, 1, 1, "foreign_key_race_admin"),
+        object_write_with_name(actor, 8, "foreign_key_race_admin"),
+        membership_write(actor, admin_role),
+        dependency_write(actor, admin_role, 5),
+    ]);
+    let mut setup_audit = identity_audit_event(0xb6, admin_role, id(80));
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(id(0xb7), admin_role, 9_999, &setup_writes, &[setup_audit])?;
+
+    let mut foreign_key_definition = foreign_key_catalog_writes(true, true)
+        .into_iter()
+        .find(|write| write.key == foreign_key_key)
+        .ok_or("missing foreign-key definition")?;
+    foreign_key_definition.expected_value = None;
+    let foreign_key_object = object_write(id(86), 6);
+    let mut source_table_update = table_write_with_versions(id(82), id(80), 1, 2);
+    source_table_update.expected_value = table_write(id(82), id(80)).payload;
+    let mut target_table_update = table_write_with_versions(id(81), id(80), 1, 2);
+    target_table_update.expected_value = table_write(id(81), id(80)).payload;
+    let fk_invocation = id(0xb8);
+    let drop_invocation = id(0xb9);
+    let barrier = Arc::new(Barrier::new(3));
+    let (fk_result, drop_result) = std::thread::scope(|scope| {
+        let fk_barrier = barrier.clone();
+        let fk_storage = &storage;
+        let fk = scope.spawn(move || {
+            let mut audit = identity_audit_event(0xba, actor, id(86));
+            audit.correlation_id = fk_invocation;
+            fk_barrier.wait();
+            fk_storage.commit_authorized_foreign_key_ddl(
+                fk_invocation,
+                actor,
+                9_999,
+                &[
+                    foreign_key_definition,
+                    foreign_key_object,
+                    target_edge,
+                    source_table_update,
+                    target_table_update,
+                ],
+                &[audit],
+            )
+        });
+        let drop_barrier = barrier.clone();
+        let drop_storage = &storage;
+        let drop = scope.spawn(move || {
+            let mut audit = identity_audit_event(0xbb, actor, id(81));
+            audit.correlation_id = drop_invocation;
+            drop_barrier.wait();
+            drop_storage.drop_table(drop_invocation, actor, id(81), 9_999, audit)
+        });
+        barrier.wait();
+        (fk.join().unwrap(), drop.join().unwrap())
+    });
+
+    let (fk_status, drop_status) = match (fk_result, drop_result) {
+        (Ok(_), Err(TableLifecycleError::Commit(CommitError::TableHasDependencies))) => {
+            (OutcomeStatus::Committed, OutcomeStatus::Aborted)
+        }
+        (
+            Err(
+                CommitError::Conflict
+                | CommitError::InvalidCatalog
+                | CommitError::DdlAuthorizationDenied,
+            ),
+            Ok(_),
+        ) => (OutcomeStatus::Aborted, OutcomeStatus::Committed),
+        (fk, drop) => panic!("unexpected FK-create/table-drop race: {fk:?} / {drop:?}"),
+    };
+    assert_eq!(commit_sequence(&database)?, 2);
+    assert_eq!(
+        lookup_outcome(&database, fk_invocation, actor, 1)?
+            .ok_or("missing FK race outcome")?
+            .status,
+        fk_status
+    );
+    assert_eq!(
+        lookup_outcome(&database, drop_invocation, actor, 1)?
+            .ok_or("missing table-drop race outcome")?
+            .status,
+        drop_status
+    );
+
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    if drop_status == OutcomeStatus::Committed {
+        assert!(catalog.get(id_catalog_key(5, id(81)).as_slice())?.is_none());
+        assert!(catalog.get(foreign_key_key.as_slice())?.is_none());
+        assert!(catalog.get(target_edge_key.as_slice())?.is_none());
+        assert!(catalog.get(id_catalog_key(5, id(82)).as_slice())?.is_some());
+    } else {
+        assert!(catalog.get(id_catalog_key(5, id(81)).as_slice())?.is_some());
+        assert!(catalog.get(foreign_key_key.as_slice())?.is_some());
+        assert!(catalog.get(target_edge_key.as_slice())?.is_some());
+    }
+    drop(catalog);
+    drop(read);
+    prdb_engine::startup::validate_persisted_records(&database)?;
+    Ok(())
+}
+
+#[test]
 fn storage_manager_drop_referencing_table_removes_owned_foreign_key()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
