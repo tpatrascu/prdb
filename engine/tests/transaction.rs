@@ -4645,8 +4645,8 @@ fn invocation_snapshot_hides_private_writes_and_keeps_repeated_reads_stable()
 #[test]
 fn retained_invocation_snapshot_survives_a_durable_write_burst()
 -> Result<(), Box<dyn std::error::Error>> {
-    const VALUE_BYTES: usize = 16 * 1024;
-    const WRITE_COUNT: u8 = 32;
+    const VALUE_BYTES: usize = 32 * 1024;
+    const WRITE_COUNT: u8 = 64;
 
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
@@ -4677,7 +4677,7 @@ fn retained_invocation_snapshot_survives_a_durable_write_burst()
     reader.abort()?;
 
     let mut observer =
-        InvocationTransaction::begin(&database, [0x61; 16], [9; 16], 9_999, 4, 32 * 1024)?;
+        InvocationTransaction::begin(&database, [0x90; 16], [9; 16], 9_999, 4, 32 * 1024)?;
     assert_eq!(observer.read(id(1))?, Some(latest_value));
     observer.abort()?;
     Ok(())

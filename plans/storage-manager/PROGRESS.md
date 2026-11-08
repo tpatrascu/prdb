@@ -1745,3 +1745,9 @@
 - Regression: the real-redb [transaction test](../../engine/tests/transaction.rs) holds one invocation snapshot while 32 other invocations each commit a 16 KiB replacement to the same row. The retained reader returns the original row after every commit; a new invocation reads the 32nd committed value.
 - Verification: `cargo fmt --all -- --check` and `cargo test -p prdb-engine --test transaction retained_invocation_snapshot_survives_a_durable_write_burst --locked` passed.
 - Scope: validates engine transaction behavior for a bounded single-row burst. It does not measure production reader scheduling, sustained write/analytical contention, file reclamation, or power-loss durability.
+
+### Expanded retained invocation pressure — verified
+
+- Regression: expanded `retained_invocation_snapshot_survives_a_durable_write_burst` to hold one invocation snapshot open while 64 other invocations durably replace the same row with 32 KiB values (2 MiB of committed replacement payload). After every commit, the held snapshot still reads its original value; a fresh invocation reads the last replacement.
+- Verification: the focused transaction integration test passed with the pinned Nix toolchain.
+- Scope: bounded pressure evidence only; sustained contention, physical reclamation, and power-loss behavior remain unmeasured.
