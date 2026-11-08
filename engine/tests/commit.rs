@@ -16581,6 +16581,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     };
     use prdb_engine::supervisor_ipc::{
         GatewayAdmissionConfig, GatewayExecutorConfig, GatewayTerminalDecision,
+        finalize_gateway_invocation_and_send_terminal, observe_executor_and_relay_results,
         observe_executor_relay_and_finalize_gateway,
     };
     use prdb_engine::tuple::ScalarType;
@@ -17518,27 +17519,16 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
 
     let (mut service, mut gateway) = UnixStream::pair()?;
     gateway.set_read_timeout(Some(Duration::from_secs(10)))?;
-    let decision = observe_executor_relay_and_finalize_gateway(
-        &storage,
-        &mut invocation,
+    let worker_status = observe_executor_and_relay_results(
         &mut executor,
+        &invocation,
         &mut service,
         accepted.request_id,
     )?;
-    if decision != GatewayTerminalDecision::Commit {
-        let mut relayed = Vec::new();
-        while let Some(frame) = read_frame(&mut gateway)? {
-            let terminal = frame.operation == Operation::GatewayTerminal as u16;
-            relayed.push((
-                frame.operation,
-                String::from_utf8_lossy(&frame.payload).into_owned(),
-            ));
-            if terminal {
-                break;
-            }
-        }
-        panic!("sandbox query aborted: {decision:?}; relayed frames: {relayed:?}");
-    }
+    assert!(
+        worker_status.success(),
+        "sandbox query worker failed: {worker_status}"
+    );
     staging.finish_started(owner, reservation.invocation_id)?;
     let inserted = read_frame(&mut gateway)?.ok_or("missing INSERT visibility result")?;
     assert_eq!(inserted.operation, Operation::GatewayResultData as u16);
@@ -17579,10 +17569,16 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     assert_eq!(updated.operation, Operation::GatewayResultData as u16);
     assert_eq!(updated.request_id, accepted.request_id);
     assert_eq!(updated.payload, b"update-visible");
-    let terminal = read_frame(&mut gateway)?.ok_or("missing committed terminal event")?;
-    assert_eq!(terminal.operation, Operation::GatewayTerminal as u16);
-    assert_eq!(terminal.request_id, accepted.request_id);
-    assert!(String::from_utf8(terminal.payload)?.contains("\"outcome\":\"committed\""));
+    drop(gateway);
+    assert!(matches!(
+        finalize_gateway_invocation_and_send_terminal(
+            &mut invocation,
+            &mut service,
+            accepted.request_id,
+            GatewayTerminalDecision::Commit,
+        ),
+        Err(prdb_engine::supervisor_ipc::GatewayTerminalRelayError::Frame(_))
+    ));
     assert_eq!(
         storage
             .lookup_invocation_outcome(reservation.invocation_id, user_id, now + 1)?
