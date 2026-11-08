@@ -106,6 +106,7 @@ pub struct GatewayServiceListenerConfig {
 pub enum GatewayServiceListenerError {
     InvalidConfig,
     StorageReopenRequired,
+    Staging(crate::supervisor::StagingError),
     Io(io::Error),
     WorkerPanicked,
 }
@@ -482,10 +483,15 @@ where
     std::thread::scope(|scope| {
         let mut workers = Vec::new();
         let mut accept_error = None;
+        let mut staging_error = None;
         let mut storage_reopen_required = false;
         while !shutdown.load(Ordering::Acquire) {
             if manager.requires_reopen_after_commit_error() {
                 storage_reopen_required = true;
+                break;
+            }
+            if let Err(error) = staging.reap_expired(256) {
+                staging_error = Some(error);
                 break;
             }
             match listener.accept() {
@@ -576,6 +582,8 @@ where
             Err(GatewayServiceListenerError::WorkerPanicked)
         } else if storage_reopen_required {
             Err(GatewayServiceListenerError::StorageReopenRequired)
+        } else if let Some(error) = staging_error {
+            Err(GatewayServiceListenerError::Staging(error))
         } else if let Some(error) = accept_error {
             Err(GatewayServiceListenerError::Io(error))
         } else {
@@ -1597,6 +1605,122 @@ mod worker_result_event_tests {
         drop(manager);
         drop(instance);
         let _ = std::fs::remove_file(&socket_path);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn idle_gateway_service_periodically_reaps_expired_staging() {
+        use crate::supervisor::{
+            ChunkKind, PrepareSubmission, StagingLimits, StagingOwner, StagingStore, WorkloadClass,
+        };
+        use sha2::{Digest, Sha256};
+
+        let root = std::env::temp_dir().join(format!("prdb-service-reaper-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut bootstrap = crate::bootstrap::initialize(&root, "reaper_admin", i64::MAX)
+            .expect("initialize service instance");
+        bootstrap.take_secret().expect("take bootstrap secret");
+        let instance = bootstrap
+            .acknowledge()
+            .expect("publish ready service instance");
+        let manager = instance
+            .storage_manager(crate::storage_manager::StorageManagerConfig::default())
+            .expect("build storage manager");
+
+        let owner = StagingOwner::authenticated([1; 16], [2; 16]);
+        let artifact = b"staged artifact";
+        let staging = StagingStore::new(
+            StagingLimits {
+                reservation_ttl: Duration::from_millis(5),
+                ..StagingLimits::default()
+            },
+            Arc::new(AcceptMetadata),
+        )
+        .expect("build staging store");
+        let reservation = staging
+            .prepare(
+                owner,
+                PrepareSubmission {
+                    manifest_version: 1,
+                    manifest: b"manifest".to_vec(),
+                    artifact_bytes: artifact.len() as u64,
+                    artifact_sha256: Sha256::digest(artifact).into(),
+                    scope_version: 1,
+                    requested_scope: b"scope".to_vec(),
+                    parameter_bytes: 0,
+                    parameter_sha256: Sha256::digest([]).into(),
+                    deadline_ms: 30_000,
+                    workload_class: WorkloadClass::Operational,
+                },
+            )
+            .expect("prepare staging reservation");
+        staging
+            .upload_chunk(
+                owner,
+                reservation.invocation_id,
+                ChunkKind::Artifact,
+                0,
+                artifact,
+            )
+            .expect("upload artifact");
+
+        let socket_path = root.with_extension("reaper.sock");
+        let listener = super::bind_gateway_service_socket(&socket_path).expect("bind listener");
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_signal = Arc::clone(&shutdown);
+        let shutdown_thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(40));
+            shutdown_signal.store(true, Ordering::Release);
+        });
+        let runtime = super::GatewayServiceRuntimeConfig {
+            admission: super::GatewayAdmissionConfig {
+                retention_deadline_us: i64::MAX,
+                max_rows: 1,
+                max_bytes: 64,
+            },
+            executor: super::GatewayExecutorConfig {
+                cgroup_parent: root.clone(),
+                resource_limits: crate::linux_sandbox::WorkerResourceLimits {
+                    cpu_quota_micros: 100_000,
+                    cpu_period_micros: 100_000,
+                    memory_max_bytes: 64 * 1024 * 1024,
+                    max_processes: 16,
+                },
+                launch: crate::executor_launcher::ExecutorLaunchConfig {
+                    executor_path: std::env::current_exe().expect("current executable"),
+                    scratch_parent: std::env::temp_dir(),
+                    runtime_read_execute: Vec::new(),
+                    runtime_read_only: Vec::new(),
+                    cleanup_timeout: Duration::from_millis(100),
+                },
+            },
+            listener: super::GatewayServiceListenerConfig {
+                expected_gateway_uid: unsafe { libc::geteuid() },
+                max_connections: 1,
+                idle_timeout: Duration::from_secs(1),
+                accept_poll_interval: Duration::from_millis(1),
+            },
+        };
+        super::serve_gateway_service_listener(
+            listener,
+            &manager,
+            &staging,
+            runtime,
+            shutdown,
+            |_request_id, _stream, _invocation, _submission, _executor| {},
+        )
+        .expect("serve idle gateway listener");
+        shutdown_thread.join().expect("join shutdown thread");
+        assert_eq!(
+            staging
+                .close_connection(owner)
+                .expect("close expired owner"),
+            crate::supervisor::ConnectionClose::Discarded(Vec::new())
+        );
+
+        drop(manager);
+        drop(instance);
+        let _ = std::fs::remove_file(socket_path);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

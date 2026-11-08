@@ -1563,3 +1563,11 @@
 - Test setup: the initial attempt to revoke membership from the fixture's non-credentialed owner was correctly denied because changing a role's membership requires an authorized administrative caller. The fixture now provisions a credentialed database administrator and performs the revocation through the supported API.
 - Verification: the focused real-redb lifecycle test passed in the configured Nix shell.
 - Remaining: separate supervisor/gateway process integration and broader DDL acceptance evidence remain open.
+
+## SM-6: periodic bounded submission expiry — implemented
+
+- Behavior and normative contract: [supervisor staging lifecycle](../../specs/supervisor.md). Expired pre-start reservations must be reaped even while the service receives no client traffic, and each maintenance pass must have a bounded scan cost.
+- Implementation: `StagingStore::reap_expired(max_scanned)` scans an ordered reservation map with a rotating cursor, visits at most the caller's budget, and eventually covers all live reservations. Opportunistic staging operations use a 256-entry pass. The gateway service runs the same 256-entry reaper on each accept-loop iteration and stops if the staging state is poisoned.
+- Red evidence: disabling the service-loop reaper made `idle_gateway_service_periodically_reaps_expired_staging` fail: closing the expired connection returned its still-live reservation ID. Restoring periodic maintenance made the test pass. The bounded-pass regression creates three expired reservations, confirms one is returned per one-entry pass, and checks all are unavailable afterward.
+- Verification: focused reaper and idle-service tests passed. In the prescribed Nix shell, `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, and `git diff --check` passed. The workspace had 22 passing library unit tests; the commit integration target had 109 passing and 2 pre-existing cgroup-dependent tests ignored.
+- Remaining: production manifest/scope decoders and a supervisor executable still depend on the versioned formats and admission contracts left open in the specs; gateway/supervisor process-level execution remains incomplete.

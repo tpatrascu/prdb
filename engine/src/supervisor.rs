@@ -4,7 +4,8 @@
 //! must bind `StagingOwner` to an already authenticated query connection.
 
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::ops::Bound::{Excluded, Unbounded};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -14,6 +15,7 @@ pub const MAX_MANIFEST_BYTES: usize = 16 * 1024;
 pub const MAX_SCOPE_BYTES: usize = 8 * 1024;
 pub const MAX_CHUNK_BYTES: usize = 256 * 1024;
 pub const DEFAULT_MAX_DEADLINE_MS: u64 = 15 * 60 * 1000;
+const OPPORTUNISTIC_REAPER_SCAN_LIMIT: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StagingOwner {
@@ -172,10 +174,11 @@ struct Reservation {
 
 #[derive(Default)]
 struct StagingState {
-    reservations: HashMap<[u8; 16], Reservation>,
+    reservations: BTreeMap<[u8; 16], Reservation>,
     connection_reservations: HashMap<[u8; 16], [u8; 16]>,
     global_reserved_bytes: u64,
     principal_reserved_bytes: HashMap<[u8; 16], u64>,
+    reaper_cursor: Option<[u8; 16]>,
 }
 
 pub struct StagingStore {
@@ -289,7 +292,12 @@ impl StagingStore {
             .and_then(|size| size.checked_add(request.requested_scope.len() as u64))
             .ok_or(StagingError::InvalidRequest)?;
         let mut state = self.state.lock().map_err(|_| StagingError::Poisoned)?;
-        reap_expired(&mut state, self.limits.reservation_ttl, Instant::now());
+        reap_expired(
+            &mut state,
+            self.limits.reservation_ttl,
+            Instant::now(),
+            OPPORTUNISTIC_REAPER_SCAN_LIMIT,
+        );
         if state
             .connection_reservations
             .contains_key(&owner.connection_id)
@@ -369,7 +377,12 @@ impl StagingStore {
             return Err(StagingError::InvalidChunk);
         }
         let mut state = self.state.lock().map_err(|_| StagingError::Poisoned)?;
-        reap_expired(&mut state, self.limits.reservation_ttl, Instant::now());
+        reap_expired(
+            &mut state,
+            self.limits.reservation_ttl,
+            Instant::now(),
+            OPPORTUNISTIC_REAPER_SCAN_LIMIT,
+        );
         let reservation = owned_reservation_mut(&mut state, owner, invocation_id)?;
         if reservation.state != ReservationState::Uploading {
             return Err(StagingError::InvalidState);
@@ -401,7 +414,12 @@ impl StagingStore {
     pub fn seal(&self, owner: StagingOwner, invocation_id: [u8; 16]) -> Result<(), StagingError> {
         let (sealed_data, artifact_sha256, parameter_sha256) = {
             let mut state = self.state.lock().map_err(|_| StagingError::Poisoned)?;
-            reap_expired(&mut state, self.limits.reservation_ttl, Instant::now());
+            reap_expired(
+                &mut state,
+                self.limits.reservation_ttl,
+                Instant::now(),
+                OPPORTUNISTIC_REAPER_SCAN_LIMIT,
+            );
             let reservation = owned_reservation_mut(&mut state, owner, invocation_id)?;
             if reservation.state != ReservationState::Uploading {
                 return Err(StagingError::InvalidState);
@@ -475,7 +493,12 @@ impl StagingStore {
                 .state
                 .lock()
                 .map_err(|_| StartError::Staging(StagingError::Poisoned))?;
-            reap_expired(&mut state, self.limits.reservation_ttl, Instant::now());
+            reap_expired(
+                &mut state,
+                self.limits.reservation_ttl,
+                Instant::now(),
+                OPPORTUNISTIC_REAPER_SCAN_LIMIT,
+            );
             let reservation = owned_reservation_mut(&mut state, owner, invocation_id)
                 .map_err(StartError::Staging)?;
             if reservation.state != ReservationState::Sealed {
@@ -570,7 +593,12 @@ impl StagingStore {
                 .state
                 .lock()
                 .map_err(|_| StartError::Staging(StagingError::Poisoned))?;
-            reap_expired(&mut state, self.limits.reservation_ttl, Instant::now());
+            reap_expired(
+                &mut state,
+                self.limits.reservation_ttl,
+                Instant::now(),
+                OPPORTUNISTIC_REAPER_SCAN_LIMIT,
+            );
             let reservation = owned_reservation_mut(&mut state, owner, invocation_id)
                 .map_err(StartError::Staging)?;
             if reservation.state != ReservationState::Sealed {
@@ -621,7 +649,12 @@ impl StagingStore {
         invocation_id: [u8; 16],
     ) -> Result<(), StagingError> {
         let mut state = self.state.lock().map_err(|_| StagingError::Poisoned)?;
-        reap_expired(&mut state, self.limits.reservation_ttl, Instant::now());
+        reap_expired(
+            &mut state,
+            self.limits.reservation_ttl,
+            Instant::now(),
+            OPPORTUNISTIC_REAPER_SCAN_LIMIT,
+        );
         let reservation = owned_reservation_mut(&mut state, owner, invocation_id)?;
         match reservation.state {
             ReservationState::Uploading | ReservationState::Sealed => {
@@ -647,7 +680,12 @@ impl StagingStore {
         invocation_id: [u8; 16],
     ) -> Result<SubmissionState, StagingError> {
         let mut state = self.state.lock().map_err(|_| StagingError::Poisoned)?;
-        reap_expired(&mut state, self.limits.reservation_ttl, Instant::now());
+        reap_expired(
+            &mut state,
+            self.limits.reservation_ttl,
+            Instant::now(),
+            OPPORTUNISTIC_REAPER_SCAN_LIMIT,
+        );
         let reservation = owned_reservation_mut(&mut state, owner, invocation_id)?;
         match reservation.state {
             ReservationState::Uploading => Ok(SubmissionState::Uploading),
@@ -668,7 +706,12 @@ impl StagingStore {
         invocation_id: [u8; 16],
     ) -> Result<SealedSubmission, StagingError> {
         let mut state = self.state.lock().map_err(|_| StagingError::Poisoned)?;
-        reap_expired(&mut state, self.limits.reservation_ttl, Instant::now());
+        reap_expired(
+            &mut state,
+            self.limits.reservation_ttl,
+            Instant::now(),
+            OPPORTUNISTIC_REAPER_SCAN_LIMIT,
+        );
         let reservation = owned_reservation_mut(&mut state, owner, invocation_id)?;
         if reservation.state != ReservationState::Started {
             return Err(StagingError::InvalidState);
@@ -684,15 +727,20 @@ impl StagingStore {
         })
     }
 
-    /// Reap expired reservations that have not started and return their IDs.
-    /// A trusted supervisor should call this periodically as well as relying
-    /// on the opportunistic reaping performed by mutating operations.
-    pub fn reap_expired(&self) -> Result<Vec<[u8; 16]>, StagingError> {
+    /// Reap at most `max_scanned` reservations that have not started and
+    /// return the expired IDs. Repeated calls rotate through the ordered
+    /// reservation set, so large configured stores are eventually covered
+    /// without one maintenance pass scanning the whole store.
+    pub fn reap_expired(&self, max_scanned: usize) -> Result<Vec<[u8; 16]>, StagingError> {
+        if max_scanned == 0 {
+            return Err(StagingError::InvalidRequest);
+        }
         let mut state = self.state.lock().map_err(|_| StagingError::Poisoned)?;
         Ok(reap_expired(
             &mut state,
             self.limits.reservation_ttl,
             Instant::now(),
+            max_scanned,
         ))
     }
 
@@ -776,16 +824,49 @@ fn discard_reservation(state: &mut StagingState, invocation_id: [u8; 16]) {
     }
 }
 
-fn reap_expired(state: &mut StagingState, ttl: Duration, now: Instant) -> Vec<[u8; 16]> {
-    let expired = state
-        .reservations
+fn reap_expired(
+    state: &mut StagingState,
+    ttl: Duration,
+    now: Instant,
+    max_scanned: usize,
+) -> Vec<[u8; 16]> {
+    let mut scanned = Vec::with_capacity(max_scanned.min(state.reservations.len()));
+    if let Some(cursor) = state.reaper_cursor {
+        scanned.extend(
+            state
+                .reservations
+                .range((Excluded(cursor), Unbounded))
+                .take(max_scanned)
+                .map(|(id, _)| *id),
+        );
+    }
+    if scanned.len() < max_scanned {
+        let remaining = max_scanned - scanned.len();
+        scanned.extend(
+            state
+                .reservations
+                .keys()
+                .take(remaining)
+                .filter(|id| state.reaper_cursor.is_none_or(|cursor| **id <= cursor))
+                .copied(),
+        );
+    }
+    if let Some(last_scanned) = scanned.last().copied() {
+        state.reaper_cursor = Some(last_scanned);
+    }
+    let expired = scanned
         .iter()
-        .filter_map(|(invocation_id, reservation)| {
-            (matches!(
-                reservation.state,
-                ReservationState::Uploading | ReservationState::Sealed
-            ) && now.saturating_duration_since(reservation.created_at) >= ttl)
-                .then_some(*invocation_id)
+        .filter_map(|invocation_id| {
+            state
+                .reservations
+                .get(invocation_id)
+                .and_then(|reservation| {
+                    (matches!(
+                        reservation.state,
+                        ReservationState::Uploading | ReservationState::Sealed
+                    ) && now.saturating_duration_since(reservation.created_at) >= ttl)
+                        .then_some(*invocation_id)
+                })
         })
         .collect::<Vec<_>>();
     for invocation_id in &expired {
@@ -1143,13 +1224,50 @@ mod tests {
             .unwrap();
         std::thread::sleep(Duration::from_millis(5));
         assert_eq!(
-            expiring_store.reap_expired().unwrap(),
+            expiring_store.reap_expired(usize::MAX).unwrap(),
             vec![expiring.invocation_id]
         );
         assert_eq!(
             expiring_store.status(expiring_owner, expiring.invocation_id),
             Err(StagingError::Unavailable)
         );
+    }
+
+    #[test]
+    fn expiration_reaper_bounds_each_pass_and_rotates_across_reservations() {
+        let limits = StagingLimits {
+            reservation_ttl: Duration::from_millis(1),
+            max_live_reservations: 4,
+            ..StagingLimits::default()
+        };
+        let store = StagingStore::new(limits, Arc::new(AcceptMetadata)).unwrap();
+        let reservations = (1..=3)
+            .map(|connection| {
+                let owner = make_owner(connection, 9);
+                store
+                    .prepare(owner, request(b"artifact", b""))
+                    .map(|reservation| (owner, reservation))
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        std::thread::sleep(Duration::from_millis(5));
+
+        for _ in 0..reservations.len() {
+            let reaped = store.reap_expired(1).unwrap();
+            assert_eq!(reaped.len(), 1);
+            assert!(
+                reservations
+                    .iter()
+                    .any(|(_, reservation)| reservation.invocation_id == reaped[0])
+            );
+        }
+        for (owner, reservation) in reservations {
+            assert_eq!(
+                store.status(owner, reservation.invocation_id),
+                Err(StagingError::Unavailable)
+            );
+        }
+        assert_eq!(store.reap_expired(0), Err(StagingError::InvalidRequest));
     }
 
     #[test]
