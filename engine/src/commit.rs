@@ -14012,6 +14012,7 @@ mod durable_commit_gate_tests {
     struct FailNextSyncBackend {
         inner: redb::backends::FileBackend,
         fail_next_sync: Arc<AtomicBool>,
+        fail_next_write: Arc<AtomicBool>,
     }
 
     impl StorageBackend for FailNextSyncBackend {
@@ -14035,6 +14036,9 @@ mod durable_commit_gate_tests {
         }
 
         fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+            if self.fail_next_write.swap(false, Ordering::SeqCst) {
+                return Err(std::io::Error::other("injected storage write failure"));
+            }
             self.inner.write(offset, data)
         }
 
@@ -14170,6 +14174,7 @@ mod durable_commit_gate_tests {
         let database = Database::builder().create_with_backend(FailNextSyncBackend {
             inner: redb::backends::FileBackend::new(file)?,
             fail_next_sync: fail_next_sync.clone(),
+            fail_next_write: Arc::new(AtomicBool::new(false)),
         })?;
         let storage =
             StorageManager::from_validated_database(&database, StorageManagerConfig::default())?;
@@ -14265,6 +14270,115 @@ mod durable_commit_gate_tests {
     }
 
     #[test]
+    fn redb_storage_write_error_quarantines_and_recovers_atomically()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture_id = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "prdb-storage-write-error-{}-{fixture_id}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory)?;
+        let path = directory.join("write-error.redb");
+        {
+            let database = Database::create(&path)?;
+            let mut write = database.begin_write()?;
+            write.set_durability(redb::Durability::Immediate)?;
+            write.set_two_phase_commit(true);
+            schema::create_tables(&write)?;
+            let metadata = EngineMetadata {
+                database_id: [0x33; 16],
+                catalog_version: 2,
+                expression_version: 1,
+                builtin_semantics_version: 1,
+                commit_sequence: 0,
+                lifecycle: Lifecycle::Ready,
+            }
+            .encode()?;
+            write
+                .open_table(ENGINE_META)?
+                .insert(&b"format"[..], &metadata[..])?;
+            write.commit()?;
+        }
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)?;
+        let fail_next_write = Arc::new(AtomicBool::new(false));
+        let database = Database::builder().create_with_backend(FailNextSyncBackend {
+            inner: redb::backends::FileBackend::new(file)?,
+            fail_next_sync: Arc::new(AtomicBool::new(false)),
+            fail_next_write: fail_next_write.clone(),
+        })?;
+        let storage =
+            StorageManager::from_validated_database(&database, StorageManagerConfig::default())?;
+        let invocation_id = [0x76; 16];
+        let principal_id = [0x65; 16];
+        let mut invocation =
+            storage.begin_invocation(invocation_id, principal_id, i64::MAX, 1, 1024)?;
+        invocation.stage_put(
+            crate::overlay::RowId {
+                table: [0x51; 16],
+                row: [0x52; 16],
+            },
+            b"fault-injected storage write",
+        )?;
+        fail_next_write.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            invocation.commit(),
+            Err(TransactionError::Commit(CommitError::Storage(_)))
+        ));
+        assert!(!fail_next_write.load(Ordering::SeqCst));
+        assert!(storage.requires_reopen_after_commit_error());
+        assert!(matches!(
+            storage.begin_invocation([0x77; 16], principal_id, i64::MAX, 1, 1024),
+            Err(TransactionError::Storage(_))
+        ));
+
+        let closed_database_key = &database as *const Database as usize;
+        drop(storage);
+        drop(database);
+        let reopened = Database::open(&path)?;
+        crate::storage_manager::clear_uncertain_database_key(closed_database_key);
+        let recovered_storage =
+            StorageManager::from_validated_database(&reopened, StorageManagerConfig::default())?;
+        assert!(!recovered_storage.requires_reopen_after_commit_error());
+        let read = reopened.begin_read()?;
+        let outcome = read
+            .open_table(OUTCOMES)?
+            .get(&invocation_id[..])?
+            .map(|value| crate::outcome::InvocationOutcome::decode(value.value()))
+            .transpose()?;
+        let metadata = read
+            .open_table(ENGINE_META)?
+            .get(&&b"format"[..])?
+            .ok_or("missing engine metadata after write error recovery")?;
+        let sequence = EngineMetadata::decode(metadata.value())?.commit_sequence;
+        let row_key = [0x51; 16].into_iter().chain([0x52; 16]).collect::<Vec<_>>();
+        let row_exists = read.open_table(ROWS)?.get(row_key.as_slice())?.is_some();
+        match (outcome, sequence) {
+            (Some(outcome), 1) => {
+                assert_eq!(outcome.status, OutcomeStatus::Committed);
+                assert_eq!(outcome.commit_sequence, 1);
+                assert!(row_exists);
+            }
+            (None, 0) => assert!(!row_exists),
+            (outcome, sequence) => {
+                return Err(format!(
+                    "redb write-error recovery exposed a partial commit: outcome={outcome:?}, sequence={sequence}"
+                )
+                .into());
+            }
+        }
+
+        drop(read);
+        drop(recovered_storage);
+        drop(reopened);
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[test]
     fn outcome_prune_commit_error_quarantines_database() -> Result<(), Box<dyn std::error::Error>> {
         let fixture_id = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
         let directory = std::env::temp_dir().join(format!(
@@ -14313,6 +14427,7 @@ mod durable_commit_gate_tests {
         let database = Database::builder().create_with_backend(FailNextSyncBackend {
             inner: redb::backends::FileBackend::new(file)?,
             fail_next_sync: fail_next_sync.clone(),
+            fail_next_write: Arc::new(AtomicBool::new(false)),
         })?;
         let storage =
             StorageManager::from_validated_database(&database, StorageManagerConfig::default())?;

@@ -1737,7 +1737,7 @@
 - Regression: the real-redb [foundation test](../../engine/tests/redb_foundation.rs) pins an initial value, completes 64 Immediate/two-phase commits of 32 KiB replacements while that reader remains open, verifies the pinned reader still sees the original bytes, and confirms a new reader sees the latest committed value.
 - Verification: Rust 1.95.0 and redb 4.4.0; `cargo fmt --all -- --check` and `cargo test -p prdb-engine --test redb_foundation --locked` passed.
 - Scope: this validates redb snapshot stability and writer progress for this bounded workload. It does not establish the storage manager's admission limits under sustained pressure, physical reclamation/compaction behavior, or power-loss durability.
-- Remaining: add storage-file fault points and broaden retained-reader pressure/reclamation evidence.
+- Remaining: add additional storage-file fault points and broaden retained-reader pressure/reclamation evidence.
 
 ## SM-4 / SM-7: durable writer progress under a retained invocation snapshot — verified
 
@@ -1769,3 +1769,9 @@
 - Terminal-loss regression: `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` now completes the real worker and relays every provisional SQL result, closes the gateway before terminal delivery, requires the terminal frame write to fail, and then verifies the durable outcome is COMMITTED. The restricted-principal query still follows the normal terminal path.
 - Verification: workspace build, format, warning-denied Clippy, and all default workspace tests passed; the changed commit integration target compiled and passed warning-denied Clippy. The ignored sandbox run could not launch in the current app scope because its cgroup lacks the enabled `cpu` controller required by sandbox admission.
 - Remaining: rerun the terminal-loss acceptance on a properly delegated cgroup; add storage-file fault points; broaden retained-reader pressure and reclamation evidence.
+
+## SM-1 / SM-7: recover an injected redb storage write error — verified
+
+- Regression: `redb_storage_write_error_quarantines_and_recovers_atomically` injects an error from the redb backend's `write` callback during a managed row commit. It verifies the live manager rejects new admissions after the error, then closes and reopens the database and checks that the row, outcome, and commit sequence are either all present or all absent.
+- Verification: the focused test passed. Full workspace build, format, warning-denied Clippy, tests, and `git diff --check` passed; the commit integration target had 109 passing tests and 3 delegated-cgroup tests ignored.
+- Scope: adds a backend-write failure point alongside the existing injected sync failure. Power loss, other storage-file operations, and other platform/durability profiles remain untested.
