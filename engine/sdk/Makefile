@@ -124,21 +124,21 @@ $(SQL_V3_CAUGHT_ERROR_OBJECT): engine/tests/fixtures/sql_v3_caught_error.c $(INC
 	$(TCC) -Wall -Wextra -Werror -fPIC -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
 $(SQL_V3_CAUGHT_ERROR_QUERY): $(SQL_V3_CAUGHT_ERROR_OBJECT) $(SDK_ARCHIVE) | $(BUILD_DIR)
-	$(CC) -shared -Wl,--no-eh-frame-hdr,-z,noexecstack "$<" "$(SDK_ARCHIVE)" -o "$@"
+	env -u NIX_LDFLAGS NIX_DONT_SET_RPATH=1 $(CC) -shared -Wl,--no-eh-frame-hdr,-z,noexecstack "$<" "$(SDK_ARCHIVE)" -o "$@"
 
 # This is an untrusted query artifact; run it only with the sandbox acceptance test.
 $(SQL_V3_WRITE_READ_OBJECT): engine/tests/fixtures/sql_v3_write_read.c $(INCLUDE_DIR)/prdb_query_abi_v3.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v2.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -fPIC -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
 $(SQL_V3_WRITE_READ_QUERY): $(SQL_V3_WRITE_READ_OBJECT) $(SDK_ARCHIVE) | $(BUILD_DIR)
-	$(CC) -shared -Wl,--no-eh-frame-hdr,-z,noexecstack "$<" "$(SDK_ARCHIVE)" -o "$@"
+	env -u NIX_LDFLAGS NIX_DONT_SET_RPATH=1 $(CC) -shared -Wl,--no-eh-frame-hdr,-z,noexecstack "$<" "$(SDK_ARCHIVE)" -o "$@"
 
 # This is an untrusted query artifact; run it only with the sandbox acceptance test.
 $(SQL_V3_RESTRICTED_METADATA_OBJECT): engine/tests/fixtures/sql_v3_restricted_metadata.c $(INCLUDE_DIR)/prdb_query_abi_v3.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v2.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -fPIC -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
 $(SQL_V3_RESTRICTED_METADATA_QUERY): $(SQL_V3_RESTRICTED_METADATA_OBJECT) $(SDK_ARCHIVE) | $(BUILD_DIR)
-	$(CC) -shared -Wl,--no-eh-frame-hdr,-z,noexecstack "$<" "$(SDK_ARCHIVE)" -o "$@"
+	env -u NIX_LDFLAGS NIX_DONT_SET_RPATH=1 $(CC) -shared -Wl,--no-eh-frame-hdr,-z,noexecstack "$<" "$(SDK_ARCHIVE)" -o "$@"
 
 .PHONY: sandbox-query-fixture
 sandbox-query-fixture: $(SQL_V3_CAUGHT_ERROR_QUERY) $(SQL_V3_WRITE_READ_QUERY) $(SQL_V3_RESTRICTED_METADATA_QUERY)
