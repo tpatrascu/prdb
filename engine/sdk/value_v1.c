@@ -126,3 +126,174 @@ int32_t prdb_sdk_value_validate_v1(const prdb_sdk_value_v1 *value) {
     }
     return PRDB_SDK_VALUE_VALID;
 }
+
+static int32_t require_value(const prdb_sdk_value_v1 *value,
+                             uint32_t expected_type) {
+    int32_t status = prdb_sdk_value_validate_v1(value);
+    if (status == PRDB_SDK_VALUE_INVALID_ARGUMENT) {
+        return PRDB_SDK_VALUE_ACCESS_INVALID_ARGUMENT;
+    }
+    if (status != PRDB_SDK_VALUE_VALID) {
+        return PRDB_SDK_VALUE_ACCESS_INVALID_VALUE;
+    }
+    if (value->state != PRDB_SDK_VALUE_STATE_VALUE) {
+        return PRDB_SDK_VALUE_ACCESS_NO_VALUE;
+    }
+    if (expected_type != 0 && value->type_code != expected_type) {
+        return PRDB_SDK_VALUE_ACCESS_TYPE_MISMATCH;
+    }
+    return PRDB_SDK_VALUE_ACCESS_OK;
+}
+
+static uint16_t read_be_u16(const uint8_t *bytes) {
+    return (uint16_t)(((uint16_t)bytes[0] << 8) | bytes[1]);
+}
+
+static uint32_t read_be_u32(const uint8_t *bytes) {
+    return ((uint32_t)bytes[0] << 24) | ((uint32_t)bytes[1] << 16) |
+           ((uint32_t)bytes[2] << 8) | (uint32_t)bytes[3];
+}
+
+static uint64_t read_be_u64(const uint8_t *bytes) {
+    uint64_t value = 0;
+    for (size_t index = 0; index < 8; ++index) {
+        value = (value << 8) | bytes[index];
+    }
+    return value;
+}
+
+static int16_t signed_i16(uint16_t bits) {
+    if (bits <= INT16_MAX) {
+        return (int16_t)bits;
+    }
+    return (int16_t)(-1 - (int16_t)(uint16_t)~bits);
+}
+
+static int32_t signed_i32(uint32_t bits) {
+    if (bits <= INT32_MAX) {
+        return (int32_t)bits;
+    }
+    return (int32_t)(-1 - (int64_t)(uint32_t)~bits);
+}
+
+static int64_t signed_i64(uint64_t bits) {
+    if (bits <= INT64_MAX) {
+        return (int64_t)bits;
+    }
+    return -1 - (int64_t)~bits;
+}
+
+int32_t prdb_sdk_value_state_v1(const prdb_sdk_value_v1 *value,
+                                uint32_t *state_out) {
+    int32_t status;
+    if (state_out == NULL) {
+        return PRDB_SDK_VALUE_ACCESS_INVALID_ARGUMENT;
+    }
+    status = require_value(value, 0);
+    if (status != PRDB_SDK_VALUE_ACCESS_OK &&
+        status != PRDB_SDK_VALUE_ACCESS_NO_VALUE) {
+        return status;
+    }
+    *state_out = value->state;
+    return PRDB_SDK_VALUE_ACCESS_OK;
+}
+
+int32_t prdb_sdk_value_get_boolean_v1(const prdb_sdk_value_v1 *value,
+                                      uint8_t *out) {
+    int32_t status;
+    if (out == NULL) {
+        return PRDB_SDK_VALUE_ACCESS_INVALID_ARGUMENT;
+    }
+    status = require_value(value, PRDB_SDK_VALUE_TYPE_BOOLEAN);
+    if (status != PRDB_SDK_VALUE_ACCESS_OK) {
+        return status;
+    }
+    *out = value->data[0];
+    return PRDB_SDK_VALUE_ACCESS_OK;
+}
+
+int32_t prdb_sdk_value_get_smallint_v1(const prdb_sdk_value_v1 *value,
+                                       int16_t *out) {
+    int32_t status;
+    if (out == NULL) {
+        return PRDB_SDK_VALUE_ACCESS_INVALID_ARGUMENT;
+    }
+    status = require_value(value, PRDB_SDK_VALUE_TYPE_SMALLINT);
+    if (status != PRDB_SDK_VALUE_ACCESS_OK) {
+        return status;
+    }
+    *out = signed_i16(read_be_u16(value->data));
+    return PRDB_SDK_VALUE_ACCESS_OK;
+}
+
+int32_t prdb_sdk_value_get_integer_v1(const prdb_sdk_value_v1 *value,
+                                      int32_t *out) {
+    int32_t status;
+    if (out == NULL) {
+        return PRDB_SDK_VALUE_ACCESS_INVALID_ARGUMENT;
+    }
+    status = require_value(value, PRDB_SDK_VALUE_TYPE_INTEGER);
+    if (status != PRDB_SDK_VALUE_ACCESS_OK) {
+        return status;
+    }
+    *out = signed_i32(read_be_u32(value->data));
+    return PRDB_SDK_VALUE_ACCESS_OK;
+}
+
+int32_t prdb_sdk_value_get_bigint_v1(const prdb_sdk_value_v1 *value,
+                                     int64_t *out) {
+    int32_t status;
+    if (out == NULL) {
+        return PRDB_SDK_VALUE_ACCESS_INVALID_ARGUMENT;
+    }
+    status = require_value(value, PRDB_SDK_VALUE_TYPE_BIGINT);
+    if (status != PRDB_SDK_VALUE_ACCESS_OK) {
+        return status;
+    }
+    *out = signed_i64(read_be_u64(value->data));
+    return PRDB_SDK_VALUE_ACCESS_OK;
+}
+
+int32_t prdb_sdk_value_get_date_v1(const prdb_sdk_value_v1 *value,
+                                   int32_t *out) {
+    int32_t status;
+    if (out == NULL) {
+        return PRDB_SDK_VALUE_ACCESS_INVALID_ARGUMENT;
+    }
+    status = require_value(value, PRDB_SDK_VALUE_TYPE_DATE);
+    if (status != PRDB_SDK_VALUE_ACCESS_OK) {
+        return status;
+    }
+    *out = signed_i32(read_be_u32(value->data));
+    return PRDB_SDK_VALUE_ACCESS_OK;
+}
+
+int32_t prdb_sdk_value_get_timestamptz_v1(const prdb_sdk_value_v1 *value,
+                                          int64_t *out) {
+    int32_t status;
+    if (out == NULL) {
+        return PRDB_SDK_VALUE_ACCESS_INVALID_ARGUMENT;
+    }
+    status = require_value(value, PRDB_SDK_VALUE_TYPE_TIMESTAMPTZ);
+    if (status != PRDB_SDK_VALUE_ACCESS_OK) {
+        return status;
+    }
+    *out = signed_i64(read_be_u64(value->data));
+    return PRDB_SDK_VALUE_ACCESS_OK;
+}
+
+int32_t prdb_sdk_value_get_bytes_v1(const prdb_sdk_value_v1 *value,
+                                    const uint8_t **data_out,
+                                    uint64_t *length_out) {
+    int32_t status;
+    if (data_out == NULL || length_out == NULL) {
+        return PRDB_SDK_VALUE_ACCESS_INVALID_ARGUMENT;
+    }
+    status = require_value(value, 0);
+    if (status != PRDB_SDK_VALUE_ACCESS_OK) {
+        return status;
+    }
+    *data_out = value->data;
+    *length_out = value->data_len;
+    return PRDB_SDK_VALUE_ACCESS_OK;
+}

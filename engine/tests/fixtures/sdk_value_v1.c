@@ -17,6 +17,14 @@ int main(void) {
     static const uint8_t text_bytes[] = {'o', 'k'};
     static const uint8_t bad_utf8[] = {0xc0, 0x80};
     static const uint8_t invalid_boolean[] = {2};
+    static const uint8_t negative_integer_bytes[] = {0xff, 0xff, 0xff, 0xd6};
+    static const uint8_t minimum_integer_bytes[] = {0x80, 0x00, 0x00, 0x00};
+    static const uint8_t minimum_smallint_bytes[] = {0x80, 0x00};
+    static const uint8_t negative_bigint_bytes[] = {
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xd6};
+    static const uint8_t minimum_bigint_bytes[] = {
+        0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    static const uint8_t true_boolean[] = {1};
     static const uint8_t fixed_width_bytes[16] = {0};
     static const uint32_t fixed_types[] = {
         PRDB_SDK_VALUE_TYPE_BOOLEAN, PRDB_SDK_VALUE_TYPE_SMALLINT,
@@ -37,6 +45,13 @@ int main(void) {
     prdb_sdk_value_v1 malformed =
         value(PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_INTEGER,
               integer_bytes, 3);
+    int32_t integer_output = 0;
+    int16_t smallint_output = 0;
+    int64_t bigint_output = 0;
+    uint8_t boolean_output = 0;
+    uint32_t state_output = 0;
+    const uint8_t *bytes_output = 0;
+    uint64_t bytes_length = 0;
 
     assert(prdb_sdk_value_validate_v1(&integer) == PRDB_SDK_VALUE_VALID);
     assert(integer.data == integer_bytes);
@@ -45,6 +60,58 @@ int main(void) {
     assert(prdb_sdk_value_validate_v1(&text) == PRDB_SDK_VALUE_VALID);
     assert(prdb_sdk_value_validate_v1(&malformed) ==
            PRDB_SDK_VALUE_INVALID_VALUE);
+    assert(prdb_sdk_value_state_v1(&redacted, &state_output) ==
+           PRDB_SDK_VALUE_ACCESS_OK);
+    assert(state_output == PRDB_SDK_VALUE_STATE_REDACTED);
+    assert(prdb_sdk_value_get_integer_v1(&integer, &integer_output) ==
+           PRDB_SDK_VALUE_ACCESS_OK);
+    assert(integer_output == 42);
+    assert(prdb_sdk_value_get_bigint_v1(&integer, &bigint_output) ==
+           PRDB_SDK_VALUE_ACCESS_TYPE_MISMATCH);
+    assert(prdb_sdk_value_get_bytes_v1(&text, &bytes_output, &bytes_length) ==
+           PRDB_SDK_VALUE_ACCESS_OK);
+    assert(bytes_output == text_bytes && bytes_length == sizeof(text_bytes));
+    assert(prdb_sdk_value_get_integer_v1(&null_value, &integer_output) ==
+           PRDB_SDK_VALUE_ACCESS_NO_VALUE);
+    assert(prdb_sdk_value_get_integer_v1(&redacted, &integer_output) ==
+           PRDB_SDK_VALUE_ACCESS_NO_VALUE);
+
+    malformed = value(PRDB_SDK_VALUE_STATE_VALUE,
+                      PRDB_SDK_VALUE_TYPE_SMALLINT, minimum_smallint_bytes,
+                      sizeof(minimum_smallint_bytes));
+    assert(prdb_sdk_value_get_smallint_v1(&malformed, &smallint_output) ==
+           PRDB_SDK_VALUE_ACCESS_OK);
+    assert(smallint_output == INT16_MIN);
+    malformed = value(PRDB_SDK_VALUE_STATE_VALUE,
+                      PRDB_SDK_VALUE_TYPE_INTEGER, negative_integer_bytes,
+                      sizeof(negative_integer_bytes));
+    assert(prdb_sdk_value_get_integer_v1(&malformed, &integer_output) ==
+           PRDB_SDK_VALUE_ACCESS_OK);
+    assert(integer_output == -42);
+    malformed = value(PRDB_SDK_VALUE_STATE_VALUE,
+                      PRDB_SDK_VALUE_TYPE_INTEGER, minimum_integer_bytes,
+                      sizeof(minimum_integer_bytes));
+    assert(prdb_sdk_value_get_integer_v1(&malformed, &integer_output) ==
+           PRDB_SDK_VALUE_ACCESS_OK);
+    assert(integer_output == INT32_MIN);
+    malformed = value(PRDB_SDK_VALUE_STATE_VALUE,
+                      PRDB_SDK_VALUE_TYPE_BIGINT, negative_bigint_bytes,
+                      sizeof(negative_bigint_bytes));
+    assert(prdb_sdk_value_get_bigint_v1(&malformed, &bigint_output) ==
+           PRDB_SDK_VALUE_ACCESS_OK);
+    assert(bigint_output == -42);
+    malformed = value(PRDB_SDK_VALUE_STATE_VALUE,
+                      PRDB_SDK_VALUE_TYPE_BIGINT, minimum_bigint_bytes,
+                      sizeof(minimum_bigint_bytes));
+    assert(prdb_sdk_value_get_bigint_v1(&malformed, &bigint_output) ==
+           PRDB_SDK_VALUE_ACCESS_OK);
+    assert(bigint_output == INT64_MIN);
+    malformed = value(PRDB_SDK_VALUE_STATE_VALUE,
+                      PRDB_SDK_VALUE_TYPE_BOOLEAN, true_boolean,
+                      sizeof(true_boolean));
+    assert(prdb_sdk_value_get_boolean_v1(&malformed, &boolean_output) ==
+           PRDB_SDK_VALUE_ACCESS_OK);
+    assert(boolean_output == 1);
 
     for (size_t index = 0;
          index < sizeof(fixed_types) / sizeof(fixed_types[0]); ++index) {

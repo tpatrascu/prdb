@@ -27,6 +27,12 @@
 #define PRDB_SDK_VALUE_UNSUPPORTED_VERSION INT32_C(2)
 #define PRDB_SDK_VALUE_INVALID_ARGUMENT INT32_C(3)
 
+#define PRDB_SDK_VALUE_ACCESS_OK INT32_C(0)
+#define PRDB_SDK_VALUE_ACCESS_NO_VALUE INT32_C(1)
+#define PRDB_SDK_VALUE_ACCESS_TYPE_MISMATCH INT32_C(2)
+#define PRDB_SDK_VALUE_ACCESS_INVALID_VALUE INT32_C(3)
+#define PRDB_SDK_VALUE_ACCESS_INVALID_ARGUMENT INT32_C(4)
+
 /* data is borrowed and remains valid only as long as its source batch. */
 typedef struct prdb_sdk_value_v1 {
     uint32_t struct_size;
@@ -39,5 +45,23 @@ typedef struct prdb_sdk_value_v1 {
 
 /* Validates representation only; it cannot make an invalid native pointer safe. */
 int32_t prdb_sdk_value_validate_v1(const prdb_sdk_value_v1 *value);
+int32_t prdb_sdk_value_state_v1(const prdb_sdk_value_v1 *value,
+                                uint32_t *state_out);
+int32_t prdb_sdk_value_get_boolean_v1(const prdb_sdk_value_v1 *value,
+                                      uint8_t *out);
+int32_t prdb_sdk_value_get_smallint_v1(const prdb_sdk_value_v1 *value,
+                                       int16_t *out);
+int32_t prdb_sdk_value_get_integer_v1(const prdb_sdk_value_v1 *value,
+                                      int32_t *out);
+int32_t prdb_sdk_value_get_bigint_v1(const prdb_sdk_value_v1 *value,
+                                     int64_t *out);
+int32_t prdb_sdk_value_get_date_v1(const prdb_sdk_value_v1 *value,
+                                   int32_t *out);
+int32_t prdb_sdk_value_get_timestamptz_v1(const prdb_sdk_value_v1 *value,
+                                          int64_t *out);
+/* Returns the borrowed canonical payload for the exact typed value. */
+int32_t prdb_sdk_value_get_bytes_v1(const prdb_sdk_value_v1 *value,
+                                    const uint8_t **data_out,
+                                    uint64_t *length_out);
 
 #endif /* PRDB_SDK_VALUE_V1_H */
