@@ -1661,15 +1661,14 @@ pub(crate) fn mark_database_uncertain(database: &Database) {
         database,
         StorageManagerConfig::default().max_active_invocations,
     );
-    let mut live = invocations
-        .live
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    invocations
-        .database_uncertain
-        .store(true, Ordering::Release);
-    live.generation = live.generation.wrapping_add(1).max(1);
-    drop(live);
+    let first_uncertain = !invocations.database_uncertain.swap(true, Ordering::AcqRel);
+    if first_uncertain {
+        let mut live = invocations
+            .live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        live.generation = live.generation.wrapping_add(1).max(1);
+    }
     retain_uncertain_registry(invocations.database_key, invocations);
 }
 
@@ -6611,6 +6610,10 @@ fn persist_admin_cancellation_audit(
     administrator_id: [u8; 16],
     event: &AuditEvent,
 ) -> Result<(), AdministrativeCancellationError> {
+    let storage_error = || {
+        mark_database_uncertain(database);
+        AdministrativeCancellationError::Storage
+    };
     if event.actor_id != Some(administrator_id)
         || event.action != AuditAction::AdministrativeCancellation
         || !matches!(event.result, AuditResult::Accepted | AuditResult::Denied)
@@ -6621,14 +6624,12 @@ fn persist_admin_cancellation_audit(
         .encode()
         .map_err(|_| AdministrativeCancellationError::InvalidAudit)?;
 
-    let read = database
-        .begin_read()
-        .map_err(|_| AdministrativeCancellationError::Storage)?;
+    let read = database.begin_read().map_err(|_| storage_error())?;
     let snapshot = RowSnapshot::new(read);
     let is_administrator =
         database_admin_authority(&snapshot, administrator_id).map_err(|error| match error {
             TokenLifecycleError::TokenUnavailable => AdministrativeCancellationError::Unauthorized,
-            _ => AdministrativeCancellationError::Storage,
+            _ => storage_error(),
         })?;
     if !is_administrator {
         return Err(AdministrativeCancellationError::Unauthorized);
@@ -6636,53 +6637,45 @@ fn persist_admin_cancellation_audit(
 
     let membership_records = snapshot
         .scan_catalog_family(11, MAX_CATALOG_FAMILY_SCAN)
-        .map_err(|_| AdministrativeCancellationError::Storage)?;
+        .map_err(|_| storage_error())?;
     let mut guarded_values = HashMap::<Vec<u8>, Vec<u8>>::new();
     let mut principal_ids = HashSet::from([administrator_id]);
     for record in membership_records {
         let key = record.logical_key;
         if key.len() != 36 || key[2] != 1 || key[19] != 1 {
-            return Err(AdministrativeCancellationError::Storage);
+            return Err(storage_error());
         }
-        let member_id: [u8; 16] = key[3..19]
-            .try_into()
-            .map_err(|_| AdministrativeCancellationError::Storage)?;
-        let role_id: [u8; 16] = key[20..36]
-            .try_into()
-            .map_err(|_| AdministrativeCancellationError::Storage)?;
+        let member_id: [u8; 16] = key[3..19].try_into().map_err(|_| storage_error())?;
+        let role_id: [u8; 16] = key[20..36].try_into().map_err(|_| storage_error())?;
         principal_ids.insert(member_id);
         principal_ids.insert(role_id);
         let value = snapshot
             .get_catalog_value(&key)
-            .map_err(|_| AdministrativeCancellationError::Storage)?
-            .ok_or(AdministrativeCancellationError::Storage)?;
+            .map_err(|_| storage_error())?
+            .ok_or_else(&storage_error)?;
         guarded_values.insert(key, value);
     }
     for principal_id in principal_ids {
         let key = principal_catalog_key(principal_id);
         let value = snapshot
             .get_catalog_value(&key)
-            .map_err(|_| AdministrativeCancellationError::Storage)?
-            .ok_or(AdministrativeCancellationError::Storage)?;
+            .map_err(|_| storage_error())?
+            .ok_or_else(&storage_error)?;
         guarded_values.insert(key, value);
     }
     drop(snapshot);
 
-    let mut write = database
-        .begin_write()
-        .map_err(|_| AdministrativeCancellationError::Storage)?;
+    let mut write = database.begin_write().map_err(|_| storage_error())?;
     write
         .set_durability(redb::Durability::Immediate)
-        .map_err(|_| AdministrativeCancellationError::Storage)?;
+        .map_err(|_| storage_error())?;
     write.set_two_phase_commit(true);
     {
-        let catalog = write
-            .open_table(CATALOG)
-            .map_err(|_| AdministrativeCancellationError::Storage)?;
+        let catalog = write.open_table(CATALOG).map_err(|_| storage_error())?;
         for (key, expected) in guarded_values {
             let current = catalog
                 .get(key.as_slice())
-                .map_err(|_| AdministrativeCancellationError::Storage)?
+                .map_err(|_| storage_error())?
                 .map(|value| value.value().to_vec());
             if current.as_deref() != Some(expected.as_slice()) {
                 return Err(AdministrativeCancellationError::Unauthorized);
@@ -6690,26 +6683,21 @@ fn persist_admin_cancellation_audit(
         }
     }
     {
-        let mut audit = write
-            .open_table(AUDIT)
-            .map_err(|_| AdministrativeCancellationError::Storage)?;
+        let mut audit = write.open_table(AUDIT).map_err(|_| storage_error())?;
         if audit
             .get(event.event_id.as_slice())
-            .map_err(|_| AdministrativeCancellationError::Storage)?
+            .map_err(|_| storage_error())?
             .is_some()
         {
             return Err(AdministrativeCancellationError::InvalidAudit);
         }
         audit
             .insert(event.event_id.as_slice(), encoded.as_slice())
-            .map_err(|_| AdministrativeCancellationError::Storage)?;
+            .map_err(|_| storage_error())?;
     }
     match write.commit() {
         Ok(()) => Ok(()),
-        Err(_) => {
-            mark_database_uncertain(database);
-            Err(AdministrativeCancellationError::Storage)
-        }
+        Err(_) => Err(storage_error()),
     }
 }
 

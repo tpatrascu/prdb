@@ -13,17 +13,53 @@ use prdb_engine::index_locator::IndexLocator;
 use prdb_engine::metadata::{EngineMetadata, Lifecycle};
 use prdb_engine::outcome::{InvocationOutcome, OutcomeStatus, lookup_outcome};
 use prdb_engine::row_record::RowRecord;
-use prdb_engine::schema::{self, CATALOG, ENGINE_META, ROWS};
+use prdb_engine::schema::{self, AUDIT, CATALOG, ENGINE_META, ROWS};
 use prdb_engine::storage_manager::{
-    StorageManager, StorageManagerConfig, StorageManagerInitError, TokenIssueRequest,
+    AdministrativeCancellationError, StorageManager, StorageManagerConfig, StorageManagerInitError,
+    TokenIssueRequest,
 };
 use prdb_engine::tuple::{ColumnSchema, ScalarType, ScalarValue, decode_tuple, encode_tuple};
-use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata};
-use std::sync::atomic::{AtomicU64, Ordering};
+use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, StorageBackend};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug)]
+struct FailNextSyncBackend {
+    inner: redb::backends::FileBackend,
+    fail_next_sync: Arc<AtomicBool>,
+}
+
+impl StorageBackend for FailNextSyncBackend {
+    fn len(&self) -> Result<u64, std::io::Error> {
+        self.inner.len()
+    }
+
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+        self.inner.read(offset, out)
+    }
+
+    fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+        self.inner.set_len(len)
+    }
+
+    fn sync_data(&self) -> Result<(), std::io::Error> {
+        if self.fail_next_sync.swap(false, Ordering::SeqCst) {
+            return Err(std::io::Error::other("injected commit sync failure"));
+        }
+        self.inner.sync_data()
+    }
+
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+        self.inner.write(offset, data)
+    }
+
+    fn close(&self) -> Result<(), std::io::Error> {
+        self.inner.close()
+    }
+}
 
 struct Fixture(std::path::PathBuf);
 
@@ -9124,6 +9160,106 @@ fn storage_manager_audits_cancellation_before_commit_and_preserves_terminal_outc
         ),
         Err(AdministrativeCancellationError::RateLimited)
     ));
+    Ok(())
+}
+
+#[test]
+fn admin_cancellation_sync_failure_quarantines_until_reopen()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::process::Command;
+
+    const CHILD_DATABASE_ENV: &str = "PRDB_TEST_ADMIN_CANCEL_SYNC_FAILURE_DATABASE";
+    const ADMIN_ID: [u8; 16] = [0xf0; 16];
+    const OWNER_ID: [u8; 16] = [0xf1; 16];
+    const INVOCATION_ID: [u8; 16] = [0xf2; 16];
+    const AUDIT_ID: [u8; 16] = [0xf3; 16];
+
+    if let Some(database_path) = std::env::var_os(CHILD_DATABASE_ENV) {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(database_path)?;
+        let fail_next_sync = Arc::new(AtomicBool::new(false));
+        let database = Database::builder().create_with_backend(FailNextSyncBackend {
+            inner: redb::backends::FileBackend::new(file)?,
+            fail_next_sync: fail_next_sync.clone(),
+        })?;
+        let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+        let _pending = storage.begin_invocation(INVOCATION_ID, OWNER_ID, i64::MAX, 1, 64)?;
+        let now_us = 1_700_000_000_000_000;
+        let cancellation_audit = AuditEvent {
+            event_id: AUDIT_ID,
+            actor_id: Some(ADMIN_ID),
+            correlation_id: [0xf4; 16],
+            occurred_at_us: now_us,
+            action: AuditAction::AdministrativeCancellation,
+            result: AuditResult::Denied,
+            target_ids: vec![INVOCATION_ID],
+        };
+
+        fail_next_sync.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            storage.cancel_invocation(ADMIN_ID, INVOCATION_ID, 7, now_us, cancellation_audit,),
+            Err(AdministrativeCancellationError::Storage)
+        ));
+        assert!(!fail_next_sync.load(Ordering::SeqCst));
+        assert!(storage.requires_reopen_after_commit_error());
+        assert!(matches!(
+            storage.begin_invocation([0xf5; 16], OWNER_ID, i64::MAX, 1, 64),
+            Err(prdb_engine::transaction::TransactionError::Storage(_))
+        ));
+        assert!(matches!(
+            storage.get_invocation_status(INVOCATION_ID, OWNER_ID, now_us),
+            Err(prdb_engine::storage_manager::InvocationStatusError::Storage)
+        ));
+        // Let process teardown close redb and discard its process-local quarantine.
+        std::process::exit(0);
+    }
+
+    let fixture = Fixture::new();
+    let database_path = fixture.path();
+    let database = initialize(&database_path)?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let admin_role = builtin_owner_id();
+    let records = [
+        principal_write_with_name(ADMIN_ID, 1, 1, "sync_admin"),
+        object_write_with_name(ADMIN_ID, 8, "sync_admin"),
+        principal_write_with_name(OWNER_ID, 1, 1, "sync_owner"),
+        object_write_with_name(OWNER_ID, 8, "sync_owner"),
+        membership_write_with_grantor(ADMIN_ID, admin_role, admin_role),
+        dependency_write(ADMIN_ID, admin_role, 5),
+        credential_verifier_write([0xf6; 16], ADMIN_ID, &[0x71; 32], 1, i64::MAX, None, 1),
+    ];
+    let mut setup_audit = audit_event(0xf7);
+    setup_audit.actor_id = Some(admin_role);
+    storage.commit_catalog_and_audit(id(0xf7), admin_role, i64::MAX, &records, &[setup_audit])?;
+    drop(storage);
+    drop(database);
+
+    let child_status = Command::new(std::env::current_exe()?)
+        .arg("--exact")
+        .arg("admin_cancellation_sync_failure_quarantines_until_reopen")
+        .arg("--nocapture")
+        .env(CHILD_DATABASE_ENV, &database_path)
+        .status()?;
+    assert!(
+        child_status.success(),
+        "cancellation fault-injection child exited with {child_status}"
+    );
+
+    let reopened = Database::open(&database_path)?;
+    let storage = StorageManager::new(&reopened, Duration::from_millis(100))?;
+    assert!(!storage.requires_reopen_after_commit_error());
+    let mut resumed = storage.begin_invocation([0xf8; 16], OWNER_ID, i64::MAX, 1, 64)?;
+    resumed.abort()?;
+    let read = reopened.begin_read()?;
+    let audit_table = read.open_table(AUDIT)?;
+    if let Some(audit) = audit_table.get(&AUDIT_ID[..])? {
+        assert_eq!(
+            AuditEvent::decode(audit.value())?.result,
+            AuditResult::Accepted
+        );
+    }
     Ok(())
 }
 

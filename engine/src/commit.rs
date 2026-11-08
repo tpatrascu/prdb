@@ -5232,6 +5232,9 @@ pub(crate) fn commit_storage_changes_with_gate(
         match build_constraint_validation_rows(database, request.catalog, request.rows) {
             Ok(rows) => rows,
             Err(error) => {
+                if matches!(error, CommitError::Storage(_)) {
+                    crate::storage_manager::mark_database_uncertain(database);
+                }
                 if !matches!(error, CommitError::Storage(_)) {
                     record_aborted_outcome(
                         database,
@@ -5289,6 +5292,30 @@ fn commit_storage_changes_with_index_ddl(
 }
 
 fn commit_storage_changes_inner_with_admin_credential_check(
+    database: &Database,
+    request: CommitRequest<'_>,
+    index_ddl_plan: Option<&IndexDdlPlan>,
+    require_usable_admin_credential: bool,
+    check_table_name_uniqueness: bool,
+    check_column_name_uniqueness: bool,
+    before_durable_commit: impl FnOnce() -> bool,
+) -> Result<u64, CommitError> {
+    let result = commit_storage_changes_inner_unchecked(
+        database,
+        request,
+        index_ddl_plan,
+        require_usable_admin_credential,
+        check_table_name_uniqueness,
+        check_column_name_uniqueness,
+        before_durable_commit,
+    );
+    if matches!(&result, Err(CommitError::Storage(_))) {
+        crate::storage_manager::mark_database_uncertain(database);
+    }
+    result
+}
+
+fn commit_storage_changes_inner_unchecked(
     database: &Database,
     request: CommitRequest<'_>,
     index_ddl_plan: Option<&IndexDdlPlan>,
@@ -6015,7 +6042,6 @@ fn commit_storage_changes_inner_with_admin_credential_check(
         return Err(CommitError::InvocationCancelled);
     }
     if let Err(error) = transaction.commit() {
-        crate::storage_manager::mark_database_uncertain(database);
         return Err(storage_error(error));
     }
     Ok(next_sequence)
@@ -13899,6 +13925,24 @@ pub(crate) fn record_aborted_outcome(
     principal_id: [u8; 16],
     retention_deadline_us: i64,
 ) -> Result<(), CommitError> {
+    let result = record_aborted_outcome_unchecked(
+        database,
+        invocation_id,
+        principal_id,
+        retention_deadline_us,
+    );
+    if matches!(&result, Err(CommitError::Storage(_))) {
+        crate::storage_manager::mark_database_uncertain(database);
+    }
+    result
+}
+
+fn record_aborted_outcome_unchecked(
+    database: &Database,
+    invocation_id: [u8; 16],
+    principal_id: [u8; 16],
+    retention_deadline_us: i64,
+) -> Result<(), CommitError> {
     let outcome = InvocationOutcome {
         status: OutcomeStatus::Aborted,
         invocation_id,
@@ -13946,10 +13990,7 @@ pub(crate) fn record_aborted_outcome(
     }
     match transaction.commit() {
         Ok(()) => Ok(()),
-        Err(error) => {
-            crate::storage_manager::mark_database_uncertain(database);
-            Err(storage_error(error))
-        }
+        Err(error) => Err(storage_error(error)),
     }
 }
 
@@ -14134,8 +14175,15 @@ mod durable_commit_gate_tests {
             StorageManager::from_validated_database(&database, StorageManagerConfig::default())?;
         let invocation_id = [0x66; 16];
         let principal_id = [0x55; 16];
-        let invocation =
+        let mut invocation =
             storage.begin_invocation(invocation_id, principal_id, i64::MAX, 1, 1024)?;
+        invocation.stage_put(
+            crate::overlay::RowId {
+                table: [0x41; 16],
+                row: [0x42; 16],
+            },
+            b"fault-injected row write",
+        )?;
         fail_next_sync.store(true, Ordering::SeqCst);
         assert!(matches!(
             invocation.commit(),
@@ -14192,12 +14240,15 @@ mod durable_commit_gate_tests {
             .get(&&b"format"[..])?
             .ok_or("missing metadata after redb recovery")?;
         let sequence = EngineMetadata::decode(metadata.value())?.commit_sequence;
+        let row_key = [0x41; 16].into_iter().chain([0x42; 16]).collect::<Vec<_>>();
+        let row_exists = read.open_table(ROWS)?.get(row_key.as_slice())?.is_some();
         match (outcome, sequence) {
             (Some(outcome), 1) => {
                 assert_eq!(outcome.status, crate::outcome::OutcomeStatus::Committed);
                 assert_eq!(outcome.commit_sequence, 1);
+                assert!(row_exists);
             }
-            (None, 0) => {}
+            (None, 0) => assert!(!row_exists),
             (outcome, sequence) => {
                 return Err(format!(
                     "redb recovery exposed a partial commit: outcome={outcome:?}, sequence={sequence}"

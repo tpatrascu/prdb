@@ -68,6 +68,18 @@ pub fn prune_expired_outcomes(
     now_us: i64,
     max_scanned: usize,
 ) -> Result<OutcomePruneResult, OutcomeMaintenanceError> {
+    let result = prune_expired_outcomes_unchecked(database, now_us, max_scanned);
+    if matches!(&result, Err(OutcomeMaintenanceError::Storage(_))) {
+        crate::storage_manager::mark_database_uncertain(database);
+    }
+    result
+}
+
+fn prune_expired_outcomes_unchecked(
+    database: &Database,
+    now_us: i64,
+    max_scanned: usize,
+) -> Result<OutcomePruneResult, OutcomeMaintenanceError> {
     if now_us <= 0 {
         return Err(OutcomeMaintenanceError::InvalidTime);
     }
@@ -175,10 +187,9 @@ pub fn prune_expired_outcomes(
                 .map_err(|error| OutcomeMaintenanceError::Storage(error.to_string()))?;
         }
     }
-    if let Err(error) = write.commit() {
-        crate::storage_manager::mark_database_uncertain(database);
-        return Err(OutcomeMaintenanceError::Storage(error.to_string()));
-    }
+    write
+        .commit()
+        .map_err(|error| OutcomeMaintenanceError::Storage(error.to_string()))?;
 
     Ok(OutcomePruneResult {
         scanned: scanned_entries.len(),
