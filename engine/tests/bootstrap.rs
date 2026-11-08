@@ -184,6 +184,56 @@ fn storage_open_rejects_a_truncated_redb_image_and_releases_the_instance_lock() 
 }
 
 #[test]
+fn storage_open_rejects_single_byte_page_corruption_and_releases_the_instance_lock() {
+    const REDB_PAGE_SIZE: usize = 4096;
+    const PAGE_PROBE_OFFSET: usize = 128;
+
+    let fixture = Fixture::new();
+    let mut session = initialize(&fixture.0, "page_corruption_admin", expiry()).unwrap();
+    let mut secret = session.take_secret().unwrap();
+    secret.zeroize();
+    drop(session.acknowledge().unwrap());
+
+    let database_path = fixture.0.join("storage.redb");
+    let valid_image = std::fs::read(&database_path).unwrap();
+    let mut rejected_corruption = None;
+    for page_start in (REDB_PAGE_SIZE..valid_image.len()).step_by(REDB_PAGE_SIZE) {
+        let offset = page_start + PAGE_PROBE_OFFSET;
+        if offset >= valid_image.len() {
+            continue;
+        }
+        let mut corrupted_image = valid_image.clone();
+        corrupted_image[offset] ^= 0x80;
+        std::fs::write(&database_path, corrupted_image).unwrap();
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&database_path)
+            .unwrap()
+            .sync_all()
+            .unwrap();
+
+        match StorageInstance::open(&fixture.0) {
+            Err(_) => {
+                rejected_corruption = Some(offset);
+                break;
+            }
+            Ok(instance) => drop(instance),
+        }
+        std::fs::write(&database_path, &valid_image).unwrap();
+    }
+
+    std::fs::write(&database_path, &valid_image).unwrap();
+    let reopened = StorageInstance::open(&fixture.0)
+        .expect("corruption rejection must release the instance lock");
+    assert!(validate_persisted_records(reopened.database()).is_ok());
+    assert!(
+        rejected_corruption.is_some(),
+        "single-byte changes to every probed redb page were accepted"
+    );
+}
+
+#[test]
 fn bootstrap_cannot_publish_ready_before_secret_transfer() {
     let fixture = Fixture::new();
     let session = initialize(&fixture.0, "first_admin", expiry()).unwrap();

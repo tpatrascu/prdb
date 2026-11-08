@@ -1829,3 +1829,10 @@
 - Regression: `process_crash_during_backend_write_recovers_atomic_commit` exits with code 87 immediately after an underlying backend write; `process_crash_after_durable_sync_recovers_atomic_commit` exits with code 86 immediately after a successful sync callback. Each parent reopens the database and accepts only the fully committed row/outcome/sequence or the original empty state.
 - Verification: both focused crash tests passed on redb 4.4.0. The full workspace build, format check, warning-denied Clippy, and tests also passed; the commit integration target had 109 passing tests and 3 delegated-cgroup tests ignored.
 - Scope: abrupt process exits after a backend write and successful sync callback; kernel cache and filesystem remain alive. Torn-write, power-loss, production filesystem, and other durability-profile recovery remain open.
+
+## SM-1 / SM-7: single-byte persisted-page corruption rejection — verified
+
+- Contract: [redb storage recovery](../../specs/redb-storage.md) requires invalid persisted state to fail closed before service admission, with the instance lock released after a failed open.
+- Regression: `storage_open_rejects_single_byte_page_corruption_and_releases_the_instance_lock` flips one byte at the same offset in successive 4 KiB pages of a READY redb image until open rejects a corrupted page. It restores the valid image and confirms the instance can reopen and persisted records validate.
+- Verification: the focused bootstrap regression passed. The workspace build, formatting check, warning-denied Clippy, and full workspace tests passed with Rust 1.95.0; the commit integration target had 109 passing tests and 3 delegated-cgroup tests ignored.
+- Scope: detects the tested redb page corruption through the pinned local open/validation path. It does not prove every byte/page corruption is detected, simulate torn writes or power loss, or establish recovery across other platforms and durability profiles.
