@@ -516,6 +516,68 @@ fn admin_client_creates_and_drops_schemas() {
     server.join().unwrap();
 }
 
+#[test]
+fn admin_client_renames_and_drops_tables() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut decoder = ClientFrameDecoder::default();
+        establish_control_session(&mut stream, &mut decoder);
+        for (operation, arguments, operation_id, sequence) in [
+            (
+                "tables.rename",
+                format!(r#"{{"table_id":"{}","name":"events_v2"}}"#, "a4".repeat(16)),
+                [0x71; 16],
+                51,
+            ),
+            (
+                "tables.drop",
+                format!(r#"{{"table_id":"{}"}}"#, "a4".repeat(16)),
+                [0x72; 16],
+                52,
+            ),
+        ] {
+            let prepare = read_frame(&mut stream, &mut decoder);
+            let payload = String::from_utf8(prepare.payload.clone()).unwrap();
+            assert!(payload.contains(&format!("\"operation\":\"{operation}\"")));
+            assert!(payload.contains(&format!("\"arguments\":{arguments}")));
+            respond(
+                &mut stream,
+                &prepare,
+                format!(
+                    "{{\"operation_id\":\"{}\",\"state\":\"prepared\"}}",
+                    hex(&operation_id)
+                )
+                .as_bytes(),
+            );
+            let start = read_frame(&mut stream, &mut decoder);
+            respond(
+                &mut stream,
+                &start,
+                format!(
+                    "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"table_id\":\"{}\",\"commit_sequence\":\"{sequence}\"}}",
+                    hex(&operation_id),
+                    "a4".repeat(16)
+                )
+                .as_bytes(),
+            );
+        }
+    });
+
+    let mut secret = [5; 32];
+    let mut client = AdminClient::connect_authenticated_with_timeout(
+        address,
+        [6; 16],
+        &mut secret,
+        Duration::from_secs(3),
+    )
+    .unwrap();
+    client.rename_table([0xa4; 16], "events_v2").unwrap();
+    client.drop_table([0xa4; 16]).unwrap();
+    server.join().unwrap();
+}
+
 fn hex(id: &[u8; 16]) -> String {
     id.iter().map(|byte| format!("{byte:02x}")).collect()
 }

@@ -1081,6 +1081,37 @@ impl AdminClient {
         .map(|(result, _)| result)
     }
 
+    pub fn rename_table(
+        &mut self,
+        table_id: [u8; 16],
+        name: &str,
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        validate_admin_id(table_id)?;
+        validate_admin_name(name)?;
+        self.execute_admin_operation(
+            "tables.rename",
+            format!(
+                "{{\"table_id\":\"{}\",\"name\":\"{name}\"}}",
+                lower_hex(&table_id)
+            ),
+            Some("table_id"),
+        )
+        .map(|(result, _)| result)
+    }
+
+    pub fn drop_table(
+        &mut self,
+        table_id: [u8; 16],
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        validate_admin_id(table_id)?;
+        self.execute_admin_operation(
+            "tables.drop",
+            format!("{{\"table_id\":\"{}\"}}", lower_hex(&table_id)),
+            Some("table_id"),
+        )
+        .map(|(result, _)| result)
+    }
+
     fn create_identity(
         &mut self,
         operation: &str,

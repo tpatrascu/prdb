@@ -83,7 +83,15 @@
 - Implementation: `AdminClient::create_schema` validates the normalized name and owner ID and returns the generated schema ID; `drop_schema` validates the target and checks the echoed schema ID in the committed result.
 - Regression: mock-TCP coverage verifies exact create/drop arguments, PREPARE/START flow, generated ID, and committed response decoding.
 - Verification: focused `client_admin` tests passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed in the Nix shell; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
-- Remaining: typed table, constraint and foreign-key helpers; CLI/credential-file lifecycle; and live ADMIN operations through the real multi-process gateway path remain open.
+- Remaining: typed table create/alter, constraint and foreign-key helpers; CLI/credential-file lifecycle; and live ADMIN operations through the real multi-process gateway path remain open.
+
+## SDK-5 dependency: typed table rename and drop AdminClient operations — implemented
+
+- Contract: [client protocol](../../specs/client-protocol.md) defines stable table ID arguments and requires START to echo the table ID for both rename and drop.
+- Implementation: `AdminClient::rename_table` validates the normalized new name; `drop_table` validates the nonzero table ID. Both use the shared PREPARE/START path and reject success responses with mismatched table IDs.
+- Regression: mock-TCP coverage checks exact rename/drop argument shapes and typed committed-result validation.
+- Verification: focused `client_admin` tests passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed in the Nix shell; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
+- Remaining: typed table create/alter, constraint and foreign-key helpers; CLI/credential-file lifecycle; and live ADMIN operations through the real multi-process gateway path remain open.
 
 ## SDK-5 dependency: typed schema rename AdminClient operation — implemented
 
