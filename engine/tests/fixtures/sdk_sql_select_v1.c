@@ -9,6 +9,12 @@ int main(void) {
         "SELECT name,department_id FROM employees "
         "WHERE department_id >= $2 LIMIT 100;";
     static const uint8_t star_query[] = "select * from Employees limit 0";
+    static const uint8_t is_null_query[] =
+        "SELECT nickname FROM people WHERE nickname IS NULL";
+    static const uint8_t is_not_null_query[] =
+        "SELECT nickname FROM people WHERE nickname IS NOT NULL";
+    static const uint8_t malformed_is_null_query[] =
+        "SELECT nickname FROM people WHERE nickname IS MAYBE";
     static const uint8_t unsupported[] = "DELETE FROM employees";
     static const uint8_t malformed[] = "SELECT FROM employees";
     static const uint8_t empty_query[] = "";
@@ -52,6 +58,24 @@ int main(void) {
     assert(statement.relation.length == 9);
     assert(memcmp(statement.sql + statement.relation.offset, "Employees", 9) ==
            0);
+
+    assert(prdb_sdk_sql_parse_select_v1(
+               is_null_query, sizeof(is_null_query) - 1, &statement,
+               sizeof(statement), &error_offset) == PRDB_SDK_SQL_OK);
+    assert(statement.has_where == 1);
+    assert(statement.comparison == PRDB_SDK_SQL_COMPARE_IS_NULL);
+    assert(statement.parameter_index == 0);
+    assert(memcmp(statement.sql + statement.where_column.offset, "nickname",
+                  8) == 0);
+    assert(prdb_sdk_sql_parse_select_v1(
+               is_not_null_query, sizeof(is_not_null_query) - 1, &statement,
+               sizeof(statement), &error_offset) == PRDB_SDK_SQL_OK);
+    assert(statement.comparison == PRDB_SDK_SQL_COMPARE_IS_NOT_NULL);
+    assert(statement.parameter_index == 0);
+    assert(prdb_sdk_sql_parse_select_v1(
+               malformed_is_null_query, sizeof(malformed_is_null_query) - 1,
+               &statement, sizeof(statement), &error_offset) ==
+           PRDB_SDK_SQL_SYNTAX_ERROR);
 
     assert(prdb_sdk_sql_parse_select_v1(
                unsupported, sizeof(unsupported) - 1, &statement,

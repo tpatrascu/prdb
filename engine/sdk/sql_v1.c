@@ -202,7 +202,9 @@ static int32_t parse_unsigned(parser *state, token token, uint32_t maximum,
 static int32_t expect_identifier(parser *state, prdb_sdk_sql_span_v1 *out) {
     if (state->current.kind != TOKEN_IDENTIFIER ||
         token_is_keyword(state, "SELECT") || token_is_keyword(state, "FROM") ||
-        token_is_keyword(state, "WHERE") || token_is_keyword(state, "LIMIT")) {
+        token_is_keyword(state, "WHERE") || token_is_keyword(state, "LIMIT") ||
+        token_is_keyword(state, "IS") || token_is_keyword(state, "NOT") ||
+        token_is_keyword(state, "NULL")) {
         state->error_offset = state->current.offset;
         return PRDB_SDK_SQL_SYNTAX_ERROR;
     }
@@ -346,30 +348,57 @@ int32_t prdb_sdk_sql_parse_select_v1(const uint8_t *sql, uint64_t sql_len,
         if (status != PRDB_SDK_SQL_OK) {
             goto failed;
         }
-        status = comparison_code(state.current.kind, &result.comparison);
-        if (status != PRDB_SDK_SQL_OK) {
-            state.error_offset = state.current.offset;
-            goto failed;
-        }
-        if (advance(&state) != PRDB_SDK_SQL_OK) {
-            status = state.error;
-            goto failed;
-        }
-        if (state.current.kind != TOKEN_PARAMETER) {
-            status = PRDB_SDK_SQL_SYNTAX_ERROR;
-            state.error_offset = state.current.offset;
-            goto failed;
-        }
-        status = parse_unsigned(&state, state.current,
-                                PRDB_SDK_SQL_MAX_PARAMETER_INDEX, 0,
-                                &parameter_index);
-        if (status != PRDB_SDK_SQL_OK) {
-            goto failed;
-        }
-        result.parameter_index = parameter_index;
-        if (advance(&state) != PRDB_SDK_SQL_OK) {
-            status = state.error;
-            goto failed;
+        if (token_is_keyword(&state, "IS")) {
+            uint32_t is_not_null = 0;
+            if (advance(&state) != PRDB_SDK_SQL_OK) {
+                status = state.error;
+                goto failed;
+            }
+            if (token_is_keyword(&state, "NOT")) {
+                is_not_null = 1;
+                if (advance(&state) != PRDB_SDK_SQL_OK) {
+                    status = state.error;
+                    goto failed;
+                }
+            }
+            if (!token_is_keyword(&state, "NULL")) {
+                status = PRDB_SDK_SQL_SYNTAX_ERROR;
+                state.error_offset = state.current.offset;
+                goto failed;
+            }
+            result.comparison = is_not_null
+                                    ? PRDB_SDK_SQL_COMPARE_IS_NOT_NULL
+                                    : PRDB_SDK_SQL_COMPARE_IS_NULL;
+            if (advance(&state) != PRDB_SDK_SQL_OK) {
+                status = state.error;
+                goto failed;
+            }
+        } else {
+            status = comparison_code(state.current.kind, &result.comparison);
+            if (status != PRDB_SDK_SQL_OK) {
+                state.error_offset = state.current.offset;
+                goto failed;
+            }
+            if (advance(&state) != PRDB_SDK_SQL_OK) {
+                status = state.error;
+                goto failed;
+            }
+            if (state.current.kind != TOKEN_PARAMETER) {
+                status = PRDB_SDK_SQL_SYNTAX_ERROR;
+                state.error_offset = state.current.offset;
+                goto failed;
+            }
+            status = parse_unsigned(&state, state.current,
+                                    PRDB_SDK_SQL_MAX_PARAMETER_INDEX, 0,
+                                    &parameter_index);
+            if (status != PRDB_SDK_SQL_OK) {
+                goto failed;
+            }
+            result.parameter_index = parameter_index;
+            if (advance(&state) != PRDB_SDK_SQL_OK) {
+                status = state.error;
+                goto failed;
+            }
         }
     }
     if (token_is_keyword(&state, "LIMIT")) {

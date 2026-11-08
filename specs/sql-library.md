@@ -19,21 +19,23 @@ Support a single-table read/write subset from the initial implementation:
 
 For example: `SELECT name FROM employees WHERE department_id = $1 LIMIT 100`.
 
-[Schema DDL](ddl-schema.md) defines initial scalar types and identifier rules. Remaining expression/coercion details, wire encodings, and exact parameter grammar must be fixed before implementation; the example is illustrative. Reject unsupported syntax explicitly. The required analytical follow-on adds inner equijoins, grouping, COUNT/SUM/MIN/MAX/AVG, sorting, and HAVING under the [workload profile](workload-profile.md); these are not yet part of the first parser slice. General subqueries, explicit transaction-control statements, and user-defined SQL functions remain deferred. Schema/user/permission DDL is supported through the separate administrative SDK channel and is rejected inside user invocations. Existing design discussions of aggregates describe future semantics, not initial language support.
+[Schema DDL](ddl-schema.md) defines initial scalar types and identifier rules. Remaining expression/coercion details and wire encodings must be fixed before their implementation; the example is illustrative. Reject unsupported syntax explicitly. The required analytical follow-on adds inner equijoins, grouping, COUNT/SUM/MIN/MAX/AVG, sorting, and HAVING under the [workload profile](workload-profile.md); these are not yet part of the first parser slice. General subqueries, explicit transaction-control statements, and user-defined SQL functions remain deferred. Schema/user/permission DDL is supported through the separate administrative SDK channel and is rejected inside user invocations. Existing design discussions of aggregates describe future semantics, not initial language support.
 
-The first parser increment has a deliberately narrow, explicit grammar:
+The parser currently accepts this deliberately narrow grammar:
 
 ```text
 select       := SELECT projection FROM identifier
-                [WHERE identifier comparison parameter]
+                [WHERE predicate]
                 [LIMIT unsigned_integer] [;]
 projection   := * | identifier (',' identifier)*
 comparison   := '=' | '!=' | '<>' | '<' | '<=' | '>' | '>='
+predicate   := identifier comparison parameter
+             | identifier IS [NOT] NULL
 parameter    := '$' unsigned_integer
 identifier   := ASCII letter or '_' followed by ASCII letters, digits, or '_'
 ```
 
-Keywords are case-insensitive; identifier spelling is preserved as source bytes for later binding. Whitespace is ASCII space, tab, CR, or LF. SQL input is bounded to 65,536 bytes, each identifier to 128 bytes, projection to 64 columns, parameter indices to 1–65,535, and LIMIT to 0–1,000,000. LIMIT 0 is valid. This increment accepts at most one simple comparison predicate and only a positional parameter on its right side; parameter values are bound separately. Comments, quoted identifiers, aliases, schema qualification, literals, Boolean combinations, multiple statements, and other statement kinds are rejected (a non-SELECT statement reports UNSUPPORTED). The AST stores source offsets/lengths into the caller-owned immutable SQL buffer and allocates no strings.
+Keywords are case-insensitive; identifier spelling is preserved as source bytes for later binding. Whitespace is ASCII space, tab, CR, or LF. SQL input is bounded to 65,536 bytes, each identifier to 128 bytes, projection to 64 columns, parameter indices to 1–65,535, and LIMIT to 0–1,000,000. LIMIT 0 is valid. The parser accepts at most one predicate. Comparison predicates take only a positional parameter on the right side; `IS [NOT] NULL` predicates take no parameter. Parameter values are bound separately. Comments, quoted identifiers, aliases, schema qualification, literals, Boolean combinations, multiple statements, and other statement kinds are rejected (a non-SELECT statement reports UNSUPPORTED). The AST stores source offsets/lengths into the caller-owned immutable SQL buffer and allocates no strings. The predicate operator field uses `PRDB_SDK_SQL_COMPARE_IS_NULL` or `PRDB_SDK_SQL_COMPARE_IS_NOT_NULL` for null tests, and leaves `parameter_index` zero for them; those codes are predicate operators and are not valid inputs to the scalar comparison evaluator.
 
 ## Scalar Comparison Semantics
 
@@ -41,7 +43,7 @@ The C SDK's initial scalar evaluator follows the trusted policy evaluator's type
 
 Comparison with SQL NULL yields UNKNOWN. REDACTED is not SQL NULL: any comparison or `IS NULL` requiring a REDACTED operand returns an evaluation error. `IS NULL` returns TRUE only for NULL and FALSE for VALUE. Boolean AND/OR/NOT use SQL three-valued truth tables; evaluation is left to right and short-circuits only on decisive FALSE for AND or TRUE for OR. Once a reached operand is REDACTED or malformed, evaluation fails rather than treating it as UNKNOWN. These rules do not authorize filtering hidden storage data: SQL operates only on sanitized executor batches.
 
-The C SDK provides scalar comparison, `IS NULL`, Boolean-to-truth conversion, and pure AND/OR/NOT truth-table helpers in [`prdb_sdk_sql_v1.h`](../engine/include/prdb_sdk_sql_v1.h). The truth-table helpers combine already evaluated operands; they do not evaluate an expression tree or invoke a potentially skipped right operand. The parser does not yet emit Boolean-combination or `IS NULL` nodes, and the helpers are not yet connected to SQL statement execution.
+The C SDK provides scalar comparison, `IS NULL`, Boolean-to-truth conversion, and pure AND/OR/NOT truth-table helpers in [`prdb_sdk_sql_v1.h`](../engine/include/prdb_sdk_sql_v1.h). The truth-table helpers combine already evaluated operands; they do not evaluate an expression tree or invoke a potentially skipped right operand. The parser emits one simple comparison or `IS [NOT] NULL` predicate; Boolean combinations and connection to SQL statement execution remain future work.
 
 The first typed-parameter binding helper takes the parsed SELECT record, a caller-owned one-based array of `prdb_sdk_value_v1` views, and the resolved column type (plus Decimal precision and scale when applicable). Decimal metadata must satisfy `1 <= p <= 38` and `0 <= s <= p`; a value's signed coefficient magnitude must not exceed `10^p - 1`. It selects the AST's `$n` entry, validates its record and bytes, rejects REDACTED values and type mismatches, and returns a borrowed copy of the selected view. SQL NULL is accepted and retains the expected type only in the binder context; the value record itself carries no type for NULL. No implicit coercions occur. The parameter array and underlying bytes remain caller-owned and immutable for the call and any later evaluation.
 
