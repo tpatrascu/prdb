@@ -35,6 +35,14 @@ identifier   := ASCII letter or '_' followed by ASCII letters, digits, or '_'
 
 Keywords are case-insensitive; identifier spelling is preserved as source bytes for later binding. Whitespace is ASCII space, tab, CR, or LF. SQL input is bounded to 65,536 bytes, each identifier to 128 bytes, projection to 64 columns, parameter indices to 1–65,535, and LIMIT to 0–1,000,000. LIMIT 0 is valid. This increment accepts at most one simple comparison predicate and only a positional parameter on its right side; parameter values are bound separately. Comments, quoted identifiers, aliases, schema qualification, literals, Boolean combinations, multiple statements, and other statement kinds are rejected (a non-SELECT statement reports UNSUPPORTED). The AST stores source offsets/lengths into the caller-owned immutable SQL buffer and allocates no strings.
 
+## Scalar Comparison Semantics
+
+The C SDK's initial scalar evaluator follows the trusted policy evaluator's type and ordering rules. VALUE comparisons require identical scalar type codes; Decimal additionally requires equal declared scales, which the binder obtains from the pinned column/parameter types. Since NULL and REDACTED value views carry no type code, static type compatibility must be checked by the binder before evaluation. Fixed-width signed scalars compare as signed two's-complement values. Text and Varchar compare lexicographically by Unicode scalar value (equivalent to bytewise order for valid UTF-8), Bytea and Uuid compare lexicographically by bytes, and Boolean orders FALSE before TRUE. Numeric coercions, mixed Text/Varchar comparison, and collation-specific ordering are not implicit.
+
+Comparison with SQL NULL yields UNKNOWN. REDACTED is not SQL NULL: any comparison or `IS NULL` requiring a REDACTED operand returns an evaluation error. `IS NULL` returns TRUE only for NULL and FALSE for VALUE. Boolean AND/OR/NOT use SQL three-valued truth tables; evaluation is left to right and short-circuits only on decisive FALSE for AND or TRUE for OR. Once a reached operand is REDACTED or malformed, evaluation fails rather than treating it as UNKNOWN. These rules do not authorize filtering hidden storage data: SQL operates only on sanitized executor batches.
+
+The C SDK provides scalar comparison, `IS NULL`, Boolean-to-truth conversion, and pure AND/OR/NOT truth-table helpers in [`prdb_sdk_sql_v1.h`](../engine/include/prdb_sdk_sql_v1.h). The truth-table helpers combine already evaluated operands; they do not evaluate an expression tree or invoke a potentially skipped right operand. The parser does not yet emit Boolean-combination or `IS NULL` nodes, and the helpers are not yet connected to SQL statement execution.
+
 ## Query Flow
 
 1. The client builds query.so with the SDK and submits the artifact plus parameters. The supervisor creates its context and launches the confined executor.

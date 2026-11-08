@@ -409,3 +409,240 @@ failed:
     }
     return fail_at(&state, status);
 }
+
+static int32_t validate_eval_value(const prdb_sdk_value_v1 *value) {
+    int32_t status = prdb_sdk_value_validate_v1(value);
+    if (status == PRDB_SDK_VALUE_INVALID_ARGUMENT) {
+        return PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT;
+    }
+    if (status != PRDB_SDK_VALUE_VALID) {
+        return PRDB_SDK_SQL_EVAL_INVALID_VALUE;
+    }
+    if (value->state == PRDB_SDK_VALUE_STATE_REDACTED) {
+        return PRDB_SDK_SQL_EVAL_REDACTED_INPUT;
+    }
+    return PRDB_SDK_SQL_EVAL_OK;
+}
+
+static int compare_bytes(const uint8_t *left, uint64_t left_len,
+                         const uint8_t *right, uint64_t right_len) {
+    uint64_t common_len = left_len < right_len ? left_len : right_len;
+    int result = common_len == 0 ? 0 : memcmp(left, right, (size_t)common_len);
+    if (result != 0) {
+        return result < 0 ? -1 : 1;
+    }
+    if (left_len == right_len) {
+        return 0;
+    }
+    return left_len < right_len ? -1 : 1;
+}
+
+static int compare_signed_bytes(const uint8_t *left, const uint8_t *right,
+                                size_t length) {
+    int left_negative = (left[0] & 0x80) != 0;
+    int right_negative = (right[0] & 0x80) != 0;
+    if (left_negative != right_negative) {
+        return left_negative ? -1 : 1;
+    }
+    return compare_bytes(left, length, right, length);
+}
+
+static int32_t compare_value_payloads(const prdb_sdk_value_v1 *left,
+                                      const prdb_sdk_value_v1 *right,
+                                      uint8_t left_decimal_scale,
+                                      uint8_t right_decimal_scale,
+                                      int *ordering) {
+    switch (left->type_code) {
+    case PRDB_SDK_VALUE_TYPE_BOOLEAN:
+        *ordering = (left->data[0] > right->data[0]) -
+                    (left->data[0] < right->data[0]);
+        break;
+    case PRDB_SDK_VALUE_TYPE_SMALLINT:
+        *ordering = compare_signed_bytes(left->data, right->data, 2);
+        break;
+    case PRDB_SDK_VALUE_TYPE_INTEGER:
+    case PRDB_SDK_VALUE_TYPE_DATE:
+        *ordering = compare_signed_bytes(left->data, right->data, 4);
+        break;
+    case PRDB_SDK_VALUE_TYPE_BIGINT:
+    case PRDB_SDK_VALUE_TYPE_TIMESTAMPTZ:
+        *ordering = compare_signed_bytes(left->data, right->data, 8);
+        break;
+    case PRDB_SDK_VALUE_TYPE_DECIMAL:
+        if (left_decimal_scale > 38 || right_decimal_scale > 38) {
+            return PRDB_SDK_SQL_EVAL_INVALID_VALUE;
+        }
+        if (left_decimal_scale != right_decimal_scale) {
+            return PRDB_SDK_SQL_EVAL_TYPE_MISMATCH;
+        }
+        *ordering = compare_signed_bytes(left->data, right->data, 16);
+        break;
+    case PRDB_SDK_VALUE_TYPE_TEXT:
+    case PRDB_SDK_VALUE_TYPE_VARCHAR:
+    case PRDB_SDK_VALUE_TYPE_BYTEA:
+    case PRDB_SDK_VALUE_TYPE_UUID:
+        *ordering = compare_bytes(left->data, left->data_len, right->data,
+                                  right->data_len);
+        break;
+    default:
+        return PRDB_SDK_SQL_EVAL_INVALID_VALUE;
+    }
+    return PRDB_SDK_SQL_EVAL_OK;
+}
+
+int32_t prdb_sdk_sql_compare_v1(const prdb_sdk_value_v1 *left,
+                                const prdb_sdk_value_v1 *right,
+                                uint32_t comparison, uint8_t left_decimal_scale,
+                                uint8_t right_decimal_scale,
+                                uint32_t *truth_out) {
+    int32_t status;
+    int ordering;
+
+    if (truth_out == NULL) {
+        return PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT;
+    }
+    if (comparison < PRDB_SDK_SQL_COMPARE_EQUAL ||
+        comparison > PRDB_SDK_SQL_COMPARE_GREATER_EQUAL) {
+        return PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT;
+    }
+    status = validate_eval_value(left);
+    if (status != PRDB_SDK_SQL_EVAL_OK) {
+        return status;
+    }
+    status = validate_eval_value(right);
+    if (status != PRDB_SDK_SQL_EVAL_OK) {
+        return status;
+    }
+    if (left->state == PRDB_SDK_VALUE_STATE_NULL ||
+        right->state == PRDB_SDK_VALUE_STATE_NULL) {
+        *truth_out = PRDB_SDK_SQL_TRUTH_UNKNOWN;
+        return PRDB_SDK_SQL_EVAL_OK;
+    }
+    if (left->type_code != right->type_code) {
+        return PRDB_SDK_SQL_EVAL_TYPE_MISMATCH;
+    }
+    status = compare_value_payloads(left, right, left_decimal_scale,
+                                     right_decimal_scale, &ordering);
+    if (status != PRDB_SDK_SQL_EVAL_OK) {
+        return status;
+    }
+    switch (comparison) {
+    case PRDB_SDK_SQL_COMPARE_EQUAL:
+        *truth_out = ordering == 0 ? PRDB_SDK_SQL_TRUTH_TRUE
+                                   : PRDB_SDK_SQL_TRUTH_FALSE;
+        break;
+    case PRDB_SDK_SQL_COMPARE_NOT_EQUAL:
+        *truth_out = ordering != 0 ? PRDB_SDK_SQL_TRUTH_TRUE
+                                   : PRDB_SDK_SQL_TRUTH_FALSE;
+        break;
+    case PRDB_SDK_SQL_COMPARE_LESS:
+        *truth_out = ordering < 0 ? PRDB_SDK_SQL_TRUTH_TRUE
+                                  : PRDB_SDK_SQL_TRUTH_FALSE;
+        break;
+    case PRDB_SDK_SQL_COMPARE_LESS_EQUAL:
+        *truth_out = ordering <= 0 ? PRDB_SDK_SQL_TRUTH_TRUE
+                                   : PRDB_SDK_SQL_TRUTH_FALSE;
+        break;
+    case PRDB_SDK_SQL_COMPARE_GREATER:
+        *truth_out = ordering > 0 ? PRDB_SDK_SQL_TRUTH_TRUE
+                                  : PRDB_SDK_SQL_TRUTH_FALSE;
+        break;
+    case PRDB_SDK_SQL_COMPARE_GREATER_EQUAL:
+        *truth_out = ordering >= 0 ? PRDB_SDK_SQL_TRUTH_TRUE
+                                   : PRDB_SDK_SQL_TRUTH_FALSE;
+        break;
+    default:
+        return PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT;
+    }
+    return PRDB_SDK_SQL_EVAL_OK;
+}
+
+int32_t prdb_sdk_sql_value_is_null_v1(const prdb_sdk_value_v1 *value,
+                                      uint32_t *truth_out) {
+    int32_t status;
+    if (truth_out == NULL) {
+        return PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT;
+    }
+    status = validate_eval_value(value);
+    if (status != PRDB_SDK_SQL_EVAL_OK) {
+        return status;
+    }
+    *truth_out = value->state == PRDB_SDK_VALUE_STATE_NULL
+                     ? PRDB_SDK_SQL_TRUTH_TRUE
+                     : PRDB_SDK_SQL_TRUTH_FALSE;
+    return PRDB_SDK_SQL_EVAL_OK;
+}
+
+int32_t prdb_sdk_sql_value_truth_v1(const prdb_sdk_value_v1 *value,
+                                    uint32_t *truth_out) {
+    int32_t status;
+    if (truth_out == NULL) {
+        return PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT;
+    }
+    status = validate_eval_value(value);
+    if (status != PRDB_SDK_SQL_EVAL_OK) {
+        return status;
+    }
+    if (value->state == PRDB_SDK_VALUE_STATE_NULL) {
+        *truth_out = PRDB_SDK_SQL_TRUTH_UNKNOWN;
+        return PRDB_SDK_SQL_EVAL_OK;
+    }
+    if (value->type_code != PRDB_SDK_VALUE_TYPE_BOOLEAN) {
+        return PRDB_SDK_SQL_EVAL_TYPE_MISMATCH;
+    }
+    *truth_out = value->data[0] == 0 ? PRDB_SDK_SQL_TRUTH_FALSE
+                                     : PRDB_SDK_SQL_TRUTH_TRUE;
+    return PRDB_SDK_SQL_EVAL_OK;
+}
+
+static int valid_truth(uint32_t value) {
+    return value == PRDB_SDK_SQL_TRUTH_UNKNOWN ||
+           value == PRDB_SDK_SQL_TRUTH_FALSE ||
+           value == PRDB_SDK_SQL_TRUTH_TRUE;
+}
+
+int32_t prdb_sdk_sql_truth_not_v1(uint32_t operand, uint32_t *truth_out) {
+    if (truth_out == NULL || !valid_truth(operand)) {
+        return PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT;
+    }
+    *truth_out = operand == PRDB_SDK_SQL_TRUTH_UNKNOWN
+                     ? PRDB_SDK_SQL_TRUTH_UNKNOWN
+                     : operand == PRDB_SDK_SQL_TRUTH_TRUE
+                           ? PRDB_SDK_SQL_TRUTH_FALSE
+                           : PRDB_SDK_SQL_TRUTH_TRUE;
+    return PRDB_SDK_SQL_EVAL_OK;
+}
+
+int32_t prdb_sdk_sql_truth_and_v1(uint32_t left, uint32_t right,
+                                  uint32_t *truth_out) {
+    if (truth_out == NULL || !valid_truth(left) || !valid_truth(right)) {
+        return PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT;
+    }
+    if (left == PRDB_SDK_SQL_TRUTH_FALSE ||
+        right == PRDB_SDK_SQL_TRUTH_FALSE) {
+        *truth_out = PRDB_SDK_SQL_TRUTH_FALSE;
+    } else if (left == PRDB_SDK_SQL_TRUTH_UNKNOWN ||
+               right == PRDB_SDK_SQL_TRUTH_UNKNOWN) {
+        *truth_out = PRDB_SDK_SQL_TRUTH_UNKNOWN;
+    } else {
+        *truth_out = PRDB_SDK_SQL_TRUTH_TRUE;
+    }
+    return PRDB_SDK_SQL_EVAL_OK;
+}
+
+int32_t prdb_sdk_sql_truth_or_v1(uint32_t left, uint32_t right,
+                                 uint32_t *truth_out) {
+    if (truth_out == NULL || !valid_truth(left) || !valid_truth(right)) {
+        return PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT;
+    }
+    if (left == PRDB_SDK_SQL_TRUTH_TRUE ||
+        right == PRDB_SDK_SQL_TRUTH_TRUE) {
+        *truth_out = PRDB_SDK_SQL_TRUTH_TRUE;
+    } else if (left == PRDB_SDK_SQL_TRUTH_UNKNOWN ||
+               right == PRDB_SDK_SQL_TRUTH_UNKNOWN) {
+        *truth_out = PRDB_SDK_SQL_TRUTH_UNKNOWN;
+    } else {
+        *truth_out = PRDB_SDK_SQL_TRUTH_FALSE;
+    }
+    return PRDB_SDK_SQL_EVAL_OK;
+}

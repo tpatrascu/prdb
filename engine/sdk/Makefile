@@ -13,6 +13,7 @@ SDK_ARCHIVE := $(BUILD_DIR)/libprdb_sdk.a
 SDK_VALUE_TEST := $(BUILD_DIR)/sdk-value-v1
 SDK_BATCH_TEST := $(BUILD_DIR)/sdk-batch-v1
 SDK_SQL_TEST := $(BUILD_DIR)/sdk-sql-select-v1
+SDK_SQL_EXPRESSION_TEST := $(BUILD_DIR)/sdk-sql-expression-v1
 
 .PHONY: all test
 
@@ -42,7 +43,11 @@ $(SDK_BATCH_TEST): engine/tests/fixtures/sdk_batch_v1.c $(SDK_ARCHIVE) | $(BUILD
 $(SDK_SQL_TEST): engine/tests/fixtures/sdk_sql_select_v1.c $(SDK_ARCHIVE) | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" "$<" "$(SDK_ARCHIVE)" -o "$@"
 
-test: $(SDK_VALUE_TEST) $(SDK_BATCH_TEST) $(SDK_SQL_TEST)
+$(SDK_SQL_EXPRESSION_TEST): engine/tests/fixtures/sdk_sql_expression_v1.c $(SDK_ARCHIVE) | $(BUILD_DIR)
+	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" "$<" "$(SDK_ARCHIVE)" -o "$@"
+
+test: $(SDK_VALUE_TEST) $(SDK_BATCH_TEST) $(SDK_SQL_TEST) $(SDK_SQL_EXPRESSION_TEST)
 	"$(SDK_VALUE_TEST)"
 	"$(SDK_BATCH_TEST)"
 	"$(SDK_SQL_TEST)"
+	"$(SDK_SQL_EXPRESSION_TEST)"
