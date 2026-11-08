@@ -1356,6 +1356,8 @@ static int32_t evaluate_predicate_node_v2(
     const prdb_sdk_select_v2 *statement, uint32_t index,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     prdb_sdk_sql_resolve_column_v2 resolve_column, void *resolver_context,
+    const prdb_sdk_select_binding_v2 *binding,
+    prdb_sdk_sql_resolve_bound_column_v2 resolve_bound_column,
     uint32_t depth, uint32_t *truth_out) {
     const prdb_sdk_predicate_node_v2 *node = &statement->predicates[index];
     uint32_t left_truth;
@@ -1368,7 +1370,8 @@ static int32_t evaluate_predicate_node_v2(
     if (node->node_kind == PRDB_SDK_SQL_PREDICATE_NOT) {
         status = evaluate_predicate_node_v2(
             statement, node->left_child, parameters, parameter_count,
-            resolve_column, resolver_context, depth + 1, &left_truth);
+            resolve_column, resolver_context, binding, resolve_bound_column,
+            depth + 1, &left_truth);
         if (status != PRDB_SDK_SQL_EVAL_OK) {
             return status;
         }
@@ -1378,7 +1381,8 @@ static int32_t evaluate_predicate_node_v2(
         node->node_kind == PRDB_SDK_SQL_PREDICATE_OR) {
         status = evaluate_predicate_node_v2(
             statement, node->left_child, parameters, parameter_count,
-            resolve_column, resolver_context, depth + 1, &left_truth);
+            resolve_column, resolver_context, binding, resolve_bound_column,
+            depth + 1, &left_truth);
         if (status != PRDB_SDK_SQL_EVAL_OK) {
             return status;
         }
@@ -1394,7 +1398,8 @@ static int32_t evaluate_predicate_node_v2(
         }
         status = evaluate_predicate_node_v2(
             statement, node->right_child, parameters, parameter_count,
-            resolve_column, resolver_context, depth + 1, &right_truth);
+            resolve_column, resolver_context, binding, resolve_bound_column,
+            depth + 1, &right_truth);
         if (status != PRDB_SDK_SQL_EVAL_OK) {
             return status;
         }
@@ -1418,10 +1423,20 @@ static int32_t evaluate_predicate_node_v2(
             node->parameter_index > parameter_count) {
             return PRDB_SDK_SQL_EVAL_PARAMETER_MISSING;
         }
-        status = resolve_column(resolver_context, statement->sql,
-                                 statement->sql_len, node->column,
-                                 &column_value, &expected_type, &precision,
-                                 &scale);
+        if (binding == NULL) {
+            status = resolve_column(resolver_context, statement->sql,
+                                    statement->sql_len, node->column,
+                                    &column_value, &expected_type, &precision,
+                                    &scale);
+        } else {
+            const prdb_sdk_sql_bound_column_v2 *column =
+                &binding->predicate_columns[index];
+            expected_type = column->type_code;
+            precision = column->decimal_precision;
+            scale = column->decimal_scale;
+            status = resolve_bound_column(resolver_context, column->ordinal,
+                                          &column_value);
+        }
         if (status != PRDB_SDK_SQL_EVAL_OK) {
             return status;
         }
@@ -1494,7 +1509,82 @@ int32_t prdb_sdk_sql_eval_select_predicate_v2(
     }
     status = evaluate_predicate_node_v2(
         statement, statement->predicate_root, parameters, parameter_count,
-        resolve_column, resolver_context, 0, &truth);
+        resolve_column, resolver_context, NULL, NULL, 0, &truth);
+    if (status == PRDB_SDK_SQL_EVAL_OK) {
+        *truth_out = truth;
+    }
+    return status;
+}
+
+static int valid_bound_column_type_v2(
+    const prdb_sdk_sql_bound_column_v2 *column) {
+    return column->type_code >= PRDB_SDK_VALUE_TYPE_BOOLEAN &&
+           column->type_code <= PRDB_SDK_VALUE_TYPE_TIMESTAMPTZ &&
+           (column->type_code == PRDB_SDK_VALUE_TYPE_DECIMAL
+                ? column->decimal_precision != 0 &&
+                      column->decimal_precision <= 38 &&
+                      column->decimal_scale <= column->decimal_precision
+                : column->decimal_precision == 0 &&
+                      column->decimal_scale == 0);
+}
+
+int32_t prdb_sdk_sql_eval_bound_select_predicate_v2(
+    const prdb_sdk_select_v2 *statement,
+    const prdb_sdk_select_binding_v2 *binding,
+    const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
+    prdb_sdk_sql_resolve_bound_column_v2 resolve_column,
+    void *resolver_context, uint32_t *truth_out) {
+    int32_t status;
+    uint32_t truth;
+
+    if (statement == NULL || binding == NULL || truth_out == NULL ||
+        statement->struct_size < sizeof(*statement) ||
+        statement->abi_version != PRDB_SDK_SQL_ABI_V2_VERSION ||
+        statement->sql == NULL || statement->sql_len == 0 ||
+        statement->sql_len > PRDB_SDK_SQL_MAX_QUERY_BYTES ||
+        statement->projection_star > 1 ||
+        (statement->projection_star == 1
+             ? statement->projection_count != 0
+             : statement->projection_count == 0 ||
+                   statement->projection_count >
+                       PRDB_SDK_SQL_MAX_PROJECTION_COLUMNS) ||
+        binding->struct_size < sizeof(*binding) ||
+        binding->abi_version != PRDB_SDK_SQL_ABI_V2_VERSION ||
+        binding->projection_star != statement->projection_star ||
+        binding->projection_count != statement->projection_count ||
+        binding->predicate_count != statement->predicate_count ||
+        binding->projection_count > PRDB_SDK_SQL_MAX_PROJECTION_COLUMNS ||
+        binding->predicate_count > PRDB_SDK_SQL_MAX_PREDICATE_NODES ||
+        parameter_count > PRDB_SDK_SQL_MAX_PARAMETER_INDEX ||
+        (parameter_count != 0 && parameters == NULL)) {
+        return PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT;
+    }
+    if (statement->predicate_count == 0) {
+        if (statement->predicate_root != 0) {
+            return PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT;
+        }
+        *truth_out = PRDB_SDK_SQL_TRUTH_TRUE;
+        return PRDB_SDK_SQL_EVAL_OK;
+    }
+    if (resolve_column == NULL) {
+        return PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT;
+    }
+    status = validate_predicate_tree_v2(statement);
+    if (status != PRDB_SDK_SQL_EVAL_OK) {
+        return status;
+    }
+    for (uint32_t index = 0; index < statement->predicate_count; ++index) {
+        uint32_t kind = statement->predicates[index].node_kind;
+        if ((kind == PRDB_SDK_SQL_PREDICATE_COMPARE ||
+             kind == PRDB_SDK_SQL_PREDICATE_IS_NULL ||
+             kind == PRDB_SDK_SQL_PREDICATE_IS_NOT_NULL) &&
+            !valid_bound_column_type_v2(&binding->predicate_columns[index])) {
+            return PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT;
+        }
+    }
+    status = evaluate_predicate_node_v2(
+        statement, statement->predicate_root, parameters, parameter_count,
+        NULL, resolver_context, binding, resolve_column, 0, &truth);
     if (status == PRDB_SDK_SQL_EVAL_OK) {
         *truth_out = truth;
     }

@@ -14,14 +14,16 @@
 - Bounds and representation: predicates use a postorder array of at most 64 nodes with zero-based child indices and a root index; NOT and parenthesis nesting is bounded to 32. Source column spans borrow immutable SQL bytes.
 - Regression: [`sdk_sql_select_v2.c`](../../engine/tests/fixtures/sdk_sql_select_v2.c) checks mixed precedence, grouping, comparison operators, null tests, parameter indices, malformed expressions, and both AST bounds. Before implementation it failed to link because the v2 parser entry point was missing.
 - Regression: the fixture uses a resolver that counts column reads; it proves AND/FALSE skips an entire branch, OR/TRUE skips a REDACTED leaf, reached REDACTED errors propagate, UNKNOWN combines correctly with FALSE, missing parameters fail, no-WHERE evaluates TRUE, and malformed tree edges are rejected. Before implementation it failed to link because the v2 evaluator symbol was absent.
-- Remaining: connect binding and evaluation to planner responses and sanitized storage batches.
+- Bound evaluation: `prdb_sdk_sql_eval_bound_select_predicate_v2` consumes the binding, resolves reached leaves by zero-based column ordinal, and takes type/Decimal metadata from the bound record. TinyCC regressions prove ordinal access, three-valued results, short-circuiting, callback error propagation and malformed-binding rejection before any row access. The first fixture run failed to link because the bound evaluator symbol was absent.
+- Verification: the full maintained TinyCC SDK fixture suite and `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, and `git diff --check` passed.
+- Remaining: decode planner responses into the binder's relation/column shape and connect the ordinal callback to sanitized storage batch cell views.
 
 ## SQL-4 v2 schema column binding — implemented
 
 - Contract: `prdb_sdk_sql_bind_select_v2` receives the v2 statement, one already-resolved authorized relation name, and its declared column shape. It maps unquoted projection and predicate names to zero-based ordinals using ASCII case folding, and attaches scalar/Decimal metadata to predicate leaves.
 - Failure behavior: relation mismatch, missing/ambiguous columns, malformed statement records, and malformed type metadata fail without changing the output record. `SELECT *` remains a star marker with no explicit ordinal list. The mapping grants no storage access.
 - Regression: the v2 fixture checks case-insensitive relation/column matching, projection and predicate ordinals, Decimal precision/scale, star binding, relation mismatch, missing/ambiguous columns, and invalid schema metadata. Before implementation it failed to link because the binder symbol was absent.
-- Remaining: connect binding and evaluation to planner responses and sanitized storage batches.
+- Remaining: decode planner responses into binder relation/column shapes and connect bound evaluation to sanitized storage batch cell views.
 
 ## SQL-2 typed scalar comparison and truth primitives — implemented
 
@@ -30,4 +32,4 @@
 - Regression: [`sdk_sql_expression_v1.c`](../../engine/tests/fixtures/sdk_sql_expression_v1.c) uses hand-evaluated integer, text and decimal examples, and checks NULL, REDACTED, type mismatch and truth-table behavior. The fixture first failed to compile because `prdb_sdk_sql_compare_v1` was missing and now passes against the TinyCC SDK archive.
 - Parameter binding: `prdb_sdk_sql_bind_select_parameter_v1` connects the parsed one-based `$n` to a caller-owned value-view array and checks the selected value against the planner-resolved column type. It accepts NULL in binder context, rejects REDACTED, missing parameters and type mismatch, and returns a borrowed view. Decimal binding validates precision/scale metadata and the coefficient's precision range. The regression parses `$2` and binds it; before implementation TinyCC failed because the binder symbol was absent.
 - Predicate evaluation: `prdb_sdk_sql_eval_select_predicate_v1` evaluates the parsed comparison or null-test operator against a sanitized row-cell view and a separately bound parameter. It checks resolved VALUE types, applies Decimal scale, returns UNKNOWN for SQL NULL comparisons and propagates REDACTED errors. The regression covers true, false, unknown, type mismatch, NULL tests and REDACTED rejection; before implementation the TinyCC fixture failed to link because the evaluator symbol was absent.
-- Remaining: use planner-resolved column type/Decimal precision and scale during v2 evaluation, then plan and execute SELECT over the scoped storage channel.
+- Remaining: obtain relation shape from planner responses and execute SELECT over the scoped storage channel.

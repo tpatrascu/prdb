@@ -85,6 +85,10 @@ typedef int32_t (*prdb_sdk_sql_resolve_column_v2)(
     uint32_t *type_out, uint8_t *decimal_precision_out,
     uint8_t *decimal_scale_out);
 
+/* Resolves a bound schema ordinal in one already-authorized sanitized row. */
+typedef int32_t (*prdb_sdk_sql_resolve_bound_column_v2)(
+    void *context, uint32_t ordinal, const prdb_sdk_value_v1 **value_out);
+
 /* Version 2 preserves v1 and adds a bounded Boolean predicate tree. */
 int32_t prdb_sdk_sql_parse_select_v2(const uint8_t *sql, uint64_t sql_len,
                                      prdb_sdk_select_v2 *out,
@@ -103,5 +107,13 @@ int32_t prdb_sdk_sql_eval_select_predicate_v2(
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     prdb_sdk_sql_resolve_column_v2 resolve_column, void *resolver_context,
     uint32_t *truth_out);
+/* Uses binding ordinals and type metadata so callbacks can read row cells by
+ * schema position without reparsing names. */
+int32_t prdb_sdk_sql_eval_bound_select_predicate_v2(
+    const prdb_sdk_select_v2 *statement,
+    const prdb_sdk_select_binding_v2 *binding,
+    const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
+    prdb_sdk_sql_resolve_bound_column_v2 resolve_column,
+    void *resolver_context, uint32_t *truth_out);
 
 #endif /* PRDB_SDK_SQL_V2_H */
