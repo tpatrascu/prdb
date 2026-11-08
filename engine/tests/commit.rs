@@ -9164,9 +9164,21 @@ fn storage_manager_audits_cancellation_before_commit_and_preserves_terminal_outc
 }
 
 #[test]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn admin_cancellation_sync_failure_quarantines_until_reopen()
 -> Result<(), Box<dyn std::error::Error>> {
     use std::process::Command;
+
+    struct AcceptMetadata;
+    impl prdb_engine::supervisor::SubmissionMetadataValidator for AcceptMetadata {
+        fn supports_versions(&self, manifest_version: u32, scope_version: u32) -> bool {
+            manifest_version == 1 && scope_version == 1
+        }
+
+        fn validate(&self, _metadata: &prdb_engine::supervisor::SubmissionMetadata) -> bool {
+            true
+        }
+    }
 
     const CHILD_DATABASE_ENV: &str = "PRDB_TEST_ADMIN_CANCEL_SYNC_FAILURE_DATABASE";
     const ADMIN_ID: [u8; 16] = [0xf0; 16];
@@ -9175,10 +9187,11 @@ fn admin_cancellation_sync_failure_quarantines_until_reopen()
     const AUDIT_ID: [u8; 16] = [0xf3; 16];
 
     if let Some(database_path) = std::env::var_os(CHILD_DATABASE_ENV) {
+        let database_path = std::path::PathBuf::from(database_path);
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .open(database_path)?;
+            .open(&database_path)?;
         let fail_next_sync = Arc::new(AtomicBool::new(false));
         let database = Database::builder().create_with_backend(FailNextSyncBackend {
             inner: redb::backends::FileBackend::new(file)?,
@@ -9212,6 +9225,57 @@ fn admin_cancellation_sync_failure_quarantines_until_reopen()
             storage.get_invocation_status(INVOCATION_ID, OWNER_ID, now_us),
             Err(prdb_engine::storage_manager::InvocationStatusError::Storage)
         ));
+        let socket_path =
+            std::path::PathBuf::from(format!("{}.quarantine.sock", database_path.display()));
+        let listener = prdb_engine::supervisor_ipc::bind_gateway_service_socket(&socket_path)?;
+        let staging = prdb_engine::supervisor::StagingStore::new(
+            prdb_engine::supervisor::StagingLimits::default(),
+            Arc::new(AcceptMetadata),
+        )?;
+        let runtime = prdb_engine::supervisor_ipc::GatewayServiceRuntimeConfig {
+            admission: prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+                retention_deadline_us: i64::MAX,
+                max_rows: 1,
+                max_bytes: 64,
+            },
+            executor: prdb_engine::supervisor_ipc::GatewayExecutorConfig {
+                cgroup_parent: std::path::Path::new(&database_path)
+                    .parent()
+                    .ok_or("database fixture has no parent")?
+                    .to_path_buf(),
+                resource_limits: prdb_engine::linux_sandbox::WorkerResourceLimits {
+                    cpu_quota_micros: 100_000,
+                    cpu_period_micros: 100_000,
+                    memory_max_bytes: 64 * 1024 * 1024,
+                    max_processes: 16,
+                },
+                launch: prdb_engine::executor_launcher::ExecutorLaunchConfig {
+                    executor_path: std::env::current_exe()?,
+                    scratch_parent: std::env::temp_dir(),
+                    runtime_read_execute: Vec::new(),
+                    runtime_read_only: Vec::new(),
+                    cleanup_timeout: Duration::from_millis(100),
+                },
+            },
+            listener: prdb_engine::supervisor_ipc::GatewayServiceListenerConfig {
+                expected_gateway_uid: unsafe { libc::geteuid() },
+                max_connections: 1,
+                idle_timeout: Duration::from_secs(1),
+                accept_poll_interval: Duration::from_millis(1),
+            },
+        };
+        assert!(matches!(
+            prdb_engine::supervisor_ipc::serve_gateway_service_listener(
+                listener,
+                &storage,
+                &staging,
+                runtime,
+                Arc::new(AtomicBool::new(false)),
+                |_request_id, _stream, _invocation, _submission, _executor| {},
+            ),
+            Err(prdb_engine::supervisor_ipc::GatewayServiceListenerError::StorageReopenRequired)
+        ));
+        std::fs::remove_file(socket_path)?;
         // Let process teardown close redb and discard its process-local quarantine.
         std::process::exit(0);
     }

@@ -105,6 +105,7 @@ pub struct GatewayServiceListenerConfig {
 #[derive(Debug)]
 pub enum GatewayServiceListenerError {
     InvalidConfig,
+    StorageReopenRequired,
     Io(io::Error),
     WorkerPanicked,
 }
@@ -462,7 +463,12 @@ where
     std::thread::scope(|scope| {
         let mut workers = Vec::new();
         let mut accept_error = None;
+        let mut storage_reopen_required = false;
         while !shutdown.load(Ordering::Acquire) {
+            if manager.requires_reopen_after_commit_error() {
+                storage_reopen_required = true;
+                break;
+            }
             match listener.accept() {
                 Ok((mut stream, _peer)) => {
                     let Some(permit) = limiter.try_acquire() else {
@@ -549,6 +555,8 @@ where
         }
         if worker_panicked {
             Err(GatewayServiceListenerError::WorkerPanicked)
+        } else if storage_reopen_required {
+            Err(GatewayServiceListenerError::StorageReopenRequired)
         } else if let Some(error) = accept_error {
             Err(GatewayServiceListenerError::Io(error))
         } else {
