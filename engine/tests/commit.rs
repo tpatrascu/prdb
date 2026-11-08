@@ -7599,6 +7599,56 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
     let schema_discovery = String::from_utf8(schema_discovery)?;
     assert!(schema_discovery.contains("\"schemas\":["));
     assert!(schema_discovery.contains("\"name\":\"information_schema\""));
+    let public_relations =
+        prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+            prdb_engine::ipc::ServiceRole::Gateway,
+            &storage,
+            &staging,
+            &mut discovery_control,
+            &prdb_engine::ipc::IpcFrame {
+                operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+                request_id: 2,
+                payload: br#"{"phase":"read","operation_version":1,"operation":"metadata.relations.list","arguments":{"schema_id":"80808080808080808080808080808002"}}"#.to_vec(),
+            },
+            prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+                retention_period_us: 60_000_000,
+                max_rows: 1,
+                max_bytes: 1,
+            },
+        )?;
+    let public_relations = match public_relations {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => response.payload,
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
+            return Err("relation discovery unexpectedly started an invocation".into());
+        }
+    };
+    let public_relations = String::from_utf8(public_relations)?;
+    assert!(public_relations.contains("\"name\":\"columns\""));
+    assert!(public_relations.contains("\"name\":\"schemata\""));
+    assert!(public_relations.contains("\"name\":\"tables\""));
+    let unavailable_relations = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut discovery_control,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 3,
+            payload: br#"{"phase":"read","operation_version":1,"operation":"metadata.relations.list","arguments":{"schema_id":"f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0"}}"#.to_vec(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_period_us: 60_000_000,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )?;
+    let unavailable_relations = match unavailable_relations {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => response.payload,
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
+            return Err("relation discovery unexpectedly started an invocation".into());
+        }
+    };
+    assert_eq!(unavailable_relations, br#"{"relations":[]}"#);
     let token_request = prdb_engine::ipc::IpcFrame {
         operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
         request_id: 4,

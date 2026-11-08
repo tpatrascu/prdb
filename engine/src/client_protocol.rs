@@ -263,6 +263,9 @@ struct PendingAdminOperation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ClientAdminRead {
     ListSchemas,
+    ListRelations {
+        schema_id: [u8; 16],
+    },
     ListTokens {
         user_id: [u8; 16],
         after_token_id: Option<[u8; 16]>,
@@ -272,6 +275,9 @@ pub enum ClientAdminRead {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ClientAdminCommand {
     ListSchemas,
+    ListRelations {
+        schema_id: [u8; 16],
+    },
     ListTokens {
         user_id: [u8; 16],
         after_token_id: Option<[u8; 16]>,
@@ -381,6 +387,9 @@ pub enum ClientAdminCommand {
 pub fn decode_client_admin_read(payload: &[u8]) -> Result<ClientAdminRead, ClientControlError> {
     match decode_client_admin_command(payload)? {
         ClientAdminCommand::ListSchemas => Ok(ClientAdminRead::ListSchemas),
+        ClientAdminCommand::ListRelations { schema_id } => {
+            Ok(ClientAdminRead::ListRelations { schema_id })
+        }
         ClientAdminCommand::ListTokens {
             user_id,
             after_token_id,
@@ -499,6 +508,23 @@ pub fn decode_client_admin_command(
                 return Err(ClientControlError::UnknownKey);
             }
             Ok(ClientAdminCommand::ListSchemas)
+        }
+        Some("read")
+            if version == Some(1) && operation.as_deref() == Some("metadata.relations.list") =>
+        {
+            if operation_id.is_some() || seen.len() != 4 {
+                return Err(ClientControlError::UnknownKey);
+            }
+            let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
+            let schema_id = decode_lower_hex_id(
+                &args
+                    .remove("schema_id")
+                    .ok_or(ClientControlError::MissingKey)?,
+            )?;
+            if !args.is_empty() {
+                return Err(ClientControlError::UnknownKey);
+            }
+            Ok(ClientAdminCommand::ListRelations { schema_id })
         }
         Some("read") if version == Some(1) && operation.as_deref() == Some("tokens.list") => {
             if operation_id.is_some() || seen.len() != 4 {
@@ -2430,6 +2456,38 @@ impl ClientConnectionSession {
                     payload.push_str("\",\"name\":\"");
                     push_json_string(&mut payload, &schema.name);
                     payload.push_str("\"}");
+                }
+                payload.push_str("]}");
+                if payload.len() > CLIENT_MAX_CONTROL_BYTES {
+                    return Err(ClientSessionError::ResourceLimit);
+                }
+                self.json_response(request.request_id, payload.into_bytes())
+            }
+            ClientAdminCommand::ListRelations { schema_id } => {
+                let token_id = self
+                    .authenticated
+                    .as_ref()
+                    .ok_or(ClientSessionError::AuthenticationRequired)?
+                    .token_id();
+                let token_secret = self
+                    .token_secret
+                    .as_ref()
+                    .ok_or(ClientSessionError::AuthenticationRequired)?;
+                let relations = storage
+                    .discover_token_authorized_relations(token_id, token_secret, schema_id)
+                    .map_err(ClientSessionError::Storage)?;
+                let mut payload = String::from("{\"relations\":[");
+                if let Some(relations) = relations {
+                    for (index, relation) in relations.iter().enumerate() {
+                        if index != 0 {
+                            payload.push(',');
+                        }
+                        payload.push_str("{\"relation_id\":\"");
+                        payload.push_str(&encode_lower_hex_id(relation.relation_id));
+                        payload.push_str("\",\"name\":\"");
+                        push_json_string(&mut payload, &relation.name);
+                        payload.push_str("\"}");
+                    }
                 }
                 payload.push_str("]}");
                 if payload.len() > CLIENT_MAX_CONTROL_BYTES {

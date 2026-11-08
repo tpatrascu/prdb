@@ -205,6 +205,24 @@ fn admin_read_decoder_accepts_empty_visible_schema_discovery_request() {
 }
 
 #[test]
+fn admin_read_decoder_requires_exact_relation_discovery_arguments() {
+    assert_eq!(
+        decode_client_admin_read(
+            br#"{"phase":"read","operation_version":1,"operation":"metadata.relations.list","arguments":{"schema_id":"000102030405060708090a0b0c0d0e0f"}}"#
+        ),
+        Ok(ClientAdminRead::ListRelations {
+            schema_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        })
+    );
+    assert_eq!(
+        decode_client_admin_read(
+            br#"{"phase":"read","operation_version":1,"operation":"metadata.relations.list","arguments":{"schema_id":"000102030405060708090a0b0c0d0e0f","cursor":"x"}}"#
+        ),
+        Err(ClientControlError::UnknownKey)
+    );
+}
+
+#[test]
 fn admin_revoke_decoder_requires_prepare_then_start_schemas() {
     assert_eq!(
         decode_client_admin_command(

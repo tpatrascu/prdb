@@ -9,6 +9,9 @@ pub const RELATION_CURSOR_TOKEN_KIND: u8 = 2;
 pub const COLUMN_CURSOR_TOKEN_KIND: u8 = 3;
 pub const INFORMATION_SCHEMA_TABLES_CURSOR_TOKEN_KIND: u8 = 4;
 pub const INFORMATION_SCHEMA_COLUMNS_CURSOR_TOKEN_KIND: u8 = 5;
+pub const INFORMATION_SCHEMA_SCHEMA_ID: [u8; 16] = [
+    0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 2,
+];
 pub const RELATION_HANDLE_TOKEN_KIND: u8 = 6;
 pub const EXECUTOR_SCAN_CURSOR_TOKEN_KIND: u8 = 7;
 pub const EXECUTOR_ROW_HANDLE_TOKEN_KIND: u8 = 8;
@@ -22,6 +25,33 @@ pub const MAX_EXECUTOR_BATCH_CANDIDATES: usize = 128;
 pub struct VisibleRelation {
     pub relation_id: [u8; 16],
     pub name: String,
+}
+
+/// Fixed public relations in the reserved information_schema namespace.
+pub fn information_schema_relations() -> [VisibleRelation; 3] {
+    [
+        VisibleRelation {
+            relation_id: [
+                0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81,
+                0x81, 1,
+            ],
+            name: "columns".to_owned(),
+        },
+        VisibleRelation {
+            relation_id: [
+                0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81,
+                0x81, 2,
+            ],
+            name: "schemata".to_owned(),
+        },
+        VisibleRelation {
+            relation_id: [
+                0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81,
+                0x81, 3,
+            ],
+            name: "tables".to_owned(),
+        },
+    ]
 }
 
 /// One declared column that is safe for the authorized caller to bind.

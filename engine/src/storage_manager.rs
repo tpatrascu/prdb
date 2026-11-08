@@ -48,6 +48,8 @@ pub const MAX_ADMIN_INVOCATION_PAGE: usize = 128;
 /// snapshot. Clients can request a fresh snapshot when this bound is reached.
 pub const MAX_DISCOVERED_SCHEMAS: usize = 4096;
 const MAX_DISCOVERED_SCHEMA_BYTES: usize = 1024 * 1024;
+pub const MAX_DISCOVERED_RELATIONS: usize = 4096;
+const MAX_DISCOVERED_RELATION_BYTES: usize = 1024 * 1024;
 static TOKEN_REQUEST_LIMITERS: OnceLock<Mutex<HashMap<usize, Weak<TokenRequestLimiter>>>> =
     OnceLock::new();
 static ADMIN_CANCELLATION_LIMITERS: OnceLock<Mutex<HashMap<usize, Weak<TokenRequestLimiter>>>> =
@@ -1960,6 +1962,71 @@ impl<'db> StorageManager<'db> {
             continuation = page.continuation;
             if continuation.is_none() {
                 return Ok(schemas);
+            }
+        }
+    }
+
+    /// Discover relations for one schema visible to a token-authenticated
+    /// principal. Hidden and absent schemas return `None`; an authorized
+    /// empty schema returns an empty vector. The read uses one request-scoped
+    /// catalog snapshot and does not admit an invocation or write an outcome.
+    pub fn discover_token_authorized_relations(
+        &self,
+        token_id: [u8; 16],
+        token_secret: &[u8; TOKEN_SECRET_BYTES],
+        schema_id: [u8; 16],
+    ) -> Result<Option<Vec<crate::metadata_discovery::VisibleRelation>>, TransactionError> {
+        let principal_id = lookup_credential_principal(self.database, token_id)?;
+        let mut invocation_id = [0; 16];
+        getrandom::fill(&mut invocation_id)
+            .map_err(|_| TransactionError::Storage("randomness unavailable".into()))?;
+        if invocation_id == [0; 16] {
+            return Err(TransactionError::Storage("randomness unavailable".into()));
+        }
+        let mut transaction = InvocationTransaction::begin_inner(
+            self.database,
+            InvocationCoordination::uncoordinated(),
+            invocation_id,
+            principal_id,
+            i64::MAX,
+            1,
+            1,
+        )?;
+        let now_us = now_unix_micros().ok_or(TransactionError::ClockUnavailable)?;
+        transaction.authenticate_credential_token(token_id, token_secret, now_us)?;
+        if schema_id == crate::metadata_discovery::INFORMATION_SCHEMA_SCHEMA_ID {
+            return Ok(Some(
+                crate::metadata_discovery::information_schema_relations().into(),
+            ));
+        }
+
+        let mut relations = Vec::new();
+        let mut encoded_bytes = 0usize;
+        let mut continuation = None;
+        loop {
+            let Some(page) = transaction.list_catalog_authorized_relations(
+                schema_id,
+                crate::metadata_discovery::MAX_RELATIONS_PER_PAGE,
+                continuation,
+            )?
+            else {
+                return Ok(None);
+            };
+            if relations.len().saturating_add(page.relations.len()) > MAX_DISCOVERED_RELATIONS {
+                return Err(TransactionError::InvalidMetadataRequest);
+            }
+            for relation in &page.relations {
+                encoded_bytes = encoded_bytes
+                    .saturating_add(16)
+                    .saturating_add(relation.name.len());
+                if encoded_bytes > MAX_DISCOVERED_RELATION_BYTES {
+                    return Err(TransactionError::InvalidMetadataRequest);
+                }
+            }
+            relations.extend(page.relations);
+            continuation = page.continuation;
+            if continuation.is_none() {
+                return Ok(Some(relations));
             }
         }
     }

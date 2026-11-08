@@ -53,9 +53,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 const MAX_INDEX_CHANGES_PER_ROW: usize = 256;
-const INFORMATION_SCHEMA_ID: [u8; 16] = [
-    0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 2,
-];
+const INFORMATION_SCHEMA_ID: [u8; 16] = crate::metadata_discovery::INFORMATION_SCHEMA_SCHEMA_ID;
 const INFORMATION_SCHEMA_COLUMN_EXTRA_BYTES: usize =
     "TIMESTAMP WITH TIME ZONE".len() + "YES".len() + 4 + 3 * 5 + 16;
 
@@ -6640,20 +6638,7 @@ fn decode_catalog_scalar_type_parameters(
 }
 
 fn builtin_information_schema_relations() -> [VisibleRelation; 3] {
-    [
-        VisibleRelation {
-            relation_id: builtin_information_schema_relation_id(1),
-            name: "columns".to_owned(),
-        },
-        VisibleRelation {
-            relation_id: builtin_information_schema_relation_id(2),
-            name: "schemata".to_owned(),
-        },
-        VisibleRelation {
-            relation_id: builtin_information_schema_relation_id(3),
-            name: "tables".to_owned(),
-        },
-    ]
+    crate::metadata_discovery::information_schema_relations()
 }
 
 fn builtin_information_schema_relation(relation_name: &str) -> Option<VisibleRelation> {
