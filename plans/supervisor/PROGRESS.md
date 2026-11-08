@@ -75,3 +75,10 @@
 - Contract: [supervisor lifecycle](../../specs/supervisor.md), [query worker](../../specs/query-worker.md), and [storage manager](../../specs/storage-manager.md).
 - Limitation: successful cgroup-backed spawn remains unavailable on this host; ABI v1 has no callbacks, so SDK query code cannot make documented requests over these channels.
 - Remaining: define and implement a new sized query ABI with bounded executor/planner operations and output relay, then exercise the actual C callback path inside the complete sandbox harness.
+
+## SU-2 / NP-3: real gateway submission upload and seal — verified
+
+- Behavior: the supervised service accepts authenticated TCP submission traffic from the real gateway binary, stages TinyCC artifact bytes and confirms PMF1/PSC1/ELF validation at SEAL.
+- Regression: the binary integration compiles an ABI-v3 TinyCC fixture, authenticates using the bootstrap credential, uploads it through PREPARE/chunk, and verifies SEAL returns `prepared`. It does not load or execute the fixture.
+- Verification: full workspace build, formatting, warning-denied Clippy, tests and maintained TinyCC SDK tests passed.
+- Remaining: real START and confined process execution are gated on a host with a writable delegated cgroup; this machine's cgroup v2 mount is read only.

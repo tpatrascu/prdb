@@ -83,3 +83,10 @@
 - Changed code and spec: [gateway IPC adapter](../../engine/src/supervisor_ipc.rs) and [payload mapping](../../specs/ipc-protocol.md).
 - Verification: the real-redb handshake/submission regression covers the dispatcher lifecycle.
 - Remaining: real service socket provisioning, TCP listener, result relay, and process lifecycle.
+
+## NP-3 integration: authenticated TCP upload and seal — verified
+
+- Behavior: the real supervisor and gateway binaries now carry HELLO, bootstrap-token AUTH, PMF1/PSC1 PREPARE, a TinyCC artifact chunk, and SEAL over one external TCP connection. The service validates artifact hashes, compatibility, requested scope and ELF dependencies, then reports `prepared` without loading the artifact.
+- Regression: `supervisor_and_gateway_binaries_authenticate_upload_and_seal_tinycc_query_over_tcp` compiles a minimal ABI-v3 shared object with TinyCC and exercises the complete authenticated submission path through both binaries.
+- Verification: `cargo test --workspace --locked` passed; this integration test was among the three passing supervisor binary tests. The two sandboxed START tests remain ignored because this host has no writable delegated cgroup.
+- Remaining: exercise START, confined loading, result relay and durable terminal reconciliation on a host with a writable delegated cgroup.
