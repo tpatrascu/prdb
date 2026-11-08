@@ -16209,6 +16209,17 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         now + 3_600_000_000,
         empty_schema_audit,
     )?;
+    let hidden_schema_invocation = id(0xa5);
+    let mut hidden_schema_audit = identity_audit_event(0xa6, user_id, id(0xa7));
+    hidden_schema_audit.correlation_id = hidden_schema_invocation;
+    let hidden_schema = storage.create_schema(
+        hidden_schema_invocation,
+        user_id,
+        "hidden_roundtrip",
+        user_id,
+        now + 3_600_000_000,
+        hidden_schema_audit,
+    )?;
     let table_invocation = id(0x80);
     let mut table_audit = identity_audit_event(0x81, user_id, id(0x82));
     table_audit.correlation_id = table_invocation;
@@ -16247,6 +16258,24 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             audit_event: private_table_audit,
         })
         .map_err(|error| format!("private metadata fixture table creation failed: {error:?}"))?;
+    let hidden_table_invocation = id(0xa8);
+    let mut hidden_table_audit = identity_audit_event(0xa9, user_id, hidden_schema.schema_id);
+    hidden_table_audit.correlation_id = hidden_table_invocation;
+    let _hidden_table = storage.create_table(CreateTableRequest {
+        invocation_id: hidden_table_invocation,
+        authenticated_actor_id: user_id,
+        schema_id: hidden_schema.schema_id,
+        name: "hidden_records".to_owned(),
+        columns: vec![TableColumnDefinition {
+            name: "secret".to_owned(),
+            scalar_type: ScalarType::Integer,
+            nullable: true,
+            generated_uuid_identity: false,
+            default: None,
+        }],
+        retention_deadline_us: now + 3_600_000_000,
+        audit_event: hidden_table_audit,
+    })?;
 
     let authority_invocation = id(0x83);
     let mut authority_audit = identity_audit_event(0x84, user_id, user_id);
@@ -16865,6 +16894,36 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         !column_rows
             .iter()
             .any(|row| row.table_name == "private_records")
+    );
+    assert!(
+        !schema_rows
+            .iter()
+            .any(|row| row.schema_name == "hidden_roundtrip")
+    );
+    assert!(
+        !schema_rows
+            .iter()
+            .any(|row| row.schema_name == "missing_roundtrip")
+    );
+    assert!(
+        !table_rows
+            .iter()
+            .any(|row| row.table_schema == "hidden_roundtrip")
+    );
+    assert!(
+        !table_rows
+            .iter()
+            .any(|row| row.table_schema == "missing_roundtrip")
+    );
+    assert!(
+        !column_rows
+            .iter()
+            .any(|row| row.table_schema == "hidden_roundtrip")
+    );
+    assert!(
+        !column_rows
+            .iter()
+            .any(|row| row.table_schema == "missing_roundtrip")
     );
     assert!(
         !table_rows

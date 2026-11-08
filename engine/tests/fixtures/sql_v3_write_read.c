@@ -125,6 +125,8 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
     static const uint8_t expected_user_column[] = "id";
     static const uint8_t private_table_name[] = "private_records";
     static const uint8_t missing_table_name[] = "missing_records";
+    static const uint8_t hidden_schema_name[] = "hidden_roundtrip";
+    static const uint8_t missing_schema_name[] = "missing_roundtrip";
     static const uint8_t first_information_schema_table[] = "columns";
     static const uint8_t first_information_schema_column[] = "table_schema";
     static const uint8_t integer_bytes[] = {0, 0, 0, 42};
@@ -503,6 +505,102 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
         cell_scratch, 9, verify_information_schema_name, &results);
     if (status != PRDB_SDK_SQL_EXEC_OK || results.row_count != 0) {
         static const uint8_t message[] = "fixture-error-missing-columns-result";
+        return report_failure(host, message, sizeof(message) - 1);
+    }
+
+    metadata_parameter.data = hidden_schema_name;
+    metadata_parameter.data_len = sizeof(hidden_schema_name) - 1;
+    results.expected_value = NULL;
+    results.expected_value_len = 0;
+    results.expected_ordinal = 0;
+    results.row_count = 0;
+    status = prdb_sdk_sql_execute_select_v2(
+        host, information_schema, sizeof(information_schema) - 1,
+        select_schemata_sql, sizeof(select_schemata_sql) - 1,
+        &metadata_parameter, 1, 16,
+        sizeof(batch_response), planner_response, sizeof(planner_response),
+        executor_response, sizeof(executor_response), batch_response,
+        sizeof(batch_response), planner_columns, 1, executor_columns, 1,
+        cell_scratch, 1, verify_information_schema_name, &results);
+    if (status != PRDB_SDK_SQL_EXEC_OK || results.row_count != 0) {
+        static const uint8_t message[] = "fixture-error-hidden-schema-visible";
+        return report_failure(host, message, sizeof(message) - 1);
+    }
+
+    results.expected_ordinal = 1;
+    results.row_count = 0;
+    status = prdb_sdk_sql_execute_select_v2(
+        host, information_schema, sizeof(information_schema) - 1,
+        select_tables_sql, sizeof(select_tables_sql) - 1,
+        &metadata_parameter, 1, 16,
+        sizeof(batch_response), planner_response, sizeof(planner_response),
+        executor_response, sizeof(executor_response), batch_response,
+        sizeof(batch_response), planner_columns, 9, executor_columns, 9,
+        cell_scratch, 9, verify_information_schema_name, &results);
+    if (status != PRDB_SDK_SQL_EXEC_OK || results.row_count != 0) {
+        static const uint8_t message[] = "fixture-error-hidden-schema-tables-visible";
+        return report_failure(host, message, sizeof(message) - 1);
+    }
+
+    results.expected_ordinal = 2;
+    results.row_count = 0;
+    status = prdb_sdk_sql_execute_select_v2(
+        host, information_schema, sizeof(information_schema) - 1,
+        select_columns_sql, sizeof(select_columns_sql) - 1,
+        &metadata_parameter, 1, 16,
+        sizeof(batch_response), planner_response, sizeof(planner_response),
+        executor_response, sizeof(executor_response), batch_response,
+        sizeof(batch_response), planner_columns, 9, executor_columns, 9,
+        cell_scratch, 9, verify_information_schema_name, &results);
+    if (status != PRDB_SDK_SQL_EXEC_OK || results.row_count != 0) {
+        static const uint8_t message[] = "fixture-error-hidden-schema-columns-visible";
+        return report_failure(host, message, sizeof(message) - 1);
+    }
+
+    metadata_parameter.data = missing_schema_name;
+    metadata_parameter.data_len = sizeof(missing_schema_name) - 1;
+    results.expected_ordinal = 0;
+    results.row_count = 0;
+    status = prdb_sdk_sql_execute_select_v2(
+        host, information_schema, sizeof(information_schema) - 1,
+        select_schemata_sql, sizeof(select_schemata_sql) - 1,
+        &metadata_parameter, 1, 16,
+        sizeof(batch_response), planner_response, sizeof(planner_response),
+        executor_response, sizeof(executor_response), batch_response,
+        sizeof(batch_response), planner_columns, 1, executor_columns, 1,
+        cell_scratch, 1, verify_information_schema_name, &results);
+    if (status != PRDB_SDK_SQL_EXEC_OK || results.row_count != 0) {
+        static const uint8_t message[] = "fixture-error-missing-schema-result";
+        return report_failure(host, message, sizeof(message) - 1);
+    }
+
+    results.expected_ordinal = 1;
+    results.row_count = 0;
+    status = prdb_sdk_sql_execute_select_v2(
+        host, information_schema, sizeof(information_schema) - 1,
+        select_tables_sql, sizeof(select_tables_sql) - 1,
+        &metadata_parameter, 1, 16,
+        sizeof(batch_response), planner_response, sizeof(planner_response),
+        executor_response, sizeof(executor_response), batch_response,
+        sizeof(batch_response), planner_columns, 9, executor_columns, 9,
+        cell_scratch, 9, verify_information_schema_name, &results);
+    if (status != PRDB_SDK_SQL_EXEC_OK || results.row_count != 0) {
+        static const uint8_t message[] = "fixture-error-missing-schema-tables-result";
+        return report_failure(host, message, sizeof(message) - 1);
+    }
+
+    results.expected_ordinal = 2;
+    results.row_count = 0;
+    status = prdb_sdk_sql_execute_select_v2(
+        host, information_schema, sizeof(information_schema) - 1,
+        select_columns_sql, sizeof(select_columns_sql) - 1,
+        &metadata_parameter, 1, 16,
+        sizeof(batch_response), planner_response, sizeof(planner_response),
+        executor_response, sizeof(executor_response), batch_response,
+        sizeof(batch_response), planner_columns, 9, executor_columns, 9,
+        cell_scratch, 9, verify_information_schema_name, &results);
+    if (status != PRDB_SDK_SQL_EXEC_OK || results.row_count != 0) {
+        static const uint8_t message[] = "fixture-error-missing-schema-columns-result";
         return report_failure(host, message, sizeof(message) - 1);
     }
 
