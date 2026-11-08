@@ -1178,6 +1178,180 @@ static int32_t validate_predicate_tree_v2(
     return PRDB_SDK_SQL_EVAL_OK;
 }
 
+static uint8_t fold_identifier_byte(uint8_t byte) {
+    return byte >= 'A' && byte <= 'Z' ? (uint8_t)(byte + ('a' - 'A')) : byte;
+}
+
+static int valid_identifier_bytes(const uint8_t *name, uint32_t name_len) {
+    if (name == NULL || name_len == 0 ||
+        name_len > PRDB_SDK_SQL_MAX_IDENTIFIER_BYTES ||
+        !is_identifier_start(name[0])) {
+        return 0;
+    }
+    for (uint32_t index = 1; index < name_len; ++index) {
+        if (!is_identifier_continue(name[index])) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int span_matches_name(const prdb_sdk_select_v2 *statement,
+                             prdb_sdk_sql_span_v1 span, const uint8_t *name,
+                             uint32_t name_len) {
+    if (span.length != name_len || span.offset > statement->sql_len ||
+        span.length > statement->sql_len - span.offset) {
+        return 0;
+    }
+    for (uint32_t index = 0; index < name_len; ++index) {
+        if (fold_identifier_byte(statement->sql[span.offset + index]) !=
+            fold_identifier_byte(name[index])) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int32_t validate_column_shape_v2(
+    const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count) {
+    if (column_count > PRDB_SDK_SQL_MAX_RELATION_COLUMNS ||
+        (column_count != 0 && columns == NULL)) {
+        return PRDB_SDK_SQL_BIND_INVALID_ARGUMENT;
+    }
+    for (uint32_t index = 0; index < column_count; ++index) {
+        const prdb_sdk_sql_column_shape_v2 *column = &columns[index];
+        if (!valid_identifier_bytes(column->name, column->name_len) ||
+            column->ordinal != index ||
+            column->type_code < PRDB_SDK_VALUE_TYPE_BOOLEAN ||
+            column->type_code > PRDB_SDK_VALUE_TYPE_TIMESTAMPTZ ||
+            (column->type_code == PRDB_SDK_VALUE_TYPE_DECIMAL
+                 ? column->decimal_precision == 0 ||
+                       column->decimal_precision > 38 ||
+                       column->decimal_scale > column->decimal_precision
+                 : column->decimal_precision != 0 ||
+                       column->decimal_scale != 0)) {
+            return PRDB_SDK_SQL_BIND_INVALID_SCHEMA;
+        }
+    }
+    return PRDB_SDK_SQL_BIND_OK;
+}
+
+static int32_t find_column_shape_v2(
+    const prdb_sdk_select_v2 *statement, prdb_sdk_sql_span_v1 span,
+    const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count,
+    uint32_t *ordinal_out) {
+    uint32_t found = UINT32_MAX;
+    for (uint32_t index = 0; index < column_count; ++index) {
+        if (!span_matches_name(statement, span, columns[index].name,
+                              columns[index].name_len)) {
+            continue;
+        }
+        if (found != UINT32_MAX) {
+            return PRDB_SDK_SQL_BIND_AMBIGUOUS_COLUMN;
+        }
+        found = index;
+    }
+    if (found == UINT32_MAX) {
+        return PRDB_SDK_SQL_BIND_COLUMN_NOT_FOUND;
+    }
+    *ordinal_out = columns[found].ordinal;
+    return PRDB_SDK_SQL_BIND_OK;
+}
+
+int32_t prdb_sdk_sql_bind_select_v2(
+    const prdb_sdk_select_v2 *statement, const uint8_t *relation_name,
+    uint32_t relation_name_len,
+    const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count,
+    prdb_sdk_select_binding_v2 *out, uint32_t out_capacity) {
+    prdb_sdk_select_binding_v2 result = {0};
+    int32_t status;
+
+    if (statement == NULL || relation_name == NULL || out == NULL ||
+        out_capacity < sizeof(*out) ||
+        !valid_identifier_bytes(relation_name, relation_name_len)) {
+        return PRDB_SDK_SQL_BIND_INVALID_ARGUMENT;
+    }
+    if (statement->struct_size < sizeof(*statement) ||
+        statement->abi_version != PRDB_SDK_SQL_ABI_V2_VERSION ||
+        statement->sql == NULL || statement->sql_len == 0 ||
+        statement->sql_len > PRDB_SDK_SQL_MAX_QUERY_BYTES ||
+        statement->relation.length == 0 ||
+        statement->relation.offset > statement->sql_len ||
+        statement->relation.length >
+            statement->sql_len - statement->relation.offset ||
+        statement->projection_star > 1 ||
+        (statement->projection_star == 1
+             ? statement->projection_count != 0
+             : statement->projection_count == 0 ||
+                   statement->projection_count >
+                       PRDB_SDK_SQL_MAX_PROJECTION_COLUMNS) ||
+        (statement->predicate_count == 0
+             ? statement->predicate_root != 0
+             : statement->predicate_count >
+                       PRDB_SDK_SQL_MAX_PREDICATE_NODES ||
+                   statement->predicate_root !=
+                       statement->predicate_count - 1)) {
+        return PRDB_SDK_SQL_BIND_INVALID_STATEMENT;
+    }
+    if (!span_matches_name(statement, statement->relation, relation_name,
+                           relation_name_len)) {
+        return PRDB_SDK_SQL_BIND_RELATION_MISMATCH;
+    }
+    for (uint32_t index = 0; index < statement->projection_count; ++index) {
+        prdb_sdk_sql_span_v1 span = statement->projection[index];
+        if (span.length == 0 || span.offset > statement->sql_len ||
+            span.length > statement->sql_len - span.offset) {
+            return PRDB_SDK_SQL_BIND_INVALID_STATEMENT;
+        }
+    }
+    status = validate_column_shape_v2(columns, column_count);
+    if (status != PRDB_SDK_SQL_BIND_OK) {
+        return status;
+    }
+    if (statement->predicate_count != 0 &&
+        validate_predicate_tree_v2(statement) != PRDB_SDK_SQL_EVAL_OK) {
+        return PRDB_SDK_SQL_BIND_INVALID_STATEMENT;
+    }
+
+    result.struct_size = sizeof(result);
+    result.abi_version = PRDB_SDK_SQL_ABI_V2_VERSION;
+    result.projection_star = statement->projection_star;
+    result.projection_count = statement->projection_count;
+    result.predicate_count = statement->predicate_count;
+    if (statement->projection_star == 0) {
+        for (uint32_t index = 0; index < statement->projection_count; ++index) {
+            status = find_column_shape_v2(
+                statement, statement->projection[index], columns,
+                column_count, &result.projection_ordinals[index]);
+            if (status != PRDB_SDK_SQL_BIND_OK) {
+                return status;
+            }
+        }
+    }
+    for (uint32_t index = 0; index < statement->predicate_count; ++index) {
+        const prdb_sdk_predicate_node_v2 *node =
+            &statement->predicates[index];
+        uint32_t ordinal;
+        if (node->node_kind != PRDB_SDK_SQL_PREDICATE_COMPARE &&
+            node->node_kind != PRDB_SDK_SQL_PREDICATE_IS_NULL &&
+            node->node_kind != PRDB_SDK_SQL_PREDICATE_IS_NOT_NULL) {
+            continue;
+        }
+        status = find_column_shape_v2(statement, node->column, columns,
+                                      column_count, &ordinal);
+        if (status != PRDB_SDK_SQL_BIND_OK) {
+            return status;
+        }
+        result.predicate_columns[index] =
+            (prdb_sdk_sql_bound_column_v2){
+                ordinal, columns[ordinal].type_code,
+                columns[ordinal].decimal_precision,
+                columns[ordinal].decimal_scale};
+    }
+    *out = result;
+    return PRDB_SDK_SQL_BIND_OK;
+}
+
 static int32_t evaluate_predicate_node_v2(
     const prdb_sdk_select_v2 *statement, uint32_t index,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,

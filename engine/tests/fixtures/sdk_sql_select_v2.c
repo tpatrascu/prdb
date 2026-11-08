@@ -75,6 +75,39 @@ int main(void) {
     static const uint8_t unknown_and_false_query[] =
         "SELECT id FROM t WHERE salary >= $2 AND active = $3";
     static const uint8_t no_predicate_query[] = "SELECT id FROM t";
+    static const uint8_t bind_query[] =
+        "SELECT Name FROM Employees WHERE salary >= $1 AND active IS NULL";
+    static const uint8_t missing_column_query[] =
+        "SELECT secret FROM employees";
+    static const uint8_t star_query[] = "SELECT * FROM employees";
+    static const uint8_t relation_name[] = "employees";
+    static const uint8_t column_name[] = "name";
+    static const uint8_t salary_name[] = "salary";
+    static const uint8_t active_name[] = "active";
+    static const uint8_t secret_name[] = "secret";
+    static const prdb_sdk_sql_column_shape_v2 columns[] = {
+        {column_name, sizeof(column_name) - 1, 0, PRDB_SDK_VALUE_TYPE_TEXT,
+         0, 0},
+        {salary_name, sizeof(salary_name) - 1, 1,
+         PRDB_SDK_VALUE_TYPE_DECIMAL, 10, 2},
+        {active_name, sizeof(active_name) - 1, 2,
+         PRDB_SDK_VALUE_TYPE_BOOLEAN, 0, 0}};
+    static const prdb_sdk_sql_column_shape_v2 ambiguous_columns[] = {
+        {column_name, sizeof(column_name) - 1, 0, PRDB_SDK_VALUE_TYPE_TEXT,
+         0, 0},
+        {salary_name, sizeof(salary_name) - 1, 1,
+         PRDB_SDK_VALUE_TYPE_DECIMAL, 10, 2},
+        {salary_name, sizeof(salary_name) - 1, 2,
+         PRDB_SDK_VALUE_TYPE_DECIMAL, 10, 2},
+        {active_name, sizeof(active_name) - 1, 3,
+         PRDB_SDK_VALUE_TYPE_BOOLEAN, 0, 0}};
+    static const prdb_sdk_sql_column_shape_v2 invalid_columns[] = {
+        {column_name, sizeof(column_name) - 1, 0, PRDB_SDK_VALUE_TYPE_TEXT,
+         0, 0},
+        {salary_name, sizeof(salary_name) - 1, 1,
+         PRDB_SDK_VALUE_TYPE_DECIMAL, 0, 2},
+        {active_name, sizeof(active_name) - 1, 2,
+         PRDB_SDK_VALUE_TYPE_BOOLEAN, 0, 0}};
     static const uint8_t positive_integer[] = {0, 0, 0, 2};
     static const uint8_t negative_integer[] = {0xff, 0xff, 0xff, 0xfd};
     static const uint8_t false_boolean[] = {0};
@@ -89,6 +122,10 @@ int main(void) {
     prdb_sdk_select_v2 statement = {0};
     prdb_sdk_select_v2 unknown_statement = {0};
     prdb_sdk_select_v2 no_predicate_statement = {0};
+    prdb_sdk_select_v2 bind_statement = {0};
+    prdb_sdk_select_v2 missing_column_statement = {0};
+    prdb_sdk_select_v2 star_statement = {0};
+    prdb_sdk_select_binding_v2 binding = {0};
     prdb_sdk_value_v1 two = make_value(
         PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_INTEGER,
         positive_integer, sizeof(positive_integer));
@@ -162,6 +199,57 @@ int main(void) {
     assert(statement.predicate_count == 1);
     assert(statement.predicates[0].node_kind ==
            PRDB_SDK_SQL_PREDICATE_IS_NOT_NULL);
+
+    assert(prdb_sdk_sql_parse_select_v2(
+               bind_query, sizeof(bind_query) - 1, &bind_statement,
+               sizeof(bind_statement), NULL) == PRDB_SDK_SQL_OK);
+    assert(prdb_sdk_sql_bind_select_v2(
+               &bind_statement, relation_name, sizeof(relation_name) - 1,
+               columns, 3, &binding, sizeof(binding)) ==
+           PRDB_SDK_SQL_BIND_OK);
+    assert(binding.abi_version == PRDB_SDK_SQL_ABI_V2_VERSION);
+    assert(binding.projection_count == 1);
+    assert(binding.projection_ordinals[0] == 0);
+    assert(binding.predicate_count == bind_statement.predicate_count);
+    assert(binding.predicate_columns[0].ordinal == 1);
+    assert(binding.predicate_columns[0].type_code ==
+           PRDB_SDK_VALUE_TYPE_DECIMAL);
+    assert(binding.predicate_columns[0].decimal_precision == 10);
+    assert(binding.predicate_columns[0].decimal_scale == 2);
+    assert(binding.predicate_columns[1].ordinal == 2);
+    assert(binding.predicate_columns[1].type_code ==
+           PRDB_SDK_VALUE_TYPE_BOOLEAN);
+    assert(binding.predicate_columns[2].type_code == 0);
+
+    assert(prdb_sdk_sql_bind_select_v2(
+               &bind_statement, relation_name, sizeof(relation_name) - 1,
+               ambiguous_columns, 4, &binding, sizeof(binding)) ==
+           PRDB_SDK_SQL_BIND_AMBIGUOUS_COLUMN);
+    assert(binding.projection_count == 1);
+    assert(prdb_sdk_sql_bind_select_v2(
+               &bind_statement, relation_name, sizeof(relation_name) - 1,
+               invalid_columns, 3, &binding, sizeof(binding)) ==
+           PRDB_SDK_SQL_BIND_INVALID_SCHEMA);
+    assert(prdb_sdk_sql_bind_select_v2(
+               &bind_statement, (const uint8_t *)"other", 5, columns, 3,
+               &binding, sizeof(binding)) ==
+           PRDB_SDK_SQL_BIND_RELATION_MISMATCH);
+    assert(prdb_sdk_sql_parse_select_v2(
+               missing_column_query, sizeof(missing_column_query) - 1,
+               &missing_column_statement, sizeof(missing_column_statement),
+               NULL) == PRDB_SDK_SQL_OK);
+    assert(prdb_sdk_sql_bind_select_v2(
+               &missing_column_statement, relation_name,
+               sizeof(relation_name) - 1, columns, 3, &binding,
+               sizeof(binding)) == PRDB_SDK_SQL_BIND_COLUMN_NOT_FOUND);
+    assert(prdb_sdk_sql_parse_select_v2(
+               star_query, sizeof(star_query) - 1, &star_statement,
+               sizeof(star_statement), NULL) == PRDB_SDK_SQL_OK);
+    assert(prdb_sdk_sql_bind_select_v2(
+               &star_statement, relation_name, sizeof(relation_name) - 1,
+               columns, 3, &binding, sizeof(binding)) ==
+           PRDB_SDK_SQL_BIND_OK);
+    assert(binding.projection_star == 1 && binding.projection_count == 0);
 
     assert(prdb_sdk_sql_parse_select_v2(
                malformed, sizeof(malformed) - 1, &statement,
