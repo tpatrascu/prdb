@@ -46,6 +46,8 @@ Treat the manifest as untrusted. Pin immutable artifact bytes for admission/load
 
 `requested_scope` version 1 is canonical binary `PSC1`: four magic bytes, a big-endian u16 capability count from 1 through 200, then that many strictly increasing records. Each record starts with operation:u8 and target-kind:u8, followed by a 16-byte object ID for schema/table targets or two 16-byte IDs for a column target (`table_id`, then `column_id`). Operations are USAGE=1, SELECT=2, INSERT=3, UPDATE=4, DELETE=5; targets are schema=1, table=2, column=3. USAGE is valid only for schemas; data operations are valid only for tables and columns. IDs must be nonzero. Duplicate, unsorted, truncated, trailing, unknown, and empty records are invalid. The largest encoding is 6,806 bytes, within the 8 KiB transport bound.
 
+The C SDK exposes `prdb_sdk_scope_encode_v1` to build PSC1 records. It validates target/operation combinations, nonzero identifiers, strict ordering and count bounds; it supports size queries and never writes a partial result when output capacity is short. Inputs are borrowed and output bytes are caller-owned.
+
 The requested set is only a ceiling. At START storage intersects it with the current token-authenticated principal's catalog-derived grants in the pinned invocation context. It cannot create a grant, bypass a policy, or widen access after START. Every schema, relation, column, row, estimate, and mutation authorization path uses the narrowed scope. SEAL validates the encoding before making the upload immutable; START decodes it again before storage admission. Unsupported scope versions are rejected.
 
 ## Buffer Lifetime and Workload

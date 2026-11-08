@@ -14,6 +14,13 @@
 - Verification: the focused fixture and full TinyCC SDK suite passed with the pinned Nix-shell TinyCC. The Rust manifest encoder test remains the independent decoder-roundtrip check.
 - Remaining: a client compiler wrapper must inspect the compiled ELF, collect dependencies and invoke the encoder before upload.
 
+## SDK-1 dependency: bounded C PSC1 scope encoder — implemented
+
+- Behavior: `prdb_sdk_scope_encode_v1` emits sorted canonical PSC1 capability records for schema USAGE and table/column SELECT/INSERT/UPDATE/DELETE. It rejects zero IDs, invalid target/operation pairs, duplicate or unsorted records, and counts outside 1–200. Size queries report the required length and undersized buffers remain untouched.
+- Red/green evidence: the maintained fixture first failed to link because the encoder was absent. It now matches a hand-checked PSC1 byte fixture, exercises invalid pairs/IDs/order/count, checks no-partial-output behavior, and accepts the maximum 200-column capability scope at 6,806 bytes.
+- Verification: the focused TinyCC fixture and forced full SDK archive/test/fixture build passed. Rust workspace build, formatting, warning-denied Clippy, and all workspace tests also passed; the suite reports 109 commit tests passing and two sandbox START tests ignored for missing cgroup delegation.
+- Remaining: client-side discovery/selection must supply current object IDs; scope encoding is only a requested ceiling and grants no authority.
+
 ## SDK-1 initial borrowed value view — implemented
 
 - Contract: [`prdb_sdk_value_v1`](../../engine/include/prdb_sdk_value_v1.h) exposes a sized/versioned view with VALUE, NULL, and REDACTED states. Value type codes and canonical bytes match the executor batch protocol. The view borrows bytes from an immutable source batch; it never allocates or frees them.
