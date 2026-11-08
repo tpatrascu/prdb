@@ -1874,3 +1874,10 @@
 - Regression: `storage_manager_creates_foreign_key_and_advances_both_table_epochs` creates an FK using a target REFERENCES grant and source owner authority. It verifies returned server-generated ID, durable COMMITTED outcome, all catalog records and dependency, both table epoch increments, and startup integrity. The existing authority-separation and FK-create/table-drop race regressions also pass.
 - Exposure: authenticated ADMIN `foreign_keys.create` uses connection-owned PREPARE/START, accepts ordered source columns plus a target key constraint, and returns the generated FK ID. The strict decoder rejects extra arguments; the real ADMIN control-dispatch integration now creates then drops an FK.
 - Verification: focused FK creation, authorization-separation, FK/table-drop race, decoder, and authenticated control-path tests passed. Workspace build, format check, warning-denied Clippy, and full tests passed under Rust 1.95.0; the commit integration target had 115 passed and 3 delegated-cgroup tests ignored.
+
+## SM-5 / DS-7: FK removal racing with referenced-table drop — verified
+
+- Contract: removing an FK and dropping its referenced table must serialize so no committed table remains with a dangling dependency and no committed table drop leaves the FK behind.
+- Regression: `foreign_key_removal_racing_referenced_table_drop_is_atomic` releases authorized FK removal and target-table drop together. It accepts FK removal with either a successful subsequent table drop, a RESTRICT abort, or a stale-catalog conflict; checks durable outcomes and sequence advances; verifies source/FK/target shape; and runs startup integrity validation.
+- Evidence: the first run observed a stale-catalog `Conflict` for the table drop after FK removal had serialized first. The test records that as a safe durable abort alongside the explicit dependency RESTRICT result. The focused barrier test passes.
+- Verification: workspace build, format check, warning-denied Clippy, and all workspace tests passed under Rust 1.95.0. The commit integration target had 116 passed and 3 delegated-cgroup tests ignored.
