@@ -174,3 +174,43 @@ int32_t prdb_sdk_sql_encode_result_row_v1(
     *output_len = writer.offset;
     return PRDB_SDK_SQL_RESULT_OK;
 }
+
+int32_t prdb_sdk_sql_write_result_row_v1(
+    const prdb_host_api_v3 *host,
+    const prdb_sdk_select_binding_v2 *binding,
+    const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count,
+    const prdb_sdk_row_v1 *row, prdb_sdk_value_v1 *cell_scratch,
+    uint32_t cell_scratch_capacity, uint8_t *output,
+    uint64_t output_capacity, uint64_t *output_len) {
+    int32_t status;
+    uint64_t offset = 0;
+
+    if (output_len != NULL) {
+        *output_len = 0;
+    }
+    if (host == NULL || output_len == NULL ||
+        host->struct_size < sizeof(*host) ||
+        host->abi_version != PRDB_QUERY_ABI_V3_VERSION ||
+        host->write_result == NULL) {
+        return PRDB_SDK_SQL_RESULT_INVALID_ARGUMENT;
+    }
+    status = prdb_sdk_sql_encode_result_row_v1(
+        binding, columns, column_count, row, cell_scratch,
+        cell_scratch_capacity, output, output_capacity, output_len);
+    if (status != PRDB_SDK_SQL_RESULT_OK) {
+        return status;
+    }
+    while (offset < *output_len) {
+        uint64_t chunk_length = *output_len - offset;
+        if (chunk_length > PRDB_QUERY_MAX_RESULT_CHUNK_BYTES) {
+            chunk_length = PRDB_QUERY_MAX_RESULT_CHUNK_BYTES;
+        }
+        if (host->write_result(host->context, output + offset, chunk_length) !=
+            PRDB_QUERY_CALLBACK_OK) {
+            *output_len = 0;
+            return PRDB_SDK_SQL_RESULT_WRITE_FAILED;
+        }
+        offset += chunk_length;
+    }
+    return PRDB_SDK_SQL_RESULT_OK;
+}

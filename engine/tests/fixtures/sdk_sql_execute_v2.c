@@ -1,4 +1,5 @@
 #include "prdb_sdk_sql_exec_v2.h"
+#include "prdb_sdk_sql_result_v1.h"
 
 #include <assert.h>
 #include <string.h>
@@ -132,19 +133,20 @@ static uint32_t make_relation(uint8_t *p, uint8_t handle_kind,
 typedef struct result_state {
     uint32_t calls;
     uint32_t fail;
+    const prdb_sdk_sql_column_shape_v2 *columns;
+    uint8_t encoded[128];
+    uint64_t encoded_len;
+    prdb_sdk_value_v1 cell_scratch[1];
 } result_state;
 
 static int32_t on_row(void *context, const prdb_sdk_row_v1 *row,
                       const prdb_sdk_select_binding_v2 *binding) {
     result_state *result = (result_state *)context;
-    prdb_sdk_cell_iterator_v1 cells = {0};
-    prdb_sdk_value_v1 value = {0};
-    int32_t int_value = 0;
     assert(binding->projection_count == 1 && binding->projection_ordinals[0] == 0);
-    assert(prdb_sdk_row_cells_begin_v1(row, &cells, sizeof(cells)) == PRDB_SDK_BATCH_OK);
-    assert(prdb_sdk_cell_next_v1(&cells, &value, sizeof(value)) == PRDB_SDK_BATCH_OK);
-    assert(prdb_sdk_value_get_integer_v1(&value, &int_value) == PRDB_SDK_VALUE_ACCESS_OK);
-    assert(int_value == 5);
+    assert(prdb_sdk_sql_encode_result_row_v1(
+               binding, result->columns, 1, row, result->cell_scratch, 1,
+               result->encoded, sizeof(result->encoded),
+               &result->encoded_len) == PRDB_SDK_SQL_RESULT_OK);
     ++result->calls;
     return result->fail ? 1 : 0;
 }
@@ -183,7 +185,8 @@ int main(void) {
     prdb_sdk_sql_column_shape_v2 planner_columns[1] = {{0}};
     prdb_sdk_sql_column_shape_v2 executor_columns[1] = {{0}};
     prdb_sdk_value_v1 cell_scratch[1] = {{0}};
-    result_state result = {0, 0};
+    result_state result = {0};
+    result.columns = executor_columns;
     assert(sizeof(prdb_host_api_v3) == 48);
     assert(sizeof(prdb_query_descriptor_v3_record) == 16);
     assert(sizeof(prdb_invocation_v3) == 24);
@@ -197,6 +200,15 @@ int main(void) {
            PRDB_SDK_SQL_EXEC_OK);
     assert(mock.planner_calls == 1 && mock.executor_calls == 4);
     assert(result.calls == 1);
+    {
+        static const uint8_t expected_result[] = {
+            'S', 'Q', 'L', 'R', 0, 1, 0, 1,
+            0, 2, 'i', 'd', 0, 0, 0, 3, 0, 0, 0,
+            0, 0, 0, 4, 0, 0, 0, 5};
+        assert(result.encoded_len == sizeof(expected_result));
+        assert(memcmp(result.encoded, expected_result,
+                      sizeof(expected_result)) == 0);
+    }
     assert(mock.statement_failed == 0);
 
     mock.executor_calls = 0;
