@@ -408,11 +408,13 @@ impl StorageInstance {
             .parent()
             .ok_or(BootstrapError::InvalidRequest)?;
         validate_managed_directory(directory, true)?;
+        let closed_database_key = &database as *const Database as usize;
         drop(database);
         validate_managed_directory(directory, true)?;
         validate_private_file(&database_path)?;
         let database = Database::open(&database_path).map_err(|_| BootstrapError::Storage)?;
         validate_persisted_records(&database).map_err(BootstrapError::Startup)?;
+        crate::storage_manager::clear_uncertain_database_key(closed_database_key);
         Ok(Self {
             database,
             database_path,

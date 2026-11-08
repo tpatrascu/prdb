@@ -175,9 +175,10 @@ pub fn prune_expired_outcomes(
                 .map_err(|error| OutcomeMaintenanceError::Storage(error.to_string()))?;
         }
     }
-    write
-        .commit()
-        .map_err(|error| OutcomeMaintenanceError::Storage(error.to_string()))?;
+    if let Err(error) = write.commit() {
+        crate::storage_manager::mark_database_uncertain(database);
+        return Err(OutcomeMaintenanceError::Storage(error.to_string()));
+    }
 
     Ok(OutcomePruneResult {
         scanned: scanned_entries.len(),

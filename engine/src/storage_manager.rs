@@ -50,6 +50,9 @@ static ADMIN_CANCELLATION_LIMITERS: OnceLock<Mutex<HashMap<usize, Weak<TokenRequ
     OnceLock::new();
 static INVOCATION_REGISTRIES: OnceLock<Mutex<HashMap<usize, Weak<InvocationAdmissionState>>>> =
     OnceLock::new();
+static UNCERTAIN_INVOCATION_REGISTRIES: OnceLock<
+    Mutex<HashMap<usize, Arc<InvocationAdmissionState>>>,
+> = OnceLock::new();
 
 /// Admission and coordination limits for one storage-manager handle.
 ///
@@ -1261,6 +1264,7 @@ struct LiveInvocation {
 }
 
 struct InvocationAdmissionState {
+    database_key: usize,
     limit: AtomicUsize,
     database_uncertain: AtomicBool,
     live: Mutex<LiveInvocationRegistry>,
@@ -1503,6 +1507,7 @@ impl InvocationAdmissionPermit {
             live.advance_owner_generation(principal_id);
         }
         self.state.changed.notify_all();
+        retain_uncertain_registry(self.state.database_key, Arc::clone(&self.state));
     }
 
     pub(crate) fn may_continue(&self) -> bool {
@@ -1592,11 +1597,23 @@ impl Drop for InvocationAdmissionPermit {
     }
 }
 
-fn shared_invocation_registry(
+fn invocation_registry(
     database: &Database,
     configured_limit: usize,
 ) -> Arc<InvocationAdmissionState> {
     let database_key = database as *const Database as usize;
+    let uncertain = UNCERTAIN_INVOCATION_REGISTRIES.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(invocations) = uncertain
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&database_key)
+        .cloned()
+    {
+        invocations
+            .limit
+            .fetch_min(configured_limit, Ordering::Relaxed);
+        return invocations;
+    }
     let registry = INVOCATION_REGISTRIES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut registry = registry
         .lock()
@@ -1609,6 +1626,7 @@ fn shared_invocation_registry(
         return invocations;
     }
     let invocations = Arc::new(InvocationAdmissionState {
+        database_key,
         limit: AtomicUsize::new(configured_limit),
         database_uncertain: AtomicBool::new(false),
         live: Mutex::new(LiveInvocationRegistry {
@@ -1619,6 +1637,55 @@ fn shared_invocation_registry(
     });
     registry.insert(database_key, Arc::downgrade(&invocations));
     invocations
+}
+
+fn shared_invocation_registry(
+    database: &Database,
+    configured_limit: usize,
+) -> Arc<InvocationAdmissionState> {
+    invocation_registry(database, configured_limit)
+}
+
+fn retain_uncertain_registry(database_key: usize, state: Arc<InvocationAdmissionState>) {
+    UNCERTAIN_INVOCATION_REGISTRIES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(database_key, state);
+}
+
+/// Quarantine this database handle after redb reports a commit error whose
+/// publication state requires close/reopen recovery.
+pub(crate) fn mark_database_uncertain(database: &Database) {
+    let invocations = invocation_registry(
+        database,
+        StorageManagerConfig::default().max_active_invocations,
+    );
+    let mut live = invocations
+        .live
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    invocations
+        .database_uncertain
+        .store(true, Ordering::Release);
+    live.generation = live.generation.wrapping_add(1).max(1);
+    drop(live);
+    retain_uncertain_registry(invocations.database_key, invocations);
+}
+
+/// Forget the closed handle's quarantined process-local state after a fresh
+/// redb handle has been opened and validated.
+pub(crate) fn clear_uncertain_database_key(database_key: usize) {
+    UNCERTAIN_INVOCATION_REGISTRIES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&database_key);
+    INVOCATION_REGISTRIES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&database_key);
 }
 
 impl<'db> StorageManager<'db> {
@@ -6054,6 +6121,12 @@ impl<'db> StorageManager<'db> {
         authenticated_principal_id: [u8; 16],
         now_us: i64,
     ) -> Result<Option<InvocationOutcome>, Box<dyn std::error::Error>> {
+        if self.requires_reopen_after_commit_error() {
+            return Err(std::io::Error::other(
+                "database requires reopen after an ambiguous commit error",
+            )
+            .into());
+        }
         lookup_outcome(
             self.database,
             invocation_id,
@@ -6078,6 +6151,9 @@ impl<'db> StorageManager<'db> {
             if live.principal_id != authenticated_principal_id {
                 return Ok(None);
             }
+            if self.requires_reopen_after_commit_error() && !live.commit_uncertain {
+                return Err(InvocationStatusError::Storage);
+            }
             let status = match live.phase {
                 LiveInvocationPhase::Active => InvocationStatus::Active {
                     started_at_us: live.started_at_us,
@@ -6100,6 +6176,9 @@ impl<'db> StorageManager<'db> {
                 consistency: InvocationStatusConsistency::BestEffort,
                 status,
             }));
+        }
+        if self.requires_reopen_after_commit_error() {
+            return Err(InvocationStatusError::Storage);
         }
         lookup_outcome(
             self.database,
@@ -6144,6 +6223,21 @@ impl<'db> StorageManager<'db> {
         drop(snapshot);
         if !is_administrator {
             return Err(AdministrativeInvocationListError::Unauthorized);
+        }
+
+        if self.requires_reopen_after_commit_error() {
+            return match self.admissions.status(invocation_id) {
+                Some(live) if live.commit_uncertain => Ok(Some(InvocationStatusSnapshot {
+                    observed_at_us: now_us,
+                    consistency: InvocationStatusConsistency::BestEffort,
+                    status: InvocationStatus::Committing {
+                        started_at_us: live.started_at_us,
+                        deadline_at_us: live.deadline_at_us,
+                        cancellation_requested: live.cancellation_reason_code.is_some(),
+                    },
+                })),
+                _ => Err(AdministrativeInvocationListError::Storage),
+            };
         }
 
         if let Some(live) = self.admissions.status(invocation_id) {
@@ -6610,9 +6704,13 @@ fn persist_admin_cancellation_audit(
             .insert(event.event_id.as_slice(), encoded.as_slice())
             .map_err(|_| AdministrativeCancellationError::Storage)?;
     }
-    write
-        .commit()
-        .map_err(|_| AdministrativeCancellationError::Storage)
+    match write.commit() {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            mark_database_uncertain(database);
+            Err(AdministrativeCancellationError::Storage)
+        }
+    }
 }
 
 fn lookup_any_outcome(

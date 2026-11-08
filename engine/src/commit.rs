@@ -6014,7 +6014,10 @@ fn commit_storage_changes_inner_with_admin_credential_check(
         transaction.abort().map_err(storage_error)?;
         return Err(CommitError::InvocationCancelled);
     }
-    transaction.commit().map_err(storage_error)?;
+    if let Err(error) = transaction.commit() {
+        crate::storage_manager::mark_database_uncertain(database);
+        return Err(storage_error(error));
+    }
     Ok(next_sequence)
 }
 
@@ -13941,13 +13944,20 @@ pub(crate) fn record_aborted_outcome(
             .insert(&invocation_id[..], &outcome[..])
             .map_err(storage_error)?;
     }
-    transaction.commit().map_err(storage_error)
+    match transaction.commit() {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            crate::storage_manager::mark_database_uncertain(database);
+            Err(storage_error(error))
+        }
+    }
 }
 
 #[cfg(test)]
 mod durable_commit_gate_tests {
     use super::{CommitError, CommitRequest, RowWrite, commit_storage_changes_with_gate};
     use crate::metadata::{EngineMetadata, Lifecycle};
+    use crate::outcome::{InvocationOutcome, OutcomeStatus, prune_expired_outcomes};
     use crate::schema::{self, ENGINE_META, OUTCOMES, ROWS};
     use crate::storage_manager::{InvocationStatus, StorageManager, StorageManagerConfig};
     use crate::transaction::TransactionError;
@@ -14144,11 +14154,30 @@ mod durable_commit_gate_tests {
             storage.begin_invocation([0x67; 16], principal_id, i64::MAX, 1, 1024),
             Err(TransactionError::Storage(_))
         ));
+        let closed_database_key = &database as *const Database as usize;
         drop(storage);
+        let rebuilt_before_reopen =
+            StorageManager::from_validated_database(&database, StorageManagerConfig::default())?;
+        assert!(rebuilt_before_reopen.requires_reopen_after_commit_error());
+        assert!(matches!(
+            rebuilt_before_reopen.begin_invocation([0x68; 16], principal_id, i64::MAX, 1, 1024),
+            Err(TransactionError::Storage(_))
+        ));
+        assert!(matches!(
+            rebuilt_before_reopen.get_invocation_status([0x69; 16], principal_id, 1),
+            Err(crate::storage_manager::InvocationStatusError::Storage)
+        ));
+        assert!(
+            rebuilt_before_reopen
+                .lookup_invocation_outcome(invocation_id, principal_id, 1)
+                .is_err()
+        );
+        drop(rebuilt_before_reopen);
         drop(database);
 
         // redb requires a fresh handle after a non-poisoned commit I/O error.
         let reopened = Database::open(&path)?;
+        crate::storage_manager::clear_uncertain_database_key(closed_database_key);
         let recovered_storage =
             StorageManager::from_validated_database(&reopened, StorageManagerConfig::default())?;
         assert!(!recovered_storage.requires_reopen_after_commit_error());
@@ -14179,6 +14208,80 @@ mod durable_commit_gate_tests {
 
         drop(read);
         drop(recovered_storage);
+        drop(reopened);
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[test]
+    fn outcome_prune_commit_error_quarantines_database() -> Result<(), Box<dyn std::error::Error>> {
+        let fixture_id = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "prdb-outcome-prune-error-{}-{fixture_id}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory)?;
+        let path = directory.join("prune.redb");
+        {
+            let database = Database::create(&path)?;
+            let mut write = database.begin_write()?;
+            write.set_durability(redb::Durability::Immediate)?;
+            write.set_two_phase_commit(true);
+            schema::create_tables(&write)?;
+            let metadata = EngineMetadata {
+                database_id: [0x33; 16],
+                catalog_version: 2,
+                expression_version: 1,
+                builtin_semantics_version: 1,
+                commit_sequence: 0,
+                lifecycle: Lifecycle::Ready,
+            }
+            .encode()?;
+            write
+                .open_table(ENGINE_META)?
+                .insert(&b"format"[..], &metadata[..])?;
+            let expired = InvocationOutcome {
+                status: OutcomeStatus::Aborted,
+                invocation_id: [0x45; 16],
+                principal_id: [0x54; 16],
+                commit_sequence: 0,
+                retention_deadline_us: 10,
+            }
+            .encode()?;
+            write
+                .open_table(OUTCOMES)?
+                .insert(&[0x45; 16][..], &expired[..])?;
+            write.commit()?;
+        }
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)?;
+        let fail_next_sync = Arc::new(AtomicBool::new(false));
+        let database = Database::builder().create_with_backend(FailNextSyncBackend {
+            inner: redb::backends::FileBackend::new(file)?,
+            fail_next_sync: fail_next_sync.clone(),
+        })?;
+        let storage =
+            StorageManager::from_validated_database(&database, StorageManagerConfig::default())?;
+        fail_next_sync.store(true, Ordering::SeqCst);
+        assert!(prune_expired_outcomes(&database, 11, 1).is_err());
+        assert!(!fail_next_sync.load(Ordering::SeqCst));
+        assert!(storage.requires_reopen_after_commit_error());
+        assert!(matches!(
+            storage.begin_invocation([0x65; 16], [0x54; 16], i64::MAX, 1, 1024),
+            Err(TransactionError::Storage(_))
+        ));
+
+        let database_key = &database as *const Database as usize;
+        drop(storage);
+        drop(database);
+        let reopened = Database::open(&path)?;
+        crate::storage_manager::clear_uncertain_database_key(database_key);
+        let read = reopened.begin_read()?;
+        assert!(read.open_table(OUTCOMES)?.get(&[0x45; 16][..])?.is_some());
+        drop(read);
         drop(reopened);
         std::fs::remove_dir_all(directory)?;
         Ok(())
