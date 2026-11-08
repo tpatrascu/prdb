@@ -71,6 +71,12 @@ int32_t prdb_sdk_sql_bind_select_parameter_v1(
     uint32_t expected_type, uint8_t expected_decimal_precision,
     uint8_t expected_decimal_scale, prdb_sdk_value_v1 *out,
     uint32_t out_capacity);
+/* parameter_value is required for comparisons and must be NULL for null tests. */
+int32_t prdb_sdk_sql_eval_select_predicate_v1(
+    const prdb_sdk_select_v1 *statement,
+    const prdb_sdk_value_v1 *column_value,
+    const prdb_sdk_value_v1 *parameter_value, uint32_t expected_type,
+    uint8_t decimal_scale, uint32_t *truth_out);
 int32_t prdb_sdk_sql_compare_v1(const prdb_sdk_value_v1 *left,
                                 const prdb_sdk_value_v1 *right,
                                 uint32_t comparison, uint8_t left_decimal_scale,

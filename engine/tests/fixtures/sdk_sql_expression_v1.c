@@ -15,6 +15,10 @@ static prdb_sdk_value_v1 value(uint32_t state, uint32_t type,
 int main(void) {
     static const uint8_t select_sql[] =
         "SELECT salary FROM employees WHERE salary = $2";
+    static const uint8_t is_null_sql[] =
+        "SELECT nickname FROM people WHERE nickname IS NULL";
+    static const uint8_t is_not_null_sql[] =
+        "SELECT nickname FROM people WHERE nickname IS NOT NULL";
     static const uint8_t positive_integer[] = {0, 0, 0, 2};
     static const uint8_t negative_integer[] = {0xff, 0xff, 0xff, 0xfd};
     static const uint8_t other_type[] = {0, 0, 0, 2, 0, 0, 0, 0};
@@ -82,6 +86,7 @@ int main(void) {
     prdb_sdk_value_v1 parameters[] = {minus_three, two};
     prdb_sdk_value_v1 bound_parameter;
     prdb_sdk_select_v1 select = {0};
+    prdb_sdk_select_v1 null_select = {0};
     uint32_t result = 99;
 
     assert(prdb_sdk_sql_parse_select_v1(
@@ -165,6 +170,52 @@ int main(void) {
                &select, parameters, 2, PRDB_SDK_VALUE_TYPE_DECIMAL, 2, 2,
                &bound_parameter, sizeof(bound_parameter)) ==
            PRDB_SDK_SQL_EVAL_OK);
+    parameters[1] = two;
+    assert(prdb_sdk_sql_eval_select_predicate_v1(
+               &select, &two, &two, PRDB_SDK_VALUE_TYPE_INTEGER, 0,
+               &result) == PRDB_SDK_SQL_EVAL_OK);
+    assert(result == PRDB_SDK_SQL_TRUTH_TRUE);
+    assert(prdb_sdk_sql_eval_select_predicate_v1(
+               &select, &minus_three, &two, PRDB_SDK_VALUE_TYPE_INTEGER, 0,
+               &result) == PRDB_SDK_SQL_EVAL_OK);
+    assert(result == PRDB_SDK_SQL_TRUTH_FALSE);
+    assert(prdb_sdk_sql_eval_select_predicate_v1(
+               &select, &null_value, &two, PRDB_SDK_VALUE_TYPE_INTEGER, 0,
+               &result) == PRDB_SDK_SQL_EVAL_OK);
+    assert(result == PRDB_SDK_SQL_TRUTH_UNKNOWN);
+    assert(prdb_sdk_sql_eval_select_predicate_v1(
+               &select, &bigint, &two, PRDB_SDK_VALUE_TYPE_INTEGER, 0,
+               &result) == PRDB_SDK_SQL_EVAL_TYPE_MISMATCH);
+    assert(prdb_sdk_sql_eval_select_predicate_v1(
+               &select, &two, &bigint, PRDB_SDK_VALUE_TYPE_INTEGER, 0,
+               &result) == PRDB_SDK_SQL_EVAL_TYPE_MISMATCH);
+    assert(prdb_sdk_sql_eval_select_predicate_v1(
+               &select, &two, NULL, PRDB_SDK_VALUE_TYPE_INTEGER, 0,
+               &result) == PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT);
+    assert(prdb_sdk_sql_parse_select_v1(
+               is_null_sql, sizeof(is_null_sql) - 1, &null_select,
+               sizeof(null_select), NULL) == PRDB_SDK_SQL_OK);
+    assert(prdb_sdk_sql_eval_select_predicate_v1(
+               &null_select, &null_value, NULL, PRDB_SDK_VALUE_TYPE_TEXT, 0,
+               &result) == PRDB_SDK_SQL_EVAL_OK);
+    assert(result == PRDB_SDK_SQL_TRUTH_TRUE);
+    assert(prdb_sdk_sql_eval_select_predicate_v1(
+               &null_select, &null_value, &text_a, PRDB_SDK_VALUE_TYPE_TEXT,
+               0, &result) == PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT);
+    assert(prdb_sdk_sql_eval_select_predicate_v1(
+               &null_select, &text_a, NULL, PRDB_SDK_VALUE_TYPE_TEXT, 0,
+               &result) == PRDB_SDK_SQL_EVAL_OK);
+    assert(result == PRDB_SDK_SQL_TRUTH_FALSE);
+    assert(prdb_sdk_sql_eval_select_predicate_v1(
+               &null_select, &redacted, NULL, PRDB_SDK_VALUE_TYPE_TEXT, 0,
+               &result) == PRDB_SDK_SQL_EVAL_REDACTED_INPUT);
+    assert(prdb_sdk_sql_parse_select_v1(
+               is_not_null_sql, sizeof(is_not_null_sql) - 1, &null_select,
+               sizeof(null_select), NULL) == PRDB_SDK_SQL_OK);
+    assert(prdb_sdk_sql_eval_select_predicate_v1(
+               &null_select, &text_a, NULL, PRDB_SDK_VALUE_TYPE_TEXT, 0,
+               &result) == PRDB_SDK_SQL_EVAL_OK);
+    assert(result == PRDB_SDK_SQL_TRUTH_TRUE);
 
     assert(prdb_sdk_sql_value_is_null_v1(&null_value, &result) ==
            PRDB_SDK_SQL_EVAL_OK);

@@ -705,6 +705,67 @@ int32_t prdb_sdk_sql_value_is_null_v1(const prdb_sdk_value_v1 *value,
     return PRDB_SDK_SQL_EVAL_OK;
 }
 
+int32_t prdb_sdk_sql_eval_select_predicate_v1(
+    const prdb_sdk_select_v1 *statement,
+    const prdb_sdk_value_v1 *column_value,
+    const prdb_sdk_value_v1 *parameter_value, uint32_t expected_type,
+    uint8_t decimal_scale, uint32_t *truth_out) {
+    int32_t status;
+
+    if (statement == NULL || truth_out == NULL ||
+        statement->struct_size < sizeof(*statement) ||
+        statement->abi_version != PRDB_SDK_SQL_ABI_V1_VERSION ||
+        statement->has_where != 1 ||
+        expected_type < PRDB_SDK_VALUE_TYPE_BOOLEAN ||
+        expected_type > PRDB_SDK_VALUE_TYPE_TIMESTAMPTZ ||
+        (expected_type == PRDB_SDK_VALUE_TYPE_DECIMAL
+             ? decimal_scale > 38
+             : decimal_scale != 0)) {
+        return PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT;
+    }
+    status = validate_eval_value(column_value);
+    if (status != PRDB_SDK_SQL_EVAL_OK) {
+        return status;
+    }
+    if (column_value->state == PRDB_SDK_VALUE_STATE_VALUE &&
+        column_value->type_code != expected_type) {
+        return PRDB_SDK_SQL_EVAL_TYPE_MISMATCH;
+    }
+
+    if (statement->comparison == PRDB_SDK_SQL_COMPARE_IS_NULL ||
+        statement->comparison == PRDB_SDK_SQL_COMPARE_IS_NOT_NULL) {
+        if (parameter_value != NULL || statement->parameter_index != 0) {
+            return PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT;
+        }
+        status = prdb_sdk_sql_value_is_null_v1(column_value, truth_out);
+        if (status != PRDB_SDK_SQL_EVAL_OK) {
+            return status;
+        }
+        if (statement->comparison == PRDB_SDK_SQL_COMPARE_IS_NOT_NULL) {
+            *truth_out = *truth_out == PRDB_SDK_SQL_TRUTH_TRUE
+                             ? PRDB_SDK_SQL_TRUTH_FALSE
+                             : PRDB_SDK_SQL_TRUTH_TRUE;
+        }
+        return PRDB_SDK_SQL_EVAL_OK;
+    }
+    if (statement->comparison < PRDB_SDK_SQL_COMPARE_EQUAL ||
+        statement->comparison > PRDB_SDK_SQL_COMPARE_GREATER_EQUAL ||
+        parameter_value == NULL || statement->parameter_index == 0) {
+        return PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT;
+    }
+    status = validate_eval_value(parameter_value);
+    if (status != PRDB_SDK_SQL_EVAL_OK) {
+        return status;
+    }
+    if (parameter_value->state == PRDB_SDK_VALUE_STATE_VALUE &&
+        parameter_value->type_code != expected_type) {
+        return PRDB_SDK_SQL_EVAL_TYPE_MISMATCH;
+    }
+    return prdb_sdk_sql_compare_v1(column_value, parameter_value,
+                                   statement->comparison, decimal_scale,
+                                   decimal_scale, truth_out);
+}
+
 int32_t prdb_sdk_sql_value_truth_v1(const prdb_sdk_value_v1 *value,
                                     uint32_t *truth_out) {
     int32_t status;
