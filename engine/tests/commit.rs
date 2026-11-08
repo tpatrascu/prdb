@@ -16198,6 +16198,17 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         now + 3_600_000_000,
         schema_audit,
     )?;
+    let empty_schema_invocation = id(0xa2);
+    let mut empty_schema_audit = identity_audit_event(0xa3, user_id, id(0xa4));
+    empty_schema_audit.correlation_id = empty_schema_invocation;
+    let empty_schema = storage.create_schema(
+        empty_schema_invocation,
+        user_id,
+        "empty_roundtrip",
+        user_id,
+        now + 3_600_000_000,
+        empty_schema_audit,
+    )?;
     let table_invocation = id(0x80);
     let mut table_audit = identity_audit_event(0x81, user_id, id(0x82));
     table_audit.correlation_id = table_invocation;
@@ -16243,7 +16254,16 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     authority_audit.correlation_id = authority_invocation;
     let mut authority_writes = vec![
         grant_write(user_id, schema.schema_id, 1, 1, schema.schema_id, user_id),
+        grant_write(
+            user_id,
+            empty_schema.schema_id,
+            1,
+            1,
+            empty_schema.schema_id,
+            user_id,
+        ),
         dependency_write(user_id, schema.schema_id, 5),
+        dependency_write(user_id, empty_schema.schema_id, 5),
         dependency_write(user_id, records_table.table_id, 5),
         dependency_write(user_id, records_table.column_ids[0], 5),
     ];
@@ -16722,9 +16742,16 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         )
         .map_err(|error| format!("metadata fixture policies failed: {error:?}"))?;
 
-    let mut requested_scope = b"PSC1\0\x08".to_vec();
-    requested_scope.extend([1, 1]);
-    requested_scope.extend(schema.schema_id);
+    let mut requested_scope = b"PSC1\0\x09".to_vec();
+    let (first_usage_schema, second_usage_schema) = if schema.schema_id < empty_schema.schema_id {
+        (schema.schema_id, empty_schema.schema_id)
+    } else {
+        (empty_schema.schema_id, schema.schema_id)
+    };
+    for schema_id in [first_usage_schema, second_usage_schema] {
+        requested_scope.extend([1, 1]);
+        requested_scope.extend(schema_id);
+    }
     for operation in 2..=5 {
         requested_scope.extend([operation, 2]);
         requested_scope.extend(records_table.table_id);
@@ -16839,6 +16866,16 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             .iter()
             .any(|row| row.table_name == "private_records")
     );
+    assert!(
+        !table_rows
+            .iter()
+            .any(|row| row.table_schema == "empty_roundtrip")
+    );
+    assert!(
+        !column_rows
+            .iter()
+            .any(|row| row.table_schema == "empty_roundtrip")
+    );
     let expected_schema = schema_rows
         .iter()
         .find(|row| row.schema_name == "information_schema")
@@ -16864,6 +16901,13 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         .iter()
         .find(|row| row.schema_name == "sql_roundtrip")
         .ok_or("metadata API omitted the admitted user schema")?
+        .schema_name
+        .as_bytes()
+        .to_vec();
+    let expected_empty_schema = schema_rows
+        .iter()
+        .find(|row| row.schema_name == "empty_roundtrip")
+        .ok_or("metadata API omitted the authorized empty schema")?
         .schema_name
         .as_bytes()
         .to_vec();
@@ -16934,6 +16978,10 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     assert_eq!(user_column.operation, Operation::GatewayResultData as u16);
     assert_eq!(user_column.request_id, accepted.request_id);
     assert_eq!(user_column.payload, expected_user_column);
+    let empty_schema = read_frame(&mut gateway)?.ok_or("missing empty schema SQL result")?;
+    assert_eq!(empty_schema.operation, Operation::GatewayResultData as u16);
+    assert_eq!(empty_schema.request_id, accepted.request_id);
+    assert_eq!(empty_schema.payload, expected_empty_schema);
     let updated = read_frame(&mut gateway)?.ok_or("missing UPDATE visibility result")?;
     assert_eq!(updated.operation, Operation::GatewayResultData as u16);
     assert_eq!(updated.request_id, accepted.request_id);
