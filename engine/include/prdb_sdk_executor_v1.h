@@ -11,6 +11,7 @@
 #define PRDB_SDK_EXECUTOR_OP_NEXT_BATCH UINT16_C(0x1103)
 #define PRDB_SDK_EXECUTOR_OP_CLOSE_CURSOR UINT16_C(0x1104)
 #define PRDB_SDK_EXECUTOR_OP_STAGE_INSERT UINT16_C(0x1110)
+#define PRDB_SDK_EXECUTOR_OP_STAGE_UPDATE UINT16_C(0x1111)
 #define PRDB_SDK_EXECUTOR_OP_STAGE_DELETE UINT16_C(0x1112)
 
 #define PRDB_SDK_EXECUTOR_OK INT32_C(0)
@@ -41,6 +42,13 @@ typedef struct prdb_sdk_executor_insert_value_v1 {
     uint32_t state;
     prdb_sdk_value_v1 value;
 } prdb_sdk_executor_insert_value_v1;
+
+typedef struct prdb_sdk_executor_update_patch_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint32_t ordinal;
+    prdb_sdk_value_v1 value;
+} prdb_sdk_executor_update_patch_v1;
 
 /* Resolve requires an explicit schema because InvocationV2 has no default
  * schema field. Request and response buffers are caller-owned and bounded. */
@@ -75,6 +83,14 @@ int32_t prdb_sdk_executor_stage_insert_v1(
     uint8_t *request, uint64_t request_capacity, uint8_t *response,
     uint64_t response_capacity, uint64_t *response_len,
     uint8_t row_handle_out[16]);
+
+/* Patches accept VALUE/NULL only. Duplicate and out-of-range ordinals are
+ * rejected before the host callback is invoked. */
+int32_t prdb_sdk_executor_stage_update_v1(
+    const prdb_host_api_v2 *host, const uint8_t row_handle[16],
+    const prdb_sdk_executor_update_patch_v1 *patches, uint16_t patch_count,
+    uint8_t *request, uint64_t request_capacity, uint8_t *response,
+    uint64_t response_capacity, uint64_t *response_len);
 
 /* Stages deletion of a connection-local row handle. Storage rechecks its
  * invocation, snapshot, grant, policy and row-version authority. */

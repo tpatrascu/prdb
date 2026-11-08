@@ -211,6 +211,8 @@ int main(void) {
                &response_len, inserted_handle) == PRDB_SDK_EXECUTOR_OK);
     assert(response_len == sizeof(insert_reply) && inserted_handle[0] == 8 &&
            mock.calls == 7);
+    uint8_t valid_inserted_handle[16];
+    memcpy(valid_inserted_handle, inserted_handle, sizeof(valid_inserted_handle));
     memset(inserted_handle, 0xaa, sizeof(inserted_handle));
     insert_reply[2] = 7;
     assert(prdb_sdk_executor_stage_insert_v1(
@@ -219,6 +221,72 @@ int main(void) {
                &response_len, inserted_handle) ==
            PRDB_SDK_EXECUTOR_INVALID_PAYLOAD);
     assert(inserted_handle[0] == 0xaa && mock.calls == 8);
+
+    uint8_t expected_update_request[39] = {0, 1};
+    memcpy(expected_update_request + 2, valid_inserted_handle, 16);
+    expected_update_request[18] = 0;
+    expected_update_request[19] = 2;
+    expected_update_request[23] = 1;
+    expected_update_request[24] = 1;
+    expected_update_request[25] = 0;
+    expected_update_request[26] = 0;
+    expected_update_request[27] = 0;
+    expected_update_request[28] = 3;
+    expected_update_request[29] = 0;
+    expected_update_request[30] = PRDB_SDK_VALUE_TYPE_INTEGER;
+    expected_update_request[34] = 4;
+    expected_update_request[35] = 0;
+    expected_update_request[36] = 0;
+    expected_update_request[37] = 0;
+    expected_update_request[38] = 99;
+    prdb_sdk_executor_update_patch_v1 patches[2] = {{0}};
+    for (uint32_t i = 0; i < 2; ++i) {
+        patches[i].struct_size = sizeof(patches[i]);
+        patches[i].abi_version = PRDB_SDK_EXECUTOR_ABI_V1_VERSION;
+    }
+    patches[0].ordinal = 1;
+    patches[0].value.struct_size = sizeof(prdb_sdk_value_v1);
+    patches[0].value.abi_version = PRDB_SDK_VALUE_ABI_V1_VERSION;
+    patches[0].value.state = PRDB_SDK_VALUE_STATE_NULL;
+    patches[1].ordinal = 3;
+    patches[1].value.struct_size = sizeof(prdb_sdk_value_v1);
+    patches[1].value.abi_version = PRDB_SDK_VALUE_ABI_V1_VERSION;
+    patches[1].value.state = PRDB_SDK_VALUE_STATE_VALUE;
+    patches[1].value.type_code = PRDB_SDK_VALUE_TYPE_INTEGER;
+    const uint8_t integer_99[] = {0, 0, 0, 99};
+    patches[1].value.data = integer_99;
+    patches[1].value.data_len = sizeof(integer_99);
+    uint8_t update_request[39] = {0};
+    mock.expected_operation = PRDB_SDK_EXECUTOR_OP_STAGE_UPDATE;
+    mock.expected_request = expected_update_request;
+    mock.expected_request_len = sizeof(expected_update_request);
+    mock.reply = mutation_reply;
+    mutation_reply[2] = 0;
+    mock.reply_len = sizeof(mutation_reply);
+    assert(prdb_sdk_executor_stage_update_v1(
+               &host, valid_inserted_handle, patches, 2, update_request,
+               sizeof(update_request), response, sizeof(response),
+               &response_len) == PRDB_SDK_EXECUTOR_OK);
+    assert(mock.calls == 9);
+    mutation_reply[2] = 1;
+    assert(prdb_sdk_executor_stage_update_v1(
+               &host, valid_inserted_handle, patches, 2, update_request,
+               sizeof(update_request), response, sizeof(response),
+               &response_len) == PRDB_SDK_EXECUTOR_INVALID_PAYLOAD);
+    assert(mock.calls == 10);
+    mutation_reply[2] = 0;
+    patches[1].ordinal = 1;
+    assert(prdb_sdk_executor_stage_update_v1(
+               &host, valid_inserted_handle, patches, 2, update_request,
+               sizeof(update_request), response, sizeof(response),
+               &response_len) == PRDB_SDK_EXECUTOR_INVALID_ARGUMENT);
+    assert(mock.calls == 10);
+    patches[1].ordinal = PRDB_SDK_BATCH_MAX_CELLS_PER_ROW;
+    assert(prdb_sdk_executor_stage_update_v1(
+               &host, valid_inserted_handle, patches, 2, update_request,
+               sizeof(update_request), response, sizeof(response),
+               &response_len) == PRDB_SDK_EXECUTOR_INVALID_ARGUMENT);
+    assert(mock.calls == 10);
 
     assert(prdb_sdk_executor_open_full_scan_v1(
                &host, cursor, response, sizeof(response), &response_len,

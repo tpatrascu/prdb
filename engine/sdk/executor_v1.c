@@ -236,6 +236,73 @@ int32_t prdb_sdk_executor_stage_insert_v1(
     return PRDB_SDK_EXECUTOR_OK;
 }
 
+int32_t prdb_sdk_executor_stage_update_v1(
+    const prdb_host_api_v2 *host, const uint8_t row_handle[16],
+    const prdb_sdk_executor_update_patch_v1 *patches, uint16_t patch_count,
+    uint8_t *request, uint64_t request_capacity, uint8_t *response,
+    uint64_t response_capacity, uint64_t *response_len) {
+    uint8_t seen[PRDB_SDK_BATCH_MAX_CELLS_PER_ROW / 8] = {0};
+    uint64_t offset = 20;
+    int32_t status;
+    if (row_handle == NULL || row_handle[0] != PRDB_SDK_BATCH_ROW_TOKEN_KIND ||
+        patches == NULL || patch_count > PRDB_SDK_BATCH_MAX_CELLS_PER_ROW ||
+        request == NULL || request_capacity > PRDB_QUERY_MAX_IPC_REQUEST_BYTES ||
+        response == NULL || response_len == NULL) {
+        return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+    }
+    if (request_capacity < offset) return PRDB_SDK_EXECUTOR_RESPONSE_TOO_SMALL;
+    write_u16(request, 1);
+    memcpy(request + 2, row_handle, 16);
+    write_u16(request + 18, patch_count);
+    for (uint16_t i = 0; i < patch_count; ++i) {
+        const prdb_sdk_executor_update_patch_v1 *patch = &patches[i];
+        if (patch->struct_size < sizeof(*patch) ||
+            patch->abi_version != PRDB_SDK_EXECUTOR_ABI_V1_VERSION ||
+            patch->ordinal >= PRDB_SDK_BATCH_MAX_CELLS_PER_ROW) {
+            return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+        }
+        uint32_t byte_index = patch->ordinal / 8;
+        uint8_t mask = (uint8_t)(1U << (patch->ordinal % 8));
+        if ((seen[byte_index] & mask) != 0) return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+        seen[byte_index] |= mask;
+        if (prdb_sdk_value_validate_v1(&patch->value) != PRDB_SDK_VALUE_VALID ||
+            (patch->value.state != PRDB_SDK_VALUE_STATE_NULL &&
+             patch->value.state != PRDB_SDK_VALUE_STATE_VALUE)) {
+            return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+        }
+        uint64_t value_len = patch->value.state == PRDB_SDK_VALUE_STATE_VALUE
+                                 ? patch->value.data_len : 0;
+        uint64_t value_end = offset + 5 + value_len +
+                             (patch->value.state == PRDB_SDK_VALUE_STATE_VALUE ? 5 : 0);
+        if (value_len > UINT32_MAX || value_end < offset ||
+            value_end > request_capacity ||
+            value_end > PRDB_QUERY_MAX_IPC_REQUEST_BYTES) {
+            return PRDB_SDK_EXECUTOR_RESPONSE_TOO_SMALL;
+        }
+        write_u32(request + offset, patch->ordinal);
+        offset += 4;
+        if (patch->value.state == PRDB_SDK_VALUE_STATE_NULL) {
+            request[offset++] = 1;
+        } else {
+            request[offset++] = 0;
+            request[offset++] = (uint8_t)patch->value.type_code;
+            write_u32(request + offset, (uint32_t)value_len);
+            offset += 4;
+            if (value_len != 0) {
+                memcpy(request + offset, patch->value.data, (size_t)value_len);
+            }
+            offset += value_len;
+        }
+    }
+    status = invoke(host, PRDB_SDK_EXECUTOR_OP_STAGE_UPDATE, request, offset,
+                    response, response_capacity, response_len);
+    if (status != PRDB_SDK_EXECUTOR_OK) return status;
+    if (*response_len != 3 || read_u16(response) != 1 || response[2] != 0) {
+        return PRDB_SDK_EXECUTOR_INVALID_PAYLOAD;
+    }
+    return PRDB_SDK_EXECUTOR_OK;
+}
+
 int32_t prdb_sdk_executor_stage_delete_v1(
     const prdb_host_api_v2 *host, const uint8_t row_handle[16],
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len) {

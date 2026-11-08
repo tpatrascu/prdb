@@ -14,6 +14,13 @@
 - Verification: `nix-shell -p rustc cargo clippy rustfmt tinycc --run 'make -f engine/sdk/Makefile test'` passed with TinyCC 0.9.27-unstable-2025-01-06. This is an SDK callback fixture, not live storage IPC.
 - Limits/next: UPDATE's C bridge and end-to-end sequential SQL mutation execution remain open. Next add UPDATE patch encoding with unique ordinal checks and ack validation; later SQL-4 needs fixed target materialization before staging writes.
 
+## SM-6 dependency: C executor stage-update bridge — partial
+
+- Contract: [IPC protocol](../../specs/ipc-protocol.md) mutation payload v1 and [client SDK](../../specs/client-sdk.md). UPDATE sends one row handle and unique zero-based ordinals, each with VALUE or NULL; DEFAULT and REDACTED are invalid. The existing Rust dispatcher and transaction path enforce row authority, old/new update policy checks, and snapshot/conflict rules.
+- Red/green evidence: the executor fixture first failed to compile because the patch record and bridge were absent. It now verifies exact bytes for a NULL patch and an INTEGER 99 patch, rejects a non-success acknowledgement, duplicate ordinal, out-of-range ordinal, and undersized request without another host callback.
+- Verification: `nix-shell -p rustc cargo clippy rustfmt tinycc --run 'make -f engine/sdk/Makefile test'` passed with TinyCC 0.9.27-unstable-2025-01-06 after correcting fixture ordinal/value offsets found by the byte comparison.
+- Limits/next: low-level C insert/update/delete bridges now exist, but SQL still does not produce mutation requests and no live SDK-to-storage mutation stream is tested. Next close the SQL execution gap with fixed target materialization and sequential own-write visibility, retaining statement-error abort behavior.
+
 ## Signed index components — in progress
 
 - Contract: [index-key encoding v1](../../specs/index-key-encoding.md), SQL tuple components and normative examples. Non-null signed 16/32/64-bit values use marker `01`, sign-bit normalization, and big-endian bytes. These bytes are comparable only within the same index definition.
