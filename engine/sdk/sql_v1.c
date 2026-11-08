@@ -946,22 +946,20 @@ static int decimal_fits_precision(const uint8_t *coefficient,
     return 1;
 }
 
-int32_t prdb_sdk_sql_bind_select_parameter_v1(
-    const prdb_sdk_select_v1 *statement,
-    const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
+int32_t prdb_sdk_sql_bind_parameter_v1(
+    uint32_t parameter_index, const prdb_sdk_value_v1 *parameters,
+    uint32_t parameter_count,
     uint32_t expected_type, uint8_t expected_decimal_precision,
     uint8_t expected_decimal_scale, prdb_sdk_value_v1 *out,
     uint32_t out_capacity) {
     const prdb_sdk_value_v1 *parameter;
     int32_t status;
 
-    if (statement == NULL || out == NULL || out_capacity < sizeof(*out) ||
+    if (out == NULL || out_capacity < sizeof(*out) ||
         parameter_count > PRDB_SDK_SQL_MAX_PARAMETER_INDEX ||
         (parameter_count != 0 && parameters == NULL) ||
-        statement->struct_size < sizeof(*statement) ||
-        statement->abi_version != PRDB_SDK_SQL_ABI_V1_VERSION ||
-        statement->has_where != 1 || statement->parameter_index == 0 ||
-        statement->parameter_index > PRDB_SDK_SQL_MAX_PARAMETER_INDEX ||
+        parameter_index == 0 ||
+        parameter_index > PRDB_SDK_SQL_MAX_PARAMETER_INDEX ||
         expected_type < PRDB_SDK_VALUE_TYPE_BOOLEAN ||
         expected_type > PRDB_SDK_VALUE_TYPE_TIMESTAMPTZ ||
         (expected_type == PRDB_SDK_VALUE_TYPE_DECIMAL &&
@@ -971,10 +969,10 @@ int32_t prdb_sdk_sql_bind_select_parameter_v1(
          (expected_decimal_precision != 0 || expected_decimal_scale != 0))) {
         return PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT;
     }
-    if (statement->parameter_index > parameter_count) {
+    if (parameter_index > parameter_count) {
         return PRDB_SDK_SQL_EVAL_PARAMETER_MISSING;
     }
-    parameter = &parameters[statement->parameter_index - 1];
+    parameter = &parameters[parameter_index - 1];
     status = prdb_sdk_value_validate_v1(parameter);
     if (status == PRDB_SDK_VALUE_INVALID_ARGUMENT) {
         return PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT;
@@ -997,6 +995,22 @@ int32_t prdb_sdk_sql_bind_select_parameter_v1(
     }
     *out = *parameter;
     return PRDB_SDK_SQL_EVAL_OK;
+}
+
+int32_t prdb_sdk_sql_bind_select_parameter_v1(
+    const prdb_sdk_select_v1 *statement,
+    const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
+    uint32_t expected_type, uint8_t expected_decimal_precision,
+    uint8_t expected_decimal_scale, prdb_sdk_value_v1 *out,
+    uint32_t out_capacity) {
+    if (statement == NULL || statement->struct_size < sizeof(*statement) ||
+        statement->abi_version != PRDB_SDK_SQL_ABI_V1_VERSION ||
+        statement->has_where != 1 || statement->parameter_index == 0) {
+        return PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT;
+    }
+    return prdb_sdk_sql_bind_parameter_v1(
+        statement->parameter_index, parameters, parameter_count, expected_type,
+        expected_decimal_precision, expected_decimal_scale, out, out_capacity);
 }
 
 static int32_t validate_eval_value(const prdb_sdk_value_v1 *value) {

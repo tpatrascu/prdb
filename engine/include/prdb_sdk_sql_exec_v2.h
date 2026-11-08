@@ -2,6 +2,7 @@
 #define PRDB_SDK_SQL_EXEC_V2_H
 
 #include "prdb_sdk_executor_v1.h"
+#include "prdb_sdk_sql_dml_v1.h"
 #include "prdb_query_abi_v3.h"
 
 #define PRDB_SDK_SQL_EXEC_V2_ABI_VERSION UINT32_C(1)
@@ -45,5 +46,25 @@ int32_t prdb_sdk_sql_execute_select_v2(
     uint32_t executor_column_capacity,
     prdb_sdk_value_v1 *cell_scratch, uint32_t cell_scratch_capacity,
     prdb_sdk_sql_result_row_v2_fn on_row, void *result_context);
+
+/* Executes a single positional INSERT. `insert_values` is caller-owned
+ * scratch with one slot per resolved column; request/response buffers must
+ * remain valid for each synchronous host callback. The provisional returned
+ * row handle is connection-local and is written only on success. */
+int32_t prdb_sdk_sql_execute_insert_v1(
+    const prdb_host_api_v3 *host,
+    const uint8_t *schema, uint32_t schema_len,
+    const uint8_t *sql, uint64_t sql_len,
+    const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
+    uint8_t *planner_response, uint64_t planner_response_capacity,
+    uint8_t *executor_response, uint64_t executor_response_capacity,
+    uint8_t *insert_request, uint64_t insert_request_capacity,
+    prdb_sdk_sql_column_shape_v2 *planner_columns,
+    uint32_t planner_column_capacity,
+    prdb_sdk_sql_column_shape_v2 *executor_columns,
+    uint32_t executor_column_capacity,
+    prdb_sdk_executor_insert_value_v1 *insert_values,
+    uint32_t insert_value_capacity,
+    uint8_t row_handle_out[16]);
 
 #endif

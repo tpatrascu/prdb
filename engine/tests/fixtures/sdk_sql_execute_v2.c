@@ -85,6 +85,20 @@ static int32_t executor_request(void *context, uint16_t operation,
         assert(sizeof(reply) <= capacity);
         memcpy(response, reply, sizeof(reply));
         *response_len = sizeof(reply);
+    } else if (operation == PRDB_SDK_EXECUTOR_OP_STAGE_INSERT) {
+        static const uint8_t expected[] = {
+            0, 1, 6, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
+            0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
+            0, 3, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0, 0, 4,
+            0, 0, 0, 42, 1, 2};
+        static const uint8_t reply[18] = {
+            0, 1, 8, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
+            0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66};
+        assert(request_len == sizeof(expected));
+        assert(memcmp(request, expected, sizeof(expected)) == 0);
+        assert(sizeof(reply) <= capacity);
+        memcpy(response, reply, sizeof(reply));
+        *response_len = sizeof(reply);
     } else {
         assert(!"unexpected executor operation");
     }
@@ -130,6 +144,31 @@ static uint32_t make_relation(uint8_t *p, uint8_t handle_kind,
     return offset;
 }
 
+static uint32_t make_relation_three(uint8_t *p, uint8_t handle_kind,
+                                    uint8_t handle_fill) {
+    static const char *names[] = {"id", "label", "payload"};
+    static const uint8_t types[] = {PRDB_SDK_VALUE_TYPE_INTEGER,
+                                    PRDB_SDK_VALUE_TYPE_TEXT,
+                                    PRDB_SDK_VALUE_TYPE_BYTEA};
+    uint32_t offset = 0;
+    put_u16(p, &offset, 1);
+    p[offset++] = 0;
+    memset(p + offset, 0x11, 16); offset += 16;
+    p[offset++] = handle_kind;
+    memset(p + offset, handle_fill, 15); offset += 15;
+    put_name(p, &offset, "widgets");
+    put_u16(p, &offset, 3);
+    for (uint32_t index = 0; index < 3; ++index) {
+        memset(p + offset, (int)(0x33 + index), 16); offset += 16;
+        put_u32(p, &offset, index);
+        p[offset++] = 1;
+        p[offset++] = types[index];
+        p[offset++] = 0; p[offset++] = 0; p[offset++] = 0; p[offset++] = 0;
+        put_name(p, &offset, names[index]);
+    }
+    return offset;
+}
+
 typedef struct result_state {
     uint32_t calls;
     uint32_t fail;
@@ -154,6 +193,8 @@ static int32_t on_row(void *context, const prdb_sdk_row_v1 *row,
 int main(void) {
     static const uint8_t sql[] = "SELECT id FROM widgets WHERE id >= $1 LIMIT 1";
     static const uint8_t zero_limit_sql[] = "SELECT id FROM widgets LIMIT 0";
+    static const uint8_t insert_sql[] =
+        "INSERT INTO widgets VALUES ($1, NULL, DEFAULT)";
     static const uint8_t schema[] = "app";
     static const uint8_t parameter_bytes[] = {0, 0, 0, 4};
     uint8_t planner_payload[256] = {0};
@@ -179,11 +220,16 @@ int main(void) {
                                    PRDB_SDK_VALUE_STATE_VALUE,
                                    PRDB_SDK_VALUE_TYPE_INTEGER,
                                    parameter_bytes, sizeof(parameter_bytes)};
+    const uint8_t insert_parameter_bytes[] = {0, 0, 0, 42};
+    prdb_sdk_value_v1 insert_parameter = {
+        sizeof(insert_parameter), PRDB_SDK_VALUE_ABI_V1_VERSION,
+        PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_INTEGER,
+        insert_parameter_bytes, sizeof(insert_parameter_bytes)};
     uint8_t planner_response[256] = {0};
     uint8_t executor_response[256] = {0};
     uint8_t batch_response[1024] = {0};
-    prdb_sdk_sql_column_shape_v2 planner_columns[1] = {{0}};
-    prdb_sdk_sql_column_shape_v2 executor_columns[1] = {{0}};
+    prdb_sdk_sql_column_shape_v2 planner_columns[3] = {{0}};
+    prdb_sdk_sql_column_shape_v2 executor_columns[3] = {{0}};
     prdb_sdk_value_v1 cell_scratch[1] = {{0}};
     result_state result = {0};
     result.columns = executor_columns;
@@ -253,6 +299,41 @@ int main(void) {
                1, cell_scratch, 1, on_row, &result) ==
            PRDB_SDK_SQL_EXEC_BIND_ERROR);
     assert(mock.executor_calls == 1 && result.calls == 0);
+    assert(mock.statement_failed == 1);
+
+    mock.planner_calls = 0;
+    mock.executor_calls = 0;
+    mock.statement_failed = 0;
+    mock.planner_len = make_relation_three(
+        planner_payload, PRDB_SDK_PLANNER_TABLE_HANDLE_KIND, 0x99);
+    mock.executor_len = make_relation_three(executor_payload, 6, 0x22);
+    uint8_t insert_request[64] = {0};
+    uint8_t inserted_row_handle[16] = {0};
+    prdb_sdk_executor_insert_value_v1 insert_values[3] = {{0}};
+    assert(prdb_sdk_sql_execute_insert_v1(
+               &host, schema, sizeof(schema) - 1, insert_sql,
+               sizeof(insert_sql) - 1, &insert_parameter, 1,
+               planner_response, sizeof(planner_response), executor_response,
+               sizeof(executor_response), insert_request,
+               sizeof(insert_request), planner_columns, 3, executor_columns,
+               3, insert_values, 3, inserted_row_handle) ==
+           PRDB_SDK_SQL_EXEC_OK);
+    assert(mock.planner_calls == 1 && mock.executor_calls == 2);
+    assert(inserted_row_handle[0] == 8 && mock.statement_failed == 0);
+
+    insert_parameter.type_code = PRDB_SDK_VALUE_TYPE_BIGINT;
+    mock.planner_calls = 0;
+    mock.executor_calls = 0;
+    mock.statement_failed = 0;
+    assert(prdb_sdk_sql_execute_insert_v1(
+               &host, schema, sizeof(schema) - 1, insert_sql,
+               sizeof(insert_sql) - 1, &insert_parameter, 1,
+               planner_response, sizeof(planner_response), executor_response,
+               sizeof(executor_response), insert_request,
+               sizeof(insert_request), planner_columns, 3, executor_columns,
+               3, insert_values, 3, inserted_row_handle) ==
+           PRDB_SDK_SQL_EXEC_BIND_ERROR);
+    assert(mock.planner_calls == 1 && mock.executor_calls == 1);
     assert(mock.statement_failed == 1);
     return 0;
 }

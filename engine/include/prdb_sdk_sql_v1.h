@@ -71,6 +71,12 @@ int32_t prdb_sdk_sql_bind_select_parameter_v1(
     uint32_t expected_type, uint8_t expected_decimal_precision,
     uint8_t expected_decimal_scale, prdb_sdk_value_v1 *out,
     uint32_t out_capacity);
+/* Validates one-based parameter values against a schema-declared type. */
+int32_t prdb_sdk_sql_bind_parameter_v1(
+    uint32_t parameter_index, const prdb_sdk_value_v1 *parameters,
+    uint32_t parameter_count, uint32_t expected_type,
+    uint8_t expected_decimal_precision, uint8_t expected_decimal_scale,
+    prdb_sdk_value_v1 *out, uint32_t out_capacity);
 /* parameter_value is required for comparisons and must be NULL for null tests. */
 int32_t prdb_sdk_sql_eval_select_predicate_v1(
     const prdb_sdk_select_v1 *statement,
