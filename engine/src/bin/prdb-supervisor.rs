@@ -151,6 +151,8 @@ mod service {
                 max_connections: 128,
                 idle_timeout: Duration::from_secs(30),
                 accept_poll_interval: Duration::from_millis(50),
+                outcome_maintenance_interval: Duration::from_secs(60),
+                outcome_maintenance_batch: prdb_engine::outcome::MAX_OUTCOME_PRUNE_BATCH,
             },
         };
 

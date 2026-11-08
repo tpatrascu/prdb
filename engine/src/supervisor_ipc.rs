@@ -122,6 +122,8 @@ pub struct GatewayServiceListenerConfig {
     pub max_connections: usize,
     pub idle_timeout: Duration,
     pub accept_poll_interval: Duration,
+    pub outcome_maintenance_interval: Duration,
+    pub outcome_maintenance_batch: usize,
 }
 
 #[cfg(unix)]
@@ -130,6 +132,7 @@ pub enum GatewayServiceListenerError {
     InvalidConfig,
     StorageReopenRequired,
     Staging(crate::supervisor::StagingError),
+    OutcomeMaintenance(crate::outcome::OutcomeMaintenanceError),
     Io(io::Error),
     WorkerPanicked,
 }
@@ -497,6 +500,9 @@ where
     if runtime.listener.max_connections == 0
         || runtime.listener.idle_timeout.is_zero()
         || runtime.listener.accept_poll_interval.is_zero()
+        || runtime.listener.outcome_maintenance_interval.is_zero()
+        || runtime.listener.outcome_maintenance_batch == 0
+        || runtime.listener.outcome_maintenance_batch > crate::outcome::MAX_OUTCOME_PRUNE_BATCH
         || runtime.admission.retention_period_us <= 0
     {
         return Err(GatewayServiceListenerError::InvalidConfig);
@@ -506,11 +512,13 @@ where
         .map_err(GatewayServiceListenerError::Io)?;
     let limiter = crate::gateway::GatewayConnectionLimiter::new(runtime.listener.max_connections)
         .map_err(|_| GatewayServiceListenerError::InvalidConfig)?;
+    let mut next_outcome_maintenance = std::time::Instant::now();
 
     std::thread::scope(|scope| {
         let mut workers = Vec::new();
         let mut accept_error = None;
         let mut staging_error = None;
+        let mut outcome_maintenance_error = None;
         let mut storage_reopen_required = false;
         while !shutdown.load(Ordering::Acquire) {
             if manager.requires_reopen_after_commit_error() {
@@ -520,6 +528,17 @@ where
             if let Err(error) = staging.reap_expired(256) {
                 staging_error = Some(error);
                 break;
+            }
+            if std::time::Instant::now() >= next_outcome_maintenance {
+                next_outcome_maintenance =
+                    std::time::Instant::now() + runtime.listener.outcome_maintenance_interval;
+                if let Some(now_us) = crate::credentials::now_unix_micros()
+                    && let Err(error) = manager
+                        .prune_expired_outcomes(now_us, runtime.listener.outcome_maintenance_batch)
+                {
+                    outcome_maintenance_error = Some(error);
+                    break;
+                }
             }
             match listener.accept() {
                 Ok((mut stream, _peer)) => {
@@ -619,6 +638,7 @@ where
                 break;
             }
         }
+        storage_reopen_required |= manager.requires_reopen_after_commit_error();
         let mut worker_panicked = false;
         for worker in workers {
             worker_panicked |= worker.join().is_err();
@@ -629,6 +649,8 @@ where
             Err(GatewayServiceListenerError::StorageReopenRequired)
         } else if let Some(error) = staging_error {
             Err(GatewayServiceListenerError::Staging(error))
+        } else if let Some(error) = outcome_maintenance_error {
+            Err(GatewayServiceListenerError::OutcomeMaintenance(error))
         } else if let Some(error) = accept_error {
             Err(GatewayServiceListenerError::Io(error))
         } else {
@@ -1751,6 +1773,8 @@ mod worker_result_event_tests {
                 max_connections: 1,
                 idle_timeout: Duration::from_secs(1),
                 accept_poll_interval: Duration::from_millis(1),
+                outcome_maintenance_interval: Duration::from_secs(60),
+                outcome_maintenance_batch: crate::outcome::MAX_OUTCOME_PRUNE_BATCH,
             },
         };
 
@@ -1793,6 +1817,15 @@ mod worker_result_event_tests {
         let manager = instance
             .storage_manager(crate::storage_manager::StorageManagerConfig::default())
             .expect("build storage manager");
+        let mut expired = manager
+            .begin_invocation([73; 16], [74; 16], 1, 1, 1)
+            .expect("admit expired-outcome fixture");
+        expired.abort().expect("persist expired outcome");
+        assert!(
+            crate::outcome::lookup_outcome(instance.database(), [73; 16], [74; 16], 0)
+                .expect("lookup pre-maintenance outcome")
+                .is_some()
+        );
 
         let owner = StagingOwner::authenticated([1; 16], [2; 16]);
         let artifact = b"staged artifact";
@@ -1868,6 +1901,8 @@ mod worker_result_event_tests {
                 max_connections: 1,
                 idle_timeout: Duration::from_secs(1),
                 accept_poll_interval: Duration::from_millis(1),
+                outcome_maintenance_interval: Duration::from_millis(1),
+                outcome_maintenance_batch: crate::outcome::MAX_OUTCOME_PRUNE_BATCH,
             },
         };
         super::serve_gateway_service_listener(
@@ -1880,6 +1915,11 @@ mod worker_result_event_tests {
         )
         .expect("serve idle gateway listener");
         shutdown_thread.join().expect("join shutdown thread");
+        assert!(
+            crate::outcome::lookup_outcome(instance.database(), [73; 16], [74; 16], 0)
+                .expect("lookup after service maintenance")
+                .is_none()
+        );
         assert_eq!(
             staging
                 .close_connection(owner)

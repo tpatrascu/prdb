@@ -9268,6 +9268,8 @@ fn admin_cancellation_sync_failure_quarantines_until_reopen()
                 max_connections: 1,
                 idle_timeout: Duration::from_secs(1),
                 accept_poll_interval: Duration::from_millis(1),
+                outcome_maintenance_interval: Duration::from_secs(60),
+                outcome_maintenance_batch: prdb_engine::outcome::MAX_OUTCOME_PRUNE_BATCH,
             },
         };
         assert!(matches!(
@@ -14869,6 +14871,8 @@ fn gateway_service_listener_binds_peer_and_serves_hello() -> Result<(), Box<dyn 
                         max_connections: 2,
                         idle_timeout: Duration::from_secs(5),
                         accept_poll_interval: Duration::from_millis(5),
+                        outcome_maintenance_interval: Duration::from_secs(60),
+                        outcome_maintenance_batch: prdb_engine::outcome::MAX_OUTCOME_PRUNE_BATCH,
                     },
                 },
                 shutdown_server,

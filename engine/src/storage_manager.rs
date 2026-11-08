@@ -1688,6 +1688,16 @@ pub(crate) fn clear_uncertain_database_key(database_key: usize) {
 }
 
 impl<'db> StorageManager<'db> {
+    /// Prune one bounded batch of expired durable outcomes. Storage failures
+    /// quarantine this database handle; the owning service must reopen it.
+    pub(crate) fn prune_expired_outcomes(
+        &self,
+        now_us: i64,
+        max_scanned: usize,
+    ) -> Result<crate::outcome::OutcomePruneResult, crate::outcome::OutcomeMaintenanceError> {
+        crate::outcome::prune_expired_outcomes(self.database, now_us, max_scanned)
+    }
+
     /// Validate the recovered database, then use the default snapshot limit
     /// and the supplied DDL-fence timeout.
     pub fn new(
