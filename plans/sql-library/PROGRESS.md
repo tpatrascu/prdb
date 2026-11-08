@@ -6,7 +6,7 @@
 - Bounds and rejection: query 65,536 bytes; identifier 128 bytes; projection 64 columns; parameter index 1–65,535; LIMIT 0–1,000,000. Unsupported statement kinds return `UNSUPPORTED_STATEMENT`; malformed/incrementally unsupported syntax returns `SYNTAX_ERROR`; bounds return `LIMIT_EXCEEDED`. The parser copies no SQL or names and does not bind parameters or execute a plan.
 - Implementation: [`sql_v1.c`](../../engine/sdk/sql_v1.c) performs bounded tokenization and parsing, stores source offsets/lengths, and is included in the TinyCC SDK archive.
 - Regression: [`sdk_sql_select_v1.c`](../../engine/tests/fixtures/sdk_sql_select_v1.c) checks the documented parameterized SELECT, case-insensitive keywords, preserved identifier bytes, star projection, LIMIT 0, `IS NULL` and `IS NOT NULL` without a parameter, malformed null tests, DELETE rejection, malformed SELECT, second-statement rejection, too many columns, query length, parameter range, and LIMIT range. Initial TinyCC compile failed because `prdb_sdk_sql_v1.h` was absent; the fixture passes after implementation.
-- Remaining: submit a bounded structured request to the planner, implement storage-backed SELECT execution, and add mutations only after statement-abort behavior is wired end to end.
+- Remaining: the parser is now composed with planner and executor bridges and bounded SELECT/DML runners in later SQL-3/SQL-4 increments. The initial SELECT grammar still lacks joins, grouping, sorting, and information_schema SQL integration.
 
 ## SQL-3 bounded Boolean SELECT parser — implemented
 
@@ -27,7 +27,7 @@
 - Verification for sticky statement failures: Rust v3 ABI/layout and descriptor tests, the executor latch-to-exit test, the partial-result durable-abort integration test, maintained TinyCC suite, full workspace build, format, Clippy, workspace tests, and diff check passed. The new Rust vertical integration harness compiles but is not run in this environment because its cgroup mount is read-only and has no delegation.
 - Verification for planner/executor/SELECT bridge: maintained TinyCC SDK fixtures, `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, and `git diff --check` passed.
 - Verification: the full maintained TinyCC SDK fixture suite and `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, and `git diff --check` passed.
-- Remaining: execute the maintained v3 artifact through the new integration harness on a host with a delegated cgroup and the declared runtime profile; this sandbox acceptance evidence is not available in this environment. Statement lifecycle integration, sequential statement/result lifetimes, cancellation/deadline notification, planner physical plans, and mutations also remain unimplemented. The runner enforces a bounded number of executor requests and closes the latest continuation cursor when it stops early.
+- Remaining: execute the maintained v3 artifact through the integration harness on a host with a delegated cgroup and the declared runtime profile; sandbox acceptance evidence is not available in this environment. Statement lifecycle integration, sequential result-stream rules, cancellation/deadline notification, planner physical plans, and SQL-backed information_schema remain open. The runner enforces a bounded number of executor requests and closes the latest continuation cursor when it stops early.
 
 ## SQL-4 dependency: bounded positional INSERT parser and storage submission — partial
 
@@ -36,7 +36,7 @@
 - Execution: `prdb_sdk_sql_execute_insert_v1` obtains planner and executor shapes independently, checks they agree, enforces exact full-row arity, binds parameter values to declared scalar/Decimal types, preserves NULL/DEFAULT states, submits `stage_insert`, and returns its provisional opaque row handle. Every valid-host failure latches SQL statement failure.
 - Regression: the maintained SQL execution fixture first failed to link because `prdb_sdk_sql_execute_insert_v1` was absent. It now verifies the exact three-column operation payload for INTEGER 42, NULL, and DEFAULT, returned row-handle kind, planner/executor request counts, and a BIGINT/INTEGER mismatch that fails before stage mutation and latches the statement.
 - Verification: `make -f engine/sdk/Makefile test`, `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, and `git diff --check` passed in the required Nix shell. The existing sandbox integration remains ignored because the host cgroup mount is read-only and not delegated.
-- Limits/next: this is one-row INSERT only. UPDATE/DELETE SQL grammar/execution, default-schema/catalog constraints, real storage IPC through the sandbox, and sequential read/write/read acceptance remain open. A host callback fixture verifies the client ABI bytes but is not live storage evidence.
+- Limits/next: this is one-row INSERT only. UPDATE and DELETE are implemented in subsequent increments. Default-schema/catalog constraints and executed live storage IPC acceptance remain open; the combined DML sandbox path is prepared but not runnable on this host because cgroup delegation is unavailable.
 
 ## SQL-4 dependency: bounded UPDATE parser — partial
 
@@ -46,7 +46,7 @@
 - Execution: `prdb_sdk_sql_execute_update_v1` binds SET ordinals and typed values, validates predicate parameters before scanning, evaluates authorized full-shape rows, copies at most 128 matching row handles into caller-owned storage, closes the scan, then stages the same patch set per target. It budgets its own executor requests before staging and invokes sticky failure on any error.
 - Regression: the SQL runner fixture checks exact `stage_update` bytes after fetching a matching row and receiving a finished continuation page. A second fixture returns two matching rows for a one-target buffer; the runner closes the cursor, reports `MATERIALIZATION_LIMIT`, latches failure, leaves the output count unchanged, and sends no update operation.
 - Verification: full `make -f engine/sdk/Makefile test`, `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` passed in the required Nix shell with TinyCC 0.9.27-unstable-2025-01-06.
-- Limits/next: this UPDATE runner uses callback mocks, not live sandboxed storage. UPDATE predicates and assignments have the documented narrow grammar; multi-statement INSERT/UPDATE/SELECT own-write acceptance is still missing.
+- Limits/next: this UPDATE runner's focused regression uses callback mocks, not live sandboxed storage. The combined INSERT/SELECT/UPDATE/SELECT/DELETE/SELECT acceptance fixture is prepared, but its live own-write visibility and commit assertions have not run on this host.
 
 ## SQL-4 dependency: bounded DELETE parser and runner — partial
 
@@ -54,15 +54,15 @@
 - Implementation: `prdb_sdk_sql_parse_delete_v1` parses the grammar. `prdb_sdk_sql_execute_delete_v1` compares planner/executor relation shapes, binds typed predicate parameters, evaluates authorized full-shape scan rows, retains at most the caller capacity (maximum 128) of opaque row handles, closes the scan, and then stages deletes. Materialization or 256-request budget failures happen before staging; all execution failures latch the v3 statement-failure callback.
 - Regression: [`sdk_sql_dml_v1.c`](../../engine/tests/fixtures/sdk_sql_dml_v1.c) covers a Boolean/NULL predicate and rejects missing WHERE. [`sdk_sql_execute_v2.c`](../../engine/tests/fixtures/sdk_sql_execute_v2.c) covers successful one-row deletion and target-capacity overflow; the overflow case confirms scan closure, unchanged output count, sticky failure, and no delete request.
 - Verification: focused TinyCC parser and SQL execution fixtures pass; the full maintained TinyCC SDK fixture suite passes. Rust 1.95.0 build, `cargo fmt --all -- --check`, Clippy with warnings denied, and workspace tests pass. One sandboxed SQL integration test is ignored because delegated cgroup support is unavailable. No live sandbox/storage write evidence was produced.
-- Limits/next: host callback fixtures do not establish sandboxed executor or live Rust storage behavior. SQL INSERT/UPDATE/DELETE own-write sequencing, end-to-end write commit, and delegated-cgroup sandbox acceptance remain open.
+- Limits/next: host callback fixtures do not establish sandboxed executor or live Rust storage behavior. SQL INSERT/UPDATE/DELETE own-write sequencing and end-to-end write commit remain unverified until the prepared delegated-cgroup acceptance test runs.
 
-## SQL-4 sandboxed INSERT then SELECT acceptance path — prepared, not run
+## SQL-4 sandboxed SQL DML sequence acceptance path — prepared, not run
 
-- Artifact: [`sql_v3_write_read.c`](../../engine/tests/fixtures/sql_v3_write_read.c) calls the existing INSERT runner and then SELECT runner with the same v3 host callbacks. The SELECT callback checks that the inserted row is visible with SQL NULL and emits a result marker only after seeing that row.
-- Rust acceptance test: `sandboxed_v3_sql_insert_is_visible_to_following_select_and_commits` provisions an owner-scoped nullable Integer table, stages the TinyCC artifact through authenticated submission, runs it in the confined executor, and expects the provisional marker followed by a storage-confirmed COMMITTED terminal event.
+- Artifact: [`sql_v3_write_read.c`](../../engine/tests/fixtures/sql_v3_write_read.c) calls the INSERT, SELECT, UPDATE, SELECT, DELETE, and SELECT runners with the same v3 host callbacks. It checks NULL after insertion, checks the updated Integer value 42, and requires zero rows after deletion. The query emits markers only after the expected staged values are observed.
+- Rust acceptance test: `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` provisions an owner-scoped nullable Integer table, stages the TinyCC artifact through authenticated submission, runs it in the confined executor, and expects the two provisional markers followed by a storage-confirmed COMMITTED terminal event.
 - Tooling: `make -f engine/sdk/Makefile sandbox-query-fixture` now builds this artifact alongside the caught-error fixture. [`SANDBOX_TEST.md`](SANDBOX_TEST.md) documents its environment variable and opt-in command.
 - Verification: the artifact builds with TinyCC and the new Rust integration test compiles. The integration test has not been executed because this host has no delegated cgroup; no live own-write or commit evidence is claimed. Run it with the declared runtime profile on a delegated-cgroup host.
-- Next: execute the integration on a conforming Linux host, then extend the real path to UPDATE/DELETE and verify transaction abort after a later statement error.
+- Next: execute the integration on a conforming Linux host, then verify transaction abort after a later DML statement error.
 
 ## SQL-4 v2 schema column binding — implemented
 

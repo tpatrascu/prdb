@@ -15133,8 +15133,8 @@ fn sandboxed_v3_sql_error_latches_failure_and_durably_aborts_after_partial_outpu
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 #[ignore = "requires a delegated cgroup and the built TinyCC SQL write/read fixture"]
-fn sandboxed_v3_sql_insert_is_visible_to_following_select_and_commits()
--> Result<(), Box<dyn std::error::Error>> {
+fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn std::error::Error>>
+{
     use prdb_engine::client_protocol::{ClientConnectionSession, ClientFrame, ClientMode};
     use prdb_engine::ipc::{Operation, read_frame};
     use prdb_engine::outcome::OutcomeStatus;
@@ -15329,10 +15329,14 @@ fn sandboxed_v3_sql_insert_is_visible_to_following_select_and_commits()
         GatewayTerminalDecision::Commit
     );
     staging.finish_started(owner, reservation.invocation_id)?;
-    let result = read_frame(&mut gateway)?.ok_or("missing read-after-write result")?;
-    assert_eq!(result.operation, Operation::GatewayResultData as u16);
-    assert_eq!(result.request_id, accepted.request_id);
-    assert_eq!(result.payload, b"read-after-insert");
+    let inserted = read_frame(&mut gateway)?.ok_or("missing INSERT visibility result")?;
+    assert_eq!(inserted.operation, Operation::GatewayResultData as u16);
+    assert_eq!(inserted.request_id, accepted.request_id);
+    assert_eq!(inserted.payload, b"insert-visible");
+    let updated = read_frame(&mut gateway)?.ok_or("missing UPDATE visibility result")?;
+    assert_eq!(updated.operation, Operation::GatewayResultData as u16);
+    assert_eq!(updated.request_id, accepted.request_id);
+    assert_eq!(updated.payload, b"update-visible");
     let terminal = read_frame(&mut gateway)?.ok_or("missing committed terminal event")?;
     assert_eq!(terminal.operation, Operation::GatewayTerminal as u16);
     assert_eq!(terminal.request_id, accepted.request_id);
