@@ -7336,6 +7336,148 @@ fn foreign_key_creation_racing_orphan_child_insert_is_atomic()
 }
 
 #[test]
+fn storage_manager_creates_named_unique_index_and_backfills_atomically()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let admin_role = builtin_owner_id();
+    let actor = id(0xd0);
+    let foreign_key_edge = dependency_write(id(86), id(85), 3).key;
+    let mut setup_writes = foreign_key_catalog_writes(false, true)
+        .into_iter()
+        .filter(|write| {
+            write.key != id_catalog_key(8, id(86))
+                && write.key != id_catalog_key(2, id(86))
+                && write.key != foreign_key_edge
+        })
+        .collect::<Vec<_>>();
+    setup_writes.extend([
+        principal_write_with_name(actor, 1, 1, "named_index_admin"),
+        object_write_with_name(actor, 8, "named_index_admin"),
+        membership_write(actor, admin_role),
+        dependency_write(actor, admin_role, 5),
+    ]);
+    let mut setup_audit = identity_audit_event(0xd1, admin_role, id(80));
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(id(0xd1), admin_role, 9_999, &setup_writes, &[setup_audit])?;
+
+    let mut seed = storage.begin_invocation(id(0xd2), actor, 9_999, 2, 2048)?;
+    let schema = seed.load_catalog_table_schema(id(82))?;
+    seed.load_catalog_indexes(&schema)?;
+    for (row_id, value) in [(id(0xd3), b"one".as_slice()), (id(0xd4), b"two".as_slice())] {
+        let tuple = encode_tuple(
+            &schema.columns,
+            schema.schema_version,
+            &[Some(ScalarValue::Bytea(value.to_vec()))],
+        )?;
+        seed.stage_put(
+            prdb_engine::overlay::RowId {
+                table: id(82),
+                row: row_id,
+            },
+            &tuple,
+        )?;
+    }
+    assert_eq!(seed.commit()?, 2);
+
+    let stale_invocation = id(0xd5);
+    let stale_row = id(0xd6);
+    let mut stale_writer = storage.begin_invocation(stale_invocation, actor, 9_999, 1, 1024)?;
+    let stale_schema = stale_writer.load_catalog_table_schema(id(82))?;
+    stale_writer.load_catalog_indexes(&stale_schema)?;
+    let stale_tuple = encode_tuple(
+        &stale_schema.columns,
+        stale_schema.schema_version,
+        &[Some(ScalarValue::Bytea(b"three".to_vec()))],
+    )?;
+    stale_writer.stage_put(
+        prdb_engine::overlay::RowId {
+            table: id(82),
+            row: stale_row,
+        },
+        &stale_tuple,
+    )?;
+
+    let invocation_id = id(0xd7);
+    let mut audit = identity_audit_event(0xd8, actor, id(82));
+    audit.correlation_id = invocation_id;
+    let created = storage
+        .create_index(prdb_engine::storage_manager::CreateIndexRequest {
+            invocation_id,
+            authenticated_actor_id: actor,
+            table_id: id(82),
+            name: "source_value_unique".to_owned(),
+            column_ids: vec![id(84)],
+            unique: true,
+            retention_deadline_us: 9_999,
+            audit_event: audit,
+        })
+        .map_err(|error| format!("named unique index creation failed: {error:?}"))?;
+    assert_ne!(created.index_id, [0; 16]);
+    assert_eq!(created.commit_sequence, 3);
+    assert!(matches!(
+        stale_writer.commit(),
+        Err(prdb_engine::transaction::TransactionError::Commit(
+            CommitError::Conflict
+        ))
+    ));
+    assert!(row(&database, &table_row_key(id(82), stale_row))?.is_none());
+    assert_eq!(
+        lookup_outcome(&database, stale_invocation, actor, 1)?
+            .ok_or("missing stale named-index writer outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
+    assert_eq!(
+        lookup_outcome(&database, invocation_id, actor, 1)?
+            .ok_or("missing named-index creation outcome")?
+            .status,
+        OutcomeStatus::Committed
+    );
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    let index_object = decode_registered_envelope(
+        catalog
+            .get(id_catalog_key(2, created.index_id).as_slice())?
+            .ok_or("missing index object")?
+            .value(),
+    )?;
+    assert!(
+        index_object
+            .fields
+            .iter()
+            .any(|field| { field.tag == 3 && field.payload.as_slice() == b"source_value_unique" })
+    );
+    assert!(
+        index_object
+            .fields
+            .iter()
+            .any(|field| field.tag == 2 && field.payload.as_slice() == id(80))
+    );
+    assert!(
+        catalog
+            .get(dependency_write(created.index_id, id(80), 1).key.as_slice())?
+            .is_some()
+    );
+    let index_record = catalog
+        .get(id_catalog_key(9, created.index_id).as_slice())?
+        .ok_or("missing index definition")?;
+    assert!(
+        decode_registered_envelope(index_record.value())?
+            .fields
+            .iter()
+            .any(|field| field.tag == 4 && field.payload.as_slice() == [1])
+    );
+    assert_eq!(read.open_table(schema::INDEXES)?.iter()?.count(), 2);
+    assert_eq!(read.open_table(schema::ROW_INDEXES)?.iter()?.count(), 2);
+    drop(catalog);
+    drop(read);
+    prdb_engine::startup::validate_persisted_records(&database)?;
+    Ok(())
+}
+
+#[test]
 fn storage_manager_creates_unique_constraint_and_backfills_existing_rows()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
@@ -13266,6 +13408,34 @@ fn storage_manager_checks_index_ddl_authority_for_current_actor()
             .status,
         OutcomeStatus::Aborted
     );
+    let (narrow_guard_index_key, narrow_guard_index_definition) =
+        index_definition(id(0x8f), id(16));
+    let mut narrow_guard_audit = audit_event(215);
+    narrow_guard_audit.actor_id = Some(authorized_user);
+    assert_eq!(
+        storage.commit_authorized_index_ddl(
+            id(215),
+            authorized_user,
+            9_999,
+            &[
+                CatalogWrite {
+                    key: narrow_guard_index_key.clone(),
+                    expected_value: None,
+                    payload: Some(narrow_guard_index_definition),
+                },
+                object_write(id(0x8f), 7),
+                dependency_write(id(0x8b), id(16), 1),
+            ],
+            &[narrow_guard_audit],
+        ),
+        Err(CommitError::InvalidCatalog)
+    );
+    assert_eq!(
+        lookup_outcome(&database, id(215), authorized_user, 1)?
+            .ok_or("missing rejected unrelated index ownership-edge outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
     let read = database.begin_read()?;
     assert!(
         read.open_table(CATALOG)?
@@ -13275,6 +13445,11 @@ fn storage_manager_checks_index_ddl_authority_for_current_actor()
     assert!(
         read.open_table(CATALOG)?
             .get(denied_index_key.as_slice())?
+            .is_none()
+    );
+    assert!(
+        read.open_table(CATALOG)?
+            .get(narrow_guard_index_key.as_slice())?
             .is_none()
     );
     assert!(

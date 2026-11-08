@@ -7207,6 +7207,7 @@ fn index_ddl_authority_guards(
     let mut affected_tables = HashSet::<[u8; 16]>::new();
     let mut changed_object_ids = HashSet::<[u8; 16]>::new();
     let mut object_record_states = HashMap::<[u8; 16], (bool, bool)>::new();
+    let mut changed_owned_child_dependents = Vec::<[u8; 16]>::new();
     for write in catalog_writes {
         let family = write
             .key
@@ -7256,6 +7257,18 @@ fn index_ddl_authority_guards(
                     affected_tables.insert(table_id);
                 }
             }
+            15 => {
+                for bytes in [current.as_deref(), write.payload.as_deref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    let (dependent_id, _, kind) = decode_dependency_edge(&write.key, bytes)?;
+                    if kind != 1 {
+                        return Err(CommitError::InvalidCatalog);
+                    }
+                    changed_owned_child_dependents.push(dependent_id);
+                }
+            }
             _ => return Err(CommitError::InvalidCatalog),
         }
     }
@@ -7272,6 +7285,9 @@ fn index_ddl_authority_guards(
                 (true, true) => object_record_states.contains_key(index_id),
                 _ => true,
             })
+        || changed_owned_child_dependents
+            .iter()
+            .any(|dependent_id| !changed_index_ids.contains(dependent_id))
     {
         return Err(CommitError::InvalidCatalog);
     }
