@@ -82,3 +82,9 @@
 - Regression: the binary integration compiles an ABI-v3 TinyCC fixture, authenticates using the bootstrap credential, uploads it through PREPARE/chunk, and verifies SEAL returns `prepared`. It does not load or execute the fixture.
 - Verification: full workspace build, formatting, warning-denied Clippy, tests and maintained TinyCC SDK tests passed.
 - Remaining: real START and confined process execution are gated on a host with a writable delegated cgroup; this machine's cgroup v2 mount is read only.
+
+## SU-2 / NP-5: prepared reservation control over TCP — verified
+
+- Behavior: the authenticated real gateway path reports a sealed upload as prepared, cancels it without creating an invocation outcome, then hides it as unknown on STATUS.
+- Regression and verification: included in the real supervisor/gateway TinyCC upload test; workspace build, format, Clippy, Rust tests and SDK tests pass.
+- Remaining: active cancellation and terminal STATUS through a started worker still require the delegated-cgroup process path.

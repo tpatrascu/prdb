@@ -90,3 +90,10 @@
 - Regression: `supervisor_and_gateway_binaries_authenticate_upload_and_seal_tinycc_query_over_tcp` compiles a minimal ABI-v3 shared object with TinyCC and exercises the complete authenticated submission path through both binaries.
 - Verification: `cargo test --workspace --locked` passed; this integration test was among the three passing supervisor binary tests. The two sandboxed START tests remain ignored because this host has no writable delegated cgroup.
 - Remaining: exercise START, confined loading, result relay and durable terminal reconciliation on a host with a writable delegated cgroup.
+
+## NP-5 integration: prepared STATUS and CANCEL over TCP — verified
+
+- Behavior: through the same authenticated real-binary connection, STATUS reports a sealed reservation as `prepared`, CANCEL releases the unstarted reservation with `accepted`, and subsequent STATUS returns the same `unknown` response used for unavailable invocations.
+- Regression: the TinyCC TCP submission test now covers that state transition and confirms the connection remains usable afterward with PING.
+- Verification: focused supervisor binary regression, workspace build/format/warning-denied Clippy/tests, and the maintained TinyCC SDK suite passed. Workspace tests reported 109 commit tests passing and two cgroup-gated tests ignored.
+- Remaining: exercise active invocation status/cancellation and durable terminal reconciliation through the process boundary when a writable delegated cgroup host is available.

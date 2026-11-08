@@ -336,9 +336,22 @@ fn supervisor_and_gateway_binaries_authenticate_upload_and_seal_tinycc_query_ove
         assert_eq!(sealed.kind, 100);
         assert!(String::from_utf8_lossy(&sealed.payload).contains("\"state\":\"prepared\""));
 
-        let ping = exchange(11, 6, b"{}".to_vec());
+        let status_payload = format!("{{\"invocation_id\":\"{invocation_id_hex}\"}}");
+        let status = exchange(8, 6, status_payload.as_bytes().to_vec());
+        assert_eq!(status.kind, 100);
+        assert_eq!(status.payload, br#"{"state":"prepared"}"#);
+
+        let cancel = exchange(9, 7, status_payload.as_bytes().to_vec());
+        assert_eq!(cancel.kind, 100);
+        assert_eq!(cancel.payload, br#"{"state":"accepted"}"#);
+
+        let cancelled_status = exchange(8, 8, status_payload.into_bytes());
+        assert_eq!(cancelled_status.kind, 100);
+        assert_eq!(cancelled_status.payload, br#"{"state":"unknown"}"#);
+
+        let ping = exchange(11, 9, b"{}".to_vec());
         assert_eq!(ping.kind, 100);
-        assert_eq!(ping.request_id, 6);
+        assert_eq!(ping.request_id, 9);
         assert_eq!(ping.payload, br#"{"alive":true}"#);
     }
     client
