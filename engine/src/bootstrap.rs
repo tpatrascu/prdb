@@ -187,7 +187,7 @@ impl BootstrapSession {
         validate_persisted_records(&self.database).map_err(BootstrapError::Startup)?;
         let database_path = self.directory.join(DATABASE_FILE);
         Ok(StorageInstance {
-            database: self.database,
+            database: Box::new(self.database),
             database_path,
             _lock: self._lock,
         })
@@ -367,7 +367,7 @@ impl Drop for OneTimeSecret {
 /// An opened READY instance. Keep this value alive for as long as any
 /// `StorageManager` borrows its database handle.
 pub struct StorageInstance {
-    database: Database,
+    database: Box<Database>,
     database_path: PathBuf,
     _lock: InstanceLock,
 }
@@ -385,7 +385,7 @@ impl StorageInstance {
         let database = Database::open(&database_path).map_err(|_| BootstrapError::Storage)?;
         validate_persisted_records(&database).map_err(BootstrapError::Startup)?;
         Ok(Self {
-            database,
+            database: Box::new(database),
             database_path,
             _lock: lock,
         })
@@ -399,6 +399,7 @@ impl StorageInstance {
     /// then validate the recovered READY image before returning it. Callers
     /// must drop every `StorageManager` borrowing this instance first.
     pub fn reopen(self) -> Result<Self, BootstrapError> {
+        let closed_database_key = &*self.database as *const Database as usize;
         let Self {
             database,
             database_path,
@@ -408,7 +409,6 @@ impl StorageInstance {
             .parent()
             .ok_or(BootstrapError::InvalidRequest)?;
         validate_managed_directory(directory, true)?;
-        let closed_database_key = &database as *const Database as usize;
         drop(database);
         validate_managed_directory(directory, true)?;
         validate_private_file(&database_path)?;
@@ -416,7 +416,7 @@ impl StorageInstance {
         validate_persisted_records(&database).map_err(BootstrapError::Startup)?;
         crate::storage_manager::clear_uncertain_database_key(closed_database_key);
         Ok(Self {
-            database,
+            database: Box::new(database),
             database_path,
             _lock,
         })

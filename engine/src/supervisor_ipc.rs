@@ -110,6 +110,25 @@ pub enum GatewayServiceListenerError {
     WorkerPanicked,
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[derive(Debug)]
+pub enum GatewayServiceRecoveryError {
+    Bind(io::Error),
+    Manager(crate::storage_manager::StorageManagerInitError),
+    Listener(GatewayServiceListenerError),
+    Bootstrap(crate::bootstrap::BootstrapError),
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+impl std::fmt::Display for GatewayServiceRecoveryError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "gateway service recovery failed: {self:?}")
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+impl std::error::Error for GatewayServiceRecoveryError {}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GatewayAbortReason {
     QueryError,
@@ -563,6 +582,68 @@ where
             Ok(())
         }
     })
+}
+
+/// Own the StorageInstance/StorageManager lifecycle for a gateway service.
+/// `bind_listener` must return a fresh private listener each time it is called;
+/// the previous listener has been dropped before a reopen cycle reaches it.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub fn run_gateway_service_with_recovery<B, F>(
+    mut instance: crate::bootstrap::StorageInstance,
+    storage_config: crate::storage_manager::StorageManagerConfig,
+    staging: &crate::supervisor::StagingStore,
+    runtime: GatewayServiceRuntimeConfig,
+    shutdown: Arc<AtomicBool>,
+    mut bind_listener: B,
+    on_started: F,
+) -> Result<crate::bootstrap::StorageInstance, GatewayServiceRecoveryError>
+where
+    B: FnMut() -> io::Result<UnixListener>,
+    F: for<'db> Fn(
+            u64,
+            &mut UnixStream,
+            crate::storage_manager::SupervisorInvocation<'db>,
+            crate::supervisor::SealedSubmission,
+            crate::executor_launcher::RunningExecutor,
+        ) + Sync,
+{
+    loop {
+        if shutdown.load(Ordering::Acquire) {
+            return Ok(instance);
+        }
+        let listener = bind_listener().map_err(GatewayServiceRecoveryError::Bind)?;
+        let (listener_result, requires_reopen) = {
+            let manager = instance
+                .storage_manager(storage_config)
+                .map_err(GatewayServiceRecoveryError::Manager)?;
+            let result = serve_gateway_service_listener(
+                listener,
+                &manager,
+                staging,
+                runtime.clone(),
+                Arc::clone(&shutdown),
+                &on_started,
+            );
+            (result, manager.requires_reopen_after_commit_error())
+        };
+
+        if requires_reopen {
+            instance = instance
+                .reopen()
+                .map_err(GatewayServiceRecoveryError::Bootstrap)?;
+            return match listener_result {
+                Ok(()) if shutdown.load(Ordering::Acquire) => Ok(instance),
+                Ok(()) | Err(GatewayServiceListenerError::StorageReopenRequired) => {
+                    continue;
+                }
+                Err(error) => Err(GatewayServiceRecoveryError::Listener(error)),
+            };
+        }
+        match listener_result {
+            Ok(()) => return Ok(instance),
+            Err(error) => return Err(GatewayServiceRecoveryError::Listener(error)),
+        }
+    }
 }
 
 /// Observe one executor while relaying its provisional result bytes to the
@@ -1398,6 +1479,9 @@ mod worker_result_event_tests {
     use super::write_gateway_result_data_event;
     use crate::ipc::{IpcFrame, Operation, read_frame};
     use std::io::Cursor;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
 
     #[test]
     fn result_relay_emits_only_correlated_gateway_data_events() {
@@ -1413,5 +1497,106 @@ mod worker_result_event_tests {
             })
         );
         assert_eq!(read_frame(&mut encoded).unwrap(), None);
+    }
+
+    struct AcceptMetadata;
+    impl crate::supervisor::SubmissionMetadataValidator for AcceptMetadata {
+        fn supports_versions(&self, manifest_version: u32, scope_version: u32) -> bool {
+            manifest_version == 1 && scope_version == 1
+        }
+
+        fn validate(&self, _metadata: &crate::supervisor::SubmissionMetadata) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn gateway_service_reopens_quarantined_instance_before_rebinding() {
+        let fixture_id = AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "prdb-service-recovery-{}-{}",
+            std::process::id(),
+            fixture_id.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut bootstrap = crate::bootstrap::initialize(&root, "service_admin", i64::MAX)
+            .expect("initialize service instance");
+        bootstrap.take_secret().expect("take bootstrap secret");
+        let instance = bootstrap
+            .acknowledge()
+            .expect("publish ready service instance");
+        crate::storage_manager::mark_database_uncertain(instance.database());
+
+        let socket_path = root.with_extension("gateway.sock");
+        let listener_socket_path = socket_path.clone();
+        let bind_count = Arc::new(AtomicUsize::new(0));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let bind_count_for_listener = Arc::clone(&bind_count);
+        let shutdown_for_listener = Arc::clone(&shutdown);
+        let bind_listener = move || {
+            let count = bind_count_for_listener.fetch_add(1, Ordering::SeqCst);
+            if listener_socket_path.exists() {
+                std::fs::remove_file(&listener_socket_path)?;
+            }
+            let listener = super::bind_gateway_service_socket(&listener_socket_path)?;
+            if count == 1 {
+                shutdown_for_listener.store(true, Ordering::Release);
+            }
+            Ok(listener)
+        };
+        let staging = crate::supervisor::StagingStore::new(
+            crate::supervisor::StagingLimits::default(),
+            Arc::new(AcceptMetadata),
+        )
+        .expect("build staging store");
+        let runtime = super::GatewayServiceRuntimeConfig {
+            admission: super::GatewayAdmissionConfig {
+                retention_deadline_us: i64::MAX,
+                max_rows: 1,
+                max_bytes: 64,
+            },
+            executor: super::GatewayExecutorConfig {
+                cgroup_parent: root.clone(),
+                resource_limits: crate::linux_sandbox::WorkerResourceLimits {
+                    cpu_quota_micros: 100_000,
+                    cpu_period_micros: 100_000,
+                    memory_max_bytes: 64 * 1024 * 1024,
+                    max_processes: 16,
+                },
+                launch: crate::executor_launcher::ExecutorLaunchConfig {
+                    executor_path: std::env::current_exe().unwrap(),
+                    scratch_parent: std::env::temp_dir(),
+                    runtime_read_execute: Vec::new(),
+                    runtime_read_only: Vec::new(),
+                    cleanup_timeout: Duration::from_millis(100),
+                },
+            },
+            listener: super::GatewayServiceListenerConfig {
+                expected_gateway_uid: unsafe { libc::geteuid() },
+                max_connections: 1,
+                idle_timeout: Duration::from_secs(1),
+                accept_poll_interval: Duration::from_millis(1),
+            },
+        };
+
+        let instance = super::run_gateway_service_with_recovery(
+            instance,
+            crate::storage_manager::StorageManagerConfig::default(),
+            &staging,
+            runtime,
+            shutdown,
+            bind_listener,
+            |_request_id, _stream, _invocation, _submission, _executor| {},
+        )
+        .expect("reopen and restart gateway listener");
+        assert_eq!(bind_count.load(Ordering::SeqCst), 2);
+        let manager = instance
+            .storage_manager(crate::storage_manager::StorageManagerConfig::default())
+            .expect("build manager after recovery");
+        assert!(!manager.requires_reopen_after_commit_error());
+        drop(manager);
+        drop(instance);
+        let _ = std::fs::remove_file(&socket_path);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
