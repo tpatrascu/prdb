@@ -53,7 +53,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 const MAX_INDEX_CHANGES_PER_ROW: usize = 256;
-pub const MAX_INVOCATION_SCAN_CANDIDATES: usize = 65_536;
+pub const MAX_INVOCATION_SCAN_WORK: usize = 65_536;
 const INFORMATION_SCHEMA_ID: [u8; 16] = crate::metadata_discovery::INFORMATION_SCHEMA_SCHEMA_ID;
 const INFORMATION_SCHEMA_COLUMN_EXTRA_BYTES: usize =
     "TIMESTAMP WITH TIME ZONE".len() + "YES".len() + 4 + 3 * 5 + 16;
@@ -254,8 +254,8 @@ pub struct InvocationTransaction<'db> {
     aborted: bool,
     outcome_recorded: bool,
     active_scan: Option<ActiveRowScan>,
-    max_scan_candidates: usize,
-    scanned_candidates: usize,
+    max_scan_work: usize,
+    scanned_work: usize,
     active_relation_scan: Option<ActiveRelationScan>,
     active_schema_scan: Option<ActiveSchemaScan>,
     active_column_scan: Option<ActiveColumnScan>,
@@ -497,7 +497,7 @@ pub(crate) struct InvocationCoordination {
     ddl_fences: Option<DdlFenceCoordinator>,
     _admission_permit: Option<InvocationAdmissionPermit>,
     max_age: Option<(Instant, Duration)>,
-    max_scan_candidates: usize,
+    max_scan_work: usize,
 }
 
 impl InvocationCoordination {
@@ -506,7 +506,7 @@ impl InvocationCoordination {
             ddl_fences: None,
             _admission_permit: None,
             max_age: None,
-            max_scan_candidates: MAX_INVOCATION_SCAN_CANDIDATES,
+            max_scan_work: MAX_INVOCATION_SCAN_WORK,
         }
     }
 
@@ -515,7 +515,7 @@ impl InvocationCoordination {
             ddl_fences: Some(ddl_fences),
             _admission_permit: None,
             max_age: None,
-            max_scan_candidates: MAX_INVOCATION_SCAN_CANDIDATES,
+            max_scan_work: MAX_INVOCATION_SCAN_WORK,
         }
     }
 
@@ -523,13 +523,13 @@ impl InvocationCoordination {
         ddl_fences: DdlFenceCoordinator,
         admission_permit: InvocationAdmissionPermit,
         max_age: Duration,
-        max_scan_candidates: usize,
+        max_scan_work: usize,
     ) -> Self {
         Self {
             ddl_fences: Some(ddl_fences),
             _admission_permit: Some(admission_permit),
             max_age: Some((Instant::now(), max_age)),
-            max_scan_candidates,
+            max_scan_work,
         }
     }
 
@@ -684,8 +684,8 @@ impl<'db> InvocationTransaction<'db> {
             principal_id,
             requested_scope: None,
             retention_deadline_us,
-            max_scan_candidates: coordination.max_scan_candidates,
-            scanned_candidates: 0,
+            max_scan_work: coordination.max_scan_work,
+            scanned_work: 0,
             coordination,
             aborted: false,
             outcome_recorded: false,
@@ -766,6 +766,41 @@ impl<'db> InvocationTransaction<'db> {
             return Err(TransactionError::CancellationRequested);
         }
         self.snapshot.as_ref().ok_or(TransactionError::Aborted)
+    }
+
+    fn charge_scan_work(&mut self, amount: usize) -> Result<(), TransactionError> {
+        self.scanned_work = self
+            .scanned_work
+            .checked_add(amount)
+            .filter(|work| *work <= self.max_scan_work)
+            .ok_or(TransactionError::ScanBudgetExceeded)?;
+        Ok(())
+    }
+
+    fn scan_catalog_family(
+        &mut self,
+        family_code: u16,
+    ) -> Result<Vec<CatalogRecord>, TransactionError> {
+        let remaining = self.max_scan_work.saturating_sub(self.scanned_work);
+        if remaining == 0 {
+            return Err(TransactionError::ScanBudgetExceeded);
+        }
+        let family_limit = MAX_CATALOG_FAMILY_SCAN;
+        let records = self
+            .pinned_snapshot()?
+            .scan_catalog_family_limited(family_code, remaining.min(family_limit))
+            .map_err(|error| match error {
+                SnapshotError::RecordLimitExceeded if remaining < family_limit => {
+                    TransactionError::ScanBudgetExceeded
+                }
+                SnapshotError::RecordLimitExceeded | SnapshotError::InvalidCatalogRecord => {
+                    TransactionError::CorruptCatalog
+                }
+                SnapshotError::Storage(error) => TransactionError::Storage(error),
+                _ => TransactionError::CorruptCatalog,
+            })?;
+        self.charge_scan_work(records.len())?;
+        Ok(records)
     }
 
     pub fn read(&mut self, id: RowId) -> Result<Option<Vec<u8>>, TransactionError> {
@@ -874,11 +909,7 @@ impl<'db> InvocationTransaction<'db> {
             row_ids.sort_unstable();
             row_ids.dedup();
             row_ids.truncate(max_scanned);
-            self.scanned_candidates = self
-                .scanned_candidates
-                .checked_add(row_ids.len())
-                .filter(|scanned| *scanned <= self.max_scan_candidates)
-                .ok_or(TransactionError::ScanBudgetExceeded)?;
+            self.charge_scan_work(row_ids.len())?;
             let complete = snapshot_complete && overlay_complete && row_ids.len() < max_scanned;
             let after_row_id = row_ids.last().copied();
             let mut rows = Vec::with_capacity(row_ids.len());
@@ -1553,10 +1584,7 @@ impl<'db> InvocationTransaction<'db> {
             // is represented by each relation's schema_id field. Discover
             // relations by scanning the table family so schemas created by
             // normal DDL expose their tables consistently.
-            let table_records = self
-                .pinned_snapshot()?
-                .scan_catalog_family(5, crate::snapshot::MAX_CATALOG_FAMILY_SCAN)
-                .map_err(|error| TransactionError::Storage(error.to_string()))?;
+            let table_records = self.scan_catalog_family(5)?;
             let mut table_ids = Vec::new();
             for table_record in table_records {
                 if table_record.family_code != 5 {
@@ -2041,10 +2069,7 @@ impl<'db> InvocationTransaction<'db> {
     ) -> Result<Vec<VisibleSchema>, TransactionError> {
         let roles = self.load_catalog_role_closure(self.principal_id)?;
         let database_admin = roles.contains(&crate::bootstrap::database_admin_role_id());
-        let records = self
-            .pinned_snapshot()?
-            .scan_catalog_family(2, MAX_CATALOG_FAMILY_SCAN)
-            .map_err(|error| TransactionError::Storage(error.to_string()))?;
+        let records = self.scan_catalog_family(2)?;
         let mut schemas = Vec::new();
         let mut encoded_bytes = 0usize;
         for record in records {
@@ -2093,10 +2118,7 @@ impl<'db> InvocationTransaction<'db> {
         if !self.has_schema_metadata_authority(schema_id, &roles)? {
             return Ok(None);
         }
-        let records = self
-            .pinned_snapshot()?
-            .scan_catalog_family(5, MAX_CATALOG_FAMILY_SCAN)
-            .map_err(|error| TransactionError::Storage(error.to_string()))?;
+        let records = self.scan_catalog_family(5)?;
         let mut relations = Vec::new();
         let mut encoded_bytes = 0usize;
         for record in records {
@@ -3560,10 +3582,7 @@ impl<'db> InvocationTransaction<'db> {
                 return Err(TransactionError::CorruptCatalog);
             }
 
-            let records = self
-                .pinned_snapshot()?
-                .scan_catalog_family(6, MAX_CATALOG_FAMILY_SCAN)
-                .map_err(|error| TransactionError::Storage(error.to_string()))?;
+            let records = self.scan_catalog_family(6)?;
             let mut columns = Vec::new();
             for record in records.into_iter().filter(|record| {
                 record.family_code == 6
@@ -3699,10 +3718,7 @@ impl<'db> InvocationTransaction<'db> {
             if trusted_schema != *schema {
                 return Err(TransactionError::InvalidContext);
             }
-            let records = self
-                .pinned_snapshot()?
-                .scan_catalog_family(9, MAX_CATALOG_FAMILY_SCAN)
-                .map_err(|error| TransactionError::Storage(error.to_string()))?;
+            let records = self.scan_catalog_family(9)?;
             let mut indexes = Vec::new();
             let mut seen_index_ids = HashSet::new();
             for record in records {
@@ -3778,10 +3794,7 @@ impl<'db> InvocationTransaction<'db> {
         &mut self,
         schema: &CatalogTableSchema,
     ) -> Result<(), TransactionError> {
-        let records = self
-            .pinned_snapshot()?
-            .scan_catalog_family(8, MAX_CATALOG_FAMILY_SCAN)
-            .map_err(|error| TransactionError::Storage(error.to_string()))?;
+        let records = self.scan_catalog_family(8)?;
         for record in records {
             if record.family_code != 8 || record.logical_key.len() != 19 {
                 return Err(TransactionError::CorruptCatalog);
@@ -3955,10 +3968,7 @@ impl<'db> InvocationTransaction<'db> {
             if principal_id == [0; 16] {
                 return Err(TransactionError::InvalidContext);
             }
-            let records = self
-                .pinned_snapshot()?
-                .scan_catalog_family(11, MAX_CATALOG_FAMILY_SCAN)
-                .map_err(|error| TransactionError::Storage(error.to_string()))?;
+            let records = self.scan_catalog_family(11)?;
             if records.len() > crate::authorization::MAX_MEMBERSHIP_EDGES {
                 return Err(TransactionError::CorruptCatalog);
             }
@@ -4045,10 +4055,7 @@ impl<'db> InvocationTransaction<'db> {
             let roles = self.load_catalog_role_closure(principal_id)?;
             let mut grantees = roles.clone();
             grantees.insert(principal_id);
-            let records = self
-                .pinned_snapshot()?
-                .scan_catalog_family(12, MAX_CATALOG_FAMILY_SCAN)
-                .map_err(|error| TransactionError::Storage(error.to_string()))?;
+            let records = self.scan_catalog_family(12)?;
             let mut grants = Vec::new();
             let mut guarded_principals = HashSet::new();
             for record in records {
@@ -4168,10 +4175,7 @@ impl<'db> InvocationTransaction<'db> {
             let roles = self.load_catalog_role_closure(principal_id)?;
             let mut grantees = roles.clone();
             grantees.insert(principal_id);
-            let records = self
-                .pinned_snapshot()?
-                .scan_catalog_family(12, MAX_CATALOG_FAMILY_SCAN)
-                .map_err(|error| TransactionError::Storage(error.to_string()))?;
+            let records = self.scan_catalog_family(12)?;
             let mut grants = Vec::new();
             let mut guarded_principals = HashSet::new();
             for record in records {
@@ -4271,10 +4275,7 @@ impl<'db> InvocationTransaction<'db> {
             let roles = self.load_catalog_role_closure(principal_id)?;
             let mut grantees = roles.clone();
             grantees.insert(principal_id);
-            let records = self
-                .pinned_snapshot()?
-                .scan_catalog_family(12, MAX_CATALOG_FAMILY_SCAN)
-                .map_err(|error| TransactionError::Storage(error.to_string()))?;
+            let records = self.scan_catalog_family(12)?;
 
             let mut has_schema_usage = false;
             for record in &records {
@@ -4314,10 +4315,7 @@ impl<'db> InvocationTransaction<'db> {
             }
 
             self.read_discovery_schema(schema_id)?;
-            let table_records = self
-                .pinned_snapshot()?
-                .scan_catalog_family(5, crate::snapshot::MAX_CATALOG_FAMILY_SCAN)
-                .map_err(|error| TransactionError::Storage(error.to_string()))?;
+            let table_records = self.scan_catalog_family(5)?;
             let mut table_ids = Vec::new();
             for table_record in table_records {
                 if table_record.family_code != 5 {
@@ -4461,10 +4459,7 @@ impl<'db> InvocationTransaction<'db> {
             if !(1..=11).contains(&builtin_kind) {
                 return Err(TransactionError::InvalidContext);
             }
-            let records = self
-                .pinned_snapshot()?
-                .scan_catalog_family(4, MAX_CATALOG_FAMILY_SCAN)
-                .map_err(|error| TransactionError::Storage(error.to_string()))?;
+            let records = self.scan_catalog_family(4)?;
             let mut matched = None;
             for record in records {
                 if catalog_u16(&record, 1)? != builtin_kind {
@@ -4524,14 +4519,8 @@ impl<'db> InvocationTransaction<'db> {
                 return Err(TransactionError::InvalidContext);
             }
             let roles = self.load_catalog_role_closure(principal_id)?;
-            let policies = self
-                .pinned_snapshot()?
-                .scan_catalog_family(13, MAX_CATALOG_FAMILY_SCAN)
-                .map_err(|error| TransactionError::Storage(error.to_string()))?;
-            let targets = self
-                .pinned_snapshot()?
-                .scan_catalog_family(14, MAX_CATALOG_FAMILY_SCAN)
-                .map_err(|error| TransactionError::Storage(error.to_string()))?;
+            let policies = self.scan_catalog_family(13)?;
+            let targets = self.scan_catalog_family(14)?;
             if policies.len() > crate::authorization::MAX_AUTHORIZATION_INPUTS {
                 return Err(TransactionError::CorruptCatalog);
             }
@@ -4716,10 +4705,7 @@ impl<'db> InvocationTransaction<'db> {
     ) -> Result<Vec<Expr>, TransactionError> {
         let result = (|| {
             self.load_catalog_foreign_keys_for_table(schema)?;
-            let records = self
-                .pinned_snapshot()?
-                .scan_catalog_family(8, MAX_CATALOG_FAMILY_SCAN)
-                .map_err(|error| TransactionError::Storage(error.to_string()))?;
+            let records = self.scan_catalog_family(8)?;
             let mut checks = Vec::new();
             for record in records {
                 if catalog_id(&record, 1)? != schema.table_id {
@@ -7338,6 +7324,9 @@ fn map_snapshot_scan_error(error: SnapshotError) -> TransactionError {
         | SnapshotError::InvalidCursor
         | SnapshotError::InvalidScanLimit => TransactionError::InvalidScanRequest,
         SnapshotError::InvalidRowKey => TransactionError::CorruptRowKey,
+        SnapshotError::InvalidCatalogRecord | SnapshotError::RecordLimitExceeded => {
+            TransactionError::CorruptCatalog
+        }
         SnapshotError::Storage(error) => TransactionError::Storage(error),
     }
 }

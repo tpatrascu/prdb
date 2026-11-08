@@ -6928,8 +6928,7 @@ fn storage_manager_routes_invocations_and_catalog_commits_through_shared_fences(
             ddl_fence_timeout: Duration::from_millis(100),
             max_active_invocations: 128,
             max_invocation_age: Duration::from_secs(15 * 60),
-            max_invocation_scan_candidates:
-                prdb_engine::transaction::MAX_INVOCATION_SCAN_CANDIDATES,
+            max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
             max_token_lifecycle_requests_per_minute: 30,
             max_admin_cancellation_requests_per_minute: 30,
         },
@@ -6969,8 +6968,7 @@ fn storage_manager_admission_requires_a_login_enabled_catalog_user()
             ddl_fence_timeout: Duration::from_millis(100),
             max_active_invocations: 1,
             max_invocation_age: Duration::from_secs(30),
-            max_invocation_scan_candidates:
-                prdb_engine::transaction::MAX_INVOCATION_SCAN_CANDIDATES,
+            max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
             max_token_lifecycle_requests_per_minute: 30,
             max_admin_cancellation_requests_per_minute: 30,
         },
@@ -7021,8 +7019,7 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
                 ddl_fence_timeout: Duration::from_millis(100),
                 max_active_invocations: 0,
                 max_invocation_age: Duration::from_secs(30),
-                max_invocation_scan_candidates:
-                    prdb_engine::transaction::MAX_INVOCATION_SCAN_CANDIDATES,
+                max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
                 max_token_lifecycle_requests_per_minute: 30,
                 max_admin_cancellation_requests_per_minute: 30,
             },
@@ -7039,8 +7036,7 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
                 ddl_fence_timeout: Duration::from_millis(100),
                 max_active_invocations: 1,
                 max_invocation_age: Duration::ZERO,
-                max_invocation_scan_candidates:
-                    prdb_engine::transaction::MAX_INVOCATION_SCAN_CANDIDATES,
+                max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
                 max_token_lifecycle_requests_per_minute: 30,
                 max_admin_cancellation_requests_per_minute: 30,
             },
@@ -7057,14 +7053,14 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
                 ddl_fence_timeout: Duration::from_millis(100),
                 max_active_invocations: 1,
                 max_invocation_age: Duration::from_secs(30),
-                max_invocation_scan_candidates: 0,
+                max_invocation_scan_work: 0,
                 max_token_lifecycle_requests_per_minute: 30,
                 max_admin_cancellation_requests_per_minute: 30,
             },
         )
         .err(),
         Some(StorageManagerInitError::Config(
-            prdb_engine::storage_manager::StorageManagerConfigError::ZeroInvocationScanCandidateLimit,
+            prdb_engine::storage_manager::StorageManagerConfigError::ZeroInvocationScanWorkLimit,
         ))
     );
     assert_eq!(
@@ -7074,8 +7070,7 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
                 ddl_fence_timeout: Duration::from_millis(100),
                 max_active_invocations: 1,
                 max_invocation_age: Duration::from_secs(30),
-                max_invocation_scan_candidates:
-                    prdb_engine::transaction::MAX_INVOCATION_SCAN_CANDIDATES,
+                max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
                 max_token_lifecycle_requests_per_minute: 0,
                 max_admin_cancellation_requests_per_minute: 30,
             },
@@ -7092,7 +7087,7 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
                 ddl_fence_timeout: Duration::from_millis(100),
                 max_active_invocations: 1,
                 max_invocation_age: Duration::from_secs(30),
-                max_invocation_scan_candidates: prdb_engine::transaction::MAX_INVOCATION_SCAN_CANDIDATES,
+                max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
                 max_token_lifecycle_requests_per_minute: 30,
                 max_admin_cancellation_requests_per_minute: 0,
             },
@@ -7108,8 +7103,7 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
             ddl_fence_timeout: Duration::from_millis(100),
             max_active_invocations: 1,
             max_invocation_age: Duration::from_secs(30),
-            max_invocation_scan_candidates:
-                prdb_engine::transaction::MAX_INVOCATION_SCAN_CANDIDATES,
+            max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
             max_token_lifecycle_requests_per_minute: 30,
             max_admin_cancellation_requests_per_minute: 30,
         },
@@ -7145,8 +7139,7 @@ fn storage_manager_expires_idle_invocations_and_releases_the_snapshot()
             ddl_fence_timeout: Duration::from_millis(100),
             max_active_invocations: 1,
             max_invocation_age: Duration::from_millis(1),
-            max_invocation_scan_candidates:
-                prdb_engine::transaction::MAX_INVOCATION_SCAN_CANDIDATES,
+            max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
             max_token_lifecycle_requests_per_minute: 30,
             max_admin_cancellation_requests_per_minute: 30,
         },
@@ -9637,8 +9630,7 @@ fn storage_manager_audits_cancellation_before_commit_and_preserves_terminal_outc
             ddl_fence_timeout: Duration::from_millis(100),
             max_active_invocations: 1,
             max_invocation_age: Duration::from_secs(15 * 60),
-            max_invocation_scan_candidates:
-                prdb_engine::transaction::MAX_INVOCATION_SCAN_CANDIDATES,
+            max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
             max_token_lifecycle_requests_per_minute: 30,
             max_admin_cancellation_requests_per_minute: 2,
         },
@@ -18203,7 +18195,7 @@ fn storage_manager_issues_and_revokes_tokens_for_manage_users()
         ddl_fence_timeout: Duration::from_millis(100),
         max_active_invocations: 128,
         max_invocation_age: Duration::from_secs(15 * 60),
-        max_invocation_scan_candidates: prdb_engine::transaction::MAX_INVOCATION_SCAN_CANDIDATES,
+        max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
         max_token_lifecycle_requests_per_minute: 5,
         max_admin_cancellation_requests_per_minute: 30,
     };

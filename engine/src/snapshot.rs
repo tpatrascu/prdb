@@ -14,6 +14,8 @@ pub(crate) enum SnapshotError {
     InvalidCursor,
     InvalidScanLimit,
     InvalidRowKey,
+    InvalidCatalogRecord,
+    RecordLimitExceeded,
     Storage(String),
 }
 
@@ -158,31 +160,48 @@ impl RowSnapshot {
         family_code: u16,
         max_records: usize,
     ) -> Result<Vec<CatalogRecord>, Box<dyn std::error::Error>> {
+        self.scan_catalog_family_limited(family_code, max_records)
+            .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)
+    }
+
+    pub(crate) fn scan_catalog_family_limited(
+        &self,
+        family_code: u16,
+        max_records: usize,
+    ) -> Result<Vec<CatalogRecord>, SnapshotError> {
         if !(1..=16).contains(&family_code)
             || max_records == 0
             || max_records > MAX_CATALOG_FAMILY_SCAN
         {
-            return Err(InvalidCatalogRecord.into());
+            return Err(SnapshotError::InvalidCatalogRecord);
         }
         let prefix = family_code.to_be_bytes();
-        let table = self.transaction.open_table(CATALOG)?;
+        let table = self
+            .transaction
+            .open_table(CATALOG)
+            .map_err(|error| SnapshotError::Storage(error.to_string()))?;
         let mut records = Vec::new();
-        for entry in table.range(prefix.as_slice()..)? {
-            let (key, value) = entry?;
+        for entry in table
+            .range(prefix.as_slice()..)
+            .map_err(|error| SnapshotError::Storage(error.to_string()))?
+        {
+            let (key, value) = entry.map_err(|error| SnapshotError::Storage(error.to_string()))?;
             let key = key.value().to_vec();
             if !key.starts_with(&prefix) {
                 break;
             }
             if records.len() == max_records {
-                return Err(InvalidCatalogRecord.into());
+                return Err(SnapshotError::RecordLimitExceeded);
             }
             let bytes = value.value().to_vec();
-            let record = decode_registered_envelope(&bytes)?;
+            let record = decode_registered_envelope(&bytes)
+                .map_err(|_| SnapshotError::InvalidCatalogRecord)?;
             if record.logical_key != key || record.family_code != family_code {
-                return Err(InvalidCatalogRecord.into());
+                return Err(SnapshotError::InvalidCatalogRecord);
             }
             if family_code == 7 {
-                decode_catalog_expression_record(&record)?;
+                decode_catalog_expression_record(&record)
+                    .map_err(|_| SnapshotError::InvalidCatalogRecord)?;
             }
             records.push(record);
         }

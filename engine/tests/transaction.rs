@@ -4972,7 +4972,7 @@ fn authorized_row_scan_pages_over_the_pinned_snapshot_and_private_overlay()
 }
 
 #[test]
-fn managed_scan_candidate_budget_is_cumulative_and_aborts_private_writes()
+fn managed_scan_work_budget_is_cumulative_and_aborts_private_writes()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::storage_manager::{StorageManager, StorageManagerConfig};
     use zeroize::Zeroize;
@@ -4981,6 +4981,7 @@ fn managed_scan_candidate_budget_is_cumulative_and_aborts_private_writes()
     let data_directory = fixture.0.join("data");
     let mut bootstrap =
         prdb_engine::bootstrap::initialize(&data_directory, "scan_admin", i64::MAX)?;
+    let admin_user_id = bootstrap.admin_user_id();
     let mut secret = bootstrap.take_secret().ok_or("bootstrap secret missing")?;
     secret.zeroize();
     let instance = bootstrap.acknowledge()?;
@@ -4988,7 +4989,14 @@ fn managed_scan_candidate_budget_is_cumulative_and_aborts_private_writes()
     let storage = StorageManager::with_config(
         database,
         StorageManagerConfig {
-            max_invocation_scan_candidates: 2,
+            max_invocation_scan_work: 2,
+            ..StorageManagerConfig::default()
+        },
+    )?;
+    let metadata_storage = StorageManager::with_config(
+        database,
+        StorageManagerConfig {
+            max_invocation_scan_work: 1,
             ..StorageManagerConfig::default()
         },
     )?;
@@ -5099,6 +5107,44 @@ fn managed_scan_candidate_budget_is_cumulative_and_aborts_private_writes()
             read.open_table(prdb_engine::schema::OUTCOMES)?
                 .get(&invocation_id[..])?
                 .ok_or("scan budget failure did not persist ABORTED")?
+                .value(),
+        )?
+        .status,
+        OutcomeStatus::Aborted
+    );
+
+    let metadata_invocation_id = [0x39; 16];
+    let metadata_row = prdb_engine::overlay::RowId {
+        table: [0x41; 16],
+        row: [0x42; 16],
+    };
+    let mut metadata_invocation = metadata_storage.begin_invocation(
+        metadata_invocation_id,
+        admin_user_id,
+        i64::MAX,
+        4,
+        512,
+    )?;
+    metadata_invocation.stage_put(metadata_row, b"discard after catalog scan budget")?;
+    assert!(matches!(
+        metadata_invocation.scan_information_schema_schemata(1, None),
+        Err(TransactionError::ScanBudgetExceeded)
+    ));
+    assert!(matches!(
+        metadata_invocation.commit(),
+        Err(TransactionError::Aborted)
+    ));
+    let read = database.begin_read()?;
+    assert!(
+        read.open_table(ROWS)?
+            .get(&key(metadata_row)[..])?
+            .is_none()
+    );
+    assert_eq!(
+        InvocationOutcome::decode(
+            read.open_table(prdb_engine::schema::OUTCOMES)?
+                .get(&metadata_invocation_id[..])?
+                .ok_or("catalog scan budget failure did not persist ABORTED")?
                 .value(),
         )?
         .status,
