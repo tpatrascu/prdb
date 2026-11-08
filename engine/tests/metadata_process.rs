@@ -1,9 +1,12 @@
 #![cfg(all(unix, target_os = "linux", target_arch = "x86_64"))]
 
+use prdb_engine::audit::{AuditAction, AuditEvent, AuditResult};
 use prdb_engine::bootstrap::initialize;
 use prdb_engine::client_submit::{InvocationStatus, MetadataClient, SubmissionClient};
+use prdb_engine::storage_manager::{CreateTableRequest, TableColumnDefinition, TokenIssueRequest};
 use prdb_engine::submission_manifest::{encode_manifest_v1, manifest_v1_from_elf};
 use prdb_engine::supervisor::WorkloadClass;
+use prdb_engine::tuple::ScalarType;
 use sha2::{Digest, Sha256};
 use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
@@ -67,13 +70,97 @@ fn authenticated_metadata_reads_cross_gateway_and_supervisor_processes()
     let instance_dir = root.join("instance");
     let mut setup = initialize(&instance_dir, "metadata_process_admin", i64::MAX)?;
     let token_id = setup.token_id();
+    let admin_user_id = setup.admin_user_id();
     let mut token_secret = setup.take_secret().ok_or("bootstrap secret missing")?;
     let committed_invocation_id = [0xa3; 16];
+    let restricted_token;
+    let mut restricted_secret;
+    let restricted_schema_id;
+    let restricted_table_id;
     {
         let instance = setup.acknowledge()?;
         let storage = instance.storage_manager(Default::default())?;
         let now_us = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
         let retention_deadline_us = now_us.saturating_add(3_600_000_000);
+
+        let restricted_schema = storage.create_schema(
+            [0xa4; 16],
+            admin_user_id,
+            "admin_private",
+            admin_user_id,
+            retention_deadline_us,
+            AuditEvent {
+                event_id: [0xa5; 16],
+                actor_id: Some(admin_user_id),
+                correlation_id: [0xa4; 16],
+                occurred_at_us: now_us,
+                action: AuditAction::Ddl,
+                result: AuditResult::Succeeded,
+                target_ids: Vec::new(),
+            },
+        )?;
+        restricted_schema_id = restricted_schema.schema_id;
+        let private_table = storage.create_table(CreateTableRequest {
+            invocation_id: [0xaa; 16],
+            authenticated_actor_id: admin_user_id,
+            schema_id: restricted_schema_id,
+            name: "private_records".to_owned(),
+            columns: vec![TableColumnDefinition {
+                name: "payload".to_owned(),
+                scalar_type: ScalarType::Text,
+                nullable: false,
+                generated_uuid_identity: false,
+                default: None,
+            }],
+            retention_deadline_us,
+            audit_event: AuditEvent {
+                event_id: [0xab; 16],
+                actor_id: Some(admin_user_id),
+                correlation_id: [0xaa; 16],
+                occurred_at_us: now_us,
+                action: AuditAction::Ddl,
+                result: AuditResult::Succeeded,
+                target_ids: Vec::new(),
+            },
+        })?;
+        restricted_table_id = private_table.table_id;
+        let restricted_user = storage.create_user(
+            [0xa6; 16],
+            admin_user_id,
+            "metadata_reader",
+            retention_deadline_us,
+            AuditEvent {
+                event_id: [0xa7; 16],
+                actor_id: Some(admin_user_id),
+                correlation_id: [0xa6; 16],
+                occurred_at_us: now_us,
+                action: AuditAction::Ddl,
+                result: AuditResult::Succeeded,
+                target_ids: Vec::new(),
+            },
+        )?;
+        let mut issued = storage.issue_token(TokenIssueRequest {
+            invocation_id: [0xa8; 16],
+            authenticated_actor_id: admin_user_id,
+            user_id: restricted_user.user_id,
+            label: "metadata reader",
+            expires_at_us: now_us.saturating_add(1_800_000_000),
+            retention_deadline_us,
+            audit_event: AuditEvent {
+                event_id: [0xa9; 16],
+                actor_id: Some(admin_user_id),
+                correlation_id: [0xa8; 16],
+                occurred_at_us: now_us,
+                action: AuditAction::TokenLifecycle,
+                result: AuditResult::Succeeded,
+                target_ids: vec![restricted_user.user_id],
+            },
+        })?;
+        restricted_token = issued.token_id;
+        restricted_secret = issued
+            .take_secret()
+            .ok_or("restricted metadata token secret missing")?;
+
         let mut invocation = storage.admit_supervisor_invocation(
             committed_invocation_id,
             token_id,
@@ -222,6 +309,35 @@ fn authenticated_metadata_reads_cross_gateway_and_supervisor_processes()
     )?;
     assert!(!columns.is_empty());
     drop(metadata);
+
+    let mut restricted_metadata =
+        MetadataClient::connect_authenticated(address, restricted_token, &mut restricted_secret)?;
+    let restricted_schemas = restricted_metadata.list_schemas()?;
+    assert!(restricted_schemas.iter().any(|schema| {
+        schema.schema_id == prdb_engine::metadata_discovery::INFORMATION_SCHEMA_SCHEMA_ID
+    }));
+    assert!(
+        !restricted_schemas
+            .iter()
+            .any(|schema| schema.name == "admin_private")
+    );
+    assert!(
+        restricted_metadata
+            .list_relations(prdb_engine::metadata_discovery::INFORMATION_SCHEMA_SCHEMA_ID)?
+            .iter()
+            .any(|relation| relation.name == "schemata")
+    );
+    assert!(
+        restricted_metadata
+            .list_relations(restricted_schema_id)?
+            .is_empty()
+    );
+    assert!(
+        restricted_metadata
+            .list_columns(restricted_schema_id, restricted_table_id)?
+            .is_empty()
+    );
+    drop(restricted_metadata);
 
     let mut outcome_status_client =
         SubmissionClient::connect_authenticated(address, token_id, &mut outcome_status_secret)?;
