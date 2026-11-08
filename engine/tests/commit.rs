@@ -16216,6 +16216,26 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         retention_deadline_us: now + 3_600_000_000,
         audit_event: table_audit,
     })?;
+    let private_table_invocation = id(0xa0);
+    let mut private_table_audit = identity_audit_event(0xa1, user_id, schema.schema_id);
+    private_table_audit.correlation_id = private_table_invocation;
+    let _private_table = storage
+        .create_table(CreateTableRequest {
+            invocation_id: private_table_invocation,
+            authenticated_actor_id: user_id,
+            schema_id: schema.schema_id,
+            name: "private_records".to_owned(),
+            columns: vec![TableColumnDefinition {
+                name: "secret".to_owned(),
+                scalar_type: ScalarType::Integer,
+                nullable: true,
+                generated_uuid_identity: false,
+                default: None,
+            }],
+            retention_deadline_us: now + 3_600_000_000,
+            audit_event: private_table_audit,
+        })
+        .map_err(|error| format!("private metadata fixture table creation failed: {error:?}"))?;
 
     let authority_invocation = id(0x83);
     let mut authority_audit = identity_audit_event(0x84, user_id, user_id);
@@ -16277,13 +16297,15 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     );
     refreshed_token.expected_value = Some(old_token_record);
     authority_writes.push(refreshed_token);
-    storage.commit_catalog_and_audit(
-        authority_invocation,
-        user_id,
-        now + 3_600_000_000,
-        &authority_writes,
-        &[authority_audit],
-    )?;
+    storage
+        .commit_catalog_and_audit(
+            authority_invocation,
+            user_id,
+            now + 3_600_000_000,
+            &authority_writes,
+            &[authority_audit],
+        )
+        .map_err(|error| format!("metadata fixture grants failed: {error:?}"))?;
 
     let insert_policy_id = id(0x85);
     let insert_policy_expression_id = id(0x86);
@@ -16690,13 +16712,15 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     let policy_invocation = id(0x87);
     let mut policy_audit = identity_audit_event(0x88, user_id, insert_policy_id);
     policy_audit.correlation_id = policy_invocation;
-    storage.commit_authorized_policy_ddl(
-        policy_invocation,
-        user_id,
-        now + 3_600_000_000,
-        &policy_writes,
-        &[policy_audit],
-    )?;
+    storage
+        .commit_authorized_policy_ddl(
+            policy_invocation,
+            user_id,
+            now + 3_600_000_000,
+            &policy_writes,
+            &[policy_audit],
+        )
+        .map_err(|error| format!("metadata fixture policies failed: {error:?}"))?;
 
     let mut requested_scope = b"PSC1\0\x08".to_vec();
     requested_scope.extend([1, 1]);
@@ -16784,30 +16808,79 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     )?;
     assert_eq!(accepted.payload, b"{\"state\":\"accepted\"}");
 
-    let expected_schema = invocation
-        .scan_information_schema_schemata(128)?
-        .rows
-        .into_iter()
+    let schema_rows = invocation.scan_information_schema_schemata(128)?.rows;
+    let mut table_rows = Vec::new();
+    let mut table_cursor = None;
+    loop {
+        let page = invocation.scan_information_schema_tables(128, table_cursor)?;
+        table_rows.extend(page.rows);
+        table_cursor = page.continuation;
+        if table_cursor.is_none() {
+            break;
+        }
+    }
+    let mut column_rows = Vec::new();
+    let mut column_cursor = None;
+    loop {
+        let page = invocation.scan_information_schema_columns(128, column_cursor)?;
+        column_rows.extend(page.rows);
+        column_cursor = page.continuation;
+        if column_cursor.is_none() {
+            break;
+        }
+    }
+    assert!(
+        !table_rows
+            .iter()
+            .any(|row| row.table_name == "private_records")
+    );
+    assert!(
+        !column_rows
+            .iter()
+            .any(|row| row.table_name == "private_records")
+    );
+    let expected_schema = schema_rows
+        .iter()
         .find(|row| row.schema_name == "information_schema")
         .ok_or("metadata API omitted the public information_schema schema")?
         .schema_name
-        .into_bytes();
-    let expected_table = invocation
-        .scan_information_schema_tables(128)?
-        .rows
-        .into_iter()
+        .as_bytes()
+        .to_vec();
+    let expected_table = table_rows
+        .iter()
         .find(|row| row.table_schema == "information_schema")
         .ok_or("metadata API omitted the public information_schema tables")?
         .table_name
-        .into_bytes();
-    let expected_column = invocation
-        .scan_information_schema_columns(128)?
-        .rows
-        .into_iter()
+        .as_bytes()
+        .to_vec();
+    let expected_column = column_rows
+        .iter()
         .find(|row| row.table_schema == "information_schema" && row.table_name == "columns")
         .ok_or("metadata API omitted information_schema.columns metadata")?
         .column_name
-        .into_bytes();
+        .as_bytes()
+        .to_vec();
+    let expected_user_schema = schema_rows
+        .iter()
+        .find(|row| row.schema_name == "sql_roundtrip")
+        .ok_or("metadata API omitted the admitted user schema")?
+        .schema_name
+        .as_bytes()
+        .to_vec();
+    let expected_user_table = table_rows
+        .iter()
+        .find(|row| row.table_schema == "sql_roundtrip")
+        .ok_or("metadata API omitted the admitted user table")?
+        .table_name
+        .as_bytes()
+        .to_vec();
+    let expected_user_column = column_rows
+        .iter()
+        .find(|row| row.table_schema == "sql_roundtrip" && row.table_name == "records")
+        .ok_or("metadata API omitted the admitted user column")?
+        .column_name
+        .as_bytes()
+        .to_vec();
 
     let (mut service, mut gateway) = UnixStream::pair()?;
     gateway.set_read_timeout(Some(Duration::from_secs(10)))?;
@@ -16849,6 +16922,18 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     assert_eq!(columns.operation, Operation::GatewayResultData as u16);
     assert_eq!(columns.request_id, accepted.request_id);
     assert_eq!(columns.payload, expected_column);
+    let user_schema = read_frame(&mut gateway)?.ok_or("missing SQL user schema result")?;
+    assert_eq!(user_schema.operation, Operation::GatewayResultData as u16);
+    assert_eq!(user_schema.request_id, accepted.request_id);
+    assert_eq!(user_schema.payload, expected_user_schema);
+    let user_table = read_frame(&mut gateway)?.ok_or("missing SQL user table result")?;
+    assert_eq!(user_table.operation, Operation::GatewayResultData as u16);
+    assert_eq!(user_table.request_id, accepted.request_id);
+    assert_eq!(user_table.payload, expected_user_table);
+    let user_column = read_frame(&mut gateway)?.ok_or("missing SQL user column result")?;
+    assert_eq!(user_column.operation, Operation::GatewayResultData as u16);
+    assert_eq!(user_column.request_id, accepted.request_id);
+    assert_eq!(user_column.payload, expected_user_column);
     let updated = read_frame(&mut gateway)?.ok_or("missing UPDATE visibility result")?;
     assert_eq!(updated.operation, Operation::GatewayResultData as u16);
     assert_eq!(updated.request_id, accepted.request_id);

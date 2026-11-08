@@ -27,8 +27,8 @@ use crate::credentials::{
 use crate::ddl_fence::{DdlFenceCoordinator, DdlFenceManager};
 use crate::metadata::{EngineMetadata, Lifecycle};
 use crate::metadata_discovery::{
-    InformationSchemaColumnsScanPage, InformationSchemaSchemataPage,
-    InformationSchemaTablesScanPage,
+    InformationSchemaColumnsCursor, InformationSchemaColumnsScanPage,
+    InformationSchemaSchemataPage, InformationSchemaTablesCursor, InformationSchemaTablesScanPage,
 };
 use crate::outcome::{InvocationOutcome, lookup_outcome};
 use crate::schema::{AUDIT, CATALOG, ENGINE_META, OUTCOMES};
@@ -794,9 +794,10 @@ impl SupervisorInvocation<'_> {
     pub fn scan_information_schema_tables(
         &self,
         page_limit: usize,
+        continuation: Option<InformationSchemaTablesCursor>,
     ) -> Result<InformationSchemaTablesScanPage, SupervisorInvocationError> {
         self.with_owned_transaction(|transaction| {
-            transaction.scan_information_schema_tables(page_limit, None)
+            transaction.scan_information_schema_tables(page_limit, continuation)
         })
     }
 
@@ -805,9 +806,10 @@ impl SupervisorInvocation<'_> {
     pub fn scan_information_schema_columns(
         &self,
         page_limit: usize,
+        continuation: Option<InformationSchemaColumnsCursor>,
     ) -> Result<InformationSchemaColumnsScanPage, SupervisorInvocationError> {
         self.with_owned_transaction(|transaction| {
-            transaction.scan_information_schema_columns(page_limit, None)
+            transaction.scan_information_schema_columns(page_limit, continuation)
         })
     }
 

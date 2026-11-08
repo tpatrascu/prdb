@@ -109,6 +109,10 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
         "SELECT table_name FROM tables WHERE table_schema = $1 LIMIT 1";
     static const uint8_t select_columns_sql[] =
         "SELECT column_name FROM columns WHERE table_schema = $1 LIMIT 1";
+    static const uint8_t select_private_table_sql[] =
+        "SELECT table_name FROM tables WHERE table_schema = $1 AND table_name = $2 LIMIT 1";
+    static const uint8_t select_private_columns_sql[] =
+        "SELECT column_name FROM columns WHERE table_schema = $1 AND table_name = $2 LIMIT 1";
     static const uint8_t update_sql[] =
         "UPDATE records SET id = $1 WHERE id IS NULL";
     static const uint8_t select_value_sql[] =
@@ -116,6 +120,10 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
     static const uint8_t delete_sql[] = "DELETE FROM records WHERE id = $1";
     static const uint8_t schema[] = "sql_roundtrip";
     static const uint8_t information_schema[] = "information_schema";
+    static const uint8_t expected_user_table[] = "records";
+    static const uint8_t expected_user_column[] = "id";
+    static const uint8_t private_table_name[] = "private_records";
+    static const uint8_t missing_table_name[] = "missing_records";
     static const uint8_t first_information_schema_table[] = "columns";
     static const uint8_t first_information_schema_column[] = "table_schema";
     static const uint8_t integer_bytes[] = {0, 0, 0, 42};
@@ -136,6 +144,8 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
     prdb_sdk_value_v1 cell_scratch[9] = {{0}};
     prdb_sdk_value_v1 parameter = {0};
     prdb_sdk_value_v1 metadata_parameter = {0};
+    prdb_sdk_value_v1 private_table_parameter = {0};
+    prdb_sdk_value_v1 private_metadata_parameters[2] = {{0}};
     result_context results = {0};
     uint32_t updated_count = 0;
     uint32_t deleted_count = 0;
@@ -161,6 +171,12 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
     metadata_parameter.type_code = PRDB_SDK_VALUE_TYPE_TEXT;
     metadata_parameter.data = information_schema;
     metadata_parameter.data_len = sizeof(information_schema) - 1;
+    private_table_parameter.struct_size = sizeof(private_table_parameter);
+    private_table_parameter.abi_version = PRDB_SDK_VALUE_ABI_V1_VERSION;
+    private_table_parameter.state = PRDB_SDK_VALUE_STATE_VALUE;
+    private_table_parameter.type_code = PRDB_SDK_VALUE_TYPE_TEXT;
+    private_table_parameter.data = private_table_name;
+    private_table_parameter.data_len = sizeof(private_table_name) - 1;
 
     status = prdb_sdk_sql_execute_insert_v1(
         host, schema, sizeof(schema) - 1, insert_sql, sizeof(insert_sql) - 1,
@@ -312,6 +328,128 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
             return report_failure(host, status_message, sizeof(status_message) - 1);
         }
         return report_failure(host, count_message, sizeof(count_message) - 1);
+    }
+
+    metadata_parameter.data = schema;
+    metadata_parameter.data_len = sizeof(schema) - 1;
+    results.expected_value = schema;
+    results.expected_value_len = sizeof(schema) - 1;
+    results.expected_ordinal = 0;
+    results.row_count = 0;
+    status = prdb_sdk_sql_execute_select_v2(
+        host, information_schema, sizeof(information_schema) - 1,
+        select_schemata_sql, sizeof(select_schemata_sql) - 1,
+        &metadata_parameter, 1, 16,
+        sizeof(batch_response), planner_response, sizeof(planner_response),
+        executor_response, sizeof(executor_response), batch_response,
+        sizeof(batch_response), planner_columns, 1, executor_columns, 1,
+        cell_scratch, 1, verify_information_schema_name, &results);
+    if (status != PRDB_SDK_SQL_EXEC_OK || results.row_count != 1) {
+        static const uint8_t message[] = "fixture-error-user-schema-select";
+        return report_failure(host, message, sizeof(message) - 1);
+    }
+
+    results.expected_value = expected_user_table;
+    results.expected_value_len = sizeof(expected_user_table) - 1;
+    results.expected_ordinal = 1;
+    results.row_count = 0;
+    status = prdb_sdk_sql_execute_select_v2(
+        host, information_schema, sizeof(information_schema) - 1,
+        select_tables_sql, sizeof(select_tables_sql) - 1,
+        &metadata_parameter, 1, 16,
+        sizeof(batch_response), planner_response, sizeof(planner_response),
+        executor_response, sizeof(executor_response), batch_response,
+        sizeof(batch_response), planner_columns, 9, executor_columns, 9,
+        cell_scratch, 9, verify_information_schema_name, &results);
+    if (status != PRDB_SDK_SQL_EXEC_OK || results.row_count != 1) {
+        static const uint8_t message[] = "fixture-error-user-table-select";
+        return report_failure(host, message, sizeof(message) - 1);
+    }
+
+    results.expected_value = expected_user_column;
+    results.expected_value_len = sizeof(expected_user_column) - 1;
+    results.expected_ordinal = 2;
+    results.row_count = 0;
+    status = prdb_sdk_sql_execute_select_v2(
+        host, information_schema, sizeof(information_schema) - 1,
+        select_columns_sql, sizeof(select_columns_sql) - 1,
+        &metadata_parameter, 1, 16,
+        sizeof(batch_response), planner_response, sizeof(planner_response),
+        executor_response, sizeof(executor_response), batch_response,
+        sizeof(batch_response), planner_columns, 9, executor_columns, 9,
+        cell_scratch, 9, verify_information_schema_name, &results);
+    if (status != PRDB_SDK_SQL_EXEC_OK || results.row_count != 1) {
+        static const uint8_t message[] = "fixture-error-user-column-select";
+        return report_failure(host, message, sizeof(message) - 1);
+    }
+
+    private_metadata_parameters[0] = metadata_parameter;
+    private_metadata_parameters[1] = private_table_parameter;
+    results.expected_value = private_table_name;
+    results.expected_value_len = sizeof(private_table_name) - 1;
+    results.expected_ordinal = 1;
+    results.row_count = 0;
+    status = prdb_sdk_sql_execute_select_v2(
+        host, information_schema, sizeof(information_schema) - 1,
+        select_private_table_sql, sizeof(select_private_table_sql) - 1,
+        private_metadata_parameters, 2, 16,
+        sizeof(batch_response), planner_response, sizeof(planner_response),
+        executor_response, sizeof(executor_response), batch_response,
+        sizeof(batch_response), planner_columns, 9, executor_columns, 9,
+        cell_scratch, 9, verify_information_schema_name, &results);
+    if (status != PRDB_SDK_SQL_EXEC_OK || results.row_count != 0) {
+        static const uint8_t message[] = "fixture-error-private-table-leaked";
+        return report_failure(host, message, sizeof(message) - 1);
+    }
+
+    results.expected_ordinal = 2;
+    results.row_count = 0;
+    status = prdb_sdk_sql_execute_select_v2(
+        host, information_schema, sizeof(information_schema) - 1,
+        select_private_columns_sql, sizeof(select_private_columns_sql) - 1,
+        private_metadata_parameters, 2, 16,
+        sizeof(batch_response), planner_response, sizeof(planner_response),
+        executor_response, sizeof(executor_response), batch_response,
+        sizeof(batch_response), planner_columns, 9, executor_columns, 9,
+        cell_scratch, 9, verify_information_schema_name, &results);
+    if (status != PRDB_SDK_SQL_EXEC_OK || results.row_count != 0) {
+        static const uint8_t message[] = "fixture-error-private-columns-leaked";
+        return report_failure(host, message, sizeof(message) - 1);
+    }
+
+    private_table_parameter.data = missing_table_name;
+    private_table_parameter.data_len = sizeof(missing_table_name) - 1;
+    private_metadata_parameters[1] = private_table_parameter;
+    results.expected_value = missing_table_name;
+    results.expected_value_len = sizeof(missing_table_name) - 1;
+    results.expected_ordinal = 1;
+    results.row_count = 0;
+    status = prdb_sdk_sql_execute_select_v2(
+        host, information_schema, sizeof(information_schema) - 1,
+        select_private_table_sql, sizeof(select_private_table_sql) - 1,
+        private_metadata_parameters, 2, 16,
+        sizeof(batch_response), planner_response, sizeof(planner_response),
+        executor_response, sizeof(executor_response), batch_response,
+        sizeof(batch_response), planner_columns, 9, executor_columns, 9,
+        cell_scratch, 9, verify_information_schema_name, &results);
+    if (status != PRDB_SDK_SQL_EXEC_OK || results.row_count != 0) {
+        static const uint8_t message[] = "fixture-error-missing-table-result";
+        return report_failure(host, message, sizeof(message) - 1);
+    }
+
+    results.expected_ordinal = 2;
+    results.row_count = 0;
+    status = prdb_sdk_sql_execute_select_v2(
+        host, information_schema, sizeof(information_schema) - 1,
+        select_private_columns_sql, sizeof(select_private_columns_sql) - 1,
+        private_metadata_parameters, 2, 16,
+        sizeof(batch_response), planner_response, sizeof(planner_response),
+        executor_response, sizeof(executor_response), batch_response,
+        sizeof(batch_response), planner_columns, 9, executor_columns, 9,
+        cell_scratch, 9, verify_information_schema_name, &results);
+    if (status != PRDB_SDK_SQL_EXEC_OK || results.row_count != 0) {
+        static const uint8_t message[] = "fixture-error-missing-columns-result";
+        return report_failure(host, message, sizeof(message) - 1);
     }
 
     status = prdb_sdk_sql_execute_update_v1(
