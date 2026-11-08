@@ -23,6 +23,76 @@ pub struct ArtifactManifestV1 {
     pub dependencies: Vec<String>,
 }
 
+/// Encode a canonical PMF1 manifest. Dependencies must already be sorted in
+/// bytewise order and unique so the output has one representation per value.
+pub fn encode_manifest_v1(manifest: &ArtifactManifestV1) -> Result<Vec<u8>, ManifestError> {
+    if !(1..=3).contains(&manifest.native_abi_version) {
+        return Err(ManifestError::UnsupportedAbi);
+    }
+    let (expected_descriptor, expected_entry) = abi_symbols(manifest.native_abi_version);
+    let fields = [
+        manifest.cpu_baseline.as_bytes(),
+        manifest.runtime_profile.as_bytes(),
+        manifest.compiler_identity.as_bytes(),
+        manifest.descriptor_symbol.as_bytes(),
+        manifest.entry_point_symbol.as_bytes(),
+    ];
+    if manifest.sdk_release == 0
+        || !is_profile_identifier(&manifest.cpu_baseline)
+        || !is_profile_identifier(&manifest.runtime_profile)
+        || !is_compiler_identity(&manifest.compiler_identity)
+        || !is_symbol(&manifest.descriptor_symbol)
+        || !is_symbol(&manifest.entry_point_symbol)
+        || manifest.descriptor_symbol != expected_descriptor
+        || manifest.entry_point_symbol != expected_entry
+        || manifest.dependencies.len() > MAX_MANIFEST_DEPENDENCIES
+        || manifest
+            .dependencies
+            .iter()
+            .any(|name| !is_dependency_name(name))
+        || manifest
+            .dependencies
+            .windows(2)
+            .any(|pair| pair[0].as_bytes() >= pair[1].as_bytes())
+    {
+        return Err(ManifestError::InvalidEncoding);
+    }
+
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(
+            MANIFEST_V1_HEADER_BYTES
+                + fields.iter().map(|field| field.len()).sum::<usize>()
+                + manifest
+                    .dependencies
+                    .iter()
+                    .map(|name| 2 + name.len())
+                    .sum::<usize>(),
+        )
+        .map_err(|_| ManifestError::InvalidEncoding)?;
+    bytes.extend_from_slice(MANIFEST_V1_MAGIC);
+    bytes.extend([1, 1, manifest.native_abi_version, 0]);
+    bytes.extend(CLIENT_PROTOCOL_MAJOR.to_be_bytes());
+    bytes.extend(CLIENT_PROTOCOL_MINOR.to_be_bytes());
+    bytes.extend(manifest.sdk_release.to_be_bytes());
+    bytes.extend((manifest.dependencies.len() as u16).to_be_bytes());
+    for field in fields {
+        bytes.extend((field.len() as u16).to_be_bytes());
+    }
+    for field in fields {
+        bytes.extend_from_slice(field);
+    }
+    for dependency in &manifest.dependencies {
+        bytes.extend((dependency.len() as u16).to_be_bytes());
+        bytes.extend_from_slice(dependency.as_bytes());
+    }
+    // Keep the encoder and decoder constraints aligned as the format evolves.
+    if decode_manifest_v1(&bytes)? != *manifest {
+        return Err(ManifestError::InvalidEncoding);
+    }
+    Ok(bytes)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ManifestError {
     InvalidEncoding,
@@ -627,6 +697,7 @@ mod tests {
         ArtifactCompatibilityProfile, ArtifactManifestV1, CLIENT_PROTOCOL_MAJOR,
         CLIENT_PROTOCOL_MINOR, MANIFEST_V1_HEADER_BYTES, MAX_MANIFEST_DEPENDENCIES, ManifestError,
         VersionedSubmissionMetadataValidator, decode_elf_needed_dependencies, decode_manifest_v1,
+        encode_manifest_v1,
     };
     use crate::supervisor::{
         ChunkKind, PrepareSubmission, StagingError, StagingLimits, StagingOwner, StagingStore,
@@ -647,6 +718,20 @@ mod tests {
             entry_point_symbol: "prdb_query_main_v3".to_owned(),
             dependencies: vec!["libc.so.6".to_owned(), "libm.so.6".to_owned()],
         }
+    }
+
+    #[test]
+    fn public_manifest_encoder_roundtrips_and_rejects_noncanonical_dependencies() {
+        let value = manifest();
+        let bytes = encode_manifest_v1(&value).expect("encode manifest");
+        assert_eq!(decode_manifest_v1(&bytes), Ok(value.clone()));
+
+        let mut unsorted = value;
+        unsorted.dependencies.reverse();
+        assert_eq!(
+            encode_manifest_v1(&unsorted),
+            Err(ManifestError::InvalidEncoding)
+        );
     }
 
     fn encode(value: &ArtifactManifestV1) -> Vec<u8> {

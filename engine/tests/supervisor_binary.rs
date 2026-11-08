@@ -74,14 +74,19 @@ impl Drop for ChildGuard {
 
 #[cfg(unix)]
 #[test]
-fn supervisor_and_gateway_binaries_exchange_real_tcp_hello_and_ping() {
+fn supervisor_and_gateway_binaries_authenticate_upload_and_seal_tinycc_query_over_tcp() {
     use prdb_engine::bootstrap::initialize;
     use prdb_engine::client_protocol::{ClientFrame, ClientFrameDecoder};
+    use prdb_engine::submission_manifest::{
+        ArtifactManifestV1, decode_elf_needed_dependencies, encode_manifest_v1,
+    };
+    use sha2::{Digest, Sha256};
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpStream;
     use std::os::unix::fs::PermissionsExt;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    use zeroize::Zeroize;
 
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -94,54 +99,103 @@ fn supervisor_and_gateway_binaries_exchange_real_tcp_hello_and_ping() {
     std::fs::create_dir(&root).expect("create test root");
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
         .expect("protect test root");
+    let query_source = root.join("query.c");
+    let query_artifact = root.join("query.so");
+    std::fs::write(
+        &query_source,
+        "#include \"prdb_query_abi_v3.h\"\n\
+         const prdb_query_descriptor_v3_record prdb_query_descriptor_v3 = {\n\
+             sizeof(prdb_query_descriptor_v3_record), 3,\n\
+             sizeof(prdb_host_api_v3), sizeof(prdb_invocation_v3)\n\
+         };\n\
+         int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,\n\
+             const prdb_invocation_v3 *invocation) {\n\
+             (void)host; (void)invocation; return 0;\n\
+         }\n",
+    )
+    .expect("write TinyCC query fixture");
+    let include_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("include");
+    let compile = Command::new("tcc")
+        .arg("-shared")
+        .arg("-I")
+        .arg(include_dir)
+        .arg(&query_source)
+        .arg("-o")
+        .arg(&query_artifact)
+        .output()
+        .expect("run TinyCC for the TCP query fixture");
+    assert!(
+        compile.status.success(),
+        "TinyCC failed: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let artifact = std::fs::read(&query_artifact).expect("read TinyCC query fixture");
+    let dependencies = decode_elf_needed_dependencies(&artifact).expect("inspect fixture ELF");
+    let manifest = encode_manifest_v1(&ArtifactManifestV1 {
+        native_abi_version: 3,
+        sdk_release: 1,
+        cpu_baseline: "x86_64-v1".to_owned(),
+        runtime_profile: "test-runtime".to_owned(),
+        compiler_identity: "TinyCC integration fixture".to_owned(),
+        descriptor_symbol: "prdb_query_descriptor_v3".to_owned(),
+        entry_point_symbol: "prdb_query_main_v3".to_owned(),
+        dependencies: dependencies.clone(),
+    })
+    .expect("encode fixture manifest");
     let instance_dir = root.join("instance");
     let mut setup =
         initialize(&instance_dir, "tcp_test_admin", i64::MAX).expect("initialize test instance");
+    let token_id = setup.token_id();
     let mut bootstrap_secret = setup.take_secret().expect("take setup secret");
-    bootstrap_secret.fill(0);
     drop(setup.acknowledge().expect("publish READY instance"));
 
     let service_socket = root.join("supervisor.sock");
     let uid = unsafe { libc::geteuid() };
-    let supervisor = Command::new(env!("CARGO_BIN_EXE_prdb-supervisor"))
-        .args([
-            "--instance-dir",
-            instance_dir.to_str().expect("UTF-8 instance path"),
-            "--service-socket",
-            service_socket.to_str().expect("UTF-8 socket path"),
-            "--gateway-uid",
-            &uid.to_string(),
-            "--cgroup-parent",
-            "/sys/fs/cgroup",
-            "--executor",
-            env!("CARGO_BIN_EXE_prdb-executor"),
-            "--scratch-parent",
-            root.to_str().expect("UTF-8 scratch path"),
-            "--runtime-read-execute",
-            "/usr",
-            "--runtime-read-only",
-            "/etc/ld.so.cache",
-            "--cpu-baseline",
-            "x86_64-v1",
-            "--runtime-profile",
-            "test-runtime",
-            "--sdk-release",
-            "1",
-            "--retention-seconds",
-            "3600",
-            "--max-rows",
-            "8",
-            "--max-bytes",
-            "4096",
-            "--cpu-quota-us",
-            "100000",
-            "--cpu-period-us",
-            "100000",
-            "--memory-max-bytes",
-            "67108864",
-            "--max-processes",
-            "16",
-        ])
+    let mut supervisor_command = Command::new(env!("CARGO_BIN_EXE_prdb-supervisor"));
+    supervisor_command.args([
+        "--instance-dir",
+        instance_dir.to_str().expect("UTF-8 instance path"),
+        "--service-socket",
+        service_socket.to_str().expect("UTF-8 socket path"),
+        "--gateway-uid",
+        &uid.to_string(),
+        "--cgroup-parent",
+        "/sys/fs/cgroup",
+        "--executor",
+        env!("CARGO_BIN_EXE_prdb-executor"),
+        "--scratch-parent",
+        root.to_str().expect("UTF-8 scratch path"),
+        "--runtime-read-execute",
+        "/usr",
+        "--runtime-read-only",
+        "/etc/ld.so.cache",
+        "--cpu-baseline",
+        "x86_64-v1",
+        "--runtime-profile",
+        "test-runtime",
+        "--sdk-release",
+        "1",
+        "--retention-seconds",
+        "3600",
+        "--max-rows",
+        "8",
+        "--max-bytes",
+        "4096",
+        "--cpu-quota-us",
+        "100000",
+        "--cpu-period-us",
+        "100000",
+        "--memory-max-bytes",
+        "67108864",
+        "--max-processes",
+        "16",
+    ]);
+    for dependency in &dependencies {
+        supervisor_command
+            .arg("--allowed-dependency")
+            .arg(dependency);
+    }
+    let supervisor = supervisor_command
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()
@@ -233,9 +287,58 @@ fn supervisor_and_gateway_binaries_exchange_real_tcp_hello_and_ping() {
             prdb_engine::client_protocol::CLIENT_MAX_CHUNK_BYTES,
         );
         assert_eq!(hello.payload, expected_hello.as_bytes());
-        let ping = exchange(11, 2, b"{}".to_vec());
+        let token_id_hex = token_id
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let token_secret = encode_base64(&bootstrap_secret);
+        bootstrap_secret.zeroize();
+        let mut auth_payload =
+            format!("{{\"token_id\":\"{token_id_hex}\",\"token_secret\":\"{token_secret}\"}}");
+        let auth = exchange(2, 2, auth_payload.as_bytes().to_vec());
+        auth_payload.zeroize();
+        assert_eq!(auth.kind, 100);
+        assert!(String::from_utf8_lossy(&auth.payload).contains("\"authenticated\":true"));
+
+        let scope = [b"PSC1\0\x01\x02\x02".as_slice(), &[1; 16]].concat();
+        let artifact_sha256 = Sha256::digest(&artifact);
+        let empty_sha256 = Sha256::digest([]);
+        let prepare_payload = format!(
+            "{{\"manifest_version\":1,\"manifest\":\"{}\",\"artifact_bytes\":\"{}\",\"artifact_sha256\":\"{}\",\"parameter_bytes\":\"0\",\"parameter_sha256\":\"{}\",\"scope_version\":1,\"requested_scope\":\"{}\",\"deadline_ms\":\"30000\",\"workload_class\":\"operational\"}}",
+            encode_base64(&manifest),
+            artifact.len(),
+            encode_hex(&artifact_sha256),
+            encode_hex(&empty_sha256),
+            encode_base64(&scope),
+        );
+        let prepared = exchange(3, 3, prepare_payload.into_bytes());
+        assert_eq!(prepared.kind, 100);
+        let prepared_json = String::from_utf8(prepared.payload).expect("prepared JSON");
+        let invocation_id_hex = prepared_json
+            .split("\"invocation_id\":\"")
+            .nth(1)
+            .and_then(|tail| tail.split('\"').next())
+            .expect("prepared invocation id");
+        let invocation_id = decode_hex_id(invocation_id_hex);
+
+        let mut chunk = Vec::with_capacity(24 + artifact.len());
+        chunk.extend(invocation_id);
+        chunk.extend(0_u64.to_le_bytes());
+        chunk.extend(&artifact);
+        let uploaded = exchange(4, 4, chunk);
+        assert_eq!(uploaded.kind, 100);
+        assert_eq!(
+            String::from_utf8_lossy(&uploaded.payload),
+            format!("{{\"next_offset\":\"{}\"}}", artifact.len())
+        );
+        let seal_payload = format!("{{\"invocation_id\":\"{invocation_id_hex}\"}}");
+        let sealed = exchange(6, 5, seal_payload.into_bytes());
+        assert_eq!(sealed.kind, 100);
+        assert!(String::from_utf8_lossy(&sealed.payload).contains("\"state\":\"prepared\""));
+
+        let ping = exchange(11, 6, b"{}".to_vec());
         assert_eq!(ping.kind, 100);
-        assert_eq!(ping.request_id, 2);
+        assert_eq!(ping.request_id, 6);
         assert_eq!(ping.payload, br#"{"alive":true}"#);
     }
     client
@@ -255,4 +358,43 @@ fn supervisor_and_gateway_binaries_exchange_real_tcp_hello_and_ping() {
     );
     assert!(!service_socket.exists(), "supervisor left a stale socket");
     std::fs::remove_dir_all(root).expect("remove test files");
+}
+
+#[cfg(unix)]
+fn encode_base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        let second = *chunk.get(1).unwrap_or(&0);
+        let third = *chunk.get(2).unwrap_or(&0);
+        output.push(TABLE[(first >> 2) as usize] as char);
+        output.push(TABLE[(((first & 0x03) << 4) | (second >> 4)) as usize] as char);
+        output.push(if chunk.len() > 1 {
+            TABLE[(((second & 0x0f) << 2) | (third >> 6)) as usize] as char
+        } else {
+            '='
+        });
+        output.push(if chunk.len() > 2 {
+            TABLE[(third & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    output
+}
+
+#[cfg(unix)]
+fn encode_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(unix)]
+fn decode_hex_id(value: &str) -> [u8; 16] {
+    let mut id = [0; 16];
+    for (index, byte) in id.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+            .expect("valid response invocation id");
+    }
+    id
 }
