@@ -1754,9 +1754,9 @@
 
 ### Concurrent retained invocation pressure — verified
 
-- Regression: `retained_invocation_snapshot_survives_concurrent_writer_pressure` pins one invocation snapshot while four concurrent writers each publish sixteen 32 KiB replacements to separate rows (2 MiB total). The retained reader continues to observe all original values; a new invocation reads each writer's final value.
-- Verification: the focused transaction integration test passed with the pinned Nix toolchain.
-- Scope: bounded concurrent pressure; longer-duration workloads and power-loss behavior remain unmeasured.
+- Regression: `retained_invocation_snapshot_survives_concurrent_writer_pressure` pins one invocation snapshot while four concurrent writers each publish 64 durable 32 KiB replacements to separate rows (8 MiB total across 256 commits). In each writer round, the reader also rereads all four rows and checks that its original values remain visible; a new invocation reads each writer's final value.
+- Verification: formatting and the focused transaction integration test passed with the pinned Nix toolchain; the focused test completed in 1.11 seconds.
+- Scope: expanded bounded concurrent pressure; extended production-duration workloads and power-loss behavior remain unmeasured.
 
 ### Physical reclamation with a retained reader — verified
 

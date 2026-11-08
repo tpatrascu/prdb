@@ -4687,7 +4687,7 @@ fn retained_invocation_snapshot_survives_a_durable_write_burst()
 fn retained_invocation_snapshot_survives_concurrent_writer_pressure()
 -> Result<(), Box<dyn std::error::Error>> {
     const WRITER_COUNT: usize = 4;
-    const WRITES_PER_WRITER: u8 = 16;
+    const WRITES_PER_WRITER: u8 = 64;
     const VALUE_BYTES: usize = 32 * 1024;
 
     let fixture = Fixture::new();
@@ -4709,37 +4709,72 @@ fn retained_invocation_snapshot_survives_concurrent_writer_pressure()
         assert_eq!(reader.read(row_id)?, Some(value.clone()));
     }
 
-    let barrier = Arc::new(Barrier::new(WRITER_COUNT + 1));
+    let start_round = Arc::new(Barrier::new(WRITER_COUNT + 1));
+    let finish_round = Arc::new(Barrier::new(WRITER_COUNT + 1));
     let database_ref = &database;
-    std::thread::scope(|scope| {
+    let (reader_succeeded, writers_succeeded) = std::thread::scope(|scope| {
+        let mut writers = Vec::with_capacity(WRITER_COUNT);
         for (writer_index, row_id) in row_ids.iter().copied().enumerate() {
-            let barrier = Arc::clone(&barrier);
+            let start_round = Arc::clone(&start_round);
+            let finish_round = Arc::clone(&finish_round);
             let database = database_ref;
-            scope.spawn(move || {
-                barrier.wait();
+            writers.push(scope.spawn(move || {
+                let mut succeeded = true;
                 for version in 0..WRITES_PER_WRITER {
-                    let value =
-                        vec![0x40 + writer_index as u8 * WRITES_PER_WRITER + version; VALUE_BYTES];
-                    let invocation_id =
-                        [0x80 + writer_index as u8 * WRITES_PER_WRITER + version; 16];
-                    let mut writer = InvocationTransaction::begin(
-                        database,
-                        invocation_id,
-                        [9; 16],
-                        9_999,
-                        4,
-                        VALUE_BYTES * 2,
-                    )
-                    .expect("pressure writer admission failed");
-                    writer
-                        .stage_put(row_id, &value)
-                        .expect("pressure writer stage failed");
-                    writer.commit().expect("pressure writer commit failed");
+                    start_round.wait();
+                    if succeeded {
+                        let result = (|| {
+                            let value = vec![
+                                0x40u8.wrapping_add(
+                                    (writer_index as u8)
+                                        .wrapping_mul(WRITES_PER_WRITER)
+                                        .wrapping_add(version),
+                                );
+                                VALUE_BYTES
+                            ];
+                            let mut invocation_id = [0; 16];
+                            invocation_id[0] = 0x80 + writer_index as u8;
+                            invocation_id[1] = version;
+                            let mut writer = InvocationTransaction::begin(
+                                database,
+                                invocation_id,
+                                [9; 16],
+                                9_999,
+                                4,
+                                VALUE_BYTES * 2,
+                            )?;
+                            writer.stage_put(row_id, &value)?;
+                            writer.commit()?;
+                            Ok::<(), Box<dyn std::error::Error>>(())
+                        })();
+                        succeeded = result.is_ok();
+                    }
+                    finish_round.wait();
                 }
-            });
+                succeeded
+            }));
         }
-        barrier.wait();
+        let mut reader_succeeded = true;
+        for _ in 0..WRITES_PER_WRITER {
+            start_round.wait();
+            for (row_id, value) in row_ids.iter().copied().zip(&original_values) {
+                match reader.read(row_id) {
+                    Ok(actual) if actual == Some(value.clone()) => {}
+                    _ => reader_succeeded = false,
+                }
+            }
+            finish_round.wait();
+        }
+        let writers_succeeded = writers
+            .into_iter()
+            .all(|writer| writer.join().unwrap_or(false));
+        (reader_succeeded, writers_succeeded)
     });
+    assert!(writers_succeeded, "a pressure writer failed");
+    assert!(
+        reader_succeeded,
+        "the retained invocation snapshot changed during writer rounds"
+    );
 
     for (row_id, value) in row_ids.iter().copied().zip(&original_values) {
         assert_eq!(
@@ -4753,10 +4788,12 @@ fn retained_invocation_snapshot_survives_concurrent_writer_pressure()
     let mut observer =
         InvocationTransaction::begin(&database, [0xd0; 16], [9; 16], 9_999, 8, 512 * 1024)?;
     for (writer_index, row_id) in row_ids.iter().copied().enumerate() {
-        let expected = vec![
-            0x40 + writer_index as u8 * WRITES_PER_WRITER + WRITES_PER_WRITER - 1;
-            VALUE_BYTES
-        ];
+        let expected_tag = 0x40u8.wrapping_add(
+            (writer_index as u8)
+                .wrapping_mul(WRITES_PER_WRITER)
+                .wrapping_add(WRITES_PER_WRITER - 1),
+        );
+        let expected = vec![expected_tag; VALUE_BYTES];
         assert_eq!(observer.read(row_id)?, Some(expected));
     }
     observer.abort()?;
