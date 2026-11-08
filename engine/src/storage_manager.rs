@@ -525,6 +525,16 @@ pub struct CreateForeignKeyRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreateUniqueConstraintRequest {
+    pub invocation_id: [u8; 16],
+    pub authenticated_actor_id: [u8; 16],
+    pub table_id: [u8; 16],
+    pub column_ids: Vec<[u8; 16]>,
+    pub retention_deadline_us: i64,
+    pub audit_event: AuditEvent,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AlterColumnDefaultRequest {
     pub invocation_id: [u8; 16],
     pub authenticated_actor_id: [u8; 16],
@@ -555,6 +565,13 @@ pub struct CreatedTable {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreatedForeignKey {
     pub foreign_key_id: [u8; 16],
+    pub commit_sequence: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreatedUniqueConstraint {
+    pub constraint_id: [u8; 16],
+    pub index_id: [u8; 16],
     pub commit_sequence: u64,
 }
 
@@ -6630,6 +6647,299 @@ impl<'db> StorageManager<'db> {
             })?;
         Ok(CreatedForeignKey {
             foreign_key_id,
+            commit_sequence,
+        })
+    }
+
+    /// Add a UNIQUE constraint and its owned unique index. The authorized
+    /// constraint commit backfills and validates the index against the final
+    /// table state under the table DDL fence.
+    pub fn create_unique_constraint(
+        &self,
+        request: CreateUniqueConstraintRequest,
+    ) -> Result<CreatedUniqueConstraint, TableLifecycleError> {
+        let CreateUniqueConstraintRequest {
+            invocation_id,
+            authenticated_actor_id,
+            table_id,
+            column_ids,
+            retention_deadline_us,
+            mut audit_event,
+        } = request;
+        if invocation_id == [0; 16]
+            || authenticated_actor_id == [0; 16]
+            || table_id == [0; 16]
+            || column_ids.is_empty()
+            || column_ids.len() > crate::tuple::MAX_COLUMNS
+            || column_ids.contains(&[0; 16])
+            || column_ids.iter().copied().collect::<HashSet<_>>().len() != column_ids.len()
+            || retention_deadline_us <= 0
+        {
+            return Err(TableLifecycleError::InvalidRequest);
+        }
+        if audit_event.actor_id != Some(authenticated_actor_id)
+            || audit_event.correlation_id != invocation_id
+            || audit_event.action != AuditAction::Ddl
+            || audit_event.result != AuditResult::Succeeded
+        {
+            return Err(TableLifecycleError::InvalidAudit);
+        }
+
+        let constraint_id = self.generate_table_object_id()?;
+        let mut index_id = self.generate_table_object_id()?;
+        for _ in 0..8 {
+            if index_id != constraint_id {
+                break;
+            }
+            index_id = self.generate_table_object_id()?;
+        }
+        if index_id == constraint_id {
+            return Err(TableLifecycleError::ObjectIdGenerationFailed);
+        }
+
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|_| TableLifecycleError::Storage)?;
+        let catalog = read
+            .open_table(CATALOG)
+            .map_err(|_| TableLifecycleError::Storage)?;
+        let table_key = id_catalog_key(5, table_id);
+        let table_bytes = catalog
+            .get(table_key.as_slice())
+            .map_err(|_| TableLifecycleError::Storage)?
+            .map(|value| value.value().to_vec())
+            .ok_or(TableLifecycleError::InvalidRequest)?;
+        read_catalog_record(&table_key, &table_bytes, 5)?;
+        let schema_version = read_catalog_u64(&table_key, &table_bytes, 5, 2)?;
+        let table_epoch = read_catalog_u64(&table_key, &table_bytes, 5, 3)?;
+        let next_table_epoch = table_epoch
+            .checked_add(1)
+            .ok_or(TableLifecycleError::Commit(CommitError::InvalidCatalog))?;
+
+        let table_object_key = id_catalog_key(2, table_id);
+        let table_object_bytes = catalog
+            .get(table_object_key.as_slice())
+            .map_err(|_| TableLifecycleError::Storage)?
+            .map(|value| value.value().to_vec())
+            .ok_or(TableLifecycleError::Commit(CommitError::InvalidCatalog))?;
+        let owner_id = read_catalog_id(&table_object_key, &table_object_bytes, 2, 4)?;
+
+        let encode_ids = |ids: &[[u8; 16]]| {
+            let mut payload = (ids.len() as u32).to_le_bytes().to_vec();
+            payload.extend(ids.iter().flatten());
+            payload
+        };
+        let constraint_key = id_catalog_key(8, constraint_id);
+        let constraint_fields = [
+            CatalogField {
+                tag: 1,
+                wire_type: WireType::Id,
+                payload: table_id.to_vec(),
+            },
+            CatalogField {
+                tag: 2,
+                wire_type: WireType::U16,
+                payload: 3u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 3,
+                wire_type: WireType::Ids,
+                payload: encode_ids(&column_ids),
+            },
+            CatalogField {
+                tag: 6,
+                wire_type: WireType::Ids,
+                payload: 0u32.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 7,
+                wire_type: WireType::U16,
+                payload: 0u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 8,
+                wire_type: WireType::U16,
+                payload: 0u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 9,
+                wire_type: WireType::U16,
+                payload: 0u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 10,
+                wire_type: WireType::U16,
+                payload: 1u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 11,
+                wire_type: WireType::Id,
+                payload: index_id.to_vec(),
+            },
+        ];
+        let constraint_payload = encode_envelope(
+            &family_schema(8).ok_or(TableLifecycleError::Storage)?,
+            &constraint_key,
+            &constraint_fields,
+        )
+        .map_err(|_| TableLifecycleError::InvalidRequest)?;
+
+        let make_object_write = |object_id: [u8; 16], kind: u16, prefix: &str| {
+            let key = id_catalog_key(2, object_id);
+            let name = format!(
+                "{prefix}_{}",
+                object_id
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            );
+            let payload = encode_envelope(
+                &family_schema(2).ok_or(TableLifecycleError::Storage)?,
+                &key,
+                &[
+                    CatalogField {
+                        tag: 1,
+                        wire_type: WireType::U16,
+                        payload: kind.to_le_bytes().to_vec(),
+                    },
+                    CatalogField {
+                        tag: 3,
+                        wire_type: WireType::Text,
+                        payload: name.into_bytes(),
+                    },
+                    CatalogField {
+                        tag: 4,
+                        wire_type: WireType::Id,
+                        payload: owner_id.to_vec(),
+                    },
+                    CatalogField {
+                        tag: 5,
+                        wire_type: WireType::U64,
+                        payload: 1u64.to_le_bytes().to_vec(),
+                    },
+                    CatalogField {
+                        tag: 6,
+                        wire_type: WireType::U16,
+                        payload: 1u16.to_le_bytes().to_vec(),
+                    },
+                ],
+            )
+            .map_err(|_| TableLifecycleError::InvalidRequest)?;
+            Ok::<_, TableLifecycleError>(CatalogWrite {
+                key,
+                expected_value: None,
+                payload: Some(payload),
+            })
+        };
+        let index_key = id_catalog_key(9, index_id);
+        let index_fields = [
+            CatalogField {
+                tag: 1,
+                wire_type: WireType::Id,
+                payload: table_id.to_vec(),
+            },
+            CatalogField {
+                tag: 2,
+                wire_type: WireType::Ids,
+                payload: encode_ids(&column_ids),
+            },
+            CatalogField {
+                tag: 3,
+                wire_type: WireType::U16,
+                payload: 1u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 4,
+                wire_type: WireType::Bool,
+                payload: vec![1],
+            },
+            CatalogField {
+                tag: 5,
+                wire_type: WireType::U16,
+                payload: 1u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 6,
+                wire_type: WireType::Id,
+                payload: constraint_id.to_vec(),
+            },
+            CatalogField {
+                tag: 7,
+                wire_type: WireType::Id,
+                payload: index_id.to_vec(),
+            },
+            CatalogField {
+                tag: 8,
+                wire_type: WireType::U16,
+                payload: 1u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 9,
+                wire_type: WireType::U32,
+                payload: u32::try_from(schema_version)
+                    .map_err(|_| TableLifecycleError::InvalidRequest)?
+                    .to_le_bytes()
+                    .to_vec(),
+            },
+            CatalogField {
+                tag: 10,
+                wire_type: WireType::U64,
+                payload: 1u64.to_le_bytes().to_vec(),
+            },
+        ];
+        let index_payload = encode_envelope(
+            &family_schema(9).ok_or(TableLifecycleError::Storage)?,
+            &index_key,
+            &index_fields,
+        )
+        .map_err(|_| TableLifecycleError::InvalidRequest)?;
+        let writes = [
+            CatalogWrite {
+                key: constraint_key,
+                expected_value: None,
+                payload: Some(constraint_payload),
+            },
+            make_object_write(constraint_id, 6, "unique_constraint")?,
+            CatalogWrite {
+                key: index_key,
+                expected_value: None,
+                payload: Some(index_payload),
+            },
+            make_object_write(index_id, 7, "unique_index")?,
+            new_dependency_write(constraint_id, index_id, 4)?,
+            CatalogWrite {
+                key: table_key.clone(),
+                expected_value: Some(table_bytes.clone()),
+                payload: Some(rewrite_catalog_u64_field(
+                    &table_key,
+                    &table_bytes,
+                    5,
+                    3,
+                    next_table_epoch,
+                )?),
+            },
+        ];
+        drop(catalog);
+        drop(read);
+
+        audit_event.target_ids = vec![constraint_id, index_id];
+        audit_event.target_ids.sort_unstable();
+        let commit_sequence = self
+            .commit_authorized_constraint_ddl(
+                invocation_id,
+                authenticated_actor_id,
+                retention_deadline_us,
+                &writes,
+                &[audit_event],
+            )
+            .map_err(|error| match error {
+                CommitError::DdlAuthorizationDenied => TableLifecycleError::Unauthorized,
+                error => TableLifecycleError::Commit(error),
+            })?;
+        Ok(CreatedUniqueConstraint {
+            constraint_id,
+            index_id,
             commit_sequence,
         })
     }

@@ -1881,3 +1881,11 @@
 - Regression: `foreign_key_removal_racing_referenced_table_drop_is_atomic` releases authorized FK removal and target-table drop together. It accepts FK removal with either a successful subsequent table drop, a RESTRICT abort, or a stale-catalog conflict; checks durable outcomes and sequence advances; verifies source/FK/target shape; and runs startup integrity validation.
 - Evidence: the first run observed a stale-catalog `Conflict` for the table drop after FK removal had serialized first. The test records that as a safe durable abort alongside the explicit dependency RESTRICT result. The focused barrier test passes.
 - Verification: workspace build, format check, warning-denied Clippy, and all workspace tests passed under Rust 1.95.0. The commit integration target had 116 passed and 3 delegated-cgroup tests ignored.
+
+## SM-5: structured UNIQUE creation through StorageManager and ADMIN — implemented
+
+- Contract: [schema DDL](../../specs/ddl-schema.md) requires UNIQUE creation to validate current rows, publish its owned unique index atomically, preserve NULLS DISTINCT behavior, and invalidate writers pinned before DDL.
+- Implementation: `StorageManager::create_unique_constraint` generates constraint/index IDs and creates the family-8 definition, family-9 unique index, objects, dependency and table epoch update. The authorized constraint DDL commit validates and backfills the physical index under the table fence. ADMIN `constraints.create_unique` uses connection-owned PREPARE/START and returns both IDs.
+- Regression: `storage_manager_creates_unique_constraint_and_backfills_existing_rows` inserts two unique values before DDL, creates the constraint, checks stale writer conflict and durable ABORTED outcome, and validates startup. Decoder coverage checks ordered ID arrays and exact arguments; the authenticated control integration creates a UNIQUE constraint before creating/dropping an FK.
+- Verification: focused manager, decoder, and authenticated ADMIN control-path tests passed. Workspace build, format check, warning-denied Clippy, and full tests passed under Rust 1.95.0; the commit integration target had 117 passed and 3 delegated-cgroup tests ignored.
+- Remaining: PRIMARY KEY and CHECK creation/removal need equivalent structured manager and ADMIN operations; SQL `ALTER TABLE` parsing remains outside this control protocol.

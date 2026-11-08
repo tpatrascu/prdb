@@ -87,6 +87,7 @@ pub enum ClientSessionError {
     TableLifecycle(crate::storage_manager::TableLifecycleError),
     ForeignKeyLifecycle(crate::commit::CommitError),
     ForeignKeyCreateLifecycle(crate::storage_manager::TableLifecycleError),
+    ConstraintLifecycle(crate::storage_manager::TableLifecycleError),
     Storage(TransactionError),
 }
 
@@ -201,6 +202,10 @@ enum PendingAdminAction {
         source_table_id: [u8; 16],
         source_column_ids: Vec<[u8; 16]>,
         target_constraint_id: [u8; 16],
+    },
+    CreateUniqueConstraint {
+        table_id: [u8; 16],
+        column_ids: Vec<[u8; 16]>,
     },
     RenameTable {
         table_id: [u8; 16],
@@ -431,6 +436,10 @@ pub enum ClientAdminCommand {
         source_column_ids: Vec<[u8; 16]>,
         target_constraint_id: [u8; 16],
     },
+    PrepareCreateUniqueConstraint {
+        table_id: [u8; 16],
+        column_ids: Vec<[u8; 16]>,
+    },
     PrepareRenameTable {
         table_id: [u8; 16],
         name: String,
@@ -572,6 +581,7 @@ pub fn decode_client_admin_command(
     let mut arguments = None;
     let mut table_columns = None;
     let mut foreign_key_source_columns = None;
+    let mut constraint_column_ids = None;
     let mut table_column = None;
     let mut column_default = None;
     let mut operation_id = None;
@@ -615,6 +625,9 @@ pub fn decode_client_admin_command(
                         && parser.text.get(parser.offset) == Some(&b'[')
                     {
                         foreign_key_source_columns = Some(parser.parse_id_array()?);
+                        args.insert(arg, "<structured-ids>".to_owned());
+                    } else if arg == "column_ids" && parser.text.get(parser.offset) == Some(&b'[') {
+                        constraint_column_ids = Some(parser.parse_id_array()?);
                         args.insert(arg, "<structured-ids>".to_owned());
                     } else if arg == "column" && parser.text.get(parser.offset) == Some(&b'{') {
                         table_column = Some(parser.parse_table_column_definition()?);
@@ -933,6 +946,31 @@ pub fn decode_client_admin_command(
                 source_table_id,
                 source_column_ids,
                 target_constraint_id,
+            })
+        }
+        Some("prepare")
+            if version == Some(1) && operation.as_deref() == Some("constraints.create_unique") =>
+        {
+            if operation_id.is_some() || seen.len() != 4 {
+                return Err(ClientControlError::UnknownKey);
+            }
+            let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
+            let table_id = decode_lower_hex_id(
+                &args
+                    .remove("table_id")
+                    .ok_or(ClientControlError::MissingKey)?,
+            )?;
+            args.remove("column_ids")
+                .ok_or(ClientControlError::MissingKey)?;
+            let column_ids = constraint_column_ids
+                .take()
+                .ok_or(ClientControlError::MissingKey)?;
+            if column_ids.is_empty() || !args.is_empty() {
+                return Err(ClientControlError::InvalidPrepare);
+            }
+            Ok(ClientAdminCommand::PrepareCreateUniqueConstraint {
+                table_id,
+                column_ids,
             })
         }
         Some("prepare") if version == Some(1) && operation.as_deref() == Some("tables.rename") => {
@@ -3270,6 +3308,38 @@ impl ClientConnectionSession {
                     .into_bytes(),
                 )
             }
+            ClientAdminCommand::PrepareCreateUniqueConstraint {
+                table_id,
+                column_ids,
+            } => {
+                if self.pending_admin_operation.is_some() {
+                    return Err(ClientSessionError::WrongMode);
+                }
+                let mut operation_id = [0; 16];
+                getrandom::fill(&mut operation_id).map_err(|_| {
+                    ClientSessionError::Storage(TransactionError::RandomnessUnavailable)
+                })?;
+                if operation_id == [0; 16] {
+                    return Err(ClientSessionError::Storage(
+                        TransactionError::RandomnessUnavailable,
+                    ));
+                }
+                self.pending_admin_operation = Some(PendingAdminOperation {
+                    operation_id,
+                    action: PendingAdminAction::CreateUniqueConstraint {
+                        table_id,
+                        column_ids,
+                    },
+                });
+                self.json_response(
+                    request.request_id,
+                    format!(
+                        "{{\"operation_id\":\"{}\",\"state\":\"prepared\"}}",
+                        encode_lower_hex_id(operation_id)
+                    )
+                    .into_bytes(),
+                )
+            }
             ClientAdminCommand::PrepareRenameTable { table_id, name } => {
                 if self.pending_admin_operation.is_some() {
                     return Err(ClientSessionError::WrongMode);
@@ -3989,6 +4059,42 @@ impl ClientConnectionSession {
                                 "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"foreign_key_id\":\"{}\",\"commit_sequence\":\"{}\"}}",
                                 encode_lower_hex_id(operation_id),
                                 encode_lower_hex_id(created.foreign_key_id),
+                                created.commit_sequence,
+                            )
+                            .into_bytes(),
+                        )
+                    }
+                    PendingAdminAction::CreateUniqueConstraint {
+                        table_id,
+                        column_ids,
+                    } => {
+                        let created = storage
+                            .create_unique_constraint(
+                                crate::storage_manager::CreateUniqueConstraintRequest {
+                                    invocation_id: operation_id,
+                                    authenticated_actor_id: actor_id,
+                                    table_id,
+                                    column_ids,
+                                    retention_deadline_us,
+                                    audit_event: crate::audit::AuditEvent {
+                                        event_id,
+                                        actor_id: Some(actor_id),
+                                        correlation_id: operation_id,
+                                        occurred_at_us: now_us,
+                                        action: crate::audit::AuditAction::Ddl,
+                                        result: crate::audit::AuditResult::Succeeded,
+                                        target_ids: Vec::new(),
+                                    },
+                                },
+                            )
+                            .map_err(ClientSessionError::ConstraintLifecycle)?;
+                        self.json_response(
+                            request.request_id,
+                            format!(
+                                "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"constraint_id\":\"{}\",\"index_id\":\"{}\",\"commit_sequence\":\"{}\"}}",
+                                encode_lower_hex_id(operation_id),
+                                encode_lower_hex_id(created.constraint_id),
+                                encode_lower_hex_id(created.index_id),
                                 created.commit_sequence,
                             )
                             .into_bytes(),
