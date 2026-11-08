@@ -1058,7 +1058,7 @@ fn admin_client_sends_typed_constraint_and_foreign_key_operations() {
         .unwrap();
     assert_eq!(foreign_key.foreign_key_id, foreign_key_id);
     client.drop_foreign_key(foreign_key_id).unwrap();
-    let _ = server.join().unwrap();
+    server.join().unwrap();
 }
 
 fn hex(id: &[u8; 16]) -> String {

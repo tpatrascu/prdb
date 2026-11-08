@@ -117,6 +117,14 @@
 - Verification: the focused `client_admin` regression passed. In the pinned Nix shell, `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
 - Remaining: CLI/credential-file lifecycle and live ADMIN operations through the real multi-process gateway path remain open.
 
+## SDK-5 dependency: private client credential-file lifecycle — implemented
+
+- Contract: [client SDK](../../specs/client-sdk.md) keeps bearer credentials in a private client-only file, rejects unsafe file ownership/permissions, and does not overwrite an existing credential path.
+- Implementation: `client_credentials` reads canonical `PDB-CREDENTIALS-1` token ID/secret files, rejects symlinks and non-owner-only modes, atomically creates a private file with no-overwrite publication, and removes owned files. Secret-bearing temporary byte buffers are zeroized.
+- Regression: module tests cover round trip, mode 0600, no-overwrite, removal, symlink rejection, and broad-permission rejection. The initial run caught an `O_NOFOLLOW` symlink error mapping issue; the corrected path now returns the documented unsafe-file result.
+- Verification: `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed in the pinned Nix shell. The first full-suite attempt hit the known intermittent CHECK lifecycle `InvalidAudit`; the isolated CHECK test and full rerun passed. The commit integration target reported 124 passed and 3 cgroup-dependent ignored.
+- Remaining: user-facing CLI commands and live ADMIN operations through the real multi-process gateway path remain open.
+
 ## SDK-5 dependency: typed schema rename AdminClient operation — implemented
 
 - Contract: [client protocol](../../specs/client-protocol.md) requires `schemas.rename` START to echo the stable schema ID and normalized new name.
