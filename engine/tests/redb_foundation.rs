@@ -88,3 +88,56 @@ fn retained_snapshot_is_stable_and_byte_keys_sort_lexicographically()
     assert_eq!(keys, [b"a".to_vec(), b"a\0".to_vec(), vec![0xff]]);
     Ok(())
 }
+
+#[test]
+fn retained_reader_allows_repeated_durable_writes_without_changing_its_snapshot()
+-> Result<(), Box<dyn std::error::Error>> {
+    const VALUE_BYTES: usize = 32 * 1024;
+    const WRITE_COUNT: u32 = 64;
+
+    let fixture = Fixture::new();
+    let db = Database::create(fixture.path())?;
+    let original_value = vec![0x11; VALUE_BYTES];
+    let mut write = db.begin_write()?;
+    write.set_durability(Durability::Immediate)?;
+    write.set_two_phase_commit(true);
+    {
+        let mut table = write.open_table(TABLE)?;
+        table.insert(&b"row"[..], original_value.as_slice())?;
+    }
+    write.commit()?;
+
+    let retained_reader = db.begin_read()?;
+    for version in 0..WRITE_COUNT {
+        let value = vec![version as u8; VALUE_BYTES];
+        let mut write = db.begin_write()?;
+        write.set_durability(Durability::Immediate)?;
+        write.set_two_phase_commit(true);
+        {
+            let mut table = write.open_table(TABLE)?;
+            table.insert(&b"row"[..], value.as_slice())?;
+        }
+        write.commit()?;
+    }
+
+    assert_eq!(
+        retained_reader
+            .open_table(TABLE)?
+            .get(&b"row"[..])?
+            .ok_or("retained snapshot lost its row")?
+            .value(),
+        original_value
+    );
+    drop(retained_reader);
+
+    let current_reader = db.begin_read()?;
+    assert_eq!(
+        current_reader
+            .open_table(TABLE)?
+            .get(&b"row"[..])?
+            .ok_or("current snapshot lost its row")?
+            .value(),
+        vec![(WRITE_COUNT - 1) as u8; VALUE_BYTES]
+    );
+    Ok(())
+}

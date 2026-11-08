@@ -1723,3 +1723,11 @@
 - Verification: the rebuilt TinyCC artifact, maintained SDK suite, workspace build, format check, warning-denied Clippy, and workspace tests passed (commit target: 109 passed, 2 delegated-cgroup tests ignored). The confined metadata/DML acceptance and both delegated-cgroup SQL acceptance tests passed with the writable delegated-cgroup parent and declared runtime allowlists; `git diff --check` passed.
 - Distinct principals: the real-redb discovery fixture now includes a second principal with USAGE on only the public `public` schema. `information_schema_scans_respect_each_principals_grants` verifies that the broader principal sees `app` and its granted/DELETE-visible relations, while the restricted principal sees only the public virtual schema; the corresponding table and column scan pages narrow with those grants.
 - Remaining: exercise the same distinct-principal filtering through confined SQL artifacts and the authenticated network path.
+
+## SM-1 / SM-7: repeated durable writes under a retained reader — verified
+
+- Contract: [redb storage](../../specs/redb-storage.md) and [storage manager validation](05-validation-and-integration.md). A retained read transaction must continue to observe its pinned version while later durable writes make progress.
+- Regression: the real-redb [foundation test](../../engine/tests/redb_foundation.rs) pins an initial value, completes 64 Immediate/two-phase commits of 32 KiB replacements while that reader remains open, verifies the pinned reader still sees the original bytes, and confirms a new reader sees the latest committed value.
+- Verification: Rust 1.95.0 and redb 4.4.0; `cargo fmt --all -- --check` and `cargo test -p prdb-engine --test redb_foundation --locked` passed.
+- Scope: this validates redb snapshot stability and writer progress for this bounded workload. It does not establish the storage manager's admission limits under sustained pressure, physical reclamation/compaction behavior, or power-loss durability.
+- Remaining: process-level COMMITTED recovery after terminal loss, storage-file fault points and broader retained-reader pressure/reclamation evidence remain open.
