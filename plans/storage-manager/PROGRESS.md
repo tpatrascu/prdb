@@ -1822,3 +1822,10 @@
 - Command: `nix-shell -p rustc cargo clippy rustfmt tinycc --run 'cargo build --release -p prdb-engine --example storage_pressure --locked'`, followed separately by `nix-shell -p rustc cargo clippy rustfmt tinycc --run './target/release/examples/storage_pressure'`.
 - Measurement: redb 4.4.0, Rust 1.95.0, x86_64 Linux, ext4 on `/tmp` (`/dev/vda2`). One local run completed 256 durable commits in 0.610 s (419.5 commits/s) while the retained snapshot performed 8,930 full authorized scans and 35,720 point reads (14,632.4 scans/s). Exact values matched the original snapshot through all writer commits.
 - Scope: one synthetic four-row workload and one local run; timings are machine-specific and do not establish production-duration contention, database growth/reclamation, power-loss durability, or other filesystem profiles.
+
+## SM-1 / SM-7: process crash during a durable commit — verified
+
+- Contract: [redb storage recovery](../../specs/redb-storage.md) requires atomic rows, outcomes, and commit sequence after process exit; process termination does not prove power-loss durability.
+- Regression: `process_crash_after_durable_sync_recovers_atomic_commit` runs a child against a fault-injected redb backend and exits with code 86 immediately after the backend completes a sync callback during a managed commit. The parent reopens the database and accepts only the fully committed row/outcome/sequence or the original empty state.
+- Verification: the focused crash test and full workspace build, format check, warning-denied Clippy, and tests passed under the pinned Rust 1.95.0/redb 4.4.0 profile. The commit integration target had 109 passing tests and 3 delegated-cgroup tests ignored.
+- Scope: abrupt process exit after a successful sync callback; kernel cache and filesystem remain alive. Torn-write, power-loss, production filesystem, and other durability-profile recovery remain open.

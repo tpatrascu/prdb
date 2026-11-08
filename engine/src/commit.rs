@@ -14012,6 +14012,7 @@ mod durable_commit_gate_tests {
     struct FaultInjectedBackend {
         inner: redb::backends::FileBackend,
         fail_next_sync: Arc<AtomicBool>,
+        exit_after_sync: Arc<AtomicBool>,
         fail_next_write: Arc<AtomicBool>,
         fail_next_read: Arc<AtomicBool>,
         fail_next_set_len: Arc<AtomicBool>,
@@ -14044,7 +14045,11 @@ mod durable_commit_gate_tests {
             if self.fail_next_sync.swap(false, Ordering::SeqCst) {
                 return Err(std::io::Error::other("injected commit sync failure"));
             }
-            self.inner.sync_data()
+            self.inner.sync_data()?;
+            if self.exit_after_sync.swap(false, Ordering::SeqCst) {
+                std::process::exit(86);
+            }
+            Ok(())
         }
 
         fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
@@ -14057,6 +14062,122 @@ mod durable_commit_gate_tests {
         fn close(&self) -> Result<(), std::io::Error> {
             self.inner.close()
         }
+    }
+
+    #[test]
+    fn process_crash_after_durable_sync_recovers_atomic_commit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::process::Command;
+
+        const CHILD_DATABASE_ENV: &str = "PRDB_TEST_EXIT_AFTER_DURABLE_SYNC_DATABASE";
+        const INVOCATION_ID: [u8; 16] = [0x86; 16];
+        const PRINCIPAL_ID: [u8; 16] = [0x87; 16];
+        let row_key = [0x88; 16].into_iter().chain([0x89; 16]).collect::<Vec<_>>();
+
+        if let Some(database_path) = std::env::var_os(CHILD_DATABASE_ENV) {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&database_path)?;
+            let exit_after_sync = Arc::new(AtomicBool::new(false));
+            let database = Database::builder().create_with_backend(FaultInjectedBackend {
+                inner: redb::backends::FileBackend::new(file)?,
+                fail_next_sync: Arc::new(AtomicBool::new(false)),
+                exit_after_sync: exit_after_sync.clone(),
+                fail_next_write: Arc::new(AtomicBool::new(false)),
+                fail_next_read: Arc::new(AtomicBool::new(false)),
+                fail_next_set_len: Arc::new(AtomicBool::new(false)),
+                fail_next_len: Arc::new(AtomicBool::new(false)),
+            })?;
+            let storage = StorageManager::from_validated_database(
+                &database,
+                StorageManagerConfig::default(),
+            )?;
+            let mut invocation =
+                storage.begin_invocation(INVOCATION_ID, PRINCIPAL_ID, i64::MAX, 1, 1024)?;
+            invocation.stage_put(
+                crate::overlay::RowId {
+                    table: [0x88; 16],
+                    row: [0x89; 16],
+                },
+                b"crash-boundary row",
+            )?;
+            exit_after_sync.store(true, Ordering::SeqCst);
+            invocation.commit()?;
+            return Err("child commit returned without the injected process exit".into());
+        }
+
+        let fixture_id = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "prdb-process-crash-{}-{fixture_id}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory)?;
+        let path = directory.join("crash.redb");
+        {
+            let database = Database::create(&path)?;
+            let mut write = database.begin_write()?;
+            write.set_durability(redb::Durability::Immediate)?;
+            write.set_two_phase_commit(true);
+            schema::create_tables(&write)?;
+            let metadata = EngineMetadata {
+                database_id: [0x33; 16],
+                catalog_version: 2,
+                expression_version: 1,
+                builtin_semantics_version: 1,
+                commit_sequence: 0,
+                lifecycle: Lifecycle::Ready,
+            }
+            .encode()?;
+            write
+                .open_table(ENGINE_META)?
+                .insert(&b"format"[..], &metadata[..])?;
+            write.commit()?;
+        }
+
+        let child_status = Command::new(std::env::current_exe()?)
+            .arg("--exact")
+            .arg("commit::durable_commit_gate_tests::process_crash_after_durable_sync_recovers_atomic_commit")
+            .arg("--nocapture")
+            .env(CHILD_DATABASE_ENV, &path)
+            .status()?;
+        assert_eq!(
+            child_status.code(),
+            Some(86),
+            "unexpected child exit: {child_status}"
+        );
+
+        let reopened = Database::open(&path)?;
+        let read = reopened.begin_read()?;
+        let outcome = read
+            .open_table(OUTCOMES)?
+            .get(&INVOCATION_ID[..])?
+            .map(|value| InvocationOutcome::decode(value.value()))
+            .transpose()?;
+        let metadata = read
+            .open_table(ENGINE_META)?
+            .get(&&b"format"[..])?
+            .ok_or("crash recovery lost engine metadata")?;
+        let sequence = EngineMetadata::decode(metadata.value())?.commit_sequence;
+        let row_exists = read.open_table(ROWS)?.get(row_key.as_slice())?.is_some();
+        match (outcome, sequence, row_exists) {
+            (Some(outcome), 1, true) => {
+                assert_eq!(outcome.status, OutcomeStatus::Committed);
+                assert_eq!(outcome.commit_sequence, 1);
+            }
+            (None, 0, false) => {}
+            (outcome, sequence, row_exists) => {
+                return Err(format!(
+                    "process-crash recovery exposed a partial commit: outcome={outcome:?}, sequence={sequence}, row={row_exists}"
+                )
+                .into());
+            }
+        }
+
+        drop(read);
+        drop(reopened);
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
     }
 
     #[test]
@@ -14186,6 +14307,7 @@ mod durable_commit_gate_tests {
         let database = Database::builder().create_with_backend(FaultInjectedBackend {
             inner: redb::backends::FileBackend::new(file)?,
             fail_next_sync: fail_next_sync.clone(),
+            exit_after_sync: Arc::new(AtomicBool::new(false)),
             fail_next_write: Arc::new(AtomicBool::new(false)),
             fail_next_read: Arc::new(AtomicBool::new(false)),
             fail_next_set_len: Arc::new(AtomicBool::new(false)),
@@ -14323,6 +14445,7 @@ mod durable_commit_gate_tests {
         let database = Database::builder().create_with_backend(FaultInjectedBackend {
             inner: redb::backends::FileBackend::new(file)?,
             fail_next_sync: Arc::new(AtomicBool::new(false)),
+            exit_after_sync: Arc::new(AtomicBool::new(false)),
             fail_next_write: fail_next_write.clone(),
             fail_next_read: Arc::new(AtomicBool::new(false)),
             fail_next_set_len: Arc::new(AtomicBool::new(false)),
@@ -14436,6 +14559,7 @@ mod durable_commit_gate_tests {
         let opened = Database::builder().create_with_backend(FaultInjectedBackend {
             inner: redb::backends::FileBackend::new(file)?,
             fail_next_sync: Arc::new(AtomicBool::new(false)),
+            exit_after_sync: Arc::new(AtomicBool::new(false)),
             fail_next_write: Arc::new(AtomicBool::new(false)),
             fail_next_read: fail_next_read.clone(),
             fail_next_set_len: Arc::new(AtomicBool::new(false)),
@@ -14452,6 +14576,7 @@ mod durable_commit_gate_tests {
         let opened = Database::builder().create_with_backend(FaultInjectedBackend {
             inner: redb::backends::FileBackend::new(file)?,
             fail_next_sync: Arc::new(AtomicBool::new(false)),
+            exit_after_sync: Arc::new(AtomicBool::new(false)),
             fail_next_write: Arc::new(AtomicBool::new(false)),
             fail_next_read: Arc::new(AtomicBool::new(false)),
             fail_next_set_len: Arc::new(AtomicBool::new(false)),
@@ -14529,6 +14654,7 @@ mod durable_commit_gate_tests {
         let mut database = Database::builder().create_with_backend(FaultInjectedBackend {
             inner: redb::backends::FileBackend::new(file)?,
             fail_next_sync: Arc::new(AtomicBool::new(false)),
+            exit_after_sync: Arc::new(AtomicBool::new(false)),
             fail_next_write: Arc::new(AtomicBool::new(false)),
             fail_next_read: Arc::new(AtomicBool::new(false)),
             fail_next_set_len: fail_next_set_len.clone(),
@@ -14616,6 +14742,7 @@ mod durable_commit_gate_tests {
         let database = Database::builder().create_with_backend(FaultInjectedBackend {
             inner: redb::backends::FileBackend::new(file)?,
             fail_next_sync: fail_next_sync.clone(),
+            exit_after_sync: Arc::new(AtomicBool::new(false)),
             fail_next_write: Arc::new(AtomicBool::new(false)),
             fail_next_read: Arc::new(AtomicBool::new(false)),
             fail_next_set_len: Arc::new(AtomicBool::new(false)),
