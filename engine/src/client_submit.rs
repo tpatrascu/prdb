@@ -118,6 +118,30 @@ pub struct AdminTokenResult {
     pub commit_sequence: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminColumnDefinition {
+    pub name: String,
+    pub scalar_type: crate::tuple::ScalarType,
+    pub nullable: bool,
+    pub generated_uuid_identity: bool,
+    pub default: Option<AdminColumnDefault>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AdminColumnDefault {
+    Null,
+    Literal(crate::tuple::ScalarValue),
+    CurrentPrincipalId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminTableResult {
+    pub operation_id: [u8; 16],
+    pub table_id: [u8; 16],
+    pub column_ids: Vec<[u8; 16]>,
+    pub commit_sequence: u64,
+}
+
 /// Database-scoped privileges that an administrator may grant or revoke.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AdminSystemPrivilege {
@@ -1112,6 +1136,95 @@ impl AdminClient {
         .map(|(result, _)| result)
     }
 
+    /// Create a table with typed columns. The result preserves the server's
+    /// column order and returns each generated column ID in that same order.
+    pub fn create_table(
+        &mut self,
+        schema_id: [u8; 16],
+        name: &str,
+        columns: &[AdminColumnDefinition],
+    ) -> Result<AdminTableResult, ClientSubmitError> {
+        validate_admin_id(schema_id)?;
+        validate_admin_name(name)?;
+        let encoded_columns = encode_admin_table_columns(columns)?;
+        let prepare = format!(
+            "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"tables.create\",\"arguments\":{{\"schema_id\":\"{}\",\"name\":\"{name}\",\"columns\":{encoded_columns}}}}}",
+            lower_hex(&schema_id)
+        );
+        let prepared = self.transport.exchange(10, prepare.into_bytes())?;
+        let fields = parse_flat_response(&prepared.payload)?;
+        let operation_id = response_id(&fields, "operation_id")?;
+        if fields.len() != 2 || take_string(&fields, "state").as_deref() != Some("prepared") {
+            return Err(ClientSubmitError::InvalidResponse);
+        }
+        let start = format!(
+            "{{\"phase\":\"start\",\"operation_id\":\"{}\"}}",
+            lower_hex(&operation_id)
+        );
+        let started = match self.transport.exchange(10, start.into_bytes()) {
+            Ok(response) => response,
+            Err(ClientSubmitError::ServerRejected(message)) => {
+                return Err(ClientSubmitError::AdministrativeOperationRejected {
+                    operation_id,
+                    message,
+                });
+            }
+            Err(_) => {
+                return Err(ClientSubmitError::AdministrativeOutcomeUncertain(
+                    operation_id,
+                ));
+            }
+        };
+        let fields = parse_flat_response(&started.payload)
+            .map_err(|_| ClientSubmitError::AdministrativeOutcomeUncertain(operation_id))?;
+        let response_operation_id = response_id(&fields, "operation_id").ok();
+        let table_id = response_id(&fields, "table_id").ok();
+        let outcome = fields.get("outcome").and_then(ResponseValue::as_string);
+        let sequence = fields
+            .get("commit_sequence")
+            .and_then(ResponseValue::as_string)
+            .and_then(|text| parse_canonical_positive_u64(text.to_owned()));
+        let column_ids = fields.get("column_ids").and_then(|value| {
+            let values = value.as_array()?;
+            values
+                .iter()
+                .map(|value| {
+                    value
+                        .as_string()
+                        .and_then(decode_hex_array::<16>)
+                        .filter(|id| *id != [0; 16])
+                })
+                .collect::<Option<Vec<_>>>()
+        });
+        let valid_columns = column_ids.as_ref().is_some_and(|ids| {
+            ids.len() == columns.len()
+                && ids.iter().copied().collect::<HashSet<_>>().len() == ids.len()
+        });
+        if fields.len() != 5
+            || response_operation_id != Some(operation_id)
+            || table_id.is_none()
+            || outcome != Some("committed")
+            || sequence.is_none()
+            || !valid_columns
+        {
+            return Err(ClientSubmitError::AdministrativeOutcomeUncertain(
+                operation_id,
+            ));
+        }
+        Ok(AdminTableResult {
+            operation_id,
+            table_id: table_id.ok_or(ClientSubmitError::AdministrativeOutcomeUncertain(
+                operation_id,
+            ))?,
+            column_ids: column_ids.ok_or(ClientSubmitError::AdministrativeOutcomeUncertain(
+                operation_id,
+            ))?,
+            commit_sequence: sequence.ok_or(ClientSubmitError::AdministrativeOutcomeUncertain(
+                operation_id,
+            ))?,
+        })
+    }
+
     fn create_identity(
         &mut self,
         operation: &str,
@@ -1459,6 +1572,135 @@ fn validate_admin_id(id: [u8; 16]) -> Result<(), ClientSubmitError> {
     } else {
         Ok(())
     }
+}
+
+fn encode_admin_table_columns(
+    columns: &[AdminColumnDefinition],
+) -> Result<String, ClientSubmitError> {
+    use crate::tuple::ScalarType;
+
+    if columns.is_empty() || columns.len() > crate::tuple::MAX_COLUMNS {
+        return Err(ClientSubmitError::InvalidAdministrativeRequest);
+    }
+    let mut seen_names = HashSet::with_capacity(columns.len());
+    let mut encoded_columns = Vec::with_capacity(columns.len());
+    for column in columns {
+        validate_admin_name(&column.name)?;
+        if !seen_names.insert(column.name.as_str()) {
+            return Err(ClientSubmitError::InvalidAdministrativeRequest);
+        }
+        if column.generated_uuid_identity
+            && (column.scalar_type != ScalarType::Uuid || column.default.is_some())
+        {
+            return Err(ClientSubmitError::InvalidAdministrativeRequest);
+        }
+        let scalar_type = encode_admin_scalar_type(column.scalar_type)?;
+        let mut encoded = format!(
+            "{{\"name\":{},\"type\":{},\"nullable\":{},\"generated_uuid_identity\":{}",
+            json_quote(&column.name),
+            json_quote(&scalar_type),
+            column.nullable,
+            column.generated_uuid_identity
+        );
+        if let Some(default) = &column.default {
+            match default {
+                AdminColumnDefault::Null if column.nullable => {
+                    encoded.push_str(",\"default\":{\"kind\":\"null\"}");
+                }
+                AdminColumnDefault::Null => {
+                    return Err(ClientSubmitError::InvalidAdministrativeRequest);
+                }
+                AdminColumnDefault::CurrentPrincipalId
+                    if column.scalar_type == ScalarType::Uuid =>
+                {
+                    encoded.push_str(",\"default\":{\"kind\":\"current_principal_id\"}");
+                }
+                AdminColumnDefault::CurrentPrincipalId => {
+                    return Err(ClientSubmitError::InvalidAdministrativeRequest);
+                }
+                AdminColumnDefault::Literal(value) => {
+                    let text = encode_admin_default_literal(column.scalar_type, value)?;
+                    encoded.push_str(&format!(
+                        ",\"default\":{{\"kind\":\"literal\",\"value\":{}}}",
+                        json_quote(&text)
+                    ));
+                }
+            }
+        }
+        encoded.push('}');
+        encoded_columns.push(encoded);
+    }
+    Ok(format!("[{}]", encoded_columns.join(",")))
+}
+
+fn encode_admin_scalar_type(
+    scalar_type: crate::tuple::ScalarType,
+) -> Result<String, ClientSubmitError> {
+    use crate::tuple::ScalarType;
+    match scalar_type {
+        ScalarType::Boolean => Ok("boolean".into()),
+        ScalarType::SmallInt => Ok("smallint".into()),
+        ScalarType::Integer => Ok("integer".into()),
+        ScalarType::BigInt => Ok("bigint".into()),
+        ScalarType::Decimal { precision, scale }
+            if (1..=38).contains(&precision) && scale <= precision =>
+        {
+            Ok(format!("decimal({precision},{scale})"))
+        }
+        ScalarType::Decimal { .. } => Err(ClientSubmitError::InvalidAdministrativeRequest),
+        ScalarType::Text => Ok("text".into()),
+        ScalarType::Varchar { max_chars } if max_chars > 0 => Ok(format!("varchar({max_chars})")),
+        ScalarType::Varchar { .. } => Err(ClientSubmitError::InvalidAdministrativeRequest),
+        ScalarType::Bytea => Ok("bytea".into()),
+        ScalarType::Uuid => Ok("uuid".into()),
+        ScalarType::Date => Ok("date".into()),
+        ScalarType::TimestampTz => Ok("timestamptz".into()),
+    }
+}
+
+fn encode_admin_default_literal(
+    scalar_type: crate::tuple::ScalarType,
+    value: &crate::tuple::ScalarValue,
+) -> Result<String, ClientSubmitError> {
+    use crate::tuple::{ScalarType, ScalarValue};
+    let invalid = || ClientSubmitError::InvalidAdministrativeRequest;
+    let text = match (scalar_type, value) {
+        (ScalarType::Boolean, ScalarValue::Boolean(value)) => value.to_string(),
+        (ScalarType::SmallInt, ScalarValue::SmallInt(value)) => value.to_string(),
+        (ScalarType::Integer, ScalarValue::Integer(value)) => value.to_string(),
+        (ScalarType::BigInt, ScalarValue::BigInt(value)) => value.to_string(),
+        (ScalarType::Decimal { precision, scale }, ScalarValue::Decimal(value)) => {
+            let limit = 10u128.pow(u32::from(precision));
+            let magnitude = value.unsigned_abs();
+            if magnitude >= limit {
+                return Err(invalid());
+            }
+            let factor = 10u128.pow(u32::from(scale));
+            let sign = if *value < 0 { "-" } else { "" };
+            if scale == 0 {
+                format!("{sign}{magnitude}")
+            } else {
+                format!(
+                    "{sign}{}.{:0width$}",
+                    magnitude / factor,
+                    magnitude % factor,
+                    width = usize::from(scale)
+                )
+            }
+        }
+        (ScalarType::Text, ScalarValue::Text(value)) => value.clone(),
+        (ScalarType::Varchar { max_chars }, ScalarValue::Varchar(value))
+            if value.chars().count() <= max_chars as usize =>
+        {
+            value.clone()
+        }
+        (ScalarType::Bytea, ScalarValue::Bytea(value)) => lower_hex(value),
+        (ScalarType::Uuid, ScalarValue::Uuid(value)) => lower_hex(value),
+        (ScalarType::Date, ScalarValue::Date(value)) => value.to_string(),
+        (ScalarType::TimestampTz, ScalarValue::TimestampTz(value)) => value.to_string(),
+        _ => return Err(invalid()),
+    };
+    Ok(text)
 }
 
 fn json_quote(text: &str) -> String {
@@ -2011,8 +2253,8 @@ fn hex_nibble(byte: u8) -> Option<u8> {
 mod tests {
     use super::{
         ClientSubmitError, ResponseValue, decode_hex_array, decode_token_secret,
-        is_normalized_index_name, parse_canonical_positive_u64, parse_flat_response,
-        validate_admin_id, validate_admin_name, validate_index_request,
+        encode_admin_table_columns, is_normalized_index_name, parse_canonical_positive_u64,
+        parse_flat_response, validate_admin_id, validate_admin_name, validate_index_request,
     };
 
     #[test]
@@ -2068,6 +2310,55 @@ mod tests {
         assert!(decode_token_secret("paWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaU").is_none());
         assert!(decode_token_secret("p=WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaU=").is_none());
         assert!(decode_token_secret("paWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaV=").is_none());
+    }
+
+    #[test]
+    fn admin_table_column_encoder_rejects_invalid_shapes_and_defaults() {
+        use super::{AdminColumnDefault, AdminColumnDefinition};
+        use crate::tuple::{ScalarType, ScalarValue};
+
+        assert!(encode_admin_table_columns(&[]).is_err());
+        let duplicate_names = [
+            AdminColumnDefinition {
+                name: "value".into(),
+                scalar_type: ScalarType::Text,
+                nullable: true,
+                generated_uuid_identity: false,
+                default: None,
+            },
+            AdminColumnDefinition {
+                name: "value".into(),
+                scalar_type: ScalarType::Integer,
+                nullable: true,
+                generated_uuid_identity: false,
+                default: None,
+            },
+        ];
+        assert!(encode_admin_table_columns(&duplicate_names).is_err());
+        let generated_non_uuid = [AdminColumnDefinition {
+            name: "id".into(),
+            scalar_type: ScalarType::Text,
+            nullable: false,
+            generated_uuid_identity: true,
+            default: None,
+        }];
+        assert!(encode_admin_table_columns(&generated_non_uuid).is_err());
+        let null_not_null = [AdminColumnDefinition {
+            name: "required".into(),
+            scalar_type: ScalarType::Integer,
+            nullable: false,
+            generated_uuid_identity: false,
+            default: Some(AdminColumnDefault::Null),
+        }];
+        assert!(encode_admin_table_columns(&null_not_null).is_err());
+        let mismatched_literal = [AdminColumnDefinition {
+            name: "count".into(),
+            scalar_type: ScalarType::Integer,
+            nullable: false,
+            generated_uuid_identity: false,
+            default: Some(AdminColumnDefault::Literal(ScalarValue::Text("1".into()))),
+        }];
+        assert!(encode_admin_table_columns(&mismatched_literal).is_err());
     }
 
     #[test]

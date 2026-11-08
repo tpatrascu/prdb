@@ -1,5 +1,8 @@
 use prdb_engine::client_protocol::{ClientFrame, ClientFrameDecoder};
-use prdb_engine::client_submit::{AdminClient, AdminSystemPrivilege, InvocationStatus};
+use prdb_engine::client_submit::{
+    AdminClient, AdminColumnDefault, AdminColumnDefinition, AdminSystemPrivilege, InvocationStatus,
+};
+use prdb_engine::tuple::{ScalarType, ScalarValue};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
@@ -575,6 +578,100 @@ fn admin_client_renames_and_drops_tables() {
     .unwrap();
     client.rename_table([0xa4; 16], "events_v2").unwrap();
     client.drop_table([0xa4; 16]).unwrap();
+    server.join().unwrap();
+}
+
+#[test]
+fn admin_client_creates_table_with_typed_columns_and_defaults() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut decoder = ClientFrameDecoder::default();
+        establish_control_session(&mut stream, &mut decoder);
+        let prepare = read_frame(&mut stream, &mut decoder);
+        let payload = String::from_utf8(prepare.payload.clone()).unwrap();
+        assert_eq!(
+            payload,
+            r#"{"phase":"prepare","operation_version":1,"operation":"tables.create","arguments":{"schema_id":"01010101010101010101010101010101","name":"events","columns":[{"name":"id","type":"uuid","nullable":false,"generated_uuid_identity":true},{"name":"title","type":"text","nullable":false,"generated_uuid_identity":false,"default":{"kind":"literal","value":"hello \"db\""}},{"name":"amount","type":"decimal(6,2)","nullable":true,"generated_uuid_identity":false,"default":{"kind":"literal","value":"12.34"}},{"name":"owner","type":"uuid","nullable":false,"generated_uuid_identity":false,"default":{"kind":"current_principal_id"}}]}}"#
+        );
+        let operation_id = [0x81; 16];
+        respond(
+            &mut stream,
+            &prepare,
+            format!(
+                "{{\"operation_id\":\"{}\",\"state\":\"prepared\"}}",
+                hex(&operation_id)
+            )
+            .as_bytes(),
+        );
+        let start = read_frame(&mut stream, &mut decoder);
+        respond(
+            &mut stream,
+            &start,
+            format!(
+                "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"table_id\":\"{}\",\"column_ids\":[\"{}\",\"{}\",\"{}\",\"{}\"],\"commit_sequence\":\"61\"}}",
+                hex(&operation_id),
+                "a5".repeat(16),
+                "b1".repeat(16),
+                "b2".repeat(16),
+                "b3".repeat(16),
+                "b4".repeat(16)
+            )
+            .as_bytes(),
+        );
+    });
+
+    let columns = [
+        AdminColumnDefinition {
+            name: "id".into(),
+            scalar_type: ScalarType::Uuid,
+            nullable: false,
+            generated_uuid_identity: true,
+            default: None,
+        },
+        AdminColumnDefinition {
+            name: "title".into(),
+            scalar_type: ScalarType::Text,
+            nullable: false,
+            generated_uuid_identity: false,
+            default: Some(AdminColumnDefault::Literal(ScalarValue::Text(
+                "hello \"db\"".into(),
+            ))),
+        },
+        AdminColumnDefinition {
+            name: "amount".into(),
+            scalar_type: ScalarType::Decimal {
+                precision: 6,
+                scale: 2,
+            },
+            nullable: true,
+            generated_uuid_identity: false,
+            default: Some(AdminColumnDefault::Literal(ScalarValue::Decimal(1234))),
+        },
+        AdminColumnDefinition {
+            name: "owner".into(),
+            scalar_type: ScalarType::Uuid,
+            nullable: false,
+            generated_uuid_identity: false,
+            default: Some(AdminColumnDefault::CurrentPrincipalId),
+        },
+    ];
+    let mut secret = [5; 32];
+    let mut client = AdminClient::connect_authenticated_with_timeout(
+        address,
+        [6; 16],
+        &mut secret,
+        Duration::from_secs(3),
+    )
+    .unwrap();
+    let created = client.create_table([1; 16], "events", &columns).unwrap();
+    assert_eq!(created.table_id, [0xa5; 16]);
+    assert_eq!(
+        created.column_ids,
+        [[0xb1; 16], [0xb2; 16], [0xb3; 16], [0xb4; 16]]
+    );
+    assert_eq!(created.commit_sequence, 61);
     server.join().unwrap();
 }
 
