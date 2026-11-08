@@ -125,6 +125,14 @@
 - Verification: `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed in the pinned Nix shell. The first full-suite attempt hit the known intermittent CHECK lifecycle `InvalidAudit`; the isolated CHECK test and full rerun passed. The commit integration target reported 124 passed and 3 cgroup-dependent ignored.
 - Remaining: user-facing CLI commands and live ADMIN operations through the real multi-process gateway path remain open.
 
+## SDK-3 dependency: basic submit/status CLI — implemented
+
+- Contract: [client SDK](../../specs/client-sdk.md) requires status reconciliation after uncertain START, a durable no-overwrite receipt before START, and provisional output until a committed terminal outcome.
+- Implementation: `prdb-client submit` reads a private credential file, validates a package through `SubmissionClient`, uploads/seals, persists the requested receipt, starts once, streams provisional bytes, and exits successfully only after COMMITTED. `prdb-client status` opens a fresh authenticated connection and queries the supplied invocation ID. Parameters are bounded to the protocol's 1 MiB limit.
+- Regression: unit coverage checks canonical nonzero invocation-ID parsing; `prdb-client --help` was exercised to inspect the user-facing commands.
+- Verification: `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed in the pinned Nix shell. The commit integration target reported 124 passed and 3 cgroup-dependent ignored. The focused binary test and `prdb-client --help` check also passed.
+- Remaining: credential creation/rotation UX, authenticated metadata-based scope selection, admin CLI commands, and live ADMIN multi-process path tests remain open.
+
 ## SDK-5 dependency: typed schema rename AdminClient operation — implemented
 
 - Contract: [client protocol](../../specs/client-protocol.md) requires `schemas.rename` START to echo the stable schema ID and normalized new name.
