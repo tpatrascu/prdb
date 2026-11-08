@@ -39,4 +39,13 @@ int32_t prdb_sdk_planner_decode_relation_v1(
     prdb_sdk_planner_relation_v1 *out, uint32_t out_capacity,
     prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_capacity);
 
+/* Shared wire decoder for the executor's independently resolved relation.
+ * Unlike the planner decoder, it requires handle kind 6. */
+int32_t prdb_sdk_executor_decode_relation_v1(
+    const uint8_t *payload, uint64_t payload_len,
+    uint8_t relation_id_out[16], uint8_t executor_handle_out[16],
+    const uint8_t **name_out, uint32_t *name_len_out,
+    uint32_t *column_count_out, uint32_t output_capacity,
+    prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_capacity);
+
 #endif /* PRDB_SDK_PLANNER_V1_H */
