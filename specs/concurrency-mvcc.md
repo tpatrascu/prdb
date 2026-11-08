@@ -81,7 +81,7 @@ Bound invocation age, private write-set bytes, pinned history, cursor buffers, a
 ## Required Validation
 
 - Concurrent readers/writers: no dirty reads, stable repeated reads, own-write visibility, and no partial multi-row commits.
-- Two updates/deletes to one row: one conflicting transaction aborts; distinct-row writes can commit. Include a write-skew case documenting the snapshot-isolation limit.
+- Two updates/deletes to one row: one conflicting transaction aborts; distinct-row writes can commit. The `snapshot_isolation_allows_documented_disjoint_row_write_skew` regression starts two invocations from one snapshot: each sees two `on-call` rows and takes a different row off call. Both disjoint writes may commit, leaving no one on call. This documents that snapshot isolation does not enforce cross-row invariants or promise serializability.
 - Policy/membership change racing with commit: stale write authorization aborts; unreadable cells remain undisclosed.
 - Multi-statement error, crash, or cancellation: all staged writes roll back before commit; committed decisions survive lost replies and restart.
 - Cursor races, late responses, cleanup during estimation, and long snapshots concurrent with reclamation.

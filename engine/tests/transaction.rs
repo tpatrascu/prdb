@@ -5602,6 +5602,94 @@ fn concurrent_same_row_writers_have_one_commit_and_one_durable_conflict()
 }
 
 #[test]
+fn snapshot_isolation_allows_documented_disjoint_row_write_skew()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    commit_rows(
+        &database,
+        [1; 16],
+        [9; 16],
+        9_999,
+        &[
+            RowWrite {
+                key: key(id(1)),
+                expected_version: None,
+                payload: Some(b"on-call".to_vec()),
+            },
+            RowWrite {
+                key: key(id(2)),
+                expected_version: None,
+                payload: Some(b"on-call".to_vec()),
+            },
+        ],
+    )?;
+
+    // Each transaction observes both people on call, then independently takes
+    // one person off call. Their write sets are disjoint, so snapshot isolation
+    // permits both commits even though the resulting state violates the
+    // application invariant that at least one person remains on call.
+    let barrier = Arc::new(Barrier::new(3));
+    let (left, right) = std::thread::scope(|scope| {
+        let left_barrier = barrier.clone();
+        let left_database = &database;
+        let left = scope.spawn(move || {
+            let mut transaction =
+                InvocationTransaction::begin(left_database, [12; 16], [9; 16], 9_999, 2, 32)?;
+            assert_eq!(
+                transaction.read(id(1))?.as_deref(),
+                Some(b"on-call".as_slice())
+            );
+            assert_eq!(
+                transaction.read(id(2))?.as_deref(),
+                Some(b"on-call".as_slice())
+            );
+            transaction.stage_put(id(1), b"off-call")?;
+            left_barrier.wait();
+            transaction.commit()
+        });
+        let right_barrier = barrier.clone();
+        let right_database = &database;
+        let right = scope.spawn(move || {
+            let mut transaction =
+                InvocationTransaction::begin(right_database, [13; 16], [9; 16], 9_999, 2, 32)?;
+            assert_eq!(
+                transaction.read(id(1))?.as_deref(),
+                Some(b"on-call".as_slice())
+            );
+            assert_eq!(
+                transaction.read(id(2))?.as_deref(),
+                Some(b"on-call".as_slice())
+            );
+            transaction.stage_put(id(2), b"off-call")?;
+            right_barrier.wait();
+            transaction.commit()
+        });
+        barrier.wait();
+        (left.join().unwrap(), right.join().unwrap())
+    });
+
+    let mut commit_sequences = [left?, right?];
+    commit_sequences.sort();
+    assert_eq!(commit_sequences, [2, 3]);
+    assert_eq!(commit_sequence(&database)?, 3);
+    let read = database.begin_read()?;
+    let rows = read.open_table(ROWS)?;
+    for row_id in [id(1), id(2)] {
+        let record = RowRecord::decode(rows.get(&key(row_id)[..])?.unwrap().value())?;
+        assert_eq!(record.payload, b"off-call");
+    }
+    let outcomes = read.open_table(prdb_engine::schema::OUTCOMES)?;
+    for invocation_id in [[12; 16], [13; 16]] {
+        assert_eq!(
+            InvocationOutcome::decode(outcomes.get(&invocation_id[..])?.unwrap().value())?.status,
+            OutcomeStatus::Committed
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn field_patch_merges_with_pinned_tuple_and_preserves_untouched_values()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
