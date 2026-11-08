@@ -14844,7 +14844,8 @@ fn supervisor_worker_exit_failure_is_reaped_and_durably_aborted()
     use prdb_engine::outcome::OutcomeStatus;
     use prdb_engine::storage_manager::SupervisorInvocationError;
     use prdb_engine::supervisor_ipc::{
-        GatewayAbortReason, GatewayTerminalDecision, send_gateway_terminal_for_confirmed_outcome,
+        GatewayAbortReason, GatewayTerminalDecision, send_gateway_result_data_event,
+        send_gateway_terminal_for_confirmed_outcome,
     };
     use std::io::Cursor;
     use std::process::Command;
@@ -14898,6 +14899,13 @@ fn supervisor_worker_exit_failure_is_reaped_and_durably_aborted()
     );
     assert!(terminal_stream.get_ref().is_empty());
 
+    let mut result_and_terminal_stream = Cursor::new(Vec::new());
+    send_gateway_result_data_event(
+        &mut result_and_terminal_stream,
+        9,
+        b"partial SQL output".to_vec(),
+    )?;
+
     let mut worker = Command::new("sh").args(["-c", "exit 7"]).spawn()?;
     assert!(matches!(
         invocation.observe_worker_exit(&mut worker),
@@ -14915,14 +14923,20 @@ fn supervisor_worker_exit_failure_is_reaped_and_durably_aborted()
         send_gateway_terminal_for_confirmed_outcome(
             &storage,
             &invocation,
-            &mut terminal_stream,
+            &mut result_and_terminal_stream,
             9,
             GatewayAbortReason::WorkerFailure,
         )?,
         GatewayTerminalDecision::Abort(GatewayAbortReason::WorkerFailure)
     );
-    terminal_stream.set_position(0);
-    let terminal = read_frame(&mut terminal_stream)?.ok_or("missing aborted terminal")?;
+    result_and_terminal_stream.set_position(0);
+    let provisional =
+        read_frame(&mut result_and_terminal_stream)?.ok_or("missing provisional result data")?;
+    assert_eq!(provisional.operation, Operation::GatewayResultData as u16);
+    assert_eq!(provisional.request_id, 9);
+    assert_eq!(provisional.payload, b"partial SQL output");
+    let terminal =
+        read_frame(&mut result_and_terminal_stream)?.ok_or("missing aborted terminal")?;
     assert_eq!(terminal.operation, Operation::GatewayTerminal as u16);
     assert_eq!(terminal.request_id, 9);
     assert!(String::from_utf8(terminal.payload)?.contains("\"outcome\":\"aborted\""));
