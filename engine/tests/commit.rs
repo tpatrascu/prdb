@@ -7898,6 +7898,94 @@ fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
         }
     };
     assert_eq!(unavailable_relations, br#"{"relations":[]}"#);
+
+    let metadata_listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let metadata_address = metadata_listener.local_addr()?;
+    std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+        let server = scope.spawn(|| {
+            use std::io::{Read, Write};
+            let (mut stream, _) = metadata_listener.accept().unwrap();
+            let mut decoder = prdb_engine::client_protocol::ClientFrameDecoder::default();
+            let mut session = ClientConnectionSession::default();
+            let mut input = [0u8; 4096];
+            loop {
+                let count = stream.read(&mut input).unwrap();
+                if count == 0 {
+                    break;
+                }
+                for request in decoder.push(&input[..count]).unwrap() {
+                    let response = match request.kind {
+                        1 | 2 => session.handle_handshake_request(&storage, request).unwrap(),
+                        10 => session
+                            .handle_admin_request(&storage, request, retention_deadline_us)
+                            .unwrap(),
+                        kind => panic!("unexpected metadata client frame kind {kind}"),
+                    };
+                    stream.write_all(&response.encode().unwrap()).unwrap();
+                }
+            }
+        });
+
+        let mut secret = [0x6b; 32];
+        let mut metadata_client =
+            prdb_engine::client_submit::MetadataClient::connect_authenticated(
+                metadata_address,
+                id(242),
+                &mut secret,
+            )?;
+        assert_eq!(secret, [0; 32]);
+        let schemas = metadata_client.list_schemas()?;
+        let schema = schemas
+            .iter()
+            .find(|schema| schema.name == "visible_app")
+            .ok_or("grant-visible schema missing through MetadataClient")?;
+        assert!(!schemas.iter().any(|schema| schema.name == "hidden_app"));
+        let relations = metadata_client.list_relations(schema.schema_id)?;
+        let relation = relations
+            .iter()
+            .find(|relation| relation.name == "metrics")
+            .ok_or("grant-visible relation missing through MetadataClient")?;
+        assert!(
+            !relations
+                .iter()
+                .any(|relation| relation.name == "ungranted_metrics")
+        );
+        let columns = metadata_client.list_columns(schema.schema_id, relation.relation_id)?;
+        let column = columns
+            .iter()
+            .find(|column| column.name == "reading")
+            .ok_or("grant-visible column missing through MetadataClient")?;
+        let mut requested_scope = prdb_engine::submission_scope::RequestedScopeBuilder::new();
+        requested_scope
+            .include_column(
+                schema,
+                relation,
+                column,
+                &[prdb_engine::authorization::Operation::Select],
+            )
+            .map_err(|error| format!("requested-scope selection failed: {error:?}"))?;
+        let decoded_scope = prdb_engine::submission_scope::decode_requested_scope_v1(
+            &requested_scope
+                .encode()
+                .map_err(|error| format!("requested-scope encoding failed: {error:?}"))?,
+        )
+        .map_err(|error| format!("requested-scope decoding failed: {error:?}"))?;
+        assert!(decoded_scope.contains(&(
+            prdb_engine::authorization::Operation::Usage,
+            prdb_engine::authorization::AccessTarget::Schema(schema.schema_id),
+        )));
+        assert!(decoded_scope.contains(&(
+            prdb_engine::authorization::Operation::Select,
+            prdb_engine::authorization::AccessTarget::Column {
+                table_id: relation.relation_id,
+                column_id: column.column_id,
+            },
+        )));
+        drop(metadata_client);
+        server.join().map_err(|_| "metadata TCP server panicked")?;
+        Ok(())
+    })?;
+
     let token_request = prdb_engine::ipc::IpcFrame {
         operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
         request_id: 4,

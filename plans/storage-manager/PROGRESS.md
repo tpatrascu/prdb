@@ -1637,7 +1637,7 @@
 - Implementation: the versioned read decoder accepts only `phase=read`, operation version 1, operation `metadata.schemas.list`, and empty arguments. The connection-owned handler revalidates its token and emits bounded schema IDs/names from the storage snapshot API. Existing gateway administrative-operation dispatch carries this request over the control channel; no invocation is admitted.
 - Regression evidence: strict decoder tests reject arguments and mutation phase; the real-redb gateway dispatch test authenticates a non-admin control session and receives the public schema in the response.
 - Verification: focused decoder and real-redb gateway-dispatch regressions passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed. Commit integration had 109 passing and 2 cgroup-dependent tests ignored.
-- Remaining: complete selected-scope discovery with real gateway records; schema/relation results are capped complete lists rather than resumable pages.
+- Remaining: schema/relation results are capped complete lists rather than resumable pages.
 
 ## SM-6: authenticated relation discovery over the control channel — implemented
 
@@ -1645,7 +1645,7 @@
 - Implementation: `StorageManager::discover_token_authorized_relations` authenticates and filters under one request-scoped catalog snapshot, consumes the transaction-bound cursors internally, and bounds the complete result by record count and encoded ID/name bytes. The client read requires exactly one schema ID. Hidden and absent schemas serialize identically to an authorized empty schema.
 - Regression evidence: strict request decoding checks the schema ID and rejects extra arguments. Real-redb gateway dispatch authenticates an ordinary principal, returns only its granted `visible_app` schema, exposes the granted `metrics` relation, and returns its `reading` column shape. A second table in the visible schema without a data grant is omitted; an ungranted schema containing a table and an absent schema both return the indistinguishable empty relation array. The reads do not start invocations.
 - Verification: focused decoder and real-redb gateway-dispatch regressions passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed. Commit integration had 109 passing and 2 cgroup-dependent tests ignored.
-- Remaining: build selected-scope discovery end to end; complete results still use bounded full-list responses rather than resumable network pages.
+- Remaining: complete results still use bounded full-list responses rather than resumable network pages.
 
 ## SM-6: authenticated column-shape discovery over the control channel — implemented
 
@@ -1661,4 +1661,11 @@
 - Red evidence: the gateway regression initially authenticated with an admin token and could not prove ordinary-principal filtering. After switching to an ordinary principal with explicit schema USAGE and table SELECT grants, the test showed schema discovery worked but relation discovery returned an empty list. The table catalog held the relation and grant, while schema records had no relation ID list.
 - Implementation: both relation enumeration and relation-grant loading now scan the pinned table catalog and select records whose stored schema ID matches the requested schema. The regression verifies the granted schema, relation, and column over the real gateway path; an ungranted table within that visible schema and a second schema with no USAGE grant remain hidden.
 - Verification: the focused real-redb gateway regression passed. Rust 1.95.0, Cargo 1.95.0, rustfmt 1.9.0, Clippy 0.1.95, and TinyCC 0.9.27-unstable-2025-01-06 were verified in the prescribed Nix shell. Workspace build, format check, warning-denied Clippy, all workspace tests, and `git diff --check` passed; the commit integration target had 109 passing tests and 2 cgroup-dependent tests ignored.
-- Remaining: build selected-scope discovery end to end; complete results still use bounded full-list responses and the 64 KiB control-frame cap.
+- Remaining: complete results still use bounded full-list responses and the 64 KiB control-frame cap.
+
+## SM-6: build requested scope from authenticated TCP discovery — implemented
+
+- Behavior and normative contract: [client SDK](../../specs/client-sdk.md), Requested Capability Scope v1 and `MetadataClient`; [metadata discovery](../../specs/metadata-discovery.md); [storage manager](../../specs/storage-manager.md), token-authenticated pre-invocation reads.
+- Regression: the real-redb authorization integration test now runs `MetadataClient` over loopback TCP against a `ClientConnectionSession` backed by the real `StorageManager`. An ordinary user's bearer token returns only the granted schema and relation, then the declared granted column. `RequestedScopeBuilder` produces and decodes PSC1 with schema USAGE and the selected column SELECT capability. The same fixture omits an ungranted relation in the visible schema and a separate schema without USAGE.
+- Evidence: the focused `storage_manager_runtime_and_metadata_reads_enforce_authorization` integration test passed. Existing gateway-dispatch checks in that fixture independently verify the versioned gateway ADMIN read route and no-invocation behavior. Workspace build, format check, warning-denied Clippy, and all workspace tests passed; commit integration had 109 passing tests and 2 cgroup-dependent tests ignored.
+- Remaining: metadata methods return bounded full lists; resumable network pages with cross-request snapshot consistency are unimplemented.
