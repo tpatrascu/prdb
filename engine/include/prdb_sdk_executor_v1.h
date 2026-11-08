@@ -10,6 +10,7 @@
 #define PRDB_SDK_EXECUTOR_OP_OPEN_SCAN UINT16_C(0x1102)
 #define PRDB_SDK_EXECUTOR_OP_NEXT_BATCH UINT16_C(0x1103)
 #define PRDB_SDK_EXECUTOR_OP_CLOSE_CURSOR UINT16_C(0x1104)
+#define PRDB_SDK_EXECUTOR_OP_STAGE_INSERT UINT16_C(0x1110)
 #define PRDB_SDK_EXECUTOR_OP_STAGE_DELETE UINT16_C(0x1112)
 
 #define PRDB_SDK_EXECUTOR_OK INT32_C(0)
@@ -29,6 +30,17 @@ typedef struct prdb_sdk_executor_relation_v1 {
     uint32_t name_len;
     uint32_t column_count;
 } prdb_sdk_executor_relation_v1;
+
+#define PRDB_SDK_EXECUTOR_INSERT_VALUE UINT32_C(0)
+#define PRDB_SDK_EXECUTOR_INSERT_NULL UINT32_C(1)
+#define PRDB_SDK_EXECUTOR_INSERT_DEFAULT UINT32_C(2)
+
+typedef struct prdb_sdk_executor_insert_value_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint32_t state;
+    prdb_sdk_value_v1 value;
+} prdb_sdk_executor_insert_value_v1;
 
 /* Resolve requires an explicit schema because InvocationV2 has no default
  * schema field. Request and response buffers are caller-owned and bounded. */
@@ -54,6 +66,15 @@ int32_t prdb_sdk_executor_next_batch_v1(
 int32_t prdb_sdk_executor_close_cursor_v1(
     const prdb_host_api_v2 *host, const uint8_t cursor[16],
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len);
+
+/* Encodes the caller's complete schema-order insert shape into request before
+ * submitting it. VALUE/NULL/DEFAULT use the public state constants below. */
+int32_t prdb_sdk_executor_stage_insert_v1(
+    const prdb_host_api_v2 *host, const uint8_t relation_handle[16],
+    const prdb_sdk_executor_insert_value_v1 *values, uint16_t value_count,
+    uint8_t *request, uint64_t request_capacity, uint8_t *response,
+    uint64_t response_capacity, uint64_t *response_len,
+    uint8_t row_handle_out[16]);
 
 /* Stages deletion of a connection-local row handle. Storage rechecks its
  * invocation, snapshot, grant, policy and row-version authority. */

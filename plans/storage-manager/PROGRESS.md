@@ -7,6 +7,13 @@
 - Verification: `nix-shell -p rustc cargo clippy rustfmt tinycc --run 'make -f engine/sdk/Makefile test'` passed with TinyCC 0.9.27-unstable-2025-01-06. Base PATH lacked the toolchain; initial Nix access was denied by the sandbox and the authorized Nix shell command succeeded.
 - Limits/next: this is only the delete bridge; INSERT and UPDATE C encoders are still absent. The test uses a host callback fixture and does not claim a live IPC/storage or sandbox integration. Next implement full-shape INSERT with VALUE/NULL/DEFAULT encoding and response handle validation.
 
+## SM-6 dependency: C executor stage-insert bridge — partial
+
+- Contract: [IPC protocol](../../specs/ipc-protocol.md) mutation payload v1 and [client SDK](../../specs/client-sdk.md). INSERT sends every declared field in schema order; each is VALUE, NULL, or DEFAULT, and successful storage returns a connection-local row handle. Storage still derives defaults, permissions, constraints, and indexes from its pinned catalog.
+- Red/green evidence: the executor fixture first failed to compile because the INSERT input record and bridge were absent. It now compares the exact request bytes for a typed INTEGER 42, NULL, and DEFAULT, rejects a short caller buffer before IPC, and rejects a response with the wrong handle kind without publishing it to the caller.
+- Verification: `nix-shell -p rustc cargo clippy rustfmt tinycc --run 'make -f engine/sdk/Makefile test'` passed with TinyCC 0.9.27-unstable-2025-01-06. This is an SDK callback fixture, not live storage IPC.
+- Limits/next: UPDATE's C bridge and end-to-end sequential SQL mutation execution remain open. Next add UPDATE patch encoding with unique ordinal checks and ack validation; later SQL-4 needs fixed target materialization before staging writes.
+
 ## Signed index components — in progress
 
 - Contract: [index-key encoding v1](../../specs/index-key-encoding.md), SQL tuple components and normative examples. Non-null signed 16/32/64-bit values use marker `01`, sign-bit normalization, and big-endian bytes. These bytes are comparable only within the same index definition.

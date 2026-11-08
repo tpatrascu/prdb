@@ -7,6 +7,13 @@ static void write_u16(uint8_t *out, uint16_t value) {
     out[1] = (uint8_t)value;
 }
 
+static void write_u32(uint8_t *out, uint32_t value) {
+    out[0] = (uint8_t)(value >> 24);
+    out[1] = (uint8_t)(value >> 16);
+    out[2] = (uint8_t)(value >> 8);
+    out[3] = (uint8_t)value;
+}
+
 static uint16_t read_u16(const uint8_t *in) {
     return (uint16_t)(((uint16_t)in[0] << 8) | in[1]);
 }
@@ -154,6 +161,78 @@ int32_t prdb_sdk_executor_close_cursor_v1(
     if (*response_len != 4 || read_u16(response) != 1 || read_u16(response + 2) != 0) {
         return PRDB_SDK_EXECUTOR_INVALID_PAYLOAD;
     }
+    return PRDB_SDK_EXECUTOR_OK;
+}
+
+int32_t prdb_sdk_executor_stage_insert_v1(
+    const prdb_host_api_v2 *host, const uint8_t relation_handle[16],
+    const prdb_sdk_executor_insert_value_v1 *values, uint16_t value_count,
+    uint8_t *request, uint64_t request_capacity, uint8_t *response,
+    uint64_t response_capacity, uint64_t *response_len,
+    uint8_t row_handle_out[16]) {
+    uint64_t offset = 20;
+    int32_t status;
+    if (relation_handle == NULL || relation_handle[0] != 6 || values == NULL ||
+        value_count > PRDB_SDK_BATCH_MAX_CELLS_PER_ROW || request == NULL ||
+        request_capacity > PRDB_QUERY_MAX_IPC_REQUEST_BYTES || response == NULL ||
+        response_len == NULL || row_handle_out == NULL) {
+        return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+    }
+    if (request_capacity < offset) return PRDB_SDK_EXECUTOR_RESPONSE_TOO_SMALL;
+    write_u16(request, 1);
+    memcpy(request + 2, relation_handle, 16);
+    write_u16(request + 18, value_count);
+    for (uint16_t i = 0; i < value_count; ++i) {
+        const prdb_sdk_executor_insert_value_v1 *input = &values[i];
+        if (input->struct_size < sizeof(*input) ||
+            input->abi_version != PRDB_SDK_EXECUTOR_ABI_V1_VERSION) {
+            return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+        }
+        if (input->state == PRDB_SDK_EXECUTOR_INSERT_DEFAULT) {
+            if (offset >= request_capacity) return PRDB_SDK_EXECUTOR_RESPONSE_TOO_SMALL;
+            request[offset++] = 2;
+        } else if (input->state == PRDB_SDK_EXECUTOR_INSERT_NULL ||
+                   input->state == PRDB_SDK_EXECUTOR_INSERT_VALUE) {
+            if (prdb_sdk_value_validate_v1(&input->value) != PRDB_SDK_VALUE_VALID ||
+                (input->state == PRDB_SDK_EXECUTOR_INSERT_NULL &&
+                 input->value.state != PRDB_SDK_VALUE_STATE_NULL) ||
+                (input->state == PRDB_SDK_EXECUTOR_INSERT_VALUE &&
+                 input->value.state != PRDB_SDK_VALUE_STATE_VALUE)) {
+                return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+            }
+            if (input->state == PRDB_SDK_EXECUTOR_INSERT_NULL) {
+                if (offset >= request_capacity) return PRDB_SDK_EXECUTOR_RESPONSE_TOO_SMALL;
+                request[offset++] = 1;
+            } else {
+                uint64_t value_len = input->value.data_len;
+                uint64_t value_end = offset + 6 + value_len;
+                if (value_len > UINT32_MAX || value_end < offset ||
+                    value_end > request_capacity) {
+                    return PRDB_SDK_EXECUTOR_RESPONSE_TOO_SMALL;
+                }
+                request[offset++] = 0;
+                request[offset++] = (uint8_t)input->value.type_code;
+                write_u32(request + offset, (uint32_t)value_len);
+                offset += 4;
+                if (value_len != 0) {
+                    memcpy(request + offset, input->value.data, (size_t)value_len);
+                }
+                offset += value_len;
+            }
+        } else {
+            return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+        }
+        if (offset > PRDB_QUERY_MAX_IPC_REQUEST_BYTES) {
+            return PRDB_SDK_EXECUTOR_RESPONSE_TOO_SMALL;
+        }
+    }
+    status = invoke(host, PRDB_SDK_EXECUTOR_OP_STAGE_INSERT, request, offset,
+                    response, response_capacity, response_len);
+    if (status != PRDB_SDK_EXECUTOR_OK) return status;
+    if (*response_len != 18 || read_u16(response) != 1 || response[2] != 8) {
+        return PRDB_SDK_EXECUTOR_INVALID_PAYLOAD;
+    }
+    memcpy(row_handle_out, response + 2, 16);
     return PRDB_SDK_EXECUTOR_OK;
 }
 

@@ -156,6 +156,70 @@ int main(void) {
            PRDB_SDK_EXECUTOR_INVALID_ARGUMENT);
     assert(mock.calls == 6);
 
+    uint8_t relation_handle[16] = {6};
+    memset(relation_handle + 1, 0x22, 15);
+    uint8_t expected_insert_request[32] = {0, 1};
+    memcpy(expected_insert_request + 2, relation_handle, 16);
+    expected_insert_request[18] = 0;
+    expected_insert_request[19] = 3;
+    expected_insert_request[20] = 0;
+    expected_insert_request[21] = PRDB_SDK_VALUE_TYPE_INTEGER;
+    expected_insert_request[25] = 4;
+    expected_insert_request[26] = 0;
+    expected_insert_request[27] = 0;
+    expected_insert_request[28] = 0;
+    expected_insert_request[29] = 42;
+    expected_insert_request[30] = 1;
+    expected_insert_request[31] = 2;
+    prdb_sdk_executor_insert_value_v1 insert_values[3] = {{0}};
+    for (uint32_t i = 0; i < 3; ++i) {
+        insert_values[i].struct_size = sizeof(insert_values[i]);
+        insert_values[i].abi_version = PRDB_SDK_EXECUTOR_ABI_V1_VERSION;
+    }
+    insert_values[0].state = PRDB_SDK_EXECUTOR_INSERT_VALUE;
+    insert_values[0].value.struct_size = sizeof(prdb_sdk_value_v1);
+    insert_values[0].value.abi_version = PRDB_SDK_VALUE_ABI_V1_VERSION;
+    insert_values[0].value.state = PRDB_SDK_VALUE_STATE_VALUE;
+    insert_values[0].value.type_code = PRDB_SDK_VALUE_TYPE_INTEGER;
+    const uint8_t integer_42[] = {0, 0, 0, 42};
+    insert_values[0].value.data = integer_42;
+    insert_values[0].value.data_len = sizeof(integer_42);
+    insert_values[1].state = PRDB_SDK_EXECUTOR_INSERT_NULL;
+    insert_values[1].value.struct_size = sizeof(prdb_sdk_value_v1);
+    insert_values[1].value.abi_version = PRDB_SDK_VALUE_ABI_V1_VERSION;
+    insert_values[1].value.state = PRDB_SDK_VALUE_STATE_NULL;
+    insert_values[2].state = PRDB_SDK_EXECUTOR_INSERT_DEFAULT;
+
+    uint8_t insert_reply[18] = {0, 1, 8};
+    memset(insert_reply + 3, 0x66, 15);
+    mock.expected_operation = PRDB_SDK_EXECUTOR_OP_STAGE_INSERT;
+    mock.expected_request = expected_insert_request;
+    mock.expected_request_len = sizeof(expected_insert_request);
+    mock.reply = insert_reply;
+    mock.reply_len = sizeof(insert_reply);
+    uint8_t inserted_handle[16] = {0};
+    uint8_t insert_request[32] = {0};
+    assert(prdb_sdk_executor_stage_insert_v1(
+               &host, relation_handle, insert_values, 3, insert_request,
+               sizeof(insert_request) - 1, response, sizeof(response),
+               &response_len, inserted_handle) ==
+           PRDB_SDK_EXECUTOR_RESPONSE_TOO_SMALL);
+    assert(mock.calls == 6);
+    assert(prdb_sdk_executor_stage_insert_v1(
+               &host, relation_handle, insert_values, 3, insert_request,
+               sizeof(insert_request), response, sizeof(response),
+               &response_len, inserted_handle) == PRDB_SDK_EXECUTOR_OK);
+    assert(response_len == sizeof(insert_reply) && inserted_handle[0] == 8 &&
+           mock.calls == 7);
+    memset(inserted_handle, 0xaa, sizeof(inserted_handle));
+    insert_reply[2] = 7;
+    assert(prdb_sdk_executor_stage_insert_v1(
+               &host, relation_handle, insert_values, 3, insert_request,
+               sizeof(insert_request), response, sizeof(response),
+               &response_len, inserted_handle) ==
+           PRDB_SDK_EXECUTOR_INVALID_PAYLOAD);
+    assert(inserted_handle[0] == 0xaa && mock.calls == 8);
+
     assert(prdb_sdk_executor_open_full_scan_v1(
                &host, cursor, response, sizeof(response), &response_len,
                cursor) == PRDB_SDK_EXECUTOR_INVALID_ARGUMENT);
