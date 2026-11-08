@@ -1598,3 +1598,12 @@
 - Red/green evidence: temporarily making SEAL call metadata-only `validate` caused the mismatch reservation to seal successfully and the new test failed at the expected assertion. Restoring `validate_artifact` makes it pass.
 - Verification: focused regression passed in the prescribed Nix shell. Workspace build, format check, warning-denied Clippy, all workspace tests, and `git diff --check` passed. The engine library had 34 passing unit tests; the commit target had 109 passing and 2 pre-existing cgroup/TinyCC fixture tests ignored.
 - Remaining: supervisor executable integration, production compatibility-profile configuration, and execution inside the sandbox remain open.
+
+## SM-6: verify ABI exports before SEAL — implemented
+
+- Behavior and normative contracts: [client SDK](../../specs/client-sdk.md), Artifact Manifest v1 and its acceptance plan; [supervisor staging](../../specs/supervisor.md). A manifest naming ABI entry points is accepted only when the pinned ELF exports both symbols with the required ELF symbol kinds.
+- Implementation: the bounded ELF64 dynamic-table reader now requires and validates `DT_HASH`, `DT_SYMTAB`, and `DT_SYMENT` when checking an artifact. It walks bounded dynamic symbols and accepts the descriptor only as a defined externally visible OBJECT and the entry point only as a defined externally visible FUNC. No loader or constructor is invoked.
+- Red/green evidence: before the check, the validator accepted an artifact missing `prdb_query_descriptor_v3`; `elf_dependency_reader_checks_loaded_names_without_loading_the_artifact` failed at the expected assertion. The test also covers an object symbol exported with FUNC type. Both pass with the check enabled.
+- Toolchain evidence: the configured TinyCC 0.9.27-unstable-2025-01-06 output for a shared object using `puts` contained `libc.so.6`, `ld-linux-x86-64.so.2`, both SysV/GNU hash tables, and the required ABI-named exports. A temporary Rust validation harness accepted it when the manifest and profile declared those dependencies.
+- Verification: manifest-focused tests and full workspace build, formatting, warning-denied Clippy, all workspace tests, and `git diff --check` passed. The engine library had 34 passing unit tests; the commit target had 109 passing and 2 pre-existing cgroup/TinyCC fixture tests ignored.
+- Remaining: supervisor executable integration and confined query execution acceptance remain open.

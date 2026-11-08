@@ -115,7 +115,16 @@ impl SubmissionMetadataValidator for VersionedSubmissionMetadataValidator {
         let Ok(manifest) = decode_manifest_v1(&metadata.manifest) else {
             return false;
         };
-        decode_elf_needed_dependencies(artifact).is_ok_and(|dependencies| {
+        decode_elf_needed_dependencies_internal(
+            artifact,
+            Some((
+                &manifest.descriptor_symbol,
+                1,
+                &manifest.entry_point_symbol,
+                2,
+            )),
+        )
+        .is_ok_and(|dependencies| {
             dependencies.into_iter().collect::<HashSet<_>>()
                 == manifest.dependencies.into_iter().collect::<HashSet<_>>()
         })
@@ -216,6 +225,13 @@ fn abi_symbols(abi: u8) -> (&'static str, &'static str) {
 /// Read the ELF64 dynamic dependency table without mapping or loading the
 /// artifact. Only the Linux x86_64 ET_DYN profile is accepted.
 pub fn decode_elf_needed_dependencies(artifact: &[u8]) -> Result<Vec<String>, ManifestError> {
+    decode_elf_needed_dependencies_internal(artifact, None)
+}
+
+fn decode_elf_needed_dependencies_internal(
+    artifact: &[u8],
+    required_symbols: Option<(&str, u8, &str, u8)>,
+) -> Result<Vec<String>, ManifestError> {
     if artifact.len() < 64
         || &artifact[..4] != b"\x7fELF"
         || artifact[4] != 2
@@ -284,6 +300,9 @@ pub fn decode_elf_needed_dependencies(artifact: &[u8]) -> Result<Vec<String>, Ma
     let mut needed_offsets = Vec::new();
     let mut string_table = None;
     let mut string_table_size = None;
+    let mut symbol_table = None;
+    let mut symbol_entry_size = None;
+    let mut hash_table = None;
     let mut found_null = false;
     for index in 0..dynamic.file_size / 16 {
         let entry = dynamic.offset + index * 16;
@@ -295,12 +314,15 @@ pub fn decode_elf_needed_dependencies(artifact: &[u8]) -> Result<Vec<String>, Ma
                 break;
             }
             1 => needed_offsets.push(value),
+            4 if hash_table.replace(value).is_none() => {}
+            6 if symbol_table.replace(value).is_none() => {}
             5 if string_table.replace(value).is_none() => {}
             10 if string_table_size.replace(value).is_none() => {}
+            11 if symbol_entry_size.replace(value).is_none() => {}
             15 | 29 | 0x6fff_fefb | 0x6fff_fefc | 0x7fff_fffd | 0x7fff_ffff => {
                 return Err(ManifestError::InvalidArtifact);
             }
-            5 | 10 => return Err(ManifestError::InvalidArtifact),
+            4 | 5 | 6 | 10 | 11 => return Err(ManifestError::InvalidArtifact),
             _ => {}
         }
     }
@@ -322,6 +344,21 @@ pub fn decode_elf_needed_dependencies(artifact: &[u8]) -> Result<Vec<String>, Ma
     let table = artifact
         .get(string_table_offset..string_table_end)
         .ok_or(ManifestError::InvalidArtifact)?;
+    if let Some(required_symbols) = required_symbols {
+        let hash_address = hash_table.ok_or(ManifestError::InvalidArtifact)?;
+        let symbol_table_address = symbol_table.ok_or(ManifestError::InvalidArtifact)?;
+        if symbol_entry_size != Some(24) {
+            return Err(ManifestError::InvalidArtifact);
+        }
+        validate_required_dynamic_symbols(
+            artifact,
+            &load_segments,
+            hash_address,
+            symbol_table_address,
+            table,
+            required_symbols,
+        )?;
+    }
     let mut dependencies = Vec::with_capacity(needed_offsets.len());
     let mut unique = HashSet::with_capacity(needed_offsets.len());
     for needed_offset in needed_offsets {
@@ -340,6 +377,98 @@ pub fn decode_elf_needed_dependencies(artifact: &[u8]) -> Result<Vec<String>, Ma
     }
     dependencies.sort();
     Ok(dependencies)
+}
+
+fn validate_required_dynamic_symbols(
+    artifact: &[u8],
+    load_segments: &[ElfSegment],
+    hash_address: u64,
+    symbol_table_address: u64,
+    string_table: &[u8],
+    required: (&str, u8, &str, u8),
+) -> Result<(), ManifestError> {
+    const MAX_DYNAMIC_SYMBOLS: usize = 262_144;
+    let hash_header = map_virtual_address(hash_address, 8, load_segments)?;
+    let bucket_count = read_elf_u32(artifact, hash_header)? as usize;
+    let symbol_count = read_elf_u32(artifact, hash_header + 4)? as usize;
+    if bucket_count == 0 || symbol_count == 0 || symbol_count > MAX_DYNAMIC_SYMBOLS {
+        return Err(ManifestError::InvalidArtifact);
+    }
+    let hash_words = bucket_count
+        .checked_add(symbol_count)
+        .and_then(|count| count.checked_add(2))
+        .ok_or(ManifestError::InvalidArtifact)?;
+    let hash_size = hash_words
+        .checked_mul(4)
+        .ok_or(ManifestError::InvalidArtifact)?;
+    let hash_offset = map_virtual_address(hash_address, hash_size, load_segments)?;
+    let hash_end = hash_offset
+        .checked_add(hash_size)
+        .ok_or(ManifestError::InvalidArtifact)?;
+    let hash_bytes = artifact
+        .get(hash_offset..hash_end)
+        .ok_or(ManifestError::InvalidArtifact)?;
+    for chunk in hash_bytes[8..].chunks_exact(4) {
+        let index = u32::from_le_bytes(
+            chunk
+                .try_into()
+                .map_err(|_| ManifestError::InvalidArtifact)?,
+        ) as usize;
+        if index >= symbol_count {
+            return Err(ManifestError::InvalidArtifact);
+        }
+    }
+
+    let symbol_table_size = symbol_count
+        .checked_mul(24)
+        .ok_or(ManifestError::InvalidArtifact)?;
+    let symbol_table_offset =
+        map_virtual_address(symbol_table_address, symbol_table_size, load_segments)?;
+    let symbol_table_end = symbol_table_offset
+        .checked_add(symbol_table_size)
+        .ok_or(ManifestError::InvalidArtifact)?;
+    let symbol_table = artifact
+        .get(symbol_table_offset..symbol_table_end)
+        .ok_or(ManifestError::InvalidArtifact)?;
+    let mut descriptor_found = false;
+    let mut entry_found = false;
+    for index in 0..symbol_count {
+        let symbol = &symbol_table[index * 24..(index + 1) * 24];
+        let name_offset = u32::from_le_bytes(
+            symbol[0..4]
+                .try_into()
+                .map_err(|_| ManifestError::InvalidArtifact)?,
+        ) as usize;
+        if name_offset == 0 {
+            continue;
+        }
+        let name_suffix = string_table
+            .get(name_offset..)
+            .ok_or(ManifestError::InvalidArtifact)?;
+        let name_end = name_suffix
+            .iter()
+            .position(|byte| *byte == 0)
+            .ok_or(ManifestError::InvalidArtifact)?;
+        let name = &name_suffix[..name_end];
+        let binding = symbol[4] >> 4;
+        let kind = symbol[4] & 0x0f;
+        let visibility = symbol[5] & 0x03;
+        let section_index = u16::from_le_bytes(
+            symbol[6..8]
+                .try_into()
+                .map_err(|_| ManifestError::InvalidArtifact)?,
+        );
+        if !matches!(binding, 1 | 2) || !matches!(visibility, 0 | 3) || section_index == 0 {
+            continue;
+        }
+        descriptor_found |= name == required.0.as_bytes() && kind == required.1;
+        entry_found |= name == required.2.as_bytes() && kind == required.3;
+    }
+    if descriptor_found && entry_found {
+        Ok(())
+    } else {
+        Err(ManifestError::InvalidArtifact)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -577,16 +706,33 @@ mod tests {
     }
 
     fn elf_with_dependencies(dependencies: &[&str]) -> Vec<u8> {
+        elf_with_dependencies_and_symbols(
+            dependencies,
+            &[("prdb_query_descriptor_v3", 1), ("prdb_query_main_v3", 2)],
+        )
+    }
+
+    fn elf_with_dependencies_and_symbols(dependencies: &[&str], symbols: &[(&str, u8)]) -> Vec<u8> {
         let program_headers_offset = 64usize;
         let dynamic_offset = program_headers_offset + 2 * 56;
-        let dynamic_entry_count = dependencies.len() + 3;
+        let dynamic_entry_count = dependencies.len() + 6;
         let dynamic_size = dynamic_entry_count * 16;
-        let string_table_offset = dynamic_offset + dynamic_size;
+        let symbol_table_offset = dynamic_offset + dynamic_size;
+        let symbol_table_size = (symbols.len() + 1) * 24;
+        let hash_table_offset = symbol_table_offset + symbol_table_size;
+        let hash_table_size = 8 + 4 * (1 + symbols.len() + 1);
+        let string_table_offset = hash_table_offset + hash_table_size;
         let mut strings = vec![0];
         let mut dependency_offsets = Vec::new();
         for dependency in dependencies {
             dependency_offsets.push(strings.len() as u64);
             strings.extend_from_slice(dependency.as_bytes());
+            strings.push(0);
+        }
+        let mut symbol_offsets = Vec::new();
+        for (symbol, _) in symbols {
+            symbol_offsets.push(strings.len() as u32);
+            strings.extend_from_slice(symbol.as_bytes());
             strings.push(0);
         }
         let file_size = string_table_offset + strings.len();
@@ -625,12 +771,34 @@ mod tests {
             bytes[entry + 8..entry + 16].copy_from_slice(&value.to_le_bytes());
             entry += 16;
         };
+        write_dynamic(4, hash_table_offset as u64);
+        write_dynamic(6, symbol_table_offset as u64);
         write_dynamic(5, string_table_offset as u64);
         write_dynamic(10, strings.len() as u64);
+        write_dynamic(11, 24);
         for offset in dependency_offsets {
             write_dynamic(1, offset);
         }
         write_dynamic(0, 0);
+
+        let hash = hash_table_offset;
+        bytes[hash..hash + 4].copy_from_slice(&1u32.to_le_bytes());
+        bytes[hash + 4..hash + 8]
+            .copy_from_slice(&u32::try_from(symbols.len() + 1).unwrap().to_le_bytes());
+        bytes[hash + 8..hash + 12].copy_from_slice(&u32::from(!symbols.is_empty()).to_le_bytes());
+
+        for (index, ((_, symbol_type), name_offset)) in
+            symbols.iter().zip(symbol_offsets).enumerate()
+        {
+            let symbol_offset = symbol_table_offset + (index + 1) * 24;
+            bytes[symbol_offset..symbol_offset + 4].copy_from_slice(&name_offset.to_le_bytes());
+            bytes[symbol_offset + 4] = (1 << 4) | symbol_type;
+            bytes[symbol_offset + 6..symbol_offset + 8].copy_from_slice(&1u16.to_le_bytes());
+            bytes[symbol_offset + 8..symbol_offset + 16].copy_from_slice(&0x1000u64.to_le_bytes());
+            bytes[symbol_offset + 16..symbol_offset + 24].copy_from_slice(&8u64.to_le_bytes());
+            let chain_offset = hash + 12 + (index + 1) * 4;
+            bytes[chain_offset..chain_offset + 4].copy_from_slice(&0u32.to_le_bytes());
+        }
         bytes[string_table_offset..].copy_from_slice(&strings);
         bytes
     }
@@ -778,6 +946,20 @@ mod tests {
         assert!(
             !validator.validate_artifact(&valid_metadata, &elf_with_dependencies(&["libc.so.6"]))
         );
+        assert!(!validator.validate_artifact(
+            &valid_metadata,
+            &elf_with_dependencies_and_symbols(
+                &["libc.so.6", "libm.so.6"],
+                &[("prdb_query_main_v3", 2)],
+            )
+        ));
+        assert!(!validator.validate_artifact(
+            &valid_metadata,
+            &elf_with_dependencies_and_symbols(
+                &["libc.so.6", "libm.so.6"],
+                &[("prdb_query_descriptor_v3", 2), ("prdb_query_main_v3", 2),],
+            )
+        ));
     }
 
     #[test]
