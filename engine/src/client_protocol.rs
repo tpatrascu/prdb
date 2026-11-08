@@ -6209,6 +6209,12 @@ impl ClientFrameDecoder {
     }
 }
 
+impl Drop for ClientFrameDecoder {
+    fn drop(&mut self) {
+        self.pending_payload.zeroize();
+    }
+}
+
 impl ClientFrame {
     pub fn encode(&self) -> Result<Vec<u8>, ClientFrameError> {
         let header = Header {

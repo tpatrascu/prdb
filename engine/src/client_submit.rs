@@ -109,6 +109,22 @@ pub struct AdminOperationResult {
     pub commit_sequence: u64,
 }
 
+/// One-time token material returned only by a successful token issuance.
+/// The secret is zeroized when this value is dropped and is omitted from Debug.
+pub struct AdminTokenResult {
+    pub operation_id: [u8; 16],
+    pub token_id: [u8; 16],
+    token_secret: Zeroizing<[u8; TOKEN_SECRET_BYTES]>,
+    pub commit_sequence: u64,
+}
+
+impl AdminTokenResult {
+    /// Borrow the one-time bearer secret for secure storage or immediate use.
+    pub fn token_secret(&self) -> &[u8; TOKEN_SECRET_BYTES] {
+        &self.token_secret
+    }
+}
+
 /// One bounded page from a permission-filtered metadata query.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MetadataPage<T> {
@@ -489,9 +505,9 @@ impl SubmissionClient {
         if let Some(frame) = self.pending_frames.pop_front() {
             return Ok(frame);
         }
-        let mut input = [0u8; 8192];
+        let mut input = Zeroizing::new([0u8; 8192]);
         loop {
-            let count = self.stream.read(&mut input)?;
+            let count = self.stream.read(&mut input[..])?;
             if count == 0 {
                 self.decoder.finish()?;
                 return Err(ClientSubmitError::InvalidResponse);
@@ -856,6 +872,108 @@ impl AdminClient {
         self.change_role_membership("roles.revoke", member_id, role_id)
     }
 
+    /// Issue a bearer token. The plaintext secret is returned once and zeroized
+    /// when the result is dropped; a lost START response cannot be recovered.
+    pub fn issue_token(
+        &mut self,
+        user_id: [u8; 16],
+        label: &str,
+        expires_at_us: i64,
+    ) -> Result<AdminTokenResult, ClientSubmitError> {
+        validate_admin_id(user_id)?;
+        if label.is_empty() || label.len() > 128 || expires_at_us <= 0 {
+            return Err(ClientSubmitError::InvalidAdministrativeRequest);
+        }
+        let arguments = format!(
+            "{{\"user_id\":\"{}\",\"label\":{},\"expires_at_us\":\"{expires_at_us}\"}}",
+            lower_hex(&user_id),
+            json_quote(label)
+        );
+        let prepare = format!(
+            "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"tokens.issue\",\"arguments\":{arguments}}}"
+        );
+        let prepared = self.transport.exchange(10, prepare.into_bytes())?;
+        let fields = parse_flat_response(&prepared.payload)?;
+        let operation_id = response_id(&fields, "operation_id")?;
+        if fields.len() != 2 || take_string(&fields, "state").as_deref() != Some("prepared") {
+            return Err(ClientSubmitError::InvalidResponse);
+        }
+        let start = format!(
+            "{{\"phase\":\"start\",\"operation_id\":\"{}\"}}",
+            lower_hex(&operation_id)
+        );
+        let mut started = match self.transport.exchange(10, start.into_bytes()) {
+            Ok(response) => response,
+            Err(ClientSubmitError::ServerRejected(message)) => {
+                return Err(ClientSubmitError::AdministrativeOperationRejected {
+                    operation_id,
+                    message,
+                });
+            }
+            Err(_) => {
+                return Err(ClientSubmitError::AdministrativeOutcomeUncertain(
+                    operation_id,
+                ));
+            }
+        };
+        let parsed = parse_flat_response(&started.payload);
+        started.payload.zeroize();
+        let mut fields =
+            parsed.map_err(|_| ClientSubmitError::AdministrativeOutcomeUncertain(operation_id))?;
+        let secret_text = match fields.remove("token_secret") {
+            Some(ResponseValue::String(value)) => Zeroizing::new(value),
+            _ => {
+                return Err(ClientSubmitError::AdministrativeOutcomeUncertain(
+                    operation_id,
+                ));
+            }
+        };
+        let token_id = response_id(&fields, "token_id").ok();
+        let response_operation_id = response_id(&fields, "operation_id").ok();
+        let outcome = fields.get("outcome").and_then(ResponseValue::as_string);
+        let sequence = fields
+            .get("commit_sequence")
+            .and_then(ResponseValue::as_string)
+            .and_then(|text| parse_canonical_positive_u64(text.to_owned()));
+        let token_secret = decode_token_secret(&secret_text);
+        if fields.len() != 4
+            || token_id.is_none()
+            || response_operation_id != Some(operation_id)
+            || outcome != Some("committed")
+            || sequence.is_none()
+            || token_secret.is_none()
+        {
+            return Err(ClientSubmitError::AdministrativeOutcomeUncertain(
+                operation_id,
+            ));
+        }
+        Ok(AdminTokenResult {
+            operation_id,
+            token_id: token_id.ok_or(ClientSubmitError::AdministrativeOutcomeUncertain(
+                operation_id,
+            ))?,
+            token_secret: token_secret.ok_or(ClientSubmitError::AdministrativeOutcomeUncertain(
+                operation_id,
+            ))?,
+            commit_sequence: sequence.ok_or(ClientSubmitError::AdministrativeOutcomeUncertain(
+                operation_id,
+            ))?,
+        })
+    }
+
+    pub fn revoke_token(
+        &mut self,
+        token_id: [u8; 16],
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        validate_admin_id(token_id)?;
+        self.execute_admin_operation(
+            "tokens.revoke",
+            format!("{{\"token_id\":\"{}\"}}", lower_hex(&token_id)),
+            None,
+        )
+        .map(|(result, _)| result)
+    }
+
     fn create_identity(
         &mut self,
         operation: &str,
@@ -1189,6 +1307,65 @@ fn validate_admin_id(id: [u8; 16]) -> Result<(), ClientSubmitError> {
     } else {
         Ok(())
     }
+}
+
+fn json_quote(text: &str) -> String {
+    let mut quoted = String::with_capacity(text.len() + 2);
+    quoted.push('"');
+    for character in text.chars() {
+        match character {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            '\t' => quoted.push_str("\\t"),
+            character if character <= '\u{1f}' => {
+                use std::fmt::Write as _;
+                let _ = write!(quoted, "\\u{:04x}", character as u32);
+            }
+            character => quoted.push(character),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
+fn decode_token_secret(text: &str) -> Option<Zeroizing<[u8; TOKEN_SECRET_BYTES]>> {
+    if text.len() != 44 || !text.is_ascii() || !text.ends_with('=') {
+        return None;
+    }
+    let mut secret = Zeroizing::new([0; TOKEN_SECRET_BYTES]);
+    let mut accumulator = Zeroizing::new(0u32);
+    let mut bit_count = 0u8;
+    let mut output_index = 0usize;
+    for byte in text.bytes().take(43) {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+        *accumulator = (*accumulator << 6) | u32::from(value);
+        bit_count += 6;
+        if bit_count >= 8 {
+            bit_count -= 8;
+            if output_index >= secret.len() {
+                return None;
+            }
+            secret[output_index] = (*accumulator >> bit_count) as u8;
+            output_index += 1;
+        }
+    }
+    if output_index != TOKEN_SECRET_BYTES
+        || bit_count != 2
+        || (*accumulator & 0b11) != 0
+        || encode_base64(secret.as_ref()) != text
+    {
+        return None;
+    }
+    Some(secret)
 }
 
 fn discovery_records(
@@ -1681,9 +1858,9 @@ fn hex_nibble(byte: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClientSubmitError, ResponseValue, decode_hex_array, is_normalized_index_name,
-        parse_canonical_positive_u64, parse_flat_response, validate_admin_id, validate_admin_name,
-        validate_index_request,
+        ClientSubmitError, ResponseValue, decode_hex_array, decode_token_secret,
+        is_normalized_index_name, parse_canonical_positive_u64, parse_flat_response,
+        validate_admin_id, validate_admin_name, validate_index_request,
     };
 
     #[test]
@@ -1728,6 +1905,17 @@ mod tests {
             validate_admin_id([0; 16]),
             Err(ClientSubmitError::InvalidAdministrativeRequest)
         ));
+    }
+
+    #[test]
+    fn one_time_token_secret_decoder_requires_canonical_fixed_width_base64() {
+        assert_eq!(
+            decode_token_secret("paWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaU=").as_deref(),
+            Some(&[0xa5; 32])
+        );
+        assert!(decode_token_secret("paWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaU").is_none());
+        assert!(decode_token_secret("p=WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaU=").is_none());
+        assert!(decode_token_secret("paWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaV=").is_none());
     }
 
     #[test]

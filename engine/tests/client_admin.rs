@@ -307,6 +307,76 @@ fn admin_client_sends_typed_user_and_role_lifecycle_requests() {
     server.join().unwrap();
 }
 
+#[test]
+fn admin_client_issues_one_time_token_and_revokes_tokens() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut decoder = ClientFrameDecoder::default();
+        establish_control_session(&mut stream, &mut decoder);
+        for (operation, arguments, operation_id) in [
+            (
+                "tokens.issue",
+                r#"{"user_id":"01010101010101010101010101010101","label":"daily \"alpha\"","expires_at_us":"123456"}"#,
+                [0x41; 16],
+            ),
+            (
+                "tokens.revoke",
+                r#"{"token_id":"a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2"}"#,
+                [0x42; 16],
+            ),
+        ] {
+            let prepare = read_frame(&mut stream, &mut decoder);
+            assert_eq!(prepare.kind, 10);
+            let payload = String::from_utf8(prepare.payload.clone()).unwrap();
+            assert!(payload.contains(&format!("\"operation\":\"{operation}\"")));
+            assert!(payload.contains(&format!("\"arguments\":{arguments}")));
+            respond(
+                &mut stream,
+                &prepare,
+                format!(
+                    "{{\"operation_id\":\"{}\",\"state\":\"prepared\"}}",
+                    hex(&operation_id)
+                )
+                .as_bytes(),
+            );
+            let start = read_frame(&mut stream, &mut decoder);
+            assert_eq!(start.kind, 10);
+            let result = if operation == "tokens.issue" {
+                format!(
+                    "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"token_id\":\"{}\",\"token_secret\":\"paWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaU=\",\"commit_sequence\":\"21\"}}",
+                    hex(&operation_id),
+                    "a2".repeat(16)
+                )
+            } else {
+                format!(
+                    "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"commit_sequence\":\"22\"}}",
+                    hex(&operation_id)
+                )
+            };
+            respond(&mut stream, &start, result.as_bytes());
+        }
+    });
+
+    let mut secret = [5; 32];
+    let mut client = AdminClient::connect_authenticated_with_timeout(
+        address,
+        [6; 16],
+        &mut secret,
+        Duration::from_secs(3),
+    )
+    .unwrap();
+    let issued = client
+        .issue_token([1; 16], "daily \"alpha\"", 123456)
+        .unwrap();
+    assert_eq!(issued.token_id, [0xa2; 16]);
+    assert_eq!(issued.token_secret(), &[0xa5; 32]);
+    assert_eq!(issued.commit_sequence, 21);
+    client.revoke_token(issued.token_id).unwrap();
+    server.join().unwrap();
+}
+
 fn hex(id: &[u8; 16]) -> String {
     id.iter().map(|byte| format!("{byte:02x}")).collect()
 }
