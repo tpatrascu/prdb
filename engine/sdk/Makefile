@@ -24,6 +24,7 @@ SDK_SQL_V2_TEST := $(BUILD_DIR)/sdk-sql-select-v2
 SDK_PLANNER_TEST := $(BUILD_DIR)/sdk-planner-v1
 SDK_EXECUTOR_TEST := $(BUILD_DIR)/sdk-executor-v1
 SDK_SQL_EXEC_TEST := $(BUILD_DIR)/sdk-sql-execute-v2
+SQL_V3_CAUGHT_ERROR_QUERY := $(BUILD_DIR)/sql-v3-caught-error.so
 
 .PHONY: all test
 
@@ -76,6 +77,14 @@ $(SDK_EXECUTOR_TEST): engine/tests/fixtures/sdk_executor_v1.c $(SDK_ARCHIVE) $(I
 
 $(SDK_SQL_EXEC_TEST): engine/tests/fixtures/sdk_sql_execute_v2.c $(SDK_ARCHIVE) $(INCLUDE_DIR)/prdb_sdk_sql_exec_v2.h $(INCLUDE_DIR)/prdb_sdk_executor_v1.h $(INCLUDE_DIR)/prdb_sdk_planner_v1.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" "$<" "$(SDK_ARCHIVE)" -o "$@"
+
+# This is an untrusted query artifact. Build it for the Rust sandbox launcher;
+# never execute it with tcc -run or load it from a trusted test process.
+$(SQL_V3_CAUGHT_ERROR_QUERY): engine/tests/fixtures/sql_v3_caught_error.c $(SDK_ARCHIVE) $(INCLUDE_DIR)/prdb_query_abi_v3.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v2.h | $(BUILD_DIR)
+	$(TCC) -Wall -Wextra -Werror -shared -I"$(INCLUDE_DIR)" "$<" "$(SDK_ARCHIVE)" -o "$@"
+
+.PHONY: sandbox-query-fixture
+sandbox-query-fixture: $(SQL_V3_CAUGHT_ERROR_QUERY)
 
 test: $(SDK_VALUE_TEST) $(SDK_BATCH_TEST) $(SDK_SQL_TEST) $(SDK_SQL_EXPRESSION_TEST) $(SDK_SQL_V2_TEST) $(SDK_PLANNER_TEST) $(SDK_EXECUTOR_TEST) $(SDK_SQL_EXEC_TEST)
 	"$(SDK_VALUE_TEST)"
