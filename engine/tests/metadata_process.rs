@@ -413,6 +413,7 @@ fn disconnected_submission_is_reconciled_after_gateway_restart()
     drop(client);
 
     let (mut replacement_gateway, replacement_address) = start_gateway(&service_socket, uid)?;
+    let mut restart_secret = status_secret;
     let mut status_client =
         SubmissionClient::connect_authenticated(replacement_address, token_id, &mut status_secret)?;
     let status_deadline = Instant::now() + Duration::from_secs(10);
@@ -435,6 +436,85 @@ fn disconnected_submission_is_reconciled_after_gateway_restart()
     drop(status_client);
     assert!(replacement_gateway.stop()?.success());
     assert!(supervisor.stop()?.success());
+    assert!(!service_socket.exists(), "supervisor left a stale socket");
+
+    let mut restarted_supervisor_command = Command::new(env!("CARGO_BIN_EXE_prdb-supervisor"));
+    restarted_supervisor_command.args([
+        "--instance-dir",
+        instance_dir.to_str().ok_or("non-UTF-8 instance path")?,
+        "--service-socket",
+        service_socket.to_str().ok_or("non-UTF-8 socket path")?,
+        "--gateway-uid",
+        &uid_string,
+        "--cgroup-parent",
+        cgroup_string,
+        "--executor",
+        env!("CARGO_BIN_EXE_prdb-executor"),
+        "--scratch-parent",
+        root.to_str().ok_or("non-UTF-8 scratch path")?,
+        "--cpu-baseline",
+        "x86_64-v1",
+        "--runtime-profile",
+        "test-runtime",
+        "--sdk-release",
+        "1",
+        "--retention-seconds",
+        "3600",
+        "--max-rows",
+        "8",
+        "--max-bytes",
+        "4096",
+        "--cpu-quota-us",
+        "100000",
+        "--cpu-period-us",
+        "100000",
+        "--memory-max-bytes",
+        "67108864",
+        "--max-processes",
+        "16",
+    ]);
+    for path in required_paths("PRDB_TEST_RUNTIME_READ_EXECUTE")? {
+        restarted_supervisor_command
+            .arg("--runtime-read-execute")
+            .arg(path);
+    }
+    for path in required_paths("PRDB_TEST_RUNTIME_READ_ONLY")? {
+        restarted_supervisor_command
+            .arg("--runtime-read-only")
+            .arg(path);
+    }
+    for dependency in &manifest_value.dependencies {
+        restarted_supervisor_command
+            .arg("--allowed-dependency")
+            .arg(dependency);
+    }
+    let mut restarted_supervisor = ChildGuard(Some(
+        restarted_supervisor_command
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()?,
+    ));
+    let restart_deadline = Instant::now() + Duration::from_secs(5);
+    while !service_socket.exists() {
+        if let Some(status) = restarted_supervisor.child().try_wait()? {
+            return Err(format!("restarted supervisor exited before binding: {status}").into());
+        }
+        if Instant::now() >= restart_deadline {
+            return Err("restarted supervisor did not bind its service socket".into());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let (mut recovered_gateway, recovered_address) = start_gateway(&service_socket, uid)?;
+    let mut recovered_status_client =
+        SubmissionClient::connect_authenticated(recovered_address, token_id, &mut restart_secret)?;
+    assert_eq!(
+        recovered_status_client.status(invocation_id)?,
+        InvocationStatus::Aborted,
+        "ABORTED must survive closing and reopening the storage process"
+    );
+    drop(recovered_status_client);
+    assert!(recovered_gateway.stop()?.success());
+    assert!(restarted_supervisor.stop()?.success());
     Ok(())
 }
 
