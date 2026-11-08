@@ -1,19 +1,25 @@
+use prdb_engine::authorization::Operation;
 use prdb_engine::client_credentials::read_client_credentials;
+use prdb_engine::client_submit::MetadataClient;
 use prdb_engine::client_submit::{
     ClientResultEvent, InvocationStatus, SubmissionClient, TerminalOutcome,
 };
+use prdb_engine::submission_scope::RequestedScopeBuilder;
 use prdb_engine::supervisor::{MAX_PARAMETER_BYTES, WorkloadClass};
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 
 const USAGE: &str = "Usage:\n\
   prdb-client submit --address IP:PORT --credentials FILE --package DIR --receipt FILE \\\n    [--parameters FILE] [--deadline-ms N] [--workload operational|analytical]\n\
   prdb-client status --address IP:PORT --credentials FILE --invocation-id HEX\n\n\
+  prdb-client scope --address IP:PORT --credentials FILE --schema NAME --output FILE \\\n    [--relation NAME --operations select,insert,update,delete [--columns NAME,...]]\n\n\
 Submission output is provisional until a committed terminal event. START is never retried;\n\
-if its reply is uncertain, use status with the invocation ID and a newly authenticated connection.";
+if its reply is uncertain, use status with the invocation ID and a newly authenticated connection.\n\
+Scope files contain only permissions visible to the authenticated identity and remain a request ceiling.";
 
 fn main() -> std::process::ExitCode {
     match run() {
@@ -64,8 +70,179 @@ fn run() -> Result<(), String> {
     match command.as_str() {
         "submit" => submit(address, credentials_path, &mut fields),
         "status" => status(address, credentials_path, &mut fields),
+        "scope" => scope(address, credentials_path, &mut fields),
         _ => Err(format!("unknown command {command}\n{USAGE}")),
     }
+}
+
+fn scope(
+    address: SocketAddr,
+    credentials_path: PathBuf,
+    fields: &mut HashMap<String, std::ffi::OsString>,
+) -> Result<(), String> {
+    let schema_name = take_text(fields, "--schema")?;
+    let output_path = take_path(fields, "--output")?;
+    let relation_name = fields
+        .remove("--relation")
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| "--relation must be UTF-8".to_owned())
+        })
+        .transpose()?;
+    let operations = fields
+        .remove("--operations")
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| "--operations must be UTF-8".to_owned())
+                .and_then(|value| parse_operations(&value))
+        })
+        .transpose()?;
+    let column_names = fields
+        .remove("--columns")
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| "--columns must be UTF-8".to_owned())
+                .and_then(|value| split_names(&value, "--columns"))
+        })
+        .transpose()?;
+    reject_unknown(fields)?;
+    if relation_name.is_none() && (operations.is_some() || column_names.is_some()) {
+        return Err("--operations and --columns require --relation".to_owned());
+    }
+    if relation_name.is_some() && operations.is_none() {
+        return Err("--relation requires --operations".to_owned());
+    }
+    if column_names.is_some() && relation_name.is_none() {
+        return Err("--columns requires --relation".to_owned());
+    }
+
+    let mut credentials =
+        read_client_credentials(credentials_path).map_err(|error| error.to_string())?;
+    let mut client = MetadataClient::connect_authenticated(
+        address,
+        credentials.token_id,
+        &mut credentials.token_secret,
+    )
+    .map_err(|error| error.to_string())?;
+    let schemas = client.list_schemas().map_err(|error| error.to_string())?;
+    let schema = schemas
+        .iter()
+        .find(|schema| schema.name == schema_name)
+        .ok_or_else(|| format!("schema {schema_name:?} is not visible"))?;
+    let mut builder = RequestedScopeBuilder::new();
+    match relation_name {
+        None => builder
+            .include_schema(schema)
+            .map_err(|error| format!("invalid requested scope: {error:?}"))?,
+        Some(relation_name) => {
+            let relations = client
+                .list_relations(schema.schema_id)
+                .map_err(|error| error.to_string())?;
+            let relation = relations
+                .iter()
+                .find(|relation| relation.name == relation_name)
+                .ok_or_else(|| format!("relation {relation_name:?} is not visible"))?;
+            let operations = operations.expect("validated relation operation list");
+            match column_names {
+                None => builder
+                    .include_relation(schema, relation, &operations)
+                    .map_err(|error| format!("invalid requested scope: {error:?}"))?,
+                Some(column_names) => {
+                    let columns = client
+                        .list_columns(schema.schema_id, relation.relation_id)
+                        .map_err(|error| error.to_string())?;
+                    for name in column_names {
+                        let column = columns
+                            .iter()
+                            .find(|column| column.name == name)
+                            .ok_or_else(|| format!("column {name:?} is not visible"))?;
+                        builder
+                            .include_column(schema, relation, column, &operations)
+                            .map_err(|error| format!("invalid requested scope: {error:?}"))?;
+                    }
+                }
+            }
+        }
+    }
+    let bytes = builder
+        .encode()
+        .map_err(|error| format!("invalid requested scope: {error:?}"))?;
+    write_scope_file(&output_path, &bytes)?;
+    let count = u16::from_be_bytes([bytes[4], bytes[5]]);
+    println!("wrote {} capabilities to {}", count, output_path.display());
+    Ok(())
+}
+
+fn parse_operations(value: &str) -> Result<Vec<Operation>, String> {
+    let mut operations = Vec::new();
+    for name in split_names(value, "--operations")? {
+        let operation = match name.as_str() {
+            "select" => Operation::Select,
+            "insert" => Operation::Insert,
+            "update" => Operation::Update,
+            "delete" => Operation::Delete,
+            _ => return Err(format!("unsupported operation {name:?}")),
+        };
+        if operations.contains(&operation) {
+            return Err(format!("duplicate operation {name:?}"));
+        }
+        operations.push(operation);
+    }
+    Ok(operations)
+}
+
+fn split_names(value: &str, option: &str) -> Result<Vec<String>, String> {
+    let names = value
+        .split(',')
+        .map(str::trim)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if names.is_empty() || names.iter().any(String::is_empty) {
+        return Err(format!("{option} must be a comma-separated nonempty list"));
+    }
+    let mut unique = names.clone();
+    unique.sort();
+    unique.dedup();
+    if unique.len() != names.len() {
+        return Err(format!("{option} contains a duplicate value"));
+    }
+    Ok(names)
+}
+
+fn write_scope_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let parent = fs::canonicalize(parent).map_err(|error| error.to_string())?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| "invalid --output path".to_owned())?;
+    let target = parent.join(name);
+    let mut random = [0u8; 16];
+    getrandom::fill(&mut random).map_err(|error| error.to_string())?;
+    let temporary = parent.join(format!(".psc1-{}.tmp", lower_hex(&random)));
+    random.fill(0);
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        fs::hard_link(&temporary, &target)?;
+        fs::remove_file(&temporary)?;
+        File::open(parent)?.sync_all()?;
+        Ok::<(), io::Error>(())
+    })();
+    let _ = fs::remove_file(&temporary);
+    result.map_err(|error| error.to_string())
 }
 
 fn submit(
@@ -259,6 +436,8 @@ fn status_name(status: InvocationStatus) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn invocation_id_parser_requires_canonical_nonzero_hex() {
@@ -266,5 +445,40 @@ mod tests {
         assert!(parse_id("0102030405060708090a0b0c0d0e0f1A").is_err());
         assert!(parse_id("00000000000000000000000000000000").is_err());
         assert!(parse_id("1").is_err());
+    }
+
+    #[test]
+    fn scope_operation_and_name_lists_are_strict() {
+        assert_eq!(
+            parse_operations("select,insert,delete").unwrap(),
+            vec![Operation::Select, Operation::Insert, Operation::Delete]
+        );
+        assert!(parse_operations("select,select").is_err());
+        assert!(parse_operations("usage").is_err());
+        assert!(split_names("id,name", "--columns").is_ok());
+        assert!(split_names("id,id", "--columns").is_err());
+        assert!(split_names("id,,name", "--columns").is_err());
+    }
+
+    #[test]
+    fn scope_file_is_private_and_never_overwritten() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("prdb-client-scope-{}-{nonce}", std::process::id()));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("requested.psc1");
+        write_scope_file(&path, b"PSC1test").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"PSC1test");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(write_scope_file(&path, b"replacement").is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"PSC1test");
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(directory).unwrap();
     }
 }

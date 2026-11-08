@@ -133,6 +133,14 @@
 - Verification: `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed in the pinned Nix shell. The commit integration target reported 124 passed and 3 cgroup-dependent ignored. The focused binary test and `prdb-client --help` check also passed.
 - Remaining: credential creation/rotation UX, authenticated metadata-based scope selection, admin CLI commands, and live ADMIN multi-process path tests remain open.
 
+## SDK-3 dependency: authenticated metadata scope CLI — implemented
+
+- Contract: [client SDK](../../specs/client-sdk.md) requires scope selection from authorized metadata records; PSC1 is a requested ceiling and never grants authority.
+- Implementation: `prdb-client scope` resolves exact schema/relation/column names using `MetadataClient`, selects schema USAGE and requested table/column operations through `RequestedScopeBuilder`, and atomically publishes a private no-overwrite PSC1 file.
+- Regression: CLI tests cover valid operation and column lists, duplicate/unsupported inputs, nonzero invocation parsing, and private no-overwrite PSC1 output. Existing metadata client and scope-builder suites cover protocol response validation and independent PSC1 decoding.
+- Verification: focused `prdb-client` tests passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed in the pinned Nix shell; the commit integration target reported 124 passed and 3 cgroup-dependent ignored. The existing authenticated metadata process test passed, and updated CLI help was inspected.
+- Remaining: credential creation/rotation UX, admin CLI commands, and live ADMIN multi-process path tests remain open.
+
 ## SDK-5 dependency: typed schema rename AdminClient operation — implemented
 
 - Contract: [client protocol](../../specs/client-protocol.md) requires `schemas.rename` START to echo the stable schema ID and normalized new name.
