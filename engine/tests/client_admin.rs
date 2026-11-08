@@ -441,6 +441,68 @@ fn admin_client_grants_and_revokes_database_system_privileges() {
     server.join().unwrap();
 }
 
+#[test]
+fn admin_client_creates_and_drops_schemas() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut decoder = ClientFrameDecoder::default();
+        establish_control_session(&mut stream, &mut decoder);
+        for (operation, arguments, operation_id, result) in [
+            (
+                "schemas.create",
+                r#"{"name":"analytics","owner_id":"01010101010101010101010101010101"}"#,
+                [0x61; 16],
+                format!(
+                    "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"schema_id\":\"{}\",\"commit_sequence\":\"41\"}}",
+                    hex(&[0x61; 16]),
+                    "a3".repeat(16)
+                ),
+            ),
+            (
+                "schemas.drop",
+                r#"{"schema_id":"a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3"}"#,
+                [0x62; 16],
+                format!(
+                    "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"schema_id\":\"{}\",\"commit_sequence\":\"42\"}}",
+                    hex(&[0x62; 16]),
+                    "a3".repeat(16)
+                ),
+            ),
+        ] {
+            let prepare = read_frame(&mut stream, &mut decoder);
+            let payload = String::from_utf8(prepare.payload.clone()).unwrap();
+            assert!(payload.contains(&format!("\"operation\":\"{operation}\"")));
+            assert!(payload.contains(&format!("\"arguments\":{arguments}")));
+            respond(
+                &mut stream,
+                &prepare,
+                format!(
+                    "{{\"operation_id\":\"{}\",\"state\":\"prepared\"}}",
+                    hex(&operation_id)
+                )
+                .as_bytes(),
+            );
+            let start = read_frame(&mut stream, &mut decoder);
+            respond(&mut stream, &start, result.as_bytes());
+        }
+    });
+
+    let mut secret = [5; 32];
+    let mut client = AdminClient::connect_authenticated_with_timeout(
+        address,
+        [6; 16],
+        &mut secret,
+        Duration::from_secs(3),
+    )
+    .unwrap();
+    let schema = client.create_schema("analytics", [1; 16]).unwrap();
+    assert_eq!(schema.identity_id, [0xa3; 16]);
+    client.drop_schema(schema.identity_id).unwrap();
+    server.join().unwrap();
+}
+
 fn hex(id: &[u8; 16]) -> String {
     id.iter().map(|byte| format!("{byte:02x}")).collect()
 }

@@ -1027,6 +1027,41 @@ impl AdminClient {
         .map(|(result, _)| result)
     }
 
+    pub fn create_schema(
+        &mut self,
+        name: &str,
+        owner_id: [u8; 16],
+    ) -> Result<AdminIdentityResult, ClientSubmitError> {
+        validate_admin_name(name)?;
+        validate_admin_id(owner_id)?;
+        let (result, schema_id) = self.execute_admin_operation(
+            "schemas.create",
+            format!(
+                "{{\"name\":\"{name}\",\"owner_id\":\"{}\"}}",
+                lower_hex(&owner_id)
+            ),
+            Some("schema_id"),
+        )?;
+        Ok(AdminIdentityResult {
+            operation_id: result.operation_id,
+            identity_id: schema_id.ok_or(ClientSubmitError::InvalidResponse)?,
+            commit_sequence: result.commit_sequence,
+        })
+    }
+
+    pub fn drop_schema(
+        &mut self,
+        schema_id: [u8; 16],
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        validate_admin_id(schema_id)?;
+        self.execute_admin_operation(
+            "schemas.drop",
+            format!("{{\"schema_id\":\"{}\"}}", lower_hex(&schema_id)),
+            Some("schema_id"),
+        )
+        .map(|(result, _)| result)
+    }
+
     fn create_identity(
         &mut self,
         operation: &str,
