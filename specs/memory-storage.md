@@ -35,6 +35,8 @@ Long read transactions retain historical copy-on-write pages and can delay redb 
 
 Canceling an asynchronous storage task cannot release a guard still used by work or IPC. Drain in-flight tasks before ending the read transaction and releasing overlay/results. Test large readers, process cancellation, memory growth, and compaction/reclamation with the pinned redb release.
 
+The current worker path uses synchronous request handling: planner and executor dispatch each request under the shared invocation mutex, and the supervisor keeps a channel lease until each handler returns. `serve_worker_channels` joins both handlers before it returns; worker-exit observation rejects while either lease is active. Cancellation and deadline checks use the same invocation mutex before aborting, so an active request finishes or returns before the transaction drops its snapshot. There are no detached asynchronous storage tasks in this path. Any future task queue or background scan must own an explicit snapshot/task pin and participate in cancellation drain before the invocation releases its snapshot.
+
 ## Optional Shared Results
 
 The baseline uses copied local IPC and TCP frames. A later sealed memfd may contain only sanitized invocation output and needs separate sandbox/capability review. It must not expose redb pages or become a generic database mapping.

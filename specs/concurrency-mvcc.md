@@ -72,6 +72,8 @@ Use bounded storage/optimizer work queues and admission limits globally and per 
 
 Cancellation marks a context closed, prevents new work, and waits for existing storage tasks to release references before reclaiming memory. Storage tasks hold snapshot/version pins independently of executor liveness. Use a documented latch order and short critical sections for indexes, version chains, caches, and context tables. Slow clients must cause backpressure without holding global locks. Shard data structures only after measuring contention.
 
+The current planner/executor path dispatches requests synchronously under the shared invocation mutex, holds a worker-channel lease for each handler, and joins both handlers before `serve_worker_channels` returns. Worker-exit observation rejects while a channel lease remains active. Cancellation and deadline handling acquire the same invocation mutex before aborting, which keeps the invocation snapshot alive until an active request returns. This is the current drain mechanism; any detached storage task must add an explicit task-owned snapshot pin and cancellation drain before it is introduced.
+
 ## Version Reclamation and Pressure
 
 Track all active snapshot pins, including optimizer estimates and background maintenance. Reclaim an obsolete committed version only when no pinned snapshot or in-flight task can observe it; clean abandoned private versions separately. Publish the safe reclamation frontier consistently with snapshot admission. Never free versions merely because a worker exited while its storage task is still running.

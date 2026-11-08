@@ -7367,3 +7367,75 @@ mod commit_cancellation_boundary_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod worker_storage_lifetime_tests {
+    use super::{SupervisorChannelState, SupervisorInvocation, SupervisorInvocationError};
+    use std::collections::HashSet;
+    use std::os::unix::net::UnixStream;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn worker_exit_waits_for_both_channel_handlers_to_drain()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let invocation = SupervisorInvocation {
+            invocation_id: [0x81; 16],
+            principal_id: [0x82; 16],
+            role_ids: HashSet::new(),
+            transaction: Arc::new(Mutex::new(None)),
+            channels: Arc::new(Mutex::new(SupervisorChannelState::default())),
+            deadline: None,
+        };
+        let (planner_worker, planner_storage) = UnixStream::pair()?;
+        let (executor_worker, executor_storage) = UnixStream::pair()?;
+
+        std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+            let service =
+                scope.spawn(|| invocation.serve_worker_channels(planner_storage, executor_storage));
+            let active_channel_deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let active = invocation
+                    .channels
+                    .lock()
+                    .map_err(|_| std::io::Error::other("channel state poisoned"))?
+                    .active_worker_channels;
+                if active == 2 {
+                    break;
+                }
+                assert!(Instant::now() < active_channel_deadline);
+                std::thread::yield_now();
+            }
+
+            let mut worker = std::process::Command::new("true").spawn()?;
+            assert!(matches!(
+                invocation.observe_worker_exit(&mut worker),
+                Err(SupervisorInvocationError::WorkerChannelsActive)
+            ));
+            drop(planner_worker);
+            drop(executor_worker);
+            let service_result = service
+                .join()
+                .map_err(|_| std::io::Error::other("worker-channel service panicked"))?;
+            assert!(
+                service_result.is_ok(),
+                "worker-channel service failed: {service_result:?}"
+            );
+            {
+                let channels = invocation.channels.lock().unwrap();
+                assert_eq!(channels.active_worker_channels, 0);
+                assert!(!channels.worker_exit_succeeded);
+                assert!(!channels.terminal_requested);
+            }
+            assert!(worker.wait()?.success());
+            let exit_result = invocation.observe_worker_exit(&mut worker);
+            assert!(
+                exit_result.is_ok(),
+                "worker exit observation failed: {exit_result:?}"
+            );
+            assert!(exit_result?.success());
+            Ok(())
+        })?;
+        Ok(())
+    }
+}

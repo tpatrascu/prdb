@@ -21,6 +21,13 @@
 - Verification: the focused real-redb cancellation test passed. The locked workspace build, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and full locked workspace tests all passed in the required Nix shell. The suite reports 106 commit tests passed and two sandbox SQL integration tests ignored because this host lacks a delegated cgroup.
 - Remaining: exercise cancellation at both sides of the irreversible redb commit boundary and verify drain behavior for in-flight storage tasks.
 
+## MV-8: synchronous worker-channel drain — verified
+
+- Contract: [concurrency and MVCC](../../specs/concurrency-mvcc.md) and [memory storage](../../specs/memory-storage.md). No request may outlive its invocation snapshot; worker exit and finalization wait until planner and executor handlers drain.
+- Implementation evidence: shared planner/executor dispatch holds the invocation mutex for each synchronous storage request. Each handler owns a channel lease, `serve_worker_channels` joins both handlers, and cancellation/deadline abort takes the same invocation mutex before dropping the transaction snapshot.
+- Regression: [`worker_exit_waits_for_both_channel_handlers_to_drain`](../../engine/src/storage_manager.rs) keeps both worker channels open, verifies exit observation rejects while their leases remain active, closes them, then verifies exit observation succeeds.
+- Limits: this confirms the synchronous worker-channel lifetime model. There are no detached storage tasks in this path; a future task queue or background scan needs an explicit owned snapshot pin and drain protocol. A test that pauses inside an actual storage operation while cancellation waits remains open.
+
 ## MV-6: cancellation arbitration at the durable commit boundary — in progress
 
 - Contract: [concurrency and MVCC](../../specs/concurrency-mvcc.md). Cancellation remains admissible while redb validates and stages a write transaction. The synchronized transition to COMMITTING now runs immediately before `WriteTransaction::commit`; cancellation accepted before that transition aborts the staged redb transaction and records ABORTED separately.
