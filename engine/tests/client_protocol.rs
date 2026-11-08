@@ -300,6 +300,38 @@ fn admin_revoke_decoder_requires_prepare_then_start_schemas() {
             identity_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
         })
     );
+    let check_eir =
+        prdb_engine::expression::encode_expression(&prdb_engine::authorization::Expr::Literal(
+            Some(prdb_engine::tuple::ScalarValue::Boolean(true)),
+        ))
+        .expect("encode CHECK fixture");
+    let check_eir_hex = check_eir
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert_eq!(
+        decode_client_admin_command(
+            format!(
+                "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"constraints.create_check\",\"arguments\":{{\"table_id\":\"000102030405060708090a0b0c0d0e0f\",\"expression_eir1\":\"{check_eir_hex}\",\"dependency_column_ids\":[]}}}}"
+            )
+            .as_bytes()
+        ),
+        Ok(ClientAdminCommand::PrepareCreateCheckConstraint {
+            table_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+            expression: prdb_engine::authorization::Expr::Literal(Some(
+                prdb_engine::tuple::ScalarValue::Boolean(true),
+            )),
+            dependency_column_ids: vec![],
+        })
+    );
+    assert_eq!(
+        decode_client_admin_command(
+            br#"{"phase":"prepare","operation_version":1,"operation":"constraints.drop_check","arguments":{"constraint_id":"000102030405060708090a0b0c0d0e0f"}}"#
+        ),
+        Ok(ClientAdminCommand::PrepareDropCheckConstraint {
+            constraint_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        })
+    );
     assert_eq!(
         decode_client_admin_command(
             br#"{"phase":"prepare","operation_version":1,"operation":"roles.drop","arguments":{"role_id":"000102030405060708090a0b0c0d0e0f"}}"#

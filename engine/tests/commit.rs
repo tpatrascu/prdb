@@ -10752,11 +10752,74 @@ fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
     )?;
     assert!(unique_create.contains("\"outcome\":\"committed\""));
     assert!(unique_create.contains("\"constraint_id\":"));
-    let foreign_key_create_prepare = admin_dispatch_json(
+    let check_eir = prdb_engine::expression::encode_expression(
+        &prdb_engine::authorization::Expr::Literal(Some(ScalarValue::Boolean(true))),
+    )?;
+    let check_eir_hex = check_eir
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let check_prepare = admin_dispatch_json(
         &storage,
         &staging,
         &mut foreign_key_control,
         51,
+        &format!(
+            "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"constraints.create_check\",\"arguments\":{{\"table_id\":\"{unique_table_id_wire}\",\"expression_eir1\":\"{check_eir_hex}\",\"dependency_column_ids\":[]}}}}"
+        ),
+        60_000_000,
+    )?;
+    let check_operation_id = check_prepare
+        .split("\"operation_id\":\"")
+        .nth(1)
+        .ok_or("missing ADMIN CHECK operation ID")?
+        .get(..32)
+        .ok_or("invalid ADMIN CHECK operation ID")?;
+    let check_create = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut foreign_key_control,
+        52,
+        &format!("{{\"phase\":\"start\",\"operation_id\":\"{check_operation_id}\"}}"),
+        60_000_000,
+    )?;
+    assert!(check_create.contains("\"outcome\":\"committed\""));
+    let check_constraint_id_wire = check_create
+        .split("\"constraint_id\":\"")
+        .nth(1)
+        .ok_or("missing created CHECK constraint ID")?
+        .get(..32)
+        .ok_or("invalid created CHECK constraint ID")?;
+    let check_drop_prepare = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut foreign_key_control,
+        53,
+        &format!(
+            "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"constraints.drop_check\",\"arguments\":{{\"constraint_id\":\"{check_constraint_id_wire}\"}}}}"
+        ),
+        60_000_000,
+    )?;
+    let check_drop_operation_id = check_drop_prepare
+        .split("\"operation_id\":\"")
+        .nth(1)
+        .ok_or("missing ADMIN CHECK-drop operation ID")?
+        .get(..32)
+        .ok_or("invalid ADMIN CHECK-drop operation ID")?;
+    let check_drop = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut foreign_key_control,
+        54,
+        &format!("{{\"phase\":\"start\",\"operation_id\":\"{check_drop_operation_id}\"}}"),
+        60_000_000,
+    )?;
+    assert!(check_drop.contains("\"outcome\":\"committed\""));
+    let foreign_key_create_prepare = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut foreign_key_control,
+        55,
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"foreign_keys.create\",\"arguments\":{{\"source_table_id\":\"{source_table_id_wire}\",\"source_column_ids\":[\"{source_column_id_wire}\"],\"target_constraint_id\":\"{target_constraint_id_wire}\"}}}}"
         ),
@@ -10772,7 +10835,7 @@ fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
         &storage,
         &staging,
         &mut foreign_key_control,
-        52,
+        56,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{foreign_key_create_operation_id}\"}}"),
         60_000_000,
     )?;
@@ -10787,7 +10850,7 @@ fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
         &storage,
         &staging,
         &mut foreign_key_control,
-        53,
+        57,
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"foreign_keys.drop\",\"arguments\":{{\"foreign_key_id\":\"{foreign_key_id_wire}\"}}}}"
         ),
@@ -10803,7 +10866,7 @@ fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
         &storage,
         &staging,
         &mut foreign_key_control,
-        54,
+        58,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{foreign_key_drop_operation_id}\"}}"),
         60_000_000,
     )?;
