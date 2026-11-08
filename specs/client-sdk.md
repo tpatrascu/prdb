@@ -48,7 +48,7 @@ The executor SDK exposes `prdb_sdk_executor_stage_insert_v1`, `prdb_sdk_executor
 
 The SDK serves operational invocations first and also supports bounded analytical work. SQL analytical operators follow the [workload roadmap](workload-profile.md), run over authorized batches, and must not treat redaction as SQL null or omit denied inputs silently.
 
-The SQL DML AST API in [`prdb_sdk_sql_dml_v1.h`](../engine/include/prdb_sdk_sql_dml_v1.h) parses positional single-row INSERT values (`$n`, `NULL`, `DEFAULT`) and bounded UPDATE assignments with a mandatory v2 predicate. [`prdb_sdk_sql_execute_insert_v1`](../engine/include/prdb_sdk_sql_exec_v2.h) binds typed parameters against independently checked planner/executor shapes and submits one full-row storage mutation. It does not confer mutation authority; storage validates the INSERT under the invocation's scope. UPDATE execution, DELETE SQL parsing/execution, and live multi-process SQL write evidence remain future work.
+The SQL DML AST API in [`prdb_sdk_sql_dml_v1.h`](../engine/include/prdb_sdk_sql_dml_v1.h) parses positional single-row INSERT values (`$n`, `NULL`, `DEFAULT`) and bounded UPDATE assignments with a mandatory v2 predicate. [`prdb_sdk_sql_execute_insert_v1`](../engine/include/prdb_sdk_sql_exec_v2.h) binds typed parameters against independently checked planner/executor shapes and submits one full-row storage mutation. [`prdb_sdk_sql_execute_update_v1`](../engine/include/prdb_sdk_sql_exec_v2.h) materializes bounded matching row handles, closes its scan, then submits typed patches. Neither grants authority: storage validates the mutation under the invocation's scope. DELETE SQL parsing/execution and live multi-process SQL write evidence remain future work.
 
 ## Administrative SDK
 

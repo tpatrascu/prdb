@@ -70,16 +70,46 @@ static int32_t executor_request(void *context, uint16_t operation,
             0, 1, 7, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44,
             0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44,
             0, 1, 0, 0, 4, 0};
+        static const uint8_t expected_two_candidates[24] = {
+            0, 1, 7, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44,
+            0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44,
+            0, 2, 0, 0, 4, 0};
+        static const uint8_t continuation_request[24] = {
+            0, 1, 7, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
+            0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
+            0, 1, 0, 0, 4, 0};
+        static const uint8_t finished_reply[5] = {0, 1, 1, 0, 0};
         assert(request_len == sizeof(expected));
-        assert(memcmp(request, expected, sizeof(expected)) == 0);
-        assert(mock->batch_len <= capacity);
-        memcpy(response, mock->batch, mock->batch_len);
-        *response_len = mock->batch_len;
+        if (mock->executor_calls >= 3) {
+            assert(memcmp(request, continuation_request,
+                          sizeof(continuation_request)) == 0);
+            assert(sizeof(finished_reply) <= capacity);
+            memcpy(response, finished_reply, sizeof(finished_reply));
+            *response_len = sizeof(finished_reply);
+        } else {
+            const uint8_t *expected_request =
+                mock->batch_len > 60 ? expected_two_candidates : expected;
+            assert(memcmp(request, expected_request, sizeof(expected)) == 0);
+            assert(mock->batch_len <= capacity);
+            memcpy(response, mock->batch, mock->batch_len);
+            *response_len = mock->batch_len;
+        }
     } else if (operation == PRDB_SDK_EXECUTOR_OP_CLOSE_CURSOR) {
         static const uint8_t expected[] = {
             0, 1, 7, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
             0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55};
         static const uint8_t reply[] = {0, 1, 0, 0};
+        assert(request_len == sizeof(expected));
+        assert(memcmp(request, expected, sizeof(expected)) == 0);
+        assert(sizeof(reply) <= capacity);
+        memcpy(response, reply, sizeof(reply));
+        *response_len = sizeof(reply);
+    } else if (operation == PRDB_SDK_EXECUTOR_OP_STAGE_UPDATE) {
+        static const uint8_t expected[] = {
+            0, 1, 8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+            0, 1, 0, 0, 0, 0, 0, PRDB_SDK_VALUE_TYPE_INTEGER,
+            0, 0, 0, 4, 0, 0, 0, 4};
+        static const uint8_t reply[] = {0, 1, 0};
         assert(request_len == sizeof(expected));
         assert(memcmp(request, expected, sizeof(expected)) == 0);
         assert(sizeof(reply) <= capacity);
@@ -169,6 +199,25 @@ static uint32_t make_relation_three(uint8_t *p, uint8_t handle_kind,
     return offset;
 }
 
+static uint32_t make_two_matching_rows(uint8_t *p) {
+    uint32_t offset = 0;
+    put_u16(p, &offset, 1);
+    p[offset++] = 0;
+    p[offset++] = 7;
+    memset(p + offset, 0x55, 15); offset += 15;
+    put_u16(p, &offset, 2);
+    for (uint8_t row = 0; row < 2; ++row) {
+        p[offset++] = 8;
+        memset(p + offset, (int)(row + 1), 15); offset += 15;
+        put_u16(p, &offset, 1);
+        p[offset++] = 0;
+        p[offset++] = PRDB_SDK_VALUE_TYPE_INTEGER;
+        put_u32(p, &offset, 4);
+        put_u32(p, &offset, 5);
+    }
+    return offset;
+}
+
 typedef struct result_state {
     uint32_t calls;
     uint32_t fail;
@@ -195,6 +244,8 @@ int main(void) {
     static const uint8_t zero_limit_sql[] = "SELECT id FROM widgets LIMIT 0";
     static const uint8_t insert_sql[] =
         "INSERT INTO widgets VALUES ($1, NULL, DEFAULT)";
+    static const uint8_t update_sql[] =
+        "UPDATE widgets SET id = $1 WHERE id >= $1";
     static const uint8_t schema[] = "app";
     static const uint8_t parameter_bytes[] = {0, 0, 0, 4};
     uint8_t planner_payload[256] = {0};
@@ -335,5 +386,54 @@ int main(void) {
            PRDB_SDK_SQL_EXEC_BIND_ERROR);
     assert(mock.planner_calls == 1 && mock.executor_calls == 1);
     assert(mock.statement_failed == 1);
+
+    planner_len = make_relation(planner_payload,
+                                PRDB_SDK_PLANNER_TABLE_HANDLE_KIND, 0x99);
+    executor_len = make_relation(executor_payload, 6, 0x22);
+    mock.planner_len = planner_len;
+    mock.executor_len = executor_len;
+    mock.planner_calls = 0;
+    mock.executor_calls = 0;
+    mock.statement_failed = 0;
+    parameter.type_code = PRDB_SDK_VALUE_TYPE_INTEGER;
+    uint8_t update_request[64] = {0};
+    uint8_t update_targets[16 * PRDB_SDK_SQL_EXEC_MAX_MUTATION_TARGETS] = {0};
+    prdb_sdk_select_binding_v2 update_binding = {0};
+    prdb_sdk_value_v1 update_cell_scratch[1] = {{0}};
+    prdb_sdk_executor_update_patch_v1 update_patches[1] = {{0}};
+    uint32_t updated_count = 0;
+    assert(prdb_sdk_sql_execute_update_v1(
+               &host, schema, sizeof(schema) - 1, update_sql,
+               sizeof(update_sql) - 1, &parameter, 1, 1, 1024,
+               planner_response, sizeof(planner_response), executor_response,
+               sizeof(executor_response), batch_response,
+               sizeof(batch_response), update_request, sizeof(update_request),
+               planner_columns, 1, executor_columns, 1, &update_binding,
+               sizeof(update_binding), update_cell_scratch, 1, update_targets,
+               PRDB_SDK_SQL_EXEC_MAX_MUTATION_TARGETS, update_patches, 1,
+               &updated_count) == PRDB_SDK_SQL_EXEC_OK);
+    assert(updated_count == 1 && mock.planner_calls == 1 &&
+           mock.executor_calls == 5 && mock.statement_failed == 0);
+
+    uint8_t two_rows_batch[128] = {0};
+    uint32_t two_rows_batch_len = make_two_matching_rows(two_rows_batch);
+    mock.batch = two_rows_batch;
+    mock.batch_len = two_rows_batch_len;
+    mock.planner_calls = 0;
+    mock.executor_calls = 0;
+    mock.statement_failed = 0;
+    updated_count = 777;
+    assert(prdb_sdk_sql_execute_update_v1(
+               &host, schema, sizeof(schema) - 1, update_sql,
+               sizeof(update_sql) - 1, &parameter, 1, 2, 1024,
+               planner_response, sizeof(planner_response), executor_response,
+               sizeof(executor_response), batch_response,
+               sizeof(batch_response), update_request, sizeof(update_request),
+               planner_columns, 1, executor_columns, 1, &update_binding,
+               sizeof(update_binding), update_cell_scratch, 1, update_targets,
+               1, update_patches, 1, &updated_count) ==
+           PRDB_SDK_SQL_EXEC_MATERIALIZATION_LIMIT);
+    assert(updated_count == 777 && mock.planner_calls == 1 &&
+           mock.executor_calls == 4 && mock.statement_failed == 1);
     return 0;
 }
