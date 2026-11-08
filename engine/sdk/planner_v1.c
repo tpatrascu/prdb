@@ -273,3 +273,69 @@ int32_t prdb_sdk_executor_decode_relation_v1(
     *column_count_out = column_count;
     return PRDB_SDK_PLANNER_DECODE_OK;
 }
+
+static int planner_identifier(const uint8_t *value, uint32_t length) {
+    if (value == NULL || length == 0 ||
+        length > PRDB_SDK_SQL_MAX_IDENTIFIER_BYTES ||
+        !((value[0] >= 'a' && value[0] <= 'z') ||
+          (value[0] >= 'A' && value[0] <= 'Z') || value[0] == '_')) return 0;
+    for (uint32_t index = 1; index < length; ++index) {
+        uint8_t c = value[index];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '_')) return 0;
+    }
+    return 1;
+}
+
+int32_t prdb_sdk_planner_describe_relation_v1(
+    const prdb_host_api_v2 *host, const uint8_t *schema, uint32_t schema_len,
+    const uint8_t *relation_name, uint32_t relation_name_len, uint8_t *response,
+    uint64_t response_capacity, uint64_t *response_len,
+    prdb_sdk_planner_relation_v1 *out, uint32_t out_capacity,
+    prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_capacity) {
+    uint8_t request[6 + 2 * PRDB_SDK_SQL_MAX_IDENTIFIER_BYTES];
+    int32_t callback_status;
+    int32_t decode_status;
+    uint32_t request_len;
+    if (host == NULL || host->struct_size < sizeof(*host) ||
+        host->abi_version != PRDB_QUERY_ABI_V2_VERSION ||
+        host->planner_request == NULL || !planner_identifier(schema, schema_len) ||
+        !planner_identifier(relation_name, relation_name_len) || response == NULL ||
+        response_len == NULL || out == NULL || out_capacity < sizeof(*out) ||
+        columns == NULL || response_capacity > PRDB_SDK_PLANNER_MAX_RESPONSE_BYTES) {
+        return PRDB_SDK_PLANNER_REQUEST_INVALID_ARGUMENT;
+    }
+    request[0] = 0;
+    request[1] = PRDB_SDK_PLANNER_WIRE_V1_VERSION;
+    request[2] = (uint8_t)(schema_len >> 8);
+    request[3] = (uint8_t)schema_len;
+    request[4] = (uint8_t)(relation_name_len >> 8);
+    request[5] = (uint8_t)relation_name_len;
+    memcpy(request + 6, schema, schema_len);
+    memcpy(request + 6 + schema_len, relation_name, relation_name_len);
+    request_len = 6 + schema_len + relation_name_len;
+    *response_len = 0;
+    callback_status = host->planner_request(
+        host->context, PRDB_SDK_PLANNER_OP_DESCRIBE_RELATION, request,
+        request_len, response, response_capacity, response_len);
+    if (callback_status == PRDB_QUERY_CALLBACK_RESPONSE_TOO_SMALL) {
+        return PRDB_SDK_PLANNER_REQUEST_RESPONSE_TOO_SMALL;
+    }
+    if (callback_status != PRDB_QUERY_CALLBACK_OK ||
+        *response_len > response_capacity ||
+        *response_len > PRDB_SDK_PLANNER_MAX_RESPONSE_BYTES) {
+        return PRDB_SDK_PLANNER_REQUEST_INVALID_PAYLOAD;
+    }
+    decode_status = prdb_sdk_planner_decode_relation_v1(
+        response, *response_len, out, out_capacity, columns, column_capacity);
+    if (decode_status == PRDB_SDK_PLANNER_DECODE_OK) {
+        return PRDB_SDK_PLANNER_REQUEST_OK;
+    }
+    if (decode_status == PRDB_SDK_PLANNER_DECODE_UNAVAILABLE) {
+        return PRDB_SDK_PLANNER_REQUEST_UNAVAILABLE;
+    }
+    if (decode_status == PRDB_SDK_PLANNER_DECODE_RESPONSE_TOO_SMALL) {
+        return PRDB_SDK_PLANNER_REQUEST_RESPONSE_TOO_SMALL;
+    }
+    return PRDB_SDK_PLANNER_REQUEST_INVALID_PAYLOAD;
+}

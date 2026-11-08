@@ -3,6 +3,30 @@
 #include <assert.h>
 #include <string.h>
 
+typedef struct planner_mock {
+    const uint8_t *reply;
+    uint64_t reply_len;
+    uint32_t calls;
+} planner_mock;
+
+static int32_t planner_request(void *context, uint16_t operation,
+                               const uint8_t *request, uint64_t request_len,
+                               uint8_t *response, uint64_t capacity,
+                               uint64_t *response_len) {
+    static const uint8_t expected[] = {
+        0, 1, 0, 6, 0, 9, 'p', 'u', 'b', 'l', 'i', 'c',
+        'e', 'm', 'p', 'l', 'o', 'y', 'e', 'e', 's'};
+    planner_mock *mock = (planner_mock *)context;
+    assert(operation == PRDB_SDK_PLANNER_OP_DESCRIBE_RELATION);
+    assert(request_len == sizeof(expected));
+    assert(memcmp(request, expected, sizeof(expected)) == 0);
+    assert(mock->reply_len <= capacity);
+    memcpy(response, mock->reply, mock->reply_len);
+    *response_len = mock->reply_len;
+    ++mock->calls;
+    return PRDB_QUERY_CALLBACK_OK;
+}
+
 static void put_u16(uint8_t *buffer, uint32_t *offset, uint16_t value) {
     buffer[(*offset)++] = (uint8_t)(value >> 8);
     buffer[(*offset)++] = (uint8_t)value;
@@ -93,6 +117,25 @@ int main(void) {
            PRDB_SDK_VALUE_TYPE_DECIMAL);
     assert(binding.predicate_columns[0].decimal_precision == 10);
     assert(binding.predicate_columns[0].decimal_scale == 2);
+
+    {
+        uint8_t reply[256];
+        const uint8_t schema[] = "public";
+        const uint8_t relation_name[] = "employees";
+        planner_mock mock = {reply, length, 0};
+        prdb_host_api_v2 host = {sizeof(host), PRDB_QUERY_ABI_V2_VERSION,
+                                 &mock, NULL, planner_request, NULL};
+        uint64_t response_len = 0;
+        memcpy(reply, response, length);
+        assert(prdb_sdk_planner_describe_relation_v1(
+                   &host, schema, sizeof(schema) - 1, relation_name,
+                   sizeof(relation_name) - 1, response, sizeof(response),
+                   &response_len, &relation, sizeof(relation), columns, 2) ==
+               PRDB_SDK_PLANNER_REQUEST_OK);
+        assert(mock.calls == 1 && response_len == length);
+        assert(relation.planning_handle[0] ==
+               PRDB_SDK_PLANNER_TABLE_HANDLE_KIND);
+    }
 
     assert(prdb_sdk_planner_decode_relation_v1(
                unavailable, sizeof(unavailable), &relation, sizeof(relation),

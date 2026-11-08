@@ -2,12 +2,20 @@
 #define PRDB_SDK_PLANNER_V1_H
 
 #include "prdb_sdk_sql_v2.h"
+#include "prdb_query_abi_v2.h"
 
 #define PRDB_SDK_PLANNER_ABI_V1_VERSION UINT32_C(1)
 #define PRDB_SDK_PLANNER_WIRE_V1_VERSION UINT16_C(1)
 #define PRDB_SDK_PLANNER_MAX_RESPONSE_BYTES UINT64_C(1048576)
 #define PRDB_SDK_PLANNER_MAX_RELATION_COLUMNS UINT32_C(4096)
 #define PRDB_SDK_PLANNER_TABLE_HANDLE_KIND UINT8_C(9)
+#define PRDB_SDK_PLANNER_OP_DESCRIBE_RELATION UINT16_C(0x1201)
+
+#define PRDB_SDK_PLANNER_REQUEST_OK INT32_C(0)
+#define PRDB_SDK_PLANNER_REQUEST_UNAVAILABLE INT32_C(1)
+#define PRDB_SDK_PLANNER_REQUEST_INVALID_ARGUMENT INT32_C(2)
+#define PRDB_SDK_PLANNER_REQUEST_INVALID_PAYLOAD INT32_C(3)
+#define PRDB_SDK_PLANNER_REQUEST_RESPONSE_TOO_SMALL INT32_C(4)
 
 #define PRDB_SDK_PLANNER_DECODE_OK INT32_C(0)
 #define PRDB_SDK_PLANNER_DECODE_UNAVAILABLE INT32_C(1)
@@ -36,6 +44,16 @@ typedef struct prdb_sdk_planner_relation_v1 {
  * handle. */
 int32_t prdb_sdk_planner_decode_relation_v1(
     const uint8_t *payload, uint64_t payload_len,
+    prdb_sdk_planner_relation_v1 *out, uint32_t out_capacity,
+    prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_capacity);
+
+/* Submit an explicitly qualified name through the planner host channel,
+ * decode its authorized shape, and retain the planner-only handle. */
+int32_t prdb_sdk_planner_describe_relation_v1(
+    const prdb_host_api_v2 *host,
+    const uint8_t *schema, uint32_t schema_len,
+    const uint8_t *relation_name, uint32_t relation_name_len,
+    uint8_t *response, uint64_t response_capacity, uint64_t *response_len,
     prdb_sdk_planner_relation_v1 *out, uint32_t out_capacity,
     prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_capacity);
 
