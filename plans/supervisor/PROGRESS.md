@@ -88,3 +88,10 @@
 - Behavior: the authenticated real gateway path reports a sealed upload as prepared, cancels it without creating an invocation outcome, then hides it as unknown on STATUS.
 - Regression and verification: included in the real supervisor/gateway TinyCC upload test; workspace build, format, Clippy, Rust tests and SDK tests pass.
 - Remaining: active cancellation and terminal STATUS through a started worker still require the delegated-cgroup process path.
+
+## SU-3 / SB-1: process-boundary START preflight failure — verified
+
+- Behavior: with a regular directory configured as the cgroup parent, the real binaries reject START with the sanitized `unavailable` error before storage admission; a fresh authenticated session reports `unknown` for the invocation.
+- Regression: covered in the TinyCC upload/status/cancel binary test. The fixture is compiled and sealed, then discarded without loading or execution.
+- Verification: the focused integration and full Rust/TinyCC validation pass. This proves the fail-closed boundary on an invalid host profile, not successful worker launch.
+- Remaining: successful cgroup provisioning, confinement installation, and execution still need a delegated-cgroup Linux host.

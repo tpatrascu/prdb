@@ -97,3 +97,10 @@
 - Regression: the TinyCC TCP submission test now covers that state transition and confirms the connection remains usable afterward with PING.
 - Verification: focused supervisor binary regression, workspace build/format/warning-denied Clippy/tests, and the maintained TinyCC SDK suite passed. Workspace tests reported 109 commit tests passing and two cgroup-gated tests ignored.
 - Remaining: exercise active invocation status/cancellation and durable terminal reconciliation through the process boundary when a writable delegated cgroup host is available.
+
+## NP-4 integration: START sandbox preflight rejection over TCP — verified
+
+- Behavior: a valid sealed TinyCC submission cannot enter storage admission when the configured cgroup parent is an ordinary directory. The real supervisor/gateway path returns the generic `unavailable` error, and a new authenticated connection sees the invocation as `unknown`.
+- Regression: the binary test uses its private temporary directory as the deliberately invalid cgroup parent, making the preflight failure deterministic without depending on host cgroup permissions. The artifact is never loaded.
+- Verification: the focused real-binary test passes alongside full workspace build/format/Clippy/tests and maintained TinyCC SDK tests. Two positive sandbox START tests remain ignored pending writable cgroup delegation.
+- Remaining: successful sandboxed START and terminal outcome relay remain gated on a conforming delegated-cgroup host.

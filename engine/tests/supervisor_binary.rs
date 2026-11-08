@@ -74,7 +74,7 @@ impl Drop for ChildGuard {
 
 #[cfg(unix)]
 #[test]
-fn supervisor_and_gateway_binaries_authenticate_upload_and_seal_tinycc_query_over_tcp() {
+fn supervisor_and_gateway_binaries_cover_submission_status_cancel_and_start_preflight() {
     use prdb_engine::bootstrap::initialize;
     use prdb_engine::client_protocol::{ClientFrame, ClientFrameDecoder};
     use prdb_engine::submission_manifest::{
@@ -160,7 +160,7 @@ fn supervisor_and_gateway_binaries_authenticate_upload_and_seal_tinycc_query_ove
         "--gateway-uid",
         &uid.to_string(),
         "--cgroup-parent",
-        "/sys/fs/cgroup",
+        root.to_str().expect("UTF-8 invalid cgroup path"),
         "--executor",
         env!("CARGO_BIN_EXE_prdb-executor"),
         "--scratch-parent",
@@ -291,7 +291,7 @@ fn supervisor_and_gateway_binaries_authenticate_upload_and_seal_tinycc_query_ove
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
-        let token_secret = encode_base64(&bootstrap_secret);
+        let mut token_secret = encode_base64(&bootstrap_secret);
         bootstrap_secret.zeroize();
         let mut auth_payload =
             format!("{{\"token_id\":\"{token_id_hex}\",\"token_secret\":\"{token_secret}\"}}");
@@ -311,7 +311,7 @@ fn supervisor_and_gateway_binaries_authenticate_upload_and_seal_tinycc_query_ove
             encode_hex(&empty_sha256),
             encode_base64(&scope),
         );
-        let prepared = exchange(3, 3, prepare_payload.into_bytes());
+        let prepared = exchange(3, 3, prepare_payload.as_bytes().to_vec());
         assert_eq!(prepared.kind, 100);
         let prepared_json = String::from_utf8(prepared.payload).expect("prepared JSON");
         let invocation_id_hex = prepared_json
@@ -353,6 +353,86 @@ fn supervisor_and_gateway_binaries_authenticate_upload_and_seal_tinycc_query_ove
         assert_eq!(ping.kind, 100);
         assert_eq!(ping.request_id, 9);
         assert_eq!(ping.payload, br#"{"alive":true}"#);
+
+        let second_prepared = exchange(3, 10, prepare_payload.into_bytes());
+        assert_eq!(second_prepared.kind, 100);
+        let second_prepared_json =
+            String::from_utf8(second_prepared.payload).expect("second prepared JSON");
+        let second_invocation_hex = second_prepared_json
+            .split("\"invocation_id\":\"")
+            .nth(1)
+            .and_then(|tail| tail.split('\"').next())
+            .expect("second prepared invocation id");
+        let second_invocation = decode_hex_id(second_invocation_hex);
+        let mut second_chunk = Vec::with_capacity(24 + artifact.len());
+        second_chunk.extend(second_invocation);
+        second_chunk.extend(0_u64.to_le_bytes());
+        second_chunk.extend(&artifact);
+        let second_upload = exchange(4, 11, second_chunk);
+        assert_eq!(second_upload.kind, 100);
+        let second_seal_payload = format!("{{\"invocation_id\":\"{second_invocation_hex}\"}}");
+        let second_sealed = exchange(6, 12, second_seal_payload.as_bytes().to_vec());
+        assert_eq!(second_sealed.kind, 100);
+        assert_eq!(second_sealed.payload, br#"{"state":"prepared"}"#);
+
+        let start = exchange(7, 13, second_seal_payload.into_bytes());
+        assert_eq!(start.kind, prdb_engine::client_protocol::CLIENT_ERROR_KIND);
+        assert_eq!(start.request_id, 13);
+        assert_eq!(
+            start.payload,
+            br#"{"code":"unavailable","message":"Requested resource is unavailable."}"#
+        );
+        let unknown = {
+            let mut verification_client =
+                TcpStream::connect(address).expect("reconnect after rejected START");
+            verification_client
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .expect("set reconnected TCP client timeout");
+            let mut exchange = |kind, request_id, payload: Vec<u8>| {
+                let frame = ClientFrame {
+                    kind,
+                    request_id,
+                    response_sequence: 0,
+                    payload,
+                }
+                .encode()
+                .expect("encode reconnect client frame");
+                verification_client
+                    .write_all(&frame)
+                    .expect("write reconnect client frame");
+                let mut decoder = ClientFrameDecoder::default();
+                let mut bytes = [0u8; 1024];
+                loop {
+                    let count = verification_client
+                        .read(&mut bytes)
+                        .expect("read reconnect response");
+                    assert_ne!(count, 0, "connection closed before reconnect response");
+                    let mut frames = decoder
+                        .push(&bytes[..count])
+                        .expect("decode reconnect response");
+                    if let Some(frame) = frames.pop() {
+                        assert!(frames.is_empty(), "unexpected extra reconnect response");
+                        return frame;
+                    }
+                }
+            };
+            let hello = exchange(
+                1,
+                1,
+                br#"{"mode":"query","client_name":"start-retry"}"#.to_vec(),
+            );
+            assert_eq!(hello.kind, 100);
+            let mut auth_payload =
+                format!("{{\"token_id\":\"{token_id_hex}\",\"token_secret\":\"{token_secret}\"}}");
+            let auth = exchange(2, 2, auth_payload.as_bytes().to_vec());
+            auth_payload.zeroize();
+            assert_eq!(auth.kind, 100);
+            let status_payload = format!("{{\"invocation_id\":\"{second_invocation_hex}\"}}");
+            exchange(8, 3, status_payload.into_bytes())
+        };
+        token_secret.zeroize();
+        assert_eq!(unknown.kind, 100);
+        assert_eq!(unknown.payload, br#"{"state":"unknown"}"#);
     }
     client
         .shutdown(std::net::Shutdown::Write)
