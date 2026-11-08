@@ -8947,7 +8947,7 @@ fn storage_manager_audits_cancellation_before_commit_and_preserves_terminal_outc
         &database,
         StorageManagerConfig {
             ddl_fence_timeout: Duration::from_millis(100),
-            max_active_invocations: 128,
+            max_active_invocations: 1,
             max_invocation_age: Duration::from_secs(15 * 60),
             max_token_lifecycle_requests_per_minute: 30,
             max_admin_cancellation_requests_per_minute: 2,
@@ -8984,6 +8984,20 @@ fn storage_manager_audits_cancellation_before_commit_and_preserves_terminal_outc
     };
 
     let mut pending = storage.begin_invocation(id(243), owner_id, retention_deadline_us, 2, 64)?;
+    let cancelled_row_key = table_row_key(id(250), id(251));
+    pending.stage_put(
+        prdb_engine::overlay::RowId {
+            table: id(250),
+            row: id(251),
+        },
+        b"must be discarded",
+    )?;
+    assert!(matches!(
+        storage
+            .clone()
+            .begin_invocation(id(252), owner_id, retention_deadline_us, 2, 64),
+        Err(TransactionError::AdmissionLimitExceeded)
+    ));
     assert!(matches!(
         storage.cancel_invocation(
             owner_id,
@@ -9039,6 +9053,10 @@ fn storage_manager_audits_cancellation_before_commit_and_preserves_terminal_outc
             .status,
         OutcomeStatus::Aborted
     );
+    assert!(row(&database, &cancelled_row_key)?.is_none());
+    let mut after_cancel =
+        storage.begin_invocation(id(253), owner_id, retention_deadline_us, 2, 64)?;
+    after_cancel.abort()?;
     let audit_read = database.begin_read()?;
     let audit_table = audit_read.open_table(schema::AUDIT)?;
     let audit = audit_table
