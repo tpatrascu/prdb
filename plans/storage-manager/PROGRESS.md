@@ -1787,3 +1787,9 @@
 - Regression: `redb_storage_read_error_rejects_database_open` injects a one-shot backend read failure while redb opens an existing database image and verifies open is rejected before a storage manager can be constructed.
 - Verification: the focused library test passed.
 - Scope: read-path fail-closed evidence at startup; additional file operations and platform/durability profiles remain untested.
+
+### Compaction resize failure — verified
+
+- Regression: `redb_compaction_resize_error_preserves_reopenable_data` injects a backend `set_len` failure during redb compaction. Compaction returns the storage error; after reopen, all live rows remain and deleted rows stay deleted.
+- Verification: the focused library test passed on redb 4.4.0.
+- Scope: bounded compaction-resize recovery only; other file operations, power loss, and platform/durability profiles remain untested.

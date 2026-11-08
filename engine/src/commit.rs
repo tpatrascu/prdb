@@ -14002,7 +14002,7 @@ mod durable_commit_gate_tests {
     use crate::schema::{self, ENGINE_META, OUTCOMES, ROWS};
     use crate::storage_manager::{InvocationStatus, StorageManager, StorageManagerConfig};
     use crate::transaction::TransactionError;
-    use redb::{Database, ReadableDatabase, StorageBackend};
+    use redb::{Database, ReadableDatabase, ReadableTableMetadata, StorageBackend};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -14014,6 +14014,7 @@ mod durable_commit_gate_tests {
         fail_next_sync: Arc<AtomicBool>,
         fail_next_write: Arc<AtomicBool>,
         fail_next_read: Arc<AtomicBool>,
+        fail_next_set_len: Arc<AtomicBool>,
     }
 
     impl StorageBackend for FaultInjectedBackend {
@@ -14029,6 +14030,9 @@ mod durable_commit_gate_tests {
         }
 
         fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+            if self.fail_next_set_len.swap(false, Ordering::SeqCst) {
+                return Err(std::io::Error::other("injected storage resize failure"));
+            }
             self.inner.set_len(len)
         }
 
@@ -14180,6 +14184,7 @@ mod durable_commit_gate_tests {
             fail_next_sync: fail_next_sync.clone(),
             fail_next_write: Arc::new(AtomicBool::new(false)),
             fail_next_read: Arc::new(AtomicBool::new(false)),
+            fail_next_set_len: Arc::new(AtomicBool::new(false)),
         })?;
         let storage =
             StorageManager::from_validated_database(&database, StorageManagerConfig::default())?;
@@ -14315,6 +14320,7 @@ mod durable_commit_gate_tests {
             fail_next_sync: Arc::new(AtomicBool::new(false)),
             fail_next_write: fail_next_write.clone(),
             fail_next_read: Arc::new(AtomicBool::new(false)),
+            fail_next_set_len: Arc::new(AtomicBool::new(false)),
         })?;
         let storage =
             StorageManager::from_validated_database(&database, StorageManagerConfig::default())?;
@@ -14425,10 +14431,113 @@ mod durable_commit_gate_tests {
             fail_next_sync: Arc::new(AtomicBool::new(false)),
             fail_next_write: Arc::new(AtomicBool::new(false)),
             fail_next_read: fail_next_read.clone(),
+            fail_next_set_len: Arc::new(AtomicBool::new(false)),
         });
         assert!(opened.is_err());
         assert!(!fail_next_read.load(Ordering::SeqCst));
 
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[test]
+    fn redb_compaction_resize_error_preserves_reopenable_data()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const ROW_COUNT: u8 = 64;
+        const DELETE_COUNT: u8 = 58;
+        let fixture_id = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "prdb-compaction-resize-error-{}-{fixture_id}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory)?;
+        let path = directory.join("compact.redb");
+        {
+            let database = Database::create(&path)?;
+            let mut write = database.begin_write()?;
+            write.set_durability(redb::Durability::Immediate)?;
+            write.set_two_phase_commit(true);
+            schema::create_tables(&write)?;
+            let metadata = EngineMetadata {
+                database_id: [0x33; 16],
+                catalog_version: 2,
+                expression_version: 1,
+                builtin_semantics_version: 1,
+                commit_sequence: 0,
+                lifecycle: Lifecycle::Ready,
+            }
+            .encode()?;
+            write
+                .open_table(ENGINE_META)?
+                .insert(&b"format"[..], &metadata[..])?;
+            {
+                let mut rows = write.open_table(ROWS)?;
+                let value = vec![0x5a; 100 * 1024];
+                for id in 0..ROW_COUNT {
+                    let key = [id; 32];
+                    rows.insert(key.as_slice(), value.as_slice())?;
+                }
+            }
+            write.commit()?;
+
+            let mut write = database.begin_write()?;
+            write.set_durability(redb::Durability::Immediate)?;
+            write.set_two_phase_commit(true);
+            {
+                let mut rows = write.open_table(ROWS)?;
+                for id in 0..DELETE_COUNT {
+                    let key = [id; 32];
+                    rows.remove(key.as_slice())?;
+                }
+            }
+            write.commit()?;
+            let mut write = database.begin_write()?;
+            write.set_durability(redb::Durability::Immediate)?;
+            write.set_two_phase_commit(true);
+            write.commit()?;
+        }
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)?;
+        let fail_next_set_len = Arc::new(AtomicBool::new(false));
+        let mut database = Database::builder().create_with_backend(FaultInjectedBackend {
+            inner: redb::backends::FileBackend::new(file)?,
+            fail_next_sync: Arc::new(AtomicBool::new(false)),
+            fail_next_write: Arc::new(AtomicBool::new(false)),
+            fail_next_read: Arc::new(AtomicBool::new(false)),
+            fail_next_set_len: fail_next_set_len.clone(),
+        })?;
+        fail_next_set_len.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            database.compact(),
+            Err(redb::CompactionError::Storage(_))
+        ));
+        assert!(!fail_next_set_len.load(Ordering::SeqCst));
+        drop(database);
+
+        let reopened = Database::open(&path)?;
+        let read = reopened.begin_read()?;
+        let rows = read.open_table(ROWS)?;
+        assert_eq!(rows.len()?, u64::from(ROW_COUNT - DELETE_COUNT));
+        for id in 0..DELETE_COUNT {
+            let key = [id; 32];
+            assert!(rows.get(key.as_slice())?.is_none());
+        }
+        for id in DELETE_COUNT..ROW_COUNT {
+            let key = [id; 32];
+            assert_eq!(
+                rows.get(key.as_slice())?
+                    .ok_or("reopened database lost a live row")?
+                    .value(),
+                vec![0x5a; 100 * 1024]
+            );
+        }
+
+        drop(rows);
+        drop(read);
+        drop(reopened);
         std::fs::remove_dir_all(directory)?;
         Ok(())
     }
@@ -14484,6 +14593,7 @@ mod durable_commit_gate_tests {
             fail_next_sync: fail_next_sync.clone(),
             fail_next_write: Arc::new(AtomicBool::new(false)),
             fail_next_read: Arc::new(AtomicBool::new(false)),
+            fail_next_set_len: Arc::new(AtomicBool::new(false)),
         })?;
         let storage =
             StorageManager::from_validated_database(&database, StorageManagerConfig::default())?;
