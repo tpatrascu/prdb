@@ -7651,7 +7651,7 @@ fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
         admin_id,
         retention_deadline_us,
         &[
-            usage_grant,
+            usage_grant.clone(),
             dependency_write(ordinary_id, visible_schema.schema_id, 5),
             select_grant,
             dependency_write(ordinary_id, visible_table.table_id, 5),
@@ -8081,10 +8081,62 @@ fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
                 column_id: column.column_id,
             },
         )));
-        let foreign_cursor = metadata_client
+        let revoked_cursor = metadata_client
             .list_schemas_page(1, None)?
             .next_cursor
-            .ok_or("expected a cursor for the cross-connection test")?;
+            .ok_or("expected a cursor before schema USAGE is revoked")?;
+        let usage_dependency = dependency_write(ordinary_id, visible_schema.schema_id, 5);
+        let (grant_bytes, dependency_bytes, principal_bytes) = {
+            let read = database.begin_read()?;
+            let catalog = read.open_table(CATALOG)?;
+            let grant_bytes = catalog
+                .get(usage_grant.key.as_slice())?
+                .ok_or("schema USAGE grant disappeared before revocation")?
+                .value()
+                .to_vec();
+            let dependency_bytes = catalog
+                .get(usage_dependency.key.as_slice())?
+                .ok_or("schema USAGE dependency disappeared before revocation")?
+                .value()
+                .to_vec();
+            let principal_bytes = catalog
+                .get(id_catalog_key(10, ordinary_id).as_slice())?
+                .ok_or("metadata principal disappeared before grant revocation")?
+                .value()
+                .to_vec();
+            (grant_bytes, dependency_bytes, principal_bytes)
+        };
+        let mut ordinary_epoch = principal_write_with_name(ordinary_id, 1, 3, "runtime_user");
+        ordinary_epoch.expected_value = Some(principal_bytes);
+        let revoke_schema_usage_invocation = id(250);
+        let mut revoke_schema_usage_audit =
+            identity_audit_event(0xfc, admin_id, visible_schema.schema_id);
+        revoke_schema_usage_audit.action = AuditAction::AuthorityChange;
+        revoke_schema_usage_audit.correlation_id = revoke_schema_usage_invocation;
+        storage.commit_authorized_object_grant_ddl(
+            revoke_schema_usage_invocation,
+            admin_id,
+            retention_deadline_us,
+            &[
+                catalog_delete(usage_grant.clone(), grant_bytes),
+                catalog_delete(usage_dependency, dependency_bytes),
+                ordinary_epoch,
+            ],
+            &[revoke_schema_usage_audit],
+        )?;
+        assert!(matches!(
+            metadata_client.list_schemas_page(1, Some(&revoked_cursor)),
+            Err(prdb_engine::client_submit::ClientSubmitError::ServerRejected(_))
+        ));
+
+        let foreign_cursor = metadata_client
+            .list_relations_page(
+                prdb_engine::metadata_discovery::INFORMATION_SCHEMA_SCHEMA_ID,
+                1,
+                None,
+            )?
+            .next_cursor
+            .ok_or("expected a public relation cursor for the cross-connection test")?;
         drop(metadata_client);
         let mut second_secret = [0x6b; 32];
         let mut second_client = prdb_engine::client_submit::MetadataClient::connect_authenticated(
@@ -8093,7 +8145,11 @@ fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
             &mut second_secret,
         )?;
         assert!(matches!(
-            second_client.list_schemas_page(1, Some(&foreign_cursor)),
+            second_client.list_relations_page(
+                prdb_engine::metadata_discovery::INFORMATION_SCHEMA_SCHEMA_ID,
+                1,
+                Some(&foreign_cursor),
+            ),
             Err(prdb_engine::client_submit::ClientSubmitError::ServerRejected(_))
         ));
         drop(second_client);
