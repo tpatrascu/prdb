@@ -14015,10 +14015,14 @@ mod durable_commit_gate_tests {
         fail_next_write: Arc<AtomicBool>,
         fail_next_read: Arc<AtomicBool>,
         fail_next_set_len: Arc<AtomicBool>,
+        fail_next_len: Arc<AtomicBool>,
     }
 
     impl StorageBackend for FaultInjectedBackend {
         fn len(&self) -> Result<u64, std::io::Error> {
+            if self.fail_next_len.swap(false, Ordering::SeqCst) {
+                return Err(std::io::Error::other("injected storage length failure"));
+            }
             self.inner.len()
         }
 
@@ -14185,6 +14189,7 @@ mod durable_commit_gate_tests {
             fail_next_write: Arc::new(AtomicBool::new(false)),
             fail_next_read: Arc::new(AtomicBool::new(false)),
             fail_next_set_len: Arc::new(AtomicBool::new(false)),
+            fail_next_len: Arc::new(AtomicBool::new(false)),
         })?;
         let storage =
             StorageManager::from_validated_database(&database, StorageManagerConfig::default())?;
@@ -14321,6 +14326,7 @@ mod durable_commit_gate_tests {
             fail_next_write: fail_next_write.clone(),
             fail_next_read: Arc::new(AtomicBool::new(false)),
             fail_next_set_len: Arc::new(AtomicBool::new(false)),
+            fail_next_len: Arc::new(AtomicBool::new(false)),
         })?;
         let storage =
             StorageManager::from_validated_database(&database, StorageManagerConfig::default())?;
@@ -14391,7 +14397,8 @@ mod durable_commit_gate_tests {
     }
 
     #[test]
-    fn redb_storage_read_error_rejects_database_open() -> Result<(), Box<dyn std::error::Error>> {
+    fn redb_storage_read_or_len_error_rejects_database_open()
+    -> Result<(), Box<dyn std::error::Error>> {
         let fixture_id = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
         let directory = std::env::temp_dir().join(format!(
             "prdb-storage-read-error-{}-{fixture_id}",
@@ -14432,9 +14439,26 @@ mod durable_commit_gate_tests {
             fail_next_write: Arc::new(AtomicBool::new(false)),
             fail_next_read: fail_next_read.clone(),
             fail_next_set_len: Arc::new(AtomicBool::new(false)),
+            fail_next_len: Arc::new(AtomicBool::new(false)),
         });
         assert!(opened.is_err());
         assert!(!fail_next_read.load(Ordering::SeqCst));
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)?;
+        let fail_next_len = Arc::new(AtomicBool::new(true));
+        let opened = Database::builder().create_with_backend(FaultInjectedBackend {
+            inner: redb::backends::FileBackend::new(file)?,
+            fail_next_sync: Arc::new(AtomicBool::new(false)),
+            fail_next_write: Arc::new(AtomicBool::new(false)),
+            fail_next_read: Arc::new(AtomicBool::new(false)),
+            fail_next_set_len: Arc::new(AtomicBool::new(false)),
+            fail_next_len: fail_next_len.clone(),
+        });
+        assert!(opened.is_err());
+        assert!(!fail_next_len.load(Ordering::SeqCst));
 
         std::fs::remove_dir_all(directory)?;
         Ok(())
@@ -14508,6 +14532,7 @@ mod durable_commit_gate_tests {
             fail_next_write: Arc::new(AtomicBool::new(false)),
             fail_next_read: Arc::new(AtomicBool::new(false)),
             fail_next_set_len: fail_next_set_len.clone(),
+            fail_next_len: Arc::new(AtomicBool::new(false)),
         })?;
         fail_next_set_len.store(true, Ordering::SeqCst);
         assert!(matches!(
@@ -14594,6 +14619,7 @@ mod durable_commit_gate_tests {
             fail_next_write: Arc::new(AtomicBool::new(false)),
             fail_next_read: Arc::new(AtomicBool::new(false)),
             fail_next_set_len: Arc::new(AtomicBool::new(false)),
+            fail_next_len: Arc::new(AtomicBool::new(false)),
         })?;
         let storage =
             StorageManager::from_validated_database(&database, StorageManagerConfig::default())?;
