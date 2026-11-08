@@ -195,3 +195,11 @@
 - Regression: CLI tests check the parameterized type parser and invalid schema shapes. The real gateway/supervisor process test now creates a schema and table, renames and drops the table, then drops the schema.
 - Verification: focused CLI tests and the focused multi-process ADMIN lifecycle passed. The final locked workspace build, format check, warning-denied Clippy, and full tests passed; the commit integration target had 124 passed and 3 cgroup-dependent ignored. CLI help was inspected after correcting its continuation formatting.
 - Remaining: general DDL CLI commands for columns, constraints, indexes, privileges, and policies; additional multi-process coverage; and confined artifact submission remain open.
+
+## SDK-5: column DDL CLI and process coverage — implemented
+
+- Contract: column changes use the authenticated ADMIN control channel and storage's typed, fenced schema-evolution operations.
+- Implementation: `prdb-client` exposes add, rename, and drop column commands. Add accepts one nullable column declaration; rename/drop use explicit table and column IDs.
+- Regression: parser tests reject unsupported non-null, identity, and multi-column add forms. The real gateway/supervisor integration now exercises nullable add, rename, and drop.
+- Verification: focused CLI and process tests passed; final workspace build, formatting, warning-denied Clippy, and all workspace tests passed. The commit integration target reported 124 passed and 3 cgroup-dependent ignored.
+- Remaining: CLI support for nullability/default operations, indexes, constraints, privileges, policies, more real-process DDL, and confined artifact execution remains open.

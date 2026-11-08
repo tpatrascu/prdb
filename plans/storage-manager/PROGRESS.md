@@ -1984,3 +1984,11 @@
 - Regression: parser tests cover parameterized DECIMAL and VARCHAR types, UUID identity columns, and reject invalid precision/scale, zero VARCHAR length, duplicates, missing defaults for non-null non-identity columns, and invalid identity combinations. The real-process metadata integration now creates a schema and table, renames/drops the table, and drops the schema through the gateway and supervisor.
 - Verification: focused CLI parser tests passed (6); the focused authenticated metadata/admin process test passed. Final `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed in the Nix shell. The commit integration target reported 124 passed and 3 cgroup-dependent ignored. Updated `prdb-client --help` was inspected.
 - Remaining: column add/rename/drop, defaults/nullability, indexes, constraints, privileges, policies, and broader multi-process ADMIN DDL coverage remain for later slices; confined artifact submission still requires the sandbox integration environment.
+
+## SDK-5: column add/rename/drop CLI and process coverage — implemented
+
+- Contract: column DDL uses authenticated typed ADMIN operations, and storage applies schema evolution and its write-epoch fences atomically.
+- Implementation: `prdb-client` now exposes `column-add`, `column-rename`, and `column-drop`. Column addition accepts one nullable typed column and returns the generated column ID; rename/drop require the table and column IDs. Storage's existing AdminClient API still supports broader add-column defaults.
+- Regression: the parser rejects non-null or identity columns for the CLI add form and rejects multiple declarations. The authenticated gateway/supervisor process test exercises add, rename, and drop on the created table.
+- Verification: focused CLI parser and real-process tests passed. Workspace build, format, warning-denied Clippy, and full tests passed under the prescribed Nix shell; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
+- Remaining: nullability/default changes, indexes, constraints, privileges, policies, additional multi-process DDL coverage, and confined artifact submission remain open.

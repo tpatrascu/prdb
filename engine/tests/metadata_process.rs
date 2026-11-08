@@ -475,6 +475,20 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
     )?;
     assert_ne!(created_table.table_id, [0; 16]);
     assert_eq!(created_table.column_ids.len(), 1);
+    let added_column = admin.add_column(
+        created_table.table_id,
+        &AdminColumnDefinition {
+            name: "extra".to_owned(),
+            scalar_type: ScalarType::Integer,
+            nullable: true,
+            generated_uuid_identity: false,
+            default: None,
+        },
+    )?;
+    let renamed_column =
+        admin.rename_column(created_table.table_id, added_column.column_id, "extra_v2")?;
+    let dropped_column = admin.drop_column(created_table.table_id, added_column.column_id)?;
+    assert!(dropped_column.commit_sequence > renamed_column.commit_sequence);
     let renamed_table = admin.rename_table(created_table.table_id, "process_admin_table_v2")?;
     let dropped_table = admin.drop_table(created_table.table_id)?;
     assert!(dropped_table.commit_sequence > renamed_table.commit_sequence);

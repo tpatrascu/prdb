@@ -39,6 +39,9 @@ Token secrets are saved only to mode-0600 credential files and are never printed
   prdb-client table-create --address IP:PORT --credentials ADMIN_FILE --schema-id HEX --name NAME \\\n    --columns 'name:type:nullable[;name:type:nullable...]'\n\
   prdb-client table-rename --address IP:PORT --credentials ADMIN_FILE --id HEX --name NAME\n\
   prdb-client table-drop --address IP:PORT --credentials ADMIN_FILE --id HEX\n\n\
+  prdb-client column-add --address IP:PORT --credentials ADMIN_FILE --table-id HEX --column name:type:nullable\n\
+  prdb-client column-rename --address IP:PORT --credentials ADMIN_FILE --table-id HEX --column-id HEX --name NAME\n\
+  prdb-client column-drop --address IP:PORT --credentials ADMIN_FILE --table-id HEX --column-id HEX\n\n\
 Column types: boolean, smallint, integer, bigint, decimal(P,S), text, varchar(N), bytea, uuid, date, timestamptz.\n\
 Column nullability is nullable or not-null; not-null columns require the UUID identity modifier.\n\n\
 Token secrets are saved only to mode-0600 credential files and are never printed.\n\
@@ -98,6 +101,9 @@ fn run() -> Result<(), String> {
         "token-revoke" => token_revoke(address, credentials_path, &mut fields),
         "schema-create" | "schema-rename" | "schema-drop" | "table-create" | "table-rename"
         | "table-drop" => schema_table_admin(&command, address, credentials_path, &mut fields),
+        "column-add" | "column-rename" | "column-drop" => {
+            column_admin(&command, address, credentials_path, &mut fields)
+        }
         "user-create" | "user-rename" | "user-drop" | "user-login" | "role-create"
         | "role-rename" | "role-drop" | "role-grant" | "role-revoke" => {
             identity_admin(&command, address, credentials_path, &mut fields)
@@ -185,6 +191,75 @@ fn schema_table_admin(
         _ => return Err(format!("unsupported schema/table command {command}")),
     }
     Ok(())
+}
+
+fn column_admin(
+    command: &str,
+    address: SocketAddr,
+    credentials_path: PathBuf,
+    fields: &mut HashMap<String, std::ffi::OsString>,
+) -> Result<(), String> {
+    let table_id = parse_id(&take_text(fields, "--table-id")?)?;
+    let mut administrator =
+        read_client_credentials(credentials_path).map_err(|error| error.to_string())?;
+    let mut client = AdminClient::connect_authenticated(
+        address,
+        administrator.token_id,
+        &mut administrator.token_secret,
+    )
+    .map_err(|error| error.to_string())?;
+    match command {
+        "column-add" => {
+            let column_text = take_text(fields, "--column")?;
+            let column = parse_added_column(&column_text)?;
+            reject_unknown(fields)?;
+            let result = client
+                .add_column(table_id, &column)
+                .map_err(|error| error.to_string())?;
+            println!(
+                "added column {} to table {} (operation {}, commit {})",
+                lower_hex(&result.column_id),
+                lower_hex(&result.table_id),
+                lower_hex(&result.operation_id),
+                result.commit_sequence
+            );
+        }
+        "column-rename" => {
+            let column_id = parse_id(&take_text(fields, "--column-id")?)?;
+            let name = take_text(fields, "--name")?;
+            reject_unknown(fields)?;
+            let result = client
+                .rename_column(table_id, column_id, &name)
+                .map_err(|error| error.to_string())?;
+            print_operation(
+                "renamed column",
+                &result.operation_id,
+                result.commit_sequence,
+            );
+        }
+        "column-drop" => {
+            let column_id = parse_id(&take_text(fields, "--column-id")?)?;
+            reject_unknown(fields)?;
+            let result = client
+                .drop_column(table_id, column_id)
+                .map_err(|error| error.to_string())?;
+            print_operation(
+                "dropped column",
+                &result.operation_id,
+                result.commit_sequence,
+            );
+        }
+        _ => return Err(format!("unsupported column command {command}")),
+    }
+    Ok(())
+}
+
+fn parse_added_column(value: &str) -> Result<AdminColumnDefinition, String> {
+    let mut columns = parse_column_definitions(value)?;
+    if columns.len() != 1 || !columns[0].nullable || columns[0].generated_uuid_identity {
+        return Err("column-add accepts one nullable column without identity".to_owned());
+    }
+    Ok(columns.remove(0))
 }
 
 fn parse_column_definitions(value: &str) -> Result<Vec<AdminColumnDefinition>, String> {
@@ -954,5 +1029,8 @@ mod tests {
         assert!(parse_column_definitions("id:uuid:nullable:identity").is_err());
         assert!(parse_column_definitions("id:decimal(2,3):nullable").is_err());
         assert!(parse_column_definitions("id:varchar(0):nullable").is_err());
+        assert!(parse_added_column("extra:integer:nullable").is_ok());
+        assert!(parse_added_column("id:integer:not-null:identity").is_err());
+        assert!(parse_added_column("one:text:nullable;two:text:nullable").is_err());
     }
 }
