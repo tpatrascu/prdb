@@ -16099,7 +16099,7 @@ fn sandboxed_v3_sql_error_latches_failure_and_durably_aborts_after_partial_outpu
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
-#[ignore = "requires a delegated cgroup and the built TinyCC SQL write/read fixture"]
+#[ignore = "requires a delegated cgroup and the built TinyCC SQL write/read metadata fixture"]
 fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn std::error::Error>>
 {
     use prdb_engine::client_protocol::{ClientConnectionSession, ClientFrame, ClientMode};
@@ -16300,6 +16300,10 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     assert_eq!(inserted.operation, Operation::GatewayResultData as u16);
     assert_eq!(inserted.request_id, accepted.request_id);
     assert_eq!(inserted.payload, b"insert-visible");
+    let metadata = read_frame(&mut gateway)?.ok_or("missing SQL metadata result")?;
+    assert_eq!(metadata.operation, Operation::GatewayResultData as u16);
+    assert_eq!(metadata.request_id, accepted.request_id);
+    assert_eq!(metadata.payload, b"metadata-visible");
     let updated = read_frame(&mut gateway)?.ok_or("missing UPDATE visibility result")?;
     assert_eq!(updated.operation, Operation::GatewayResultData as u16);
     assert_eq!(updated.request_id, accepted.request_id);

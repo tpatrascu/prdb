@@ -48,19 +48,54 @@ static int32_t verify_selected_value(void *opaque, const prdb_sdk_row_v1 *row,
     return 0;
 }
 
+static int32_t verify_information_schema_name(
+    void *opaque, const prdb_sdk_row_v1 *row,
+    const prdb_sdk_select_binding_v2 *binding) {
+    static const uint8_t expected[] = "information_schema";
+    result_context *context = (result_context *)opaque;
+    prdb_sdk_cell_iterator_v1 cells = {0};
+    prdb_sdk_value_v1 value = {0};
+
+    if (context == NULL || row == NULL || binding == NULL ||
+        binding->projection_count != 1 ||
+        binding->projection_ordinals[0] != 0 || row->cell_count != 1 ||
+        prdb_sdk_row_cells_begin_v1(row, &cells, sizeof(cells)) !=
+            PRDB_SDK_BATCH_OK ||
+        prdb_sdk_cell_next_v1(&cells, &value, sizeof(value)) !=
+            PRDB_SDK_BATCH_OK ||
+        cells.cells_remaining != 0 ||
+        value.state != PRDB_SDK_VALUE_STATE_VALUE ||
+        value.type_code != PRDB_SDK_VALUE_TYPE_TEXT ||
+        value.data_len != sizeof(expected) - 1 ||
+        memcmp(value.data, expected, sizeof(expected) - 1) != 0) {
+        return 1;
+    }
+    ++context->row_count;
+    if (context->marker != NULL) {
+        return context->host->write_result(context->host->context,
+                                           context->marker,
+                                           context->marker_len);
+    }
+    return 0;
+}
+
 int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
                            const prdb_invocation_v3 *invocation) {
     static const uint8_t insert_sql[] = "INSERT INTO records VALUES (NULL)";
     static const uint8_t select_null_sql[] =
         "SELECT id FROM records WHERE id IS NULL";
+    static const uint8_t select_schemata_sql[] =
+        "SELECT schema_name FROM schemata LIMIT 1";
     static const uint8_t update_sql[] =
         "UPDATE records SET id = $1 WHERE id IS NULL";
     static const uint8_t select_value_sql[] =
         "SELECT id FROM records WHERE id = $1";
     static const uint8_t delete_sql[] = "DELETE FROM records WHERE id = $1";
     static const uint8_t schema[] = "sql_roundtrip";
+    static const uint8_t information_schema[] = "information_schema";
     static const uint8_t integer_bytes[] = {0, 0, 0, 42};
     static const uint8_t inserted_marker[] = "insert-visible";
+    static const uint8_t metadata_marker[] = "metadata-visible";
     static const uint8_t updated_marker[] = "update-visible";
     uint8_t planner_response[1024] = {0};
     uint8_t executor_response[1024] = {0};
@@ -114,6 +149,21 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
         sizeof(planner_response), executor_response, sizeof(executor_response),
         batch_response, sizeof(batch_response), planner_columns, 1,
         executor_columns, 1, cell_scratch, 1, verify_selected_value, &results);
+    if (status != PRDB_SDK_SQL_EXEC_OK || results.row_count != 1) return 1;
+
+    results.expected_state = PRDB_SDK_VALUE_STATE_VALUE;
+    results.expected_value = NULL;
+    results.expected_value_len = 0;
+    results.marker = metadata_marker;
+    results.marker_len = sizeof(metadata_marker) - 1;
+    results.row_count = 0;
+    status = prdb_sdk_sql_execute_select_v2(
+        host, information_schema, sizeof(information_schema) - 1,
+        select_schemata_sql, sizeof(select_schemata_sql) - 1, NULL, 0, 16,
+        sizeof(batch_response), planner_response, sizeof(planner_response),
+        executor_response, sizeof(executor_response), batch_response,
+        sizeof(batch_response), planner_columns, 1, executor_columns, 1,
+        cell_scratch, 1, verify_information_schema_name, &results);
     if (status != PRDB_SDK_SQL_EXEC_OK || results.row_count != 1) return 1;
 
     status = prdb_sdk_sql_execute_update_v1(
