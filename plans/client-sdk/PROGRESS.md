@@ -141,6 +141,14 @@
 - Verification: focused `prdb-client` tests passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed in the pinned Nix shell; the commit integration target reported 124 passed and 3 cgroup-dependent ignored. The existing authenticated metadata process test passed, and updated CLI help was inspected.
 - Remaining: credential creation/rotation UX, admin CLI commands, and live ADMIN multi-process path tests remain open.
 
+## SDK-5 dependency: token issue/revoke CLI and credential rotation — implemented
+
+- Contract: [client protocol](../../specs/client-protocol.md) returns token secrets exactly once; [identity DDL](../../specs/ddl-identity.md) requires the caller to preserve a usable administrator credential and never log bearer material.
+- Implementation: `prdb-client token-issue` calls authenticated `AdminClient::issue_token`, computes a bounded absolute expiration from a positive TTL, and atomically writes the one-time result to a new private credential file without printing the secret. `token-revoke` exposes explicit revocation. If issuance commits but saving fails, the CLI reports the operation/token IDs and directs the operator to revoke before retrying. Rotation keeps the old credential until the new one is saved and verified.
+- Regression: CLI tests cover zero/overflow TTL rejection; credential file tests cover the private no-overwrite publication path; existing AdminClient mock-TCP tests cover the one-time issue/revoke protocol and malformed secret handling.
+- Verification: focused CLI/credential tests and the existing one-time `AdminClient` token issue/revoke mock-TCP regression passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed in the pinned Nix shell; the commit integration target reported 124 passed and 3 cgroup-dependent ignored. CLI help was inspected.
+- Remaining: general admin DDL CLI commands and live ADMIN multi-process path tests remain open.
+
 ## SDK-5 dependency: typed schema rename AdminClient operation — implemented
 
 - Contract: [client protocol](../../specs/client-protocol.md) requires `schemas.rename` START to echo the stable schema ID and normalized new name.

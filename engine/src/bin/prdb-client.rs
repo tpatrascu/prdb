@@ -1,8 +1,9 @@
 use prdb_engine::authorization::Operation;
-use prdb_engine::client_credentials::read_client_credentials;
+use prdb_engine::client_credentials::{read_client_credentials, write_client_credentials};
+use prdb_engine::client_protocol::ClientCredentials;
 use prdb_engine::client_submit::MetadataClient;
 use prdb_engine::client_submit::{
-    ClientResultEvent, InvocationStatus, SubmissionClient, TerminalOutcome,
+    AdminClient, ClientResultEvent, InvocationStatus, SubmissionClient, TerminalOutcome,
 };
 use prdb_engine::submission_scope::RequestedScopeBuilder;
 use prdb_engine::supervisor::{MAX_PARAMETER_BYTES, WorkloadClass};
@@ -12,6 +13,7 @@ use std::io::{self, Read, Write};
 use std::net::SocketAddr;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const USAGE: &str = "Usage:\n\
   prdb-client submit --address IP:PORT --credentials FILE --package DIR --receipt FILE \\\n    [--parameters FILE] [--deadline-ms N] [--workload operational|analytical]\n\
@@ -19,7 +21,13 @@ const USAGE: &str = "Usage:\n\
   prdb-client scope --address IP:PORT --credentials FILE --schema NAME --output FILE \\\n    [--relation NAME --operations select,insert,update,delete [--columns NAME,...]]\n\n\
 Submission output is provisional until a committed terminal event. START is never retried;\n\
 if its reply is uncertain, use status with the invocation ID and a newly authenticated connection.\n\
-Scope files contain only permissions visible to the authenticated identity and remain a request ceiling.";
+Scope files contain only permissions visible to the authenticated identity and remain a request ceiling.\n\
+Token secrets are saved only to mode-0600 credential files and are never printed.\n\
+  prdb-client token-issue --address IP:PORT --credentials ADMIN_FILE --user-id HEX\n\
+    --label TEXT --ttl-seconds N --output-credentials FILE\n\
+  prdb-client token-revoke --address IP:PORT --credentials ADMIN_FILE --token-id HEX\n\n\
+Token secrets are saved only to mode-0600 credential files and are never printed.\n\
+For rotation, save a replacement credential, verify it, then revoke the old token.";
 
 fn main() -> std::process::ExitCode {
     match run() {
@@ -71,6 +79,8 @@ fn run() -> Result<(), String> {
         "submit" => submit(address, credentials_path, &mut fields),
         "status" => status(address, credentials_path, &mut fields),
         "scope" => scope(address, credentials_path, &mut fields),
+        "token-issue" => token_issue(address, credentials_path, &mut fields),
+        "token-revoke" => token_revoke(address, credentials_path, &mut fields),
         _ => Err(format!("unknown command {command}\n{USAGE}")),
     }
 }
@@ -332,6 +342,104 @@ fn status(
     Ok(())
 }
 
+fn token_issue(
+    address: SocketAddr,
+    credentials_path: PathBuf,
+    fields: &mut HashMap<String, std::ffi::OsString>,
+) -> Result<(), String> {
+    let user_id = parse_id(&take_text(fields, "--user-id")?)?;
+    let label = take_text(fields, "--label")?;
+    let ttl_seconds: u64 = parse_number(
+        fields
+            .remove("--ttl-seconds")
+            .ok_or_else(|| "missing required option --ttl-seconds".to_owned())?,
+        "--ttl-seconds",
+    )?;
+    let output_path = take_path(fields, "--output-credentials")?;
+    reject_unknown(fields)?;
+    let expires_at_us = expiration_time(ttl_seconds)?;
+
+    let mut administrator =
+        read_client_credentials(credentials_path).map_err(|error| error.to_string())?;
+    let mut client = AdminClient::connect_authenticated(
+        address,
+        administrator.token_id,
+        &mut administrator.token_secret,
+    )
+    .map_err(|error| error.to_string())?;
+    let issued = client
+        .issue_token(user_id, &label, expires_at_us)
+        .map_err(|error| error.to_string())?;
+    let token_id = issued.token_id;
+    let operation_id = issued.operation_id;
+    let new_credentials = ClientCredentials {
+        token_id,
+        token_secret: *issued.token_secret(),
+    };
+    write_client_credentials(&output_path, &new_credentials).map_err(|error| {
+        format!(
+            "token issuance committed (operation {}, token {}) but saving {} failed: {error}; revoke token {} before retrying",
+            lower_hex(&operation_id),
+            lower_hex(&token_id),
+            output_path.display(),
+            lower_hex(&token_id)
+        )
+    })?;
+    println!(
+        "saved token {} to {} (operation {}, expires at {expires_at_us} us)",
+        lower_hex(&token_id),
+        output_path.display(),
+        lower_hex(&operation_id)
+    );
+    Ok(())
+}
+
+fn token_revoke(
+    address: SocketAddr,
+    credentials_path: PathBuf,
+    fields: &mut HashMap<String, std::ffi::OsString>,
+) -> Result<(), String> {
+    let token_id = parse_id(&take_text(fields, "--token-id")?)?;
+    reject_unknown(fields)?;
+    let mut administrator =
+        read_client_credentials(credentials_path).map_err(|error| error.to_string())?;
+    let mut client = AdminClient::connect_authenticated(
+        address,
+        administrator.token_id,
+        &mut administrator.token_secret,
+    )
+    .map_err(|error| error.to_string())?;
+    let result = client
+        .revoke_token(token_id)
+        .map_err(|error| error.to_string())?;
+    println!(
+        "revoked token {} (operation {}, commit {})",
+        lower_hex(&token_id),
+        lower_hex(&result.operation_id),
+        result.commit_sequence
+    );
+    Ok(())
+}
+
+fn expiration_time(ttl_seconds: u64) -> Result<i64, String> {
+    if ttl_seconds == 0 {
+        return Err("--ttl-seconds must be positive".to_owned());
+    }
+    let now_us: i64 = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "system clock is before the Unix epoch".to_owned())?
+        .as_micros()
+        .try_into()
+        .map_err(|_| "system time is outside the supported range".to_owned())?;
+    let ttl_us = ttl_seconds
+        .checked_mul(1_000_000)
+        .and_then(|value| i64::try_from(value).ok())
+        .ok_or_else(|| "--ttl-seconds is outside the supported range".to_owned())?;
+    now_us
+        .checked_add(ttl_us)
+        .ok_or_else(|| "token expiration is outside the supported range".to_owned())
+}
+
 fn read_parameters(path: Option<&PathBuf>) -> Result<Vec<u8>, String> {
     let Some(path) = path else {
         return Ok(Vec::new());
@@ -480,5 +588,19 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), b"PSC1test");
         fs::remove_file(path).unwrap();
         fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn token_expiration_requires_positive_bounded_lifetime() {
+        assert!(expiration_time(0).is_err());
+        let expiry = expiration_time(60).unwrap();
+        let now: i64 = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_micros()
+            .try_into()
+            .unwrap();
+        assert!(expiry > now);
+        assert!(expiration_time(u64::MAX).is_err());
     }
 }
