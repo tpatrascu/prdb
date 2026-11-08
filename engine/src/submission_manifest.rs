@@ -93,6 +93,40 @@ pub fn encode_manifest_v1(manifest: &ArtifactManifestV1) -> Result<Vec<u8>, Mani
     Ok(bytes)
 }
 
+/// Derive a canonical manifest from a compiled Linux x86_64 ELF artifact.
+/// Dependencies and required ABI exports are inspected as data; the artifact
+/// is never loaded or executed. Compatibility-profile strings remain caller
+/// supplied and their canonical identifier form is checked by the encoder.
+pub fn manifest_v1_from_elf(
+    artifact: &[u8],
+    native_abi_version: u8,
+    sdk_release: u32,
+    cpu_baseline: String,
+    runtime_profile: String,
+    compiler_identity: String,
+) -> Result<ArtifactManifestV1, ManifestError> {
+    if !(1..=3).contains(&native_abi_version) {
+        return Err(ManifestError::UnsupportedAbi);
+    }
+    let (descriptor_symbol, entry_point_symbol) = abi_symbols(native_abi_version);
+    let dependencies = decode_elf_needed_dependencies_internal(
+        artifact,
+        Some((descriptor_symbol, 1, entry_point_symbol, 2)),
+    )?;
+    let manifest = ArtifactManifestV1 {
+        native_abi_version,
+        sdk_release,
+        cpu_baseline,
+        runtime_profile,
+        compiler_identity,
+        descriptor_symbol: descriptor_symbol.to_owned(),
+        entry_point_symbol: entry_point_symbol.to_owned(),
+        dependencies,
+    };
+    encode_manifest_v1(&manifest)?;
+    Ok(manifest)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ManifestError {
     InvalidEncoding,
@@ -697,7 +731,7 @@ mod tests {
         ArtifactCompatibilityProfile, ArtifactManifestV1, CLIENT_PROTOCOL_MAJOR,
         CLIENT_PROTOCOL_MINOR, MANIFEST_V1_HEADER_BYTES, MAX_MANIFEST_DEPENDENCIES, ManifestError,
         VersionedSubmissionMetadataValidator, decode_elf_needed_dependencies, decode_manifest_v1,
-        encode_manifest_v1,
+        encode_manifest_v1, manifest_v1_from_elf,
     };
     use crate::supervisor::{
         ChunkKind, PrepareSubmission, StagingError, StagingLimits, StagingOwner, StagingStore,
@@ -731,6 +765,32 @@ mod tests {
         assert_eq!(
             encode_manifest_v1(&unsorted),
             Err(ManifestError::InvalidEncoding)
+        );
+    }
+
+    #[test]
+    fn elf_manifest_builder_rejects_unsupported_abi_and_malformed_artifacts() {
+        assert_eq!(
+            manifest_v1_from_elf(
+                &[],
+                4,
+                1,
+                "x86_64_v1".to_owned(),
+                "test_runtime".to_owned(),
+                "fixture compiler".to_owned(),
+            ),
+            Err(ManifestError::UnsupportedAbi)
+        );
+        assert_eq!(
+            manifest_v1_from_elf(
+                &[],
+                3,
+                1,
+                "x86_64_v1".to_owned(),
+                "test_runtime".to_owned(),
+                "fixture compiler".to_owned(),
+            ),
+            Err(ManifestError::InvalidArtifact)
         );
     }
 

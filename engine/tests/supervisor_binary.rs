@@ -77,9 +77,7 @@ impl Drop for ChildGuard {
 fn supervisor_and_gateway_binaries_cover_submission_status_cancel_and_start_preflight() {
     use prdb_engine::bootstrap::initialize;
     use prdb_engine::client_protocol::{ClientFrame, ClientFrameDecoder};
-    use prdb_engine::submission_manifest::{
-        ArtifactManifestV1, decode_elf_needed_dependencies, encode_manifest_v1,
-    };
+    use prdb_engine::submission_manifest::{encode_manifest_v1, manifest_v1_from_elf};
     use sha2::{Digest, Sha256};
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpStream;
@@ -130,18 +128,17 @@ fn supervisor_and_gateway_binaries_cover_submission_status_cancel_and_start_pref
         String::from_utf8_lossy(&compile.stderr)
     );
     let artifact = std::fs::read(&query_artifact).expect("read TinyCC query fixture");
-    let dependencies = decode_elf_needed_dependencies(&artifact).expect("inspect fixture ELF");
-    let manifest = encode_manifest_v1(&ArtifactManifestV1 {
-        native_abi_version: 3,
-        sdk_release: 1,
-        cpu_baseline: "x86_64-v1".to_owned(),
-        runtime_profile: "test-runtime".to_owned(),
-        compiler_identity: "TinyCC integration fixture".to_owned(),
-        descriptor_symbol: "prdb_query_descriptor_v3".to_owned(),
-        entry_point_symbol: "prdb_query_main_v3".to_owned(),
-        dependencies: dependencies.clone(),
-    })
-    .expect("encode fixture manifest");
+    let manifest_value = manifest_v1_from_elf(
+        &artifact,
+        3,
+        1,
+        "x86_64-v1".to_owned(),
+        "test-runtime".to_owned(),
+        "TinyCC integration fixture".to_owned(),
+    )
+    .expect("derive manifest from fixture ELF");
+    let dependencies = manifest_value.dependencies.clone();
+    let manifest = encode_manifest_v1(&manifest_value).expect("encode fixture manifest");
     let instance_dir = root.join("instance");
     let mut setup =
         initialize(&instance_dir, "tcp_test_admin", i64::MAX).expect("initialize test instance");
