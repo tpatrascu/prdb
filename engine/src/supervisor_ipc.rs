@@ -449,7 +449,9 @@ pub fn bind_gateway_service_socket(socket_path: impl AsRef<Path>) -> io::Result<
 
 /// Accept bounded per-client Unix streams from the configured gateway UID.
 /// The START callback owns trusted scheduling and event emission for that
-/// invocation; status/cancel control remains available through other sessions.
+/// invocation and receives the service's current StorageManager for durable
+/// outcome confirmation; status/cancel control remains available through other
+/// sessions.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub fn serve_gateway_service_listener<'db, F>(
     listener: UnixListener,
@@ -461,6 +463,7 @@ pub fn serve_gateway_service_listener<'db, F>(
 ) -> Result<(), GatewayServiceListenerError>
 where
     F: Fn(
+            &StorageManager<'db>,
             u64,
             &mut UnixStream,
             crate::storage_manager::SupervisorInvocation<'db>,
@@ -547,6 +550,7 @@ where
                                         invocation_id,
                                         || {
                                             worker_started(
+                                                worker_manager,
                                                 request_id,
                                                 &mut stream,
                                                 invocation,
@@ -622,6 +626,8 @@ fn finish_started_after_callback(
 /// Own the StorageInstance/StorageManager lifecycle for a gateway service.
 /// `bind_listener` must return a fresh private listener each time it is called;
 /// the previous listener has been dropped before a reopen cycle reaches it.
+/// The START callback receives the manager for the currently validated
+/// database instance, including after a reopen.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub fn run_gateway_service_with_recovery<B, F>(
     mut instance: crate::bootstrap::StorageInstance,
@@ -635,6 +641,7 @@ pub fn run_gateway_service_with_recovery<B, F>(
 where
     B: FnMut() -> io::Result<UnixListener>,
     F: for<'db> Fn(
+            &StorageManager<'db>,
             u64,
             &mut UnixStream,
             crate::storage_manager::SupervisorInvocation<'db>,
@@ -1696,7 +1703,7 @@ mod worker_result_event_tests {
             runtime,
             shutdown,
             bind_listener,
-            |_request_id, _stream, _invocation, _submission, _executor| {},
+            |_manager, _request_id, _stream, _invocation, _submission, _executor| {},
         )
         .expect("reopen and restart gateway listener");
         assert_eq!(bind_count.load(Ordering::SeqCst), 2);
@@ -1811,7 +1818,7 @@ mod worker_result_event_tests {
             &staging,
             runtime,
             shutdown,
-            |_request_id, _stream, _invocation, _submission, _executor| {},
+            |_manager, _request_id, _stream, _invocation, _submission, _executor| {},
         )
         .expect("serve idle gateway listener");
         shutdown_thread.join().expect("join shutdown thread");

@@ -9277,7 +9277,7 @@ fn admin_cancellation_sync_failure_quarantines_until_reopen()
                 &staging,
                 runtime,
                 Arc::new(AtomicBool::new(false)),
-                |_request_id, _stream, _invocation, _submission, _executor| {},
+                |_manager, _request_id, _stream, _invocation, _submission, _executor| {},
             ),
             Err(prdb_engine::supervisor_ipc::GatewayServiceListenerError::StorageReopenRequired)
         ));
@@ -14872,7 +14872,7 @@ fn gateway_service_listener_binds_peer_and_serves_hello() -> Result<(), Box<dyn 
                     },
                 },
                 shutdown_server,
-                |_request_id, _stream, _invocation, _submission, _executor| {},
+                |_manager, _request_id, _stream, _invocation, _submission, _executor| {},
             )
         });
 
