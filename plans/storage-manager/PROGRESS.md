@@ -1752,6 +1752,12 @@
 - Verification: the focused transaction integration test passed with the pinned Nix toolchain.
 - Scope: bounded invocation-write pressure only; sustained contention and power-loss behavior remain unmeasured. A separate single-reader compaction case follows.
 
+### Concurrent retained invocation pressure — verified
+
+- Regression: `retained_invocation_snapshot_survives_concurrent_writer_pressure` pins one invocation snapshot while four concurrent writers each publish sixteen 32 KiB replacements to separate rows (2 MiB total). The retained reader continues to observe all original values; a new invocation reads each writer's final value.
+- Verification: the focused transaction integration test passed with the pinned Nix toolchain.
+- Scope: bounded concurrent pressure; longer-duration workloads and power-loss behavior remain unmeasured.
+
 ### Physical reclamation with a retained reader — verified
 
 - Regression: `retained_reader_blocks_compaction_until_release_then_reclaims_deleted_pages` writes 6.25 MiB of durable values, pins a read snapshot, deletes most rows, and verifies redb rejects compaction while the reader is open. The pinned snapshot still reads all original rows; after release, compaction shrinks the database file and the remaining rows are intact.
@@ -1774,7 +1780,7 @@
 - Verification: the acceptance passed again with `/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service`, whose `cpu`, `memory`, and `pids` controllers are enabled. This NixOS profile used the pinned loader/libc paths and an empty `PRDB_TEST_RUNTIME_READ_ONLY` list because no additional read-only runtime files were required.
 - Terminal-loss regression: `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` now completes the real worker and relays every provisional SQL result, closes the gateway before terminal delivery, requires the terminal frame write to fail, and then verifies the durable outcome is COMMITTED. The restricted-principal query still follows the normal terminal path.
 - Verification: the terminal-loss acceptance passed under the delegated `user@1000.service` cgroup. The confined metadata submission, caught-query-error abort, disconnected gateway restart, and SQL DML/terminal-loss acceptances all passed with the same NixOS runtime profile. Default workspace build, format, warning-denied Clippy, and tests passed; three delegated-cgroup tests remain ignored by the default suite.
-- Remaining: add additional storage-file fault points; measure sustained mixed reader/writer pressure beyond the bounded workloads above.
+- Remaining: add additional storage-file fault points; measure longer-duration mixed reader/writer pressure beyond the bounded sequential and concurrent workloads above.
 
 ## SM-1 / SM-7: recover an injected redb storage write error — verified
 

@@ -4684,6 +4684,86 @@ fn retained_invocation_snapshot_survives_a_durable_write_burst()
 }
 
 #[test]
+fn retained_invocation_snapshot_survives_concurrent_writer_pressure()
+-> Result<(), Box<dyn std::error::Error>> {
+    const WRITER_COUNT: usize = 4;
+    const WRITES_PER_WRITER: u8 = 16;
+    const VALUE_BYTES: usize = 32 * 1024;
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let row_ids = (1..=WRITER_COUNT as u8).map(id).collect::<Vec<_>>();
+    let original_values = (0..WRITER_COUNT)
+        .map(|writer| vec![0x10 + writer as u8; VALUE_BYTES])
+        .collect::<Vec<_>>();
+    let mut seed =
+        InvocationTransaction::begin(&database, [0x20; 16], [9; 16], 9_999, 8, 512 * 1024)?;
+    for (row_id, value) in row_ids.iter().copied().zip(&original_values) {
+        seed.stage_put(row_id, value)?;
+    }
+    seed.commit()?;
+
+    let mut reader =
+        InvocationTransaction::begin(&database, [0x30; 16], [9; 16], 9_999, 8, 512 * 1024)?;
+    for (row_id, value) in row_ids.iter().copied().zip(&original_values) {
+        assert_eq!(reader.read(row_id)?, Some(value.clone()));
+    }
+
+    let barrier = Arc::new(Barrier::new(WRITER_COUNT + 1));
+    let database_ref = &database;
+    std::thread::scope(|scope| {
+        for (writer_index, row_id) in row_ids.iter().copied().enumerate() {
+            let barrier = Arc::clone(&barrier);
+            let database = database_ref;
+            scope.spawn(move || {
+                barrier.wait();
+                for version in 0..WRITES_PER_WRITER {
+                    let value =
+                        vec![0x40 + writer_index as u8 * WRITES_PER_WRITER + version; VALUE_BYTES];
+                    let invocation_id =
+                        [0x80 + writer_index as u8 * WRITES_PER_WRITER + version; 16];
+                    let mut writer = InvocationTransaction::begin(
+                        database,
+                        invocation_id,
+                        [9; 16],
+                        9_999,
+                        4,
+                        VALUE_BYTES * 2,
+                    )
+                    .expect("pressure writer admission failed");
+                    writer
+                        .stage_put(row_id, &value)
+                        .expect("pressure writer stage failed");
+                    writer.commit().expect("pressure writer commit failed");
+                }
+            });
+        }
+        barrier.wait();
+    });
+
+    for (row_id, value) in row_ids.iter().copied().zip(&original_values) {
+        assert_eq!(
+            reader.read(row_id)?,
+            Some(value.clone()),
+            "the retained invocation snapshot changed under concurrent commits"
+        );
+    }
+    reader.abort()?;
+
+    let mut observer =
+        InvocationTransaction::begin(&database, [0xd0; 16], [9; 16], 9_999, 8, 512 * 1024)?;
+    for (writer_index, row_id) in row_ids.iter().copied().enumerate() {
+        let expected = vec![
+            0x40 + writer_index as u8 * WRITES_PER_WRITER + WRITES_PER_WRITER - 1;
+            VALUE_BYTES
+        ];
+        assert_eq!(observer.read(row_id)?, Some(expected));
+    }
+    observer.abort()?;
+    Ok(())
+}
+
+#[test]
 fn authorized_row_scan_pages_over_the_pinned_snapshot_and_private_overlay()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
