@@ -109,6 +109,14 @@
 - Verification: focused `client_admin` tests passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed in the Nix shell; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
 - Remaining: typed constraint and foreign-key helpers; CLI/credential-file lifecycle; and live ADMIN operations through the real multi-process gateway path remain open.
 
+## SDK-5 dependency: typed constraint and foreign-key AdminClient operations — implemented
+
+- Contract: [client protocol](../../specs/client-protocol.md) defines ordered distinct key columns, EIR1 row-local CHECK expressions and dependencies, generated constraint/index/expression/FK IDs, and ID-echoing drop results.
+- Implementation: `AdminClient` exposes unique and primary-key create/drop, CHECK create/drop, and foreign-key create/drop. Creation uses the canonical expression encoder and the shared exact PREPARE/START response validator; generated IDs and commit sequences are decoded into typed results. CHECK dependency lists may be empty but remain bounded and reject zero or repeated IDs.
+- Regression: mock-TCP coverage verifies all eight wire schemas, canonical EIR1 bytes, generated IDs, committed sequence decoding, and empty CHECK dependencies.
+- Verification: the focused `client_admin` regression passed. In the pinned Nix shell, `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
+- Remaining: CLI/credential-file lifecycle and live ADMIN operations through the real multi-process gateway path remain open.
+
 ## SDK-5 dependency: typed schema rename AdminClient operation — implemented
 
 - Contract: [client protocol](../../specs/client-protocol.md) requires `schemas.rename` START to echo the stable schema ID and normalized new name.

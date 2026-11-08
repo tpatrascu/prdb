@@ -150,6 +150,29 @@ pub struct AdminTableColumnResult {
     pub commit_sequence: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminKeyConstraintResult {
+    pub operation_id: [u8; 16],
+    pub constraint_id: [u8; 16],
+    pub index_id: [u8; 16],
+    pub commit_sequence: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminCheckConstraintResult {
+    pub operation_id: [u8; 16],
+    pub constraint_id: [u8; 16],
+    pub expression_id: [u8; 16],
+    pub commit_sequence: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminForeignKeyResult {
+    pub operation_id: [u8; 16],
+    pub foreign_key_id: [u8; 16],
+    pub commit_sequence: u64,
+}
+
 /// Database-scoped privileges that an administrator may grant or revoke.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AdminSystemPrivilege {
@@ -1445,6 +1468,172 @@ impl AdminClient {
         .map(|(result, _)| result)
     }
 
+    pub fn create_unique_constraint(
+        &mut self,
+        table_id: [u8; 16],
+        column_ids: &[[u8; 16]],
+    ) -> Result<AdminKeyConstraintResult, ClientSubmitError> {
+        validate_admin_id(table_id)?;
+        validate_admin_id_list(column_ids, crate::tuple::MAX_COLUMNS)?;
+        let (result, generated_ids) = self.execute_admin_operation_with_generated_ids(
+            "constraints.create_unique",
+            format!(
+                "{{\"table_id\":\"{}\",\"column_ids\":{}}}",
+                lower_hex(&table_id),
+                encode_id_array(column_ids)
+            ),
+            &["constraint_id", "index_id"],
+            &[],
+        )?;
+        Ok(AdminKeyConstraintResult {
+            operation_id: result.operation_id,
+            constraint_id: generated_ids[0],
+            index_id: generated_ids[1],
+            commit_sequence: result.commit_sequence,
+        })
+    }
+
+    pub fn create_primary_key(
+        &mut self,
+        table_id: [u8; 16],
+        column_ids: &[[u8; 16]],
+    ) -> Result<AdminKeyConstraintResult, ClientSubmitError> {
+        validate_admin_id(table_id)?;
+        validate_admin_id_list(column_ids, crate::tuple::MAX_COLUMNS)?;
+        let (result, generated_ids) = self.execute_admin_operation_with_generated_ids(
+            "constraints.create_primary_key",
+            format!(
+                "{{\"table_id\":\"{}\",\"column_ids\":{}}}",
+                lower_hex(&table_id),
+                encode_id_array(column_ids)
+            ),
+            &["constraint_id", "index_id"],
+            &[],
+        )?;
+        Ok(AdminKeyConstraintResult {
+            operation_id: result.operation_id,
+            constraint_id: generated_ids[0],
+            index_id: generated_ids[1],
+            commit_sequence: result.commit_sequence,
+        })
+    }
+
+    pub fn drop_primary_key(
+        &mut self,
+        constraint_id: [u8; 16],
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        self.drop_constraint("constraints.drop_primary_key", constraint_id)
+    }
+
+    pub fn drop_unique_constraint(
+        &mut self,
+        constraint_id: [u8; 16],
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        self.drop_constraint("constraints.drop_unique", constraint_id)
+    }
+
+    pub fn drop_check_constraint(
+        &mut self,
+        constraint_id: [u8; 16],
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        self.drop_constraint("constraints.drop_check", constraint_id)
+    }
+
+    fn drop_constraint(
+        &mut self,
+        operation: &str,
+        constraint_id: [u8; 16],
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        validate_admin_id(constraint_id)?;
+        let (result, response_id) = self.execute_admin_operation(
+            operation,
+            format!("{{\"constraint_id\":\"{}\"}}", lower_hex(&constraint_id)),
+            Some("constraint_id"),
+        )?;
+        if response_id != Some(constraint_id) {
+            return Err(ClientSubmitError::AdministrativeOutcomeUncertain(
+                result.operation_id,
+            ));
+        }
+        Ok(result)
+    }
+
+    pub fn create_check_constraint(
+        &mut self,
+        table_id: [u8; 16],
+        expression: &crate::authorization::Expr,
+        dependency_column_ids: &[[u8; 16]],
+    ) -> Result<AdminCheckConstraintResult, ClientSubmitError> {
+        validate_admin_id(table_id)?;
+        validate_admin_id_list_allow_empty(dependency_column_ids, crate::tuple::MAX_COLUMNS)?;
+        if !crate::expression::is_row_local_expression(expression) {
+            return Err(ClientSubmitError::InvalidAdministrativeRequest);
+        }
+        let expression_bytes = crate::expression::encode_expression(expression)
+            .map_err(|_| ClientSubmitError::InvalidAdministrativeRequest)?;
+        let (result, generated_ids) = self.execute_admin_operation_with_generated_ids(
+            "constraints.create_check",
+            format!(
+                "{{\"table_id\":\"{}\",\"expression_eir1\":\"{}\",\"dependency_column_ids\":{}}}",
+                lower_hex(&table_id),
+                lower_hex(&expression_bytes),
+                encode_id_array(dependency_column_ids)
+            ),
+            &["constraint_id", "expression_id"],
+            &[],
+        )?;
+        Ok(AdminCheckConstraintResult {
+            operation_id: result.operation_id,
+            constraint_id: generated_ids[0],
+            expression_id: generated_ids[1],
+            commit_sequence: result.commit_sequence,
+        })
+    }
+
+    pub fn create_foreign_key(
+        &mut self,
+        source_table_id: [u8; 16],
+        source_column_ids: &[[u8; 16]],
+        target_constraint_id: [u8; 16],
+    ) -> Result<AdminForeignKeyResult, ClientSubmitError> {
+        validate_admin_id(source_table_id)?;
+        validate_admin_id(target_constraint_id)?;
+        validate_admin_id_list(source_column_ids, crate::tuple::MAX_COLUMNS)?;
+        let (result, foreign_key_id) = self.execute_admin_operation(
+            "foreign_keys.create",
+            format!(
+                "{{\"source_table_id\":\"{}\",\"source_column_ids\":{},\"target_constraint_id\":\"{}\"}}",
+                lower_hex(&source_table_id),
+                encode_id_array(source_column_ids),
+                lower_hex(&target_constraint_id)
+            ),
+            Some("foreign_key_id"),
+        )?;
+        Ok(AdminForeignKeyResult {
+            operation_id: result.operation_id,
+            foreign_key_id: foreign_key_id.ok_or(ClientSubmitError::InvalidResponse)?,
+            commit_sequence: result.commit_sequence,
+        })
+    }
+
+    pub fn drop_foreign_key(
+        &mut self,
+        foreign_key_id: [u8; 16],
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        validate_admin_id(foreign_key_id)?;
+        let (result, response_id) = self.execute_admin_operation(
+            "foreign_keys.drop",
+            format!("{{\"foreign_key_id\":\"{}\"}}", lower_hex(&foreign_key_id)),
+            Some("foreign_key_id"),
+        )?;
+        if response_id != Some(foreign_key_id) {
+            return Err(ClientSubmitError::AdministrativeOutcomeUncertain(
+                result.operation_id,
+            ));
+        }
+        Ok(result)
+    }
+
     fn create_identity(
         &mut self,
         operation: &str,
@@ -1556,6 +1745,23 @@ impl AdminClient {
         created_id_field: Option<&str>,
         expected_response_fields: &[AdminExpectedResponseField<'_>],
     ) -> Result<(AdminOperationResult, Option<[u8; 16]>), ClientSubmitError> {
+        let generated_id_fields = created_id_field.into_iter().collect::<Vec<_>>();
+        self.execute_admin_operation_with_generated_ids(
+            operation,
+            arguments,
+            &generated_id_fields,
+            expected_response_fields,
+        )
+        .map(|(result, ids)| (result, ids.first().copied()))
+    }
+
+    fn execute_admin_operation_with_generated_ids(
+        &mut self,
+        operation: &str,
+        arguments: String,
+        generated_id_fields: &[&str],
+        expected_response_fields: &[AdminExpectedResponseField<'_>],
+    ) -> Result<(AdminOperationResult, Vec<[u8; 16]>), ClientSubmitError> {
         let prepare = format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"{operation}\",\"arguments\":{arguments}}}"
         );
@@ -1591,14 +1797,16 @@ impl AdminClient {
             .get("commit_sequence")
             .and_then(ResponseValue::as_string)
             .and_then(|text| parse_canonical_positive_u64(text.to_owned()));
-        let created_id = created_id_field.and_then(|key| response_id(&fields, key).ok());
-        let expected_field_count =
-            3 + usize::from(created_id_field.is_some()) + expected_response_fields.len();
+        let generated_ids = generated_id_fields
+            .iter()
+            .map(|key| response_id(&fields, key).ok())
+            .collect::<Option<Vec<_>>>();
+        let expected_field_count = 3 + generated_id_fields.len() + expected_response_fields.len();
         if fields.len() != expected_field_count
             || response_operation_id != Some(operation_id)
             || outcome != Some("committed")
             || sequence.is_none()
-            || (created_id_field.is_some() && created_id.is_none())
+            || generated_ids.is_none()
             || expected_response_fields
                 .iter()
                 .any(|expectation| !expectation.matches(&fields))
@@ -1612,7 +1820,7 @@ impl AdminClient {
                 operation_id,
                 commit_sequence: sequence.unwrap(),
             },
-            created_id,
+            generated_ids.unwrap(),
         ))
     }
 
@@ -1806,6 +2014,27 @@ fn validate_admin_name(name: &str) -> Result<(), ClientSubmitError> {
 
 fn validate_admin_id(id: [u8; 16]) -> Result<(), ClientSubmitError> {
     if id == [0; 16] {
+        Err(ClientSubmitError::InvalidAdministrativeRequest)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_admin_id_list(ids: &[[u8; 16]], maximum: usize) -> Result<(), ClientSubmitError> {
+    if ids.is_empty() {
+        return Err(ClientSubmitError::InvalidAdministrativeRequest);
+    }
+    validate_admin_id_list_allow_empty(ids, maximum)
+}
+
+fn validate_admin_id_list_allow_empty(
+    ids: &[[u8; 16]],
+    maximum: usize,
+) -> Result<(), ClientSubmitError> {
+    if ids.len() > maximum
+        || ids.contains(&[0; 16])
+        || ids.iter().copied().collect::<HashSet<_>>().len() != ids.len()
+    {
         Err(ClientSubmitError::InvalidAdministrativeRequest)
     } else {
         Ok(())

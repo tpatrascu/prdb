@@ -874,6 +874,193 @@ fn admin_client_changes_table_owner_nullability_and_defaults() {
     server.join().unwrap();
 }
 
+#[test]
+fn admin_client_sends_typed_constraint_and_foreign_key_operations() {
+    use prdb_engine::authorization::Expr;
+
+    let expression = Expr::Equal(
+        Box::new(Expr::Field(0)),
+        Box::new(Expr::Literal(Some(ScalarValue::BigInt(0)))),
+    );
+    let expression_hex = prdb_engine::expression::encode_expression(&expression)
+        .unwrap()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let table_id = [0x11; 16];
+    let column_ids = [[0x21; 16], [0x22; 16]];
+    let constraint_id = [0x31; 16];
+    let index_id = [0x32; 16];
+    let expression_id = [0x33; 16];
+    let foreign_key_id = [0x41; 16];
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut decoder = ClientFrameDecoder::default();
+        establish_control_session(&mut stream, &mut decoder);
+
+        let cases = [
+            (
+                "constraints.create_unique",
+                format!(
+                    r#"{{"table_id":"{}","column_ids":["{}","{}"]}}"#,
+                    hex(&table_id),
+                    hex(&column_ids[0]),
+                    hex(&column_ids[1])
+                ),
+                [0x51; 16],
+                format!(
+                    r#"{{"operation_id":"{}","outcome":"committed","constraint_id":"{}","index_id":"{}","commit_sequence":"91"}}"#,
+                    hex(&[0x51; 16]),
+                    hex(&constraint_id),
+                    hex(&index_id)
+                ),
+            ),
+            (
+                "constraints.create_primary_key",
+                format!(
+                    r#"{{"table_id":"{}","column_ids":["{}"]}}"#,
+                    hex(&table_id),
+                    hex(&column_ids[0])
+                ),
+                [0x52; 16],
+                format!(
+                    r#"{{"operation_id":"{}","outcome":"committed","constraint_id":"{}","index_id":"{}","commit_sequence":"92"}}"#,
+                    hex(&[0x52; 16]),
+                    hex(&[0x34; 16]),
+                    hex(&[0x35; 16])
+                ),
+            ),
+            (
+                "constraints.create_check",
+                format!(
+                    r#"{{"table_id":"{}","expression_eir1":"{}","dependency_column_ids":[]}}"#,
+                    hex(&table_id),
+                    expression_hex
+                ),
+                [0x53; 16],
+                format!(
+                    r#"{{"operation_id":"{}","outcome":"committed","constraint_id":"{}","expression_id":"{}","commit_sequence":"93"}}"#,
+                    hex(&[0x53; 16]),
+                    hex(&[0x36; 16]),
+                    hex(&expression_id)
+                ),
+            ),
+            (
+                "constraints.drop_primary_key",
+                format!(r#"{{"constraint_id":"{}"}}"#, hex(&constraint_id)),
+                [0x54; 16],
+                format!(
+                    r#"{{"operation_id":"{}","outcome":"committed","constraint_id":"{}","commit_sequence":"94"}}"#,
+                    hex(&[0x54; 16]),
+                    hex(&constraint_id)
+                ),
+            ),
+            (
+                "constraints.drop_unique",
+                format!(r#"{{"constraint_id":"{}"}}"#, hex(&[0x34; 16])),
+                [0x55; 16],
+                format!(
+                    r#"{{"operation_id":"{}","outcome":"committed","constraint_id":"{}","commit_sequence":"95"}}"#,
+                    hex(&[0x55; 16]),
+                    hex(&[0x34; 16])
+                ),
+            ),
+            (
+                "constraints.drop_check",
+                format!(r#"{{"constraint_id":"{}"}}"#, hex(&[0x36; 16])),
+                [0x56; 16],
+                format!(
+                    r#"{{"operation_id":"{}","outcome":"committed","constraint_id":"{}","commit_sequence":"96"}}"#,
+                    hex(&[0x56; 16]),
+                    hex(&[0x36; 16])
+                ),
+            ),
+            (
+                "foreign_keys.create",
+                format!(
+                    r#"{{"source_table_id":"{}","source_column_ids":["{}"],"target_constraint_id":"{}"}}"#,
+                    hex(&table_id),
+                    hex(&column_ids[0]),
+                    hex(&constraint_id)
+                ),
+                [0x57; 16],
+                format!(
+                    r#"{{"operation_id":"{}","outcome":"committed","foreign_key_id":"{}","commit_sequence":"97"}}"#,
+                    hex(&[0x57; 16]),
+                    hex(&foreign_key_id)
+                ),
+            ),
+            (
+                "foreign_keys.drop",
+                format!(r#"{{"foreign_key_id":"{}"}}"#, hex(&foreign_key_id)),
+                [0x58; 16],
+                format!(
+                    r#"{{"operation_id":"{}","outcome":"committed","foreign_key_id":"{}","commit_sequence":"98"}}"#,
+                    hex(&[0x58; 16]),
+                    hex(&foreign_key_id)
+                ),
+            ),
+        ];
+        for (operation, arguments, operation_id, result) in cases {
+            let prepare = read_frame(&mut stream, &mut decoder);
+            let payload = String::from_utf8(prepare.payload.clone()).unwrap();
+            assert!(
+                payload.contains(&format!(r#""operation":"{operation}""#)),
+                "{payload}"
+            );
+            assert!(
+                payload.contains(&format!(r#""arguments":{arguments}"#)),
+                "{payload}"
+            );
+            respond(
+                &mut stream,
+                &prepare,
+                format!(
+                    r#"{{"operation_id":"{}","state":"prepared"}}"#,
+                    hex(&operation_id)
+                )
+                .as_bytes(),
+            );
+            let start = read_frame(&mut stream, &mut decoder);
+            respond(&mut stream, &start, result.as_bytes());
+        }
+    });
+    let mut secret = [7; 32];
+    let mut client = AdminClient::connect_authenticated_with_timeout(
+        address,
+        [8; 16],
+        &mut secret,
+        Duration::from_secs(3),
+    )
+    .unwrap();
+    let unique = client
+        .create_unique_constraint(table_id, &column_ids)
+        .unwrap();
+    assert_eq!(unique.constraint_id, constraint_id);
+    assert_eq!(unique.index_id, index_id);
+    let primary_key = client
+        .create_primary_key(table_id, &column_ids[..1])
+        .unwrap();
+    assert_eq!(primary_key.constraint_id, [0x34; 16]);
+    assert_eq!(primary_key.index_id, [0x35; 16]);
+    let check = client
+        .create_check_constraint(table_id, &expression, &[])
+        .unwrap();
+    assert_eq!(check.constraint_id, [0x36; 16]);
+    assert_eq!(check.expression_id, expression_id);
+    client.drop_primary_key(constraint_id).unwrap();
+    client.drop_unique_constraint([0x34; 16]).unwrap();
+    client.drop_check_constraint([0x36; 16]).unwrap();
+    let foreign_key = client
+        .create_foreign_key(table_id, &column_ids[..1], constraint_id)
+        .unwrap();
+    assert_eq!(foreign_key.foreign_key_id, foreign_key_id);
+    client.drop_foreign_key(foreign_key_id).unwrap();
+    let _ = server.join().unwrap();
+}
+
 fn hex(id: &[u8; 16]) -> String {
     id.iter().map(|byte| format!("{byte:02x}")).collect()
 }
