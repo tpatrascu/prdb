@@ -7610,6 +7610,20 @@ fn storage_manager_creates_and_drops_check_constraint() -> Result<(), Box<dyn st
         OutcomeStatus::Aborted
     );
 
+    let mut stale_add_writer = storage.begin_invocation(id(0xdc), actor, 9_999, 1, 1024)?;
+    let stale_add_schema = stale_add_writer.load_catalog_table_schema(id(82))?;
+    stale_add_writer.load_catalog_indexes(&stale_add_schema)?;
+    let stale_add_tuple = encode_tuple(
+        &stale_add_schema.columns,
+        stale_add_schema.schema_version,
+        &[Some(ScalarValue::Bytea(b"stale before CHECK add".to_vec()))],
+    )?;
+    let stale_add_row = prdb_engine::overlay::RowId {
+        table: id(82),
+        row: id(0xdd),
+    };
+    stale_add_writer.stage_put(stale_add_row, &stale_add_tuple)?;
+
     let invocation_id = id(0xfe);
     let mut create_audit = identity_audit_event(0xff, actor, id(82));
     create_audit.correlation_id = invocation_id;
@@ -7625,6 +7639,19 @@ fn storage_manager_creates_and_drops_check_constraint() -> Result<(), Box<dyn st
         })
         .map_err(|error| format!("CHECK constraint creation failed: {error:?}"))?;
     assert_eq!(created.commit_sequence, 3);
+    assert!(matches!(
+        stale_add_writer.commit(),
+        Err(prdb_engine::transaction::TransactionError::Commit(
+            CommitError::Conflict
+        ))
+    ));
+    assert!(row(&database, &table_row_key(id(82), stale_add_row.row))?.is_none());
+    assert_eq!(
+        lookup_outcome(&database, id(0xdc), actor, 1)?
+            .ok_or("missing stale CHECK-add writer outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
     prdb_engine::startup::validate_persisted_records(&database)?;
 
     let mut stale_drop_writer = storage.begin_invocation(id(0xe3), actor, 9_999, 1, 1024)?;
