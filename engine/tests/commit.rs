@@ -10235,22 +10235,85 @@ fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
 
     let mut foreign_key_setup_audit = identity_audit_event(0xd1, admin_role, id(80));
     foreign_key_setup_audit.action = AuditAction::AuthorityChange;
-    storage.commit_catalog_and_audit(
-        id(0xd2),
-        admin_role,
-        60_000_000,
-        &foreign_key_catalog_writes(true, true),
-        &[foreign_key_setup_audit],
-    )?;
-    let foreign_key_id_wire = id(86)
+    storage
+        .commit_catalog_and_audit(
+            id(0xd2),
+            admin_role,
+            60_000_000,
+            &foreign_key_catalog_writes(true, true),
+            &[foreign_key_setup_audit],
+        )
+        .map_err(|error| format!("FK ADMIN fixture setup failed: {error:?}"))?;
+    let mut references_audit = identity_audit_event(0xd3, admin_role, backup_admin_id);
+    references_audit.action = AuditAction::AuthorityChange;
+    let mut references_admin_epoch =
+        principal_write_with_name(backup_admin_id, 1, 2, "backup_admin");
+    references_admin_epoch.expected_value =
+        principal_write_with_name(backup_admin_id, 1, 1, "backup_admin").payload;
+    storage
+        .commit_catalog_and_audit(
+            id(0xd3),
+            admin_role,
+            60_000_000,
+            &[
+                grant_write(backup_admin_id, id(81), 6, 1, id(81), admin_role),
+                dependency_write(backup_admin_id, id(81), 5),
+                references_admin_epoch,
+            ],
+            &[references_audit],
+        )
+        .map_err(|error| format!("FK REFERENCES grant setup failed: {error:?}"))?;
+    let source_table_id_wire = id(82)
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
+    let source_column_id_wire = id(84)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let target_constraint_id_wire = id(85)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let mut foreign_key_control = ClientConnectionSession::default();
+    foreign_key_control.accept_hello(ClientMode::Control, "fk-admin")?;
+    foreign_key_control.authenticate(&storage, id(236), &[0x6a; 32])?;
+    let foreign_key_create_prepare = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut foreign_key_control,
+        47,
+        &format!(
+            "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"foreign_keys.create\",\"arguments\":{{\"source_table_id\":\"{source_table_id_wire}\",\"source_column_ids\":[\"{source_column_id_wire}\"],\"target_constraint_id\":\"{target_constraint_id_wire}\"}}}}"
+        ),
+        60_000_000,
+    )?;
+    let foreign_key_create_operation_id = foreign_key_create_prepare
+        .split("\"operation_id\":\"")
+        .nth(1)
+        .ok_or("missing ADMIN foreign-key-create operation ID")?
+        .get(..32)
+        .ok_or("invalid ADMIN foreign-key-create operation ID")?;
+    let foreign_key_create = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut foreign_key_control,
+        48,
+        &format!("{{\"phase\":\"start\",\"operation_id\":\"{foreign_key_create_operation_id}\"}}"),
+        60_000_000,
+    )?;
+    assert!(foreign_key_create.contains("\"outcome\":\"committed\""));
+    let foreign_key_id_wire = foreign_key_create
+        .split("\"foreign_key_id\":\"")
+        .nth(1)
+        .ok_or("missing created foreign-key ID")?
+        .get(..32)
+        .ok_or("invalid created foreign-key ID")?;
     let foreign_key_drop_prepare = admin_dispatch_json(
         &storage,
         &staging,
-        &mut control,
-        47,
+        &mut foreign_key_control,
+        49,
         &format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"foreign_keys.drop\",\"arguments\":{{\"foreign_key_id\":\"{foreign_key_id_wire}\"}}}}"
         ),
@@ -10265,8 +10328,8 @@ fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
     let foreign_key_drop = admin_dispatch_json(
         &storage,
         &staging,
-        &mut control,
-        48,
+        &mut foreign_key_control,
+        50,
         &format!("{{\"phase\":\"start\",\"operation_id\":\"{foreign_key_drop_operation_id}\"}}"),
         60_000_000,
     )?;

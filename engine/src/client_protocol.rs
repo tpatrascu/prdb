@@ -86,6 +86,7 @@ pub enum ClientSessionError {
     SchemaLifecycle(crate::storage_manager::SchemaLifecycleError),
     TableLifecycle(crate::storage_manager::TableLifecycleError),
     ForeignKeyLifecycle(crate::commit::CommitError),
+    ForeignKeyCreateLifecycle(crate::storage_manager::TableLifecycleError),
     Storage(TransactionError),
 }
 
@@ -195,6 +196,11 @@ enum PendingAdminAction {
     },
     DropForeignKey {
         foreign_key_id: [u8; 16],
+    },
+    CreateForeignKey {
+        source_table_id: [u8; 16],
+        source_column_ids: Vec<[u8; 16]>,
+        target_constraint_id: [u8; 16],
     },
     RenameTable {
         table_id: [u8; 16],
@@ -420,6 +426,11 @@ pub enum ClientAdminCommand {
     PrepareDropForeignKey {
         foreign_key_id: [u8; 16],
     },
+    PrepareCreateForeignKey {
+        source_table_id: [u8; 16],
+        source_column_ids: Vec<[u8; 16]>,
+        target_constraint_id: [u8; 16],
+    },
     PrepareRenameTable {
         table_id: [u8; 16],
         name: String,
@@ -560,6 +571,7 @@ pub fn decode_client_admin_command(
     let mut operation = None;
     let mut arguments = None;
     let mut table_columns = None;
+    let mut foreign_key_source_columns = None;
     let mut table_column = None;
     let mut column_default = None;
     let mut operation_id = None;
@@ -599,6 +611,11 @@ pub fn decode_client_admin_command(
                     if arg == "columns" && parser.text.get(parser.offset) == Some(&b'[') {
                         table_columns = Some(parser.parse_table_column_array()?);
                         args.insert(arg, "<structured-columns>".to_owned());
+                    } else if arg == "source_column_ids"
+                        && parser.text.get(parser.offset) == Some(&b'[')
+                    {
+                        foreign_key_source_columns = Some(parser.parse_id_array()?);
+                        args.insert(arg, "<structured-ids>".to_owned());
                     } else if arg == "column" && parser.text.get(parser.offset) == Some(&b'{') {
                         table_column = Some(parser.parse_table_column_definition()?);
                         args.insert(arg, "<structured-column>".to_owned());
@@ -886,6 +903,37 @@ pub fn decode_client_admin_command(
                 return Err(ClientControlError::UnknownKey);
             }
             Ok(ClientAdminCommand::PrepareDropForeignKey { foreign_key_id })
+        }
+        Some("prepare")
+            if version == Some(1) && operation.as_deref() == Some("foreign_keys.create") =>
+        {
+            if operation_id.is_some() || seen.len() != 4 {
+                return Err(ClientControlError::UnknownKey);
+            }
+            let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
+            let source_table_id = decode_lower_hex_id(
+                &args
+                    .remove("source_table_id")
+                    .ok_or(ClientControlError::MissingKey)?,
+            )?;
+            let target_constraint_id = decode_lower_hex_id(
+                &args
+                    .remove("target_constraint_id")
+                    .ok_or(ClientControlError::MissingKey)?,
+            )?;
+            args.remove("source_column_ids")
+                .ok_or(ClientControlError::MissingKey)?;
+            let source_column_ids = foreign_key_source_columns
+                .take()
+                .ok_or(ClientControlError::MissingKey)?;
+            if source_column_ids.is_empty() || !args.is_empty() {
+                return Err(ClientControlError::InvalidPrepare);
+            }
+            Ok(ClientAdminCommand::PrepareCreateForeignKey {
+                source_table_id,
+                source_column_ids,
+                target_constraint_id,
+            })
         }
         Some("prepare") if version == Some(1) && operation.as_deref() == Some("tables.rename") => {
             if operation_id.is_some() || seen.len() != 4 {
@@ -1806,6 +1854,27 @@ impl JsonStringObjectParser<'_> {
             self.expect(b',')?;
         }
         Ok(columns)
+    }
+
+    fn parse_id_array(&mut self) -> Result<Vec<[u8; 16]>, ClientControlError> {
+        self.expect(b'[')?;
+        self.skip_whitespace();
+        let mut ids = Vec::new();
+        if self.consume(b']') {
+            return Ok(ids);
+        }
+        loop {
+            if ids.len() >= crate::tuple::MAX_COLUMNS {
+                return Err(ClientControlError::InvalidPrepare);
+            }
+            ids.push(decode_lower_hex_id(&self.parse_string()?)?);
+            self.skip_whitespace();
+            if self.consume(b']') {
+                break;
+            }
+            self.expect(b',')?;
+        }
+        Ok(ids)
     }
 
     fn parse_table_column_definition(
@@ -3167,6 +3236,40 @@ impl ClientConnectionSession {
                     .into_bytes(),
                 )
             }
+            ClientAdminCommand::PrepareCreateForeignKey {
+                source_table_id,
+                source_column_ids,
+                target_constraint_id,
+            } => {
+                if self.pending_admin_operation.is_some() {
+                    return Err(ClientSessionError::WrongMode);
+                }
+                let mut operation_id = [0; 16];
+                getrandom::fill(&mut operation_id).map_err(|_| {
+                    ClientSessionError::Storage(TransactionError::RandomnessUnavailable)
+                })?;
+                if operation_id == [0; 16] {
+                    return Err(ClientSessionError::Storage(
+                        TransactionError::RandomnessUnavailable,
+                    ));
+                }
+                self.pending_admin_operation = Some(PendingAdminOperation {
+                    operation_id,
+                    action: PendingAdminAction::CreateForeignKey {
+                        source_table_id,
+                        source_column_ids,
+                        target_constraint_id,
+                    },
+                });
+                self.json_response(
+                    request.request_id,
+                    format!(
+                        "{{\"operation_id\":\"{}\",\"state\":\"prepared\"}}",
+                        encode_lower_hex_id(operation_id)
+                    )
+                    .into_bytes(),
+                )
+            }
             ClientAdminCommand::PrepareRenameTable { table_id, name } => {
                 if self.pending_admin_operation.is_some() {
                     return Err(ClientSessionError::WrongMode);
@@ -3852,6 +3955,41 @@ impl ClientConnectionSession {
                                 encode_lower_hex_id(operation_id),
                                 encode_lower_hex_id(foreign_key_id),
                                 commit_sequence,
+                            )
+                            .into_bytes(),
+                        )
+                    }
+                    PendingAdminAction::CreateForeignKey {
+                        source_table_id,
+                        source_column_ids,
+                        target_constraint_id,
+                    } => {
+                        let created = storage
+                            .create_foreign_key(crate::storage_manager::CreateForeignKeyRequest {
+                                invocation_id: operation_id,
+                                authenticated_actor_id: actor_id,
+                                source_table_id,
+                                source_column_ids,
+                                target_constraint_id,
+                                retention_deadline_us,
+                                audit_event: crate::audit::AuditEvent {
+                                    event_id,
+                                    actor_id: Some(actor_id),
+                                    correlation_id: operation_id,
+                                    occurred_at_us: now_us,
+                                    action: crate::audit::AuditAction::Ddl,
+                                    result: crate::audit::AuditResult::Succeeded,
+                                    target_ids: Vec::new(),
+                                },
+                            })
+                            .map_err(ClientSessionError::ForeignKeyCreateLifecycle)?;
+                        self.json_response(
+                            request.request_id,
+                            format!(
+                                "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"foreign_key_id\":\"{}\",\"commit_sequence\":\"{}\"}}",
+                                encode_lower_hex_id(operation_id),
+                                encode_lower_hex_id(created.foreign_key_id),
+                                created.commit_sequence,
                             )
                             .into_bytes(),
                         )
