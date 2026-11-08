@@ -2000,3 +2000,11 @@
 - Regression: parser checks cover decimal scaling, bytea decoding, UUID principal defaults, and type mismatches. The multi-process ADMIN test exercises nullability changes and a literal default set/drop through the gateway and supervisor.
 - Verification: focused parser and real-process tests passed. Build, formatting, and warning-denied Clippy passed. The first full-suite run hit the known intermittent CHECK lifecycle `InvalidAudit`; that test passed in isolation, and the complete rerun passed with 124 commit tests and 3 cgroup-dependent ignored.
 - Remaining: CLI commands for indexes, constraints, privileges, and policies; broader ADMIN process coverage; and confined artifact submission remain open.
+
+## SDK-5: ordinary index CLI and process coverage — partial
+
+- Contract: authenticated index create/rebuild/drop requests use the existing typed AdminClient and server-side authorization/fencing path.
+- Implementation: the CLI exposes create, rebuild, and drop with canonical ordered column IDs; uniqueness defaults to false and is an optional boolean flag.
+- Regression: parser coverage checks canonical nonzero ID lists and duplicate rejection. The real-process ADMIN lifecycle covers index create and drop; existing typed-client and ADMIN dispatcher tests cover rebuild request construction and the authorized in-process path.
+- Verification: focused CLI parsing passed, and the focused multi-process create/drop lifecycle passed. Full workspace build, format check, warning-denied Clippy, and tests passed; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
+- Remaining: a real gateway/supervisor process `indexes.rebuild` START currently returns a sanitized `unavailable` rejection after successful create; diagnose that path before claiming multi-process rebuild coverage. Constraint, privilege, and policy CLI commands remain open.

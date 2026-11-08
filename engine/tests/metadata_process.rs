@@ -499,6 +499,18 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
         AdminColumnDefault::Literal(prdb_engine::tuple::ScalarValue::Text("seed".to_owned())),
     )?;
     admin.drop_column_default(created_table.table_id, created_table.column_ids[0])?;
+    let created_index = admin
+        .create_index(
+            created_table.table_id,
+            "process_admin_index",
+            &created_table.column_ids,
+            false,
+        )
+        .map_err(|error| format!("process ADMIN create_index failed: {error}"))?;
+    let dropped_index = admin
+        .drop_index(created_index.index_id)
+        .map_err(|error| format!("process ADMIN drop_index failed: {error}"))?;
+    assert!(dropped_index.commit_sequence > created_index.commit_sequence);
     let renamed_table = admin.rename_table(created_table.table_id, "process_admin_table_v2")?;
     let dropped_table = admin.drop_table(created_table.table_id)?;
     assert!(dropped_table.commit_sequence > renamed_table.commit_sequence);

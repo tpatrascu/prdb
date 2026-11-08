@@ -211,3 +211,11 @@
 - Regression: parser tests cover decimal scaling and invalid scale, BYTEA decoding, principal UUID defaults, and type mismatch. The real-process ADMIN test exercises nullability changes and setting/dropping a literal default.
 - Verification: focused CLI and process tests passed; final workspace build, formatting, warning-denied Clippy, and full test suite passed after isolating and rerunning the known intermittent CHECK lifecycle test. Commit integration had 124 passed and 3 cgroup-dependent ignored.
 - Remaining: index, constraint, privilege, and policy CLI commands; broader live-process DDL coverage; and confined artifact execution remain open.
+
+## SDK-5: ordinary index CLI and process coverage — partial
+
+- Contract: index administration stays on the authenticated AdminClient channel and uses ordered, distinct nonzero column IDs.
+- Implementation: CLI commands now expose ordinary index create, rebuild, and drop; the uniqueness flag defaults to false.
+- Regression: command parsing checks canonical IDs and duplicate detection. The real process test exercises create/drop; existing AdminClient mock and in-process ADMIN tests verify rebuild protocol/schema behavior.
+- Verification: focused CLI parser and multi-process create/drop tests passed; full workspace build, format, warning-denied Clippy, and tests passed. The commit integration target had 124 passed and 3 cgroup-dependent ignored.
+- Remaining: live multi-process rebuild currently receives the sanitized `unavailable` response. Constraint, privilege, and policy CLI operations are still pending.

@@ -45,6 +45,9 @@ Token secrets are saved only to mode-0600 credential files and are never printed
   prdb-client column-nullability --address IP:PORT --credentials ADMIN_FILE --table-id HEX --column-id HEX --nullable true|false\n\
   prdb-client column-default-set --address IP:PORT --credentials ADMIN_FILE --table-id HEX --column-id HEX --type TYPE --value VALUE\n\
   prdb-client column-default-drop --address IP:PORT --credentials ADMIN_FILE --table-id HEX --column-id HEX\n\n\
+  prdb-client index-create --address IP:PORT --credentials ADMIN_FILE --table-id HEX --name NAME --columns HEX,... [--unique true|false]\n\
+  prdb-client index-rebuild --address IP:PORT --credentials ADMIN_FILE --index-id HEX --columns HEX,... [--unique true|false]\n\
+  prdb-client index-drop --address IP:PORT --credentials ADMIN_FILE --index-id HEX\n\n\
 Column types: boolean, smallint, integer, bigint, decimal(P,S), text, varchar(N), bytea, uuid, date, timestamptz.\n\
 Column nullability is nullable or not-null; not-null columns require the UUID identity modifier.\n\n\
 Token secrets are saved only to mode-0600 credential files and are never printed.\n\
@@ -110,6 +113,9 @@ fn run() -> Result<(), String> {
         | "column-nullability"
         | "column-default-set"
         | "column-default-drop" => column_admin(&command, address, credentials_path, &mut fields),
+        "index-create" | "index-rebuild" | "index-drop" => {
+            index_admin(&command, address, credentials_path, &mut fields)
+        }
         "user-create" | "user-rename" | "user-drop" | "user-login" | "role-create"
         | "role-rename" | "role-drop" | "role-grant" | "role-revoke" => {
             identity_admin(&command, address, credentials_path, &mut fields)
@@ -298,6 +304,93 @@ fn column_admin(
         _ => return Err(format!("unsupported column command {command}")),
     }
     Ok(())
+}
+
+fn index_admin(
+    command: &str,
+    address: SocketAddr,
+    credentials_path: PathBuf,
+    fields: &mut HashMap<String, std::ffi::OsString>,
+) -> Result<(), String> {
+    let mut administrator =
+        read_client_credentials(credentials_path).map_err(|error| error.to_string())?;
+    let mut client = AdminClient::connect_authenticated(
+        address,
+        administrator.token_id,
+        &mut administrator.token_secret,
+    )
+    .map_err(|error| error.to_string())?;
+    match command {
+        "index-create" => {
+            let table_id = parse_id(&take_text(fields, "--table-id")?)?;
+            let name = take_text(fields, "--name")?;
+            let column_ids = parse_id_list(&take_text(fields, "--columns")?, "--columns")?;
+            let unique = take_optional_boolean(fields, "--unique")?.unwrap_or(false);
+            reject_unknown(fields)?;
+            let result = client
+                .create_index(table_id, &name, &column_ids, unique)
+                .map_err(|error| error.to_string())?;
+            println!(
+                "created index {} (operation {}, commit {})",
+                lower_hex(&result.index_id),
+                lower_hex(&result.operation_id),
+                result.commit_sequence
+            );
+        }
+        "index-rebuild" => {
+            let index_id = parse_id(&take_text(fields, "--index-id")?)?;
+            let column_ids = parse_id_list(&take_text(fields, "--columns")?, "--columns")?;
+            let unique = take_optional_boolean(fields, "--unique")?.unwrap_or(false);
+            reject_unknown(fields)?;
+            let result = client
+                .rebuild_index(index_id, &column_ids, unique)
+                .map_err(|error| error.to_string())?;
+            print_operation(
+                "rebuilt index",
+                &result.operation_id,
+                result.commit_sequence,
+            );
+        }
+        "index-drop" => {
+            let index_id = parse_id(&take_text(fields, "--index-id")?)?;
+            reject_unknown(fields)?;
+            let result = client
+                .drop_index(index_id)
+                .map_err(|error| error.to_string())?;
+            print_operation(
+                "dropped index",
+                &result.operation_id,
+                result.commit_sequence,
+            );
+        }
+        _ => return Err(format!("unsupported index command {command}")),
+    }
+    Ok(())
+}
+
+fn parse_id_list(value: &str, option: &str) -> Result<Vec<[u8; 16]>, String> {
+    split_names(value, option)?
+        .iter()
+        .map(|value| {
+            parse_id(value)
+                .map_err(|_| format!("{option} must contain nonzero lowercase hexadecimal IDs"))
+        })
+        .collect()
+}
+
+fn take_optional_boolean(
+    fields: &mut HashMap<String, std::ffi::OsString>,
+    option: &str,
+) -> Result<Option<bool>, String> {
+    fields
+        .remove(option)
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| format!("{option} must be UTF-8"))
+                .and_then(|value| parse_boolean(&value, option))
+        })
+        .transpose()
 }
 
 fn parse_added_column(value: &str) -> Result<AdminColumnDefinition, String> {
@@ -1206,5 +1299,16 @@ mod tests {
             .is_err()
         );
         assert!(parse_column_default("current-principal-id", ScalarType::Text).is_err());
+        assert_eq!(
+            parse_id_list("00000000000000000000000000000001", "--columns").unwrap(),
+            vec![[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]]
+        );
+        assert!(
+            parse_id_list(
+                "00000000000000000000000000000001,00000000000000000000000000000001",
+                "--columns"
+            )
+            .is_err()
+        );
     }
 }
