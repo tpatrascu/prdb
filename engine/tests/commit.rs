@@ -7571,6 +7571,34 @@ fn storage_manager_lists_runtime_invocations_only_to_database_admins()
         },
     )?;
     assert_eq!(cancelled.payload, b"{\"state\":\"accepted\"}");
+    let mut discovery_control = ClientConnectionSession::default();
+    discovery_control.accept_hello(ClientMode::Control, "schema-discovery")?;
+    discovery_control.authenticate(&storage, id(237), &[0x5a; 32])?;
+    let schema_discovery = prdb_engine::supervisor_ipc::dispatch_gateway_client_request(
+        prdb_engine::ipc::ServiceRole::Gateway,
+        &storage,
+        &staging,
+        &mut discovery_control,
+        &prdb_engine::ipc::IpcFrame {
+            operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
+            request_id: 1,
+            payload: br#"{"phase":"read","operation_version":1,"operation":"metadata.schemas.list","arguments":{}}"#.to_vec(),
+        },
+        prdb_engine::supervisor_ipc::GatewayAdmissionConfig {
+            retention_period_us: 60_000_000,
+            max_rows: 1,
+            max_bytes: 1,
+        },
+    )?;
+    let schema_discovery = match schema_discovery {
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Response(response) => response.payload,
+        prdb_engine::supervisor_ipc::GatewayClientDispatch::Started { .. } => {
+            return Err("metadata discovery unexpectedly started an invocation".into());
+        }
+    };
+    let schema_discovery = String::from_utf8(schema_discovery)?;
+    assert!(schema_discovery.contains("\"schemas\":["));
+    assert!(schema_discovery.contains("\"name\":\"information_schema\""));
     let token_request = prdb_engine::ipc::IpcFrame {
         operation: prdb_engine::ipc::Operation::SubmitAdministrativeOperation as u16,
         request_id: 4,

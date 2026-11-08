@@ -1630,3 +1630,11 @@
 - Regression: the credential lifecycle integration test now verifies that a valid token sees the public `information_schema` namespace and that a wrong secret is rejected.
 - Verification: the focused `token_admission_checks_expiry_secret_revocation_and_commit_guards` real-redb test passed in the prescribed Nix shell. Initial sandbox Nix access was denied; the authorized `nix-shell` invocation succeeded.
 - Remaining: expose the storage call through a versioned client request, add relation discovery for visible schemas, and test grant-filtered multi-page discovery end to end.
+
+## SM-6: expose schema discovery through the client control channel — implemented
+
+- Behavior and normative contract: [client protocol](../../specs/client-protocol.md), ADMIN read envelope and `metadata.schemas.list`; [metadata discovery](../../specs/metadata-discovery.md).
+- Implementation: the versioned read decoder accepts only `phase=read`, operation version 1, operation `metadata.schemas.list`, and empty arguments. The connection-owned handler revalidates its token and emits bounded schema IDs/names from the storage snapshot API. Existing gateway administrative-operation dispatch carries this request over the control channel; no invocation is admitted.
+- Regression evidence: strict decoder tests reject arguments and mutation phase; the real-redb gateway dispatch test authenticates a non-admin control session and receives the public schema in the response.
+- Verification: focused decoder and real-redb gateway-dispatch regressions passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed. Commit integration had 109 passing and 2 cgroup-dependent tests ignored.
+- Remaining: add authenticated relation discovery and a Rust control client helper; this endpoint reports schemas only and is capped rather than resumable.

@@ -184,6 +184,27 @@ fn admin_read_decoder_accepts_token_inventory_and_rejects_mutation_shapes() {
 }
 
 #[test]
+fn admin_read_decoder_accepts_empty_visible_schema_discovery_request() {
+    let request = br#"{"phase":"read","operation_version":1,"operation":"metadata.schemas.list","arguments":{}}"#;
+    assert_eq!(
+        decode_client_admin_read(request),
+        Ok(ClientAdminRead::ListSchemas)
+    );
+    assert_eq!(
+        decode_client_admin_read(
+            br#"{"phase":"read","operation_version":1,"operation":"metadata.schemas.list","arguments":{"principal_id":"000102030405060708090a0b0c0d0e0f"}}"#
+        ),
+        Err(ClientControlError::UnknownKey)
+    );
+    assert_eq!(
+        decode_client_admin_read(
+            br#"{"phase":"prepare","operation_version":1,"operation":"metadata.schemas.list","arguments":{}}"#
+        ),
+        Err(ClientControlError::UnsupportedAdminOperation)
+    );
+}
+
+#[test]
 fn admin_revoke_decoder_requires_prepare_then_start_schemas() {
     assert_eq!(
         decode_client_admin_command(
