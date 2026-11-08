@@ -644,6 +644,23 @@ pub struct DroppedIndex {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RebuildIndexRequest {
+    pub invocation_id: [u8; 16],
+    pub authenticated_actor_id: [u8; 16],
+    pub index_id: [u8; 16],
+    pub column_ids: Vec<[u8; 16]>,
+    pub unique: bool,
+    pub retention_deadline_us: i64,
+    pub audit_event: AuditEvent,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RebuiltIndex {
+    pub index_id: [u8; 16],
+    pub commit_sequence: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum IndexLifecycleError {
     InvalidRequest,
     InvalidAudit,
@@ -6707,6 +6724,103 @@ impl<'db> StorageManager<'db> {
             )
             .map_err(IndexLifecycleError::Commit)?;
         Ok(DroppedIndex {
+            index_id,
+            commit_sequence,
+        })
+    }
+
+    /// Rebuild an index using a new ordered column set and uniqueness profile.
+    /// The authorized index DDL commit validates the old memberships, builds
+    /// the replacement from current rows, and publishes it under the table
+    /// DDL fence.
+    pub fn rebuild_index(
+        &self,
+        request: RebuildIndexRequest,
+    ) -> Result<RebuiltIndex, IndexLifecycleError> {
+        let RebuildIndexRequest {
+            invocation_id,
+            authenticated_actor_id,
+            index_id,
+            column_ids,
+            unique,
+            retention_deadline_us,
+            audit_event,
+        } = request;
+        if invocation_id == [0; 16]
+            || authenticated_actor_id == [0; 16]
+            || index_id == [0; 16]
+            || column_ids.is_empty()
+            || column_ids.len() > 256
+            || column_ids.contains(&[0; 16])
+            || column_ids.iter().copied().collect::<HashSet<_>>().len() != column_ids.len()
+            || retention_deadline_us <= 0
+        {
+            return Err(IndexLifecycleError::InvalidRequest);
+        }
+        if audit_event.actor_id != Some(authenticated_actor_id)
+            || audit_event.correlation_id != invocation_id
+            || audit_event.action != AuditAction::Ddl
+            || audit_event.result != AuditResult::Succeeded
+        {
+            return Err(IndexLifecycleError::InvalidAudit);
+        }
+
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|_| IndexLifecycleError::Storage)?;
+        let catalog = read
+            .open_table(CATALOG)
+            .map_err(|_| IndexLifecycleError::Storage)?;
+        let index_key = id_catalog_key(9, index_id);
+        let index_bytes = catalog
+            .get(index_key.as_slice())
+            .map_err(|_| IndexLifecycleError::Storage)?
+            .map(|value| value.value().to_vec())
+            .ok_or(IndexLifecycleError::Commit(CommitError::InvalidCatalog))?;
+        read_catalog_record(&index_key, &index_bytes, 9).map_err(IndexLifecycleError::from)?;
+        let table_id =
+            read_catalog_id(&index_key, &index_bytes, 9, 1).map_err(IndexLifecycleError::from)?;
+        let table_key = id_catalog_key(5, table_id);
+        let table_bytes = catalog
+            .get(table_key.as_slice())
+            .map_err(|_| IndexLifecycleError::Storage)?
+            .map(|value| value.value().to_vec())
+            .ok_or(IndexLifecycleError::Commit(CommitError::InvalidCatalog))?;
+        read_catalog_record(&table_key, &table_bytes, 5).map_err(IndexLifecycleError::from)?;
+        let schema_version =
+            read_catalog_u64(&table_key, &table_bytes, 5, 2).map_err(IndexLifecycleError::from)?;
+        drop(catalog);
+        drop(read);
+
+        let mut encoded_ids = (column_ids.len() as u32).to_le_bytes().to_vec();
+        encoded_ids.extend(column_ids.iter().flatten());
+        let updated = rewrite_catalog_fields(
+            &index_key,
+            &index_bytes,
+            9,
+            &[
+                (2, WireType::Ids, encoded_ids),
+                (4, WireType::Bool, vec![u8::from(unique)]),
+                (10, WireType::U64, schema_version.to_le_bytes().to_vec()),
+            ],
+        )
+        .map_err(IndexLifecycleError::from)?;
+        let writes = [CatalogWrite {
+            key: index_key,
+            expected_value: Some(index_bytes),
+            payload: Some(updated),
+        }];
+        let commit_sequence = self
+            .commit_authorized_index_ddl(
+                invocation_id,
+                authenticated_actor_id,
+                retention_deadline_us,
+                &writes,
+                &[audit_event],
+            )
+            .map_err(IndexLifecycleError::Commit)?;
+        Ok(RebuiltIndex {
             index_id,
             commit_sequence,
         })

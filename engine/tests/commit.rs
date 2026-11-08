@@ -12979,11 +12979,19 @@ fn storage_manager_rebuilds_populated_indexes_atomically() -> Result<(), Box<dyn
 {
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
+    let index_admin = id(0x78);
     let new_column_object = object_write(id(0x67), 4);
     let new_column = column_write_at_ordinal(id(0x67), id(16), 1, "object_103");
     {
         let setup = database.begin_write()?;
-        for record in [new_column_object, new_column] {
+        for record in [
+            new_column_object,
+            new_column,
+            principal_write_with_name(index_admin, 1, 1, "index_rebuild_admin"),
+            object_write_with_name(index_admin, 8, "index_rebuild_admin"),
+            membership_write(index_admin, builtin_owner_id()),
+            dependency_write(index_admin, builtin_owner_id(), 5),
+        ] {
             setup
                 .open_table(CATALOG)?
                 .insert(&record.key[..], record.payload.as_ref().unwrap().as_slice())?;
@@ -13054,20 +13062,21 @@ fn storage_manager_rebuilds_populated_indexes_atomically() -> Result<(), Box<dyn
         },
         &two_bytea_tuple(b"staged", b"before rebuild"),
     )?;
-    assert_eq!(
-        storage.commit_catalog_and_audit(
-            id(205),
-            id(9),
-            9_999,
-            &[CatalogWrite {
-                key: index_catalog_key.clone(),
-                expected_value: Some(old_definition.clone()),
-                payload: Some(unique_definition.clone()),
-            }],
-            &[audit_event(205)],
-        )?,
-        2
-    );
+    let mut rebuild_audit = audit_event(205);
+    rebuild_audit.actor_id = Some(index_admin);
+    rebuild_audit.correlation_id = id(205);
+    let rebuilt_result = storage
+        .rebuild_index(prdb_engine::storage_manager::RebuildIndexRequest {
+            invocation_id: id(205),
+            authenticated_actor_id: index_admin,
+            index_id: id(0x44),
+            column_ids: vec![id(0x67)],
+            unique: true,
+            retention_deadline_us: 9_999,
+            audit_event: rebuild_audit,
+        })
+        .map_err(|error| format!("typed index rebuild failed: {error:?}"))?;
+    assert_eq!(rebuilt_result.commit_sequence, 2);
     let stale_result = stale_writer.commit();
     assert!(
         matches!(
@@ -13154,7 +13163,7 @@ fn storage_manager_rebuilds_populated_indexes_atomically() -> Result<(), Box<dyn
             .is_some()
     );
     assert_eq!(
-        lookup_outcome(&database, id(205), id(9), 1)?
+        lookup_outcome(&database, id(205), index_admin, 1)?
             .unwrap()
             .status,
         OutcomeStatus::Committed

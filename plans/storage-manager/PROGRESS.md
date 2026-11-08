@@ -1952,4 +1952,12 @@
 - Implementation: `StorageManager::drop_index` accepts an index ID and captures exact current bytes for the family-9 definition, family-2 object, and schema-parent kind-1 ownership edge. It removes all three through `commit_authorized_index_ddl`; that path removes forward and reverse memberships and rejects a drop that leaves an invalid dependent constraint.
 - Regression: `storage_manager_creates_named_unique_index_and_backfills_atomically` now continues through typed drop, checking durable COMMITTED status and removal of the definition, object, ownership edge, and all forward/reverse memberships.
 - Verification: the focused real-redb create/drop lifecycle regression passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` all passed in the prescribed Nix shell; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
-- Remaining: typed index rebuild and authenticated ADMIN operation dispatch remain open.
+- Remaining: authenticated ADMIN operation dispatch remains open.
+
+## SM-5: typed ordinary index rebuild through StorageManager — implemented
+
+- Contract: [storage manager](../../specs/storage-manager.md) requires rebuild to validate old memberships, derive replacement keys from current rows, publish the updated definition and memberships atomically, advance the table write epoch, and preserve older snapshots.
+- Implementation: `StorageManager::rebuild_index` accepts an index ID, ordered column IDs, and uniqueness profile. It captures the exact current index definition and table schema version, then rewrites the typed catalog fields and delegates the replacement build to `commit_authorized_index_ddl`.
+- Regression: `storage_manager_rebuilds_populated_indexes_atomically` now exercises the typed API with authenticated database-admin membership. It verifies old snapshot visibility, replacement forward/reverse memberships, and durable conflict of a writer pinned before the rebuild.
+- Verification: the focused real-redb rebuild regression passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` all passed in the prescribed Nix shell; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
+- Remaining: authenticated ADMIN operation dispatch for ordinary index create/drop/rebuild remains open.
