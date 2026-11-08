@@ -461,12 +461,22 @@ fn admin_client_creates_and_drops_schemas() {
                 ),
             ),
             (
-                "schemas.drop",
-                r#"{"schema_id":"a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3"}"#,
+                "schemas.rename",
+                r#"{"schema_id":"a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3","name":"insights"}"#,
                 [0x62; 16],
                 format!(
-                    "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"schema_id\":\"{}\",\"commit_sequence\":\"42\"}}",
+                    "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"schema_id\":\"{}\",\"name\":\"insights\",\"commit_sequence\":\"42\"}}",
                     hex(&[0x62; 16]),
+                    "a3".repeat(16)
+                ),
+            ),
+            (
+                "schemas.drop",
+                r#"{"schema_id":"a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3"}"#,
+                [0x63; 16],
+                format!(
+                    "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"schema_id\":\"{}\",\"commit_sequence\":\"43\"}}",
+                    hex(&[0x63; 16]),
                     "a3".repeat(16)
                 ),
             ),
@@ -499,6 +509,9 @@ fn admin_client_creates_and_drops_schemas() {
     .unwrap();
     let schema = client.create_schema("analytics", [1; 16]).unwrap();
     assert_eq!(schema.identity_id, [0xa3; 16]);
+    client
+        .rename_schema(schema.identity_id, "insights")
+        .unwrap();
     client.drop_schema(schema.identity_id).unwrap();
     server.join().unwrap();
 }

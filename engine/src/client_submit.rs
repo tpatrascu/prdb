@@ -1062,6 +1062,25 @@ impl AdminClient {
         .map(|(result, _)| result)
     }
 
+    pub fn rename_schema(
+        &mut self,
+        schema_id: [u8; 16],
+        name: &str,
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        validate_admin_id(schema_id)?;
+        validate_admin_name(name)?;
+        self.execute_admin_operation_with_name_echo(
+            "schemas.rename",
+            format!(
+                "{{\"schema_id\":\"{}\",\"name\":\"{name}\"}}",
+                lower_hex(&schema_id)
+            ),
+            Some("schema_id"),
+            Some(("name", name)),
+        )
+        .map(|(result, _)| result)
+    }
+
     fn create_identity(
         &mut self,
         operation: &str,
@@ -1145,6 +1164,16 @@ impl AdminClient {
         arguments: String,
         created_id_field: Option<&str>,
     ) -> Result<(AdminOperationResult, Option<[u8; 16]>), ClientSubmitError> {
+        self.execute_admin_operation_with_name_echo(operation, arguments, created_id_field, None)
+    }
+
+    fn execute_admin_operation_with_name_echo(
+        &mut self,
+        operation: &str,
+        arguments: String,
+        created_id_field: Option<&str>,
+        expected_name: Option<(&str, &str)>,
+    ) -> Result<(AdminOperationResult, Option<[u8; 16]>), ClientSubmitError> {
         let prepare = format!(
             "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"{operation}\",\"arguments\":{arguments}}}"
         );
@@ -1181,12 +1210,16 @@ impl AdminClient {
             .and_then(ResponseValue::as_string)
             .and_then(|text| parse_canonical_positive_u64(text.to_owned()));
         let created_id = created_id_field.and_then(|key| response_id(&fields, key).ok());
-        let expected_fields = 3 + usize::from(created_id_field.is_some());
+        let expected_fields =
+            3 + usize::from(created_id_field.is_some()) + usize::from(expected_name.is_some());
         if fields.len() != expected_fields
             || response_operation_id != Some(operation_id)
             || outcome != Some("committed")
             || sequence.is_none()
             || (created_id_field.is_some() && created_id.is_none())
+            || expected_name.is_some_and(|(key, value)| {
+                fields.get(key).and_then(ResponseValue::as_string) != Some(value)
+            })
         {
             return Err(ClientSubmitError::AdministrativeOutcomeUncertain(
                 operation_id,

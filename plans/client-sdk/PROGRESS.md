@@ -83,7 +83,15 @@
 - Implementation: `AdminClient::create_schema` validates the normalized name and owner ID and returns the generated schema ID; `drop_schema` validates the target and checks the echoed schema ID in the committed result.
 - Regression: mock-TCP coverage verifies exact create/drop arguments, PREPARE/START flow, generated ID, and committed response decoding.
 - Verification: focused `client_admin` tests passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed in the Nix shell; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
-- Remaining: typed schema rename, tables, constraints and foreign keys; CLI/credential-file lifecycle; and live ADMIN operations through the real multi-process gateway path remain open.
+- Remaining: typed table, constraint and foreign-key helpers; CLI/credential-file lifecycle; and live ADMIN operations through the real multi-process gateway path remain open.
+
+## SDK-5 dependency: typed schema rename AdminClient operation — implemented
+
+- Contract: [client protocol](../../specs/client-protocol.md) requires `schemas.rename` START to echo the stable schema ID and normalized new name.
+- Implementation: `AdminClient::rename_schema` validates ID and name and accepts success only when both echoed values, the operation ID, committed outcome, and commit sequence match. The shared response validator now supports this exact echoed-name shape.
+- Regression: schema mock-TCP coverage verifies create, rename, and drop requests and checks the rename response includes the expected schema ID and name.
+- Verification: focused schema lifecycle mock-TCP test passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed in the Nix shell; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
+- Remaining: typed table, constraint and foreign-key helpers; CLI/credential-file lifecycle; and live ADMIN operations through the real multi-process gateway path remain open.
 
 ## SDK-5 dependency: typed system privilege AdminClient operations — implemented
 
