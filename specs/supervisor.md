@@ -4,6 +4,8 @@
 
 Implement the supervisor in Rust. Client network connections terminate in the separate [gateway](client-gateway.md); the supervisor exposes bounded private admission/result IPC, not a public listener. It is trusted to establish execution identity, arrange confinement, provision scoped channels, and manage process lifetimes. It may initially run alongside the storage manager. It must not execute user native code or load client-built query libraries, including for inspection.
 
+The Linux x86_64 `prdb-supervisor` executable owns the READY instance lock and current `StorageManager`, and exposes the service only over a mode-0600 Unix socket restricted by peer UID. It requires an explicit compatibility profile (CPU baseline, runtime profile, SDK release, and dependency allowlist), executor and scratch paths, runtime filesystem allowlists, delegated cgroup parent, worker resource ceilings, and admission limits. It validates and opens a READY instance before binding. On an ambiguous durable commit error it drops the listener, reopens and revalidates storage while retaining the instance lock, then binds again. Each START callback relays provisional worker output and sends a terminal result only after storage confirms it. The profile and sandbox paths are deployment inputs; this executable does not infer or ship a host runtime profile.
+
 ## Execution Context
 
 Arrange a storage-managed context containing:
@@ -67,4 +69,4 @@ Cancellation accepted before redb commit begins aborts; after commit begins it m
 
 Test launch failures, timeout, client/gateway disconnect, slow network output, forged worker terminal messages, upload revocation before START, worker descendants, cancellation during an outstanding read, output flooding, and cleanup after planner failure.
 
-Open choices: authentication wire/cryptographic details, deployment privileges, resource-limit mechanism, process supervision API, and whether supervisor/storage separation is needed after the prototype.
+Open choices: authentication wire/cryptographic details, deployment privileges and packaged runtime profile, and whether supervisor/storage separation is needed after the prototype.
