@@ -113,6 +113,89 @@ fn signed_components_sort_in_numeric_order() {
     }
 }
 
+fn assert_typed_values_sort_like_encoded_keys<T: Ord + Clone + std::fmt::Debug>(
+    scalar_type: ScalarType,
+    values: &[T],
+    wrap: impl Fn(&T) -> ScalarValue,
+) {
+    let column = ColumnSchema {
+        scalar_type,
+        nullable: false,
+    };
+    let mut ordered = values.to_vec();
+    ordered.sort();
+    let encoded = ordered
+        .iter()
+        .map(|value| encode_sql_tuple(std::slice::from_ref(&column), &[Some(wrap(value))]).unwrap())
+        .collect::<Vec<_>>();
+    for pair in encoded.windows(2) {
+        assert!(pair[0] < pair[1], "encoded order differs for {ordered:?}");
+    }
+}
+
+#[test]
+fn typed_component_keys_preserve_independent_value_order() {
+    let decimal_bound = 10_i128.pow(37);
+    assert_typed_values_sort_like_encoded_keys(ScalarType::Boolean, &[false, true], |value| {
+        ScalarValue::Boolean(*value)
+    });
+    assert_typed_values_sort_like_encoded_keys(
+        ScalarType::SmallInt,
+        &[i16::MIN, -1, 0, 1, i16::MAX],
+        |value| ScalarValue::SmallInt(*value),
+    );
+    assert_typed_values_sort_like_encoded_keys(
+        ScalarType::Integer,
+        &[i32::MIN, -1, 0, 1, i32::MAX],
+        |value| ScalarValue::Integer(*value),
+    );
+    assert_typed_values_sort_like_encoded_keys(
+        ScalarType::BigInt,
+        &[i64::MIN, -1, 0, 1, i64::MAX],
+        |value| ScalarValue::BigInt(*value),
+    );
+    assert_typed_values_sort_like_encoded_keys(
+        ScalarType::Decimal {
+            precision: 38,
+            scale: 0,
+        },
+        &[-decimal_bound, -120, -1, 0, 1, 120, decimal_bound],
+        |value| ScalarValue::Decimal(*value),
+    );
+    assert_typed_values_sort_like_encoded_keys(
+        ScalarType::Text,
+        &["", "A", "A\0", "A\u{e9}", "B", "é", "𐀀"],
+        |value| ScalarValue::Text((*value).to_owned()),
+    );
+    assert_typed_values_sort_like_encoded_keys(
+        ScalarType::Varchar { max_chars: 8 },
+        &["", "a", "aa", "b", "é", "𐀀"],
+        |value| ScalarValue::Varchar((*value).to_owned()),
+    );
+    assert_typed_values_sort_like_encoded_keys(
+        ScalarType::Bytea,
+        &[vec![], vec![0], vec![0, 0], vec![0, 1], vec![1], vec![0xff]],
+        |value| ScalarValue::Bytea(value.clone()),
+    );
+    let mut uuid_mid = [0; 16];
+    uuid_mid[15] = 1;
+    assert_typed_values_sort_like_encoded_keys(
+        ScalarType::Uuid,
+        &[[0; 16], uuid_mid, [0xff; 16]],
+        |value| ScalarValue::Uuid(*value),
+    );
+    assert_typed_values_sort_like_encoded_keys(
+        ScalarType::Date,
+        &[-719_162, -1, 0, 1, 2_932_896],
+        |value| ScalarValue::Date(*value),
+    );
+    assert_typed_values_sort_like_encoded_keys(
+        ScalarType::TimestampTz,
+        &[-62_135_596_800_000_000, -1, 0, 1, 253_402_300_799_999_999],
+        |value| ScalarValue::TimestampTz(*value),
+    );
+}
+
 #[test]
 fn typed_sql_tuple_key_uses_null_markers_and_declared_scalar_encodings() {
     let columns = [

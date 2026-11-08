@@ -30,7 +30,15 @@
 - Regression: a compiling real-redb commit test first accepted a key one byte above the proposed limit and committed its row. It now verifies rejection as `InvalidIndex`, unchanged commit sequence, and no row publication.
 - Implementation: transaction staging and the serialized storage commit both reject over-limit keys, so direct trusted commit callers cannot bypass the logical bound. The low-level key composer remains an encoding helper and may construct bytes that cannot be persisted.
 - Verification: the focused real-redb regression passed both the over-limit rejection and exact-limit acceptance cases. The full TinyCC suite and `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, and `git diff --check` all passed in the configured Nix shell. The commit integration target passed all 106 tests.
-- Remaining: independent typed comparator properties and index-scan equivalence remain open.
+- Remaining: independent composite/null/suffix properties and index-scan equivalence remain open.
+
+## SM-2: typed component ordering evidence — verified
+
+- Contract: [index-key encoding v1](../../specs/index-key-encoding.md). Within one index definition, encoded component bytes must preserve the declared scalar's SQL order.
+- Regression: the first test run was rejected during setup because `i128::MIN` exceeds `DECIMAL(38)` precision. Replacing it with signed 38-digit values made the focused property pass.
+- Evidence: the integration regression independently sorts representative BOOLEAN, signed integer, DECIMAL(38), TEXT, VARCHAR, BYTEA, UUID, DATE and TIMESTAMPTZ values by their native Rust order, then checks the encoded key bytes increase strictly.
+- Verification: all 11 tests in `cargo test -p prdb-engine --test index_key --locked` passed; `cargo fmt --all -- --check`, workspace Clippy with warnings denied, and `git diff --check` also passed. The regression adds ordering evidence only; it changes no runtime implementation.
+- Remaining: broader composite/null/suffix properties and persisted index-scan equivalence remain open.
 
 ## SM-3: bounded private overlay primitive — in progress
 
