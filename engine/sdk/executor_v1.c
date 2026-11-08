@@ -158,7 +158,7 @@ int32_t prdb_sdk_executor_close_cursor_v1(
     status = invoke(host, PRDB_SDK_EXECUTOR_OP_CLOSE_CURSOR, request, sizeof(request),
                     response, response_capacity, response_len);
     if (status != PRDB_SDK_EXECUTOR_OK) return status;
-    if (*response_len != 4 || read_u16(response) != 1 || read_u16(response + 2) != 0) {
+    if (*response_len != 3 || read_u16(response) != 1 || response[2] != 0) {
         return PRDB_SDK_EXECUTOR_INVALID_PAYLOAD;
     }
     return PRDB_SDK_EXECUTOR_OK;

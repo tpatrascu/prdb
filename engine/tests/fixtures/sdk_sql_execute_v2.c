@@ -98,7 +98,7 @@ static int32_t executor_request(void *context, uint16_t operation,
         static const uint8_t expected[] = {
             0, 1, 7, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
             0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55};
-        static const uint8_t reply[] = {0, 1, 0, 0};
+        static const uint8_t reply[] = {0, 1, 0};
         assert(request_len == sizeof(expected));
         assert(memcmp(request, expected, sizeof(expected)) == 0);
         assert(sizeof(reply) <= capacity);

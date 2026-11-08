@@ -16121,14 +16121,16 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    struct AcceptFixture;
+    struct AcceptFixture {
+        requested_scope: Vec<u8>,
+    }
     impl SubmissionMetadataValidator for AcceptFixture {
         fn supports_versions(&self, manifest_version: u32, scope_version: u32) -> bool {
             manifest_version == 1 && scope_version == 1
         }
 
         fn validate(&self, metadata: &SubmissionMetadata) -> bool {
-            metadata.manifest == b"m" && metadata.requested_scope == requested_scope_fixture()
+            metadata.manifest == b"m" && metadata.requested_scope == self.requested_scope
         }
     }
 
@@ -16199,7 +16201,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     let table_invocation = id(0x80);
     let mut table_audit = identity_audit_event(0x81, user_id, id(0x82));
     table_audit.correlation_id = table_invocation;
-    storage.create_table(CreateTableRequest {
+    let records_table = storage.create_table(CreateTableRequest {
         invocation_id: table_invocation,
         authenticated_actor_id: user_id,
         schema_id: schema.schema_id,
@@ -16215,11 +16217,510 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         audit_event: table_audit,
     })?;
 
+    let authority_invocation = id(0x83);
+    let mut authority_audit = identity_audit_event(0x84, user_id, user_id);
+    authority_audit.action = AuditAction::AuthorityChange;
+    authority_audit.correlation_id = authority_invocation;
+    let mut authority_writes = vec![
+        grant_write(user_id, schema.schema_id, 1, 1, schema.schema_id, user_id),
+        dependency_write(user_id, schema.schema_id, 5),
+        dependency_write(user_id, records_table.table_id, 5),
+        dependency_write(user_id, records_table.column_ids[0], 5),
+    ];
+    authority_writes.extend((2..=5).map(|privilege| {
+        grant_write(
+            user_id,
+            records_table.table_id,
+            privilege,
+            1,
+            records_table.table_id,
+            user_id,
+        )
+    }));
+    authority_writes.extend((2..=4).map(|privilege| {
+        grant_write(
+            user_id,
+            records_table.table_id,
+            privilege,
+            2,
+            records_table.column_ids[0],
+            user_id,
+        )
+    }));
+    let (old_user_record, old_token_record) = {
+        let read = database.begin_read()?;
+        let catalog = read.open_table(CATALOG)?;
+        (
+            catalog
+                .get(id_catalog_key(10, user_id).as_slice())?
+                .ok_or("sandbox SQL user record missing")?
+                .value()
+                .to_vec(),
+            catalog
+                .get(id_catalog_key(16, token_id).as_slice())?
+                .ok_or("sandbox SQL token record missing")?
+                .value()
+                .to_vec(),
+        )
+    };
+    let mut bumped_user = principal_write_with_name(user_id, 1, 2, "sandbox_sql_roundtrip");
+    bumped_user.expected_value = Some(old_user_record);
+    authority_writes.push(bumped_user);
+    let mut refreshed_token = credential_verifier_write(
+        token_id,
+        user_id,
+        &secret,
+        now - 1_000_000,
+        now + 60_000_000,
+        None,
+        2,
+    );
+    refreshed_token.expected_value = Some(old_token_record);
+    authority_writes.push(refreshed_token);
+    storage.commit_catalog_and_audit(
+        authority_invocation,
+        user_id,
+        now + 3_600_000_000,
+        &authority_writes,
+        &[authority_audit],
+    )?;
+
+    let insert_policy_id = id(0x85);
+    let insert_policy_expression_id = id(0x86);
+    let insert_cell_policy_id = id(0x89);
+    let insert_policy_key = id_catalog_key(13, insert_policy_id);
+    let insert_policy_payload = encode_envelope(
+        &family_schema(13).unwrap(),
+        &insert_policy_key,
+        &[
+            CatalogField {
+                tag: 1,
+                wire_type: WireType::Id,
+                payload: records_table.table_id.to_vec(),
+            },
+            CatalogField {
+                tag: 2,
+                wire_type: WireType::U16,
+                payload: 1u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 3,
+                wire_type: WireType::U16,
+                payload: 2u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 4,
+                wire_type: WireType::U16,
+                payload: 1u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 6,
+                wire_type: WireType::Id,
+                payload: insert_policy_expression_id.to_vec(),
+            },
+            CatalogField {
+                tag: 7,
+                wire_type: WireType::U64,
+                payload: 1u64.to_le_bytes().to_vec(),
+            },
+        ],
+    )?;
+    let policy_target_payload =
+        prdb_engine::catalog::encode_policy_target(&prdb_engine::catalog::PolicyTarget {
+            policy_id: insert_policy_id,
+            kind: 1,
+            target_id: user_id,
+        })?;
+    let cell_policy_key = id_catalog_key(13, insert_cell_policy_id);
+    let cell_policy_payload = encode_envelope(
+        &family_schema(13).unwrap(),
+        &cell_policy_key,
+        &[
+            CatalogField {
+                tag: 1,
+                wire_type: WireType::Id,
+                payload: records_table.table_id.to_vec(),
+            },
+            CatalogField {
+                tag: 2,
+                wire_type: WireType::U16,
+                payload: 2u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 3,
+                wire_type: WireType::U16,
+                payload: 2u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 4,
+                wire_type: WireType::U16,
+                payload: 1u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 6,
+                wire_type: WireType::Id,
+                payload: insert_policy_expression_id.to_vec(),
+            },
+            CatalogField {
+                tag: 7,
+                wire_type: WireType::U64,
+                payload: 1u64.to_le_bytes().to_vec(),
+            },
+        ],
+    )?;
+    let cell_policy_recipient =
+        prdb_engine::catalog::encode_policy_target(&prdb_engine::catalog::PolicyTarget {
+            policy_id: insert_cell_policy_id,
+            kind: 1,
+            target_id: user_id,
+        })?;
+    let cell_policy_column =
+        prdb_engine::catalog::encode_policy_target(&prdb_engine::catalog::PolicyTarget {
+            policy_id: insert_cell_policy_id,
+            kind: 3,
+            target_id: records_table.column_ids[0],
+        })?;
+    let insert_policy_expression_key = id_catalog_key(7, insert_policy_expression_id);
+    let insert_policy_expression_ir =
+        prdb_engine::expression::encode_expression(&prdb_engine::authorization::Expr::Literal(
+            Some(prdb_engine::tuple::ScalarValue::Boolean(true)),
+        ))?;
+    let insert_policy_expression = CatalogWrite {
+        key: insert_policy_expression_key.clone(),
+        expected_value: None,
+        payload: Some(encode_envelope(
+            &family_schema(7).unwrap(),
+            &insert_policy_expression_key,
+            &[
+                CatalogField {
+                    tag: 1,
+                    wire_type: WireType::U16,
+                    payload: 4u16.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 2,
+                    wire_type: WireType::U32,
+                    payload: 1u32.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 3,
+                    wire_type: WireType::Id,
+                    payload: builtin_id(101).to_vec(),
+                },
+                CatalogField {
+                    tag: 4,
+                    wire_type: WireType::Bytes,
+                    payload: vec![0; 8],
+                },
+                CatalogField {
+                    tag: 5,
+                    wire_type: WireType::Bytes,
+                    payload: insert_policy_expression_ir,
+                },
+                CatalogField {
+                    tag: 6,
+                    wire_type: WireType::Ids,
+                    payload: 0u32.to_le_bytes().to_vec(),
+                },
+            ],
+        )?),
+    };
+    let mut insert_policy_table_epoch =
+        table_write_with_versions(records_table.table_id, schema.schema_id, 1, 2);
+    insert_policy_table_epoch.expected_value = Some(
+        database
+            .begin_read()?
+            .open_table(CATALOG)?
+            .get(id_catalog_key(5, records_table.table_id).as_slice())?
+            .ok_or("sandbox SQL table record missing")?
+            .value()
+            .to_vec(),
+    );
+    let select_using_id = id(0x8a);
+    let update_using_id = id(0x8b);
+    let mut policy_writes = vec![
+        CatalogWrite {
+            key: insert_policy_key,
+            expected_value: None,
+            payload: Some(insert_policy_payload),
+        },
+        CatalogWrite {
+            key: cell_policy_key,
+            expected_value: None,
+            payload: Some(cell_policy_payload),
+        },
+        object_write_with_parent_and_owner_and_name(
+            insert_policy_id,
+            10,
+            None,
+            user_id,
+            "sandbox_insert_policy",
+        ),
+        object_write_with_parent_and_owner_and_name(
+            insert_cell_policy_id,
+            10,
+            None,
+            user_id,
+            "sandbox_insert_cell_policy",
+        ),
+        insert_policy_expression,
+        object_write_with_parent_and_owner_and_name(
+            insert_policy_expression_id,
+            5,
+            None,
+            user_id,
+            "sandbox_insert_policy_check",
+        ),
+        CatalogWrite {
+            key: policy_target_payload[32..].to_vec(),
+            expected_value: None,
+            payload: Some(policy_target_payload),
+        },
+        CatalogWrite {
+            key: cell_policy_recipient[32..].to_vec(),
+            expected_value: None,
+            payload: Some(cell_policy_recipient),
+        },
+        CatalogWrite {
+            key: cell_policy_column[32..].to_vec(),
+            expected_value: None,
+            payload: Some(cell_policy_column),
+        },
+        dependency_write(insert_policy_id, insert_policy_expression_id, 2),
+        dependency_write(insert_policy_id, user_id, 5),
+        dependency_write(insert_cell_policy_id, insert_policy_expression_id, 2),
+        dependency_write(insert_cell_policy_id, user_id, 5),
+        insert_policy_table_epoch,
+    ];
+    let make_using_expression = |expression_id: [u8; 16], name: &str| {
+        let key = id_catalog_key(7, expression_id);
+        let ir = prdb_engine::expression::encode_expression(
+            &prdb_engine::authorization::Expr::Literal(Some(
+                prdb_engine::tuple::ScalarValue::Boolean(true),
+            )),
+        )?;
+        let expression = CatalogWrite {
+            key: key.clone(),
+            expected_value: None,
+            payload: Some(encode_envelope(
+                &family_schema(7).unwrap(),
+                &key,
+                &[
+                    CatalogField {
+                        tag: 1,
+                        wire_type: WireType::U16,
+                        payload: 3u16.to_le_bytes().to_vec(),
+                    },
+                    CatalogField {
+                        tag: 2,
+                        wire_type: WireType::U32,
+                        payload: 1u32.to_le_bytes().to_vec(),
+                    },
+                    CatalogField {
+                        tag: 3,
+                        wire_type: WireType::Id,
+                        payload: builtin_id(101).to_vec(),
+                    },
+                    CatalogField {
+                        tag: 4,
+                        wire_type: WireType::Bytes,
+                        payload: vec![0; 8],
+                    },
+                    CatalogField {
+                        tag: 5,
+                        wire_type: WireType::Bytes,
+                        payload: ir,
+                    },
+                    CatalogField {
+                        tag: 6,
+                        wire_type: WireType::Ids,
+                        payload: 0u32.to_le_bytes().to_vec(),
+                    },
+                ],
+            )?),
+        };
+        Ok::<_, Box<dyn std::error::Error>>((
+            expression,
+            object_write_with_parent_and_owner_and_name(expression_id, 5, None, user_id, name),
+        ))
+    };
+    let (select_using, select_using_object) =
+        make_using_expression(select_using_id, "sandbox_select_using")?;
+    let (update_using, update_using_object) =
+        make_using_expression(update_using_id, "sandbox_update_using")?;
+    policy_writes.extend([
+        select_using,
+        select_using_object,
+        update_using,
+        update_using_object,
+    ]);
+
+    let mut add_table_policy = |policy_id: [u8; 16],
+                                operation: u16,
+                                using_id: Option<[u8; 16]>,
+                                check_id: Option<[u8; 16]>,
+                                column_target: bool,
+                                name: &str|
+     -> Result<(), Box<dyn std::error::Error>> {
+        let key = id_catalog_key(13, policy_id);
+        let mut fields = vec![
+            CatalogField {
+                tag: 1,
+                wire_type: WireType::Id,
+                payload: records_table.table_id.to_vec(),
+            },
+            CatalogField {
+                tag: 2,
+                wire_type: WireType::U16,
+                payload: if column_target { 2u16 } else { 1u16 }
+                    .to_le_bytes()
+                    .to_vec(),
+            },
+            CatalogField {
+                tag: 3,
+                wire_type: WireType::U16,
+                payload: operation.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 4,
+                wire_type: WireType::U16,
+                payload: 1u16.to_le_bytes().to_vec(),
+            },
+        ];
+        if let Some(expression_id) = using_id {
+            fields.push(CatalogField {
+                tag: 5,
+                wire_type: WireType::Id,
+                payload: expression_id.to_vec(),
+            });
+        }
+        if let Some(expression_id) = check_id {
+            fields.push(CatalogField {
+                tag: 6,
+                wire_type: WireType::Id,
+                payload: expression_id.to_vec(),
+            });
+        }
+        fields.push(CatalogField {
+            tag: 7,
+            wire_type: WireType::U64,
+            payload: 1u64.to_le_bytes().to_vec(),
+        });
+        policy_writes.extend([
+            CatalogWrite {
+                key: key.clone(),
+                expected_value: None,
+                payload: Some(encode_envelope(&family_schema(13).unwrap(), &key, &fields)?),
+            },
+            object_write_with_parent_and_owner_and_name(policy_id, 10, None, user_id, name),
+        ]);
+        let recipient =
+            prdb_engine::catalog::encode_policy_target(&prdb_engine::catalog::PolicyTarget {
+                policy_id,
+                kind: 1,
+                target_id: user_id,
+            })?;
+        policy_writes.push(CatalogWrite {
+            key: recipient[32..].to_vec(),
+            expected_value: None,
+            payload: Some(recipient),
+        });
+        if column_target {
+            let column =
+                prdb_engine::catalog::encode_policy_target(&prdb_engine::catalog::PolicyTarget {
+                    policy_id,
+                    kind: 3,
+                    target_id: records_table.column_ids[0],
+                })?;
+            policy_writes.push(CatalogWrite {
+                key: column[32..].to_vec(),
+                expected_value: None,
+                payload: Some(column),
+            });
+        }
+        if let Some(expression_id) = using_id {
+            policy_writes.push(dependency_write(policy_id, expression_id, 2));
+        }
+        if let Some(expression_id) = check_id {
+            policy_writes.push(dependency_write(policy_id, expression_id, 2));
+        }
+        policy_writes.push(dependency_write(policy_id, user_id, 5));
+        Ok(())
+    };
+    add_table_policy(
+        id(0x8c),
+        1,
+        Some(select_using_id),
+        None,
+        false,
+        "sandbox_select_policy",
+    )?;
+    add_table_policy(
+        id(0x8d),
+        1,
+        Some(select_using_id),
+        None,
+        true,
+        "sandbox_select_cell_policy",
+    )?;
+    add_table_policy(
+        id(0x8e),
+        3,
+        Some(update_using_id),
+        Some(insert_policy_expression_id),
+        false,
+        "sandbox_update_policy",
+    )?;
+    add_table_policy(
+        id(0x8f),
+        3,
+        Some(update_using_id),
+        Some(insert_policy_expression_id),
+        true,
+        "sandbox_update_cell_policy",
+    )?;
+    add_table_policy(
+        id(0x90),
+        4,
+        Some(select_using_id),
+        None,
+        false,
+        "sandbox_delete_policy",
+    )?;
+    let policy_invocation = id(0x87);
+    let mut policy_audit = identity_audit_event(0x88, user_id, insert_policy_id);
+    policy_audit.correlation_id = policy_invocation;
+    storage.commit_authorized_policy_ddl(
+        policy_invocation,
+        user_id,
+        now + 3_600_000_000,
+        &policy_writes,
+        &[policy_audit],
+    )?;
+
+    let mut requested_scope = b"PSC1\0\x08".to_vec();
+    requested_scope.extend([1, 1]);
+    requested_scope.extend(schema.schema_id);
+    for operation in 2..=5 {
+        requested_scope.extend([operation, 2]);
+        requested_scope.extend(records_table.table_id);
+        if operation <= 4 {
+            requested_scope.extend([operation, 3]);
+            requested_scope.extend(records_table.table_id);
+            requested_scope.extend(records_table.column_ids[0]);
+        }
+    }
+
     let mut client = ClientConnectionSession::default();
     client.accept_hello(ClientMode::Query, "sandbox-sql-write-read")?;
     client.authenticate(&storage, token_id, &secret)?;
     let owner = client.staging_owner()?;
-    let staging = StagingStore::new(StagingLimits::default(), Arc::new(AcceptFixture))?;
+    let staging = StagingStore::new(
+        StagingLimits::default(),
+        Arc::new(AcceptFixture {
+            requested_scope: requested_scope.clone(),
+        }),
+    )?;
     let reservation = staging.prepare(
         owner,
         PrepareSubmission {
@@ -16228,7 +16729,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             artifact_bytes: u64::try_from(artifact.len())?,
             artifact_sha256: Sha256::digest(&artifact).into(),
             scope_version: 1,
-            requested_scope: requested_scope_fixture(),
+            requested_scope,
             parameter_bytes: 0,
             parameter_sha256: Sha256::digest([]).into(),
             deadline_ms: 30_000,
@@ -16285,16 +16786,27 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
 
     let (mut service, mut gateway) = UnixStream::pair()?;
     gateway.set_read_timeout(Some(Duration::from_secs(10)))?;
-    assert_eq!(
-        observe_executor_relay_and_finalize_gateway(
-            &storage,
-            &mut invocation,
-            &mut executor,
-            &mut service,
-            accepted.request_id,
-        )?,
-        GatewayTerminalDecision::Commit
-    );
+    let decision = observe_executor_relay_and_finalize_gateway(
+        &storage,
+        &mut invocation,
+        &mut executor,
+        &mut service,
+        accepted.request_id,
+    )?;
+    if decision != GatewayTerminalDecision::Commit {
+        let mut relayed = Vec::new();
+        while let Some(frame) = read_frame(&mut gateway)? {
+            let terminal = frame.operation == Operation::GatewayTerminal as u16;
+            relayed.push((
+                frame.operation,
+                String::from_utf8_lossy(&frame.payload).into_owned(),
+            ));
+            if terminal {
+                break;
+            }
+        }
+        panic!("sandbox query aborted: {decision:?}; relayed frames: {relayed:?}");
+    }
     staging.finish_started(owner, reservation.invocation_id)?;
     let inserted = read_frame(&mut gateway)?.ok_or("missing INSERT visibility result")?;
     assert_eq!(inserted.operation, Operation::GatewayResultData as u16);
@@ -16304,6 +16816,14 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     assert_eq!(metadata.operation, Operation::GatewayResultData as u16);
     assert_eq!(metadata.request_id, accepted.request_id);
     assert_eq!(metadata.payload, b"metadata-visible");
+    let tables = read_frame(&mut gateway)?.ok_or("missing SQL tables metadata result")?;
+    assert_eq!(tables.operation, Operation::GatewayResultData as u16);
+    assert_eq!(tables.request_id, accepted.request_id);
+    assert_eq!(tables.payload, b"metadata-tables-visible");
+    let columns = read_frame(&mut gateway)?.ok_or("missing SQL columns metadata result")?;
+    assert_eq!(columns.operation, Operation::GatewayResultData as u16);
+    assert_eq!(columns.request_id, accepted.request_id);
+    assert_eq!(columns.payload, b"metadata-columns-visible");
     let updated = read_frame(&mut gateway)?.ok_or("missing UPDATE visibility result")?;
     assert_eq!(updated.operation, Operation::GatewayResultData as u16);
     assert_eq!(updated.request_id, accepted.request_id);

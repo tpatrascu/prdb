@@ -134,7 +134,7 @@ static int32_t executor_request(void *context, uint16_t operation,
         0, 1, 7,
         0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
         0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66};
-    static const uint8_t close_reply[] = {0, 1, 0, 0};
+    static const uint8_t close_reply[] = {0, 1, 0};
     mock_host *mock = (mock_host *)context;
     const uint8_t *source = NULL;
     uint32_t source_len = 0;
