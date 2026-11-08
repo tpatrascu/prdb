@@ -1904,3 +1904,10 @@
 - Regression: real-redb coverage creates a Boolean CHECK, verifies startup integrity, then removes the CHECK/expression. A row-local CHECK that rejects an existing row leaves no publication and records ABORTED; non-row-local identity expressions are rejected. Decoder tests cover create/drop requests, and the authenticated ADMIN control integration creates then drops a CHECK.
 - Verification: focused lifecycle, decoder, and authenticated gateway regressions passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` passed under Rust 1.95.0; the commit integration target had 119 passed and 3 cgroup-dependent tests ignored.
 - Remaining: SQL `ALTER TABLE` parsing remains outside this control protocol.
+
+## SM-5: structured PRIMARY KEY and UNIQUE removal through StorageManager and ADMIN — implemented
+
+- Implementation: typed PK/UNIQUE drop methods remove the constraint, owned index, object rows, and kind-4 dependency, and advance the table write epoch through the authorized constraint commit. That commit removes physical index memberships and checks remaining FK references before publication. ADMIN exposes `constraints.drop_primary_key` and `constraints.drop_unique` with connection-owned PREPARE/START.
+- Regression: manager tests create and backfill a UNIQUE over existing rows and create a PRIMARY KEY, then remove each and verify catalog cleanup and startup integrity. The authenticated ADMIN integration creates and removes both key kinds after exercising CHECK and FK lifecycle; decoder tests verify the exact drop request shapes.
+- Verification: focused manager, decoder, and authenticated gateway regressions passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` passed under Rust 1.95.0; the commit integration target had 119 passed and 3 cgroup-dependent tests ignored.
+- Remaining: SQL `ALTER TABLE` parsing remains outside this control protocol.

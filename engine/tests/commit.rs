@@ -7198,6 +7198,36 @@ fn storage_manager_creates_unique_constraint_and_backfills_existing_rows()
     drop(catalog);
     drop(read);
     prdb_engine::startup::validate_persisted_records(&database)?;
+    let drop_invocation_id = id(0xe2);
+    let mut drop_audit = identity_audit_event(0xe3, actor, created.constraint_id);
+    drop_audit.correlation_id = drop_invocation_id;
+    assert_eq!(
+        storage
+            .drop_unique_constraint(
+                drop_invocation_id,
+                actor,
+                created.constraint_id,
+                9_999,
+                drop_audit,
+            )
+            .map_err(|error| format!("UNIQUE drop failed: {error:?}"))?,
+        4
+    );
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    assert!(
+        catalog
+            .get(id_catalog_key(8, created.constraint_id).as_slice())?
+            .is_none()
+    );
+    assert!(
+        catalog
+            .get(id_catalog_key(9, created.index_id).as_slice())?
+            .is_none()
+    );
+    drop(catalog);
+    drop(read);
+    prdb_engine::startup::validate_persisted_records(&database)?;
     Ok(())
 }
 
@@ -7264,8 +7294,25 @@ fn storage_manager_creates_primary_key_with_owned_unique_index()
             .get(id_catalog_key(9, created.index_id).as_slice())?
             .is_some()
     );
+    drop(constraint);
     drop(catalog);
     drop(read);
+    prdb_engine::startup::validate_persisted_records(&database)?;
+    let drop_invocation_id = id(0xe4);
+    let mut drop_audit = identity_audit_event(0xe5, actor, created.constraint_id);
+    drop_audit.correlation_id = drop_invocation_id;
+    assert_eq!(
+        storage
+            .drop_primary_key(
+                drop_invocation_id,
+                actor,
+                created.constraint_id,
+                9_999,
+                drop_audit,
+            )
+            .map_err(|error| format!("PRIMARY KEY drop failed: {error:?}"))?,
+        3
+    );
     prdb_engine::startup::validate_persisted_records(&database)?;
     Ok(())
 }
@@ -10726,6 +10773,12 @@ fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
     )?;
     assert!(primary_create.contains("\"outcome\":\"committed\""));
     assert!(primary_create.contains("\"index_id\":"));
+    let primary_constraint_id_wire = primary_create
+        .split("\"constraint_id\":\"")
+        .nth(1)
+        .ok_or("missing created PRIMARY KEY ID")?
+        .get(..32)
+        .ok_or("invalid created PRIMARY KEY ID")?;
     let unique_prepare = admin_dispatch_json(
         &storage,
         &staging,
@@ -10752,6 +10805,12 @@ fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
     )?;
     assert!(unique_create.contains("\"outcome\":\"committed\""));
     assert!(unique_create.contains("\"constraint_id\":"));
+    let unique_constraint_id_wire = unique_create
+        .split("\"constraint_id\":\"")
+        .nth(1)
+        .ok_or("missing created UNIQUE ID")?
+        .get(..32)
+        .ok_or("invalid created UNIQUE ID")?;
     let check_eir = prdb_engine::expression::encode_expression(
         &prdb_engine::authorization::Expr::Literal(Some(ScalarValue::Boolean(true))),
     )?;
@@ -10872,6 +10931,56 @@ fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
     )?;
     assert!(foreign_key_drop.contains("\"outcome\":\"committed\""));
     assert!(foreign_key_drop.contains(&format!("\"foreign_key_id\":\"{foreign_key_id_wire}\"")));
+    let unique_drop_prepare = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut foreign_key_control,
+        59,
+        &format!(
+            "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"constraints.drop_unique\",\"arguments\":{{\"constraint_id\":\"{unique_constraint_id_wire}\"}}}}"
+        ),
+        60_000_000,
+    )?;
+    let unique_drop_operation_id = unique_drop_prepare
+        .split("\"operation_id\":\"")
+        .nth(1)
+        .ok_or("missing ADMIN UNIQUE-drop operation ID")?
+        .get(..32)
+        .ok_or("invalid ADMIN UNIQUE-drop operation ID")?;
+    let unique_drop = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut foreign_key_control,
+        60,
+        &format!("{{\"phase\":\"start\",\"operation_id\":\"{unique_drop_operation_id}\"}}"),
+        60_000_000,
+    )?;
+    assert!(unique_drop.contains("\"outcome\":\"committed\""));
+    let primary_drop_prepare = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut foreign_key_control,
+        61,
+        &format!(
+            "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"constraints.drop_primary_key\",\"arguments\":{{\"constraint_id\":\"{primary_constraint_id_wire}\"}}}}"
+        ),
+        60_000_000,
+    )?;
+    let primary_drop_operation_id = primary_drop_prepare
+        .split("\"operation_id\":\"")
+        .nth(1)
+        .ok_or("missing ADMIN PRIMARY KEY-drop operation ID")?
+        .get(..32)
+        .ok_or("invalid ADMIN PRIMARY KEY-drop operation ID")?;
+    let primary_drop = admin_dispatch_json(
+        &storage,
+        &staging,
+        &mut foreign_key_control,
+        62,
+        &format!("{{\"phase\":\"start\",\"operation_id\":\"{primary_drop_operation_id}\"}}"),
+        60_000_000,
+    )?;
+    assert!(primary_drop.contains("\"outcome\":\"committed\""));
     prdb_engine::startup::validate_persisted_records(&database)?;
 
     assert!(storage.list_tokens(admin_id, created_user_id)?[0].revoked);

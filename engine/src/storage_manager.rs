@@ -7098,6 +7098,167 @@ impl<'db> StorageManager<'db> {
         Ok(commit_sequence)
     }
 
+    /// Drop a UNIQUE constraint and its owned index. Referencing foreign keys
+    /// are rejected by the final catalog dependency checks.
+    pub fn drop_unique_constraint(
+        &self,
+        invocation_id: [u8; 16],
+        authenticated_actor_id: [u8; 16],
+        constraint_id: [u8; 16],
+        retention_deadline_us: i64,
+        audit_event: AuditEvent,
+    ) -> Result<u64, TableLifecycleError> {
+        self.drop_key_constraint(
+            invocation_id,
+            authenticated_actor_id,
+            constraint_id,
+            3,
+            retention_deadline_us,
+            audit_event,
+        )
+    }
+
+    /// Drop a PRIMARY KEY and its owned index. Referencing foreign keys are
+    /// rejected by the final catalog dependency checks.
+    pub fn drop_primary_key(
+        &self,
+        invocation_id: [u8; 16],
+        authenticated_actor_id: [u8; 16],
+        constraint_id: [u8; 16],
+        retention_deadline_us: i64,
+        audit_event: AuditEvent,
+    ) -> Result<u64, TableLifecycleError> {
+        self.drop_key_constraint(
+            invocation_id,
+            authenticated_actor_id,
+            constraint_id,
+            2,
+            retention_deadline_us,
+            audit_event,
+        )
+    }
+
+    fn drop_key_constraint(
+        &self,
+        invocation_id: [u8; 16],
+        authenticated_actor_id: [u8; 16],
+        constraint_id: [u8; 16],
+        expected_kind: u16,
+        retention_deadline_us: i64,
+        mut audit_event: AuditEvent,
+    ) -> Result<u64, TableLifecycleError> {
+        if invocation_id == [0; 16]
+            || authenticated_actor_id == [0; 16]
+            || constraint_id == [0; 16]
+            || retention_deadline_us <= 0
+        {
+            return Err(TableLifecycleError::InvalidRequest);
+        }
+        if audit_event.actor_id != Some(authenticated_actor_id)
+            || audit_event.correlation_id != invocation_id
+            || audit_event.action != AuditAction::Ddl
+            || audit_event.result != AuditResult::Succeeded
+        {
+            return Err(TableLifecycleError::InvalidAudit);
+        }
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|_| TableLifecycleError::Storage)?;
+        let catalog = read
+            .open_table(CATALOG)
+            .map_err(|_| TableLifecycleError::Storage)?;
+        let constraint_key = id_catalog_key(8, constraint_id);
+        let constraint_bytes = catalog
+            .get(constraint_key.as_slice())
+            .map_err(|_| TableLifecycleError::Storage)?
+            .map(|value| value.value().to_vec())
+            .ok_or(TableLifecycleError::InvalidRequest)?;
+        read_catalog_record(&constraint_key, &constraint_bytes, 8)?;
+        if read_catalog_u16(&constraint_key, &constraint_bytes, 8, 2)? != expected_kind {
+            return Err(TableLifecycleError::InvalidRequest);
+        }
+        let table_id = read_catalog_id(&constraint_key, &constraint_bytes, 8, 1)?;
+        let index_id = read_catalog_id(&constraint_key, &constraint_bytes, 8, 11)?;
+        let index_key = id_catalog_key(9, index_id);
+        let index_bytes = catalog
+            .get(index_key.as_slice())
+            .map_err(|_| TableLifecycleError::Storage)?
+            .map(|value| value.value().to_vec())
+            .ok_or(TableLifecycleError::Commit(CommitError::InvalidCatalog))?;
+        read_catalog_record(&index_key, &index_bytes, 9)?;
+        let edge_key = dependency_catalog_key(constraint_id, index_id, 4);
+        let edge_bytes = catalog
+            .get(edge_key.as_slice())
+            .map_err(|_| TableLifecycleError::Storage)?
+            .map(|value| value.value().to_vec())
+            .ok_or(TableLifecycleError::Commit(CommitError::InvalidCatalog))?;
+        let mut writes = Vec::with_capacity(6);
+        for (key, bytes) in [
+            (constraint_key.clone(), constraint_bytes),
+            (index_key.clone(), index_bytes),
+        ] {
+            writes.push(CatalogWrite {
+                key,
+                expected_value: Some(bytes),
+                payload: None,
+            });
+        }
+        for object_id in [constraint_id, index_id] {
+            let object_key = id_catalog_key(2, object_id);
+            let object_bytes = catalog
+                .get(object_key.as_slice())
+                .map_err(|_| TableLifecycleError::Storage)?
+                .map(|value| value.value().to_vec())
+                .ok_or(TableLifecycleError::Commit(CommitError::InvalidCatalog))?;
+            writes.push(CatalogWrite {
+                key: object_key,
+                expected_value: Some(object_bytes),
+                payload: None,
+            });
+        }
+        writes.push(CatalogWrite {
+            key: edge_key,
+            expected_value: Some(edge_bytes),
+            payload: None,
+        });
+        let table_key = id_catalog_key(5, table_id);
+        let table_bytes = catalog
+            .get(table_key.as_slice())
+            .map_err(|_| TableLifecycleError::Storage)?
+            .map(|value| value.value().to_vec())
+            .ok_or(TableLifecycleError::Commit(CommitError::InvalidCatalog))?;
+        let next_epoch = read_catalog_u64(&table_key, &table_bytes, 5, 3)?
+            .checked_add(1)
+            .ok_or(TableLifecycleError::Commit(CommitError::InvalidCatalog))?;
+        writes.push(CatalogWrite {
+            key: table_key.clone(),
+            expected_value: Some(table_bytes.clone()),
+            payload: Some(rewrite_catalog_u64_field(
+                &table_key,
+                &table_bytes,
+                5,
+                3,
+                next_epoch,
+            )?),
+        });
+        drop(catalog);
+        drop(read);
+        audit_event.target_ids = vec![constraint_id, index_id];
+        audit_event.target_ids.sort_unstable();
+        self.commit_authorized_constraint_ddl(
+            invocation_id,
+            authenticated_actor_id,
+            retention_deadline_us,
+            &writes,
+            &[audit_event],
+        )
+        .map_err(|error| match error {
+            CommitError::DdlAuthorizationDenied => TableLifecycleError::Unauthorized,
+            error => TableLifecycleError::Commit(error),
+        })
+    }
+
     /// Add a UNIQUE constraint and its owned unique index. The authorized
     /// constraint commit backfills and validates the index against the final
     /// table state under the table DDL fence.

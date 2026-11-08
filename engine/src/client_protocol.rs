@@ -219,6 +219,12 @@ enum PendingAdminAction {
     DropCheckConstraint {
         constraint_id: [u8; 16],
     },
+    DropPrimaryKey {
+        constraint_id: [u8; 16],
+    },
+    DropUniqueConstraint {
+        constraint_id: [u8; 16],
+    },
     RenameTable {
         table_id: [u8; 16],
         name: String,
@@ -462,6 +468,12 @@ pub enum ClientAdminCommand {
         dependency_column_ids: Vec<[u8; 16]>,
     },
     PrepareDropCheckConstraint {
+        constraint_id: [u8; 16],
+    },
+    PrepareDropPrimaryKey {
+        constraint_id: [u8; 16],
+    },
+    PrepareDropUniqueConstraint {
         constraint_id: [u8; 16],
     },
     PrepareRenameTable {
@@ -1079,6 +1091,31 @@ pub fn decode_client_admin_command(
                 return Err(ClientControlError::UnknownKey);
             }
             Ok(ClientAdminCommand::PrepareDropCheckConstraint { constraint_id })
+        }
+        Some("prepare")
+            if version == Some(1)
+                && matches!(
+                    operation.as_deref(),
+                    Some("constraints.drop_primary_key" | "constraints.drop_unique")
+                ) =>
+        {
+            if operation_id.is_some() || seen.len() != 4 {
+                return Err(ClientControlError::UnknownKey);
+            }
+            let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
+            let constraint_id = decode_lower_hex_id(
+                &args
+                    .remove("constraint_id")
+                    .ok_or(ClientControlError::MissingKey)?,
+            )?;
+            if !args.is_empty() {
+                return Err(ClientControlError::UnknownKey);
+            }
+            if operation.as_deref() == Some("constraints.drop_primary_key") {
+                Ok(ClientAdminCommand::PrepareDropPrimaryKey { constraint_id })
+            } else {
+                Ok(ClientAdminCommand::PrepareDropUniqueConstraint { constraint_id })
+            }
         }
         Some("prepare") if version == Some(1) && operation.as_deref() == Some("tables.rename") => {
             if operation_id.is_some() || seen.len() != 4 {
@@ -3423,6 +3460,58 @@ impl ClientConnectionSession {
                     .into_bytes(),
                 )
             }
+            ClientAdminCommand::PrepareDropPrimaryKey { constraint_id } => {
+                if self.pending_admin_operation.is_some() {
+                    return Err(ClientSessionError::WrongMode);
+                }
+                let mut operation_id = [0; 16];
+                getrandom::fill(&mut operation_id).map_err(|_| {
+                    ClientSessionError::Storage(TransactionError::RandomnessUnavailable)
+                })?;
+                if operation_id == [0; 16] {
+                    return Err(ClientSessionError::Storage(
+                        TransactionError::RandomnessUnavailable,
+                    ));
+                }
+                self.pending_admin_operation = Some(PendingAdminOperation {
+                    operation_id,
+                    action: PendingAdminAction::DropPrimaryKey { constraint_id },
+                });
+                self.json_response(
+                    request.request_id,
+                    format!(
+                        "{{\"operation_id\":\"{}\",\"state\":\"prepared\"}}",
+                        encode_lower_hex_id(operation_id)
+                    )
+                    .into_bytes(),
+                )
+            }
+            ClientAdminCommand::PrepareDropUniqueConstraint { constraint_id } => {
+                if self.pending_admin_operation.is_some() {
+                    return Err(ClientSessionError::WrongMode);
+                }
+                let mut operation_id = [0; 16];
+                getrandom::fill(&mut operation_id).map_err(|_| {
+                    ClientSessionError::Storage(TransactionError::RandomnessUnavailable)
+                })?;
+                if operation_id == [0; 16] {
+                    return Err(ClientSessionError::Storage(
+                        TransactionError::RandomnessUnavailable,
+                    ));
+                }
+                self.pending_admin_operation = Some(PendingAdminOperation {
+                    operation_id,
+                    action: PendingAdminAction::DropUniqueConstraint { constraint_id },
+                });
+                self.json_response(
+                    request.request_id,
+                    format!(
+                        "{{\"operation_id\":\"{}\",\"state\":\"prepared\"}}",
+                        encode_lower_hex_id(operation_id)
+                    )
+                    .into_bytes(),
+                )
+            }
             ClientAdminCommand::PrepareCreateForeignKey {
                 source_table_id,
                 source_column_ids,
@@ -4247,6 +4336,64 @@ impl ClientConnectionSession {
                     PendingAdminAction::DropCheckConstraint { constraint_id } => {
                         let commit_sequence = storage
                             .drop_check_constraint(
+                                operation_id,
+                                actor_id,
+                                constraint_id,
+                                retention_deadline_us,
+                                crate::audit::AuditEvent {
+                                    event_id,
+                                    actor_id: Some(actor_id),
+                                    correlation_id: operation_id,
+                                    occurred_at_us: now_us,
+                                    action: crate::audit::AuditAction::Ddl,
+                                    result: crate::audit::AuditResult::Succeeded,
+                                    target_ids: Vec::new(),
+                                },
+                            )
+                            .map_err(ClientSessionError::ConstraintLifecycle)?;
+                        self.json_response(
+                            request.request_id,
+                            format!(
+                                "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"constraint_id\":\"{}\",\"commit_sequence\":\"{}\"}}",
+                                encode_lower_hex_id(operation_id),
+                                encode_lower_hex_id(constraint_id),
+                                commit_sequence,
+                            )
+                            .into_bytes(),
+                        )
+                    }
+                    PendingAdminAction::DropPrimaryKey { constraint_id } => {
+                        let commit_sequence = storage
+                            .drop_primary_key(
+                                operation_id,
+                                actor_id,
+                                constraint_id,
+                                retention_deadline_us,
+                                crate::audit::AuditEvent {
+                                    event_id,
+                                    actor_id: Some(actor_id),
+                                    correlation_id: operation_id,
+                                    occurred_at_us: now_us,
+                                    action: crate::audit::AuditAction::Ddl,
+                                    result: crate::audit::AuditResult::Succeeded,
+                                    target_ids: Vec::new(),
+                                },
+                            )
+                            .map_err(ClientSessionError::ConstraintLifecycle)?;
+                        self.json_response(
+                            request.request_id,
+                            format!(
+                                "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"constraint_id\":\"{}\",\"commit_sequence\":\"{}\"}}",
+                                encode_lower_hex_id(operation_id),
+                                encode_lower_hex_id(constraint_id),
+                                commit_sequence,
+                            )
+                            .into_bytes(),
+                        )
+                    }
+                    PendingAdminAction::DropUniqueConstraint { constraint_id } => {
+                        let commit_sequence = storage
+                            .drop_unique_constraint(
                                 operation_id,
                                 actor_id,
                                 constraint_id,

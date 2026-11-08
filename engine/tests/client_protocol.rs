@@ -332,6 +332,30 @@ fn admin_revoke_decoder_requires_prepare_then_start_schemas() {
             constraint_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
         })
     );
+    for (operation, command) in [
+        (
+            "constraints.drop_primary_key",
+            ClientAdminCommand::PrepareDropPrimaryKey {
+                constraint_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+            },
+        ),
+        (
+            "constraints.drop_unique",
+            ClientAdminCommand::PrepareDropUniqueConstraint {
+                constraint_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+            },
+        ),
+    ] {
+        assert_eq!(
+            decode_client_admin_command(
+                format!(
+                    "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"{operation}\",\"arguments\":{{\"constraint_id\":\"000102030405060708090a0b0c0d0e0f\"}}}}"
+                )
+                .as_bytes()
+            ),
+            Ok(command)
+        );
+    }
     assert_eq!(
         decode_client_admin_command(
             br#"{"phase":"prepare","operation_version":1,"operation":"roles.drop","arguments":{"role_id":"000102030405060708090a0b0c0d0e0f"}}"#
