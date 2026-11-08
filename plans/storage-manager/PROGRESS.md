@@ -1918,3 +1918,9 @@
 - Regression: `foreign_key_creation_racing_referenced_primary_key_drop_is_atomic` releases the authorized FK catalog commit and typed PK drop from a barrier. It accepts only one committed DDL operation, verifies both durable outcomes, checks the corresponding FK/key/dependency records, and runs startup integrity validation.
 - Evidence: the focused barrier-coordinated regression passed against real redb.
 - Verification: the focused barrier regression passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` passed under Rust 1.95.0; the commit integration target had 121 passed and 3 cgroup-dependent tests ignored.
+
+## SM-5 / DS-7: CHECK creation racing with a violating insert — verified
+
+- Contract: CHECK publication must validate the serialized final row set, and an invocation pinned before constraint publication cannot commit using the older table write epoch.
+- Regression: `storage_manager_creates_and_drops_check_constraint` races a non-NULL insert against publishing `CHECK (column IS NULL)` from a three-party barrier. It accepts only either a committed insert with CHECK backfill durably aborted as `CheckViolation`, or committed CHECK DDL with the stale insert rejected as `Conflict`. Both paths verify durable outcomes, exactly one sequence advance, and row presence consistent with the winner; startup validation succeeds after cleanup.
+- Verification: the focused real-redb lifecycle/race regression passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` passed in the prescribed Nix shell; the commit integration target reported 121 passed and 3 cgroup-dependent ignored.

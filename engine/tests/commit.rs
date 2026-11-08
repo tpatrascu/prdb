@@ -7737,6 +7737,121 @@ fn storage_manager_creates_and_drops_check_constraint() -> Result<(), Box<dyn st
     );
     drop(catalog);
     drop(read);
+
+    let mut remove_seed = storage.begin_invocation(id(0xd0), actor, 9_999, 1, 1024)?;
+    let remove_seed_schema = remove_seed.load_catalog_table_schema(id(82))?;
+    remove_seed.load_catalog_indexes(&remove_seed_schema)?;
+    remove_seed.stage_delete(prdb_engine::overlay::RowId {
+        table: id(82),
+        row: id(0xf9),
+    })?;
+    remove_seed.commit()?;
+
+    let insert_invocation = id(0xd1);
+    let insert_row_id = id(0xd2);
+    let mut racing_insert = storage.begin_invocation(insert_invocation, actor, 9_999, 1, 1024)?;
+    let racing_schema = racing_insert.load_catalog_table_schema(id(82))?;
+    racing_insert.load_catalog_indexes(&racing_schema)?;
+    let violating_tuple = encode_tuple(
+        &racing_schema.columns,
+        racing_schema.schema_version,
+        &[Some(ScalarValue::Bytea(b"not null".to_vec()))],
+    )?;
+    racing_insert.stage_put(
+        prdb_engine::overlay::RowId {
+            table: id(82),
+            row: insert_row_id,
+        },
+        &violating_tuple,
+    )?;
+
+    let check_invocation = id(0xd3);
+    let before_race = commit_sequence(&database)?;
+    let barrier = Arc::new(Barrier::new(3));
+    let (insert_result, check_result) = std::thread::scope(|scope| {
+        let insert_barrier = barrier.clone();
+        let insert = scope.spawn(move || {
+            insert_barrier.wait();
+            racing_insert.commit()
+        });
+        let check_barrier = barrier.clone();
+        let check_storage = &storage;
+        let check = scope.spawn(move || {
+            let mut audit = identity_audit_event(0xd4, actor, id(82));
+            audit.correlation_id = check_invocation;
+            check_barrier.wait();
+            check_storage.create_check_constraint(
+                prdb_engine::storage_manager::CreateCheckConstraintRequest {
+                    invocation_id: check_invocation,
+                    authenticated_actor_id: actor,
+                    table_id: id(82),
+                    expression: prdb_engine::authorization::Expr::IsNull(Box::new(
+                        prdb_engine::authorization::Expr::Field(0),
+                    )),
+                    dependency_column_ids: vec![id(84)],
+                    retention_deadline_us: 9_999,
+                    audit_event: audit,
+                },
+            )
+        });
+        barrier.wait();
+        (
+            insert.join().expect("CHECK race insert thread panicked"),
+            check.join().expect("CHECK race DDL thread panicked"),
+        )
+    });
+    match (insert_result, check_result) {
+        (
+            Ok(_),
+            Err(prdb_engine::storage_manager::TableLifecycleError::Commit(
+                CommitError::CheckViolation,
+            )),
+        ) => {
+            assert_eq!(
+                lookup_outcome(&database, insert_invocation, actor, 1)?
+                    .ok_or("missing winning CHECK-race insert outcome")?
+                    .status,
+                OutcomeStatus::Committed
+            );
+            assert_eq!(
+                lookup_outcome(&database, check_invocation, actor, 1)?
+                    .ok_or("missing aborted CHECK-race DDL outcome")?
+                    .status,
+                OutcomeStatus::Aborted
+            );
+            assert!(row(&database, &table_row_key(id(82), insert_row_id))?.is_some());
+            assert_eq!(commit_sequence(&database)?, before_race + 1);
+        }
+        (
+            Err(prdb_engine::transaction::TransactionError::Commit(CommitError::Conflict)),
+            Ok(created_check),
+        ) => {
+            assert_eq!(
+                lookup_outcome(&database, insert_invocation, actor, 1)?
+                    .ok_or("missing aborted CHECK-race insert outcome")?
+                    .status,
+                OutcomeStatus::Aborted
+            );
+            assert_eq!(
+                lookup_outcome(&database, check_invocation, actor, 1)?
+                    .ok_or("missing winning CHECK-race DDL outcome")?
+                    .status,
+                OutcomeStatus::Committed
+            );
+            assert!(row(&database, &table_row_key(id(82), insert_row_id))?.is_none());
+            assert_eq!(commit_sequence(&database)?, before_race + 1);
+            storage.drop_check_constraint(
+                id(0xd5),
+                actor,
+                created_check.constraint_id,
+                9_999,
+                identity_audit_event(0xd6, actor, created_check.constraint_id),
+            )?;
+        }
+        (insert_result, check_result) => panic!(
+            "unexpected CHECK creation race outcomes: insert={insert_result:?}, check={check_result:?}"
+        ),
+    }
     prdb_engine::startup::validate_persisted_records(&database)?;
     Ok(())
 }
