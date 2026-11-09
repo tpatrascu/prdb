@@ -2449,7 +2449,7 @@ fn storage_manager_drop_table_byte_limit_aborts_atomically()
     })?;
     let columns = [ColumnSchema {
         scalar_type: ScalarType::Bytea,
-        nullable: false,
+        nullable: true,
     }];
     let empty_tuple = encode_tuple(&columns, 1, &[Some(ScalarValue::Bytea(Vec::new()))])?;
     let full_tuple = encode_tuple(
@@ -18145,7 +18145,12 @@ fn catalog_commit_rejects_malformed_credential_verifier_profiles()
 #[test]
 fn token_admission_checks_expiry_secret_revocation_and_commit_guards()
 -> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::authorization::{
+        AccessTarget, AuthorityDependency, AuthorizationContext, AuthorizedProjection, Effect,
+        Expr, Grant, Operation, Policy, Subject,
+    };
     use prdb_engine::transaction::TransactionError;
+    use prdb_engine::tuple::FieldPatch;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let fixture = Fixture::new();
@@ -18205,6 +18210,9 @@ fn token_admission_checks_expiry_secret_revocation_and_commit_guards()
             dependency_write(admin_user_id, admin_role, 5),
             principal_write_with_name(user_id, 1, 1, "credential_user"),
             object_write_with_name(user_id, 8, "credential_user"),
+            grant_write(user_id, id(16), 2, 1, id(16), admin_role),
+            grant_write(user_id, id(16), 4, 1, id(16), admin_role),
+            dependency_write(user_id, id(16), 5),
             active,
             expired,
             revoked,
@@ -18216,6 +18224,35 @@ fn token_admission_checks_expiry_secret_revocation_and_commit_guards()
 
     let storage = StorageManager::new(&database, Duration::from_millis(10))
         .map_err(|error| format!("validate seeded credential records: {error:?}"))?;
+    let columns = [ColumnSchema {
+        scalar_type: ScalarType::Bytea,
+        nullable: false,
+    }];
+    let row_id = id(0x7a);
+    let row_key = table_row_key(id(16), row_id);
+    let original_value = ScalarValue::Bytea(b"before token revoke".to_vec());
+    let original_payload = encode_tuple(&columns, 1, &[Some(original_value.clone())])?;
+    let original_index = typed_bytea_index_key([0x44; 16], &row_key, &original_payload);
+    let original_index_key = original_index.key.clone();
+    commit_rows_and_indexes(
+        &database,
+        id(0x84),
+        user_id,
+        now + 3_600_000_000,
+        &[RowWrite {
+            key: row_key,
+            expected_version: None,
+            payload: Some(original_payload),
+        }],
+        &[IndexWrite {
+            key: original_index.key,
+            row_key,
+            expected_version: None,
+            present: true,
+            unique: false,
+            null_exempt: original_index.has_null,
+        }],
+    )?;
     let discovered = storage.discover_token_authorized_schemas(id(71), &active_secret)?;
     assert_eq!(discovered.len(), 1);
     assert_eq!(discovered[0].name, "information_schema");
@@ -18229,26 +18266,176 @@ fn token_admission_checks_expiry_secret_revocation_and_commit_guards()
         &active_secret,
         now + 3_600_000_000,
         2,
-        64,
+        1024,
     )?;
     assert!(roles.is_empty());
-    let pending_row_id = prdb_engine::overlay::RowId {
-        table: id(16),
-        row: id(0x7a),
+    let schema = admitted.load_catalog_table_schema(id(16))?;
+    admitted.load_catalog_indexes(&schema)?;
+    let select_grant_key = grant_write(user_id, id(16), 2, 1, id(16), admin_role).key;
+    let update_grant_key = grant_write(user_id, id(16), 4, 1, id(16), admin_role).key;
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    let select_grant_value = catalog
+        .get(select_grant_key.as_slice())?
+        .ok_or("missing persisted SELECT grant")?
+        .value()
+        .to_vec();
+    let update_grant_value = catalog
+        .get(update_grant_key.as_slice())?
+        .ok_or("missing persisted UPDATE grant")?
+        .value()
+        .to_vec();
+    drop(catalog);
+    drop(read);
+    let column_id = schema.column_ids[0];
+    let context = AuthorizationContext {
+        principal_id: user_id,
+        role_ids: roles,
+        scope: [
+            (Operation::Usage, AccessTarget::Schema(schema.schema_id)),
+            (Operation::Select, AccessTarget::Table(schema.table_id)),
+            (Operation::Update, AccessTarget::Table(schema.table_id)),
+            (
+                Operation::Select,
+                AccessTarget::Column {
+                    table_id: schema.table_id,
+                    column_id,
+                },
+            ),
+            (
+                Operation::Update,
+                AccessTarget::Column {
+                    table_id: schema.table_id,
+                    column_id,
+                },
+            ),
+        ]
+        .into(),
     };
-    admitted.stage_put(
-        pending_row_id,
-        &encode_tuple(
-            &[ColumnSchema {
-                scalar_type: ScalarType::Text,
-                nullable: false,
-            }],
-            1,
-            &[Some(ScalarValue::Text(
-                "must not publish after token revoke".to_owned(),
-            ))],
-        )?,
+    let grants = [
+        Grant {
+            subject: Subject::Principal(user_id),
+            operation: Operation::Usage,
+            target: AccessTarget::Schema(schema.schema_id),
+        },
+        Grant {
+            subject: Subject::Principal(user_id),
+            operation: Operation::Select,
+            target: AccessTarget::Table(schema.table_id),
+        },
+        Grant {
+            subject: Subject::Principal(user_id),
+            operation: Operation::Update,
+            target: AccessTarget::Table(schema.table_id),
+        },
+        Grant {
+            subject: Subject::Principal(user_id),
+            operation: Operation::Select,
+            target: AccessTarget::Column {
+                table_id: schema.table_id,
+                column_id,
+            },
+        },
+        Grant {
+            subject: Subject::Principal(user_id),
+            operation: Operation::Update,
+            target: AccessTarget::Column {
+                table_id: schema.table_id,
+                column_id,
+            },
+        },
+    ];
+    let policies = [
+        Policy {
+            subjects: vec![Subject::Principal(user_id)],
+            operation: Operation::Select,
+            target: AccessTarget::Table(schema.table_id),
+            effect: Effect::Allow,
+            using: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+            with_check: None,
+        },
+        Policy {
+            subjects: vec![Subject::Principal(user_id)],
+            operation: Operation::Update,
+            target: AccessTarget::Table(schema.table_id),
+            effect: Effect::Allow,
+            using: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+            with_check: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+        },
+        Policy {
+            subjects: vec![Subject::Principal(user_id)],
+            operation: Operation::Select,
+            target: AccessTarget::Column {
+                table_id: schema.table_id,
+                column_id,
+            },
+            effect: Effect::Allow,
+            using: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+            with_check: None,
+        },
+        Policy {
+            subjects: vec![Subject::Principal(user_id)],
+            operation: Operation::Update,
+            target: AccessTarget::Column {
+                table_id: schema.table_id,
+                column_id,
+            },
+            effect: Effect::Allow,
+            using: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+            with_check: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+        },
+    ];
+    let dependencies = [
+        AuthorityDependency {
+            key: select_grant_key,
+            expected_value: Some(select_grant_value),
+        },
+        AuthorityDependency {
+            key: update_grant_key,
+            expected_value: Some(update_grant_value),
+        },
+    ];
+    let projection = AuthorizedProjection {
+        columns: &schema.columns,
+        column_ids: &schema.column_ids,
+        schema_version: schema.schema_version,
+        schema_id: schema.schema_id,
+        context: &context,
+        grants: &grants,
+        policies: &policies,
+        checks: &[],
+        policy_driving_columns: &[],
+        dependencies: &dependencies,
+    };
+    admitted.stage_patch_authorized(
+        prdb_engine::overlay::RowId {
+            table: schema.table_id,
+            row: row_id,
+        },
+        &projection,
+        &[FieldPatch {
+            ordinal: 0,
+            value: Some(ScalarValue::Bytea(
+                b"must not publish after token revoke".to_vec(),
+            )),
+        }],
     )?;
+    let updated_payload = encode_tuple(
+        &schema.columns,
+        schema.schema_version,
+        &[Some(ScalarValue::Bytea(
+            b"must not publish after token revoke".to_vec(),
+        ))],
+    )?;
+    let updated_index = typed_bytea_index_key([0x44; 16], &row_key, &updated_payload);
+    let updated_index_key = updated_index.key.clone();
+    let original_index_key_for_assert = original_index_key.clone();
+    let row_handle = prdb_engine::overlay::RowId {
+        table: schema.table_id,
+        row: row_id,
+    };
+    admitted.stage_index_membership(row_handle, original_index_key, false)?;
+    admitted.stage_index_membership(row_handle, updated_index.key, true)?;
 
     for (invocation_id, token_id, secret) in [
         (id(76), id(71), [0xFF; 32]),
@@ -18284,19 +18471,46 @@ fn token_admission_checks_expiry_secret_revocation_and_commit_guards()
         now + 3_600_000_000,
         revoke_event,
     )?;
-    assert!(matches!(
-        admitted.commit(),
-        Err(TransactionError::Commit(CommitError::Conflict))
-    ));
-    let pending_row_key = table_row_key(pending_row_id.table, pending_row_id.row);
+    let stale_commit = admitted.commit();
     assert!(
-        database
-            .begin_read()?
-            .open_table(ROWS)?
-            .get(&pending_row_key[..])?
-            .is_none(),
-        "revoked token's pending row write was published"
+        matches!(
+            &stale_commit,
+            Err(TransactionError::Commit(CommitError::Conflict))
+        ),
+        "revoked token allowed a stale commit or produced the wrong error: {stale_commit:?}"
     );
+    assert_eq!(
+        decode_tuple(
+            &columns,
+            1,
+            &RowRecord::decode(
+                database
+                    .begin_read()?
+                    .open_table(ROWS)?
+                    .get(&row_key[..])?
+                    .ok_or("row disappeared after token revocation")?
+                    .value(),
+            )?
+            .payload,
+        )?
+        .values,
+        [Some(original_value)],
+        "revoked token's authorized update was published"
+    );
+    let read = database.begin_read()?;
+    let indexes = read.open_table(schema::INDEXES)?;
+    assert!(
+        indexes
+            .get(original_index_key_for_assert.as_slice())?
+            .is_some(),
+        "revoked token removed the existing index membership"
+    );
+    assert!(
+        indexes.get(updated_index_key.as_slice())?.is_none(),
+        "revoked token published the replacement index membership"
+    );
+    drop(indexes);
+    drop(read);
     assert_eq!(
         lookup_outcome(&database, id(75), user_id, now)?
             .unwrap()
