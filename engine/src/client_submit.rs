@@ -167,6 +167,80 @@ pub struct AdminCheckConstraintResult {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminPolicyResult {
+    pub operation_id: [u8; 16],
+    pub policy_id: [u8; 16],
+    pub commit_sequence: u64,
+}
+
+pub struct AdminCreatePolicyRequest<'a> {
+    pub table_id: [u8; 16],
+    pub name: &'a str,
+    pub kind: AdminPolicyKind,
+    pub operation: AdminPolicyOperation,
+    pub effect: AdminPolicyEffect,
+    pub recipients: &'a [AdminPolicyRecipient],
+    pub target_column_ids: &'a [[u8; 16]],
+    pub using_expression: Option<&'a crate::authorization::Expr>,
+    pub with_check_expression: Option<&'a crate::authorization::Expr>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdminPolicyKind {
+    Row,
+    Cell,
+}
+
+impl AdminPolicyKind {
+    fn as_wire_name(self) -> &'static str {
+        match self {
+            Self::Row => "row",
+            Self::Cell => "cell",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdminPolicyOperation {
+    Select,
+    Insert,
+    Update,
+    Delete,
+}
+
+impl AdminPolicyOperation {
+    fn as_wire_name(self) -> &'static str {
+        match self {
+            Self::Select => "select",
+            Self::Insert => "insert",
+            Self::Update => "update",
+            Self::Delete => "delete",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdminPolicyEffect {
+    Allow,
+    Restrict,
+}
+
+impl AdminPolicyEffect {
+    fn as_wire_name(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Restrict => "restrict",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum AdminPolicyRecipient {
+    User([u8; 16]),
+    Role([u8; 16]),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdminForeignKeyResult {
     pub operation_id: [u8; 16],
     pub foreign_key_id: [u8; 16],
@@ -1680,6 +1754,120 @@ impl AdminClient {
             expression_id: generated_ids[1],
             commit_sequence: result.commit_sequence,
         })
+    }
+
+    pub fn create_policy(
+        &mut self,
+        request: AdminCreatePolicyRequest<'_>,
+    ) -> Result<AdminPolicyResult, ClientSubmitError> {
+        let AdminCreatePolicyRequest {
+            table_id,
+            name,
+            kind,
+            operation,
+            effect,
+            recipients,
+            target_column_ids,
+            using_expression,
+            with_check_expression,
+        } = request;
+        validate_admin_id(table_id)?;
+        validate_admin_name(name)?;
+        validate_admin_id_list_allow_empty(target_column_ids, crate::tuple::MAX_COLUMNS)?;
+        if recipients.is_empty()
+            || recipients.len() > crate::authorization::MAX_POLICY_SUBJECTS
+            || recipients
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != recipients.len()
+            || recipients.iter().any(|recipient| match recipient {
+                AdminPolicyRecipient::User(id) | AdminPolicyRecipient::Role(id) => *id == [0; 16],
+            })
+            || (kind == AdminPolicyKind::Row && !target_column_ids.is_empty())
+            || (kind == AdminPolicyKind::Cell && target_column_ids.is_empty())
+            || (kind == AdminPolicyKind::Cell && operation == AdminPolicyOperation::Delete)
+            || !match operation {
+                AdminPolicyOperation::Select | AdminPolicyOperation::Delete => {
+                    using_expression.is_some() && with_check_expression.is_none()
+                }
+                AdminPolicyOperation::Insert => {
+                    using_expression.is_none() && with_check_expression.is_some()
+                }
+                AdminPolicyOperation::Update => {
+                    using_expression.is_some() && with_check_expression.is_some()
+                }
+            }
+        {
+            return Err(ClientSubmitError::InvalidAdministrativeRequest);
+        }
+        let encode_optional_expression = |expression: Option<&crate::authorization::Expr>| {
+            expression
+                .map(crate::expression::encode_expression)
+                .transpose()
+                .map(|bytes| bytes.map(|bytes| lower_hex(&bytes)))
+                .map_err(|_| ClientSubmitError::InvalidAdministrativeRequest)
+        };
+        let using_ir = encode_optional_expression(using_expression)?;
+        let check_ir = encode_optional_expression(with_check_expression)?;
+        let recipients_json = recipients
+            .iter()
+            .map(|recipient| {
+                let (kind, id) = match recipient {
+                    AdminPolicyRecipient::User(id) => ("user", id),
+                    AdminPolicyRecipient::Role(id) => ("role", id),
+                };
+                format!("\"{kind}:{}\"", lower_hex(id))
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let using_json = using_ir
+            .map(|value| format!("\"{value}\""))
+            .unwrap_or_else(|| "null".to_owned());
+        let check_json = check_ir
+            .map(|value| format!("\"{value}\""))
+            .unwrap_or_else(|| "null".to_owned());
+        let (result, generated_ids) = self.execute_admin_operation_with_generated_ids(
+            "policies.create",
+            format!(
+                "{{\"table_id\":\"{}\",\"name\":{},\"kind\":\"{}\",\"policy_operation\":\"{}\",\"effect\":\"{}\",\"recipients\":[{}],\"target_column_ids\":{},\"using_expression_eir1\":{},\"with_check_expression_eir1\":{}}}",
+                lower_hex(&table_id),
+                json_quote(name),
+                kind.as_wire_name(),
+                operation.as_wire_name(),
+                effect.as_wire_name(),
+                recipients_json,
+                encode_id_array(target_column_ids),
+                using_json,
+                check_json,
+            ),
+            &["policy_id"],
+            &[],
+        )?;
+        Ok(AdminPolicyResult {
+            operation_id: result.operation_id,
+            policy_id: generated_ids[0],
+            commit_sequence: result.commit_sequence,
+        })
+    }
+
+    pub fn drop_policy(
+        &mut self,
+        policy_id: [u8; 16],
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        validate_admin_id(policy_id)?;
+        let (result, response_id) = self.execute_admin_operation(
+            "policies.drop",
+            format!("{{\"policy_id\":\"{}\"}}", lower_hex(&policy_id)),
+            Some("policy_id"),
+        )?;
+        if response_id != Some(policy_id) {
+            return Err(ClientSubmitError::AdministrativeOutcomeUncertain(
+                result.operation_id,
+            ));
+        }
+        Ok(result)
     }
 
     pub fn create_foreign_key(

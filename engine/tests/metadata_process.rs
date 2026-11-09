@@ -7,8 +7,10 @@ use prdb_engine::client_credentials::{
 };
 use prdb_engine::client_protocol::ClientCredentials;
 use prdb_engine::client_submit::{
-    AdminClient, AdminColumnDefault, AdminColumnDefinition, AdminObjectGrantTarget,
-    AdminObjectPrivilege, AdminSystemPrivilege, InvocationStatus, MetadataClient, SubmissionClient,
+    AdminClient, AdminColumnDefault, AdminColumnDefinition, AdminCreatePolicyRequest,
+    AdminObjectGrantTarget, AdminObjectPrivilege, AdminPolicyEffect, AdminPolicyKind,
+    AdminPolicyOperation, AdminPolicyRecipient, AdminSystemPrivilege, InvocationStatus,
+    MetadataClient, SubmissionClient,
 };
 use prdb_engine::storage_manager::{CreateTableRequest, TableColumnDefinition, TokenIssueRequest};
 use prdb_engine::submission_manifest::{encode_manifest_v1, manifest_v1_from_elf};
@@ -557,6 +559,21 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
         .drop_check_constraint(check_constraint.constraint_id)
         .map_err(|error| format!("process ADMIN drop_check_constraint failed: {error}"))?;
     assert!(dropped_check.commit_sequence > check_constraint.commit_sequence);
+    let policy = admin.create_policy(AdminCreatePolicyRequest {
+        table_id: created_table.table_id,
+        name: "process_visible_rows",
+        kind: AdminPolicyKind::Row,
+        operation: AdminPolicyOperation::Select,
+        effect: AdminPolicyEffect::Allow,
+        recipients: &[AdminPolicyRecipient::User(admin_user_id)],
+        target_column_ids: &[],
+        using_expression: Some(&prdb_engine::authorization::Expr::Literal(Some(
+            prdb_engine::tuple::ScalarValue::Boolean(true),
+        ))),
+        with_check_expression: None,
+    })?;
+    let dropped_policy = admin.drop_policy(policy.policy_id)?;
+    assert!(dropped_policy.commit_sequence > policy.commit_sequence);
     let renamed_column =
         admin.rename_column(created_table.table_id, added_column.column_id, "extra_v2")?;
     let dropped_column = admin.drop_column(created_table.table_id, added_column.column_id)?;

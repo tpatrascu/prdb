@@ -3,9 +3,10 @@ use prdb_engine::client_credentials::{read_client_credentials, write_client_cred
 use prdb_engine::client_protocol::ClientCredentials;
 use prdb_engine::client_submit::MetadataClient;
 use prdb_engine::client_submit::{
-    AdminClient, AdminColumnDefault, AdminColumnDefinition, AdminObjectGrantTarget,
-    AdminObjectPrivilege, AdminSystemPrivilege, ClientResultEvent, InvocationStatus,
-    SubmissionClient, TerminalOutcome,
+    AdminClient, AdminColumnDefault, AdminColumnDefinition, AdminCreatePolicyRequest,
+    AdminObjectGrantTarget, AdminObjectPrivilege, AdminPolicyEffect, AdminPolicyKind,
+    AdminPolicyOperation, AdminPolicyRecipient, AdminSystemPrivilege, ClientResultEvent,
+    InvocationStatus, SubmissionClient, TerminalOutcome,
 };
 use prdb_engine::submission_scope::RequestedScopeBuilder;
 use prdb_engine::supervisor::{MAX_PARAMETER_BYTES, WorkloadClass};
@@ -60,6 +61,11 @@ Token secrets are saved only to mode-0600 credential files and are never printed
   prdb-client check-drop --address IP:PORT --credentials ADMIN_FILE --constraint-id HEX\n\n\
   prdb-client object-grant|object-revoke --address IP:PORT --credentials ADMIN_FILE \\
     --grantee-id HEX --object-id HEX --privilege NAME --target-scope object|column --target-id HEX\n\n\
+  prdb-client policy-create --address IP:PORT --credentials ADMIN_FILE --table-id HEX --name NAME \\
+    --kind row|cell --operation select|insert|update|delete --effect allow|restrict \\
+    --recipients user:HEX,role:HEX [--target-columns HEX,...] \\
+    [--using-expression-eir1 HEX] [--with-check-expression-eir1 HEX]\n\
+  prdb-client policy-drop --address IP:PORT --credentials ADMIN_FILE --policy-id HEX\n\n\
   prdb-client system-privilege-grant|system-privilege-revoke --address IP:PORT \\
     --credentials ADMIN_FILE --grantee-id HEX --privilege manage_users|manage_roles|create_schema\n\n\
 Column types: boolean, smallint, integer, bigint, decimal(P,S), text, varchar(N), bytea, uuid, date, timestamptz.\n\
@@ -144,6 +150,9 @@ fn run() -> Result<(), String> {
         }
         "object-grant" | "object-revoke" => {
             object_grant_admin(&command, address, credentials_path, &mut fields)
+        }
+        "policy-create" | "policy-drop" => {
+            policy_admin(&command, address, credentials_path, &mut fields)
         }
         "user-create" | "user-rename" | "user-drop" | "user-login" | "role-create"
         | "role-rename" | "role-drop" | "role-grant" | "role-revoke" => {
@@ -594,6 +603,131 @@ fn object_grant_admin(
         result.commit_sequence,
     );
     Ok(())
+}
+
+fn policy_admin(
+    command: &str,
+    address: SocketAddr,
+    credentials_path: PathBuf,
+    fields: &mut HashMap<String, std::ffi::OsString>,
+) -> Result<(), String> {
+    let mut administrator =
+        read_client_credentials(credentials_path).map_err(|error| error.to_string())?;
+    let mut client = AdminClient::connect_authenticated(
+        address,
+        administrator.token_id,
+        &mut administrator.token_secret,
+    )
+    .map_err(|error| error.to_string())?;
+    match command {
+        "policy-create" => {
+            let table_id = parse_id(&take_text(fields, "--table-id")?)?;
+            let name = take_text(fields, "--name")?;
+            let kind = match take_text(fields, "--kind")?.as_str() {
+                "row" => AdminPolicyKind::Row,
+                "cell" => AdminPolicyKind::Cell,
+                _ => return Err("--kind must be row or cell".to_owned()),
+            };
+            let operation = match take_text(fields, "--operation")?.as_str() {
+                "select" => AdminPolicyOperation::Select,
+                "insert" => AdminPolicyOperation::Insert,
+                "update" => AdminPolicyOperation::Update,
+                "delete" => AdminPolicyOperation::Delete,
+                _ => return Err("--operation must be select, insert, update, or delete".to_owned()),
+            };
+            let effect = match take_text(fields, "--effect")?.as_str() {
+                "allow" => AdminPolicyEffect::Allow,
+                "restrict" => AdminPolicyEffect::Restrict,
+                _ => return Err("--effect must be allow or restrict".to_owned()),
+            };
+            let recipients = parse_policy_recipients(&take_text(fields, "--recipients")?)?;
+            let target_columns = fields
+                .remove("--target-columns")
+                .map(|value| {
+                    value
+                        .into_string()
+                        .map_err(|_| "--target-columns must be UTF-8".to_owned())
+                        .and_then(|value| parse_optional_constraint_columns(&value))
+                })
+                .transpose()?
+                .unwrap_or_default();
+            let using_expression =
+                take_optional_policy_expression(fields, "--using-expression-eir1")?;
+            let with_check_expression =
+                take_optional_policy_expression(fields, "--with-check-expression-eir1")?;
+            reject_unknown(fields)?;
+            let result = client
+                .create_policy(AdminCreatePolicyRequest {
+                    table_id,
+                    name: &name,
+                    kind,
+                    operation,
+                    effect,
+                    recipients: &recipients,
+                    target_column_ids: &target_columns,
+                    using_expression: using_expression.as_ref(),
+                    with_check_expression: with_check_expression.as_ref(),
+                })
+                .map_err(|error| error.to_string())?;
+            println!(
+                "created policy {} (operation {}, commit {})",
+                lower_hex(&result.policy_id),
+                lower_hex(&result.operation_id),
+                result.commit_sequence
+            );
+        }
+        "policy-drop" => {
+            let policy_id = parse_id(&take_text(fields, "--policy-id")?)?;
+            reject_unknown(fields)?;
+            let result = client
+                .drop_policy(policy_id)
+                .map_err(|error| error.to_string())?;
+            print_operation(
+                "dropped policy",
+                &result.operation_id,
+                result.commit_sequence,
+            );
+        }
+        _ => return Err(format!("unsupported policy command {command}")),
+    }
+    Ok(())
+}
+
+fn parse_policy_recipients(value: &str) -> Result<Vec<AdminPolicyRecipient>, String> {
+    if value.is_empty() {
+        return Err("--recipients must contain user:HEX or role:HEX values".to_owned());
+    }
+    value
+        .split(',')
+        .map(|entry| {
+            let (kind, id) = entry
+                .split_once(':')
+                .ok_or_else(|| "--recipients entries must use user:HEX or role:HEX".to_owned())?;
+            let id = parse_id(id)?;
+            match kind {
+                "user" => Ok(AdminPolicyRecipient::User(id)),
+                "role" => Ok(AdminPolicyRecipient::Role(id)),
+                _ => Err("--recipients entries must use user:HEX or role:HEX".to_owned()),
+            }
+        })
+        .collect()
+}
+
+fn take_optional_policy_expression(
+    fields: &mut HashMap<String, std::ffi::OsString>,
+    option: &str,
+) -> Result<Option<prdb_engine::authorization::Expr>, String> {
+    fields
+        .remove(option)
+        .map(|value| {
+            let value = value
+                .into_string()
+                .map_err(|_| format!("{option} must be UTF-8"))?;
+            let bytes = parse_lowercase_hex_bytes(&value)?;
+            prdb_engine::expression::decode_expression(&bytes)
+                .map_err(|_| format!("{option} must contain a valid EIR1 expression"))
+        })
+        .transpose()
 }
 
 fn foreign_key_admin(
@@ -1584,6 +1718,26 @@ mod tests {
         }
         assert!(parse_object_privilege("all").is_err());
         assert!(parse_object_privilege("REFERENCES").is_err());
+    }
+
+    #[test]
+    fn policy_recipient_parser_accepts_only_canonical_user_and_role_ids() {
+        assert_eq!(
+            parse_policy_recipients(
+                "user:000102030405060708090a0b0c0d0e0f,role:101112131415161718191a1b1c1d1e1f"
+            )
+            .unwrap(),
+            vec![
+                AdminPolicyRecipient::User([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]),
+                AdminPolicyRecipient::Role([
+                    16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+                ]),
+            ]
+        );
+        assert!(parse_policy_recipients("").is_err());
+        assert!(parse_policy_recipients("group:000102030405060708090a0b0c0d0e0f").is_err());
+        assert!(parse_policy_recipients("user:000102030405060708090a0b0c0d0e0A").is_err());
+        assert!(parse_policy_recipients("user:00000000000000000000000000000000").is_err());
     }
 
     #[test]

@@ -89,6 +89,7 @@ pub enum ClientSessionError {
     ForeignKeyLifecycle(crate::commit::CommitError),
     ForeignKeyCreateLifecycle(crate::storage_manager::TableLifecycleError),
     ConstraintLifecycle(crate::storage_manager::TableLifecycleError),
+    PolicyLifecycle(crate::storage_manager::TableLifecycleError),
     IndexLifecycle(crate::storage_manager::IndexLifecycleError),
     Storage(TransactionError),
 }
@@ -217,6 +218,20 @@ enum PendingAdminAction {
         table_id: [u8; 16],
         expression: crate::authorization::Expr,
         dependency_column_ids: Vec<[u8; 16]>,
+    },
+    CreatePolicy {
+        table_id: [u8; 16],
+        name: String,
+        kind: crate::storage_manager::PolicyKind,
+        operation: crate::authorization::Operation,
+        effect: crate::authorization::Effect,
+        recipients: Vec<crate::authorization::Subject>,
+        target_column_ids: Vec<[u8; 16]>,
+        using_expression: Option<crate::authorization::Expr>,
+        with_check_expression: Option<crate::authorization::Expr>,
+    },
+    DropPolicy {
+        policy_id: [u8; 16],
     },
     DropCheckConstraint {
         constraint_id: [u8; 16],
@@ -490,6 +505,20 @@ pub enum ClientAdminCommand {
         expression: crate::authorization::Expr,
         dependency_column_ids: Vec<[u8; 16]>,
     },
+    PrepareCreatePolicy {
+        table_id: [u8; 16],
+        name: String,
+        kind: crate::storage_manager::PolicyKind,
+        operation: crate::authorization::Operation,
+        effect: crate::authorization::Effect,
+        recipients: Vec<crate::authorization::Subject>,
+        target_column_ids: Vec<[u8; 16]>,
+        using_expression: Option<crate::authorization::Expr>,
+        with_check_expression: Option<crate::authorization::Expr>,
+    },
+    PrepareDropPolicy {
+        policy_id: [u8; 16],
+    },
     PrepareDropCheckConstraint {
         constraint_id: [u8; 16],
     },
@@ -664,6 +693,8 @@ pub fn decode_client_admin_command(
     let mut constraint_column_ids = None;
     let mut index_unique = None;
     let mut check_dependency_column_ids = None;
+    let mut policy_recipients = None;
+    let mut policy_target_column_ids = None;
     let mut table_column = None;
     let mut column_default = None;
     let mut operation_id = None;
@@ -716,6 +747,14 @@ pub fn decode_client_admin_command(
                     {
                         check_dependency_column_ids = Some(parser.parse_id_array()?);
                         args.insert(arg, "<structured-ids>".to_owned());
+                    } else if arg == "target_column_ids"
+                        && parser.text.get(parser.offset) == Some(&b'[')
+                    {
+                        policy_target_column_ids = Some(parser.parse_id_array()?);
+                        args.insert(arg, "<structured-ids>".to_owned());
+                    } else if arg == "recipients" && parser.text.get(parser.offset) == Some(&b'[') {
+                        policy_recipients = Some(parser.parse_policy_recipient_array()?);
+                        args.insert(arg, "<structured-recipients>".to_owned());
                     } else if arg == "unique" {
                         index_unique = Some(parser.parse_boolean()?);
                         args.insert(arg, "<boolean>".to_owned());
@@ -725,6 +764,14 @@ pub fn decode_client_admin_command(
                     } else if arg == "default" && parser.text.get(parser.offset) == Some(&b'{') {
                         column_default = Some(parser.parse_table_column_default()?);
                         args.insert(arg, "<structured-default>".to_owned());
+                    } else if matches!(
+                        arg.as_str(),
+                        "using_expression_eir1" | "with_check_expression_eir1"
+                    ) && parser.text.get(parser.offset..parser.offset + 4)
+                        == Some(b"null")
+                    {
+                        parser.offset += 4;
+                        args.insert(arg, "<null>".to_owned());
                     } else {
                         args.insert(arg, parser.parse_string()?);
                     }
@@ -1214,6 +1261,131 @@ pub fn decode_client_admin_command(
                 expression,
                 dependency_column_ids,
             })
+        }
+        Some("prepare")
+            if version == Some(1) && operation.as_deref() == Some("policies.create") =>
+        {
+            if operation_id.is_some() || seen.len() != 4 {
+                return Err(ClientControlError::UnknownKey);
+            }
+            let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
+            let table_id = decode_lower_hex_id(
+                &args
+                    .remove("table_id")
+                    .ok_or(ClientControlError::MissingKey)?,
+            )?;
+            let name = args.remove("name").ok_or(ClientControlError::MissingKey)?;
+            let kind = match args
+                .remove("kind")
+                .ok_or(ClientControlError::MissingKey)?
+                .as_str()
+            {
+                "row" => crate::storage_manager::PolicyKind::Row,
+                "cell" => crate::storage_manager::PolicyKind::Cell,
+                _ => return Err(ClientControlError::InvalidPrepare),
+            };
+            let policy_operation = match args
+                .remove("policy_operation")
+                .ok_or(ClientControlError::MissingKey)?
+                .as_str()
+            {
+                "select" => crate::authorization::Operation::Select,
+                "insert" => crate::authorization::Operation::Insert,
+                "update" => crate::authorization::Operation::Update,
+                "delete" => crate::authorization::Operation::Delete,
+                _ => return Err(ClientControlError::InvalidPrepare),
+            };
+            let effect = match args
+                .remove("effect")
+                .ok_or(ClientControlError::MissingKey)?
+                .as_str()
+            {
+                "allow" => crate::authorization::Effect::Allow,
+                "restrict" => crate::authorization::Effect::Restrict,
+                _ => return Err(ClientControlError::InvalidPrepare),
+            };
+            if args.remove("recipients").as_deref() != Some("<structured-recipients>") {
+                return Err(ClientControlError::MissingKey);
+            }
+            let recipients = policy_recipients
+                .take()
+                .ok_or(ClientControlError::MissingKey)?;
+            if args.remove("target_column_ids").as_deref() != Some("<structured-ids>") {
+                return Err(ClientControlError::MissingKey);
+            }
+            let target_column_ids = policy_target_column_ids
+                .take()
+                .ok_or(ClientControlError::MissingKey)?;
+            let using_expression = decode_optional_policy_expression(
+                args.remove("using_expression_eir1")
+                    .ok_or(ClientControlError::MissingKey)?,
+            )?;
+            let with_check_expression = decode_optional_policy_expression(
+                args.remove("with_check_expression_eir1")
+                    .ok_or(ClientControlError::MissingKey)?,
+            )?;
+            if !args.is_empty()
+                || !is_canonical_admin_principal_name(&name)
+                || recipients.is_empty()
+                || recipients
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::HashSet<_>>()
+                    .len()
+                    != recipients.len()
+                || target_column_ids
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::HashSet<_>>()
+                    .len()
+                    != target_column_ids.len()
+                || (kind == crate::storage_manager::PolicyKind::Row
+                    && !target_column_ids.is_empty())
+                || (kind == crate::storage_manager::PolicyKind::Cell
+                    && (target_column_ids.is_empty()
+                        || policy_operation == crate::authorization::Operation::Delete))
+                || !match policy_operation {
+                    crate::authorization::Operation::Select
+                    | crate::authorization::Operation::Delete => {
+                        using_expression.is_some() && with_check_expression.is_none()
+                    }
+                    crate::authorization::Operation::Insert => {
+                        using_expression.is_none() && with_check_expression.is_some()
+                    }
+                    crate::authorization::Operation::Update => {
+                        using_expression.is_some() && with_check_expression.is_some()
+                    }
+                    crate::authorization::Operation::Usage => false,
+                }
+            {
+                return Err(ClientControlError::InvalidPrepare);
+            }
+            Ok(ClientAdminCommand::PrepareCreatePolicy {
+                table_id,
+                name,
+                kind,
+                operation: policy_operation,
+                effect,
+                recipients,
+                target_column_ids,
+                using_expression,
+                with_check_expression,
+            })
+        }
+        Some("prepare") if version == Some(1) && operation.as_deref() == Some("policies.drop") => {
+            if operation_id.is_some() || seen.len() != 4 {
+                return Err(ClientControlError::UnknownKey);
+            }
+            let mut args = arguments.ok_or(ClientControlError::MissingKey)?;
+            let policy_id = decode_lower_hex_id(
+                &args
+                    .remove("policy_id")
+                    .ok_or(ClientControlError::MissingKey)?,
+            )?;
+            if !args.is_empty() {
+                return Err(ClientControlError::UnknownKey);
+            }
+            Ok(ClientAdminCommand::PrepareDropPolicy { policy_id })
         }
         Some("prepare")
             if version == Some(1) && operation.as_deref() == Some("constraints.drop_check") =>
@@ -1711,6 +1883,18 @@ fn decode_object_grant_prepare(
         target,
         grant,
     })
+}
+
+fn decode_optional_policy_expression(
+    value: String,
+) -> Result<Option<crate::authorization::Expr>, ClientControlError> {
+    if value == "<null>" {
+        return Ok(None);
+    }
+    let bytes = decode_lower_hex_bytes(&value, crate::expression::MAX_EXPRESSION_BYTES)?;
+    crate::expression::decode_expression(&bytes)
+        .map(Some)
+        .map_err(|_| ClientControlError::InvalidPrepare)
 }
 
 fn decode_identity_rename_prepare(
@@ -2266,6 +2450,38 @@ impl JsonStringObjectParser<'_> {
             self.expect(b',')?;
         }
         Ok(ids)
+    }
+
+    fn parse_policy_recipient_array(
+        &mut self,
+    ) -> Result<Vec<crate::authorization::Subject>, ClientControlError> {
+        self.expect(b'[')?;
+        self.skip_whitespace();
+        let mut recipients = Vec::new();
+        if self.consume(b']') {
+            return Ok(recipients);
+        }
+        loop {
+            if recipients.len() >= crate::authorization::MAX_POLICY_SUBJECTS {
+                return Err(ClientControlError::InvalidPrepare);
+            }
+            let value = self.parse_string()?;
+            let (kind, id) = value
+                .split_once(':')
+                .ok_or(ClientControlError::InvalidPrepare)?;
+            let id = decode_lower_hex_id(id)?;
+            recipients.push(match kind {
+                "user" => crate::authorization::Subject::Principal(id),
+                "role" => crate::authorization::Subject::Role(id),
+                _ => return Err(ClientControlError::InvalidPrepare),
+            });
+            self.skip_whitespace();
+            if self.consume(b']') {
+                break;
+            }
+            self.expect(b',')?;
+        }
+        Ok(recipients)
     }
 
     fn parse_table_column_definition(
@@ -3949,6 +4165,78 @@ impl ClientConnectionSession {
                     .into_bytes(),
                 )
             }
+            ClientAdminCommand::PrepareCreatePolicy {
+                table_id,
+                name,
+                kind,
+                operation,
+                effect,
+                recipients,
+                target_column_ids,
+                using_expression,
+                with_check_expression,
+            } => {
+                if self.pending_admin_operation.is_some() {
+                    return Err(ClientSessionError::WrongMode);
+                }
+                let mut operation_id = [0; 16];
+                getrandom::fill(&mut operation_id).map_err(|_| {
+                    ClientSessionError::Storage(TransactionError::RandomnessUnavailable)
+                })?;
+                if operation_id == [0; 16] {
+                    return Err(ClientSessionError::Storage(
+                        TransactionError::RandomnessUnavailable,
+                    ));
+                }
+                self.pending_admin_operation = Some(PendingAdminOperation {
+                    operation_id,
+                    action: PendingAdminAction::CreatePolicy {
+                        table_id,
+                        name,
+                        kind,
+                        operation,
+                        effect,
+                        recipients,
+                        target_column_ids,
+                        using_expression,
+                        with_check_expression,
+                    },
+                });
+                self.json_response(
+                    request.request_id,
+                    format!(
+                        "{{\"operation_id\":\"{}\",\"state\":\"prepared\"}}",
+                        encode_lower_hex_id(operation_id)
+                    )
+                    .into_bytes(),
+                )
+            }
+            ClientAdminCommand::PrepareDropPolicy { policy_id } => {
+                if self.pending_admin_operation.is_some() {
+                    return Err(ClientSessionError::WrongMode);
+                }
+                let mut operation_id = [0; 16];
+                getrandom::fill(&mut operation_id).map_err(|_| {
+                    ClientSessionError::Storage(TransactionError::RandomnessUnavailable)
+                })?;
+                if operation_id == [0; 16] {
+                    return Err(ClientSessionError::Storage(
+                        TransactionError::RandomnessUnavailable,
+                    ));
+                }
+                self.pending_admin_operation = Some(PendingAdminOperation {
+                    operation_id,
+                    action: PendingAdminAction::DropPolicy { policy_id },
+                });
+                self.json_response(
+                    request.request_id,
+                    format!(
+                        "{{\"operation_id\":\"{}\",\"state\":\"prepared\"}}",
+                        encode_lower_hex_id(operation_id)
+                    )
+                    .into_bytes(),
+                )
+            }
             ClientAdminCommand::PrepareRenameTable { table_id, name } => {
                 if self.pending_admin_operation.is_some() {
                     return Err(ClientSessionError::WrongMode);
@@ -5016,6 +5304,82 @@ impl ClientConnectionSession {
                                 encode_lower_hex_id(created.constraint_id),
                                 encode_lower_hex_id(created.expression_id),
                                 created.commit_sequence,
+                            )
+                            .into_bytes(),
+                        )
+                    }
+                    PendingAdminAction::CreatePolicy {
+                        table_id,
+                        name,
+                        kind,
+                        operation,
+                        effect,
+                        recipients,
+                        target_column_ids,
+                        using_expression,
+                        with_check_expression,
+                    } => {
+                        let created = storage
+                            .create_policy(crate::storage_manager::CreatePolicyRequest {
+                                invocation_id: operation_id,
+                                authenticated_actor_id: actor_id,
+                                table_id,
+                                name,
+                                kind,
+                                operation,
+                                effect,
+                                recipients,
+                                target_column_ids,
+                                using_expression,
+                                with_check_expression,
+                                retention_deadline_us,
+                                audit_event: crate::audit::AuditEvent {
+                                    event_id,
+                                    actor_id: Some(actor_id),
+                                    correlation_id: operation_id,
+                                    occurred_at_us: now_us,
+                                    action: crate::audit::AuditAction::Ddl,
+                                    result: crate::audit::AuditResult::Succeeded,
+                                    target_ids: Vec::new(),
+                                },
+                            })
+                            .map_err(ClientSessionError::PolicyLifecycle)?;
+                        self.json_response(
+                            request.request_id,
+                            format!(
+                                "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"policy_id\":\"{}\",\"commit_sequence\":\"{}\"}}",
+                                encode_lower_hex_id(operation_id),
+                                encode_lower_hex_id(created.policy_id),
+                                created.commit_sequence,
+                            )
+                            .into_bytes(),
+                        )
+                    }
+                    PendingAdminAction::DropPolicy { policy_id } => {
+                        let commit_sequence = storage
+                            .drop_policy(crate::storage_manager::DropPolicyRequest {
+                                invocation_id: operation_id,
+                                authenticated_actor_id: actor_id,
+                                policy_id,
+                                retention_deadline_us,
+                                audit_event: crate::audit::AuditEvent {
+                                    event_id,
+                                    actor_id: Some(actor_id),
+                                    correlation_id: operation_id,
+                                    occurred_at_us: now_us,
+                                    action: crate::audit::AuditAction::Ddl,
+                                    result: crate::audit::AuditResult::Succeeded,
+                                    target_ids: Vec::new(),
+                                },
+                            })
+                            .map_err(ClientSessionError::PolicyLifecycle)?;
+                        self.json_response(
+                            request.request_id,
+                            format!(
+                                "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"policy_id\":\"{}\",\"commit_sequence\":\"{}\"}}",
+                                encode_lower_hex_id(operation_id),
+                                encode_lower_hex_id(policy_id),
+                                commit_sequence,
                             )
                             .into_bytes(),
                         )

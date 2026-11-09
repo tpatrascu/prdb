@@ -2039,4 +2039,12 @@
 - Implementation: `StorageManager::create_policy` validates normalized per-table names, operation/clause shape, unique live user/role recipients, same-table cell columns, expression Boolean type and binding against the current ordered schema, and live role dependencies. It generates policy/expression IDs and publishes all records and edges atomically. `drop_policy` removes the policy object, recipient/column targets, expression objects/records and all dependencies while advancing the table epoch.
 - Regression: the existing policy DDL authorization integration now creates a typed row SELECT ALLOW policy for a role, checks its generated expression ID and committed outcome, then drops it and checks the next durable commit. Existing policy DDL tests cover inherited `MANAGE_POLICIES`, denied actors, target validity, and required recipients.
 - Verification: focused policy lifecycle passed. Rust 1.95.0 workspace format check, warning-denied Clippy, build, and full tests passed; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
-- Remaining: authenticated ADMIN protocol/client/CLI dispatch for policy create/drop and broader row/cell operation coverage remain open.
+- Remaining: broader row/cell operation coverage and repeated race stress remain open.
+
+## SM-5 / SDK-5: authenticated policy ADMIN and CLI — implemented
+
+- Contract: strict PREPARE/START accepts canonical row/cell policy shape, recipient IDs, cell-column targets, and nullable EIR1 USING/WITH CHECK expressions. START delegates to typed StorageManager policy create/drop and revalidates authority at serialized commit.
+- Implementation: `policies.create` and `policies.drop` are connection-owned ADMIN operations. `AdminClient` encodes typed policy enums, recipients, target columns and expressions; `prdb-client policy-create/policy-drop` exposes the same path.
+- Regression: protocol decoder tests accept canonical row-policy create/drop and reject malformed shapes; the real gateway/supervisor process lifecycle creates and drops a row SELECT ALLOW policy. CLI recipient parser accepts only user/role plus canonical nonzero lowercase IDs.
+- Verification: focused protocol, multi-process, and CLI parser tests passed; updated `prdb-client --help` was inspected. Rust 1.95.0 workspace build, formatting, warning-denied Clippy, and full tests passed; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
+- Remaining: broader cell policy process coverage, repeated race stress, and confined artifact execution remain open.

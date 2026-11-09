@@ -441,6 +441,44 @@ fn admin_revoke_decoder_requires_prepare_then_start_schemas() {
         br#"{"phase":"prepare","operation_version":1,"operation":"objects.grant","arguments":{"grantee_id":"000102030405060708090a0b0c0d0e0f","object_id":"101112131415161718191a1b1c1d1e1f","privilege":"all","target_scope":"object","target_id":"101112131415161718191a1b1c1d1e1f"}}"#
     )
     .is_err());
+    let policy_eir =
+        prdb_engine::expression::encode_expression(&prdb_engine::authorization::Expr::Literal(
+            Some(prdb_engine::tuple::ScalarValue::Boolean(true)),
+        ))
+        .expect("encode policy fixture");
+    let policy_eir_hex = policy_eir
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let policy_create = format!(
+        "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"policies.create\",\"arguments\":{{\"table_id\":\"101112131415161718191a1b1c1d1e1f\",\"name\":\"visible_rows\",\"kind\":\"row\",\"policy_operation\":\"select\",\"effect\":\"allow\",\"recipients\":[\"role:000102030405060708090a0b0c0d0e0f\"],\"target_column_ids\":[],\"using_expression_eir1\":\"{policy_eir_hex}\",\"with_check_expression_eir1\":null}}}}"
+    );
+    assert!(matches!(
+        decode_client_admin_command(policy_create.as_bytes()),
+        Ok(ClientAdminCommand::PrepareCreatePolicy {
+            table_id: [16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31],
+            name,
+            kind: prdb_engine::storage_manager::PolicyKind::Row,
+            operation: prdb_engine::authorization::Operation::Select,
+            effect: prdb_engine::authorization::Effect::Allow,
+            recipients,
+            target_column_ids,
+            using_expression: Some(prdb_engine::authorization::Expr::Literal(Some(
+                prdb_engine::tuple::ScalarValue::Boolean(true)
+            ))),
+            with_check_expression: None,
+        }) if name == "visible_rows"
+            && recipients == vec![prdb_engine::authorization::Subject::Role([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])]
+            && target_column_ids.is_empty()
+    ));
+    assert_eq!(
+        decode_client_admin_command(
+            br#"{"phase":"prepare","operation_version":1,"operation":"policies.drop","arguments":{"policy_id":"000102030405060708090a0b0c0d0e0f"}}"#
+        ),
+        Ok(ClientAdminCommand::PrepareDropPolicy {
+            policy_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        })
+    );
     assert_eq!(
         decode_client_admin_command(
             br#"{"phase":"prepare","operation_version":1,"operation":"tokens.revoke","arguments":{"token_id":"000102030405060708090a0b0c0d0e0f"}}"#

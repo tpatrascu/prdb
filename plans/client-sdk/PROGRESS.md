@@ -260,3 +260,11 @@
 - Regression: parser coverage accepts canonical hex and empty dependencies while rejecting empty/odd/uppercase/nonhex input. The real gateway/supervisor ADMIN lifecycle creates and drops a constant-true CHECK after column addition.
 - Verification: focused parser and real-process tests, CLI help inspection, format check, full workspace build, warning-denied Clippy, and tests passed under Rust/Cargo 1.95.0; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
 - Remaining: policy CLI, broader live ADMIN DDL coverage, and confined artifact execution remain open.
+
+## SDK-5: row/cell policy ADMIN and CLI — implemented
+
+- Contract: policy creation uses a closed row/cell kind, operation, ALLOW/RESTRICT effect, typed user/role recipients, optional cell-column targets, and operation-required EIR1 clauses. Storage binds the expressions to current schema and checks current `MANAGE_POLICIES` authority.
+- Implementation: `AdminClient` exposes typed create/drop policy methods; `prdb-client policy-create/policy-drop` uses the authenticated control channel. The CLI parses canonical recipient IDs and EIR1 hex without exposing policy bodies through metadata discovery.
+- Regression: strict decoder coverage checks a canonical row SELECT policy and drop shape. The real gateway/supervisor lifecycle creates and drops a row policy and verifies committed sequences; CLI parser coverage accepts user/role recipients and rejects unknown kinds, uppercase IDs, and zero IDs.
+- Verification: focused protocol, process, and parser checks and help inspection passed. Rust 1.95.0 workspace build, format, warning-denied Clippy, and full tests passed; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
+- Remaining: broader cell-policy process coverage, other live ADMIN DDL families, and confined artifact execution remain open.
