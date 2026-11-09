@@ -27,28 +27,7 @@ typedef int32_t (*prdb_query_ipc_request_v2_fn)(
 typedef int32_t (*prdb_query_write_result_v2_fn)(
     void *context, const uint8_t *bytes, uint64_t bytes_len);
 
-typedef struct prdb_host_api_v2 {
-    uint32_t struct_size;
-    uint32_t abi_version;
-    void *context;
-    prdb_query_ipc_request_v2_fn executor_request;
-    prdb_query_ipc_request_v2_fn planner_request;
-    prdb_query_write_result_v2_fn write_result;
-} prdb_host_api_v2;
-
-typedef struct prdb_invocation_v2 {
-    uint32_t struct_size;
-    uint32_t abi_version;
-    const uint8_t *parameters;
-    uint64_t parameters_len;
-} prdb_invocation_v2;
-
-typedef struct prdb_query_descriptor_v2_record {
-    uint32_t struct_size;
-    uint32_t abi_version;
-    uint32_t host_api_size;
-    uint32_t invocation_size;
-} prdb_query_descriptor_v2_record;
+#include "prdb_query_abi_records_v2.h"
 
 typedef int32_t (*prdb_query_main_v2_fn)(const prdb_host_api_v2 *host,
                                          const prdb_invocation_v2 *invocation);

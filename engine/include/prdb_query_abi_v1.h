@@ -4,24 +4,7 @@
 #include <stdint.h>
 #include "prdb_query_abi_constants.h"
 
-typedef struct prdb_host_api_v1 {
-    uint32_t struct_size;
-    uint32_t abi_version;
-} prdb_host_api_v1;
-
-typedef struct prdb_invocation_v1 {
-    uint32_t struct_size;
-    uint32_t abi_version;
-    const uint8_t *parameters;
-    uint64_t parameters_len;
-} prdb_invocation_v1;
-
-typedef struct prdb_query_descriptor_v1_record {
-    uint32_t struct_size;
-    uint32_t abi_version;
-    uint32_t host_api_size;
-    uint32_t invocation_size;
-} prdb_query_descriptor_v1_record;
+#include "prdb_query_abi_records_v1.h"
 
 typedef int32_t (*prdb_query_main_v1_fn)(const prdb_host_api_v1 *host,
                                          const prdb_invocation_v1 *invocation);

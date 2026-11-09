@@ -28,85 +28,10 @@ pub type QueryWriteResultV2 =
 pub type QueryStatementFailureV3 =
     unsafe extern "C" fn(context: *mut std::ffi::c_void, failure_code: u32) -> i32;
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct HostApiV2 {
-    pub struct_size: u32,
-    pub abi_version: u32,
-    pub context: *mut std::ffi::c_void,
-    pub executor_request: Option<QueryIpcRequestV2>,
-    pub planner_request: Option<QueryIpcRequestV2>,
-    pub write_result: Option<QueryWriteResultV2>,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct HostApiV3 {
-    pub struct_size: u32,
-    pub abi_version: u32,
-    pub context: *mut std::ffi::c_void,
-    pub executor_request: Option<QueryIpcRequestV2>,
-    pub planner_request: Option<QueryIpcRequestV2>,
-    pub write_result: Option<QueryWriteResultV2>,
-    pub statement_failure: Option<QueryStatementFailureV3>,
-}
-
-pub type InvocationV3 = InvocationV2;
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct InvocationV2 {
-    pub struct_size: u32,
-    pub abi_version: u32,
-    pub parameters: *const u8,
-    pub parameters_len: u64,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct QueryDescriptorV2 {
-    pub struct_size: u32,
-    pub abi_version: u32,
-    pub host_api_size: u32,
-    pub invocation_size: u32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct QueryDescriptorV3 {
-    pub struct_size: u32,
-    pub abi_version: u32,
-    pub host_api_size: u32,
-    pub invocation_size: u32,
-}
+include!("query_abi_records.rs");
 
 pub type QueryMainV2 = unsafe extern "C" fn(*const HostApiV2, *const InvocationV2) -> c_int;
 pub type QueryMainV3 = unsafe extern "C" fn(*const HostApiV3, *const InvocationV3) -> c_int;
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct HostApiV1 {
-    pub struct_size: u32,
-    pub abi_version: u32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct InvocationV1 {
-    pub struct_size: u32,
-    pub abi_version: u32,
-    pub parameters: *const u8,
-    pub parameters_len: u64,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct QueryDescriptorV1 {
-    pub struct_size: u32,
-    pub abi_version: u32,
-    pub host_api_size: u32,
-    pub invocation_size: u32,
-}
 
 pub type QueryMainV1 = unsafe extern "C" fn(*const HostApiV1, *const InvocationV1) -> c_int;
 

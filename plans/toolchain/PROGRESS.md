@@ -11,10 +11,10 @@
 
 ## TC-2: generated query ABI constants — partial
 
-- Behavior: [`query_abi_constants.json`](../../engine/abi/query_abi_constants.json) is the common source for query ABI versions, symbol names, callback failure code, parameter/IPC/result bounds, and v1-v3 native record sizes, alignments, and field offsets. [`generate_query_abi.py`](../../engine/tools/generate_query_abi.py) emits C constants and layout assertions plus Rust constants and compile-time layout assertions. `make -f engine/sdk/Makefile abi-constants` regenerates them; the maintained SDK `test` target checks drift.
-- Compatibility: C record declarations and Rust `repr(C)` records remain hand-maintained and unchanged. Generated assertions now fail C and Rust builds if native layouts diverge from the schema; descriptor tests also reject unsupported versions/sizes.
-- Verification: generated-file drift check and the full maintained TinyCC SDK suite passed. Focused Rust/C ABI tests passed all six tests, and the full workspace build, formatting, warning-denied Clippy, and serial workspace test suite passed. The serial suite reported 3 cgroup-gated commit tests and 1 cgroup-gated metadata process test as ignored.
-- Remaining: generate native field declarations and extend cross-language parity to IPC encodings and serializers. This increment does not claim TC-2 complete.
+- Behavior: [`query_abi_constants.json`](../../engine/abi/query_abi_constants.json) is the common source for query ABI versions, symbol names, callback failure code, parameter/IPC/result bounds, and v1-v3 native record declarations, sizes, alignments, and field offsets. [`generate_query_abi.py`](../../engine/tools/generate_query_abi.py) emits C record headers, Rust records, constants, and layout assertions. `make -f engine/sdk/Makefile abi-constants` regenerates them; the maintained SDK `test` target checks drift.
+- Compatibility: The v3 invocation remains an alias of the v2 record. Generated assertions fail C and Rust builds if native layouts diverge from the schema; descriptor tests also reject unsupported versions/sizes.
+- Verification: generated-file drift check and the full maintained TinyCC SDK suite passed. Focused Rust/C ABI tests passed all six tests; workspace build, formatting, warning-denied Clippy, and serial workspace tests passed with this increment. The serial suite reported 3 cgroup-gated commit tests and 1 cgroup-gated metadata process test as ignored.
+- Remaining: extend cross-language parity to IPC encodings and serializers. TC-2 is still partial.
 
 ## TC-1 / TC-3: maintained TinyCC SDK and shared-artifact link profile — partial
 
