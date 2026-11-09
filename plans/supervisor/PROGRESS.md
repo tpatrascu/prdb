@@ -142,5 +142,5 @@
 ## WI-7 / SM-5: configure storage snapshot caps in the service — implemented
 
 - Behavior: `prdb-supervisor` exposes positive `--max-storage-active-snapshots` and `--max-storage-active-analytical-snapshots` settings and passes them to every storage manager created by the service, including after recovery/reopen. Defaults remain 128 total and 8 analytical snapshots.
-- Regression: `supervisor_help_documents_explicit_runtime_and_compatibility_configuration` checks both options are documented in `--help`; manager construction validates zero values.
+- Regression: `supervisor_help_documents_explicit_runtime_and_compatibility_configuration` checks both options are documented in `--help`. Supervisor unit tests verify defaults, explicit CLI values, and rejection of zero for either limit.
 - Contract: [supervisor CLI](../../engine/src/bin/prdb-supervisor.rs), [storage manager](../../specs/storage-manager.md), and [workload profile](../../specs/workload-profile.md).

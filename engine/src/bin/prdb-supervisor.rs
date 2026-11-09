@@ -103,6 +103,7 @@ mod service {
 
     fn run() -> Result<(), Box<dyn std::error::Error>> {
         let options = parse_options()?;
+        let storage_config = storage_manager_config(&options)?;
         let instance_dir = required(options.instance_dir, "--instance-dir")?;
         let socket_path = required(options.service_socket, "--service-socket")?;
         let gateway_uid = required(options.gateway_uid, "--gateway-uid")?;
@@ -231,22 +232,6 @@ mod service {
             },
             validator,
         )?;
-        let default_storage_config = prdb_engine::storage_manager::StorageManagerConfig::default();
-        let storage_config = prdb_engine::storage_manager::StorageManagerConfig {
-            max_active_invocations: positive(
-                options
-                    .max_storage_active_snapshots
-                    .unwrap_or(default_storage_config.max_active_invocations),
-                "--max-storage-active-snapshots",
-            )?,
-            max_active_analytical_invocations: positive(
-                options
-                    .max_storage_active_analytical_snapshots
-                    .unwrap_or(default_storage_config.max_active_analytical_invocations),
-                "--max-storage-active-analytical-snapshots",
-            )?,
-            ..default_storage_config
-        };
         let instance = StorageInstance::open(&instance_dir)?;
         let runtime = GatewayServiceRuntimeConfig {
             admission: GatewayAdmissionConfig {
@@ -483,6 +468,27 @@ mod service {
         }
     }
 
+    fn storage_manager_config(
+        options: &Options,
+    ) -> Result<prdb_engine::storage_manager::StorageManagerConfig, String> {
+        let defaults = prdb_engine::storage_manager::StorageManagerConfig::default();
+        Ok(prdb_engine::storage_manager::StorageManagerConfig {
+            max_active_invocations: positive(
+                options
+                    .max_storage_active_snapshots
+                    .unwrap_or(defaults.max_active_invocations),
+                "--max-storage-active-snapshots",
+            )?,
+            max_active_analytical_invocations: positive(
+                options
+                    .max_storage_active_analytical_snapshots
+                    .unwrap_or(defaults.max_active_analytical_invocations),
+                "--max-storage-active-analytical-snapshots",
+            )?,
+            ..defaults
+        })
+    }
+
     fn install_signal_handlers() -> Result<(), std::io::Error> {
         // SAFETY: the handler only performs an atomic store before shutdown.
         unsafe {
@@ -495,6 +501,44 @@ mod service {
             }
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{Options, storage_manager_config};
+
+        #[test]
+        fn storage_snapshot_limits_use_cli_values_and_documented_defaults() {
+            let defaults = storage_manager_config(&Options::default()).expect("default config");
+            assert_eq!(defaults.max_active_invocations, 128);
+            assert_eq!(defaults.max_active_analytical_invocations, 8);
+
+            let configured = storage_manager_config(&Options {
+                max_storage_active_snapshots: Some(48),
+                max_storage_active_analytical_snapshots: Some(6),
+                ..Options::default()
+            })
+            .expect("configured limits");
+            assert_eq!(configured.max_active_invocations, 48);
+            assert_eq!(configured.max_active_analytical_invocations, 6);
+        }
+
+        #[test]
+        fn storage_snapshot_limits_reject_zero_cli_values() {
+            let error = storage_manager_config(&Options {
+                max_storage_active_snapshots: Some(0),
+                ..Options::default()
+            })
+            .expect_err("zero global storage limit must fail");
+            assert!(error.contains("--max-storage-active-snapshots must be positive"));
+
+            let error = storage_manager_config(&Options {
+                max_storage_active_analytical_snapshots: Some(0),
+                ..Options::default()
+            })
+            .expect_err("zero analytical storage limit must fail");
+            assert!(error.contains("--max-storage-active-analytical-snapshots must be positive"));
+        }
     }
 }
 
