@@ -18152,6 +18152,8 @@ fn token_admission_checks_expiry_secret_revocation_and_commit_guards()
     let database = initialize(&fixture.path())?;
     let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
     let user_id = id(70);
+    let admin_user_id = id(0x82);
+    let admin_role = builtin_owner_id();
     let active_secret = [0x31; 32];
     let expired_secret = [0x32; 32];
     let revoked_secret = [0x33; 32];
@@ -18182,18 +18184,31 @@ fn token_admission_checks_expiry_secret_revocation_and_commit_guards()
         Some(now - 1_000_000),
         1,
     );
-    let active_payload = active.payload.clone().unwrap();
+    let live_admin_credential = credential_verifier_write(
+        id(0x83),
+        admin_user_id,
+        &[0x34; 32],
+        now - 1_000_000,
+        now + 60_000_000,
+        None,
+        1,
+    );
     commit_catalog_and_audit(
         &database,
         id(74),
         id(9),
         now + 3_600_000_000,
         &[
+            principal_write_with_name(admin_user_id, 1, 1, "credential_admin"),
+            object_write_with_name(admin_user_id, 8, "credential_admin"),
+            membership_write(admin_user_id, admin_role),
+            dependency_write(admin_user_id, admin_role, 5),
             principal_write_with_name(user_id, 1, 1, "credential_user"),
             object_write_with_name(user_id, 8, "credential_user"),
             active,
             expired,
             revoked,
+            live_admin_credential,
         ],
         &[audit_event(74)],
     )
@@ -18257,22 +18272,17 @@ fn token_admission_checks_expiry_secret_revocation_and_commit_guards()
         );
     }
 
-    let mut revoked_active = credential_verifier_write(
-        id(71),
-        user_id,
-        &active_secret,
-        now - 1_000_000,
-        now + 60_000_000,
-        Some(now),
-        2,
-    );
-    revoked_active.expected_value = Some(active_payload);
-    storage.commit_catalog_and_audit(
+    let mut revoke_event = audit_event(79);
+    revoke_event.actor_id = Some(admin_user_id);
+    revoke_event.correlation_id = id(79);
+    revoke_event.action = AuditAction::TokenLifecycle;
+    revoke_event.target_ids = vec![id(71)];
+    storage.revoke_token(
         id(79),
-        id(9),
+        admin_user_id,
+        id(71),
         now + 3_600_000_000,
-        &[revoked_active],
-        &[audit_event(79)],
+        revoke_event,
     )?;
     assert!(matches!(
         admitted.commit(),

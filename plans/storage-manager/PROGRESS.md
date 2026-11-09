@@ -2096,7 +2096,7 @@
 ## SM-5 / AU-6: token revocation discards a pending row write — verified
 
 - Contract: a token-authenticated invocation must revalidate its exact credential record at finalization; revoking that token makes a pending invocation conflict before any staged row can publish.
-- Regression: `token_admission_checks_expiry_secret_revocation_and_commit_guards` now stages a valid tuple before revocation, then checks the durable ABORTED outcome and confirms the row key remains absent after the credential record is revoked.
+- Regression: `token_admission_checks_expiry_secret_revocation_and_commit_guards` stages a valid tuple under a token-authenticated invocation, revokes that token through `StorageManager::revoke_token` as a separate database administrator, then verifies the stale invocation is durably ABORTED and the row key remains absent. A second live admin credential keeps final-admin validation satisfied.
 - Implementation: no production change was needed; token admission's pinned verifier guard rejects the stale finalization.
-- Verification: the focused regression passed. The full Rust commit integration target passed with 126 tests and 3 delegated-cgroup tests ignored; formatting and warning-denied workspace Clippy passed in the prescribed Rust/Cargo 1.95.0 Nix shell.
+- Verification: the focused regression passed. `cargo fmt --all -- --check` and warning-denied workspace Clippy passed. The full Rust commit integration target passed serially with 126 tests and 3 delegated-cgroup tests ignored under the prescribed Rust/Cargo 1.95.0 Nix shell. Two parallel full-target runs hit the existing intermittent `InvalidAudit` in `storage_manager_creates_and_drops_check_constraint`; that test passed alone and in the serial full-target run.
 - Remaining: repeat the check through a fully authorized mutation path and add stale-writer coverage for identity/login changes and broader authority-changing DDL routes.
