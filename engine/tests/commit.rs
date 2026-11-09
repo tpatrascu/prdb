@@ -20152,14 +20152,21 @@ fn sandboxed_v3_sql_error_latches_failure_and_durably_aborts_after_partial_outpu
             workload_class: WorkloadClass::Operational,
         },
     )?;
-    staging.upload_chunk(
-        owner,
-        reservation.invocation_id,
-        ChunkKind::Artifact,
-        0,
-        &artifact,
-    )?;
-    staging.seal(owner, reservation.invocation_id)?;
+    let mut artifact_offset = 0;
+    for chunk in artifact.chunks(prdb_engine::supervisor::MAX_CHUNK_BYTES) {
+        artifact_offset = staging
+            .upload_chunk(
+                owner,
+                reservation.invocation_id,
+                ChunkKind::Artifact,
+                artifact_offset,
+                chunk,
+            )
+            .map_err(|error| format!("SQL artifact chunk upload: {error:?}"))?;
+    }
+    staging
+        .seal(owner, reservation.invocation_id)
+        .map_err(|error| format!("SQL artifact seal: {error:?}"))?;
 
     let paths_hex = |value: [u8; 16]| {
         value
@@ -21729,13 +21736,18 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             workload_class: WorkloadClass::Operational,
         },
     )?;
-    staging.upload_chunk(
-        owner,
-        reservation.invocation_id,
-        ChunkKind::Artifact,
-        0,
-        &artifact,
-    )?;
+    let mut artifact_offset = 0;
+    for chunk in artifact.chunks(prdb_engine::supervisor::MAX_CHUNK_BYTES) {
+        artifact_offset = staging
+            .upload_chunk(
+                owner,
+                reservation.invocation_id,
+                ChunkKind::Artifact,
+                artifact_offset,
+                chunk,
+            )
+            .map_err(|error| format!("SQL artifact chunk upload: {error:?}"))?;
+    }
     staging.seal(owner, reservation.invocation_id)?;
 
     let invocation_hex = reservation
@@ -22170,13 +22182,18 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             workload_class: WorkloadClass::Operational,
         },
     )?;
-    restricted_staging.upload_chunk(
-        restricted_owner,
-        restricted_reservation.invocation_id,
-        ChunkKind::Artifact,
-        0,
-        &restricted_artifact,
-    )?;
+    let mut restricted_artifact_offset = 0;
+    for chunk in restricted_artifact.chunks(prdb_engine::supervisor::MAX_CHUNK_BYTES) {
+        restricted_artifact_offset = restricted_staging
+            .upload_chunk(
+                restricted_owner,
+                restricted_reservation.invocation_id,
+                ChunkKind::Artifact,
+                restricted_artifact_offset,
+                chunk,
+            )
+            .map_err(|error| format!("restricted SQL artifact chunk upload: {error:?}"))?;
+    }
     restricted_staging.seal(restricted_owner, restricted_reservation.invocation_id)?;
     let restricted_invocation_hex = restricted_reservation
         .invocation_id
