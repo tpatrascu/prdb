@@ -235,3 +235,11 @@
 - Implementation: `prdb_sdk_sql_inner_join_pairs_v1` validates inputs and preflights comparison results and exact output size before writing the pair array. It reuses the existing scalar comparator, so types must agree and Decimal scales must match.
 - Verification: focused TinyCC fixture passed with `-Wall -Wextra -Werror`.
 - Remaining: SQL JOIN syntax, relation aliases and binding, two authorized scans, joined-row projection/filtering, SQLR results, and confined end-to-end acceptance remain open. This primitive does not yet claim SQL JOIN support.
+
+## SQL-7 dependency: single INNER JOIN parser and binder — implemented
+
+- Contract: [SQL library](../../specs/sql-library.md). Parse one `INNER JOIN` between two named relations, qualified projected columns, one qualified equality predicate, and optional LIMIT. Bind each reference against its own independently supplied authorized relation shape, and require compatible join-key metadata.
+- Red/green evidence: the maintained v8 TinyCC fixture parses the two-relation join form and verifies projection sides/ordinals and key bindings. It rejects malformed and unqualified syntax, preserves outputs on failed parse/bind, rejects relation and type mismatches, and confirms the frozen v7 parser does not accept the new grammar.
+- Implementation: v8 uses a separately versioned borrowed-span AST and binding. Relation aliases and self-joins are not accepted; one key equality is supported, with Decimal scale agreement matching the shared comparator.
+- Verification: focused TinyCC parser/binder fixture passed with `-Wall -Wextra -Werror`.
+- Remaining: resolve and scan both relations through planner/executor APIs, materialize bounded authorized rows, compose the join kernel with projection and LIMIT, encode result rows, and verify the path through the confined sandbox. WHERE, outer joins, multiple join predicates, and aliases remain open.
