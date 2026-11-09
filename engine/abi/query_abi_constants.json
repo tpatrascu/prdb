@@ -900,6 +900,55 @@
       "value": 4,
       "c_name": "PRDB_IPC_FRAME_PAYLOAD_LEN_LEN",
       "c_type": "UINT32_C"
+    },
+    {
+      "rust_name": "IPC_FRAME_STATUS_INVALID_MAGIC",
+      "rust_type": "u32",
+      "value": 2,
+      "c_name": "PRDB_IPC_FRAME_STATUS_INVALID_MAGIC",
+      "c_type": "UINT32_C"
+    },
+    {
+      "rust_name": "IPC_FRAME_STATUS_UNSUPPORTED_VERSION",
+      "rust_type": "u32",
+      "value": 3,
+      "c_name": "PRDB_IPC_FRAME_STATUS_UNSUPPORTED_VERSION",
+      "c_type": "UINT32_C"
+    },
+    {
+      "rust_name": "IPC_FRAME_STATUS_INVALID_OPERATION",
+      "rust_type": "u32",
+      "value": 4,
+      "c_name": "PRDB_IPC_FRAME_STATUS_INVALID_OPERATION",
+      "c_type": "UINT32_C"
+    },
+    {
+      "rust_name": "IPC_FRAME_STATUS_UNKNOWN_OPERATION",
+      "rust_type": "u32",
+      "value": 5,
+      "c_name": "PRDB_IPC_FRAME_STATUS_UNKNOWN_OPERATION",
+      "c_type": "UINT32_C"
+    },
+    {
+      "rust_name": "IPC_FRAME_STATUS_INVALID_REQUEST_ID",
+      "rust_type": "u32",
+      "value": 6,
+      "c_name": "PRDB_IPC_FRAME_STATUS_INVALID_REQUEST_ID",
+      "c_type": "UINT32_C"
+    },
+    {
+      "rust_name": "IPC_FRAME_STATUS_PAYLOAD_TOO_LARGE",
+      "rust_type": "u32",
+      "value": 7,
+      "c_name": "PRDB_IPC_FRAME_STATUS_PAYLOAD_TOO_LARGE",
+      "c_type": "UINT32_C"
+    },
+    {
+      "rust_name": "IPC_FRAME_STATUS_TRUNCATED",
+      "rust_type": "u32",
+      "value": 8,
+      "c_name": "PRDB_IPC_FRAME_STATUS_TRUNCATED",
+      "c_type": "UINT32_C"
     }
   ]
 }

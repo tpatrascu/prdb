@@ -219,6 +219,25 @@ pub enum FrameError {
     Io(std::io::Error),
 }
 
+impl FrameError {
+    /// Returns the shared v1 status for malformed-frame errors. I/O failures
+    /// are transport errors and do not have a wire validation status.
+    pub fn status_code(&self) -> Option<u32> {
+        match self {
+            Self::InvalidMagic => Some(crate::query_abi::IPC_FRAME_STATUS_INVALID_MAGIC),
+            Self::UnsupportedVersion(_) => {
+                Some(crate::query_abi::IPC_FRAME_STATUS_UNSUPPORTED_VERSION)
+            }
+            Self::InvalidOperation => Some(crate::query_abi::IPC_FRAME_STATUS_INVALID_OPERATION),
+            Self::UnknownOperation(_) => Some(crate::query_abi::IPC_FRAME_STATUS_UNKNOWN_OPERATION),
+            Self::InvalidRequestId => Some(crate::query_abi::IPC_FRAME_STATUS_INVALID_REQUEST_ID),
+            Self::PayloadTooLarge => Some(crate::query_abi::IPC_FRAME_STATUS_PAYLOAD_TOO_LARGE),
+            Self::TruncatedFrame => Some(crate::query_abi::IPC_FRAME_STATUS_TRUNCATED),
+            Self::Io(_) => None,
+        }
+    }
+}
+
 impl std::fmt::Display for FrameError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "IPC frame error: {self:?}")

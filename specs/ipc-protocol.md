@@ -12,6 +12,8 @@ Unix-stream frames use a fixed 20-byte header followed by a copied payload. Head
 
 Readers accept arbitrary stream fragmentation and leave following coalesced frames available for the next read. EOF is clean only between frames; EOF within a header or payload is a truncated-frame error. Unknown frame versions and malformed headers fail before payload allocation. Frame payloads contain encoded fields, never native struct memory.
 
+The Rust and C frame codecs use shared v1 validation status values: invalid magic `2`, unsupported version `3`, invalid operation `4`, unknown operation `5`, invalid request ID `6`, payload too large `7`, and truncated frame `8`. C-only argument and output-capacity results remain local API statuses; Rust transport I/O failures do not map to a frame-validation status.
+
 The C v1 frame codec uses the same generated header constants and generated operation-tag case list as Rust. `prdb_ipc_frame_encode_v1` writes into caller-owned storage, supports a required-size query, and leaves a short output buffer untouched. `prdb_ipc_frame_decode_v1` decodes one frame prefix and borrows its payload from the input, so coalesced frames can be processed successively without allocation. Both reject zero/unknown operations, zero request IDs, unsupported versions, oversized payloads, malformed arguments, and truncated input before publishing a decoded result. Native `prdb_ipc_frame_v1` values are local C views and are never wire encodings.
 
 ### Version-1 Operation Tags and Service Roles

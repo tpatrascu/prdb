@@ -16,7 +16,7 @@ The gateway submission payload mapping is specified in [IPC protocol](../../spec
 
 | ID | Observable test first | Minimum implementation and evidence |
 | --- | --- | --- |
-| IPC-1 | Hand-checked frames decode under split/coalesced reads; invalid lengths/versions fail before allocation | Rust bounded framing and the TinyCC-built C codec consume shared generated header offsets, version, magic, size limits and operation tags. Both match the hand-checked frame fixture; canonical cross-language error fixtures remain |
+| IPC-1 | Hand-checked frames decode under split/coalesced reads; invalid lengths/versions fail before allocation | Rust bounded framing and the TinyCC-built C codec consume shared generated header offsets, version, magic, size limits, operation tags, and v1 frame-validation status values. Both match the hand-checked frame fixture and the canonical error-status fixture |
 | IPC-2 | Executor attempts to finalize, estimate or administer fail even with validly encoded messages | The role matrix and pure allowlist helper exist; bind roles to provisioned channels and enforce the helper in handlers, then add context lifecycle validation independently of SDK wrappers |
 | IPC-3 | Cross-connection, stale-generation and closed-context handles fail without disclosing object existence | Resolve logical references independently per connection; add cursor/row ownership, duplicate IDs and late-response rejection |
 | IPC-4 | Serialized batches omit invisible rows and every hidden payload byte/length/offset | Encode sanitized owned buffers after storage authorization; bounded next/close semantics, initialized capacity and reference-evaluator comparison |

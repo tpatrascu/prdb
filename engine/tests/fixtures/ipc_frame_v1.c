@@ -133,6 +133,16 @@ static void test_decode_rejections_preserve_outputs(void) {
                                     &consumed) == PRDB_IPC_FRAME_TRUNCATED);
 }
 
+static void test_error_statuses_match_shared_fixture(void) {
+    assert(PRDB_IPC_FRAME_INVALID_MAGIC == 2);
+    assert(PRDB_IPC_FRAME_UNSUPPORTED_VERSION == 3);
+    assert(PRDB_IPC_FRAME_INVALID_OPERATION == 4);
+    assert(PRDB_IPC_FRAME_UNKNOWN_OPERATION == 5);
+    assert(PRDB_IPC_FRAME_INVALID_REQUEST_ID == 6);
+    assert(PRDB_IPC_FRAME_PAYLOAD_TOO_LARGE == 7);
+    assert(PRDB_IPC_FRAME_TRUNCATED == 8);
+}
+
 static void test_decode_one_of_coalesced_frames_and_bad_arguments(void) {
     uint8_t coalesced[sizeof(expected) * 2];
     memcpy(coalesced, expected, sizeof(expected));
@@ -158,5 +168,6 @@ int main(void) {
     test_encode_rejections_and_payload_boundary();
     test_decode_rejections_preserve_outputs();
     test_decode_one_of_coalesced_frames_and_bad_arguments();
+    test_error_statuses_match_shared_fixture();
     return 0;
 }

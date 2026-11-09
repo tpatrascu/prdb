@@ -153,6 +153,26 @@ fn ipc_frame_writer_enforces_payload_limit() {
 }
 
 #[test]
+fn ipc_frame_error_statuses_match_the_shared_cross_language_fixture() {
+    let cases = [
+        (FrameError::InvalidMagic, 2),
+        (FrameError::UnsupportedVersion(2), 3),
+        (FrameError::InvalidOperation, 4),
+        (FrameError::UnknownOperation(0x7fff), 5),
+        (FrameError::InvalidRequestId, 6),
+        (FrameError::PayloadTooLarge, 7),
+        (FrameError::TruncatedFrame, 8),
+    ];
+    for (error, expected_code) in cases {
+        assert_eq!(error.status_code(), Some(expected_code));
+    }
+    assert_eq!(
+        FrameError::Io(std::io::ErrorKind::Other.into()).status_code(),
+        None
+    );
+}
+
+#[test]
 fn ipc_operation_codes_are_fixed_and_unknown_codes_fail_closed() {
     assert_eq!(Operation::BootstrapDeliverCredential as u16, 0x0101);
     assert_eq!(Operation::BootstrapAcknowledgeDelivery as u16, 0x0102);

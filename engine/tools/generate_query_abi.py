@@ -91,6 +91,18 @@ def render(schema):
     max_payload = constant_values.get("IPC_FRAME_MAX_PAYLOAD_BYTES")
     if not isinstance(max_payload, int) or not 0 < max_payload <= 0xFFFFFFFF:
         raise ValueError("IPC frame payload cap must fit the u32 wire field")
+    frame_statuses = (
+        "IPC_FRAME_STATUS_INVALID_MAGIC",
+        "IPC_FRAME_STATUS_UNSUPPORTED_VERSION",
+        "IPC_FRAME_STATUS_INVALID_OPERATION",
+        "IPC_FRAME_STATUS_UNKNOWN_OPERATION",
+        "IPC_FRAME_STATUS_INVALID_REQUEST_ID",
+        "IPC_FRAME_STATUS_PAYLOAD_TOO_LARGE",
+        "IPC_FRAME_STATUS_TRUNCATED",
+    )
+    status_values = [constant_values.get(name) for name in frame_statuses]
+    if status_values != list(range(2, 9)):
+        raise ValueError("IPC frame error statuses must preserve the canonical v1 mapping")
 
     c_lines.extend(["", "#endif /* PRDB_QUERY_ABI_CONSTANTS_H */", ""])
     rust_lines.append("")
