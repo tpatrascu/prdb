@@ -244,6 +244,14 @@
 - Verification: the focused fixture and complete maintained TinyCC SDK suite passed with TinyCC `-Wall -Wextra -Werror` after the new object was added to the maintained SDK archive/test target. Rust 1.95.0 workspace build, rustfmt check, warning-denied Clippy, and serial locked workspace tests also passed (127 commit tests passed, 3 cgroup-dependent cases ignored, all other workspace tests passed); `git diff --check` passed.
 - Remaining: parser/binder, two-scan runner, SQLR projection path, and confined end-to-end coverage for multiple join predicates remain open; aliases, self-joins, WHERE, outer joins, cancellation/deadlines, and spill also remain unsupported.
 
+## SQL-8 dependency: multi-predicate INNER JOIN parser and binder — implemented
+
+- Contract: [SQL library](../../specs/sql-library.md). V16 accepts two to eight qualified equality predicates joined by AND, preserves the two separately resolved relation shapes and qualified projections from v8, and requires each left/right pair to bind to its respective side with matching scalar type and Decimal scale.
+- Red/green evidence: the maintained v16 fixture covers two-predicate parsing/binding, LIMIT, the eight-key maximum, ninth-key and malformed-clause rejection, wrong relation/type failures, output preservation, and rejection by frozen v8/v15 parsers.
+- Implementation: `prdb_sdk_sql_v16.h` defines sized statement/binding records embedding the frozen v8 records. The parser stores source spans for each equality pair; binding reuses v8 projection/relation checks and resolves every pair against the independent relation shapes. V1-v15 records and parsing remain unchanged.
+- Verification: the focused v16 fixture and complete maintained TinyCC SDK suite passed with `-Wall -Wextra -Werror`; `git diff --check` passed. The locked Rust workspace build, formatting, Clippy, and serial test suite passed immediately before this C-only parser/binder increment.
+- Remaining: connect v16 binding to the composite join kernel in a bounded two-scan runner, add composite SQLR output, and prove the path through confined acceptance. Aliases, self-joins, WHERE, outer joins, cancellation/deadlines, and spill remain unsupported.
+
 ## SQL-7 dependency: single INNER JOIN parser and binder — implemented
 
 - Contract: [SQL library](../../specs/sql-library.md). Parse one `INNER JOIN` between two named relations, qualified projected columns, one qualified equality predicate, and optional LIMIT. Bind each reference against its own independently supplied authorized relation shape, and require compatible join-key metadata.

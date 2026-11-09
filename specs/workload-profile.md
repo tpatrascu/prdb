@@ -24,6 +24,8 @@ The separately versioned composite join pair kernel accepts two to eight row-maj
 
 The v8 parser/binder and runner accept one INNER JOIN with relation-qualified projections and one equijoin predicate over two separately authorized relation shapes. The runner resolves both relations independently, scans sequentially, and closes both before result callbacks. It bounds each side to 128 rows and combined copied key/projection bytes to 1 MiB, then emits joined projection values in stable left-major match order. NULL keys do not match; REDACTED keys fail before callbacks. The joined-row SQLR v1 encoder/writer derives metadata from each projection's bound relation side and ordinal and emits bounded provisional chunks. The maintained confined acceptance exercises two distinct SELECT-authorized storage relations through the result relay and durable commit.
 
+The v16 parser/binder now describe two to eight qualified equality predicates for an INNER JOIN and bind each pair against the independently authorized relation shapes. V16 keeps v8's projection and relation semantics, requires matching key types/scales, and preserves v8 compatibility. The multi-predicate runner, SQLR composition, and confined acceptance are not implemented yet; executable JOIN queries still use the v8 single-predicate runner.
+
 ## Mixed-Workload Scheduling
 
 The supervisor admits an invocation into an operational or analytical resource class, bounded by the caller's configured allowance. A client label cannot obtain unlimited priority or override budgets. Both classes retain snapshot isolation and the same permission model; read-only analytical grants are the default, not a mechanism to prohibit explicitly authorized writes.
