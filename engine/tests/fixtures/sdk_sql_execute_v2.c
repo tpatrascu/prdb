@@ -1,4 +1,5 @@
 #include "prdb_sdk_sql_exec_v2.h"
+#include "prdb_sdk_sql_exec_v3.h"
 #include "prdb_sdk_sql_result_v1.h"
 
 #include <assert.h>
@@ -78,10 +79,17 @@ static int32_t executor_request(void *context, uint16_t operation,
             0, 1, 7, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
             0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
             0, 1, 0, 0, 4, 0};
+        static const uint8_t continuation_two_candidates[24] = {
+            0, 1, 7, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
+            0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
+            0, 2, 0, 0, 4, 0};
         static const uint8_t finished_reply[5] = {0, 1, 1, 0, 0};
         assert(request_len == sizeof(expected));
         if (mock->executor_calls >= 3) {
-            assert(memcmp(request, continuation_request,
+            const uint8_t *expected_continuation =
+                mock->batch_len > 60 ? continuation_two_candidates
+                                     : continuation_request;
+            assert(memcmp(request, expected_continuation,
                           sizeof(continuation_request)) == 0);
             assert(sizeof(finished_reply) <= capacity);
             memcpy(response, finished_reply, sizeof(finished_reply));
@@ -227,9 +235,31 @@ static uint32_t make_two_matching_rows(uint8_t *p) {
     return offset;
 }
 
+static uint32_t make_two_sort_rows(uint8_t *p, uint32_t first,
+                                   uint32_t second) {
+    uint32_t offset = 0;
+    put_u16(p, &offset, 1);
+    p[offset++] = 0;
+    p[offset++] = 7;
+    memset(p + offset, 0x55, 15); offset += 15;
+    put_u16(p, &offset, 2);
+    for (uint32_t value_index = 0; value_index < 2; ++value_index) {
+        uint32_t value = value_index == 0 ? first : second;
+        p[offset++] = 8;
+        memset(p + offset, (int)(value_index + 1), 15); offset += 15;
+        put_u16(p, &offset, 1);
+        p[offset++] = 0;
+        p[offset++] = PRDB_SDK_VALUE_TYPE_INTEGER;
+        put_u32(p, &offset, 4);
+        put_u32(p, &offset, value);
+    }
+    return offset;
+}
+
 typedef struct result_state {
     uint32_t calls;
     uint32_t fail;
+    uint8_t last_value;
     const prdb_sdk_sql_column_shape_v2 *columns;
     uint8_t encoded[128];
     uint64_t encoded_len;
@@ -244,6 +274,7 @@ static int32_t on_row(void *context, const prdb_sdk_row_v1 *row,
                binding, result->columns, 1, row, result->cell_scratch, 1,
                result->encoded, sizeof(result->encoded),
                &result->encoded_len) == PRDB_SDK_SQL_RESULT_OK);
+    result->last_value = result->encoded[result->encoded_len - 1];
     ++result->calls;
     return result->fail ? 1 : 0;
 }
@@ -251,6 +282,10 @@ static int32_t on_row(void *context, const prdb_sdk_row_v1 *row,
 int main(void) {
     static const uint8_t sql[] = "SELECT id FROM widgets WHERE id >= $1 LIMIT 1";
     static const uint8_t zero_limit_sql[] = "SELECT id FROM widgets LIMIT 0";
+    static const uint8_t sort_limit_sql[] =
+        "SELECT id FROM widgets ORDER BY id DESC LIMIT 1";
+    static const uint8_t sort_all_sql[] =
+        "SELECT id FROM widgets ORDER BY id DESC";
     static const uint8_t insert_sql[] =
         "INSERT INTO widgets VALUES ($1, NULL, DEFAULT)";
     static const uint8_t update_sql[] =
@@ -289,6 +324,7 @@ int main(void) {
     uint8_t planner_response[256] = {0};
     uint8_t executor_response[256] = {0};
     uint8_t batch_response[1024] = {0};
+    uint8_t materialized_rows[256] = {0};
     prdb_sdk_sql_column_shape_v2 planner_columns[3] = {{0}};
     prdb_sdk_sql_column_shape_v2 executor_columns[3] = {{0}};
     prdb_sdk_value_v1 cell_scratch[1] = {{0}};
@@ -317,6 +353,62 @@ int main(void) {
                       sizeof(expected_result)) == 0);
     }
     assert(mock.statement_failed == 0);
+
+    {
+        uint8_t sort_batch[128] = {0};
+        uint32_t sort_batch_len = make_two_sort_rows(sort_batch, 3, 5);
+        mock.batch = sort_batch;
+        mock.batch_len = sort_batch_len;
+        mock.executor_calls = 0;
+        result.calls = 0;
+        result.last_value = 0;
+        mock.statement_failed = 0;
+        assert(prdb_sdk_sql_execute_select_v3(
+                   &host, schema, sizeof(schema) - 1, sort_limit_sql,
+                   sizeof(sort_limit_sql) - 1, NULL, 0, 2, 1024,
+                   planner_response, sizeof(planner_response),
+                   executor_response, sizeof(executor_response),
+                   batch_response, sizeof(batch_response), planner_columns, 1,
+                   executor_columns, 1, cell_scratch, 1, materialized_rows,
+                   sizeof(materialized_rows), on_row, &result) ==
+               PRDB_SDK_SQL_EXEC_OK);
+        assert(result.calls == 1 && result.last_value == 5);
+        assert(mock.executor_calls == 4 && mock.statement_failed == 0);
+
+        mock.executor_calls = 0;
+        result.calls = 0;
+        result.last_value = 0;
+        mock.statement_failed = 0;
+        assert(prdb_sdk_sql_execute_select_v3(
+                   &host, schema, sizeof(schema) - 1, sort_all_sql,
+                   sizeof(sort_all_sql) - 1, NULL, 0, 2, 1024,
+                   planner_response, sizeof(planner_response),
+                   executor_response, sizeof(executor_response),
+                   batch_response, sizeof(batch_response), planner_columns, 1,
+                   executor_columns, 1, cell_scratch, 1, materialized_rows,
+                   sizeof(materialized_rows), on_row, &result) ==
+               PRDB_SDK_SQL_EXEC_OK);
+        assert(result.calls == 2 && result.last_value == 3);
+        assert(mock.executor_calls == 4 && mock.statement_failed == 0);
+
+        mock.executor_calls = 0;
+        result.calls = 0;
+        result.last_value = 0;
+        mock.statement_failed = 0;
+        assert(prdb_sdk_sql_execute_select_v3(
+                   &host, schema, sizeof(schema) - 1, sort_limit_sql,
+                   sizeof(sort_limit_sql) - 1, NULL, 0, 2, 1024,
+                   planner_response, sizeof(planner_response),
+                   executor_response, sizeof(executor_response),
+                   batch_response, sizeof(batch_response), planner_columns, 1,
+                   executor_columns, 1, cell_scratch, 1, materialized_rows, 40,
+                   on_row, &result) ==
+               PRDB_SDK_SQL_EXEC_MATERIALIZATION_LIMIT);
+        assert(result.calls == 0 && mock.executor_calls == 4);
+        assert(mock.statement_failed == 1);
+        mock.batch = batch_payload;
+        mock.batch_len = sizeof(batch_payload);
+    }
 
     mock.executor_calls = 0;
     result.calls = 0;
