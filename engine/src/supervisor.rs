@@ -202,10 +202,19 @@ struct Reservation {
 #[derive(Default)]
 struct StagingState {
     reservations: BTreeMap<[u8; 16], Reservation>,
+    start_queue: BTreeMap<u128, StartQueueEntry>,
+    next_start_ticket: u128,
     connection_reservations: HashMap<[u8; 16], [u8; 16]>,
     global_reserved_bytes: u64,
     principal_reserved_bytes: HashMap<[u8; 16], u64>,
     reaper_cursor: Option<[u8; 16]>,
+}
+
+#[derive(Clone, Copy)]
+struct StartQueueEntry {
+    invocation_id: [u8; 16],
+    principal_id: [u8; 16],
+    workload_class: WorkloadClass,
 }
 
 pub struct StagingStore {
@@ -583,47 +592,26 @@ impl StagingStore {
             if reservation.state != ReservationState::Sealed {
                 return Err(StartError::Staging(StagingError::InvalidState));
             }
-            let workload_class = reservation.metadata.workload_class;
-            let active_count = state
-                .reservations
-                .values()
-                .filter(|reservation| {
-                    matches!(
-                        reservation.state,
-                        ReservationState::Starting | ReservationState::Started
-                    ) && reservation.metadata.workload_class == workload_class
-                })
-                .count();
-            let active_limit = match workload_class {
-                WorkloadClass::Operational => self.limits.max_active_operational,
-                WorkloadClass::Analytical => self.limits.max_active_analytical,
+            let entry = StartQueueEntry {
+                invocation_id,
+                principal_id: reservation.principal_id,
+                workload_class: reservation.metadata.workload_class,
             };
-            let principal_active_count = state
-                .reservations
-                .values()
-                .filter(|reservation| {
-                    matches!(
-                        reservation.state,
-                        ReservationState::Starting | ReservationState::Started
-                    ) && reservation.principal_id == owner.principal_id
-                        && reservation.metadata.workload_class == workload_class
-                })
-                .count();
-            let principal_active_limit = match workload_class {
-                WorkloadClass::Operational => self.limits.max_active_operational_per_principal,
-                WorkloadClass::Analytical => self.limits.max_active_analytical_per_principal,
-            };
-            if active_count >= active_limit || principal_active_count >= principal_active_limit {
+            let sealed_data = Arc::clone(
+                reservation
+                    .sealed
+                    .as_ref()
+                    .ok_or(StartError::Staging(StagingError::InvalidState))?,
+            );
+            self.enqueue_start(&mut state, entry)
+                .map_err(StartError::Staging)?;
+            if self.next_eligible_start(&state).map(|(_, id)| id) != Some(invocation_id) {
                 return Err(StartError::Staging(StagingError::ResourceLimit));
             }
+            remove_start_queue_entry(&mut state, invocation_id);
             let submission = SealedSubmission {
                 invocation_id,
-                data: Arc::clone(
-                    reservation
-                        .sealed
-                        .as_ref()
-                        .ok_or(StartError::Staging(StagingError::InvalidState))?,
-                ),
+                data: sealed_data,
             };
             state
                 .reservations
@@ -663,6 +651,60 @@ impl StagingStore {
                 Err(StartError::Admission(error))
             }
         }
+    }
+
+    fn enqueue_start(
+        &self,
+        state: &mut StagingState,
+        entry: StartQueueEntry,
+    ) -> Result<(), StagingError> {
+        if state
+            .start_queue
+            .values()
+            .any(|queued| queued.invocation_id == entry.invocation_id)
+        {
+            return Ok(());
+        }
+        let ticket = state.next_start_ticket;
+        state.next_start_ticket = ticket.checked_add(1).ok_or(StagingError::ResourceLimit)?;
+        state.start_queue.insert(ticket, entry);
+        Ok(())
+    }
+
+    fn next_eligible_start(&self, state: &StagingState) -> Option<(u128, [u8; 16])> {
+        state.start_queue.iter().find_map(|(ticket, entry)| {
+            let active_count = state
+                .reservations
+                .values()
+                .filter(|reservation| {
+                    matches!(
+                        reservation.state,
+                        ReservationState::Starting | ReservationState::Started
+                    ) && reservation.metadata.workload_class == entry.workload_class
+                })
+                .count();
+            let active_limit = match entry.workload_class {
+                WorkloadClass::Operational => self.limits.max_active_operational,
+                WorkloadClass::Analytical => self.limits.max_active_analytical,
+            };
+            let principal_active_count = state
+                .reservations
+                .values()
+                .filter(|reservation| {
+                    matches!(
+                        reservation.state,
+                        ReservationState::Starting | ReservationState::Started
+                    ) && reservation.principal_id == entry.principal_id
+                        && reservation.metadata.workload_class == entry.workload_class
+                })
+                .count();
+            let principal_active_limit = match entry.workload_class {
+                WorkloadClass::Operational => self.limits.max_active_operational_per_principal,
+                WorkloadClass::Analytical => self.limits.max_active_analytical_per_principal,
+            };
+            (active_count < active_limit && principal_active_count < principal_active_limit)
+                .then_some((*ticket, entry.invocation_id))
+        })
     }
 
     /// Check the configured host profile before entering storage admission.
@@ -946,6 +988,7 @@ fn discard_reservation(state: &mut StagingState, invocation_id: [u8; 16]) {
     let Some(reservation) = state.reservations.remove(&invocation_id) else {
         return;
     };
+    remove_start_queue_entry(state, invocation_id);
     state
         .connection_reservations
         .remove(&reservation.connection_id);
@@ -965,6 +1008,16 @@ fn discard_reservation(state: &mut StagingState, invocation_id: [u8; 16]) {
                 .principal_reserved_bytes
                 .remove(&reservation.principal_id);
         }
+    }
+}
+
+fn remove_start_queue_entry(state: &mut StagingState, invocation_id: [u8; 16]) {
+    let ticket = state
+        .start_queue
+        .iter()
+        .find_map(|(ticket, entry)| (entry.invocation_id == invocation_id).then_some(*ticket));
+    if let Some(ticket) = ticket {
+        state.start_queue.remove(&ticket);
     }
 }
 
@@ -1259,6 +1312,93 @@ mod tests {
             .start_with(queued_owner, queued_id, |_| Ok::<_, ()>(()))
             .unwrap();
         store.finish_started(queued_owner, queued_id).unwrap();
+    }
+
+    #[test]
+    fn start_retries_preserve_fifo_order_within_eligible_capacity() {
+        let store = StagingStore::new(
+            StagingLimits {
+                max_active_operational: 1,
+                ..StagingLimits::default()
+            },
+            Arc::new(AcceptMetadata),
+        )
+        .unwrap();
+        let first_owner = make_owner(51, 61);
+        let second_owner = make_owner(52, 62);
+        let third_owner = make_owner(53, 63);
+        let first_id = upload_and_seal(&store, first_owner, b"first", b"");
+        let second_id = upload_and_seal(&store, second_owner, b"second", b"");
+        let third_id = upload_and_seal(&store, third_owner, b"third", b"");
+
+        store
+            .start_with(first_owner, first_id, |_| Ok::<_, ()>(()))
+            .unwrap();
+        assert!(matches!(
+            store.start_with(second_owner, second_id, |_| Ok::<_, ()>(())),
+            Err(StartError::Staging(StagingError::ResourceLimit))
+        ));
+        assert!(matches!(
+            store.start_with(third_owner, third_id, |_| Ok::<_, ()>(())),
+            Err(StartError::Staging(StagingError::ResourceLimit))
+        ));
+        store.finish_started(first_owner, first_id).unwrap();
+
+        assert!(matches!(
+            store.start_with(third_owner, third_id, |_| Ok::<_, ()>(())),
+            Err(StartError::Staging(StagingError::ResourceLimit))
+        ));
+        assert_eq!(
+            store.status(third_owner, third_id),
+            Ok(SubmissionState::Prepared)
+        );
+        store
+            .start_with(second_owner, second_id, |_| Ok::<_, ()>(()))
+            .unwrap();
+        store.finish_started(second_owner, second_id).unwrap();
+        store
+            .start_with(third_owner, third_id, |_| Ok::<_, ()>(()))
+            .unwrap();
+        store.finish_started(third_owner, third_id).unwrap();
+    }
+
+    #[test]
+    fn canceling_a_queued_start_releases_its_turn() {
+        let store = StagingStore::new(
+            StagingLimits {
+                max_active_operational: 1,
+                ..StagingLimits::default()
+            },
+            Arc::new(AcceptMetadata),
+        )
+        .unwrap();
+        let first_owner = make_owner(54, 64);
+        let cancelled_owner = make_owner(55, 65);
+        let next_owner = make_owner(56, 66);
+        let first_id = upload_and_seal(&store, first_owner, b"first", b"");
+        let cancelled_id = upload_and_seal(&store, cancelled_owner, b"cancel", b"");
+        let next_id = upload_and_seal(&store, next_owner, b"next", b"");
+
+        store
+            .start_with(first_owner, first_id, |_| Ok::<_, ()>(()))
+            .unwrap();
+        assert!(matches!(
+            store.start_with(cancelled_owner, cancelled_id, |_| Ok::<_, ()>(())),
+            Err(StartError::Staging(StagingError::ResourceLimit))
+        ));
+        store
+            .cancel_prepared(cancelled_owner, cancelled_id)
+            .unwrap();
+        assert!(matches!(
+            store.start_with(next_owner, next_id, |_| Ok::<_, ()>(())),
+            Err(StartError::Staging(StagingError::ResourceLimit))
+        ));
+
+        store.finish_started(first_owner, first_id).unwrap();
+        store
+            .start_with(next_owner, next_id, |_| Ok::<_, ()>(()))
+            .unwrap();
+        store.finish_started(next_owner, next_id).unwrap();
     }
 
     #[test]

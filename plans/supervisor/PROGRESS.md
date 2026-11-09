@@ -144,3 +144,10 @@
 - Behavior: `prdb-supervisor` exposes positive `--max-storage-active-snapshots` and `--max-storage-active-analytical-snapshots` settings and passes them to every storage manager created by the service, including after recovery/reopen. Defaults remain 128 total and 8 analytical snapshots.
 - Regression: `supervisor_help_documents_explicit_runtime_and_compatibility_configuration` checks both options are documented in `--help`. Supervisor unit tests verify defaults, explicit CLI values, and rejection of zero for either limit.
 - Contract: [supervisor CLI](../../engine/src/bin/prdb-supervisor.rs), [storage manager](../../specs/storage-manager.md), and [workload profile](../../specs/workload-profile.md).
+
+## WI-7 / SU-7: bounded fair START retry queue — implemented
+
+- Behavior: the first START attempt assigns a ticket to its sealed reservation. A retry can consume the next available active slot only if it is the earliest eligible ticket. Entries blocked by a full class or per-principal quota are skipped, so other configured allowances make progress. Tickets are removed when a reservation is cancelled, expires, disconnects, or starts. The queue is bounded by existing live-reservation and class pending quotas; capacity responses remain retryable resource-limit results and do not block a gateway-service thread.
+- Red/green evidence: `start_retries_preserve_fifo_order_within_eligible_capacity` failed before the queue implementation because a later reservation took the freed slot. It now verifies non-barging order. `canceling_a_queued_start_releases_its_turn` checks cancellation does not strand a later eligible submission; the per-principal quota regression checks an unrelated principal can use otherwise available class capacity.
+- Contract: [supervisor](../../specs/supervisor.md) and [workload profile](../../specs/workload-profile.md).
+- Limitation: admission is retry-driven; the service does not asynchronously wake queued clients. This does not guarantee latency for storage commits, point reads, cancellation, or reclamation under host-wide resource saturation.
