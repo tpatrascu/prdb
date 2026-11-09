@@ -25,7 +25,7 @@ Use a dedicated planning channel for authorized schema, logical access paths, an
 
 Request cardinality, authorized output size, selectivity, and eventually distinct-count/correlation estimates as supported. Each estimate identifies its population and uncertainty. A readable-cell estimate cannot substitute for an estimate over every visible row. An estimate never proves a query is authorized.
 
-The planner cannot request unrestricted refresh jobs, access raw global catalogs, or submit native estimation callbacks. An unavailable estimate or exhausted estimation allowance may use fixed heuristics while the planning request remains active. Exhaustion of the overall planning budget, cancellation, or deadline expiry terminates planning. Treat all returned metadata as potentially disclosed through plans, diagnostics, and executor output.
+The planner cannot request unrestricted refresh jobs, access raw global catalogs, or submit native estimation callbacks. Each planner stream has a cumulative allowance of 16 storage estimate requests; once exhausted, storage returns `Unknown` and planning may continue with fixed heuristics. This estimate allowance is separate from the existing 256-request planner stream cap and the invocation deadline. Exhaustion of the overall planning budget, cancellation, or deadline expiry terminates planning. Treat all returned metadata as potentially disclosed through plans, diagnostics, and executor output.
 
 ## Catalog and DDL Boundaries
 

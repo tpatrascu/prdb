@@ -54,6 +54,9 @@ use std::time::{Duration, Instant};
 
 const MAX_INDEX_CHANGES_PER_ROW: usize = 256;
 pub const MAX_INVOCATION_SCAN_WORK: usize = 65_536;
+/// Authorized estimate requests admitted on one planner connection before the
+/// session switches to fixed optimizer heuristics.
+pub const MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION: usize = 16;
 const INFORMATION_SCHEMA_ID: [u8; 16] = crate::metadata_discovery::INFORMATION_SCHEMA_SCHEMA_ID;
 const INFORMATION_SCHEMA_COLUMN_EXTRA_BYTES: usize =
     "TIMESTAMP WITH TIME ZONE".len() + "YES".len() + 4 + 3 * 5 + 16;
@@ -296,12 +299,14 @@ pub struct PlannerMetadataConnection<'connection, 'db> {
     transaction: &'connection mut InvocationTransaction<'db>,
     handles: HashMap<[u8; 16], PlannerTableHandleState>,
     used_tokens: HashSet<[u8; 16]>,
+    estimate_requests: usize,
 }
 
 #[derive(Default)]
 pub(crate) struct PlannerMetadataSessionState {
     handles: HashMap<[u8; 16], PlannerTableHandleState>,
     used_tokens: HashSet<[u8; 16]>,
+    estimate_requests: usize,
 }
 
 #[derive(Clone)]
@@ -744,6 +749,7 @@ impl<'db> InvocationTransaction<'db> {
             transaction: self,
             handles: state.handles,
             used_tokens: state.used_tokens,
+            estimate_requests: state.estimate_requests,
         }
     }
 
@@ -6670,6 +6676,7 @@ impl PlannerMetadataConnection<'_, '_> {
         PlannerMetadataSessionState {
             handles: self.handles,
             used_tokens: self.used_tokens,
+            estimate_requests: self.estimate_requests,
         }
     }
 
@@ -6738,6 +6745,9 @@ impl PlannerMetadataConnection<'_, '_> {
         {
             return Ok(AuthorizedScanEstimate::Unknown);
         }
+        if !consume_planner_estimate_budget(&mut self.estimate_requests) {
+            return Ok(AuthorizedScanEstimate::Unknown);
+        }
         let state = self
             .transaction
             .load_catalog_estimate_projection(description.relation_id)?;
@@ -6792,6 +6802,14 @@ impl PlannerMetadataConnection<'_, '_> {
             .map(|_| ())
             .ok_or(TransactionError::InvalidMetadataRequest)
     }
+}
+
+fn consume_planner_estimate_budget(requests: &mut usize) -> bool {
+    if *requests >= MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION {
+        return false;
+    }
+    *requests += 1;
+    true
 }
 
 fn valid_estimate_projection(table_id: [u8; 16], projection: &AuthorizedProjection<'_>) -> bool {
@@ -7463,5 +7481,21 @@ mod requested_scope_tests {
         drop(invocation);
         drop(instance);
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod planner_estimate_budget_tests {
+    use super::{MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION, consume_planner_estimate_budget};
+
+    #[test]
+    fn estimate_budget_exhaustion_falls_back_without_ending_the_planner_session() {
+        let mut requests = 0;
+        for _ in 0..MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION {
+            assert!(consume_planner_estimate_budget(&mut requests));
+        }
+        assert_eq!(requests, MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION);
+        assert!(!consume_planner_estimate_budget(&mut requests));
+        assert_eq!(requests, MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION);
     }
 }

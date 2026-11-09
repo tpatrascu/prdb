@@ -6,7 +6,7 @@ Implement [statistics](../../specs/statistics-service.md) as a trusted module wi
 
 ## Initial Implemented Slice
 
-The internal `InvocationTransaction::estimate_authorized_scan` API returns exact visible-row and requested-column VALUE/NULL/REDACTED counts from the pinned snapshot plus private overlay, or `Unknown` without partial counts. It scans at most 16,384 candidates and only returns exact results when row inclusion can be proven independent of row values. Value-dependent table SELECT policies and invalid contexts return `Unknown` before scanning. `planner_ipc` dispatches relation descriptions and estimates through connection-scoped kind-9 handles; the IPC role matrix denies estimate operations to executors and executor scan operations to planners. Supervisor provisioning of the planner stream remains unimplemented.
+The internal `InvocationTransaction::estimate_authorized_scan` API returns exact visible-row and requested-column VALUE/NULL/REDACTED counts from the pinned snapshot plus private overlay, or `Unknown` without partial counts. It scans at most 16,384 candidates per estimate and the planner metadata connection admits at most 16 estimates over its lifetime; exhaustion returns `Unknown` while leaving the invocation active. It only returns exact results when row inclusion can be proven independent of row values. Value-dependent table SELECT policies and invalid contexts return `Unknown` before scanning. `planner_ipc` dispatches relation descriptions and estimates through connection-scoped kind-9 handles; the IPC role matrix denies estimate operations to executors and executor scan operations to planners. Supervisor provisioning of the planner stream remains unimplemented.
 
 ## Decisions Before Further Implementation
 

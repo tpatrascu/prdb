@@ -20,14 +20,14 @@
 - Behavior: PREPARE atomically enforces a live reservation ceiling per authenticated principal in addition to the global count and byte quotas. The default is 128 per principal; `--max-principal-reservations` configures it. All live staging and active states count. A denied PREPARE creates no reservation, and cancellation/expiry/disconnect/terminal cleanup releases capacity.
 - Changed code and contract: [staging state machine](../../engine/src/supervisor.rs), [supervisor CLI](../../engine/src/bin/prdb-supervisor.rs), and [supervisor admission contract](../../specs/supervisor.md).
 - Verification: the deterministic principal-isolation/cancellation regression and supervisor help test passed. In the pinned Nix shell, locked workspace build, format check, warning-denied Clippy, and `cargo test --workspace --locked --offline` passed; commit integration reported 128 passed and 3 cgroup-gated ignored tests.
-- Remaining: bounded wait queues, separate planner/estimation budgets, and analytical prefetch/cache controls remain open.
+- Remaining: execution wait-queue scheduling/fair progress, overall planner search budgets, and analytical prefetch/cache controls remain open. The storage estimate allowance is tracked in the [statistics plan progress](../statistics-service/PROGRESS.md).
 
 ## SU-2 / SU-7: class-bounded pending submission backlog — implemented
 
 - Behavior: PREPARE counts uploading, sealing, sealed, and discard-requested reservations against independent operational and analytical pending limits. Defaults are 256 operational and 64 analytical; `--max-pending-operational` and `--max-pending-analytical` configure them. At the class limit PREPARE returns a resource-limit error without creating a reservation. Starting/started work uses the active invocation quotas above.
 - Changed code and contract: [staging state machine](../../engine/src/supervisor.rs), [supervisor CLI](../../engine/src/bin/prdb-supervisor.rs), and [workload profile](../../specs/workload-profile.md).
 - Verification: deterministic staging test checks cap rejection, class independence, cancellation release, and successful retry; supervisor help coverage checks both flags. In the pinned Nix shell, locked workspace build, format check, warning-denied Clippy, and `cargo test --workspace --locked --offline` passed; commit integration reported 128 passed and 3 cgroup-gated ignored tests.
-- Remaining: execution wait-queue scheduling/fair progress, separate planner/estimation budgets, and analytical prefetch/cache controls remain open.
+- Remaining: execution wait-queue scheduling/fair progress, overall planner search budgets, and analytical prefetch/cache controls remain open. The storage estimate allowance is tracked in the [statistics plan progress](../statistics-service/PROGRESS.md).
 
 ## SU-2 dependency: bounded submission staging
 
