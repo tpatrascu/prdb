@@ -618,6 +618,40 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
     })?;
     let dropped_cell_update_policy = admin.drop_policy(cell_update_policy.policy_id)?;
     assert!(dropped_cell_update_policy.commit_sequence > cell_update_policy.commit_sequence);
+    for (name, operation, using_expression, with_check_expression) in [
+        (
+            "process_insertable_rows",
+            AdminPolicyOperation::Insert,
+            None,
+            Some(&policy_true),
+        ),
+        (
+            "process_updatable_rows",
+            AdminPolicyOperation::Update,
+            Some(&policy_true),
+            Some(&policy_true),
+        ),
+        (
+            "process_deletable_rows",
+            AdminPolicyOperation::Delete,
+            Some(&policy_true),
+            None,
+        ),
+    ] {
+        let row_policy = admin.create_policy(AdminCreatePolicyRequest {
+            table_id: created_table.table_id,
+            name,
+            kind: AdminPolicyKind::Row,
+            operation,
+            effect: AdminPolicyEffect::Allow,
+            recipients: &[AdminPolicyRecipient::User(admin_user_id)],
+            target_column_ids: &[],
+            using_expression,
+            with_check_expression,
+        })?;
+        let dropped_row_policy = admin.drop_policy(row_policy.policy_id)?;
+        assert!(dropped_row_policy.commit_sequence > row_policy.commit_sequence);
+    }
     let renamed_column =
         admin.rename_column(created_table.table_id, added_column.column_id, "extra_v2")?;
     let dropped_column = admin.drop_column(created_table.table_id, added_column.column_id)?;
