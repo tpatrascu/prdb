@@ -3,7 +3,7 @@
 
 #include "prdb_sdk_sql_order_v2.h"
 
-#define PRDB_SDK_SQL_ORDER_MAX_KEYS UINT32_C(2)
+#define PRDB_SDK_SQL_ORDER_MAX_KEYS UINT32_C(9)
 
 typedef struct prdb_sdk_sql_order_key_v3 {
     const prdb_sdk_value_v1 *values;
@@ -14,7 +14,7 @@ typedef struct prdb_sdk_sql_order_key_v3 {
     uint8_t reserved;
 } prdb_sdk_sql_order_key_v3;
 
-/* Stable lexicographic ordering for up to two authorized keys and 128 rows.
+/* Stable lexicographic ordering for up to nine authorized keys and 128 rows.
  * No index output is written if any key or comparison is invalid. */
 int32_t prdb_sdk_sql_order_row_indices_v3(
     const prdb_sdk_sql_order_key_v3 *keys, uint32_t key_count,

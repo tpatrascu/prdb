@@ -96,6 +96,31 @@ int main(void) {
     }
 
     {
+        uint8_t bytes[PRDB_SDK_SQL_ORDER_MAX_KEYS][5][4];
+        prdb_sdk_value_v1 values[PRDB_SDK_SQL_ORDER_MAX_KEYS][5];
+        prdb_sdk_sql_order_key_v3 keys_v3[PRDB_SDK_SQL_ORDER_MAX_KEYS];
+        const int32_t last_key[] = {3, 1, 4, 0, 2};
+        static const uint32_t expected[] = {3, 1, 4, 0, 2};
+        for (uint32_t key = 0; key < PRDB_SDK_SQL_ORDER_MAX_KEYS; ++key) {
+            keys_v3[key] = (prdb_sdk_sql_order_key_v3){
+                values[key], PRDB_SDK_VALUE_TYPE_INTEGER, 0,
+                PRDB_SDK_SQL_ORDER_ASCENDING, PRDB_SDK_SQL_ORDER_NULLS_FIRST,
+                0};
+            for (uint32_t row = 0; row < 5; ++row) {
+                values[key][row] = integer_value(
+                    bytes[key][row], key + 1 == PRDB_SDK_SQL_ORDER_MAX_KEYS
+                                         ? last_key[row]
+                                         : 7);
+            }
+        }
+        assert(PRDB_SDK_SQL_ORDER_MAX_KEYS == 9);
+        assert(prdb_sdk_sql_order_row_indices_v3(
+                   keys_v3, PRDB_SDK_SQL_ORDER_MAX_KEYS, 5, order, 5) ==
+               PRDB_SDK_SQL_ORDER_OK);
+        assert(memcmp(order, expected, sizeof(expected)) == 0);
+    }
+
+    {
         prdb_sdk_value_v1 invalid_keys[2] = {keys[0], keys[1]};
         uint32_t unchanged[2] = {41, 42};
         uint8_t bigint_bytes[8] = {0};
