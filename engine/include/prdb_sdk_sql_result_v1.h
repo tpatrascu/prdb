@@ -5,6 +5,7 @@
 #include "prdb_sdk_sql_v5.h"
 #include "prdb_sdk_sql_v6.h"
 #include "prdb_sdk_sql_v8.h"
+#include "prdb_sdk_sql_v13.h"
 #include "prdb_query_abi_v3.h"
 
 #define PRDB_SDK_SQL_RESULT_V1_ABI_VERSION UINT32_C(1)
@@ -141,6 +142,24 @@ int32_t prdb_sdk_sql_write_group_avg_result_v1(
     const prdb_sdk_value_v1 *group_key,
     const prdb_sdk_sql_column_shape_v2 *aggregate_input_column,
     const prdb_sdk_value_v1 *aggregate_value,
+    uint8_t *output, uint64_t output_capacity, uint64_t *output_len);
+
+/* Encodes one multi-key v13 grouped SQLR record. Key fields retain source
+ * names/types; the final field is count/min/max/sum/avg. COUNT(*) uses the
+ * supplied matching-row count. */
+int32_t prdb_sdk_sql_encode_group_composite_result_v1(
+    const prdb_sdk_select_binding_v13 *binding,
+    const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count,
+    const prdb_sdk_value_v1 *group_keys, uint32_t group_key_count,
+    const prdb_sdk_value_v1 *aggregate_value, uint64_t matching_row_count,
+    uint8_t *output, uint64_t output_capacity, uint64_t *output_len);
+
+int32_t prdb_sdk_sql_write_group_composite_result_v1(
+    const prdb_host_api_v3 *host,
+    const prdb_sdk_select_binding_v13 *binding,
+    const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count,
+    const prdb_sdk_value_v1 *group_keys, uint32_t group_key_count,
+    const prdb_sdk_value_v1 *aggregate_value, uint64_t matching_row_count,
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len);
 
 #endif /* PRDB_SDK_SQL_RESULT_V1_H */

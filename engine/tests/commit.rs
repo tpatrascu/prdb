@@ -20813,6 +20813,67 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         retention_deadline_us: now + 3_600_000_000,
         audit_event: joined_table_audit,
     })?;
+    let composite_table_invocation = id(0xd0);
+    let mut composite_table_audit = identity_audit_event(0xd1, user_id, schema.schema_id);
+    composite_table_audit.correlation_id = composite_table_invocation;
+    let composite_table = storage.create_table(CreateTableRequest {
+        invocation_id: composite_table_invocation,
+        authenticated_actor_id: user_id,
+        schema_id: schema.schema_id,
+        name: "grouped_records".to_owned(),
+        columns: vec![
+            TableColumnDefinition {
+                name: "left_key".to_owned(),
+                scalar_type: ScalarType::Integer,
+                nullable: false,
+                generated_uuid_identity: false,
+                default: None,
+            },
+            TableColumnDefinition {
+                name: "right_key".to_owned(),
+                scalar_type: ScalarType::Integer,
+                nullable: false,
+                generated_uuid_identity: false,
+                default: None,
+            },
+        ],
+        retention_deadline_us: now + 3_600_000_000,
+        audit_event: composite_table_audit,
+    })?;
+    let composite_schema = [
+        ColumnSchema {
+            scalar_type: ScalarType::Integer,
+            nullable: false,
+        },
+        ColumnSchema {
+            scalar_type: ScalarType::Integer,
+            nullable: false,
+        },
+    ];
+    let composite_rows = [(0xd3, 1, 7), (0xd4, 1, 7), (0xd5, 2, 9)]
+        .into_iter()
+        .map(|(row_id, left, right)| {
+            Ok(RowWrite {
+                key: table_row_key(composite_table.table_id, id(row_id)),
+                expected_version: None,
+                payload: Some(encode_tuple(
+                    &composite_schema,
+                    1,
+                    &[
+                        Some(ScalarValue::Integer(left)),
+                        Some(ScalarValue::Integer(right)),
+                    ],
+                )?),
+            })
+        })
+        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+    commit_rows(
+        &database,
+        id(0xd6),
+        builtin_owner_id(),
+        now + 3_600_000_000,
+        &composite_rows,
+    )?;
     let joined_tuple = encode_tuple(
         &[ColumnSchema {
             scalar_type: ScalarType::Integer,
@@ -20900,6 +20961,9 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         dependency_write(user_id, records_table.column_ids[0], 5),
         dependency_write(user_id, joined_table.table_id, 5),
         dependency_write(user_id, joined_table.column_ids[0], 5),
+        dependency_write(user_id, composite_table.table_id, 5),
+        dependency_write(user_id, composite_table.column_ids[0], 5),
+        dependency_write(user_id, composite_table.column_ids[1], 5),
     ];
     authority_writes.extend((2..=5).map(|privilege| {
         grant_write(
@@ -20938,7 +21002,18 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             joined_table.column_ids[0],
             user_id,
         ),
+        grant_write(
+            user_id,
+            composite_table.table_id,
+            2,
+            1,
+            composite_table.table_id,
+            user_id,
+        ),
     ]);
+    authority_writes.extend(composite_table.column_ids.iter().map(|column_id| {
+        grant_write(user_id, composite_table.table_id, 2, 2, *column_id, user_id)
+    }));
     let (
         old_user_record,
         old_token_record,
@@ -21480,7 +21555,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     }
     for operation in 2..=5 {
         let mut tables = if operation == 2 {
-            vec![&records_table, &joined_table]
+            vec![&records_table, &joined_table, &composite_table]
         } else {
             vec![&records_table]
         };
@@ -21491,9 +21566,11 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         }
         if operation <= 4 {
             for table in &tables {
-                requested_scope.extend([operation, 3]);
-                requested_scope.extend(table.table_id);
-                requested_scope.extend(table.column_ids[0]);
+                for column_id in &table.column_ids {
+                    requested_scope.extend([operation, 3]);
+                    requested_scope.extend(table.table_id);
+                    requested_scope.extend(column_id);
+                }
             }
         }
     }
@@ -21759,6 +21836,36 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 0, 1, 0, 2, 0, 2, b'i', b'd', 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 42, 0, 3,
                 b'm', b'i', b'n', 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 42
             ][..]
+        ]
+        .concat()
+    );
+    let grouped_composite_first =
+        read_frame(&mut gateway)?.ok_or("missing first composite GROUP BY SQLR result")?;
+    assert_eq!(
+        grouped_composite_first.payload,
+        [
+            b"SQLR".as_slice(),
+            &[
+                0, 1, 0, 3, 0, 8, b'l', b'e', b'f', b't', b'_', b'k', b'e', b'y', 0, 0, 0, 3, 0, 0,
+                1, 0, 0, 0, 4, 0, 0, 0, 1, 0, 9, b'r', b'i', b'g', b'h', b't', b'_', b'k', b'e',
+                b'y', 0, 0, 0, 3, 0, 0, 1, 0, 0, 0, 4, 0, 0, 0, 7, 0, 5, b'c', b'o', b'u', b'n',
+                b't', 0, 0, 0, 4, 0, 0, 1, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 2,
+            ][..],
+        ]
+        .concat()
+    );
+    let grouped_composite_second =
+        read_frame(&mut gateway)?.ok_or("missing second composite GROUP BY SQLR result")?;
+    assert_eq!(
+        grouped_composite_second.payload,
+        [
+            b"SQLR".as_slice(),
+            &[
+                0, 1, 0, 3, 0, 8, b'l', b'e', b'f', b't', b'_', b'k', b'e', b'y', 0, 0, 0, 3, 0, 0,
+                1, 0, 0, 0, 4, 0, 0, 0, 2, 0, 9, b'r', b'i', b'g', b'h', b't', b'_', b'k', b'e',
+                b'y', 0, 0, 0, 3, 0, 0, 1, 0, 0, 0, 4, 0, 0, 0, 9, 0, 5, b'c', b'o', b'u', b'n',
+                b't', 0, 0, 0, 4, 0, 0, 1, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 1,
+            ][..],
         ]
         .concat()
     );

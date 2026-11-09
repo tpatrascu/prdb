@@ -6,6 +6,7 @@
 #include "prdb_sdk_sql_exec_v10.h"
 #include "prdb_sdk_sql_exec_v11.h"
 #include "prdb_sdk_sql_exec_v12.h"
+#include "prdb_sdk_sql_exec_v13.h"
 #include "prdb_sdk_sql_result_v1.h"
 
 #include <string.h>
@@ -45,6 +46,39 @@ typedef struct joined_result_context {
     uint64_t output_len;
     uint32_t row_count;
 } joined_result_context;
+
+typedef struct composite_grouped_result_context {
+    const prdb_host_api_v3 *host;
+    const prdb_sdk_sql_column_shape_v2 *columns;
+    uint32_t column_count;
+    uint8_t *output;
+    uint64_t output_capacity;
+    uint64_t output_len;
+    uint32_t row_count;
+} composite_grouped_result_context;
+
+static int32_t write_grouped_composite_count(
+    void *opaque, const prdb_sdk_value_v1 *group_keys,
+    uint32_t group_key_count, const prdb_sdk_value_v1 *aggregate_value,
+    uint64_t matching_row_count,
+    const prdb_sdk_select_binding_v13 *binding) {
+    composite_grouped_result_context *context =
+        (composite_grouped_result_context *)opaque;
+    if (context == NULL || binding == NULL || aggregate_value != NULL ||
+        binding->base.aggregate_kind !=
+            PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR ||
+        group_key_count != 2 || binding->group_key_count != 2 ||
+        matching_row_count == 0) {
+        return 1;
+    }
+    int32_t status = prdb_sdk_sql_write_group_composite_result_v1(
+        context->host, binding, context->columns, context->column_count,
+        group_keys, group_key_count, NULL, matching_row_count,
+        context->output, context->output_capacity, &context->output_len);
+    if (status != PRDB_SDK_SQL_RESULT_OK) return 1;
+    ++context->row_count;
+    return 0;
+}
 
 static int32_t write_joined_row(void *opaque,
                                 const prdb_sdk_value_v1 *projected_values,
@@ -266,6 +300,9 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
     static const uint8_t select_grouped_order_sql[] =
         "SELECT id, COUNT(*) FROM records GROUP BY id "
         "ORDER BY COUNT(*) DESC NULLS LAST, id ASC NULLS LAST LIMIT 1";
+    static const uint8_t select_composite_group_sql[] =
+        "SELECT left_key, right_key, COUNT(*) FROM grouped_records "
+        "GROUP BY left_key, right_key LIMIT 2";
     static const uint8_t select_join_sql[] =
         "SELECT records.id, linked_records.id FROM records INNER JOIN "
         "linked_records ON records.id = linked_records.id LIMIT 1";
@@ -288,6 +325,7 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
     uint8_t batch_response[4096] = {0};
     uint8_t grouped_materialized[128] = {0};
     uint8_t grouped_result[256] = {0};
+    uint8_t composite_grouped_result[256] = {0};
     uint8_t join_result[128] = {0};
     uint8_t insert_request[256] = {0};
     uint8_t update_request[256] = {0};
@@ -323,6 +361,9 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
     grouped_result_context grouped_results = {
         host, &grouped_column, &grouped_column, grouped_result,
         sizeof(grouped_result), 0, 0};
+    composite_grouped_result_context composite_grouped_results = {
+        host, executor_columns, 2, composite_grouped_result,
+        sizeof(composite_grouped_result), 0, 0};
     joined_result_context joined_results = {
         host, join_left_executor_columns, join_right_executor_columns,
         join_result, sizeof(join_result), 0, 0};
@@ -822,6 +863,22 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
         write_grouped_min, &grouped_results);
     if (status != PRDB_SDK_SQL_EXEC_OK || grouped_results.row_count != 1) {
         static const uint8_t message[] = "fixture-error-grouped-min";
+        return report_failure(host, message, sizeof(message) - 1);
+    }
+
+    composite_grouped_results.row_count = 0;
+    composite_grouped_results.output_len = 0;
+    status = prdb_sdk_sql_execute_group_v13(
+        host, schema, sizeof(schema) - 1, select_composite_group_sql,
+        sizeof(select_composite_group_sql) - 1, NULL, 0, 16,
+        sizeof(batch_response), planner_response, sizeof(planner_response),
+        executor_response, sizeof(executor_response), batch_response,
+        sizeof(batch_response), planner_columns, 9, executor_columns, 9,
+        cell_scratch, 9, grouped_materialized, sizeof(grouped_materialized),
+        write_grouped_composite_count, &composite_grouped_results);
+    if (status != PRDB_SDK_SQL_EXEC_OK ||
+        composite_grouped_results.row_count != 2) {
+        static const uint8_t message[] = "fixture-error-composite-group";
         return report_failure(host, message, sizeof(message) - 1);
     }
 
