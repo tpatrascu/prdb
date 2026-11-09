@@ -19,6 +19,7 @@
           gcc
           binutils
           gnumake
+          python3
         ];
       };
     };

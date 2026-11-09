@@ -1,0 +1,109 @@
+{
+  "constants": [
+    {
+      "rust_name": "QUERY_ABI_VERSION",
+      "rust_type": "u32",
+      "value": 1,
+      "c_name": "PRDB_QUERY_ABI_VERSION",
+      "c_type": "UINT32_C"
+    },
+    {
+      "rust_name": "QUERY_DESCRIPTOR_SYMBOL",
+      "rust_type": "&str",
+      "value": "prdb_query_descriptor_v1",
+      "c_name": "PRDB_QUERY_DESCRIPTOR_SYMBOL",
+      "c_type": "string"
+    },
+    {
+      "rust_name": "QUERY_ENTRY_SYMBOL",
+      "rust_type": "&str",
+      "value": "prdb_query_main_v1",
+      "c_name": "PRDB_QUERY_ENTRY_SYMBOL",
+      "c_type": "string"
+    },
+    {
+      "rust_name": "QUERY_ABI_V2_VERSION",
+      "rust_type": "u32",
+      "value": 2,
+      "c_name": "PRDB_QUERY_ABI_V2_VERSION",
+      "c_type": "UINT32_C"
+    },
+    {
+      "rust_name": "QUERY_DESCRIPTOR_V2_SYMBOL",
+      "rust_type": "&str",
+      "value": "prdb_query_descriptor_v2",
+      "c_name": "PRDB_QUERY_DESCRIPTOR_V2_SYMBOL",
+      "c_type": "string"
+    },
+    {
+      "rust_name": "QUERY_ENTRY_V2_SYMBOL",
+      "rust_type": "&str",
+      "value": "prdb_query_main_v2",
+      "c_name": "PRDB_QUERY_ENTRY_V2_SYMBOL",
+      "c_type": "string"
+    },
+    {
+      "rust_name": "QUERY_ABI_V3_VERSION",
+      "rust_type": "u32",
+      "value": 3,
+      "c_name": "PRDB_QUERY_ABI_V3_VERSION",
+      "c_type": "UINT32_C"
+    },
+    {
+      "rust_name": "QUERY_DESCRIPTOR_V3_SYMBOL",
+      "rust_type": "&str",
+      "value": "prdb_query_descriptor_v3",
+      "c_name": "PRDB_QUERY_DESCRIPTOR_V3_SYMBOL",
+      "c_type": "string"
+    },
+    {
+      "rust_name": "QUERY_ENTRY_V3_SYMBOL",
+      "rust_type": "&str",
+      "value": "prdb_query_main_v3",
+      "c_name": "PRDB_QUERY_ENTRY_V3_SYMBOL",
+      "c_type": "string"
+    },
+    {
+      "rust_name": "QUERY_STATEMENT_FAILURE_SQL",
+      "rust_type": "u32",
+      "value": 1,
+      "c_name": "PRDB_QUERY_STATEMENT_FAILURE_SQL",
+      "c_type": "UINT32_C"
+    },
+    {
+      "rust_name": "MAX_PARAMETER_BYTES",
+      "rust_type": "u64",
+      "value": 1048576,
+      "c_name": "PRDB_QUERY_MAX_PARAMETER_BYTES",
+      "c_type": "UINT64_C"
+    },
+    {
+      "rust_name": "MAX_IPC_REQUEST_BYTES",
+      "rust_type": "u64",
+      "value": 1048576,
+      "c_name": "PRDB_QUERY_MAX_IPC_REQUEST_BYTES",
+      "c_type": "UINT64_C"
+    },
+    {
+      "rust_name": "MAX_IPC_RESPONSE_BYTES",
+      "rust_type": "u64",
+      "value": 1048576,
+      "c_name": "PRDB_QUERY_MAX_IPC_RESPONSE_BYTES",
+      "c_type": "UINT64_C"
+    },
+    {
+      "rust_name": "MAX_RESULT_CHUNK_BYTES",
+      "rust_type": "u64",
+      "value": 16384,
+      "c_name": "PRDB_QUERY_MAX_RESULT_CHUNK_BYTES",
+      "c_type": "UINT64_C"
+    },
+    {
+      "rust_name": "MAX_TOTAL_RESULT_BYTES",
+      "rust_type": "u64",
+      "value": 67108864,
+      "c_name": "PRDB_QUERY_MAX_TOTAL_RESULT_BYTES",
+      "c_type": "UINT64_C"
+    }
+  ]
+}

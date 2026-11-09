@@ -3,12 +3,6 @@
 
 #include "prdb_query_abi_v2.h"
 
-#define PRDB_QUERY_ABI_V3_VERSION UINT32_C(3)
-#define PRDB_QUERY_DESCRIPTOR_V3_SYMBOL "prdb_query_descriptor_v3"
-#define PRDB_QUERY_ENTRY_V3_SYMBOL "prdb_query_main_v3"
-
-#define PRDB_QUERY_STATEMENT_FAILURE_SQL UINT32_C(1)
-
 /* This callback latches a statement failure in the trusted executor. It does
  * not expose terminal transaction authority to query code; after the entry
  * point returns, the executor exits unsuccessfully and the supervisor aborts. */

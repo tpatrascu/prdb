@@ -2,10 +2,7 @@
 #define PRDB_QUERY_ABI_V1_H
 
 #include <stdint.h>
-
-#define PRDB_QUERY_ABI_VERSION UINT32_C(1)
-#define PRDB_QUERY_DESCRIPTOR_SYMBOL "prdb_query_descriptor_v1"
-#define PRDB_QUERY_ENTRY_SYMBOL "prdb_query_main_v1"
+#include "prdb_query_abi_constants.h"
 
 typedef struct prdb_host_api_v1 {
     uint32_t struct_size;

@@ -3,21 +3,7 @@
 //! statement-failure callback.
 
 use std::ffi::c_int;
-
-pub const QUERY_ABI_VERSION: u32 = 1;
-pub const QUERY_DESCRIPTOR_SYMBOL: &str = "prdb_query_descriptor_v1";
-pub const QUERY_ENTRY_SYMBOL: &str = "prdb_query_main_v1";
-pub const QUERY_ABI_V2_VERSION: u32 = 2;
-pub const QUERY_DESCRIPTOR_V2_SYMBOL: &str = "prdb_query_descriptor_v2";
-pub const QUERY_ENTRY_V2_SYMBOL: &str = "prdb_query_main_v2";
-pub const QUERY_ABI_V3_VERSION: u32 = 3;
-pub const QUERY_DESCRIPTOR_V3_SYMBOL: &str = "prdb_query_descriptor_v3";
-pub const QUERY_ENTRY_V3_SYMBOL: &str = "prdb_query_main_v3";
-pub const QUERY_STATEMENT_FAILURE_SQL: u32 = 1;
-pub const MAX_PARAMETER_BYTES: u64 = 1024 * 1024;
-pub const MAX_IPC_REQUEST_BYTES: u64 = 1024 * 1024;
-pub const MAX_RESULT_CHUNK_BYTES: u64 = 16 * 1024;
-pub const MAX_TOTAL_RESULT_BYTES: u64 = 64 * 1024 * 1024;
+include!("query_abi_constants.rs");
 
 /// Generic bounded callback for one request on a role-bound IPC channel.
 /// The channel determines authority; the operation remains subject to the

@@ -2,14 +2,7 @@
 #define PRDB_QUERY_ABI_V2_H
 
 #include <stdint.h>
-
-#define PRDB_QUERY_ABI_V2_VERSION UINT32_C(2)
-#define PRDB_QUERY_DESCRIPTOR_V2_SYMBOL "prdb_query_descriptor_v2"
-#define PRDB_QUERY_ENTRY_V2_SYMBOL "prdb_query_main_v2"
-#define PRDB_QUERY_MAX_IPC_REQUEST_BYTES UINT64_C(1048576)
-#define PRDB_QUERY_MAX_IPC_RESPONSE_BYTES UINT64_C(1048576)
-#define PRDB_QUERY_MAX_RESULT_CHUNK_BYTES UINT64_C(16384)
-#define PRDB_QUERY_MAX_TOTAL_RESULT_BYTES UINT64_C(67108864)
+#include "prdb_query_abi_constants.h"
 
 enum prdb_query_callback_status_v2 {
     PRDB_QUERY_CALLBACK_OK = 0,

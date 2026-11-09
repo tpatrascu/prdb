@@ -7,7 +7,14 @@
 - Verification: inside the locked shell, the maintained TinyCC SDK suite passed, `sandbox-query-fixture` built all three GNU-linked artifacts, and workspace build, format, warning-denied Clippy, and serial tests passed. Three cgroup-gated commit tests and one cgroup-gated metadata process test remained ignored; confined acceptance had already passed with this exact Nixpkgs source revision.
 - Changed contract: [`specs/toolchain.md`](../../specs/toolchain.md) records the development profile; [`AGENTS.md`](../../AGENTS.md) points checks to the locked shell and maintained SDK targets.
 - TinyCC provenance: the pinned recipe records upstream commit `f6385c05308f715bdd2c06336801193a21d69b50`, source hash `sha256-tO3N+NplYy8QUOC2N3x0CO5Ui75j9bQzLSZQF1HQyhY=`, and Nix NAR hashes for the compiler, runtime-support library, and development/header outputs. These are recorded in [`specs/toolchain.md`](../../specs/toolchain.md).
-- Remaining: validate the release Linux/libc/runtime profile, generate interface headers from a single schema, record release build commands and panic profiles, and package signed/checkable release artifacts. The locked shell is a development profile, not release artifact packaging.
+- Remaining: validate the release Linux/libc/runtime profile, extend schema generation to native fields/serializers, record release build commands and panic profiles, and package signed/checkable release artifacts. The locked shell is a development profile, not release artifact packaging.
+
+## TC-2: generated query ABI constants — partial
+
+- Behavior: [`query_abi_constants.json`](../../engine/abi/query_abi_constants.json) is the common source for query ABI versions, symbol names, callback failure code, and parameter/IPC/result bounds. [`generate_query_abi.py`](../../engine/tools/generate_query_abi.py) emits the C constants header and Rust constants module. `make -f engine/sdk/Makefile abi-constants` regenerates them; the maintained SDK `test` target checks drift.
+- Compatibility: C record declarations and Rust `repr(C)` records remain unchanged. Existing Rust ABI layout/descriptor tests still compare the records against the C header contract and reject unsupported descriptor versions/sizes.
+- Verification: generated-file drift check passed as part of the full maintained TinyCC SDK suite. The focused Rust/C query ABI test passed all six tests, including v1-v3 layout and descriptor validation.
+- Remaining: generate native field declarations/layout assertions from the schema and extend cross-language parity to IPC encodings and serializers. This increment does not claim TC-2 complete.
 
 ## TC-1 / TC-3: maintained TinyCC SDK and shared-artifact link profile — partial
 
