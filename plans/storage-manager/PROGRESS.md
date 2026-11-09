@@ -2045,6 +2045,6 @@
 
 - Contract: strict PREPARE/START accepts canonical row/cell policy shape, recipient IDs, cell-column targets, and nullable EIR1 USING/WITH CHECK expressions. START delegates to typed StorageManager policy create/drop and revalidates authority at serialized commit.
 - Implementation: `policies.create` and `policies.drop` are connection-owned ADMIN operations. `AdminClient` encodes typed policy enums, recipients, target columns and expressions; `prdb-client policy-create/policy-drop` exposes the same path.
-- Regression: protocol decoder tests accept canonical row-policy create/drop and reject malformed shapes; the real gateway/supervisor process lifecycle creates and drops a row SELECT ALLOW policy. CLI recipient parser accepts only user/role plus canonical nonzero lowercase IDs.
+- Regression: protocol decoder tests accept canonical row-policy create/drop and reject malformed shapes; the real gateway/supervisor process lifecycle creates and drops row and cell SELECT ALLOW policies, including a cell target bound to a live column. CLI recipient parser accepts only user/role plus canonical nonzero lowercase IDs.
 - Verification: focused protocol, multi-process, and CLI parser tests passed; updated `prdb-client --help` was inspected. Rust 1.95.0 workspace build, formatting, warning-denied Clippy, and full tests passed; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
 - Remaining: broader cell policy process coverage, repeated race stress, and confined artifact execution remain open.

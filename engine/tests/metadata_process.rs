@@ -574,6 +574,21 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
     })?;
     let dropped_policy = admin.drop_policy(policy.policy_id)?;
     assert!(dropped_policy.commit_sequence > policy.commit_sequence);
+    let cell_policy = admin.create_policy(AdminCreatePolicyRequest {
+        table_id: created_table.table_id,
+        name: "process_visible_cells",
+        kind: AdminPolicyKind::Cell,
+        operation: AdminPolicyOperation::Select,
+        effect: AdminPolicyEffect::Allow,
+        recipients: &[AdminPolicyRecipient::User(admin_user_id)],
+        target_column_ids: &[added_column.column_id],
+        using_expression: Some(&prdb_engine::authorization::Expr::Literal(Some(
+            prdb_engine::tuple::ScalarValue::Boolean(true),
+        ))),
+        with_check_expression: None,
+    })?;
+    let dropped_cell_policy = admin.drop_policy(cell_policy.policy_id)?;
+    assert!(dropped_cell_policy.commit_sequence > cell_policy.commit_sequence);
     let renamed_column =
         admin.rename_column(created_table.table_id, added_column.column_id, "extra_v2")?;
     let dropped_column = admin.drop_column(created_table.table_id, added_column.column_id)?;
