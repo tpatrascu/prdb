@@ -18208,7 +18208,7 @@ fn token_admission_checks_expiry_secret_revocation_and_commit_guards()
         storage.discover_token_authorized_schemas(id(71), &[0xFF; 32]),
         Err(TransactionError::AuthenticationFailed)
     ));
-    let (admitted, roles) = storage.begin_token_authenticated_invocation(
+    let (mut admitted, roles) = storage.begin_token_authenticated_invocation(
         id(75),
         id(71),
         &active_secret,
@@ -18217,6 +18217,23 @@ fn token_admission_checks_expiry_secret_revocation_and_commit_guards()
         64,
     )?;
     assert!(roles.is_empty());
+    let pending_row_id = prdb_engine::overlay::RowId {
+        table: id(16),
+        row: id(0x7a),
+    };
+    admitted.stage_put(
+        pending_row_id,
+        &encode_tuple(
+            &[ColumnSchema {
+                scalar_type: ScalarType::Text,
+                nullable: false,
+            }],
+            1,
+            &[Some(ScalarValue::Text(
+                "must not publish after token revoke".to_owned(),
+            ))],
+        )?,
+    )?;
 
     for (invocation_id, token_id, secret) in [
         (id(76), id(71), [0xFF; 32]),
@@ -18261,6 +18278,15 @@ fn token_admission_checks_expiry_secret_revocation_and_commit_guards()
         admitted.commit(),
         Err(TransactionError::Commit(CommitError::Conflict))
     ));
+    let pending_row_key = table_row_key(pending_row_id.table, pending_row_id.row);
+    assert!(
+        database
+            .begin_read()?
+            .open_table(ROWS)?
+            .get(&pending_row_key[..])?
+            .is_none(),
+        "revoked token's pending row write was published"
+    );
     assert_eq!(
         lookup_outcome(&database, id(75), user_id, now)?
             .unwrap()

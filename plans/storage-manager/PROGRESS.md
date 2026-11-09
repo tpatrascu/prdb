@@ -2092,3 +2092,11 @@
 - Implementation: no production change was needed; the existing pinned membership and authority-epoch guards reject the stale write.
 - Verification: the focused regression passed. The Rust commit integration target passed with 126 tests and 3 delegated-cgroup tests ignored; `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed in the prescribed Rust/Cargo 1.95.0 Nix shell.
 - Remaining: equivalent stale-writer coverage for identity, credential, and other authority-changing DDL routes, plus repeated concurrent schedules, remains open.
+
+## SM-5 / AU-6: token revocation discards a pending row write — verified
+
+- Contract: a token-authenticated invocation must revalidate its exact credential record at finalization; revoking that token makes a pending invocation conflict before any staged row can publish.
+- Regression: `token_admission_checks_expiry_secret_revocation_and_commit_guards` now stages a valid tuple before revocation, then checks the durable ABORTED outcome and confirms the row key remains absent after the credential record is revoked.
+- Implementation: no production change was needed; token admission's pinned verifier guard rejects the stale finalization.
+- Verification: the focused regression passed. The full Rust commit integration target passed with 126 tests and 3 delegated-cgroup tests ignored; formatting and warning-denied workspace Clippy passed in the prescribed Rust/Cargo 1.95.0 Nix shell.
+- Remaining: repeat the check through a fully authorized mutation path and add stale-writer coverage for identity/login changes and broader authority-changing DDL routes.
