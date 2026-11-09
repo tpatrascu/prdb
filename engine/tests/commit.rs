@@ -18162,6 +18162,7 @@ fn token_admission_checks_expiry_secret_revocation_and_commit_guards()
     let active_secret = [0x31; 32];
     let expired_secret = [0x32; 32];
     let revoked_secret = [0x33; 32];
+    let login_disable_secret = [0x35; 32];
     let active = credential_verifier_write(
         id(71),
         user_id,
@@ -18198,6 +18199,15 @@ fn token_admission_checks_expiry_secret_revocation_and_commit_guards()
         None,
         1,
     );
+    let login_disable_credential = credential_verifier_write(
+        id(0x85),
+        user_id,
+        &login_disable_secret,
+        now - 1_000_000,
+        now + 60_000_000,
+        None,
+        1,
+    );
     commit_catalog_and_audit(
         &database,
         id(74),
@@ -18217,6 +18227,7 @@ fn token_admission_checks_expiry_secret_revocation_and_commit_guards()
             expired,
             revoked,
             live_admin_credential,
+            login_disable_credential,
         ],
         &[audit_event(74)],
     )
@@ -18530,6 +18541,128 @@ fn token_admission_checks_expiry_secret_revocation_and_commit_guards()
         Err(TransactionError::AuthenticationFailed)
     ));
     assert_eq!(lookup_outcome(&database, id(80), user_id, now)?, None);
+
+    let (mut login_disable_writer, login_roles) = storage.begin_token_authenticated_invocation(
+        id(0x88),
+        id(0x85),
+        &login_disable_secret,
+        now + 3_600_000_000,
+        2,
+        1024,
+    )?;
+    assert!(login_roles.is_empty());
+    login_disable_writer.stage_patch_authorized(
+        prdb_engine::overlay::RowId {
+            table: schema.table_id,
+            row: row_id,
+        },
+        &projection,
+        &[FieldPatch {
+            ordinal: 0,
+            value: Some(ScalarValue::Bytea(
+                b"must not publish after LOGIN disable".to_vec(),
+            )),
+        }],
+    )?;
+    let login_disabled_payload = encode_tuple(
+        &schema.columns,
+        schema.schema_version,
+        &[Some(ScalarValue::Bytea(
+            b"must not publish after LOGIN disable".to_vec(),
+        ))],
+    )?;
+    let login_disabled_index = typed_bytea_index_key([0x44; 16], &row_key, &login_disabled_payload);
+    login_disable_writer.stage_index_membership(
+        prdb_engine::overlay::RowId {
+            table: schema.table_id,
+            row: row_id,
+        },
+        original_index_key_for_assert.clone(),
+        false,
+    )?;
+    login_disable_writer.stage_index_membership(
+        prdb_engine::overlay::RowId {
+            table: schema.table_id,
+            row: row_id,
+        },
+        login_disabled_index.key.clone(),
+        true,
+    )?;
+
+    let login_disable_invocation = id(0x87);
+    let mut login_disable_audit = identity_audit_event(0x86, admin_user_id, user_id);
+    login_disable_audit.correlation_id = login_disable_invocation;
+    assert_eq!(
+        storage.set_user_login_enabled(
+            login_disable_invocation,
+            admin_user_id,
+            user_id,
+            false,
+            now + 3_600_000_000,
+            login_disable_audit,
+        )?,
+        4,
+    );
+    let login_disable_result = login_disable_writer.commit();
+    assert!(
+        matches!(
+            &login_disable_result,
+            Err(TransactionError::Commit(CommitError::Conflict))
+        ),
+        "disabled LOGIN user committed a stale update: {login_disable_result:?}"
+    );
+    assert_eq!(
+        decode_tuple(
+            &columns,
+            1,
+            &RowRecord::decode(
+                database
+                    .begin_read()?
+                    .open_table(ROWS)?
+                    .get(&row_key[..])?
+                    .ok_or("row disappeared after LOGIN disable")?
+                    .value(),
+            )?
+            .payload,
+        )?
+        .values,
+        [Some(ScalarValue::Bytea(b"before token revoke".to_vec()))],
+        "disabled user's staged update was published"
+    );
+    let read = database.begin_read()?;
+    let indexes = read.open_table(schema::INDEXES)?;
+    assert!(
+        indexes
+            .get(original_index_key_for_assert.as_slice())?
+            .is_some()
+    );
+    assert!(indexes.get(login_disabled_index.key.as_slice())?.is_none());
+    drop(indexes);
+    drop(read);
+    assert_eq!(
+        lookup_outcome(&database, id(0x88), user_id, now)?
+            .ok_or("missing LOGIN-disable stale writer outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
+    assert!(matches!(
+        storage.begin_token_authenticated_invocation(
+            id(0x89),
+            id(0x85),
+            &login_disable_secret,
+            now + 3_600_000_000,
+            2,
+            64,
+        ),
+        Err(TransactionError::AuthenticationFailed)
+    ));
+    assert_eq!(lookup_outcome(&database, id(0x89), user_id, now)?, None);
+    assert!(
+        storage
+            .list_tokens(admin_user_id, user_id)?
+            .iter()
+            .any(|token| token.token_id == id(0x85) && token.revoked)
+    );
     assert!(prdb_engine::startup::validate_persisted_records(&database).is_ok());
     Ok(())
 }

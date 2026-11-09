@@ -2099,4 +2099,12 @@
 - Regression: `token_admission_checks_expiry_secret_revocation_and_commit_guards` admits an ordinary user, stages a policy-authorized row update and its old/new index memberships, then revokes the token through `StorageManager::revoke_token` as a separate database administrator. It verifies the stale invocation is durably ABORTED, the original row and index entry remain, and the replacement index entry is absent. A second live admin credential keeps final-admin validation satisfied.
 - Implementation: no production change was needed; token admission's pinned verifier guard rejects the stale finalization.
 - Verification: the focused regression passed. `cargo fmt --all -- --check` and warning-denied workspace Clippy passed. The full Rust commit integration target passed serially with 126 tests and 3 delegated-cgroup tests ignored under the prescribed Rust/Cargo 1.95.0 Nix shell. Two earlier parallel full-target runs hit the existing intermittent `InvalidAudit` in `storage_manager_creates_and_drops_check_constraint`; that test passed alone and in the serial full-target run.
-- Remaining: add stale-writer coverage for identity/login changes and broader authority-changing DDL routes.
+- Remaining: add stale-writer coverage for identity rename/drop and broader authority-changing DDL routes.
+
+## SM-5 / AU-6: LOGIN disable conflicts with an authorized staged write — verified
+
+- Contract: disabling a LOGIN user advances the principal authority epoch and revokes all active credentials atomically; an invocation admitted through a prior token and authority snapshot must not publish its pending mutation.
+- Regression: `token_admission_checks_expiry_secret_revocation_and_commit_guards` admits a second token-authenticated writer, stages an authorized row patch and corresponding index replacement, disables the user through `StorageManager::set_user_login_enabled`, and verifies the writer is durably ABORTED, the row and old index membership remain, the replacement index membership is absent, new token admission fails, and the issued token is listed as revoked.
+- Implementation: no production change was needed; the identity epoch and verifier guards reject the stale write after the serialized LOGIN transition.
+- Verification: the focused regression passed. Rust formatting and warning-denied workspace Clippy passed; the full commit integration target passed serially with 126 tests and 3 delegated-cgroup tests ignored in the prescribed Rust/Cargo 1.95.0 Nix shell.
+- Remaining: stale-writer coverage for identity rename/drop and other authority-changing DDL routes remains open.
