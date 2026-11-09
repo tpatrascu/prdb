@@ -14,6 +14,7 @@
 #define PRDB_SDK_EXECUTOR_OP_STAGE_INSERT PRDB_IPC_OP_STAGE_INSERT
 #define PRDB_SDK_EXECUTOR_OP_STAGE_UPDATE PRDB_IPC_OP_STAGE_UPDATE
 #define PRDB_SDK_EXECUTOR_OP_STAGE_DELETE PRDB_IPC_OP_STAGE_DELETE
+#define PRDB_SDK_EXECUTOR_OP_CHECK_CANCELLATION PRDB_IPC_OP_EXECUTOR_CHECK_CANCELLATION
 
 #define PRDB_SDK_EXECUTOR_OK INT32_C(0)
 #define PRDB_SDK_EXECUTOR_UNAVAILABLE INT32_C(1)
@@ -98,5 +99,11 @@ int32_t prdb_sdk_executor_stage_update_v1(
 int32_t prdb_sdk_executor_stage_delete_v1(
     const prdb_host_api_v2 *host, const uint8_t row_handle[16],
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len);
+
+/* Returns the invocation's current cancellation or deadline state in
+ * cancelled_out (0 or 1). Query runners should poll between bounded work
+ * batches and stop promptly when the result is 1. */
+int32_t prdb_sdk_executor_check_cancelled_v1(
+    const prdb_host_api_v2 *host, int32_t *cancelled_out);
 
 #endif

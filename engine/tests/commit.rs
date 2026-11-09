@@ -12061,6 +12061,21 @@ fn storage_manager_audits_cancellation_before_commit_and_preserves_terminal_outc
     };
 
     let mut pending = storage.begin_invocation(id(243), owner_id, retention_deadline_us, 2, 64)?;
+    {
+        use prdb_engine::ipc::{Operation, ServiceRole};
+        let request = prdb_engine::ipc::IpcFrame {
+            operation: Operation::ExecutorCheckCancellation as u16,
+            request_id: 1,
+            payload: Vec::new(),
+        };
+        let mut executor = pending.open_executor_metadata_connection();
+        let response = prdb_engine::executor_ipc::dispatch_executor_request(
+            ServiceRole::Executor,
+            &mut executor,
+            &request,
+        )?;
+        assert_eq!(response.payload, [0, 1, 0]);
+    }
     let cancelled_row_key = table_row_key(id(250), id(251));
     pending.stage_put(
         prdb_engine::overlay::RowId {
@@ -12120,10 +12135,21 @@ fn storage_manager_audits_cancellation_before_commit_and_preserves_terminal_outc
             ..
         }
     ));
-    assert!(matches!(
-        pending.check_deadline(),
-        Err(TransactionError::CancellationRequested)
-    ));
+    {
+        use prdb_engine::ipc::{Operation, ServiceRole};
+        let request = prdb_engine::ipc::IpcFrame {
+            operation: Operation::ExecutorCheckCancellation as u16,
+            request_id: 2,
+            payload: Vec::new(),
+        };
+        let mut executor = pending.open_executor_metadata_connection();
+        let response = prdb_engine::executor_ipc::dispatch_executor_request(
+            ServiceRole::Executor,
+            &mut executor,
+            &request,
+        )?;
+        assert_eq!(response.payload, [0, 1, 1]);
+    }
     assert_eq!(
         lookup_outcome(&database, id(243), owner_id, now_us)?
             .unwrap()

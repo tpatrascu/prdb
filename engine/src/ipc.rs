@@ -43,6 +43,7 @@ pub enum Operation {
     StageInsert = crate::query_abi::IPC_OP_STAGE_INSERT,
     StageUpdate = crate::query_abi::IPC_OP_STAGE_UPDATE,
     StageDelete = crate::query_abi::IPC_OP_STAGE_DELETE,
+    ExecutorCheckCancellation = crate::query_abi::IPC_OP_EXECUTOR_CHECK_CANCELLATION,
     DescribeRelation = crate::query_abi::IPC_OP_DESCRIBE_RELATION,
     EstimateScan = crate::query_abi::IPC_OP_ESTIMATE_SCAN,
     FinalizeTransaction = crate::query_abi::IPC_OP_FINALIZE_TRANSACTION,
@@ -86,6 +87,9 @@ impl Operation {
             crate::query_abi::IPC_OP_STAGE_INSERT => Ok(Self::StageInsert),
             crate::query_abi::IPC_OP_STAGE_UPDATE => Ok(Self::StageUpdate),
             crate::query_abi::IPC_OP_STAGE_DELETE => Ok(Self::StageDelete),
+            crate::query_abi::IPC_OP_EXECUTOR_CHECK_CANCELLATION => {
+                Ok(Self::ExecutorCheckCancellation)
+            }
             crate::query_abi::IPC_OP_DESCRIBE_RELATION => Ok(Self::DescribeRelation),
             crate::query_abi::IPC_OP_ESTIMATE_SCAN => Ok(Self::EstimateScan),
             crate::query_abi::IPC_OP_FINALIZE_TRANSACTION => Ok(Self::FinalizeTransaction),
@@ -158,6 +162,7 @@ pub fn authorize_operation(role: ServiceRole, operation: Operation) -> Result<()
                 | Operation::StageInsert
                 | Operation::StageUpdate
                 | Operation::StageDelete
+                | Operation::ExecutorCheckCancellation
         ),
         ServiceRole::Planner => matches!(
             operation,

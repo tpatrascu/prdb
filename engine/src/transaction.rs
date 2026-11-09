@@ -5864,6 +5864,16 @@ impl<'db> InvocationTransaction<'db> {
 }
 
 impl ExecutorMetadataConnection<'_, '_> {
+    /// Poll the invocation's cancellation and deadline state. Expired or
+    /// cancelled invocations are aborted before returning `true`.
+    pub fn check_cancellation(&mut self) -> Result<bool, TransactionError> {
+        match self.transaction.check_deadline() {
+            Ok(()) => Ok(false),
+            Err(TransactionError::CancellationRequested | TransactionError::Expired) => Ok(true),
+            Err(error) => Err(error),
+        }
+    }
+
     pub(crate) fn detach(mut self) -> ExecutorMetadataSessionState {
         self.detached = true;
         ExecutorMetadataSessionState {

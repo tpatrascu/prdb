@@ -11,6 +11,7 @@ _Static_assert(PRDB_SDK_EXECUTOR_OP_CLOSE_CURSOR == UINT16_C(0x1104), "close cur
 _Static_assert(PRDB_SDK_EXECUTOR_OP_STAGE_INSERT == UINT16_C(0x1110), "insert operation tag");
 _Static_assert(PRDB_SDK_EXECUTOR_OP_STAGE_UPDATE == UINT16_C(0x1111), "update operation tag");
 _Static_assert(PRDB_SDK_EXECUTOR_OP_STAGE_DELETE == UINT16_C(0x1112), "delete operation tag");
+_Static_assert(PRDB_SDK_EXECUTOR_OP_CHECK_CANCELLATION == UINT16_C(0x1113), "cancellation operation tag");
 #endif
 
 typedef struct mock_host {
@@ -308,5 +309,26 @@ int main(void) {
     assert(prdb_sdk_executor_open_full_scan_v1(
                &host, cursor, response, sizeof(response), &response_len,
                cursor) == PRDB_SDK_EXECUTOR_INVALID_ARGUMENT);
+
+    const uint8_t empty_request = 0;
+    uint8_t cancellation_reply[3] = {0, 1, 0};
+    mock.expected_operation = PRDB_SDK_EXECUTOR_OP_CHECK_CANCELLATION;
+    mock.expected_request = &empty_request;
+    mock.expected_request_len = 0;
+    mock.reply = cancellation_reply;
+    mock.reply_len = sizeof(cancellation_reply);
+    int32_t cancelled = 77;
+    assert(prdb_sdk_executor_check_cancelled_v1(&host, &cancelled) ==
+           PRDB_SDK_EXECUTOR_OK);
+    assert(cancelled == 0 && mock.calls == 12);
+    cancellation_reply[2] = 1;
+    assert(prdb_sdk_executor_check_cancelled_v1(&host, &cancelled) ==
+           PRDB_SDK_EXECUTOR_OK);
+    assert(cancelled == 1 && mock.calls == 13);
+    cancellation_reply[2] = 2;
+    cancelled = 77;
+    assert(prdb_sdk_executor_check_cancelled_v1(&host, &cancelled) ==
+           PRDB_SDK_EXECUTOR_INVALID_PAYLOAD);
+    assert(cancelled == 77 && mock.calls == 14);
     return 0;
 }

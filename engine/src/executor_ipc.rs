@@ -1098,6 +1098,14 @@ pub fn dispatch_executor_request(
             connection.stage_delete(&decoded.handle)?;
             MutationAcknowledgement.encode()
         }
+        Operation::ExecutorCheckCancellation => {
+            if !request.payload.is_empty() {
+                return Err(ExecutorRequestError::InvalidPayload);
+            }
+            let mut payload = EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes().to_vec();
+            payload.push(u8::from(connection.check_cancellation()?));
+            payload
+        }
         _ => return Err(ExecutorRequestError::UnsupportedOperation(operation)),
     };
     Ok(IpcFrame {
