@@ -20678,9 +20678,10 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         SubmissionMetadataValidator, WorkloadClass,
     };
     use prdb_engine::supervisor_ipc::{
-        GatewayAdmissionConfig, GatewayExecutorConfig, GatewayTerminalDecision,
+        GatewayAbortReason, GatewayAdmissionConfig, GatewayExecutorConfig, GatewayTerminalDecision,
         finalize_gateway_invocation_and_send_terminal, observe_executor_and_relay_results,
-        observe_executor_relay_and_finalize_gateway,
+        observe_executor_relay_and_finalize_gateway, send_gateway_result_data_event,
+        send_gateway_terminal_for_confirmed_outcome,
     };
     use prdb_engine::tuple::ScalarType;
     use sha2::{Digest, Sha256};
@@ -21729,7 +21730,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             artifact_bytes: u64::try_from(artifact.len())?,
             artifact_sha256: Sha256::digest(&artifact).into(),
             scope_version: 1,
-            requested_scope,
+            requested_scope: requested_scope.clone(),
             parameter_bytes: 0,
             parameter_sha256: Sha256::digest([]).into(),
             deadline_ms: 30_000,
@@ -22150,6 +22151,136 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             .status,
         OutcomeStatus::Committed
     );
+
+    let cancellation_parameter = [b'C'];
+    let cancellation_reservation = staging.prepare(
+        owner,
+        PrepareSubmission {
+            manifest_version: 1,
+            manifest: b"m".to_vec(),
+            artifact_bytes: u64::try_from(artifact.len())?,
+            artifact_sha256: Sha256::digest(&artifact).into(),
+            scope_version: 1,
+            requested_scope: requested_scope.clone(),
+            parameter_bytes: 1,
+            parameter_sha256: Sha256::digest(cancellation_parameter).into(),
+            deadline_ms: 30_000,
+            workload_class: WorkloadClass::Operational,
+        },
+    )?;
+    let mut cancellation_artifact_offset = 0;
+    for chunk in artifact.chunks(prdb_engine::supervisor::MAX_CHUNK_BYTES) {
+        cancellation_artifact_offset = staging
+            .upload_chunk(
+                owner,
+                cancellation_reservation.invocation_id,
+                ChunkKind::Artifact,
+                cancellation_artifact_offset,
+                chunk,
+            )
+            .map_err(|error| format!("cancellation SQL artifact chunk upload: {error:?}"))?;
+    }
+    staging
+        .upload_chunk(
+            owner,
+            cancellation_reservation.invocation_id,
+            ChunkKind::Parameters,
+            0,
+            &cancellation_parameter,
+        )
+        .map_err(|error| format!("cancellation SQL parameter upload: {error:?}"))?;
+    staging.seal(owner, cancellation_reservation.invocation_id)?;
+    let cancellation_invocation_hex = cancellation_reservation
+        .invocation_id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let (cancellation_accepted, cancellation_invocation, mut cancellation_executor) = client
+        .handle_start_request_with_executor(
+            &storage,
+            &staging,
+            ClientFrame {
+                kind: 7,
+                request_id: 2,
+                response_sequence: 0,
+                payload: format!("{{\"invocation_id\":\"{cancellation_invocation_hex}\"}}")
+                    .into_bytes(),
+            },
+            GatewayAdmissionConfig {
+                retention_period_us: 3_600_000_000,
+                max_rows: 8,
+                max_bytes: 4096,
+            },
+            &runtime,
+        )?;
+    assert_eq!(cancellation_accepted.payload, b"{\"state\":\"accepted\"}");
+    let (mut cancellation_service, mut cancellation_gateway) = UnixStream::pair()?;
+    let mut cancellation_requested = false;
+    let cancellation_observation =
+        cancellation_executor.observe_exit_with_results(&cancellation_invocation, |payload| {
+            if payload != b"CANCEL_READY" {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "unexpected cancellation fixture result",
+                ));
+            }
+            send_gateway_result_data_event(
+                &mut cancellation_service,
+                cancellation_accepted.request_id,
+                payload.to_vec(),
+            )
+            .map_err(|error| std::io::Error::other(format!("result relay: {error:?}")))?;
+            match storage
+                .cancel_owned_invocation(user_id, cancellation_reservation.invocation_id, now + 2)
+                .map_err(|error| {
+                    std::io::Error::other(format!("cancellation request: {error:?}"))
+                })? {
+                prdb_engine::storage_manager::OwnerCancellationResult::Accepted => {
+                    cancellation_requested = true;
+                    Ok(())
+                }
+                result => Err(std::io::Error::other(format!(
+                    "unexpected cancellation result: {result:?}"
+                ))),
+            }
+        });
+    assert!(cancellation_requested);
+    match cancellation_observation {
+        Ok(status) => assert!(!status.success()),
+        Err(prdb_engine::storage_manager::SupervisorInvocationError::Deadline(
+            prdb_engine::transaction::TransactionError::CancellationRequested
+            | prdb_engine::transaction::TransactionError::Aborted,
+        )) => {}
+        Err(error) => return Err(error.into()),
+    }
+    let ready_event = read_frame(&mut cancellation_gateway)?.ok_or("missing cancel ready event")?;
+    assert_eq!(ready_event.operation, Operation::GatewayResultData as u16);
+    assert_eq!(ready_event.payload, b"CANCEL_READY");
+    assert_eq!(
+        storage
+            .lookup_invocation_outcome(cancellation_reservation.invocation_id, user_id, now + 3,)?
+            .ok_or("missing durable cancellation outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
+    assert_eq!(
+        send_gateway_terminal_for_confirmed_outcome(
+            &storage,
+            &cancellation_invocation,
+            &mut cancellation_service,
+            cancellation_accepted.request_id,
+            GatewayAbortReason::Cancelled,
+        )?,
+        GatewayTerminalDecision::Abort(GatewayAbortReason::Cancelled)
+    );
+    let cancellation_terminal =
+        read_frame(&mut cancellation_gateway)?.ok_or("missing cancellation terminal event")?;
+    assert_eq!(
+        cancellation_terminal.operation,
+        Operation::GatewayTerminal as u16
+    );
+    assert!(String::from_utf8(cancellation_terminal.payload)?.contains("\"outcome\":\"aborted\""));
+    drop(cancellation_gateway);
 
     let restricted_scope = [
         b"PSC1\0\x01".as_slice(),

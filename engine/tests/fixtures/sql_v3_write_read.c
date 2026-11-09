@@ -10,6 +10,7 @@
 #include "prdb_sdk_sql_exec_v15.h"
 #include "prdb_sdk_sql_exec_v16.h"
 #include "prdb_sdk_sql_result_v1.h"
+#include "prdb_sdk_executor_v1.h"
 
 #include <string.h>
 
@@ -451,6 +452,29 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
         host->abi_version != PRDB_QUERY_ABI_V3_VERSION ||
         host->executor_request == NULL || host->planner_request == NULL ||
         host->write_result == NULL || host->statement_failure == NULL) {
+        return 1;
+    }
+    if (invocation->parameters_len == 1 && invocation->parameters != NULL &&
+        invocation->parameters[0] == 'C') {
+        static const uint8_t cancellation_ready[] = "CANCEL_READY";
+        prdb_host_api_v2 executor_host = {
+            sizeof(executor_host), PRDB_QUERY_ABI_V2_VERSION, host->context,
+            host->executor_request, host->planner_request, host->write_result};
+        int32_t cancelled = 0;
+        if (prdb_sdk_executor_check_cancelled_v1(&executor_host, &cancelled) !=
+                PRDB_SDK_EXECUTOR_OK ||
+            cancelled != 0 ||
+            host->write_result(host->context, cancellation_ready,
+                               sizeof(cancellation_ready) - 1) != 0) {
+            return 1;
+        }
+        while (cancelled == 0) {
+            if (prdb_sdk_executor_check_cancelled_v1(&executor_host,
+                                                     &cancelled) !=
+                PRDB_SDK_EXECUTOR_OK) {
+                return 1;
+            }
+        }
         return 1;
     }
     results.host = host;

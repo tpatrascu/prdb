@@ -95,7 +95,8 @@
 
 - Behavior: the authenticated real gateway path reports a sealed upload as prepared, cancels it without creating an invocation outcome, then hides it as unknown on STATUS.
 - Regression and verification: included in the real supervisor/gateway TinyCC upload test; workspace build, format, Clippy, Rust tests and SDK tests pass.
-- Remaining: active cancellation and terminal STATUS through a started worker still require the delegated-cgroup process path.
+- Verification update: the confined SQL artifact acceptance now starts a worker, accepts owner cancellation while it is live, observes durable ABORTED status, and relays the confirmed terminal event through the gateway path using the delegated cgroup.
+- Remaining: cover authenticated active STATUS/CANCEL over the real client protocol and confirm the worker's application-level cancellation response through the process boundary.
 
 ## SU-3 / SB-1: process-boundary START preflight failure — verified
 
