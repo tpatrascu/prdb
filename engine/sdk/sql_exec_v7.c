@@ -1,4 +1,6 @@
 #include "prdb_sdk_sql_exec_v7.h"
+#include "prdb_sdk_sql_exec_v9.h"
+#include "prdb_sdk_sql_v9.h"
 
 #include <string.h>
 
@@ -49,7 +51,7 @@ static int values_equal(const prdb_sdk_value_v1 *left,
            truth == PRDB_SDK_SQL_TRUTH_TRUE;
 }
 
-int32_t prdb_sdk_sql_execute_group_v7(
+static int32_t execute_group_internal(
     const prdb_host_api_v3 *host_v3,
     const uint8_t *schema, uint32_t schema_len,
     const uint8_t *sql, uint64_t sql_len,
@@ -64,9 +66,14 @@ int32_t prdb_sdk_sql_execute_group_v7(
     uint32_t executor_column_capacity,
     prdb_sdk_value_v1 *cell_scratch, uint32_t cell_scratch_capacity,
     uint8_t *materialized_bytes, uint64_t materialized_bytes_capacity,
-    prdb_sdk_sql_group_row_v7_fn on_group, void *result_context) {
+    prdb_sdk_sql_group_row_v7_fn on_group,
+    prdb_sdk_sql_group_row_v9_fn on_group_v9, void *result_context,
+    int enable_having) {
     prdb_sdk_select_v7 statement = {0};
     prdb_sdk_select_binding_v7 binding = {0};
+    prdb_sdk_select_v9 statement_v9 = {0};
+    prdb_sdk_select_binding_v9 binding_v9 = {0};
+    prdb_sdk_value_v1 having_parameter = {0};
     prdb_sdk_planner_relation_v1 planned = {0};
     prdb_sdk_executor_relation_v1 resolved = {0};
     prdb_sdk_batch_v1 batch = {0};
@@ -75,6 +82,7 @@ int32_t prdb_sdk_sql_execute_group_v7(
     prdb_sdk_value_v1 keys[PRDB_SDK_SQL_GROUP_MAX_ROWS];
     prdb_sdk_value_v1 operands[PRDB_SDK_SQL_GROUP_MAX_ROWS];
     prdb_sdk_value_v1 aggregate_results[PRDB_SDK_SQL_GROUP_MAX_ROWS];
+    uint8_t having_match[PRDB_SDK_SQL_GROUP_MAX_ROWS] = {0};
     uint8_t aggregate_result_bytes[PRDB_SDK_SQL_GROUP_MAX_ROWS][16] = {{0}};
     uint8_t aggregate_result_scales[PRDB_SDK_SQL_GROUP_MAX_ROWS] = {0};
     prdb_sdk_value_v1 group_operands[PRDB_SDK_SQL_GROUP_MAX_ROWS];
@@ -104,7 +112,8 @@ int32_t prdb_sdk_sql_execute_group_v7(
     if (schema == NULL || sql == NULL || planner_response == NULL ||
         executor_response == NULL || batch_response == NULL ||
         planner_columns == NULL || executor_columns == NULL ||
-        cell_scratch == NULL || materialized_bytes == NULL || on_group == NULL ||
+        cell_scratch == NULL || materialized_bytes == NULL ||
+        (on_group == NULL && on_group_v9 == NULL) ||
         planner_column_capacity == 0 || executor_column_capacity == 0 ||
         cell_scratch_capacity == 0 || planner_response_capacity == 0 ||
         executor_response_capacity == 0 ||
@@ -117,8 +126,14 @@ int32_t prdb_sdk_sql_execute_group_v7(
         return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_INVALID_ARGUMENT);
     }
 
-    status = prdb_sdk_sql_parse_select_v7(sql, sql_len, &statement,
-                                          sizeof(statement), NULL);
+    if (enable_having) {
+        status = prdb_sdk_sql_parse_select_v9(sql, sql_len, &statement_v9,
+                                              sizeof(statement_v9), NULL);
+        statement = statement_v9.base;
+    } else {
+        status = prdb_sdk_sql_parse_select_v7(sql, sql_len, &statement,
+                                              sizeof(statement), NULL);
+    }
     if (status != PRDB_SDK_SQL_OK) {
         return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_BIND_ERROR);
     }
@@ -147,11 +162,29 @@ int32_t prdb_sdk_sql_execute_group_v7(
     if (cell_scratch_capacity < resolved.column_count) {
         return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_INVALID_ARGUMENT);
     }
-    status = prdb_sdk_sql_bind_select_v7(
-        &statement, resolved.name, resolved.name_len, executor_columns,
-        resolved.column_count, &binding, sizeof(binding));
+    if (enable_having) {
+        status = prdb_sdk_sql_bind_select_v9(
+            &statement_v9, resolved.name, resolved.name_len, executor_columns,
+            resolved.column_count, &binding_v9, sizeof(binding_v9));
+        binding = binding_v9.base;
+    } else {
+        status = prdb_sdk_sql_bind_select_v7(
+            &statement, resolved.name, resolved.name_len, executor_columns,
+            resolved.column_count, &binding, sizeof(binding));
+    }
     if (status != PRDB_SDK_SQL_BIND_OK) {
         return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_BIND_ERROR);
+    }
+    if (enable_having && binding_v9.has_having) {
+        status = prdb_sdk_sql_bind_parameter_v1(
+            binding_v9.having_parameter_index, parameters, parameter_count,
+            binding_v9.having_type_code,
+            binding_v9.having_decimal_precision,
+            binding_v9.having_decimal_scale, &having_parameter,
+            sizeof(having_parameter));
+        if (status != PRDB_SDK_SQL_EVAL_OK) {
+            return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_BIND_ERROR);
+        }
     }
     for (uint32_t index = 0; index < statement.base.predicate_count; ++index) {
         const prdb_sdk_predicate_node_v2 *node =
@@ -350,19 +383,125 @@ int32_t prdb_sdk_sql_execute_group_v7(
             }
         }
     }
-    for (uint32_t group = 0; group < group_count; ++group) {
-        if (statement.base.has_limit && group >= statement.base.limit)
-            break;
-        const prdb_sdk_value_v1 *aggregate =
-            binding.aggregate_kind == PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR
-                ? NULL
-                : &aggregate_results[group];
-        status = on_group(result_context,
-                          &keys[groups[group].representative_row], aggregate,
-                          groups[group].count, &binding);
-        if (status != 0) {
-            return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_RESULT_ERROR);
+    if (enable_having && binding_v9.has_having) {
+        for (uint32_t group = 0; group < group_count; ++group) {
+            uint8_t count_bytes[8];
+            prdb_sdk_value_v1 count_value = {0};
+            const prdb_sdk_value_v1 *aggregate =
+                binding.aggregate_kind == PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR
+                    ? NULL
+                    : &aggregate_results[group];
+            const prdb_sdk_value_v1 *comparison_value = aggregate;
+            uint32_t truth = PRDB_SDK_SQL_TRUTH_FALSE;
+            if (binding.aggregate_kind ==
+                PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR) {
+                uint64_t count = groups[group].count;
+                for (uint32_t byte = 0; byte < 8; ++byte) {
+                    count_bytes[7 - byte] = (uint8_t)(count & UINT64_C(0xff));
+                    count >>= 8;
+                }
+                count_value.struct_size = sizeof(count_value);
+                count_value.abi_version = PRDB_SDK_VALUE_ABI_V1_VERSION;
+                count_value.type_code = PRDB_SDK_VALUE_TYPE_BIGINT;
+                count_value.state = PRDB_SDK_VALUE_STATE_VALUE;
+                count_value.data = count_bytes;
+                count_value.data_len = sizeof(count_bytes);
+                comparison_value = &count_value;
+            }
+            status = prdb_sdk_sql_compare_v1(
+                comparison_value, &having_parameter,
+                binding_v9.having_comparison,
+                binding_v9.having_decimal_scale,
+                binding_v9.having_decimal_scale, &truth);
+            if (status != PRDB_SDK_SQL_EVAL_OK) {
+                return fail_statement(host_v3,
+                                      PRDB_SDK_SQL_EXEC_EVALUATION_ERROR);
+            }
+            having_match[group] = (uint8_t)(truth == PRDB_SDK_SQL_TRUTH_TRUE);
+        }
+    }
+    {
+        uint32_t emitted_groups = 0;
+        for (uint32_t group = 0; group < group_count; ++group) {
+            const prdb_sdk_value_v1 *aggregate =
+                binding.aggregate_kind ==
+                        PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR
+                    ? NULL
+                    : &aggregate_results[group];
+            if (enable_having && binding_v9.has_having &&
+                !having_match[group]) {
+                continue;
+            }
+            if (statement.base.has_limit &&
+                emitted_groups >= statement.base.limit) {
+                break;
+            }
+            if (enable_having && on_group_v9 != NULL) {
+                status = on_group_v9(
+                    result_context, &keys[groups[group].representative_row],
+                    aggregate, groups[group].count, &binding_v9);
+            } else {
+                status = on_group(
+                    result_context, &keys[groups[group].representative_row],
+                    aggregate, groups[group].count, &binding);
+            }
+            if (status != 0) {
+                return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_RESULT_ERROR);
+            }
+            ++emitted_groups;
         }
     }
     return PRDB_SDK_SQL_EXEC_OK;
+}
+
+int32_t prdb_sdk_sql_execute_group_v7(
+    const prdb_host_api_v3 *host_v3, const uint8_t *schema,
+    uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
+    const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
+    uint16_t max_candidates, uint32_t max_batch_bytes,
+    uint8_t *planner_response, uint64_t planner_response_capacity,
+    uint8_t *executor_response, uint64_t executor_response_capacity,
+    uint8_t *batch_response, uint64_t batch_response_capacity,
+    prdb_sdk_sql_column_shape_v2 *planner_columns,
+    uint32_t planner_column_capacity,
+    prdb_sdk_sql_column_shape_v2 *executor_columns,
+    uint32_t executor_column_capacity, prdb_sdk_value_v1 *cell_scratch,
+    uint32_t cell_scratch_capacity, uint8_t *materialized_bytes,
+    uint64_t materialized_bytes_capacity, prdb_sdk_sql_group_row_v7_fn on_group,
+    void *result_context) {
+    return execute_group_internal(
+        host_v3, schema, schema_len, sql, sql_len, parameters, parameter_count,
+        max_candidates, max_batch_bytes, planner_response,
+        planner_response_capacity, executor_response,
+        executor_response_capacity, batch_response, batch_response_capacity,
+        planner_columns, planner_column_capacity, executor_columns,
+        executor_column_capacity, cell_scratch, cell_scratch_capacity,
+        materialized_bytes, materialized_bytes_capacity, on_group, NULL,
+        result_context, 0);
+}
+
+int32_t prdb_sdk_sql_execute_group_v9(
+    const prdb_host_api_v3 *host_v3, const uint8_t *schema,
+    uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
+    const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
+    uint16_t max_candidates, uint32_t max_batch_bytes,
+    uint8_t *planner_response, uint64_t planner_response_capacity,
+    uint8_t *executor_response, uint64_t executor_response_capacity,
+    uint8_t *batch_response, uint64_t batch_response_capacity,
+    prdb_sdk_sql_column_shape_v2 *planner_columns,
+    uint32_t planner_column_capacity,
+    prdb_sdk_sql_column_shape_v2 *executor_columns,
+    uint32_t executor_column_capacity, prdb_sdk_value_v1 *cell_scratch,
+    uint32_t cell_scratch_capacity, uint8_t *materialized_bytes,
+    uint64_t materialized_bytes_capacity, prdb_sdk_sql_group_row_v9_fn on_group,
+    void *result_context) {
+    return execute_group_internal(
+        host_v3, schema, schema_len, sql, sql_len, parameters, parameter_count,
+        max_candidates, max_batch_bytes, planner_response,
+        planner_response_capacity, executor_response,
+        executor_response_capacity, batch_response, batch_response_capacity,
+        planner_columns, planner_column_capacity, executor_columns,
+        executor_column_capacity, cell_scratch, cell_scratch_capacity,
+        materialized_bytes, materialized_bytes_capacity, NULL, on_group,
+        result_context, 1);
 }
