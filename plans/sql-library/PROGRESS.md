@@ -296,4 +296,12 @@
 - Implementation: the SDK now exposes a row-major composite-key count kernel with per-column type and Decimal-scale validation. It validates all cells before building groups, compares each tuple using the shared SQL comparator, and publishes groups only after capacity validation.
 - Regression: the fixture groups `(INTEGER, TEXT)` pairs, distinguishes tuples by either component, groups NULL combinations correctly, and checks redacted input, row/column bounds, zero rows, capacity failure, and output preservation.
 - Verification: the focused fixture passed with `-Wall -Wextra -Werror`; the complete maintained TinyCC SDK suite (`make -f engine/sdk/Makefile test`) also passed after implementation.
-- Scope: this is an operator primitive only. The current SELECT parser/binder/runner still supports one grouping key; multi-key SQL grammar, execution, SQLR encoding, and confined acceptance remain open.
+- Scope at implementation time: this was an operator primitive only. The v13 parser and binder now consume multi-key statements; grouped execution, SQLR encoding, and confined acceptance remain open.
+
+## SQL-7 dependency: multi-key GROUP BY parser and binder — partial
+
+- Contract: [SQL library](../../specs/sql-library.md). V13 accepts two to eight group keys and corresponding non-aggregate projections in the same order, with COUNT(*), MIN, MAX, SUM, or AVG, optional WHERE, and final LIMIT. Key matching is case-insensitive. V1-v12 ASTs and behavior stay frozen; v13 does not accept HAVING or ORDER BY.
+- Red/green evidence: the maintained v13 fixture first failed to link because both entry points were absent. It now checks two-key WHERE/LIMIT binding, typed ordinal metadata, the eight-key and AVG bounds, one/duplicate/mismatched/over-limit keys, unsupported HAVING, output preservation, malformed binding records, and rejection by the frozen v12 parser.
+- Implementation: `prdb_sdk_sql_v13.h` defines sized statement/binding records embedding v7 plus ordered projection and group-key spans. The parser enforces matching key lists; the binder resolves all key ordinals and type/Decimal metadata and rejects duplicate ordinals.
+- Verification: focused v13 parser/binder fixture and complete maintained TinyCC SDK suite passed with TinyCC `-Wall -Wextra -Werror`.
+- Remaining: the grouped runner and SQLR path still emit only one group key. Integrate the row-major composite kernel into bounded scan materialization, group-key projection and SQLR encoding, then add confined acceptance. HAVING/ORDER BY for multi-key grouping, cancellation/deadlines, spill, and mixed-workload measurements remain open.
