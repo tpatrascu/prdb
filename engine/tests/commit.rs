@@ -7515,6 +7515,69 @@ fn storage_manager_creates_named_unique_index_and_backfills_atomically()
     assert_eq!(read.open_table(schema::ROW_INDEXES)?.iter()?.count(), 0);
     drop(catalog);
     drop(read);
+
+    let stale_policy_writer_invocation = id(0xdb);
+    let stale_policy_row = id(0xdc);
+    let mut stale_policy_writer =
+        storage.begin_invocation(stale_policy_writer_invocation, actor, 9_999, 1, 1024)?;
+    let stale_policy_schema = stale_policy_writer.load_catalog_table_schema(id(82))?;
+    stale_policy_writer.load_catalog_indexes(&stale_policy_schema)?;
+    let stale_policy_tuple = encode_tuple(
+        &stale_policy_schema.columns,
+        stale_policy_schema.schema_version,
+        &[Some(ScalarValue::Bytea(
+            b"staged before policy creation".to_vec(),
+        ))],
+    )?;
+    stale_policy_writer.stage_put(
+        prdb_engine::overlay::RowId {
+            table: id(82),
+            row: stale_policy_row,
+        },
+        &stale_policy_tuple,
+    )?;
+    let policy_invocation = id(0xdd);
+    let mut policy_audit = identity_audit_event(0xde, actor, id(82));
+    policy_audit.correlation_id = policy_invocation;
+    let policy = storage
+        .create_policy(prdb_engine::storage_manager::CreatePolicyRequest {
+            invocation_id: policy_invocation,
+            authenticated_actor_id: actor,
+            table_id: id(82),
+            name: "fresh_row_policy".to_owned(),
+            kind: prdb_engine::storage_manager::PolicyKind::Row,
+            operation: prdb_engine::authorization::Operation::Select,
+            effect: prdb_engine::authorization::Effect::Allow,
+            recipients: vec![prdb_engine::authorization::Subject::Principal(actor)],
+            target_column_ids: Vec::new(),
+            using_expression: Some(prdb_engine::authorization::Expr::Literal(Some(
+                ScalarValue::Boolean(true),
+            ))),
+            with_check_expression: None,
+            retention_deadline_us: 9_999,
+            audit_event: policy_audit,
+        })
+        .map_err(|error| format!("row policy creation failed: {error:?}"))?;
+    assert_eq!(policy.commit_sequence, 5);
+    assert!(matches!(
+        stale_policy_writer.commit(),
+        Err(prdb_engine::transaction::TransactionError::Commit(
+            CommitError::Conflict
+        ))
+    ));
+    assert!(row(&database, &table_row_key(id(82), stale_policy_row))?.is_none());
+    assert_eq!(
+        lookup_outcome(&database, stale_policy_writer_invocation, actor, 1)?
+            .ok_or("missing stale policy writer outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
+    assert_eq!(
+        lookup_outcome(&database, policy_invocation, actor, 1)?
+            .ok_or("missing policy creation outcome")?
+            .status,
+        OutcomeStatus::Committed
+    );
     prdb_engine::startup::validate_persisted_records(&database)?;
     Ok(())
 }
