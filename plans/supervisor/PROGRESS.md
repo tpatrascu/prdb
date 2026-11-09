@@ -8,12 +8,12 @@
 - Verification: `cargo test -p prdb-engine --lib supervisor_ipc::worker_result_event_tests::workload_class_selects_the_configured_cgroup_profile --locked --offline -- --exact` passed. Locked workspace build, rustfmt check, warning-denied Clippy, and serial workspace tests passed in the documented Nix shell; cgroup-dependent sandbox tests remained ignored.
 - Remaining: class-wide active invocation quotas are implemented below. Separate queue reservations/depth limits and analytical prefetch/cache controls remain unimplemented.
 
-## SU-2: class-wide active invocation quotas — implemented
+## SU-2 / SU-7: class-wide and per-principal active invocation quotas — implemented
 
-- Behavior: START atomically reserves a slot by immutable sealed workload class, counting `Starting` and `Started` reservations. Defaults are 64 operational and 8 analytical active invocations; deployments can configure each limit with `--max-active-operational` and `--max-active-analytical`. At capacity, START returns a resource-limit error before storage admission and preserves the sealed reservation for retry. Slots release when a started reservation reaches durable finish/cleanup.
+- Behavior: START atomically reserves a slot by immutable sealed workload class, counting `Starting` and `Started` reservations. Global defaults are 64 operational and 8 analytical active invocations; per-principal defaults are 16 operational and 2 analytical. Deployments configure the four limits with `--max-active-operational`, `--max-active-analytical`, `--max-active-operational-per-principal`, and `--max-active-analytical-per-principal`. At either cap, START returns a resource-limit error before storage admission and preserves the sealed reservation for retry. Slots release when a started reservation reaches durable finish/cleanup.
 - Changed code and contract: [staging state machine](../../engine/src/supervisor.rs), [supervisor CLI](../../engine/src/bin/prdb-supervisor.rs), and [workload profile](../../specs/workload-profile.md).
-- Verification: a deterministic concurrent staging test checks same-class rejection, independent class capacity, prepared retention, and retry after slot release; supervisor help coverage checks both flags.
-- Remaining: queue reservations/depth limits and analytical prefetch/cache controls remain open.
+- Verification: deterministic staging tests check same-class rejection, per-principal active rejection, independent principal/class capacity, prepared retention, and retry after slot release; supervisor help coverage checks all four flags. In the pinned Nix shell, locked workspace build, format check, warning-denied Clippy, and `cargo test --workspace --locked --offline` passed; commit integration reported 128 passed and 3 cgroup-gated ignored tests.
+- Remaining: bounded wait queues and analytical prefetch/cache controls remain open.
 
 ## SU-2 / SU-7: per-principal staging reservation quota — implemented
 

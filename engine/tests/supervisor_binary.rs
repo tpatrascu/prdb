@@ -21,6 +21,8 @@ fn supervisor_help_documents_explicit_runtime_and_compatibility_configuration() 
         "--max-active-operational",
         "--max-active-analytical",
         "--max-principal-reservations",
+        "--max-active-operational-per-principal",
+        "--max-active-analytical-per-principal",
     ] {
         assert!(help.contains(option), "missing {option} from help");
     }

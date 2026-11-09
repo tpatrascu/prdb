@@ -52,6 +52,10 @@ pub struct StagingLimits {
     pub max_active_operational: usize,
     /// Maximum reservations entering or executing START with analytical limits.
     pub max_active_analytical: usize,
+    /// Maximum active operational reservations owned by one principal.
+    pub max_active_operational_per_principal: usize,
+    /// Maximum active analytical reservations owned by one principal.
+    pub max_active_analytical_per_principal: usize,
     pub reservation_ttl: Duration,
 }
 
@@ -70,6 +74,8 @@ impl Default for StagingLimits {
             max_live_reservations_per_principal: 128,
             max_active_operational: 64,
             max_active_analytical: 8,
+            max_active_operational_per_principal: 16,
+            max_active_analytical_per_principal: 2,
             reservation_ttl: Duration::from_secs(300),
         }
     }
@@ -265,6 +271,8 @@ impl StagingStore {
             || limits.max_live_reservations_per_principal == 0
             || limits.max_active_operational == 0
             || limits.max_active_analytical == 0
+            || limits.max_active_operational_per_principal == 0
+            || limits.max_active_analytical_per_principal == 0
             || limits.reservation_ttl.is_zero()
         {
             return Err(StagingError::InvalidLimits);
@@ -562,7 +570,22 @@ impl StagingStore {
                 WorkloadClass::Operational => self.limits.max_active_operational,
                 WorkloadClass::Analytical => self.limits.max_active_analytical,
             };
-            if active_count >= active_limit {
+            let principal_active_count = state
+                .reservations
+                .values()
+                .filter(|reservation| {
+                    matches!(
+                        reservation.state,
+                        ReservationState::Starting | ReservationState::Started
+                    ) && reservation.principal_id == owner.principal_id
+                        && reservation.metadata.workload_class == workload_class
+                })
+                .count();
+            let principal_active_limit = match workload_class {
+                WorkloadClass::Operational => self.limits.max_active_operational_per_principal,
+                WorkloadClass::Analytical => self.limits.max_active_analytical_per_principal,
+            };
+            if active_count >= active_limit || principal_active_count >= principal_active_limit {
                 return Err(StartError::Staging(StagingError::ResourceLimit));
             }
             let submission = SealedSubmission {
@@ -1244,6 +1267,46 @@ mod tests {
             store.cancel_prepared(same_principal, replacement.invocation_id),
             Ok(())
         );
+    }
+
+    #[test]
+    fn active_invocation_quota_also_bounds_each_principal_within_a_class() {
+        let store = StagingStore::new(
+            StagingLimits {
+                max_active_operational: 2,
+                max_active_operational_per_principal: 1,
+                ..StagingLimits::default()
+            },
+            Arc::new(AcceptMetadata),
+        )
+        .unwrap();
+        let first_owner = make_owner(71, 81);
+        let same_principal = make_owner(72, 81);
+        let other_principal = make_owner(73, 82);
+        let first_id = upload_and_seal(&store, first_owner, b"first", b"");
+        let queued_id = upload_and_seal(&store, same_principal, b"queued", b"");
+        let other_id = upload_and_seal(&store, other_principal, b"other", b"");
+
+        store
+            .start_with(first_owner, first_id, |_| Ok::<_, ()>(()))
+            .unwrap();
+        assert!(matches!(
+            store.start_with(same_principal, queued_id, |_| Ok::<_, ()>(())),
+            Err(StartError::Staging(StagingError::ResourceLimit))
+        ));
+        assert_eq!(
+            store.status(same_principal, queued_id),
+            Ok(SubmissionState::Prepared)
+        );
+        store
+            .start_with(other_principal, other_id, |_| Ok::<_, ()>(()))
+            .unwrap();
+        store.finish_started(first_owner, first_id).unwrap();
+        store
+            .start_with(same_principal, queued_id, |_| Ok::<_, ()>(()))
+            .unwrap();
+        store.finish_started(same_principal, queued_id).unwrap();
+        store.finish_started(other_principal, other_id).unwrap();
     }
 
     #[test]

@@ -52,6 +52,8 @@ mod service {
         max_principal_reservations: Option<usize>,
         max_active_operational: Option<usize>,
         max_active_analytical: Option<usize>,
+        max_active_operational_per_principal: Option<usize>,
+        max_active_analytical_per_principal: Option<usize>,
         cpu_quota_us: Option<u64>,
         cpu_period_us: Option<u64>,
         memory_max_bytes: Option<u64>,
@@ -83,6 +85,8 @@ mod service {
              --retention-seconds N --max-rows N --max-bytes N\n\
              --max-principal-reservations N\n\
              [--max-active-operational N --max-active-analytical N]\n\
+             [--max-active-operational-per-principal N\n\
+             --max-active-analytical-per-principal N]\n\
              --cpu-quota-us N --cpu-period-us N --memory-max-bytes N --max-processes N\n\
              [--analytical-cpu-quota-us N --analytical-cpu-period-us N\n\
              --analytical-memory-max-bytes N --analytical-max-processes N]\n\
@@ -191,6 +195,18 @@ mod service {
                         .max_active_analytical
                         .unwrap_or(default_staging_limits.max_active_analytical),
                     "--max-active-analytical",
+                )?,
+                max_active_operational_per_principal: positive(
+                    options
+                        .max_active_operational_per_principal
+                        .unwrap_or(default_staging_limits.max_active_operational_per_principal),
+                    "--max-active-operational-per-principal",
+                )?,
+                max_active_analytical_per_principal: positive(
+                    options
+                        .max_active_analytical_per_principal
+                        .unwrap_or(default_staging_limits.max_active_analytical_per_principal),
+                    "--max-active-analytical-per-principal",
                 )?,
                 ..default_staging_limits
             },
@@ -370,6 +386,15 @@ mod service {
                 }
                 "--max-active-analytical" => {
                     set!(max_active_analytical, value.parse::<usize>()?)
+                }
+                "--max-active-operational-per-principal" => {
+                    set!(
+                        max_active_operational_per_principal,
+                        value.parse::<usize>()?
+                    )
+                }
+                "--max-active-analytical-per-principal" => {
+                    set!(max_active_analytical_per_principal, value.parse::<usize>()?)
                 }
                 "--cpu-quota-us" => set!(cpu_quota_us, value.parse::<u64>()?),
                 "--cpu-period-us" => set!(cpu_period_us, value.parse::<u64>()?),
