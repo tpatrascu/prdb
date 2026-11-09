@@ -252,6 +252,7 @@ pub struct InvocationTransaction<'db> {
     retention_deadline_us: i64,
     coordination: InvocationCoordination,
     aborted: bool,
+    cancellation_triggered: bool,
     outcome_recorded: bool,
     active_scan: Option<ActiveRowScan>,
     max_scan_work: usize,
@@ -544,6 +545,12 @@ impl InvocationCoordination {
             .is_none_or(InvocationAdmissionPermit::may_continue)
     }
 
+    fn cancellation_requested(&self) -> bool {
+        self._admission_permit
+            .as_ref()
+            .is_some_and(InvocationAdmissionPermit::cancellation_requested)
+    }
+
     fn mark_committing(&self) -> bool {
         self._admission_permit
             .as_ref()
@@ -688,6 +695,7 @@ impl<'db> InvocationTransaction<'db> {
             scanned_work: 0,
             coordination,
             aborted: false,
+            cancellation_triggered: false,
             outcome_recorded: false,
             active_scan: None,
             active_relation_scan: None,
@@ -750,10 +758,38 @@ impl<'db> InvocationTransaction<'db> {
             return Err(TransactionError::Expired);
         }
         if !self.coordination.may_continue() {
+            self.cancellation_triggered = true;
             self.abort()?;
             return Err(TransactionError::CancellationRequested);
         }
         Ok(())
+    }
+
+    /// Check hard age limits without consuming a pending cooperative
+    /// cancellation. The supervisor uses this while waiting for the worker's
+    /// next cancellation poll or grace-period expiry.
+    pub(crate) fn check_worker_deadline(&mut self) -> Result<(), TransactionError> {
+        if self.coordination.is_expired() {
+            if !self.aborted {
+                self.abort()?;
+            }
+            return Err(TransactionError::Expired);
+        }
+        if self.aborted {
+            return if self.cancellation_triggered {
+                Ok(())
+            } else {
+                Err(TransactionError::Aborted)
+            };
+        }
+        if self.coordination.cancellation_requested() {
+            return Ok(());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn cancellation_requested(&self) -> bool {
+        self.cancellation_triggered || self.coordination.cancellation_requested()
     }
 
     fn pinned_snapshot(&mut self) -> Result<&RowSnapshot, TransactionError> {

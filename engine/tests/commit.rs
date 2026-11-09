@@ -22216,9 +22216,11 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     assert_eq!(cancellation_accepted.payload, b"{\"state\":\"accepted\"}");
     let (mut cancellation_service, mut cancellation_gateway) = UnixStream::pair()?;
     let mut cancellation_requested = false;
+    let mut cancellation_requested_at: Option<std::time::Instant> = None;
+    let mut cancellation_observed_latency: Option<Duration> = None;
     let cancellation_observation =
         cancellation_executor.observe_exit_with_results(&cancellation_invocation, |payload| {
-            if payload != b"CANCEL_READY" {
+            if payload != b"CANCEL_READY" && payload != b"CANCEL_OBSERVED" {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     "unexpected cancellation fixture result",
@@ -22230,6 +22232,13 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 payload.to_vec(),
             )
             .map_err(|error| std::io::Error::other(format!("result relay: {error:?}")))?;
+            if payload == b"CANCEL_OBSERVED" {
+                let requested_at = cancellation_requested_at.ok_or_else(|| {
+                    std::io::Error::other("query reported cancellation before it was requested")
+                })?;
+                cancellation_observed_latency = Some(requested_at.elapsed());
+                return Ok(());
+            }
             match storage
                 .cancel_owned_invocation(user_id, cancellation_reservation.invocation_id, now + 2)
                 .map_err(|error| {
@@ -22237,6 +22246,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 })? {
                 prdb_engine::storage_manager::OwnerCancellationResult::Accepted => {
                     cancellation_requested = true;
+                    cancellation_requested_at = Some(std::time::Instant::now());
                     Ok(())
                 }
                 result => Err(std::io::Error::other(format!(
@@ -22247,15 +22257,31 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     assert!(cancellation_requested);
     match cancellation_observation {
         Ok(status) => assert!(!status.success()),
+        Err(prdb_engine::storage_manager::SupervisorInvocationError::WorkerExited(status)) => {
+            assert!(!status.success())
+        }
         Err(prdb_engine::storage_manager::SupervisorInvocationError::Deadline(
             prdb_engine::transaction::TransactionError::CancellationRequested
             | prdb_engine::transaction::TransactionError::Aborted,
         )) => {}
         Err(error) => return Err(error.into()),
     }
+    let cancellation_observed_latency = cancellation_observed_latency
+        .ok_or("query never observed cancellation through SDK poll")?;
+    assert!(
+        cancellation_observed_latency < Duration::from_secs(2),
+        "query cancellation poll was relayed after {cancellation_observed_latency:?}"
+    );
     let ready_event = read_frame(&mut cancellation_gateway)?.ok_or("missing cancel ready event")?;
     assert_eq!(ready_event.operation, Operation::GatewayResultData as u16);
     assert_eq!(ready_event.payload, b"CANCEL_READY");
+    let observed_event =
+        read_frame(&mut cancellation_gateway)?.ok_or("missing cancellation-observed result")?;
+    assert_eq!(
+        observed_event.operation,
+        Operation::GatewayResultData as u16
+    );
+    assert_eq!(observed_event.payload, b"CANCEL_OBSERVED");
     assert_eq!(
         storage
             .lookup_invocation_outcome(cancellation_reservation.invocation_id, user_id, now + 3,)?

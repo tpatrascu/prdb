@@ -1369,6 +1369,7 @@ fn disconnected_submission_is_reconciled_after_gateway_restart()
         .upload_and_seal(&package, &[], 30_000, WorkloadClass::Operational)
         .map_err(|error| format!("upload/seal failed: {error:?}"))?;
     let receipt = root.join("start.receipt");
+    let cancellation_requested_at;
     {
         let mut started = client
             .start(invocation_id, &receipt)
@@ -1386,6 +1387,7 @@ fn disconnected_submission_is_reconciled_after_gateway_restart()
             .cancel_invocation(invocation_id)
             .map_err(|error| format!("active CANCEL failed: {error:?}"))?;
         assert_eq!(cancellation, CancellationResult::Accepted);
+        cancellation_requested_at = Instant::now();
         let _gateway_crash_status = gateway.kill()?;
     }
     drop(client);
@@ -1413,6 +1415,10 @@ fn disconnected_submission_is_reconciled_after_gateway_restart()
         std::thread::sleep(Duration::from_millis(20));
     };
     assert_eq!(status, InvocationStatus::Aborted);
+    assert!(
+        cancellation_requested_at.elapsed() < Duration::from_secs(2),
+        "non-cooperative worker did not reach durable ABORTED within two seconds"
+    );
     drop(status_client);
     drop(admin);
     assert!(replacement_gateway.stop()?.success());

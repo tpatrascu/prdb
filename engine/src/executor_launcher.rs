@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::Duration;
 
+const COOPERATIVE_CANCELLATION_GRACE: Duration = Duration::from_millis(500);
+
 #[derive(Clone, Debug)]
 pub struct ExecutorLaunchConfig {
     pub executor_path: PathBuf,
@@ -160,11 +162,27 @@ impl RunningExecutor {
 
                 let mut result_done = false;
                 let mut storage_done = storage_task.is_none();
+                let mut cancellation_started_at = None;
                 while !result_done || !storage_done {
                     if primary_error.is_none()
-                        && let Err(error) = invocation.check_deadline()
+                        && let Err(error) = invocation.check_worker_deadline()
                     {
                         primary_error = Some(error);
+                    }
+                    if primary_error.is_none() {
+                        match invocation.cancellation_requested() {
+                            Ok(true) => {
+                                let requested_at = cancellation_started_at
+                                    .get_or_insert_with(std::time::Instant::now);
+                                if requested_at.elapsed() >= COOPERATIVE_CANCELLATION_GRACE {
+                                    primary_error = Some(SupervisorInvocationError::Deadline(
+                                        crate::transaction::TransactionError::CancellationRequested,
+                                    ));
+                                }
+                            }
+                            Ok(false) => {}
+                            Err(error) => primary_error = Some(error),
+                        }
                     }
                     match result_rx.recv_timeout(Duration::from_millis(50)) {
                         Ok(Ok(chunk)) => {

@@ -1147,6 +1147,49 @@ impl SupervisorInvocation<'_> {
         Ok(())
     }
 
+    /// Check only hard age limits while a worker is draining cooperative
+    /// cancellation. The executor gets a bounded window to poll cancellation
+    /// and exit before the launcher forcefully reaps it.
+    pub fn check_worker_deadline(&self) -> Result<(), SupervisorInvocationError> {
+        let mut owner = match self.transaction.lock() {
+            Ok(owner) => owner,
+            Err(poisoned) => {
+                let mut owner = poisoned.into_inner();
+                if let Some(mut transaction) = owner.take() {
+                    let _ = transaction.abort();
+                }
+                return Err(SupervisorInvocationError::Closed);
+            }
+        };
+        let transaction = owner.as_mut().ok_or(SupervisorInvocationError::Closed)?;
+        transaction
+            .check_worker_deadline()
+            .map_err(SupervisorInvocationError::Deadline)?;
+        if self
+            .deadline
+            .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+        {
+            transaction
+                .abort()
+                .map_err(SupervisorInvocationError::Deadline)?;
+            return Err(SupervisorInvocationError::Deadline(
+                TransactionError::Expired,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Whether cancellation has been accepted, including after an executor
+    /// poll has already aborted and released the storage transaction.
+    pub fn cancellation_requested(&self) -> Result<bool, SupervisorInvocationError> {
+        let owner = self
+            .transaction
+            .lock()
+            .map_err(|_| SupervisorInvocationError::Closed)?;
+        let transaction = owner.as_ref().ok_or(SupervisorInvocationError::Closed)?;
+        Ok(transaction.cancellation_requested())
+    }
+
     /// Observe and reap a worker after its planner and executor channels have
     /// drained. A failed exit or process-inspection error durably aborts the
     /// invocation; the caller may request commit only after this returns Ok.
@@ -1282,8 +1325,9 @@ impl SupervisorInvocation<'_> {
     }
 
     /// Serve provisioned planner and executor Unix streams concurrently.
-    /// Poll cancellation/deadline while either stream is idle, stop its peer
-    /// after a handler error, and return only after both handlers have drained.
+    /// Poll hard deadlines while either stream is idle, preserve the executor
+    /// cancellation response window, stop the peer after a handler error, and
+    /// return only after both handlers have drained.
     pub fn serve_worker_channels(
         &self,
         mut planner_stream: std::os::unix::net::UnixStream,
@@ -1361,7 +1405,7 @@ impl SupervisorInvocation<'_> {
                         }
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                        if let Err(error) = self.check_deadline() {
+                        if let Err(error) = self.check_worker_deadline() {
                             deadline_error = Some(error);
                             let _ = stop_planner.shutdown(Shutdown::Both);
                             let _ = stop_executor.shutdown(Shutdown::Both);
@@ -1865,6 +1909,17 @@ impl InvocationAdmissionPermit {
                 _ => return false,
             }
         }
+    }
+
+    pub(crate) fn cancellation_requested(&self) -> bool {
+        let live = self
+            .state
+            .live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        live.entries
+            .get(&self.invocation_id)
+            .is_some_and(|invocation| invocation.cancellation_reason_code.is_some())
     }
 
     pub(crate) fn try_mark_committing(&self) -> bool {

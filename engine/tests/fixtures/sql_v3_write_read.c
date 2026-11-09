@@ -457,6 +457,7 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
     if (invocation->parameters_len == 1 && invocation->parameters != NULL &&
         invocation->parameters[0] == 'C') {
         static const uint8_t cancellation_ready[] = "CANCEL_READY";
+        static const uint8_t cancellation_observed[] = "CANCEL_OBSERVED";
         prdb_host_api_v2 executor_host = {
             sizeof(executor_host), PRDB_QUERY_ABI_V2_VERSION, host->context,
             host->executor_request, host->planner_request, host->write_result};
@@ -474,6 +475,11 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
                 PRDB_SDK_EXECUTOR_OK) {
                 return 1;
             }
+        }
+        if (cancelled != 1 ||
+            host->write_result(host->context, cancellation_observed,
+                               sizeof(cancellation_observed) - 1) != 0) {
+            return 1;
         }
         return 1;
     }
