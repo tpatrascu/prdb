@@ -210,4 +210,12 @@
 - Red/green evidence: the maintained TinyCC group fixture checks integer average, Decimal scale conversion, both even and odd half-tie cases at the 128-row boundary, all-NULL output, and output/scale preservation when REDACTED input fails.
 - Implementation: `prdb_sdk_sql_avg_v1` uses a fixed 20-byte unsigned scaled-division workspace, validates Decimal input precision, rounds ties by quotient parity, and writes result coefficient and scale only after validation and range checks.
 - Verification: the focused TinyCC grouping fixture was force-rebuilt and passed with `-Wall -Wextra -Werror`.
-- Remaining: parser/binder support, grouped runner integration, SQLR metadata/writing, and sandbox acceptance remain open.
+- Remaining: grouped runner integration, SQLR metadata/writing, and sandbox acceptance remain open.
+
+## SQL-7 dependency: grouped AVG parser and binder — partial
+
+- Contract: [SQL library](../../specs/sql-library.md). Preserve v1-v6 AST/binding layouts and add a separately versioned grouped SELECT form for `AVG(column)`. Bind only SMALLINT, INTEGER, BIGINT, and DECIMAL arguments, retaining Decimal metadata.
+- Red/green evidence: the maintained v7 fixture checks AVG parsing with WHERE and LIMIT, Decimal argument binding, nonnumeric argument rejection with output preservation, and confirms the frozen v6 parser still rejects AVG.
+- Implementation: the v7 AST/binding have dedicated version tags and aggregate kind. The parser shares the grouped grammar while only exposing AVG through the v7 entry point; binding reuses v6 numeric aggregate validation and preserves the AVG kind.
+- Verification: the focused TinyCC parser/binder fixture was force-rebuilt and passed with `-Wall -Wextra -Werror`.
+- Remaining: grouped AVG runner aggregation, SQLR result metadata/writing, and confined sandbox acceptance remain open.

@@ -4,6 +4,7 @@
 #include "prdb_sdk_sql_v4.h"
 #include "prdb_sdk_sql_v5.h"
 #include "prdb_sdk_sql_v6.h"
+#include "prdb_sdk_sql_v7.h"
 #include "prdb_sdk_sql_dml_v1.h"
 
 #include <stddef.h>
@@ -2171,7 +2172,8 @@ int32_t prdb_sdk_sql_bind_select_v4(
 
 static int32_t parse_grouped_select_v5_internal(
     const uint8_t *sql, uint64_t sql_len, prdb_sdk_select_v5 *out,
-    uint32_t out_capacity, uint32_t *error_offset_out, int allow_sum) {
+    uint32_t out_capacity, uint32_t *error_offset_out, int allow_sum,
+    int allow_avg) {
     parser state;
     prdb_sdk_select_v5 result = {0};
     int32_t status;
@@ -2227,6 +2229,8 @@ static int32_t parse_grouped_select_v5_internal(
         result.aggregate_kind = PRDB_SDK_SQL_V5_AGGREGATE_MAX;
     } else if (allow_sum && token_is_keyword(&state, "SUM")) {
         result.aggregate_kind = PRDB_SDK_SQL_V6_AGGREGATE_SUM;
+    } else if (allow_avg && token_is_keyword(&state, "AVG")) {
+        result.aggregate_kind = PRDB_SDK_SQL_V7_AGGREGATE_AVG;
     } else {
         status = PRDB_SDK_SQL_SYNTAX_ERROR;
         state.error_offset = state.current.offset;
@@ -2360,7 +2364,7 @@ int32_t prdb_sdk_sql_parse_select_v5(const uint8_t *sql, uint64_t sql_len,
                                      uint32_t out_capacity,
                                      uint32_t *error_offset_out) {
     return parse_grouped_select_v5_internal(sql, sql_len, out, out_capacity,
-                                            error_offset_out, 0);
+                                            error_offset_out, 0, 0);
 }
 
 int32_t prdb_sdk_sql_parse_select_v6(const uint8_t *sql, uint64_t sql_len,
@@ -2376,7 +2380,7 @@ int32_t prdb_sdk_sql_parse_select_v6(const uint8_t *sql, uint64_t sql_len,
         return PRDB_SDK_SQL_INVALID_ARGUMENT;
     }
     status = parse_grouped_select_v5_internal(
-        sql, sql_len, &parsed, sizeof(parsed), error_offset_out, 1);
+        sql, sql_len, &parsed, sizeof(parsed), error_offset_out, 1, 0);
     if (status != PRDB_SDK_SQL_OK) return status;
     result.struct_size = sizeof(result);
     result.abi_version = PRDB_SDK_SQL_ABI_V6_VERSION;
@@ -2440,6 +2444,81 @@ int32_t prdb_sdk_sql_bind_select_v6(
     }
     result.struct_size = sizeof(result);
     result.abi_version = PRDB_SDK_SQL_ABI_V6_VERSION;
+    result.base = compatible_binding.base;
+    result.has_group_by = compatible_binding.has_group_by;
+    result.group_by_column = compatible_binding.group_by_column;
+    result.aggregate_kind = aggregate_kind;
+    result.aggregate_column = compatible_binding.aggregate_column;
+    *out = result;
+    return PRDB_SDK_SQL_BIND_OK;
+}
+
+int32_t prdb_sdk_sql_parse_select_v7(const uint8_t *sql, uint64_t sql_len,
+                                     prdb_sdk_select_v7 *out,
+                                     uint32_t out_capacity,
+                                     uint32_t *error_offset_out) {
+    prdb_sdk_select_v5 parsed = {0};
+    prdb_sdk_select_v7 result = {0};
+    int32_t status;
+
+    if (out == NULL || out_capacity < sizeof(*out)) {
+        if (error_offset_out != NULL) *error_offset_out = 0;
+        return PRDB_SDK_SQL_INVALID_ARGUMENT;
+    }
+    status = parse_grouped_select_v5_internal(
+        sql, sql_len, &parsed, sizeof(parsed), error_offset_out, 1, 1);
+    if (status != PRDB_SDK_SQL_OK) return status;
+    result.struct_size = sizeof(result);
+    result.abi_version = PRDB_SDK_SQL_ABI_V7_VERSION;
+    result.base = parsed.base;
+    result.has_group_by = parsed.has_group_by;
+    result.group_by_column = parsed.group_by_column;
+    result.aggregate_kind = parsed.aggregate_kind;
+    result.aggregate_column = parsed.aggregate_column;
+    *out = result;
+    return PRDB_SDK_SQL_OK;
+}
+
+int32_t prdb_sdk_sql_bind_select_v7(
+    const prdb_sdk_select_v7 *statement, const uint8_t *relation_name,
+    uint32_t relation_name_len,
+    const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count,
+    prdb_sdk_select_binding_v7 *out, uint32_t out_capacity) {
+    prdb_sdk_select_v6 compatible_statement = {0};
+    prdb_sdk_select_binding_v6 compatible_binding = {0};
+    prdb_sdk_select_binding_v7 result = {0};
+    uint32_t aggregate_kind;
+    int32_t status;
+
+    if (statement == NULL || out == NULL || out_capacity < sizeof(*out)) {
+        return PRDB_SDK_SQL_BIND_INVALID_ARGUMENT;
+    }
+    if (statement->struct_size < sizeof(*statement) ||
+        statement->abi_version != PRDB_SDK_SQL_ABI_V7_VERSION ||
+        (statement->aggregate_kind < PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR ||
+         statement->aggregate_kind > PRDB_SDK_SQL_V7_AGGREGATE_AVG)) {
+        return PRDB_SDK_SQL_BIND_INVALID_STATEMENT;
+    }
+    aggregate_kind = statement->aggregate_kind;
+    compatible_statement.struct_size = sizeof(compatible_statement);
+    compatible_statement.abi_version = PRDB_SDK_SQL_ABI_V6_VERSION;
+    compatible_statement.base = statement->base;
+    compatible_statement.has_group_by = statement->has_group_by;
+    compatible_statement.group_by_column = statement->group_by_column;
+    compatible_statement.aggregate_kind =
+        aggregate_kind == PRDB_SDK_SQL_V7_AGGREGATE_AVG
+            ? PRDB_SDK_SQL_V6_AGGREGATE_SUM
+            : aggregate_kind;
+    compatible_statement.aggregate_column = statement->aggregate_column;
+    status = prdb_sdk_sql_bind_select_v6(
+        &compatible_statement, relation_name, relation_name_len, columns,
+        column_count, &compatible_binding, sizeof(compatible_binding));
+    if (status == PRDB_SDK_SQL_BIND_V6_INVALID_AGGREGATE_TYPE) {
+        return PRDB_SDK_SQL_BIND_V7_INVALID_AGGREGATE_TYPE;
+    }
+    if (status != PRDB_SDK_SQL_BIND_OK) return status;
+    result.struct_size = sizeof(result);
+    result.abi_version = PRDB_SDK_SQL_ABI_V7_VERSION;
     result.base = compatible_binding.base;
     result.has_group_by = compatible_binding.has_group_by;
     result.group_by_column = compatible_binding.group_by_column;
