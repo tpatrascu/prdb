@@ -96,7 +96,8 @@
 - Behavior: through the same authenticated real-binary connection, STATUS reports a sealed reservation as `prepared`, CANCEL releases the unstarted reservation with `accepted`, and subsequent STATUS returns the same `unknown` response used for unavailable invocations.
 - Regression: the TinyCC TCP submission test now covers that state transition and confirms the connection remains usable afterward with PING.
 - Verification: focused supervisor binary regression, workspace build/format/warning-denied Clippy/tests, and the maintained TinyCC SDK suite passed. Workspace tests reported 109 commit tests passing and two cgroup-gated tests ignored.
-- Remaining: exercise active invocation status/cancellation and durable terminal reconciliation through the process boundary when a writable delegated cgroup host is available.
+- Verification update: the ignored `disconnected_submission_is_reconciled_after_gateway_restart` test now passes on a delegated-cgroup host. It starts a confined invocation, kills the gateway before terminal delivery, reads its ABORTED status through a replacement gateway, restarts the supervisor/storage process, and reads the same retained ABORTED result again.
+- Remaining: exercise authenticated active invocation STATUS/CANCEL through the process boundary. The restarted-process test covers durable terminal STATUS and does not exercise cancellation through the active network protocol.
 
 ## NP-4 integration: START sandbox preflight rejection over TCP — verified
 
