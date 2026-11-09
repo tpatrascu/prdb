@@ -46,6 +46,10 @@ pub struct StagingLimits {
     pub max_parameter_bytes: u64,
     pub max_deadline_ms: u64,
     pub max_live_reservations: usize,
+    /// Maximum reservations entering or executing START with operational limits.
+    pub max_active_operational: usize,
+    /// Maximum reservations entering or executing START with analytical limits.
+    pub max_active_analytical: usize,
     pub reservation_ttl: Duration,
 }
 
@@ -61,6 +65,8 @@ impl Default for StagingLimits {
             max_parameter_bytes: MAX_PARAMETER_BYTES,
             max_deadline_ms: DEFAULT_MAX_DEADLINE_MS,
             max_live_reservations: 1024,
+            max_active_operational: 64,
+            max_active_analytical: 8,
             reservation_ttl: Duration::from_secs(300),
         }
     }
@@ -253,6 +259,8 @@ impl StagingStore {
             || limits.max_parameter_bytes > MAX_PARAMETER_BYTES
             || limits.max_deadline_ms == 0
             || limits.max_live_reservations == 0
+            || limits.max_active_operational == 0
+            || limits.max_active_analytical == 0
             || limits.reservation_ttl.is_zero()
         {
             return Err(StagingError::InvalidLimits);
@@ -516,13 +524,36 @@ impl StagingStore {
                 Instant::now(),
                 OPPORTUNISTIC_REAPER_SCAN_LIMIT,
             );
-            let reservation = owned_reservation_mut(&mut state, owner, invocation_id)
-                .map_err(StartError::Staging)?;
+            let reservation = state
+                .reservations
+                .get(&invocation_id)
+                .filter(|reservation| {
+                    reservation.connection_id == owner.connection_id
+                        && reservation.principal_id == owner.principal_id
+                })
+                .ok_or(StartError::Staging(StagingError::Unavailable))?;
             if reservation.state != ReservationState::Sealed {
                 return Err(StartError::Staging(StagingError::InvalidState));
             }
-            reservation.state = ReservationState::Starting;
-            SealedSubmission {
+            let workload_class = reservation.metadata.workload_class;
+            let active_count = state
+                .reservations
+                .values()
+                .filter(|reservation| {
+                    matches!(
+                        reservation.state,
+                        ReservationState::Starting | ReservationState::Started
+                    ) && reservation.metadata.workload_class == workload_class
+                })
+                .count();
+            let active_limit = match workload_class {
+                WorkloadClass::Operational => self.limits.max_active_operational,
+                WorkloadClass::Analytical => self.limits.max_active_analytical,
+            };
+            if active_count >= active_limit {
+                return Err(StartError::Staging(StagingError::ResourceLimit));
+            }
+            let submission = SealedSubmission {
                 invocation_id,
                 data: Arc::clone(
                     reservation
@@ -530,7 +561,13 @@ impl StagingStore {
                         .as_ref()
                         .ok_or(StartError::Staging(StagingError::InvalidState))?,
                 ),
-            }
+            };
+            state
+                .reservations
+                .get_mut(&invocation_id)
+                .ok_or(StartError::Staging(StagingError::Unavailable))?
+                .state = ReservationState::Starting;
+            submission
         };
 
         let result = revalidate_and_start(&submission);
@@ -976,6 +1013,14 @@ mod tests {
     }
 
     fn request(artifact: &[u8], parameters: &[u8]) -> PrepareSubmission {
+        request_for_class(artifact, parameters, WorkloadClass::Operational)
+    }
+
+    fn request_for_class(
+        artifact: &[u8],
+        parameters: &[u8],
+        workload_class: WorkloadClass,
+    ) -> PrepareSubmission {
         PrepareSubmission {
             manifest_version: 1,
             manifest: b"manifest".to_vec(),
@@ -986,7 +1031,7 @@ mod tests {
             parameter_bytes: parameters.len() as u64,
             parameter_sha256: Sha256::digest(parameters).into(),
             deadline_ms: 30_000,
-            workload_class: WorkloadClass::Operational,
+            workload_class,
         }
     }
 
@@ -1062,6 +1107,95 @@ mod tests {
         );
         let replacement = store.prepare(owner, request(b"x", b""));
         assert!(replacement.is_ok());
+    }
+
+    #[test]
+    fn active_invocation_quotas_are_isolated_by_class_and_retain_prepared_work() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
+
+        let store = StagingStore::new(
+            StagingLimits {
+                max_active_operational: 1,
+                max_active_analytical: 1,
+                ..StagingLimits::default()
+            },
+            Arc::new(AcceptMetadata),
+        )
+        .unwrap();
+        let operational_owner = make_owner(31, 41);
+        let queued_owner = make_owner(32, 42);
+        let analytical_owner = make_owner(33, 43);
+        let operational_id = upload_and_seal(&store, operational_owner, b"op1", b"");
+        let queued_id = upload_and_seal(&store, queued_owner, b"op2", b"");
+        let analytical_reservation = store
+            .prepare(
+                analytical_owner,
+                request_for_class(b"an1", b"", WorkloadClass::Analytical),
+            )
+            .unwrap();
+        store
+            .upload_chunk(
+                analytical_owner,
+                analytical_reservation.invocation_id,
+                ChunkKind::Artifact,
+                0,
+                b"an1",
+            )
+            .unwrap();
+        store
+            .seal(analytical_owner, analytical_reservation.invocation_id)
+            .unwrap();
+
+        let (started_sender, started_receiver) = mpsc::sync_channel(0);
+        let (resume_sender, resume_receiver) = mpsc::sync_channel(0);
+        std::thread::scope(|scope| {
+            let store_ref = &store;
+            let starting = scope.spawn(move || {
+                store_ref.start_with(operational_owner, operational_id, |_| {
+                    started_sender.send(()).unwrap();
+                    resume_receiver.recv().unwrap();
+                    Ok::<_, ()>(())
+                })
+            });
+            started_receiver.recv().unwrap();
+
+            let callback_called = AtomicBool::new(false);
+            assert!(matches!(
+                store.start_with(queued_owner, queued_id, |_| {
+                    callback_called.store(true, Ordering::SeqCst);
+                    Ok::<_, ()>(())
+                }),
+                Err(StartError::Staging(StagingError::ResourceLimit))
+            ));
+            assert!(!callback_called.load(Ordering::SeqCst));
+            assert_eq!(
+                store.status(queued_owner, queued_id),
+                Ok(SubmissionState::Prepared)
+            );
+
+            store
+                .start_with(
+                    analytical_owner,
+                    analytical_reservation.invocation_id,
+                    |_| Ok::<_, ()>(()),
+                )
+                .unwrap();
+            store
+                .finish_started(analytical_owner, analytical_reservation.invocation_id)
+                .unwrap();
+
+            resume_sender.send(()).unwrap();
+            starting.join().unwrap().unwrap();
+        });
+
+        store
+            .finish_started(operational_owner, operational_id)
+            .unwrap();
+        store
+            .start_with(queued_owner, queued_id, |_| Ok::<_, ()>(()))
+            .unwrap();
+        store.finish_started(queued_owner, queued_id).unwrap();
     }
 
     #[test]

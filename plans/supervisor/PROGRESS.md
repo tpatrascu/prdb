@@ -6,7 +6,14 @@
 - Security/consistency: the class comes from immutable sealed submission metadata, and START still revalidates reservation ownership/state after cgroup setup. The class selects a trusted configured ceiling; it does not grant additional storage authority or override any limit.
 - Interface: `prdb-supervisor` accepts the complete optional flag set `--analytical-cpu-quota-us`, `--analytical-cpu-period-us`, `--analytical-memory-max-bytes`, and `--analytical-max-processes`; partial sets are rejected.
 - Verification: `cargo test -p prdb-engine --lib supervisor_ipc::worker_result_event_tests::workload_class_selects_the_configured_cgroup_profile --locked --offline -- --exact` passed. Locked workspace build, rustfmt check, warning-denied Clippy, and serial workspace tests passed in the documented Nix shell; cgroup-dependent sandbox tests remained ignored.
-- Remaining: aggregate class-wide queue/concurrency quotas and analytical prefetch/cache controls remain unimplemented.
+- Remaining: class-wide active invocation quotas are implemented below. Separate queue reservations/depth limits and analytical prefetch/cache controls remain unimplemented.
+
+## SU-2: class-wide active invocation quotas — implemented
+
+- Behavior: START atomically reserves a slot by immutable sealed workload class, counting `Starting` and `Started` reservations. Defaults are 64 operational and 8 analytical active invocations; deployments can configure each limit with `--max-active-operational` and `--max-active-analytical`. At capacity, START returns a resource-limit error before storage admission and preserves the sealed reservation for retry. Slots release when a started reservation reaches durable finish/cleanup.
+- Changed code and contract: [staging state machine](../../engine/src/supervisor.rs), [supervisor CLI](../../engine/src/bin/prdb-supervisor.rs), and [workload profile](../../specs/workload-profile.md).
+- Verification: a deterministic concurrent staging test checks same-class rejection, independent class capacity, prepared retention, and retry after slot release; supervisor help coverage checks both flags.
+- Remaining: queue reservations/depth limits and analytical prefetch/cache controls remain open.
 
 ## SU-2 dependency: bounded submission staging
 
@@ -42,7 +49,7 @@
 - Behavior: PREPARE now stores `deadline_ms` and operational/analytical `workload_class` in the sealed submission metadata. It rejects zero or over-ceiling deadlines; the default ceiling is 15 minutes and is configurable.
 - Changed code and contract: [staging metadata](../../engine/src/supervisor.rs) and [supervisor admission contract](../../specs/supervisor.md).
 - Verification: staging tests cover deadline ceiling rejection and preservation of the accepted class/deadline through START.
-- Remaining: aggregate class-wide queue/concurrency quotas and analytical prefetch/cache controls remain open; per-invocation cgroup selection is implemented above.
+- Remaining: queue reservations/depth limits and analytical prefetch/cache controls remain open; per-invocation cgroup selection and active invocation quotas are implemented above.
 
 ## SU-3 dependency: token-bound START and deadline enforcement
 
