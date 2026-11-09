@@ -3,6 +3,7 @@
 #include "prdb_sdk_sql_exec_v12.h"
 #include "prdb_sdk_sql_exec_v13.h"
 #include "prdb_sdk_sql_exec_v14.h"
+#include "prdb_sdk_sql_exec_v15.h"
 
 #include <assert.h>
 #include <string.h>
@@ -499,6 +500,62 @@ static int32_t run_query_v14(mock_state *mock, const uint8_t *sql,
         materialized_bytes, sizeof(materialized_bytes), on_group_v14, capture);
 }
 
+static int32_t on_group_v15(void *context,
+                            const prdb_sdk_value_v1 *group_keys,
+                            uint32_t group_key_count,
+                            const prdb_sdk_value_v1 *aggregate_value,
+                            uint64_t matching_row_count,
+                            const prdb_sdk_select_binding_v15 *binding) {
+    group_capture *capture = (group_capture *)context;
+    int32_t first = 0, second = 0;
+    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V15_VERSION);
+    assert(binding->order_count == 3);
+    assert(binding->order_items[0].type_code == PRDB_SDK_VALUE_TYPE_INTEGER);
+    assert(binding->order_items[1].type_code == PRDB_SDK_VALUE_TYPE_BIGINT);
+    assert(binding->order_items[2].type_code == PRDB_SDK_VALUE_TYPE_INTEGER);
+    assert(group_key_count == 2 && aggregate_value == NULL);
+    assert(capture->mock->batch_finished != 0);
+    assert(capture->mock->executor_calls == 3);
+    assert(prdb_sdk_value_get_integer_v1(&group_keys[0], &first) ==
+           PRDB_SDK_VALUE_ACCESS_OK);
+    assert(prdb_sdk_value_get_integer_v1(&group_keys[1], &second) ==
+           PRDB_SDK_VALUE_ACCESS_OK);
+    capture->keys[capture->calls] = first;
+    capture->second_keys[capture->calls] = second;
+    capture->row_counts[capture->calls] = matching_row_count;
+    ++capture->calls;
+    return 0;
+}
+
+static int32_t run_query_v15(mock_state *mock, const uint8_t *sql,
+                             uint64_t sql_len,
+                             const prdb_sdk_value_v1 *parameter,
+                             group_capture *capture) {
+    static const uint8_t schema[] = "app";
+    uint8_t planner_response[256] = {0};
+    uint8_t executor_response[256] = {0};
+    uint8_t batch_response[512] = {0};
+    uint8_t materialized_bytes[64] = {0};
+    static const uint8_t id_name[] = "id";
+    static const uint8_t score_name[] = "score";
+    prdb_sdk_sql_column_shape_v2 planner_columns[2] = {
+        {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
+        {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
+    prdb_sdk_sql_column_shape_v2 executor_columns[2] = {
+        {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
+        {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
+    prdb_sdk_value_v1 cell_scratch[2] = {{0}};
+    prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
+                             mock, executor_request, planner_request, NULL,
+                             statement_failure};
+    return prdb_sdk_sql_execute_group_v15(
+        &host, schema, sizeof(schema) - 1, sql, sql_len, parameter, 1, 3, 512,
+        planner_response, sizeof(planner_response), executor_response,
+        sizeof(executor_response), batch_response, sizeof(batch_response),
+        planner_columns, 2, executor_columns, 2, cell_scratch, 2,
+        materialized_bytes, sizeof(materialized_bytes), on_group_v15, capture);
+}
+
 static void reset_scan(mock_state *mock, group_capture *capture,
                        uint32_t finished) {
     mock->executor_calls = 0;
@@ -551,6 +608,10 @@ int main(void) {
     static const uint8_t v14_having_sql[] =
         "SELECT id, score, SUM(score) FROM widgets GROUP BY id, score "
         "HAVING SUM(score) >= $1";
+    static const uint8_t v15_order_sql[] =
+        "SELECT id, score, COUNT(*) FROM widgets GROUP BY id, score "
+        "HAVING COUNT(*) >= $1 ORDER BY score DESC NULLS LAST, "
+        "COUNT(*) DESC, id ASC NULLS LAST LIMIT 3";
     static const uint8_t parameter_bytes[] = {0, 0, 0, 5};
     static const uint8_t having_parameter_bytes[] = {
         0, 0, 0, 0, 0, 0, 0, 1};
@@ -576,6 +637,10 @@ int main(void) {
         sizeof(v14_having_parameter), PRDB_SDK_VALUE_ABI_V1_VERSION,
         PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_BIGINT,
         v14_having_parameter_bytes, sizeof(v14_having_parameter_bytes)};
+    prdb_sdk_value_v1 v15_having_parameter = {
+        sizeof(v15_having_parameter), PRDB_SDK_VALUE_ABI_V1_VERSION,
+        PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_BIGINT,
+        having_parameter_bytes, sizeof(having_parameter_bytes)};
     mock.planner_len = make_relation(mock.planner,
                                      PRDB_SDK_PLANNER_TABLE_HANDLE_KIND, 0x99);
     mock.executor_len = make_relation(mock.executor, 6, 0x22);
@@ -700,6 +765,31 @@ int main(void) {
                PRDB_SDK_SQL_EXEC_OK);
         assert(capture.calls == 1 && capture.keys[0] == 1 &&
                capture.aggregates[0] == 18 && mock.statement_failed == 0);
+        mock.batch_len = make_rows(mock.batch, 1, keys, scores,
+                                   value_states, 3);
+    }
+
+    {
+        const int32_t tuple_ids[] = {2, 1, 1, 0};
+        const int32_t tuple_scores[] = {9, 9, 9, 9};
+        const uint8_t tuple_states[] = {
+            PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_STATE_VALUE,
+            PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_STATE_VALUE};
+        const int32_t sorted_ids[] = {1, 0, 2};
+        mock.batch_len = make_rows(mock.batch, 1, tuple_ids, tuple_scores,
+                                   tuple_states, 4);
+        reset_scan(&mock, &capture, 1);
+        assert(run_query_v15(&mock, v15_order_sql,
+                             sizeof(v15_order_sql) - 1,
+                             &v15_having_parameter, &capture) ==
+               PRDB_SDK_SQL_EXEC_OK);
+        assert(capture.calls == 3 && mock.statement_failed == 0);
+        for (uint32_t index = 0; index < 3; ++index) {
+            assert(capture.keys[index] == sorted_ids[index]);
+            assert(capture.second_keys[index] == 9);
+        }
+        assert(capture.row_counts[0] == 2 && capture.row_counts[1] == 1 &&
+               capture.row_counts[2] == 1);
         mock.batch_len = make_rows(mock.batch, 1, keys, scores,
                                    value_states, 3);
     }
