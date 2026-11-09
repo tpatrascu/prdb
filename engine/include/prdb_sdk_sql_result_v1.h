@@ -4,6 +4,7 @@
 #include "prdb_sdk_sql_v2.h"
 #include "prdb_sdk_sql_v5.h"
 #include "prdb_sdk_sql_v6.h"
+#include "prdb_sdk_sql_v8.h"
 #include "prdb_query_abi_v3.h"
 
 #define PRDB_SDK_SQL_RESULT_V1_ABI_VERSION UINT32_C(1)
@@ -42,6 +43,30 @@ int32_t prdb_sdk_sql_write_result_row_v1(
     const prdb_sdk_row_v1 *row, prdb_sdk_value_v1 *cell_scratch,
     uint32_t cell_scratch_capacity, uint8_t *output,
     uint64_t output_capacity, uint64_t *output_len);
+
+/* Encodes one joined projection row as SQLR v1 using each binding's source
+ * side, ordinal, and declared column metadata. VALUE, NULL, and REDACTED
+ * projection states are preserved. All inputs and output must be disjoint. */
+int32_t prdb_sdk_sql_encode_join_result_v1(
+    const prdb_sdk_select_binding_v8 *binding,
+    const prdb_sdk_sql_column_shape_v2 *left_columns,
+    uint32_t left_column_count,
+    const prdb_sdk_sql_column_shape_v2 *right_columns,
+    uint32_t right_column_count,
+    const prdb_sdk_value_v1 *projected_values, uint32_t projected_count,
+    uint8_t *output, uint64_t output_capacity, uint64_t *output_len);
+
+/* Encodes and emits one joined SQLR row through the v3 result callback in
+ * host-sized provisional chunks. */
+int32_t prdb_sdk_sql_write_join_result_v1(
+    const prdb_host_api_v3 *host,
+    const prdb_sdk_select_binding_v8 *binding,
+    const prdb_sdk_sql_column_shape_v2 *left_columns,
+    uint32_t left_column_count,
+    const prdb_sdk_sql_column_shape_v2 *right_columns,
+    uint32_t right_column_count,
+    const prdb_sdk_value_v1 *projected_values, uint32_t projected_count,
+    uint8_t *output, uint64_t output_capacity, uint64_t *output_len);
 
 /* Encodes one GROUP BY COUNT(*) row as SQLR v1. The first field uses the
  * declared group-column metadata and the second field is named `count` with

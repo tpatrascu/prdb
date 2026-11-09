@@ -186,6 +186,69 @@ int main(void) {
         assert(counter.total == PRDB_QUERY_MAX_RESULT_CHUNK_BYTES);
     }
 
+    {
+        static const uint8_t right_name[] = "label";
+        static const uint8_t left_id_bytes[] = {0, 0, 0, 7};
+        static const uint8_t expected_join[] = {
+            'S', 'Q', 'L', 'R', 0, 1, 0, 2,
+            0, 2, 'i', 'd', 0, 0, 0, 3, 0, 0,
+            PRDB_SDK_VALUE_STATE_VALUE, 0, 0, 0, 4, 0, 0, 0, 7,
+            0, 5, 'l', 'a', 'b', 'e', 'l', 0, 0, 0, 6, 0, 0,
+            PRDB_SDK_VALUE_STATE_NULL, 0, 0, 0, 0};
+        prdb_sdk_sql_column_shape_v2 right_column = {
+            right_name, sizeof(right_name) - 1, 0,
+            PRDB_SDK_VALUE_TYPE_TEXT, 0, 0};
+        prdb_sdk_select_binding_v8 join_binding = {0};
+        prdb_sdk_value_v1 join_values[2] = {
+            {sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
+             PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_INTEGER,
+             left_id_bytes, sizeof(left_id_bytes)},
+            {sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
+             PRDB_SDK_VALUE_STATE_NULL, 0, NULL, 0}};
+
+        join_binding.struct_size = sizeof(join_binding);
+        join_binding.abi_version = PRDB_SDK_SQL_ABI_V8_VERSION;
+        join_binding.left_relation_column_count = 1;
+        join_binding.right_relation_column_count = 1;
+        join_binding.projection_count = 2;
+        join_binding.projections[0].relation_side = PRDB_SDK_SQL_V8_LEFT;
+        join_binding.projections[0].column =
+            (prdb_sdk_sql_bound_column_v2){0, PRDB_SDK_VALUE_TYPE_INTEGER,
+                                           0, 0};
+        join_binding.projections[1].relation_side = PRDB_SDK_SQL_V8_RIGHT;
+        join_binding.projections[1].column =
+            (prdb_sdk_sql_bound_column_v2){0, PRDB_SDK_VALUE_TYPE_TEXT, 0, 0};
+        output_len = 99;
+        assert(prdb_sdk_sql_encode_join_result_v1(
+                   &join_binding, columns, 1, &right_column, 1, join_values,
+                   2, output, sizeof(output), &output_len) ==
+               PRDB_SDK_SQL_RESULT_OK);
+        assert(output_len == sizeof(expected_join));
+        assert(memcmp(output, expected_join, sizeof(expected_join)) == 0);
+        capture.calls = 0;
+        capture.length = 0;
+        assert(prdb_sdk_sql_write_join_result_v1(
+                   &host, &join_binding, columns, 1, &right_column, 1,
+                   join_values, 2, output, sizeof(output), &output_len) ==
+               PRDB_SDK_SQL_RESULT_OK);
+        assert(capture.calls == 1 && capture.length == output_len &&
+               memcmp(capture.bytes, expected_join, sizeof(expected_join)) == 0);
+        join_binding.projections[1].relation_side = 2;
+        output_len = 99;
+        assert(prdb_sdk_sql_encode_join_result_v1(
+                   &join_binding, columns, 1, &right_column, 1, join_values,
+                   2, output, sizeof(output), &output_len) ==
+               PRDB_SDK_SQL_RESULT_INVALID_BINDING);
+        assert(output_len == 0);
+        join_binding.projections[1].relation_side = PRDB_SDK_SQL_V8_RIGHT;
+        join_values[0].type_code = PRDB_SDK_VALUE_TYPE_TEXT;
+        assert(prdb_sdk_sql_encode_join_result_v1(
+                   &join_binding, columns, 1, &right_column, 1, join_values,
+                   2, output, sizeof(output), &output_len) ==
+               PRDB_SDK_SQL_RESULT_INVALID_ROW);
+        assert(output_len == 0);
+    }
+
     output_len = 99;
     assert(prdb_sdk_sql_encode_result_row_v1(
                &binding, columns, 2, &row, cell_scratch, 2, too_small,
