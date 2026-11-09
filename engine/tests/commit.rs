@@ -15327,7 +15327,7 @@ fn identity_ddl_cannot_disable_the_last_credentialed_admin()
 }
 
 #[test]
-fn storage_manager_authorizes_object_grants_for_owners_and_manage_grants_holders()
+fn storage_manager_authorizes_object_grants_and_aborts_stale_writers_after_revoke()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
@@ -15470,12 +15470,210 @@ fn storage_manager_authorizes_object_grants_for_owners_and_manage_grants_holders
         )?,
         4
     );
-    assert_eq!(commit_sequence(&database)?, 4);
+
+    use prdb_engine::authorization::{
+        AccessTarget, AuthorityDependency, AuthorizationContext, AuthorizedProjection, Effect,
+        Expr, Grant, Operation, Policy, Subject,
+    };
+    use prdb_engine::tuple::FieldPatch;
+
+    let row_id = id(0x81);
+    let row_key = table_row_key(id(16), row_id);
+    let columns = [ColumnSchema {
+        scalar_type: ScalarType::Text,
+        nullable: false,
+    }];
+    let column_ids = [[0x82; 16]];
+    commit_rows(
+        &database,
+        id(0x80),
+        manager_grantee,
+        9_999,
+        &[RowWrite {
+            key: row_key,
+            expected_version: None,
+            payload: Some(encode_tuple(
+                &columns,
+                1,
+                &[Some(ScalarValue::Text("before revoke".to_owned()))],
+            )?),
+        }],
+    )
+    .map_err(|error| format!("seed grant-race row: {error:?}"))?;
+
+    let grant_bytes = database
+        .begin_read()?
+        .open_table(CATALOG)?
+        .get(manager_update.key.as_slice())?
+        .ok_or("missing update grant before staged write")?
+        .value()
+        .to_vec();
+    let context = AuthorizationContext {
+        principal_id: manager_grantee,
+        role_ids: Default::default(),
+        scope: [
+            (Operation::Usage, AccessTarget::Schema(id(16))),
+            (Operation::Select, AccessTarget::Table(id(16))),
+            (Operation::Update, AccessTarget::Table(id(16))),
+            (
+                Operation::Select,
+                AccessTarget::Column {
+                    table_id: id(16),
+                    column_id: column_ids[0],
+                },
+            ),
+            (
+                Operation::Update,
+                AccessTarget::Column {
+                    table_id: id(16),
+                    column_id: column_ids[0],
+                },
+            ),
+        ]
+        .into(),
+    };
+    let grants = [
+        Grant {
+            subject: Subject::Principal(manager_grantee),
+            operation: Operation::Usage,
+            target: AccessTarget::Schema(id(16)),
+        },
+        Grant {
+            subject: Subject::Principal(manager_grantee),
+            operation: Operation::Select,
+            target: AccessTarget::Table(id(16)),
+        },
+        Grant {
+            subject: Subject::Principal(manager_grantee),
+            operation: Operation::Update,
+            target: AccessTarget::Table(id(16)),
+        },
+        Grant {
+            subject: Subject::Principal(manager_grantee),
+            operation: Operation::Select,
+            target: AccessTarget::Column {
+                table_id: id(16),
+                column_id: column_ids[0],
+            },
+        },
+        Grant {
+            subject: Subject::Principal(manager_grantee),
+            operation: Operation::Update,
+            target: AccessTarget::Column {
+                table_id: id(16),
+                column_id: column_ids[0],
+            },
+        },
+    ];
+    let mut policies = Vec::new();
+    for operation in [Operation::Select, Operation::Update] {
+        let policy = Policy {
+            subjects: vec![Subject::Principal(manager_grantee)],
+            operation,
+            target: AccessTarget::Table(id(16)),
+            effect: Effect::Allow,
+            using: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+            with_check: (operation == Operation::Update)
+                .then_some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+        };
+        policies.push(policy.clone());
+        policies.push(Policy {
+            target: AccessTarget::Column {
+                table_id: id(16),
+                column_id: column_ids[0],
+            },
+            ..policy
+        });
+    }
+    let dependency = AuthorityDependency {
+        key: manager_update.key.clone(),
+        expected_value: Some(grant_bytes),
+    };
+    let projection = AuthorizedProjection {
+        columns: &columns,
+        column_ids: &column_ids,
+        schema_version: 1,
+        schema_id: id(16),
+        context: &context,
+        grants: &grants,
+        policies: &policies,
+        checks: &[],
+        policy_driving_columns: &[],
+        dependencies: std::slice::from_ref(&dependency),
+    };
+    let mut writer = storage.begin_invocation(id(0x83), manager_grantee, 9_999, 1, 1024)?;
+    writer
+        .stage_patch_authorized(
+            prdb_engine::overlay::RowId {
+                table: id(16),
+                row: row_id,
+            },
+            &projection,
+            &[FieldPatch {
+                ordinal: 0,
+                value: Some(ScalarValue::Text("stale after revoke".to_owned())),
+            }],
+        )
+        .map_err(|error| format!("stage grant-race update: {error:?}"))?;
+
+    let mut race_revoke_audit = audit_event(0x84);
+    race_revoke_audit.actor_id = Some(grant_manager);
+    race_revoke_audit.action = AuditAction::AuthorityChange;
+    assert_eq!(
+        storage
+            .commit_authorized_object_grant_ddl(
+                id(0x84),
+                grant_manager,
+                9_999,
+                &[
+                    remove_catalog_record(manager_update.clone())?,
+                    remove_catalog_record(dependency_write(manager_grantee, id(16), 5))?,
+                    bump_grantee_epoch(manager_grantee, 3, "manager_grantee")?,
+                ],
+                &[race_revoke_audit],
+            )
+            .map_err(|error| format!("revoke grant for staged writer: {error:?}"))?,
+        6
+    );
+    assert!(matches!(
+        writer.commit(),
+        Err(prdb_engine::transaction::TransactionError::Commit(
+            CommitError::Conflict
+        ))
+    ));
+    assert_eq!(
+        decode_tuple(
+            &columns,
+            1,
+            &RowRecord::decode(
+                database
+                    .begin_read()?
+                    .open_table(ROWS)?
+                    .get(&row_key[..])?
+                    .ok_or("row disappeared after grant revoke")?
+                    .value(),
+            )?
+            .payload,
+        )?
+        .values,
+        [Some(ScalarValue::Text("before revoke".to_owned()))]
+    );
+    assert_eq!(
+        lookup_outcome(&database, id(0x83), manager_grantee, 1)?
+            .ok_or("missing stale grant writer outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
+
+    assert_eq!(commit_sequence(&database)?, 6);
     for (invocation_id, principal_id, status) in [
         (id(101), table_owner, OutcomeStatus::Committed),
         (id(102), grant_manager, OutcomeStatus::Committed),
         (id(103), denied_user, OutcomeStatus::Aborted),
         (id(104), table_owner, OutcomeStatus::Committed),
+        (id(0x80), manager_grantee, OutcomeStatus::Committed),
+        (id(0x84), grant_manager, OutcomeStatus::Committed),
+        (id(0x83), manager_grantee, OutcomeStatus::Aborted),
     ] {
         assert_eq!(
             lookup_outcome(&database, invocation_id, principal_id, 1)?
@@ -15487,7 +15685,7 @@ fn storage_manager_authorizes_object_grants_for_owners_and_manage_grants_holders
     let read = database.begin_read()?;
     let catalog = read.open_table(CATALOG)?;
     assert!(catalog.get(owner_select.key.as_slice())?.is_none());
-    assert!(catalog.get(manager_update.key.as_slice())?.is_some());
+    assert!(catalog.get(manager_update.key.as_slice())?.is_none());
     assert!(catalog.get(denied_insert.key.as_slice())?.is_none());
     assert!(
         catalog

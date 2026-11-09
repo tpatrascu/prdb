@@ -2077,3 +2077,10 @@
 - Implementation: `derive_index_key` now rejects a zero index ID or row UUID before decoding and projecting the typed tuple; the codec spec states the nonzero-ID rule.
 - Verification: all 12 `index_key` integration tests passed. With Rust/Cargo 1.95.0, `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed; the commit integration target reported 125 passed and 3 delegated-cgroup tests ignored.
 - Remaining: no change to storage admission or migration behavior; database-format upgrade evidence and production power-loss/filesystem validation remain open.
+
+## SM-5 / AU-6: object-grant revocation conflicts with a staged writer — verified
+
+- Contract: [authorization](../../specs/authorization.md), [concurrency/MVCC](../../specs/concurrency-mvcc.md), and [storage manager](../../specs/storage-manager.md). Finalization must revalidate the exact grant record used by an authorized write; revocation cannot leave a previously staged write committing under stale authority.
+- Regression: `storage_manager_authorizes_object_grants_and_aborts_stale_writers_after_revoke` stages an authorized row update with the persisted table UPDATE grant, revokes that grant through `commit_authorized_object_grant_ddl`, and then finalizes the writer. It verifies durable ABORTED status, unchanged row bytes, committed revocation, and the final commit sequence.
+- Verification: the full Rust commit integration target passed (125 passed, 3 delegated-cgroup tests ignored); workspace formatting and warning-denied Clippy passed under Rust/Cargo 1.95.0.
+- Remaining: repeated concurrent schedules and equivalent stale-writer coverage for membership, identity, credential, and other policy DDL routes remain open.
