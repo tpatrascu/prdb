@@ -227,3 +227,11 @@
 - Regression: TinyCC v7 execution checks integer results, null groups and error behavior; SQLR fixtures check AVG metadata and writer output. The maintained confined query artifact now runs MIN, SUM, and AVG. `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` checks the exact DECIMAL(38,6) AVG frame after sandbox execution and relay, followed by durable commit. This acceptance passed with the local delegated cgroup/runtime profile.
 - Verification: full maintained TinyCC SDK suite, focused sandbox acceptance, `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked -- --test-threads=1`, and `git diff --check` passed. Three cgroup-dependent integration tests remain ignored in the full test run; the AVG acceptance was run separately with delegated cgroup and runtime paths.
 - Remaining: mixed-workload benchmarks, joins, HAVING, grouped ORDER BY, multiple grouping keys, cancellation/deadlines, and spill remain open.
+
+## SQL-7 dependency: bounded inner equijoin pair kernel — implemented
+
+- Contract: [SQL library](../../specs/sql-library.md) and [workload profile](../../specs/workload-profile.md). Match two authorized scalar-key arrays with inner equijoin semantics, bounded to 128 rows per side and at most 16,384 output pairs. NULL does not match; REDACTED or malformed values fail; errors leave caller output unchanged.
+- Red/green evidence: the maintained TinyCC fixture first failed to link on the absent kernel. It now checks stable left-major pair order, duplicate keys, NULL behavior, Decimal keys at the same declared scale, rejected scale/type mismatches, malformed and REDACTED inputs, insufficient output capacity, and the maximum 128×128 result.
+- Implementation: `prdb_sdk_sql_inner_join_pairs_v1` validates inputs and preflights comparison results and exact output size before writing the pair array. It reuses the existing scalar comparator, so types must agree and Decimal scales must match.
+- Verification: focused TinyCC fixture passed with `-Wall -Wextra -Werror`.
+- Remaining: SQL JOIN syntax, relation aliases and binding, two authorized scans, joined-row projection/filtering, SQLR results, and confined end-to-end acceptance remain open. This primitive does not yet claim SQL JOIN support.
