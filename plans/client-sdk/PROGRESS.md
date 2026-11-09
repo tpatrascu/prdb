@@ -59,7 +59,15 @@
 - Typed accessors: value state, Boolean, signed 16/32/64-bit scalars, Date, TimestampTz and borrowed raw payload accessors validate state/type and preserve NULL versus REDACTED. Signed conversion handles negative values and minimum representable boundaries without out-of-range signed casts.
 - Regression: the expanded value fixture initially failed to compile because `prdb_sdk_value_state_v1` and the typed getters were absent; after implementation it passes against the TinyCC archive, including negative/minimum signed values, no-value statuses, type mismatch, and borrowed text bytes.
 - Query host ABI v3: [`prdb_query_abi_v3.h`](../../engine/include/prdb_query_abi_v3.h) adds a sticky SQL statement-failure callback while preserving v1/v2 entry points. The trusted executor latches the callback and forces a nonzero worker exit after user entry returns, so a caught SQL API error still reaches supervisor abort handling. Rust/C layout and descriptor checks and the SDK SELECT fixture cover the new boundary.
-- Remaining: add generated bindings and an owned batch-result lifetime API before claiming SDK-1 complete; complete the C SQL/runtime result format and client cancellation surface; connect requested-scope selection to metadata discovery.
+- Remaining: add generated bindings before claiming SDK-1 complete; complete the C SQL/runtime result format and client cancellation surface; connect requested-scope selection to metadata discovery.
+
+## SDK-1: owned batch-result lifetime — implemented
+
+- Contract: [`prdb_sdk_owned_batch_v1`](../../engine/include/prdb_sdk_owned_batch_v1.h) optionally copies a bounded executor batch into SDK-owned memory. The copy is validated before publication; opened batch/row/cell views remain borrowed from it and become invalid on release.
+- Red/green evidence: the maintained batch fixture first failed to compile because the owned-batch header was absent. It now checks copy isolation, full validation, borrowed views into the owned copy, active-wrapper rejection, malformed/unsupported payload rejection, release invalidation, idempotent release, and wrapper reuse.
+- Implementation: `owned_batch_v1.c` owns the copy and exposes copy/open/release functions; release clears the wrapper and permits reuse. The API reuses the existing batch decoder so owned and directly borrowed payloads receive identical validation.
+- Verification: the maintained TinyCC SDK suite passed with `make -f engine/sdk/Makefile BUILD_DIR=/tmp/prdb-sdk-owned-batch test` under TinyCC 0.9.27-unstable-2025-01-06. Rust 1.95.0 workspace build, format, warning-denied Clippy, and full tests also passed; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
+- Remaining: generated bindings, the C SQL/runtime result format, client cancellation, and metadata discovery networking remain open.
 
 ## SDK-5 dependency: typed ordinary-index AdminClient — implemented
 

@@ -1,4 +1,5 @@
 #include "prdb_sdk_batch_v1.h"
+#include "prdb_sdk_owned_batch_v1.h"
 
 #include <assert.h>
 #include <string.h>
@@ -83,5 +84,72 @@ int main(void) {
     assert(prdb_sdk_batch_open_v1(&batch, sizeof(batch), malformed_payload,
                                   sizeof(malformed_payload)) ==
            PRDB_SDK_BATCH_INVALID_PAYLOAD);
+    {
+        prdb_sdk_owned_batch_v1 owned = {0};
+        prdb_sdk_owned_batch_v1 invalid = {0};
+        uint8_t source_payload[sizeof(payload)];
+        prdb_sdk_batch_v1 owned_batch;
+        prdb_sdk_row_iterator_v1 owned_rows;
+        prdb_sdk_row_v1 owned_row;
+        prdb_sdk_cell_iterator_v1 owned_cells;
+        prdb_sdk_value_v1 owned_cell;
+
+        assert(prdb_sdk_owned_batch_copy_v1(
+                   &owned, (uint32_t)sizeof(owned) - 1, payload,
+                   sizeof(payload)) == PRDB_SDK_BATCH_INVALID_ARGUMENT);
+        memcpy(source_payload, payload, sizeof(payload));
+        assert(prdb_sdk_owned_batch_copy_v1(
+                   &owned, sizeof(owned), source_payload,
+                   sizeof(source_payload)) ==
+               PRDB_SDK_BATCH_OK);
+        assert(prdb_sdk_owned_batch_copy_v1(
+                   &owned, sizeof(owned), payload, sizeof(payload)) ==
+               PRDB_SDK_BATCH_INVALID_ARGUMENT);
+        assert(owned.payload != payload);
+        assert(owned.payload_len == sizeof(payload));
+        assert(memcmp(owned.payload, payload, sizeof(payload)) == 0);
+        source_payload[32] = 0;
+        assert(owned.payload[32] == 42);
+        assert(prdb_sdk_owned_batch_open_v1(&owned, &owned_batch,
+                                            sizeof(owned_batch)) ==
+               PRDB_SDK_BATCH_OK);
+        assert(prdb_sdk_batch_rows_begin_v1(&owned_batch, &owned_rows,
+                                            sizeof(owned_rows)) ==
+               PRDB_SDK_BATCH_OK);
+        assert(prdb_sdk_batch_row_next_v1(&owned_rows, &owned_row,
+                                          sizeof(owned_row)) ==
+               PRDB_SDK_BATCH_OK);
+        assert(prdb_sdk_row_cells_begin_v1(&owned_row, &owned_cells,
+                                           sizeof(owned_cells)) ==
+               PRDB_SDK_BATCH_OK);
+        assert(prdb_sdk_cell_next_v1(&owned_cells, &owned_cell,
+                                     sizeof(owned_cell)) == PRDB_SDK_BATCH_OK);
+        assert(owned_cell.data >= owned.payload &&
+               owned_cell.data < owned.payload + owned.payload_len);
+        assert(prdb_sdk_owned_batch_release_v1(&owned) == PRDB_SDK_BATCH_OK);
+        assert(owned.payload == NULL && owned.payload_len == 0);
+        assert(prdb_sdk_owned_batch_release_v1(&owned) == PRDB_SDK_BATCH_OK);
+        assert(prdb_sdk_owned_batch_open_v1(&owned, &owned_batch,
+                                            sizeof(owned_batch)) ==
+               PRDB_SDK_BATCH_INVALID_ARGUMENT);
+        assert(prdb_sdk_owned_batch_copy_v1(
+                   &owned, sizeof(owned), payload, sizeof(payload)) ==
+               PRDB_SDK_BATCH_OK);
+        assert(prdb_sdk_owned_batch_release_v1(&owned) == PRDB_SDK_BATCH_OK);
+        memcpy(malformed_payload, payload, sizeof(payload));
+        malformed_payload[1] = 2;
+        assert(prdb_sdk_owned_batch_copy_v1(
+                   &invalid, sizeof(invalid), malformed_payload,
+                   sizeof(malformed_payload)) ==
+               PRDB_SDK_BATCH_UNSUPPORTED_VERSION);
+        assert(invalid.payload == NULL && invalid.payload_len == 0);
+        memcpy(malformed_payload, payload, sizeof(payload));
+        malformed_payload[5] = 9;
+        assert(prdb_sdk_owned_batch_copy_v1(
+                   &invalid, sizeof(invalid), malformed_payload,
+                   sizeof(malformed_payload)) ==
+               PRDB_SDK_BATCH_INVALID_PAYLOAD);
+        assert(invalid.payload == NULL && invalid.payload_len == 0);
+    }
     return 0;
 }
