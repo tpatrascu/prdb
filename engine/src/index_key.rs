@@ -97,7 +97,9 @@ pub fn derive_index_key(
     tuple_payload: &[u8],
     index_column_ids: &[[u8; 16]],
 ) -> Result<DerivedIndexKey, DeriveIndexKeyError> {
-    if schema_column_ids.is_empty()
+    if index_id == [0; 16]
+        || row_id == [0; 16]
+        || schema_column_ids.is_empty()
         || schema_column_ids.len() != schema_columns.len()
         || index_column_ids.is_empty()
     {

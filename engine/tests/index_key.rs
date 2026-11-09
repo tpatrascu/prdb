@@ -374,3 +374,38 @@ fn catalog_index_key_reports_nulls_and_rejects_invalid_definitions_or_rows() {
         ))
     );
 }
+
+#[test]
+fn catalog_index_key_rejects_zero_index_and_row_ids() {
+    let schema_columns = [ColumnSchema {
+        scalar_type: ScalarType::Integer,
+        nullable: false,
+    }];
+    let schema_ids = [[0x10; 16]];
+    let payload = encode_tuple(&schema_columns, 1, &[Some(ScalarValue::Integer(1))]).unwrap();
+
+    assert_eq!(
+        derive_index_key(
+            [0; 16],
+            [0x33; 16],
+            1,
+            &schema_ids,
+            &schema_columns,
+            &payload,
+            &schema_ids,
+        ),
+        Err(DeriveIndexKeyError::InvalidDefinition)
+    );
+    assert_eq!(
+        derive_index_key(
+            [0x22; 16],
+            [0; 16],
+            1,
+            &schema_ids,
+            &schema_columns,
+            &payload,
+            &schema_ids,
+        ),
+        Err(DeriveIndexKeyError::InvalidDefinition)
+    );
+}

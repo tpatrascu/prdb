@@ -2069,3 +2069,11 @@
 - Regression: a barrier-coordinated real-redb race concurrently creates a row policy as the current table owner and transfers ownership as a database administrator. It accepts the valid serial orders, checks durable outcomes and commit-sequence advancement, verifies the resulting policy and table owner, and validates the recovered catalog image.
 - Verification: focused test passed once and in ten fresh processes. Rust 1.95.0 workspace build, format check, warning-denied Clippy, and full test suite passed; the commit integration target reported 125 passed and 3 cgroup-dependent ignored.
 - Remaining: races against other DDL families, broader stress schedules, and confined artifact execution remain open.
+
+## SM-2: reject zero IDs in derived index keys — verified
+
+- Contract: [index-key encoding v1](../../specs/index-key-encoding.md) requires catalog table/index/row/column identifiers to be nonzero before a persisted SQL index key is derived.
+- Red evidence: `catalog_index_key_rejects_zero_index_and_row_ids` failed because `derive_index_key` produced a complete key with a zero index ID.
+- Implementation: `derive_index_key` now rejects a zero index ID or row UUID before decoding and projecting the typed tuple; the codec spec states the nonzero-ID rule.
+- Verification: all 12 `index_key` integration tests passed. With Rust/Cargo 1.95.0, `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed; the commit integration target reported 125 passed and 3 delegated-cgroup tests ignored.
+- Remaining: no change to storage admission or migration behavior; database-format upgrade evidence and production power-loss/filesystem validation remain open.
