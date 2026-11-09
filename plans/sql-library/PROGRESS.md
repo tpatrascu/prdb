@@ -234,7 +234,7 @@
 - Red/green evidence: the maintained TinyCC fixture first failed to link on the absent kernel. It now checks stable left-major pair order, duplicate keys, NULL behavior, Decimal keys at the same declared scale, rejected scale/type mismatches, malformed and REDACTED inputs, insufficient output capacity, and the maximum 128×128 result.
 - Implementation: `prdb_sdk_sql_inner_join_pairs_v1` validates inputs and preflights comparison results and exact output size before writing the pair array. It reuses the existing scalar comparator, so types must agree and Decimal scales must match.
 - Verification: focused TinyCC fixture passed with `-Wall -Wextra -Werror`.
-- Remaining: SQL JOIN syntax, relation aliases and binding, two authorized scans, joined-row projection/filtering, SQLR results, and confined end-to-end acceptance remain open. This primitive does not yet claim SQL JOIN support.
+- Remaining: SQL JOIN SQLR encoding and confined end-to-end acceptance remain open. The operator primitive alone did not claim full SQL JOIN support; the later v8 parser/binder and runner are recorded below.
 
 ## SQL-7 dependency: single INNER JOIN parser and binder — implemented
 
@@ -242,4 +242,11 @@
 - Red/green evidence: the maintained v8 TinyCC fixture parses the two-relation join form and verifies projection sides/ordinals and key bindings. It rejects malformed and unqualified syntax, preserves outputs on failed parse/bind, rejects relation and type mismatches, and confirms the frozen v7 parser does not accept the new grammar.
 - Implementation: v8 uses a separately versioned borrowed-span AST and binding. Relation aliases and self-joins are not accepted; one key equality is supported, with Decimal scale agreement matching the shared comparator.
 - Verification: focused TinyCC parser/binder fixture passed with `-Wall -Wextra -Werror`.
-- Remaining: resolve and scan both relations through planner/executor APIs, materialize bounded authorized rows, compose the join kernel with projection and LIMIT, encode result rows, and verify the path through the confined sandbox. WHERE, outer joins, multiple join predicates, and aliases remain open.
+- Remaining: encode joined rows as SQLR and verify the planner/executor path through the confined sandbox. WHERE, outer joins, multiple join predicates, aliases, and self-joins remain open.
+
+## SQL-7 dependency: bounded two-scan INNER JOIN runner — partial
+
+- Contract: [SQL library](../../specs/sql-library.md) and [workload profile](../../specs/workload-profile.md). Resolve two relations independently through planner and executor APIs, verify both relation shapes, scan sequentially, close before result callbacks, and cap each side at 128 rows plus 1 MiB total copied join-key/projection bytes. Apply inner equijoin and LIMIT after both scans; latch statement failure on errors.
+- Implementation: `prdb_sdk_sql_execute_inner_join_v8` uses separate planner/executor response buffers and shapes for each relation, stores only join keys and projected values in caller-owned bounded scratch, invokes the join kernel after both scans close, and dispatches synchronous projected-row callbacks.
+- Regression: the maintained v8 executor fixture checks two relation resolutions, two finished scans, stable joined projection values, NULL non-matches, LIMIT, redacted join-key rejection, copy-budget exhaustion, and callback failure propagation. The focused TinyCC fixture passed.
+- Remaining: SQLR joined-row encoding and a confined real-storage acceptance that proves the two scans use the invocation's authorized snapshot remain open. The runner currently exposes a callback API but no public joined SQLR writer.

@@ -20,7 +20,7 @@ The SDK also has bounded MIN/MAX, SUM, and AVG kernels and versioned grouped SEL
 
 The SDK has a bounded inner equijoin pair kernel for already-authorized key arrays: up to 128 values per side and at most 16,384 result pairs. It emits stable left-major matches, treats NULL as non-matching, and fails on REDACTED, malformed, or mismatched values.
 
-The v8 parser and binder accept a single INNER JOIN with relation-qualified projections and one equijoin predicate over two separately authorized relation shapes. Query execution over both scans, joins, and joined-row results remains open.
+The v8 parser/binder and runner accept one INNER JOIN with relation-qualified projections and one equijoin predicate over two separately authorized relation shapes. The runner resolves both relations independently, scans sequentially, and closes both before result callbacks. It bounds each side to 128 rows and combined copied key/projection bytes to 1 MiB, then emits joined projection values in stable left-major match order. NULL keys do not match; REDACTED keys fail before callbacks. SQLR encoding and confined end-to-end acceptance remain open.
 
 ## Mixed-Workload Scheduling
 
