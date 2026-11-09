@@ -12,6 +12,8 @@ The first storage milestone retains the existing single-table SQL subset and can
 
 Execute analytical operators in the untrusted executor over sanitized batches. SQL aggregates use declared null semantics and fail when they require redacted values; they do not silently omit denied cells. COUNT(*) counts only visible rows. No privileged aggregates over hidden data are implied. Hash joins/sorts have bounded memory; initially reject excess work rather than enabling uncontrolled spill. A future spill implementation must use invocation-private scratch files, budgets, cancellation, and deletion rules.
 
+The initial SDK sort kernel accepts at most 128 authorized keys for one declared scalar column. It places NULL before non-NULL values in either direction, preserves input order among ties, rejects REDACTED or malformed keys, and writes no partial index permutation on failure. This kernel is not SQL `ORDER BY` support until parser, row materialization, and `LIMIT` integration are implemented.
+
 ## Mixed-Workload Scheduling
 
 The supervisor admits an invocation into an operational or analytical resource class, bounded by the caller's configured allowance. A client label cannot obtain unlimited priority or override budgets. Both classes retain snapshot isolation and the same permission model; read-only analytical grants are the default, not a mechanism to prohibit explicitly authorized writes.

@@ -112,3 +112,12 @@
 - Red/green evidence: the first run returned no visible schema because the fixture lacked a schema USAGE grant. Adding an explicit typed USAGE grant made the authenticated TCP acceptance pass.
 - Verification: the process test passes with the optional branch disabled and enabled. With `PRDB_TEST_RESTRICTED_METADATA_QUERY_ARTIFACT`, delegated `PRDB_TEST_CGROUP_PARENT`, and the NixOS loader/libc/`libgcc_s` allowlist configured, `cargo test -p prdb-engine --test metadata_process --locked authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_processes -- --exact --nocapture` passed. Workspace build, format check, warning-denied Clippy, and full tests passed; commit integration reported 125 passed and 3 cgroup-dependent tests ignored.
 - Remaining: add broader SQL forms and workload cases; this network acceptance uses the bounded restricted-metadata fixture on Linux x86_64.
+
+## SQL-7: stable bounded single-key sort kernel — partial
+
+- Contract: [SQL library](../../specs/sql-library.md) and [workload profile](../../specs/workload-profile.md). Sort one already-authorized declared scalar key across at most 128 rows; NULL sorts first in both directions, ties preserve input order, and REDACTED or invalid values fail without a partial permutation.
+- Implementation: `prdb_sdk_sql_order_row_indices_v1` uses a bounded stable insertion sort and returns caller row indexes without allocation. It validates every key before publishing the output order and delegates scalar ordering to the shared typed comparator.
+- Red/green evidence: the maintained TinyCC fixture first failed because the order header/target did not exist. It now covers ascending/descending order, NULL placement, stable ties, type mismatch, redaction, output preservation on failures, caller capacity, the 128-row bound, and the empty input.
+- Verification: `nix-shell -p rustc cargo clippy rustfmt tinycc --run 'make -f engine/sdk/Makefile test'` passed with TinyCC 0.9.27-unstable-2025-01-06.
+- Remaining: SQL grammar does not yet parse `ORDER BY`; the SQL runner does not materialize and reorder rows or apply `LIMIT` after sorting. This kernel is a foundation, not complete SQL sorting.
+- Next: add a versioned single-key `ORDER BY` parse/bind record, then integrate bounded row materialization and post-sort `LIMIT` without changing the v1/v2 SELECT ABI.
