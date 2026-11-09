@@ -187,3 +187,11 @@
 - Implementation: `prdb_sdk_sql_sum_v1` uses caller-owned output bytes and fixed-size accumulators sized for the 128-row cap. It validates Decimal input coefficients against declared precision and reports overflow only when the final exact sum exceeds the result type range. Failure leaves output view and bytes unchanged.
 - Verification: the focused TinyCC grouping fixture was force-rebuilt and passed with `-Wall -Wextra -Werror`.
 - Remaining: grouped SUM parser/binder support, runner aggregation and SQLR encoding/writing, AVG semantics, and live sandbox integration remain open.
+
+## SQL-7 dependency: grouped SUM parser and binder — partial
+
+- Contract: [SQL library](../../specs/sql-library.md). Preserve v1-v5 AST/binding layouts and add a separately versioned grouped SELECT form for `SUM(column)`. Bind only SMALLINT, INTEGER, BIGINT, and DECIMAL arguments, carrying Decimal precision/scale from the authorized relation shape.
+- Red/green evidence: the maintained v6 fixture checks SUM parsing with WHERE and LIMIT, numeric Decimal binding, rejection of nonnumeric arguments without modifying the output, and confirms the frozen v5 parser still rejects SUM.
+- Implementation: the v6 AST and binding have dedicated version tags and aggregate kind. The shared parser grammar accepts SUM only through the v6 entry point; v5 behavior remains unchanged. Binding reuses v5 group-key and column resolution, then enforces the numeric type set.
+- Verification: the focused TinyCC parser/binder fixture was force-rebuilt and passed with `-Wall -Wextra -Werror`.
+- Remaining: grouped SUM runner aggregation and SQLR output/writing, AVG semantics, and live sandbox integration remain open.
