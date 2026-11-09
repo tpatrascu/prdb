@@ -1,4 +1,4 @@
-#include "prdb_sdk_sql_order_v1.h"
+#include "prdb_sdk_sql_order_v2.h"
 
 #include <assert.h>
 #include <string.h>
@@ -34,6 +34,8 @@ int main(void) {
     uint32_t order[5] = {99, 99, 99, 99, 99};
     static const uint32_t ascending[] = {2, 1, 4, 3, 0};
     static const uint32_t descending[] = {2, 0, 3, 1, 4};
+    static const uint32_t nulls_last[] = {1, 4, 3, 0, 2};
+    static const uint32_t descending_nulls_last[] = {0, 3, 1, 4, 2};
 
     assert(prdb_sdk_sql_order_row_indices_v1(
                keys, 5, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0, order, 5) ==
@@ -44,6 +46,18 @@ int main(void) {
                keys, 5, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 1, order, 5) ==
            PRDB_SDK_SQL_ORDER_OK);
     assert(memcmp(order, descending, sizeof(descending)) == 0);
+
+    assert(prdb_sdk_sql_order_row_indices_v2(
+               keys, 5, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0,
+               PRDB_SDK_SQL_ORDER_NULLS_LAST, order, 5) ==
+           PRDB_SDK_SQL_ORDER_OK);
+    assert(memcmp(order, nulls_last, sizeof(nulls_last)) == 0);
+    assert(prdb_sdk_sql_order_row_indices_v2(
+               keys, 5, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 1,
+               PRDB_SDK_SQL_ORDER_NULLS_LAST, order, 5) ==
+           PRDB_SDK_SQL_ORDER_OK);
+    assert(memcmp(order, descending_nulls_last,
+                  sizeof(descending_nulls_last)) == 0);
 
     {
         prdb_sdk_value_v1 invalid_keys[2] = {keys[0], keys[1]};

@@ -1,4 +1,5 @@
 #include "prdb_sdk_sql_exec_v10.h"
+#include "prdb_sdk_sql_exec_v11.h"
 
 #include <assert.h>
 #include <string.h>
@@ -291,6 +292,44 @@ static int32_t run_query(mock_state *mock, const uint8_t *sql,
         cell_scratch, 2, materialized_bytes, arena_capacity, on_group, capture);
 }
 
+static int32_t on_group_v11(void *context,
+                            const prdb_sdk_value_v1 *group_key,
+                            const prdb_sdk_value_v1 *aggregate_value,
+                            uint64_t matching_row_count,
+                            const prdb_sdk_select_binding_v11 *binding) {
+    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V11_VERSION);
+    return on_group(context, group_key, aggregate_value, matching_row_count,
+                    &binding->base);
+}
+
+static int32_t run_query_v11(mock_state *mock, const uint8_t *sql,
+                             uint64_t sql_len, uint64_t arena_capacity,
+                             group_capture *capture) {
+    static const uint8_t schema[] = "app";
+    uint8_t planner_response[256] = {0};
+    uint8_t executor_response[256] = {0};
+    uint8_t batch_response[512] = {0};
+    uint8_t materialized_bytes[64] = {0};
+    static const uint8_t id_name[] = "id";
+    static const uint8_t score_name[] = "score";
+    prdb_sdk_sql_column_shape_v2 planner_columns[2] = {
+        {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
+        {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
+    prdb_sdk_sql_column_shape_v2 executor_columns[2] = {
+        {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
+        {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
+    prdb_sdk_value_v1 cell_scratch[2] = {{0}};
+    prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
+                             mock, executor_request, planner_request, NULL,
+                             statement_failure};
+    return prdb_sdk_sql_execute_group_v11(
+        &host, schema, sizeof(schema) - 1, sql, sql_len, NULL, 0, 3, 512,
+        planner_response, sizeof(planner_response), executor_response,
+        sizeof(executor_response), batch_response, sizeof(batch_response),
+        planner_columns, 2, executor_columns, 2, cell_scratch, 2,
+        materialized_bytes, arena_capacity, on_group_v11, capture);
+}
+
 static void reset_scan(mock_state *mock, group_capture *capture,
                        uint32_t finished) {
     mock->executor_calls = 0;
@@ -325,6 +364,12 @@ int main(void) {
     static const uint8_t ordered_aggregate_sql[] =
         "SELECT id, MIN(score) FROM widgets GROUP BY id "
         "ORDER BY MIN(score) DESC LIMIT 1";
+    static const uint8_t nulls_last_sql[] =
+        "SELECT id, MIN(score) FROM widgets GROUP BY id "
+        "ORDER BY MIN(score) ASC NULLS LAST";
+    static const uint8_t default_null_order_sql[] =
+        "SELECT id, MIN(score) FROM widgets GROUP BY id "
+        "ORDER BY MIN(score) DESC";
     static const uint8_t parameter_bytes[] = {0, 0, 0, 5};
     static const uint8_t having_parameter_bytes[] = {
         0, 0, 0, 0, 0, 0, 0, 1};
@@ -406,6 +451,33 @@ int main(void) {
                      &capture) == PRDB_SDK_SQL_EXEC_OK);
     assert(capture.calls == 1 && capture.keys[0] == 2 &&
            capture.aggregates[0] == 5);
+
+    {
+        const uint8_t null_then_value[] = {
+            PRDB_SDK_VALUE_STATE_NULL,
+            PRDB_SDK_VALUE_STATE_NULL,
+            PRDB_SDK_VALUE_STATE_VALUE};
+        mock.batch_len = make_rows(mock.batch, 1, keys, scores,
+                                   null_then_value, 3);
+        reset_scan(&mock, &capture, 1);
+        assert(run_query_v11(&mock, nulls_last_sql,
+                             sizeof(nulls_last_sql) - 1, 64, &capture) ==
+               PRDB_SDK_SQL_EXEC_OK);
+        assert(capture.calls == 2 && capture.keys[0] == 2 &&
+               capture.aggregates[0] == 5 && capture.keys[1] == 1 &&
+               capture.aggregate_states[1] == PRDB_SDK_VALUE_STATE_NULL &&
+               mock.statement_failed == 0);
+        reset_scan(&mock, &capture, 1);
+        assert(run_query_v11(&mock, default_null_order_sql,
+                             sizeof(default_null_order_sql) - 1, 64,
+                             &capture) == PRDB_SDK_SQL_EXEC_OK);
+        assert(capture.calls == 2 && capture.keys[0] == 1 &&
+               capture.aggregate_states[0] == PRDB_SDK_VALUE_STATE_NULL &&
+               capture.keys[1] == 2 && capture.aggregates[1] == 5 &&
+               mock.statement_failed == 0);
+        mock.batch_len = make_rows(mock.batch, 1, keys, scores,
+                                   value_states, 3);
+    }
 
     reset_scan(&mock, &capture, 1);
     assert(run_query(&mock, ordered_having_sql,
