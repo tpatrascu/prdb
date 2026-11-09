@@ -236,6 +236,14 @@
 - Verification: focused TinyCC fixture passed with `-Wall -Wextra -Werror`.
 - Remaining: SQL JOIN SQLR encoding and confined end-to-end acceptance remain open. The operator primitive alone did not claim full SQL JOIN support; the later v8 parser/binder and runner are recorded below.
 
+## SQL-8 dependency: bounded composite inner equijoin pair kernel — implemented
+
+- Contract: [SQL library](../../specs/sql-library.md) and [workload profile](../../specs/workload-profile.md). Match row-major authorized tuples across two to eight declared key positions, with SQL equality semantics, stable left-major output, 128 rows per side, and at most 16,384 pairs. Any NULL component makes the pair non-matching; every supplied cell is still validated, so REDACTED or malformed keys fail.
+- Red/green evidence: the maintained TinyCC fixture exercises two integer keys, mixed INTEGER/TEXT keys, Decimal scale metadata, NULL components, an eight-key tuple, stable duplicate ordering, type/redaction failures, insufficient capacity, row-count bounds, and output preservation.
+- Implementation: `prdb_sdk_sql_inner_join_pairs_composite_v2` is a new operator ABI; v1 remains unchanged. It validates shapes and every cell, preflights tuple comparisons and capacity, then publishes the stable pair array and count.
+- Verification: the focused fixture and complete maintained TinyCC SDK suite passed with TinyCC `-Wall -Wextra -Werror` after the new object was added to the maintained SDK archive/test target. Rust 1.95.0 workspace build, rustfmt check, warning-denied Clippy, and serial locked workspace tests also passed (127 commit tests passed, 3 cgroup-dependent cases ignored, all other workspace tests passed); `git diff --check` passed.
+- Remaining: parser/binder, two-scan runner, SQLR projection path, and confined end-to-end coverage for multiple join predicates remain open; aliases, self-joins, WHERE, outer joins, cancellation/deadlines, and spill also remain unsupported.
+
 ## SQL-7 dependency: single INNER JOIN parser and binder — implemented
 
 - Contract: [SQL library](../../specs/sql-library.md). Parse one `INNER JOIN` between two named relations, qualified projected columns, one qualified equality predicate, and optional LIMIT. Bind each reference against its own independently supplied authorized relation shape, and require compatible join-key metadata.

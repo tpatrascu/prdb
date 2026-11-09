@@ -20,6 +20,8 @@ The SDK also has bounded MIN/MAX, SUM, and AVG kernels and versioned grouped SEL
 
 The SDK has a bounded inner equijoin pair kernel for already-authorized key arrays: up to 128 values per side and at most 16,384 result pairs. It emits stable left-major matches, treats NULL as non-matching, and fails on REDACTED, malformed, or mismatched values.
 
+The separately versioned composite join pair kernel accepts two to eight row-major key columns with one declared type and Decimal scale per position. Every component must compare TRUE for a match, so a NULL component makes the tuple non-matching. It validates all operands before emitting output, preserves stable left-major ordering, and retains the 128-row/16,384-pair bounds. The SQL parser and runner still support only a single join predicate; the composite kernel is an operator primitive until a versioned SQL integration is added.
+
 The v8 parser/binder and runner accept one INNER JOIN with relation-qualified projections and one equijoin predicate over two separately authorized relation shapes. The runner resolves both relations independently, scans sequentially, and closes both before result callbacks. It bounds each side to 128 rows and combined copied key/projection bytes to 1 MiB, then emits joined projection values in stable left-major match order. NULL keys do not match; REDACTED keys fail before callbacks. The joined-row SQLR v1 encoder/writer derives metadata from each projection's bound relation side and ordinal and emits bounded provisional chunks. The maintained confined acceptance exercises two distinct SELECT-authorized storage relations through the result relay and durable commit.
 
 ## Mixed-Workload Scheduling
