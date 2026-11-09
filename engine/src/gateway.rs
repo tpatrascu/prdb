@@ -440,11 +440,11 @@ pub(crate) enum GatewayClientErrorCode {
 impl GatewayClientErrorCode {
     pub(crate) fn payload(self) -> &'static [u8] {
         match self {
-            Self::InvalidRequest => br#"{"code":"invalid_request","message":"Request is invalid."}"#,
-            Self::InvalidState => br#"{"code":"invalid_state","message":"Request is not valid in the current session state."}"#,
-            Self::Unauthenticated => br#"{"code":"unauthenticated","message":"Authentication is required."}"#,
-            Self::ResourceLimit => br#"{"code":"resource_limit","message":"Request exceeds a configured limit."}"#,
-            Self::Unavailable => br#"{"code":"unavailable","message":"Requested resource is unavailable."}"#,
+            Self::InvalidRequest => crate::query_abi::IPC_GATEWAY_ERROR_INVALID_REQUEST.as_bytes(),
+            Self::InvalidState => crate::query_abi::IPC_GATEWAY_ERROR_INVALID_STATE.as_bytes(),
+            Self::Unauthenticated => crate::query_abi::IPC_GATEWAY_ERROR_UNAUTHENTICATED.as_bytes(),
+            Self::ResourceLimit => crate::query_abi::IPC_GATEWAY_ERROR_RESOURCE_LIMIT.as_bytes(),
+            Self::Unavailable => crate::query_abi::IPC_GATEWAY_ERROR_UNAVAILABLE.as_bytes(),
         }
     }
 

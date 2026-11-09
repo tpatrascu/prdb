@@ -143,6 +143,19 @@ static void test_error_statuses_match_shared_fixture(void) {
     assert(PRDB_IPC_FRAME_TRUNCATED == 8);
 }
 
+static void test_gateway_error_payloads_match_shared_fixture(void) {
+    assert(strcmp(PRDB_IPC_GATEWAY_ERROR_INVALID_REQUEST,
+                  "{\"code\":\"invalid_request\",\"message\":\"Request is invalid.\"}") == 0);
+    assert(strcmp(PRDB_IPC_GATEWAY_ERROR_INVALID_STATE,
+                  "{\"code\":\"invalid_state\",\"message\":\"Request is not valid in the current session state.\"}") == 0);
+    assert(strcmp(PRDB_IPC_GATEWAY_ERROR_UNAUTHENTICATED,
+                  "{\"code\":\"unauthenticated\",\"message\":\"Authentication is required.\"}") == 0);
+    assert(strcmp(PRDB_IPC_GATEWAY_ERROR_RESOURCE_LIMIT,
+                  "{\"code\":\"resource_limit\",\"message\":\"Request exceeds a configured limit.\"}") == 0);
+    assert(strcmp(PRDB_IPC_GATEWAY_ERROR_UNAVAILABLE,
+                  "{\"code\":\"unavailable\",\"message\":\"Requested resource is unavailable.\"}") == 0);
+}
+
 static void test_decode_one_of_coalesced_frames_and_bad_arguments(void) {
     uint8_t coalesced[sizeof(expected) * 2];
     memcpy(coalesced, expected, sizeof(expected));
@@ -169,5 +182,6 @@ int main(void) {
     test_decode_rejections_preserve_outputs();
     test_decode_one_of_coalesced_frames_and_bad_arguments();
     test_error_statuses_match_shared_fixture();
+    test_gateway_error_payloads_match_shared_fixture();
     return 0;
 }

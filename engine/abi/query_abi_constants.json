@@ -949,6 +949,41 @@
       "value": 8,
       "c_name": "PRDB_IPC_FRAME_STATUS_TRUNCATED",
       "c_type": "UINT32_C"
+    },
+    {
+      "rust_name": "IPC_GATEWAY_ERROR_INVALID_REQUEST",
+      "rust_type": "&str",
+      "value": "{\"code\":\"invalid_request\",\"message\":\"Request is invalid.\"}",
+      "c_name": "PRDB_IPC_GATEWAY_ERROR_INVALID_REQUEST",
+      "c_type": "string"
+    },
+    {
+      "rust_name": "IPC_GATEWAY_ERROR_INVALID_STATE",
+      "rust_type": "&str",
+      "value": "{\"code\":\"invalid_state\",\"message\":\"Request is not valid in the current session state.\"}",
+      "c_name": "PRDB_IPC_GATEWAY_ERROR_INVALID_STATE",
+      "c_type": "string"
+    },
+    {
+      "rust_name": "IPC_GATEWAY_ERROR_UNAUTHENTICATED",
+      "rust_type": "&str",
+      "value": "{\"code\":\"unauthenticated\",\"message\":\"Authentication is required.\"}",
+      "c_name": "PRDB_IPC_GATEWAY_ERROR_UNAUTHENTICATED",
+      "c_type": "string"
+    },
+    {
+      "rust_name": "IPC_GATEWAY_ERROR_RESOURCE_LIMIT",
+      "rust_type": "&str",
+      "value": "{\"code\":\"resource_limit\",\"message\":\"Request exceeds a configured limit.\"}",
+      "c_name": "PRDB_IPC_GATEWAY_ERROR_RESOURCE_LIMIT",
+      "c_type": "string"
+    },
+    {
+      "rust_name": "IPC_GATEWAY_ERROR_UNAVAILABLE",
+      "rust_type": "&str",
+      "value": "{\"code\":\"unavailable\",\"message\":\"Requested resource is unavailable.\"}",
+      "c_name": "PRDB_IPC_GATEWAY_ERROR_UNAVAILABLE",
+      "c_type": "string"
     }
   ]
 }

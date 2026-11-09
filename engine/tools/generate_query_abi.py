@@ -103,6 +103,20 @@ def render(schema):
     status_values = [constant_values.get(name) for name in frame_statuses]
     if status_values != list(range(2, 9)):
         raise ValueError("IPC frame error statuses must preserve the canonical v1 mapping")
+    gateway_error_payloads = {
+        "IPC_GATEWAY_ERROR_INVALID_REQUEST":
+            '{"code":"invalid_request","message":"Request is invalid."}',
+        "IPC_GATEWAY_ERROR_INVALID_STATE":
+            '{"code":"invalid_state","message":"Request is not valid in the current session state."}',
+        "IPC_GATEWAY_ERROR_UNAUTHENTICATED":
+            '{"code":"unauthenticated","message":"Authentication is required."}',
+        "IPC_GATEWAY_ERROR_RESOURCE_LIMIT":
+            '{"code":"resource_limit","message":"Request exceeds a configured limit."}',
+        "IPC_GATEWAY_ERROR_UNAVAILABLE":
+            '{"code":"unavailable","message":"Requested resource is unavailable."}',
+    }
+    if any(constant_values.get(name) != value for name, value in gateway_error_payloads.items()):
+        raise ValueError("IPC gateway error payloads must preserve the canonical v1 schema")
 
     c_lines.extend(["", "#endif /* PRDB_QUERY_ABI_CONSTANTS_H */", ""])
     rust_lines.append("")

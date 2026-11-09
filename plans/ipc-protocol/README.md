@@ -28,7 +28,7 @@ The gateway submission payload mapping is specified in [IPC protocol](../../spec
 - Behavior: gateway role authorizes each submission operation; strict AUTH, PREPARE, chunk, SEAL, START, STATUS, and CANCEL session handlers are invoked with per-connection state. START returns an in-process supervisor invocation/submission event while only the correlated acceptance payload is eligible for response encoding.
 - Contract and implementation: [gateway submission payloads](../../specs/ipc-protocol.md) and [dispatcher](../../engine/src/supervisor_ipc.rs).
 - Verification: real-redb submission lifecycle test passes through the operation dispatcher; warning-denied Clippy passes in the repository Nix shell.
-- Gateway error handling: supervisor production and gateway validation use one typed definition for the five canonical sanitized v1 error payloads; other supervisor payloads close the client connection. See [IPC progress](PROGRESS.md).
+- Gateway error handling: supervisor production and gateway validation use five canonical sanitized v1 error payloads generated for Rust and C from the shared ABI schema; other supervisor payloads close the client connection. See [IPC progress](PROGRESS.md).
 - Remaining: provision per-client Unix sockets/generation references and launch/reap a confined worker.
 
 ## IPC-6 dependency: per-client gateway Unix service loop

@@ -74,5 +74,10 @@
 #define PRDB_IPC_FRAME_STATUS_INVALID_REQUEST_ID UINT32_C(6)
 #define PRDB_IPC_FRAME_STATUS_PAYLOAD_TOO_LARGE UINT32_C(7)
 #define PRDB_IPC_FRAME_STATUS_TRUNCATED UINT32_C(8)
+#define PRDB_IPC_GATEWAY_ERROR_INVALID_REQUEST "{\"code\":\"invalid_request\",\"message\":\"Request is invalid.\"}"
+#define PRDB_IPC_GATEWAY_ERROR_INVALID_STATE "{\"code\":\"invalid_state\",\"message\":\"Request is not valid in the current session state.\"}"
+#define PRDB_IPC_GATEWAY_ERROR_UNAUTHENTICATED "{\"code\":\"unauthenticated\",\"message\":\"Authentication is required.\"}"
+#define PRDB_IPC_GATEWAY_ERROR_RESOURCE_LIMIT "{\"code\":\"resource_limit\",\"message\":\"Request exceeds a configured limit.\"}"
+#define PRDB_IPC_GATEWAY_ERROR_UNAVAILABLE "{\"code\":\"unavailable\",\"message\":\"Requested resource is unavailable.\"}"
 
 #endif /* PRDB_QUERY_ABI_CONSTANTS_H */
