@@ -676,6 +676,53 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
     )?;
     assert_ne!(created_table.table_id, [0; 16]);
     assert_eq!(created_table.column_ids.len(), 1);
+    let transfer_owner = admin.create_user("process_table_owner")?;
+    let token_expiration =
+        i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?
+            .saturating_add(900_000_000);
+    let transfer_credentials = admin.issue_token(
+        transfer_owner.identity_id,
+        "table owner transfer",
+        token_expiration,
+    )?;
+    let transfer_token_id = transfer_credentials.token_id;
+    let transfer_credential_path = root.join("table-owner.cred");
+    let transfer_client_credentials = ClientCredentials {
+        token_id: transfer_token_id,
+        token_secret: *transfer_credentials.token_secret(),
+    };
+    write_client_credentials(&transfer_credential_path, &transfer_client_credentials)?;
+    drop(transfer_client_credentials);
+    drop(transfer_credentials);
+    let transferred = admin.set_table_owner(created_table.table_id, transfer_owner.identity_id)?;
+    assert!(transferred.commit_sequence > 0);
+    let address_text = address.to_string();
+    let table_id_text = encode_id_hex(&created_table.table_id);
+    let admin_owner_id_text = encode_id_hex(&admin_user_id);
+    let credential_path_text = transfer_credential_path
+        .to_str()
+        .ok_or("credential path is not UTF-8")?;
+    let transfer_command = Command::new(env!("CARGO_BIN_EXE_prdb-client"))
+        .args([
+            "table-owner-set",
+            "--address",
+            &address_text,
+            "--credentials",
+            credential_path_text,
+            "--table-id",
+            &table_id_text,
+            "--owner-id",
+            &admin_owner_id_text,
+        ])
+        .output()?;
+    assert!(
+        transfer_command.status.success(),
+        "table-owner CLI failed: {}",
+        String::from_utf8_lossy(&transfer_command.stderr)
+    );
+    assert!(String::from_utf8_lossy(&transfer_command.stdout).contains("changed table owner"));
+    admin.revoke_token(transfer_token_id)?;
+    remove_client_credentials(&transfer_credential_path)?;
     let added_column = admin.add_column(
         created_table.table_id,
         &AdminColumnDefinition {
@@ -1283,6 +1330,15 @@ fn disconnected_submission_is_reconciled_after_gateway_restart()
 }
 
 struct DirectoryGuard(std::path::PathBuf);
+
+fn encode_id_hex(id: &[u8; 16]) -> String {
+    let mut encoded = String::with_capacity(32);
+    for byte in id {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    encoded
+}
 
 impl Drop for DirectoryGuard {
     fn drop(&mut self) {

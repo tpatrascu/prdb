@@ -41,6 +41,7 @@ Token secrets are saved only to mode-0600 credential files and are never printed
   prdb-client table-create --address IP:PORT --credentials ADMIN_FILE --schema-id HEX --name NAME \\\n    --columns 'name:type:nullable[;name:type:nullable...]'\n\
   prdb-client table-rename --address IP:PORT --credentials ADMIN_FILE --id HEX --name NAME\n\
   prdb-client table-drop --address IP:PORT --credentials ADMIN_FILE --id HEX\n\n\
+  prdb-client table-owner-set --address IP:PORT --credentials ADMIN_FILE --table-id HEX --owner-id HEX\n\n\
   prdb-client column-add --address IP:PORT --credentials ADMIN_FILE --table-id HEX --column name:type:nullable\n\
   prdb-client column-rename --address IP:PORT --credentials ADMIN_FILE --table-id HEX --column-id HEX --name NAME\n\
   prdb-client column-drop --address IP:PORT --credentials ADMIN_FILE --table-id HEX --column-id HEX\n\n\
@@ -126,7 +127,9 @@ fn run() -> Result<(), String> {
         "token-issue" => token_issue(address, credentials_path, &mut fields),
         "token-revoke" => token_revoke(address, credentials_path, &mut fields),
         "schema-create" | "schema-rename" | "schema-drop" | "table-create" | "table-rename"
-        | "table-drop" => schema_table_admin(&command, address, credentials_path, &mut fields),
+        | "table-drop" | "table-owner-set" => {
+            schema_table_admin(&command, address, credentials_path, &mut fields)
+        }
         "column-add"
         | "column-rename"
         | "column-drop"
@@ -238,9 +241,29 @@ fn schema_table_admin(
                 result.commit_sequence
             );
         }
+        "table-owner-set" => {
+            let (table_id, owner_id) = take_table_owner_args(fields)?;
+            let result = client
+                .set_table_owner(table_id, owner_id)
+                .map_err(|error| error.to_string())?;
+            print_operation(
+                "changed table owner",
+                &result.operation_id,
+                result.commit_sequence,
+            );
+        }
         _ => return Err(format!("unsupported schema/table command {command}")),
     }
     Ok(())
+}
+
+fn take_table_owner_args(
+    fields: &mut HashMap<String, std::ffi::OsString>,
+) -> Result<([u8; 16], [u8; 16]), String> {
+    let table_id = parse_id(&take_text(fields, "--table-id")?)?;
+    let owner_id = parse_id(&take_text(fields, "--owner-id")?)?;
+    reject_unknown(fields)?;
+    Ok((table_id, owner_id))
 }
 
 fn column_admin(
@@ -1870,5 +1893,57 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn table_owner_arguments_require_canonical_nonzero_ids_and_no_extras() {
+        let mut fields = HashMap::from([
+            (
+                "--table-id".to_owned(),
+                "000102030405060708090a0b0c0d0e0f".into(),
+            ),
+            (
+                "--owner-id".to_owned(),
+                "101112131415161718191a1b1c1d1e1f".into(),
+            ),
+        ]);
+        assert_eq!(
+            take_table_owner_args(&mut fields).unwrap(),
+            (
+                [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+                [
+                    16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31
+                ],
+            )
+        );
+        assert!(fields.is_empty());
+
+        for owner in [
+            "00000000000000000000000000000000",
+            "000102030405060708090a0b0c0d0e0A",
+            "000102030405060708090a0b0c0d0e0",
+        ] {
+            let mut fields = HashMap::from([
+                (
+                    "--table-id".to_owned(),
+                    "000102030405060708090a0b0c0d0e0f".into(),
+                ),
+                ("--owner-id".to_owned(), owner.into()),
+            ]);
+            assert!(take_table_owner_args(&mut fields).is_err());
+        }
+
+        let mut fields = HashMap::from([
+            (
+                "--table-id".to_owned(),
+                "000102030405060708090a0b0c0d0e0f".into(),
+            ),
+            (
+                "--owner-id".to_owned(),
+                "101112131415161718191a1b1c1d1e1f".into(),
+            ),
+            ("--unexpected".to_owned(), "value".into()),
+        ]);
+        assert!(take_table_owner_args(&mut fields).is_err());
     }
 }
