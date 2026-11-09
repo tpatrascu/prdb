@@ -1,6 +1,7 @@
 use prdb_engine::client_protocol::{ClientFrame, ClientFrameDecoder};
 use prdb_engine::client_submit::{
-    AdminClient, AdminColumnDefault, AdminColumnDefinition, AdminSystemPrivilege, InvocationStatus,
+    AdminClient, AdminColumnDefault, AdminColumnDefinition, AdminSystemPrivilege,
+    CancellationResult, InvocationStatus, SubmissionClient, TerminalOutcome,
 };
 use prdb_engine::tuple::{ScalarType, ScalarValue};
 use std::io::{Read, Write};
@@ -55,6 +56,95 @@ fn establish_control_session(stream: &mut TcpStream, decoder: &mut ClientFrameDe
         &auth,
         br#"{"session_id":"01010101010101010101010101010101","authenticated":true}"#,
     );
+}
+
+fn establish_query_session(stream: &mut TcpStream, decoder: &mut ClientFrameDecoder) {
+    let hello = read_frame(stream, decoder);
+    assert_eq!(hello.kind, 1);
+    assert!(
+        String::from_utf8(hello.payload.clone())
+            .unwrap()
+            .contains("\"mode\":\"query\"")
+    );
+    respond(
+        stream,
+        &hello,
+        br#"{"transport":"plaintext_tcp","limits":{"chunk_bytes":131072,"control_bytes":32768,"payload_bytes":524288},"mode":"query","minor":0,"major":1}"#,
+    );
+    let auth = read_frame(stream, decoder);
+    assert_eq!(auth.kind, 2);
+    respond(
+        stream,
+        &auth,
+        br#"{"session_id":"01010101010101010101010101010101","authenticated":true}"#,
+    );
+}
+
+#[test]
+fn submission_client_decodes_cancellation_acknowledgements() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        for state in [
+            "accepted",
+            "too_late",
+            "committed",
+            "aborted",
+            "unknown",
+            "pending",
+        ] {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut decoder = ClientFrameDecoder::default();
+            establish_query_session(&mut stream, &mut decoder);
+            let request = read_frame(&mut stream, &mut decoder);
+            assert_eq!(request.kind, 9);
+            assert_eq!(
+                request.payload,
+                br#"{"invocation_id":"11111111111111111111111111111111"}"#
+            );
+            respond(
+                &mut stream,
+                &request,
+                format!("{{\"state\":\"{state}\"}}").as_bytes(),
+            );
+        }
+    });
+
+    for expected in [
+        CancellationResult::Accepted,
+        CancellationResult::TooLate,
+        CancellationResult::Terminal(TerminalOutcome::Committed),
+        CancellationResult::Terminal(TerminalOutcome::Aborted),
+        CancellationResult::Unknown,
+    ] {
+        let mut secret = [5; 32];
+        let mut client = SubmissionClient::connect_authenticated_with_timeout(
+            address,
+            [6; 16],
+            &mut secret,
+            Duration::from_secs(3),
+        )
+        .unwrap();
+        assert_eq!(secret, [0; 32]);
+        assert!(matches!(
+            client.cancel([0; 16]),
+            Err(prdb_engine::client_submit::ClientSubmitError::InvalidInvocationId)
+        ));
+        assert_eq!(client.cancel([0x11; 16]).unwrap(), expected);
+    }
+    let mut secret = [5; 32];
+    let mut client = SubmissionClient::connect_authenticated_with_timeout(
+        address,
+        [6; 16],
+        &mut secret,
+        Duration::from_secs(3),
+    )
+    .unwrap();
+    assert!(matches!(
+        client.cancel([0x11; 16]),
+        Err(prdb_engine::client_submit::ClientSubmitError::InvalidResponse)
+    ));
+    server.join().unwrap();
 }
 
 #[test]

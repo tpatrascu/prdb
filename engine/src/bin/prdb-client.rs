@@ -5,8 +5,8 @@ use prdb_engine::client_submit::MetadataClient;
 use prdb_engine::client_submit::{
     AdminClient, AdminColumnDefault, AdminColumnDefinition, AdminCreatePolicyRequest,
     AdminObjectGrantTarget, AdminObjectPrivilege, AdminPolicyEffect, AdminPolicyKind,
-    AdminPolicyOperation, AdminPolicyRecipient, AdminSystemPrivilege, ClientResultEvent,
-    InvocationStatus, SubmissionClient, TerminalOutcome,
+    AdminPolicyOperation, AdminPolicyRecipient, AdminSystemPrivilege, CancellationResult,
+    ClientResultEvent, InvocationStatus, SubmissionClient, TerminalOutcome,
 };
 use prdb_engine::submission_scope::RequestedScopeBuilder;
 use prdb_engine::supervisor::{MAX_PARAMETER_BYTES, WorkloadClass};
@@ -22,6 +22,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const USAGE: &str = "Usage:\n\
   prdb-client submit --address IP:PORT --credentials FILE --package DIR --receipt FILE \\\n    [--parameters FILE] [--deadline-ms N] [--workload operational|analytical]\n\
   prdb-client status --address IP:PORT --credentials FILE --invocation-id HEX\n\n\
+  prdb-client cancel --address IP:PORT --credentials FILE --invocation-id HEX\n\n\
   prdb-client scope --address IP:PORT --credentials FILE --schema NAME --output FILE \\\n    [--relation NAME --operations select,insert,update,delete [--columns NAME,...]]\n\n\
 Submission output is provisional until a committed terminal event. START is never retried;\n\
 if its reply is uncertain, use status with the invocation ID and a newly authenticated connection.\n\
@@ -124,6 +125,7 @@ fn run() -> Result<(), String> {
     match command.as_str() {
         "submit" => submit(address, credentials_path, &mut fields),
         "status" => status(address, credentials_path, &mut fields),
+        "cancel" => cancel(address, credentials_path, &mut fields),
         "scope" => scope(address, credentials_path, &mut fields),
         "token-issue" => token_issue(address, credentials_path, &mut fields),
         "token-revoke" => token_revoke(address, credentials_path, &mut fields),
@@ -1361,6 +1363,28 @@ fn status(
     Ok(())
 }
 
+fn cancel(
+    address: SocketAddr,
+    credentials_path: PathBuf,
+    fields: &mut HashMap<String, std::ffi::OsString>,
+) -> Result<(), String> {
+    let invocation_id = parse_id(&take_text(fields, "--invocation-id")?)?;
+    reject_unknown(fields)?;
+    let mut credentials =
+        read_client_credentials(credentials_path).map_err(|error| error.to_string())?;
+    let mut client = SubmissionClient::connect_authenticated(
+        address,
+        credentials.token_id,
+        &mut credentials.token_secret,
+    )
+    .map_err(|error| error.to_string())?;
+    let result = client
+        .cancel(invocation_id)
+        .map_err(|error| error.to_string())?;
+    println!("{}", cancellation_result_name(result));
+    Ok(())
+}
+
 fn token_issue(
     address: SocketAddr,
     credentials_path: PathBuf,
@@ -1673,6 +1697,18 @@ fn status_name(status: InvocationStatus) -> &'static str {
         InvocationStatus::Aborted => "aborted",
         InvocationStatus::Unknown => "unknown",
         InvocationStatus::Expired => "expired",
+    }
+}
+
+fn cancellation_result_name(result: CancellationResult) -> &'static str {
+    match result {
+        CancellationResult::Accepted => "accepted",
+        CancellationResult::TooLate => "too_late",
+        CancellationResult::Terminal(TerminalOutcome::Committed) => "committed",
+        CancellationResult::Terminal(TerminalOutcome::Aborted) => "aborted",
+        CancellationResult::Terminal(TerminalOutcome::Unknown) | CancellationResult::Unknown => {
+            "unknown"
+        }
     }
 }
 

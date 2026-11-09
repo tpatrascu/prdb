@@ -30,6 +30,7 @@ pub enum ClientSubmitError {
     InvalidCredentials,
     InvalidPackage,
     InvalidAdministrativeRequest,
+    InvalidInvocationId,
     InvalidMetadataPage,
     InvalidResponse,
     ServerRejected(String),
@@ -340,6 +341,14 @@ pub enum TerminalOutcome {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CancellationResult {
+    Accepted,
+    TooLate,
+    Terminal(TerminalOutcome),
+    Unknown,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InvocationTerminal {
     pub invocation_id: [u8; 16],
     pub outcome: TerminalOutcome,
@@ -597,6 +606,31 @@ impl SubmissionClient {
             Some("aborted") => Ok(InvocationStatus::Aborted),
             Some("unknown") => Ok(InvocationStatus::Unknown),
             Some("expired") => Ok(InvocationStatus::Expired),
+            _ => Err(ClientSubmitError::InvalidResponse),
+        }
+    }
+
+    /// Request cancellation of this authenticated owner's prepared or active
+    /// invocation. Acknowledgement does not itself prove a terminal outcome.
+    pub fn cancel(
+        &mut self,
+        invocation_id: [u8; 16],
+    ) -> Result<CancellationResult, ClientSubmitError> {
+        if invocation_id == [0; 16] {
+            return Err(ClientSubmitError::InvalidInvocationId);
+        }
+        let payload = format!("{{\"invocation_id\":\"{}\"}}", lower_hex(&invocation_id));
+        let response = self.exchange(9, payload.into_bytes())?;
+        let fields = parse_flat_response(&response.payload)?;
+        if fields.len() != 1 {
+            return Err(ClientSubmitError::InvalidResponse);
+        }
+        match take_string(&fields, "state").as_deref() {
+            Some("accepted") => Ok(CancellationResult::Accepted),
+            Some("too_late") => Ok(CancellationResult::TooLate),
+            Some("committed") => Ok(CancellationResult::Terminal(TerminalOutcome::Committed)),
+            Some("aborted") => Ok(CancellationResult::Terminal(TerminalOutcome::Aborted)),
+            Some("unknown") => Ok(CancellationResult::Unknown),
             _ => Err(ClientSubmitError::InvalidResponse),
         }
     }

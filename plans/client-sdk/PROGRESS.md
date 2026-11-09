@@ -295,3 +295,13 @@
 - Regression: the AdminClient mock verifies request and response fields. CLI parser checks reject zero, uppercase, short, and extra IDs. The real gateway/supervisor lifecycle transfers a schema to a newly credentialed non-admin user and invokes the compiled CLI with that user's credential to transfer it back.
 - Verification: the focused AdminClient mock, CLI parser, and real multi-process CLI regressions passed. Rust 1.95.0 workspace build, formatting, warning-denied Clippy, and full serial workspace tests passed. The commit suite reported 127 passed and 3 cgroup-dependent ignored; the metadata-process suite reported 1 passed and 1 cgroup-dependent ignored.
 - Remaining: broader separate-process DDL coverage and confined artifact execution remain open.
+
+
+## SDK-4: owner-scoped cancellation client and CLI — implemented
+
+- Contract: [`CANCEL`](../../specs/client-protocol.md) accepts a caller-owned prepared or active invocation and returns accepted, too-late, terminal, or unknown state. Acknowledgement is not a transaction terminal event.
+- Red evidence: the new protocol regression failed to compile because `CancellationResult` and `SubmissionClient::cancel` did not exist.
+- Implementation: `SubmissionClient::cancel` sends kind 9 once, validates the response shape and closed state set, and rejects a zero invocation ID. `prdb-client cancel` authenticates from the private credential file and prints the server acknowledgement.
+- Regression: mock TCP coverage verifies kind, invocation ID, secret zeroization, and all five valid state results. The real gateway/supervisor lifecycle cancels an already committed owned invocation through both the Rust client and compiled CLI, confirming committed terminal status is returned.
+- Verification: the focused cancellation mock and real multi-process lifecycle passed. Rust 1.95.0 workspace build, format check, warning-denied Clippy, and full serial tests passed; the commit suite reported 127 passed and 3 cgroup-dependent ignored, and the metadata-process suite reported 1 passed and 1 cgroup-dependent ignored. `make -f engine/sdk/Makefile test` also passed with TinyCC 0.9.27-unstable-2025-01-06.
+- Remaining: administrative cancellation CLI, C SQL/runtime cancellation propagation, generated bindings, and other SDK/package release gates remain open.

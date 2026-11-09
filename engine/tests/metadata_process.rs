@@ -9,8 +9,8 @@ use prdb_engine::client_protocol::ClientCredentials;
 use prdb_engine::client_submit::{
     AdminClient, AdminColumnDefault, AdminColumnDefinition, AdminCreatePolicyRequest,
     AdminObjectGrantTarget, AdminObjectPrivilege, AdminPolicyEffect, AdminPolicyKind,
-    AdminPolicyOperation, AdminPolicyRecipient, AdminSystemPrivilege, InvocationStatus,
-    MetadataClient, SubmissionClient,
+    AdminPolicyOperation, AdminPolicyRecipient, AdminSystemPrivilege, CancellationResult,
+    InvocationStatus, MetadataClient, SubmissionClient, TerminalOutcome,
 };
 use prdb_engine::storage_manager::{
     CreateTableRequest, ObjectGrantPrivilege, ObjectGrantTarget, SetObjectGrantRequest,
@@ -561,6 +561,42 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
             Some(prdb_engine::client_submit::TerminalOutcome::Committed)
         );
         assert_eq!(query.status(invocation_id)?, InvocationStatus::Committed);
+        assert_eq!(
+            query.cancel(invocation_id)?,
+            CancellationResult::Terminal(TerminalOutcome::Committed)
+        );
+        let cancel_credentials_path = root.join("cancel-owner.cred");
+        let cancel_credentials = ClientCredentials {
+            token_id: restricted_token,
+            token_secret: restricted_secret,
+        };
+        write_client_credentials(&cancel_credentials_path, &cancel_credentials)?;
+        drop(cancel_credentials);
+        let invocation_id_text = encode_id_hex(&invocation_id);
+        let cancel_address_text = address.to_string();
+        let cancel_command = Command::new(env!("CARGO_BIN_EXE_prdb-client"))
+            .args([
+                "cancel",
+                "--address",
+                &cancel_address_text,
+                "--credentials",
+                cancel_credentials_path
+                    .to_str()
+                    .ok_or("credential path is not UTF-8")?,
+                "--invocation-id",
+                &invocation_id_text,
+            ])
+            .output()?;
+        assert!(
+            cancel_command.status.success(),
+            "cancel CLI failed: {}",
+            String::from_utf8_lossy(&cancel_command.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&cancel_command.stdout).trim(),
+            "committed"
+        );
+        remove_client_credentials(&cancel_credentials_path)?;
     }
 
     let mut admin_control_secret = token_secret;
