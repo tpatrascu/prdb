@@ -15696,6 +15696,270 @@ fn storage_manager_authorizes_object_grants_and_aborts_stale_writers_after_revok
 }
 
 #[test]
+fn role_membership_revocation_aborts_a_staged_role_authorized_writer()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::authorization::{
+        AccessTarget, AuthorityDependency, AuthorizationContext, AuthorizedProjection, Effect,
+        Expr, Grant, Operation, Policy, Subject,
+    };
+    use prdb_engine::storage_manager::RoleMembershipChange;
+    use prdb_engine::tuple::FieldPatch;
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let user_id = id(0x91);
+    let role_id = id(0x92);
+    let invocation_id = id(0x93);
+    let membership_invocation_id = id(0x94);
+    let admin_role = builtin_owner_id();
+    let row_id = id(0x95);
+    let row_key = table_row_key(id(16), row_id);
+    let columns = [ColumnSchema {
+        scalar_type: ScalarType::Text,
+        nullable: false,
+    }];
+    let column_ids = [[0x96; 16]];
+
+    let mut setup_audit = audit_event(0x97);
+    setup_audit.actor_id = Some(admin_role);
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(
+        id(0x97),
+        admin_role,
+        9_999,
+        &[
+            principal_write_with_name(user_id, 1, 1, "membership_writer"),
+            object_write_with_name(user_id, 8, "membership_writer"),
+            credential_verifier_write(id(0x9a), user_id, &[0x9a; 32], 1, i64::MAX, None, 1),
+            membership_write(user_id, admin_role),
+            dependency_write(user_id, admin_role, 5),
+            principal_write_with_name(role_id, 2, 1, "membership_editor"),
+            object_write_with_name(role_id, 9, "membership_editor"),
+            membership_write(user_id, role_id),
+            dependency_write(user_id, role_id, 5),
+            grant_write(role_id, id(16), 4, 1, id(16), admin_role),
+            dependency_write(role_id, id(16), 5),
+        ],
+        &[setup_audit],
+    )?;
+
+    commit_rows(
+        &database,
+        id(0x98),
+        user_id,
+        9_999,
+        &[RowWrite {
+            key: row_key,
+            expected_version: None,
+            payload: Some(encode_tuple(
+                &columns,
+                1,
+                &[Some(ScalarValue::Text(
+                    "before membership revoke".to_owned(),
+                ))],
+            )?),
+        }],
+    )?;
+
+    let grant_key = grant_write(role_id, id(16), 4, 1, id(16), admin_role).key;
+    let grant_bytes = database
+        .begin_read()?
+        .open_table(CATALOG)?
+        .get(grant_key.as_slice())?
+        .ok_or("missing role UPDATE grant")?
+        .value()
+        .to_vec();
+    let (mut writer, role_ids) = storage
+        .begin_authenticated_invocation(invocation_id, user_id, 9_999, 1, 1024)
+        .map_err(|error| format!("admit membership writer: {error:?}"))?;
+    assert!(role_ids.contains(&role_id));
+    assert!(role_ids.contains(&admin_role));
+    let context = AuthorizationContext {
+        principal_id: user_id,
+        role_ids,
+        scope: [
+            (Operation::Usage, AccessTarget::Schema(id(16))),
+            (Operation::Select, AccessTarget::Table(id(16))),
+            (Operation::Update, AccessTarget::Table(id(16))),
+            (
+                Operation::Select,
+                AccessTarget::Column {
+                    table_id: id(16),
+                    column_id: column_ids[0],
+                },
+            ),
+            (
+                Operation::Update,
+                AccessTarget::Column {
+                    table_id: id(16),
+                    column_id: column_ids[0],
+                },
+            ),
+        ]
+        .into(),
+    };
+    let grants = [
+        Grant {
+            subject: Subject::Role(role_id),
+            operation: Operation::Usage,
+            target: AccessTarget::Schema(id(16)),
+        },
+        Grant {
+            subject: Subject::Role(role_id),
+            operation: Operation::Select,
+            target: AccessTarget::Table(id(16)),
+        },
+        Grant {
+            subject: Subject::Role(role_id),
+            operation: Operation::Update,
+            target: AccessTarget::Table(id(16)),
+        },
+        Grant {
+            subject: Subject::Role(role_id),
+            operation: Operation::Select,
+            target: AccessTarget::Column {
+                table_id: id(16),
+                column_id: column_ids[0],
+            },
+        },
+        Grant {
+            subject: Subject::Role(role_id),
+            operation: Operation::Update,
+            target: AccessTarget::Column {
+                table_id: id(16),
+                column_id: column_ids[0],
+            },
+        },
+    ];
+    let policies = [
+        Policy {
+            subjects: vec![Subject::Role(role_id)],
+            operation: Operation::Select,
+            target: AccessTarget::Table(id(16)),
+            effect: Effect::Allow,
+            using: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+            with_check: None,
+        },
+        Policy {
+            subjects: vec![Subject::Role(role_id)],
+            operation: Operation::Update,
+            target: AccessTarget::Table(id(16)),
+            effect: Effect::Allow,
+            using: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+            with_check: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+        },
+        Policy {
+            subjects: vec![Subject::Role(role_id)],
+            operation: Operation::Select,
+            target: AccessTarget::Column {
+                table_id: id(16),
+                column_id: column_ids[0],
+            },
+            effect: Effect::Allow,
+            using: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+            with_check: None,
+        },
+        Policy {
+            subjects: vec![Subject::Role(role_id)],
+            operation: Operation::Update,
+            target: AccessTarget::Column {
+                table_id: id(16),
+                column_id: column_ids[0],
+            },
+            effect: Effect::Allow,
+            using: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+            with_check: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+        },
+    ];
+    let projection = AuthorizedProjection {
+        columns: &columns,
+        column_ids: &column_ids,
+        schema_version: 1,
+        schema_id: id(16),
+        context: &context,
+        grants: &grants,
+        policies: &policies,
+        checks: &[],
+        policy_driving_columns: &[],
+        dependencies: &[AuthorityDependency {
+            key: grant_key,
+            expected_value: Some(grant_bytes),
+        }],
+    };
+    writer
+        .stage_patch_authorized(
+            prdb_engine::overlay::RowId {
+                table: id(16),
+                row: row_id,
+            },
+            &projection,
+            &[FieldPatch {
+                ordinal: 0,
+                value: Some(ScalarValue::Text(
+                    "stale after membership revoke".to_owned(),
+                )),
+            }],
+        )
+        .map_err(|error| format!("stage membership-authorized writer: {error:?}"))?;
+
+    let mut revoke_audit = audit_event(0x99);
+    revoke_audit.actor_id = Some(user_id);
+    revoke_audit.correlation_id = membership_invocation_id;
+    revoke_audit.action = AuditAction::AuthorityChange;
+    assert_eq!(
+        storage
+            .set_role_membership(
+                membership_invocation_id,
+                user_id,
+                RoleMembershipChange {
+                    member_id: user_id,
+                    role_id,
+                    grant: false
+                },
+                9_999,
+                revoke_audit,
+            )
+            .map_err(|error| format!("revoke role membership: {error:?}"))?,
+        3,
+    );
+    assert!(matches!(
+        writer.commit(),
+        Err(prdb_engine::transaction::TransactionError::Commit(
+            CommitError::Conflict
+        ))
+    ));
+
+    let row = database
+        .begin_read()?
+        .open_table(ROWS)?
+        .get(&row_key[..])?
+        .ok_or("row disappeared after membership revoke")?
+        .value()
+        .to_vec();
+    assert_eq!(
+        decode_tuple(&columns, 1, &RowRecord::decode(&row)?.payload)?.values,
+        [Some(ScalarValue::Text(
+            "before membership revoke".to_owned()
+        ))]
+    );
+    assert_eq!(
+        lookup_outcome(&database, invocation_id, user_id, 1)?
+            .ok_or("missing aborted writer outcome")?
+            .status,
+        OutcomeStatus::Aborted,
+    );
+    assert_eq!(
+        lookup_outcome(&database, membership_invocation_id, user_id, 1)?
+            .ok_or("missing membership revoke outcome")?
+            .status,
+        OutcomeStatus::Committed,
+    );
+    assert_eq!(commit_sequence(&database)?, 3);
+    Ok(())
+}
+
+#[test]
 fn storage_manager_authorizes_policy_ddl_for_owners_and_inherited_manage_policies()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::authorization::Expr;

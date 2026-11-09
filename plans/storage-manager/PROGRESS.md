@@ -2084,3 +2084,11 @@
 - Regression: `storage_manager_authorizes_object_grants_and_aborts_stale_writers_after_revoke` stages an authorized row update with the persisted table UPDATE grant, revokes that grant through `commit_authorized_object_grant_ddl`, and then finalizes the writer. It verifies durable ABORTED status, unchanged row bytes, committed revocation, and the final commit sequence.
 - Verification: the full Rust commit integration target passed (125 passed, 3 delegated-cgroup tests ignored); workspace formatting and warning-denied Clippy passed under Rust/Cargo 1.95.0.
 - Remaining: repeated concurrent schedules and equivalent stale-writer coverage for membership, identity, credential, and other policy DDL routes remain open.
+
+## SM-5 / AU-6: role-membership revocation conflicts with a staged writer — verified
+
+- Contract: a committed role-membership change advances the member's authority epoch and invalidates writes admitted through the prior role closure.
+- Regression: `role_membership_revocation_aborts_a_staged_role_authorized_writer` admits a user with an inherited role grant, stages an authorized update, revokes the role membership through `StorageManager::set_role_membership`, and verifies the stale writer is durably ABORTED, the row remains unchanged, the revocation is COMMITTED, and the commit sequence advances only for the two successful commits.
+- Implementation: no production change was needed; the existing pinned membership and authority-epoch guards reject the stale write.
+- Verification: the focused regression passed. The Rust commit integration target passed with 126 tests and 3 delegated-cgroup tests ignored; `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed in the prescribed Rust/Cargo 1.95.0 Nix shell.
+- Remaining: equivalent stale-writer coverage for identity, credential, and other authority-changing DDL routes, plus repeated concurrent schedules, remains open.
