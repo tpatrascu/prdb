@@ -6,7 +6,8 @@
 - Package versions: Rust/Cargo/Clippy 1.95.0, rustfmt 1.9.0, TinyCC `0.9.27-unstable-2025-01-06`, GCC 15.3.0, binutils 2.46, and GNU Make 4.4.1. `nix develop --offline --command` reproduced these versions from the lockfile.
 - Verification: inside the locked shell, the maintained TinyCC SDK suite passed, `sandbox-query-fixture` built all three GNU-linked artifacts, and workspace build, format, warning-denied Clippy, and serial tests passed. Three cgroup-gated commit tests and one cgroup-gated metadata process test remained ignored; confined acceptance had already passed with this exact Nixpkgs source revision.
 - Changed contract: [`specs/toolchain.md`](../../specs/toolchain.md) records the development profile; [`AGENTS.md`](../../AGENTS.md) points checks to the locked shell and maintained SDK targets.
-- Remaining: separately pin/record TinyCC's upstream commit and support-file hashes and validate the release Linux/libc/runtime profile. The locked package recipe currently supplies the matching development compiler but does not constitute release artifact packaging.
+- TinyCC provenance: the pinned recipe records upstream commit `f6385c05308f715bdd2c06336801193a21d69b50`, source hash `sha256-tO3N+NplYy8QUOC2N3x0CO5Ui75j9bQzLSZQF1HQyhY=`, and Nix NAR hashes for the compiler, runtime-support library, and development/header outputs. These are recorded in [`specs/toolchain.md`](../../specs/toolchain.md).
+- Remaining: validate the release Linux/libc/runtime profile, generate interface headers from a single schema, record release build commands and panic profiles, and package signed/checkable release artifacts. The locked shell is a development profile, not release artifact packaging.
 
 ## TC-1 / TC-3: maintained TinyCC SDK and shared-artifact link profile — partial
 
