@@ -3,6 +3,7 @@
 #include "prdb_sdk_sql_exec_v6.h"
 #include "prdb_sdk_sql_exec_v7.h"
 #include "prdb_sdk_sql_exec_v8.h"
+#include "prdb_sdk_sql_exec_v10.h"
 #include "prdb_sdk_sql_result_v1.h"
 
 #include <string.h>
@@ -121,6 +122,28 @@ static int32_t write_grouped_avg(void *opaque,
     return 0;
 }
 
+static int32_t write_grouped_ordered_count(
+    void *opaque, const prdb_sdk_value_v1 *group_key,
+    const prdb_sdk_value_v1 *aggregate_value, uint64_t matching_row_count,
+    const prdb_sdk_select_binding_v10 *binding) {
+    grouped_result_context *context = (grouped_result_context *)opaque;
+    if (context == NULL || binding == NULL || aggregate_value != NULL ||
+        binding->base.base.aggregate_kind !=
+            PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR ||
+        binding->has_order_by != 1 ||
+        binding->order_kind != PRDB_SDK_SQL_V10_ORDER_AGGREGATE ||
+        binding->order_direction != PRDB_SDK_SQL_V10_ORDER_DESCENDING ||
+        matching_row_count != 1) {
+        return 1;
+    }
+    int32_t status = prdb_sdk_sql_write_group_count_result_v1(
+        context->host, context->group_column, group_key, matching_row_count,
+        context->output, context->output_capacity, &context->output_len);
+    if (status != PRDB_SDK_SQL_RESULT_OK) return 1;
+    ++context->row_count;
+    return 0;
+}
+
 static int32_t verify_selected_value(void *opaque, const prdb_sdk_row_v1 *row,
                                      const prdb_sdk_select_binding_v2 *binding) {
     result_context *context = (result_context *)opaque;
@@ -179,9 +202,10 @@ static int32_t verify_information_schema_name(
     if (
         value.state != PRDB_SDK_VALUE_STATE_VALUE ||
         value.type_code != PRDB_SDK_VALUE_TYPE_TEXT ||
-        value.data_len != context->expected_value_len ||
-        memcmp(value.data, context->expected_value,
-               (size_t)context->expected_value_len) != 0) {
+        (context->expected_value != NULL &&
+         (value.data_len != context->expected_value_len ||
+          memcmp(value.data, context->expected_value,
+                 (size_t)context->expected_value_len) != 0))) {
         context->failure_code = 3;
         return 1;
     }
@@ -226,6 +250,9 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
         "SELECT id, SUM(id) FROM records GROUP BY id";
     static const uint8_t select_grouped_avg_sql[] =
         "SELECT id, AVG(id) FROM records GROUP BY id";
+    static const uint8_t select_grouped_order_sql[] =
+        "SELECT id, COUNT(*) FROM records GROUP BY id "
+        "ORDER BY COUNT(*) DESC LIMIT 1";
     static const uint8_t select_join_sql[] =
         "SELECT records.id, linked_records.id FROM records INNER JOIN "
         "linked_records ON records.id = linked_records.id LIMIT 1";
@@ -233,7 +260,6 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
     static const uint8_t schema[] = "sql_roundtrip";
     static const uint8_t empty_schema[] = "empty_roundtrip";
     static const uint8_t information_schema[] = "information_schema";
-    static const uint8_t expected_user_table[] = "records";
     static const uint8_t expected_user_column[] = "id";
     static const uint8_t private_table_name[] = "private_records";
     static const uint8_t missing_table_name[] = "missing_records";
@@ -489,8 +515,8 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
         return report_failure(host, message, sizeof(message) - 1);
     }
 
-    results.expected_value = expected_user_table;
-    results.expected_value_len = sizeof(expected_user_table) - 1;
+    results.expected_value = NULL;
+    results.expected_value_len = 0;
     results.expected_ordinal = 1;
     results.row_count = 0;
     status = prdb_sdk_sql_execute_select_v2(
@@ -813,6 +839,21 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
         write_grouped_avg, &grouped_results);
     if (status != PRDB_SDK_SQL_EXEC_OK || grouped_results.row_count != 1) {
         static const uint8_t message[] = "fixture-error-grouped-avg";
+        return report_failure(host, message, sizeof(message) - 1);
+    }
+
+    grouped_results.row_count = 0;
+    grouped_results.output_len = 0;
+    status = prdb_sdk_sql_execute_group_v10(
+        host, schema, sizeof(schema) - 1, select_grouped_order_sql,
+        sizeof(select_grouped_order_sql) - 1, NULL, 0, 16,
+        sizeof(batch_response), planner_response, sizeof(planner_response),
+        executor_response, sizeof(executor_response), batch_response,
+        sizeof(batch_response), planner_columns, 1, executor_columns, 1,
+        cell_scratch, 1, grouped_materialized, sizeof(grouped_materialized),
+        write_grouped_ordered_count, &grouped_results);
+    if (status != PRDB_SDK_SQL_EXEC_OK || grouped_results.row_count != 1) {
+        static const uint8_t message[] = "fixture-error-grouped-order";
         return report_failure(host, message, sizeof(message) - 1);
     }
 

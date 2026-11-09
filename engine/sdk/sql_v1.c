@@ -7,6 +7,7 @@
 #include "prdb_sdk_sql_v7.h"
 #include "prdb_sdk_sql_v8.h"
 #include "prdb_sdk_sql_v9.h"
+#include "prdb_sdk_sql_v10.h"
 #include "prdb_sdk_sql_dml_v1.h"
 
 #include <stddef.h>
@@ -2179,8 +2180,10 @@ int32_t prdb_sdk_sql_bind_select_v4(
 static int32_t parse_grouped_select_v5_internal(
     const uint8_t *sql, uint64_t sql_len, prdb_sdk_select_v5 *out,
     uint32_t out_capacity, uint32_t *error_offset_out, int allow_sum,
-    int allow_avg, int allow_having, uint32_t *has_having_out,
-    uint32_t *having_comparison_out, uint32_t *having_parameter_index_out) {
+    int allow_avg, int allow_having, int allow_group_order,
+    uint32_t *has_having_out, uint32_t *having_comparison_out,
+    uint32_t *having_parameter_index_out, uint32_t *has_order_by_out,
+    uint32_t *order_kind_out, uint32_t *order_direction_out) {
     parser state;
     prdb_sdk_select_v5 result = {0};
     int32_t status;
@@ -2189,6 +2192,9 @@ static int32_t parse_grouped_select_v5_internal(
     if (has_having_out != NULL) *has_having_out = 0;
     if (having_comparison_out != NULL) *having_comparison_out = 0;
     if (having_parameter_index_out != NULL) *having_parameter_index_out = 0;
+    if (has_order_by_out != NULL) *has_order_by_out = 0;
+    if (order_kind_out != NULL) *order_kind_out = 0;
+    if (order_direction_out != NULL) *order_direction_out = 0;
     if (sql == NULL || out == NULL || out_capacity < sizeof(*out)) {
         return PRDB_SDK_SQL_INVALID_ARGUMENT;
     }
@@ -2463,6 +2469,131 @@ static int32_t parse_grouped_select_v5_internal(
             *having_parameter_index_out = parameter_index;
         }
     }
+    if (token_is_keyword(&state, "ORDER")) {
+        uint32_t order_kind = 0;
+        uint32_t order_direction = PRDB_SDK_SQL_V10_ORDER_ASCENDING;
+        prdb_sdk_sql_span_v1 order_column = {0};
+        int aggregate_matches = 0;
+
+        if (!allow_group_order) {
+            status = PRDB_SDK_SQL_SYNTAX_ERROR;
+            state.error_offset = state.current.offset;
+            goto failed_v5;
+        }
+        if (advance(&state) != PRDB_SDK_SQL_OK ||
+            !token_is_keyword(&state, "BY")) {
+            status = state.error == PRDB_SDK_SQL_OK
+                         ? PRDB_SDK_SQL_SYNTAX_ERROR
+                         : state.error;
+            if (state.error == PRDB_SDK_SQL_OK) {
+                state.error_offset = state.current.offset;
+            }
+            goto failed_v5;
+        }
+        if (advance(&state) != PRDB_SDK_SQL_OK) {
+            status = state.error;
+            goto failed_v5;
+        }
+        if (state.current.kind == TOKEN_IDENTIFIER &&
+            span_matches_name(&result.base, result.group_by_column,
+                              sql + state.current.offset,
+                              state.current.length)) {
+            order_kind = PRDB_SDK_SQL_V10_ORDER_GROUP_KEY;
+            if (advance(&state) != PRDB_SDK_SQL_OK) {
+                status = state.error;
+                goto failed_v5;
+            }
+        } else {
+            if (state.current.kind == TOKEN_IDENTIFIER) {
+                aggregate_matches =
+                    (result.aggregate_kind ==
+                         PRDB_SDK_SQL_V5_AGGREGATE_COUNT_STAR &&
+                     token_is_keyword(&state, "COUNT")) ||
+                    (result.aggregate_kind ==
+                         PRDB_SDK_SQL_V5_AGGREGATE_MIN &&
+                     token_is_keyword(&state, "MIN")) ||
+                    (result.aggregate_kind ==
+                         PRDB_SDK_SQL_V5_AGGREGATE_MAX &&
+                     token_is_keyword(&state, "MAX")) ||
+                    (result.aggregate_kind ==
+                         PRDB_SDK_SQL_V6_AGGREGATE_SUM &&
+                     token_is_keyword(&state, "SUM")) ||
+                    (result.aggregate_kind ==
+                         PRDB_SDK_SQL_V7_AGGREGATE_AVG &&
+                     token_is_keyword(&state, "AVG"));
+            }
+            if (!aggregate_matches) {
+                status = PRDB_SDK_SQL_SYNTAX_ERROR;
+                state.error_offset = state.current.offset;
+                goto failed_v5;
+            }
+            if (advance(&state) != PRDB_SDK_SQL_OK ||
+                state.current.kind != TOKEN_LEFT_PAREN) {
+                status = state.error == PRDB_SDK_SQL_OK
+                             ? PRDB_SDK_SQL_SYNTAX_ERROR
+                             : state.error;
+                if (state.error == PRDB_SDK_SQL_OK) {
+                    state.error_offset = state.current.offset;
+                }
+                goto failed_v5;
+            }
+            if (advance(&state) != PRDB_SDK_SQL_OK) {
+                status = state.error;
+                goto failed_v5;
+            }
+            if (result.aggregate_kind ==
+                PRDB_SDK_SQL_V5_AGGREGATE_COUNT_STAR) {
+                if (state.current.kind != TOKEN_STAR) {
+                    status = PRDB_SDK_SQL_SYNTAX_ERROR;
+                    state.error_offset = state.current.offset;
+                    goto failed_v5;
+                }
+                if (advance(&state) != PRDB_SDK_SQL_OK) {
+                    status = state.error;
+                    goto failed_v5;
+                }
+            } else {
+                status = expect_identifier(&state, &order_column);
+                if (status != PRDB_SDK_SQL_OK) goto failed_v5;
+                if (!span_matches_name(
+                        &result.base, order_column,
+                        sql + result.aggregate_column.offset,
+                        result.aggregate_column.length)) {
+                    status = PRDB_SDK_SQL_SYNTAX_ERROR;
+                    state.error_offset = order_column.offset;
+                    goto failed_v5;
+                }
+            }
+            if (state.current.kind != TOKEN_RIGHT_PAREN) {
+                status = PRDB_SDK_SQL_SYNTAX_ERROR;
+                state.error_offset = state.current.offset;
+                goto failed_v5;
+            }
+            if (advance(&state) != PRDB_SDK_SQL_OK) {
+                status = state.error;
+                goto failed_v5;
+            }
+            order_kind = PRDB_SDK_SQL_V10_ORDER_AGGREGATE;
+        }
+        if (token_is_keyword(&state, "ASC")) {
+            order_direction = PRDB_SDK_SQL_V10_ORDER_ASCENDING;
+            if (advance(&state) != PRDB_SDK_SQL_OK) {
+                status = state.error;
+                goto failed_v5;
+            }
+        } else if (token_is_keyword(&state, "DESC")) {
+            order_direction = PRDB_SDK_SQL_V10_ORDER_DESCENDING;
+            if (advance(&state) != PRDB_SDK_SQL_OK) {
+                status = state.error;
+                goto failed_v5;
+            }
+        }
+        if (has_order_by_out != NULL) *has_order_by_out = 1;
+        if (order_kind_out != NULL) *order_kind_out = order_kind;
+        if (order_direction_out != NULL) {
+            *order_direction_out = order_direction;
+        }
+    }
     if (token_is_keyword(&state, "LIMIT")) {
         token limit_token;
         result.base.has_limit = 1;
@@ -2504,8 +2635,9 @@ int32_t prdb_sdk_sql_parse_select_v5(const uint8_t *sql, uint64_t sql_len,
                                      uint32_t out_capacity,
                                      uint32_t *error_offset_out) {
     return parse_grouped_select_v5_internal(sql, sql_len, out, out_capacity,
-                                            error_offset_out, 0, 0, 0, NULL,
-                                            NULL, NULL);
+                                            error_offset_out, 0, 0, 0, 0,
+                                            NULL, NULL, NULL, NULL, NULL,
+                                            NULL);
 }
 
 int32_t prdb_sdk_sql_parse_select_v6(const uint8_t *sql, uint64_t sql_len,
@@ -2521,8 +2653,8 @@ int32_t prdb_sdk_sql_parse_select_v6(const uint8_t *sql, uint64_t sql_len,
         return PRDB_SDK_SQL_INVALID_ARGUMENT;
     }
     status = parse_grouped_select_v5_internal(
-        sql, sql_len, &parsed, sizeof(parsed), error_offset_out, 1, 0, 0,
-        NULL, NULL, NULL);
+        sql, sql_len, &parsed, sizeof(parsed), error_offset_out, 1, 0, 0, 0,
+        NULL, NULL, NULL, NULL, NULL, NULL);
     if (status != PRDB_SDK_SQL_OK) return status;
     result.struct_size = sizeof(result);
     result.abi_version = PRDB_SDK_SQL_ABI_V6_VERSION;
@@ -2608,8 +2740,8 @@ int32_t prdb_sdk_sql_parse_select_v7(const uint8_t *sql, uint64_t sql_len,
         return PRDB_SDK_SQL_INVALID_ARGUMENT;
     }
     status = parse_grouped_select_v5_internal(
-        sql, sql_len, &parsed, sizeof(parsed), error_offset_out, 1, 1, 0,
-        NULL, NULL, NULL);
+        sql, sql_len, &parsed, sizeof(parsed), error_offset_out, 1, 1, 0, 0,
+        NULL, NULL, NULL, NULL, NULL, NULL);
     if (status != PRDB_SDK_SQL_OK) return status;
     result.struct_size = sizeof(result);
     result.abi_version = PRDB_SDK_SQL_ABI_V7_VERSION;
@@ -2686,8 +2818,9 @@ int32_t prdb_sdk_sql_parse_select_v9(const uint8_t *sql, uint64_t sql_len,
         return PRDB_SDK_SQL_INVALID_ARGUMENT;
     }
     status = parse_grouped_select_v5_internal(
-        sql, sql_len, &parsed, sizeof(parsed), error_offset_out, 1, 1, 1,
-        &has_having, &having_comparison, &having_parameter_index);
+        sql, sql_len, &parsed, sizeof(parsed), error_offset_out, 1, 1, 1, 0,
+        &has_having, &having_comparison, &having_parameter_index, NULL, NULL,
+        NULL);
     if (status != PRDB_SDK_SQL_OK) return status;
     result.struct_size = sizeof(result);
     result.abi_version = PRDB_SDK_SQL_ABI_V9_VERSION;
@@ -2781,6 +2914,130 @@ int32_t prdb_sdk_sql_bind_select_v9(
     }
     result.struct_size = sizeof(result);
     result.abi_version = PRDB_SDK_SQL_ABI_V9_VERSION;
+    *out = result;
+    return PRDB_SDK_SQL_BIND_OK;
+}
+
+int32_t prdb_sdk_sql_parse_select_v10(const uint8_t *sql, uint64_t sql_len,
+                                      prdb_sdk_select_v10 *out,
+                                      uint32_t out_capacity,
+                                      uint32_t *error_offset_out) {
+    prdb_sdk_select_v5 parsed = {0};
+    prdb_sdk_select_v10 result = {0};
+    uint32_t has_having = 0, having_comparison = 0;
+    uint32_t having_parameter_index = 0;
+    uint32_t has_order_by = 0, order_kind = 0, order_direction = 0;
+    int32_t status;
+
+    if (error_offset_out != NULL) *error_offset_out = 0;
+    if (sql == NULL || out == NULL || out_capacity < sizeof(*out)) {
+        return PRDB_SDK_SQL_INVALID_ARGUMENT;
+    }
+    status = parse_grouped_select_v5_internal(
+        sql, sql_len, &parsed, sizeof(parsed), error_offset_out, 1, 1, 1, 1,
+        &has_having, &having_comparison, &having_parameter_index,
+        &has_order_by, &order_kind, &order_direction);
+    if (status != PRDB_SDK_SQL_OK) return status;
+    result.struct_size = sizeof(result);
+    result.abi_version = PRDB_SDK_SQL_ABI_V10_VERSION;
+    result.base.struct_size = sizeof(result.base);
+    result.base.abi_version = PRDB_SDK_SQL_ABI_V9_VERSION;
+    result.base.base.struct_size = sizeof(result.base.base);
+    result.base.base.abi_version = PRDB_SDK_SQL_ABI_V7_VERSION;
+    result.base.base.base = parsed.base;
+    result.base.base.has_group_by = parsed.has_group_by;
+    result.base.base.group_by_column = parsed.group_by_column;
+    result.base.base.aggregate_kind = parsed.aggregate_kind;
+    result.base.base.aggregate_column = parsed.aggregate_column;
+    result.base.has_having = has_having;
+    result.base.having_comparison = having_comparison;
+    result.base.having_parameter_index = having_parameter_index;
+    result.has_order_by = has_order_by;
+    result.order_kind = order_kind;
+    result.order_direction = order_direction;
+    *out = result;
+    return PRDB_SDK_SQL_OK;
+}
+
+int32_t prdb_sdk_sql_bind_select_v10(
+    const prdb_sdk_select_v10 *statement, const uint8_t *relation_name,
+    uint32_t relation_name_len,
+    const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count,
+    prdb_sdk_select_binding_v10 *out, uint32_t out_capacity) {
+    prdb_sdk_select_binding_v10 result = {0};
+    int32_t status;
+
+    if (statement == NULL || out == NULL || out_capacity < sizeof(*out)) {
+        return PRDB_SDK_SQL_BIND_INVALID_ARGUMENT;
+    }
+    if (statement->struct_size < sizeof(*statement) ||
+        statement->abi_version != PRDB_SDK_SQL_ABI_V10_VERSION ||
+        statement->has_order_by > 1 ||
+        (statement->has_order_by == 0 &&
+         (statement->order_kind != 0 || statement->order_direction != 0)) ||
+        (statement->has_order_by == 1 &&
+         (statement->order_kind < PRDB_SDK_SQL_V10_ORDER_GROUP_KEY ||
+          statement->order_kind > PRDB_SDK_SQL_V10_ORDER_AGGREGATE ||
+          statement->order_direction >
+              PRDB_SDK_SQL_V10_ORDER_DESCENDING))) {
+        return PRDB_SDK_SQL_BIND_INVALID_STATEMENT;
+    }
+    status = prdb_sdk_sql_bind_select_v9(
+        &statement->base, relation_name, relation_name_len, columns,
+        column_count, &result.base, sizeof(result.base));
+    if (status != PRDB_SDK_SQL_BIND_OK) return status;
+    result.has_order_by = statement->has_order_by;
+    result.order_kind = statement->order_kind;
+    result.order_direction = statement->order_direction;
+    if (statement->has_order_by) {
+        const prdb_sdk_sql_bound_column_v2 *aggregate =
+            &result.base.base.aggregate_column;
+        uint32_t kind = result.base.base.aggregate_kind;
+        if (statement->order_kind == PRDB_SDK_SQL_V10_ORDER_GROUP_KEY) {
+            result.order_type_code =
+                result.base.base.group_by_column.type_code;
+            result.order_decimal_precision =
+                result.base.base.group_by_column.decimal_precision;
+            result.order_decimal_scale =
+                result.base.base.group_by_column.decimal_scale;
+        } else if (kind == PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR) {
+            result.order_type_code = PRDB_SDK_VALUE_TYPE_BIGINT;
+        } else if (kind == PRDB_SDK_SQL_V7_AGGREGATE_MIN ||
+                   kind == PRDB_SDK_SQL_V7_AGGREGATE_MAX) {
+            result.order_type_code = aggregate->type_code;
+            result.order_decimal_precision = aggregate->decimal_precision;
+            result.order_decimal_scale = aggregate->decimal_scale;
+        } else if (kind == PRDB_SDK_SQL_V7_AGGREGATE_SUM) {
+            if (aggregate->type_code == PRDB_SDK_VALUE_TYPE_DECIMAL) {
+                result.order_type_code = PRDB_SDK_VALUE_TYPE_DECIMAL;
+                result.order_decimal_precision = 38;
+                result.order_decimal_scale = aggregate->decimal_scale;
+            } else {
+                result.order_type_code = PRDB_SDK_VALUE_TYPE_BIGINT;
+            }
+        } else if (kind == PRDB_SDK_SQL_V7_AGGREGATE_AVG) {
+            uint32_t integer_digits =
+                aggregate->type_code == PRDB_SDK_VALUE_TYPE_DECIMAL
+                    ? aggregate->decimal_precision - aggregate->decimal_scale
+                    : 0;
+            uint32_t desired_scale =
+                aggregate->type_code == PRDB_SDK_VALUE_TYPE_DECIMAL
+                    ? aggregate->decimal_scale + 6
+                    : 6;
+            uint32_t available_scale = 38 - integer_digits;
+            if (desired_scale < 6) desired_scale = 6;
+            if (desired_scale > available_scale) {
+                desired_scale = available_scale;
+            }
+            result.order_type_code = PRDB_SDK_VALUE_TYPE_DECIMAL;
+            result.order_decimal_precision = 38;
+            result.order_decimal_scale = (uint8_t)desired_scale;
+        } else {
+            return PRDB_SDK_SQL_BIND_INVALID_STATEMENT;
+        }
+    }
+    result.struct_size = sizeof(result);
+    result.abi_version = PRDB_SDK_SQL_ABI_V10_VERSION;
     *out = result;
     return PRDB_SDK_SQL_BIND_OK;
 }

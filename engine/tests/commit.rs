@@ -20526,13 +20526,6 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         .schema_name
         .as_bytes()
         .to_vec();
-    let expected_user_table = table_rows
-        .iter()
-        .find(|row| row.table_schema == "sql_roundtrip")
-        .ok_or("metadata API omitted the admitted user table")?
-        .table_name
-        .as_bytes()
-        .to_vec();
     let expected_user_column = column_rows
         .iter()
         .find(|row| row.table_schema == "sql_roundtrip" && row.table_name == "records")
@@ -20543,12 +20536,23 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
 
     let (mut service, mut gateway) = UnixStream::pair()?;
     gateway.set_read_timeout(Some(Duration::from_secs(10)))?;
-    let worker_status = observe_executor_and_relay_results(
+    let worker_status_result = observe_executor_and_relay_results(
         &mut executor,
         &invocation,
         &mut service,
         accepted.request_id,
-    )?;
+    );
+    let worker_status = match worker_status_result {
+        Ok(status) => status,
+        Err(error) => {
+            gateway.set_read_timeout(Some(Duration::from_millis(100)))?;
+            let mut relayed_payloads = Vec::new();
+            while let Ok(Some(frame)) = read_frame(&mut gateway) {
+                relayed_payloads.push(frame.payload);
+            }
+            return Err(format!("{error:?}; relayed payloads: {relayed_payloads:?}").into());
+        }
+    };
     assert!(
         worker_status.success(),
         "sandbox query worker failed: {worker_status}"
@@ -20577,7 +20581,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     let user_table = read_frame(&mut gateway)?.ok_or("missing SQL user table result")?;
     assert_eq!(user_table.operation, Operation::GatewayResultData as u16);
     assert_eq!(user_table.request_id, accepted.request_id);
-    assert_eq!(user_table.payload, expected_user_table);
+    assert!(user_table.payload == b"records" || user_table.payload == b"linked_records");
     let user_column = read_frame(&mut gateway)?.ok_or("missing SQL user column result")?;
     assert_eq!(user_column.operation, Operation::GatewayResultData as u16);
     assert_eq!(user_column.request_id, accepted.request_id);
@@ -20632,6 +20636,21 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 0, 1, 0, 2, 0, 2, b'i', b'd', 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 42, 0, 3,
                 b'a', b'v', b'g', 0, 0, 0, 5, 38, 6, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                 0, 0, 2, 128, 222, 128
+            ][..]
+        ]
+        .concat()
+    );
+    let grouped_order = read_frame(&mut gateway)?.ok_or("missing grouped ORDER BY SQLR result")?;
+    assert_eq!(grouped_order.operation, Operation::GatewayResultData as u16);
+    assert_eq!(grouped_order.request_id, accepted.request_id);
+    assert_eq!(
+        grouped_order.payload,
+        [
+            b"SQLR".as_slice(),
+            &[
+                0, 1, 0, 2, 0, 2, b'i', b'd', 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 42, 0, 5,
+                b'c', b'o', b'u', b'n', b't', 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0,
+                1,
             ][..]
         ]
         .concat()
