@@ -46,6 +46,8 @@ pub struct StagingLimits {
     pub max_parameter_bytes: u64,
     pub max_deadline_ms: u64,
     pub max_live_reservations: usize,
+    /// Maximum live reservations owned by one authenticated principal.
+    pub max_live_reservations_per_principal: usize,
     /// Maximum reservations entering or executing START with operational limits.
     pub max_active_operational: usize,
     /// Maximum reservations entering or executing START with analytical limits.
@@ -65,6 +67,7 @@ impl Default for StagingLimits {
             max_parameter_bytes: MAX_PARAMETER_BYTES,
             max_deadline_ms: DEFAULT_MAX_DEADLINE_MS,
             max_live_reservations: 1024,
+            max_live_reservations_per_principal: 128,
             max_active_operational: 64,
             max_active_analytical: 8,
             reservation_ttl: Duration::from_secs(300),
@@ -259,6 +262,7 @@ impl StagingStore {
             || limits.max_parameter_bytes > MAX_PARAMETER_BYTES
             || limits.max_deadline_ms == 0
             || limits.max_live_reservations == 0
+            || limits.max_live_reservations_per_principal == 0
             || limits.max_active_operational == 0
             || limits.max_active_analytical == 0
             || limits.reservation_ttl.is_zero()
@@ -319,6 +323,14 @@ impl StagingStore {
             return Err(StagingError::InvalidState);
         }
         if state.reservations.len() >= self.limits.max_live_reservations {
+            return Err(StagingError::ResourceLimit);
+        }
+        let principal_reservation_count = state
+            .reservations
+            .values()
+            .filter(|reservation| reservation.principal_id == owner.principal_id)
+            .count();
+        if principal_reservation_count >= self.limits.max_live_reservations_per_principal {
             return Err(StagingError::ResourceLimit);
         }
         let next_global = state
@@ -1196,6 +1208,42 @@ mod tests {
             .start_with(queued_owner, queued_id, |_| Ok::<_, ()>(()))
             .unwrap();
         store.finish_started(queued_owner, queued_id).unwrap();
+    }
+
+    #[test]
+    fn live_reservation_quota_is_per_principal_and_released_on_cancel() {
+        let store = StagingStore::new(
+            StagingLimits {
+                max_live_reservations_per_principal: 1,
+                ..StagingLimits::default()
+            },
+            Arc::new(AcceptMetadata),
+        )
+        .unwrap();
+        let owner = make_owner(51, 61);
+        let same_principal = make_owner(52, 61);
+        let other_principal = make_owner(53, 62);
+        let first = store.prepare(owner, request(b"first", b"")).unwrap();
+
+        assert!(matches!(
+            store.prepare(same_principal, request(b"second", b"")),
+            Err(StagingError::ResourceLimit)
+        ));
+        let other = store
+            .prepare(other_principal, request(b"other", b""))
+            .unwrap();
+        assert_eq!(store.cancel_prepared(owner, first.invocation_id), Ok(()));
+        let replacement = store
+            .prepare(same_principal, request(b"replacement", b""))
+            .unwrap();
+        assert_eq!(
+            store.cancel_prepared(other_principal, other.invocation_id),
+            Ok(())
+        );
+        assert_eq!(
+            store.cancel_prepared(same_principal, replacement.invocation_id),
+            Ok(())
+        );
     }
 
     #[test]

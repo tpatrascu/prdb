@@ -20,6 +20,7 @@ fn supervisor_help_documents_explicit_runtime_and_compatibility_configuration() 
         "--allowed-dependency",
         "--max-active-operational",
         "--max-active-analytical",
+        "--max-principal-reservations",
     ] {
         assert!(help.contains(option), "missing {option} from help");
     }

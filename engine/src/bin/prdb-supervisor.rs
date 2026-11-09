@@ -49,6 +49,7 @@ mod service {
         retention_seconds: Option<u64>,
         max_rows: Option<usize>,
         max_bytes: Option<usize>,
+        max_principal_reservations: Option<usize>,
         max_active_operational: Option<usize>,
         max_active_analytical: Option<usize>,
         cpu_quota_us: Option<u64>,
@@ -80,6 +81,7 @@ mod service {
              --runtime-read-execute PATH (repeatable) --runtime-profile NAME\n\
              --cpu-baseline NAME --sdk-release NUMBER --allowed-dependency NAME (repeatable)\n\
              --retention-seconds N --max-rows N --max-bytes N\n\
+             --max-principal-reservations N\n\
              [--max-active-operational N --max-active-analytical N]\n\
              --cpu-quota-us N --cpu-period-us N --memory-max-bytes N --max-processes N\n\
              [--analytical-cpu-quota-us N --analytical-cpu-period-us N\n\
@@ -172,6 +174,12 @@ mod service {
         let default_staging_limits = StagingLimits::default();
         let staging = StagingStore::new(
             StagingLimits {
+                max_live_reservations_per_principal: positive(
+                    options
+                        .max_principal_reservations
+                        .unwrap_or(default_staging_limits.max_live_reservations_per_principal),
+                    "--max-principal-reservations",
+                )?,
                 max_active_operational: positive(
                     options
                         .max_active_operational
@@ -354,6 +362,9 @@ mod service {
                 "--retention-seconds" => set!(retention_seconds, value.parse::<u64>()?),
                 "--max-rows" => set!(max_rows, value.parse::<usize>()?),
                 "--max-bytes" => set!(max_bytes, value.parse::<usize>()?),
+                "--max-principal-reservations" => {
+                    set!(max_principal_reservations, value.parse::<usize>()?)
+                }
                 "--max-active-operational" => {
                     set!(max_active_operational, value.parse::<usize>()?)
                 }
