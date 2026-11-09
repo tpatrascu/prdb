@@ -156,3 +156,11 @@
 - Implementation: the no-allocation kernel retains a borrowed view of the first extremum and uses the existing scalar comparator; equal values preserve the first representation. It is an operator primitive, not yet exposed by SQL aggregate parsing or grouped execution.
 - Verification: the complete maintained TinyCC suite passed. Locked workspace build, format check, warning-denied Clippy, and full locked workspace tests passed; the commit integration suite reported 125 passed and 3 cgroup-dependent ignored.
 - Remaining: SQL aggregate grammar/execution/result encoding, SUM/AVG overflow and result type rules, and live analytical integration remain open.
+
+## SQL-7 dependency: grouped MIN/MAX parser and binder — partial
+
+- Contract: [SQL library](../../specs/sql-library.md). Preserve v1-v4 AST/binding layouts and accept the existing one-key grouped form with `COUNT(*)`, `MIN(column)`, or `MAX(column)`. Bind the aggregate argument to the same authorized relation shape, including Decimal metadata; reject unsupported aggregates and malformed/trailing syntax.
+- Red/green evidence: the new maintained v5 fixture first failed to link because `prdb_sdk_sql_parse_select_v5` and `prdb_sdk_sql_bind_select_v5` were missing. It now checks MIN/MAX/COUNT ASTs, WHERE and LIMIT spans, Decimal aggregate binding, missing columns, unsupported SUM/argument forms, grouping-key mismatch, misplaced clauses, trailing syntax, and output preservation on parse/bind errors.
+- Implementation: v5 embeds the frozen v2 SELECT record and separately records the group key, aggregate kind, and optional aggregate-column span/binding. It is parser/binder support only; the v4 COUNT runner remains unchanged.
+- Verification: the complete maintained TinyCC suite, locked workspace build, format check, and warning-denied Clippy passed. `cargo test --workspace --locked -- --test-threads=1` passed across the workspace; the commit integration suite reported 125 passed and 3 cgroup-dependent ignored. The default parallel test run hit the known `storage_manager_creates_and_drops_check_constraint` `InvalidAudit` interaction; that test passed alone and the commit suite passed serially.
+- Remaining: bounded per-group MIN/MAX execution and SQLR aggregate output, plus SUM/AVG typing and overflow rules, remain open.

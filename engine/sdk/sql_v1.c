@@ -2,6 +2,7 @@
 #include "prdb_sdk_sql_v2.h"
 #include "prdb_sdk_sql_v3.h"
 #include "prdb_sdk_sql_v4.h"
+#include "prdb_sdk_sql_v5.h"
 #include "prdb_sdk_sql_dml_v1.h"
 
 #include <stddef.h>
@@ -2163,6 +2164,272 @@ int32_t prdb_sdk_sql_bind_select_v4(
         columns[ordinal].decimal_precision;
     result.group_by_column.decimal_scale = columns[ordinal].decimal_scale;
     result.aggregate_kind = PRDB_SDK_SQL_AGGREGATE_COUNT_STAR;
+    *out = result;
+    return PRDB_SDK_SQL_BIND_OK;
+}
+
+int32_t prdb_sdk_sql_parse_select_v5(const uint8_t *sql, uint64_t sql_len,
+                                     prdb_sdk_select_v5 *out,
+                                     uint32_t out_capacity,
+                                     uint32_t *error_offset_out) {
+    parser state;
+    prdb_sdk_select_v5 result = {0};
+    int32_t status;
+
+    if (error_offset_out != NULL) *error_offset_out = 0;
+    if (sql == NULL || out == NULL || out_capacity < sizeof(*out)) {
+        return PRDB_SDK_SQL_INVALID_ARGUMENT;
+    }
+    if (sql_len == 0) return PRDB_SDK_SQL_SYNTAX_ERROR;
+    if (sql_len > PRDB_SDK_SQL_MAX_QUERY_BYTES) {
+        if (error_offset_out != NULL) {
+            *error_offset_out = (uint32_t)PRDB_SDK_SQL_MAX_QUERY_BYTES;
+        }
+        return PRDB_SDK_SQL_LIMIT_EXCEEDED;
+    }
+    state = (parser){sql, (uint32_t)sql_len, 0, {TOKEN_END, 0, 0}, 0,
+                     PRDB_SDK_SQL_OK};
+    result.base.struct_size = sizeof(result.base);
+    result.base.abi_version = PRDB_SDK_SQL_ABI_V2_VERSION;
+    result.base.sql = sql;
+    result.base.sql_len = sql_len;
+
+    status = advance(&state);
+    if (status != PRDB_SDK_SQL_OK) goto failed_v5;
+    if (!token_is_keyword(&state, "SELECT")) {
+        status = state.current.kind == TOKEN_IDENTIFIER
+                     ? PRDB_SDK_SQL_UNSUPPORTED_STATEMENT
+                     : PRDB_SDK_SQL_SYNTAX_ERROR;
+        state.error_offset = state.current.offset;
+        goto failed_v5;
+    }
+    if (advance(&state) != PRDB_SDK_SQL_OK) {
+        status = state.error;
+        goto failed_v5;
+    }
+    status = expect_identifier(&state, &result.base.projection[0]);
+    if (status != PRDB_SDK_SQL_OK) goto failed_v5;
+    result.base.projection_count = 1;
+    if (state.current.kind != TOKEN_COMMA) {
+        status = PRDB_SDK_SQL_SYNTAX_ERROR;
+        state.error_offset = state.current.offset;
+        goto failed_v5;
+    }
+    if (advance(&state) != PRDB_SDK_SQL_OK) {
+        status = state.error;
+        goto failed_v5;
+    }
+    if (token_is_keyword(&state, "COUNT")) {
+        result.aggregate_kind = PRDB_SDK_SQL_V5_AGGREGATE_COUNT_STAR;
+    } else if (token_is_keyword(&state, "MIN")) {
+        result.aggregate_kind = PRDB_SDK_SQL_V5_AGGREGATE_MIN;
+    } else if (token_is_keyword(&state, "MAX")) {
+        result.aggregate_kind = PRDB_SDK_SQL_V5_AGGREGATE_MAX;
+    } else {
+        status = PRDB_SDK_SQL_SYNTAX_ERROR;
+        state.error_offset = state.current.offset;
+        goto failed_v5;
+    }
+    if (advance(&state) != PRDB_SDK_SQL_OK ||
+        state.current.kind != TOKEN_LEFT_PAREN) {
+        status = state.error == PRDB_SDK_SQL_OK
+                     ? PRDB_SDK_SQL_SYNTAX_ERROR
+                     : state.error;
+        if (state.error == PRDB_SDK_SQL_OK) {
+            state.error_offset = state.current.offset;
+        }
+        goto failed_v5;
+    }
+    if (advance(&state) != PRDB_SDK_SQL_OK) {
+        status = state.error;
+        goto failed_v5;
+    }
+    if (result.aggregate_kind == PRDB_SDK_SQL_V5_AGGREGATE_COUNT_STAR) {
+        if (state.current.kind != TOKEN_STAR) {
+            status = PRDB_SDK_SQL_SYNTAX_ERROR;
+            state.error_offset = state.current.offset;
+            goto failed_v5;
+        }
+        if (advance(&state) != PRDB_SDK_SQL_OK) {
+            status = state.error;
+            goto failed_v5;
+        }
+    } else {
+        status = expect_identifier(&state, &result.aggregate_column);
+        if (status != PRDB_SDK_SQL_OK) goto failed_v5;
+    }
+    if (state.current.kind != TOKEN_RIGHT_PAREN) {
+        status = PRDB_SDK_SQL_SYNTAX_ERROR;
+        state.error_offset = state.current.offset;
+        goto failed_v5;
+    }
+    if (advance(&state) != PRDB_SDK_SQL_OK) {
+        status = state.error;
+        goto failed_v5;
+    }
+    if (!token_is_keyword(&state, "FROM")) {
+        status = PRDB_SDK_SQL_SYNTAX_ERROR;
+        state.error_offset = state.current.offset;
+        goto failed_v5;
+    }
+    if (advance(&state) != PRDB_SDK_SQL_OK) {
+        status = state.error;
+        goto failed_v5;
+    }
+    status = expect_identifier(&state, &result.base.relation);
+    if (status != PRDB_SDK_SQL_OK) goto failed_v5;
+    if (token_is_keyword(&state, "WHERE")) {
+        if (advance(&state) != PRDB_SDK_SQL_OK) {
+            status = state.error;
+            goto failed_v5;
+        }
+        status = parse_predicate_or_v2(
+            &state, &result.base, 0, &result.base.predicate_root);
+        if (status != PRDB_SDK_SQL_OK) goto failed_v5;
+    }
+    if (!token_is_keyword(&state, "GROUP")) {
+        status = PRDB_SDK_SQL_SYNTAX_ERROR;
+        state.error_offset = state.current.offset;
+        goto failed_v5;
+    }
+    if (advance(&state) != PRDB_SDK_SQL_OK ||
+        !token_is_keyword(&state, "BY")) {
+        status = state.error == PRDB_SDK_SQL_OK
+                     ? PRDB_SDK_SQL_SYNTAX_ERROR
+                     : state.error;
+        if (state.error == PRDB_SDK_SQL_OK) {
+            state.error_offset = state.current.offset;
+        }
+        goto failed_v5;
+    }
+    if (advance(&state) != PRDB_SDK_SQL_OK) {
+        status = state.error;
+        goto failed_v5;
+    }
+    status = expect_identifier(&state, &result.group_by_column);
+    if (status != PRDB_SDK_SQL_OK) goto failed_v5;
+    if (!span_matches_name(
+            &result.base, result.group_by_column,
+            sql + result.base.projection[0].offset,
+            result.base.projection[0].length)) {
+        status = PRDB_SDK_SQL_SYNTAX_ERROR;
+        state.error_offset = result.group_by_column.offset;
+        goto failed_v5;
+    }
+    result.has_group_by = 1;
+    if (token_is_keyword(&state, "LIMIT")) {
+        token limit_token;
+        result.base.has_limit = 1;
+        if (advance(&state) != PRDB_SDK_SQL_OK) {
+            status = state.error;
+            goto failed_v5;
+        }
+        limit_token = state.current;
+        status = parse_unsigned(&state, limit_token, PRDB_SDK_SQL_MAX_LIMIT,
+                                1, &result.base.limit);
+        if (status != PRDB_SDK_SQL_OK) goto failed_v5;
+        if (advance(&state) != PRDB_SDK_SQL_OK) {
+            status = state.error;
+            goto failed_v5;
+        }
+    }
+    if (state.current.kind == TOKEN_SEMICOLON &&
+        advance(&state) != PRDB_SDK_SQL_OK) {
+        status = state.error;
+        goto failed_v5;
+    }
+    if (state.current.kind != TOKEN_END) {
+        status = PRDB_SDK_SQL_SYNTAX_ERROR;
+        state.error_offset = state.current.offset;
+        goto failed_v5;
+    }
+    result.struct_size = sizeof(result);
+    result.abi_version = PRDB_SDK_SQL_ABI_V5_VERSION;
+    *out = result;
+    return PRDB_SDK_SQL_OK;
+
+failed_v5:
+    if (error_offset_out != NULL) *error_offset_out = state.error_offset;
+    return fail_at(&state, status);
+}
+
+int32_t prdb_sdk_sql_bind_select_v5(
+    const prdb_sdk_select_v5 *statement, const uint8_t *relation_name,
+    uint32_t relation_name_len,
+    const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count,
+    prdb_sdk_select_binding_v5 *out, uint32_t out_capacity) {
+    prdb_sdk_select_binding_v5 result = {0};
+    uint32_t ordinal;
+    int32_t status;
+
+    if (statement == NULL || out == NULL || out_capacity < sizeof(*out)) {
+        return PRDB_SDK_SQL_BIND_INVALID_ARGUMENT;
+    }
+    if (statement->struct_size < sizeof(*statement) ||
+        statement->abi_version != PRDB_SDK_SQL_ABI_V5_VERSION ||
+        statement->has_group_by != 1 ||
+        (statement->aggregate_kind !=
+             PRDB_SDK_SQL_V5_AGGREGATE_COUNT_STAR &&
+         statement->aggregate_kind != PRDB_SDK_SQL_V5_AGGREGATE_MIN &&
+         statement->aggregate_kind != PRDB_SDK_SQL_V5_AGGREGATE_MAX) ||
+        statement->base.projection_star != 0 ||
+        statement->base.projection_count != 1 ||
+        statement->base.has_limit > 1 ||
+        (statement->base.has_limit == 0 && statement->base.limit != 0) ||
+        statement->base.sql == NULL || statement->base.sql_len == 0 ||
+        statement->group_by_column.length == 0 ||
+        statement->group_by_column.offset > statement->base.sql_len ||
+        statement->group_by_column.length >
+            statement->base.sql_len - statement->group_by_column.offset ||
+        statement->base.projection[0].length == 0 ||
+        statement->base.projection[0].offset > statement->base.sql_len ||
+        statement->base.projection[0].length >
+            statement->base.sql_len - statement->base.projection[0].offset ||
+        !span_matches_name(
+            &statement->base, statement->group_by_column,
+            statement->base.sql + statement->base.projection[0].offset,
+            statement->base.projection[0].length) ||
+        (statement->aggregate_kind ==
+                 PRDB_SDK_SQL_V5_AGGREGATE_COUNT_STAR
+             ? statement->aggregate_column.length != 0
+             : statement->aggregate_column.length == 0 ||
+                   statement->aggregate_column.offset >
+                       statement->base.sql_len ||
+                   statement->aggregate_column.length >
+                       statement->base.sql_len -
+                           statement->aggregate_column.offset ||
+                   !valid_identifier_bytes(
+                       statement->base.sql +
+                           statement->aggregate_column.offset,
+                       statement->aggregate_column.length))) {
+        return PRDB_SDK_SQL_BIND_INVALID_STATEMENT;
+    }
+    status = prdb_sdk_sql_bind_select_v2(
+        &statement->base, relation_name, relation_name_len, columns,
+        column_count, &result.base, sizeof(result.base));
+    if (status != PRDB_SDK_SQL_BIND_OK) return status;
+    ordinal = result.base.projection_ordinals[0];
+    result.group_by_column.ordinal = ordinal;
+    result.group_by_column.type_code = columns[ordinal].type_code;
+    result.group_by_column.decimal_precision =
+        columns[ordinal].decimal_precision;
+    result.group_by_column.decimal_scale = columns[ordinal].decimal_scale;
+    if (statement->aggregate_kind !=
+        PRDB_SDK_SQL_V5_AGGREGATE_COUNT_STAR) {
+        status = find_column_shape_v2(
+            &statement->base, statement->aggregate_column, columns,
+            column_count, &ordinal);
+        if (status != PRDB_SDK_SQL_BIND_OK) return status;
+        result.aggregate_column.ordinal = ordinal;
+        result.aggregate_column.type_code = columns[ordinal].type_code;
+        result.aggregate_column.decimal_precision =
+            columns[ordinal].decimal_precision;
+        result.aggregate_column.decimal_scale = columns[ordinal].decimal_scale;
+    }
+    result.struct_size = sizeof(result);
+    result.abi_version = PRDB_SDK_SQL_ABI_V5_VERSION;
+    result.has_group_by = 1;
+    result.aggregate_kind = statement->aggregate_kind;
     *out = result;
     return PRDB_SDK_SQL_BIND_OK;
 }

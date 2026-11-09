@@ -16,7 +16,7 @@ The initial SDK sort kernel accepts at most 128 authorized keys for one declared
 
 The initial grouping kernel and v4 runner compute stable `COUNT(*)` groups for at most 128 matching authorized rows and 1 MiB of copied key bytes for one scalar key. `WHERE` is evaluated before grouping; equal values group together, NULL values form one group, and groups follow first appearance order. `COUNT(*)` counts every matching visible row, including NULL-key rows. The runner closes the scan before group callbacks and applies `LIMIT` after aggregation. Scan, filter, key validation, and materialization errors produce no group callbacks. The runner reports groups through its synchronous SDK callback and the SQLR v1 grouped writer. Spill, multiple keys, HAVING, ORDER BY on grouped output, and SQL grouped projection of aggregates other than `COUNT(*)` are not supported yet.
 
-The SDK also has a bounded MIN/MAX kernel for at most 128 typed scalar operands. It ignores SQL NULLs, returns NULL for no non-NULL operands, and fails on any REDACTED, malformed, or mismatched operand instead of silently omitting it. This kernel is not yet exposed in grouped SELECT syntax.
+The SDK also has a bounded MIN/MAX kernel for at most 128 typed scalar operands. It ignores SQL NULLs, returns NULL for no non-NULL operands, and fails on any REDACTED, malformed, or mismatched operand instead of silently omitting it. The v5 grouped SELECT parser/binder accepts `MIN(column)` and `MAX(column)`, but runner and result encoding support are still pending.
 
 ## Mixed-Workload Scheduling
 
