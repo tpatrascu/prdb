@@ -148,6 +148,39 @@ fn submission_client_decodes_cancellation_acknowledgements() {
 }
 
 #[test]
+fn admin_client_cancels_invocations_on_control_mode() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut decoder = ClientFrameDecoder::default();
+        establish_control_session(&mut stream, &mut decoder);
+        let request = read_frame(&mut stream, &mut decoder);
+        assert_eq!(request.kind, 9);
+        assert_eq!(
+            request.payload,
+            br#"{"invocation_id":"22222222222222222222222222222222"}"#
+        );
+        respond(&mut stream, &request, br#"{"state":"committed"}"#);
+    });
+
+    let mut secret = [5; 32];
+    let mut client = AdminClient::connect_authenticated_with_timeout(
+        address,
+        [6; 16],
+        &mut secret,
+        Duration::from_secs(3),
+    )
+    .unwrap();
+    assert_eq!(secret, [0; 32]);
+    assert_eq!(
+        client.cancel_invocation([0x22; 16]).unwrap(),
+        CancellationResult::Terminal(TerminalOutcome::Committed)
+    );
+    server.join().unwrap();
+}
+
+#[test]
 fn admin_client_sends_typed_index_prepare_start_and_status_requests() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();

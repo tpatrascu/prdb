@@ -2241,6 +2241,14 @@ impl AdminClient {
         }
     }
 
+    /// Request administrator-authorized cancellation through control mode.
+    pub fn cancel_invocation(
+        &mut self,
+        invocation_id: [u8; 16],
+    ) -> Result<CancellationResult, ClientSubmitError> {
+        self.transport.cancel(invocation_id)
+    }
+
     fn execute_index_ddl(
         &mut self,
         operation: &str,

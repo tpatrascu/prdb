@@ -683,9 +683,45 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
     );
     drop(restricted_metadata);
 
+    let admin_cancel_credentials_path = root.join("admin-cancel.cred");
+    let admin_cancel_credentials = ClientCredentials {
+        token_id,
+        token_secret: admin_control_secret,
+    };
+    write_client_credentials(&admin_cancel_credentials_path, &admin_cancel_credentials)?;
+    drop(admin_cancel_credentials);
     let mut admin =
         AdminClient::connect_authenticated(address, token_id, &mut admin_control_secret)?;
     assert_eq!(admin_control_secret, [0; 32]);
+    assert_eq!(
+        admin.cancel_invocation(committed_invocation_id)?,
+        CancellationResult::Terminal(TerminalOutcome::Committed)
+    );
+    let committed_invocation_id_text = encode_id_hex(&committed_invocation_id);
+    let admin_cancel_address_text = address.to_string();
+    let admin_cancel_command = Command::new(env!("CARGO_BIN_EXE_prdb-client"))
+        .args([
+            "admin-cancel",
+            "--address",
+            &admin_cancel_address_text,
+            "--credentials",
+            admin_cancel_credentials_path
+                .to_str()
+                .ok_or("credential path is not UTF-8")?,
+            "--invocation-id",
+            &committed_invocation_id_text,
+        ])
+        .output()?;
+    assert!(
+        admin_cancel_command.status.success(),
+        "admin-cancel CLI failed: {}",
+        String::from_utf8_lossy(&admin_cancel_command.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&admin_cancel_command.stdout).trim(),
+        "committed"
+    );
+    remove_client_credentials(&admin_cancel_credentials_path)?;
     let created_role = admin.create_role("process_admin_role")?;
     assert_ne!(created_role.identity_id, [0; 16]);
     let renamed = admin.rename_role(created_role.identity_id, "process_admin_role_v2")?;
