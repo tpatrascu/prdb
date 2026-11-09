@@ -28,12 +28,14 @@ Run the opt-in integration test after configuring the exact runtime profile:
 ```sh
 cargo test --locked --test commit sandboxed_v3_sql_error_latches_failure_and_durably_aborts_after_partial_output -- --ignored --exact --nocapture
 cargo test --locked --test commit sandboxed_v3_sql_dml_sequence_is_visible_and_commits -- --ignored --exact --nocapture
+cargo test --locked --test commit sandboxed_v3_metadata_submission_commits_over_tcp -- --ignored --exact --nocapture
 ```
 
 Run the optional authenticated TCP SQL branch with:
 
 ```sh
 cargo test -p prdb-engine --locked --test metadata_process authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_processes -- --exact --nocapture
+cargo test -p prdb-engine --locked --test metadata_process disconnected_submission_is_reconciled_after_gateway_restart -- --ignored --exact --nocapture
 ```
 
 Do not execute or load the artifact outside this executor path. A successful artifact build and a skipped Cargo test do not establish sandbox or durable-abort acceptance; the test must run on a host with the configured cgroup delegation and runtime profile.

@@ -5,16 +5,16 @@
 - Behavior: `linux_sandbox::probe` reports user-namespace configuration, Landlock ABI, seccomp `KILL_PROCESS`, and cgroup v2 availability/delegation. `require_supported` lists missing profile requirements; capability reporting does not launch a worker or claim confinement.
 - Contract: [Linux sandbox profile](../../specs/linux-sandbox.md).
 - Changed code: [capability probe](../../engine/src/linux_sandbox.rs) and [engine module export](../../engine/src/lib.rs).
-- Host observation: this Linux 6.18.57 host permits a rootless user/network/mount/PID namespace probe and exposes seccomp actions. `/sys/fs/cgroup` is read-only to the current account, so the required writable delegated cgroup parent is unavailable here.
-- Verification: workspace build, format, warning-denied Clippy, and `git diff --check` are recorded after implementation. No runtime confinement or worker-launch evidence is claimed.
-- Remaining: test the Rust report on supported and unsupported profiles; implement and validate actual namespace, Landlock, seccomp, and cgroup setup in the launcher before loading any artifact.
+- Host observation: this Linux 6.18.57 host permits a rootless user/network/mount/PID namespace probe and exposes seccomp actions. The desktop process sees `/sys/fs/cgroup` read-only; an authorized temporary parent inside the existing `user@1000.service` delegation made the required controllers writable for confined acceptance.
+- Verification: `prdb-sandbox-probe` reported Landlock ABI 7, user namespaces and seccomp KILL_PROCESS available, and CPU/memory/PID cgroup controllers enabled on the delegated parent. The parent was removed after the acceptance runs. See the end-to-end acceptance record below.
+- Remaining: exercise unsupported profiles and additional kernel/runtime combinations; probe success alone still does not prove all platform configurations.
 
 ## SB-1 dependency: host profile diagnostic
 
 - Behavior: `prdb-sandbox-probe [CGROUP_PARENT]` prints the discovered capability report and exits nonzero with missing requirements when the host fails the preflight. It never starts a worker.
 - Changed code: [probe binary](../../engine/src/bin/prdb-sandbox-probe.rs).
-- Verification: Nix-shell formatting, workspace build, and warning-denied Clippy pass. Running `cargo run -p prdb-engine --bin prdb-sandbox-probe` reports Landlock ABI 7, user namespaces and seccomp available, cgroup v2 mounted with `cpu`, `memory`, and `pids` enabled, but rejects the host because `/sys/fs/cgroup` is not writable. Exit code is 1 as required for this unsupported launch profile; `git diff --check` passes.
-- Remaining: this diagnostic is not a launch gate until the supervisor calls the same preflight and performs the full confinement setup.
+- Verification: the probe rejects `/sys/fs/cgroup` because it is not writable by the desktop account, and passes when pointed at the temporary delegated `user@1000.service` cgroup parent. The full confined executor acceptance below confirms the launch profile beyond the diagnostic.
+- Remaining: cover unsupported capability combinations and additional host profiles; the worker admission path already calls the preflight before cgroup setup.
 
 ## SB-5 dependency: cgroup v2 worker resource controls
 
@@ -22,8 +22,9 @@
 - Contract and implementation: [cgroup worker limits](../../specs/linux-sandbox.md) and [Linux sandbox resource helpers](../../engine/src/linux_sandbox.rs).
 - Changed regression: [fake cgroup control files verify encodings, validation, placement and kill request](../../engine/tests/linux_sandbox.rs).
 - Observed red: the focused target initially failed to compile because `WorkerResourceLimits` and cgroup helper functions were absent.
-- Verification: six tests validate positive limits, process placement before exec, kill requests, rejection of an undelegated parent, and fail-closed handling of non-cgroup directories. A cleanup regression found that writes could create missing mock controls; control writes now require existing kernel files. A capability-probe regression found that `cgroup.controllers` alone falsely identified an ordinary directory as cgroup v2; the probe now verifies the filesystem type, and cgroup creation checks the complete supported profile before creating a leaf. The real host probe reports cgroup v2 mounted with CPU/memory/PID controllers enabled, but rejects launch because `/sys/fs/cgroup` is not writable. Full configured Nix-shell validation passed: format check, workspace build, warning-denied Clippy, workspace tests, and `git diff --check`.
-- Remaining: exercise leaf creation/cleanup against a delegated cgroup v2 mount and wire cgroup creation/placement into the confined worker launcher. This host has no writable delegated cgroup parent, so no live cgroup launch evidence exists.
+- Verification: six tests validate positive limits, process placement before exec, kill requests, rejection of an undelegated parent, and fail-closed handling of non-cgroup directories. A cleanup regression found that writes could create missing mock controls; control writes now require existing kernel files. A capability-probe regression found that `cgroup.controllers` alone falsely identified an ordinary directory as cgroup v2; the probe now verifies the filesystem type, and cgroup creation checks the complete supported profile before creating a leaf. The desktop account cannot write `/sys/fs/cgroup`; a temporary delegated parent under `user@1000.service` passed the probe and the live worker acceptance. Full configured Nix-shell validation passed: format check, workspace build, warning-denied Clippy, workspace tests, and `git diff --check`.
+- Verification extension: live leaf creation, resource-limit application, pre-exec placement, kill/reap, and cleanup were exercised by the confined TinyCC acceptance tests using the temporary delegated parent. The test parent was empty and removed afterward.
+- Remaining: validate controller behavior across supported deployment systemd configurations and stress cleanup under kernel/controller failures.
 
 ## SB-3 dependency: Landlock filesystem restrictions
 
@@ -31,7 +32,7 @@
 - Contract and implementation: [Landlock launch ordering and profile](../../specs/linux-sandbox.md) and [Landlock policy and ruleset](../../engine/src/linux_sandbox.rs).
 - Regression: a confined shell can write its marker in an allowed directory while `cat /etc/passwd` is denied before worker code can read it.
 - Verification: the focused Landlock regression passed. Full Nix-shell validation passed: format check, workspace build, warning-denied Clippy, workspace tests, and `git diff --check`.
-- Remaining: this Landlock setup is not yet integrated with a clean executor launcher, namespaces, descriptor scrubbing, network isolation, or seccomp. Full hostile-artifact launch validation remains outstanding.
+- Remaining: broaden hostile-artifact coverage and validate the same policy across additional runtime profiles. The maintained confined SQL fixtures now traverse the complete launcher chain.
 
 ## SB-2 dependency: rootless worker namespaces — implemented
 
@@ -39,7 +40,7 @@
 - Ordering: attach the invocation cgroup first, then namespaces, then Landlock and seccomp. The command handle tracks the reaper; the invocation cgroup is required to terminate the entire worker tree.
 - Regression: [Linux namespace tests](../../engine/tests/linux_sandbox.rs) check distinct user/mount/network/PID namespace handles, worker PID 1, zero effective and bounding capabilities, `NoNewPrivs`, isolation from the supervisor PID in `/proc`, cgroup-hook ordering, and that `Command::spawn` returns before worker exit.
 - Observed runtime: both focused namespace tests passed on the configured Linux host. They launch only harmless shell probes; no query artifact is loaded.
-- Remaining: wire the hook chain and `prdb-executor` host into the supervisor, provision filesystem/runtime resources, and exercise the full profile with a delegated cgroup parent and hostile fixtures.
+- Remaining: extend the maintained acceptance matrix to more hostile fixtures, resource pressure, and supported kernel/runtime profiles.
 
 ## SB-2 dependency: clean worker exec environment — implemented
 
@@ -47,7 +48,7 @@
 - Ordering: call after cgroup, namespace, and Landlock hooks have registered their setup work; add only non-secret environment values after this helper. It runs before the worker's final `exec`.
 - Regression: [clean worker command test](../../engine/tests/linux_sandbox.rs) verifies a kept close-on-exec descriptor survives, an unlisted descriptor is absent, and a supervisor environment variable is stripped.
 - Verification: focused regression passed with Rust/Cargo 1.95.0. Full Nix-shell validation passed: formatting, workspace build, warning-denied Clippy, all workspace tests, and `git diff --check`.
-- Remaining: call this command setup from the supervisor and validate that only the intended IPC descriptors are provisioned.
+- Remaining: add descriptor-provisioning cases for future supervisor channels and additional worker runtime profiles.
 
 ## SB-2 / SB-3 dependency: ordered worker pre-exec configuration — implemented
 
@@ -55,7 +56,7 @@
 - Regression: the composed command test exercises the ordered setup chain with a worker shell, verifies an allowed scratch write, checks the environment is cleared, confirms an unlisted file read fails, and confirms the cgroup placement hook ran. Separate namespace tests inspect the namespace handles and PID view.
 - TDD evidence: the focused test first failed to compile because the ordering API was absent; it passed after the helper assembled the existing hooks.
 - Verification: focused composition regression passed with Rust/Cargo 1.95.0. Full Nix-shell validation passed: formatting, workspace build, warning-denied Clippy, all workspace tests, and `git diff --check`.
-- Remaining: create and own the real invocation cgroup, spawn the clean executor host from the supervisor, and run confined TinyCC artifacts through the full supported profile.
+- Remaining: exercise hook failure cases at each chain position and add integration coverage for more invocation resource profiles.
 
 ## SB-4 dependency: worker syscall filter — implemented for Linux x86_64
 
@@ -63,4 +64,11 @@
 - Ordering: call after the worker host's final `exec` and before loading the query library or creating threads. Do not install it in the supervisor or before the namespace hook's final exec.
 - Regression: a disposable copy of the test executable confirms `getpid` remains available and a new socket syscall terminates the child with `SIGSYS`.
 - Verification: the focused seccomp regression passed with Rust/Cargo 1.95.0. Full Nix-shell validation passed: formatting, workspace build, warning-denied Clippy, all workspace tests, and `git diff --check`.
-- Remaining: wire the clean executor host into the supervisor, validate the allowlist against the supported Rust/libc/SDK runtime and admitted query behavior, and run hostile artifact fixtures only in that sandbox. This host still lacks the writable delegated cgroup parent needed for a complete launch.
+- Remaining: expand syscall compatibility checks to more admitted query behavior and hostile fixtures. The current verified profile is Linux x86_64 with the pinned NixOS glibc/TinyCC runtime.
+
+## SB-2 / SB-3 / SB-4 / SB-5: confined TinyCC execution acceptance — verified
+
+- Behavior: the supervisor admits a sealed artifact, creates and configures a per-invocation cgroup, places the executor before user code, applies private user/mount/network/PID namespaces, Landlock filesystem rules, a clean environment and descriptor set, and the x86_64 seccomp filter before loading the query library. Worker exit and cgroup cleanup precede the storage terminal decision.
+- Verification environment: Linux 6.18.57 x86_64, Rust/Cargo 1.95.0, TinyCC `0.9.27-unstable-2025-01-06`, glibc 2.42-100, and GCC 15.3 `libgcc_s`. A root-level temporary parent passed preflight but the acceptance returned `EPERM`; moving the temporary parent under `user@1000.service` allowed the complete launch and cleanup. The temporary parent was removed after testing.
+- Acceptance results: `sandboxed_v3_metadata_submission_commits_over_tcp`, `sandboxed_v3_sql_error_latches_failure_and_durably_aborts_after_partial_output`, `sandboxed_v3_sql_dml_sequence_is_visible_and_commits`, and `disconnected_submission_is_reconciled_after_gateway_restart` each passed individually through their documented exact opt-in commands. The SQL tests verified committed and aborted terminal outcomes; the disconnect test verified status reconciliation after a broken terminal relay.
+- Remaining: test additional runtime/kernel profiles, broader hostile constructor and syscall fixtures, and resource exhaustion cases. These results establish the maintained Linux x86_64 fixtures, not an audit or all-platform proof.
