@@ -1,5 +1,6 @@
 #include "prdb_sdk_sql_exec_v2.h"
 #include "prdb_sdk_sql_exec_v3.h"
+#include "prdb_sdk_sql_exec_v4.h"
 #include "prdb_sdk_sql_result_v1.h"
 
 #include <assert.h>
@@ -266,6 +267,30 @@ typedef struct result_state {
     prdb_sdk_value_v1 cell_scratch[1];
 } result_state;
 
+typedef struct group_result_state {
+    uint32_t calls;
+    uint32_t keys[4];
+    uint64_t counts[4];
+    mock_host *mock;
+} group_result_state;
+
+static int32_t on_group(void *context, const prdb_sdk_value_v1 *key,
+                        uint64_t count,
+                        const prdb_sdk_sql_bound_column_v2 *column) {
+    group_result_state *result = (group_result_state *)context;
+    int32_t value = 0;
+    assert(result->mock != NULL && result->mock->executor_calls == 4);
+    assert(result->calls < 4);
+    assert(column->ordinal == 0 &&
+           column->type_code == PRDB_SDK_VALUE_TYPE_INTEGER);
+    assert(prdb_sdk_value_get_integer_v1(key, &value) ==
+           PRDB_SDK_VALUE_ACCESS_OK);
+    result->keys[result->calls] = (uint32_t)value;
+    result->counts[result->calls] = count;
+    ++result->calls;
+    return 0;
+}
+
 static int32_t on_row(void *context, const prdb_sdk_row_v1 *row,
                       const prdb_sdk_select_binding_v2 *binding) {
     result_state *result = (result_state *)context;
@@ -286,6 +311,12 @@ int main(void) {
         "SELECT id FROM widgets ORDER BY id DESC LIMIT 1";
     static const uint8_t sort_all_sql[] =
         "SELECT id FROM widgets ORDER BY id DESC";
+    static const uint8_t group_sql[] =
+        "SELECT id, COUNT(*) FROM widgets GROUP BY id";
+    static const uint8_t group_limit_sql[] =
+        "SELECT id, COUNT(*) FROM widgets GROUP BY id LIMIT 1";
+    static const uint8_t group_filter_sql[] =
+        "SELECT id, COUNT(*) FROM widgets WHERE id >= $1 GROUP BY id";
     static const uint8_t insert_sql[] =
         "INSERT INTO widgets VALUES ($1, NULL, DEFAULT)";
     static const uint8_t update_sql[] =
@@ -574,5 +605,96 @@ int main(void) {
                1, &deleted_count) == PRDB_SDK_SQL_EXEC_MATERIALIZATION_LIMIT);
     assert(deleted_count == 888 && mock.planner_calls == 1 &&
            mock.executor_calls == 4 && mock.statement_failed == 1);
+
+    {
+        uint8_t group_batch[128] = {0};
+        uint32_t group_batch_len = make_two_sort_rows(group_batch, 3, 5);
+        uint8_t group_key_bytes[16] = {0};
+        group_result_state groups = {0};
+        groups.mock = &mock;
+        mock.batch = group_batch;
+        mock.batch_len = group_batch_len;
+        mock.planner_calls = 0;
+        mock.executor_calls = 0;
+        mock.statement_failed = 0;
+        assert(prdb_sdk_sql_execute_group_count_v4(
+                   &host, schema, sizeof(schema) - 1, group_sql,
+                   sizeof(group_sql) - 1, NULL, 0, 2, 1024,
+                   planner_response, sizeof(planner_response),
+                   executor_response, sizeof(executor_response),
+                   batch_response, sizeof(batch_response), planner_columns, 1,
+                   executor_columns, 1, cell_scratch, 1, group_key_bytes,
+                   sizeof(group_key_bytes), on_group, &groups) ==
+               PRDB_SDK_SQL_EXEC_OK);
+        assert(groups.calls == 2 && groups.keys[0] == 3 &&
+               groups.counts[0] == 1 && groups.keys[1] == 5 &&
+               groups.counts[1] == 1);
+        assert(mock.executor_calls == 4 && mock.statement_failed == 0);
+
+        group_batch_len = make_two_sort_rows(group_batch, 3, 3);
+        mock.batch_len = group_batch_len;
+        groups = (group_result_state){0};
+        groups.mock = &mock;
+        mock.executor_calls = 0;
+        assert(prdb_sdk_sql_execute_group_count_v4(
+                   &host, schema, sizeof(schema) - 1, group_sql,
+                   sizeof(group_sql) - 1, NULL, 0, 2, 1024,
+                   planner_response, sizeof(planner_response),
+                   executor_response, sizeof(executor_response),
+                   batch_response, sizeof(batch_response), planner_columns, 1,
+                   executor_columns, 1, cell_scratch, 1, group_key_bytes,
+                   sizeof(group_key_bytes), on_group, &groups) ==
+               PRDB_SDK_SQL_EXEC_OK);
+        assert(groups.calls == 1 && groups.keys[0] == 3 &&
+               groups.counts[0] == 2 && mock.statement_failed == 0);
+
+        group_batch_len = make_two_sort_rows(group_batch, 3, 5);
+        mock.batch_len = group_batch_len;
+        groups = (group_result_state){0};
+        groups.mock = &mock;
+        mock.executor_calls = 0;
+        assert(prdb_sdk_sql_execute_group_count_v4(
+                   &host, schema, sizeof(schema) - 1, group_filter_sql,
+                   sizeof(group_filter_sql) - 1, &parameter, 1, 2, 1024,
+                   planner_response, sizeof(planner_response),
+                   executor_response, sizeof(executor_response),
+                   batch_response, sizeof(batch_response), planner_columns, 1,
+                   executor_columns, 1, cell_scratch, 1, group_key_bytes,
+                   sizeof(group_key_bytes), on_group, &groups) ==
+               PRDB_SDK_SQL_EXEC_OK);
+        assert(groups.calls == 1 && groups.keys[0] == 5 &&
+               groups.counts[0] == 1 && mock.statement_failed == 0);
+
+        groups = (group_result_state){0};
+        groups.mock = &mock;
+        mock.executor_calls = 0;
+        assert(prdb_sdk_sql_execute_group_count_v4(
+                   &host, schema, sizeof(schema) - 1, group_limit_sql,
+                   sizeof(group_limit_sql) - 1, NULL, 0, 2, 1024,
+                   planner_response, sizeof(planner_response),
+                   executor_response, sizeof(executor_response),
+                   batch_response, sizeof(batch_response), planner_columns, 1,
+                   executor_columns, 1, cell_scratch, 1, group_key_bytes,
+                   sizeof(group_key_bytes), on_group, &groups) ==
+               PRDB_SDK_SQL_EXEC_OK);
+        assert(groups.calls == 1 && groups.keys[0] == 3 &&
+               groups.counts[0] == 1 && mock.statement_failed == 0);
+
+        groups = (group_result_state){0};
+        groups.mock = &mock;
+        mock.executor_calls = 0;
+        mock.statement_failed = 0;
+        assert(prdb_sdk_sql_execute_group_count_v4(
+                   &host, schema, sizeof(schema) - 1, group_sql,
+                   sizeof(group_sql) - 1, NULL, 0, 2, 1024,
+                   planner_response, sizeof(planner_response),
+                   executor_response, sizeof(executor_response),
+                   batch_response, sizeof(batch_response), planner_columns, 1,
+                   executor_columns, 1, cell_scratch, 1, group_key_bytes,
+                   2, on_group, &groups) ==
+               PRDB_SDK_SQL_EXEC_MATERIALIZATION_LIMIT);
+        assert(groups.calls == 0 && mock.executor_calls == 4 &&
+               mock.statement_failed == 1);
+    }
     return 0;
 }
