@@ -272,6 +272,9 @@ typedef struct group_result_state {
     uint32_t keys[4];
     uint64_t counts[4];
     mock_host *mock;
+    const prdb_sdk_sql_column_shape_v2 *columns;
+    uint8_t encoded[128];
+    uint64_t encoded_len;
 } group_result_state;
 
 static int32_t on_group(void *context, const prdb_sdk_value_v1 *key,
@@ -285,6 +288,10 @@ static int32_t on_group(void *context, const prdb_sdk_value_v1 *key,
            column->type_code == PRDB_SDK_VALUE_TYPE_INTEGER);
     assert(prdb_sdk_value_get_integer_v1(key, &value) ==
            PRDB_SDK_VALUE_ACCESS_OK);
+    assert(prdb_sdk_sql_encode_group_count_result_v1(
+               &result->columns[column->ordinal], key, count,
+               result->encoded, sizeof(result->encoded),
+               &result->encoded_len) == PRDB_SDK_SQL_RESULT_OK);
     result->keys[result->calls] = (uint32_t)value;
     result->counts[result->calls] = count;
     ++result->calls;
@@ -612,6 +619,7 @@ int main(void) {
         uint8_t group_key_bytes[16] = {0};
         group_result_state groups = {0};
         groups.mock = &mock;
+        groups.columns = executor_columns;
         mock.batch = group_batch;
         mock.batch_len = group_batch_len;
         mock.planner_calls = 0;
@@ -629,12 +637,14 @@ int main(void) {
         assert(groups.calls == 2 && groups.keys[0] == 3 &&
                groups.counts[0] == 1 && groups.keys[1] == 5 &&
                groups.counts[1] == 1);
+        assert(groups.encoded_len == 53 && groups.encoded[52] == 1);
         assert(mock.executor_calls == 4 && mock.statement_failed == 0);
 
         group_batch_len = make_two_sort_rows(group_batch, 3, 3);
         mock.batch_len = group_batch_len;
         groups = (group_result_state){0};
         groups.mock = &mock;
+        groups.columns = executor_columns;
         mock.executor_calls = 0;
         assert(prdb_sdk_sql_execute_group_count_v4(
                    &host, schema, sizeof(schema) - 1, group_sql,
@@ -647,11 +657,13 @@ int main(void) {
                PRDB_SDK_SQL_EXEC_OK);
         assert(groups.calls == 1 && groups.keys[0] == 3 &&
                groups.counts[0] == 2 && mock.statement_failed == 0);
+        assert(groups.encoded_len == 53 && groups.encoded[52] == 2);
 
         group_batch_len = make_two_sort_rows(group_batch, 3, 5);
         mock.batch_len = group_batch_len;
         groups = (group_result_state){0};
         groups.mock = &mock;
+        groups.columns = executor_columns;
         mock.executor_calls = 0;
         assert(prdb_sdk_sql_execute_group_count_v4(
                    &host, schema, sizeof(schema) - 1, group_filter_sql,
@@ -667,6 +679,7 @@ int main(void) {
 
         groups = (group_result_state){0};
         groups.mock = &mock;
+        groups.columns = executor_columns;
         mock.executor_calls = 0;
         assert(prdb_sdk_sql_execute_group_count_v4(
                    &host, schema, sizeof(schema) - 1, group_limit_sql,
@@ -682,6 +695,7 @@ int main(void) {
 
         groups = (group_result_state){0};
         groups.mock = &mock;
+        groups.columns = executor_columns;
         mock.executor_calls = 0;
         mock.statement_failed = 0;
         assert(prdb_sdk_sql_execute_group_count_v4(

@@ -260,5 +260,118 @@ int main(void) {
                &binding, columns, 2, &row, cell_scratch, 2, output,
                sizeof(output), &output_len) == PRDB_SDK_SQL_RESULT_INVALID_ROW);
     assert(output_len == 0);
+
+    {
+        static const uint8_t count_name[] = "id";
+        static const uint8_t count_key_bytes[] = {0, 0, 0, 42};
+        static const uint8_t expected_group[] = {
+            'S', 'Q', 'L', 'R', 0, 1, 0, 2,
+            0, 2, 'i', 'd',
+            0, 0, 0, PRDB_SDK_VALUE_TYPE_INTEGER,
+            0, 0, PRDB_SDK_VALUE_STATE_VALUE, 0, 0, 0, 4,
+            0, 0, 0, 42,
+            0, 5, 'c', 'o', 'u', 'n', 't',
+            0, 0, 0, PRDB_SDK_VALUE_TYPE_BIGINT,
+            0, 0, PRDB_SDK_VALUE_STATE_VALUE, 0, 0, 0, 8,
+            0, 0, 0, 0, 0, 0, 0, 2};
+        prdb_sdk_sql_column_shape_v2 group_column = {
+            count_name, sizeof(count_name) - 1, 0,
+            PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0};
+        prdb_sdk_value_v1 group_key = {
+            sizeof(group_key), PRDB_SDK_VALUE_ABI_V1_VERSION,
+            PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_INTEGER,
+            count_key_bytes, sizeof(count_key_bytes)};
+
+        output_len = 99;
+        assert(prdb_sdk_sql_encode_group_count_result_v1(
+                   &group_column, &group_key, 2, output, sizeof(output),
+                   &output_len) == PRDB_SDK_SQL_RESULT_OK);
+        assert(output_len == sizeof(expected_group));
+        assert(memcmp(output, expected_group, sizeof(expected_group)) == 0);
+        capture.calls = 0;
+        capture.length = 0;
+        assert(prdb_sdk_sql_write_group_count_result_v1(
+                   &host, &group_column, &group_key, 2, output,
+                   sizeof(output), &output_len) == PRDB_SDK_SQL_RESULT_OK);
+        assert(capture.calls == 1 && capture.length == sizeof(expected_group));
+        assert(memcmp(capture.bytes, expected_group,
+                      sizeof(expected_group)) == 0);
+        capture.fail = 1;
+        capture.calls = 0;
+        capture.length = 0;
+        assert(prdb_sdk_sql_write_group_count_result_v1(
+                   &host, &group_column, &group_key, 2, output,
+                   sizeof(output), &output_len) ==
+               PRDB_SDK_SQL_RESULT_WRITE_FAILED);
+        assert(capture.calls == 0 && capture.length == 0 && output_len == 0);
+        capture.fail = 0;
+        output_len = 99;
+        assert(prdb_sdk_sql_encode_group_count_result_v1(
+                   &group_column, &group_key, 2, too_small,
+                   sizeof(too_small), &output_len) ==
+               PRDB_SDK_SQL_RESULT_LIMIT_EXCEEDED);
+        assert(output_len == 0);
+        assert(prdb_sdk_sql_encode_group_count_result_v1(
+                   &group_column, &group_key, 0, output, sizeof(output),
+                   &output_len) == PRDB_SDK_SQL_RESULT_INVALID_ROW);
+        assert(output_len == 0);
+        group_key = (prdb_sdk_value_v1){
+            sizeof(group_key), PRDB_SDK_VALUE_ABI_V1_VERSION,
+            PRDB_SDK_VALUE_STATE_NULL, 0, NULL, 0};
+        assert(prdb_sdk_sql_encode_group_count_result_v1(
+                   &group_column, &group_key, 2, output, sizeof(output),
+                   &output_len) == PRDB_SDK_SQL_RESULT_OK);
+        assert(output[18] == PRDB_SDK_VALUE_STATE_NULL &&
+               output[19] == 0 && output[20] == 0 && output[21] == 0 &&
+               output[22] == 0);
+        group_key = (prdb_sdk_value_v1){
+            sizeof(group_key), PRDB_SDK_VALUE_ABI_V1_VERSION,
+            PRDB_SDK_VALUE_STATE_REDACTED, 0, NULL, 0};
+        assert(prdb_sdk_sql_encode_group_count_result_v1(
+                   &group_column, &group_key, 2, output, sizeof(output),
+                   &output_len) == PRDB_SDK_SQL_RESULT_OK);
+        assert(output[18] == PRDB_SDK_VALUE_STATE_REDACTED &&
+               output[19] == 0 && output[20] == 0 && output[21] == 0 &&
+               output[22] == 0);
+    }
+
+    {
+        enum { GROUP_TEXT_BYTES = 17000 };
+        static const uint8_t label_name[] = "label";
+        uint8_t group_text[GROUP_TEXT_BYTES];
+        uint8_t grouped_output[18000] = {0};
+        prdb_sdk_sql_column_shape_v2 label_column = {
+            label_name, sizeof(label_name) - 1, 0,
+            PRDB_SDK_VALUE_TYPE_TEXT, 0, 0};
+        prdb_sdk_value_v1 label_key = {
+            sizeof(label_key), PRDB_SDK_VALUE_ABI_V1_VERSION,
+            PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_TEXT,
+            group_text, sizeof(group_text)};
+        chunk_counter counter = {0};
+        prdb_host_api_v3 chunk_host = {sizeof(chunk_host),
+                                       PRDB_QUERY_ABI_V3_VERSION, &counter,
+                                       NULL, NULL, count_result_chunk, NULL};
+        uint64_t grouped_output_len = 0;
+
+        memset(group_text, 'x', sizeof(group_text));
+        assert(prdb_sdk_sql_write_group_count_result_v1(
+                   &chunk_host, &label_column, &label_key, 2, grouped_output,
+                   sizeof(grouped_output), &grouped_output_len) ==
+               PRDB_SDK_SQL_RESULT_OK);
+        assert(grouped_output_len == 17052 && counter.calls == 2 &&
+               counter.total == grouped_output_len &&
+               counter.last_chunk ==
+                   grouped_output_len - PRDB_QUERY_MAX_RESULT_CHUNK_BYTES);
+        counter.calls = 0;
+        counter.total = 0;
+        counter.last_chunk = 0;
+        counter.fail_on_call = 2;
+        assert(prdb_sdk_sql_write_group_count_result_v1(
+                   &chunk_host, &label_column, &label_key, 2, grouped_output,
+                   sizeof(grouped_output), &grouped_output_len) ==
+               PRDB_SDK_SQL_RESULT_WRITE_FAILED);
+        assert(grouped_output_len == 0 && counter.calls == 1 &&
+               counter.total == PRDB_QUERY_MAX_RESULT_CHUNK_BYTES);
+    }
     return 0;
 }

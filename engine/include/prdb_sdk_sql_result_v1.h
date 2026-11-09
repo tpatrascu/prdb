@@ -41,4 +41,21 @@ int32_t prdb_sdk_sql_write_result_row_v1(
     uint32_t cell_scratch_capacity, uint8_t *output,
     uint64_t output_capacity, uint64_t *output_len);
 
+/* Encodes one GROUP BY COUNT(*) row as SQLR v1. The first field uses the
+ * declared group-column metadata and the second field is named `count` with
+ * BIGINT type. VALUE/NULL/REDACTED group-key states are preserved. Input and
+ * output buffers must not overlap; output_len is zero on failure. */
+int32_t prdb_sdk_sql_encode_group_count_result_v1(
+    const prdb_sdk_sql_column_shape_v2 *group_column,
+    const prdb_sdk_value_v1 *group_key, uint64_t count,
+    uint8_t *output, uint64_t output_capacity, uint64_t *output_len);
+
+/* Encodes and emits one grouped SQLR record through the v3 result callback,
+ * split into host-sized chunks. Output remains provisional. */
+int32_t prdb_sdk_sql_write_group_count_result_v1(
+    const prdb_host_api_v3 *host,
+    const prdb_sdk_sql_column_shape_v2 *group_column,
+    const prdb_sdk_value_v1 *group_key, uint64_t count,
+    uint8_t *output, uint64_t output_capacity, uint64_t *output_len);
+
 #endif /* PRDB_SDK_SQL_RESULT_V1_H */
