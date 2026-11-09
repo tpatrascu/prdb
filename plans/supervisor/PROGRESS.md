@@ -95,8 +95,8 @@
 
 - Behavior: the authenticated real gateway path reports a sealed upload as prepared, cancels it without creating an invocation outcome, then hides it as unknown on STATUS.
 - Regression and verification: included in the real supervisor/gateway TinyCC upload test; workspace build, format, Clippy, Rust tests and SDK tests pass.
-- Verification update: the confined SQL acceptance verifies durable cancellation and terminal relay. The delegated-cgroup TCP process test also observes a started invocation as active from a second authenticated query connection, accepts CANCEL, kills the gateway before terminal delivery, and reconfirms ABORTED after restarting the supervisor/storage process.
-- Remaining: cover control-mode cancellation of another owner's active invocation and confirm the worker's application-level cancellation response through the process boundary.
+- Verification update: the confined SQL acceptance verifies durable cancellation and terminal relay. The delegated-cgroup TCP process test starts an invocation for a separately created query user, observes it as active through an authenticated bootstrap-administrator control session, accepts administrative CANCEL, kills the gateway before terminal delivery, and reconfirms ABORTED after restarting the supervisor/storage process.
+- Remaining: reject control-mode cancellation after COMMITTING over TCP and confirm the worker's application-level cancellation response through the process boundary.
 
 ## SU-3 / SB-1: process-boundary START preflight failure — verified
 

@@ -1260,7 +1260,7 @@ fn disconnected_submission_is_reconciled_after_gateway_restart()
     let instance_dir = root.join("instance");
     let mut setup = initialize(&instance_dir, "outcome_process_admin", i64::MAX)?;
     let token_id = setup.token_id();
-    let mut token_secret = setup.take_secret().ok_or("bootstrap secret missing")?;
+    let token_secret = setup.take_secret().ok_or("bootstrap secret missing")?;
     drop(setup.acknowledge()?);
 
     let service_socket = root.join("supervisor.sock");
@@ -1331,27 +1331,59 @@ fn disconnected_submission_is_reconciled_after_gateway_restart()
     }
 
     let (mut gateway, address) = start_gateway(&service_socket, uid)?;
-    let mut status_secret = token_secret;
-    let mut client = SubmissionClient::connect_authenticated(address, token_id, &mut token_secret)?;
-    let invocation_id =
-        client.upload_and_seal(&package, &[], 30_000, WorkloadClass::Operational)?;
+    let mut admin_secret = token_secret;
+    let mut admin = AdminClient::connect_authenticated(address, token_id, &mut admin_secret)?;
+    let query_user = admin
+        .create_user("process_query_owner")
+        .map_err(|error| format!("create query user failed: {error:?}"))?;
+    let query_schema = admin
+        .create_schema("process_query_schema", query_user.identity_id)
+        .map_err(|error| format!("create query schema failed: {error:?}"))?;
+    admin
+        .grant_object_privilege(
+            query_user.identity_id,
+            query_schema.identity_id,
+            AdminObjectPrivilege::Usage,
+            AdminObjectGrantTarget::Object,
+        )
+        .map_err(|error| format!("grant query schema usage failed: {error:?}"))?;
+    let mut requested_scope = b"PSC1\0\x01\x01\x01".to_vec();
+    requested_scope.extend_from_slice(&query_schema.identity_id);
+    std::fs::write(package.join("requested_scope.psc1"), requested_scope)?;
+    std::fs::set_permissions(
+        package.join("requested_scope.psc1"),
+        std::fs::Permissions::from_mode(0o600),
+    )?;
+    let query_token_expiry =
+        i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())? + 3_600_000_000;
+    let query_token = admin
+        .issue_token(query_user.identity_id, "process query", query_token_expiry)
+        .map_err(|error| format!("issue query token failed: {error:?}"))?;
+    let query_token_id = query_token.token_id;
+    let mut query_secret = *query_token.token_secret();
+    let mut restart_query_secret = query_secret;
+    let mut recovery_query_secret = query_secret;
+    let mut client =
+        SubmissionClient::connect_authenticated(address, query_token_id, &mut query_secret)?;
+    let invocation_id = client
+        .upload_and_seal(&package, &[], 30_000, WorkloadClass::Operational)
+        .map_err(|error| format!("upload/seal failed: {error:?}"))?;
     let receipt = root.join("start.receipt");
     {
-        let mut started = client.start(invocation_id, &receipt)?;
+        let mut started = client
+            .start(invocation_id, &receipt)
+            .map_err(|error| format!("query START failed: {error:?}"))?;
         let ready_event = started.next_event()?;
         assert!(
             matches!(ready_event, Some(prdb_engine::client_submit::ClientResultEvent::Data(ref bytes)) if bytes == b"QUERY_READY"),
             "unexpected query startup event: {ready_event:?}"
         );
-        let mut cancel_secret = status_secret;
-        let mut cancel_client =
-            SubmissionClient::connect_authenticated(address, token_id, &mut cancel_secret)?;
-        let active_status = cancel_client
+        let active_status = admin
             .status(invocation_id)
             .map_err(|error| format!("active STATUS failed: {error:?}"))?;
         assert_eq!(active_status, InvocationStatus::Active);
-        let cancellation = cancel_client
-            .cancel(invocation_id)
+        let cancellation = admin
+            .cancel_invocation(invocation_id)
             .map_err(|error| format!("active CANCEL failed: {error:?}"))?;
         assert_eq!(cancellation, CancellationResult::Accepted);
         let _gateway_crash_status = gateway.kill()?;
@@ -1359,9 +1391,11 @@ fn disconnected_submission_is_reconciled_after_gateway_restart()
     drop(client);
 
     let (mut replacement_gateway, replacement_address) = start_gateway(&service_socket, uid)?;
-    let mut restart_secret = status_secret;
-    let mut status_client =
-        SubmissionClient::connect_authenticated(replacement_address, token_id, &mut status_secret)?;
+    let mut status_client = SubmissionClient::connect_authenticated(
+        replacement_address,
+        query_token_id,
+        &mut restart_query_secret,
+    )?;
     let status_deadline = Instant::now() + Duration::from_secs(10);
     let status = loop {
         let status = status_client.status(invocation_id)?;
@@ -1380,6 +1414,7 @@ fn disconnected_submission_is_reconciled_after_gateway_restart()
     };
     assert_eq!(status, InvocationStatus::Aborted);
     drop(status_client);
+    drop(admin);
     assert!(replacement_gateway.stop()?.success());
     assert!(supervisor.stop()?.success());
     assert!(!service_socket.exists(), "supervisor left a stale socket");
@@ -1451,8 +1486,11 @@ fn disconnected_submission_is_reconciled_after_gateway_restart()
         std::thread::sleep(Duration::from_millis(10));
     }
     let (mut recovered_gateway, recovered_address) = start_gateway(&service_socket, uid)?;
-    let mut recovered_status_client =
-        SubmissionClient::connect_authenticated(recovered_address, token_id, &mut restart_secret)?;
+    let mut recovered_status_client = SubmissionClient::connect_authenticated(
+        recovered_address,
+        query_token_id,
+        &mut recovery_query_secret,
+    )?;
     assert_eq!(
         recovered_status_client.status(invocation_id)?,
         InvocationStatus::Aborted,
