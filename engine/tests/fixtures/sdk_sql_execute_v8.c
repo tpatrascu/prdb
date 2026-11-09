@@ -208,7 +208,8 @@ static int32_t on_row_v16(void *context,
     assert(capture->mock->scan_finished[0] == 1 &&
            capture->mock->scan_finished[1] == 1);
     assert(binding->base.projection_count == 2 &&
-           binding->join_key_count == 2 && projection_count == 2);
+           (binding->join_key_count == 2 || binding->join_key_count == 8) &&
+           projection_count == 2);
     assert(capture->calls < 8);
     assert(prdb_sdk_value_get_integer_v1(
                &projected_values[0], &capture->left_values[capture->calls]) ==
@@ -351,6 +352,16 @@ int main(void) {
         "SELECT accounts.value, orders.value FROM accounts INNER JOIN "
         "orders ON accounts.account_id = orders.account_id AND "
         "accounts.value = orders.value LIMIT 1";
+    static const uint8_t composite_max_keys_sql[] =
+        "SELECT accounts.value, orders.value FROM accounts INNER JOIN "
+        "orders ON accounts.account_id = orders.account_id AND "
+        "accounts.value = orders.value AND "
+        "accounts.account_id = orders.account_id AND "
+        "accounts.value = orders.value AND "
+        "accounts.account_id = orders.account_id AND "
+        "accounts.value = orders.value AND "
+        "accounts.account_id = orders.account_id AND "
+        "accounts.value = orders.value";
     const int32_t left_keys[] = {1, 2, 3};
     const uint8_t left_states[] = {
         PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_STATE_VALUE,
@@ -440,6 +451,14 @@ int main(void) {
         assert(mock.planner_calls == 2 && mock.resolve_calls == 2 &&
                mock.open_calls == 2 && mock.next_calls[0] == 1 &&
                mock.next_calls[1] == 1 && mock.statement_failed == 0);
+        assert(capture.calls == 2 && capture.left_values[0] == 10 &&
+               capture.right_values[0] == 10 && capture.left_values[1] == 20 &&
+               capture.right_values[1] == 20);
+
+        reset(&mock, &capture);
+        assert(run_query_v16(&mock, &capture, composite_max_keys_sql,
+                             sizeof(composite_max_keys_sql) - 1, 1024) ==
+               PRDB_SDK_SQL_EXEC_OK);
         assert(capture.calls == 2 && capture.left_values[0] == 10 &&
                capture.right_values[0] == 10 && capture.left_values[1] == 20 &&
                capture.right_values[1] == 20);
