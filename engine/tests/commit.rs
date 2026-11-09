@@ -9003,6 +9003,7 @@ fn storage_manager_routes_invocations_and_catalog_commits_through_shared_fences(
         StorageManagerConfig {
             ddl_fence_timeout: Duration::from_millis(100),
             max_active_invocations: 128,
+            max_active_analytical_invocations: 8,
             max_invocation_age: Duration::from_secs(15 * 60),
             max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
             max_token_lifecycle_requests_per_minute: 30,
@@ -9043,6 +9044,7 @@ fn storage_manager_admission_requires_a_login_enabled_catalog_user()
         StorageManagerConfig {
             ddl_fence_timeout: Duration::from_millis(100),
             max_active_invocations: 1,
+            max_active_analytical_invocations: 1,
             max_invocation_age: Duration::from_secs(30),
             max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
             max_token_lifecycle_requests_per_minute: 30,
@@ -9094,6 +9096,7 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
             StorageManagerConfig {
                 ddl_fence_timeout: Duration::from_millis(100),
                 max_active_invocations: 0,
+                max_active_analytical_invocations: 1,
                 max_invocation_age: Duration::from_secs(30),
                 max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
                 max_token_lifecycle_requests_per_minute: 30,
@@ -9111,6 +9114,7 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
             StorageManagerConfig {
                 ddl_fence_timeout: Duration::from_millis(100),
                 max_active_invocations: 1,
+                max_active_analytical_invocations: 1,
                 max_invocation_age: Duration::ZERO,
                 max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
                 max_token_lifecycle_requests_per_minute: 30,
@@ -9128,6 +9132,7 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
             StorageManagerConfig {
                 ddl_fence_timeout: Duration::from_millis(100),
                 max_active_invocations: 1,
+                max_active_analytical_invocations: 1,
                 max_invocation_age: Duration::from_secs(30),
                 max_invocation_scan_work: 0,
                 max_token_lifecycle_requests_per_minute: 30,
@@ -9145,6 +9150,7 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
             StorageManagerConfig {
                 ddl_fence_timeout: Duration::from_millis(100),
                 max_active_invocations: 1,
+                max_active_analytical_invocations: 1,
                 max_invocation_age: Duration::from_secs(30),
                 max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
                 max_token_lifecycle_requests_per_minute: 0,
@@ -9162,6 +9168,7 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
             StorageManagerConfig {
                 ddl_fence_timeout: Duration::from_millis(100),
                 max_active_invocations: 1,
+            max_active_analytical_invocations: 1,
                 max_invocation_age: Duration::from_secs(30),
                 max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
                 max_token_lifecycle_requests_per_minute: 30,
@@ -9178,6 +9185,7 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
         StorageManagerConfig {
             ddl_fence_timeout: Duration::from_millis(100),
             max_active_invocations: 1,
+            max_active_analytical_invocations: 1,
             max_invocation_age: Duration::from_secs(30),
             max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
             max_token_lifecycle_requests_per_minute: 30,
@@ -9214,6 +9222,7 @@ fn storage_manager_expires_idle_invocations_and_releases_the_snapshot()
         StorageManagerConfig {
             ddl_fence_timeout: Duration::from_millis(100),
             max_active_invocations: 1,
+            max_active_analytical_invocations: 1,
             max_invocation_age: Duration::from_millis(1),
             max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
             max_token_lifecycle_requests_per_minute: 30,
@@ -12082,6 +12091,7 @@ fn storage_manager_audits_cancellation_before_commit_and_preserves_terminal_outc
         StorageManagerConfig {
             ddl_fence_timeout: Duration::from_millis(100),
             max_active_invocations: 1,
+            max_active_analytical_invocations: 1,
             max_invocation_age: Duration::from_secs(15 * 60),
             max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
             max_token_lifecycle_requests_per_minute: 30,
@@ -22863,6 +22873,7 @@ fn supervisor_cancellation_and_deadline_during_worker_wait_abort()
             max_rows: 2,
             max_bytes: 64,
             deadline: Some(std::time::Instant::now() + Duration::from_millis(40)),
+            workload_class: prdb_engine::supervisor::WorkloadClass::Operational,
         },
         &secret,
     )?;
@@ -23179,6 +23190,7 @@ fn storage_manager_issues_and_revokes_tokens_for_manage_users()
     let token_config = StorageManagerConfig {
         ddl_fence_timeout: Duration::from_millis(100),
         max_active_invocations: 128,
+        max_active_analytical_invocations: 8,
         max_invocation_age: Duration::from_secs(15 * 60),
         max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
         max_token_lifecycle_requests_per_minute: 5,

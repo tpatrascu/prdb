@@ -79,6 +79,7 @@ static UNCERTAIN_INVOCATION_REGISTRIES: OnceLock<
 pub struct StorageManagerConfig {
     pub ddl_fence_timeout: Duration,
     pub max_active_invocations: usize,
+    pub max_active_analytical_invocations: usize,
     pub max_invocation_age: Duration,
     /// Maximum catalog records and row candidates scanned in one invocation.
     pub max_invocation_scan_work: usize,
@@ -91,6 +92,7 @@ impl Default for StorageManagerConfig {
         Self {
             ddl_fence_timeout: Duration::from_secs(5),
             max_active_invocations: 128,
+            max_active_analytical_invocations: 8,
             max_invocation_age: Duration::from_secs(15 * 60),
             max_invocation_scan_work: crate::transaction::MAX_INVOCATION_SCAN_WORK,
             max_token_lifecycle_requests_per_minute: 30,
@@ -102,6 +104,7 @@ impl Default for StorageManagerConfig {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StorageManagerConfigError {
     ZeroActiveInvocationLimit,
+    ZeroAnalyticalInvocationLimit,
     ZeroInvocationAge,
     ZeroInvocationScanWorkLimit,
     ZeroTokenLifecycleRequestLimit,
@@ -936,6 +939,7 @@ pub struct StorageManager<'db> {
     database: &'db Database,
     ddl_fences: DdlFenceCoordinator,
     max_active_invocations: usize,
+    max_active_analytical_invocations: usize,
     admissions: Arc<InvocationAdmissionState>,
     token_requests: Arc<TokenRequestLimiter>,
     admin_cancellation_requests: Arc<TokenRequestLimiter>,
@@ -963,6 +967,7 @@ pub struct SupervisorAdmissionRequest {
     pub max_rows: usize,
     pub max_bytes: usize,
     pub deadline: Option<std::time::Instant>,
+    pub workload_class: crate::supervisor::WorkloadClass,
 }
 
 #[derive(Default)]
@@ -1629,6 +1634,7 @@ enum LiveInvocationPhase {
 #[derive(Clone, Copy)]
 struct LiveInvocation {
     principal_id: [u8; 16],
+    workload_class: crate::supervisor::WorkloadClass,
     started_at_us: i64,
     deadline_at_us: Option<i64>,
     phase: LiveInvocationPhase,
@@ -1642,6 +1648,7 @@ struct LiveInvocation {
 struct InvocationAdmissionState {
     database_key: usize,
     limit: AtomicUsize,
+    analytical_limit: AtomicUsize,
     database_uncertain: AtomicBool,
     live: Mutex<LiveInvocationRegistry>,
     changed: Condvar,
@@ -1681,6 +1688,7 @@ impl InvocationAdmissionState {
         self: &Arc<Self>,
         invocation_id: [u8; 16],
         principal_id: [u8; 16],
+        workload_class: crate::supervisor::WorkloadClass,
         started_at_us: i64,
         max_age: Duration,
     ) -> Result<InvocationAdmissionPermit, AdmissionError> {
@@ -1694,6 +1702,18 @@ impl InvocationAdmissionState {
         if live.entries.contains_key(&invocation_id) {
             return Err(AdmissionError::Duplicate);
         }
+        if workload_class == crate::supervisor::WorkloadClass::Analytical
+            && live
+                .entries
+                .values()
+                .filter(|invocation| {
+                    invocation.workload_class == crate::supervisor::WorkloadClass::Analytical
+                })
+                .count()
+                >= self.analytical_limit.load(Ordering::Acquire)
+        {
+            return Err(AdmissionError::Limit);
+        }
         if live.entries.len() >= self.limit.load(Ordering::Acquire) {
             return Err(AdmissionError::Limit);
         }
@@ -1704,6 +1724,7 @@ impl InvocationAdmissionState {
             invocation_id,
             LiveInvocation {
                 principal_id,
+                workload_class,
                 started_at_us,
                 deadline_at_us,
                 phase: LiveInvocationPhase::Active,
@@ -1987,6 +2008,7 @@ impl Drop for InvocationAdmissionPermit {
 fn invocation_registry(
     database: &Database,
     configured_limit: usize,
+    configured_analytical_limit: usize,
 ) -> Arc<InvocationAdmissionState> {
     let database_key = database as *const Database as usize;
     let uncertain = UNCERTAIN_INVOCATION_REGISTRIES.get_or_init(|| Mutex::new(HashMap::new()));
@@ -1999,6 +2021,9 @@ fn invocation_registry(
         invocations
             .limit
             .fetch_min(configured_limit, Ordering::Relaxed);
+        invocations
+            .analytical_limit
+            .fetch_min(configured_analytical_limit, Ordering::Relaxed);
         return invocations;
     }
     let registry = INVOCATION_REGISTRIES.get_or_init(|| Mutex::new(HashMap::new()));
@@ -2010,11 +2035,15 @@ fn invocation_registry(
         invocations
             .limit
             .fetch_min(configured_limit, Ordering::Relaxed);
+        invocations
+            .analytical_limit
+            .fetch_min(configured_analytical_limit, Ordering::Relaxed);
         return invocations;
     }
     let invocations = Arc::new(InvocationAdmissionState {
         database_key,
         limit: AtomicUsize::new(configured_limit),
+        analytical_limit: AtomicUsize::new(configured_analytical_limit),
         database_uncertain: AtomicBool::new(false),
         live: Mutex::new(LiveInvocationRegistry {
             generation: 1,
@@ -2029,8 +2058,9 @@ fn invocation_registry(
 fn shared_invocation_registry(
     database: &Database,
     configured_limit: usize,
+    configured_analytical_limit: usize,
 ) -> Arc<InvocationAdmissionState> {
-    invocation_registry(database, configured_limit)
+    invocation_registry(database, configured_limit, configured_analytical_limit)
 }
 
 fn retain_uncertain_registry(database_key: usize, state: Arc<InvocationAdmissionState>) {
@@ -2047,6 +2077,7 @@ pub(crate) fn mark_database_uncertain(database: &Database) {
     let invocations = invocation_registry(
         database,
         StorageManagerConfig::default().max_active_invocations,
+        StorageManagerConfig::default().max_active_analytical_invocations,
     );
     let first_uncertain = !invocations.database_uncertain.swap(true, Ordering::AcqRel);
     if first_uncertain {
@@ -2124,6 +2155,11 @@ impl<'db> StorageManager<'db> {
                 StorageManagerConfigError::ZeroActiveInvocationLimit,
             ));
         }
+        if config.max_active_analytical_invocations == 0 {
+            return Err(StorageManagerInitError::Config(
+                StorageManagerConfigError::ZeroAnalyticalInvocationLimit,
+            ));
+        }
         if config.max_invocation_age.is_zero() {
             return Err(StorageManagerInitError::Config(
                 StorageManagerConfigError::ZeroInvocationAge,
@@ -2153,11 +2189,16 @@ impl<'db> StorageManager<'db> {
             database,
             config.max_admin_cancellation_requests_per_minute,
         );
-        let admissions = shared_invocation_registry(database, config.max_active_invocations);
+        let admissions = shared_invocation_registry(
+            database,
+            config.max_active_invocations,
+            config.max_active_analytical_invocations,
+        );
         Ok(Self {
             database,
             ddl_fences: DdlFenceCoordinator::new(DdlFenceManager::new(), config.ddl_fence_timeout),
             max_active_invocations: config.max_active_invocations,
+            max_active_analytical_invocations: config.max_active_analytical_invocations,
             admissions,
             token_requests,
             admin_cancellation_requests,
@@ -2170,6 +2211,12 @@ impl<'db> StorageManager<'db> {
     pub fn max_active_invocations(&self) -> usize {
         self.max_active_invocations
             .min(self.admissions.limit.load(Ordering::Acquire))
+    }
+
+    /// The effective analytical snapshot cap shared by live manager handles.
+    pub fn max_active_analytical_invocations(&self) -> usize {
+        self.max_active_analytical_invocations
+            .min(self.admissions.analytical_limit.load(Ordering::Acquire))
     }
 
     pub fn max_invocation_age(&self) -> Duration {
@@ -2199,12 +2246,32 @@ impl<'db> StorageManager<'db> {
         max_rows: usize,
         max_bytes: usize,
     ) -> Result<InvocationTransaction<'db>, TransactionError> {
+        self.begin_invocation_in_class(
+            invocation_id,
+            principal_id,
+            retention_deadline_us,
+            max_rows,
+            max_bytes,
+            crate::supervisor::WorkloadClass::Operational,
+        )
+    }
+
+    fn begin_invocation_in_class(
+        &self,
+        invocation_id: [u8; 16],
+        principal_id: [u8; 16],
+        retention_deadline_us: i64,
+        max_rows: usize,
+        max_bytes: usize,
+        workload_class: crate::supervisor::WorkloadClass,
+    ) -> Result<InvocationTransaction<'db>, TransactionError> {
         let started_at_us = now_unix_micros().ok_or(TransactionError::ClockUnavailable)?;
         let admission_permit = self
             .admissions
             .acquire(
                 invocation_id,
                 principal_id,
+                workload_class,
                 started_at_us,
                 self.max_invocation_age,
             )
@@ -2269,19 +2336,40 @@ impl<'db> StorageManager<'db> {
         max_rows: usize,
         max_bytes: usize,
     ) -> Result<(InvocationTransaction<'db>, HashSet<[u8; 16]>), TransactionError> {
-        let principal_id = lookup_credential_principal(self.database, token_id)?;
-        let mut transaction = self.begin_invocation(
-            invocation_id,
+        self.begin_token_authenticated_invocation_in_class(
+            SupervisorAdmissionRequest {
+                invocation_id,
+                token_id,
+                retention_deadline_us,
+                max_rows,
+                max_bytes,
+                deadline: None,
+                workload_class: crate::supervisor::WorkloadClass::Operational,
+            },
+            token_secret,
+        )
+    }
+
+    fn begin_token_authenticated_invocation_in_class(
+        &self,
+        request: SupervisorAdmissionRequest,
+        token_secret: &[u8; TOKEN_SECRET_BYTES],
+    ) -> Result<(InvocationTransaction<'db>, HashSet<[u8; 16]>), TransactionError> {
+        let principal_id = lookup_credential_principal(self.database, request.token_id)?;
+        let mut transaction = self.begin_invocation_in_class(
+            request.invocation_id,
             principal_id,
-            retention_deadline_us,
-            max_rows,
-            max_bytes,
+            request.retention_deadline_us,
+            request.max_rows,
+            request.max_bytes,
+            request.workload_class,
         )?;
         let Some(now_us) = now_unix_micros() else {
             transaction.discard_unstarted_admission();
             return Err(TransactionError::ClockUnavailable);
         };
-        let roles = transaction.authenticate_credential_token(token_id, token_secret, now_us)?;
+        let roles =
+            transaction.authenticate_credential_token(request.token_id, token_secret, now_us)?;
         Ok((transaction, roles))
     }
 
@@ -2598,6 +2686,7 @@ impl<'db> StorageManager<'db> {
                 max_rows,
                 max_bytes,
                 deadline: None,
+                workload_class: crate::supervisor::WorkloadClass::Operational,
             },
             token_secret,
             None,
@@ -2638,14 +2727,8 @@ impl<'db> StorageManager<'db> {
         requested_scope: Option<crate::submission_scope::RequestedScope>,
     ) -> Result<SupervisorInvocation<'db>, TransactionError> {
         let principal_id = lookup_credential_principal(self.database, request.token_id)?;
-        let (mut transaction, role_ids) = self.begin_token_authenticated_invocation(
-            request.invocation_id,
-            request.token_id,
-            token_secret,
-            request.retention_deadline_us,
-            request.max_rows,
-            request.max_bytes,
-        )?;
+        let (mut transaction, role_ids) =
+            self.begin_token_authenticated_invocation_in_class(request, token_secret)?;
         if let Some(requested_scope) = requested_scope {
             transaction.restrict_to_requested_scope(requested_scope);
         }
@@ -10829,13 +10912,62 @@ fn lookup_credential_principal(
 
 #[cfg(test)]
 mod commit_cancellation_boundary_tests {
-    use super::{OwnerCancellationResult, StorageManager, StorageManagerConfig};
+    use super::{
+        AdmissionError, InvocationAdmissionState, LiveInvocationRegistry, OwnerCancellationResult,
+        StorageManager, StorageManagerConfig,
+    };
     use redb::Database;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::mpsc;
     use std::time::Duration;
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn analytical_admission_cap_preserves_operational_capacity() {
+        let state = std::sync::Arc::new(InvocationAdmissionState {
+            database_key: 0,
+            limit: std::sync::atomic::AtomicUsize::new(3),
+            analytical_limit: std::sync::atomic::AtomicUsize::new(1),
+            database_uncertain: std::sync::atomic::AtomicBool::new(false),
+            live: std::sync::Mutex::new(LiveInvocationRegistry {
+                generation: 1,
+                entries: std::collections::HashMap::new(),
+            }),
+            changed: std::sync::Condvar::new(),
+        });
+        let analytical = state
+            .acquire(
+                [0x71; 16],
+                [0x81; 16],
+                crate::supervisor::WorkloadClass::Analytical,
+                1_000,
+                Duration::from_secs(60),
+            )
+            .expect("first analytical invocation should be admitted");
+        assert_eq!(
+            state
+                .acquire(
+                    [0x72; 16],
+                    [0x82; 16],
+                    crate::supervisor::WorkloadClass::Analytical,
+                    1_001,
+                    Duration::from_secs(60),
+                )
+                .err(),
+            Some(AdmissionError::Limit)
+        );
+        let operational = state
+            .acquire(
+                [0x73; 16],
+                [0x83; 16],
+                crate::supervisor::WorkloadClass::Operational,
+                1_002,
+                Duration::from_secs(60),
+            )
+            .expect("operational invocation should use reserved global capacity");
+        drop((analytical, operational));
+    }
 
     #[test]
     fn cancellation_after_committing_transition_is_too_late()
@@ -10853,7 +10985,13 @@ mod commit_cancellation_boundary_tests {
         let principal_id = [0x74; 16];
         let permit = storage
             .admissions
-            .acquire(invocation_id, principal_id, 1_000, Duration::from_secs(60))
+            .acquire(
+                invocation_id,
+                principal_id,
+                crate::supervisor::WorkloadClass::Operational,
+                1_000,
+                Duration::from_secs(60),
+            )
             .map_err(|error| {
                 std::io::Error::other(format!("unexpected admission error: {error:?}"))
             })?;

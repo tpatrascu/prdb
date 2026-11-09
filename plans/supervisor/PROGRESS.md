@@ -132,3 +132,9 @@
 - Regression: [`metadata_process.rs`](../../engine/tests/metadata_process.rs) exercises the real binaries and bearer-token control path. It does not start or load a query worker.
 - Verification: `cargo test --locked --test metadata_process` passed in the configured Nix shell.
 - Remaining: this covers metadata control reads only; process-level query execution still depends on successful cgroup provisioning and the executor callback ABI path.
+## WI-7 / SM-5: reserve storage snapshots from analytical saturation — implemented
+
+- Behavior: storage admission tracks the immutable sealed workload class and enforces a shared analytical snapshot cap (default 8) in addition to the global active snapshot cap (default 128). Operational admissions do not consume the analytical allowance and can use the remaining global slots. The two limits are shared across manager handles for one database object.
+- Regression: `analytical_admission_cap_preserves_operational_capacity` proves the second analytical admission is rejected at a cap of one while an operational admission still succeeds under a global cap of three.
+- Contract: [workload profile](../../specs/workload-profile.md) and [storage manager](../../specs/storage-manager.md).
+- Limitation: this is an admission reserve, not a fair queue. Operational requests can still be rejected when the global cap is full; queue depth, wait scheduling, and progress guarantees under saturation remain open under WI-7.
