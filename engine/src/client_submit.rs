@@ -1302,6 +1302,29 @@ impl AdminClient {
         .map(|(result, _)| result)
     }
 
+    pub fn set_schema_owner(
+        &mut self,
+        schema_id: [u8; 16],
+        owner_id: [u8; 16],
+    ) -> Result<AdminOperationResult, ClientSubmitError> {
+        validate_admin_id(schema_id)?;
+        validate_admin_id(owner_id)?;
+        self.execute_admin_operation_with_fields(
+            "schemas.set_owner",
+            format!(
+                "{{\"schema_id\":\"{}\",\"owner_id\":\"{}\"}}",
+                lower_hex(&schema_id),
+                lower_hex(&owner_id)
+            ),
+            None,
+            &[
+                AdminExpectedResponseField::Id("schema_id", schema_id),
+                AdminExpectedResponseField::Id("owner_id", owner_id),
+            ],
+        )
+        .map(|(result, _)| result)
+    }
+
     pub fn rename_table(
         &mut self,
         table_id: [u8; 16],

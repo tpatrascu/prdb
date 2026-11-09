@@ -474,11 +474,22 @@ fn admin_client_creates_and_drops_schemas() {
                 ),
             ),
             (
+                "schemas.set_owner",
+                r#"{"schema_id":"a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3","owner_id":"01010101010101010101010101010101"}"#,
+                [0x65; 16],
+                format!(
+                    "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"schema_id\":\"{}\",\"owner_id\":\"{}\",\"commit_sequence\":\"43\"}}",
+                    hex(&[0x65; 16]),
+                    "a3".repeat(16),
+                    "01".repeat(16)
+                ),
+            ),
+            (
                 "schemas.drop",
                 r#"{"schema_id":"a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3"}"#,
                 [0x63; 16],
                 format!(
-                    "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"schema_id\":\"{}\",\"commit_sequence\":\"43\"}}",
+                    "{{\"operation_id\":\"{}\",\"outcome\":\"committed\",\"schema_id\":\"{}\",\"commit_sequence\":\"44\"}}",
                     hex(&[0x63; 16]),
                     "a3".repeat(16)
                 ),
@@ -487,7 +498,10 @@ fn admin_client_creates_and_drops_schemas() {
             let prepare = read_frame(&mut stream, &mut decoder);
             let payload = String::from_utf8(prepare.payload.clone()).unwrap();
             assert!(payload.contains(&format!("\"operation\":\"{operation}\"")));
-            assert!(payload.contains(&format!("\"arguments\":{arguments}")));
+            assert!(
+                payload.contains(&format!("\"arguments\":{arguments}")),
+                "unexpected payload: {payload}; expected {arguments}"
+            );
             respond(
                 &mut stream,
                 &prepare,
@@ -514,6 +528,9 @@ fn admin_client_creates_and_drops_schemas() {
     assert_eq!(schema.identity_id, [0xa3; 16]);
     client
         .rename_schema(schema.identity_id, "insights")
+        .unwrap();
+    client
+        .set_schema_owner(schema.identity_id, [1; 16])
         .unwrap();
     client.drop_schema(schema.identity_id).unwrap();
     server.join().unwrap();

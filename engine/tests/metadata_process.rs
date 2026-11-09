@@ -694,11 +694,36 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
     write_client_credentials(&transfer_credential_path, &transfer_client_credentials)?;
     drop(transfer_client_credentials);
     drop(transfer_credentials);
+    let address_text = address.to_string();
+    let admin_owner_id_text = encode_id_hex(&admin_user_id);
+    admin.set_schema_owner(created_schema.identity_id, transfer_owner.identity_id)?;
+    let schema_id_text = encode_id_hex(&created_schema.identity_id);
+    let schema_transfer_command = Command::new(env!("CARGO_BIN_EXE_prdb-client"))
+        .args([
+            "schema-owner-set",
+            "--address",
+            &address_text,
+            "--credentials",
+            transfer_credential_path
+                .to_str()
+                .ok_or("credential path is not UTF-8")?,
+            "--schema-id",
+            &schema_id_text,
+            "--owner-id",
+            &admin_owner_id_text,
+        ])
+        .output()?;
+    assert!(
+        schema_transfer_command.status.success(),
+        "schema-owner CLI failed: {}",
+        String::from_utf8_lossy(&schema_transfer_command.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&schema_transfer_command.stdout).contains("changed schema owner")
+    );
     let transferred = admin.set_table_owner(created_table.table_id, transfer_owner.identity_id)?;
     assert!(transferred.commit_sequence > 0);
-    let address_text = address.to_string();
     let table_id_text = encode_id_hex(&created_table.table_id);
-    let admin_owner_id_text = encode_id_hex(&admin_user_id);
     let credential_path_text = transfer_credential_path
         .to_str()
         .ok_or("credential path is not UTF-8")?;

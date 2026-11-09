@@ -285,3 +285,13 @@
 - Regression: the CLI parser accepts canonical IDs and rejects zero, uppercase, short, and extra values. `authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_processes` transfers a table from the administrator to a newly credentialed non-admin user, then invokes the compiled `prdb-client table-owner-set` command with that user's private credential to transfer it back. The temporary token and credential file are revoked and removed before shutdown.
 - Verification: focused CLI parser and real multi-process ADMIN tests passed. `cargo build --workspace --locked --offline`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`, and `cargo test --workspace --locked --offline -- --test-threads=1` passed in the pinned Nix shell. CLI help displays the new command. The full suite reported 3 cgroup-gated commit tests and 1 cgroup-gated metadata process test as ignored by default.
 - Remaining: broaden separate-process DDL coverage and finish confined artifact execution and the remaining SDK packaging/release gates.
+
+
+## SDK-5: schema-owner transfer client and CLI — implemented
+
+- Contract: [`schemas.set_owner`](../../specs/client-protocol.md) lets the current schema owner or a database administrator transfer a non-system schema to a live user or role. The transfer does not grant data privileges.
+- Red evidence: `client_admin` failed to compile because `AdminClient::set_schema_owner` did not exist.
+- Implementation: `AdminClient::set_schema_owner` validates both IDs and validates the returned schema and owner ID echoes. `prdb-client schema-owner-set --schema-id HEX --owner-id HEX` applies strict ID parsing and reports the committed operation.
+- Regression: the AdminClient mock verifies request and response fields. CLI parser checks reject zero, uppercase, short, and extra IDs. The real gateway/supervisor lifecycle transfers a schema to a newly credentialed non-admin user and invokes the compiled CLI with that user's credential to transfer it back.
+- Verification: the focused AdminClient mock, CLI parser, and real multi-process CLI regressions passed. Rust 1.95.0 workspace build, formatting, warning-denied Clippy, and full serial workspace tests passed. The commit suite reported 127 passed and 3 cgroup-dependent ignored; the metadata-process suite reported 1 passed and 1 cgroup-dependent ignored.
+- Remaining: broader separate-process DDL coverage and confined artifact execution remain open.
