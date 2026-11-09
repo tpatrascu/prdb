@@ -2081,9 +2081,9 @@
 ## SM-5 / AU-6: object-grant revocation conflicts with a staged writer — verified
 
 - Contract: [authorization](../../specs/authorization.md), [concurrency/MVCC](../../specs/concurrency-mvcc.md), and [storage manager](../../specs/storage-manager.md). Finalization must revalidate the exact grant record used by an authorized write; revocation cannot leave a previously staged write committing under stale authority.
-- Regression: `storage_manager_authorizes_object_grants_and_aborts_stale_writers_after_revoke` stages an authorized row update with the persisted table UPDATE grant, revokes that grant through `commit_authorized_object_grant_ddl`, and then finalizes the writer. It verifies durable ABORTED status, unchanged row bytes, committed revocation, and the final commit sequence.
-- Verification: the full Rust commit integration target passed (125 passed, 3 delegated-cgroup tests ignored); workspace formatting and warning-denied Clippy passed under Rust/Cargo 1.95.0.
-- Remaining: repeated concurrent schedules and equivalent stale-writer coverage for membership, identity, credential, and other policy DDL routes remain open.
+- Regression: `storage_manager_authorizes_object_grants_and_linearizes_revocation_races` stages an authorized row update with the persisted table UPDATE grant and races its commit against `commit_authorized_object_grant_ddl` revocation. It accepts only commit-before-revoke or revoke-before-abort, checks row bytes, durable outcomes, commit sequence, and final grant/dependency state. Ten fresh-process runs all observed commit-before-revoke; token and role-membership regressions separately verify revoke-before-stale-write aborts.
+- Verification: the full Rust commit integration target passed (127 passed, 3 delegated-cgroup tests ignored); workspace formatting and warning-denied Clippy passed under Rust/Cargo 1.95.0.
+- Remaining: repeat the grant race under schedules that exercise revoke-before-write, and cover other authority-changing DDL races.
 
 ## SM-5 / AU-6: role-membership revocation conflicts with a staged writer — verified
 

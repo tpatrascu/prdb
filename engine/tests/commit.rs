@@ -15507,7 +15507,7 @@ fn identity_ddl_cannot_disable_the_last_credentialed_admin()
 }
 
 #[test]
-fn storage_manager_authorizes_object_grants_and_aborts_stale_writers_after_revoke()
+fn storage_manager_authorizes_object_grants_and_linearizes_revocation_races()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
@@ -15791,7 +15791,7 @@ fn storage_manager_authorizes_object_grants_and_aborts_stale_writers_after_revok
             &projection,
             &[FieldPatch {
                 ordinal: 0,
-                value: Some(ScalarValue::Text("stale after revoke".to_owned())),
+                value: Some(ScalarValue::Text("after grant race".to_owned())),
             }],
         )
         .map_err(|error| format!("stage grant-race update: {error:?}"))?;
@@ -15799,28 +15799,43 @@ fn storage_manager_authorizes_object_grants_and_aborts_stale_writers_after_revok
     let mut race_revoke_audit = audit_event(0x84);
     race_revoke_audit.actor_id = Some(grant_manager);
     race_revoke_audit.action = AuditAction::AuthorityChange;
+    let before_race = commit_sequence(&database)?;
+    let barrier = Arc::new(Barrier::new(2));
+    let (write_result, revoke_result) = std::thread::scope(|scope| {
+        let write_barrier = barrier.clone();
+        let write_thread = scope.spawn(move || {
+            write_barrier.wait();
+            writer.commit()
+        });
+        barrier.wait();
+        let revoke_result = storage.commit_authorized_object_grant_ddl(
+            id(0x84),
+            grant_manager,
+            9_999,
+            &[
+                remove_catalog_record(manager_update.clone())?,
+                remove_catalog_record(dependency_write(manager_grantee, id(16), 5))?,
+                bump_grantee_epoch(manager_grantee, 3, "manager_grantee")?,
+            ],
+            &[race_revoke_audit],
+        );
+        let write_result = write_thread.join().expect("grant writer thread panicked");
+        Ok::<_, Box<dyn std::error::Error>>((write_result, revoke_result))
+    })?;
+    let write_status = match write_result {
+        Ok(_) => OutcomeStatus::Committed,
+        Err(prdb_engine::transaction::TransactionError::Commit(CommitError::Conflict)) => {
+            OutcomeStatus::Aborted
+        }
+        Err(error) => panic!("unexpected grant-writer race result: {error:?}"),
+    };
+    let revoke_sequence =
+        revoke_result.map_err(|error| format!("revoke grant for staged writer: {error:?}"))?;
+    assert_eq!(commit_sequence(&database)?, revoke_sequence);
     assert_eq!(
-        storage
-            .commit_authorized_object_grant_ddl(
-                id(0x84),
-                grant_manager,
-                9_999,
-                &[
-                    remove_catalog_record(manager_update.clone())?,
-                    remove_catalog_record(dependency_write(manager_grantee, id(16), 5))?,
-                    bump_grantee_epoch(manager_grantee, 3, "manager_grantee")?,
-                ],
-                &[race_revoke_audit],
-            )
-            .map_err(|error| format!("revoke grant for staged writer: {error:?}"))?,
-        6
+        revoke_sequence,
+        before_race + u64::from(write_status == OutcomeStatus::Committed) + 1
     );
-    assert!(matches!(
-        writer.commit(),
-        Err(prdb_engine::transaction::TransactionError::Commit(
-            CommitError::Conflict
-        ))
-    ));
     assert_eq!(
         decode_tuple(
             &columns,
@@ -15836,16 +15851,23 @@ fn storage_manager_authorizes_object_grants_and_aborts_stale_writers_after_revok
             .payload,
         )?
         .values,
-        [Some(ScalarValue::Text("before revoke".to_owned()))]
+        [Some(ScalarValue::Text(
+            if write_status == OutcomeStatus::Committed {
+                "after grant race"
+            } else {
+                "before revoke"
+            }
+            .to_owned()
+        ))]
     );
     assert_eq!(
         lookup_outcome(&database, id(0x83), manager_grantee, 1)?
             .ok_or("missing stale grant writer outcome")?
             .status,
-        OutcomeStatus::Aborted
+        write_status
     );
 
-    assert_eq!(commit_sequence(&database)?, 6);
+    assert_eq!(commit_sequence(&database)?, revoke_sequence);
     for (invocation_id, principal_id, status) in [
         (id(101), table_owner, OutcomeStatus::Committed),
         (id(102), grant_manager, OutcomeStatus::Committed),
@@ -15853,7 +15875,7 @@ fn storage_manager_authorizes_object_grants_and_aborts_stale_writers_after_revok
         (id(104), table_owner, OutcomeStatus::Committed),
         (id(0x80), manager_grantee, OutcomeStatus::Committed),
         (id(0x84), grant_manager, OutcomeStatus::Committed),
-        (id(0x83), manager_grantee, OutcomeStatus::Aborted),
+        (id(0x83), manager_grantee, write_status),
     ] {
         assert_eq!(
             lookup_outcome(&database, invocation_id, principal_id, 1)?
