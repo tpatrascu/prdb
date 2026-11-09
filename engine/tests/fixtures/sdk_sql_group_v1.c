@@ -26,6 +26,15 @@ static prdb_sdk_value_v1 null_value(void) {
                                0};
 }
 
+static prdb_sdk_value_v1 text_value(const char *value) {
+    return (prdb_sdk_value_v1){sizeof(prdb_sdk_value_v1),
+                               PRDB_SDK_VALUE_ABI_V1_VERSION,
+                               PRDB_SDK_VALUE_STATE_VALUE,
+                               PRDB_SDK_VALUE_TYPE_TEXT,
+                               (const uint8_t *)value,
+                               strlen(value)};
+}
+
 static prdb_sdk_value_v1 bigint_value(uint8_t bytes[8], int64_t value) {
     uint64_t bits = (uint64_t)value;
     for (uint32_t index = 0; index < 8; ++index) {
@@ -54,6 +63,81 @@ int main(void) {
     assert(groups[0].representative_row == 0 && groups[0].count == 2);
     assert(groups[1].representative_row == 1 && groups[1].count == 1);
     assert(groups[2].representative_row == 3 && groups[2].count == 2);
+
+    {
+        uint8_t composite_integer_bytes[4][4];
+        prdb_sdk_value_v1 composite_keys[] = {
+            integer_value(composite_integer_bytes[0], 1), text_value("x"),
+            integer_value(composite_integer_bytes[1], 1), text_value("y"),
+            integer_value(composite_integer_bytes[2], 1), text_value("x"),
+            null_value(), text_value("x"),
+            null_value(), text_value("y"),
+            null_value(), text_value("x")};
+        const uint32_t declared_types[] = {
+            PRDB_SDK_VALUE_TYPE_INTEGER, PRDB_SDK_VALUE_TYPE_TEXT};
+        const uint8_t decimal_scales[] = {0, 0};
+        prdb_sdk_sql_count_group_v1 composite_groups[6] = {{0}};
+        uint32_t composite_group_count = 99;
+        assert(prdb_sdk_sql_group_count_composite_v1(
+                   composite_keys, 6, 2, declared_types, decimal_scales,
+                   composite_groups, 6, &composite_group_count) ==
+               PRDB_SDK_SQL_GROUP_OK);
+        assert(composite_group_count == 4);
+        assert(composite_groups[0].representative_row == 0 &&
+               composite_groups[0].count == 2);
+        assert(composite_groups[1].representative_row == 1 &&
+               composite_groups[1].count == 1);
+        assert(composite_groups[2].representative_row == 3 &&
+               composite_groups[2].count == 2);
+        assert(composite_groups[3].representative_row == 4 &&
+               composite_groups[3].count == 1);
+
+        {
+            prdb_sdk_sql_count_group_v1 unchanged = {81, UINT64_C(82)};
+            uint32_t unchanged_count = 83;
+            assert(prdb_sdk_sql_group_count_composite_v1(
+                       composite_keys, PRDB_SDK_SQL_GROUP_MAX_ROWS + 1, 2,
+                       declared_types, decimal_scales, &unchanged, 1,
+                       &unchanged_count) ==
+                   PRDB_SDK_SQL_GROUP_LIMIT_EXCEEDED);
+            assert(unchanged_count == 83 &&
+                   unchanged.representative_row == 81 && unchanged.count == 82);
+            assert(prdb_sdk_sql_group_count_composite_v1(
+                       composite_keys, 6,
+                       PRDB_SDK_SQL_GROUP_MAX_COLUMNS + 1,
+                       declared_types, decimal_scales, &unchanged, 1,
+                       &unchanged_count) ==
+                   PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT);
+            assert(unchanged_count == 83 && unchanged.representative_row == 81);
+            assert(prdb_sdk_sql_group_count_composite_v1(
+                       NULL, 0, 2, declared_types, decimal_scales, NULL, 0,
+                       &unchanged_count) == PRDB_SDK_SQL_GROUP_OK);
+            assert(unchanged_count == 0);
+        }
+
+        {
+            prdb_sdk_sql_count_group_v1 unchanged = {71, UINT64_C(72)};
+            uint32_t unchanged_count = 73;
+            prdb_sdk_value_v1 invalid_keys[12];
+            memcpy(invalid_keys, composite_keys, sizeof(invalid_keys));
+            invalid_keys[5] = (prdb_sdk_value_v1){
+                sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
+                PRDB_SDK_VALUE_STATE_REDACTED, 0, NULL, 0};
+            assert(prdb_sdk_sql_group_count_composite_v1(
+                       invalid_keys, 6, 2, declared_types, decimal_scales,
+                       &unchanged, 1, &unchanged_count) ==
+                   PRDB_SDK_SQL_EVAL_REDACTED_INPUT);
+            assert(unchanged_count == 73 &&
+                   unchanged.representative_row == 71 && unchanged.count == 72);
+
+            assert(prdb_sdk_sql_group_count_composite_v1(
+                       composite_keys, 6, 2, declared_types, decimal_scales,
+                       &unchanged, 1, &unchanged_count) ==
+                   PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT);
+            assert(unchanged_count == 73 &&
+                   unchanged.representative_row == 71 && unchanged.count == 72);
+        }
+    }
 
     {
         prdb_sdk_sql_count_group_v1 unchanged[2] = {

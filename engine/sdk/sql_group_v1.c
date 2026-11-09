@@ -174,6 +174,94 @@ int32_t prdb_sdk_sql_group_count_v1(
     return PRDB_SDK_SQL_GROUP_OK;
 }
 
+int32_t prdb_sdk_sql_group_count_composite_v1(
+    const prdb_sdk_value_v1 *keys, uint32_t row_count,
+    uint32_t key_column_count, const uint32_t *declared_types,
+    const uint8_t *decimal_scales,
+    prdb_sdk_sql_count_group_v1 *groups_out, uint32_t groups_capacity,
+    uint32_t *group_count_out) {
+    prdb_sdk_sql_count_group_v1 groups[PRDB_SDK_SQL_GROUP_MAX_ROWS];
+    uint32_t group_count = 0;
+    int32_t status;
+
+    if (group_count_out == NULL || key_column_count == 0 ||
+        key_column_count > PRDB_SDK_SQL_GROUP_MAX_COLUMNS ||
+        declared_types == NULL || decimal_scales == NULL ||
+        (row_count != 0 && keys == NULL)) {
+        return PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT;
+    }
+    if (row_count > PRDB_SDK_SQL_GROUP_MAX_ROWS) {
+        return PRDB_SDK_SQL_GROUP_LIMIT_EXCEEDED;
+    }
+    for (uint32_t column = 0; column < key_column_count; ++column) {
+        uint32_t type = declared_types[column];
+        uint8_t scale = decimal_scales[column];
+        if (type < PRDB_SDK_VALUE_TYPE_BOOLEAN ||
+            type > PRDB_SDK_VALUE_TYPE_TIMESTAMPTZ ||
+            (type == PRDB_SDK_VALUE_TYPE_DECIMAL ? scale > 38 : scale != 0)) {
+            return PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT;
+        }
+    }
+    for (uint32_t row = 0; row < row_count; ++row) {
+        for (uint32_t column = 0; column < key_column_count; ++column) {
+            const prdb_sdk_value_v1 *key =
+                &keys[row * key_column_count + column];
+            status = validate_group_key(key, declared_types[column],
+                                        decimal_scales[column]);
+            if (status != PRDB_SDK_SQL_EVAL_OK) return status;
+        }
+    }
+
+    for (uint32_t row = 0; row < row_count; ++row) {
+        uint32_t matching_group = group_count;
+        for (uint32_t group = 0; group < group_count; ++group) {
+            uint32_t representative = groups[group].representative_row;
+            uint32_t column = 0;
+            for (; column < key_column_count; ++column) {
+                const prdb_sdk_value_v1 *left =
+                    &keys[row * key_column_count + column];
+                const prdb_sdk_value_v1 *right =
+                    &keys[representative * key_column_count + column];
+                if (left->state == PRDB_SDK_VALUE_STATE_NULL ||
+                    right->state == PRDB_SDK_VALUE_STATE_NULL) {
+                    if (left->state != right->state) break;
+                    continue;
+                }
+                {
+                    uint32_t truth;
+                    status = prdb_sdk_sql_compare_v1(
+                        left, right, PRDB_SDK_SQL_COMPARE_EQUAL,
+                        decimal_scales[column], decimal_scales[column],
+                        &truth);
+                    if (status != PRDB_SDK_SQL_EVAL_OK) return status;
+                    if (truth != PRDB_SDK_SQL_TRUTH_TRUE) break;
+                }
+            }
+            if (column == key_column_count) {
+                matching_group = group;
+                break;
+            }
+        }
+        if (matching_group == group_count) {
+            groups[group_count].representative_row = row;
+            groups[group_count].count = 1;
+            ++group_count;
+        } else {
+            ++groups[matching_group].count;
+        }
+    }
+    if (groups_capacity < group_count ||
+        (group_count != 0 && groups_out == NULL)) {
+        return PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT;
+    }
+    if (group_count != 0) {
+        memcpy(groups_out, groups,
+               (size_t)group_count * sizeof(*groups_out));
+    }
+    *group_count_out = group_count;
+    return PRDB_SDK_SQL_GROUP_OK;
+}
+
 int32_t prdb_sdk_sql_minmax_v1(
     const prdb_sdk_value_v1 *values, uint32_t value_count,
     uint32_t declared_type, uint8_t decimal_scale, uint32_t operation,

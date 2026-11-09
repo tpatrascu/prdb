@@ -4,6 +4,7 @@
 #include "prdb_sdk_sql_v1.h"
 
 #define PRDB_SDK_SQL_GROUP_MAX_ROWS UINT32_C(128)
+#define PRDB_SDK_SQL_GROUP_MAX_COLUMNS UINT32_C(8)
 #define PRDB_SDK_SQL_GROUP_OK INT32_C(0)
 #define PRDB_SDK_SQL_GROUP_LIMIT_EXCEEDED INT32_C(6)
 
@@ -41,6 +42,17 @@ typedef struct prdb_sdk_sql_count_group_v1 {
 int32_t prdb_sdk_sql_group_count_v1(
     const prdb_sdk_value_v1 *keys, uint32_t key_count,
     uint32_t declared_type, uint8_t decimal_scale,
+    prdb_sdk_sql_count_group_v1 *groups_out, uint32_t groups_capacity,
+    uint32_t *group_count_out);
+
+/* Groups row-major composite keys (row_count x key_column_count) in first-seen
+ * order. Each key column has its own declared type and Decimal scale. NULL
+ * components compare equal for grouping, as in SQL GROUP BY; REDACTED or
+ * malformed components fail without changing caller outputs. */
+int32_t prdb_sdk_sql_group_count_composite_v1(
+    const prdb_sdk_value_v1 *keys, uint32_t row_count,
+    uint32_t key_column_count, const uint32_t *declared_types,
+    const uint8_t *decimal_scales,
     prdb_sdk_sql_count_group_v1 *groups_out, uint32_t groups_capacity,
     uint32_t *group_count_out);
 

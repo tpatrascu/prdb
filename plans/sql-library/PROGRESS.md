@@ -288,3 +288,12 @@
 - Confined acceptance: the maintained SQL artifact now uses `ORDER BY COUNT(*) DESC NULLS LAST, id ASC NULLS LAST`; `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` passed through the delegated cgroup and verified the two v12 binding items, relayed SQLR output, and durable COMMITTED.
 - Verification: full maintained TinyCC SDK suite and focused confined SQL acceptance passed. Rust 1.95.0 workspace build, format, warning-denied Clippy, and full tests passed; no Rust source changed in this increment.
 - Remaining: more than two grouped sort keys are unsupported because only two selected grouped outputs currently exist; multiple group keys, arbitrary expressions, cancellation/deadlines, spill, broader SQLR composition, and mixed-workload measurements remain open.
+
+## SQL-7 dependency: bounded composite grouping kernel — implemented
+
+- Contract: [SQL library](../../specs/sql-library.md), Operational and Analytical Execution. Group one to eight already-authorized scalar key columns over at most 128 rows, treating NULL components as equal, preserving first-seen group order, and leaving outputs untouched on invalid/redacted input or insufficient capacity.
+- Red evidence: the maintained TinyCC grouping fixture failed to link because `prdb_sdk_sql_group_count_composite_v1` was absent.
+- Implementation: the SDK now exposes a row-major composite-key count kernel with per-column type and Decimal-scale validation. It validates all cells before building groups, compares each tuple using the shared SQL comparator, and publishes groups only after capacity validation.
+- Regression: the fixture groups `(INTEGER, TEXT)` pairs, distinguishes tuples by either component, groups NULL combinations correctly, and checks redacted input, row/column bounds, zero rows, capacity failure, and output preservation.
+- Verification: the focused fixture passed with `-Wall -Wextra -Werror`; the complete maintained TinyCC SDK suite (`make -f engine/sdk/Makefile test`) also passed after implementation.
+- Scope: this is an operator primitive only. The current SELECT parser/binder/runner still supports one grouping key; multi-key SQL grammar, execution, SQLR encoding, and confined acceptance remain open.
