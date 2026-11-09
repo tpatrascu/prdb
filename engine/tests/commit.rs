@@ -21542,18 +21542,13 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             &[policy_audit],
         )
         .map_err(|error| format!("metadata fixture policies failed: {error:?}"))?;
-
-    let mut requested_scope = b"PSC1\0\x0b".to_vec();
-    let (first_usage_schema, second_usage_schema) = if schema.schema_id < empty_schema.schema_id {
-        (schema.schema_id, empty_schema.schema_id)
-    } else {
-        (empty_schema.schema_id, schema.schema_id)
-    };
-    for schema_id in [first_usage_schema, second_usage_schema] {
-        requested_scope.extend([1, 1]);
-        requested_scope.extend(schema_id);
+    let mut requested_scope_records = Vec::<Vec<u8>>::new();
+    for schema_id in [schema.schema_id, empty_schema.schema_id] {
+        let mut record = vec![1, 1];
+        record.extend_from_slice(&schema_id);
+        requested_scope_records.push(record);
     }
-    for operation in 2..=5 {
+    for operation in 2u8..=5 {
         let mut tables = if operation == 2 {
             vec![&records_table, &joined_table, &composite_table]
         } else {
@@ -21561,18 +21556,28 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         };
         tables.sort_by_key(|table| table.table_id);
         for table in &tables {
-            requested_scope.extend([operation, 2]);
-            requested_scope.extend(table.table_id);
+            let mut record = vec![operation, 2];
+            record.extend_from_slice(&table.table_id);
+            requested_scope_records.push(record);
         }
         if operation <= 4 {
             for table in &tables {
                 for column_id in &table.column_ids {
-                    requested_scope.extend([operation, 3]);
-                    requested_scope.extend(table.table_id);
-                    requested_scope.extend(column_id);
+                    let mut record = vec![operation, 3];
+                    record.extend_from_slice(&table.table_id);
+                    record.extend_from_slice(column_id);
+                    requested_scope_records.push(record);
                 }
             }
         }
+    }
+    requested_scope_records.sort();
+    requested_scope_records.dedup();
+    let scope_count = u16::try_from(requested_scope_records.len())?;
+    let mut requested_scope = b"PSC1".to_vec();
+    requested_scope.extend_from_slice(&scope_count.to_be_bytes());
+    for record in requested_scope_records {
+        requested_scope.extend_from_slice(&record);
     }
 
     let mut client = ClientConnectionSession::default();
