@@ -7578,6 +7578,100 @@ fn storage_manager_creates_named_unique_index_and_backfills_atomically()
             .status,
         OutcomeStatus::Committed
     );
+
+    let racing_writer_invocation = id(0xdf);
+    let racing_row = id(0xe0);
+    let mut racing_writer =
+        storage.begin_invocation(racing_writer_invocation, actor, 9_999, 1, 1024)?;
+    let racing_schema = racing_writer.load_catalog_table_schema(id(82))?;
+    racing_writer.load_catalog_indexes(&racing_schema)?;
+    let racing_tuple = encode_tuple(
+        &racing_schema.columns,
+        racing_schema.schema_version,
+        &[Some(ScalarValue::Bytea(b"raced policy creation".to_vec()))],
+    )?;
+    racing_writer.stage_put(
+        prdb_engine::overlay::RowId {
+            table: id(82),
+            row: racing_row,
+        },
+        &racing_tuple,
+    )?;
+    let racing_policy_invocation = id(0xe1);
+    let before_policy_race = commit_sequence(&database)?;
+    let barrier = Arc::new(Barrier::new(3));
+    let (writer_result, policy_result) = std::thread::scope(|scope| {
+        let writer_barrier = barrier.clone();
+        let writer = scope.spawn(move || {
+            writer_barrier.wait();
+            racing_writer.commit()
+        });
+        let policy_barrier = barrier.clone();
+        let policy_storage = &storage;
+        let policy = scope.spawn(move || {
+            let mut audit = identity_audit_event(0xe2, actor, id(82));
+            audit.correlation_id = racing_policy_invocation;
+            policy_barrier.wait();
+            policy_storage.create_policy(prdb_engine::storage_manager::CreatePolicyRequest {
+                invocation_id: racing_policy_invocation,
+                authenticated_actor_id: actor,
+                table_id: id(82),
+                name: "racing_row_policy".to_owned(),
+                kind: prdb_engine::storage_manager::PolicyKind::Row,
+                operation: prdb_engine::authorization::Operation::Select,
+                effect: prdb_engine::authorization::Effect::Allow,
+                recipients: vec![prdb_engine::authorization::Subject::Principal(actor)],
+                target_column_ids: Vec::new(),
+                using_expression: Some(prdb_engine::authorization::Expr::Literal(Some(
+                    ScalarValue::Boolean(true),
+                ))),
+                with_check_expression: None,
+                retention_deadline_us: 9_999,
+                audit_event: audit,
+            })
+        });
+        barrier.wait();
+        (
+            writer.join().expect("racing writer panicked"),
+            policy.join().expect("racing policy DDL panicked"),
+        )
+    });
+    let created_racing_policy =
+        policy_result.map_err(|error| format!("racing row policy creation failed: {error:?}"))?;
+    let writer_sequence = match writer_result {
+        Ok(sequence) => Some(sequence),
+        Err(prdb_engine::transaction::TransactionError::Commit(CommitError::Conflict)) => None,
+        Err(error) => return Err(Box::new(error)),
+    };
+    let writer_status = if writer_sequence.is_some() {
+        OutcomeStatus::Committed
+    } else {
+        OutcomeStatus::Aborted
+    };
+    assert_eq!(
+        row(&database, &table_row_key(id(82), racing_row))?.is_some(),
+        writer_sequence.is_some()
+    );
+    assert_eq!(
+        lookup_outcome(&database, racing_writer_invocation, actor, 1)?
+            .ok_or("missing racing writer outcome")?
+            .status,
+        writer_status
+    );
+    assert_eq!(
+        lookup_outcome(&database, racing_policy_invocation, actor, 1)?
+            .ok_or("missing racing policy outcome")?
+            .status,
+        OutcomeStatus::Committed
+    );
+    assert_eq!(
+        created_racing_policy.commit_sequence,
+        before_policy_race + 1 + u64::from(writer_sequence.is_some())
+    );
+    assert_eq!(
+        commit_sequence(&database)?,
+        created_racing_policy.commit_sequence
+    );
     prdb_engine::startup::validate_persisted_records(&database)?;
     Ok(())
 }

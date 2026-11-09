@@ -2054,4 +2054,11 @@
 - Contract: a policy DDL commit advances its table write epoch; a writer pinned before that authority change must not commit using stale policy state.
 - Regression: the named-index lifecycle test now stages a row write, creates a row policy through typed `StorageManager::create_policy`, and confirms the stale writer records an ABORTED outcome and publishes no row while policy creation records COMMITTED.
 - Verification: the focused real-redb regression passed. Rust 1.95.0 workspace build, formatting, warning-denied Clippy, and full tests passed; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
-- Remaining: repeated concurrent race schedules, broader row-policy ADMIN process coverage, and confined artifact execution remain open.
+- Remaining: race coverage against other DDL families and confined artifact execution remain open.
+
+## SM-5 / DS-7: policy DDL racing with a staged writer — verified
+
+- Contract: policy publication and invocation writes must linearize under the table fence. A writer that commits first may succeed; a writer that reaches finalization after policy publication must conflict and persist ABORTED.
+- Regression: a barrier-coordinated real-redb race stages a row write, then concurrently commits it against typed row-policy creation. It accepts either order and checks row visibility, both durable outcomes, and the resulting commit sequence. The focused race test passed in ten fresh runs.
+- Verification: focused repeated race passed. Rust 1.95.0 workspace build, format check, warning-denied Clippy, and full test suite passed; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
+- Remaining: races against other DDL families, broader stress schedules, and confined artifact execution remain open.
