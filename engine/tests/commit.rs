@@ -14930,6 +14930,172 @@ fn identity_ddl_drops_unreferenced_user_and_revokes_tokens_atomically()
 }
 
 #[test]
+fn token_revocation_racing_a_staged_write_linearizes() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(500))?;
+    let admin_role = builtin_owner_id();
+    let admin_user = id(0xfa);
+    let user_id = id(0xfb);
+    let token_id = id(0xfc);
+    let secret = [0xa5; 32];
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_micros(),
+    )?;
+    let retention_deadline_us = now + 60_000_000;
+    let mut setup_audit = identity_audit_event(0xf6, admin_role, admin_user);
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(
+        id(0xf6),
+        admin_role,
+        retention_deadline_us,
+        &[
+            principal_write_with_name(admin_user, 1, 1, "token_race_admin"),
+            object_write_with_name(admin_user, 8, "token_race_admin"),
+            membership_write(admin_user, admin_role),
+            dependency_write(admin_user, admin_role, 5),
+            credential_verifier_write(
+                id(0xfd),
+                admin_user,
+                &[0x5a; 32],
+                now - 1,
+                now + 60_000_000,
+                None,
+                1,
+            ),
+            principal_write_with_name(user_id, 1, 1, "token_race_user"),
+            object_write_with_name(user_id, 8, "token_race_user"),
+            credential_verifier_write(
+                token_id,
+                user_id,
+                &secret,
+                now - 1,
+                now + 60_000_000,
+                None,
+                1,
+            ),
+        ],
+        &[setup_audit],
+    )?;
+
+    let writer_invocation = id(0xfe);
+    let (mut writer, roles) = storage.begin_token_authenticated_invocation(
+        writer_invocation,
+        token_id,
+        &secret,
+        retention_deadline_us,
+        2,
+        64,
+    )?;
+    assert!(roles.is_empty());
+    let row_schema = writer.load_catalog_table_schema(id(16))?;
+    writer.load_catalog_indexes(&row_schema)?;
+    writer.load_catalog_check_constraints(&row_schema)?;
+    let row_id = prdb_engine::overlay::RowId {
+        table: id(16),
+        row: id(0xa6),
+    };
+    writer.stage_put(row_id, &bytea_tuple(b"committed before token revoke"))?;
+
+    let revoke_invocation = id(0xa7);
+    let barrier = Arc::new(Barrier::new(2));
+    let (write_result, revoke_result) = std::thread::scope(|scope| {
+        let revoke_barrier = barrier.clone();
+        let revoke_storage = &storage;
+        let revoke = scope.spawn(move || {
+            let mut audit = audit_event(0xa8);
+            audit.actor_id = Some(admin_user);
+            audit.correlation_id = revoke_invocation;
+            audit.action = AuditAction::TokenLifecycle;
+            audit.target_ids = vec![token_id];
+            revoke_barrier.wait();
+            revoke_storage.revoke_token(
+                revoke_invocation,
+                admin_user,
+                token_id,
+                retention_deadline_us,
+                audit,
+            )
+        });
+        barrier.wait();
+        let write = writer.commit();
+        (
+            write,
+            revoke.join().expect("token revocation thread panicked"),
+        )
+    });
+
+    let write_result_debug = format!("{write_result:?}");
+    let write_status = match write_result {
+        Ok(sequence) => {
+            assert!(sequence >= 2);
+            OutcomeStatus::Committed
+        }
+        Err(prdb_engine::transaction::TransactionError::Commit(CommitError::Conflict)) => {
+            OutcomeStatus::Aborted
+        }
+        Err(error) => panic!("unexpected staged-write result in token race: {error:?}"),
+    };
+    assert!(
+        revoke_result.is_ok(),
+        "token revocation failed: {revoke_result:?}"
+    );
+    let revoke_sequence = revoke_result.unwrap();
+    assert_eq!(commit_sequence(&database)?, revoke_sequence);
+    assert_eq!(
+        revoke_sequence,
+        if write_status == OutcomeStatus::Committed {
+            3
+        } else {
+            2
+        }
+    );
+    let writer_outcome = lookup_outcome(&database, writer_invocation, user_id, now)?;
+    assert!(
+        writer_outcome.is_some(),
+        "missing staged-writer race outcome: result={write_result_debug}, revoke_sequence={revoke_sequence}, current_sequence={:?}",
+        commit_sequence(&database)?
+    );
+    assert_eq!(writer_outcome.unwrap().status, write_status);
+    assert_eq!(
+        lookup_outcome(&database, revoke_invocation, admin_user, now)?
+            .ok_or("missing token-revocation race outcome")?
+            .status,
+        OutcomeStatus::Committed
+    );
+    let row_key = table_row_key(row_id.table, row_id.row);
+    let read = database.begin_read()?;
+    let rows = read.open_table(ROWS)?;
+    assert_eq!(
+        rows.get(row_key.as_slice())?.map(|value| {
+            RowRecord::decode(value.value())
+                .expect("committed row record is valid")
+                .payload
+        }),
+        (write_status == OutcomeStatus::Committed)
+            .then(|| bytea_tuple(b"committed before token revoke"))
+    );
+    drop(rows);
+    drop(read);
+    assert!(matches!(
+        storage.begin_token_authenticated_invocation(
+            id(0xa9),
+            token_id,
+            &secret,
+            retention_deadline_us,
+            2,
+            64,
+        ),
+        Err(prdb_engine::transaction::TransactionError::AuthenticationFailed)
+    ));
+    assert_eq!(lookup_outcome(&database, id(0xa9), user_id, now)?, None);
+    prdb_engine::startup::validate_persisted_records(&database)?;
+    Ok(())
+}
+
+#[test]
 fn identity_ddl_restricts_user_drop_when_a_grant_references_the_user()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();

@@ -2124,3 +2124,11 @@
 - Implementation: no production change was needed; identity drop already commits token revocation atomically, and admission honors the verifier's revoked state.
 - Verification: the focused real-redb test passed; `cargo fmt --all -- --check`, warning-denied workspace Clippy, and the serial commit integration target passed under Rust/Cargo 1.95.0. The commit target reported 126 passed and 3 delegated-cgroup tests ignored.
 - Remaining: stale-writer races for other authority-changing DDL routes and broader repeated concurrency schedules remain open.
+
+## SM-5 / AU-6: token revocation racing a staged write — verified
+
+- Contract: token-authenticated row publication and token revocation serialize so a write committed first remains durable, while a writer finalized after revocation conflicts and records ABORTED; revocation always records its own committed outcome.
+- Regression: `token_revocation_racing_a_staged_write_linearizes` starts a catalog-backed staged row write and `StorageManager::revoke_token` from a barrier, then validates the winning serialization, row state, durable outcomes, commit sequence, index/catalog integrity, and rejection of later admission. Twenty fresh-process repetitions all observed write-before-revoke; the existing `token_admission_checks_expiry_secret_revocation_and_commit_guards` regression covers revoke-before-stale-write and durable abort.
+- Implementation: no production change was needed; token verifier guards and the serialized redb commit boundary preserve the allowed outcomes.
+- Verification: the focused race passed in twenty fresh processes; `cargo fmt --all -- --check`, warning-denied workspace Clippy, and the serial commit integration target passed under Rust/Cargo 1.95.0. The commit target reported 127 passed and 3 delegated-cgroup tests ignored.
+- Remaining: repeated race coverage for other authority-changing DDL routes and broader concurrent schedules remains open.
