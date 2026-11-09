@@ -336,5 +336,142 @@ int main(void) {
         assert(sum.state == PRDB_SDK_VALUE_STATE_NULL && sum.type_code == 0 &&
                sum.data == NULL && sum.data_len == 0);
     }
+    {
+        uint8_t input_bytes[2][4] = {{0}};
+        uint8_t result_bytes[16];
+        prdb_sdk_value_v1 values[2] = {integer_value(input_bytes[0], 1),
+                                       integer_value(input_bytes[1], 2)};
+        prdb_sdk_value_v1 average = {0};
+        uint8_t result_scale = 99;
+        static const uint8_t expected_half[] = {
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x16, 0xE3, 0x60};
+        assert(prdb_sdk_sql_avg_v1(
+                   values, 2, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0, &average,
+                   sizeof(average), result_bytes, sizeof(result_bytes),
+                   &result_scale) == PRDB_SDK_SQL_EVAL_OK);
+        assert(average.type_code == PRDB_SDK_VALUE_TYPE_DECIMAL &&
+               average.data == result_bytes && average.data_len == 16 &&
+               result_scale == 6 &&
+               memcmp(result_bytes, expected_half, sizeof(expected_half)) == 0);
+
+        {
+            uint8_t negative_bytes[2][4] = {{0}};
+            prdb_sdk_value_v1 negative_values[2] = {
+                integer_value(negative_bytes[0], -1),
+                integer_value(negative_bytes[1], -2)};
+            static const uint8_t expected_negative[] = {
+                0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xE9, 0x1C, 0xA0};
+            assert(prdb_sdk_sql_avg_v1(
+                       negative_values, 2, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0,
+                       &average, sizeof(average), result_bytes,
+                       sizeof(result_bytes), &result_scale) ==
+                   PRDB_SDK_SQL_EVAL_OK);
+            assert(result_scale == 6 &&
+                   memcmp(result_bytes, expected_negative,
+                          sizeof(expected_negative)) == 0);
+        }
+
+        {
+            uint8_t many_bytes[128][4] = {{0}};
+            prdb_sdk_value_v1 many_values[128] = {{0}};
+            static const uint8_t expected_even[] = {
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1E, 0x84};
+            static const uint8_t expected_odd[] = {
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x5B, 0x8E};
+            for (uint32_t index = 0; index < 128; ++index) {
+                many_values[index] = integer_value(many_bytes[index], 0);
+            }
+            many_values[0] = integer_value(many_bytes[0], 1);
+            assert(prdb_sdk_sql_avg_v1(
+                       many_values, 128, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0,
+                       &average, sizeof(average), result_bytes,
+                       sizeof(result_bytes), &result_scale) ==
+                   PRDB_SDK_SQL_EVAL_OK);
+            assert(memcmp(result_bytes, expected_even, sizeof(expected_even)) ==
+                   0);
+            many_values[0] = integer_value(many_bytes[0], 3);
+            assert(prdb_sdk_sql_avg_v1(
+                       many_values, 128, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0,
+                       &average, sizeof(average), result_bytes,
+                       sizeof(result_bytes), &result_scale) ==
+                   PRDB_SDK_SQL_EVAL_OK);
+            assert(memcmp(result_bytes, expected_odd, sizeof(expected_odd)) ==
+                   0);
+        }
+
+        {
+            uint8_t decimal_bytes[2][16] = {{0}};
+            prdb_sdk_value_v1 decimal_values[2] = {{0}};
+            static const uint8_t expected_decimal[] = {
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x07, 0x5C, 0x75, 0xE0};
+            decimal_bytes[0][15] = 123;
+            decimal_bytes[1][15] = 124;
+            for (uint32_t index = 0; index < 2; ++index) {
+                decimal_values[index] = (prdb_sdk_value_v1){
+                    sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
+                    PRDB_SDK_VALUE_STATE_VALUE,
+                    PRDB_SDK_VALUE_TYPE_DECIMAL, decimal_bytes[index], 16};
+            }
+            assert(prdb_sdk_sql_avg_v1(
+                       decimal_values, 2, PRDB_SDK_VALUE_TYPE_DECIMAL, 5, 2,
+                       &average, sizeof(average), result_bytes,
+                       sizeof(result_bytes), &result_scale) ==
+                   PRDB_SDK_SQL_EVAL_OK);
+            assert(result_scale == 8 &&
+                   memcmp(result_bytes, expected_decimal,
+                          sizeof(expected_decimal)) == 0);
+        }
+
+        {
+            static const uint8_t max_decimal[16] = {
+                0x4B, 0x3B, 0x4C, 0xA8, 0x5A, 0x86, 0xC4, 0x7A,
+                0x09, 0x8A, 0x22, 0x3F, 0xFF, 0xFF, 0xFF, 0xFF};
+            prdb_sdk_value_v1 max_value = {
+                sizeof(max_value), PRDB_SDK_VALUE_ABI_V1_VERSION,
+                PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_DECIMAL,
+                max_decimal, sizeof(max_decimal)};
+            assert(prdb_sdk_sql_avg_v1(
+                       &max_value, 1, PRDB_SDK_VALUE_TYPE_DECIMAL, 38, 0,
+                       &average, sizeof(average), result_bytes,
+                       sizeof(result_bytes), &result_scale) ==
+                   PRDB_SDK_SQL_EVAL_OK);
+            assert(result_scale == 0 &&
+                   memcmp(result_bytes, max_decimal, sizeof(max_decimal)) ==
+                       0);
+        }
+
+        {
+            prdb_sdk_value_v1 nulls[2] = {null_value(), null_value()};
+            assert(prdb_sdk_sql_avg_v1(
+                       nulls, 2, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0, &average,
+                       sizeof(average), NULL, 0, &result_scale) ==
+                   PRDB_SDK_SQL_EVAL_OK);
+            assert(average.state == PRDB_SDK_VALUE_STATE_NULL &&
+                   average.type_code == 0 && average.data == NULL &&
+                   average.data_len == 0 && result_scale == 6);
+        }
+
+        {
+            prdb_sdk_value_v1 redacted = null_value();
+            prdb_sdk_value_v1 invalid_values[2] = {values[0], redacted};
+            prdb_sdk_value_v1 unchanged_average = average;
+            uint8_t before[16];
+            memset(result_bytes, 0xA5, sizeof(result_bytes));
+            memcpy(before, result_bytes, sizeof(before));
+            result_scale = 99;
+            redacted.state = PRDB_SDK_VALUE_STATE_REDACTED;
+            invalid_values[1] = redacted;
+            unchanged_average.struct_size = UINT32_C(0x12345678);
+            assert(prdb_sdk_sql_avg_v1(
+                       invalid_values, 2, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0,
+                       &unchanged_average, sizeof(unchanged_average),
+                       result_bytes, sizeof(result_bytes), &result_scale) ==
+                   PRDB_SDK_SQL_EVAL_REDACTED_INPUT);
+            assert(unchanged_average.struct_size == UINT32_C(0x12345678) &&
+                   result_scale == 99 &&
+                   memcmp(result_bytes, before, sizeof(before)) == 0);
+        }
+    }
     return 0;
 }

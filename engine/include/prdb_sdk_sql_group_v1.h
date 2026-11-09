@@ -19,6 +19,17 @@ int32_t prdb_sdk_sql_sum_v1(
     prdb_sdk_value_v1 *value_out, uint32_t out_capacity,
     uint8_t *value_bytes_out, uint64_t value_bytes_capacity);
 
+/* AVG returns DECIMAL(38,result_scale), where integer input uses scale 6 and
+ * Decimal input uses min(max(6, scale + 6), 38 - (precision - scale)). The
+ * exact average is rounded to nearest, ties to even. result_scale_out and
+ * the value/byte outputs are written only on success. */
+int32_t prdb_sdk_sql_avg_v1(
+    const prdb_sdk_value_v1 *values, uint32_t value_count,
+    uint32_t declared_type, uint8_t decimal_precision, uint8_t decimal_scale,
+    prdb_sdk_value_v1 *value_out, uint32_t out_capacity,
+    uint8_t *value_bytes_out, uint64_t value_bytes_capacity,
+    uint8_t *result_scale_out);
+
 typedef struct prdb_sdk_sql_count_group_v1 {
     uint32_t representative_row;
     uint64_t count;

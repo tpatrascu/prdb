@@ -202,4 +202,12 @@
 - Implementation: `prdb_sdk_sql_execute_group_v6` validates planner/executor shape agreement, binds predicates and the numeric aggregate, materializes authorized rows into caller memory, closes the scan, groups stably, and computes each SUM with `prdb_sdk_sql_sum_v1`. It retains result bytes in a bounded stack array until callbacks finish. The SQLR v1 encoder/writer emits the widened result metadata and host-sized provisional chunks.
 - Regression: the maintained v6 executor fixture checks grouped integer SUM values and group counts; the SQLR fixture checks the `sum` label, BIGINT metadata/value, Decimal(38, scale) NULL metadata, redaction rejection, and writer callback output. The focused TinyCC fixtures passed.
 - Sandbox integration: the maintained `sql_v3_write_read.c` artifact now runs grouped `MIN(id)` and grouped `SUM(id)` after the update. `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` verifies the exact SUM SQLR record across the confined executor and result relay before durable commit.
-- Remaining: implement AVG semantics and add mixed-workload benchmarks.
+- Remaining: grouped AVG parsing, execution, SQLR output, and mixed-workload benchmarks remain open.
+
+## SQL-7 dependency: bounded AVG aggregate kernel — partial
+
+- Contract: [SQL library](../../specs/sql-library.md) and [workload profile](../../specs/workload-profile.md). Accept up to 128 authorized SMALLINT, INTEGER, BIGINT, or DECIMAL values. Return DECIMAL(38,r), with integer `r=6` and Decimal `r=min(max(6,s+6),38-(p-s))`; round the exact rational average to nearest, ties to even. NULLs are ignored, empty/all-NULL returns canonical NULL, and REDACTED/malformed/mismatched values fail.
+- Red/green evidence: the maintained TinyCC group fixture checks integer average, Decimal scale conversion, both even and odd half-tie cases at the 128-row boundary, all-NULL output, and output/scale preservation when REDACTED input fails.
+- Implementation: `prdb_sdk_sql_avg_v1` uses a fixed 20-byte unsigned scaled-division workspace, validates Decimal input precision, rounds ties by quotient parity, and writes result coefficient and scale only after validation and range checks.
+- Verification: the focused TinyCC grouping fixture was force-rebuilt and passed with `-Wall -Wextra -Werror`.
+- Remaining: parser/binder support, grouped runner integration, SQLR metadata/writing, and sandbox acceptance remain open.

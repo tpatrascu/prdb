@@ -380,3 +380,210 @@ int32_t prdb_sdk_sql_sum_v1(
     *value_out = result;
     return PRDB_SDK_SQL_EVAL_OK;
 }
+
+static void negate_be_bytes(uint8_t *bytes, uint32_t width) {
+    uint32_t carry = 1;
+    for (int32_t index = (int32_t)width - 1; index >= 0; --index) {
+        uint32_t value = (uint32_t)(uint8_t)~bytes[index] + carry;
+        bytes[index] = (uint8_t)value;
+        carry = value >> 8;
+    }
+}
+
+static int multiply_be_u32(uint8_t *bytes, uint32_t width,
+                           uint32_t multiplier) {
+    uint64_t carry = 0;
+    for (int32_t index = (int32_t)width - 1; index >= 0; --index) {
+        uint64_t value = (uint64_t)bytes[index] * multiplier + carry;
+        bytes[index] = (uint8_t)value;
+        carry = value >> 8;
+    }
+    return carry == 0;
+}
+
+static uint32_t divide_be_u32(const uint8_t *input, uint32_t width,
+                              uint32_t divisor, uint8_t *quotient) {
+    uint32_t remainder = 0;
+    for (uint32_t index = 0; index < width; ++index) {
+        uint32_t dividend = remainder * 256 + input[index];
+        quotient[index] = (uint8_t)(dividend / divisor);
+        remainder = dividend % divisor;
+    }
+    return remainder;
+}
+
+static int increment_be_bytes(uint8_t *bytes, uint32_t width) {
+    for (int32_t index = (int32_t)width - 1; index >= 0; --index) {
+        ++bytes[index];
+        if (bytes[index] != 0) return 1;
+    }
+    return 0;
+}
+
+int32_t prdb_sdk_sql_avg_v1(
+    const prdb_sdk_value_v1 *values, uint32_t value_count,
+    uint32_t declared_type, uint8_t decimal_precision, uint8_t decimal_scale,
+    prdb_sdk_value_v1 *value_out, uint32_t out_capacity,
+    uint8_t *value_bytes_out, uint64_t value_bytes_capacity,
+    uint8_t *result_scale_out) {
+    uint8_t total[17] = {0};
+    uint8_t input_decimal_limit[16] = {0};
+    uint8_t result_decimal_limit[16] = {0};
+    uint8_t magnitude[20] = {0};
+    uint8_t quotient[20] = {0};
+    uint8_t encoded[16] = {0};
+    uint32_t non_null_count = 0;
+    uint8_t result_scale;
+    int negative;
+    prdb_sdk_value_v1 result;
+
+    if (value_out == NULL || out_capacity < sizeof(*value_out) ||
+        result_scale_out == NULL || (value_count != 0 && values == NULL) ||
+        (declared_type == PRDB_SDK_VALUE_TYPE_DECIMAL
+             ? decimal_precision == 0 || decimal_precision > 38 ||
+                   decimal_scale > decimal_precision
+             : decimal_precision != 0 || decimal_scale != 0)) {
+        return PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT;
+    }
+    if (value_count > PRDB_SDK_SQL_GROUP_MAX_ROWS) {
+        return PRDB_SDK_SQL_GROUP_LIMIT_EXCEEDED;
+    }
+    if (declared_type == PRDB_SDK_VALUE_TYPE_SMALLINT) {
+        result_scale = 6;
+    } else if (declared_type == PRDB_SDK_VALUE_TYPE_INTEGER) {
+        result_scale = 6;
+    } else if (declared_type == PRDB_SDK_VALUE_TYPE_BIGINT) {
+        result_scale = 6;
+    } else if (declared_type == PRDB_SDK_VALUE_TYPE_DECIMAL) {
+        uint32_t integer_digits = decimal_precision - decimal_scale;
+        uint32_t desired_scale = decimal_scale + 6;
+        uint32_t available_scale = 38 - integer_digits;
+        if (desired_scale < 6) desired_scale = 6;
+        if (desired_scale > available_scale) desired_scale = available_scale;
+        result_scale = (uint8_t)desired_scale;
+        decimal_max_coefficient(decimal_precision, input_decimal_limit);
+    } else {
+        return PRDB_SDK_SQL_EVAL_TYPE_MISMATCH;
+    }
+    decimal_max_coefficient(38, result_decimal_limit);
+
+    for (uint32_t index = 0; index < value_count; ++index) {
+        const prdb_sdk_value_v1 *value = &values[index];
+        int32_t status = prdb_sdk_value_validate_v1(value);
+        if (status == PRDB_SDK_VALUE_INVALID_ARGUMENT) {
+            return PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT;
+        }
+        if (status != PRDB_SDK_VALUE_VALID) {
+            return PRDB_SDK_SQL_EVAL_INVALID_VALUE;
+        }
+        if (value->state == PRDB_SDK_VALUE_STATE_REDACTED) {
+            return PRDB_SDK_SQL_EVAL_REDACTED_INPUT;
+        }
+        if (value->state == PRDB_SDK_VALUE_STATE_NULL) continue;
+        if (value->type_code != declared_type) {
+            return PRDB_SDK_SQL_EVAL_TYPE_MISMATCH;
+        }
+        ++non_null_count;
+
+        if (declared_type == PRDB_SDK_VALUE_TYPE_SMALLINT) {
+            int16_t operand;
+            uint8_t operand_bytes[8];
+            if (prdb_sdk_value_get_smallint_v1(value, &operand) !=
+                PRDB_SDK_VALUE_ACCESS_OK) {
+                return PRDB_SDK_SQL_EVAL_INVALID_VALUE;
+            }
+            write_be_u64((uint64_t)(int64_t)operand, operand_bytes);
+            add_sign_extended(total, sizeof(total), operand_bytes,
+                              sizeof(operand_bytes));
+        } else if (declared_type == PRDB_SDK_VALUE_TYPE_INTEGER) {
+            int32_t operand;
+            uint8_t operand_bytes[8];
+            if (prdb_sdk_value_get_integer_v1(value, &operand) !=
+                PRDB_SDK_VALUE_ACCESS_OK) {
+                return PRDB_SDK_SQL_EVAL_INVALID_VALUE;
+            }
+            write_be_u64((uint64_t)(int64_t)operand, operand_bytes);
+            add_sign_extended(total, sizeof(total), operand_bytes,
+                              sizeof(operand_bytes));
+        } else if (declared_type == PRDB_SDK_VALUE_TYPE_BIGINT) {
+            int64_t operand;
+            uint8_t operand_bytes[8];
+            if (prdb_sdk_value_get_bigint_v1(value, &operand) !=
+                PRDB_SDK_VALUE_ACCESS_OK) {
+                return PRDB_SDK_SQL_EVAL_INVALID_VALUE;
+            }
+            write_be_u64((uint64_t)operand, operand_bytes);
+            add_sign_extended(total, sizeof(total), operand_bytes,
+                              sizeof(operand_bytes));
+        } else {
+            if (!decimal_magnitude_fits(value->data,
+                                        input_decimal_limit)) {
+                return PRDB_SDK_SQL_EVAL_INVALID_VALUE;
+            }
+            add_sign_extended(total, sizeof(total), value->data, 16);
+        }
+    }
+
+    if (non_null_count == 0) {
+        result = (prdb_sdk_value_v1){
+            sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
+            PRDB_SDK_VALUE_STATE_NULL, 0, NULL, 0};
+        *value_out = result;
+        *result_scale_out = result_scale;
+        return PRDB_SDK_SQL_EVAL_OK;
+    }
+    if (value_bytes_out == NULL || value_bytes_capacity < sizeof(encoded)) {
+        return PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT;
+    }
+
+    negative = (total[0] & 0x80) != 0;
+    memset(magnitude, negative ? 0xFF : 0, sizeof(magnitude));
+    memcpy(magnitude + sizeof(magnitude) - sizeof(total), total,
+           sizeof(total));
+    if (negative) negate_be_bytes(magnitude, sizeof(magnitude));
+    for (uint32_t digit = 0;
+         digit < (uint32_t)result_scale - decimal_scale; ++digit) {
+        if (!multiply_be_u32(magnitude, sizeof(magnitude), 10)) {
+            return PRDB_SDK_SQL_EVAL_NUMERIC_OVERFLOW;
+        }
+    }
+    {
+        uint32_t remainder = divide_be_u32(
+            magnitude, sizeof(magnitude), non_null_count, quotient);
+        uint32_t twice_remainder = remainder * 2;
+        if (twice_remainder > non_null_count ||
+            (twice_remainder == non_null_count &&
+             (quotient[sizeof(quotient) - 1] & 1) != 0)) {
+            if (!increment_be_bytes(quotient, sizeof(quotient))) {
+                return PRDB_SDK_SQL_EVAL_NUMERIC_OVERFLOW;
+            }
+        }
+    }
+    for (uint32_t index = 0; index < sizeof(quotient) - sizeof(encoded);
+         ++index) {
+        if (quotient[index] != 0) {
+            return PRDB_SDK_SQL_EVAL_NUMERIC_OVERFLOW;
+        }
+    }
+    if (!decimal_magnitude_fits(quotient + sizeof(quotient) - sizeof(encoded),
+                                result_decimal_limit)) {
+        return PRDB_SDK_SQL_EVAL_NUMERIC_OVERFLOW;
+    }
+    memcpy(encoded, quotient + sizeof(quotient) - sizeof(encoded),
+           sizeof(encoded));
+    if (negative) {
+        uint8_t nonzero = 0;
+        for (uint32_t index = 0; index < sizeof(encoded); ++index) {
+            nonzero |= encoded[index];
+        }
+        if (nonzero != 0) negate_be_bytes(encoded, sizeof(encoded));
+    }
+    memcpy(value_bytes_out, encoded, sizeof(encoded));
+    result = (prdb_sdk_value_v1){
+        sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
+        PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_DECIMAL,
+        value_bytes_out, sizeof(encoded)};
+    *value_out = result;
+    *result_scale_out = result_scale;
+    return PRDB_SDK_SQL_EVAL_OK;
+}
