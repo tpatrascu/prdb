@@ -2062,3 +2062,10 @@
 - Regression: a barrier-coordinated real-redb race stages a row write, then concurrently commits it against typed row-policy creation. It accepts either order and checks row visibility, both durable outcomes, and the resulting commit sequence. The focused race test passed in ten fresh runs.
 - Verification: focused repeated race passed. Rust 1.95.0 workspace build, format check, warning-denied Clippy, and full test suite passed; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
 - Remaining: races against other DDL families, broader stress schedules, and confined artifact execution remain open.
+
+## SM-5 / DS-7: policy DDL racing with table-owner transfer — verified
+
+- Contract: policy creation must revalidate table ownership at its serialized commit boundary when a concurrent owner transfer changes authority.
+- Regression: a barrier-coordinated real-redb race concurrently creates a row policy as the current table owner and transfers ownership as a database administrator. It accepts the valid serial orders, checks durable outcomes and commit-sequence advancement, verifies the resulting policy and table owner, and validates the recovered catalog image.
+- Verification: focused test passed once and in ten fresh processes. Rust 1.95.0 workspace build, format check, warning-denied Clippy, and full test suite passed; the commit integration target reported 125 passed and 3 cgroup-dependent ignored.
+- Remaining: races against other DDL families, broader stress schedules, and confined artifact execution remain open.

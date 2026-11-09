@@ -13973,6 +13973,199 @@ fn index_ddl_racing_table_owner_transfer_rechecks_authority_at_commit()
 }
 
 #[test]
+fn policy_ddl_racing_table_owner_transfer_rechecks_authority_at_commit()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::storage_manager::{
+        CreateTableRequest, SchemaLifecycleError, TableColumnDefinition, TableLifecycleError,
+    };
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(500))?;
+    let admin_role = builtin_owner_id();
+    let owner = id(0xc1);
+    let administrator = id(0xc2);
+    let successor = id(0xc3);
+    let mut setup_audit = identity_audit_event(0xc4, admin_role, owner);
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage.commit_catalog_and_audit(
+        id(0xc4),
+        admin_role,
+        9_999,
+        &[
+            principal_write_with_name(owner, 1, 1, "policy_race_owner"),
+            object_write_with_name(owner, 8, "policy_race_owner"),
+            principal_write_with_name(administrator, 1, 1, "policy_race_admin"),
+            object_write_with_name(administrator, 8, "policy_race_admin"),
+            membership_write(administrator, admin_role),
+            dependency_write(administrator, admin_role, 5),
+            principal_write_with_name(successor, 1, 1, "policy_race_successor"),
+            object_write_with_name(successor, 8, "policy_race_successor"),
+        ],
+        &[setup_audit],
+    )?;
+    let schema_invocation = id(0xc5);
+    let mut schema_audit = identity_audit_event(0xc6, administrator, owner);
+    schema_audit.correlation_id = schema_invocation;
+    let schema = storage
+        .create_schema(
+            schema_invocation,
+            administrator,
+            "policy_race_schema",
+            owner,
+            9_999,
+            schema_audit,
+        )
+        .map_err(|error: SchemaLifecycleError| format!("schema setup failed: {error:?}"))?;
+    let table_invocation = id(0xc7);
+    let mut table_audit = identity_audit_event(0xc8, owner, schema.schema_id);
+    table_audit.correlation_id = table_invocation;
+    let table = storage.create_table(CreateTableRequest {
+        invocation_id: table_invocation,
+        authenticated_actor_id: owner,
+        schema_id: schema.schema_id,
+        name: "policy_race_table".to_owned(),
+        columns: vec![TableColumnDefinition {
+            name: "value".to_owned(),
+            scalar_type: ScalarType::Bytea,
+            nullable: true,
+            generated_uuid_identity: false,
+            default: None,
+        }],
+        retention_deadline_us: 9_999,
+        audit_event: table_audit,
+    })?;
+
+    let policy_invocation = id(0xc9);
+    let transfer_invocation = id(0xca);
+    let before_race = commit_sequence(&database)?;
+    let barrier = Arc::new(Barrier::new(3));
+    let (policy_result, transfer_result) = std::thread::scope(|scope| {
+        let policy_barrier = barrier.clone();
+        let policy_storage = &storage;
+        let policy = scope.spawn(move || {
+            let mut audit = identity_audit_event(0xcb, owner, table.table_id);
+            audit.correlation_id = policy_invocation;
+            policy_barrier.wait();
+            policy_storage.create_policy(prdb_engine::storage_manager::CreatePolicyRequest {
+                invocation_id: policy_invocation,
+                authenticated_actor_id: owner,
+                table_id: table.table_id,
+                name: "owner_policy_race".to_owned(),
+                kind: prdb_engine::storage_manager::PolicyKind::Row,
+                operation: prdb_engine::authorization::Operation::Select,
+                effect: prdb_engine::authorization::Effect::Allow,
+                recipients: vec![prdb_engine::authorization::Subject::Principal(owner)],
+                target_column_ids: Vec::new(),
+                using_expression: Some(prdb_engine::authorization::Expr::Literal(Some(
+                    ScalarValue::Boolean(true),
+                ))),
+                with_check_expression: None,
+                retention_deadline_us: 9_999,
+                audit_event: audit,
+            })
+        });
+        let transfer_barrier = barrier.clone();
+        let transfer_storage = &storage;
+        let transfer = scope.spawn(move || {
+            let mut audit = identity_audit_event(0xcc, administrator, table.table_id);
+            audit.correlation_id = transfer_invocation;
+            transfer_barrier.wait();
+            transfer_storage.set_table_owner(
+                transfer_invocation,
+                administrator,
+                table.table_id,
+                successor,
+                9_999,
+                audit,
+            )
+        });
+        barrier.wait();
+        (
+            policy.join().expect("policy DDL thread panicked"),
+            transfer.join().expect("owner-transfer thread panicked"),
+        )
+    });
+
+    let (policy_status, policy_id, transfer_status) = match (policy_result, transfer_result) {
+        (Ok(created), Ok(_)) => (
+            OutcomeStatus::Committed,
+            Some(created.policy_id),
+            OutcomeStatus::Committed,
+        ),
+        (Ok(created), Err(TableLifecycleError::Commit(CommitError::Conflict))) => (
+            OutcomeStatus::Committed,
+            Some(created.policy_id),
+            OutcomeStatus::Aborted,
+        ),
+        (
+            Err(
+                TableLifecycleError::Unauthorized
+                | TableLifecycleError::Commit(CommitError::Conflict),
+            ),
+            Ok(_),
+        ) => (OutcomeStatus::Aborted, None, OutcomeStatus::Committed),
+        (policy, transfer) => {
+            panic!(
+                "unexpected policy/owner-transfer race: policy={policy:?}, transfer={transfer:?}"
+            )
+        }
+    };
+    assert_eq!(
+        commit_sequence(&database)?,
+        before_race
+            + u64::from(policy_status == OutcomeStatus::Committed)
+            + u64::from(transfer_status == OutcomeStatus::Committed)
+    );
+    assert_eq!(
+        lookup_outcome(&database, policy_invocation, owner, 1)?
+            .ok_or("missing raced policy outcome")?
+            .status,
+        policy_status
+    );
+    assert_eq!(
+        lookup_outcome(&database, transfer_invocation, administrator, 1)?
+            .ok_or("missing raced owner-transfer outcome")?
+            .status,
+        transfer_status
+    );
+    let read = database.begin_read()?;
+    let catalog = read.open_table(CATALOG)?;
+    if let Some(policy_id) = policy_id {
+        assert!(
+            catalog
+                .get(id_catalog_key(13, policy_id).as_slice())?
+                .is_some()
+        );
+    }
+    let table_object = decode_registered_envelope(
+        catalog
+            .get(id_catalog_key(2, table.table_id).as_slice())?
+            .ok_or("table object missing after policy race")?
+            .value(),
+    )?;
+    let final_owner = table_object
+        .fields
+        .iter()
+        .find(|field| field.tag == 4)
+        .ok_or("table owner missing after policy race")?
+        .payload
+        .as_slice();
+    assert_eq!(
+        final_owner,
+        if transfer_status == OutcomeStatus::Committed {
+            successor.as_slice()
+        } else {
+            owner.as_slice()
+        }
+    );
+    drop(catalog);
+    drop(read);
+    prdb_engine::startup::validate_persisted_records(&database)?;
+    Ok(())
+}
+
+#[test]
 fn storage_manager_authorizes_membership_ddl_by_system_privilege_and_admin_role()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
