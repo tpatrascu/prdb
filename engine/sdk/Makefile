@@ -12,6 +12,7 @@ SDK_PLANNER_SOURCE := engine/sdk/planner_v1.c
 SDK_EXECUTOR_SOURCE := engine/sdk/executor_v1.c
 SDK_SQL_EXEC_SOURCE := engine/sdk/sql_exec_v2.c
 SDK_SQL_EXEC_V4_SOURCE := engine/sdk/sql_exec_v4.c
+SDK_SQL_EXEC_V5_SOURCE := engine/sdk/sql_exec_v5.c
 SDK_SQL_RESULT_SOURCE := engine/sdk/sql_result_v1.c
 SDK_MANIFEST_SOURCE := engine/sdk/manifest_v1.c
 SDK_SCOPE_SOURCE := engine/sdk/scope_v1.c
@@ -25,10 +26,11 @@ SDK_PLANNER_OBJECT := $(BUILD_DIR)/planner_v1.o
 SDK_EXECUTOR_OBJECT := $(BUILD_DIR)/executor_v1.o
 SDK_SQL_EXEC_OBJECT := $(BUILD_DIR)/sql_exec_v2.o
 SDK_SQL_EXEC_V4_OBJECT := $(BUILD_DIR)/sql_exec_v4.o
+SDK_SQL_EXEC_V5_OBJECT := $(BUILD_DIR)/sql_exec_v5.o
 SDK_SQL_RESULT_OBJECT := $(BUILD_DIR)/sql_result_v1.o
 SDK_MANIFEST_OBJECT := $(BUILD_DIR)/manifest_v1.o
 SDK_SCOPE_OBJECT := $(BUILD_DIR)/scope_v1.o
-SDK_OBJECTS := $(SDK_VALUE_OBJECT) $(SDK_BATCH_OBJECT) $(SDK_OWNED_BATCH_OBJECT) $(SDK_SQL_OBJECT) $(SDK_SQL_ORDER_OBJECT) $(SDK_SQL_GROUP_OBJECT) $(SDK_PLANNER_OBJECT) $(SDK_EXECUTOR_OBJECT) $(SDK_SQL_EXEC_OBJECT) $(SDK_SQL_EXEC_V4_OBJECT) $(SDK_SQL_RESULT_OBJECT) $(SDK_MANIFEST_OBJECT) $(SDK_SCOPE_OBJECT)
+SDK_OBJECTS := $(SDK_VALUE_OBJECT) $(SDK_BATCH_OBJECT) $(SDK_OWNED_BATCH_OBJECT) $(SDK_SQL_OBJECT) $(SDK_SQL_ORDER_OBJECT) $(SDK_SQL_GROUP_OBJECT) $(SDK_PLANNER_OBJECT) $(SDK_EXECUTOR_OBJECT) $(SDK_SQL_EXEC_OBJECT) $(SDK_SQL_EXEC_V4_OBJECT) $(SDK_SQL_EXEC_V5_OBJECT) $(SDK_SQL_RESULT_OBJECT) $(SDK_MANIFEST_OBJECT) $(SDK_SCOPE_OBJECT)
 SDK_ARCHIVE := $(BUILD_DIR)/libprdb_sdk.a
 SDK_VALUE_TEST := $(BUILD_DIR)/sdk-value-v1
 SDK_BATCH_TEST := $(BUILD_DIR)/sdk-batch-v1
@@ -43,6 +45,7 @@ SDK_SQL_V5_TEST := $(BUILD_DIR)/sdk-sql-select-v5
 SDK_PLANNER_TEST := $(BUILD_DIR)/sdk-planner-v1
 SDK_EXECUTOR_TEST := $(BUILD_DIR)/sdk-executor-v1
 SDK_SQL_EXEC_TEST := $(BUILD_DIR)/sdk-sql-execute-v2
+SDK_SQL_EXEC_V5_TEST := $(BUILD_DIR)/sdk-sql-execute-v5
 SDK_SQL_INFORMATION_SCHEMA_TEST := $(BUILD_DIR)/sdk-sql-information-schema-v2
 SDK_SQL_RESULT_TEST := $(BUILD_DIR)/sdk-sql-result-v1
 SDK_SQL_DML_TEST := $(BUILD_DIR)/sdk-sql-dml-v1
@@ -90,6 +93,9 @@ $(SDK_SQL_EXEC_OBJECT): $(SDK_SQL_EXEC_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_exec_
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
 $(SDK_SQL_EXEC_V4_OBJECT): $(SDK_SQL_EXEC_V4_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_exec_v4.h $(INCLUDE_DIR)/prdb_sdk_sql_v4.h $(INCLUDE_DIR)/prdb_sdk_sql_group_v1.h | $(BUILD_DIR)
+	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
+
+$(SDK_SQL_EXEC_V5_OBJECT): $(SDK_SQL_EXEC_V5_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_exec_v5.h $(INCLUDE_DIR)/prdb_sdk_sql_v5.h $(INCLUDE_DIR)/prdb_sdk_sql_group_v1.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
 $(SDK_SQL_RESULT_OBJECT): $(SDK_SQL_RESULT_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_result_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_v2.h $(INCLUDE_DIR)/prdb_sdk_batch_v1.h $(INCLUDE_DIR)/prdb_sdk_value_v1.h | $(BUILD_DIR)
@@ -143,6 +149,9 @@ $(SDK_EXECUTOR_TEST): engine/tests/fixtures/sdk_executor_v1.c $(SDK_ARCHIVE) $(I
 $(SDK_SQL_EXEC_TEST): engine/tests/fixtures/sdk_sql_execute_v2.c $(SDK_ARCHIVE) $(INCLUDE_DIR)/prdb_sdk_sql_exec_v2.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v3.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v4.h $(INCLUDE_DIR)/prdb_sdk_sql_v3.h $(INCLUDE_DIR)/prdb_sdk_sql_result_v1.h $(INCLUDE_DIR)/prdb_sdk_executor_v1.h $(INCLUDE_DIR)/prdb_sdk_planner_v1.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" "$<" "$(SDK_ARCHIVE)" -o "$@"
 
+$(SDK_SQL_EXEC_V5_TEST): engine/tests/fixtures/sdk_sql_execute_v5.c $(SDK_ARCHIVE) $(INCLUDE_DIR)/prdb_sdk_sql_exec_v5.h $(INCLUDE_DIR)/prdb_sdk_sql_v5.h | $(BUILD_DIR)
+	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" "$<" "$(SDK_ARCHIVE)" -o "$@"
+
 $(SDK_SQL_INFORMATION_SCHEMA_TEST): engine/tests/fixtures/sdk_sql_information_schema_v2.c $(SDK_ARCHIVE) $(INCLUDE_DIR)/prdb_sdk_sql_exec_v2.h $(INCLUDE_DIR)/prdb_sdk_executor_v1.h $(INCLUDE_DIR)/prdb_sdk_planner_v1.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" "$<" "$(SDK_ARCHIVE)" -o "$@"
 
@@ -183,7 +192,7 @@ $(SQL_V3_RESTRICTED_METADATA_QUERY): $(SQL_V3_RESTRICTED_METADATA_OBJECT) $(SDK_
 .PHONY: sandbox-query-fixture
 sandbox-query-fixture: $(SQL_V3_CAUGHT_ERROR_QUERY) $(SQL_V3_WRITE_READ_QUERY) $(SQL_V3_RESTRICTED_METADATA_QUERY)
 
-test: $(SDK_VALUE_TEST) $(SDK_BATCH_TEST) $(SDK_SQL_TEST) $(SDK_SQL_EXPRESSION_TEST) $(SDK_SQL_V2_TEST) $(SDK_SQL_ORDER_TEST) $(SDK_SQL_GROUP_TEST) $(SDK_SQL_V3_TEST) $(SDK_SQL_V4_TEST) $(SDK_SQL_V5_TEST) $(SDK_PLANNER_TEST) $(SDK_EXECUTOR_TEST) $(SDK_SQL_EXEC_TEST) $(SDK_SQL_INFORMATION_SCHEMA_TEST) $(SDK_SQL_RESULT_TEST) $(SDK_SQL_DML_TEST) $(SDK_MANIFEST_TEST) $(SDK_SCOPE_TEST)
+test: $(SDK_VALUE_TEST) $(SDK_BATCH_TEST) $(SDK_SQL_TEST) $(SDK_SQL_EXPRESSION_TEST) $(SDK_SQL_V2_TEST) $(SDK_SQL_ORDER_TEST) $(SDK_SQL_GROUP_TEST) $(SDK_SQL_V3_TEST) $(SDK_SQL_V4_TEST) $(SDK_SQL_V5_TEST) $(SDK_PLANNER_TEST) $(SDK_EXECUTOR_TEST) $(SDK_SQL_EXEC_TEST) $(SDK_SQL_EXEC_V5_TEST) $(SDK_SQL_INFORMATION_SCHEMA_TEST) $(SDK_SQL_RESULT_TEST) $(SDK_SQL_DML_TEST) $(SDK_MANIFEST_TEST) $(SDK_SCOPE_TEST)
 	"$(SDK_VALUE_TEST)"
 	"$(SDK_BATCH_TEST)"
 	"$(SDK_SQL_TEST)"
@@ -197,6 +206,7 @@ test: $(SDK_VALUE_TEST) $(SDK_BATCH_TEST) $(SDK_SQL_TEST) $(SDK_SQL_EXPRESSION_T
 	"$(SDK_PLANNER_TEST)"
 	"$(SDK_EXECUTOR_TEST)"
 	"$(SDK_SQL_EXEC_TEST)"
+	"$(SDK_SQL_EXEC_V5_TEST)"
 	"$(SDK_SQL_INFORMATION_SCHEMA_TEST)"
 	"$(SDK_SQL_RESULT_TEST)"
 	"$(SDK_SQL_DML_TEST)"
