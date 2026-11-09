@@ -3,6 +3,8 @@
 #include <string.h>
 
 static const uint8_t count_column_name_v1[] = "count";
+static const uint8_t min_column_name_v1[] = "min";
+static const uint8_t max_column_name_v1[] = "max";
 
 typedef struct result_writer_v1 {
     uint8_t *bytes;
@@ -299,6 +301,124 @@ int32_t prdb_sdk_sql_write_group_count_result_v1(
     }
     status = prdb_sdk_sql_encode_group_count_result_v1(
         group_column, group_key, count, output, output_capacity, output_len);
+    if (status != PRDB_SDK_SQL_RESULT_OK) return status;
+    while (offset < *output_len) {
+        uint64_t chunk_length = *output_len - offset;
+        if (chunk_length > PRDB_QUERY_MAX_RESULT_CHUNK_BYTES) {
+            chunk_length = PRDB_QUERY_MAX_RESULT_CHUNK_BYTES;
+        }
+        if (host->write_result(host->context, output + offset, chunk_length) !=
+            PRDB_QUERY_CALLBACK_OK) {
+            *output_len = 0;
+            return PRDB_SDK_SQL_RESULT_WRITE_FAILED;
+        }
+        offset += chunk_length;
+    }
+    return PRDB_SDK_SQL_RESULT_OK;
+}
+
+int32_t prdb_sdk_sql_encode_group_minmax_result_v1(
+    const prdb_sdk_sql_column_shape_v2 *group_column,
+    const prdb_sdk_value_v1 *group_key,
+    const prdb_sdk_sql_column_shape_v2 *aggregate_column,
+    const prdb_sdk_value_v1 *aggregate_value, uint32_t aggregate_kind,
+    uint8_t *output, uint64_t output_capacity, uint64_t *output_len) {
+    static const uint8_t magic[4] = {'S', 'Q', 'L', 'R'};
+    const uint8_t *aggregate_name;
+    uint32_t aggregate_name_len;
+    result_writer_v1 writer;
+
+    if (output_len != NULL) *output_len = 0;
+    if (group_column == NULL || group_key == NULL ||
+        aggregate_column == NULL || aggregate_value == NULL ||
+        output == NULL || output_len == NULL || output_capacity == 0) {
+        return PRDB_SDK_SQL_RESULT_INVALID_ARGUMENT;
+    }
+    if (!valid_column_shape_v1(group_column, group_column->ordinal) ||
+        !valid_column_shape_v1(aggregate_column,
+                               aggregate_column->ordinal)) {
+        return PRDB_SDK_SQL_RESULT_INVALID_SHAPE;
+    }
+    if (aggregate_kind == PRDB_SDK_SQL_V5_AGGREGATE_MIN) {
+        aggregate_name = min_column_name_v1;
+        aggregate_name_len = sizeof(min_column_name_v1) - 1;
+    } else if (aggregate_kind == PRDB_SDK_SQL_V5_AGGREGATE_MAX) {
+        aggregate_name = max_column_name_v1;
+        aggregate_name_len = sizeof(max_column_name_v1) - 1;
+    } else {
+        return PRDB_SDK_SQL_RESULT_INVALID_ARGUMENT;
+    }
+    if (prdb_sdk_value_validate_v1(group_key) != PRDB_SDK_VALUE_VALID ||
+        (group_key->state == PRDB_SDK_VALUE_STATE_VALUE &&
+         group_key->type_code != group_column->type_code) ||
+        prdb_sdk_value_validate_v1(aggregate_value) !=
+            PRDB_SDK_VALUE_VALID ||
+        aggregate_value->state == PRDB_SDK_VALUE_STATE_REDACTED ||
+        (aggregate_value->state == PRDB_SDK_VALUE_STATE_VALUE &&
+         aggregate_value->type_code != aggregate_column->type_code)) {
+        return PRDB_SDK_SQL_RESULT_INVALID_ROW;
+    }
+
+    writer.bytes = output;
+    writer.capacity = output_capacity;
+    writer.offset = 0;
+    if (!append_v1(&writer, magic, sizeof(magic)) ||
+        !append_u16_v1(&writer, PRDB_SDK_SQL_RESULT_WIRE_V1_VERSION) ||
+        !append_u16_v1(&writer, 2) ||
+        !append_u16_v1(&writer, (uint16_t)group_column->name_len) ||
+        !append_v1(&writer, group_column->name, group_column->name_len) ||
+        !append_u32_v1(&writer, group_column->type_code) ||
+        !append_u8_v1(&writer, group_column->decimal_precision) ||
+        !append_u8_v1(&writer, group_column->decimal_scale) ||
+        !append_u8_v1(&writer, (uint8_t)group_key->state) ||
+        !append_u32_v1(&writer,
+                       group_key->state == PRDB_SDK_VALUE_STATE_VALUE
+                           ? (uint32_t)group_key->data_len
+                           : 0) ||
+        !append_v1(&writer, group_key->data,
+                   group_key->state == PRDB_SDK_VALUE_STATE_VALUE
+                       ? group_key->data_len
+                       : 0) ||
+        !append_u16_v1(&writer, (uint16_t)aggregate_name_len) ||
+        !append_v1(&writer, aggregate_name, aggregate_name_len) ||
+        !append_u32_v1(&writer, aggregate_column->type_code) ||
+        !append_u8_v1(&writer, aggregate_column->decimal_precision) ||
+        !append_u8_v1(&writer, aggregate_column->decimal_scale) ||
+        !append_u8_v1(&writer, (uint8_t)aggregate_value->state) ||
+        !append_u32_v1(&writer,
+                       aggregate_value->state == PRDB_SDK_VALUE_STATE_VALUE
+                           ? (uint32_t)aggregate_value->data_len
+                           : 0) ||
+        !append_v1(&writer, aggregate_value->data,
+                   aggregate_value->state == PRDB_SDK_VALUE_STATE_VALUE
+                       ? aggregate_value->data_len
+                       : 0)) {
+        return PRDB_SDK_SQL_RESULT_LIMIT_EXCEEDED;
+    }
+    *output_len = writer.offset;
+    return PRDB_SDK_SQL_RESULT_OK;
+}
+
+int32_t prdb_sdk_sql_write_group_minmax_result_v1(
+    const prdb_host_api_v3 *host,
+    const prdb_sdk_sql_column_shape_v2 *group_column,
+    const prdb_sdk_value_v1 *group_key,
+    const prdb_sdk_sql_column_shape_v2 *aggregate_column,
+    const prdb_sdk_value_v1 *aggregate_value, uint32_t aggregate_kind,
+    uint8_t *output, uint64_t output_capacity, uint64_t *output_len) {
+    int32_t status;
+    uint64_t offset = 0;
+
+    if (output_len != NULL) *output_len = 0;
+    if (host == NULL || output_len == NULL ||
+        host->struct_size < sizeof(*host) ||
+        host->abi_version != PRDB_QUERY_ABI_V3_VERSION ||
+        host->write_result == NULL) {
+        return PRDB_SDK_SQL_RESULT_INVALID_ARGUMENT;
+    }
+    status = prdb_sdk_sql_encode_group_minmax_result_v1(
+        group_column, group_key, aggregate_column, aggregate_value,
+        aggregate_kind, output, output_capacity, output_len);
     if (status != PRDB_SDK_SQL_RESULT_OK) return status;
     while (offset < *output_len) {
         uint64_t chunk_length = *output_len - offset;

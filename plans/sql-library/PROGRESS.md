@@ -171,3 +171,10 @@
 - Implementation: `prdb_sdk_sql_execute_group_v5` validates planner/executor shape agreement, binds predicate parameters and the aggregate column, copies retained values into caller storage, closes an unfinished scan, groups keys with the existing kernel, and computes each MIN/MAX through `prdb_sdk_sql_minmax_v1`. All aggregate groups validate before callbacks; `LIMIT` is applied afterward. The callback receives the group key, typed aggregate view (canonical NULL for all-NULL groups), matching-row count, and v5 binding. COUNT(*) is also accepted by this runner and passes a NULL aggregate-value pointer.
 - Regression: `sdk_sql_execute_v5.c` exercises MIN, MAX, WHERE, post-group LIMIT, all-NULL groups, redacted aggregate rejection without callbacks, cursor close on materialization overflow, and stable group counts. The focused TinyCC fixture passed.
 - Remaining: SQLR output encoding/writing for MIN/MAX, column labels, SUM/AVG typing and overflow, and live sandbox integration remain open.
+
+## SQL-7 dependency: grouped MIN/MAX SQLR output — partial
+
+- Contract: [SQL library](../../specs/sql-library.md). Encode the group key using its declared metadata and a second aggregate field named `min` or `max` using the bound argument's declared type and Decimal metadata. Preserve VALUE/NULL group-key state and canonical NULL aggregate state; reject REDACTED or mismatched aggregate values.
+- Red/green evidence: the result fixture first failed to link because the grouped MIN/MAX encoder and writer symbols were missing. It now checks exact hand-authored MIN wire bytes, the MAX label/value path, typed Decimal metadata for NULL, redacted aggregate rejection, successful callback output, and callback failure handling.
+- Implementation: `prdb_sdk_sql_encode_group_minmax_result_v1` writes a standalone SQLR v1 record; its writer emits host-sized chunks through the v3 provisional result callback.
+- Remaining: compose the MIN/MAX writer into maintained query artifacts/live sandbox result relay; SUM/AVG typing and overflow rules remain unsupported.

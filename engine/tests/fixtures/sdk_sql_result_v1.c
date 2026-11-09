@@ -373,5 +373,90 @@ int main(void) {
         assert(grouped_output_len == 0 && counter.calls == 1 &&
                counter.total == PRDB_QUERY_MAX_RESULT_CHUNK_BYTES);
     }
+    {
+        static const uint8_t score_name[] = "score";
+        static const uint8_t key_bytes[] = {0, 0, 0, 42};
+        static const uint8_t min_bytes[] = {0, 0, 0, 3};
+        static const uint8_t expected_min[] = {
+            'S', 'Q', 'L', 'R', 0, 1, 0, 2,
+            0, 2, 'i', 'd', 0, 0, 0, PRDB_SDK_VALUE_TYPE_INTEGER,
+            0, 0, PRDB_SDK_VALUE_STATE_VALUE, 0, 0, 0, 4,
+            0, 0, 0, 42,
+            0, 3, 'm', 'i', 'n', 0, 0, 0, PRDB_SDK_VALUE_TYPE_INTEGER,
+            0, 0, PRDB_SDK_VALUE_STATE_VALUE, 0, 0, 0, 4,
+            0, 0, 0, 3};
+        prdb_sdk_sql_column_shape_v2 group_column = {
+            id_name, sizeof(id_name) - 1, 0,
+            PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0};
+        prdb_sdk_sql_column_shape_v2 aggregate_column = {
+            score_name, sizeof(score_name) - 1, 1,
+            PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0};
+        prdb_sdk_value_v1 group_key = {
+            sizeof(group_key), PRDB_SDK_VALUE_ABI_V1_VERSION,
+            PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_INTEGER,
+            key_bytes, sizeof(key_bytes)};
+        prdb_sdk_value_v1 aggregate_value = {
+            sizeof(aggregate_value), PRDB_SDK_VALUE_ABI_V1_VERSION,
+            PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_INTEGER,
+            min_bytes, sizeof(min_bytes)};
+
+        assert(prdb_sdk_sql_encode_group_minmax_result_v1(
+                   &group_column, &group_key, &aggregate_column,
+                   &aggregate_value, PRDB_SDK_SQL_V5_AGGREGATE_MIN, output,
+                   sizeof(output), &output_len) == PRDB_SDK_SQL_RESULT_OK);
+        assert(output_len == sizeof(expected_min));
+        assert(memcmp(output, expected_min, sizeof(expected_min)) == 0);
+        capture.calls = 0;
+        capture.length = 0;
+        assert(prdb_sdk_sql_write_group_minmax_result_v1(
+                   &host, &group_column, &group_key, &aggregate_column,
+                   &aggregate_value, PRDB_SDK_SQL_V5_AGGREGATE_MIN, output,
+                   sizeof(output), &output_len) == PRDB_SDK_SQL_RESULT_OK);
+        assert(capture.calls == 1 && capture.length == sizeof(expected_min));
+        assert(memcmp(capture.bytes, expected_min, sizeof(expected_min)) == 0);
+        assert(prdb_sdk_sql_encode_group_minmax_result_v1(
+                   &group_column, &group_key, &aggregate_column,
+                   &aggregate_value, PRDB_SDK_SQL_V5_AGGREGATE_MAX, output,
+                   sizeof(output), &output_len) == PRDB_SDK_SQL_RESULT_OK);
+        assert(output[27] == 0 && output[28] == 3 && output[29] == 'm' &&
+               output[30] == 'a' && output[31] == 'x' &&
+               output[43] == 0 && output[44] == 0 && output[45] == 0 &&
+               output[46] == 3);
+        capture.fail = 1;
+        capture.calls = 0;
+        capture.length = 0;
+        assert(prdb_sdk_sql_write_group_minmax_result_v1(
+                   &host, &group_column, &group_key, &aggregate_column,
+                   &aggregate_value, PRDB_SDK_SQL_V5_AGGREGATE_MAX, output,
+                   sizeof(output), &output_len) ==
+               PRDB_SDK_SQL_RESULT_WRITE_FAILED);
+        assert(capture.calls == 0 && capture.length == 0 && output_len == 0);
+        capture.fail = 0;
+
+        aggregate_value = (prdb_sdk_value_v1){
+            sizeof(aggregate_value), PRDB_SDK_VALUE_ABI_V1_VERSION,
+            PRDB_SDK_VALUE_STATE_NULL, 0, NULL, 0};
+        aggregate_column.type_code = PRDB_SDK_VALUE_TYPE_DECIMAL;
+        aggregate_column.decimal_precision = 10;
+        aggregate_column.decimal_scale = 2;
+        assert(prdb_sdk_sql_encode_group_minmax_result_v1(
+                   &group_column, &group_key, &aggregate_column,
+                   &aggregate_value, PRDB_SDK_SQL_V5_AGGREGATE_MAX, output,
+                   sizeof(output), &output_len) == PRDB_SDK_SQL_RESULT_OK);
+        assert(output[27] == 0 && output[28] == 3 && output[29] == 'm' &&
+               output[30] == 'a' && output[31] == 'x');
+        assert(output[35] == PRDB_SDK_VALUE_TYPE_DECIMAL &&
+               output[36] == 10 && output[37] == 2 &&
+               output[38] == PRDB_SDK_VALUE_STATE_NULL &&
+               output[39] == 0 && output[40] == 0 && output[41] == 0 &&
+               output[42] == 0);
+
+        aggregate_value.state = PRDB_SDK_VALUE_STATE_REDACTED;
+        assert(prdb_sdk_sql_encode_group_minmax_result_v1(
+                   &group_column, &group_key, &aggregate_column,
+                   &aggregate_value, PRDB_SDK_SQL_V5_AGGREGATE_MIN, output,
+                   sizeof(output), &output_len) == PRDB_SDK_SQL_RESULT_INVALID_ROW);
+        assert(output_len == 0);
+    }
     return 0;
 }
