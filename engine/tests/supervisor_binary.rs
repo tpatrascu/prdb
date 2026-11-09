@@ -25,6 +25,8 @@ fn supervisor_help_documents_explicit_runtime_and_compatibility_configuration() 
         "--max-pending-analytical",
         "--max-active-operational-per-principal",
         "--max-active-analytical-per-principal",
+        "--max-storage-active-snapshots",
+        "--max-storage-active-analytical-snapshots",
     ] {
         assert!(help.contains(option), "missing {option} from help");
     }

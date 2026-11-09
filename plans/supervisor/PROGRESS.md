@@ -138,3 +138,9 @@
 - Regression: `analytical_admission_cap_preserves_operational_capacity` proves the second analytical admission is rejected at a cap of one while an operational admission still succeeds under a global cap of three.
 - Contract: [workload profile](../../specs/workload-profile.md) and [storage manager](../../specs/storage-manager.md).
 - Limitation: this is an admission reserve, not a fair queue. Operational requests can still be rejected when the global cap is full; queue depth, wait scheduling, and progress guarantees under saturation remain open under WI-7.
+
+## WI-7 / SM-5: configure storage snapshot caps in the service — implemented
+
+- Behavior: `prdb-supervisor` exposes positive `--max-storage-active-snapshots` and `--max-storage-active-analytical-snapshots` settings and passes them to every storage manager created by the service, including after recovery/reopen. Defaults remain 128 total and 8 analytical snapshots.
+- Regression: `supervisor_help_documents_explicit_runtime_and_compatibility_configuration` checks both options are documented in `--help`; manager construction validates zero values.
+- Contract: [supervisor CLI](../../engine/src/bin/prdb-supervisor.rs), [storage manager](../../specs/storage-manager.md), and [workload profile](../../specs/workload-profile.md).

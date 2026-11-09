@@ -54,6 +54,8 @@ mod service {
         max_pending_analytical: Option<usize>,
         max_active_operational: Option<usize>,
         max_active_analytical: Option<usize>,
+        max_storage_active_snapshots: Option<usize>,
+        max_storage_active_analytical_snapshots: Option<usize>,
         max_active_operational_per_principal: Option<usize>,
         max_active_analytical_per_principal: Option<usize>,
         cpu_quota_us: Option<u64>,
@@ -90,6 +92,8 @@ mod service {
              [--max-active-operational N --max-active-analytical N]\n\
              [--max-active-operational-per-principal N\n\
              --max-active-analytical-per-principal N]\n\
+             [--max-storage-active-snapshots N\n\
+             --max-storage-active-analytical-snapshots N]\n\
              --cpu-quota-us N --cpu-period-us N --memory-max-bytes N --max-processes N\n\
              [--analytical-cpu-quota-us N --analytical-cpu-period-us N\n\
              --analytical-memory-max-bytes N --analytical-max-processes N]\n\
@@ -227,6 +231,22 @@ mod service {
             },
             validator,
         )?;
+        let default_storage_config = prdb_engine::storage_manager::StorageManagerConfig::default();
+        let storage_config = prdb_engine::storage_manager::StorageManagerConfig {
+            max_active_invocations: positive(
+                options
+                    .max_storage_active_snapshots
+                    .unwrap_or(default_storage_config.max_active_invocations),
+                "--max-storage-active-snapshots",
+            )?,
+            max_active_analytical_invocations: positive(
+                options
+                    .max_storage_active_analytical_snapshots
+                    .unwrap_or(default_storage_config.max_active_analytical_invocations),
+                "--max-storage-active-analytical-snapshots",
+            )?,
+            ..default_storage_config
+        };
         let instance = StorageInstance::open(&instance_dir)?;
         let runtime = GatewayServiceRuntimeConfig {
             admission: GatewayAdmissionConfig {
@@ -272,7 +292,7 @@ mod service {
         });
         let result = run_gateway_service_with_recovery(
             instance,
-            Default::default(),
+            storage_config,
             &staging,
             runtime,
             Arc::clone(&shutdown),
@@ -407,6 +427,15 @@ mod service {
                 }
                 "--max-active-analytical" => {
                     set!(max_active_analytical, value.parse::<usize>()?)
+                }
+                "--max-storage-active-snapshots" => {
+                    set!(max_storage_active_snapshots, value.parse::<usize>()?)
+                }
+                "--max-storage-active-analytical-snapshots" => {
+                    set!(
+                        max_storage_active_analytical_snapshots,
+                        value.parse::<usize>()?
+                    )
                 }
                 "--max-active-operational-per-principal" => {
                     set!(
