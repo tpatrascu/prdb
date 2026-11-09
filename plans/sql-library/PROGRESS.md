@@ -186,7 +186,7 @@
 - Red/green evidence: the maintained TinyCC grouping fixture now checks BIGINT summation with NULLs, BIGINT final overflow, intermediate cancellation, Decimal coefficient summation and Decimal result overflow, canonical empty input, and unchanged output on overflow.
 - Implementation: `prdb_sdk_sql_sum_v1` uses caller-owned output bytes and fixed-size accumulators sized for the 128-row cap. It validates Decimal input coefficients against declared precision and reports overflow only when the final exact sum exceeds the result type range. Failure leaves output view and bytes unchanged.
 - Verification: the focused TinyCC grouping fixture was force-rebuilt and passed with `-Wall -Wextra -Werror`.
-- Remaining: grouped SUM parser/binder support, runner aggregation and SQLR encoding/writing, AVG semantics, and live sandbox integration remain open.
+- Remaining: grouped runner aggregation and SQLR encoding/writing, AVG semantics, and live sandbox integration remain open.
 
 ## SQL-7 dependency: grouped SUM parser and binder — partial
 
@@ -195,3 +195,11 @@
 - Implementation: the v6 AST and binding have dedicated version tags and aggregate kind. The shared parser grammar accepts SUM only through the v6 entry point; v5 behavior remains unchanged. Binding reuses v5 group-key and column resolution, then enforces the numeric type set.
 - Verification: the focused TinyCC parser/binder fixture was force-rebuilt and passed with `-Wall -Wextra -Werror`.
 - Remaining: grouped SUM runner aggregation and SQLR output/writing, AVG semantics, and live sandbox integration remain open.
+
+## SQL-7 dependency: grouped SUM runner and SQLR output — partial
+
+- Contract: [SQL library](../../specs/sql-library.md) and [workload profile](../../specs/workload-profile.md). Execute v6 grouped `SUM(column)` with WHERE before grouping, at most 128 matching authorized rows, and a combined 1 MiB cap for copied keys and operands. Validate all aggregates before callbacks. Encode the aggregate as a `sum` SQLR field using BIGINT for integer inputs or DECIMAL(38,s) for Decimal inputs.
+- Implementation: `prdb_sdk_sql_execute_group_v6` validates planner/executor shape agreement, binds predicates and the numeric aggregate, materializes authorized rows into caller memory, closes the scan, groups stably, and computes each SUM with `prdb_sdk_sql_sum_v1`. It retains result bytes in a bounded stack array until callbacks finish. The SQLR v1 encoder/writer emits the widened result metadata and host-sized provisional chunks.
+- Regression: the maintained v6 executor fixture checks grouped integer SUM values and group counts; the SQLR fixture checks the `sum` label, BIGINT metadata/value, Decimal(38, scale) NULL metadata, redaction rejection, and writer callback output. The focused TinyCC fixtures passed.
+- Sandbox integration: the maintained `sql_v3_write_read.c` artifact now runs grouped `MIN(id)` and grouped `SUM(id)` after the update. `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` verifies the exact SUM SQLR record across the confined executor and result relay before durable commit.
+- Remaining: implement AVG semantics and add mixed-workload benchmarks.

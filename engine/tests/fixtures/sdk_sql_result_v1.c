@@ -406,6 +406,31 @@ int main(void) {
                    sizeof(output), &output_len) == PRDB_SDK_SQL_RESULT_OK);
         assert(output_len == sizeof(expected_min));
         assert(memcmp(output, expected_min, sizeof(expected_min)) == 0);
+        {
+            static const uint8_t sum_bytes[] = {0, 0, 0, 0, 0, 0, 0, 12};
+            prdb_sdk_value_v1 sum_value = {
+                sizeof(sum_value), PRDB_SDK_VALUE_ABI_V1_VERSION,
+                PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_BIGINT,
+                sum_bytes, sizeof(sum_bytes)};
+            assert(prdb_sdk_sql_encode_group_sum_result_v1(
+                       &group_column, &group_key, &aggregate_column,
+                       &sum_value, output, sizeof(output), &output_len) ==
+                   PRDB_SDK_SQL_RESULT_OK);
+            assert(output[27] == 0 && output[28] == 3 &&
+                   memcmp(output + 29, "sum", 3) == 0 &&
+                   output[35] == PRDB_SDK_VALUE_TYPE_BIGINT &&
+                   output[36] == 0 && output[37] == 0 &&
+                   output[38] == PRDB_SDK_VALUE_STATE_VALUE &&
+                   output[42] == 8 && output_len == 51);
+            capture.calls = 0;
+            capture.length = 0;
+            assert(prdb_sdk_sql_write_group_sum_result_v1(
+                       &host, &group_column, &group_key, &aggregate_column,
+                       &sum_value, output, sizeof(output), &output_len) ==
+                   PRDB_SDK_SQL_RESULT_OK);
+            assert(capture.calls == 1 && capture.length == output_len &&
+                   memcmp(capture.bytes, output, output_len) == 0);
+        }
         capture.calls = 0;
         capture.length = 0;
         assert(prdb_sdk_sql_write_group_minmax_result_v1(
@@ -450,12 +475,43 @@ int main(void) {
                output[38] == PRDB_SDK_VALUE_STATE_NULL &&
                output[39] == 0 && output[40] == 0 && output[41] == 0 &&
                output[42] == 0);
+        assert(prdb_sdk_sql_encode_group_sum_result_v1(
+                   &group_column, &group_key, &aggregate_column,
+                   &aggregate_value, output, sizeof(output), &output_len) ==
+               PRDB_SDK_SQL_RESULT_OK);
+        assert(output[35] == PRDB_SDK_VALUE_TYPE_DECIMAL &&
+               output[36] == 38 && output[37] == 2 &&
+               output[38] == PRDB_SDK_VALUE_STATE_NULL);
+        {
+            uint8_t decimal_sum_bytes[16] = {0};
+            prdb_sdk_value_v1 decimal_sum = {0};
+            decimal_sum_bytes[15] = 123;
+            decimal_sum = (prdb_sdk_value_v1){
+                sizeof(decimal_sum), PRDB_SDK_VALUE_ABI_V1_VERSION,
+                PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_DECIMAL,
+                decimal_sum_bytes, sizeof(decimal_sum_bytes)};
+            assert(prdb_sdk_sql_encode_group_sum_result_v1(
+                       &group_column, &group_key, &aggregate_column,
+                       &decimal_sum, output, sizeof(output), &output_len) ==
+                   PRDB_SDK_SQL_RESULT_OK);
+            assert(output_len == 59 &&
+                   output[35] == PRDB_SDK_VALUE_TYPE_DECIMAL &&
+                   output[36] == 38 && output[37] == 2 &&
+                   output[38] == PRDB_SDK_VALUE_STATE_VALUE &&
+                   output[42] == 16 && output[43] == 0 &&
+                   output[57] == 0 && output[58] == 123);
+        }
 
         aggregate_value.state = PRDB_SDK_VALUE_STATE_REDACTED;
         assert(prdb_sdk_sql_encode_group_minmax_result_v1(
                    &group_column, &group_key, &aggregate_column,
                    &aggregate_value, PRDB_SDK_SQL_V5_AGGREGATE_MIN, output,
                    sizeof(output), &output_len) == PRDB_SDK_SQL_RESULT_INVALID_ROW);
+        assert(output_len == 0);
+        assert(prdb_sdk_sql_encode_group_sum_result_v1(
+                   &group_column, &group_key, &aggregate_column,
+                   &aggregate_value, output, sizeof(output), &output_len) ==
+               PRDB_SDK_SQL_RESULT_INVALID_ROW);
         assert(output_len == 0);
     }
     return 0;

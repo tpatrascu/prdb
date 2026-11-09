@@ -20496,6 +20496,20 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         ]
         .concat()
     );
+    let grouped_sum = read_frame(&mut gateway)?.ok_or("missing grouped SUM SQLR result")?;
+    assert_eq!(grouped_sum.operation, Operation::GatewayResultData as u16);
+    assert_eq!(grouped_sum.request_id, accepted.request_id);
+    assert_eq!(
+        grouped_sum.payload,
+        [
+            b"SQLR".as_slice(),
+            &[
+                0, 1, 0, 2, 0, 2, b'i', b'd', 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 42, 0, 3,
+                b's', b'u', b'm', 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 42
+            ][..]
+        ]
+        .concat()
+    );
     drop(gateway);
     assert!(matches!(
         finalize_gateway_invocation_and_send_terminal(

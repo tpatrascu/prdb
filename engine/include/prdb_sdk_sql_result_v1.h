@@ -3,6 +3,7 @@
 
 #include "prdb_sdk_sql_v2.h"
 #include "prdb_sdk_sql_v5.h"
+#include "prdb_sdk_sql_v6.h"
 #include "prdb_query_abi_v3.h"
 
 #define PRDB_SDK_SQL_RESULT_V1_ABI_VERSION UINT32_C(1)
@@ -77,6 +78,25 @@ int32_t prdb_sdk_sql_write_group_minmax_result_v1(
     const prdb_sdk_value_v1 *group_key,
     const prdb_sdk_sql_column_shape_v2 *aggregate_column,
     const prdb_sdk_value_v1 *aggregate_value, uint32_t aggregate_kind,
+    uint8_t *output, uint64_t output_capacity, uint64_t *output_len);
+
+/* Encodes one grouped SUM SQLR row. The `sum` field is BIGINT for integer
+ * arguments and DECIMAL(38,s) for DECIMAL(p,s) arguments. */
+int32_t prdb_sdk_sql_encode_group_sum_result_v1(
+    const prdb_sdk_sql_column_shape_v2 *group_column,
+    const prdb_sdk_value_v1 *group_key,
+    const prdb_sdk_sql_column_shape_v2 *aggregate_input_column,
+    const prdb_sdk_value_v1 *aggregate_value,
+    uint8_t *output, uint64_t output_capacity, uint64_t *output_len);
+
+/* Encodes and emits one grouped SUM SQLR row in host-sized provisional
+ * chunks. */
+int32_t prdb_sdk_sql_write_group_sum_result_v1(
+    const prdb_host_api_v3 *host,
+    const prdb_sdk_sql_column_shape_v2 *group_column,
+    const prdb_sdk_value_v1 *group_key,
+    const prdb_sdk_sql_column_shape_v2 *aggregate_input_column,
+    const prdb_sdk_value_v1 *aggregate_value,
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len);
 
 #endif /* PRDB_SDK_SQL_RESULT_V1_H */
