@@ -21,6 +21,7 @@ typedef struct mock_state {
     uint32_t next_calls;
     uint32_t statement_failed;
     uint32_t cancelled;
+    uint32_t cancel_after_first_batch;
 } mock_state;
 
 typedef struct group_capture {
@@ -186,6 +187,9 @@ static int32_t executor_request(void *context, uint16_t operation,
             *response_len = sizeof(finished_reply);
         }
         ++mock->next_calls;
+        if (mock->next_calls == 1 && mock->cancel_after_first_batch) {
+            mock->cancelled = 1;
+        }
     } else if (operation == PRDB_SDK_EXECUTOR_OP_CLOSE_CURSOR) {
         static const uint8_t reply[] = {0, 1, 0};
         static const uint8_t continued_cursor_tail[15] = {
@@ -576,6 +580,7 @@ static void reset_scan(mock_state *mock, group_capture *capture,
     mock->next_calls = 0;
     mock->statement_failed = 0;
     mock->cancelled = 0;
+    mock->cancel_after_first_batch = 0;
     mock->batch_finished = finished;
     capture->calls = 0;
 }
@@ -953,5 +958,13 @@ int main(void) {
                      &capture) == PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
     assert(capture.calls == 0 && mock.next_calls == 0 &&
            mock.executor_calls == 3 && mock.statement_failed == 1);
+
+    mock.batch_len = make_rows(mock.batch, 0, keys, scores, value_states, 3);
+    reset_scan(&mock, &capture, 0);
+    mock.cancel_after_first_batch = 1;
+    assert(run_query(&mock, min_sql, sizeof(min_sql) - 1, NULL, 0, 64,
+                     &capture) == PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
+    assert(capture.calls == 0 && mock.next_calls == 1 &&
+           mock.executor_calls == 4 && mock.statement_failed == 1);
     return 0;
 }
