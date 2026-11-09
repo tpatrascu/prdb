@@ -20874,6 +20874,15 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         now + 3_600_000_000,
         &composite_rows,
     )?;
+    for row_id in [0xd3, 0xd4, 0xd5] {
+        assert!(
+            row(
+                &database,
+                &table_row_key(composite_table.table_id, id(row_id))
+            )?
+            .is_some()
+        );
+    }
     let joined_tuple = encode_tuple(
         &[ColumnSchema {
             scalar_type: ScalarType::Integer,
@@ -21246,6 +21255,17 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             .value()
             .to_vec(),
     );
+    let mut composite_policy_table_epoch =
+        table_write_with_versions(composite_table.table_id, schema.schema_id, 1, 2);
+    composite_policy_table_epoch.expected_value = Some(
+        database
+            .begin_read()?
+            .open_table(CATALOG)?
+            .get(id_catalog_key(5, composite_table.table_id).as_slice())?
+            .ok_or("sandbox composite table record missing")?
+            .value()
+            .to_vec(),
+    );
     let select_using_id = id(0x8a);
     let update_using_id = id(0x8b);
     let mut policy_writes = vec![
@@ -21302,6 +21322,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         dependency_write(insert_cell_policy_id, user_id, 5),
         insert_policy_table_epoch,
         joined_policy_table_epoch,
+        composite_policy_table_epoch,
     ];
     let make_using_expression = |expression_id: [u8; 16], name: &str| {
         let key = id_catalog_key(7, expression_id);
@@ -21529,6 +21550,36 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         None,
         true,
         "sandbox_join_select_cell_policy",
+    )?;
+    add_table_policy(
+        composite_table.table_id,
+        composite_table.column_ids[0],
+        id(0xd7),
+        1,
+        Some(select_using_id),
+        None,
+        false,
+        "sandbox_composite_select_policy",
+    )?;
+    add_table_policy(
+        composite_table.table_id,
+        composite_table.column_ids[0],
+        id(0xd8),
+        1,
+        Some(select_using_id),
+        None,
+        true,
+        "sandbox_composite_left_select_policy",
+    )?;
+    add_table_policy(
+        composite_table.table_id,
+        composite_table.column_ids[1],
+        id(0xd9),
+        1,
+        Some(select_using_id),
+        None,
+        true,
+        "sandbox_composite_right_select_policy",
     )?;
     let policy_invocation = id(0x87);
     let mut policy_audit = identity_audit_event(0x88, user_id, insert_policy_id);
@@ -21852,9 +21903,9 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             b"SQLR".as_slice(),
             &[
                 0, 1, 0, 3, 0, 8, b'l', b'e', b'f', b't', b'_', b'k', b'e', b'y', 0, 0, 0, 3, 0, 0,
-                1, 0, 0, 0, 4, 0, 0, 0, 1, 0, 9, b'r', b'i', b'g', b'h', b't', b'_', b'k', b'e',
-                b'y', 0, 0, 0, 3, 0, 0, 1, 0, 0, 0, 4, 0, 0, 0, 7, 0, 5, b'c', b'o', b'u', b'n',
-                b't', 0, 0, 0, 4, 0, 0, 1, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 2,
+                0, 0, 0, 0, 4, 0, 0, 0, 1, 0, 9, b'r', b'i', b'g', b'h', b't', b'_', b'k', b'e',
+                b'y', 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 7, 0, 5, b'c', b'o', b'u', b'n',
+                b't', 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 2,
             ][..],
         ]
         .concat()
@@ -21867,9 +21918,9 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             b"SQLR".as_slice(),
             &[
                 0, 1, 0, 3, 0, 8, b'l', b'e', b'f', b't', b'_', b'k', b'e', b'y', 0, 0, 0, 3, 0, 0,
-                1, 0, 0, 0, 4, 0, 0, 0, 2, 0, 9, b'r', b'i', b'g', b'h', b't', b'_', b'k', b'e',
-                b'y', 0, 0, 0, 3, 0, 0, 1, 0, 0, 0, 4, 0, 0, 0, 9, 0, 5, b'c', b'o', b'u', b'n',
-                b't', 0, 0, 0, 4, 0, 0, 1, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 1,
+                0, 0, 0, 0, 4, 0, 0, 0, 2, 0, 9, b'r', b'i', b'g', b'h', b't', b'_', b'k', b'e',
+                b'y', 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 9, 0, 5, b'c', b'o', b'u', b'n',
+                b't', 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 1,
             ][..],
         ]
         .concat()
@@ -21882,9 +21933,9 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             b"SQLR".as_slice(),
             &[
                 0, 1, 0, 3, 0, 8, b'l', b'e', b'f', b't', b'_', b'k', b'e', b'y', 0, 0, 0, 3, 0, 0,
-                1, 0, 0, 0, 4, 0, 0, 0, 2, 0, 9, b'r', b'i', b'g', b'h', b't', b'_', b'k', b'e',
-                b'y', 0, 0, 0, 3, 0, 0, 1, 0, 0, 0, 4, 0, 0, 0, 9, 0, 5, b'c', b'o', b'u', b'n',
-                b't', 0, 0, 0, 4, 0, 0, 1, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 1,
+                0, 0, 0, 0, 4, 0, 0, 0, 2, 0, 9, b'r', b'i', b'g', b'h', b't', b'_', b'k', b'e',
+                b'y', 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 9, 0, 5, b'c', b'o', b'u', b'n',
+                b't', 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 1,
             ][..],
         ]
         .concat()
@@ -21897,9 +21948,9 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             b"SQLR".as_slice(),
             &[
                 0, 1, 0, 3, 0, 8, b'l', b'e', b'f', b't', b'_', b'k', b'e', b'y', 0, 0, 0, 3, 0, 0,
-                1, 0, 0, 0, 4, 0, 0, 0, 1, 0, 9, b'r', b'i', b'g', b'h', b't', b'_', b'k', b'e',
-                b'y', 0, 0, 0, 3, 0, 0, 1, 0, 0, 0, 4, 0, 0, 0, 7, 0, 5, b'c', b'o', b'u', b'n',
-                b't', 0, 0, 0, 4, 0, 0, 1, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 2,
+                0, 0, 0, 0, 4, 0, 0, 0, 1, 0, 9, b'r', b'i', b'g', b'h', b't', b'_', b'k', b'e',
+                b'y', 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 7, 0, 5, b'c', b'o', b'u', b'n',
+                b't', 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 2,
             ][..],
         ]
         .concat()
