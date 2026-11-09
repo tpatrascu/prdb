@@ -18542,6 +18542,110 @@ fn token_admission_checks_expiry_secret_revocation_and_commit_guards()
     ));
     assert_eq!(lookup_outcome(&database, id(80), user_id, now)?, None);
 
+    let (mut rename_writer, rename_roles) = storage.begin_token_authenticated_invocation(
+        id(0x8a),
+        id(0x85),
+        &login_disable_secret,
+        now + 3_600_000_000,
+        2,
+        1024,
+    )?;
+    assert!(rename_roles.is_empty());
+    rename_writer.stage_patch_authorized(
+        prdb_engine::overlay::RowId {
+            table: schema.table_id,
+            row: row_id,
+        },
+        &projection,
+        &[FieldPatch {
+            ordinal: 0,
+            value: Some(ScalarValue::Bytea(
+                b"must not publish after identity rename".to_vec(),
+            )),
+        }],
+    )?;
+    let renamed_payload = encode_tuple(
+        &schema.columns,
+        schema.schema_version,
+        &[Some(ScalarValue::Bytea(
+            b"must not publish after identity rename".to_vec(),
+        ))],
+    )?;
+    let renamed_index = typed_bytea_index_key([0x44; 16], &row_key, &renamed_payload);
+    let renamed_index_key = renamed_index.key.clone();
+    rename_writer.stage_index_membership(
+        prdb_engine::overlay::RowId {
+            table: schema.table_id,
+            row: row_id,
+        },
+        original_index_key_for_assert.clone(),
+        false,
+    )?;
+    rename_writer.stage_index_membership(
+        prdb_engine::overlay::RowId {
+            table: schema.table_id,
+            row: row_id,
+        },
+        renamed_index.key,
+        true,
+    )?;
+    let rename_invocation = id(0x8b);
+    let mut rename_audit = identity_audit_event(0x8c, admin_user_id, user_id);
+    rename_audit.correlation_id = rename_invocation;
+    assert_eq!(
+        storage.rename_identity(
+            rename_invocation,
+            admin_user_id,
+            user_id,
+            "renamed_credential_user",
+            now + 3_600_000_000,
+            rename_audit,
+        )?,
+        4,
+    );
+    let rename_result = rename_writer.commit();
+    assert!(
+        matches!(
+            &rename_result,
+            Err(TransactionError::Commit(CommitError::Conflict))
+        ),
+        "renamed identity committed a stale update: {rename_result:?}"
+    );
+    assert_eq!(
+        decode_tuple(
+            &columns,
+            1,
+            &RowRecord::decode(
+                database
+                    .begin_read()?
+                    .open_table(ROWS)?
+                    .get(&row_key[..])?
+                    .ok_or("row disappeared after identity rename")?
+                    .value(),
+            )?
+            .payload,
+        )?
+        .values,
+        [Some(ScalarValue::Bytea(b"before token revoke".to_vec()))],
+        "identity rename's stale update was published"
+    );
+    let read = database.begin_read()?;
+    let indexes = read.open_table(schema::INDEXES)?;
+    assert!(
+        indexes
+            .get(original_index_key_for_assert.as_slice())?
+            .is_some()
+    );
+    assert!(indexes.get(renamed_index_key.as_slice())?.is_none());
+    drop(indexes);
+    drop(read);
+    assert_eq!(
+        lookup_outcome(&database, id(0x8a), user_id, now)?
+            .ok_or("missing identity-rename stale writer outcome")?
+            .status,
+        OutcomeStatus::Aborted
+    );
+
     let (mut login_disable_writer, login_roles) = storage.begin_token_authenticated_invocation(
         id(0x88),
         id(0x85),
@@ -18601,7 +18705,7 @@ fn token_admission_checks_expiry_secret_revocation_and_commit_guards()
             now + 3_600_000_000,
             login_disable_audit,
         )?,
-        4,
+        5,
     );
     let login_disable_result = login_disable_writer.commit();
     assert!(

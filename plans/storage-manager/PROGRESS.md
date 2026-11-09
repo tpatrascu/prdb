@@ -2108,3 +2108,11 @@
 - Implementation: no production change was needed; the identity epoch and verifier guards reject the stale write after the serialized LOGIN transition.
 - Verification: the focused regression passed. Rust formatting and warning-denied workspace Clippy passed; the full commit integration target passed serially with 126 tests and 3 delegated-cgroup tests ignored in the prescribed Rust/Cargo 1.95.0 Nix shell.
 - Remaining: stale-writer coverage for identity rename/drop and other authority-changing DDL routes remains open.
+
+## SM-5 / AU-6: identity rename conflicts with an authorized staged write — verified
+
+- Contract: a token-authenticated invocation admitted under a pinned principal authority snapshot cannot publish after the corresponding identity is renamed through the authorized StorageManager path.
+- Regression: `token_admission_checks_expiry_secret_revocation_and_commit_guards` stages an authorized row patch and index replacement, renames that user through `StorageManager::rename_identity` as a separate database administrator, and then verifies the stale writer conflicts and records an ABORTED outcome. The original row and index membership remain, and the replacement index membership is absent. LOGIN disable coverage in the same fixture now follows the rename and checks the resulting commit sequence.
+- Implementation: no production change was needed; the existing identity epoch guard rejects the stale finalization.
+- Verification: the focused regression passed. Under Rust/Cargo 1.95.0, the workspace build, formatting check, warning-denied Clippy, full workspace tests, and serial commit integration target passed. The commit target reported 126 passed and 3 delegated-cgroup tests ignored.
+- Remaining: stale-writer coverage for identity drop and other authority-changing DDL routes remains open.
