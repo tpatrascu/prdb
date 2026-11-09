@@ -131,4 +131,11 @@
 - Implementation: `prdb_sdk_sql_group_count_v1` compares typed values through the shared SQL comparator and returns representative input-row indexes with per-group counts. It allocates no heap memory and writes outputs only after validation and capacity checks.
 - Red/green evidence: `sdk_sql_group_v1.c` first failed to link because the kernel symbol was absent. It now covers stable grouping, repeated and NULL keys, REDACTED/type errors, insufficient output capacity, the 128-row bound, empty input, and output preservation on failure.
 - Verification: the complete TinyCC SDK suite passed. Locked workspace build, format check, warning-denied Clippy, and full workspace tests passed; 3 cgroup-dependent integration tests remain ignored.
-- Remaining: this is an SDK kernel only. SQL `GROUP BY` parsing, grouped result metadata/encoding, and execution integration remain pending; SUM/MIN/MAX/AVG and multiple group keys are also open.
+- Remaining: the kernel computes group membership/counts but does not yet produce SQL rows; parser/binder and grouped execution integration are tracked below. SUM/MIN/MAX/AVG and multiple group keys are also open.
+
+## SQL-7 dependency: grouped SELECT COUNT(*) parser and binder — partial
+
+- Contract: [SQL library](../../specs/sql-library.md). Accept `SELECT key, COUNT(*) FROM relation [WHERE predicate] GROUP BY key [LIMIT n]`, with one group key repeated as the only non-aggregate projection. Name matching is case-insensitive; output AST/binding records are separately versioned and preserve v1-v3 layouts.
+- Red/green evidence: the v4 fixture first failed to link because its parser and binder entry points were absent. It now checks predicate and LIMIT spans, case-insensitive grouping-key agreement, bound ordinal/type metadata, rejection of non-star aggregates, missing/mismatched/multiple group keys, misplaced LIMIT, missing key projection, trailing statements, and output preservation on parse/bind failure.
+- Verification: the maintained TinyCC SDK suite, locked workspace build, format check, warning-denied Clippy, and full workspace tests passed; the commit integration suite reported 125 passed and 3 cgroup-dependent ignored.
+- Remaining: the runner does not yet scan, aggregate, or encode grouped output rows. HAVING, ORDER BY on grouped output, multiple group keys, and SUM/MIN/MAX/AVG remain unsupported.
