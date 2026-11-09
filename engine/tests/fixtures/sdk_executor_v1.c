@@ -3,6 +3,16 @@
 #include <assert.h>
 #include <string.h>
 
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+_Static_assert(PRDB_SDK_EXECUTOR_OP_RESOLVE_RELATION == UINT16_C(0x1101), "resolve operation tag");
+_Static_assert(PRDB_SDK_EXECUTOR_OP_OPEN_SCAN == UINT16_C(0x1102), "open scan operation tag");
+_Static_assert(PRDB_SDK_EXECUTOR_OP_NEXT_BATCH == UINT16_C(0x1103), "next batch operation tag");
+_Static_assert(PRDB_SDK_EXECUTOR_OP_CLOSE_CURSOR == UINT16_C(0x1104), "close cursor operation tag");
+_Static_assert(PRDB_SDK_EXECUTOR_OP_STAGE_INSERT == UINT16_C(0x1110), "insert operation tag");
+_Static_assert(PRDB_SDK_EXECUTOR_OP_STAGE_UPDATE == UINT16_C(0x1111), "update operation tag");
+_Static_assert(PRDB_SDK_EXECUTOR_OP_STAGE_DELETE == UINT16_C(0x1112), "delete operation tag");
+#endif
+
 typedef struct mock_host {
     uint16_t expected_operation;
     const uint8_t *expected_request;

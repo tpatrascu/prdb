@@ -52,8 +52,8 @@ def render(schema):
             escaped = json.dumps(value)
             rust_value = escaped
             c_value = escaped
-        elif rust_type in ("u32", "u64") and c_type in ("UINT32_C", "UINT64_C"):
-            expected_c_type = "UINT32_C" if rust_type == "u32" else "UINT64_C"
+        elif rust_type in ("u16", "u32", "u64") and c_type in ("UINT16_C", "UINT32_C", "UINT64_C"):
+            expected_c_type = {"u16": "UINT16_C", "u32": "UINT32_C", "u64": "UINT64_C"}[rust_type]
             if c_type != expected_c_type or not isinstance(value, int) or value < 0:
                 raise ValueError(f"invalid integer constant {rust_name}")
             rust_value = str(value)

@@ -564,6 +564,244 @@
       "value": 67108864,
       "c_name": "PRDB_QUERY_MAX_TOTAL_RESULT_BYTES",
       "c_type": "UINT64_C"
+    },
+    {
+      "rust_name": "IPC_OP_BOOTSTRAP_DELIVER_CREDENTIAL",
+      "rust_type": "u16",
+      "value": 257,
+      "c_name": "PRDB_IPC_OP_BOOTSTRAP_DELIVER_CREDENTIAL",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_BOOTSTRAP_ACKNOWLEDGE_DELIVERY",
+      "rust_type": "u16",
+      "value": 258,
+      "c_name": "PRDB_IPC_OP_BOOTSTRAP_ACKNOWLEDGE_DELIVERY",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_RESOLVE_RELATION",
+      "rust_type": "u16",
+      "value": 4353,
+      "c_name": "PRDB_IPC_OP_RESOLVE_RELATION",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_OPEN_SCAN",
+      "rust_type": "u16",
+      "value": 4354,
+      "c_name": "PRDB_IPC_OP_OPEN_SCAN",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_NEXT_BATCH",
+      "rust_type": "u16",
+      "value": 4355,
+      "c_name": "PRDB_IPC_OP_NEXT_BATCH",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_CLOSE_CURSOR",
+      "rust_type": "u16",
+      "value": 4356,
+      "c_name": "PRDB_IPC_OP_CLOSE_CURSOR",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_STAGE_INSERT",
+      "rust_type": "u16",
+      "value": 4368,
+      "c_name": "PRDB_IPC_OP_STAGE_INSERT",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_STAGE_UPDATE",
+      "rust_type": "u16",
+      "value": 4369,
+      "c_name": "PRDB_IPC_OP_STAGE_UPDATE",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_STAGE_DELETE",
+      "rust_type": "u16",
+      "value": 4370,
+      "c_name": "PRDB_IPC_OP_STAGE_DELETE",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_DESCRIBE_RELATION",
+      "rust_type": "u16",
+      "value": 4609,
+      "c_name": "PRDB_IPC_OP_DESCRIBE_RELATION",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_ESTIMATE_SCAN",
+      "rust_type": "u16",
+      "value": 4610,
+      "c_name": "PRDB_IPC_OP_ESTIMATE_SCAN",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_FINALIZE_TRANSACTION",
+      "rust_type": "u16",
+      "value": 4865,
+      "c_name": "PRDB_IPC_OP_FINALIZE_TRANSACTION",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_ABORT_TRANSACTION",
+      "rust_type": "u16",
+      "value": 4866,
+      "c_name": "PRDB_IPC_OP_ABORT_TRANSACTION",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_SUPERVISOR_CANCEL_INVOCATION",
+      "rust_type": "u16",
+      "value": 4867,
+      "c_name": "PRDB_IPC_OP_SUPERVISOR_CANCEL_INVOCATION",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_SUPERVISOR_GET_INVOCATION_STATUS",
+      "rust_type": "u16",
+      "value": 4868,
+      "c_name": "PRDB_IPC_OP_SUPERVISOR_GET_INVOCATION_STATUS",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_AUTHENTICATE_SESSION",
+      "rust_type": "u16",
+      "value": 5121,
+      "c_name": "PRDB_IPC_OP_AUTHENTICATE_SESSION",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_CLOSE_SESSION",
+      "rust_type": "u16",
+      "value": 5122,
+      "c_name": "PRDB_IPC_OP_CLOSE_SESSION",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_PREPARE_SUBMISSION",
+      "rust_type": "u16",
+      "value": 5123,
+      "c_name": "PRDB_IPC_OP_PREPARE_SUBMISSION",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_UPLOAD_SUBMISSION_CHUNK",
+      "rust_type": "u16",
+      "value": 5124,
+      "c_name": "PRDB_IPC_OP_UPLOAD_SUBMISSION_CHUNK",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_SEAL_SUBMISSION",
+      "rust_type": "u16",
+      "value": 5125,
+      "c_name": "PRDB_IPC_OP_SEAL_SUBMISSION",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_START_SUBMISSION",
+      "rust_type": "u16",
+      "value": 5126,
+      "c_name": "PRDB_IPC_OP_START_SUBMISSION",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_CLIENT_GET_INVOCATION_STATUS",
+      "rust_type": "u16",
+      "value": 5127,
+      "c_name": "PRDB_IPC_OP_CLIENT_GET_INVOCATION_STATUS",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_CLIENT_CANCEL_INVOCATION",
+      "rust_type": "u16",
+      "value": 5128,
+      "c_name": "PRDB_IPC_OP_CLIENT_CANCEL_INVOCATION",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_SUBMIT_ADMINISTRATIVE_OPERATION",
+      "rust_type": "u16",
+      "value": 5129,
+      "c_name": "PRDB_IPC_OP_SUBMIT_ADMINISTRATIVE_OPERATION",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_OPEN_CLIENT_SESSION",
+      "rust_type": "u16",
+      "value": 5130,
+      "c_name": "PRDB_IPC_OP_OPEN_CLIENT_SESSION",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_PING_CLIENT_SESSION",
+      "rust_type": "u16",
+      "value": 5131,
+      "c_name": "PRDB_IPC_OP_PING_CLIENT_SESSION",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_GATEWAY_RESULT_DATA",
+      "rust_type": "u16",
+      "value": 5136,
+      "c_name": "PRDB_IPC_OP_GATEWAY_RESULT_DATA",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_GATEWAY_TERMINAL",
+      "rust_type": "u16",
+      "value": 5137,
+      "c_name": "PRDB_IPC_OP_GATEWAY_TERMINAL",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_GATEWAY_CLIENT_ERROR",
+      "rust_type": "u16",
+      "value": 5138,
+      "c_name": "PRDB_IPC_OP_GATEWAY_CLIENT_ERROR",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_COMMIT_ADMINISTRATIVE_DDL",
+      "rust_type": "u16",
+      "value": 5377,
+      "c_name": "PRDB_IPC_OP_COMMIT_ADMINISTRATIVE_DDL",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_ISSUE_CREDENTIAL",
+      "rust_type": "u16",
+      "value": 5378,
+      "c_name": "PRDB_IPC_OP_ISSUE_CREDENTIAL",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_REVOKE_CREDENTIAL",
+      "rust_type": "u16",
+      "value": 5379,
+      "c_name": "PRDB_IPC_OP_REVOKE_CREDENTIAL",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_LIST_CREDENTIALS",
+      "rust_type": "u16",
+      "value": 5380,
+      "c_name": "PRDB_IPC_OP_LIST_CREDENTIALS",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_ADMIN_CANCEL_INVOCATION",
+      "rust_type": "u16",
+      "value": 5381,
+      "c_name": "PRDB_IPC_OP_ADMIN_CANCEL_INVOCATION",
+      "c_type": "UINT16_C"
     }
   ]
 }
