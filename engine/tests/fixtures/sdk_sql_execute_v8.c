@@ -148,7 +148,12 @@ static int32_t executor_request(void *context, uint16_t operation,
                                 uint8_t *response, uint64_t capacity,
                                 uint64_t *response_len) {
     mock_state *mock = (mock_state *)context;
-    if (operation == PRDB_SDK_EXECUTOR_OP_RESOLVE_RELATION) {
+    if (operation == PRDB_SDK_EXECUTOR_OP_CHECK_CANCELLATION) {
+        static const uint8_t reply[] = {0, 1, 0};
+        assert(request_len == 0 && sizeof(reply) <= capacity);
+        memcpy(response, reply, sizeof(reply));
+        *response_len = sizeof(reply);
+    } else if (operation == PRDB_SDK_EXECUTOR_OP_RESOLVE_RELATION) {
         uint32_t index = relation_index(request, request_len);
         assert(mock->executor_len[index] <= capacity);
         memcpy(response, mock->executor[index], mock->executor_len[index]);

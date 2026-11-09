@@ -20,6 +20,7 @@ typedef struct mock_state {
     uint32_t executor_calls;
     uint32_t next_calls;
     uint32_t statement_failed;
+    uint32_t cancelled;
 } mock_state;
 
 typedef struct group_capture {
@@ -138,7 +139,12 @@ static int32_t executor_request(void *context, uint16_t operation,
                                 uint8_t *response, uint64_t capacity,
                                 uint64_t *response_len) {
     mock_state *mock = (mock_state *)context;
-    if (operation == PRDB_SDK_EXECUTOR_OP_RESOLVE_RELATION) {
+    if (operation == PRDB_SDK_EXECUTOR_OP_CHECK_CANCELLATION) {
+        const uint8_t reply[] = {0, 1, (uint8_t)mock->cancelled};
+        assert(request_len == 0 && sizeof(reply) <= capacity);
+        memcpy(response, reply, sizeof(reply));
+        *response_len = sizeof(reply);
+    } else if (operation == PRDB_SDK_EXECUTOR_OP_RESOLVE_RELATION) {
         static const uint8_t expected[] = {
             0, 1, 0, 3, 0, 7, 'a', 'p', 'p', 'w', 'i', 'd', 'g', 'e', 't', 's'};
         assert(request_len == sizeof(expected));
@@ -185,16 +191,24 @@ static int32_t executor_request(void *context, uint16_t operation,
         static const uint8_t continued_cursor_tail[15] = {
             0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
             0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55};
+        static const uint8_t initial_cursor_tail[15] = {
+            0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44,
+            0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44};
         assert(request_len == 18);
         assert(request[0] == 0 && request[1] == 1 && request[2] == 7);
-        assert(memcmp(request + 3, continued_cursor_tail, 15) == 0);
+        assert(memcmp(request + 3,
+                      request[3] == 0x44 ? initial_cursor_tail
+                                          : continued_cursor_tail,
+                      15) == 0);
         assert(sizeof(reply) <= capacity);
         memcpy(response, reply, sizeof(reply));
         *response_len = sizeof(reply);
     } else {
         assert(!"unexpected executor operation");
     }
-    ++mock->executor_calls;
+    if (operation != PRDB_SDK_EXECUTOR_OP_CHECK_CANCELLATION) {
+        ++mock->executor_calls;
+    }
     return PRDB_QUERY_CALLBACK_OK;
 }
 
@@ -561,6 +575,7 @@ static void reset_scan(mock_state *mock, group_capture *capture,
     mock->executor_calls = 0;
     mock->next_calls = 0;
     mock->statement_failed = 0;
+    mock->cancelled = 0;
     mock->batch_finished = finished;
     capture->calls = 0;
 }
@@ -931,5 +946,12 @@ int main(void) {
            PRDB_SDK_SQL_EXEC_MATERIALIZATION_LIMIT);
     assert(capture.calls == 0 && mock.executor_calls == 4 &&
            mock.statement_failed == 1);
+
+    reset_scan(&mock, &capture, 0);
+    mock.cancelled = 1;
+    assert(run_query(&mock, min_sql, sizeof(min_sql) - 1, NULL, 0, 64,
+                     &capture) == PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
+    assert(capture.calls == 0 && mock.next_calls == 0 &&
+           mock.executor_calls == 3 && mock.statement_failed == 1);
     return 0;
 }

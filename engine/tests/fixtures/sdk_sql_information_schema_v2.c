@@ -135,10 +135,15 @@ static int32_t executor_request(void *context, uint16_t operation,
         0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
         0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66};
     static const uint8_t close_reply[] = {0, 1, 0};
+    static const uint8_t cancellation_reply[] = {0, 1, 0};
     mock_host *mock = (mock_host *)context;
     const uint8_t *source = NULL;
     uint32_t source_len = 0;
-    if (operation == PRDB_SDK_EXECUTOR_OP_RESOLVE_RELATION) {
+    if (operation == PRDB_SDK_EXECUTOR_OP_CHECK_CANCELLATION) {
+        assert(request_len == 0);
+        source = cancellation_reply;
+        source_len = sizeof(cancellation_reply);
+    } else if (operation == PRDB_SDK_EXECUTOR_OP_RESOLVE_RELATION) {
         assert(request_len == sizeof(resolve));
         assert(memcmp(request, resolve, sizeof(resolve)) == 0);
         source = mock->executor;
@@ -173,7 +178,9 @@ static int32_t executor_request(void *context, uint16_t operation,
     assert(source_len <= capacity);
     memcpy(response, source, source_len);
     *response_len = source_len;
-    ++mock->executor_calls;
+    if (operation != PRDB_SDK_EXECUTOR_OP_CHECK_CANCELLATION) {
+        ++mock->executor_calls;
+    }
     return PRDB_QUERY_CALLBACK_OK;
 }
 

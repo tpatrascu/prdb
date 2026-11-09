@@ -197,6 +197,12 @@ static int32_t execute_select_internal(
             final_status = PRDB_SDK_SQL_EXEC_REQUEST_LIMIT;
             break;
         }
+        int32_t cancelled = 0;
+        status = prdb_sdk_executor_check_cancelled_v1(host, &cancelled);
+        if (status != PRDB_SDK_EXECUTOR_OK || cancelled) {
+            final_status = PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR;
+            break;
+        }
         status = prdb_sdk_executor_next_batch_v1(
             host, cursor, max_candidates, max_batch_bytes, batch_response,
             batch_response_capacity, &batch_response_len, &batch, sizeof(batch));
@@ -700,6 +706,12 @@ int32_t prdb_sdk_sql_execute_update_v1(
             final_status = PRDB_SDK_SQL_EXEC_REQUEST_LIMIT;
             break;
         }
+        int32_t cancelled = 0;
+        status = prdb_sdk_executor_check_cancelled_v1(host, &cancelled);
+        if (status != PRDB_SDK_EXECUTOR_OK || cancelled) {
+            final_status = PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR;
+            break;
+        }
         status = prdb_sdk_executor_next_batch_v1(
             host, cursor, max_candidates, max_batch_bytes, batch_response,
             batch_response_capacity, &batch_response_len, &batch, sizeof(batch));
@@ -903,6 +915,12 @@ int32_t prdb_sdk_sql_execute_delete_v1(
     for (;;) {
         if (page_count >= PRDB_SDK_SQL_EXEC_MAX_NEXT_REQUESTS) {
             final_status = PRDB_SDK_SQL_EXEC_REQUEST_LIMIT;
+            break;
+        }
+        int32_t cancelled = 0;
+        status = prdb_sdk_executor_check_cancelled_v1(host, &cancelled);
+        if (status != PRDB_SDK_EXECUTOR_OK || cancelled) {
+            final_status = PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR;
             break;
         }
         status = prdb_sdk_executor_next_batch_v1(

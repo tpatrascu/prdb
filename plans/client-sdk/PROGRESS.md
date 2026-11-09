@@ -304,7 +304,7 @@
 - Implementation: `SubmissionClient::cancel` sends kind 9 once, validates the response shape and closed state set, and rejects a zero invocation ID. `prdb-client cancel` authenticates from the private credential file and prints the server acknowledgement.
 - Regression: mock TCP coverage verifies kind, invocation ID, secret zeroization, and all five valid state results. The real gateway/supervisor lifecycle cancels an already committed owned invocation through both the Rust client and compiled CLI, confirming committed terminal status is returned.
 - Verification: the focused cancellation mock and real multi-process lifecycle passed. Rust 1.95.0 workspace build, format check, warning-denied Clippy, and full serial tests passed; the commit suite reported 127 passed and 3 cgroup-dependent ignored, and the metadata-process suite reported 1 passed and 1 cgroup-dependent ignored. `make -f engine/sdk/Makefile test` also passed with TinyCC 0.9.27-unstable-2025-01-06.
-- Remaining: wire cooperative polling into C SQL/runtime loops, generated bindings, and other SDK/package release gates remain open.
+- Remaining: generated bindings and other SDK/package release gates remain open.
 
 
 ## SDK-5: administrator-authorized invocation cancellation — implemented
@@ -314,7 +314,7 @@
 - Implementation: `AdminClient::cancel_invocation` sends the typed cancellation request on its existing authenticated control connection. `prdb-client admin-cancel` loads a private administrator credential and reports the returned decision.
 - Regression: the mock verifies control HELLO/AUTH and kind-9 invocation cancellation. The live gateway/supervisor lifecycle uses both `AdminClient` and the compiled `admin-cancel` command on a committed invocation, verifying terminal reconciliation through the production control path.
 - Verification: the focused control-channel mock and real multi-process ADMIN/CLI regressions passed. Rust 1.95.0 workspace build, format check, warning-denied Clippy, and full serial workspace tests passed; the commit suite reported 127 passed and 3 cgroup-dependent ignored, and the metadata-process suite reported 1 passed and 1 cgroup-dependent ignored.
-- Remaining: wire cooperative polling into C SQL/runtime loops, generated bindings, and other SDK/package release gates remain open.
+- Remaining: generated bindings and other SDK/package release gates remain open.
 
 ## SDK-1 dependency: C executor cancellation checkpoint — implemented
 
@@ -322,4 +322,4 @@
 - Implementation: `prdb_sdk_executor_check_cancelled_v1` provides a bounded C SDK call for query runners to poll between work batches and validates exact response length, version, and boolean value.
 - Regression: the maintained TinyCC executor fixture verifies active and cancelled values, malformed boolean rejection, and unchanged output on error. A Rust storage/IPC regression checks the state before and after administrator cancellation.
 - Verification: focused fixture passed; full Rust and SDK checks recorded with the feature commit.
-- Remaining: integrate polling into SQL/runtime loops, and complete generated bindings and other SDK/package release gates.
+- Remaining: verify cancellation latency in the sandbox harness, and complete generated bindings and other SDK/package release gates.

@@ -356,3 +356,11 @@
 - Regression: the maintained executor fixture checks two-key filtering, the full eight-key runner bound, stable projected values, LIMIT, materialization-cap failure, and callback failure after both scans close. The confined artifact joins two authorized two-column relations on both keys and checks two exact SQLR result frames through the gateway relay.
 - Verification: the full TinyCC SDK suite and `make -f engine/sdk/Makefile sandbox-query-fixture` passed. Rust build, format check, warning-denied Clippy, serial locked workspace tests (127 commit tests passed; 3 cgroup-dependent tests ignored), and the dedicated confined acceptance passed. The acceptance ran the artifact through the real sandbox and durable commit using the configured NixOS runtime paths and a temporary delegated cgroup created with authorized root access. `git diff --check` passed.
 - Remaining: cancellation/deadlines, spill, and mixed-workload measurements remain open; aliases, self-joins, WHERE, and outer joins are unsupported.
+
+## SQL-8 dependency: cooperative cancellation in bounded scan runners — implemented
+
+- Contract: [SQL library](../../specs/sql-library.md) and [executor IPC](../../specs/ipc-protocol.md). Each SQL scan runner checks invocation cancellation/deadline state between bounded executor batches.
+- Implementation: SELECT, DML scan, grouped aggregation, and inner-join runners use `prdb_sdk_executor_check_cancelled_v1`. A positive result or malformed check stops scanning, closes a live cursor where possible, returns an executor error, and triggers the host's sticky statement-failure callback before partial result publication.
+- Red/green evidence: the maintained grouped SQL runner fixture initially rejected the newly emitted operation. It now simulates cancellation before its first batch and verifies no batch fetch or group callback occurs and statement failure is latched.
+- Verification: complete `make -f engine/sdk/Makefile test` passed with TinyCC 0.9.27-unstable-2025-01-06. Full workspace checks were run with the adjacent executor checkpoint increment.
+- Remaining: verify bounded cancellation latency and durable abort through the confined SQL artifact harness; spill and mixed-workload measurements remain open.

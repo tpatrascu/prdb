@@ -31,4 +31,4 @@
 - Behavior: executor IPC operation `0x1113` reports whether the invocation is cancelled or expired. Storage aborts before returning the positive state. The C SDK helper validates the versioned response and preserves its output on malformed replies.
 - Regression: a Rust storage/IPC integration check observes active and administrator-cancelled states; the maintained TinyCC fixture covers active, cancelled, and malformed boolean responses.
 - Verification: focused TinyCC executor fixture passed. Full workspace and SDK checks recorded with the feature commit.
-- Remaining: call the helper from SQL/runtime loops and verify bounded cancellation latency in the sandbox harness.
+- Remaining: verify bounded cancellation latency in the sandbox harness and connect statement-error behavior to storage abort.
