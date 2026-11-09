@@ -1089,12 +1089,20 @@ fn serve_gateway_client_session_inner<'db, S: Read + Write>(
 fn sanitized_gateway_error_payload(error: &GatewayRequestError) -> Vec<u8> {
     use crate::client_protocol::ClientSessionError;
     let code = match error {
-        GatewayRequestError::InvalidPayload => "invalid_request",
-        GatewayRequestError::ClockUnavailable => "unavailable",
-        GatewayRequestError::Dispatch(DispatchError::OperationNotAllowed { .. }) => "invalid_state",
-        GatewayRequestError::Dispatch(DispatchError::UnknownOperation(_)) => "invalid_request",
+        GatewayRequestError::InvalidPayload => {
+            crate::gateway::GatewayClientErrorCode::InvalidRequest
+        }
+        GatewayRequestError::ClockUnavailable => {
+            crate::gateway::GatewayClientErrorCode::Unavailable
+        }
+        GatewayRequestError::Dispatch(DispatchError::OperationNotAllowed { .. }) => {
+            crate::gateway::GatewayClientErrorCode::InvalidState
+        }
+        GatewayRequestError::Dispatch(DispatchError::UnknownOperation(_)) => {
+            crate::gateway::GatewayClientErrorCode::InvalidRequest
+        }
         GatewayRequestError::Client(ClientSessionError::AuthenticationRequired) => {
-            "unauthenticated"
+            crate::gateway::GatewayClientErrorCode::Unauthenticated
         }
         GatewayRequestError::Client(
             ClientSessionError::WrongMode
@@ -1102,23 +1110,18 @@ fn sanitized_gateway_error_payload(error: &GatewayRequestError) -> Vec<u8> {
             | ClientSessionError::HelloAlreadyAccepted
             | ClientSessionError::AuthenticationOutOfOrder
             | ClientSessionError::AlreadyAuthenticated,
-        ) => "invalid_state",
+        ) => crate::gateway::GatewayClientErrorCode::InvalidState,
         GatewayRequestError::Client(
             ClientSessionError::InvalidControlPayload(_) | ClientSessionError::UnsupportedRequest,
-        ) => "invalid_request",
-        GatewayRequestError::Client(ClientSessionError::ResourceLimit) => "resource_limit",
+        ) => crate::gateway::GatewayClientErrorCode::InvalidRequest,
+        GatewayRequestError::Client(ClientSessionError::ResourceLimit) => {
+            crate::gateway::GatewayClientErrorCode::ResourceLimit
+        }
         GatewayRequestError::Client(_)
         | GatewayRequestError::Start(_)
-        | GatewayRequestError::Staging(_) => "unavailable",
+        | GatewayRequestError::Staging(_) => crate::gateway::GatewayClientErrorCode::Unavailable,
     };
-    let message = match code {
-        "invalid_request" => "Request is invalid.",
-        "invalid_state" => "Request is not valid in the current session state.",
-        "unauthenticated" => "Authentication is required.",
-        "resource_limit" => "Request exceeds a configured limit.",
-        _ => "Requested resource is unavailable.",
-    };
-    format!("{{\"code\":\"{code}\",\"message\":\"{message}\"}}").into_bytes()
+    code.payload().to_vec()
 }
 
 fn close_gateway_client_session(

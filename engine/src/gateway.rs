@@ -428,6 +428,39 @@ pub enum GatewayConnectionError {
     AuthenticationRateLimited,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GatewayClientErrorCode {
+    InvalidRequest,
+    InvalidState,
+    Unauthenticated,
+    ResourceLimit,
+    Unavailable,
+}
+
+impl GatewayClientErrorCode {
+    pub(crate) fn payload(self) -> &'static [u8] {
+        match self {
+            Self::InvalidRequest => br#"{"code":"invalid_request","message":"Request is invalid."}"#,
+            Self::InvalidState => br#"{"code":"invalid_state","message":"Request is not valid in the current session state."}"#,
+            Self::Unauthenticated => br#"{"code":"unauthenticated","message":"Authentication is required."}"#,
+            Self::ResourceLimit => br#"{"code":"resource_limit","message":"Request exceeds a configured limit."}"#,
+            Self::Unavailable => br#"{"code":"unavailable","message":"Requested resource is unavailable."}"#,
+        }
+    }
+
+    pub(crate) fn from_payload(payload: &[u8]) -> Option<Self> {
+        [
+            Self::InvalidRequest,
+            Self::InvalidState,
+            Self::Unauthenticated,
+            Self::ResourceLimit,
+            Self::Unavailable,
+        ]
+        .into_iter()
+        .find(|code| code.payload() == payload)
+    }
+}
+
 impl std::fmt::Display for GatewayConnectionError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "gateway connection failed: {self:?}")
@@ -605,14 +638,7 @@ fn serve_tcp_client_connection_inner<C: GatewayClientStream, S: Read + Write>(
 }
 
 fn is_sanitized_gateway_error_payload(payload: &[u8]) -> bool {
-    const ALLOWED: [&[u8]; 5] = [
-        br#"{"code":"invalid_request","message":"Request is invalid."}"#,
-        br#"{"code":"invalid_state","message":"Request is not valid in the current session state."}"#,
-        br#"{"code":"unauthenticated","message":"Authentication is required."}"#,
-        br#"{"code":"resource_limit","message":"Request exceeds a configured limit."}"#,
-        br#"{"code":"unavailable","message":"Requested resource is unavailable."}"#,
-    ];
-    ALLOWED.contains(&payload)
+    GatewayClientErrorCode::from_payload(payload).is_some()
 }
 
 fn write_client_error<C: GatewayClientStream>(
@@ -981,4 +1007,47 @@ fn client_request_to_ipc(
         _ => return Err(GatewayConnectionError::UnsupportedClientKind(kind)),
     };
     Ok((operation, payload))
+}
+
+#[cfg(test)]
+mod gateway_error_payload_tests {
+    use super::GatewayClientErrorCode as ErrorCode;
+
+    #[test]
+    fn gateway_error_payloads_have_one_canonical_v1_encoding() {
+        let cases = [
+            (
+                ErrorCode::InvalidRequest,
+                br#"{"code":"invalid_request","message":"Request is invalid."}"#.as_slice(),
+            ),
+            (
+                ErrorCode::InvalidState,
+                br#"{"code":"invalid_state","message":"Request is not valid in the current session state."}"#.as_slice(),
+            ),
+            (
+                ErrorCode::Unauthenticated,
+                br#"{"code":"unauthenticated","message":"Authentication is required."}"#.as_slice(),
+            ),
+            (
+                ErrorCode::ResourceLimit,
+                br#"{"code":"resource_limit","message":"Request exceeds a configured limit."}"#.as_slice(),
+            ),
+            (
+                ErrorCode::Unavailable,
+                br#"{"code":"unavailable","message":"Requested resource is unavailable."}"#.as_slice(),
+            ),
+        ];
+        for (code, expected) in cases {
+            assert_eq!(code.payload(), expected);
+            assert_eq!(ErrorCode::from_payload(expected), Some(code));
+        }
+        assert_eq!(
+            ErrorCode::from_payload(br#"{"code":"invalid_request"}"#),
+            None
+        );
+        assert_eq!(
+            ErrorCode::from_payload(br#"{"code":"invalid_request","message":"secret detail"}"#),
+            None
+        );
+    }
 }
