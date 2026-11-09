@@ -2,10 +2,20 @@
 
 use std::io::{Read, Write};
 
-const MAGIC: &[u8; 4] = b"PRDI";
-pub const FRAME_VERSION: u16 = 1;
-pub const MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
-pub const HEADER_LEN: usize = 20;
+const MAGIC_OFFSET: usize = crate::query_abi::IPC_FRAME_MAGIC_OFFSET as usize;
+const MAGIC_LEN: usize = crate::query_abi::IPC_FRAME_MAGIC_LEN as usize;
+const VERSION_OFFSET: usize = crate::query_abi::IPC_FRAME_VERSION_OFFSET as usize;
+const VERSION_LEN: usize = crate::query_abi::IPC_FRAME_VERSION_LEN as usize;
+const OPERATION_OFFSET: usize = crate::query_abi::IPC_FRAME_OPERATION_OFFSET as usize;
+const OPERATION_LEN: usize = crate::query_abi::IPC_FRAME_OPERATION_LEN as usize;
+const REQUEST_ID_OFFSET: usize = crate::query_abi::IPC_FRAME_REQUEST_ID_OFFSET as usize;
+const REQUEST_ID_LEN: usize = crate::query_abi::IPC_FRAME_REQUEST_ID_LEN as usize;
+const PAYLOAD_LEN_OFFSET: usize = crate::query_abi::IPC_FRAME_PAYLOAD_LEN_OFFSET as usize;
+const PAYLOAD_LEN_LEN: usize = crate::query_abi::IPC_FRAME_PAYLOAD_LEN_LEN as usize;
+const MAGIC: u32 = crate::query_abi::IPC_FRAME_MAGIC;
+pub const FRAME_VERSION: u16 = crate::query_abi::IPC_FRAME_VERSION;
+pub const MAX_PAYLOAD_BYTES: usize = crate::query_abi::IPC_FRAME_MAX_PAYLOAD_BYTES as usize;
+pub const HEADER_LEN: usize = crate::query_abi::IPC_FRAME_HEADER_LEN as usize;
 
 /// Service authority assigned to a connection by trusted channel provisioning.
 /// This value is never decoded from an IPC frame or request payload.
@@ -218,61 +228,86 @@ impl std::fmt::Display for FrameError {
 impl std::error::Error for FrameError {}
 
 pub fn encode_frame(frame: &IpcFrame) -> Result<Vec<u8>, FrameError> {
-    validate_operation_and_request(frame.operation, frame.request_id)?;
-    if frame.payload.len() > MAX_PAYLOAD_BYTES {
-        return Err(FrameError::PayloadTooLarge);
-    }
-    let payload_len =
-        u32::try_from(frame.payload.len()).map_err(|_| FrameError::PayloadTooLarge)?;
+    let payload_len = validate_frame(frame)?;
+    let header = encode_header(frame, payload_len);
     let mut encoded = Vec::with_capacity(HEADER_LEN + frame.payload.len());
-    encoded.extend_from_slice(MAGIC);
-    encoded.extend_from_slice(&FRAME_VERSION.to_be_bytes());
-    encoded.extend_from_slice(&frame.operation.to_be_bytes());
-    encoded.extend_from_slice(&frame.request_id.to_be_bytes());
-    encoded.extend_from_slice(&payload_len.to_be_bytes());
+    encoded.extend_from_slice(&header);
     encoded.extend_from_slice(&frame.payload);
     Ok(encoded)
 }
 
 pub fn write_frame<W: Write>(writer: &mut W, frame: &IpcFrame) -> Result<(), FrameError> {
+    let payload_len = validate_frame(frame)?;
+    let header = encode_header(frame, payload_len);
+    writer.write_all(&header).map_err(FrameError::Io)?;
+    writer.write_all(&frame.payload).map_err(FrameError::Io)
+}
+
+fn validate_frame(frame: &IpcFrame) -> Result<u32, FrameError> {
     validate_operation_and_request(frame.operation, frame.request_id)?;
     if frame.payload.len() > MAX_PAYLOAD_BYTES {
         return Err(FrameError::PayloadTooLarge);
     }
-    let payload_len =
-        u32::try_from(frame.payload.len()).map_err(|_| FrameError::PayloadTooLarge)?;
+    u32::try_from(frame.payload.len()).map_err(|_| FrameError::PayloadTooLarge)
+}
+
+fn encode_header(frame: &IpcFrame, payload_len: u32) -> [u8; HEADER_LEN] {
     let mut header = [0; HEADER_LEN];
-    header[..4].copy_from_slice(MAGIC);
-    header[4..6].copy_from_slice(&FRAME_VERSION.to_be_bytes());
-    header[6..8].copy_from_slice(&frame.operation.to_be_bytes());
-    header[8..16].copy_from_slice(&frame.request_id.to_be_bytes());
-    header[16..20].copy_from_slice(&payload_len.to_be_bytes());
-    writer.write_all(&header).map_err(FrameError::Io)?;
-    writer.write_all(&frame.payload).map_err(FrameError::Io)
+    header[MAGIC_OFFSET..MAGIC_OFFSET + MAGIC_LEN].copy_from_slice(&MAGIC.to_be_bytes());
+    header[VERSION_OFFSET..VERSION_OFFSET + VERSION_LEN]
+        .copy_from_slice(&FRAME_VERSION.to_be_bytes());
+    header[OPERATION_OFFSET..OPERATION_OFFSET + OPERATION_LEN]
+        .copy_from_slice(&frame.operation.to_be_bytes());
+    header[REQUEST_ID_OFFSET..REQUEST_ID_OFFSET + REQUEST_ID_LEN]
+        .copy_from_slice(&frame.request_id.to_be_bytes());
+    header[PAYLOAD_LEN_OFFSET..PAYLOAD_LEN_OFFSET + PAYLOAD_LEN_LEN]
+        .copy_from_slice(&payload_len.to_be_bytes());
+    header
 }
 
 pub fn read_frame<R: Read>(reader: &mut R) -> Result<Option<IpcFrame>, FrameError> {
     let mut header = [0u8; HEADER_LEN];
     loop {
-        match reader.read(&mut header[..1]) {
+        match reader.read(&mut header[MAGIC_OFFSET..MAGIC_OFFSET + 1]) {
             Ok(0) => return Ok(None),
             Ok(_) => break,
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(FrameError::Io(error)),
         }
     }
-    read_exact(reader, &mut header[1..])?;
-    if &header[..4] != MAGIC {
+    read_exact(reader, &mut header[MAGIC_OFFSET + 1..])?;
+    let magic = u32::from_be_bytes(
+        header[MAGIC_OFFSET..MAGIC_OFFSET + MAGIC_LEN]
+            .try_into()
+            .expect("fixed magic range"),
+    );
+    if magic != MAGIC {
         return Err(FrameError::InvalidMagic);
     }
-    let version = u16::from_be_bytes(header[4..6].try_into().expect("fixed header range"));
+    let version = u16::from_be_bytes(
+        header[VERSION_OFFSET..VERSION_OFFSET + VERSION_LEN]
+            .try_into()
+            .expect("fixed version range"),
+    );
     if version != FRAME_VERSION {
         return Err(FrameError::UnsupportedVersion(version));
     }
-    let operation = u16::from_be_bytes(header[6..8].try_into().expect("fixed header range"));
-    let request_id = u64::from_be_bytes(header[8..16].try_into().expect("fixed header range"));
+    let operation = u16::from_be_bytes(
+        header[OPERATION_OFFSET..OPERATION_OFFSET + OPERATION_LEN]
+            .try_into()
+            .expect("fixed operation range"),
+    );
+    let request_id = u64::from_be_bytes(
+        header[REQUEST_ID_OFFSET..REQUEST_ID_OFFSET + REQUEST_ID_LEN]
+            .try_into()
+            .expect("fixed request ID range"),
+    );
     validate_operation_and_request(operation, request_id)?;
-    let payload_len = u32::from_be_bytes(header[16..20].try_into().expect("fixed header range"));
+    let payload_len = u32::from_be_bytes(
+        header[PAYLOAD_LEN_OFFSET..PAYLOAD_LEN_OFFSET + PAYLOAD_LEN_LEN]
+            .try_into()
+            .expect("fixed payload length range"),
+    );
     let payload_len = usize::try_from(payload_len).map_err(|_| FrameError::PayloadTooLarge)?;
     if payload_len > MAX_PAYLOAD_BYTES {
         return Err(FrameError::PayloadTooLarge);

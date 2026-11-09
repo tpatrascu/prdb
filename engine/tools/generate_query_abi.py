@@ -64,6 +64,33 @@ def render(schema):
         rust_lines.append(f"pub const {rust_name}: {rust_type} = {rust_value};")
         c_lines.append(f"#define {c_name} {c_value}")
 
+    constant_values = {item["rust_name"]: item["value"] for item in constants}
+    frame_fields = (
+        ("IPC_FRAME_MAGIC_OFFSET", "IPC_FRAME_MAGIC_LEN", "IPC_FRAME_VERSION_OFFSET"),
+        ("IPC_FRAME_VERSION_OFFSET", "IPC_FRAME_VERSION_LEN", "IPC_FRAME_OPERATION_OFFSET"),
+        ("IPC_FRAME_OPERATION_OFFSET", "IPC_FRAME_OPERATION_LEN", "IPC_FRAME_REQUEST_ID_OFFSET"),
+        ("IPC_FRAME_REQUEST_ID_OFFSET", "IPC_FRAME_REQUEST_ID_LEN", "IPC_FRAME_PAYLOAD_LEN_OFFSET"),
+        ("IPC_FRAME_PAYLOAD_LEN_OFFSET", "IPC_FRAME_PAYLOAD_LEN_LEN", "IPC_FRAME_HEADER_LEN"),
+    )
+    for offset_name, length_name, next_offset_name in frame_fields:
+        try:
+            offset = constant_values[offset_name]
+            length = constant_values[length_name]
+            next_offset = constant_values[next_offset_name]
+        except KeyError as error:
+            raise ValueError(f"missing IPC frame constant {error.args[0]}") from error
+        if not all(isinstance(value, int) for value in (offset, length, next_offset)):
+            raise ValueError(f"IPC frame offsets and lengths must be integers: {offset_name}")
+        if length <= 0 or offset < 0 or offset + length != next_offset:
+            raise ValueError(f"IPC frame field is not contiguous: {offset_name}")
+    if constant_values.get("IPC_FRAME_MAGIC") != 0x50524449:
+        raise ValueError("IPC frame magic must encode the canonical PRDI bytes")
+    if constant_values.get("IPC_FRAME_VERSION") != 1:
+        raise ValueError("IPC frame version must be 1")
+    max_payload = constant_values.get("IPC_FRAME_MAX_PAYLOAD_BYTES")
+    if not isinstance(max_payload, int) or not 0 < max_payload <= 0xFFFFFFFF:
+        raise ValueError("IPC frame payload cap must fit the u32 wire field")
+
     c_lines.extend(["", "#endif /* PRDB_QUERY_ABI_CONSTANTS_H */", ""])
     rust_lines.append("")
 
