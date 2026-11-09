@@ -151,3 +151,9 @@
 - Red/green evidence: `start_retries_preserve_fifo_order_within_eligible_capacity` failed before the queue implementation because a later reservation took the freed slot. It now verifies non-barging order. `canceling_a_queued_start_releases_its_turn` checks cancellation does not strand a later eligible submission; the per-principal quota regression checks an unrelated principal can use otherwise available class capacity.
 - Contract: [supervisor](../../specs/supervisor.md) and [workload profile](../../specs/workload-profile.md).
 - Limitation: admission is retry-driven; the service does not asynchronously wake queued clients. This does not guarantee latency for storage commits, point reads, cancellation, or reclamation under host-wide resource saturation.
+
+## WI-7 / SM-5: validate staging and storage admission capacity together — implemented
+
+- Behavior: supervisor startup rejects a storage analytical snapshot cap below the configured analytical START cap or a total storage cap below the combined operational and analytical START caps. This prevents a configured staging slot from being consumed by a guaranteed storage-level admission rejection.
+- Regression: `storage_caps_must_cover_configured_supervisor_active_admissions` accepts defaults and rejects undersized analytical and total storage caps.
+- Contract: [supervisor](../../specs/supervisor.md), [storage manager](../../specs/storage-manager.md), and [workload profile](../../specs/workload-profile.md).

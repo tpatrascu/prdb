@@ -184,54 +184,53 @@ mod service {
         .map_err(|error| format!("invalid compatibility profile: {error:?}"))?;
         let validator = Arc::new(VersionedSubmissionMetadataValidator::new(profile));
         let default_staging_limits = StagingLimits::default();
-        let staging = StagingStore::new(
-            StagingLimits {
-                max_pending_operational: positive(
-                    options
-                        .max_pending_operational
-                        .unwrap_or(default_staging_limits.max_pending_operational),
-                    "--max-pending-operational",
-                )?,
-                max_pending_analytical: positive(
-                    options
-                        .max_pending_analytical
-                        .unwrap_or(default_staging_limits.max_pending_analytical),
-                    "--max-pending-analytical",
-                )?,
-                max_live_reservations_per_principal: positive(
-                    options
-                        .max_principal_reservations
-                        .unwrap_or(default_staging_limits.max_live_reservations_per_principal),
-                    "--max-principal-reservations",
-                )?,
-                max_active_operational: positive(
-                    options
-                        .max_active_operational
-                        .unwrap_or(default_staging_limits.max_active_operational),
-                    "--max-active-operational",
-                )?,
-                max_active_analytical: positive(
-                    options
-                        .max_active_analytical
-                        .unwrap_or(default_staging_limits.max_active_analytical),
-                    "--max-active-analytical",
-                )?,
-                max_active_operational_per_principal: positive(
-                    options
-                        .max_active_operational_per_principal
-                        .unwrap_or(default_staging_limits.max_active_operational_per_principal),
-                    "--max-active-operational-per-principal",
-                )?,
-                max_active_analytical_per_principal: positive(
-                    options
-                        .max_active_analytical_per_principal
-                        .unwrap_or(default_staging_limits.max_active_analytical_per_principal),
-                    "--max-active-analytical-per-principal",
-                )?,
-                ..default_staging_limits
-            },
-            validator,
-        )?;
+        let staging_limits = StagingLimits {
+            max_pending_operational: positive(
+                options
+                    .max_pending_operational
+                    .unwrap_or(default_staging_limits.max_pending_operational),
+                "--max-pending-operational",
+            )?,
+            max_pending_analytical: positive(
+                options
+                    .max_pending_analytical
+                    .unwrap_or(default_staging_limits.max_pending_analytical),
+                "--max-pending-analytical",
+            )?,
+            max_live_reservations_per_principal: positive(
+                options
+                    .max_principal_reservations
+                    .unwrap_or(default_staging_limits.max_live_reservations_per_principal),
+                "--max-principal-reservations",
+            )?,
+            max_active_operational: positive(
+                options
+                    .max_active_operational
+                    .unwrap_or(default_staging_limits.max_active_operational),
+                "--max-active-operational",
+            )?,
+            max_active_analytical: positive(
+                options
+                    .max_active_analytical
+                    .unwrap_or(default_staging_limits.max_active_analytical),
+                "--max-active-analytical",
+            )?,
+            max_active_operational_per_principal: positive(
+                options
+                    .max_active_operational_per_principal
+                    .unwrap_or(default_staging_limits.max_active_operational_per_principal),
+                "--max-active-operational-per-principal",
+            )?,
+            max_active_analytical_per_principal: positive(
+                options
+                    .max_active_analytical_per_principal
+                    .unwrap_or(default_staging_limits.max_active_analytical_per_principal),
+                "--max-active-analytical-per-principal",
+            )?,
+            ..default_staging_limits
+        };
+        validate_storage_admission_capacity(&staging_limits, &storage_config)?;
+        let staging = StagingStore::new(staging_limits, validator)?;
         let instance = StorageInstance::open(&instance_dir)?;
         let runtime = GatewayServiceRuntimeConfig {
             admission: GatewayAdmissionConfig {
@@ -489,6 +488,28 @@ mod service {
         })
     }
 
+    fn validate_storage_admission_capacity(
+        staging: &StagingLimits,
+        storage: &prdb_engine::storage_manager::StorageManagerConfig,
+    ) -> Result<(), String> {
+        if storage.max_active_analytical_invocations < staging.max_active_analytical {
+            return Err(format!(
+                "--max-storage-active-analytical-snapshots must be at least --max-active-analytical ({})",
+                staging.max_active_analytical
+            ));
+        }
+        let combined_active_limit = staging
+            .max_active_operational
+            .checked_add(staging.max_active_analytical)
+            .ok_or_else(|| "combined supervisor active admission limit overflows".to_owned())?;
+        if storage.max_active_invocations < combined_active_limit {
+            return Err(format!(
+                "--max-storage-active-snapshots must be at least the combined --max-active-operational and --max-active-analytical limit ({combined_active_limit})"
+            ));
+        }
+        Ok(())
+    }
+
     fn install_signal_handlers() -> Result<(), std::io::Error> {
         // SAFETY: the handler only performs an atomic store before shutdown.
         unsafe {
@@ -505,7 +526,36 @@ mod service {
 
     #[cfg(test)]
     mod tests {
-        use super::{Options, storage_manager_config};
+        use super::{Options, storage_manager_config, validate_storage_admission_capacity};
+        use prdb_engine::storage_manager::StorageManagerConfig;
+        use prdb_engine::supervisor::StagingLimits;
+
+        #[test]
+        fn storage_caps_must_cover_configured_supervisor_active_admissions() {
+            let staging = StagingLimits::default();
+            let storage = StorageManagerConfig::default();
+            assert!(validate_storage_admission_capacity(&staging, &storage).is_ok());
+
+            let insufficient_analytical = StorageManagerConfig {
+                max_active_analytical_invocations: 7,
+                ..storage
+            };
+            assert!(
+                validate_storage_admission_capacity(&staging, &insufficient_analytical)
+                    .unwrap_err()
+                    .contains("analytical")
+            );
+
+            let insufficient_global = StorageManagerConfig {
+                max_active_invocations: 71,
+                ..storage
+            };
+            assert!(
+                validate_storage_admission_capacity(&staging, &insufficient_global)
+                    .unwrap_err()
+                    .contains("combined")
+            );
+        }
 
         #[test]
         fn storage_snapshot_limits_use_cli_values_and_documented_defaults() {
