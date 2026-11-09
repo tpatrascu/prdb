@@ -12262,6 +12262,7 @@ fn admin_cancellation_sync_failure_quarantines_until_reopen()
                     memory_max_bytes: 64 * 1024 * 1024,
                     max_processes: 16,
                 },
+                analytical_resource_limits: None,
                 launch: prdb_engine::executor_launcher::ExecutorLaunchConfig {
                     executor_path: std::env::current_exe()?,
                     scratch_parent: std::env::temp_dir(),
@@ -19506,6 +19507,7 @@ fn gateway_service_listener_binds_peer_and_serves_hello() -> Result<(), Box<dyn 
                             memory_max_bytes: 64 * 1024 * 1024,
                             max_processes: 16,
                         },
+                        analytical_resource_limits: None,
                         launch: prdb_engine::executor_launcher::ExecutorLaunchConfig {
                             executor_path: executor_path.clone(),
                             scratch_parent: std::env::temp_dir(),
@@ -20147,6 +20149,7 @@ fn sandboxed_v3_sql_error_latches_failure_and_durably_aborts_after_partial_outpu
             memory_max_bytes: 256 * 1024 * 1024,
             max_processes: 32,
         },
+        analytical_resource_limits: None,
         launch: prdb_engine::executor_launcher::ExecutorLaunchConfig {
             executor_path: PathBuf::from(env!("CARGO_BIN_EXE_prdb-executor")),
             scratch_parent: std::env::temp_dir(),
@@ -20459,6 +20462,7 @@ fn sandboxed_v3_metadata_submission_commits_over_tcp() -> Result<(), Box<dyn std
             memory_max_bytes: 256 * 1024 * 1024,
             max_processes: 32,
         },
+        analytical_resource_limits: None,
         launch: prdb_engine::executor_launcher::ExecutorLaunchConfig {
             executor_path: PathBuf::from(env!("CARGO_BIN_EXE_prdb-executor")),
             scratch_parent: std::env::temp_dir(),
@@ -21721,6 +21725,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             memory_max_bytes: 256 * 1024 * 1024,
             max_processes: 32,
         },
+        analytical_resource_limits: None,
         launch: prdb_engine::executor_launcher::ExecutorLaunchConfig {
             executor_path: PathBuf::from(env!("CARGO_BIN_EXE_prdb-executor")),
             scratch_parent: std::env::temp_dir(),
@@ -22573,6 +22578,7 @@ fn sealed_start_admits_only_current_credentials_and_enforces_request_deadline()
             memory_max_bytes: 64 * 1024 * 1024,
             max_processes: 16,
         },
+        analytical_resource_limits: None,
         launch: prdb_engine::executor_launcher::ExecutorLaunchConfig {
             executor_path: std::env::current_exe()?,
             scratch_parent: std::env::temp_dir(),

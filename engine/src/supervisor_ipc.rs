@@ -104,7 +104,25 @@ impl GatewayAdmissionConfig {
 pub struct GatewayExecutorConfig {
     pub cgroup_parent: std::path::PathBuf,
     pub resource_limits: crate::linux_sandbox::WorkerResourceLimits,
+    /// Optional analytical profile. When absent, analytical submissions use
+    /// the operational profile for backwards-compatible deployments.
+    pub analytical_resource_limits: Option<crate::linux_sandbox::WorkerResourceLimits>,
     pub launch: crate::executor_launcher::ExecutorLaunchConfig,
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+impl GatewayExecutorConfig {
+    pub fn resource_limits_for(
+        &self,
+        workload_class: crate::supervisor::WorkloadClass,
+    ) -> crate::linux_sandbox::WorkerResourceLimits {
+        match workload_class {
+            crate::supervisor::WorkloadClass::Operational => self.resource_limits,
+            crate::supervisor::WorkloadClass::Analytical => self
+                .analytical_resource_limits
+                .unwrap_or(self.resource_limits),
+        }
+    }
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -1580,6 +1598,50 @@ mod worker_result_event_tests {
     use std::time::Duration;
 
     #[test]
+    fn workload_class_selects_the_configured_cgroup_profile() {
+        let operational = crate::linux_sandbox::WorkerResourceLimits {
+            cpu_quota_micros: 100_000,
+            cpu_period_micros: 100_000,
+            memory_max_bytes: 64 * 1024 * 1024,
+            max_processes: 16,
+        };
+        let analytical = crate::linux_sandbox::WorkerResourceLimits {
+            cpu_quota_micros: 200_000,
+            cpu_period_micros: 100_000,
+            memory_max_bytes: 512 * 1024 * 1024,
+            max_processes: 32,
+        };
+        let config = super::GatewayExecutorConfig {
+            cgroup_parent: std::env::temp_dir(),
+            resource_limits: operational,
+            analytical_resource_limits: Some(analytical),
+            launch: crate::executor_launcher::ExecutorLaunchConfig {
+                executor_path: std::env::current_exe().unwrap(),
+                scratch_parent: std::env::temp_dir(),
+                runtime_read_execute: Vec::new(),
+                runtime_read_only: Vec::new(),
+                cleanup_timeout: Duration::from_millis(10),
+            },
+        };
+        assert_eq!(
+            config.resource_limits_for(crate::supervisor::WorkloadClass::Operational),
+            operational
+        );
+        assert_eq!(
+            config.resource_limits_for(crate::supervisor::WorkloadClass::Analytical),
+            analytical
+        );
+        assert_eq!(
+            super::GatewayExecutorConfig {
+                analytical_resource_limits: None,
+                ..config
+            }
+            .resource_limits_for(crate::supervisor::WorkloadClass::Analytical),
+            operational
+        );
+    }
+
+    #[test]
     fn outcome_retention_period_is_applied_from_each_request_time() {
         let before = crate::credentials::now_unix_micros().expect("clock");
         let config = super::GatewayAdmissionConfig {
@@ -1763,6 +1825,7 @@ mod worker_result_event_tests {
                     memory_max_bytes: 64 * 1024 * 1024,
                     max_processes: 16,
                 },
+                analytical_resource_limits: None,
                 launch: crate::executor_launcher::ExecutorLaunchConfig {
                     executor_path: std::env::current_exe().unwrap(),
                     scratch_parent: std::env::temp_dir(),
@@ -1891,6 +1954,7 @@ mod worker_result_event_tests {
                     memory_max_bytes: 64 * 1024 * 1024,
                     max_processes: 16,
                 },
+                analytical_resource_limits: None,
                 launch: crate::executor_launcher::ExecutorLaunchConfig {
                     executor_path: std::env::current_exe().expect("current executable"),
                     scratch_parent: std::env::temp_dir(),

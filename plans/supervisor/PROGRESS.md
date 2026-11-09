@@ -1,5 +1,13 @@
 # Supervisor Progress
 
+## SU-2: per-class cgroup resource profiles — implemented
+
+- Behavior: deployments may configure an optional analytical per-invocation cgroup profile with CPU quota/period, memory, and process-count ceilings. Sealed `workload_class` selects the profile before cgroup creation; operational remains the required default and analytical falls back to it when no separate profile is configured.
+- Security/consistency: the class comes from immutable sealed submission metadata, and START still revalidates reservation ownership/state after cgroup setup. The class selects a trusted configured ceiling; it does not grant additional storage authority or override any limit.
+- Interface: `prdb-supervisor` accepts the complete optional flag set `--analytical-cpu-quota-us`, `--analytical-cpu-period-us`, `--analytical-memory-max-bytes`, and `--analytical-max-processes`; partial sets are rejected.
+- Verification: `cargo test -p prdb-engine --lib supervisor_ipc::worker_result_event_tests::workload_class_selects_the_configured_cgroup_profile --locked --offline -- --exact` passed. Locked workspace build, rustfmt check, warning-denied Clippy, and serial workspace tests passed in the documented Nix shell; cgroup-dependent sandbox tests remained ignored.
+- Remaining: aggregate class-wide queue/concurrency quotas and analytical prefetch/cache controls remain unimplemented.
+
 ## SU-2 dependency: bounded submission staging
 
 - Behavior: `StagingStore` binds each reservation to an authenticated connection/principal, enforces one reservation per connection, caps artifact/parameter sizes and chunk lengths, reserves global/per-principal quotas without preallocating declared bytes, requires exact contiguous offsets, validates content lengths and SHA-256 at seal, and exposes immutable bytes only during one-shot start admission. Disconnect reclaims unstarted reservations and returns started IDs for cancellation. Unstarted reservations have configurable expiry and an explicit reaper.
@@ -34,7 +42,7 @@
 - Behavior: PREPARE now stores `deadline_ms` and operational/analytical `workload_class` in the sealed submission metadata. It rejects zero or over-ceiling deadlines; the default ceiling is 15 minutes and is configurable.
 - Changed code and contract: [staging metadata](../../engine/src/supervisor.rs) and [supervisor admission contract](../../specs/supervisor.md).
 - Verification: staging tests cover deadline ceiling rejection and preservation of the accepted class/deadline through START.
-- Remaining: use these fields in scheduler quotas and launch configuration.
+- Remaining: aggregate class-wide queue/concurrency quotas and analytical prefetch/cache controls remain open; per-invocation cgroup selection is implemented above.
 
 ## SU-3 dependency: token-bound START and deadline enforcement
 

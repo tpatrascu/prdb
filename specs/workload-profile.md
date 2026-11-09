@@ -28,7 +28,7 @@ The v16 parser/binder and runner support two to eight qualified equality predica
 
 ## Mixed-Workload Scheduling
 
-The supervisor admits an invocation into an operational or analytical resource class, bounded by the caller's configured allowance. A client label cannot obtain unlimited priority or override budgets. Both classes retain snapshot isolation and the same permission model; read-only analytical grants are the default, not a mechanism to prohibit explicitly authorized writes.
+The supervisor admits an invocation into an operational or analytical resource class, bounded by the caller's configured allowance. The Linux supervisor may configure separate per-invocation CPU, memory, and process-count cgroup ceilings for the two classes. The analytical profile is optional and defaults to the operational profile. A client label selects only one of these trusted configured ceilings and cannot obtain unlimited priority or override budgets. Both classes retain snapshot isolation and the same permission model; read-only analytical grants are the default, not a mechanism to prohibit explicitly authorized writes. This per-invocation selection does not yet provide separate queue reservations or aggregate class-wide concurrency quotas.
 
 Reserve queue capacity and progress for commits, redb commits, point reads, cancellation, and reclamation. Limit analytical queue depth, prefetch, CPU, output bytes, and snapshot age. Use scan-resistant cache admission so sequential scans do not evict the entire operational working set. Permit larger analytical budgets only through bounded admission configuration; never silently refresh their snapshots to relieve history pressure.
 

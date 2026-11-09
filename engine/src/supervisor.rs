@@ -597,6 +597,30 @@ impl StagingStore {
             crate::linux_sandbox::WorkerCgroup,
         ) -> Result<T, E>,
     ) -> Result<T, StartError<E>> {
+        self.start_with_worker_cgroup_selected(
+            owner,
+            invocation_id,
+            cgroup_parent,
+            |_| limits,
+            revalidate_and_launch,
+        )
+    }
+
+    /// Select resource limits from immutable sealed metadata before creating
+    /// the invocation cgroup. The sealed reservation is revalidated by
+    /// `start_with` after setup, so cancellation and one-shot START semantics
+    /// remain authoritative.
+    pub fn start_with_worker_cgroup_selected<T, E>(
+        &self,
+        owner: StagingOwner,
+        invocation_id: [u8; 16],
+        cgroup_parent: impl AsRef<std::path::Path>,
+        select_limits: impl FnOnce(&SubmissionMetadata) -> crate::linux_sandbox::WorkerResourceLimits,
+        revalidate_and_launch: impl FnOnce(
+            &SealedSubmission,
+            crate::linux_sandbox::WorkerCgroup,
+        ) -> Result<T, E>,
+    ) -> Result<T, StartError<E>> {
         let cgroup_parent = cgroup_parent.as_ref();
         crate::linux_sandbox::probe(cgroup_parent)
             .require_supported()
@@ -605,7 +629,7 @@ impl StagingStore {
         // Check readiness without retaining artifact bytes outside the
         // staging quota. Cancellation may still win; `start_with` rechecks
         // ownership and state before invoking the callback.
-        {
+        let metadata = {
             let mut state = self
                 .state
                 .lock()
@@ -621,10 +645,13 @@ impl StagingStore {
             if reservation.state != ReservationState::Sealed {
                 return Err(StartError::Staging(StagingError::InvalidState));
             }
-            if reservation.sealed.is_none() {
-                return Err(StartError::Staging(StagingError::InvalidState));
-            }
+            let sealed = reservation
+                .sealed
+                .as_ref()
+                .ok_or(StartError::Staging(StagingError::InvalidState))?;
+            sealed.metadata.clone()
         };
+        let limits = select_limits(&metadata);
         let cgroup =
             crate::linux_sandbox::WorkerCgroup::create(cgroup_parent, invocation_id, limits)
                 .map_err(StartError::WorkerSetup)?;

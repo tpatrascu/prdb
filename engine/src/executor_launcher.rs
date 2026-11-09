@@ -385,11 +385,35 @@ pub fn start_and_launch_executor<T, E>(
     config: &ExecutorLaunchConfig,
     admit: impl FnOnce(&SealedSubmission) -> Result<T, E>,
 ) -> Result<(T, RunningExecutor), crate::supervisor::StartError<ExecutorStartError<E>>> {
-    staging.start_with_worker_cgroup(
+    start_and_launch_executor_selected(
+        staging,
         owner,
         invocation_id,
         cgroup_parent,
-        limits,
+        |_| limits,
+        config,
+        admit,
+    )
+}
+
+/// Variant that selects cgroup limits from immutable sealed submission
+/// metadata before creating the worker cgroup.
+pub fn start_and_launch_executor_selected<T, E>(
+    staging: &crate::supervisor::StagingStore,
+    owner: crate::supervisor::StagingOwner,
+    invocation_id: [u8; 16],
+    cgroup_parent: impl AsRef<Path>,
+    select_limits: impl FnOnce(
+        &crate::supervisor::SubmissionMetadata,
+    ) -> crate::linux_sandbox::WorkerResourceLimits,
+    config: &ExecutorLaunchConfig,
+    admit: impl FnOnce(&SealedSubmission) -> Result<T, E>,
+) -> Result<(T, RunningExecutor), crate::supervisor::StartError<ExecutorStartError<E>>> {
+    staging.start_with_worker_cgroup_selected(
+        owner,
+        invocation_id,
+        cgroup_parent,
+        select_limits,
         |submission, cgroup| {
             let channels = match WorkerChannelPair::new() {
                 Ok(channels) => channels,

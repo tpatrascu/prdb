@@ -6510,12 +6510,12 @@ impl ClientConnectionSession {
         let mut token_secret = *self.token_secret.as_ref().ok_or(ClientStartError::Session(
             ClientSessionError::AuthenticationRequired,
         ))?;
-        let result = crate::executor_launcher::start_and_launch_executor(
+        let result = crate::executor_launcher::start_and_launch_executor_selected(
             staging,
             owner,
             invocation_id,
             &executor.cgroup_parent,
-            executor.resource_limits,
+            |metadata| executor.resource_limits_for(metadata.workload_class),
             &executor.launch,
             |submission| {
                 let duration = std::time::Duration::from_millis(submission.metadata().deadline_ms);

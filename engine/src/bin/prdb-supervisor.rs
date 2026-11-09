@@ -53,6 +53,10 @@ mod service {
         cpu_period_us: Option<u64>,
         memory_max_bytes: Option<u64>,
         max_processes: Option<u64>,
+        analytical_cpu_quota_us: Option<u64>,
+        analytical_cpu_period_us: Option<u64>,
+        analytical_memory_max_bytes: Option<u64>,
+        analytical_max_processes: Option<u64>,
     }
 
     pub fn main() {
@@ -75,6 +79,8 @@ mod service {
              --cpu-baseline NAME --sdk-release NUMBER --allowed-dependency NAME (repeatable)\n\
              --retention-seconds N --max-rows N --max-bytes N\n\
              --cpu-quota-us N --cpu-period-us N --memory-max-bytes N --max-processes N\n\
+             [--analytical-cpu-quota-us N --analytical-cpu-period-us N\n\
+             --analytical-memory-max-bytes N --analytical-max-processes N]\n\
              --runtime-read-only PATH (repeatable)"
         );
     }
@@ -116,6 +122,39 @@ mod service {
                 "--max-processes",
             )?,
         };
+        let analytical_values = [
+            options.analytical_cpu_quota_us,
+            options.analytical_cpu_period_us,
+            options.analytical_memory_max_bytes,
+            options.analytical_max_processes,
+        ];
+        let analytical_resource_limits =
+            match analytical_values.iter().filter(|v| v.is_some()).count() {
+                0 => None,
+                4 => Some(WorkerResourceLimits {
+                    cpu_quota_micros: positive(
+                        options.analytical_cpu_quota_us.unwrap(),
+                        "--analytical-cpu-quota-us",
+                    )?,
+                    cpu_period_micros: positive(
+                        options.analytical_cpu_period_us.unwrap(),
+                        "--analytical-cpu-period-us",
+                    )?,
+                    memory_max_bytes: positive(
+                        options.analytical_memory_max_bytes.unwrap(),
+                        "--analytical-memory-max-bytes",
+                    )?,
+                    max_processes: positive(
+                        options.analytical_max_processes.unwrap(),
+                        "--analytical-max-processes",
+                    )?,
+                }),
+                _ => {
+                    return Err(
+                        "all four --analytical-* resource flags must be supplied together".into(),
+                    );
+                }
+            };
         if options.runtime_read_execute.is_empty() {
             return Err("at least one --runtime-read-execute path is required".into());
         }
@@ -138,6 +177,7 @@ mod service {
             executor: GatewayExecutorConfig {
                 cgroup_parent,
                 resource_limits,
+                analytical_resource_limits,
                 launch: ExecutorLaunchConfig {
                     executor_path,
                     scratch_parent,
@@ -297,6 +337,18 @@ mod service {
                 "--cpu-period-us" => set!(cpu_period_us, value.parse::<u64>()?),
                 "--memory-max-bytes" => set!(memory_max_bytes, value.parse::<u64>()?),
                 "--max-processes" => set!(max_processes, value.parse::<u64>()?),
+                "--analytical-cpu-quota-us" => {
+                    set!(analytical_cpu_quota_us, value.parse::<u64>()?)
+                }
+                "--analytical-cpu-period-us" => {
+                    set!(analytical_cpu_period_us, value.parse::<u64>()?)
+                }
+                "--analytical-memory-max-bytes" => {
+                    set!(analytical_memory_max_bytes, value.parse::<u64>()?)
+                }
+                "--analytical-max-processes" => {
+                    set!(analytical_max_processes, value.parse::<u64>()?)
+                }
                 _ => return Err(format!("unknown option {flag}").into()),
             }
         }
