@@ -14,6 +14,8 @@ Execute analytical operators in the untrusted executor over sanitized batches. S
 
 The initial SDK sort kernel accepts at most 128 authorized keys for one declared scalar column. It places NULL before non-NULL values in either direction, preserves input order among ties, rejects REDACTED or malformed keys, and writes no partial index permutation on failure. SQL `ORDER BY` now supports one source-column key through the v3 parser/binder and bounded SELECT runner. The runner materializes at most 128 matching rows and 1 MiB of row bytes, closes the scan before sorted results are delivered, and applies `LIMIT` after sorting. Exceeding either materialization bound fails the statement before sorted output; spill and multiple keys remain deferred.
 
+The initial grouping kernel computes stable `COUNT(*)` groups for at most 128 authorized values of one scalar key. Equal values group together, NULL values form one group, and groups follow first appearance order. REDACTED or malformed keys fail without partial group output. This kernel does not yet provide SQL `GROUP BY` syntax or result delivery.
+
 ## Mixed-Workload Scheduling
 
 The supervisor admits an invocation into an operational or analytical resource class, bounded by the caller's configured allowance. A client label cannot obtain unlimited priority or override budgets. Both classes retain snapshot isolation and the same permission model; read-only analytical grants are the default, not a mechanism to prohibit explicitly authorized writes.

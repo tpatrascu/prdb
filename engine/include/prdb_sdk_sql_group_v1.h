@@ -1,0 +1,24 @@
+#ifndef PRDB_SDK_SQL_GROUP_V1_H
+#define PRDB_SDK_SQL_GROUP_V1_H
+
+#include "prdb_sdk_sql_v1.h"
+
+#define PRDB_SDK_SQL_GROUP_MAX_ROWS UINT32_C(128)
+#define PRDB_SDK_SQL_GROUP_OK INT32_C(0)
+#define PRDB_SDK_SQL_GROUP_LIMIT_EXCEEDED INT32_C(6)
+
+typedef struct prdb_sdk_sql_count_group_v1 {
+    uint32_t representative_row;
+    uint64_t count;
+} prdb_sdk_sql_count_group_v1;
+
+/* Groups one authorized scalar key and counts every input row, including rows
+ * whose key is NULL. Groups are emitted in first-seen order. REDACTED or
+ * malformed keys fail without writing groups_out or group_count_out. */
+int32_t prdb_sdk_sql_group_count_v1(
+    const prdb_sdk_value_v1 *keys, uint32_t key_count,
+    uint32_t declared_type, uint8_t decimal_scale,
+    prdb_sdk_sql_count_group_v1 *groups_out, uint32_t groups_capacity,
+    uint32_t *group_count_out);
+
+#endif /* PRDB_SDK_SQL_GROUP_V1_H */
