@@ -35,4 +35,6 @@ extern const prdb_query_descriptor_v3_record prdb_query_descriptor_v3;
 int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
                            const prdb_invocation_v3 *invocation);
 
+#include "prdb_query_abi_layout_assertions.h"
+
 #endif

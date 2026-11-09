@@ -1,4 +1,117 @@
 {
+  "layouts": [
+    {
+      "c_type": "prdb_host_api_v1",
+      "rust_type": "HostApiV1",
+      "size": 8,
+      "alignment": 4,
+      "fields": [
+        {"name": "struct_size", "offset": 0},
+        {"name": "abi_version", "offset": 4}
+      ]
+    },
+    {
+      "c_type": "prdb_invocation_v1",
+      "rust_type": "InvocationV1",
+      "size": 24,
+      "alignment": 8,
+      "fields": [
+        {"name": "struct_size", "offset": 0},
+        {"name": "abi_version", "offset": 4},
+        {"name": "parameters", "offset": 8},
+        {"name": "parameters_len", "offset": 16}
+      ]
+    },
+    {
+      "c_type": "prdb_query_descriptor_v1_record",
+      "rust_type": "QueryDescriptorV1",
+      "size": 16,
+      "alignment": 4,
+      "fields": [
+        {"name": "struct_size", "offset": 0},
+        {"name": "abi_version", "offset": 4},
+        {"name": "host_api_size", "offset": 8},
+        {"name": "invocation_size", "offset": 12}
+      ]
+    },
+    {
+      "c_type": "prdb_host_api_v2",
+      "rust_type": "HostApiV2",
+      "size": 40,
+      "alignment": 8,
+      "fields": [
+        {"name": "struct_size", "offset": 0},
+        {"name": "abi_version", "offset": 4},
+        {"name": "context", "offset": 8},
+        {"name": "executor_request", "offset": 16},
+        {"name": "planner_request", "offset": 24},
+        {"name": "write_result", "offset": 32}
+      ]
+    },
+    {
+      "c_type": "prdb_invocation_v2",
+      "rust_type": "InvocationV2",
+      "size": 24,
+      "alignment": 8,
+      "fields": [
+        {"name": "struct_size", "offset": 0},
+        {"name": "abi_version", "offset": 4},
+        {"name": "parameters", "offset": 8},
+        {"name": "parameters_len", "offset": 16}
+      ]
+    },
+    {
+      "c_type": "prdb_query_descriptor_v2_record",
+      "rust_type": "QueryDescriptorV2",
+      "size": 16,
+      "alignment": 4,
+      "fields": [
+        {"name": "struct_size", "offset": 0},
+        {"name": "abi_version", "offset": 4},
+        {"name": "host_api_size", "offset": 8},
+        {"name": "invocation_size", "offset": 12}
+      ]
+    },
+    {
+      "c_type": "prdb_host_api_v3",
+      "rust_type": "HostApiV3",
+      "size": 48,
+      "alignment": 8,
+      "fields": [
+        {"name": "struct_size", "offset": 0},
+        {"name": "abi_version", "offset": 4},
+        {"name": "context", "offset": 8},
+        {"name": "executor_request", "offset": 16},
+        {"name": "planner_request", "offset": 24},
+        {"name": "write_result", "offset": 32},
+        {"name": "statement_failure", "offset": 40}
+      ]
+    },
+    {
+      "c_type": "prdb_invocation_v3",
+      "rust_type": "InvocationV3",
+      "size": 24,
+      "alignment": 8,
+      "fields": [
+        {"name": "struct_size", "offset": 0},
+        {"name": "abi_version", "offset": 4},
+        {"name": "parameters", "offset": 8},
+        {"name": "parameters_len", "offset": 16}
+      ]
+    },
+    {
+      "c_type": "prdb_query_descriptor_v3_record",
+      "rust_type": "QueryDescriptorV3",
+      "size": 16,
+      "alignment": 4,
+      "fields": [
+        {"name": "struct_size", "offset": 0},
+        {"name": "abi_version", "offset": 4},
+        {"name": "host_api_size", "offset": 8},
+        {"name": "invocation_size", "offset": 12}
+      ]
+    }
+  ],
   "constants": [
     {
       "rust_name": "QUERY_ABI_VERSION",

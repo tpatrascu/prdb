@@ -110,6 +110,8 @@ pub struct QueryDescriptorV1 {
 
 pub type QueryMainV1 = unsafe extern "C" fn(*const HostApiV1, *const InvocationV1) -> c_int;
 
+include!("query_abi_layout_assertions.rs");
+
 /// Invocation record whose parameter pointer is tied to the borrowed slice.
 /// Keep this value alive for the complete C entry-point call.
 #[must_use = "the invocation record must remain alive while the C entry point uses it"]

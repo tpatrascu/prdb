@@ -1,8 +1,7 @@
 #ifndef PRDB_QUERY_ABI_V2_H
 #define PRDB_QUERY_ABI_V2_H
 
-#include <stdint.h>
-#include "prdb_query_abi_constants.h"
+#include "prdb_query_abi_v1.h"
 
 enum prdb_query_callback_status_v2 {
     PRDB_QUERY_CALLBACK_OK = 0,
