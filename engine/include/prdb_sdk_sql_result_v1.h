@@ -99,4 +99,23 @@ int32_t prdb_sdk_sql_write_group_sum_result_v1(
     const prdb_sdk_value_v1 *aggregate_value,
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len);
 
+/* Encodes one grouped AVG SQLR row. The `avg` field is DECIMAL(38,6) for
+ * integer arguments, or DECIMAL(38,r) using the declared Decimal metadata. */
+int32_t prdb_sdk_sql_encode_group_avg_result_v1(
+    const prdb_sdk_sql_column_shape_v2 *group_column,
+    const prdb_sdk_value_v1 *group_key,
+    const prdb_sdk_sql_column_shape_v2 *aggregate_input_column,
+    const prdb_sdk_value_v1 *aggregate_value,
+    uint8_t *output, uint64_t output_capacity, uint64_t *output_len);
+
+/* Encodes and emits one grouped AVG SQLR row in host-sized provisional
+ * chunks. */
+int32_t prdb_sdk_sql_write_group_avg_result_v1(
+    const prdb_host_api_v3 *host,
+    const prdb_sdk_sql_column_shape_v2 *group_column,
+    const prdb_sdk_value_v1 *group_key,
+    const prdb_sdk_sql_column_shape_v2 *aggregate_input_column,
+    const prdb_sdk_value_v1 *aggregate_value,
+    uint8_t *output, uint64_t output_capacity, uint64_t *output_len);
+
 #endif /* PRDB_SDK_SQL_RESULT_V1_H */

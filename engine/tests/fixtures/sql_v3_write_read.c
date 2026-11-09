@@ -1,6 +1,7 @@
 #include "prdb_sdk_sql_exec_v2.h"
 #include "prdb_sdk_sql_exec_v5.h"
 #include "prdb_sdk_sql_exec_v6.h"
+#include "prdb_sdk_sql_exec_v7.h"
 #include "prdb_sdk_sql_result_v1.h"
 
 #include <string.h>
@@ -63,6 +64,26 @@ static int32_t write_grouped_sum(void *opaque,
         return 1;
     }
     int32_t status = prdb_sdk_sql_write_group_sum_result_v1(
+        context->host, context->group_column, group_key,
+        context->aggregate_column, aggregate_value, context->output,
+        context->output_capacity, &context->output_len);
+    if (status != PRDB_SDK_SQL_RESULT_OK) return 1;
+    ++context->row_count;
+    return 0;
+}
+
+static int32_t write_grouped_avg(void *opaque,
+                                 const prdb_sdk_value_v1 *group_key,
+                                 const prdb_sdk_value_v1 *aggregate_value,
+                                 uint64_t matching_row_count,
+                                 const prdb_sdk_select_binding_v7 *binding) {
+    grouped_result_context *context = (grouped_result_context *)opaque;
+    if (context == NULL || binding == NULL ||
+        binding->aggregate_kind != PRDB_SDK_SQL_V7_AGGREGATE_AVG ||
+        matching_row_count != 1) {
+        return 1;
+    }
+    int32_t status = prdb_sdk_sql_write_group_avg_result_v1(
         context->host, context->group_column, group_key,
         context->aggregate_column, aggregate_value, context->output,
         context->output_capacity, &context->output_len);
@@ -174,6 +195,8 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
         "SELECT id, MIN(id) FROM records GROUP BY id";
     static const uint8_t select_grouped_sum_sql[] =
         "SELECT id, SUM(id) FROM records GROUP BY id";
+    static const uint8_t select_grouped_avg_sql[] =
+        "SELECT id, AVG(id) FROM records GROUP BY id";
     static const uint8_t delete_sql[] = "DELETE FROM records WHERE id = $1";
     static const uint8_t schema[] = "sql_roundtrip";
     static const uint8_t empty_schema[] = "empty_roundtrip";
@@ -727,6 +750,21 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
         write_grouped_sum, &grouped_results);
     if (status != PRDB_SDK_SQL_EXEC_OK || grouped_results.row_count != 1) {
         static const uint8_t message[] = "fixture-error-grouped-sum";
+        return report_failure(host, message, sizeof(message) - 1);
+    }
+
+    grouped_results.row_count = 0;
+    grouped_results.output_len = 0;
+    status = prdb_sdk_sql_execute_group_v7(
+        host, schema, sizeof(schema) - 1, select_grouped_avg_sql,
+        sizeof(select_grouped_avg_sql) - 1, NULL, 0, 16,
+        sizeof(batch_response), planner_response, sizeof(planner_response),
+        executor_response, sizeof(executor_response), batch_response,
+        sizeof(batch_response), planner_columns, 1, executor_columns, 1,
+        cell_scratch, 1, grouped_materialized, sizeof(grouped_materialized),
+        write_grouped_avg, &grouped_results);
+    if (status != PRDB_SDK_SQL_EXEC_OK || grouped_results.row_count != 1) {
+        static const uint8_t message[] = "fixture-error-grouped-avg";
         return report_failure(host, message, sizeof(message) - 1);
     }
 

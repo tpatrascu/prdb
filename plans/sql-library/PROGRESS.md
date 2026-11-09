@@ -186,7 +186,7 @@
 - Red/green evidence: the maintained TinyCC grouping fixture now checks BIGINT summation with NULLs, BIGINT final overflow, intermediate cancellation, Decimal coefficient summation and Decimal result overflow, canonical empty input, and unchanged output on overflow.
 - Implementation: `prdb_sdk_sql_sum_v1` uses caller-owned output bytes and fixed-size accumulators sized for the 128-row cap. It validates Decimal input coefficients against declared precision and reports overflow only when the final exact sum exceeds the result type range. Failure leaves output view and bytes unchanged.
 - Verification: the focused TinyCC grouping fixture was force-rebuilt and passed with `-Wall -Wextra -Werror`.
-- Remaining: grouped runner aggregation and SQLR encoding/writing, AVG semantics, and live sandbox integration remain open.
+- Remaining: mixed-workload benchmarks, joins, HAVING, grouped ORDER BY, multiple grouping keys, cancellation/deadlines, and spill remain open.
 
 ## SQL-7 dependency: grouped SUM parser and binder — partial
 
@@ -194,7 +194,7 @@
 - Red/green evidence: the maintained v6 fixture checks SUM parsing with WHERE and LIMIT, numeric Decimal binding, rejection of nonnumeric arguments without modifying the output, and confirms the frozen v5 parser still rejects SUM.
 - Implementation: the v6 AST and binding have dedicated version tags and aggregate kind. The shared parser grammar accepts SUM only through the v6 entry point; v5 behavior remains unchanged. Binding reuses v5 group-key and column resolution, then enforces the numeric type set.
 - Verification: the focused TinyCC parser/binder fixture was force-rebuilt and passed with `-Wall -Wextra -Werror`.
-- Remaining: grouped SUM runner aggregation and SQLR output/writing, AVG semantics, and live sandbox integration remain open.
+- Remaining: mixed-workload benchmarks, joins, HAVING, grouped ORDER BY, multiple grouping keys, cancellation/deadlines, and spill remain open.
 
 ## SQL-7 dependency: grouped SUM runner and SQLR output — partial
 
@@ -202,20 +202,28 @@
 - Implementation: `prdb_sdk_sql_execute_group_v6` validates planner/executor shape agreement, binds predicates and the numeric aggregate, materializes authorized rows into caller memory, closes the scan, groups stably, and computes each SUM with `prdb_sdk_sql_sum_v1`. It retains result bytes in a bounded stack array until callbacks finish. The SQLR v1 encoder/writer emits the widened result metadata and host-sized provisional chunks.
 - Regression: the maintained v6 executor fixture checks grouped integer SUM values and group counts; the SQLR fixture checks the `sum` label, BIGINT metadata/value, Decimal(38, scale) NULL metadata, redaction rejection, and writer callback output. The focused TinyCC fixtures passed.
 - Sandbox integration: the maintained `sql_v3_write_read.c` artifact now runs grouped `MIN(id)` and grouped `SUM(id)` after the update. `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` verifies the exact SUM SQLR record across the confined executor and result relay before durable commit.
-- Remaining: grouped AVG parsing, execution, SQLR output, and mixed-workload benchmarks remain open.
+- Remaining: mixed-workload benchmarks, joins, HAVING, grouped ORDER BY, multiple grouping keys, cancellation/deadlines, and spill remain open.
 
-## SQL-7 dependency: bounded AVG aggregate kernel — partial
+## SQL-7 dependency: bounded AVG aggregate kernel — implemented
 
 - Contract: [SQL library](../../specs/sql-library.md) and [workload profile](../../specs/workload-profile.md). Accept up to 128 authorized SMALLINT, INTEGER, BIGINT, or DECIMAL values. Return DECIMAL(38,r), with integer `r=6` and Decimal `r=min(max(6,s+6),38-(p-s))`; round the exact rational average to nearest, ties to even. NULLs are ignored, empty/all-NULL returns canonical NULL, and REDACTED/malformed/mismatched values fail.
 - Red/green evidence: the maintained TinyCC group fixture checks integer average, Decimal scale conversion, both even and odd half-tie cases at the 128-row boundary, all-NULL output, and output/scale preservation when REDACTED input fails.
 - Implementation: `prdb_sdk_sql_avg_v1` uses a fixed 20-byte unsigned scaled-division workspace, validates Decimal input precision, rounds ties by quotient parity, and writes result coefficient and scale only after validation and range checks.
 - Verification: the focused TinyCC grouping fixture was force-rebuilt and passed with `-Wall -Wextra -Werror`.
-- Remaining: grouped runner integration, SQLR metadata/writing, and sandbox acceptance remain open.
+- Remaining: integration coverage for mixed workloads, joins, HAVING, grouped ORDER BY, multiple grouping keys, cancellation/deadlines, and spill remain open.
 
-## SQL-7 dependency: grouped AVG parser and binder — partial
+## SQL-7 dependency: grouped AVG parser and binder — implemented
 
 - Contract: [SQL library](../../specs/sql-library.md). Preserve v1-v6 AST/binding layouts and add a separately versioned grouped SELECT form for `AVG(column)`. Bind only SMALLINT, INTEGER, BIGINT, and DECIMAL arguments, retaining Decimal metadata.
 - Red/green evidence: the maintained v7 fixture checks AVG parsing with WHERE and LIMIT, Decimal argument binding, nonnumeric argument rejection with output preservation, and confirms the frozen v6 parser still rejects AVG.
 - Implementation: the v7 AST/binding have dedicated version tags and aggregate kind. The parser shares the grouped grammar while only exposing AVG through the v7 entry point; binding reuses v6 numeric aggregate validation and preserves the AVG kind.
 - Verification: the focused TinyCC parser/binder fixture was force-rebuilt and passed with `-Wall -Wextra -Werror`.
-- Remaining: grouped AVG runner aggregation, SQLR result metadata/writing, and confined sandbox acceptance remain open.
+- Remaining: mixed-workload benchmarks, joins, HAVING, grouped ORDER BY, multiple grouping keys, cancellation/deadlines, and spill remain open.
+
+## SQL-7 dependency: grouped AVG runner and SQLR output — implemented
+
+- Contract: [SQL library](../../specs/sql-library.md) and [workload profile](../../specs/workload-profile.md). Reuse the v6 128-row and 1 MiB copied-value bounds; filter before grouping; validate all groups before callbacks; expose DECIMAL(38,r) AVG results and SQLR metadata.
+- Implementation: `prdb_sdk_sql_execute_group_v7` runs the v7 AVG binding, persists fixed-width average result bytes through callbacks, and uses the bounded AVG kernel to compute each group. The SQLR v1 AVG encoder/writer emits the `avg` label and result precision/scale.
+- Regression: TinyCC v7 execution checks integer results, null groups and error behavior; SQLR fixtures check AVG metadata and writer output. The maintained confined query artifact now runs MIN, SUM, and AVG. `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` checks the exact DECIMAL(38,6) AVG frame after sandbox execution and relay, followed by durable commit. This acceptance passed with the local delegated cgroup/runtime profile.
+- Verification: full maintained TinyCC SDK suite, focused sandbox acceptance, `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked -- --test-threads=1`, and `git diff --check` passed. Three cgroup-dependent integration tests remain ignored in the full test run; the AVG acceptance was run separately with delegated cgroup and runtime paths.
+- Remaining: mixed-workload benchmarks, joins, HAVING, grouped ORDER BY, multiple grouping keys, cancellation/deadlines, and spill remain open.

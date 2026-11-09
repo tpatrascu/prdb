@@ -513,6 +513,53 @@ int main(void) {
                    &aggregate_value, output, sizeof(output), &output_len) ==
                PRDB_SDK_SQL_RESULT_INVALID_ROW);
         assert(output_len == 0);
+
+        {
+            uint8_t average_bytes[16] = {0};
+            prdb_sdk_value_v1 average = {0};
+            average_bytes[13] = 0x16;
+            average_bytes[14] = 0xE3;
+            average_bytes[15] = 0x60;
+            average = (prdb_sdk_value_v1){
+                sizeof(average), PRDB_SDK_VALUE_ABI_V1_VERSION,
+                PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_DECIMAL,
+                average_bytes, sizeof(average_bytes)};
+            aggregate_column.type_code = PRDB_SDK_VALUE_TYPE_INTEGER;
+            aggregate_column.decimal_precision = 0;
+            aggregate_column.decimal_scale = 0;
+            assert(prdb_sdk_sql_encode_group_avg_result_v1(
+                       &group_column, &group_key, &aggregate_column,
+                       &average, output, sizeof(output), &output_len) ==
+                   PRDB_SDK_SQL_RESULT_OK);
+            assert(output_len == 59 && output[27] == 0 && output[28] == 3 &&
+                   memcmp(output + 29, "avg", 3) == 0 &&
+                   output[35] == PRDB_SDK_VALUE_TYPE_DECIMAL &&
+                   output[36] == 38 && output[37] == 6 &&
+                   output[38] == PRDB_SDK_VALUE_STATE_VALUE &&
+                   output[42] == 16 && output[58] == 0x60);
+            capture.calls = 0;
+            capture.length = 0;
+            assert(prdb_sdk_sql_write_group_avg_result_v1(
+                       &host, &group_column, &group_key, &aggregate_column,
+                       &average, output, sizeof(output), &output_len) ==
+                   PRDB_SDK_SQL_RESULT_OK);
+            assert(capture.calls == 1 && capture.length == output_len &&
+                   memcmp(capture.bytes, output, output_len) == 0);
+            average.state = PRDB_SDK_VALUE_STATE_NULL;
+            average.type_code = 0;
+            average.data = NULL;
+            average.data_len = 0;
+            aggregate_column.type_code = PRDB_SDK_VALUE_TYPE_DECIMAL;
+            aggregate_column.decimal_precision = 10;
+            aggregate_column.decimal_scale = 2;
+            assert(prdb_sdk_sql_encode_group_avg_result_v1(
+                       &group_column, &group_key, &aggregate_column,
+                       &average, output, sizeof(output), &output_len) ==
+                   PRDB_SDK_SQL_RESULT_OK);
+            assert(output[35] == PRDB_SDK_VALUE_TYPE_DECIMAL &&
+                   output[36] == 38 && output[37] == 8 &&
+                   output[38] == PRDB_SDK_VALUE_STATE_NULL);
+        }
     }
     return 0;
 }

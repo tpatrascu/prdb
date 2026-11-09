@@ -20510,6 +20510,21 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         ]
         .concat()
     );
+    let grouped_avg = read_frame(&mut gateway)?.ok_or("missing grouped AVG SQLR result")?;
+    assert_eq!(grouped_avg.operation, Operation::GatewayResultData as u16);
+    assert_eq!(grouped_avg.request_id, accepted.request_id);
+    assert_eq!(
+        grouped_avg.payload,
+        [
+            b"SQLR".as_slice(),
+            &[
+                0, 1, 0, 2, 0, 2, b'i', b'd', 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 42, 0, 3,
+                b'a', b'v', b'g', 0, 0, 0, 5, 38, 6, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 2, 128, 222, 128
+            ][..]
+        ]
+        .concat()
+    );
     drop(gateway);
     assert!(matches!(
         finalize_gateway_invocation_and_send_terminal(

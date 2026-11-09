@@ -6,6 +6,7 @@ static const uint8_t count_column_name_v1[] = "count";
 static const uint8_t min_column_name_v1[] = "min";
 static const uint8_t max_column_name_v1[] = "max";
 static const uint8_t sum_column_name_v1[] = "sum";
+static const uint8_t avg_column_name_v1[] = "avg";
 
 typedef struct result_writer_v1 {
     uint8_t *bytes;
@@ -449,6 +450,50 @@ int32_t prdb_sdk_sql_encode_group_sum_result_v1(
         output_capacity, output_len);
 }
 
+int32_t prdb_sdk_sql_encode_group_avg_result_v1(
+    const prdb_sdk_sql_column_shape_v2 *group_column,
+    const prdb_sdk_value_v1 *group_key,
+    const prdb_sdk_sql_column_shape_v2 *aggregate_input_column,
+    const prdb_sdk_value_v1 *aggregate_value,
+    uint8_t *output, uint64_t output_capacity, uint64_t *output_len) {
+    prdb_sdk_sql_column_shape_v2 result_column;
+    uint32_t result_scale;
+    if (output_len != NULL) *output_len = 0;
+    if (aggregate_input_column == NULL) {
+        return PRDB_SDK_SQL_RESULT_INVALID_ARGUMENT;
+    }
+    if (!valid_column_shape_v1(aggregate_input_column,
+                               aggregate_input_column->ordinal)) {
+        return PRDB_SDK_SQL_RESULT_INVALID_SHAPE;
+    }
+    result_column = *aggregate_input_column;
+    result_column.name = avg_column_name_v1;
+    result_column.name_len = sizeof(avg_column_name_v1) - 1;
+    if (aggregate_input_column->type_code == PRDB_SDK_VALUE_TYPE_SMALLINT ||
+        aggregate_input_column->type_code == PRDB_SDK_VALUE_TYPE_INTEGER ||
+        aggregate_input_column->type_code == PRDB_SDK_VALUE_TYPE_BIGINT) {
+        result_scale = 6;
+    } else if (aggregate_input_column->type_code ==
+               PRDB_SDK_VALUE_TYPE_DECIMAL) {
+        uint32_t integer_digits = aggregate_input_column->decimal_precision -
+                                  aggregate_input_column->decimal_scale;
+        uint32_t desired_scale = aggregate_input_column->decimal_scale + 6;
+        uint32_t available_scale = 38 - integer_digits;
+        if (desired_scale < 6) desired_scale = 6;
+        if (desired_scale > available_scale) desired_scale = available_scale;
+        result_scale = desired_scale;
+    } else {
+        return PRDB_SDK_SQL_RESULT_INVALID_SHAPE;
+    }
+    result_column.type_code = PRDB_SDK_VALUE_TYPE_DECIMAL;
+    result_column.decimal_precision = 38;
+    result_column.decimal_scale = (uint8_t)result_scale;
+    return encode_group_result_v1(
+        group_column, group_key, &result_column, aggregate_value,
+        avg_column_name_v1, sizeof(avg_column_name_v1) - 1, output,
+        output_capacity, output_len);
+}
+
 int32_t prdb_sdk_sql_write_group_minmax_result_v1(
     const prdb_host_api_v3 *host,
     const prdb_sdk_sql_column_shape_v2 *group_column,
@@ -503,6 +548,42 @@ int32_t prdb_sdk_sql_write_group_sum_result_v1(
         return PRDB_SDK_SQL_RESULT_INVALID_ARGUMENT;
     }
     status = prdb_sdk_sql_encode_group_sum_result_v1(
+        group_column, group_key, aggregate_input_column, aggregate_value,
+        output, output_capacity, output_len);
+    if (status != PRDB_SDK_SQL_RESULT_OK) return status;
+    while (offset < *output_len) {
+        uint64_t chunk_length = *output_len - offset;
+        if (chunk_length > PRDB_QUERY_MAX_RESULT_CHUNK_BYTES) {
+            chunk_length = PRDB_QUERY_MAX_RESULT_CHUNK_BYTES;
+        }
+        if (host->write_result(host->context, output + offset, chunk_length) !=
+            PRDB_QUERY_CALLBACK_OK) {
+            *output_len = 0;
+            return PRDB_SDK_SQL_RESULT_WRITE_FAILED;
+        }
+        offset += chunk_length;
+    }
+    return PRDB_SDK_SQL_RESULT_OK;
+}
+
+int32_t prdb_sdk_sql_write_group_avg_result_v1(
+    const prdb_host_api_v3 *host,
+    const prdb_sdk_sql_column_shape_v2 *group_column,
+    const prdb_sdk_value_v1 *group_key,
+    const prdb_sdk_sql_column_shape_v2 *aggregate_input_column,
+    const prdb_sdk_value_v1 *aggregate_value,
+    uint8_t *output, uint64_t output_capacity, uint64_t *output_len) {
+    int32_t status;
+    uint64_t offset = 0;
+
+    if (output_len != NULL) *output_len = 0;
+    if (host == NULL || output_len == NULL ||
+        host->struct_size < sizeof(*host) ||
+        host->abi_version != PRDB_QUERY_ABI_V3_VERSION ||
+        host->write_result == NULL) {
+        return PRDB_SDK_SQL_RESULT_INVALID_ARGUMENT;
+    }
+    status = prdb_sdk_sql_encode_group_avg_result_v1(
         group_column, group_key, aggregate_input_column, aggregate_value,
         output, output_capacity, output_len);
     if (status != PRDB_SDK_SQL_RESULT_OK) return status;
