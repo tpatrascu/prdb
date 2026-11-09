@@ -127,62 +127,71 @@ fn tcp_client_hello_and_ping_bridge_over_the_gateway_service_channel() {
 
 #[test]
 fn gateway_bridge_returns_sanitized_supervisor_error_frames() {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-    let address = listener.local_addr().unwrap();
-    let (mut gateway_service, mut supervisor_service) =
-        std::os::unix::net::UnixStream::pair().unwrap();
-    let supervisor = std::thread::spawn(move || {
-        let request = read_frame(&mut supervisor_service).unwrap().unwrap();
-        write_frame(
-            &mut supervisor_service,
-            &IpcFrame {
-                operation: Operation::GatewayClientError as u16,
-                request_id: request.request_id,
-                payload: br#"{"code":"invalid_request","message":"Request is invalid."}"#.to_vec(),
-            },
-        )
-        .unwrap();
-    });
-    let gateway = std::thread::spawn(move || {
-        let (mut client, _) = listener.accept().unwrap();
-        prdb_engine::gateway::serve_tcp_client_connection(&mut client, &mut gateway_service)
-            .unwrap();
-    });
+    let canonical_errors = [
+        br#"{"code":"invalid_request","message":"Request is invalid."}"#.as_slice(),
+        br#"{"code":"invalid_state","message":"Request is not valid in the current session state."}"#.as_slice(),
+        br#"{"code":"unauthenticated","message":"Authentication is required."}"#.as_slice(),
+        br#"{"code":"resource_limit","message":"Request exceeds a configured limit."}"#.as_slice(),
+        br#"{"code":"unavailable","message":"Requested resource is unavailable."}"#.as_slice(),
+    ];
 
-    let mut client = std::net::TcpStream::connect(address).unwrap();
-    client
-        .write_all(
-            &ClientFrame {
-                kind: 10,
-                request_id: 7,
-                response_sequence: 0,
-                payload: b"{}".to_vec(),
+    for expected_payload in canonical_errors {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (mut gateway_service, mut supervisor_service) =
+            std::os::unix::net::UnixStream::pair().unwrap();
+        let expected_payload = expected_payload.to_vec();
+        let supervisor_payload = expected_payload.clone();
+        let supervisor = std::thread::spawn(move || {
+            let request = read_frame(&mut supervisor_service).unwrap().unwrap();
+            write_frame(
+                &mut supervisor_service,
+                &IpcFrame {
+                    operation: Operation::GatewayClientError as u16,
+                    request_id: request.request_id,
+                    payload: supervisor_payload,
+                },
+            )
+            .unwrap();
+        });
+        let gateway = std::thread::spawn(move || {
+            let (mut client, _) = listener.accept().unwrap();
+            prdb_engine::gateway::serve_tcp_client_connection(&mut client, &mut gateway_service)
+                .unwrap();
+        });
+
+        let mut client = std::net::TcpStream::connect(address).unwrap();
+        client
+            .write_all(
+                &ClientFrame {
+                    kind: 10,
+                    request_id: 7,
+                    response_sequence: 0,
+                    payload: b"{}".to_vec(),
+                }
+                .encode()
+                .unwrap(),
+            )
+            .unwrap();
+        let mut decoder = ClientFrameDecoder::default();
+        let mut buffer = [0u8; 256];
+        let response = loop {
+            let count = client.read(&mut buffer).unwrap();
+            assert_ne!(count, 0);
+            if let Some(response) = decoder.push(&buffer[..count]).unwrap().pop() {
+                break response;
             }
-            .encode()
-            .unwrap(),
-        )
-        .unwrap();
-    let mut decoder = ClientFrameDecoder::default();
-    let mut buffer = [0u8; 256];
-    let response = loop {
-        let count = client.read(&mut buffer).unwrap();
-        assert_ne!(count, 0);
-        if let Some(response) = decoder.push(&buffer[..count]).unwrap().pop() {
-            break response;
-        }
-    };
-    assert_eq!(
-        response.kind,
-        prdb_engine::client_protocol::CLIENT_ERROR_KIND
-    );
-    assert_eq!(response.request_id, 7);
-    assert_eq!(
-        response.payload,
-        br#"{"code":"invalid_request","message":"Request is invalid."}"#
-    );
-    assert_eq!(client.read(&mut buffer).unwrap(), 0);
-    gateway.join().unwrap();
-    supervisor.join().unwrap();
+        };
+        assert_eq!(
+            response.kind,
+            prdb_engine::client_protocol::CLIENT_ERROR_KIND
+        );
+        assert_eq!(response.request_id, 7);
+        assert_eq!(response.payload, expected_payload);
+        assert_eq!(client.read(&mut buffer).unwrap(), 0);
+        gateway.join().unwrap();
+        supervisor.join().unwrap();
+    }
 }
 
 #[test]
