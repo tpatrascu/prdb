@@ -61,6 +61,59 @@ impl StorageBackend for FailNextSyncBackend {
     }
 }
 
+#[derive(Debug)]
+struct PauseNextWriteBackend {
+    inner: redb::backends::FileBackend,
+    state: Arc<PauseNextWriteState>,
+}
+
+#[derive(Debug)]
+struct PauseNextWriteState {
+    armed: AtomicBool,
+    entered: Barrier,
+    release: Barrier,
+}
+
+impl PauseNextWriteState {
+    fn new() -> Self {
+        Self {
+            armed: AtomicBool::new(false),
+            entered: Barrier::new(2),
+            release: Barrier::new(2),
+        }
+    }
+}
+
+impl StorageBackend for PauseNextWriteBackend {
+    fn len(&self) -> Result<u64, std::io::Error> {
+        self.inner.len()
+    }
+
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+        self.inner.read(offset, out)
+    }
+
+    fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+        self.inner.set_len(len)
+    }
+
+    fn sync_data(&self) -> Result<(), std::io::Error> {
+        self.inner.sync_data()
+    }
+
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+        if self.state.armed.swap(false, Ordering::SeqCst) {
+            self.state.entered.wait();
+            self.state.release.wait();
+        }
+        self.inner.write(offset, data)
+    }
+
+    fn close(&self) -> Result<(), std::io::Error> {
+        self.inner.close()
+    }
+}
+
 struct Fixture(std::path::PathBuf);
 
 impl Fixture {
@@ -457,6 +510,11 @@ fn bootstrap_database_record(database_id: [u8; 16]) -> (Vec<u8>, Vec<u8>) {
 
 fn initialize(path: &std::path::Path) -> Result<Database, Box<dyn std::error::Error>> {
     let database = Database::create(path)?;
+    initialize_database(&database)?;
+    Ok(database)
+}
+
+fn initialize_database(database: &Database) -> Result<(), Box<dyn std::error::Error>> {
     let mut transaction = database.begin_write()?;
     transaction.set_durability(redb::Durability::Immediate)?;
     transaction.set_two_phase_commit(true);
@@ -527,7 +585,7 @@ fn initialize(path: &std::path::Path) -> Result<Database, Box<dyn std::error::Er
         .open_table(ENGINE_META)?
         .insert(&b"format"[..], &metadata[..])?;
     transaction.commit()?;
-    Ok(database)
+    Ok(())
 }
 
 #[test]
@@ -19379,6 +19437,238 @@ fn client_handshake_requires_hello_first_and_sequences_responses()
         ),
         Err(ClientSessionError::UnsupportedRequest)
     ));
+    Ok(())
+}
+
+#[test]
+fn control_cancel_over_tcp_reports_too_late_during_durable_commit()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::client_protocol::{ClientFrame, ClientFrameDecoder};
+    use prdb_engine::supervisor::{
+        StagingLimits, StagingStore, SubmissionMetadata, SubmissionMetadataValidator,
+    };
+    use prdb_engine::supervisor_ipc::{GatewayAdmissionConfig, serve_gateway_client_session};
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::os::unix::net::UnixStream;
+    use std::sync::Arc;
+
+    struct AcceptMetadata;
+    impl SubmissionMetadataValidator for AcceptMetadata {
+        fn supports_versions(&self, manifest_version: u32, scope_version: u32) -> bool {
+            manifest_version == 1 && scope_version == 1
+        }
+
+        fn validate(&self, _metadata: &SubmissionMetadata) -> bool {
+            true
+        }
+    }
+
+    let fixture = Fixture::new();
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(fixture.path())?;
+    let pause_state = Arc::new(PauseNextWriteState::new());
+    let database = Database::builder().create_with_backend(PauseNextWriteBackend {
+        inner: redb::backends::FileBackend::new(file)?,
+        state: Arc::clone(&pause_state),
+    })?;
+    initialize_database(&database)?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let admin_id = id(0x70);
+    let token_id = id(0x71);
+    let admin_role = builtin_owner_id();
+    let records = [
+        principal_write_with_name(admin_id, 1, 1, "commit_control_admin"),
+        object_write_with_name(admin_id, 8, "commit_control_admin"),
+        membership_write_with_grantor(admin_id, admin_role, admin_role),
+        dependency_write(admin_id, admin_role, 5),
+        credential_verifier_write(token_id, admin_id, &[0; 32], 1, i64::MAX, None, 1),
+    ];
+    let mut setup_audit = audit_event(0x72);
+    setup_audit.actor_id = Some(admin_role);
+    storage.commit_catalog_and_audit(id(0x72), admin_role, 9_999, &records, &[setup_audit])?;
+
+    let invocation_id = id(0x73);
+    let mut invocation = storage.begin_invocation(invocation_id, admin_id, i64::MAX, 1, 64)?;
+    invocation.stage_put(
+        prdb_engine::overlay::RowId {
+            table: id(0x74),
+            row: id(0x75),
+        },
+        b"commit-boundary",
+    )?;
+    pause_state.armed.store(true, Ordering::SeqCst);
+    std::thread::scope(|commit_scope| -> Result<(), Box<dyn std::error::Error>> {
+        let commit_thread = commit_scope.spawn(move || invocation.commit());
+        pause_state.entered.wait();
+
+        let staging = StagingStore::new(StagingLimits::default(), Arc::new(AcceptMetadata))?;
+        let admission = GatewayAdmissionConfig {
+            retention_period_us: i64::MAX,
+            max_rows: 2,
+            max_bytes: 64,
+        };
+        let (mut service, mut ipc_gateway) = UnixStream::pair()?;
+        service.set_read_timeout(Some(Duration::from_secs(5)))?;
+        ipc_gateway.set_read_timeout(Some(Duration::from_secs(5)))?;
+        let tcp_listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let mut client = TcpStream::connect(tcp_listener.local_addr()?)?;
+        let (mut gateway_tcp, _) = tcp_listener.accept()?;
+        client.set_read_timeout(Some(Duration::from_secs(5)))?;
+        gateway_tcp.set_read_timeout(Some(Duration::from_secs(5)))?;
+
+        std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+            let service_thread = scope.spawn(|| {
+                let mut session = prdb_engine::client_protocol::ClientConnectionSession::default();
+                match serve_gateway_client_session(
+                    &mut service,
+                    &storage,
+                    &staging,
+                    &mut session,
+                    admission,
+                )
+                .map_err(|error| {
+                    std::io::Error::other(format!("gateway service failed: {error:?}"))
+                })? {
+                    prdb_engine::supervisor_ipc::GatewayClientServiceEvent::Disconnected => Ok(()),
+                    prdb_engine::supervisor_ipc::GatewayClientServiceEvent::Started { .. } => Err(
+                        std::io::Error::other("control session unexpectedly started a query"),
+                    ),
+                }
+            });
+            let bridge_thread = scope.spawn(move || {
+                prdb_engine::gateway::serve_tcp_client_connection(
+                    &mut gateway_tcp,
+                    &mut ipc_gateway,
+                )
+            });
+
+            let mut decoder = ClientFrameDecoder::default();
+            let mut next_request_id = 1;
+            let mut round_trip =
+                |kind: u16, payload: Vec<u8>| -> Result<ClientFrame, Box<dyn std::error::Error>> {
+                    let request = ClientFrame {
+                        kind,
+                        request_id: next_request_id,
+                        response_sequence: 0,
+                        payload,
+                    };
+                    next_request_id += 1;
+                    client.write_all(&request.encode()?)?;
+                    let mut buffer = [0u8; 4096];
+                    loop {
+                        let count = client.read(&mut buffer)?;
+                        if count == 0 {
+                            return Err("gateway closed before replying".into());
+                        }
+                        if let Some(frame) = decoder.push(&buffer[..count])?.into_iter().next() {
+                            return Ok(frame);
+                        }
+                    }
+                };
+
+            let hello = round_trip(
+                1,
+                br#"{"mode":"control","client_name":"commit-boundary"}"#.to_vec(),
+            )?;
+            assert_eq!(hello.kind, 100);
+            let token_id_hex = token_id
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            let auth = round_trip(
+                2,
+                format!(
+                    "{{\"token_id\":\"{token_id_hex}\",\"token_secret\":\"{}\"}}",
+                    "A".repeat(43) + "="
+                )
+                .into_bytes(),
+            )?;
+            assert_eq!(auth.kind, 100);
+            let cancel_payload = format!(
+                "{{\"invocation_id\":\"{}\"}}",
+                invocation_id
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            )
+            .into_bytes();
+            let mut cancel_stream = client.try_clone()?;
+            let (sent_sender, sent_receiver) = std::sync::mpsc::sync_channel(0);
+            let cancel_thread = scope.spawn(
+                move || -> Result<ClientFrame, Box<dyn std::error::Error + Send + Sync>> {
+                    let request = ClientFrame {
+                        kind: 9,
+                        request_id: next_request_id,
+                        response_sequence: 0,
+                        payload: cancel_payload,
+                    };
+                    cancel_stream.write_all(&request.encode()?)?;
+                    sent_sender.send(()).map_err(std::io::Error::other)?;
+                    let mut decoder = ClientFrameDecoder::default();
+                    let mut buffer = [0u8; 4096];
+                    loop {
+                        let count = cancel_stream.read(&mut buffer)?;
+                        if count == 0 {
+                            return Err("gateway closed before CANCEL response".into());
+                        }
+                        if let Some(frame) = decoder.push(&buffer[..count])?.into_iter().next() {
+                            return Ok(frame);
+                        }
+                    }
+                },
+            );
+            sent_receiver.recv_timeout(Duration::from_secs(5))?;
+            // Let the service dispatch CANCEL while the writer is held at its durable boundary.
+            std::thread::sleep(Duration::from_millis(200));
+            pause_state.release.wait();
+            let cancel = cancel_thread
+                .join()
+                .map_err(|_| std::io::Error::other("CANCEL client thread panicked"))?
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            assert_eq!(cancel.kind, 100);
+            assert_eq!(cancel.payload, br#"{"state":"too_late"}"#);
+
+            client.shutdown(std::net::Shutdown::Write)?;
+            bridge_thread
+                .join()
+                .map_err(|_| std::io::Error::other("TCP bridge panicked"))??;
+            service_thread
+                .join()
+                .map_err(|_| std::io::Error::other("gateway service panicked"))??;
+            Ok(())
+        })?;
+
+        assert!(
+            commit_thread
+                .join()
+                .map_err(|_| std::io::Error::other("commit thread panicked"))??
+                > 0
+        );
+        let status = storage
+            .get_invocation_status(invocation_id, admin_id, 10_000)?
+            .ok_or("committed invocation status disappeared")?;
+        assert!(matches!(
+            status.status,
+            prdb_engine::storage_manager::InvocationStatus::Terminal(outcome)
+                if outcome.status == OutcomeStatus::Committed
+        ));
+        let audit_read = database.begin_read()?;
+        let audit_table = audit_read.open_table(AUDIT)?;
+        let mut denied_cancellation_audited = false;
+        for entry in audit_table.iter()? {
+            let (_, value) = entry?;
+            let event = AuditEvent::decode(value.value())?;
+            denied_cancellation_audited |= event.correlation_id == invocation_id
+                && event.action == AuditAction::AdministrativeCancellation
+                && event.result == AuditResult::Denied;
+        }
+        assert!(denied_cancellation_audited);
+        Ok(())
+    })?;
     Ok(())
 }
 
