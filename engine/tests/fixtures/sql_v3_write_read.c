@@ -1,4 +1,6 @@
 #include "prdb_sdk_sql_exec_v2.h"
+#include "prdb_sdk_sql_exec_v5.h"
+#include "prdb_sdk_sql_result_v1.h"
 
 #include <string.h>
 
@@ -17,6 +19,36 @@ typedef struct result_context {
     uint32_t expected_ordinal;
     uint32_t failure_code;
 } result_context;
+
+typedef struct grouped_result_context {
+    const prdb_host_api_v3 *host;
+    const prdb_sdk_sql_column_shape_v2 *group_column;
+    const prdb_sdk_sql_column_shape_v2 *aggregate_column;
+    uint8_t *output;
+    uint64_t output_capacity;
+    uint64_t output_len;
+    uint32_t row_count;
+} grouped_result_context;
+
+static int32_t write_grouped_min(void *opaque,
+                                 const prdb_sdk_value_v1 *group_key,
+                                 const prdb_sdk_value_v1 *aggregate_value,
+                                 uint64_t matching_row_count,
+                                 const prdb_sdk_select_binding_v5 *binding) {
+    grouped_result_context *context = (grouped_result_context *)opaque;
+    if (context == NULL || binding == NULL ||
+        binding->aggregate_kind != PRDB_SDK_SQL_V5_AGGREGATE_MIN ||
+        matching_row_count != 1) {
+        return 1;
+    }
+    int32_t status = prdb_sdk_sql_write_group_minmax_result_v1(
+        context->host, context->group_column, group_key,
+        context->aggregate_column, aggregate_value, binding->aggregate_kind,
+        context->output, context->output_capacity, &context->output_len);
+    if (status != PRDB_SDK_SQL_RESULT_OK) return 1;
+    ++context->row_count;
+    return 0;
+}
 
 static int32_t verify_selected_value(void *opaque, const prdb_sdk_row_v1 *row,
                                      const prdb_sdk_select_binding_v2 *binding) {
@@ -117,6 +149,8 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
         "UPDATE records SET id = $1 WHERE id IS NULL";
     static const uint8_t select_value_sql[] =
         "SELECT id FROM records WHERE id = $1";
+    static const uint8_t select_grouped_min_sql[] =
+        "SELECT id, MIN(id) FROM records GROUP BY id";
     static const uint8_t delete_sql[] = "DELETE FROM records WHERE id = $1";
     static const uint8_t schema[] = "sql_roundtrip";
     static const uint8_t empty_schema[] = "empty_roundtrip";
@@ -135,6 +169,8 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
     uint8_t planner_response[1024] = {0};
     uint8_t executor_response[1024] = {0};
     uint8_t batch_response[4096] = {0};
+    uint8_t grouped_materialized[128] = {0};
+    uint8_t grouped_result[256] = {0};
     uint8_t insert_request[256] = {0};
     uint8_t update_request[256] = {0};
     uint8_t inserted_handle[16] = {0};
@@ -150,6 +186,13 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
     prdb_sdk_value_v1 private_table_parameter = {0};
     prdb_sdk_value_v1 private_metadata_parameters[2] = {{0}};
     result_context results = {0};
+    static const uint8_t id_column_name[] = "id";
+    prdb_sdk_sql_column_shape_v2 grouped_column = {
+        id_column_name, sizeof(id_column_name) - 1, 0,
+        PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0};
+    grouped_result_context grouped_results = {
+        host, &grouped_column, &grouped_column, grouped_result,
+        sizeof(grouped_result), 0, 0};
     uint32_t updated_count = 0;
     uint32_t deleted_count = 0;
     int32_t status;
@@ -633,6 +676,19 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
         cell_scratch, 1, verify_selected_value, &results);
     if (status != PRDB_SDK_SQL_EXEC_OK || results.row_count != 1) {
         static const uint8_t message[] = "fixture-error-value-select";
+        return report_failure(host, message, sizeof(message) - 1);
+    }
+
+    status = prdb_sdk_sql_execute_group_v5(
+        host, schema, sizeof(schema) - 1, select_grouped_min_sql,
+        sizeof(select_grouped_min_sql) - 1, NULL, 0, 16,
+        sizeof(batch_response), planner_response, sizeof(planner_response),
+        executor_response, sizeof(executor_response), batch_response,
+        sizeof(batch_response), planner_columns, 1, executor_columns, 1,
+        cell_scratch, 1, grouped_materialized, sizeof(grouped_materialized),
+        write_grouped_min, &grouped_results);
+    if (status != PRDB_SDK_SQL_EXEC_OK || grouped_results.row_count != 1) {
+        static const uint8_t message[] = "fixture-error-grouped-min";
         return report_failure(host, message, sizeof(message) - 1);
     }
 

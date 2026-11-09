@@ -20482,6 +20482,20 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     assert_eq!(updated.operation, Operation::GatewayResultData as u16);
     assert_eq!(updated.request_id, accepted.request_id);
     assert_eq!(updated.payload, b"update-visible");
+    let grouped_min = read_frame(&mut gateway)?.ok_or("missing grouped MIN SQLR result")?;
+    assert_eq!(grouped_min.operation, Operation::GatewayResultData as u16);
+    assert_eq!(grouped_min.request_id, accepted.request_id);
+    assert_eq!(
+        grouped_min.payload,
+        [
+            b"SQLR".as_slice(),
+            &[
+                0, 1, 0, 2, 0, 2, b'i', b'd', 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 42, 0, 3,
+                b'm', b'i', b'n', 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 42
+            ][..]
+        ]
+        .concat()
+    );
     drop(gateway);
     assert!(matches!(
         finalize_gateway_invocation_and_send_terminal(
