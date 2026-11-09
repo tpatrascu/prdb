@@ -14910,6 +14910,20 @@ fn identity_ddl_drops_unreferenced_user_and_revokes_tokens_atomically()
             .get(id_catalog_key(16, dropped_token).as_slice())?
             .is_some()
     );
+    drop(catalog);
+    drop(read);
+    assert!(matches!(
+        storage.begin_token_authenticated_invocation(
+            id(0xd9),
+            dropped_token,
+            &[0xd4; 32],
+            2,
+            2,
+            64,
+        ),
+        Err(prdb_engine::transaction::TransactionError::AuthenticationFailed)
+    ));
+    assert_eq!(lookup_outcome(&database, id(0xd9), dropped_user, 2)?, None);
     assert_eq!(commit_sequence(&database)?, 3);
     prdb_engine::startup::validate_persisted_records(&database)?;
     Ok(())

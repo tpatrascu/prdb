@@ -2116,3 +2116,11 @@
 - Implementation: no production change was needed; the existing identity epoch guard rejects the stale finalization.
 - Verification: the focused regression passed. Under Rust/Cargo 1.95.0, the workspace build, formatting check, warning-denied Clippy, full workspace tests, and serial commit integration target passed. The commit target reported 126 passed and 3 delegated-cgroup tests ignored.
 - Remaining: stale-writer coverage for identity drop and other authority-changing DDL routes remains open.
+
+## SM-5 / AU-6: identity drop revokes token admission — verified
+
+- Contract: dropping a user atomically removes its principal and object, records the permanent identity tombstone, and revokes its credentials; a still-unexpired token for the dropped user must fail new invocation admission without creating an invocation outcome.
+- Regression: `identity_ddl_drops_unreferenced_user_and_revokes_tokens_atomically` now tries the target user's original token after `StorageManager::drop_identity` commits and verifies authentication fails and no outcome is recorded for the rejected invocation. The existing test also checks principal/object removal, tombstones, and persisted verifier presence.
+- Implementation: no production change was needed; identity drop already commits token revocation atomically, and admission honors the verifier's revoked state.
+- Verification: the focused real-redb test passed; `cargo fmt --all -- --check`, warning-denied workspace Clippy, and the serial commit integration target passed under Rust/Cargo 1.95.0. The commit target reported 126 passed and 3 delegated-cgroup tests ignored.
+- Remaining: stale-writer races for other authority-changing DDL routes and broader repeated concurrency schedules remain open.
