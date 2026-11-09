@@ -8,6 +8,7 @@
 #include "prdb_sdk_sql_exec_v12.h"
 #include "prdb_sdk_sql_exec_v13.h"
 #include "prdb_sdk_sql_exec_v15.h"
+#include "prdb_sdk_sql_exec_v16.h"
 #include "prdb_sdk_sql_result_v1.h"
 
 #include <string.h>
@@ -113,7 +114,25 @@ static int32_t write_joined_row(void *opaque,
     }
     int32_t status = prdb_sdk_sql_write_join_result_v1(
         context->host, binding, context->left_columns, 1,
-        context->right_columns, 1, projected_values, projection_count,
+        context->right_columns, 2, projected_values, projection_count,
+        context->output, context->output_capacity, &context->output_len);
+    if (status != PRDB_SDK_SQL_RESULT_OK) return 1;
+    ++context->row_count;
+    return 0;
+}
+
+static int32_t write_composite_joined_row(
+    void *opaque, const prdb_sdk_value_v1 *projected_values,
+    uint32_t projection_count, const prdb_sdk_select_binding_v16 *binding) {
+    joined_result_context *context = (joined_result_context *)opaque;
+    if (context == NULL || binding == NULL ||
+        binding->join_key_count != 2 || projection_count != 4 ||
+        binding->base.projection_count != 4) {
+        return 1;
+    }
+    int32_t status = prdb_sdk_sql_write_join_result_v1(
+        context->host, &binding->base, context->left_columns, 2,
+        context->right_columns, 2, projected_values, projection_count,
         context->output, context->output_capacity, &context->output_len);
     if (status != PRDB_SDK_SQL_RESULT_OK) return 1;
     ++context->row_count;
@@ -336,6 +355,12 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
     static const uint8_t select_join_sql[] =
         "SELECT records.id, linked_records.id FROM records INNER JOIN "
         "linked_records ON records.id = linked_records.id LIMIT 1";
+    static const uint8_t select_composite_join_sql[] =
+        "SELECT grouped_records.left_key, grouped_records.right_key, "
+        "linked_records.id, linked_records.match_key FROM grouped_records "
+        "INNER JOIN linked_records ON grouped_records.left_key = "
+        "linked_records.id AND grouped_records.right_key = "
+        "linked_records.match_key LIMIT 2";
     static const uint8_t delete_sql[] = "DELETE FROM records WHERE id = $1";
     static const uint8_t schema[] = "sql_roundtrip";
     static const uint8_t empty_schema[] = "empty_roundtrip";
@@ -375,6 +400,18 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
     static prdb_sdk_sql_join_materialized_row_v8 join_left_rows[128];
     static prdb_sdk_sql_join_materialized_row_v8 join_right_rows[128];
     static uint8_t join_materialized_bytes[
+        PRDB_SDK_SQL_EXEC_V8_MAX_MATERIALIZED_BYTES];
+    uint8_t composite_join_left_planner_response[1024] = {0};
+    uint8_t composite_join_right_planner_response[1024] = {0};
+    uint8_t composite_join_left_executor_response[1024] = {0};
+    uint8_t composite_join_right_executor_response[1024] = {0};
+    prdb_sdk_sql_column_shape_v2 composite_join_left_planner_columns[9] = {{0}};
+    prdb_sdk_sql_column_shape_v2 composite_join_right_planner_columns[9] = {{0}};
+    prdb_sdk_sql_column_shape_v2 composite_join_left_executor_columns[9] = {{0}};
+    prdb_sdk_sql_column_shape_v2 composite_join_right_executor_columns[9] = {{0}};
+    static prdb_sdk_sql_join_materialized_row_v16 composite_join_left_rows[128];
+    static prdb_sdk_sql_join_materialized_row_v16 composite_join_right_rows[128];
+    static uint8_t composite_join_materialized_bytes[
         PRDB_SDK_SQL_EXEC_V8_MAX_MATERIALIZED_BYTES];
     prdb_sdk_executor_insert_value_v1 insert_values[1] = {{0}};
     prdb_sdk_executor_update_patch_v1 update_patches[1] = {{0}};
@@ -1003,6 +1040,34 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
         sizeof(join_materialized_bytes), write_joined_row, &joined_results);
     if (status != PRDB_SDK_SQL_EXEC_OK || joined_results.row_count != 1) {
         static const uint8_t message[] = "fixture-error-inner-join";
+        return report_failure(host, message, sizeof(message) - 1);
+    }
+
+    joined_results.row_count = 0;
+    joined_results.output_len = 0;
+    joined_results.left_columns = composite_join_left_executor_columns;
+    joined_results.right_columns = composite_join_right_executor_columns;
+    status = prdb_sdk_sql_execute_inner_join_v16(
+        host, schema, sizeof(schema) - 1, select_composite_join_sql,
+        sizeof(select_composite_join_sql) - 1, 16, sizeof(batch_response),
+        composite_join_left_planner_response,
+        sizeof(composite_join_left_planner_response),
+        composite_join_right_planner_response,
+        sizeof(composite_join_right_planner_response),
+        composite_join_left_executor_response,
+        sizeof(composite_join_left_executor_response),
+        composite_join_right_executor_response,
+        sizeof(composite_join_right_executor_response), batch_response,
+        sizeof(batch_response), composite_join_left_planner_columns, 9,
+        composite_join_right_planner_columns, 9,
+        composite_join_left_executor_columns, 9,
+        composite_join_right_executor_columns, 9, cell_scratch, 9,
+        composite_join_left_rows, 128, composite_join_right_rows, 128,
+        composite_join_materialized_bytes,
+        sizeof(composite_join_materialized_bytes),
+        write_composite_joined_row, &joined_results);
+    if (status != PRDB_SDK_SQL_EXEC_OK || joined_results.row_count != 2) {
+        static const uint8_t message[] = "fixture-error-composite-inner-join";
         return report_failure(host, message, sizeof(message) - 1);
     }
 

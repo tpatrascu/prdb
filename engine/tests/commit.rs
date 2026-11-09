@@ -20803,13 +20803,22 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         authenticated_actor_id: user_id,
         schema_id: schema.schema_id,
         name: "linked_records".to_owned(),
-        columns: vec![TableColumnDefinition {
-            name: "id".to_owned(),
-            scalar_type: ScalarType::Integer,
-            nullable: true,
-            generated_uuid_identity: false,
-            default: None,
-        }],
+        columns: vec![
+            TableColumnDefinition {
+                name: "id".to_owned(),
+                scalar_type: ScalarType::Integer,
+                nullable: true,
+                generated_uuid_identity: false,
+                default: None,
+            },
+            TableColumnDefinition {
+                name: "match_key".to_owned(),
+                scalar_type: ScalarType::Integer,
+                nullable: true,
+                generated_uuid_identity: false,
+                default: None,
+            },
+        ],
         retention_deadline_us: now + 3_600_000_000,
         audit_event: joined_table_audit,
     })?;
@@ -20883,24 +20892,39 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             .is_some()
         );
     }
-    let joined_tuple = encode_tuple(
-        &[ColumnSchema {
+    let joined_schema = [
+        ColumnSchema {
             scalar_type: ScalarType::Integer,
             nullable: true,
-        }],
-        1,
-        &[Some(ScalarValue::Integer(42))],
-    )?;
+        },
+        ColumnSchema {
+            scalar_type: ScalarType::Integer,
+            nullable: true,
+        },
+    ];
+    let joined_rows = [(0xc5, 42, 7), (0xca, 1, 7)]
+        .into_iter()
+        .map(|(row_id, id_value, match_key)| {
+            Ok(RowWrite {
+                key: table_row_key(joined_table.table_id, id(row_id)),
+                expected_version: None,
+                payload: Some(encode_tuple(
+                    &joined_schema,
+                    1,
+                    &[
+                        Some(ScalarValue::Integer(id_value)),
+                        Some(ScalarValue::Integer(match_key)),
+                    ],
+                )?),
+            })
+        })
+        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
     commit_rows(
         &database,
         id(0xc4),
         builtin_owner_id(),
         now + 3_600_000_000,
-        &[RowWrite {
-            key: table_row_key(joined_table.table_id, id(0xc5)),
-            expected_version: None,
-            payload: Some(joined_tuple),
-        }],
+        &joined_rows,
     )?;
     let private_table_invocation = id(0xa0);
     let mut private_table_audit = identity_audit_event(0xa1, user_id, schema.schema_id);
@@ -20970,6 +20994,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         dependency_write(user_id, records_table.column_ids[0], 5),
         dependency_write(user_id, joined_table.table_id, 5),
         dependency_write(user_id, joined_table.column_ids[0], 5),
+        dependency_write(user_id, joined_table.column_ids[1], 5),
         dependency_write(user_id, composite_table.table_id, 5),
         dependency_write(user_id, composite_table.column_ids[0], 5),
         dependency_write(user_id, composite_table.column_ids[1], 5),
@@ -21009,6 +21034,14 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             2,
             2,
             joined_table.column_ids[0],
+            user_id,
+        ),
+        grant_write(
+            user_id,
+            joined_table.table_id,
+            2,
+            2,
+            joined_table.column_ids[1],
             user_id,
         ),
         grant_write(
@@ -21552,6 +21585,16 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         "sandbox_join_select_cell_policy",
     )?;
     add_table_policy(
+        joined_table.table_id,
+        joined_table.column_ids[1],
+        id(0xcb),
+        1,
+        Some(select_using_id),
+        None,
+        true,
+        "sandbox_join_match_key_select_cell_policy",
+    )?;
+    add_table_policy(
         composite_table.table_id,
         composite_table.column_ids[0],
         id(0xd7),
@@ -21865,7 +21908,11 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     let user_table = read_frame(&mut gateway)?.ok_or("missing SQL user table result")?;
     assert_eq!(user_table.operation, Operation::GatewayResultData as u16);
     assert_eq!(user_table.request_id, accepted.request_id);
-    assert!(user_table.payload == b"records" || user_table.payload == b"linked_records");
+    assert!(
+        user_table.payload == b"records"
+            || user_table.payload == b"linked_records"
+            || user_table.payload == b"grouped_records"
+    );
     let user_column = read_frame(&mut gateway)?.ok_or("missing SQL user column result")?;
     assert_eq!(user_column.operation, Operation::GatewayResultData as u16);
     assert_eq!(user_column.request_id, accepted.request_id);
@@ -22013,6 +22060,36 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         ]
         .concat()
     );
+    for (expected_left, expected_right) in [(1u32, 7u32), (1u32, 7u32)] {
+        let composite_joined =
+            read_frame(&mut gateway)?.ok_or("missing composite joined SQLR result")?;
+        assert_eq!(
+            composite_joined.operation,
+            Operation::GatewayResultData as u16
+        );
+        assert_eq!(composite_joined.request_id, accepted.request_id);
+        let integer_field = |name: &[u8], value: u32| {
+            [
+                &(name.len() as u16).to_be_bytes()[..],
+                name,
+                &[0, 0, 0, 3],
+                &[0, 0, 0],
+                &[0, 0, 0, 4],
+                &value.to_be_bytes(),
+            ]
+            .concat()
+        };
+        let expected_payload = [
+            b"SQLR".as_slice(),
+            &[0, 1, 0, 4],
+            &integer_field(b"left_key", expected_left),
+            &integer_field(b"right_key", expected_right),
+            &integer_field(b"id", expected_left),
+            &integer_field(b"match_key", expected_right),
+        ]
+        .concat();
+        assert_eq!(composite_joined.payload, expected_payload);
+    }
     drop(gateway);
     assert!(matches!(
         finalize_gateway_invocation_and_send_terminal(

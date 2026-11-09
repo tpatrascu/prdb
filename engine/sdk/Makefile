@@ -18,6 +18,7 @@ SDK_SQL_EXEC_V5_SOURCE := engine/sdk/sql_exec_v5.c
 SDK_SQL_EXEC_V6_SOURCE := engine/sdk/sql_exec_v6.c
 SDK_SQL_EXEC_V7_SOURCE := engine/sdk/sql_exec_v7.c
 SDK_SQL_EXEC_V8_SOURCE := engine/sdk/sql_exec_v8.c
+SDK_SQL_EXEC_V16_SOURCE := engine/sdk/sql_exec_v16.c
 SDK_SQL_RESULT_SOURCE := engine/sdk/sql_result_v1.c
 SDK_MANIFEST_SOURCE := engine/sdk/manifest_v1.c
 SDK_SCOPE_SOURCE := engine/sdk/scope_v1.c
@@ -37,10 +38,11 @@ SDK_SQL_EXEC_V5_OBJECT := $(BUILD_DIR)/sql_exec_v5.o
 SDK_SQL_EXEC_V6_OBJECT := $(BUILD_DIR)/sql_exec_v6.o
 SDK_SQL_EXEC_V7_OBJECT := $(BUILD_DIR)/sql_exec_v7.o
 SDK_SQL_EXEC_V8_OBJECT := $(BUILD_DIR)/sql_exec_v8.o
+SDK_SQL_EXEC_V16_OBJECT := $(BUILD_DIR)/sql_exec_v16.o
 SDK_SQL_RESULT_OBJECT := $(BUILD_DIR)/sql_result_v1.o
 SDK_MANIFEST_OBJECT := $(BUILD_DIR)/manifest_v1.o
 SDK_SCOPE_OBJECT := $(BUILD_DIR)/scope_v1.o
-SDK_OBJECTS := $(SDK_VALUE_OBJECT) $(SDK_BATCH_OBJECT) $(SDK_OWNED_BATCH_OBJECT) $(SDK_SQL_OBJECT) $(SDK_SQL_ORDER_OBJECT) $(SDK_SQL_GROUP_OBJECT) $(SDK_SQL_JOIN_OBJECT) $(SDK_SQL_JOIN_V2_OBJECT) $(SDK_PLANNER_OBJECT) $(SDK_EXECUTOR_OBJECT) $(SDK_SQL_EXEC_OBJECT) $(SDK_SQL_EXEC_V4_OBJECT) $(SDK_SQL_EXEC_V5_OBJECT) $(SDK_SQL_EXEC_V6_OBJECT) $(SDK_SQL_EXEC_V7_OBJECT) $(SDK_SQL_EXEC_V8_OBJECT) $(SDK_SQL_RESULT_OBJECT) $(SDK_MANIFEST_OBJECT) $(SDK_SCOPE_OBJECT)
+SDK_OBJECTS := $(SDK_VALUE_OBJECT) $(SDK_BATCH_OBJECT) $(SDK_OWNED_BATCH_OBJECT) $(SDK_SQL_OBJECT) $(SDK_SQL_ORDER_OBJECT) $(SDK_SQL_GROUP_OBJECT) $(SDK_SQL_JOIN_OBJECT) $(SDK_SQL_JOIN_V2_OBJECT) $(SDK_PLANNER_OBJECT) $(SDK_EXECUTOR_OBJECT) $(SDK_SQL_EXEC_OBJECT) $(SDK_SQL_EXEC_V4_OBJECT) $(SDK_SQL_EXEC_V5_OBJECT) $(SDK_SQL_EXEC_V6_OBJECT) $(SDK_SQL_EXEC_V7_OBJECT) $(SDK_SQL_EXEC_V8_OBJECT) $(SDK_SQL_EXEC_V16_OBJECT) $(SDK_SQL_RESULT_OBJECT) $(SDK_MANIFEST_OBJECT) $(SDK_SCOPE_OBJECT)
 SDK_ARCHIVE := $(BUILD_DIR)/libprdb_sdk.a
 SDK_VALUE_TEST := $(BUILD_DIR)/sdk-value-v1
 SDK_BATCH_TEST := $(BUILD_DIR)/sdk-batch-v1
@@ -142,6 +144,9 @@ $(SDK_SQL_EXEC_V7_OBJECT): $(SDK_SQL_EXEC_V7_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql
 $(SDK_SQL_EXEC_V8_OBJECT): $(SDK_SQL_EXEC_V8_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_exec_v8.h $(INCLUDE_DIR)/prdb_sdk_sql_v8.h $(INCLUDE_DIR)/prdb_sdk_sql_join_v1.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
+$(SDK_SQL_EXEC_V16_OBJECT): $(SDK_SQL_EXEC_V16_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_exec_v16.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v8.h $(INCLUDE_DIR)/prdb_sdk_sql_v16.h $(INCLUDE_DIR)/prdb_sdk_sql_join_v2.h | $(BUILD_DIR)
+	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
+
 $(SDK_SQL_RESULT_OBJECT): $(SDK_SQL_RESULT_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_result_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_v2.h $(INCLUDE_DIR)/prdb_sdk_sql_v5.h $(INCLUDE_DIR)/prdb_sdk_sql_v6.h $(INCLUDE_DIR)/prdb_sdk_sql_v8.h $(INCLUDE_DIR)/prdb_sdk_sql_v13.h $(INCLUDE_DIR)/prdb_sdk_batch_v1.h $(INCLUDE_DIR)/prdb_sdk_value_v1.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
@@ -241,7 +246,7 @@ $(SDK_SQL_EXEC_V6_TEST): engine/tests/fixtures/sdk_sql_execute_v6.c $(SDK_ARCHIV
 $(SDK_SQL_EXEC_V7_TEST): engine/tests/fixtures/sdk_sql_execute_v7.c $(SDK_ARCHIVE) $(INCLUDE_DIR)/prdb_sdk_sql_exec_v7.h $(INCLUDE_DIR)/prdb_sdk_sql_v7.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" "$<" "$(SDK_ARCHIVE)" -o "$@"
 
-$(SDK_SQL_EXEC_V8_TEST): engine/tests/fixtures/sdk_sql_execute_v8.c $(SDK_ARCHIVE) $(INCLUDE_DIR)/prdb_sdk_sql_exec_v8.h $(INCLUDE_DIR)/prdb_sdk_sql_v8.h | $(BUILD_DIR)
+$(SDK_SQL_EXEC_V8_TEST): engine/tests/fixtures/sdk_sql_execute_v8.c $(SDK_ARCHIVE) $(INCLUDE_DIR)/prdb_sdk_sql_exec_v8.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v16.h $(INCLUDE_DIR)/prdb_sdk_sql_v8.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" "$<" "$(SDK_ARCHIVE)" -o "$@"
 
 $(SDK_SQL_EXEC_V9_TEST): engine/tests/fixtures/sdk_sql_execute_v9.c $(SDK_ARCHIVE) $(INCLUDE_DIR)/prdb_sdk_sql_exec_v9.h $(INCLUDE_DIR)/prdb_sdk_sql_v9.h | $(BUILD_DIR)
@@ -277,7 +282,7 @@ $(SQL_V3_CAUGHT_ERROR_QUERY): $(SQL_V3_CAUGHT_ERROR_OBJECT) $(SDK_ARCHIVE) | $(B
 	env -u NIX_LDFLAGS NIX_DONT_SET_RPATH=1 $(CC) -shared -Wl,--no-eh-frame-hdr,-z,noexecstack "$<" "$(SDK_ARCHIVE)" -o "$@"
 
 # This is an untrusted query artifact; run it only with the sandbox acceptance test.
-$(SQL_V3_WRITE_READ_OBJECT): engine/tests/fixtures/sql_v3_write_read.c $(INCLUDE_DIR)/prdb_query_abi_v3.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v2.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v5.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v6.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v7.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v8.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v10.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v11.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v12.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v13.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v15.h $(INCLUDE_DIR)/prdb_sdk_sql_v10.h $(INCLUDE_DIR)/prdb_sdk_sql_v11.h $(INCLUDE_DIR)/prdb_sdk_sql_v12.h $(INCLUDE_DIR)/prdb_sdk_sql_v13.h $(INCLUDE_DIR)/prdb_sdk_sql_v15.h $(INCLUDE_DIR)/prdb_sdk_sql_result_v1.h | $(BUILD_DIR)
+$(SQL_V3_WRITE_READ_OBJECT): engine/tests/fixtures/sql_v3_write_read.c $(INCLUDE_DIR)/prdb_query_abi_v3.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v2.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v5.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v6.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v7.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v8.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v10.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v11.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v12.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v13.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v15.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v16.h $(INCLUDE_DIR)/prdb_sdk_sql_v10.h $(INCLUDE_DIR)/prdb_sdk_sql_v11.h $(INCLUDE_DIR)/prdb_sdk_sql_v12.h $(INCLUDE_DIR)/prdb_sdk_sql_v13.h $(INCLUDE_DIR)/prdb_sdk_sql_v15.h $(INCLUDE_DIR)/prdb_sdk_sql_result_v1.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -fPIC -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
 $(SQL_V3_WRITE_READ_QUERY): $(SQL_V3_WRITE_READ_OBJECT) $(SDK_ARCHIVE) | $(BUILD_DIR)
