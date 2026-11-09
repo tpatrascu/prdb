@@ -48,6 +48,10 @@ pub struct StagingLimits {
     pub max_live_reservations: usize,
     /// Maximum live reservations owned by one authenticated principal.
     pub max_live_reservations_per_principal: usize,
+    /// Maximum non-active operational submissions uploading, sealing, or prepared.
+    pub max_pending_operational: usize,
+    /// Maximum non-active analytical submissions uploading, sealing, or prepared.
+    pub max_pending_analytical: usize,
     /// Maximum reservations entering or executing START with operational limits.
     pub max_active_operational: usize,
     /// Maximum reservations entering or executing START with analytical limits.
@@ -72,6 +76,8 @@ impl Default for StagingLimits {
             max_deadline_ms: DEFAULT_MAX_DEADLINE_MS,
             max_live_reservations: 1024,
             max_live_reservations_per_principal: 128,
+            max_pending_operational: 256,
+            max_pending_analytical: 64,
             max_active_operational: 64,
             max_active_analytical: 8,
             max_active_operational_per_principal: 16,
@@ -269,6 +275,8 @@ impl StagingStore {
             || limits.max_deadline_ms == 0
             || limits.max_live_reservations == 0
             || limits.max_live_reservations_per_principal == 0
+            || limits.max_pending_operational == 0
+            || limits.max_pending_analytical == 0
             || limits.max_active_operational == 0
             || limits.max_active_analytical == 0
             || limits.max_active_operational_per_principal == 0
@@ -339,6 +347,26 @@ impl StagingStore {
             .filter(|reservation| reservation.principal_id == owner.principal_id)
             .count();
         if principal_reservation_count >= self.limits.max_live_reservations_per_principal {
+            return Err(StagingError::ResourceLimit);
+        }
+        let pending_class_count = state
+            .reservations
+            .values()
+            .filter(|reservation| {
+                matches!(
+                    reservation.state,
+                    ReservationState::Uploading
+                        | ReservationState::Sealing
+                        | ReservationState::Sealed
+                        | ReservationState::DiscardRequested
+                ) && reservation.metadata.workload_class == request.workload_class
+            })
+            .count();
+        let pending_class_limit = match request.workload_class {
+            WorkloadClass::Operational => self.limits.max_pending_operational,
+            WorkloadClass::Analytical => self.limits.max_pending_analytical,
+        };
+        if pending_class_count >= pending_class_limit {
             return Err(StagingError::ResourceLimit);
         }
         let next_global = state
@@ -1307,6 +1335,45 @@ mod tests {
             .unwrap();
         store.finish_started(same_principal, queued_id).unwrap();
         store.finish_started(other_principal, other_id).unwrap();
+    }
+
+    #[test]
+    fn pending_submission_quotas_are_isolated_by_class_and_released_on_cancel() {
+        let store = StagingStore::new(
+            StagingLimits {
+                max_pending_operational: 1,
+                max_pending_analytical: 1,
+                ..StagingLimits::default()
+            },
+            Arc::new(AcceptMetadata),
+        )
+        .unwrap();
+        let operational = make_owner(91, 101);
+        let next_operational = make_owner(92, 102);
+        let analytical = make_owner(93, 103);
+        let first = store.prepare(operational, request(b"op", b"")).unwrap();
+        assert!(matches!(
+            store.prepare(next_operational, request(b"op2", b"")),
+            Err(StagingError::ResourceLimit)
+        ));
+        let analytical_request = store
+            .prepare(
+                analytical,
+                request_for_class(b"an", b"", WorkloadClass::Analytical),
+            )
+            .unwrap();
+        store
+            .cancel_prepared(operational, first.invocation_id)
+            .unwrap();
+        let replacement = store
+            .prepare(next_operational, request(b"op3", b""))
+            .unwrap();
+        store
+            .cancel_prepared(analytical, analytical_request.invocation_id)
+            .unwrap();
+        store
+            .cancel_prepared(next_operational, replacement.invocation_id)
+            .unwrap();
     }
 
     #[test]

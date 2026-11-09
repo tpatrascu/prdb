@@ -22,6 +22,13 @@
 - Verification: the deterministic principal-isolation/cancellation regression and supervisor help test passed. In the pinned Nix shell, locked workspace build, format check, warning-denied Clippy, and `cargo test --workspace --locked --offline` passed; commit integration reported 128 passed and 3 cgroup-gated ignored tests.
 - Remaining: bounded wait queues, separate planner/estimation budgets, and analytical prefetch/cache controls remain open.
 
+## SU-2 / SU-7: class-bounded pending submission backlog — implemented
+
+- Behavior: PREPARE counts uploading, sealing, sealed, and discard-requested reservations against independent operational and analytical pending limits. Defaults are 256 operational and 64 analytical; `--max-pending-operational` and `--max-pending-analytical` configure them. At the class limit PREPARE returns a resource-limit error without creating a reservation. Starting/started work uses the active invocation quotas above.
+- Changed code and contract: [staging state machine](../../engine/src/supervisor.rs), [supervisor CLI](../../engine/src/bin/prdb-supervisor.rs), and [workload profile](../../specs/workload-profile.md).
+- Verification: deterministic staging test checks cap rejection, class independence, cancellation release, and successful retry; supervisor help coverage checks both flags. In the pinned Nix shell, locked workspace build, format check, warning-denied Clippy, and `cargo test --workspace --locked --offline` passed; commit integration reported 128 passed and 3 cgroup-gated ignored tests.
+- Remaining: execution wait-queue scheduling/fair progress, separate planner/estimation budgets, and analytical prefetch/cache controls remain open.
+
 ## SU-2 dependency: bounded submission staging
 
 - Behavior: `StagingStore` binds each reservation to an authenticated connection/principal, enforces one reservation per connection, caps artifact/parameter sizes and chunk lengths, reserves global/per-principal quotas without preallocating declared bytes, requires exact contiguous offsets, validates content lengths and SHA-256 at seal, and exposes immutable bytes only during one-shot start admission. Disconnect reclaims unstarted reservations and returns started IDs for cancellation. Unstarted reservations have configurable expiry and an explicit reaper.

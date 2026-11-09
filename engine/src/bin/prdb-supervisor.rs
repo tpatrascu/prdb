@@ -50,6 +50,8 @@ mod service {
         max_rows: Option<usize>,
         max_bytes: Option<usize>,
         max_principal_reservations: Option<usize>,
+        max_pending_operational: Option<usize>,
+        max_pending_analytical: Option<usize>,
         max_active_operational: Option<usize>,
         max_active_analytical: Option<usize>,
         max_active_operational_per_principal: Option<usize>,
@@ -84,6 +86,7 @@ mod service {
              --cpu-baseline NAME --sdk-release NUMBER --allowed-dependency NAME (repeatable)\n\
              --retention-seconds N --max-rows N --max-bytes N\n\
              --max-principal-reservations N\n\
+             [--max-pending-operational N --max-pending-analytical N]\n\
              [--max-active-operational N --max-active-analytical N]\n\
              [--max-active-operational-per-principal N\n\
              --max-active-analytical-per-principal N]\n\
@@ -178,6 +181,18 @@ mod service {
         let default_staging_limits = StagingLimits::default();
         let staging = StagingStore::new(
             StagingLimits {
+                max_pending_operational: positive(
+                    options
+                        .max_pending_operational
+                        .unwrap_or(default_staging_limits.max_pending_operational),
+                    "--max-pending-operational",
+                )?,
+                max_pending_analytical: positive(
+                    options
+                        .max_pending_analytical
+                        .unwrap_or(default_staging_limits.max_pending_analytical),
+                    "--max-pending-analytical",
+                )?,
                 max_live_reservations_per_principal: positive(
                     options
                         .max_principal_reservations
@@ -380,6 +395,12 @@ mod service {
                 "--max-bytes" => set!(max_bytes, value.parse::<usize>()?),
                 "--max-principal-reservations" => {
                     set!(max_principal_reservations, value.parse::<usize>()?)
+                }
+                "--max-pending-operational" => {
+                    set!(max_pending_operational, value.parse::<usize>()?)
+                }
+                "--max-pending-analytical" => {
+                    set!(max_pending_analytical, value.parse::<usize>()?)
                 }
                 "--max-active-operational" => {
                     set!(max_active_operational, value.parse::<usize>()?)
