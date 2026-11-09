@@ -560,7 +560,9 @@ fn serve_tcp_client_connection_inner<C: GatewayClientStream, S: Read + Write>(
             }
         }
         if response.operation == crate::ipc::Operation::GatewayClientError as u16 {
-            if response.payload.len() > crate::client_protocol::CLIENT_MAX_CONTROL_BYTES {
+            if response.payload.len() > crate::client_protocol::CLIENT_MAX_CONTROL_BYTES
+                || !is_sanitized_gateway_error_payload(&response.payload)
+            {
                 return Err(GatewayConnectionError::MismatchedServiceResponse);
             }
             let bytes = crate::client_protocol::ClientFrame {
@@ -600,6 +602,17 @@ fn serve_tcp_client_connection_inner<C: GatewayClientStream, S: Read + Write>(
             relay_gateway_result_events(client, service, request.request_id)?;
         }
     }
+}
+
+fn is_sanitized_gateway_error_payload(payload: &[u8]) -> bool {
+    const ALLOWED: [&[u8]; 5] = [
+        br#"{"code":"invalid_request","message":"Request is invalid."}"#,
+        br#"{"code":"invalid_state","message":"Request is not valid in the current session state."}"#,
+        br#"{"code":"unauthenticated","message":"Authentication is required."}"#,
+        br#"{"code":"resource_limit","message":"Request exceeds a configured limit."}"#,
+        br#"{"code":"unavailable","message":"Requested resource is unavailable."}"#,
+    ];
+    ALLOWED.contains(&payload)
 }
 
 fn write_client_error<C: GatewayClientStream>(

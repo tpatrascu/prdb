@@ -20,7 +20,7 @@ The C v1 frame codec uses the same generated header constants and generated oper
 
 Operation tags are fixed independently of their payload schemas. The channel's service role is assigned during trusted connection provisioning and is never selected by a frame field. `Operation::from_code` rejects unknown tags; framing rejects them before payload allocation. A role/operation mismatch is denied before the selected handler runs. Database-principal authorization remains a separate StorageManager check.
 
-`GatewayClientError` (`0x1412`) is a supervisor-to-gateway response event only. Its bounded UTF-8 JSON payload uses the public client ERROR `{ "code": string, "message": string }` schema. It must contain only a fixed category and fixed sanitized message; raw errors and principal or token details do not cross this boundary. A gateway MUST reject this operation as an inbound client request.
+`GatewayClientError` (`0x1412`) is a supervisor-to-gateway response event only. Its bounded UTF-8 JSON payload uses the public client ERROR `{ "code": string, "message": string }` schema. Version 1 accepts only these canonical byte strings: `invalid_request` / `Request is invalid.`, `invalid_state` / `Request is not valid in the current session state.`, `unauthenticated` / `Authentication is required.`, `resource_limit` / `Request exceeds a configured limit.`, and `unavailable` / `Requested resource is unavailable.` A gateway rejects any other payload and closes the client connection; raw errors and principal or token details do not cross this boundary. A gateway MUST reject this operation as an inbound client request.
 
 | Role provisioned for the channel | Operation tags |
 | --- | --- |

@@ -186,6 +186,51 @@ fn gateway_bridge_returns_sanitized_supervisor_error_frames() {
 }
 
 #[test]
+fn gateway_rejects_unsanitized_supervisor_error_payloads() {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let (mut gateway_service, mut supervisor_service) =
+        std::os::unix::net::UnixStream::pair().unwrap();
+    let supervisor = std::thread::spawn(move || {
+        let request = read_frame(&mut supervisor_service).unwrap().unwrap();
+        write_frame(
+            &mut supervisor_service,
+            &IpcFrame {
+                operation: Operation::GatewayClientError as u16,
+                request_id: request.request_id,
+                payload: br#"{"code":"internal","message":"secret principal detail"}"#.to_vec(),
+            },
+        )
+        .unwrap();
+    });
+    let gateway = std::thread::spawn(move || {
+        let (mut client, _) = listener.accept().unwrap();
+        prdb_engine::gateway::serve_tcp_client_connection(&mut client, &mut gateway_service)
+    });
+
+    let mut client = std::net::TcpStream::connect(address).unwrap();
+    client
+        .write_all(
+            &ClientFrame {
+                kind: 10,
+                request_id: 7,
+                response_sequence: 0,
+                payload: b"{}".to_vec(),
+            }
+            .encode()
+            .unwrap(),
+        )
+        .unwrap();
+    let mut buffer = [0u8; 256];
+    assert_eq!(client.read(&mut buffer).unwrap(), 0);
+    assert!(matches!(
+        gateway.join().unwrap(),
+        Err(prdb_engine::gateway::GatewayConnectionError::MismatchedServiceResponse)
+    ));
+    supervisor.join().unwrap();
+}
+
+#[test]
 fn accepted_gateway_connections_obey_a_shared_limit() {
     let listener = TcpGatewayListener::bind(GatewayListenerConfig::default()).unwrap();
     let limiter = GatewayConnectionLimiter::new(1).unwrap();
