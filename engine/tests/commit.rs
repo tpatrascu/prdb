@@ -22680,7 +22680,10 @@ fn sealed_start_admits_only_current_credentials_and_enforces_request_deadline()
     assert_eq!(started_submission.invocation_id(), first.invocation_id);
     assert_eq!(started_submission.artifact(), artifact);
     assert!(started_submission.parameters().is_empty());
-    let cancelled = client.handle_cancel_prepared_request(
+    let mut cancellation_client = ClientConnectionSession::default();
+    cancellation_client.accept_hello(ClientMode::Query, "worker-cancel-control")?;
+    cancellation_client.authenticate(&storage, token_id, &secret)?;
+    let cancelled = cancellation_client.handle_cancel_prepared_request(
         &storage,
         &staging,
         ClientFrame {

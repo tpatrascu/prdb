@@ -6237,7 +6237,10 @@ impl ClientConnectionSession {
         }
         match staging.cancel_prepared(session.staging_owner(), invocation_id) {
             Ok(()) => self.json_response(request.request_id, b"{\"state\":\"accepted\"}".to_vec()),
-            Err(crate::supervisor::StagingError::InvalidState) => {
+            Err(
+                crate::supervisor::StagingError::InvalidState
+                | crate::supervisor::StagingError::Unavailable,
+            ) => {
                 let now_us = current_unix_micros().ok_or(ClientSessionError::UnsupportedRequest)?;
                 let result = storage
                     .cancel_owned_invocation(session.principal_id(), invocation_id, now_us)

@@ -1165,6 +1165,7 @@ fn disconnected_submission_is_reconciled_after_gateway_restart()
     let runtime_read_only = required_paths("PRDB_TEST_RUNTIME_READ_ONLY")?;
 
     let source = root.join("query.c");
+    let object_path = root.join("query.o");
     let artifact_path = root.join("query.so");
     std::fs::write(
         &source,
@@ -1175,22 +1176,43 @@ fn disconnected_submission_is_reconciled_after_gateway_restart()
          };\n\
          int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,\n\
              const prdb_invocation_v3 *invocation) {\n\
-             (void)host; (void)invocation; return 0;\n\
+             static const uint8_t ready[] = \"QUERY_READY\";\n\
+             (void)invocation;\n\
+             if (host == NULL || host->write_result == NULL ||\n\
+                 host->write_result(host->context, ready, sizeof(ready) - 1) != 0) return 1;\n\
+             for (;;) {}\n\
          }\n",
     )?;
     let include_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("include");
     let compile = Command::new("tcc")
-        .arg("-shared")
+        .arg("-fPIC")
+        .arg("-c")
         .arg("-I")
         .arg(include_dir)
         .arg(&source)
         .arg("-o")
-        .arg(&artifact_path)
+        .arg(&object_path)
         .output()?;
     if !compile.status.success() {
         return Err(format!(
             "TinyCC failed: {}",
             String::from_utf8_lossy(&compile.stderr)
+        )
+        .into());
+    }
+    let link = Command::new("cc")
+        .arg("-shared")
+        .arg("-Wl,-z,noexecstack")
+        .arg(&object_path)
+        .arg("-o")
+        .arg(&artifact_path)
+        .env_remove("NIX_LDFLAGS")
+        .env("NIX_DONT_SET_RPATH", "1")
+        .output()?;
+    if !link.status.success() {
+        return Err(format!(
+            "shared linker failed: {}",
+            String::from_utf8_lossy(&link.stderr)
         )
         .into());
     }
@@ -1315,7 +1337,23 @@ fn disconnected_submission_is_reconciled_after_gateway_restart()
         client.upload_and_seal(&package, &[], 30_000, WorkloadClass::Operational)?;
     let receipt = root.join("start.receipt");
     {
-        let _started = client.start(invocation_id, &receipt)?;
+        let mut started = client.start(invocation_id, &receipt)?;
+        let ready_event = started.next_event()?;
+        assert!(
+            matches!(ready_event, Some(prdb_engine::client_submit::ClientResultEvent::Data(ref bytes)) if bytes == b"QUERY_READY"),
+            "unexpected query startup event: {ready_event:?}"
+        );
+        let mut cancel_secret = status_secret;
+        let mut cancel_client =
+            SubmissionClient::connect_authenticated(address, token_id, &mut cancel_secret)?;
+        let active_status = cancel_client
+            .status(invocation_id)
+            .map_err(|error| format!("active STATUS failed: {error:?}"))?;
+        assert_eq!(active_status, InvocationStatus::Active);
+        let cancellation = cancel_client
+            .cancel(invocation_id)
+            .map_err(|error| format!("active CANCEL failed: {error:?}"))?;
+        assert_eq!(cancellation, CancellationResult::Accepted);
         let _gateway_crash_status = gateway.kill()?;
     }
     drop(client);
