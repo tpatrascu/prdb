@@ -4,6 +4,8 @@ The `sandboxed_v3_sql_error_latches_failure_and_durably_aborts_after_partial_out
 
 The `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` test uses `engine/tests/fixtures/sql_v3_write_read.c` to run a sequence of SDK calls over one sandboxed executor connection. It creates an owner-scoped nullable integer table, inserts NULL, verifies the row in a following SELECT/UPDATE scan, updates it to 42, verifies that value in a following SELECT, deletes it, then confirms a final SELECT returns no row. After receiving all provisional SQL results, the test closes the gateway before terminal delivery, requires the terminal frame write to fail, and checks that storage retained COMMITTED. Its restricted-principal query follows the normal terminal path. This exercises SQL parsing/binding, planner and executor IPC, private-write visibility across SELECT/UPDATE/DELETE, result relay, and storage commit through the real invocation path, including lost-terminal recovery.
 
+The existing `authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_processes` process test can also run the restricted metadata artifact over authenticated TCP. Set `PRDB_TEST_RESTRICTED_METADATA_QUERY_ARTIFACT` to the built `sql-v3-restricted-metadata.so`, and configure the same cgroup and runtime variables below. This optional branch packages the artifact for the test principal, uploads and starts it through `SubmissionClient`, and verifies filtered SQL results and committed STATUS through the external gateway and supervisor processes.
+
 First build the artifact and SDK archive:
 
 ```sh
@@ -26,6 +28,12 @@ Run the opt-in integration test after configuring the exact runtime profile:
 ```sh
 cargo test --locked --test commit sandboxed_v3_sql_error_latches_failure_and_durably_aborts_after_partial_output -- --ignored --exact --nocapture
 cargo test --locked --test commit sandboxed_v3_sql_dml_sequence_is_visible_and_commits -- --ignored --exact --nocapture
+```
+
+Run the optional authenticated TCP SQL branch with:
+
+```sh
+cargo test -p prdb-engine --locked --test metadata_process authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_processes -- --exact --nocapture
 ```
 
 Do not execute or load the artifact outside this executor path. A successful artifact build and a skipped Cargo test do not establish sandbox or durable-abort acceptance; the test must run on a host with the configured cgroup delegation and runtime profile.

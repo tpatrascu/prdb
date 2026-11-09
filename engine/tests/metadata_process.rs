@@ -12,7 +12,10 @@ use prdb_engine::client_submit::{
     AdminPolicyOperation, AdminPolicyRecipient, AdminSystemPrivilege, InvocationStatus,
     MetadataClient, SubmissionClient,
 };
-use prdb_engine::storage_manager::{CreateTableRequest, TableColumnDefinition, TokenIssueRequest};
+use prdb_engine::storage_manager::{
+    CreateTableRequest, ObjectGrantPrivilege, ObjectGrantTarget, SetObjectGrantRequest,
+    TableColumnDefinition, TokenIssueRequest,
+};
 use prdb_engine::submission_manifest::{encode_manifest_v1, manifest_v1_from_elf};
 use prdb_engine::supervisor::WorkloadClass;
 use prdb_engine::tuple::ScalarType;
@@ -88,6 +91,7 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
     let mut owner_secret;
     let restricted_schema_id;
     let restricted_table_id;
+    let sql_visible_schema_id;
     {
         let instance = setup.acknowledge()?;
         let storage = instance.storage_manager(Default::default())?;
@@ -141,6 +145,81 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
             },
         )?;
         restricted_schema_id = restricted_schema.schema_id;
+        let sql_visible_schema = storage.create_schema(
+            [0xb4; 16],
+            admin_user_id,
+            "empty_roundtrip",
+            restricted_user.user_id,
+            retention_deadline_us,
+            AuditEvent {
+                event_id: [0xb5; 16],
+                actor_id: Some(admin_user_id),
+                correlation_id: [0xb4; 16],
+                occurred_at_us: now_us,
+                action: AuditAction::Ddl,
+                result: AuditResult::Succeeded,
+                target_ids: Vec::new(),
+            },
+        )?;
+        sql_visible_schema_id = sql_visible_schema.schema_id;
+        storage.set_object_grant(SetObjectGrantRequest {
+            invocation_id: [0xba; 16],
+            authenticated_actor_id: admin_user_id,
+            grantee_id: restricted_user.user_id,
+            object_id: sql_visible_schema_id,
+            privilege: ObjectGrantPrivilege::Usage,
+            target: ObjectGrantTarget::Object,
+            grant: true,
+            retention_deadline_us,
+            audit_event: AuditEvent {
+                event_id: [0xbb; 16],
+                actor_id: Some(admin_user_id),
+                correlation_id: [0xba; 16],
+                occurred_at_us: now_us,
+                action: AuditAction::AuthorityChange,
+                result: AuditResult::Succeeded,
+                target_ids: vec![restricted_user.user_id, sql_visible_schema_id],
+            },
+        })?;
+        let sql_hidden_schema = storage.create_schema(
+            [0xb6; 16],
+            admin_user_id,
+            "sql_roundtrip",
+            admin_user_id,
+            retention_deadline_us,
+            AuditEvent {
+                event_id: [0xb7; 16],
+                actor_id: Some(admin_user_id),
+                correlation_id: [0xb6; 16],
+                occurred_at_us: now_us,
+                action: AuditAction::Ddl,
+                result: AuditResult::Succeeded,
+                target_ids: Vec::new(),
+            },
+        )?;
+        storage.create_table(CreateTableRequest {
+            invocation_id: [0xb8; 16],
+            authenticated_actor_id: admin_user_id,
+            schema_id: sql_hidden_schema.schema_id,
+            name: "records".to_owned(),
+            columns: vec![TableColumnDefinition {
+                name: "id".to_owned(),
+                scalar_type: ScalarType::Integer,
+                nullable: true,
+                generated_uuid_identity: false,
+                default: None,
+            }],
+            retention_deadline_us,
+            audit_event: AuditEvent {
+                event_id: [0xb9; 16],
+                actor_id: Some(admin_user_id),
+                correlation_id: [0xb8; 16],
+                occurred_at_us: now_us,
+                action: AuditAction::Ddl,
+                result: AuditResult::Succeeded,
+                target_ids: Vec::new(),
+            },
+        })?;
         let private_table = storage.create_table(CreateTableRequest {
             invocation_id: [0xaa; 16],
             authenticated_actor_id: admin_user_id,
@@ -279,6 +358,78 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
     }
     let mut outcome_status_secret = token_secret;
 
+    let network_sql_package = if let Some(artifact_path) =
+        std::env::var_os("PRDB_TEST_RESTRICTED_METADATA_QUERY_ARTIFACT")
+    {
+        let artifact = std::fs::read(artifact_path)?;
+        let manifest = manifest_v1_from_elf(
+            &artifact,
+            3,
+            1,
+            "x86_64-v1".to_owned(),
+            "test-runtime".to_owned(),
+            "TinyCC restricted metadata process fixture".to_owned(),
+        )
+        .map_err(|error| format!("derive network SQL fixture manifest: {error:?}"))?;
+        let dependencies = manifest.dependencies.clone();
+        let manifest_bytes = encode_manifest_v1(&manifest)
+            .map_err(|error| format!("encode network SQL fixture manifest: {error:?}"))?;
+        let mut requested_scope = b"PSC1\0\x01\x01\x01".to_vec();
+        requested_scope.extend_from_slice(&sql_visible_schema_id);
+        let package = root.join("restricted-metadata-package");
+        std::fs::create_dir(&package)?;
+        std::fs::set_permissions(&package, std::fs::Permissions::from_mode(0o700))?;
+        for (name, bytes) in [
+            ("query.so", artifact.as_slice()),
+            ("manifest.pmf1", manifest_bytes.as_slice()),
+            ("requested_scope.psc1", requested_scope.as_slice()),
+        ] {
+            let path = package.join(name);
+            std::fs::write(&path, bytes)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        let artifact_hash = Sha256::digest(&artifact)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let hash_path = package.join("artifact.sha256");
+        std::fs::write(&hash_path, format!("{artifact_hash}\n"))?;
+        std::fs::set_permissions(&hash_path, std::fs::Permissions::from_mode(0o600))?;
+        Some((package, dependencies))
+    } else {
+        None
+    };
+
+    let cgroup_parent = if network_sql_package.is_some() {
+        std::env::var_os("PRDB_TEST_CGROUP_PARENT")
+            .map(std::path::PathBuf::from)
+            .ok_or("PRDB_TEST_CGROUP_PARENT is required for network SQL sandbox testing")?
+    } else {
+        root.clone()
+    };
+    let runtime_paths =
+        |name: &str| -> Result<Vec<std::path::PathBuf>, Box<dyn std::error::Error>> {
+            let value = std::env::var_os(name).ok_or(format!("{name} is required"))?;
+            if name == "PRDB_TEST_RUNTIME_READ_ONLY" && value.is_empty() {
+                return Ok(Vec::new());
+            }
+            let paths = std::env::split_paths(&value).collect::<Vec<_>>();
+            if paths.is_empty() || paths.iter().any(|path| !path.is_absolute()) {
+                return Err(format!("{name} must contain absolute paths").into());
+            }
+            Ok(paths)
+        };
+    let runtime_read_execute = if network_sql_package.is_some() {
+        runtime_paths("PRDB_TEST_RUNTIME_READ_EXECUTE")?
+    } else {
+        vec![std::path::PathBuf::from("/usr")]
+    };
+    let runtime_read_only = if network_sql_package.is_some() {
+        runtime_paths("PRDB_TEST_RUNTIME_READ_ONLY")?
+    } else {
+        vec![std::path::PathBuf::from("/etc/ld.so.cache")]
+    };
+
     let socket_path = root.join("supervisor.sock");
     let uid = unsafe { libc::geteuid() };
     let mut supervisor_command = Command::new(env!("CARGO_BIN_EXE_prdb-supervisor"));
@@ -290,15 +441,11 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
         "--gateway-uid",
         &uid.to_string(),
         "--cgroup-parent",
-        root.to_str().ok_or("non-UTF-8 cgroup path")?,
+        cgroup_parent.to_str().ok_or("non-UTF-8 cgroup path")?,
         "--executor",
         env!("CARGO_BIN_EXE_prdb-executor"),
         "--scratch-parent",
         root.to_str().ok_or("non-UTF-8 scratch path")?,
-        "--runtime-read-execute",
-        "/usr",
-        "--runtime-read-only",
-        "/etc/ld.so.cache",
         "--cpu-baseline",
         "x86_64-v1",
         "--runtime-profile",
@@ -320,6 +467,19 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
         "--max-processes",
         "16",
     ]);
+    for path in &runtime_read_execute {
+        supervisor_command.arg("--runtime-read-execute").arg(path);
+    }
+    for path in &runtime_read_only {
+        supervisor_command.arg("--runtime-read-only").arg(path);
+    }
+    if let Some((_, dependencies)) = &network_sql_package {
+        for dependency in dependencies {
+            supervisor_command
+                .arg("--allowed-dependency")
+                .arg(dependency);
+        }
+    }
     let mut supervisor = ChildGuard(Some(
         supervisor_command
             .stdout(Stdio::null())
@@ -369,6 +529,39 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
         .strip_prefix("prdb-gateway listening on ")
         .ok_or("gateway listen line had an unexpected prefix")?
         .parse()?;
+
+    if let Some((package, _)) = network_sql_package.as_ref() {
+        let mut query_secret = restricted_secret;
+        let mut query =
+            SubmissionClient::connect_authenticated(address, restricted_token, &mut query_secret)?;
+        assert_eq!(query_secret, [0; 32]);
+        let invocation_id =
+            query.upload_and_seal(package, &[], 30_000, WorkloadClass::Operational)?;
+        let receipt_path = root.join("restricted-metadata.receipt");
+        let (results, terminal_outcome) = {
+            let mut started = query.start(invocation_id, &receipt_path)?;
+            let mut results = Vec::new();
+            let mut terminal_outcome = None;
+            while let Some(event) = started.next_event()? {
+                match event {
+                    prdb_engine::client_submit::ClientResultEvent::Data(bytes) => {
+                        results.push(bytes);
+                    }
+                    prdb_engine::client_submit::ClientResultEvent::Terminal(terminal) => {
+                        terminal_outcome = Some(terminal.outcome);
+                        break;
+                    }
+                }
+            }
+            (results, terminal_outcome)
+        };
+        assert_eq!(results, vec![b"empty_roundtrip".to_vec()]);
+        assert_eq!(
+            terminal_outcome,
+            Some(prdb_engine::client_submit::TerminalOutcome::Committed)
+        );
+        assert_eq!(query.status(invocation_id)?, InvocationStatus::Committed);
+    }
 
     let mut admin_control_secret = token_secret;
     let mut metadata = MetadataClient::connect_authenticated(address, token_id, &mut token_secret)?;
