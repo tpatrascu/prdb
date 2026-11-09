@@ -179,3 +179,11 @@
 - Implementation: `prdb_sdk_sql_encode_group_minmax_result_v1` writes a standalone SQLR v1 record; its writer emits host-sized chunks through the v3 provisional result callback.
 - Sandbox integration: `sql_v3_write_read.c` now executes `SELECT id, MIN(id) ... GROUP BY id` over the row it just updated and writes the SQLR record from the grouped callback. `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` checks the exact relayed SQLR bytes; the ignored acceptance passed through the confined executor, result relay, and durable commit using the documented NixOS runtime profile and a user-owned delegated cgroup with `cpu`, `memory`, and `pids` enabled.
 - Remaining: SUM/AVG typing and overflow rules, cancellation/deadlines, spill, HAVING, grouped ORDER BY, and multiple grouping keys remain unsupported.
+
+## SQL-7 dependency: bounded SUM aggregate kernel — partial
+
+- Contract: [SQL library](../../specs/sql-library.md) and [workload profile](../../specs/workload-profile.md). Accept at most 128 SMALLINT, INTEGER, BIGINT, or DECIMAL values of one declared type. Widen integer results to BIGINT and DECIMAL(p,s) to DECIMAL(38,s); ignore NULLs, return canonical NULL for empty/all-NULL input, and fail on REDACTED, malformed, mismatched, or numerically overflowing input.
+- Red/green evidence: the maintained TinyCC grouping fixture now checks BIGINT summation with NULLs, BIGINT final overflow, intermediate cancellation, Decimal coefficient summation and Decimal result overflow, canonical empty input, and unchanged output on overflow.
+- Implementation: `prdb_sdk_sql_sum_v1` uses caller-owned output bytes and fixed-size accumulators sized for the 128-row cap. It validates Decimal input coefficients against declared precision and reports overflow only when the final exact sum exceeds the result type range. Failure leaves output view and bytes unchanged.
+- Verification: the focused TinyCC grouping fixture was force-rebuilt and passed with `-Wall -Wextra -Werror`.
+- Remaining: grouped SUM parser/binder support, runner aggregation and SQLR encoding/writing, AVG semantics, and live sandbox integration remain open.

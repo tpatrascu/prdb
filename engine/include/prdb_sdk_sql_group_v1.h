@@ -10,6 +10,15 @@
 #define PRDB_SDK_SQL_MINMAX_MIN UINT32_C(1)
 #define PRDB_SDK_SQL_MINMAX_MAX UINT32_C(2)
 
+/* SUM widens SMALLINT/INTEGER/BIGINT to BIGINT and returns DECIMAL(38,s)
+ * for DECIMAL(p,s). NULLs are ignored; empty/all-NULL returns canonical NULL.
+ * The numeric bytes are written to caller storage only on success. */
+int32_t prdb_sdk_sql_sum_v1(
+    const prdb_sdk_value_v1 *values, uint32_t value_count,
+    uint32_t declared_type, uint8_t decimal_precision, uint8_t decimal_scale,
+    prdb_sdk_value_v1 *value_out, uint32_t out_capacity,
+    uint8_t *value_bytes_out, uint64_t value_bytes_capacity);
+
 typedef struct prdb_sdk_sql_count_group_v1 {
     uint32_t representative_row;
     uint64_t count;
