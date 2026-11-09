@@ -14,6 +14,11 @@ typedef struct mock_state {
     uint32_t planner_calls;
     uint32_t resolve_calls;
     uint32_t open_calls;
+    uint32_t check_cancel_calls;
+    uint32_t cancel_after_check;
+    uint32_t close_calls;
+    uint32_t executor_requests;
+    uint32_t empty_pages[2];
     uint32_t next_calls[2];
     uint32_t scan_finished[2];
     uint32_t statement_failed;
@@ -148,9 +153,16 @@ static int32_t executor_request(void *context, uint16_t operation,
                                 uint8_t *response, uint64_t capacity,
                                 uint64_t *response_len) {
     mock_state *mock = (mock_state *)context;
+    ++mock->executor_requests;
+    assert(mock->executor_requests <= 256);
     if (operation == PRDB_SDK_EXECUTOR_OP_CHECK_CANCELLATION) {
-        static const uint8_t reply[] = {0, 1, 0};
+        uint8_t reply[] = {0, 1, 0};
         assert(request_len == 0 && sizeof(reply) <= capacity);
+        ++mock->check_cancel_calls;
+        if (mock->cancel_after_check != 0 &&
+            mock->check_cancel_calls >= mock->cancel_after_check) {
+            reply[2] = 1;
+        }
         memcpy(response, reply, sizeof(reply));
         *response_len = sizeof(reply);
     } else if (operation == PRDB_SDK_EXECUTOR_OP_RESOLVE_RELATION) {
@@ -173,13 +185,32 @@ static int32_t executor_request(void *context, uint16_t operation,
         uint32_t index;
         assert(request_len == 24 && request[0] == 0 && request[1] == 1 &&
                request[2] == 7);
-        index = request[3] == 0x44 ? 0 : 1;
-        assert(request[3] == (uint8_t)(index == 0 ? 0x44 : 0x55));
-        assert(mock->batch_len[index] <= capacity);
-        memcpy(response, mock->batch[index], mock->batch_len[index]);
-        *response_len = mock->batch_len[index];
+        assert(mock->open_calls == 1 || mock->open_calls == 2);
+        index = mock->open_calls - 1;
+        if (mock->empty_pages[index] != 0) {
+            uint32_t offset = 0;
+            put_u16(response, &offset, 1);
+            response[offset++] = 0;
+            response[offset++] = PRDB_SDK_BATCH_CURSOR_TOKEN_KIND;
+            memset(response + offset, (int)(0x61 + index), 15);
+            offset += 15;
+            put_u16(response, &offset, 0);
+            *response_len = offset;
+            --mock->empty_pages[index];
+        } else {
+            assert(mock->batch_len[index] <= capacity);
+            memcpy(response, mock->batch[index], mock->batch_len[index]);
+            *response_len = mock->batch_len[index];
+            mock->scan_finished[index] = 1;
+        }
         ++mock->next_calls[index];
-        mock->scan_finished[index] = 1;
+    } else if (operation == PRDB_SDK_EXECUTOR_OP_CLOSE_CURSOR) {
+        static const uint8_t reply[] = {0, 1, 0};
+        assert(request_len == 18 && request[0] == 0 && request[1] == 1 &&
+               sizeof(reply) <= capacity);
+        memcpy(response, reply, sizeof(reply));
+        *response_len = sizeof(reply);
+        ++mock->close_calls;
     } else {
         assert(!"unexpected executor operation");
     }
@@ -329,6 +360,11 @@ static void reset(mock_state *mock, row_capture *capture) {
     mock->planner_calls = 0;
     mock->resolve_calls = 0;
     mock->open_calls = 0;
+    mock->check_cancel_calls = 0;
+    mock->cancel_after_check = 0;
+    mock->close_calls = 0;
+    mock->executor_requests = 0;
+    mock->empty_pages[0] = mock->empty_pages[1] = 0;
     mock->next_calls[0] = mock->next_calls[1] = 0;
     mock->scan_finished[0] = mock->scan_finished[1] = 0;
     mock->statement_failed = 0;
@@ -455,10 +491,28 @@ int main(void) {
                PRDB_SDK_SQL_EXEC_OK);
         assert(mock.planner_calls == 2 && mock.resolve_calls == 2 &&
                mock.open_calls == 2 && mock.next_calls[0] == 1 &&
-               mock.next_calls[1] == 1 && mock.statement_failed == 0);
+               mock.next_calls[1] == 1 && mock.check_cancel_calls == 3 &&
+               mock.statement_failed == 0);
         assert(capture.calls == 2 && capture.left_values[0] == 10 &&
                capture.right_values[0] == 10 && capture.left_values[1] == 20 &&
                capture.right_values[1] == 20);
+
+        reset(&mock, &capture);
+        mock.cancel_after_check = 3;
+        assert(run_query_v16(&mock, &capture, composite_sql,
+                             sizeof(composite_sql) - 1, 1024) ==
+               PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
+        assert(capture.calls == 0 && mock.statement_failed == 1 &&
+               mock.check_cancel_calls == 3);
+
+        reset(&mock, &capture);
+        mock.empty_pages[0] = 121;
+        assert(run_query_v16(&mock, &capture, composite_sql,
+                             sizeof(composite_sql) - 1, 1024) ==
+               PRDB_SDK_SQL_EXEC_REQUEST_LIMIT);
+        assert(mock.next_calls[0] == 121 && mock.next_calls[1] == 0 &&
+               mock.close_calls == 1 && mock.executor_requests == 246 &&
+               capture.calls == 0 && mock.statement_failed == 1);
 
         reset(&mock, &capture);
         assert(run_query_v16(&mock, &capture, composite_max_keys_sql,

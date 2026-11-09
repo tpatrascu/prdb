@@ -16,8 +16,10 @@ typedef int32_t (*prdb_sdk_sql_join_result_row_v16_fn)(
 
 /* Executes a v16 two-relation INNER JOIN over independently described and
  * resolved authorized relations. Each scan closes before the next begins.
- * At most 128 rows per side and 1 MiB of copied keys/projections are retained;
- * both scans close before any result callback. Caller buffers must be disjoint. */
+ * At most 128 rows per side and 1 MiB of copied keys/projections are retained.
+ * Combined scan pages and join-output cancellation checks stay within the
+ * executor's 256-request ceiling. Both scans close before result callbacks.
+ * Caller buffers must be disjoint. */
 int32_t prdb_sdk_sql_execute_inner_join_v16(
     const prdb_host_api_v3 *host,
     const uint8_t *schema, uint32_t schema_len,
