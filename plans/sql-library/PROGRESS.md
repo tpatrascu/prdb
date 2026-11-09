@@ -148,3 +148,11 @@
 - Result evidence: `sdk_sql_result_v1.c` first failed to link because the grouped SQLR encoder/writer were missing. It now checks exact wire bytes, positive-count validation, NULL key encoding, insufficient capacity with zero output length, successful callback output, 17 KiB record fragmentation, and failure on the second chunk after one provisional chunk. The executor fixture composes runner groups through the encoder and checks the encoded counts.
 - Verification: the complete maintained TinyCC SDK suite passed. Locked workspace build, formatting check, warning-denied Clippy, and full locked workspace tests passed; the commit integration suite reported 125 passed and 3 cgroup-dependent ignored.
 - Remaining: live sandbox/result-relay integration for grouped output, cancellation/deadlines, spill, HAVING, grouped ORDER BY, multiple keys, and SUM/MIN/MAX/AVG remain open.
+
+## SQL-7 dependency: bounded MIN/MAX aggregate kernel — partial
+
+- Contract: [SQL library](../../specs/sql-library.md) and [workload profile](../../specs/workload-profile.md). Compute MIN or MAX over at most 128 authorized values of one declared scalar type. Ignore NULLs, return a canonical NULL view for empty/all-NULL input, compare typed values through the shared exact comparator, and reject any REDACTED/malformed/mismatched operand without modifying the output.
+- Red/green evidence: the maintained grouping fixture failed to link because `prdb_sdk_sql_minmax_v1` was not implemented. It now checks MIN/MAX values, NULL behavior, redacted and type mismatch failures with output preservation, undersized output rejection, and exact Decimal ordering at a declared scale.
+- Implementation: the no-allocation kernel retains a borrowed view of the first extremum and uses the existing scalar comparator; equal values preserve the first representation. It is an operator primitive, not yet exposed by SQL aggregate parsing or grouped execution.
+- Verification: the complete maintained TinyCC suite passed. Locked workspace build, format check, warning-denied Clippy, and full locked workspace tests passed; the commit integration suite reported 125 passed and 3 cgroup-dependent ignored.
+- Remaining: SQL aggregate grammar/execution/result encoding, SUM/AVG overflow and result type rules, and live analytical integration remain open.

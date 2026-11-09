@@ -103,5 +103,119 @@ int main(void) {
                NULL, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, NULL, 0,
                &group_count) == PRDB_SDK_SQL_GROUP_OK);
     assert(group_count == 0);
+
+    {
+        prdb_sdk_value_v1 result = {
+            sizeof(result), PRDB_SDK_VALUE_ABI_V1_VERSION,
+            PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_BIGINT,
+            bytes[0], sizeof(bytes[0])};
+        uint8_t bigint_bytes[8] = {0};
+        int32_t result_number = 0;
+        assert(prdb_sdk_sql_minmax_v1(
+                   keys, 5, PRDB_SDK_VALUE_TYPE_INTEGER, 0,
+                   PRDB_SDK_SQL_MINMAX_MIN, &result, sizeof(result)) ==
+               PRDB_SDK_SQL_EVAL_OK);
+        assert(prdb_sdk_value_get_integer_v1(&result, &result_number) ==
+               PRDB_SDK_VALUE_ACCESS_OK);
+        assert(result_number == 3);
+        assert(prdb_sdk_sql_minmax_v1(
+                   keys, 5, PRDB_SDK_VALUE_TYPE_INTEGER, 0,
+                   PRDB_SDK_SQL_MINMAX_MAX, &result, sizeof(result)) ==
+               PRDB_SDK_SQL_EVAL_OK);
+        assert(prdb_sdk_value_get_integer_v1(&result, &result_number) ==
+               PRDB_SDK_VALUE_ACCESS_OK);
+        assert(result_number == 8);
+        assert(prdb_sdk_sql_minmax_v1(
+                   NULL, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0,
+                   PRDB_SDK_SQL_MINMAX_MIN, &result, sizeof(result)) ==
+               PRDB_SDK_SQL_EVAL_OK);
+        assert(result.state == PRDB_SDK_VALUE_STATE_NULL &&
+               result.type_code == 0 && result.data == NULL &&
+               result.data_len == 0);
+        assert(prdb_sdk_sql_minmax_v1(
+                   &keys[3], 2, PRDB_SDK_VALUE_TYPE_INTEGER, 0,
+                   PRDB_SDK_SQL_MINMAX_MAX, &result, sizeof(result)) ==
+               PRDB_SDK_SQL_EVAL_OK);
+        assert(result.state == PRDB_SDK_VALUE_STATE_NULL);
+
+        result = (prdb_sdk_value_v1){
+            sizeof(result), PRDB_SDK_VALUE_ABI_V1_VERSION,
+            PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_INTEGER,
+            bytes[0], sizeof(bytes[0])};
+        prdb_sdk_value_v1 invalid_values[2] = {0};
+        invalid_values[0] = keys[0];
+        invalid_values[1] = (prdb_sdk_value_v1){
+            sizeof(result), PRDB_SDK_VALUE_ABI_V1_VERSION,
+            PRDB_SDK_VALUE_STATE_REDACTED, 0, NULL, 0};
+        assert(prdb_sdk_sql_minmax_v1(
+                   invalid_values, 2, PRDB_SDK_VALUE_TYPE_INTEGER, 0,
+                   PRDB_SDK_SQL_MINMAX_MIN, &result, sizeof(result)) ==
+               PRDB_SDK_SQL_EVAL_REDACTED_INPUT);
+        assert(prdb_sdk_value_get_integer_v1(&result, &result_number) ==
+                   PRDB_SDK_VALUE_ACCESS_OK &&
+               result_number == 8);
+        invalid_values[1] = (prdb_sdk_value_v1){
+            sizeof(result), PRDB_SDK_VALUE_ABI_V1_VERSION,
+            PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_BIGINT,
+            bigint_bytes, sizeof(bigint_bytes)};
+        assert(prdb_sdk_sql_minmax_v1(
+                   invalid_values, 2, PRDB_SDK_VALUE_TYPE_INTEGER, 0,
+                   PRDB_SDK_SQL_MINMAX_MAX, &result, sizeof(result)) ==
+               PRDB_SDK_SQL_EVAL_TYPE_MISMATCH);
+        assert(prdb_sdk_value_get_integer_v1(&result, &result_number) ==
+                   PRDB_SDK_VALUE_ACCESS_OK &&
+               result_number == 8);
+        invalid_values[1] = (prdb_sdk_value_v1){
+            sizeof(result), PRDB_SDK_VALUE_ABI_V1_VERSION,
+            PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_INTEGER,
+            bytes[1], 3};
+        assert(prdb_sdk_sql_minmax_v1(
+                   invalid_values, 2, PRDB_SDK_VALUE_TYPE_INTEGER, 0,
+                   PRDB_SDK_SQL_MINMAX_MIN, &result, sizeof(result)) ==
+               PRDB_SDK_SQL_EVAL_INVALID_VALUE);
+        assert(prdb_sdk_value_get_integer_v1(&result, &result_number) ==
+                   PRDB_SDK_VALUE_ACCESS_OK &&
+               result_number == 8);
+        assert(prdb_sdk_sql_minmax_v1(
+                   keys, 5, PRDB_SDK_VALUE_TYPE_INTEGER, 0,
+                   PRDB_SDK_SQL_MINMAX_MIN, &result, 1) ==
+               PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT);
+        assert(prdb_sdk_value_get_integer_v1(&result, &result_number) ==
+                   PRDB_SDK_VALUE_ACCESS_OK &&
+               result_number == 8);
+        {
+            prdb_sdk_value_v1 too_many[PRDB_SDK_SQL_GROUP_MAX_ROWS + 1] = {0};
+            assert(prdb_sdk_sql_minmax_v1(
+                       too_many, PRDB_SDK_SQL_GROUP_MAX_ROWS + 1,
+                       PRDB_SDK_VALUE_TYPE_INTEGER, 0,
+                       PRDB_SDK_SQL_MINMAX_MAX, &result, sizeof(result)) ==
+                   PRDB_SDK_SQL_GROUP_LIMIT_EXCEEDED);
+            assert(prdb_sdk_value_get_integer_v1(&result, &result_number) ==
+                       PRDB_SDK_VALUE_ACCESS_OK &&
+                   result_number == 8);
+        }
+    }
+
+    {
+        uint8_t decimal_bytes[2][16] = {{0}};
+        prdb_sdk_value_v1 decimal_values[2] = {{0}};
+        prdb_sdk_value_v1 decimal_min = {0};
+        decimal_bytes[0][15] = 0xB6;
+        decimal_bytes[1][15] = 0x78;
+        decimal_bytes[1][14] = 0x03;
+        decimal_values[0] = (prdb_sdk_value_v1){
+            sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
+            PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_DECIMAL,
+            decimal_bytes[0], sizeof(decimal_bytes[0])};
+        decimal_values[1] = (prdb_sdk_value_v1){
+            sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
+            PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_DECIMAL,
+            decimal_bytes[1], sizeof(decimal_bytes[1])};
+        assert(prdb_sdk_sql_minmax_v1(
+                   decimal_values, 2, PRDB_SDK_VALUE_TYPE_DECIMAL, 2,
+                   PRDB_SDK_SQL_MINMAX_MIN, &decimal_min,
+                   sizeof(decimal_min)) == PRDB_SDK_SQL_EVAL_OK);
+        assert(decimal_min.data == decimal_bytes[0]);
+    }
     return 0;
 }

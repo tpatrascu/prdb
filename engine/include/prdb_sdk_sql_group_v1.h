@@ -7,6 +7,9 @@
 #define PRDB_SDK_SQL_GROUP_OK INT32_C(0)
 #define PRDB_SDK_SQL_GROUP_LIMIT_EXCEEDED INT32_C(6)
 
+#define PRDB_SDK_SQL_MINMAX_MIN UINT32_C(1)
+#define PRDB_SDK_SQL_MINMAX_MAX UINT32_C(2)
+
 typedef struct prdb_sdk_sql_count_group_v1 {
     uint32_t representative_row;
     uint64_t count;
@@ -20,5 +23,14 @@ int32_t prdb_sdk_sql_group_count_v1(
     uint32_t declared_type, uint8_t decimal_scale,
     prdb_sdk_sql_count_group_v1 *groups_out, uint32_t groups_capacity,
     uint32_t *group_count_out);
+
+/* Computes MIN or MAX over at most 128 authorized typed values. SQL NULLs
+ * are ignored; empty/all-NULL input returns a canonical NULL view. REDACTED
+ * and invalid operands fail without changing value_out. The selected VALUE
+ * borrows input bytes and ties retain the first matching input representation. */
+int32_t prdb_sdk_sql_minmax_v1(
+    const prdb_sdk_value_v1 *values, uint32_t value_count,
+    uint32_t declared_type, uint8_t decimal_scale, uint32_t operation,
+    prdb_sdk_value_v1 *value_out, uint32_t out_capacity);
 
 #endif /* PRDB_SDK_SQL_GROUP_V1_H */
