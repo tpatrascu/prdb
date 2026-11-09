@@ -32,4 +32,5 @@
 - Regression: a Rust storage/IPC integration check observes active and administrator-cancelled states; the maintained TinyCC fixture covers active, cancelled, and malformed boolean responses.
 - Verification: focused TinyCC executor fixture passed. Full workspace and SDK checks recorded with the feature commit.
 - Verification update: the confined SQL artifact acceptance requests owner cancellation after worker readiness and observes worker termination plus durable ABORTED status. It does not yet assert a latency bound or prove the positive cancellation response was relayed to query code.
-- Remaining: verify bounded cancellation latency and application-level cancellation observation in the sandbox harness; connect statement-error behavior to storage abort.
+- Verification update: `sandboxed_v3_sql_error_latches_failure_and_durably_aborts_after_partial_output` passed through the confined executor after the cancellation acceptance. A caught SQL error forces worker failure despite the query entry point returning success; storage retained ABORTED and the terminal event followed provisional output.
+- Remaining: verify bounded cancellation latency and application-level cancellation observation in the sandbox harness; add wider malformed, incompatible, and hostile artifact coverage.
