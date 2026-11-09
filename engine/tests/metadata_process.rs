@@ -589,6 +589,35 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
     })?;
     let dropped_cell_policy = admin.drop_policy(cell_policy.policy_id)?;
     assert!(dropped_cell_policy.commit_sequence > cell_policy.commit_sequence);
+    let policy_true = prdb_engine::authorization::Expr::Literal(Some(
+        prdb_engine::tuple::ScalarValue::Boolean(true),
+    ));
+    let cell_insert_policy = admin.create_policy(AdminCreatePolicyRequest {
+        table_id: created_table.table_id,
+        name: "process_insertable_cells",
+        kind: AdminPolicyKind::Cell,
+        operation: AdminPolicyOperation::Insert,
+        effect: AdminPolicyEffect::Allow,
+        recipients: &[AdminPolicyRecipient::User(admin_user_id)],
+        target_column_ids: &[added_column.column_id],
+        using_expression: None,
+        with_check_expression: Some(&policy_true),
+    })?;
+    let dropped_cell_insert_policy = admin.drop_policy(cell_insert_policy.policy_id)?;
+    assert!(dropped_cell_insert_policy.commit_sequence > cell_insert_policy.commit_sequence);
+    let cell_update_policy = admin.create_policy(AdminCreatePolicyRequest {
+        table_id: created_table.table_id,
+        name: "process_editable_cells",
+        kind: AdminPolicyKind::Cell,
+        operation: AdminPolicyOperation::Update,
+        effect: AdminPolicyEffect::Allow,
+        recipients: &[AdminPolicyRecipient::User(admin_user_id)],
+        target_column_ids: &[added_column.column_id],
+        using_expression: Some(&policy_true),
+        with_check_expression: Some(&policy_true),
+    })?;
+    let dropped_cell_update_policy = admin.drop_policy(cell_update_policy.policy_id)?;
+    assert!(dropped_cell_update_policy.commit_sequence > cell_update_policy.commit_sequence);
     let renamed_column =
         admin.rename_column(created_table.table_id, added_column.column_id, "extra_v2")?;
     let dropped_column = admin.drop_column(created_table.table_id, added_column.column_id)?;

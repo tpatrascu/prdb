@@ -2045,13 +2045,13 @@
 
 - Contract: strict PREPARE/START accepts canonical row/cell policy shape, recipient IDs, cell-column targets, and nullable EIR1 USING/WITH CHECK expressions. START delegates to typed StorageManager policy create/drop and revalidates authority at serialized commit.
 - Implementation: `policies.create` and `policies.drop` are connection-owned ADMIN operations. `AdminClient` encodes typed policy enums, recipients, target columns and expressions; `prdb-client policy-create/policy-drop` exposes the same path.
-- Regression: protocol decoder tests accept canonical row-policy create/drop and reject malformed shapes; the real gateway/supervisor process lifecycle creates and drops row and cell SELECT ALLOW policies, including a cell target bound to a live column. CLI recipient parser accepts only user/role plus canonical nonzero lowercase IDs.
+- Regression: protocol decoder tests accept canonical row-policy create/drop and reject malformed shapes; the real gateway/supervisor process lifecycle creates and drops row SELECT and cell SELECT/INSERT/UPDATE ALLOW policies, using the required USING/WITH CHECK clauses and a live cell target. CLI recipient parser accepts only user/role plus canonical nonzero lowercase IDs.
 - Verification: focused protocol, multi-process, and CLI parser tests passed; updated `prdb-client --help` was inspected. Rust 1.95.0 workspace build, formatting, warning-denied Clippy, and full tests passed; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
-- Remaining: process coverage for cell INSERT/UPDATE policy clause combinations, repeated race stress, and confined artifact execution remain open.
+- Remaining: broader row INSERT/UPDATE/DELETE ADMIN process coverage, repeated race stress, and confined artifact execution remain open.
 
 ## SM-5 / DS-7: policy creation conflicts with stale writers — verified
 
 - Contract: a policy DDL commit advances its table write epoch; a writer pinned before that authority change must not commit using stale policy state.
 - Regression: the named-index lifecycle test now stages a row write, creates a row policy through typed `StorageManager::create_policy`, and confirms the stale writer records an ABORTED outcome and publishes no row while policy creation records COMMITTED.
 - Verification: the focused real-redb regression passed. Rust 1.95.0 workspace build, formatting, warning-denied Clippy, and full tests passed; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
-- Remaining: concurrent race schedules, cell INSERT/UPDATE policy combinations, and confined artifact execution remain open.
+- Remaining: repeated concurrent race schedules, broader row-policy ADMIN process coverage, and confined artifact execution remain open.
