@@ -5,6 +5,7 @@
 #include "prdb_sdk_sql_exec_v8.h"
 #include "prdb_sdk_sql_exec_v10.h"
 #include "prdb_sdk_sql_exec_v11.h"
+#include "prdb_sdk_sql_exec_v12.h"
 #include "prdb_sdk_sql_result_v1.h"
 
 #include <string.h>
@@ -126,16 +127,25 @@ static int32_t write_grouped_avg(void *opaque,
 static int32_t write_grouped_ordered_count(
     void *opaque, const prdb_sdk_value_v1 *group_key,
     const prdb_sdk_value_v1 *aggregate_value, uint64_t matching_row_count,
-    const prdb_sdk_select_binding_v11 *binding) {
+    const prdb_sdk_select_binding_v12 *binding) {
     grouped_result_context *context = (grouped_result_context *)opaque;
     if (context == NULL || binding == NULL || aggregate_value != NULL ||
-        binding->base.base.base.aggregate_kind !=
+        binding->base.base.base.base.aggregate_kind !=
             PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR ||
-        binding->base.has_order_by != 1 ||
-        binding->base.order_kind != PRDB_SDK_SQL_V10_ORDER_AGGREGATE ||
-        binding->base.order_direction !=
+        binding->base.base.has_order_by != 1 ||
+        binding->order_count != 2 ||
+        binding->order_items[0].item.kind !=
+            PRDB_SDK_SQL_V10_ORDER_AGGREGATE ||
+        binding->order_items[0].item.direction !=
             PRDB_SDK_SQL_V10_ORDER_DESCENDING ||
-        binding->null_order != PRDB_SDK_SQL_V11_NULLS_LAST ||
+        binding->order_items[0].item.null_order !=
+            PRDB_SDK_SQL_V11_NULLS_LAST ||
+        binding->order_items[1].item.kind !=
+            PRDB_SDK_SQL_V10_ORDER_GROUP_KEY ||
+        binding->order_items[1].item.direction !=
+            PRDB_SDK_SQL_V10_ORDER_ASCENDING ||
+        binding->order_items[1].item.null_order !=
+            PRDB_SDK_SQL_V11_NULLS_LAST ||
         matching_row_count != 1) {
         return 1;
     }
@@ -255,7 +265,7 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
         "SELECT id, AVG(id) FROM records GROUP BY id";
     static const uint8_t select_grouped_order_sql[] =
         "SELECT id, COUNT(*) FROM records GROUP BY id "
-        "ORDER BY COUNT(*) DESC NULLS LAST LIMIT 1";
+        "ORDER BY COUNT(*) DESC NULLS LAST, id ASC NULLS LAST LIMIT 1";
     static const uint8_t select_join_sql[] =
         "SELECT records.id, linked_records.id FROM records INNER JOIN "
         "linked_records ON records.id = linked_records.id LIMIT 1";
@@ -847,7 +857,7 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
 
     grouped_results.row_count = 0;
     grouped_results.output_len = 0;
-    status = prdb_sdk_sql_execute_group_v11(
+    status = prdb_sdk_sql_execute_group_v12(
         host, schema, sizeof(schema) - 1, select_grouped_order_sql,
         sizeof(select_grouped_order_sql) - 1, NULL, 0, 16,
         sizeof(batch_response), planner_response, sizeof(planner_response),

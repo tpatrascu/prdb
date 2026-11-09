@@ -1,4 +1,4 @@
-#include "prdb_sdk_sql_order_v2.h"
+#include "prdb_sdk_sql_order_v3.h"
 
 #include <string.h>
 
@@ -131,4 +131,92 @@ int32_t prdb_sdk_sql_order_row_indices_v1(
         keys, key_count, declared_type, decimal_scale, direction,
         PRDB_SDK_SQL_ORDER_NULLS_FIRST, row_indices_out,
         row_indices_capacity);
+}
+
+static int32_t compare_order_tuple(const prdb_sdk_sql_order_key_v3 *keys,
+                                   uint32_t key_count, uint32_t left_index,
+                                   uint32_t right_index, int *comparison_out) {
+    for (uint32_t key = 0; key < key_count; ++key) {
+        int left_precedes = 0, right_precedes = 0;
+        int32_t status = key_precedes(
+            &keys[key].values[left_index], &keys[key].values[right_index],
+            keys[key].direction, keys[key].null_order,
+            keys[key].decimal_scale, &left_precedes);
+        if (status != PRDB_SDK_SQL_EVAL_OK) return status;
+        if (left_precedes) {
+            *comparison_out = -1;
+            return PRDB_SDK_SQL_EVAL_OK;
+        }
+        status = key_precedes(
+            &keys[key].values[right_index], &keys[key].values[left_index],
+            keys[key].direction, keys[key].null_order,
+            keys[key].decimal_scale, &right_precedes);
+        if (status != PRDB_SDK_SQL_EVAL_OK) return status;
+        if (right_precedes) {
+            *comparison_out = 1;
+            return PRDB_SDK_SQL_EVAL_OK;
+        }
+    }
+    *comparison_out = 0;
+    return PRDB_SDK_SQL_EVAL_OK;
+}
+
+int32_t prdb_sdk_sql_order_row_indices_v3(
+    const prdb_sdk_sql_order_key_v3 *keys, uint32_t key_count,
+    uint32_t row_count, uint32_t *row_indices_out,
+    uint32_t row_indices_capacity) {
+    uint32_t sorted_indices[PRDB_SDK_SQL_ORDER_MAX_ROWS];
+    int32_t status;
+
+    if (key_count == 0 || key_count > PRDB_SDK_SQL_ORDER_MAX_KEYS ||
+        keys == NULL || (row_count != 0 && row_indices_out == NULL) ||
+        row_indices_capacity < row_count) {
+        return PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT;
+    }
+    if (row_count > PRDB_SDK_SQL_ORDER_MAX_ROWS) {
+        return PRDB_SDK_SQL_ORDER_LIMIT_EXCEEDED;
+    }
+    for (uint32_t key = 0; key < key_count; ++key) {
+        if ((row_count != 0 && keys[key].values == NULL) ||
+            keys[key].declared_type < PRDB_SDK_VALUE_TYPE_BOOLEAN ||
+            keys[key].declared_type > PRDB_SDK_VALUE_TYPE_TIMESTAMPTZ ||
+            (keys[key].declared_type == PRDB_SDK_VALUE_TYPE_DECIMAL
+                 ? keys[key].decimal_scale > 38
+                 : keys[key].decimal_scale != 0) ||
+            keys[key].direction > PRDB_SDK_SQL_ORDER_DESCENDING ||
+            (keys[key].null_order != PRDB_SDK_SQL_ORDER_NULLS_FIRST &&
+             keys[key].null_order != PRDB_SDK_SQL_ORDER_NULLS_LAST) ||
+            keys[key].reserved != 0) {
+            return PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT;
+        }
+    }
+    for (uint32_t row = 0; row < row_count; ++row) {
+        for (uint32_t key = 0; key < key_count; ++key) {
+            status = validate_sort_key(&keys[key].values[row],
+                                       keys[key].declared_type,
+                                       keys[key].decimal_scale);
+            if (status != PRDB_SDK_SQL_EVAL_OK) return status;
+        }
+        sorted_indices[row] = row;
+    }
+    for (uint32_t row = 1; row < row_count; ++row) {
+        uint32_t row_index = sorted_indices[row];
+        uint32_t destination = row;
+        while (destination != 0) {
+            uint32_t previous_index = sorted_indices[destination - 1];
+            int comparison = 0;
+            status = compare_order_tuple(keys, key_count, row_index,
+                                         previous_index, &comparison);
+            if (status != PRDB_SDK_SQL_EVAL_OK) return status;
+            if (comparison >= 0) break;
+            sorted_indices[destination] = previous_index;
+            --destination;
+        }
+        sorted_indices[destination] = row_index;
+    }
+    if (row_count != 0) {
+        memcpy(row_indices_out, sorted_indices,
+               (size_t)row_count * sizeof(*row_indices_out));
+    }
+    return PRDB_SDK_SQL_ORDER_OK;
 }

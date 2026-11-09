@@ -1,4 +1,4 @@
-#include "prdb_sdk_sql_order_v2.h"
+#include "prdb_sdk_sql_order_v3.h"
 
 #include <assert.h>
 #include <string.h>
@@ -58,6 +58,42 @@ int main(void) {
            PRDB_SDK_SQL_ORDER_OK);
     assert(memcmp(order, descending_nulls_last,
                   sizeof(descending_nulls_last)) == 0);
+
+    {
+        uint8_t primary_bytes[5][4], secondary_bytes[5][4];
+        const int32_t primary_values[] = {1, 1, 1, 2, 2};
+        const int32_t secondary_values[] = {5, 2, 0, 1, 3};
+        prdb_sdk_value_v1 primary[5], secondary[5];
+        for (uint32_t index = 0; index < 5; ++index) {
+            primary[index] = integer_value(primary_bytes[index],
+                                           primary_values[index]);
+            secondary[index] = integer_value(secondary_bytes[index],
+                                             secondary_values[index]);
+        }
+        secondary[2] = null_value();
+        prdb_sdk_sql_order_key_v3 keys_v3[2] = {
+            {primary, PRDB_SDK_VALUE_TYPE_INTEGER, 0,
+             PRDB_SDK_SQL_ORDER_ASCENDING, PRDB_SDK_SQL_ORDER_NULLS_FIRST,
+             0},
+            {secondary, PRDB_SDK_VALUE_TYPE_INTEGER, 0,
+             PRDB_SDK_SQL_ORDER_DESCENDING, PRDB_SDK_SQL_ORDER_NULLS_LAST,
+             0}};
+        static const uint32_t composite[] = {0, 1, 2, 4, 3};
+        assert(prdb_sdk_sql_order_row_indices_v3(
+                   keys_v3, 2, 5, order, 5) == PRDB_SDK_SQL_ORDER_OK);
+        assert(memcmp(order, composite, sizeof(composite)) == 0);
+        secondary[1] = (prdb_sdk_value_v1){
+            sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
+            PRDB_SDK_VALUE_STATE_REDACTED, 0, NULL, 0};
+        uint32_t unchanged[5] = {31, 32, 33, 34, 35};
+        assert(prdb_sdk_sql_order_row_indices_v3(
+                   keys_v3, 2, 5, unchanged, 5) ==
+               PRDB_SDK_SQL_EVAL_REDACTED_INPUT);
+        assert(unchanged[0] == 31 && unchanged[4] == 35);
+        keys_v3[1].values = NULL;
+        assert(prdb_sdk_sql_order_row_indices_v3(
+                   keys_v3, 2, 0, NULL, 0) == PRDB_SDK_SQL_ORDER_OK);
+    }
 
     {
         prdb_sdk_value_v1 invalid_keys[2] = {keys[0], keys[1]};
