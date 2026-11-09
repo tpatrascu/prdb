@@ -19644,6 +19644,43 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         retention_deadline_us: now + 3_600_000_000,
         audit_event: table_audit,
     })?;
+    let joined_table_invocation = id(0xc1);
+    let mut joined_table_audit = identity_audit_event(0xc2, user_id, id(0xc3));
+    joined_table_audit.correlation_id = joined_table_invocation;
+    let joined_table = storage.create_table(CreateTableRequest {
+        invocation_id: joined_table_invocation,
+        authenticated_actor_id: user_id,
+        schema_id: schema.schema_id,
+        name: "linked_records".to_owned(),
+        columns: vec![TableColumnDefinition {
+            name: "id".to_owned(),
+            scalar_type: ScalarType::Integer,
+            nullable: true,
+            generated_uuid_identity: false,
+            default: None,
+        }],
+        retention_deadline_us: now + 3_600_000_000,
+        audit_event: joined_table_audit,
+    })?;
+    let joined_tuple = encode_tuple(
+        &[ColumnSchema {
+            scalar_type: ScalarType::Integer,
+            nullable: true,
+        }],
+        1,
+        &[Some(ScalarValue::Integer(42))],
+    )?;
+    commit_rows(
+        &database,
+        id(0xc4),
+        builtin_owner_id(),
+        now + 3_600_000_000,
+        &[RowWrite {
+            key: table_row_key(joined_table.table_id, id(0xc5)),
+            expected_version: None,
+            payload: Some(joined_tuple),
+        }],
+    )?;
     let private_table_invocation = id(0xa0);
     let mut private_table_audit = identity_audit_event(0xa1, user_id, schema.schema_id);
     private_table_audit.correlation_id = private_table_invocation;
@@ -19710,6 +19747,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         dependency_write(restricted_user_id, empty_schema.schema_id, 5),
         dependency_write(user_id, records_table.table_id, 5),
         dependency_write(user_id, records_table.column_ids[0], 5),
+        dependency_write(user_id, joined_table.table_id, 5),
+        dependency_write(user_id, joined_table.column_ids[0], 5),
     ];
     authority_writes.extend((2..=5).map(|privilege| {
         grant_write(
@@ -19731,6 +19770,24 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             user_id,
         )
     }));
+    authority_writes.extend([
+        grant_write(
+            user_id,
+            joined_table.table_id,
+            2,
+            1,
+            joined_table.table_id,
+            user_id,
+        ),
+        grant_write(
+            user_id,
+            joined_table.table_id,
+            2,
+            2,
+            joined_table.column_ids[0],
+            user_id,
+        ),
+    ]);
     let (
         old_user_record,
         old_token_record,
@@ -19952,6 +20009,17 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             .value()
             .to_vec(),
     );
+    let mut joined_policy_table_epoch =
+        table_write_with_versions(joined_table.table_id, schema.schema_id, 1, 2);
+    joined_policy_table_epoch.expected_value = Some(
+        database
+            .begin_read()?
+            .open_table(CATALOG)?
+            .get(id_catalog_key(5, joined_table.table_id).as_slice())?
+            .ok_or("sandbox joined table record missing")?
+            .value()
+            .to_vec(),
+    );
     let select_using_id = id(0x8a);
     let update_using_id = id(0x8b);
     let mut policy_writes = vec![
@@ -20007,6 +20075,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         dependency_write(insert_cell_policy_id, insert_policy_expression_id, 2),
         dependency_write(insert_cell_policy_id, user_id, 5),
         insert_policy_table_epoch,
+        joined_policy_table_epoch,
     ];
     let make_using_expression = |expression_id: [u8; 16], name: &str| {
         let key = id_catalog_key(7, expression_id);
@@ -20071,7 +20140,9 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         update_using_object,
     ]);
 
-    let mut add_table_policy = |policy_id: [u8; 16],
+    let mut add_table_policy = |table_id: [u8; 16],
+                                column_id: [u8; 16],
+                                policy_id: [u8; 16],
                                 operation: u16,
                                 using_id: Option<[u8; 16]>,
                                 check_id: Option<[u8; 16]>,
@@ -20083,7 +20154,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             CatalogField {
                 tag: 1,
                 wire_type: WireType::Id,
-                payload: records_table.table_id.to_vec(),
+                payload: table_id.to_vec(),
             },
             CatalogField {
                 tag: 2,
@@ -20146,7 +20217,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 prdb_engine::catalog::encode_policy_target(&prdb_engine::catalog::PolicyTarget {
                     policy_id,
                     kind: 3,
-                    target_id: records_table.column_ids[0],
+                    target_id: column_id,
                 })?;
             policy_writes.push(CatalogWrite {
                 key: column[32..].to_vec(),
@@ -20164,6 +20235,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         Ok(())
     };
     add_table_policy(
+        records_table.table_id,
+        records_table.column_ids[0],
         id(0x8c),
         1,
         Some(select_using_id),
@@ -20172,6 +20245,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         "sandbox_select_policy",
     )?;
     add_table_policy(
+        records_table.table_id,
+        records_table.column_ids[0],
         id(0x8d),
         1,
         Some(select_using_id),
@@ -20180,6 +20255,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         "sandbox_select_cell_policy",
     )?;
     add_table_policy(
+        records_table.table_id,
+        records_table.column_ids[0],
         id(0x8e),
         3,
         Some(update_using_id),
@@ -20188,6 +20265,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         "sandbox_update_policy",
     )?;
     add_table_policy(
+        records_table.table_id,
+        records_table.column_ids[0],
         id(0x8f),
         3,
         Some(update_using_id),
@@ -20196,12 +20275,34 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         "sandbox_update_cell_policy",
     )?;
     add_table_policy(
+        records_table.table_id,
+        records_table.column_ids[0],
         id(0x90),
         4,
         Some(select_using_id),
         None,
         false,
         "sandbox_delete_policy",
+    )?;
+    add_table_policy(
+        joined_table.table_id,
+        joined_table.column_ids[0],
+        id(0xc6),
+        1,
+        Some(select_using_id),
+        None,
+        false,
+        "sandbox_join_select_policy",
+    )?;
+    add_table_policy(
+        joined_table.table_id,
+        joined_table.column_ids[0],
+        id(0xc7),
+        1,
+        Some(select_using_id),
+        None,
+        true,
+        "sandbox_join_select_cell_policy",
     )?;
     let policy_invocation = id(0x87);
     let mut policy_audit = identity_audit_event(0x88, user_id, insert_policy_id);
@@ -20216,7 +20317,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         )
         .map_err(|error| format!("metadata fixture policies failed: {error:?}"))?;
 
-    let mut requested_scope = b"PSC1\0\x09".to_vec();
+    let mut requested_scope = b"PSC1\0\x0b".to_vec();
     let (first_usage_schema, second_usage_schema) = if schema.schema_id < empty_schema.schema_id {
         (schema.schema_id, empty_schema.schema_id)
     } else {
@@ -20227,12 +20328,22 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         requested_scope.extend(schema_id);
     }
     for operation in 2..=5 {
-        requested_scope.extend([operation, 2]);
-        requested_scope.extend(records_table.table_id);
+        let mut tables = if operation == 2 {
+            vec![&records_table, &joined_table]
+        } else {
+            vec![&records_table]
+        };
+        tables.sort_by_key(|table| table.table_id);
+        for table in &tables {
+            requested_scope.extend([operation, 2]);
+            requested_scope.extend(table.table_id);
+        }
         if operation <= 4 {
-            requested_scope.extend([operation, 3]);
-            requested_scope.extend(records_table.table_id);
-            requested_scope.extend(records_table.column_ids[0]);
+            for table in &tables {
+                requested_scope.extend([operation, 3]);
+                requested_scope.extend(table.table_id);
+                requested_scope.extend(table.column_ids[0]);
+            }
         }
     }
 
@@ -20521,6 +20632,20 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 0, 1, 0, 2, 0, 2, b'i', b'd', 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 42, 0, 3,
                 b'a', b'v', b'g', 0, 0, 0, 5, 38, 6, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                 0, 0, 2, 128, 222, 128
+            ][..]
+        ]
+        .concat()
+    );
+    let joined = read_frame(&mut gateway)?.ok_or("missing joined SQLR result")?;
+    assert_eq!(joined.operation, Operation::GatewayResultData as u16);
+    assert_eq!(joined.request_id, accepted.request_id);
+    assert_eq!(
+        joined.payload,
+        [
+            b"SQLR".as_slice(),
+            &[
+                0, 1, 0, 2, 0, 2, b'i', b'd', 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 42, 0, 2,
+                b'i', b'd', 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 42,
             ][..]
         ]
         .concat()
