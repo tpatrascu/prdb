@@ -113,6 +113,9 @@ static uint32_t build_filter_plan(uint8_t *bytes,
 typedef struct resolve_context {
     uint8_t response[512];
     uint32_t response_len;
+    uint8_t executor_response[1024];
+    uint32_t executor_response_len;
+    uint32_t calls;
 } resolve_context;
 
 static int32_t resolve_plan_relation(void *context, uint16_t operation,
@@ -121,18 +124,28 @@ static int32_t resolve_plan_relation(void *context, uint16_t operation,
                                      uint64_t response_capacity,
                                      uint64_t *response_len) {
     resolve_context *resolved = (resolve_context *)context;
-    assert(operation == PRDB_IPC_OP_RESOLVE_PLAN_RELATION);
     assert(request_len == 17 && request[0] == 0 && request[1] == 1);
     assert(request[2] == 0 && request[3] == 6);
     assert(memcmp(request + 6, "public", 6) == 0);
     assert(request[4] == 0 && request[5] == 5);
     assert(memcmp(request + 12, "items", 5) == 0);
-    if (response_capacity < resolved->response_len) {
-        *response_len = resolved->response_len;
+    const uint8_t *source;
+    uint32_t source_len;
+    if (operation == PRDB_IPC_OP_RESOLVE_PLAN_RELATION) {
+        source = resolved->response;
+        source_len = resolved->response_len;
+    } else {
+        assert(operation == PRDB_SDK_EXECUTOR_OP_RESOLVE_RELATION);
+        source = resolved->executor_response;
+        source_len = resolved->executor_response_len;
+    }
+    resolved->calls++;
+    if (response_capacity < source_len) {
+        *response_len = source_len;
         return PRDB_QUERY_CALLBACK_RESPONSE_TOO_SMALL;
     }
-    memcpy(response, resolved->response, resolved->response_len);
-    *response_len = resolved->response_len;
+    memcpy(response, source, source_len);
+    *response_len = source_len;
     return PRDB_QUERY_CALLBACK_OK;
 }
 
@@ -169,6 +182,37 @@ static uint32_t build_relation_response(uint8_t *bytes) {
     return offset;
 }
 
+static uint32_t build_executor_relation_response(uint8_t *bytes) {
+    uint32_t offset = 0;
+    bytes[offset++] = 0;
+    bytes[offset++] = 1;
+    bytes[offset++] = 0;
+    bytes[offset++] = 2;
+    memset(bytes + offset, 0, 15);
+    offset += 15;
+    bytes[offset++] = 6;
+    memset(bytes + offset, 0, 15);
+    offset += 15;
+    put_u16(bytes, &offset, 5);
+    memcpy(bytes + offset, "items", 5);
+    offset += 5;
+    put_u16(bytes, &offset, 4);
+    for (uint32_t ordinal = 0; ordinal < 4; ++ordinal) {
+        bytes[offset++] = ordinal == 3 ? 3 : (uint8_t)(10 + ordinal);
+        memset(bytes + offset, 0, 15);
+        offset += 15;
+        put_u32(bytes, &offset, ordinal);
+        bytes[offset++] = ordinal == 3 ? 1 : 0;
+        bytes[offset++] = ordinal == 3 ? 6 : 3;
+        memset(bytes + offset, 0, 4);
+        offset += 4;
+        put_u16(bytes, &offset, 2);
+        bytes[offset++] = 'c';
+        bytes[offset++] = (uint8_t)('0' + ordinal);
+    }
+    return offset;
+}
+
 int main(void) {
     uint8_t payload[256] = {0};
     uint8_t malformed[sizeof(payload)];
@@ -181,6 +225,8 @@ int main(void) {
     static prdb_sdk_optimizer_filter_v1 filter;
     static resolve_context resolve = {0};
     static prdb_host_api_v2 host = {0};
+    static prdb_sdk_executor_relation_v1 acquired_relation;
+    static prdb_sdk_sql_column_shape_v2 acquired_columns[4];
     uint8_t response[512];
     uint64_t response_len = 0;
 
@@ -205,6 +251,8 @@ int main(void) {
     assert(decoded.has_limit == 1 && decoded.limit == 7);
 
     resolve.response_len = build_relation_response(resolve.response);
+    resolve.executor_response_len = build_executor_relation_response(
+        resolve.executor_response);
     host.struct_size = sizeof(host);
     host.abi_version = PRDB_QUERY_ABI_V2_VERSION;
     host.context = &resolve;
@@ -298,5 +346,23 @@ int main(void) {
     assert(prdb_sdk_optimizer_decode_plan_v1(
                payload, payload_len, &decoded, sizeof(decoded)) ==
            PRDB_SDK_OPTIMIZER_PLAN_OK);
+    resolve.calls = 0;
+    assert(prdb_sdk_optimizer_acquire_plan_relation_v1(
+               &host, payload, payload_len, response, sizeof(response),
+               &response_len, &acquired_relation, sizeof(acquired_relation),
+               acquired_columns, 4) == PRDB_SDK_OPTIMIZER_PLAN_OK);
+    assert(resolve.calls == 2);
+    assert(acquired_relation.relation_id[0] == 2);
+    assert(acquired_relation.executor_handle[0] == 6);
+    assert(acquired_relation.column_count == 4);
+    assert(acquired_columns[3].ordinal == 3 &&
+           acquired_columns[3].type_code == 6);
+    resolve.executor_response[3] = 9;
+    assert(prdb_sdk_optimizer_acquire_plan_relation_v1(
+               &host, payload, payload_len, response, sizeof(response),
+               &response_len, &acquired_relation, sizeof(acquired_relation),
+               acquired_columns, 4) ==
+           PRDB_SDK_OPTIMIZER_PLAN_IDENTITY_MISMATCH);
+    resolve.executor_response[3] = 2;
     return 0;
 }

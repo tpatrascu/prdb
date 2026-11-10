@@ -95,6 +95,14 @@
 - Verification: Rust workspace and TinyCC suite passed for the preceding IPC increment. The current C helper's focused fixture passed; full workspace/TinyCC validation and diff checks are pending for this increment.
 - Remaining: resolve the executor scan capability only after identity match, then interpret the validated operators.
 
+## OP-3 dependency: acquire executor relation capability after plan identity validation
+
+- Behavior: a plan receives an ordinary executor relation handle only after its stable identity and scanned shape match metadata resolved from the invocation's authorized snapshot.
+- Implementation: `prdb_sdk_optimizer_acquire_plan_relation_v1` invokes the independent metadata validator first, then calls executor `resolve_relation` (`0x1101`) and checks that the returned relation ID/name still match the plan before reporting success. It returns the normal connection-local executor handle and full declared column shapes for subsequent scan setup.
+- Regression: TinyCC fixture verifies both IPC calls on success, the returned kind-6 handle and relation shape, and rejection if the capability response returns a different relation ID.
+- Verification: focused and full maintained TinyCC SDK suites passed; generated ABI consistency, documentation link checks, and `git diff --check` passed.
+- Remaining: open a scan using the validated capability and interpret bounded plan operators.
+
 ## OP-3 dependency: launch and confine the optimizer with each invocation
 
 - Behavior: production START launches optimizer and executor as separate confined processes in one invocation cgroup. The optimizer receives only its submission and planner sockets; storage serves its planner socket alongside executor planner and storage channels. Either launch failure cleans up the other process and invocation resources.

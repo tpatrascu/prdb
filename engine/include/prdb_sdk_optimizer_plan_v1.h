@@ -2,6 +2,7 @@
 #define PRDB_SDK_OPTIMIZER_PLAN_V1_H
 
 #include "prdb_sdk_optimizer_v1.h"
+#include "prdb_sdk_executor_v1.h"
 
 #define PRDB_SDK_OPTIMIZER_PLAN_ABI_V1_VERSION UINT32_C(1)
 #define PRDB_SDK_OPTIMIZER_PLAN_MAX_SCAN_COLUMNS UINT32_C(256)
@@ -80,5 +81,16 @@ int32_t prdb_sdk_optimizer_validate_executor_relation_v1(
     const prdb_host_api_v2 *host, const uint8_t *plan_payload,
     uint64_t plan_payload_len, uint8_t *response,
     uint64_t response_capacity, uint64_t *response_len);
+
+/* First validates plan metadata as above, then obtains a regular executor
+ * relation handle. Relation/name outputs are valid only on success; column
+ * shapes describe the full authorized relation and borrow response names. */
+int32_t prdb_sdk_optimizer_acquire_plan_relation_v1(
+    const prdb_host_api_v2 *host, const uint8_t *plan_payload,
+    uint64_t plan_payload_len, uint8_t *response,
+    uint64_t response_capacity, uint64_t *response_len,
+    prdb_sdk_executor_relation_v1 *relation_out,
+    uint32_t relation_out_capacity,
+    prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_capacity);
 
 #endif /* PRDB_SDK_OPTIMIZER_PLAN_V1_H */

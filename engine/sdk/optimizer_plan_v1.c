@@ -648,3 +648,59 @@ int32_t prdb_sdk_optimizer_validate_executor_relation_v1(
     }
     return PRDB_SDK_OPTIMIZER_PLAN_OK;
 }
+
+int32_t prdb_sdk_optimizer_acquire_plan_relation_v1(
+    const prdb_host_api_v2 *host, const uint8_t *plan_payload,
+    uint64_t plan_payload_len, uint8_t *response,
+    uint64_t response_capacity, uint64_t *response_len,
+    prdb_sdk_executor_relation_v1 *relation_out,
+    uint32_t relation_out_capacity,
+    prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_capacity) {
+    prdb_sdk_optimizer_plan_v1 plan = {0};
+    prdb_sdk_optimizer_filter_v1 filter = {0};
+    int32_t status;
+    uint64_t columns_bytes =
+        (uint64_t)column_capacity * sizeof(prdb_sdk_sql_column_shape_v2);
+
+    if (relation_out == NULL || relation_out_capacity < sizeof(*relation_out) ||
+        columns == NULL || column_capacity == 0 ||
+        ranges_overlap(relation_out, sizeof(*relation_out), columns,
+                       columns_bytes) ||
+        ranges_overlap(relation_out, sizeof(*relation_out), response,
+                       response_capacity) ||
+        ranges_overlap(columns, columns_bytes, response, response_capacity) ||
+        ranges_overlap(relation_out, sizeof(*relation_out), plan_payload,
+                       plan_payload_len) ||
+        ranges_overlap(columns, columns_bytes, plan_payload, plan_payload_len)) {
+        return PRDB_SDK_OPTIMIZER_PLAN_INVALID_ARGUMENT;
+    }
+    status = prdb_sdk_optimizer_validate_executor_relation_v1(
+        host, plan_payload, plan_payload_len, response, response_capacity,
+        response_len);
+    if (status != PRDB_SDK_OPTIMIZER_PLAN_OK) return status;
+    status = prdb_sdk_optimizer_decode_plan_with_filter_v1(
+        plan_payload, plan_payload_len, &plan, sizeof(plan), &filter,
+        sizeof(filter));
+    if (status != PRDB_SDK_OPTIMIZER_PLAN_OK) return status;
+
+    status = prdb_sdk_executor_resolve_relation_v1(
+        host, plan.schema_name, plan.schema_name_len, plan.relation_name,
+        plan.relation_name_len, response, response_capacity, response_len,
+        relation_out, relation_out_capacity, columns, column_capacity);
+    if (status == PRDB_SDK_EXECUTOR_UNAVAILABLE) {
+        return PRDB_SDK_OPTIMIZER_PLAN_UNAVAILABLE;
+    }
+    if (status == PRDB_SDK_EXECUTOR_RESPONSE_TOO_SMALL) {
+        return PRDB_SDK_OPTIMIZER_PLAN_RESPONSE_TOO_SMALL;
+    }
+    if (status != PRDB_SDK_EXECUTOR_OK) {
+        return PRDB_SDK_OPTIMIZER_PLAN_CALLBACK_ERROR;
+    }
+    if (memcmp(relation_out->relation_id, plan.relation_id, 16) != 0 ||
+        relation_out->name_len != plan.relation_name_len ||
+        memcmp(relation_out->name, plan.relation_name,
+               plan.relation_name_len) != 0) {
+        return PRDB_SDK_OPTIMIZER_PLAN_IDENTITY_MISMATCH;
+    }
+    return PRDB_SDK_OPTIMIZER_PLAN_OK;
+}
