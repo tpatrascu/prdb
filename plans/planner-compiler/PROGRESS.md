@@ -171,7 +171,7 @@
 
 ## OP-3 dependency: verify filtered optimizer process output against executor storage
 
-- Behavior: a parameterized equality SELECT crosses the real optimizer subprocess submission and planner channels; the returned Filter retains its bound column identity and literal, and executor storage independently resolves the plan's qualified relation over its own IPC channel.
-- Regression: `planner_stream_estimate_allowance_falls_back_without_aborting_invocation` now submits both an unfiltered request and `value = 7` with LIMIT, checks the decoded Filter node, then compares its schema/table identity with the executor channel response. The existing unavailable-relation check remains on the optimizer process stream.
-- Verification: the focused Rust process/channel integration test passed. Full workspace validation is recorded with the feature commit.
+- Behavior: a parameterized equality SELECT crosses the real optimizer subprocess submission and planner channels; the returned Filter retains its bound column identity and literal, and executor storage independently resolves the plan's qualified relation and scanned column shape over its own IPC channel.
+- Regression: `planner_stream_estimate_allowance_falls_back_without_aborting_invocation` submits both an unfiltered request and `value = 7` with LIMIT, checks the decoded Filter node, then compares schema/table identity plus every scanned column's ID, ordinal, type, and nullability with executor metadata. The existing unavailable-relation check remains on the optimizer process stream.
+- Verification: focused Rust process/channel integration, locked workspace build, formatting, and warning-denied Clippy passed. The full workspace test run hit `InvalidAudit` in `storage_manager_creates_and_drops_check_constraint`; that test passed alone, and the serial commit integration suite passed (129 passed, 3 cgroup-dependent tests ignored).
 - Remaining: run the SDK callback and bounded scan/result path against a real confined optimizer/executor invocation; add bounded mutation plans.

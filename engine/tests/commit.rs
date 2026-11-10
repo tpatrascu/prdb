@@ -26303,6 +26303,25 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             resolved_relation.relation.relation_id,
             filtered_plan.relation.relation_id
         );
+        let planned_scan_columns = match filtered_plan.nodes.first() {
+            Some(PlanNode::Scan { columns }) => columns,
+            _ => return Err("filtered plan did not begin with a scan".into()),
+        };
+        assert_eq!(
+            planned_scan_columns.len(),
+            resolved_relation.relation.columns.len()
+        );
+        for planned_column in planned_scan_columns {
+            let declared_column = resolved_relation
+                .relation
+                .columns
+                .iter()
+                .find(|column| column.ordinal == planned_column.ordinal)
+                .ok_or("executor metadata omitted a planned scan column")?;
+            assert_eq!(declared_column.column_id, planned_column.column_id);
+            assert_eq!(declared_column.scalar_type, planned_column.scalar_type);
+            assert_eq!(declared_column.nullable, planned_column.nullable);
+        }
         executor_plan_client.shutdown(Shutdown::Write)?;
         drop(executor_plan_client);
         executor
