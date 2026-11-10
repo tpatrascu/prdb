@@ -226,4 +226,52 @@ mod tests {
             optimizer_thread.join().unwrap().unwrap();
         });
     }
+
+    #[test]
+    fn process_protocol_rejects_malformed_frames() {
+        let (mut submission_client, mut submission_server) = UnixStream::pair().unwrap();
+        let (mut planner_client, _planner_server) = UnixStream::pair().unwrap();
+        let optimizer_thread = std::thread::spawn(move || {
+            serve_optimizer_process(&mut submission_server, &mut planner_client)
+        });
+
+        submission_client.write_all(&[0; 28]).unwrap();
+        submission_client.shutdown(Shutdown::Write).unwrap();
+        assert!(matches!(
+            optimizer_thread.join().unwrap(),
+            Err(OptimizerProcessError::Frame(_))
+        ));
+    }
+
+    #[test]
+    fn process_protocol_rejects_duplicate_request_ids_after_invalid_request() {
+        let (mut submission_client, mut submission_server) = UnixStream::pair().unwrap();
+        let (mut planner_client, _planner_server) = UnixStream::pair().unwrap();
+        let optimizer_thread = std::thread::spawn(move || {
+            serve_optimizer_process(&mut submission_server, &mut planner_client)
+        });
+        let invalid_request = IpcFrame {
+            operation: Operation::OptimizeSelect as u16,
+            request_id: 41,
+            payload: Vec::new(),
+        };
+        crate::ipc::write_frame(&mut submission_client, &invalid_request).unwrap();
+        let invalid_response = crate::ipc::read_frame(&mut submission_client)
+            .unwrap()
+            .expect("invalid request receives a response");
+        assert_eq!(invalid_response.request_id, invalid_request.request_id);
+        assert_eq!(
+            OptimizerResponse::decode(&invalid_response.payload)
+                .unwrap()
+                .status,
+            OptimizerStatus::InvalidRequest
+        );
+
+        crate::ipc::write_frame(&mut submission_client, &invalid_request).unwrap();
+        submission_client.shutdown(Shutdown::Write).unwrap();
+        assert!(matches!(
+            optimizer_thread.join().unwrap(),
+            Err(OptimizerProcessError::DuplicateRequestId)
+        ));
+    }
 }

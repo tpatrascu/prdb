@@ -185,6 +185,6 @@
 ## OP-1 / OP-3 dependency: malformed optimizer requests fail without stopping the process
 
 - Behavior: a structurally malformed request receives `InvalidRequest` without reaching planner metadata, and the same optimizer subprocess remains able to serve a later valid request.
-- Regression: `planner_stream_estimate_allowance_falls_back_without_aborting_invocation` now sends an empty SELECT payload to the real optimizer child, verifies the status and request ID, then proceeds through valid unfiltered and filtered submissions plus the unavailable-relation case.
-- Verification: the focused real-process integration test passed. Locked workspace build, formatting, warning-denied Clippy, and full tests passed; 3 cgroup-dependent commit tests and 1 cgroup-dependent process test were ignored.
-- Remaining: exercise malformed framing/duplicate request IDs over the optimizer process and run the SDK callback, Filter evaluation, and result path in a confined invocation.
+- Regression: `planner_stream_estimate_allowance_falls_back_without_aborting_invocation` sends an empty SELECT payload to the real optimizer child, verifies the status and request ID, then proceeds through valid unfiltered and filtered submissions plus the unavailable-relation case. `optimizer_process::tests` also sends a malformed IPC frame and a duplicate request ID after an `InvalidRequest` response, checking that malformed framing and duplicate IDs fail the process loop.
+- Verification: the focused process-loop tests and real-process integration passed. Locked workspace build, formatting, warning-denied Clippy, and full tests passed; 3 cgroup-dependent commit tests and 1 cgroup-dependent process test were ignored.
+- Remaining: run the SDK callback, Filter evaluation, and result path in a confined invocation; add bounded mutation plans.
