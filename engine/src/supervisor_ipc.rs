@@ -262,7 +262,8 @@ pub fn finalize_gateway_invocation_and_send_terminal<'db, W: Write>(
             &IpcFrame {
                 operation: operation as u16,
                 request_id: 1,
-                payload: SUPERVISOR_PAYLOAD_VERSION.to_be_bytes().to_vec(),
+                payload: encode_terminal_request(operation)
+                    .ok_or(GatewayTerminalRelayError::InvalidStorageResponse)?,
             },
         )
         .map_err(GatewayTerminalRelayError::Frame)?;
@@ -1531,6 +1532,18 @@ mod status_wire_tests {
 
     #[test]
     fn supervisor_terminal_requests_require_exact_versioned_headers() {
+        assert_eq!(
+            super::encode_terminal_request(crate::ipc::Operation::FinalizeTransaction),
+            Some(vec![0, 1])
+        );
+        assert_eq!(
+            super::encode_terminal_request(crate::ipc::Operation::AbortTransaction),
+            Some(vec![0, 1])
+        );
+        assert_eq!(
+            super::encode_terminal_request(crate::ipc::Operation::SupervisorGetInvocationStatus),
+            None
+        );
         assert!(valid_terminal_request(
             crate::ipc::Operation::FinalizeTransaction,
             &[0, 1]
@@ -1627,6 +1640,16 @@ fn valid_terminal_request(operation: Operation, payload: &[u8]) -> bool {
             generated::decode_supervisor_abort_request(payload).is_some()
         }
         _ => false,
+    }
+}
+
+fn encode_terminal_request(operation: Operation) -> Option<Vec<u8>> {
+    match operation {
+        Operation::FinalizeTransaction => {
+            Some(generated::encode_supervisor_finalize_request().to_vec())
+        }
+        Operation::AbortTransaction => Some(generated::encode_supervisor_abort_request().to_vec()),
+        _ => None,
     }
 }
 

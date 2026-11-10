@@ -1,5 +1,12 @@
 # Toolchain Progress
 
+## TC-2: generated supervisor terminal request encoders — implemented
+
+- Contract: finalize and abort requests carry exactly the shared supervisor payload version.
+- Implementation: the gateway terminal relay now encodes the request through the generated operation-specific helpers and rejects an unrelated operation in the helper.
+- Regression and verification: exact request bytes and unrelated-operation rejection are covered. Focused terminal request tests, locked workspace build, format check, warning-denied Clippy, serial workspace tests (129 passed, 3 cgroup-dependent ignored), and maintained TinyCC SDK suite passed.
+- Remaining: other remaining IPC layouts and release-profile, signing, runtime-support, timing, and sandbox acceptance gates remain open.
+
 ## TC-2: generated response codec C/Rust parity — verified
 
 - Behavior: generated C helpers for executor relation-resolution response variants and planner unknown estimates must encode/decode the same wire fields as the Rust codecs.

@@ -1,5 +1,12 @@
 # Internal IPC Progress
 
+## IPC-6 dependency: generated terminal request encoders — implemented
+
+- Behavior: the gateway sends the exact generated version-only request for finalize or abort and emits no terminal event for an unrelated operation.
+- Changed code and regression: [supervisor terminal relay](../../engine/src/supervisor_ipc.rs) uses operation-specific generated encoders; the unit regression checks exact bytes and rejects status lookup as a terminal operation.
+- Verification: focused regression, locked workspace build/format/warning-denied Clippy/serial tests and the maintained TinyCC SDK suite passed. Three cgroup-dependent tests remain ignored by default.
+- Remaining: other hand-coded payloads, process-level queue/deadline hardening, and worker lifecycle coverage remain open.
+
 ## IPC-2 dependency: generated executor relation response prefixes — implemented
 
 - Behavior: relation resolution encodes an exact unavailable variant or a successful fixed prefix followed by bounded authorized relation metadata.
