@@ -12,10 +12,10 @@ use std::error::Error;
 use std::fs;
 use std::hint::black_box;
 use std::path::PathBuf;
-use std::sync::Barrier;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Barrier, Mutex};
 use std::thread;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zeroize::Zeroize;
 
 const WRITERS: usize = 4;
@@ -45,6 +45,55 @@ fn payload(columns: &[ColumnSchema], value: String) -> Result<Vec<u8>, Box<dyn E
     Ok(encode_tuple(columns, 1, &[Some(ScalarValue::Text(value))])?)
 }
 
+fn run_operational_writes(
+    storage: &StorageManager<'_>,
+    columns: &[ColumnSchema],
+    invocation_id_base: usize,
+) -> Vec<Duration> {
+    let commit_latencies = Mutex::new(Vec::with_capacity(WRITERS * WRITES_PER_WRITER));
+    thread::scope(|scope| {
+        for writer in 0..WRITERS {
+            let commit_latencies = &commit_latencies;
+            scope.spawn(move || {
+                for sequence in 0..WRITES_PER_WRITER {
+                    let mut value = "x".repeat(ANALYTIC_ROW_BYTES);
+                    let prefix = format!("w{writer}-n{sequence}");
+                    value.replace_range(..prefix.len(), &prefix);
+                    let mut transaction = storage
+                        .begin_invocation(
+                            invocation_id(
+                                invocation_id_base + writer * WRITES_PER_WRITER + sequence,
+                            ),
+                            PRINCIPAL_ID,
+                            i64::MAX,
+                            1,
+                            ANALYTIC_ROW_BYTES * 2,
+                        )
+                        .expect("begin writer transaction");
+                    transaction
+                        .stage_put(
+                            row_id(writer + 1),
+                            &payload(columns, value).expect("encode row"),
+                        )
+                        .expect("stage writer row");
+                    let started = Instant::now();
+                    transaction.commit().expect("commit writer transaction");
+                    commit_latencies
+                        .lock()
+                        .expect("commit latency mutex")
+                        .push(started.elapsed());
+                }
+            });
+        }
+    });
+    commit_latencies.into_inner().expect("commit latency mutex")
+}
+
+fn percentile(samples: &mut [Duration], percentile: usize) -> Duration {
+    samples.sort_unstable();
+    samples[((samples.len() - 1) * percentile).div_ceil(100)]
+}
+
 fn temporary_data_directory() -> Result<PathBuf, Box<dyn Error>> {
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     Ok(std::env::temp_dir().join(format!(
@@ -68,7 +117,13 @@ fn run_in_directory(data_directory: &std::path::Path) -> Result<(), Box<dyn Erro
     secret.zeroize();
     let instance = bootstrap.acknowledge()?;
     let database = instance.database();
-    let storage = StorageManager::with_config(database, StorageManagerConfig::default())?;
+    let storage = StorageManager::with_config(
+        database,
+        StorageManagerConfig {
+            max_invocation_scan_work: 2_000_000,
+            ..StorageManagerConfig::default()
+        },
+    )?;
     let columns = [ColumnSchema {
         scalar_type: ScalarType::Text,
         nullable: false,
@@ -91,6 +146,26 @@ fn run_in_directory(data_directory: &std::path::Path) -> Result<(), Box<dyn Erro
         )?;
     }
     seed.commit()?;
+
+    let baseline_started = Instant::now();
+    let mut baseline_commit_latencies = run_operational_writes(&storage, &columns, 1);
+    let baseline_elapsed = baseline_started.elapsed();
+
+    let mut reset = InvocationTransaction::begin(
+        database,
+        invocation_id(WRITERS * WRITES_PER_WRITER + 1),
+        PRINCIPAL_ID,
+        i64::MAX,
+        WRITERS,
+        WRITERS * ANALYTIC_ROW_BYTES * 2,
+    )?;
+    for writer in 0..WRITERS {
+        reset.stage_put(
+            row_id(writer + 1),
+            &payload(&columns, initial_value.clone())?,
+        )?;
+    }
+    reset.commit()?;
 
     let context = AuthorizationContext {
         principal_id: PRINCIPAL_ID,
@@ -171,6 +246,7 @@ fn run_in_directory(data_directory: &std::path::Path) -> Result<(), Box<dyn Erro
 
     let barrier = Barrier::new(WRITERS + 1);
     let completed = AtomicUsize::new(0);
+    let commit_latencies = Mutex::new(Vec::with_capacity(WRITERS * WRITES_PER_WRITER));
     let writers_started = Instant::now();
     let mut analytical_rounds = 0usize;
     let mut point_reads = 0usize;
@@ -179,6 +255,7 @@ fn run_in_directory(data_directory: &std::path::Path) -> Result<(), Box<dyn Erro
         for writer in 0..WRITERS {
             let barrier = &barrier;
             let completed = &completed;
+            let commit_latencies = &commit_latencies;
             let columns = &columns;
             let storage = &storage;
             scope.spawn(move || {
@@ -189,7 +266,12 @@ fn run_in_directory(data_directory: &std::path::Path) -> Result<(), Box<dyn Erro
                     value.replace_range(..prefix.len(), &prefix);
                     let mut transaction = storage
                         .begin_invocation(
-                            invocation_id(writer * WRITES_PER_WRITER + sequence + 1),
+                            invocation_id(
+                                WRITERS * WRITES_PER_WRITER
+                                    + 2
+                                    + writer * WRITES_PER_WRITER
+                                    + sequence,
+                            ),
                             PRINCIPAL_ID,
                             i64::MAX,
                             1,
@@ -202,7 +284,12 @@ fn run_in_directory(data_directory: &std::path::Path) -> Result<(), Box<dyn Erro
                             &payload(columns, value).expect("encode row"),
                         )
                         .expect("stage writer row");
+                    let commit_started = Instant::now();
                     transaction.commit().expect("commit writer transaction");
+                    commit_latencies
+                        .lock()
+                        .expect("commit latency mutex")
+                        .push(commit_started.elapsed());
                 }
                 completed.fetch_add(1, Ordering::Release);
             });
@@ -235,6 +322,7 @@ fn run_in_directory(data_directory: &std::path::Path) -> Result<(), Box<dyn Erro
     })?;
 
     let elapsed = writers_started.elapsed();
+    let mut mixed_commit_latencies = commit_latencies.into_inner().expect("commit latency mutex");
     reader.abort()?;
     println!("profile: redb 4.4.0 / Rust 1.95.0 / x86_64 Linux");
     println!(
@@ -245,6 +333,21 @@ fn run_in_directory(data_directory: &std::path::Path) -> Result<(), Box<dyn Erro
         "writer elapsed: {:.3}s; commit throughput: {:.1}/s",
         elapsed.as_secs_f64(),
         (WRITERS * WRITES_PER_WRITER) as f64 / elapsed.as_secs_f64()
+    );
+    println!(
+        "operational-only commit latency p50/p95/p99: {:.3}/{:.3}/{:.3} ms ({} commits, {:.3}s)",
+        percentile(&mut baseline_commit_latencies, 50).as_secs_f64() * 1_000.0,
+        percentile(&mut baseline_commit_latencies, 95).as_secs_f64() * 1_000.0,
+        percentile(&mut baseline_commit_latencies, 99).as_secs_f64() * 1_000.0,
+        WRITERS * WRITES_PER_WRITER,
+        baseline_elapsed.as_secs_f64()
+    );
+    println!(
+        "mixed commit latency p50/p95/p99: {:.3}/{:.3}/{:.3} ms ({} commits)",
+        percentile(&mut mixed_commit_latencies, 50).as_secs_f64() * 1_000.0,
+        percentile(&mut mixed_commit_latencies, 95).as_secs_f64() * 1_000.0,
+        percentile(&mut mixed_commit_latencies, 99).as_secs_f64() * 1_000.0,
+        WRITERS * WRITES_PER_WRITER
     );
     println!(
         "concurrent analytics: {analytical_rounds} full authorized scans; {point_reads} point reads; {:.1} scans/s",

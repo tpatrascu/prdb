@@ -1838,6 +1838,13 @@
 - Measurement: redb 4.4.0, Rust 1.95.0, x86_64 Linux, ext4 on `/tmp` (`/dev/vda2`). One local run completed 256 durable commits in 0.610 s (419.5 commits/s) while the retained snapshot performed 8,930 full authorized scans and 35,720 point reads (14,632.4 scans/s). Exact values matched the original snapshot through all writer commits.
 - Scope: one synthetic four-row workload and one local run; timings are machine-specific and do not establish production-duration contention, database growth/reclamation, power-loss durability, or other filesystem profiles.
 
+## SM-7: operational commit latency with analytical pressure — measured
+
+- Harness: [`storage_pressure.rs`](../../engine/examples/storage_pressure.rs) now measures 256 operational-only commits, restores the four seeded rows, and measures another 256 commits while an authorized reader retains its earlier snapshot and repeats full scans and point reads. Latencies time the durable `commit()` call only. The harness sets the managed reader scan-work budget to 2,000,000 to avoid ending this synthetic sustained scan interval at the default per-invocation budget.
+- Command: `nix-shell -p rustc cargo clippy rustfmt tinycc --run 'cargo run --release -p prdb-engine --example storage_pressure --locked --offline'`.
+- Measurement: redb 4.4.0, Rust 1.95.0, x86_64 Linux. Operational-only commit p50/p95/p99 was 6.169/11.787/17.016 ms; mixed-load p50/p95/p99 was 9.004/11.184/16.042 ms. The mixed writer phase completed in 0.582 s (440.2 commits/s) as the retained snapshot completed 8,557 full authorized scans and 34,228 point reads, observing only the original row values.
+- Scope: one synthetic local run. The percentile shift is not stable evidence of an improvement or regression. This measures the managed storage API with repeated authorized scans, not concurrent SQL analytics; repeatable runs, SQL joins, maintenance, growth/reclamation, and other storage profiles remain unmeasured.
+
 ## SM-1 / SM-7: process crashes at durable commit I/O boundaries — verified
 
 - Contract: [redb storage recovery](../../specs/redb-storage.md) requires atomic rows, outcomes, and commit sequence after process exit; process termination does not prove power-loss durability.
