@@ -193,7 +193,7 @@ int32_t prdb_sdk_executor_stage_insert_v1(
     uint8_t *request, uint64_t request_capacity, uint8_t *response,
     uint64_t response_capacity, uint64_t *response_len,
     uint8_t row_handle_out[16]) {
-    uint64_t offset = 20;
+    uint64_t offset = PRDB_EXECUTOR_STAGE_INSERT_REQUEST_HEADER_BYTES;
     int32_t status;
     if (relation_handle == NULL || relation_handle[0] != 6 || values == NULL ||
         value_count > PRDB_SDK_BATCH_MAX_CELLS_PER_ROW || request == NULL ||
@@ -202,9 +202,12 @@ int32_t prdb_sdk_executor_stage_insert_v1(
         return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
     }
     if (request_capacity < offset) return PRDB_SDK_EXECUTOR_RESPONSE_TOO_SMALL;
-    write_u16(request, 1);
-    memcpy(request + 2, relation_handle, 16);
-    write_u16(request + 18, value_count);
+    write_u16(request + PRDB_EXECUTOR_STAGE_INSERT_REQUEST_VERSION_OFFSET,
+              PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION);
+    memcpy(request + PRDB_EXECUTOR_STAGE_INSERT_REQUEST_RELATION_HANDLE_OFFSET,
+           relation_handle, 16);
+    write_u16(request + PRDB_EXECUTOR_STAGE_INSERT_REQUEST_VALUE_COUNT_OFFSET,
+              value_count);
     for (uint16_t i = 0; i < value_count; ++i) {
         const prdb_sdk_executor_insert_value_v1 *input = &values[i];
         if (input->struct_size < sizeof(*input) ||

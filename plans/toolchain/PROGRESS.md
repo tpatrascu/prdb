@@ -1,5 +1,13 @@
 # Toolchain Progress
 
+## TC-2: generated executor stage-insert request header — implemented
+
+- Contract: [internal IPC](../../specs/ipc-protocol.md) defines stage-insert as the batch payload version, relation handle, value count, and bounded value records.
+- Implementation: the shared schema declares the fixed header fields. Rust and TinyCC encoders/decoders consume generated offsets and header size; variable value records retain their existing codec.
+- Regression: Rust mutation codec round-trip and maintained TinyCC executor fixture verify stage-insert request bytes.
+- Verification: generator drift, focused Rust mutation tests, full TinyCC SDK suite, and workspace build/format/warning-denied Clippy/serial tests (129 commit tests passed; 3 cgroup-dependent tests ignored).
+- Remaining: generate layouts for remaining executor/planner/supervisor payloads and serialization helpers.
+
 ## TC-2: generated executor stage-update request header — implemented
 
 - Contract: [internal IPC](../../specs/ipc-protocol.md) defines stage-update as the batch payload version, row handle, patch count, and bounded patch records.

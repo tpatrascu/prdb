@@ -21,6 +21,9 @@ pub use crate::query_abi::{
     EXECUTOR_RESOLVE_RELATION_REQUEST_SCHEMA_NAME_LENGTH_OFFSET,
     EXECUTOR_RESOLVE_RELATION_REQUEST_VERSION_OFFSET, EXECUTOR_STAGE_DELETE_REQUEST_HEADER_BYTES,
     EXECUTOR_STAGE_DELETE_REQUEST_ROW_HANDLE_OFFSET, EXECUTOR_STAGE_DELETE_REQUEST_VERSION_OFFSET,
+    EXECUTOR_STAGE_INSERT_REQUEST_HEADER_BYTES,
+    EXECUTOR_STAGE_INSERT_REQUEST_RELATION_HANDLE_OFFSET,
+    EXECUTOR_STAGE_INSERT_REQUEST_VALUE_COUNT_OFFSET, EXECUTOR_STAGE_INSERT_REQUEST_VERSION_OFFSET,
     EXECUTOR_STAGE_INSERT_RESPONSE_HEADER_BYTES, EXECUTOR_STAGE_INSERT_RESPONSE_ROW_HANDLE_OFFSET,
     EXECUTOR_STAGE_INSERT_RESPONSE_VERSION_OFFSET, EXECUTOR_STAGE_UPDATE_REQUEST_HEADER_BYTES,
     EXECUTOR_STAGE_UPDATE_REQUEST_PATCH_COUNT_OFFSET,
@@ -406,9 +409,14 @@ impl StageInsertRequest {
         if self.values.len() > crate::tuple::MAX_COLUMNS {
             return Err(ExecutorRequestError::InvalidPayload);
         }
-        let mut payload = EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes().to_vec();
-        payload.extend_from_slice(&self.relation.to_bytes());
-        payload.extend_from_slice(
+        let mut payload = vec![0; EXECUTOR_STAGE_INSERT_REQUEST_HEADER_BYTES as usize];
+        let version_offset = EXECUTOR_STAGE_INSERT_REQUEST_VERSION_OFFSET as usize;
+        payload[version_offset..version_offset + 2]
+            .copy_from_slice(&EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes());
+        let relation_offset = EXECUTOR_STAGE_INSERT_REQUEST_RELATION_HANDLE_OFFSET as usize;
+        payload[relation_offset..relation_offset + 16].copy_from_slice(&self.relation.to_bytes());
+        let count_offset = EXECUTOR_STAGE_INSERT_REQUEST_VALUE_COUNT_OFFSET as usize;
+        payload[count_offset..count_offset + 2].copy_from_slice(
             &u16::try_from(self.values.len())
                 .map_err(|_| ExecutorRequestError::InvalidPayload)?
                 .to_be_bytes(),
@@ -434,19 +442,28 @@ impl StageInsertRequest {
     }
 
     pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
-        if payload.len() < 20
+        if payload.len() < EXECUTOR_STAGE_INSERT_REQUEST_HEADER_BYTES as usize
             || payload.len() > crate::ipc::MAX_PAYLOAD_BYTES
-            || u16::from_be_bytes([payload[0], payload[1]]) != EXECUTOR_BATCH_PAYLOAD_VERSION
+            || u16::from_be_bytes([
+                payload[EXECUTOR_STAGE_INSERT_REQUEST_VERSION_OFFSET as usize],
+                payload[EXECUTOR_STAGE_INSERT_REQUEST_VERSION_OFFSET as usize + 1],
+            ]) != EXECUTOR_BATCH_PAYLOAD_VERSION
         {
             return Err(ExecutorRequestError::InvalidPayload);
         }
-        let relation = ResolvedRelationHandle::from_bytes(&payload[2..18])
-            .ok_or(ExecutorRequestError::InvalidPayload)?;
-        let count = usize::from(u16::from_be_bytes([payload[18], payload[19]]));
+        let relation_offset = EXECUTOR_STAGE_INSERT_REQUEST_RELATION_HANDLE_OFFSET as usize;
+        let relation =
+            ResolvedRelationHandle::from_bytes(&payload[relation_offset..relation_offset + 16])
+                .ok_or(ExecutorRequestError::InvalidPayload)?;
+        let count_offset = EXECUTOR_STAGE_INSERT_REQUEST_VALUE_COUNT_OFFSET as usize;
+        let count = usize::from(u16::from_be_bytes([
+            payload[count_offset],
+            payload[count_offset + 1],
+        ]));
         if count > crate::tuple::MAX_COLUMNS {
             return Err(ExecutorRequestError::InvalidPayload);
         }
-        let mut offset = 20;
+        let mut offset = EXECUTOR_STAGE_INSERT_REQUEST_HEADER_BYTES as usize;
         let mut values = Vec::with_capacity(count);
         for _ in 0..count {
             let state = *payload
