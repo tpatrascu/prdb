@@ -54,9 +54,20 @@ def render(schema):
             escaped = json.dumps(value)
             rust_value = escaped
             c_value = escaped
-        elif rust_type in ("u16", "u32", "u64") and c_type in ("UINT16_C", "UINT32_C", "UINT64_C"):
-            expected_c_type = {"u16": "UINT16_C", "u32": "UINT32_C", "u64": "UINT64_C"}[rust_type]
-            if c_type != expected_c_type or not isinstance(value, int) or value < 0:
+        elif rust_type in ("u8", "u16", "u32", "u64") and c_type in (
+            "UINT8_C",
+            "UINT16_C",
+            "UINT32_C",
+            "UINT64_C",
+        ):
+            expected_c_type = {
+                "u8": "UINT8_C",
+                "u16": "UINT16_C",
+                "u32": "UINT32_C",
+                "u64": "UINT64_C",
+            }[rust_type]
+            maximum = {"u8": 0xFF, "u16": 0xFFFF, "u32": 0xFFFFFFFF, "u64": 0xFFFFFFFFFFFFFFFF}[rust_type]
+            if c_type != expected_c_type or not isinstance(value, int) or not 0 <= value <= maximum:
                 raise ValueError(f"invalid integer constant {rust_name}")
             rust_value = str(value)
             c_value = f"{c_type}({value})"

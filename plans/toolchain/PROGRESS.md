@@ -1,5 +1,13 @@
 # Toolchain Progress
 
+## TC-2: generated optimizer SELECT request prefix — implemented
+
+- Contract: the optimizer's bounded structured SELECT request starts with version, statement tag, and zero flags before its variable relation/projection/predicate fields.
+- Implementation: the shared schema now owns the optimizer request version and SELECT tag constants plus prefix field offsets. The Rust decoder consumes the generated prefix and starts bounded parsing after the generated header size. The generator supports u8 registry constants.
+- Regression: all four optimizer request parser tests pass, including unsupported version/tag, invalid flags, malformed names, and size/depth/collection bounds.
+- Verification: generator drift, focused optimizer request tests, full workspace build/format/warning-denied Clippy/serial tests, and TinyCC SDK suite passed.
+- Remaining: generate layouts and collection codecs for remaining executor/planner/supervisor payloads.
+
 ## TC-2: generated optimizer response variants — implemented
 
 - Contract: optimizer responses use a version/status failure header, or a success header with u32 plan length followed by validated plan bytes.

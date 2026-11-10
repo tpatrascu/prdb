@@ -4,8 +4,12 @@
 //! not resolve names or grant authority; those checks belong to the invocation
 //! bound planner service and the executor/storage path.
 
-const VERSION: u16 = 1;
-const SELECT: u8 = 1;
+use crate::query_abi::{
+    OPTIMIZER_REQUEST_VERSION, OPTIMIZER_SELECT_REQUEST_FLAGS_OFFSET,
+    OPTIMIZER_SELECT_REQUEST_HEADER_BYTES, OPTIMIZER_SELECT_REQUEST_STATEMENT_OFFSET,
+    OPTIMIZER_SELECT_REQUEST_VERSION_OFFSET, OPTIMIZER_SELECT_STATEMENT,
+};
+
 pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
 pub const MAX_IDENTIFIER_BYTES: usize = 63;
 pub const MAX_PROJECTIONS: usize = 128;
@@ -80,18 +84,26 @@ pub fn decode_select_request(bytes: &[u8]) -> Result<SelectRequest, RequestError
     if bytes.len() > MAX_REQUEST_BYTES {
         return Err(RequestError::TooLarge);
     }
-    let mut cursor = Cursor::new(bytes);
-    let version = cursor.u16()?;
-    if version != VERSION {
+    let header_bytes = OPTIMIZER_SELECT_REQUEST_HEADER_BYTES as usize;
+    if bytes.len() < header_bytes {
+        return Err(RequestError::Truncated);
+    }
+    let version_offset = OPTIMIZER_SELECT_REQUEST_VERSION_OFFSET as usize;
+    let version = u16::from_be_bytes([bytes[version_offset], bytes[version_offset + 1]]);
+    if version != OPTIMIZER_REQUEST_VERSION {
         return Err(RequestError::UnsupportedVersion(version));
     }
-    let statement = cursor.u8()?;
-    if statement != SELECT {
+    let statement = bytes[OPTIMIZER_SELECT_REQUEST_STATEMENT_OFFSET as usize];
+    if statement != OPTIMIZER_SELECT_STATEMENT {
         return Err(RequestError::UnsupportedStatement(statement));
     }
-    if cursor.u8()? != 0 {
+    if bytes[OPTIMIZER_SELECT_REQUEST_FLAGS_OFFSET as usize] != 0 {
         return Err(RequestError::InvalidValue);
     }
+    let mut cursor = Cursor {
+        bytes,
+        offset: header_bytes,
+    };
     let schema_name = cursor.identifier()?;
     let relation_name = cursor.identifier()?;
     let projection_count = usize::from(cursor.u16()?);
@@ -305,7 +317,9 @@ mod tests {
     }
 
     fn select_request(predicate: &[u8]) -> Vec<u8> {
-        let mut bytes = vec![0, 1, SELECT, 0];
+        let mut bytes = vec![0, OPTIMIZER_REQUEST_VERSION as u8];
+        bytes.push(OPTIMIZER_SELECT_STATEMENT);
+        bytes.push(0);
         name("public", &mut bytes);
         name("items", &mut bytes);
         u16_bytes(2, &mut bytes);

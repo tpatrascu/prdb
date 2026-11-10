@@ -1195,6 +1195,20 @@
       "value": 1,
       "c_name": "PRDB_OPTIMIZER_RESPONSE_VERSION",
       "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "OPTIMIZER_REQUEST_VERSION",
+      "rust_type": "u16",
+      "value": 1,
+      "c_name": "PRDB_OPTIMIZER_REQUEST_VERSION",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "OPTIMIZER_SELECT_STATEMENT",
+      "rust_type": "u8",
+      "value": 1,
+      "c_name": "PRDB_OPTIMIZER_SELECT_STATEMENT",
+      "c_type": "UINT8_C"
     }
   ],
   "payload_schemas": [
@@ -1410,6 +1424,16 @@
           "length_field": "plan_length"
         }
       ]
+    },
+    {
+      "name": "OPTIMIZER_SELECT_REQUEST",
+      "version_constant": "OPTIMIZER_REQUEST_VERSION",
+      "fields": [
+        { "name": "version", "encoding": "u16be" },
+        { "name": "statement", "encoding": "u8" },
+        { "name": "flags", "encoding": "u8" }
+      ],
+      "trailing_fields": []
     }
   ]
 }
