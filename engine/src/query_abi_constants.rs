@@ -233,6 +233,23 @@ pub const SUPERVISOR_CANCEL_RESULT_TERMINAL_OUTCOME_STATUS_OFFSET: u32 = 3;
 pub const SUPERVISOR_CANCEL_RESULT_TERMINAL_COMMIT_SEQUENCE_OFFSET: u32 = 4;
 pub const SUPERVISOR_CANCEL_RESULT_TERMINAL_RETENTION_DEADLINE_OFFSET: u32 = 12;
 pub const SUPERVISOR_CANCEL_RESULT_TERMINAL_HEADER_BYTES: u32 = 20;
+pub fn encode_supervisor_cancel_result_terminal(status: u8, outcome_status: u8, commit_sequence: u64, retention_deadline: i64) -> [u8; 20] {
+    let mut payload = [0u8; 20];
+    payload[0..2].copy_from_slice(&SUPERVISOR_PAYLOAD_VERSION.to_be_bytes());
+    payload[2] = status;
+    payload[3] = outcome_status;
+    payload[4..12].copy_from_slice(&commit_sequence.to_be_bytes());
+    payload[12..20].copy_from_slice(&retention_deadline.to_be_bytes());
+    payload
+}
+
+pub fn decode_supervisor_cancel_result_terminal(payload: &[u8]) -> Option<(u8, u8, u64, i64)> {
+    if payload.len() != 20 || u16::from_be_bytes([payload[0], payload[1]]) != SUPERVISOR_PAYLOAD_VERSION {
+        return None;
+    }
+    Some((payload[2], payload[3], u64::from_be_bytes(payload[4..12].try_into().ok()?), i64::from_be_bytes(payload[12..20].try_into().ok()?)))
+}
+
 pub const SUPERVISOR_STATUS_UNKNOWN_RESPONSE_VERSION_OFFSET: u32 = 0;
 pub const SUPERVISOR_STATUS_UNKNOWN_RESPONSE_STATUS_OFFSET: u32 = 2;
 pub const SUPERVISOR_STATUS_UNKNOWN_RESPONSE_HEADER_BYTES: u32 = 3;

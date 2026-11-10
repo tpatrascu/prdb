@@ -1487,12 +1487,13 @@
     {
       "name": "SUPERVISOR_CANCEL_RESULT_TERMINAL",
       "version_constant": "SUPERVISOR_PAYLOAD_VERSION",
+      "generate_rust_codec": true,
       "fields": [
         { "name": "version", "encoding": "u16be" },
         { "name": "status", "encoding": "u8" },
         { "name": "outcome_status", "encoding": "u8" },
         { "name": "commit_sequence", "encoding": "u64be" },
-        { "name": "retention_deadline", "encoding": "u64be" }
+        { "name": "retention_deadline", "encoding": "i64be" }
       ],
       "trailing_fields": []
     },

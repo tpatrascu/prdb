@@ -230,6 +230,14 @@
 - Verification: `make -f engine/sdk/Makefile abi-constants-check abi-constants-test`, the focused codec test, full locked workspace build/format/warning-denied Clippy/serial Rust tests, and `make -f engine/sdk/Makefile test` all passed in the pinned Nix shell. Serial workspace tests included 132 commit integration tests; three cgroup-dependent commit tests and one cgroup-dependent metadata-process test remained ignored by default. Their explicit delegated-cgroup acceptances were previously run and recorded in the Linux sandbox and supervisor progress files.
 - Remaining: extend field-level schema and generated codecs to other payloads, add C serializer parity, and complete the release profile and artifact gates.
 
+## TC-2: generated terminal cancellation-result codec — implemented
+
+- Contract: [internal IPC](../../specs/ipc-protocol.md) specifies a terminal cancellation result as version, status, outcome status, `u64` commit sequence, and signed `i64` retention deadline. The shared schema had incorrectly declared the deadline `u64`; it now agrees with the wire contract and existing storage type without changing the field width or bytes.
+- Red/green evidence: the signed-value regression initially failed to compile because the terminal result had no generated codec. The schema now opts into codec generation, and supervisor terminal cancellation responses use the generated encoder.
+- Regression: the hand-checked example includes a negative retention value and verifies its two's-complement wire bytes plus signed round-trip decoding.
+- Verification: generator drift/schema tests, locked workspace build, format check, warning-denied Clippy, serial workspace tests (95 library tests), and maintained TinyCC SDK tests passed in the pinned Nix shell.
+- Remaining: extend field-level schema and generated codecs to other payloads, add C serializer parity, and complete the release profile and artifact gates.
+
 ## TC-2: generated simple cancellation-result codec — implemented
 
 - Contract: [internal IPC](../../specs/ipc-protocol.md) and [toolchain](../../specs/toolchain.md). A simple cancellation result is the v1 payload version plus one status byte. The generated codec validates exact length and version; role-specific code remains responsible for interpreting the status set.

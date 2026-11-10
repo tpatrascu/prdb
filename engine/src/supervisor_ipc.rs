@@ -1338,24 +1338,17 @@ fn encode_cancellation_result(result: AdministrativeCancellationResult) -> Vec<u
             generated::encode_supervisor_cancel_result_simple(1).to_vec()
         }
         AdministrativeCancellationResult::Terminal(outcome) => {
-            let mut payload = vec![0; SUPERVISOR_CANCEL_RESULT_TERMINAL_HEADER_BYTES as usize];
-            let version_offset = SUPERVISOR_CANCEL_RESULT_TERMINAL_VERSION_OFFSET as usize;
-            payload[version_offset..version_offset + 2]
-                .copy_from_slice(&SUPERVISOR_PAYLOAD_VERSION.to_be_bytes());
-            payload[SUPERVISOR_CANCEL_RESULT_TERMINAL_STATUS_OFFSET as usize] = 2;
-            payload[SUPERVISOR_CANCEL_RESULT_TERMINAL_OUTCOME_STATUS_OFFSET as usize] =
-                match outcome.status {
-                    OutcomeStatus::Committed => 1,
-                    OutcomeStatus::Aborted => 2,
-                };
-            let sequence_offset = SUPERVISOR_CANCEL_RESULT_TERMINAL_COMMIT_SEQUENCE_OFFSET as usize;
-            payload[sequence_offset..sequence_offset + 8]
-                .copy_from_slice(&outcome.commit_sequence.to_be_bytes());
-            let deadline_offset =
-                SUPERVISOR_CANCEL_RESULT_TERMINAL_RETENTION_DEADLINE_OFFSET as usize;
-            payload[deadline_offset..deadline_offset + 8]
-                .copy_from_slice(&outcome.retention_deadline_us.to_be_bytes());
-            payload
+            let outcome_status = match outcome.status {
+                OutcomeStatus::Committed => 1,
+                OutcomeStatus::Aborted => 2,
+            };
+            generated::encode_supervisor_cancel_result_terminal(
+                2,
+                outcome_status,
+                outcome.commit_sequence,
+                outcome.retention_deadline_us,
+            )
+            .to_vec()
         }
         AdministrativeCancellationResult::Unknown => {
             generated::encode_supervisor_cancel_result_simple(3).to_vec()

@@ -188,8 +188,9 @@ pub fn validate_descriptor_v4(descriptor: &QueryDescriptorV4) -> Result<(), Desc
 mod generated_payload_tests {
     use super::{
         decode_supervisor_admin_cancel_request, decode_supervisor_cancel_result_simple,
-        decode_supervisor_invocation_control_request, encode_supervisor_admin_cancel_request,
-        encode_supervisor_cancel_result_simple, encode_supervisor_invocation_control_request,
+        decode_supervisor_cancel_result_terminal, decode_supervisor_invocation_control_request,
+        encode_supervisor_admin_cancel_request, encode_supervisor_cancel_result_simple,
+        encode_supervisor_cancel_result_terminal, encode_supervisor_invocation_control_request,
     };
 
     #[test]
@@ -251,5 +252,21 @@ mod generated_payload_tests {
             Some(0xff)
         );
         assert_eq!(decode_supervisor_cancel_result_simple(&encoded[..2]), None);
+    }
+
+    #[test]
+    fn generated_terminal_cancel_result_uses_signed_retention_time() {
+        let encoded = encode_supervisor_cancel_result_terminal(2, 1, 7, -2);
+        assert_eq!(
+            encoded,
+            [
+                0x00, 0x01, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0xff, 0xff,
+                0xff, 0xff, 0xff, 0xff, 0xff, 0xfe
+            ]
+        );
+        assert_eq!(
+            decode_supervisor_cancel_result_terminal(&encoded),
+            Some((2, 1, 7, -2))
+        );
     }
 }

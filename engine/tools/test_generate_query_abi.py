@@ -29,6 +29,8 @@ class PayloadSchemaValidationTests(unittest.TestCase):
         self.assertIn("decode_supervisor_admin_cancel_request", rust)
         self.assertIn("encode_supervisor_cancel_result_simple", rust)
         self.assertIn("decode_supervisor_cancel_result_simple", rust)
+        self.assertIn("encode_supervisor_cancel_result_terminal", rust)
+        self.assertIn("decode_supervisor_cancel_result_terminal", rust)
         self.assertIn("PRDB_PLANNER_ESTIMATE_SCAN_RESPONSE_HEADER_BYTES", c)
 
     def test_payload_version_must_be_a_leading_u16(self):
