@@ -190,6 +190,7 @@ int32_t prdb_sdk_executor_stage_insert_v1(
     uint64_t response_capacity, uint64_t *response_len,
     uint8_t row_handle_out[16]) {
     uint64_t offset = PRDB_EXECUTOR_STAGE_INSERT_REQUEST_HEADER_BYTES;
+    uint8_t staged_row_handle[16];
     int32_t status;
     if (relation_handle == NULL || relation_handle[0] != 6 || values == NULL ||
         value_count > PRDB_SDK_BATCH_MAX_CELLS_PER_ROW || request == NULL ||
@@ -251,14 +252,12 @@ int32_t prdb_sdk_executor_stage_insert_v1(
     status = invoke(host, PRDB_SDK_EXECUTOR_OP_STAGE_INSERT, request, offset,
                     response, response_capacity, response_len);
     if (status != PRDB_SDK_EXECUTOR_OK) return status;
-    if (*response_len != PRDB_EXECUTOR_STAGE_INSERT_RESPONSE_HEADER_BYTES ||
-        read_u16(response + PRDB_EXECUTOR_STAGE_INSERT_RESPONSE_VERSION_OFFSET) !=
-            PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION ||
-        response[PRDB_EXECUTOR_STAGE_INSERT_RESPONSE_ROW_HANDLE_OFFSET] != 8) {
+    if (!prdb_decode_executor_stage_insert_response(
+            response, (size_t)*response_len, staged_row_handle) ||
+        staged_row_handle[0] != 8) {
         return PRDB_SDK_EXECUTOR_INVALID_PAYLOAD;
     }
-    memcpy(row_handle_out,
-           response + PRDB_EXECUTOR_STAGE_INSERT_RESPONSE_ROW_HANDLE_OFFSET, 16);
+    memcpy(row_handle_out, staged_row_handle, sizeof(staged_row_handle));
     return PRDB_SDK_EXECUTOR_OK;
 }
 
