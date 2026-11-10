@@ -287,40 +287,23 @@ pub struct NextBatchRequest {
 impl NextBatchRequest {
     pub fn encode(&self) -> Result<Vec<u8>, ExecutorRequestError> {
         validate_batch_limits(self.max_scanned, self.max_bytes)?;
-        let mut payload = vec![0; EXECUTOR_NEXT_BATCH_REQUEST_HEADER_BYTES as usize];
-        let version_offset = EXECUTOR_NEXT_BATCH_REQUEST_VERSION_OFFSET as usize;
-        payload[version_offset..version_offset + 2]
-            .copy_from_slice(&EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes());
-        let cursor_offset = EXECUTOR_NEXT_BATCH_REQUEST_CURSOR_HANDLE_OFFSET as usize;
-        payload[cursor_offset..cursor_offset + 16].copy_from_slice(&self.cursor.to_bytes());
-        let scanned_offset = EXECUTOR_NEXT_BATCH_REQUEST_MAX_SCANNED_OFFSET as usize;
-        payload[scanned_offset..scanned_offset + 2]
-            .copy_from_slice(&self.max_scanned.to_be_bytes());
-        let bytes_offset = EXECUTOR_NEXT_BATCH_REQUEST_MAX_BYTES_OFFSET as usize;
-        payload[bytes_offset..bytes_offset + 4].copy_from_slice(&self.max_bytes.to_be_bytes());
-        Ok(payload)
+        Ok(generated::encode_executor_next_batch_request(
+            self.cursor.to_bytes(),
+            self.max_scanned,
+            self.max_bytes,
+        )
+        .to_vec())
     }
 
     pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
-        let version_offset = EXECUTOR_NEXT_BATCH_REQUEST_VERSION_OFFSET as usize;
-        let cursor_offset = EXECUTOR_NEXT_BATCH_REQUEST_CURSOR_HANDLE_OFFSET as usize;
-        let scanned_offset = EXECUTOR_NEXT_BATCH_REQUEST_MAX_SCANNED_OFFSET as usize;
-        let bytes_offset = EXECUTOR_NEXT_BATCH_REQUEST_MAX_BYTES_OFFSET as usize;
-        if payload.len() != EXECUTOR_NEXT_BATCH_REQUEST_HEADER_BYTES as usize
-            || u16::from_be_bytes([payload[version_offset], payload[version_offset + 1]])
-                != EXECUTOR_BATCH_PAYLOAD_VERSION
-        {
-            return Err(ExecutorRequestError::InvalidPayload);
-        }
+        let (cursor, max_scanned, max_bytes) =
+            generated::decode_executor_next_batch_request(payload)
+                .ok_or(ExecutorRequestError::InvalidPayload)?;
         let request = Self {
-            cursor: ExecutorScanCursor::from_bytes(&payload[cursor_offset..cursor_offset + 16])
+            cursor: ExecutorScanCursor::from_bytes(&cursor)
                 .ok_or(ExecutorRequestError::InvalidPayload)?,
-            max_scanned: u16::from_be_bytes([payload[scanned_offset], payload[scanned_offset + 1]]),
-            max_bytes: u32::from_be_bytes(
-                payload[bytes_offset..bytes_offset + 4]
-                    .try_into()
-                    .expect("fixed payload"),
-            ),
+            max_scanned,
+            max_bytes,
         };
         validate_batch_limits(request.max_scanned, request.max_bytes)?;
         Ok(request)

@@ -187,6 +187,57 @@ static inline int prdb_decode_executor_close_cursor_request(const uint8_t *paylo
     return 1;
 }
 
+static inline void prdb_encode_executor_next_batch_request(uint8_t payload[24],
+    const uint8_t cursor_handle[16], uint16_t max_scanned, uint32_t max_bytes) {
+    payload[0] = (uint8_t)((PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION >> 8) & 0xffu);
+    payload[1] = (uint8_t)(PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION & 0xffu);
+    for (size_t i = 0; i < 16; ++i) {
+        payload[2 + i] = cursor_handle[i];
+    }
+    uint64_t max_scanned_wire = (uint64_t)max_scanned;
+    for (size_t i = 0; i < 2; ++i) {
+        payload[18 + i] = (uint8_t)(max_scanned_wire >> ((2 - 1 - i) * 8));
+    }
+    uint64_t max_bytes_wire = (uint64_t)max_bytes;
+    for (size_t i = 0; i < 4; ++i) {
+        payload[20 + i] = (uint8_t)(max_bytes_wire >> ((4 - 1 - i) * 8));
+    }
+}
+
+static inline int prdb_decode_executor_next_batch_request(const uint8_t *payload, size_t payload_len,
+    uint8_t cursor_handle[16], uint16_t *max_scanned, uint32_t *max_bytes) {
+    if (payload == NULL || payload_len != 24) {
+        return 0;
+    }
+    if (payload[0] != (uint8_t)((PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION >> 8) & 0xffu) ||
+        payload[1] != (uint8_t)(PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION & 0xffu)) {
+        return 0;
+    }
+    if (cursor_handle == NULL) {
+        return 0;
+    }
+    for (size_t i = 0; i < 16; ++i) {
+        cursor_handle[i] = payload[2 + i];
+    }
+    if (max_scanned == NULL) {
+        return 0;
+    }
+    uint64_t max_scanned_wire_value = 0;
+    for (size_t i = 0; i < 2; ++i) {
+        max_scanned_wire_value = (max_scanned_wire_value << 8) | payload[18 + i];
+    }
+    *max_scanned = (uint16_t)max_scanned_wire_value;
+    if (max_bytes == NULL) {
+        return 0;
+    }
+    uint64_t max_bytes_wire_value = 0;
+    for (size_t i = 0; i < 4; ++i) {
+        max_bytes_wire_value = (max_bytes_wire_value << 8) | payload[20 + i];
+    }
+    *max_bytes = (uint32_t)max_bytes_wire_value;
+    return 1;
+}
+
 static inline void prdb_encode_executor_stage_delete_request(uint8_t payload[18],
     const uint8_t row_handle[16]) {
     payload[0] = (uint8_t)((PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION >> 8) & 0xffu);

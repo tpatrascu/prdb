@@ -199,6 +199,22 @@ pub const EXECUTOR_NEXT_BATCH_REQUEST_CURSOR_HANDLE_OFFSET: u32 = 2;
 pub const EXECUTOR_NEXT_BATCH_REQUEST_MAX_SCANNED_OFFSET: u32 = 18;
 pub const EXECUTOR_NEXT_BATCH_REQUEST_MAX_BYTES_OFFSET: u32 = 20;
 pub const EXECUTOR_NEXT_BATCH_REQUEST_HEADER_BYTES: u32 = 24;
+pub fn encode_executor_next_batch_request(cursor_handle: [u8; 16], max_scanned: u16, max_bytes: u32) -> [u8; 24] {
+    let mut payload = [0u8; 24];
+    payload[0..2].copy_from_slice(&EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes());
+    payload[2..18].copy_from_slice(&cursor_handle);
+    payload[18..20].copy_from_slice(&max_scanned.to_be_bytes());
+    payload[20..24].copy_from_slice(&max_bytes.to_be_bytes());
+    payload
+}
+
+pub fn decode_executor_next_batch_request(payload: &[u8]) -> Option<([u8; 16], u16, u32)> {
+    if payload.len() != 24 || u16::from_be_bytes([payload[0], payload[1]]) != EXECUTOR_BATCH_PAYLOAD_VERSION {
+        return None;
+    }
+    Some((payload[2..18].try_into().ok()?, u16::from_be_bytes(payload[18..20].try_into().ok()?), u32::from_be_bytes(payload[20..24].try_into().ok()?)))
+}
+
 pub const EXECUTOR_NEXT_BATCH_RESPONSE_FINISHED_VERSION_OFFSET: u32 = 0;
 pub const EXECUTOR_NEXT_BATCH_RESPONSE_FINISHED_FINISHED_OFFSET: u32 = 2;
 pub const EXECUTOR_NEXT_BATCH_RESPONSE_FINISHED_ROW_COUNT_OFFSET: u32 = 3;
