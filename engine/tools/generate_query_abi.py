@@ -70,6 +70,7 @@ def render(schema):
     if not isinstance(payload_schemas, list) or not payload_schemas:
         raise ValueError("schema must contain at least one IPC payload schema")
     payload_names = set()
+    constants_by_name = {item["rust_name"]: item for item in constants}
     for payload in payload_schemas:
         name = payload.get("name")
         version_constant = payload.get("version_constant")
@@ -84,8 +85,18 @@ def render(schema):
             or not isinstance(trailing_fields, list)
         ):
             raise ValueError("invalid IPC payload schema")
-        if version_constant not in {item["rust_name"] for item in constants}:
+        if version_constant not in constants_by_name:
             raise ValueError(f"unknown payload version constant for {name}")
+        version_field = fields[0]
+        version_item = constants_by_name[version_constant]
+        if (
+            version_field.get("name") != "version"
+            or version_field.get("encoding") != "u16be"
+            or version_item.get("rust_type") != "u16"
+            or not isinstance(version_item.get("value"), int)
+            or not 0 <= version_item["value"] <= 0xFFFF
+        ):
+            raise ValueError(f"payload {name} must start with its u16 version constant")
         payload_names.add(name)
         field_names = set()
         offset = 0
@@ -121,21 +132,29 @@ def render(schema):
             for field in fields
             if field["name"].endswith(("_length", "_count"))
         }
+        fields_by_name = {field["name"]: field for field in fields}
         trailing_names = set()
         for field in trailing_fields:
             field_name = field.get("name")
+            encoding = field.get("encoding")
+            length_field = field.get("length_field")
             if (
                 not isinstance(field_name, str)
                 or not field_name.isidentifier()
                 or field_name in trailing_names
-                or field.get("encoding") not in (
+                or encoding not in (
                     "utf8",
                     "bytes16_array",
                     "u64_triplet_array",
                 )
-                or field.get("length_field") not in length_fields
+                or length_field not in length_fields
             ):
                 raise ValueError(f"invalid trailing field in IPC payload {name}")
+            if (
+                encoding in ("bytes16_array", "u64_triplet_array")
+                and fields_by_name[length_field].get("encoding") != "u16be"
+            ):
+                raise ValueError(f"collection {field_name} must use a u16 count")
             trailing_names.add(field_name)
         header_name = f"{name}_HEADER_BYTES"
         c_header_name = f"PRDB_{header_name}"

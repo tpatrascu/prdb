@@ -1,5 +1,13 @@
 # Toolchain Progress
 
+## TC-2: validate payload version and collection count fields — implemented
+
+- Contract: every payload version is a u16 field first in the payload and references a u16 version constant; count-delimited fixed-width collections use a u16 count.
+- Implementation: the schema generator now rejects mismatched version declarations and collection count widths before emitting C/Rust constants.
+- Regression: negative schema mutations with a u32 version field and a u32 collection count are both rejected; current generated files pass `--check`.
+- Verification: locked workspace build/format/warning-denied Clippy/serial tests and TinyCC SDK suite passed using a temporary writable Nix cache after the default cache database returned read-only errors.
+- Remaining: generate layouts and collection codecs for remaining executor/planner/supervisor payloads.
+
 ## TC-2: generated planner estimate collection declarations — implemented
 
 - Contract: estimate requests carry a count-delimited array of 16-byte column IDs; exact estimate responses carry a count-delimited array of three 64-bit population values per column.
