@@ -1,5 +1,7 @@
 use prdb_engine::authorization::Operation;
-use prdb_engine::client_credentials::{read_client_credentials, write_client_credentials};
+use prdb_engine::client_credentials::{
+    read_client_credentials, remove_client_credentials, write_client_credentials,
+};
 use prdb_engine::client_protocol::ClientCredentials;
 use prdb_engine::client_submit::MetadataClient;
 use prdb_engine::client_submit::{
@@ -25,6 +27,7 @@ const USAGE: &str = "Usage:\n\
   prdb-client cancel --address IP:PORT --credentials FILE --invocation-id HEX\n\n\
   prdb-client admin-cancel --address IP:PORT --credentials ADMIN_FILE --invocation-id HEX\n\n\
   prdb-client scope --address IP:PORT --credentials FILE --schema NAME --output FILE \\\n    [--relation NAME --operations select,insert,update,delete [--columns NAME,...]]\n\n\
+  prdb-client credential-remove --credentials FILE\n\n\
 Submission output is provisional until a committed terminal event. START is never retried;\n\
 if its reply is uncertain, use status with the invocation ID and a newly authenticated connection.\n\
 Scope files contain only permissions visible to the authenticated identity and remain a request ceiling.\n\
@@ -118,6 +121,13 @@ fn run() -> Result<(), String> {
         if fields.insert(option.clone(), value).is_some() {
             return Err(format!("duplicate option {option}"));
         }
+    }
+
+    if command == "credential-remove" {
+        let credentials_path = take_path(&mut fields, "--credentials")?;
+        reject_unknown(&fields)?;
+        credential_remove(credentials_path)?;
+        return Ok(());
     }
 
     let address = take_text(&mut fields, "--address")?
@@ -272,6 +282,12 @@ fn schema_table_admin(
         }
         _ => return Err(format!("unsupported schema/table command {command}")),
     }
+    Ok(())
+}
+
+fn credential_remove(path: PathBuf) -> Result<(), String> {
+    remove_client_credentials(&path).map_err(|error| error.to_string())?;
+    println!("removed credential file {}", path.display());
     Ok(())
 }
 
@@ -1844,6 +1860,32 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn credential_remove_uses_the_private_file_validator_and_removes_file() {
+        let root = std::env::temp_dir().join(format!(
+            "prdb-client-remove-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("client.cred");
+        write_client_credentials(
+            &path,
+            &ClientCredentials {
+                token_id: [1; 16],
+                token_secret: [2; 32],
+            },
+        )
+        .unwrap();
+
+        credential_remove(path.clone()).unwrap();
+        assert!(!path.exists());
+        std::fs::remove_dir(root).unwrap();
+    }
 
     #[test]
     fn invocation_id_parser_requires_canonical_nonzero_hex() {

@@ -148,6 +148,13 @@
 - Verification: `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed in the pinned Nix shell. The first full-suite attempt hit the known intermittent CHECK lifecycle `InvalidAudit`; the isolated CHECK test and full rerun passed. The commit integration target reported 124 passed and 3 cgroup-dependent ignored.
 - Remaining: user-facing CLI commands and live ADMIN operations through the real multi-process gateway path remain open.
 
+### Credential removal CLI — implemented
+
+- Behavior: `prdb-client credential-remove --credentials FILE` removes a valid owner-only credential file without requiring a network connection. It reuses the credential module's ownership, regular-file, and mode-0600 checks and reports local file removal without exposing token material.
+- Contract: [client SDK](../../specs/client-sdk.md) now distinguishes local credential-file deletion from server-side `token-revoke`.
+- Regression: the maintained CLI unit test creates a private credential file, runs the removal command handler, and confirms the file is gone; credential module tests separately cover symlink and unsafe-mode rejection.
+- Remaining: CLI credential lifecycle now supports issue, private save, read, and local removal. Admin CLI breadth and real multi-process ADMIN path coverage continue below.
+
 ## SDK-3 dependency: basic submit/status CLI — implemented
 
 - Contract: [client SDK](../../specs/client-sdk.md) requires status reconciliation after uncertain START, a durable no-overwrite receipt before START, and provisional output until a committed terminal outcome.
