@@ -1,5 +1,13 @@
 # Toolchain Progress
 
+## TC-2: generated mutation acknowledgement validation — implemented
+
+- Contract: [internal IPC](../../specs/ipc-protocol.md) uses the same version/status acknowledgement for cursor close, row update, and row delete.
+- Implementation: the TinyCC executor SDK validates update and delete acknowledgements through the generated field offsets and header size, matching the Rust codec and close-cursor path.
+- Regression: the maintained TinyCC executor fixture checks successful and rejected acknowledgements.
+- Verification: generator drift, full maintained TinyCC SDK suite, and workspace build/format/warning-denied Clippy/serial tests (129 commit tests passed; 3 cgroup-dependent tests ignored).
+- Remaining: generate layouts for remaining executor/planner/supervisor payloads and serialization helpers.
+
 ## TC-2: generated planner estimate-scan request header — implemented
 
 - Contract: [internal IPC](../../specs/ipc-protocol.md) defines estimate-scan as planner payload version, connection-local planning handle, column count, and a fixed-width column-ID list.

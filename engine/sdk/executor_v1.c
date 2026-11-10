@@ -18,6 +18,14 @@ static uint16_t read_u16(const uint8_t *in) {
     return (uint16_t)(((uint16_t)in[0] << 8) | in[1]);
 }
 
+static int valid_mutation_acknowledgement(const uint8_t *payload,
+                                          uint64_t payload_len) {
+    return payload_len == PRDB_EXECUTOR_MUTATION_ACKNOWLEDGEMENT_HEADER_BYTES &&
+           read_u16(payload + PRDB_EXECUTOR_MUTATION_ACKNOWLEDGEMENT_VERSION_OFFSET) ==
+               PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION &&
+           payload[PRDB_EXECUTOR_MUTATION_ACKNOWLEDGEMENT_STATUS_OFFSET] == 0;
+}
+
 static int valid_identifier(const uint8_t *value, uint32_t length) {
     if (value == NULL || length == 0 || length > PRDB_SDK_SQL_MAX_IDENTIFIER_BYTES ||
         !((value[0] >= 'a' && value[0] <= 'z') ||
@@ -330,7 +338,7 @@ int32_t prdb_sdk_executor_stage_update_v1(
     status = invoke(host, PRDB_SDK_EXECUTOR_OP_STAGE_UPDATE, request, offset,
                     response, response_capacity, response_len);
     if (status != PRDB_SDK_EXECUTOR_OK) return status;
-    if (*response_len != 3 || read_u16(response) != 1 || response[2] != 0) {
+    if (!valid_mutation_acknowledgement(response, *response_len)) {
         return PRDB_SDK_EXECUTOR_INVALID_PAYLOAD;
     }
     return PRDB_SDK_EXECUTOR_OK;
@@ -351,7 +359,7 @@ int32_t prdb_sdk_executor_stage_delete_v1(
     status = invoke(host, PRDB_SDK_EXECUTOR_OP_STAGE_DELETE, request,
                     sizeof(request), response, response_capacity, response_len);
     if (status != PRDB_SDK_EXECUTOR_OK) return status;
-    if (*response_len != 3 || read_u16(response) != 1 || response[2] != 0) {
+    if (!valid_mutation_acknowledgement(response, *response_len)) {
         return PRDB_SDK_EXECUTOR_INVALID_PAYLOAD;
     }
     return PRDB_SDK_EXECUTOR_OK;
