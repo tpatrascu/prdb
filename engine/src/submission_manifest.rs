@@ -26,7 +26,7 @@ pub struct ArtifactManifestV1 {
 /// Encode a canonical PMF1 manifest. Dependencies must already be sorted in
 /// bytewise order and unique so the output has one representation per value.
 pub fn encode_manifest_v1(manifest: &ArtifactManifestV1) -> Result<Vec<u8>, ManifestError> {
-    if !(1..=3).contains(&manifest.native_abi_version) {
+    if !(1..=4).contains(&manifest.native_abi_version) {
         return Err(ManifestError::UnsupportedAbi);
     }
     let (expected_descriptor, expected_entry) = abi_symbols(manifest.native_abi_version);
@@ -105,7 +105,7 @@ pub fn manifest_v1_from_elf(
     runtime_profile: String,
     compiler_identity: String,
 ) -> Result<ArtifactManifestV1, ManifestError> {
-    if !(1..=3).contains(&native_abi_version) {
+    if !(1..=4).contains(&native_abi_version) {
         return Err(ManifestError::UnsupportedAbi);
     }
     let (descriptor_symbol, entry_point_symbol) = abi_symbols(native_abi_version);
@@ -243,7 +243,7 @@ pub fn decode_manifest_v1(bytes: &[u8]) -> Result<ArtifactManifestV1, ManifestEr
         return Err(ManifestError::UnsupportedTarget);
     }
     let abi = bytes[6];
-    if !(1..=3).contains(&abi) || bytes[7] != 0 {
+    if !(1..=4).contains(&abi) || bytes[7] != 0 {
         return Err(ManifestError::UnsupportedAbi);
     }
     let protocol_major = read_u16(bytes, 8)?;
@@ -322,6 +322,7 @@ fn abi_symbols(abi: u8) -> (&'static str, &'static str) {
         1 => ("prdb_query_descriptor_v1", "prdb_query_main_v1"),
         2 => ("prdb_query_descriptor_v2", "prdb_query_main_v2"),
         3 => ("prdb_query_descriptor_v3", "prdb_query_main_v3"),
+        4 => ("prdb_query_descriptor_v4", "prdb_query_main_v4"),
         _ => unreachable!("ABI was range-checked"),
     }
 }
@@ -773,7 +774,7 @@ mod tests {
         assert_eq!(
             manifest_v1_from_elf(
                 &[],
-                4,
+                5,
                 1,
                 "x86_64_v1".to_owned(),
                 "test_runtime".to_owned(),
@@ -970,6 +971,49 @@ mod tests {
     }
 
     #[test]
+    fn manifest_v1_accepts_abi_v4_and_requires_its_exports() {
+        let mut value = manifest();
+        value.native_abi_version = 4;
+        value.descriptor_symbol = "prdb_query_descriptor_v4".to_owned();
+        value.entry_point_symbol = "prdb_query_main_v4".to_owned();
+        let encoded = encode_manifest_v1(&value).expect("encode v4 manifest");
+        assert_eq!(decode_manifest_v1(&encoded), Ok(value));
+
+        let artifact = elf_with_dependencies_and_symbols(
+            &["libc.so.6", "libm.so.6"],
+            &[("prdb_query_descriptor_v4", 1), ("prdb_query_main_v4", 2)],
+        );
+        let manifest = manifest_v1_from_elf(
+            &artifact,
+            4,
+            1,
+            "x86_64_v1".to_owned(),
+            "glibc_2_31".to_owned(),
+            "TinyCC-0.9.27".to_owned(),
+        )
+        .expect("derive v4 manifest from ELF");
+        assert_eq!(manifest.native_abi_version, 4);
+        assert_eq!(manifest.descriptor_symbol, "prdb_query_descriptor_v4");
+        assert_eq!(manifest.entry_point_symbol, "prdb_query_main_v4");
+
+        let missing_entry = elf_with_dependencies_and_symbols(
+            &["libc.so.6", "libm.so.6"],
+            &[("prdb_query_descriptor_v4", 1), ("prdb_query_main_v3", 2)],
+        );
+        assert_eq!(
+            manifest_v1_from_elf(
+                &missing_entry,
+                4,
+                1,
+                "x86_64_v1".to_owned(),
+                "glibc_2_31".to_owned(),
+                "TinyCC-0.9.27".to_owned(),
+            ),
+            Err(ManifestError::InvalidArtifact)
+        );
+    }
+
+    #[test]
     fn manifest_v1_rejects_incompatible_target_abi_protocol_and_symbols() {
         let valid = encode(&manifest());
         let mut wrong_target = valid.clone();
@@ -979,7 +1023,7 @@ mod tests {
             Err(ManifestError::UnsupportedTarget)
         );
         let mut unsupported_abi = valid.clone();
-        unsupported_abi[6] = 4;
+        unsupported_abi[6] = 5;
         assert_eq!(
             decode_manifest_v1(&unsupported_abi),
             Err(ManifestError::UnsupportedAbi)

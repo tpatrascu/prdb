@@ -86,7 +86,7 @@ pub fn package_query(options: &PackageOptions) -> Result<PackageSummary, Package
     let tcc = canonical_compiler(&options.tcc)?;
     let include_dir = fs::canonicalize(&options.include_dir)?;
     if !include_dir.is_dir()
-        || !(1..=3).contains(&options.native_abi_version)
+        || !(1..=4).contains(&options.native_abi_version)
         || options.sdk_release == 0
     {
         return Err(PackageError::InvalidConfiguration);

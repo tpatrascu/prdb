@@ -39,12 +39,12 @@ fn packager_compiles_and_atomically_publishes_metadata_without_loading_query() {
     let package = temp.join("package");
     fs::write(
         &source,
-        b"#include \"prdb_query_abi_v3.h\"\n\
+        b"#include \"prdb_query_abi_v4.h\"\n\
           #include <stdlib.h>\n\
-          const prdb_query_descriptor_v3_record prdb_query_descriptor_v3 = {\n\
-            sizeof(prdb_query_descriptor_v3_record), 3, sizeof(prdb_host_api_v3), sizeof(prdb_invocation_v3)};\n\
+          const prdb_query_descriptor_v4_record prdb_query_descriptor_v4 = {\n\
+            sizeof(prdb_query_descriptor_v4_record), 4, sizeof(prdb_host_api_v4), sizeof(prdb_invocation_v4)};\n\
           __attribute__((constructor)) static void must_not_load(void) { abort(); }\n\
-          int32_t prdb_query_main_v3(const prdb_host_api_v3 *h, const prdb_invocation_v3 *i) { (void)h; (void)i; return 0; }\n",
+          int32_t prdb_query_main_v4(const prdb_host_api_v4 *h, const prdb_invocation_v4 *i) { (void)h; (void)i; return 0; }\n",
     )
     .unwrap();
     let mut scope_bytes = b"PSC1\0\x01\x02\x02".to_vec();
@@ -81,7 +81,7 @@ fn packager_compiles_and_atomically_publishes_metadata_without_loading_query() {
         .arg(&package)
         .args([
             "--abi",
-            "3",
+            "4",
             "--sdk-release",
             "1",
             "--cpu-baseline",
@@ -103,12 +103,12 @@ fn packager_compiles_and_atomically_publishes_metadata_without_loading_query() {
     let artifact = fs::read(package.join("query.so")).unwrap();
     let manifest_bytes = fs::read(package.join("manifest.pmf1")).unwrap();
     let manifest = decode_manifest_v1(&manifest_bytes).unwrap();
-    assert_eq!(manifest.native_abi_version, 3);
+    assert_eq!(manifest.native_abi_version, 4);
     assert_eq!(manifest.sdk_release, 1);
     assert_eq!(manifest.cpu_baseline, "x86_64-v1");
     assert_eq!(manifest.runtime_profile, "test-runtime");
-    assert_eq!(manifest.descriptor_symbol, "prdb_query_descriptor_v3");
-    assert_eq!(manifest.entry_point_symbol, "prdb_query_main_v3");
+    assert_eq!(manifest.descriptor_symbol, "prdb_query_descriptor_v4");
+    assert_eq!(manifest.entry_point_symbol, "prdb_query_main_v4");
     assert_eq!(
         fs::read(package.join("requested_scope.psc1")).unwrap(),
         scope_bytes

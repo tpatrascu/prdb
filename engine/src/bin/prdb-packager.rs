@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 const USAGE: &str = "Usage: prdb-packager \\
   --source FILE --sdk-archive FILE --include-dir DIR --scope FILE --output-dir DIR \\
-  --abi 1|2|3 --sdk-release NUMBER --cpu-baseline NAME --runtime-profile NAME \\
+  --abi 1|2|3|4 --sdk-release NUMBER --cpu-baseline NAME --runtime-profile NAME \\
   --compiler-identity TEXT [--tcc FILE]\n\n\
 Compiles one C source with TinyCC, validates the compiled ELF without loading it, \\
 and atomically publishes query.so, manifest.pmf1, requested_scope.psc1, and \\
