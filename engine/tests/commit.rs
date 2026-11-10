@@ -20560,6 +20560,12 @@ fn sandboxed_v3_sql_error_latches_failure_and_durably_aborts_after_partial_outpu
     if !cgroup_parent.is_absolute() || !artifact_path.is_absolute() {
         return Err("sandbox test paths must be absolute".into());
     }
+    let constructor_marker = PathBuf::from("/tmp/prdb-sandbox-constructor-probe");
+    match std::fs::remove_file(&constructor_marker) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
     let artifact = std::fs::read(&artifact_path)?;
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
@@ -20689,6 +20695,14 @@ fn sandboxed_v3_sql_error_latches_failure_and_durably_aborts_after_partial_outpu
     let provisional = read_frame(&mut gateway)?.ok_or("missing provisional SQL output")?;
     assert_eq!(provisional.operation, Operation::GatewayResultData as u16);
     assert_eq!(provisional.request_id, accepted.request_id);
+    let constructor_escaped = constructor_marker.exists();
+    if constructor_escaped {
+        std::fs::remove_file(&constructor_marker)?;
+    }
+    assert!(
+        !constructor_escaped,
+        "native constructor created a file outside its invocation scratch"
+    );
     assert_eq!(provisional.payload, b"partial SQL output");
     let terminal = read_frame(&mut gateway)?.ok_or("missing aborted terminal event")?;
     assert_eq!(terminal.operation, Operation::GatewayTerminal as u16);

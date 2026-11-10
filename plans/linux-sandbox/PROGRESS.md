@@ -34,6 +34,13 @@
 - Verification: the focused Landlock regression passed. Full Nix-shell validation passed: format check, workspace build, warning-denied Clippy, workspace tests, and `git diff --check`.
 - Remaining: broaden hostile-artifact coverage and validate the same policy across additional runtime profiles. The maintained confined SQL fixtures now traverse the complete launcher chain.
 
+## SB-3: native constructor filesystem access denied — verified
+
+- Behavior: Landlock must already constrain filesystem access while the query library's native constructor runs, before `prdb_query_main_v3` is called.
+- Regression: `sql_v3_caught_error.c` now has a constructor that attempts to create and write a marker under `/tmp`. It reports a distinct result if the operation succeeds. The confined SQL error acceptance requires the ordinary entry-point output and confirms no marker file was created, then still verifies durable ABORTED after the caught SQL error.
+- Verification: `sandboxed_v3_sql_error_latches_failure_and_durably_aborts_after_partial_output` passed through the delegated cgroup, clean executor, Landlock, seccomp, result relay, and storage outcome path on the current Linux x86_64 profile. `make -f engine/sdk/Makefile sandbox-query-fixture` built the artifact with TinyCC; the temporary cgroup leaf was removed by the test.
+- Remaining: constructor probes for network, process, dependency initialization, and additional kernel/runtime profiles remain open.
+
 ## SB-2 dependency: rootless worker namespaces — implemented
 
 - Behavior: `attach_namespaces_before_exec` creates a one-ID-mapped user namespace, denies setgroups, enters private mount/network/PID namespaces, marks mount propagation private, mounts a fresh PID-scoped `/proc`, clears capability and bounding sets, and sets `no_new_privs` before the final executable image runs. It forks a trusted outer reaper for PID namespace semantics; the reaper closes its inherited descriptors before waiting, while the worker child proceeds through later pre-exec hooks.
