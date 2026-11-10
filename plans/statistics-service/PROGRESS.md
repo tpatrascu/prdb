@@ -1,5 +1,12 @@
 # Statistics Service Progress
 
+## ST-2 / WI-7: repeatable authorized-estimate cost harness — measured
+
+- Artifact: [`statistics_estimate.rs`](../../engine/examples/statistics_estimate.rs) seeds a temporary READY redb database with a deterministic 8,192-row INTEGER relation, constructs an explicitly authorized projection, runs 11 estimates over fresh invocation snapshots, verifies each exact summary, and reports median/p95 call latency. Bootstrap and seed writes are outside the timed interval.
+- Measurement: on Rust 1.95.0, redb 4.4.0, x86_64 Linux, release build: median 8.655 ms and p95 12.073 ms. The run measured the storage estimate API only; planner IPC, SQL planning, compilation, and query execution were excluded. This is a single host-local sample, not a performance target.
+- Verification: `cargo run --release -p prdb-engine --example statistics_estimate --locked --offline` completed and verified the row/cell counts. Locked workspace build, format check, warning-denied Clippy, serial workspace tests (129 passed, 3 cgroup-dependent ignored), and maintained TinyCC SDK suite passed.
+- Remaining: broader estimate-cost variation, plan-quality evidence, mixed-workload benchmarks, cache validity, and maintenance collection remain open.
+
 ## ST-4: candidate-budget boundary publishes no partial estimate — verified
 
 - Contract: authorized scan estimates may return an exact summary below the 16,384-candidate budget, but must return `Unknown` once the budget is reached, without exposing partial counts.
