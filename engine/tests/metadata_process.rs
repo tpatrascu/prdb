@@ -1153,6 +1153,70 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
     })?;
     let dropped_policy = admin.drop_policy(policy.policy_id)?;
     assert!(dropped_policy.commit_sequence > policy.commit_sequence);
+    let cli_policy_true = prdb_engine::authorization::Expr::Literal(Some(
+        prdb_engine::tuple::ScalarValue::Boolean(true),
+    ));
+    let cli_policy_expression = prdb_engine::expression::encode_expression(&cli_policy_true)?
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let policy_cli_address = address.to_string();
+    let policy_cli_credentials = admin_cancel_credentials_path
+        .to_str()
+        .ok_or("credential path is not UTF-8")?;
+    let policy_cli_table_id = encode_id_hex(&created_table.table_id);
+    let policy_cli_recipient = format!("user:{}", encode_id_hex(&admin_user_id));
+    let create_policy_cli = Command::new(env!("CARGO_BIN_EXE_prdb-client"))
+        .args([
+            "policy-create",
+            "--address",
+            &policy_cli_address,
+            "--credentials",
+            policy_cli_credentials,
+            "--table-id",
+            &policy_cli_table_id,
+            "--name",
+            "process_cli_policy",
+            "--kind",
+            "row",
+            "--operation",
+            "select",
+            "--effect",
+            "allow",
+            "--recipients",
+            &policy_cli_recipient,
+            "--using-expression-eir1",
+            &cli_policy_expression,
+        ])
+        .output()?;
+    assert!(
+        create_policy_cli.status.success(),
+        "policy-create CLI failed: {}",
+        String::from_utf8_lossy(&create_policy_cli.stderr)
+    );
+    let create_policy_output = String::from_utf8_lossy(&create_policy_cli.stdout);
+    assert!(create_policy_output.contains("created policy "));
+    let cli_policy_id = create_policy_output
+        .split_whitespace()
+        .nth(2)
+        .ok_or("policy-create output omitted the generated ID")?;
+    let drop_policy_cli = Command::new(env!("CARGO_BIN_EXE_prdb-client"))
+        .args([
+            "policy-drop",
+            "--address",
+            &policy_cli_address,
+            "--credentials",
+            policy_cli_credentials,
+            "--policy-id",
+            cli_policy_id,
+        ])
+        .output()?;
+    assert!(
+        drop_policy_cli.status.success(),
+        "policy-drop CLI failed: {}",
+        String::from_utf8_lossy(&drop_policy_cli.stderr)
+    );
+    assert!(String::from_utf8_lossy(&drop_policy_cli.stdout).contains("dropped policy"));
     let cell_policy = admin.create_policy(AdminCreatePolicyRequest {
         table_id: created_table.table_id,
         name: "process_visible_cells",
