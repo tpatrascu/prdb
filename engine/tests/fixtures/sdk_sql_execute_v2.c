@@ -16,6 +16,11 @@ typedef struct mock_host {
     uint32_t planner_calls;
     uint32_t executor_calls;
     uint32_t statement_failed;
+    uint32_t accept_multi_insert;
+    uint32_t multi_insert_calls;
+    uint32_t fail_multi_insert_at;
+    uint32_t cancellation_checks;
+    uint32_t cancel_after_checks;
 } mock_host;
 
 static int32_t statement_failure(void *context, uint32_t failure_code) {
@@ -48,8 +53,13 @@ static int32_t executor_request(void *context, uint16_t operation,
                                 uint64_t *response_len) {
     mock_host *mock = (mock_host *)context;
     if (operation == PRDB_SDK_EXECUTOR_OP_CHECK_CANCELLATION) {
-        static const uint8_t reply[] = {0, 1, 0};
+        uint8_t reply[] = {0, 1, 0};
         assert(request_len == 0 && sizeof(reply) <= capacity);
+        ++mock->cancellation_checks;
+        if (mock->cancel_after_checks != 0 &&
+            mock->cancellation_checks >= mock->cancel_after_checks) {
+            reply[2] = 1;
+        }
         memcpy(response, reply, sizeof(reply));
         *response_len = sizeof(reply);
     } else if (operation == PRDB_SDK_EXECUTOR_OP_RESOLVE_RELATION) {
@@ -139,6 +149,34 @@ static int32_t executor_request(void *context, uint16_t operation,
         memcpy(response, reply, sizeof(reply));
         *response_len = sizeof(reply);
     } else if (operation == PRDB_SDK_EXECUTOR_OP_STAGE_INSERT) {
+        if (mock->accept_multi_insert) {
+            static const uint8_t reply[18] = {
+                0, 1, 8, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
+                0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66};
+            static const uint8_t expected_handle[18] = {
+                0, 1, 6, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
+                0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22};
+            uint32_t offset = 20;
+            assert(request_len == 30);
+            assert(memcmp(request, expected_handle, sizeof(expected_handle)) == 0);
+            assert(request[18] == 0 && request[19] == 1);
+            uint8_t expected_value = (uint8_t)(42 + mock->multi_insert_calls);
+            assert(request[offset++] == PRDB_SDK_EXECUTOR_INSERT_VALUE);
+            assert(request[offset++] == PRDB_SDK_VALUE_TYPE_INTEGER);
+            assert(request[offset++] == 0 && request[offset++] == 0 &&
+                   request[offset++] == 0 && request[offset++] == 4);
+            assert(request[offset++] == 0 && request[offset++] == 0 &&
+                   request[offset++] == 0 && request[offset++] == expected_value);
+            assert(offset == request_len);
+            ++mock->multi_insert_calls;
+            if (mock->fail_multi_insert_at == mock->multi_insert_calls) {
+                *response_len = 0;
+            } else {
+                assert(sizeof(reply) <= capacity);
+                memcpy(response, reply, sizeof(reply));
+                *response_len = sizeof(reply);
+            }
+        } else {
         static const uint8_t expected[] = {
             0, 1, 6, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
             0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
@@ -152,6 +190,7 @@ static int32_t executor_request(void *context, uint16_t operation,
         assert(sizeof(reply) <= capacity);
         memcpy(response, reply, sizeof(reply));
         *response_len = sizeof(reply);
+        }
     } else {
         assert(!"unexpected executor operation");
     }
@@ -333,6 +372,8 @@ int main(void) {
         "SELECT id, COUNT(*) FROM widgets WHERE id >= $1 GROUP BY id";
     static const uint8_t insert_sql[] =
         "INSERT INTO widgets VALUES ($1, NULL, DEFAULT)";
+    static const uint8_t multi_insert_sql[] =
+        "INSERT INTO widgets VALUES ($1), ($2)";
     static const uint8_t update_sql[] =
         "UPDATE widgets SET id = $1 WHERE id >= $1";
     static const uint8_t delete_sql[] = "DELETE FROM widgets WHERE id >= $1";
@@ -352,7 +393,8 @@ int main(void) {
                                          PRDB_SDK_PLANNER_TABLE_HANDLE_KIND, 0x99);
     uint32_t executor_len = make_relation(executor_payload, 6, 0x22);
     mock_host mock = {planner_payload, planner_len, executor_payload,
-                      executor_len, batch_payload, sizeof(batch_payload), 0, 0, 0};
+                      executor_len, batch_payload, sizeof(batch_payload),
+                      0, 0, 0, 0, 0, 0, 0, 0};
     prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
                              &mock, executor_request, planner_request, NULL,
                              statement_failure};
@@ -366,6 +408,9 @@ int main(void) {
         sizeof(insert_parameter), PRDB_SDK_VALUE_ABI_V1_VERSION,
         PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_INTEGER,
         insert_parameter_bytes, sizeof(insert_parameter_bytes)};
+    static const uint8_t multi_parameter_bytes[2][4] = {
+        {0, 0, 0, 42}, {0, 0, 0, 43}};
+    prdb_sdk_value_v1 multi_parameters[2] = {{0}};
     uint8_t planner_response[256] = {0};
     uint8_t executor_response[256] = {0};
     uint8_t batch_response[1024] = {0};
@@ -375,6 +420,12 @@ int main(void) {
     prdb_sdk_value_v1 cell_scratch[1] = {{0}};
     result_state result = {0};
     result.columns = executor_columns;
+    for (uint32_t index = 0; index < 2; ++index) {
+        multi_parameters[index] = (prdb_sdk_value_v1){
+            sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
+            PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_INTEGER,
+            multi_parameter_bytes[index], sizeof(multi_parameter_bytes[index])};
+    }
     assert(sizeof(prdb_host_api_v3) == 48);
     assert(sizeof(prdb_query_descriptor_v3_record) == 16);
     assert(sizeof(prdb_invocation_v3) == 24);
@@ -518,6 +569,72 @@ int main(void) {
            PRDB_SDK_SQL_EXEC_OK);
     assert(mock.planner_calls == 1 && mock.executor_calls == 2);
     assert(inserted_row_handle[0] == 8 && mock.statement_failed == 0);
+
+    mock.accept_multi_insert = 1;
+    mock.planner_len = make_relation(
+        planner_payload, PRDB_SDK_PLANNER_TABLE_HANDLE_KIND, 0x99);
+    mock.executor_len = make_relation(executor_payload, 6, 0x22);
+    mock.planner_calls = 0;
+    mock.executor_calls = 0;
+    mock.multi_insert_calls = 0;
+    mock.cancellation_checks = 0;
+    mock.cancel_after_checks = 0;
+    mock.fail_multi_insert_at = 0;
+    mock.statement_failed = 0;
+    uint32_t inserted_count = UINT32_C(0xfeed);
+    int32_t multi_status = prdb_sdk_sql_execute_insert_v2(
+               &host, schema, sizeof(schema) - 1, multi_insert_sql,
+               sizeof(multi_insert_sql) - 1, multi_parameters, 2,
+               planner_response, sizeof(planner_response), executor_response,
+               sizeof(executor_response), insert_request,
+               sizeof(insert_request), planner_columns, 3, executor_columns,
+               3, insert_values, 3, &inserted_count);
+    assert(multi_status == PRDB_SDK_SQL_EXEC_OK);
+    assert(inserted_count == 2 && mock.multi_insert_calls == 2);
+    assert(mock.cancellation_checks == 2 && mock.executor_calls == 3);
+    assert(mock.planner_calls == 1 && mock.statement_failed == 0);
+
+    mock.planner_calls = 0;
+    mock.executor_calls = 0;
+    mock.multi_insert_calls = 0;
+    mock.cancellation_checks = 0;
+    mock.fail_multi_insert_at = 2;
+    mock.statement_failed = 0;
+    inserted_count = UINT32_C(0xbeef);
+    assert(prdb_sdk_sql_execute_insert_v2(
+               &host, schema, sizeof(schema) - 1, multi_insert_sql,
+               sizeof(multi_insert_sql) - 1, multi_parameters, 2,
+               planner_response, sizeof(planner_response), executor_response,
+               sizeof(executor_response), insert_request,
+               sizeof(insert_request), planner_columns, 3, executor_columns,
+               3, insert_values, 3, &inserted_count) ==
+           PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
+    assert(inserted_count == UINT32_C(0xbeef));
+    assert(mock.multi_insert_calls == 2 && mock.statement_failed == 1);
+
+    mock.planner_calls = 0;
+    mock.executor_calls = 0;
+    mock.multi_insert_calls = 0;
+    mock.cancellation_checks = 0;
+    mock.fail_multi_insert_at = 0;
+    mock.cancel_after_checks = 2;
+    mock.statement_failed = 0;
+    inserted_count = UINT32_C(0xcafe);
+    assert(prdb_sdk_sql_execute_insert_v2(
+               &host, schema, sizeof(schema) - 1, multi_insert_sql,
+               sizeof(multi_insert_sql) - 1, multi_parameters, 2,
+               planner_response, sizeof(planner_response), executor_response,
+               sizeof(executor_response), insert_request,
+               sizeof(insert_request), planner_columns, 3, executor_columns,
+               3, insert_values, 3, &inserted_count) ==
+           PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
+    assert(inserted_count == UINT32_C(0xcafe));
+    assert(mock.multi_insert_calls == 1 && mock.statement_failed == 1);
+    mock.accept_multi_insert = 0;
+    mock.cancel_after_checks = 0;
+    mock.planner_len = make_relation_three(
+        planner_payload, PRDB_SDK_PLANNER_TABLE_HANDLE_KIND, 0x99);
+    mock.executor_len = make_relation_three(executor_payload, 6, 0x22);
 
     insert_parameter.type_code = PRDB_SDK_VALUE_TYPE_BIGINT;
     mock.planner_calls = 0;

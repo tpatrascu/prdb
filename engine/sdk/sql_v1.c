@@ -15,6 +15,7 @@
 #include "prdb_sdk_sql_v15.h"
 #include "prdb_sdk_sql_v16.h"
 #include "prdb_sdk_sql_dml_v1.h"
+#include "prdb_sdk_sql_dml_v2.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -404,6 +405,143 @@ int32_t prdb_sdk_sql_parse_insert_v1(const uint8_t *sql, uint64_t sql_len,
     return PRDB_SDK_SQL_OK;
 
 failed_insert:
+    if (error_offset_out != NULL) *error_offset_out = state.error_offset;
+    return fail_at(&state, status);
+}
+
+int32_t prdb_sdk_sql_parse_insert_v2(const uint8_t *sql, uint64_t sql_len,
+                                     prdb_sdk_insert_v2 *out,
+                                     uint32_t out_capacity,
+                                     uint32_t *error_offset_out) {
+    parser state;
+    prdb_sdk_insert_v2 result = {0};
+    int32_t status;
+
+    if (error_offset_out != NULL) *error_offset_out = 0;
+    if (sql == NULL || out == NULL || out_capacity < sizeof(*out)) {
+        return PRDB_SDK_SQL_INVALID_ARGUMENT;
+    }
+    if (sql_len == 0 || sql_len > PRDB_SDK_SQL_MAX_QUERY_BYTES) {
+        if (sql_len > PRDB_SDK_SQL_MAX_QUERY_BYTES && error_offset_out != NULL) {
+            *error_offset_out = (uint32_t)PRDB_SDK_SQL_MAX_QUERY_BYTES;
+        }
+        return sql_len == 0 ? PRDB_SDK_SQL_SYNTAX_ERROR
+                            : PRDB_SDK_SQL_LIMIT_EXCEEDED;
+    }
+    state = (parser){sql, (uint32_t)sql_len, 0, {TOKEN_END, 0, 0}, 0,
+                     PRDB_SDK_SQL_OK};
+    result.struct_size = sizeof(result);
+    result.abi_version = PRDB_SDK_SQL_DML_ABI_V2_VERSION;
+    result.base.struct_size = sizeof(result.base);
+    result.base.abi_version = PRDB_SDK_SQL_DML_ABI_V1_VERSION;
+    result.base.sql = sql;
+    result.base.sql_len = sql_len;
+
+    status = advance(&state);
+    if (status != PRDB_SDK_SQL_OK) goto failed_insert_v2;
+    if (!token_is_keyword(&state, "INSERT")) {
+        status = state.current.kind == TOKEN_IDENTIFIER
+                     ? PRDB_SDK_SQL_UNSUPPORTED_STATEMENT
+                     : PRDB_SDK_SQL_SYNTAX_ERROR;
+        state.error_offset = state.current.offset;
+        goto failed_insert_v2;
+    }
+    status = advance(&state);
+    if (status != PRDB_SDK_SQL_OK) goto failed_insert_v2;
+    if (!token_is_keyword(&state, "INTO")) {
+        status = PRDB_SDK_SQL_SYNTAX_ERROR;
+        state.error_offset = state.current.offset;
+        goto failed_insert_v2;
+    }
+    status = advance(&state);
+    if (status != PRDB_SDK_SQL_OK) goto failed_insert_v2;
+    status = expect_identifier(&state, &result.base.relation);
+    if (status != PRDB_SDK_SQL_OK) goto failed_insert_v2;
+    if (!token_is_keyword(&state, "VALUES")) {
+        status = PRDB_SDK_SQL_SYNTAX_ERROR;
+        state.error_offset = state.current.offset;
+        goto failed_insert_v2;
+    }
+    status = advance(&state);
+    if (status != PRDB_SDK_SQL_OK) goto failed_insert_v2;
+
+    for (;;) {
+        uint32_t row_start = result.base.value_count;
+        if (result.row_count >= PRDB_SDK_SQL_MAX_INSERT_ROWS_V2) {
+            status = PRDB_SDK_SQL_LIMIT_EXCEEDED;
+            state.error_offset = state.current.offset;
+            goto failed_insert_v2;
+        }
+        if (state.current.kind != TOKEN_LEFT_PAREN) {
+            status = PRDB_SDK_SQL_SYNTAX_ERROR;
+            state.error_offset = state.current.offset;
+            goto failed_insert_v2;
+        }
+        status = advance(&state);
+        if (status != PRDB_SDK_SQL_OK) goto failed_insert_v2;
+        for (;;) {
+            prdb_sdk_sql_insert_cell_v1 *cell;
+            if (result.base.value_count >= PRDB_SDK_SQL_MAX_INSERT_VALUES) {
+                status = PRDB_SDK_SQL_LIMIT_EXCEEDED;
+                state.error_offset = state.current.offset;
+                goto failed_insert_v2;
+            }
+            cell = &result.base.values[result.base.value_count];
+            if (state.current.kind == TOKEN_PARAMETER) {
+                status = parse_unsigned(&state, state.current,
+                                        PRDB_SDK_SQL_MAX_PARAMETER_INDEX, 0,
+                                        &cell->parameter_index);
+                if (status != PRDB_SDK_SQL_OK) goto failed_insert_v2;
+                cell->kind = PRDB_SDK_SQL_INSERT_PARAMETER;
+            } else if (token_is_keyword(&state, "NULL")) {
+                cell->kind = PRDB_SDK_SQL_INSERT_NULL;
+            } else if (token_is_keyword(&state, "DEFAULT")) {
+                cell->kind = PRDB_SDK_SQL_INSERT_DEFAULT;
+            } else {
+                status = PRDB_SDK_SQL_SYNTAX_ERROR;
+                state.error_offset = state.current.offset;
+                goto failed_insert_v2;
+            }
+            ++result.base.value_count;
+            status = advance(&state);
+            if (status != PRDB_SDK_SQL_OK) goto failed_insert_v2;
+            if (state.current.kind != TOKEN_COMMA) break;
+            status = advance(&state);
+            if (status != PRDB_SDK_SQL_OK) goto failed_insert_v2;
+        }
+        if (state.current.kind != TOKEN_RIGHT_PAREN) {
+            status = PRDB_SDK_SQL_SYNTAX_ERROR;
+            state.error_offset = state.current.offset;
+            goto failed_insert_v2;
+        }
+        uint32_t row_width = result.base.value_count - row_start;
+        if (row_width == 0 ||
+            (result.row_count != 0 && row_width != result.values_per_row)) {
+            status = PRDB_SDK_SQL_SYNTAX_ERROR;
+            state.error_offset = state.current.offset;
+            goto failed_insert_v2;
+        }
+        if (result.row_count == 0) result.values_per_row = row_width;
+        ++result.row_count;
+        status = advance(&state);
+        if (status != PRDB_SDK_SQL_OK) goto failed_insert_v2;
+        if (state.current.kind != TOKEN_COMMA) break;
+        status = advance(&state);
+        if (status != PRDB_SDK_SQL_OK) goto failed_insert_v2;
+    }
+    if (state.current.kind == TOKEN_SEMICOLON) {
+        status = advance(&state);
+        if (status != PRDB_SDK_SQL_OK) goto failed_insert_v2;
+    }
+    if (state.current.kind != TOKEN_END) {
+        status = PRDB_SDK_SQL_SYNTAX_ERROR;
+        state.error_offset = state.current.offset;
+        goto failed_insert_v2;
+    }
+    *out = result;
+    return PRDB_SDK_SQL_OK;
+
+failed_insert_v2:
     if (error_offset_out != NULL) *error_offset_out = state.error_offset;
     return fail_at(&state, status);
 }

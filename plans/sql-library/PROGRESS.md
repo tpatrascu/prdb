@@ -1,5 +1,12 @@
 # SQL Library Progress
 
+## SQL-4: bounded multi-row INSERT — implemented; confined acceptance pending
+
+- Contract: [SQL library](../../specs/sql-library.md) and [client SDK](../../specs/client-sdk.md). The versioned DML v2 parser accepts 1–127 positional VALUES tuples with equal positive arity and at most 4,096 total cells; v1 stays single-row-only. Each row is type-bound and staged in invocation order, with a cancellation check before each stage. The 127-row cap plus one relation resolve keeps the executor stream at 255 calls.
+- Red/green evidence: the maintained TinyCC fixture checks flat cell order, parameters/NULL/DEFAULT forms, one-row compatibility, mismatched arity, v1 rejection, the 127-row bound, successful two-row staging, later-row executor failure with unchanged count output, and cancellation after the first staged row.
+- Verification: focused parser and executor fixtures passed after forced TinyCC rebuild. The full Rust workspace build, format check, warning-denied Clippy, serial workspace tests, and complete maintained TinyCC SDK suite pass. The three cgroup-dependent integration tests remain ignored in the default test run.
+- Remaining: compose the v2 runner with a maintained confined artifact to prove durable all-row commit and durable abort after a later-row failure; broader SQL DML and workload coverage remain open.
+
 ## SQL-3 ABI v4 optimizer callback in maintained SQL artifact — implemented; confined acceptance pending
 
 - Contract: [client SDK ABI v4](../../specs/client-sdk.md), [optimizer](../../specs/planner-compiler.md), and [sandbox acceptance](SANDBOX_TEST.md). The existing write/read query fixture exports v3 compatibility and v4 entry points; the executor's v4 preference now reaches the fixed-operation optimizer callback.
