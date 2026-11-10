@@ -7,6 +7,7 @@
 #define PRDB_SDK_OPTIMIZER_PLAN_ABI_V1_VERSION UINT32_C(1)
 #define PRDB_SDK_OPTIMIZER_PLAN_MAX_SCAN_COLUMNS UINT32_C(256)
 #define PRDB_SDK_OPTIMIZER_PLAN_MAX_PROJECTIONS UINT32_C(128)
+#define PRDB_SDK_OPTIMIZER_PLAN_MAX_NEXT_REQUESTS UINT32_C(253)
 
 #define PRDB_SDK_OPTIMIZER_PLAN_OK INT32_C(0)
 #define PRDB_SDK_OPTIMIZER_PLAN_INVALID_ARGUMENT INT32_C(1)
@@ -17,6 +18,8 @@
 #define PRDB_SDK_OPTIMIZER_PLAN_CALLBACK_ERROR INT32_C(6)
 #define PRDB_SDK_OPTIMIZER_PLAN_RESPONSE_TOO_SMALL INT32_C(7)
 #define PRDB_SDK_OPTIMIZER_PLAN_ROW_CALLBACK_ERROR INT32_C(8)
+#define PRDB_SDK_OPTIMIZER_PLAN_CANCELLED INT32_C(9)
+#define PRDB_SDK_OPTIMIZER_PLAN_REQUEST_LIMIT INT32_C(10)
 
 /* Plan names borrow the encoded payload. Column arrays are owned by this
  * output record and contain stable catalog IDs, never executor handles. */
@@ -134,6 +137,25 @@ int32_t prdb_sdk_optimizer_consume_scan_batch_v1(
     const prdb_sdk_batch_v1 *batch, uint32_t relation_column_count,
     prdb_sdk_value_v1 *source_cells, uint32_t source_cell_capacity,
     prdb_sdk_value_v1 *projected_values,
+    uint32_t projected_value_capacity,
+    prdb_sdk_optimizer_projected_row_v1_fn on_row, void *row_context,
+    uint32_t *delivered_rows_out);
+
+/* Executes an unfiltered bounded scan: validate/acquire/open, poll
+ * cancellation between pages, project values, apply LIMIT, and close an early
+ * cursor. Filter plans return UNSUPPORTED until predicate execution exists. */
+int32_t prdb_sdk_optimizer_execute_unfiltered_plan_v1(
+    const prdb_host_api_v2 *host, const uint8_t *plan_payload,
+    uint64_t plan_payload_len, uint16_t max_candidates,
+    uint32_t max_batch_bytes, uint8_t *relation_response,
+    uint64_t relation_response_capacity, uint8_t *scan_response,
+    uint64_t scan_response_capacity, uint8_t *batch_response,
+    uint64_t batch_response_capacity,
+    prdb_sdk_executor_relation_v1 *relation_out,
+    uint32_t relation_out_capacity,
+    prdb_sdk_sql_column_shape_v2 *relation_columns,
+    uint32_t relation_column_capacity, prdb_sdk_value_v1 *source_cells,
+    uint32_t source_cell_capacity, prdb_sdk_value_v1 *projected_values,
     uint32_t projected_value_capacity,
     prdb_sdk_optimizer_projected_row_v1_fn on_row, void *row_context,
     uint32_t *delivered_rows_out);

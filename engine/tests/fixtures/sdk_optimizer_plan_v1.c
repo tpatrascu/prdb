@@ -116,6 +116,10 @@ typedef struct resolve_context {
     uint8_t executor_response[1024];
     uint32_t executor_response_len;
     uint8_t scan_response[18];
+    uint8_t batch_response[128];
+    uint32_t batch_response_len;
+    uint8_t cancellation_response[3];
+    uint8_t close_response[3];
     uint32_t calls;
 } resolve_context;
 
@@ -143,13 +147,25 @@ static int32_t resolve_plan_relation(void *context, uint16_t operation,
         assert(memcmp(request + 12, "items", 5) == 0);
         source = resolved->executor_response;
         source_len = resolved->executor_response_len;
-    } else {
-        assert(operation == PRDB_SDK_EXECUTOR_OP_OPEN_SCAN);
+    } else if (operation == PRDB_SDK_EXECUTOR_OP_OPEN_SCAN) {
         assert(request_len == 20 && request[0] == 0 && request[1] == 1);
         assert(request[2] == 6);
         assert(request[18] == 0 && request[19] == 0);
         source = resolved->scan_response;
         source_len = sizeof(resolved->scan_response);
+    } else if (operation == PRDB_SDK_EXECUTOR_OP_CHECK_CANCELLATION) {
+        assert(request_len == 0);
+        source = resolved->cancellation_response;
+        source_len = sizeof(resolved->cancellation_response);
+    } else if (operation == PRDB_SDK_EXECUTOR_OP_NEXT_BATCH) {
+        assert(request_len == 24 && request[2] == 7);
+        source = resolved->batch_response;
+        source_len = resolved->batch_response_len;
+    } else {
+        assert(operation == PRDB_SDK_EXECUTOR_OP_CLOSE_CURSOR);
+        assert(request_len == 18 && request[2] == 7);
+        source = resolved->close_response;
+        source_len = sizeof(resolved->close_response);
     }
     resolved->calls++;
     if (response_capacity < source_len) {
@@ -250,6 +266,15 @@ static uint32_t build_row_batch(uint8_t *bytes) {
     return offset;
 }
 
+static uint32_t build_continuing_row_batch(uint8_t *bytes) {
+    uint32_t length = build_row_batch(bytes);
+    memmove(bytes + 19, bytes + 3, length - 3);
+    bytes[2] = 0;
+    bytes[3] = 7;
+    memset(bytes + 4, 0, 15);
+    return length + 16;
+}
+
 static uint32_t projected_rows_seen;
 
 static int32_t on_projected_row(
@@ -283,8 +308,11 @@ int main(void) {
     static prdb_sdk_value_v1 source_cells[4];
     static prdb_sdk_value_v1 projected_values[1];
     uint8_t row_batch_bytes[128];
+    uint8_t batch_response[128];
+    uint8_t scan_response[18];
     uint32_t row_batch_len;
     uint32_t delivered_rows = 0;
+    uint32_t total_rows = 0;
     uint8_t response[512];
     uint64_t response_len = 0;
     uint64_t scan_response_len = 0;
@@ -348,6 +376,10 @@ int main(void) {
         resolve.executor_response);
     resolve.scan_response[1] = 1;
     resolve.scan_response[2] = 7;
+    resolve.batch_response_len = build_continuing_row_batch(
+        resolve.batch_response);
+    resolve.cancellation_response[1] = 1;
+    resolve.close_response[1] = 1;
     host.struct_size = sizeof(host);
     host.abi_version = PRDB_QUERY_ABI_V2_VERSION;
     host.context = &resolve;
@@ -378,6 +410,31 @@ int main(void) {
     assert(prdb_sdk_optimizer_validate_executor_relation_v1(
                &host, payload, payload_len, response, 3, &response_len) ==
            PRDB_SDK_OPTIMIZER_PLAN_RESPONSE_TOO_SMALL);
+
+    memcpy(limit_one_plan, payload, payload_len);
+    limit_one_plan[payload_len - 1] = 1;
+    projected_rows_seen = 0;
+    resolve.calls = 0;
+    int32_t execute_status = prdb_sdk_optimizer_execute_unfiltered_plan_v1(
+               &host, limit_one_plan, payload_len, 2, sizeof(batch_response), response,
+               sizeof(response), scan_response, sizeof(scan_response),
+               batch_response, sizeof(batch_response), &acquired_relation,
+               sizeof(acquired_relation), acquired_columns, 4, source_cells, 4,
+               projected_values, 1, on_projected_row, NULL,
+               &total_rows);
+    assert(execute_status == PRDB_SDK_OPTIMIZER_PLAN_OK);
+    assert(total_rows == 1 && projected_rows_seen == 1 && resolve.calls == 6);
+    resolve.cancellation_response[2] = 1;
+    resolve.calls = 0;
+    assert(prdb_sdk_optimizer_execute_unfiltered_plan_v1(
+               &host, limit_one_plan, payload_len, 2, sizeof(batch_response),
+               response, sizeof(response), scan_response, sizeof(scan_response),
+               batch_response, sizeof(batch_response), &acquired_relation,
+               sizeof(acquired_relation), acquired_columns, 4, source_cells, 4,
+               projected_values, 1, on_projected_row, NULL,
+               &total_rows) == PRDB_SDK_OPTIMIZER_PLAN_CANCELLED);
+    assert(total_rows == 0 && resolve.calls == 5);
+    resolve.cancellation_response[2] = 0;
 
     memcpy(malformed, payload, payload_len);
     malformed[projected_id_offset] = 9;

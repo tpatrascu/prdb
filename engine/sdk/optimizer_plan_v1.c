@@ -887,3 +887,120 @@ int32_t prdb_sdk_optimizer_consume_scan_batch_v1(
     *delivered_rows_out = delivered;
     return PRDB_SDK_OPTIMIZER_PLAN_OK;
 }
+
+int32_t prdb_sdk_optimizer_execute_unfiltered_plan_v1(
+    const prdb_host_api_v2 *host, const uint8_t *plan_payload,
+    uint64_t plan_payload_len, uint16_t max_candidates,
+    uint32_t max_batch_bytes, uint8_t *relation_response,
+    uint64_t relation_response_capacity, uint8_t *scan_response,
+    uint64_t scan_response_capacity, uint8_t *batch_response,
+    uint64_t batch_response_capacity,
+    prdb_sdk_executor_relation_v1 *relation_out,
+    uint32_t relation_out_capacity,
+    prdb_sdk_sql_column_shape_v2 *relation_columns,
+    uint32_t relation_column_capacity, prdb_sdk_value_v1 *source_cells,
+    uint32_t source_cell_capacity, prdb_sdk_value_v1 *projected_values,
+    uint32_t projected_value_capacity,
+    prdb_sdk_optimizer_projected_row_v1_fn on_row, void *row_context,
+    uint32_t *delivered_rows_out) {
+    prdb_sdk_optimizer_scan_state_v1 state = {0};
+    prdb_sdk_batch_v1 batch = {0};
+    uint8_t cursor[16] = {0};
+    uint64_t relation_response_len = 0;
+    uint64_t scan_response_len = 0;
+    uint64_t batch_response_len = 0;
+    uint32_t total_delivered = 0;
+    uint32_t scan_opened = 0;
+    int cursor_open = 0;
+    int32_t final_status = PRDB_SDK_OPTIMIZER_PLAN_OK;
+    int32_t status;
+
+    if (relation_response == NULL || scan_response == NULL ||
+        batch_response == NULL || delivered_rows_out == NULL ||
+        on_row == NULL || max_candidates == 0 ||
+        max_candidates > PRDB_SDK_BATCH_MAX_ROWS || max_batch_bytes < 8 ||
+        max_batch_bytes > PRDB_SDK_BATCH_MAX_BYTES ||
+        batch_response_capacity < max_batch_bytes ||
+        ranges_overlap(relation_response, relation_response_capacity,
+                       scan_response, scan_response_capacity) ||
+        ranges_overlap(relation_response, relation_response_capacity,
+                       batch_response, batch_response_capacity) ||
+        ranges_overlap(scan_response, scan_response_capacity,
+                       batch_response, batch_response_capacity)) {
+        return PRDB_SDK_OPTIMIZER_PLAN_INVALID_ARGUMENT;
+    }
+    *delivered_rows_out = 0;
+    status = prdb_sdk_optimizer_scan_state_init_v1(
+        plan_payload, plan_payload_len, &state, sizeof(state));
+    if (status != PRDB_SDK_OPTIMIZER_PLAN_OK) return status;
+    status = prdb_sdk_optimizer_open_plan_scan_v1(
+        host, plan_payload, plan_payload_len, relation_response,
+        relation_response_capacity, &relation_response_len, scan_response,
+        scan_response_capacity, &scan_response_len, relation_out,
+        relation_out_capacity, relation_columns, relation_column_capacity,
+        cursor, &scan_opened);
+    if (status != PRDB_SDK_OPTIMIZER_PLAN_OK) return status;
+    if (scan_opened == 0) return PRDB_SDK_OPTIMIZER_PLAN_OK;
+    cursor_open = 1;
+
+    for (uint32_t page = 0;
+         page < PRDB_SDK_OPTIMIZER_PLAN_MAX_NEXT_REQUESTS; ++page) {
+        int32_t cancelled = 0;
+        uint32_t page_rows = 0;
+        status = prdb_sdk_executor_check_cancelled_v1(host, &cancelled);
+        if (status != PRDB_SDK_EXECUTOR_OK) {
+            final_status = PRDB_SDK_OPTIMIZER_PLAN_CALLBACK_ERROR;
+            break;
+        }
+        if (cancelled != 0) {
+            final_status = PRDB_SDK_OPTIMIZER_PLAN_CANCELLED;
+            break;
+        }
+        status = prdb_sdk_executor_next_batch_v1(
+            host, cursor, max_candidates, max_batch_bytes, batch_response,
+            batch_response_capacity, &batch_response_len, &batch,
+            sizeof(batch));
+        if (status == PRDB_SDK_EXECUTOR_RESPONSE_TOO_SMALL) {
+            final_status = PRDB_SDK_OPTIMIZER_PLAN_RESPONSE_TOO_SMALL;
+            break;
+        }
+        if (status != PRDB_SDK_EXECUTOR_OK) {
+            final_status = PRDB_SDK_OPTIMIZER_PLAN_CALLBACK_ERROR;
+            break;
+        }
+        if (batch.finished != 0) {
+            cursor_open = 0;
+        } else {
+            memcpy(cursor, batch.continuation, sizeof(cursor));
+        }
+        status = prdb_sdk_optimizer_consume_scan_batch_v1(
+            &state, &batch, relation_out->column_count, source_cells,
+            source_cell_capacity, projected_values,
+            projected_value_capacity, on_row, row_context, &page_rows);
+        if (UINT32_MAX - total_delivered < page_rows) {
+            final_status = PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
+            break;
+        }
+        total_delivered += page_rows;
+        if (status != PRDB_SDK_OPTIMIZER_PLAN_OK) {
+            final_status = status;
+            break;
+        }
+        if (state.done != 0 || batch.finished != 0) break;
+        if (page + 1 == PRDB_SDK_OPTIMIZER_PLAN_MAX_NEXT_REQUESTS) {
+            final_status = PRDB_SDK_OPTIMIZER_PLAN_REQUEST_LIMIT;
+        }
+    }
+
+    if (cursor_open != 0) {
+        status = prdb_sdk_executor_close_cursor_v1(
+            host, cursor, scan_response, scan_response_capacity,
+            &scan_response_len);
+        if (status != PRDB_SDK_EXECUTOR_OK &&
+            final_status == PRDB_SDK_OPTIMIZER_PLAN_OK) {
+            final_status = PRDB_SDK_OPTIMIZER_PLAN_CALLBACK_ERROR;
+        }
+    }
+    *delivered_rows_out = total_delivered;
+    return final_status;
+}

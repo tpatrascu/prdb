@@ -113,11 +113,11 @@
 
 ## OP-3 dependency: consume projected rows from bounded scan batches
 
-- Behavior: a stateful C executor consumes immutable bounded batches for an unfiltered plan, emits projection-ordered values, and stops after the plan's LIMIT. Filter nodes fail as unsupported before scan creation.
-- Implementation: `prdb_sdk_optimizer_scan_state_init_v1` copies validated projection records and limit state. `prdb_sdk_optimizer_consume_scan_batch_v1` validates each complete row against the resolved relation width, gathers projected values in plan order, borrows them only for the callback duration, and latches completion at the limit.
-- Regression: TinyCC fixture checks source-ordinal projection, callback value lifetime/type, limit completion across calls, and rejection of filtered plans.
+- Behavior: a bounded C executor runs an unfiltered plan over immutable storage batches, emits projection-ordered values, polls cancellation, stops at LIMIT, and closes early cursors. Filter plans fail as unsupported before scan creation.
+- Implementation: `prdb_sdk_optimizer_execute_unfiltered_plan_v1` composes validated metadata/capability/scan setup with a 253-request page budget, cancellation checks, the stateful projection/LIMIT batch consumer, and cursor cleanup on cancellation or early stop. Values borrow the current batch only during the result callback.
+- Regression: TinyCC fixture checks source-ordinal projection, callback value/type, limit completion, request order, cursor close after early LIMIT, cancellation abort/cleanup, and rejection of filtered plans.
 - Verification: focused and full maintained TinyCC SDK suites passed; generated ABI consistency, documentation link checks, and `git diff --check` passed.
-- Remaining: connect batch requests and cancellation polling to this state, evaluate Filter, encode and emit SQL results, and ensure cursors close on every failure path.
+- Remaining: evaluate Filter predicates, encode and emit SQL results, and add a real executor channel integration covering the plan-driven batch path.
 
 ## OP-3 dependency: launch and confine the optimizer with each invocation
 
