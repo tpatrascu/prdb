@@ -7,6 +7,14 @@
 - Verification: focused persisted scan and composite-key tests pass. After adding the reader and retained-snapshot assertion, `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked` all pass in the configured Nix development shell. The commit integration target reports 129 passed and three cgroup-dependent tests ignored.
 - Remaining: transaction-layer overlay reconciliation, catalog-selected index access, authorized row/cell projection, and authorization-error parity remain open; this fixture validates persisted candidate membership only.
 
+## SM-2 dependency: authorized unique equality probe — partial
+
+- Contract: a unique, non-NULL equality probe may use a catalog-loaded index only when the indexed cells are unconditionally readable. Candidates must resolve against the same pinned row snapshot and private overlay, and pass the authorized row/cell projection before being returned.
+- Red/green: `unique_constraint_uses_its_backing_index_for_invocation_writes` first failed to compile because the authorized probe API was absent. It now verifies a persisted candidate, a staged value moving off and onto the key, a staged tombstone suppressing the snapshot candidate, and a duplicate staged key causing `Unavailable` so the caller can use the reference scan. Hidden key grants and conditional cell policies also return `Unavailable` without probing.
+- Implementation: `probe_catalog_unique_index` validates the pinned schema and loaded unique-index definition, checks locator row versions, bounds snapshot and overlay work, derives staged keys, resolves the final candidate through `read_authorized`, and returns only sanitized cells. `probe_catalog_unique_index_for_principal` builds its projection from the pinned catalog. The projection-taking helper remains a trusted engine API.
+- Verification: the focused transaction regression and full workspace `cargo test --workspace --locked` pass; `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets --locked -- -D warnings` pass in the configured Nix shell. The workspace run reports 129 transaction tests passed and three cgroup-dependent tests ignored.
+- Remaining: no executor/optimizer route calls this probe yet; non-unique and range scans, paginated candidate production, richer safe-cell-policy analysis, and authorization-error equivalence across reference versus optimized SQL remain open.
+
 ## SM-6 dependency: C executor stage-delete bridge — partial
 
 - Contract: [IPC protocol](../../specs/ipc-protocol.md) mutation payload v1 and [client SDK](../../specs/client-sdk.md). A C query can submit a connection-local kind-8 row handle for deletion and must accept only the version/status-0 acknowledgement. Authority and row-version checks remain in trusted storage.

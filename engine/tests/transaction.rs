@@ -5557,6 +5557,17 @@ fn unique_constraint_uses_its_backing_index_for_invocation_writes()
         write.commit()?;
     }
 
+    let mut seed = InvocationTransaction::begin(&database, [241; 16], [9; 16], 9_999, 1, 1_024)?;
+    let seed_schema = seed.load_catalog_table_schema(table_id)?;
+    seed.load_catalog_indexes(&seed_schema)?;
+    let payload = encode_tuple(
+        &seed_schema.columns,
+        seed_schema.schema_version,
+        &[Some(ScalarValue::Bytea(b"duplicate".to_vec()))],
+    )?;
+    seed.stage_put(id(243), &payload)?;
+    assert_eq!(seed.commit()?, 1);
+
     let mut invocation =
         InvocationTransaction::begin(&database, [242; 16], [9; 16], 9_999, 8, 512)?;
     let schema = invocation.load_catalog_table_schema(table_id)?;
@@ -5576,15 +5587,210 @@ fn unique_constraint_uses_its_backing_index_for_invocation_writes()
         schema.schema_version,
         &[Some(ScalarValue::Bytea(b"duplicate".to_vec()))],
     )?;
+    let principal_id = [9; 16];
+    let context = AuthorizationContext {
+        principal_id,
+        role_ids: std::collections::HashSet::new(),
+        scope: [
+            (Operation::Usage, AccessTarget::Schema(schema.schema_id)),
+            (Operation::Select, AccessTarget::Table(table_id)),
+            (
+                Operation::Select,
+                AccessTarget::Column {
+                    table_id,
+                    column_id,
+                },
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let grants = [
+        Grant {
+            subject: Subject::Principal(principal_id),
+            operation: Operation::Usage,
+            target: AccessTarget::Schema(schema.schema_id),
+        },
+        Grant {
+            subject: Subject::Principal(principal_id),
+            operation: Operation::Select,
+            target: AccessTarget::Table(table_id),
+        },
+        Grant {
+            subject: Subject::Principal(principal_id),
+            operation: Operation::Select,
+            target: AccessTarget::Column {
+                table_id,
+                column_id,
+            },
+        },
+    ];
+    let policies = [
+        Policy {
+            subjects: vec![Subject::Principal(principal_id)],
+            operation: Operation::Select,
+            target: AccessTarget::Table(table_id),
+            effect: Effect::Allow,
+            using: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+            with_check: None,
+        },
+        Policy {
+            subjects: vec![Subject::Principal(principal_id)],
+            operation: Operation::Select,
+            target: AccessTarget::Column {
+                table_id,
+                column_id,
+            },
+            effect: Effect::Allow,
+            using: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+            with_check: None,
+        },
+    ];
+    let projection = AuthorizedProjection {
+        columns: &schema.columns,
+        column_ids: &schema.column_ids,
+        schema_version: schema.schema_version,
+        schema_id: schema.schema_id,
+        context: &context,
+        grants: &grants,
+        policies: &policies,
+        checks: &[],
+        policy_driving_columns: &[],
+        dependencies: &[],
+    };
+    let hidden_context = AuthorizationContext {
+        principal_id,
+        role_ids: std::collections::HashSet::new(),
+        scope: [
+            (Operation::Usage, AccessTarget::Schema(schema.schema_id)),
+            (Operation::Select, AccessTarget::Table(table_id)),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let hidden_projection = AuthorizedProjection {
+        columns: projection.columns,
+        column_ids: projection.column_ids,
+        schema_version: projection.schema_version,
+        schema_id: projection.schema_id,
+        context: &hidden_context,
+        grants: &grants[..2],
+        policies: projection.policies,
+        checks: projection.checks,
+        policy_driving_columns: projection.policy_driving_columns,
+        dependencies: projection.dependencies,
+    };
+    assert_eq!(
+        invocation.probe_catalog_unique_index(
+            table_id,
+            index_id,
+            &[Some(ScalarValue::Bytea(b"duplicate".to_vec()))],
+            &hidden_projection,
+        )?,
+        prdb_engine::transaction::AuthorizedUniqueIndexProbe::Unavailable
+    );
+    let conditional_policies = [
+        policies[0].clone(),
+        Policy {
+            using: Some(Expr::Equal(
+                Box::new(Expr::Field(0)),
+                Box::new(Expr::Literal(Some(ScalarValue::Bytea(
+                    b"duplicate".to_vec(),
+                )))),
+            )),
+            ..policies[1].clone()
+        },
+    ];
+    let conditional_projection = AuthorizedProjection {
+        columns: projection.columns,
+        column_ids: projection.column_ids,
+        schema_version: projection.schema_version,
+        schema_id: projection.schema_id,
+        context: projection.context,
+        grants: projection.grants,
+        policies: &conditional_policies,
+        checks: projection.checks,
+        policy_driving_columns: projection.policy_driving_columns,
+        dependencies: projection.dependencies,
+    };
+    assert_eq!(
+        invocation.probe_catalog_unique_index(
+            table_id,
+            index_id,
+            &[Some(ScalarValue::Bytea(b"duplicate".to_vec()))],
+            &conditional_projection,
+        )?,
+        prdb_engine::transaction::AuthorizedUniqueIndexProbe::Unavailable
+    );
+    assert_eq!(
+        invocation.probe_catalog_unique_index(
+            table_id,
+            index_id,
+            &[Some(ScalarValue::Bytea(b"duplicate".to_vec()))],
+            &projection,
+        )?,
+        prdb_engine::transaction::AuthorizedUniqueIndexProbe::Match {
+            id: id(243),
+            cells: vec![SanitizedCell::Value(ScalarValue::Bytea(
+                b"duplicate".to_vec()
+            ))],
+        },
+    );
+    invocation.stage_put(
+        id(243),
+        &encode_tuple(
+            &schema.columns,
+            schema.schema_version,
+            &[Some(ScalarValue::Bytea(b"moved-away".to_vec()))],
+        )?,
+    )?;
+    assert_eq!(
+        invocation.probe_catalog_unique_index(
+            table_id,
+            index_id,
+            &[Some(ScalarValue::Bytea(b"duplicate".to_vec()))],
+            &projection,
+        )?,
+        prdb_engine::transaction::AuthorizedUniqueIndexProbe::NoMatch
+    );
+    assert!(matches!(
+        invocation.probe_catalog_unique_index(
+            table_id,
+            index_id,
+            &[Some(ScalarValue::Bytea(b"moved-away".to_vec()))],
+            &projection,
+        )?,
+        prdb_engine::transaction::AuthorizedUniqueIndexProbe::Match { id: found, .. }
+            if found == id(243)
+    ));
+    invocation.stage_delete(id(243))?;
+    assert_eq!(
+        invocation.probe_catalog_unique_index(
+            table_id,
+            index_id,
+            &[Some(ScalarValue::Bytea(b"duplicate".to_vec()))],
+            &projection,
+        )?,
+        prdb_engine::transaction::AuthorizedUniqueIndexProbe::NoMatch
+    );
     invocation.stage_put(id(243), &payload)?;
     invocation.stage_put(id(244), &payload)?;
+    assert_eq!(
+        invocation.probe_catalog_unique_index(
+            table_id,
+            index_id,
+            &[Some(ScalarValue::Bytea(b"duplicate".to_vec()))],
+            &projection,
+        )?,
+        prdb_engine::transaction::AuthorizedUniqueIndexProbe::Unavailable,
+    );
     assert!(matches!(
         invocation.commit(),
         Err(TransactionError::Commit(CommitError::UniqueViolation))
     ));
 
     let read = database.begin_read()?;
-    assert!(read.open_table(ROWS)?.get(&key(id(243))[..])?.is_none());
+    assert!(read.open_table(ROWS)?.get(&key(id(243))[..])?.is_some());
     assert!(read.open_table(ROWS)?.get(&key(id(244))[..])?.is_none());
     assert_eq!(
         prdb_engine::outcome::lookup_outcome(&database, [242; 16], [9; 16], 1)?

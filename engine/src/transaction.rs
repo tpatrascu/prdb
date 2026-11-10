@@ -18,7 +18,7 @@ use crate::expression::{
     CatalogExpression, ExpressionPurpose, decode_catalog_expression_record,
     is_row_local_expression, validate_expression_binding,
 };
-use crate::index_key::{DeriveIndexKeyError, derive_index_key};
+use crate::index_key::{DeriveIndexKeyError, derive_index_key, encode_sql_tuple};
 use crate::metadata::{EngineMetadata, Lifecycle};
 use crate::metadata_discovery::{
     AuthorizedPlanRelation, AuthorizedRelationDescription, COLUMN_CURSOR_TOKEN_KIND,
@@ -150,6 +150,19 @@ pub struct RowScanCursor {
 pub struct AuthorizedRowScanPage {
     pub rows: Vec<(RowId, Vec<SanitizedCell>)>,
     pub continuation: Option<RowScanCursor>,
+}
+
+/// Result of a catalog-validated unique equality probe. `Unavailable` means
+/// the caller must use the authorized reference scan because a safe index
+/// rewrite could not be proven from the pinned permissions and policies.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AuthorizedUniqueIndexProbe {
+    Unavailable,
+    NoMatch,
+    Match {
+        id: RowId,
+        cells: Vec<SanitizedCell>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1036,6 +1049,222 @@ impl<'db> InvocationTransaction<'db> {
         })();
         match result {
             Ok(page) => Ok(page),
+            Err(error) => {
+                if !self.aborted {
+                    self.abort()?;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Probe a catalog-loaded unique index for one non-NULL equality tuple.
+    /// The path is available only when each key column is readable without a
+    /// cell policy; otherwise the caller must retain the reference scan so
+    /// redacted predicate behavior stays unchanged. Snapshot candidates are
+    /// checked against their row version, then reconciled with staged writes
+    /// and projected through the same pinned row/cell authorization path.
+    pub fn probe_catalog_unique_index(
+        &mut self,
+        table_id: [u8; 16],
+        index_id: [u8; 16],
+        values: &[Option<ScalarValue>],
+        projection: &AuthorizedProjection<'_>,
+    ) -> Result<AuthorizedUniqueIndexProbe, TransactionError> {
+        let result = (|| {
+            if table_id == [0; 16]
+                || index_id == [0; 16]
+                || projection.columns.is_empty()
+                || projection.columns.len() != projection.column_ids.len()
+                || projection.columns.len() > crate::tuple::MAX_COLUMNS
+                || projection.schema_version == 0
+                || projection.schema_id == [0; 16]
+                || projection.column_ids.contains(&[0; 16])
+                || projection.grants.len() > crate::authorization::MAX_AUTHORIZATION_INPUTS
+                || projection.policies.len() > crate::authorization::MAX_AUTHORIZATION_INPUTS
+                || projection.checks.len() > crate::authorization::MAX_AUTHORIZATION_INPUTS
+                || projection.policy_driving_columns.len()
+                    > crate::authorization::MAX_AUTHORIZATION_INPUTS
+                || projection.dependencies.len() > crate::authorization::MAX_AUTHORIZATION_INPUTS
+            {
+                return Err(TransactionError::InvalidScanRequest);
+            }
+            if self.active_scan.is_some() {
+                return Err(TransactionError::ScanStillActive);
+            }
+            self.capture_authority_dependencies(projection.context, projection.dependencies)?;
+            let schema = self.load_catalog_table_schema(table_id)?;
+            if schema.schema_id != projection.schema_id
+                || schema.schema_version != projection.schema_version
+                || schema.column_ids != projection.column_ids
+                || schema.columns != projection.columns
+            {
+                return Err(TransactionError::InvalidContext);
+            }
+            let indexes = if let Some(indexes) = self.loaded_indexes.get(&table_id) {
+                indexes.clone()
+            } else {
+                self.load_catalog_indexes(&schema)?
+            };
+            let Some(index) = indexes
+                .into_iter()
+                .find(|index| index.index_id == index_id && index.table_id == table_id)
+            else {
+                return Ok(AuthorizedUniqueIndexProbe::Unavailable);
+            };
+            if !index.unique || index.column_ids.len() != values.len() {
+                return Ok(AuthorizedUniqueIndexProbe::Unavailable);
+            }
+            let ordinals = index
+                .column_ids
+                .iter()
+                .map(|column_id| {
+                    schema
+                        .column_ids
+                        .iter()
+                        .position(|candidate| candidate == column_id)
+                        .ok_or(TransactionError::CorruptCatalog)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if ordinals.iter().any(|ordinal| {
+                !index_component_unconditionally_readable(
+                    projection,
+                    table_id,
+                    schema.column_ids[*ordinal],
+                )
+            }) {
+                return Ok(AuthorizedUniqueIndexProbe::Unavailable);
+            }
+            if values.iter().any(Option::is_none) {
+                return Ok(AuthorizedUniqueIndexProbe::NoMatch);
+            }
+            let key_columns = ordinals
+                .iter()
+                .map(|ordinal| schema.columns[*ordinal].clone())
+                .collect::<Vec<_>>();
+            let encoded_tuple =
+                encode_sql_tuple(&key_columns, values).map_err(TransactionError::Tuple)?;
+            let mut prefix = Vec::with_capacity(16 + encoded_tuple.len());
+            prefix.extend_from_slice(&index_id);
+            prefix.extend_from_slice(&encoded_tuple);
+
+            let snapshot_page = self
+                .pinned_snapshot()?
+                .scan_index_prefix(&prefix, None, 2)
+                .map_err(|error| TransactionError::Storage(error.to_string()))?;
+            if snapshot_page.candidates.len() > 1 || snapshot_page.continuation.is_some() {
+                return Err(TransactionError::CorruptRowKey);
+            }
+            let remaining_work = self.max_scan_work.saturating_sub(self.scanned_work);
+            let overlay_scan_work = self.overlay.staged_row_count()?;
+            let Some(overlay_row_ids) = self
+                .overlay
+                .bounded_row_ids_for_table(table_id, remaining_work)?
+            else {
+                return Err(TransactionError::ScanBudgetExceeded);
+            };
+            let candidate_work = overlay_scan_work
+                .checked_add(snapshot_page.candidates.len())
+                .ok_or(TransactionError::ScanBudgetExceeded)?;
+            self.charge_scan_work(candidate_work)?;
+
+            let mut candidate_ids = HashSet::new();
+            for candidate in &snapshot_page.candidates {
+                let row_id = RowId {
+                    table: table_id,
+                    row: candidate.locator.row_id,
+                };
+                let stored = self
+                    .pinned_snapshot()?
+                    .get(&row_key(row_id))
+                    .map_err(|error| TransactionError::Storage(error.to_string()))?
+                    .ok_or(TransactionError::CorruptRowKey)?;
+                let record = RowRecord::decode(&stored).map_err(TransactionError::CorruptRow)?;
+                if record.row_version != candidate.locator.row_version {
+                    return Err(TransactionError::CorruptRowKey);
+                }
+                candidate_ids.insert(row_id);
+            }
+            for row_id in overlay_row_ids {
+                let id = RowId {
+                    table: table_id,
+                    row: row_id,
+                };
+                let Some(StagedRow::Value(payload)) = self.overlay.get(&id)? else {
+                    continue;
+                };
+                let derived = derive_index_key(
+                    index_id,
+                    row_id,
+                    schema.schema_version,
+                    &schema.column_ids,
+                    &schema.columns,
+                    payload,
+                    &index.column_ids,
+                )
+                .map_err(|error| match error {
+                    DeriveIndexKeyError::InvalidDefinition => TransactionError::CorruptCatalog,
+                    DeriveIndexKeyError::Tuple(error) => TransactionError::Tuple(error),
+                })?;
+                if derived.key.starts_with(&prefix) {
+                    candidate_ids.insert(id);
+                }
+            }
+            if candidate_ids.len() > 1 {
+                // A staged duplicate violates the unique-index assumption for
+                // this access path; use the reference scan until finalization.
+                return Ok(AuthorizedUniqueIndexProbe::Unavailable);
+            }
+            let mut candidate_ids = candidate_ids.into_iter().collect::<Vec<_>>();
+            candidate_ids.sort_unstable_by_key(|id| id.row);
+            let Some(candidate_id) = candidate_ids.into_iter().next() else {
+                return Ok(AuthorizedUniqueIndexProbe::NoMatch);
+            };
+            let Some(cells) = self.read_authorized(candidate_id, projection)? else {
+                return Ok(AuthorizedUniqueIndexProbe::NoMatch);
+            };
+            for (ordinal, expected) in ordinals.iter().zip(values) {
+                match (&cells[*ordinal], expected) {
+                    (SanitizedCell::Value(actual), Some(expected)) if actual == expected => {}
+                    (SanitizedCell::Redacted, _) => {
+                        return Ok(AuthorizedUniqueIndexProbe::Unavailable);
+                    }
+                    _ => return Ok(AuthorizedUniqueIndexProbe::NoMatch),
+                }
+            }
+            Ok(AuthorizedUniqueIndexProbe::Match {
+                id: candidate_id,
+                cells,
+            })
+        })();
+        match result {
+            Ok(probe) => Ok(probe),
+            Err(error) => {
+                if !self.aborted {
+                    self.abort()?;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Catalog-derived entry point for a unique equality probe. Schema,
+    /// principal/role grants, and row/cell policies all come from this
+    /// invocation's pinned catalog before the projection-based trusted helper
+    /// is called.
+    pub fn probe_catalog_unique_index_for_principal(
+        &mut self,
+        table_id: [u8; 16],
+        index_id: [u8; 16],
+        values: &[Option<ScalarValue>],
+    ) -> Result<AuthorizedUniqueIndexProbe, TransactionError> {
+        let result = (|| {
+            let projection = self.load_catalog_estimate_projection(table_id)?;
+            self.load_catalog_indexes(&projection.schema)?;
+            self.probe_catalog_unique_index(table_id, index_id, values, &projection.as_projection())
+        })();
+        match result {
+            Ok(probe) => Ok(probe),
             Err(error) => {
                 if !self.aborted {
                     self.abort()?;
@@ -6898,6 +7127,46 @@ fn consume_planner_estimate_budget(requests: &mut usize) -> bool {
     }
     *requests += 1;
     true
+}
+
+fn index_component_unconditionally_readable(
+    projection: &AuthorizedProjection<'_>,
+    table_id: [u8; 16],
+    column_id: [u8; 16],
+) -> bool {
+    let target = AccessTarget::Column {
+        table_id,
+        column_id,
+    };
+    if !has_permission(
+        projection.context,
+        projection.grants,
+        Operation::Select,
+        target,
+    ) {
+        return false;
+    }
+    let mut has_allow = false;
+    for policy in projection.policies.iter().filter(|policy| {
+        policy.operation == Operation::Select
+            && policy.target == target
+            && policy.subjects.iter().any(|subject| match subject {
+                Subject::Principal(principal_id) => {
+                    *principal_id == projection.context.principal_id
+                }
+                Subject::Role(role_id) => projection.context.role_ids.contains(role_id),
+            })
+    }) {
+        if !matches!(
+            policy.using,
+            Some(Expr::Literal(Some(ScalarValue::Boolean(true))))
+        ) || policy.with_check.is_some()
+        {
+            return false;
+        }
+        has_allow |= policy.effect == Effect::Allow;
+    }
+    has_allow
 }
 
 fn valid_estimate_projection(table_id: [u8; 16], projection: &AuthorizedProjection<'_>) -> bool {

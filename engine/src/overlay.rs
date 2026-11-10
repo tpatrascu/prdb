@@ -135,6 +135,14 @@ impl Overlay {
         Ok(Some(row_ids))
     }
 
+    /// Number of staged entries a bounded table-filtered iteration must visit.
+    pub(crate) fn staged_row_count(&self) -> Result<usize, OverlayError> {
+        if self.aborted {
+            return Err(OverlayError::Aborted);
+        }
+        Ok(self.rows.len())
+    }
+
     /// Read the latest staged value first, falling back to the caller's pinned snapshot.
     /// The snapshot lookup is only invoked when this overlay has no entry for the row.
     pub fn read<'overlay, 'snapshot, F>(
