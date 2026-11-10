@@ -1,4 +1,5 @@
 #include "prdb_sdk_optimizer_plan_v1.h"
+#include "prdb_sdk_sql_v1.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -9,6 +10,14 @@ typedef struct plan_reader {
     uint64_t length;
     uint64_t offset;
 } plan_reader;
+
+typedef struct predicate_value {
+    prdb_sdk_value_v1 value;
+    uint8_t bytes[8];
+    uint8_t decimal_scale;
+    uint32_t is_truth;
+    uint32_t truth;
+} predicate_value;
 
 static int ranges_overlap(const void *left, uint64_t left_len,
                           const void *right, uint64_t right_len) {
@@ -291,6 +300,190 @@ static int decode_predicate(plan_reader *reader,
     }
     *type_out = type;
     return 1;
+}
+
+static void predicate_value_init(predicate_value *out, uint32_t type,
+                                 const uint8_t *bytes, uint64_t length) {
+    memset(out, 0, sizeof(*out));
+    out->value.struct_size = sizeof(out->value);
+    out->value.abi_version = PRDB_SDK_VALUE_ABI_V1_VERSION;
+    out->value.state = PRDB_SDK_VALUE_STATE_VALUE;
+    out->value.type_code = type;
+    out->value.data = bytes;
+    out->value.data_len = length;
+}
+
+static int skip_predicate_node(plan_reader *reader, uint32_t depth) {
+    uint8_t tag;
+    const uint8_t *bytes;
+    if (depth > 32 || !read_u8(reader, &tag)) return 0;
+    switch (tag) {
+    case 0x00:
+        return 1;
+    case 0x01:
+        return take(reader, 1, &bytes);
+    case 0x02:
+        return take(reader, 8, &bytes);
+    case 0x03: {
+        uint16_t length;
+        return read_u16(reader, &length) && length <= 4096 &&
+               take(reader, length, &bytes);
+    }
+    case 0x10:
+        return take(reader, 16, &bytes);
+    case 0x20: {
+        uint8_t comparison;
+        return read_u8(reader, &comparison) && comparison <= 5 &&
+               skip_predicate_node(reader, depth + 1) &&
+               skip_predicate_node(reader, depth + 1);
+    }
+    case 0x30: case 0x31: {
+        uint8_t child_count;
+        if (!read_u8(reader, &child_count) || child_count < 2 ||
+            child_count > 16) return 0;
+        for (uint32_t index = 0; index < child_count; ++index)
+            if (!skip_predicate_node(reader, depth + 1)) return 0;
+        return 1;
+    }
+    case 0x32:
+        return skip_predicate_node(reader, depth + 1);
+    default:
+        return 0;
+    }
+}
+
+static int32_t evaluate_predicate_node(
+    plan_reader *reader, const prdb_sdk_optimizer_plan_v1 *plan,
+    const prdb_sdk_value_v1 *source_cells, predicate_value *out,
+    uint32_t depth, uint32_t *nodes) {
+    uint8_t tag;
+    const uint8_t *bytes;
+    if (depth > 32 || ++*nodes > 256 || !read_u8(reader, &tag))
+        return PRDB_SDK_SQL_EVAL_INVALID_VALUE;
+    switch (tag) {
+    case 0x00:
+        predicate_value_init(out, 0, NULL, 0);
+        out->value.state = PRDB_SDK_VALUE_STATE_NULL;
+        return PRDB_SDK_SQL_EVAL_OK;
+    case 0x01:
+        if (!take(reader, 1, &bytes) || bytes[0] > 1)
+            return PRDB_SDK_SQL_EVAL_INVALID_VALUE;
+        predicate_value_init(out, PRDB_SDK_VALUE_TYPE_BOOLEAN, NULL, 1);
+        out->bytes[0] = bytes[0];
+        out->value.data = out->bytes;
+        return PRDB_SDK_SQL_EVAL_OK;
+    case 0x02: {
+        uint64_t raw = 0;
+        uint32_t high;
+        if (!take(reader, 8, &bytes)) return PRDB_SDK_SQL_EVAL_INVALID_VALUE;
+        for (uint32_t index = 0; index < 8; ++index)
+            raw = (raw << 8) | bytes[index];
+        high = (uint32_t)(raw >> 32);
+        if (!((high == 0 && (uint32_t)raw <= INT32_MAX) ||
+              (high == UINT32_MAX && (uint32_t)raw >= UINT32_C(0x80000000))))
+            return PRDB_SDK_SQL_EVAL_NUMERIC_OVERFLOW;
+        predicate_value_init(out, PRDB_SDK_VALUE_TYPE_INTEGER, NULL, 4);
+        memcpy(out->bytes, bytes + 4, 4);
+        out->value.data = out->bytes;
+        return PRDB_SDK_SQL_EVAL_OK;
+    }
+    case 0x03: {
+        uint16_t length;
+        if (!read_u16(reader, &length) || length > 4096 ||
+            !take(reader, length, &bytes))
+            return PRDB_SDK_SQL_EVAL_INVALID_VALUE;
+        predicate_value_init(out, PRDB_SDK_VALUE_TYPE_TEXT, bytes, length);
+        return PRDB_SDK_SQL_EVAL_OK;
+    }
+    case 0x10: {
+        if (!take(reader, 16, &bytes)) return PRDB_SDK_SQL_EVAL_INVALID_VALUE;
+        for (uint32_t index = 0; index < plan->scan_column_count; ++index) {
+            const prdb_sdk_optimizer_plan_column_v1 *column =
+                &plan->scan_columns[index];
+            if (memcmp(bytes, column->column_id, 16) == 0) {
+                out->value = source_cells[column->ordinal];
+                out->decimal_scale = column->type_parameters[1];
+                return PRDB_SDK_SQL_EVAL_OK;
+            }
+        }
+        return PRDB_SDK_SQL_EVAL_INVALID_VALUE;
+    }
+    case 0x20: {
+        uint8_t comparison;
+        predicate_value left = {0}, right = {0};
+        uint32_t truth = PRDB_SDK_SQL_TRUTH_UNKNOWN;
+        int32_t status;
+        if (!read_u8(reader, &comparison) || comparison > 5)
+            return PRDB_SDK_SQL_EVAL_INVALID_VALUE;
+        status = evaluate_predicate_node(reader, plan, source_cells, &left,
+                                         depth + 1, nodes);
+        if (status != PRDB_SDK_SQL_EVAL_OK) return status;
+        status = evaluate_predicate_node(reader, plan, source_cells, &right,
+                                         depth + 1, nodes);
+        if (status != PRDB_SDK_SQL_EVAL_OK) return status;
+        status = prdb_sdk_sql_compare_v1(
+            &left.value, &right.value, (uint32_t)comparison + 1,
+            left.decimal_scale,
+            right.decimal_scale, &truth);
+        if (status != PRDB_SDK_SQL_EVAL_OK) return status;
+        out->is_truth = 1;
+        out->truth = truth;
+        return PRDB_SDK_SQL_EVAL_OK;
+    }
+    case 0x30: case 0x31: {
+        uint8_t child_count;
+        uint32_t truth = tag == 0x30 ? PRDB_SDK_SQL_TRUTH_TRUE
+                                     : PRDB_SDK_SQL_TRUTH_FALSE;
+        if (!read_u8(reader, &child_count) || child_count < 2 ||
+            child_count > 16) return PRDB_SDK_SQL_EVAL_INVALID_VALUE;
+        for (uint32_t index = 0; index < child_count; ++index) {
+            predicate_value child = {0};
+            uint32_t child_truth;
+            int32_t status = evaluate_predicate_node(
+                reader, plan, source_cells, &child, depth + 1, nodes);
+            if (status != PRDB_SDK_SQL_EVAL_OK) return status;
+            status = child.is_truth != 0
+                         ? PRDB_SDK_SQL_EVAL_OK
+                         : prdb_sdk_sql_value_truth_v1(&child.value,
+                                                       &child_truth);
+            if (status != PRDB_SDK_SQL_EVAL_OK) return status;
+            if (child.is_truth != 0) child_truth = child.truth;
+            status = tag == 0x30
+                         ? prdb_sdk_sql_truth_and_v1(truth, child_truth, &truth)
+                         : prdb_sdk_sql_truth_or_v1(truth, child_truth, &truth);
+            if (status != PRDB_SDK_SQL_EVAL_OK) return status;
+            if ((tag == 0x30 && truth == PRDB_SDK_SQL_TRUTH_FALSE) ||
+                (tag == 0x31 && truth == PRDB_SDK_SQL_TRUTH_TRUE)) {
+                for (++index; index < child_count; ++index)
+                    if (!skip_predicate_node(reader, depth + 1))
+                        return PRDB_SDK_SQL_EVAL_INVALID_VALUE;
+                break;
+            }
+        }
+        out->is_truth = 1;
+        out->truth = truth;
+        return PRDB_SDK_SQL_EVAL_OK;
+    }
+    case 0x32: {
+        predicate_value child = {0};
+        uint32_t truth;
+        int32_t status = evaluate_predicate_node(
+            reader, plan, source_cells, &child, depth + 1, nodes);
+        if (status != PRDB_SDK_SQL_EVAL_OK) return status;
+        status = child.is_truth != 0
+                     ? PRDB_SDK_SQL_EVAL_OK
+                     : prdb_sdk_sql_value_truth_v1(&child.value, &truth);
+        if (status != PRDB_SDK_SQL_EVAL_OK) return status;
+        if (child.is_truth != 0) truth = child.truth;
+        status = prdb_sdk_sql_truth_not_v1(truth, &truth);
+        if (status != PRDB_SDK_SQL_EVAL_OK) return status;
+        out->is_truth = 1;
+        out->truth = truth;
+        return PRDB_SDK_SQL_EVAL_OK;
+    }
+    default:
+        return PRDB_SDK_SQL_EVAL_INVALID_VALUE;
+    }
 }
 
 static int columns_equal(const prdb_sdk_optimizer_plan_column_v1 *left,
@@ -749,7 +942,6 @@ int32_t prdb_sdk_optimizer_open_plan_scan_v1(
         plan_payload, plan_payload_len, &plan, sizeof(plan), &filter,
         sizeof(filter));
     if (status != PRDB_SDK_OPTIMIZER_PLAN_OK) return status;
-    if (filter.present != 0) return PRDB_SDK_OPTIMIZER_PLAN_UNSUPPORTED;
     status = prdb_sdk_optimizer_acquire_plan_relation_v1(
         host, plan_payload, plan_payload_len, relation_response,
         relation_response_capacity, relation_response_len,
@@ -791,7 +983,6 @@ int32_t prdb_sdk_optimizer_scan_state_init_v1(
         plan_payload, plan_payload_len, &plan, sizeof(plan), &filter,
         sizeof(filter));
     if (status != PRDB_SDK_OPTIMIZER_PLAN_OK) return status;
-    if (filter.present != 0) return PRDB_SDK_OPTIMIZER_PLAN_UNSUPPORTED;
     state.struct_size = sizeof(state);
     state.abi_version = PRDB_SDK_OPTIMIZER_PLAN_ABI_V1_VERSION;
     state.projection_count = plan.projection_count;
@@ -804,12 +995,14 @@ int32_t prdb_sdk_optimizer_scan_state_init_v1(
     return PRDB_SDK_OPTIMIZER_PLAN_OK;
 }
 
-int32_t prdb_sdk_optimizer_consume_scan_batch_v1(
+static int32_t consume_scan_batch_internal(
     prdb_sdk_optimizer_scan_state_v1 *state,
     const prdb_sdk_batch_v1 *batch, uint32_t relation_column_count,
     prdb_sdk_value_v1 *source_cells, uint32_t source_cell_capacity,
     prdb_sdk_value_v1 *projected_values,
     uint32_t projected_value_capacity,
+    const prdb_sdk_optimizer_plan_v1 *plan,
+    const prdb_sdk_optimizer_filter_v1 *filter,
     prdb_sdk_optimizer_projected_row_v1_fn on_row, void *row_context,
     uint32_t *delivered_rows_out) {
     prdb_sdk_row_iterator_v1 rows = {0};
@@ -860,6 +1053,26 @@ int32_t prdb_sdk_optimizer_consume_scan_batch_v1(
                 return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
             }
         }
+        if (filter != NULL && filter->present != 0) {
+            plan_reader predicate_reader = {filter->prefix,
+                                            filter->prefix_len, 0};
+            predicate_value predicate = {0};
+            uint32_t nodes = 0;
+            int32_t eval_status = evaluate_predicate_node(
+                &predicate_reader, plan, source_cells, &predicate, 1, &nodes);
+            if (eval_status == PRDB_SDK_SQL_EVAL_OK &&
+                predicate.is_truth == 0) {
+                eval_status = prdb_sdk_sql_value_truth_v1(
+                    &predicate.value, &predicate.truth);
+                predicate.is_truth = eval_status == PRDB_SDK_SQL_EVAL_OK;
+            }
+            if (eval_status != PRDB_SDK_SQL_EVAL_OK ||
+                predicate_reader.offset != predicate_reader.length ||
+                predicate.is_truth == 0) {
+                return PRDB_SDK_OPTIMIZER_PLAN_FILTER_ERROR;
+            }
+            if (predicate.truth != PRDB_SDK_SQL_TRUTH_TRUE) continue;
+        }
         for (uint32_t index = 0; index < state->projection_count; ++index) {
             const prdb_sdk_optimizer_plan_column_v1 *projection =
                 &state->projections[index];
@@ -886,6 +1099,50 @@ int32_t prdb_sdk_optimizer_consume_scan_batch_v1(
     }
     *delivered_rows_out = delivered;
     return PRDB_SDK_OPTIMIZER_PLAN_OK;
+}
+
+int32_t prdb_sdk_optimizer_consume_scan_batch_v1(
+    prdb_sdk_optimizer_scan_state_v1 *state,
+    const prdb_sdk_batch_v1 *batch, uint32_t relation_column_count,
+    prdb_sdk_value_v1 *source_cells, uint32_t source_cell_capacity,
+    prdb_sdk_value_v1 *projected_values,
+    uint32_t projected_value_capacity,
+    prdb_sdk_optimizer_projected_row_v1_fn on_row, void *row_context,
+    uint32_t *delivered_rows_out) {
+    return consume_scan_batch_internal(
+        state, batch, relation_column_count, source_cells,
+        source_cell_capacity, projected_values, projected_value_capacity,
+        NULL, NULL, on_row, row_context, delivered_rows_out);
+}
+
+int32_t prdb_sdk_optimizer_consume_plan_batch_v1(
+    const uint8_t *plan_payload, uint64_t plan_payload_len,
+    prdb_sdk_optimizer_scan_state_v1 *state,
+    const prdb_sdk_batch_v1 *batch, uint32_t relation_column_count,
+    prdb_sdk_value_v1 *source_cells, uint32_t source_cell_capacity,
+    prdb_sdk_value_v1 *projected_values,
+    uint32_t projected_value_capacity,
+    prdb_sdk_optimizer_projected_row_v1_fn on_row, void *row_context,
+    uint32_t *delivered_rows_out) {
+    prdb_sdk_optimizer_plan_v1 plan = {0};
+    prdb_sdk_optimizer_filter_v1 filter = {0};
+    int32_t status = prdb_sdk_optimizer_decode_plan_with_filter_v1(
+        plan_payload, plan_payload_len, &plan, sizeof(plan), &filter,
+        sizeof(filter));
+    if (status != PRDB_SDK_OPTIMIZER_PLAN_OK) return status;
+    if (state == NULL || state->struct_size < sizeof(*state) ||
+        state->abi_version != PRDB_SDK_OPTIMIZER_PLAN_ABI_V1_VERSION ||
+        state->projection_count != plan.projection_count ||
+        state->has_limit != plan.has_limit ||
+        (state->has_limit != 0 && state->limit != plan.limit) ||
+        memcmp(state->projections, plan.projections,
+               plan.projection_count * sizeof(plan.projections[0])) != 0) {
+        return PRDB_SDK_OPTIMIZER_PLAN_IDENTITY_MISMATCH;
+    }
+    return consume_scan_batch_internal(
+        state, batch, relation_column_count, source_cells,
+        source_cell_capacity, projected_values, projected_value_capacity,
+        &plan, &filter, on_row, row_context, delivered_rows_out);
 }
 
 int32_t prdb_sdk_optimizer_execute_unfiltered_plan_v1(
@@ -973,8 +1230,9 @@ int32_t prdb_sdk_optimizer_execute_unfiltered_plan_v1(
         } else {
             memcpy(cursor, batch.continuation, sizeof(cursor));
         }
-        status = prdb_sdk_optimizer_consume_scan_batch_v1(
-            &state, &batch, relation_out->column_count, source_cells,
+        status = prdb_sdk_optimizer_consume_plan_batch_v1(
+            plan_payload, plan_payload_len, &state, &batch,
+            relation_out->column_count, source_cells,
             source_cell_capacity, projected_values,
             projected_value_capacity, on_row, row_context, &page_rows);
         if (UINT32_MAX - total_delivered < page_rows) {

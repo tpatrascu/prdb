@@ -117,7 +117,15 @@
 - Implementation: `prdb_sdk_optimizer_execute_unfiltered_plan_v1` composes validated metadata/capability/scan setup with a 126-page budget so two IPC calls per page plus setup and an early close stay within the 256-request executor stream limit. The SQL optimizer bridge additionally spends one request checking the returned plan against the submitted AST, so its effective page ceiling is 125. It polls cancellation, applies the stateful projection/LIMIT batch consumer, and closes the cursor on cancellation or early stop. Values borrow the current batch only during the result callback.
 - Regression: TinyCC fixture checks source-ordinal projection, callback value/type, limit completion, request order, cursor close after early LIMIT, cancellation abort/cleanup, and rejection of filtered plans.
 - Verification: focused and full maintained TinyCC SDK suites passed; generated ABI consistency, documentation link checks, and `git diff --check` passed.
-- Remaining: evaluate Filter predicates, encode and emit SQL results, and add a real executor channel integration covering the plan-driven batch path.
+- Remaining at this increment: evaluate Filter predicates, encode and emit SQL results, and add a real executor channel integration covering the plan-driven batch path. Filter evaluation is implemented in the following increment.
+
+## OP-3 dependency: evaluate bounded Filter plans over scanned rows
+
+- Behavior: the SDK evaluates validated plan predicates against each immutable scanned row before projection. SQL three-valued logic is preserved, including short-circuit behavior for AND/OR; only TRUE rows are emitted. Predicate errors such as REDACTED inputs fail plan execution and trigger normal cursor cleanup.
+- Implementation: `prdb_sdk_optimizer_consume_plan_batch_v1` decodes the bounded prefix tree, resolves scanned columns by stable ID and ordinal, evaluates scalar comparisons through the shared SQL evaluator, and integrates with the bounded executor scan loop. False and UNKNOWN rows do not count toward LIMIT.
+- Regression: TinyCC fixture checks that a matching row emits, a nonmatching row is skipped, and the bounded executor completes a Filter scan with early LIMIT and cursor close.
+- Verification: focused and full maintained TinyCC SDK suites passed; generated ABI consistency, documentation link checks, and `git diff --check` passed.
+- Remaining: submit WHERE predicates through the SQL optimizer bridge, emit SQL result records, and add a real process/channel execution fixture.
 
 ## OP-3 dependency: connect optimizer submission to unfiltered SQL execution
 
@@ -125,7 +133,7 @@
 - Implementation: `prdb_sdk_optimizer_execute_select_ast_v1` composes canonical request encoding, the dedicated optimizer callback, response decoding, query-to-plan semantic checks, and the bounded executor plan runner. The extra metadata request is included in the 125-page budget.
 - Regression: TinyCC fixture submits a parsed SELECT, checks optimizer/executor callback order and one projected result, rejects a changed projection before scanning, verifies WHERE fallback makes no optimizer call, and checks that optimizer error status latches statement failure.
 - Verification: focused and full maintained TinyCC SDK suites passed; generated ABI consistency, documentation link checks, and `git diff --check` passed.
-- Remaining: evaluate optimizer Filter plans, compare output plan semantics with the submitted SELECT, encode/emit SQL results, and exercise the path with a real optimizer/executor IPC invocation.
+- Remaining: submit WHERE predicates through the SQL optimizer bridge, encode/emit SQL results, and exercise the path with a real optimizer/executor IPC invocation. Returned unfiltered plans are compared with the submitted SELECT; the bridge leaves WHERE queries on the established SQL path.
 
 ## OP-3 dependency: launch and confine the optimizer with each invocation
 

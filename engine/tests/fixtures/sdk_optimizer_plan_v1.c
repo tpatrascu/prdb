@@ -75,17 +75,18 @@ static uint32_t build_plan(uint8_t *bytes, uint32_t *projected_id_offset,
     return offset;
 }
 
-static void put_integer_comparison(uint8_t *bytes, uint32_t *offset) {
+static void put_integer_comparison(uint8_t *bytes, uint32_t *offset,
+                                   uint8_t integer_value) {
     bytes[(*offset)++] = 0x20;
     bytes[(*offset)++] = 0;
     bytes[(*offset)++] = 0x10;
-    bytes[(*offset)++] = 3;
+    bytes[(*offset)++] = 10;
     memset(bytes + *offset, 0, 15);
     *offset += 15;
     bytes[(*offset)++] = 0x02;
     memset(bytes + *offset, 0, 7);
     *offset += 7;
-    bytes[(*offset)++] = 7;
+    bytes[(*offset)++] = integer_value;
 }
 
 static uint32_t build_filter_plan(uint8_t *bytes,
@@ -94,19 +95,29 @@ static uint32_t build_filter_plan(uint8_t *bytes,
     (void)put_header(bytes, &offset, 4);
     bytes[offset++] = 1;
     put_u16(bytes, &offset, 1);
-    (void)put_column(bytes, &offset, 3, 0); /* INTEGER */
+    uint32_t column_id_offset = put_column(bytes, &offset, 3, 0);
+    bytes[column_id_offset] = 10;
+    bytes[column_id_offset + 16] = 0;
+    bytes[column_id_offset + 17] = 0;
+    bytes[column_id_offset + 18] = 0;
+    bytes[column_id_offset + 19] = 0; /* ordinal 0 */
     bytes[offset++] = 2;
     *predicate_offset = offset;
-    bytes[offset++] = 0x30; /* AND of comparison and its negation */
+    bytes[offset++] = 0x30; /* AND of comparison and TRUE */
     bytes[offset++] = 2;
-    put_integer_comparison(bytes, &offset);
-    bytes[offset++] = 0x32;
-    put_integer_comparison(bytes, &offset);
+    put_integer_comparison(bytes, &offset, 1);
+    bytes[offset++] = 0x01;
+    bytes[offset++] = 1;
     bytes[offset++] = 3;
     put_u16(bytes, &offset, 1);
-    (void)put_column(bytes, &offset, 3, 0);
+    column_id_offset = put_column(bytes, &offset, 3, 0);
+    bytes[column_id_offset] = 10;
+    bytes[column_id_offset + 16] = 0;
+    bytes[column_id_offset + 17] = 0;
+    bytes[column_id_offset + 18] = 0;
+    bytes[column_id_offset + 19] = 0; /* ordinal 0 */
     bytes[offset++] = 4;
-    put_u32(bytes, &offset, 7);
+    put_u32(bytes, &offset, 1);
     return offset;
 }
 
@@ -329,9 +340,14 @@ static int32_t on_projected_row(
     const prdb_sdk_value_v1 *values, uint32_t projection_count) {
     (void)context;
     assert(projection_count == 1);
-    assert(projections[0].ordinal == 3);
-    assert(values[0].type_code == PRDB_SDK_VALUE_TYPE_TEXT);
-    assert(values[0].data_len == 1 && values[0].data[0] == 'x');
+    if (projections[0].ordinal == 3) {
+        assert(values[0].type_code == PRDB_SDK_VALUE_TYPE_TEXT);
+        assert(values[0].data_len == 1 && values[0].data[0] == 'x');
+    } else {
+        assert(projections[0].ordinal == 0);
+        assert(values[0].type_code == PRDB_SDK_VALUE_TYPE_INTEGER);
+        assert(values[0].data_len == 4 && values[0].data[3] == 1);
+    }
     projected_rows_seen++;
     return 0;
 }
@@ -429,7 +445,33 @@ int main(void) {
     payload_len = build_filter_plan(payload, &predicate_offset);
     assert(prdb_sdk_optimizer_scan_state_init_v1(
                payload, payload_len, &scan_state, sizeof(scan_state)) ==
-           PRDB_SDK_OPTIMIZER_PLAN_UNSUPPORTED);
+           PRDB_SDK_OPTIMIZER_PLAN_OK);
+    scan_state.projections[0].ordinal = 1;
+    assert(prdb_sdk_optimizer_consume_plan_batch_v1(
+               payload, payload_len, &scan_state, &row_batch, 4, source_cells,
+               4, projected_values, 1, on_projected_row, NULL,
+               &delivered_rows) == PRDB_SDK_OPTIMIZER_PLAN_IDENTITY_MISMATCH);
+    scan_state.projections[0].ordinal = 0;
+    projected_rows_seen = 0;
+    assert(prdb_sdk_optimizer_consume_plan_batch_v1(
+               payload, payload_len, &scan_state, &row_batch, 4, source_cells,
+               4, projected_values, 1, on_projected_row, NULL,
+               &delivered_rows) == PRDB_SDK_OPTIMIZER_PLAN_OK);
+    assert(delivered_rows == 1 && projected_rows_seen == 1);
+    row_batch_bytes[32] = 2;
+    assert(prdb_sdk_batch_open_v1(&row_batch, sizeof(row_batch), row_batch_bytes,
+                                  row_batch_len) == PRDB_SDK_BATCH_OK);
+    assert(prdb_sdk_optimizer_scan_state_init_v1(
+               payload, payload_len, &scan_state, sizeof(scan_state)) ==
+           PRDB_SDK_OPTIMIZER_PLAN_OK);
+    assert(prdb_sdk_optimizer_consume_plan_batch_v1(
+               payload, payload_len, &scan_state, &row_batch, 4, source_cells,
+               4, projected_values, 1, on_projected_row, NULL,
+               &delivered_rows) == PRDB_SDK_OPTIMIZER_PLAN_OK);
+    assert(delivered_rows == 0 && projected_rows_seen == 1);
+    row_batch_bytes[32] = 1;
+    assert(prdb_sdk_batch_open_v1(&row_batch, sizeof(row_batch), row_batch_bytes,
+                                  row_batch_len) == PRDB_SDK_BATCH_OK);
     payload_len = build_plan(payload, &projected_id_offset,
                               &project_node_offset);
 
@@ -446,6 +488,20 @@ int main(void) {
     host.abi_version = PRDB_QUERY_ABI_V2_VERSION;
     host.context = &resolve;
     host.executor_request = resolve_plan_relation;
+    uint8_t filtered_plan[512];
+    uint32_t filtered_plan_len = build_filter_plan(filtered_plan,
+                                                   &predicate_offset);
+    resolve.calls = 0;
+    projected_rows_seen = 0;
+    assert(prdb_sdk_optimizer_execute_unfiltered_plan_v1(
+               &host, filtered_plan, filtered_plan_len, 2,
+               sizeof(batch_response), response, sizeof(response),
+               scan_response, sizeof(scan_response), batch_response,
+               sizeof(batch_response), &acquired_relation,
+               sizeof(acquired_relation), acquired_columns, 4, source_cells, 4,
+               projected_values, 1, on_projected_row, NULL, &total_rows) ==
+           PRDB_SDK_OPTIMIZER_PLAN_OK);
+    assert(total_rows == 1 && projected_rows_seen == 1 && resolve.calls == 6);
     assert(prdb_sdk_optimizer_validate_executor_relation_v1(
                &host, payload, payload_len, response, sizeof(response),
                &response_len) == PRDB_SDK_OPTIMIZER_PLAN_OK);
@@ -623,8 +679,8 @@ int main(void) {
                payload, payload_len, &decoded, sizeof(decoded), &filter,
                sizeof(filter)) == PRDB_SDK_OPTIMIZER_PLAN_OK);
     assert(filter.present == 1 && filter.prefix == payload + predicate_offset);
-    assert(filter.prefix_len == 59);
-    assert(decoded.has_limit == 1 && decoded.limit == 7);
+    assert(filter.prefix_len == 32);
+    assert(decoded.has_limit == 1 && decoded.limit == 1);
 
     memcpy(malformed, payload, payload_len);
     malformed[predicate_offset] = 0x10; /* INTEGER is not a Boolean root. */
