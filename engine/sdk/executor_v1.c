@@ -3,11 +3,6 @@
 
 #include <string.h>
 
-static void write_u16(uint8_t *out, uint16_t value) {
-    out[0] = (uint8_t)(value >> 8);
-    out[1] = (uint8_t)value;
-}
-
 static void write_u32(uint8_t *out, uint32_t value) {
     out[0] = (uint8_t)(value >> 24);
     out[1] = (uint8_t)(value >> 16);
@@ -15,16 +10,12 @@ static void write_u32(uint8_t *out, uint32_t value) {
     out[3] = (uint8_t)value;
 }
 
-static uint16_t read_u16(const uint8_t *in) {
-    return (uint16_t)(((uint16_t)in[0] << 8) | in[1]);
-}
-
 static int valid_mutation_acknowledgement(const uint8_t *payload,
                                           uint64_t payload_len) {
-    return payload_len == PRDB_EXECUTOR_MUTATION_ACKNOWLEDGEMENT_HEADER_BYTES &&
-           read_u16(payload + PRDB_EXECUTOR_MUTATION_ACKNOWLEDGEMENT_VERSION_OFFSET) ==
-               PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION &&
-           payload[PRDB_EXECUTOR_MUTATION_ACKNOWLEDGEMENT_STATUS_OFFSET] == 0;
+    uint8_t status;
+    return prdb_decode_executor_mutation_acknowledgement(
+               payload, (size_t)payload_len, &status) &&
+           status == 0;
 }
 
 static int valid_identifier(const uint8_t *value, uint32_t length) {
@@ -80,14 +71,8 @@ int32_t prdb_sdk_executor_resolve_relation_v1(
         out_capacity < sizeof(*out) || columns == NULL) {
         return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
     }
-    write_u16(request + PRDB_EXECUTOR_RESOLVE_RELATION_REQUEST_VERSION_OFFSET,
-              PRDB_RESOLVE_RELATION_PAYLOAD_VERSION);
-    write_u16(request +
-                  PRDB_EXECUTOR_RESOLVE_RELATION_REQUEST_SCHEMA_NAME_LENGTH_OFFSET,
-              (uint16_t)schema_len);
-    write_u16(request +
-                  PRDB_EXECUTOR_RESOLVE_RELATION_REQUEST_RELATION_NAME_LENGTH_OFFSET,
-              (uint16_t)relation_len);
+    prdb_encode_executor_resolve_relation_request(
+        request, (uint16_t)schema_len, (uint16_t)relation_len);
     memcpy(request + PRDB_EXECUTOR_RESOLVE_RELATION_REQUEST_HEADER_BYTES,
            schema, schema_len);
     memcpy(request + PRDB_EXECUTOR_RESOLVE_RELATION_REQUEST_HEADER_BYTES +
@@ -124,10 +109,7 @@ int32_t prdb_sdk_executor_open_full_scan_v1(
     if (executor_handle == NULL || executor_handle[0] != 6 || cursor_out == NULL) {
         return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
     }
-    write_u16(request + PRDB_EXECUTOR_OPEN_SCAN_REQUEST_VERSION_OFFSET,
-              PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION);
-    memcpy(request + PRDB_EXECUTOR_OPEN_SCAN_REQUEST_RELATION_HANDLE_OFFSET,
-           executor_handle, 16);
+    prdb_encode_executor_open_scan_request(request, executor_handle, 0);
     status = invoke(host, PRDB_SDK_EXECUTOR_OP_OPEN_SCAN, request, sizeof(request),
                     response, response_capacity, response_len);
     if (status != PRDB_SDK_EXECUTOR_OK) return status;
@@ -174,10 +156,7 @@ int32_t prdb_sdk_executor_close_cursor_v1(
     status = invoke(host, PRDB_SDK_EXECUTOR_OP_CLOSE_CURSOR, request, sizeof(request),
                     response, response_capacity, response_len);
     if (status != PRDB_SDK_EXECUTOR_OK) return status;
-    if (*response_len != PRDB_EXECUTOR_MUTATION_ACKNOWLEDGEMENT_HEADER_BYTES ||
-        read_u16(response + PRDB_EXECUTOR_MUTATION_ACKNOWLEDGEMENT_VERSION_OFFSET) !=
-            PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION ||
-        response[PRDB_EXECUTOR_MUTATION_ACKNOWLEDGEMENT_STATUS_OFFSET] != 0) {
+    if (!valid_mutation_acknowledgement(response, *response_len)) {
         return PRDB_SDK_EXECUTOR_INVALID_PAYLOAD;
     }
     return PRDB_SDK_EXECUTOR_OK;

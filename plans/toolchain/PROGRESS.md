@@ -512,6 +512,14 @@
 - Verification: generator drift/schema tests, locked workspace build, rustfmt check, warning-denied Clippy, serial workspace tests, and the complete maintained TinyCC SDK suite passed in the pinned Nix shell.
 - Remaining: migrate remaining hand-coded executor/planner/supervisor payload serializers and complete release profile and artifact gates.
 
+## TC-2: generated TinyCC executor fixed request and acknowledgement codecs — implemented
+
+- Contract: [internal IPC](../../specs/ipc-protocol.md) and [toolchain](../../specs/toolchain.md). Executor relation resolution and open scan use generated request prefixes; close, update, and delete return the common version/status acknowledgement.
+- Implementation: the TinyCC SDK now uses generated helpers for relation-resolution and open-scan request prefixes and validates mutation acknowledgements through the generated decoder. Existing bounded UTF-8 tails and semantic status checks remain in the SDK.
+- Regression: maintained TinyCC executor fixtures check request bytes, accepted acknowledgements, and rejected statuses; generator tests require the helpers.
+- Verification: generator drift/schema tests, locked workspace build, rustfmt check, warning-denied Clippy, serial workspace tests, and full maintained TinyCC SDK suite passed in the pinned Nix shell.
+- Remaining: migrate remaining hand-coded supervisor/executor payload serializers and complete release profile and artifact gates.
+
 ## TC-1: locked Nix development shell — implemented
 
 - Behavior: `nix develop --locked` provides the pinned x86_64-linux package set used for the engine and SDK checks. [`flake.nix`](../../flake.nix) and [`flake.lock`](../../flake.lock) pin Nixpkgs revision `718f670e845328e9c2cecdd832835712b2cbd065` with source NAR hash `sha256-Ee5BWo8sh3pGt70QUdRajnaginqFmWvrtdBc4gJzhks=`.
