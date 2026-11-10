@@ -7,11 +7,13 @@ use crate::metadata_discovery::{
     VisibleColumn,
 };
 pub use crate::query_abi::{
-    EXECUTOR_BATCH_PAYLOAD_VERSION, EXECUTOR_OPEN_SCAN_REQUEST_COLUMN_COUNT_OFFSET,
-    EXECUTOR_OPEN_SCAN_REQUEST_HEADER_BYTES, EXECUTOR_OPEN_SCAN_REQUEST_RELATION_HANDLE_OFFSET,
-    EXECUTOR_OPEN_SCAN_REQUEST_VERSION_OFFSET, EXECUTOR_OPEN_SCAN_RESPONSE_CURSOR_HANDLE_OFFSET,
-    EXECUTOR_OPEN_SCAN_RESPONSE_HEADER_BYTES, EXECUTOR_OPEN_SCAN_RESPONSE_VERSION_OFFSET,
-    EXECUTOR_RESOLVE_RELATION_REQUEST_HEADER_BYTES,
+    EXECUTOR_BATCH_PAYLOAD_VERSION, EXECUTOR_MUTATION_ACKNOWLEDGEMENT_HEADER_BYTES,
+    EXECUTOR_MUTATION_ACKNOWLEDGEMENT_STATUS_OFFSET,
+    EXECUTOR_MUTATION_ACKNOWLEDGEMENT_VERSION_OFFSET,
+    EXECUTOR_OPEN_SCAN_REQUEST_COLUMN_COUNT_OFFSET, EXECUTOR_OPEN_SCAN_REQUEST_HEADER_BYTES,
+    EXECUTOR_OPEN_SCAN_REQUEST_RELATION_HANDLE_OFFSET, EXECUTOR_OPEN_SCAN_REQUEST_VERSION_OFFSET,
+    EXECUTOR_OPEN_SCAN_RESPONSE_CURSOR_HANDLE_OFFSET, EXECUTOR_OPEN_SCAN_RESPONSE_HEADER_BYTES,
+    EXECUTOR_OPEN_SCAN_RESPONSE_VERSION_OFFSET, EXECUTOR_RESOLVE_RELATION_REQUEST_HEADER_BYTES,
     EXECUTOR_RESOLVE_RELATION_REQUEST_RELATION_NAME_LENGTH_OFFSET,
     EXECUTOR_RESOLVE_RELATION_REQUEST_SCHEMA_NAME_LENGTH_OFFSET,
     EXECUTOR_RESOLVE_RELATION_REQUEST_VERSION_OFFSET, RESOLVE_RELATION_PAYLOAD_VERSION,
@@ -343,19 +345,26 @@ pub struct CloseCursorRequest {
 
 impl CloseCursorRequest {
     pub fn encode(&self) -> Vec<u8> {
-        let mut payload = EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes().to_vec();
-        payload.extend_from_slice(&self.cursor.to_bytes());
+        let mut payload = vec![0; EXECUTOR_OPEN_SCAN_RESPONSE_HEADER_BYTES as usize];
+        let version_offset = EXECUTOR_OPEN_SCAN_RESPONSE_VERSION_OFFSET as usize;
+        payload[version_offset..version_offset + 2]
+            .copy_from_slice(&EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes());
+        let cursor_offset = EXECUTOR_OPEN_SCAN_RESPONSE_CURSOR_HANDLE_OFFSET as usize;
+        payload[cursor_offset..cursor_offset + 16].copy_from_slice(&self.cursor.to_bytes());
         payload
     }
 
     pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
-        if payload.len() != 18
-            || u16::from_be_bytes([payload[0], payload[1]]) != EXECUTOR_BATCH_PAYLOAD_VERSION
+        let version_offset = EXECUTOR_OPEN_SCAN_RESPONSE_VERSION_OFFSET as usize;
+        let cursor_offset = EXECUTOR_OPEN_SCAN_RESPONSE_CURSOR_HANDLE_OFFSET as usize;
+        if payload.len() != EXECUTOR_OPEN_SCAN_RESPONSE_HEADER_BYTES as usize
+            || u16::from_be_bytes([payload[version_offset], payload[version_offset + 1]])
+                != EXECUTOR_BATCH_PAYLOAD_VERSION
         {
             return Err(ExecutorRequestError::InvalidPayload);
         }
         Ok(Self {
-            cursor: ExecutorScanCursor::from_bytes(&payload[2..])
+            cursor: ExecutorScanCursor::from_bytes(&payload[cursor_offset..cursor_offset + 16])
                 .ok_or(ExecutorRequestError::InvalidPayload)?,
         })
     }
@@ -614,20 +623,20 @@ pub struct MutationAcknowledgement;
 
 impl MutationAcknowledgement {
     pub fn encode(&self) -> Vec<u8> {
-        [
-            EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes().as_slice(),
-            &[0],
-        ]
-        .concat()
+        let mut payload = vec![0; EXECUTOR_MUTATION_ACKNOWLEDGEMENT_HEADER_BYTES as usize];
+        let version_offset = EXECUTOR_MUTATION_ACKNOWLEDGEMENT_VERSION_OFFSET as usize;
+        payload[version_offset..version_offset + 2]
+            .copy_from_slice(&EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes());
+        payload[EXECUTOR_MUTATION_ACKNOWLEDGEMENT_STATUS_OFFSET as usize] = 0;
+        payload
     }
 
     pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
-        if payload
-            != [
-                EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes().as_slice(),
-                &[0],
-            ]
-            .concat()
+        let version_offset = EXECUTOR_MUTATION_ACKNOWLEDGEMENT_VERSION_OFFSET as usize;
+        if payload.len() != EXECUTOR_MUTATION_ACKNOWLEDGEMENT_HEADER_BYTES as usize
+            || u16::from_be_bytes([payload[version_offset], payload[version_offset + 1]])
+                != EXECUTOR_BATCH_PAYLOAD_VERSION
+            || payload[EXECUTOR_MUTATION_ACKNOWLEDGEMENT_STATUS_OFFSET as usize] != 0
         {
             return Err(ExecutorRequestError::InvalidPayload);
         }

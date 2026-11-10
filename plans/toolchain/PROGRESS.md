@@ -1,5 +1,13 @@
 # Toolchain Progress
 
+## TC-2: generated executor close-cursor payload schema — implemented
+
+- Contract: [internal IPC](../../specs/ipc-protocol.md) defines close-cursor as version plus opaque cursor handle and a version/status acknowledgement.
+- Implementation: the shared payload schema now supports one-byte status fields and declares the mutation acknowledgement. The Rust close-cursor request reuses the generated open-scan cursor-handle layout, and Rust/C acknowledgement codecs consume generated offsets and sizes.
+- Regression: the maintained executor IPC round-trip and TinyCC executor fixture verify close request and acknowledgement bytes.
+- Verification: generator drift, workspace build/format/warning-denied Clippy, serial Rust tests (129 commit tests passed; 3 cgroup-dependent tests ignored), and the full TinyCC SDK suite passed.
+- Remaining: add schemas for remaining executor/planner/supervisor payloads and generated serialization helpers.
+
 ## TC-2: generated executor open-scan request/response schemas — implemented
 
 - Contract: [internal IPC](../../specs/ipc-protocol.md) defines the open-scan request as version, relation handle, column count, and optional column-ID list; its response is version plus cursor handle.

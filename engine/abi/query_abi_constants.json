@@ -1231,6 +1231,15 @@
         { "name": "cursor_handle", "encoding": "bytes16" }
       ],
       "trailing_fields": []
+    },
+    {
+      "name": "EXECUTOR_MUTATION_ACKNOWLEDGEMENT",
+      "version_constant": "EXECUTOR_BATCH_PAYLOAD_VERSION",
+      "fields": [
+        { "name": "version", "encoding": "u16be" },
+        { "name": "status", "encoding": "u8" }
+      ],
+      "trailing_fields": []
     }
   ]
 }
