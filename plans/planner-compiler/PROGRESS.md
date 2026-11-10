@@ -8,3 +8,11 @@
 - Regression: four unit tests cover a compound typed request, malformed outer records/identifiers, excessive collection bounds and unsupported nodes, and predicate byte/node/depth exhaustion.
 - Verification: locked workspace build and format passed; warning-denied Clippy passed; serial locked workspace tests passed (129 commit integration tests and all other active suites passed; 3 cgroup-dependent commit tests and 1 disconnected-submission process test were ignored). `git diff --check` passed.
 - Remaining: define and validate type semantics against authorized metadata, return only non-disclosing bind failures, produce and validate a logical/physical plan, integrate a bounded isolated optimizer process and its supervisor-bound submission channel, and execute plans through SDK operations.
+
+## OP-2 dependency: bind SELECT against authorized relation shape
+
+- Implementation: [`optimizer_binding`](../../engine/src/optimizer_binding.rs) accepts the decoded v1 request and an invocation-authorized relation description. It resolves projections/predicate columns case-insensitively and binds each to stable IDs, ordinals, types, and nullability; it validates relation shape and expression type compatibility. Missing descriptions and relation-name mismatches both return `RelationUnavailable`.
+- Boundary: the helper receives no principal, grant, raw catalog, or storage handle and creates no executor permission. Its caller must perform exact schema/relation resolution through `PlannerMetadataConnection` for the same invocation before supplying the description.
+- Regression: three tests cover stable reference binding, non-disclosing relation absence/name mismatch, and unknown-column/type-incompatible rejection.
+- Verification: focused binder tests passed. Full workspace validation follows this increment before commit.
+- Remaining: wire exact authorized metadata lookup into planning requests, bind schema identity to the request, define additional literal coercions/SQL null semantics, and produce a validated logical/physical plan.

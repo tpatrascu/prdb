@@ -22,6 +22,7 @@ pub mod ipc;
 pub mod linux_sandbox;
 pub mod metadata;
 pub mod metadata_discovery;
+pub mod optimizer_binding;
 pub mod optimizer_request;
 pub mod outcome;
 pub mod overlay;
