@@ -9,6 +9,14 @@ use crate::metadata_discovery::{
     AuthorizedPlanRelation, AuthorizedRelationDescription, PlanningTableHandle,
 };
 pub use crate::query_abi::{
+    PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_HEADER_BYTES,
+    PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_PLANNING_HANDLE_OFFSET,
+    PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_RELATION_ID_OFFSET,
+    PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_STATUS_OFFSET,
+    PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_VERSION_OFFSET,
+    PLANNER_DESCRIBE_RELATION_UNAVAILABLE_RESPONSE_HEADER_BYTES,
+    PLANNER_DESCRIBE_RELATION_UNAVAILABLE_RESPONSE_STATUS_OFFSET,
+    PLANNER_DESCRIBE_RELATION_UNAVAILABLE_RESPONSE_VERSION_OFFSET,
     PLANNER_ESTIMATE_SCAN_REQUEST_COLUMN_COUNT_OFFSET, PLANNER_ESTIMATE_SCAN_REQUEST_HEADER_BYTES,
     PLANNER_ESTIMATE_SCAN_REQUEST_PLANNING_HANDLE_OFFSET,
     PLANNER_ESTIMATE_SCAN_REQUEST_VERSION_OFFSET,
@@ -22,7 +30,8 @@ use crate::transaction::{PlannerMetadataConnection, TransactionError};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
-const DESCRIBE_HEADER_BYTES: usize = 3;
+const DESCRIBE_HEADER_BYTES: usize =
+    PLANNER_DESCRIBE_RELATION_UNAVAILABLE_RESPONSE_HEADER_BYTES as usize;
 const ESTIMATE_HEADER_BYTES: usize = PLANNER_ESTIMATE_SCAN_REQUEST_HEADER_BYTES as usize;
 pub const MAX_PLANNER_REQUESTS_PER_CONNECTION: usize = 256;
 
@@ -168,13 +177,32 @@ impl DescribePlanRelationResponse {
 
 impl DescribeRelationResponse {
     pub fn encode(&self) -> Result<Vec<u8>, PlannerRequestError> {
-        let mut payload = PLANNER_PAYLOAD_VERSION.to_be_bytes().to_vec();
         match &self.table {
-            None => payload.push(1),
+            None => {
+                let mut payload = vec![0; DESCRIBE_HEADER_BYTES];
+                let version_offset =
+                    PLANNER_DESCRIBE_RELATION_UNAVAILABLE_RESPONSE_VERSION_OFFSET as usize;
+                payload[version_offset..version_offset + 2]
+                    .copy_from_slice(&PLANNER_PAYLOAD_VERSION.to_be_bytes());
+                payload[PLANNER_DESCRIBE_RELATION_UNAVAILABLE_RESPONSE_STATUS_OFFSET as usize] = 1;
+                ensure_response_size(&payload)?;
+                Ok(payload)
+            }
             Some((handle, description)) => {
-                payload.push(0);
-                payload.extend_from_slice(&description.relation_id);
-                payload.extend_from_slice(&handle.to_bytes());
+                let mut payload =
+                    vec![0; PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_HEADER_BYTES as usize];
+                let version_offset =
+                    PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_VERSION_OFFSET as usize;
+                payload[version_offset..version_offset + 2]
+                    .copy_from_slice(&PLANNER_PAYLOAD_VERSION.to_be_bytes());
+                payload[PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_STATUS_OFFSET as usize] = 0;
+                let relation_id_offset =
+                    PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_RELATION_ID_OFFSET as usize;
+                payload[relation_id_offset..relation_id_offset + 16]
+                    .copy_from_slice(&description.relation_id);
+                let handle_offset =
+                    PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_PLANNING_HANDLE_OFFSET as usize;
+                payload[handle_offset..handle_offset + 16].copy_from_slice(&handle.to_bytes());
                 encode_name(&mut payload, &description.name)?;
                 let count = u16::try_from(description.columns.len())
                     .map_err(|_| PlannerRequestError::ResponseTooLarge)?;
@@ -182,29 +210,38 @@ impl DescribeRelationResponse {
                 for column in &description.columns {
                     encode_visible_column(&mut payload, column)?;
                 }
+                ensure_response_size(&payload)?;
+                Ok(payload)
             }
         }
-        ensure_response_size(&payload)?;
-        Ok(payload)
     }
 
     pub fn decode(payload: &[u8]) -> Result<Self, PlannerRequestError> {
-        if payload.len() < DESCRIBE_HEADER_BYTES || read_u16(payload, 0)? != PLANNER_PAYLOAD_VERSION
+        let version_offset = PLANNER_DESCRIBE_RELATION_UNAVAILABLE_RESPONSE_VERSION_OFFSET as usize;
+        if payload.len() < DESCRIBE_HEADER_BYTES
+            || read_u16(payload, version_offset)? != PLANNER_PAYLOAD_VERSION
         {
             return Err(PlannerRequestError::InvalidPayload);
         }
-        match payload[2] {
+        match payload[PLANNER_DESCRIBE_RELATION_UNAVAILABLE_RESPONSE_STATUS_OFFSET as usize] {
             1 if payload.len() == DESCRIBE_HEADER_BYTES => Ok(Self { table: None }),
             0 => {
-                if payload.len() < 40 {
+                if payload.len()
+                    < PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_HEADER_BYTES as usize + 5
+                {
                     return Err(PlannerRequestError::InvalidPayload);
                 }
-                let relation_id = payload[3..19]
+                let relation_id_offset =
+                    PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_RELATION_ID_OFFSET as usize;
+                let relation_id = payload[relation_id_offset..relation_id_offset + 16]
                     .try_into()
                     .map_err(|_| PlannerRequestError::InvalidPayload)?;
-                let handle = PlanningTableHandle::from_bytes(&payload[19..35])
-                    .ok_or(PlannerRequestError::InvalidPayload)?;
-                let mut offset = 35;
+                let handle_offset =
+                    PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_PLANNING_HANDLE_OFFSET as usize;
+                let handle =
+                    PlanningTableHandle::from_bytes(&payload[handle_offset..handle_offset + 16])
+                        .ok_or(PlannerRequestError::InvalidPayload)?;
+                let mut offset = PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_HEADER_BYTES as usize;
                 let name = decode_name(payload, &mut offset)?;
                 let count = read_u16(payload, offset)? as usize;
                 offset += 2;

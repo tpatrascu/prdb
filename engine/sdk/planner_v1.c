@@ -119,7 +119,7 @@ int32_t prdb_sdk_planner_decode_relation_v1(
     prdb_sdk_planner_relation_v1 *out, uint32_t out_capacity,
     prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_capacity) {
     prdb_sdk_planner_relation_v1 result = {0};
-    uint32_t offset = 3;
+    uint32_t offset = PRDB_PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_HEADER_BYTES;
     uint32_t column_count;
     uint8_t relation_id_is_zero = 1;
 
@@ -129,31 +129,37 @@ int32_t prdb_sdk_planner_decode_relation_v1(
     if (payload_len > PRDB_SDK_PLANNER_MAX_RESPONSE_BYTES || payload_len < 3) {
         return PRDB_SDK_PLANNER_DECODE_INVALID_PAYLOAD;
     }
-    if (read_u16(payload, 0) != PRDB_SDK_PLANNER_WIRE_V1_VERSION) {
+    if (read_u16(payload,
+                  PRDB_PLANNER_DESCRIBE_RELATION_UNAVAILABLE_RESPONSE_VERSION_OFFSET) !=
+        PRDB_PLANNER_PAYLOAD_VERSION) {
         return PRDB_SDK_PLANNER_DECODE_UNSUPPORTED_VERSION;
     }
-    if (payload[2] == 1 && payload_len == 3) {
+    if (payload[PRDB_PLANNER_DESCRIBE_RELATION_UNAVAILABLE_RESPONSE_STATUS_OFFSET] == 1 &&
+        payload_len == PRDB_PLANNER_DESCRIBE_RELATION_UNAVAILABLE_RESPONSE_HEADER_BYTES) {
         result.struct_size = sizeof(result);
         result.abi_version = PRDB_SDK_PLANNER_ABI_V1_VERSION;
         *out = result;
         return PRDB_SDK_PLANNER_DECODE_UNAVAILABLE;
     }
-    if (payload[2] != 0 || payload_len < 40) {
+    if (payload[PRDB_PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_STATUS_OFFSET] != 0 ||
+        payload_len < PRDB_PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_HEADER_BYTES + 5) {
         return PRDB_SDK_PLANNER_DECODE_INVALID_PAYLOAD;
     }
     for (uint32_t index = 0; index < 16; ++index) {
-        relation_id_is_zero &= payload[offset + index] == 0;
+        relation_id_is_zero &=
+            payload[PRDB_PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_RELATION_ID_OFFSET + index] == 0;
     }
     if (relation_id_is_zero) {
         return PRDB_SDK_PLANNER_DECODE_INVALID_PAYLOAD;
     }
-    memcpy(result.relation_id, payload + offset, 16);
-    offset += 16;
-    if (payload[offset] != PRDB_SDK_PLANNER_TABLE_HANDLE_KIND) {
+    memcpy(result.relation_id,
+           payload + PRDB_PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_RELATION_ID_OFFSET, 16);
+    if (payload[PRDB_PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_PLANNING_HANDLE_OFFSET] !=
+        PRDB_SDK_PLANNER_TABLE_HANDLE_KIND) {
         return PRDB_SDK_PLANNER_DECODE_INVALID_PAYLOAD;
     }
-    memcpy(result.planning_handle, payload + offset, 16);
-    offset += 16;
+    memcpy(result.planning_handle,
+           payload + PRDB_PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_PLANNING_HANDLE_OFFSET, 16);
     if (!take_name(payload, payload_len, &offset, &result.name,
                    &result.name_len) ||
         (uint64_t)offset + 2 > payload_len) {
@@ -177,7 +183,7 @@ int32_t prdb_sdk_planner_decode_relation_v1(
         return PRDB_SDK_PLANNER_DECODE_RESPONSE_TOO_SMALL;
     }
 
-    offset = 3 + 32;
+    offset = PRDB_PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_HEADER_BYTES;
     if (!take_name(payload, payload_len, &offset, &result.name,
                    &result.name_len)) {
         return PRDB_SDK_PLANNER_DECODE_INVALID_PAYLOAD;

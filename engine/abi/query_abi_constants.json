@@ -1343,6 +1343,26 @@
           "length_field": "column_count"
         }
       ]
+    },
+    {
+      "name": "PLANNER_DESCRIBE_RELATION_UNAVAILABLE_RESPONSE",
+      "version_constant": "PLANNER_PAYLOAD_VERSION",
+      "fields": [
+        { "name": "version", "encoding": "u16be" },
+        { "name": "status", "encoding": "u8" }
+      ],
+      "trailing_fields": []
+    },
+    {
+      "name": "PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE",
+      "version_constant": "PLANNER_PAYLOAD_VERSION",
+      "fields": [
+        { "name": "version", "encoding": "u16be" },
+        { "name": "status", "encoding": "u8" },
+        { "name": "relation_id", "encoding": "bytes16" },
+        { "name": "planning_handle", "encoding": "bytes16" }
+      ],
+      "trailing_fields": []
     }
   ]
 }

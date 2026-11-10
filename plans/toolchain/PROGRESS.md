@@ -1,5 +1,13 @@
 # Toolchain Progress
 
+## TC-2: generated planner relation-description response prefixes — implemented
+
+- Contract: planner relation description returns either a version/status-only unavailable response or a success prefix with relation ID and planning handle before the variable name and column records.
+- Implementation: the shared schema declares both response prefixes. Rust encoding/decoding and the TinyCC planner decoder consume their generated version/status/identity offsets and header sizes; the variable name and column records retain their bounded codec.
+- Regression: `planner_stream_estimate_allowance_falls_back_without_aborting_invocation` and `supervisor_drains_both_worker_channels_before_durable_finalize` pass; the maintained TinyCC planner fixture passes.
+- Verification: schema drift and negative schema tests, workspace build/format/warning-denied Clippy/serial tests, and full TinyCC SDK suite passed. Three cgroup-dependent commit tests remain ignored by default.
+- Remaining: generate layouts and codecs for remaining planner/executor/supervisor payloads.
+
 ## TC-2: maintained payload schema validation tests — implemented
 
 - Behavior: the SDK test target checks that the shared payload schema renders and rejects invalid version/count field widths.
