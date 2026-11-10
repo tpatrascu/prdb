@@ -105,6 +105,20 @@ pub const EXECUTOR_MUTATION_ACKNOWLEDGEMENT_HEADER_BYTES: u32 = 3;
 pub const EXECUTOR_CANCELLATION_CHECK_RESPONSE_VERSION_OFFSET: u32 = 0;
 pub const EXECUTOR_CANCELLATION_CHECK_RESPONSE_CANCELLED_OFFSET: u32 = 2;
 pub const EXECUTOR_CANCELLATION_CHECK_RESPONSE_HEADER_BYTES: u32 = 3;
+pub fn encode_executor_cancellation_check_response(cancelled: u8) -> [u8; 3] {
+    let mut payload = [0u8; 3];
+    payload[0..2].copy_from_slice(&EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes());
+    payload[2] = cancelled;
+    payload
+}
+
+pub fn decode_executor_cancellation_check_response(payload: &[u8]) -> Option<u8> {
+    if payload.len() != 3 || u16::from_be_bytes([payload[0], payload[1]]) != EXECUTOR_BATCH_PAYLOAD_VERSION {
+        return None;
+    }
+    Some(payload[2])
+}
+
 pub const EXECUTOR_CLOSE_CURSOR_REQUEST_VERSION_OFFSET: u32 = 0;
 pub const EXECUTOR_CLOSE_CURSOR_REQUEST_CURSOR_HANDLE_OFFSET: u32 = 2;
 pub const EXECUTOR_CLOSE_CURSOR_REQUEST_HEADER_BYTES: u32 = 18;

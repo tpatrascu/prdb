@@ -6,6 +6,29 @@
 #include <stddef.h>
 #include <stdint.h>
 
+static inline void prdb_encode_executor_cancellation_check_response(uint8_t payload[3],
+    uint8_t cancelled) {
+    payload[0] = (uint8_t)((PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION >> 8) & 0xffu);
+    payload[1] = (uint8_t)(PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION & 0xffu);
+    payload[2] = cancelled;
+}
+
+static inline int prdb_decode_executor_cancellation_check_response(const uint8_t *payload, size_t payload_len,
+    uint8_t *cancelled) {
+    if (payload == NULL || payload_len != 3) {
+        return 0;
+    }
+    if (payload[0] != (uint8_t)((PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION >> 8) & 0xffu) ||
+        payload[1] != (uint8_t)(PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION & 0xffu)) {
+        return 0;
+    }
+    if (cancelled == NULL) {
+        return 0;
+    }
+    *cancelled = payload[2];
+    return 1;
+}
+
 static inline void prdb_encode_optimizer_response_failure(uint8_t payload[3],
     uint8_t status) {
     payload[0] = (uint8_t)((PRDB_OPTIMIZER_RESPONSE_VERSION >> 8) & 0xffu);

@@ -258,5 +258,19 @@ int main(void) {
         decoded_optimizer_failure_status != 4) {
         return 27;
     }
+    const uint8_t cancellation_check_expected[3] = {0x00, 0x01, 0x01};
+    uint8_t cancellation_check_payload[3] = {0};
+    uint8_t decoded_cancelled = 0;
+    prdb_encode_executor_cancellation_check_response(cancellation_check_payload, 1);
+    for (size_t i = 0; i < sizeof(cancellation_check_expected); ++i) {
+        if (cancellation_check_payload[i] != cancellation_check_expected[i]) {
+            return 28;
+        }
+    }
+    if (!prdb_decode_executor_cancellation_check_response(
+            cancellation_check_payload, sizeof(cancellation_check_payload),
+            &decoded_cancelled) || decoded_cancelled != 1) {
+        return 29;
+    }
     return 0;
 }

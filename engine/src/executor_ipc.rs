@@ -1300,13 +1300,7 @@ pub fn dispatch_executor_request(
 }
 
 fn encode_cancellation_check_response(cancelled: bool) -> Vec<u8> {
-    let mut payload =
-        vec![0; generated::EXECUTOR_CANCELLATION_CHECK_RESPONSE_HEADER_BYTES as usize];
-    let version = generated::EXECUTOR_CANCELLATION_CHECK_RESPONSE_VERSION_OFFSET as usize;
-    payload[version..version + 2].copy_from_slice(&EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes());
-    payload[generated::EXECUTOR_CANCELLATION_CHECK_RESPONSE_CANCELLED_OFFSET as usize] =
-        u8::from(cancelled);
-    payload
+    generated::encode_executor_cancellation_check_response(u8::from(cancelled)).to_vec()
 }
 
 /// Serve executor requests on one provisioned stream. The stream's caller
