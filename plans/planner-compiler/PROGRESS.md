@@ -1,5 +1,11 @@
 # Optimizer Progress
 
+## OP-3 ABI v4 SQL callback fixture — implemented; confined acceptance pending
+
+- Behavior: the maintained SQL write/read fixture now exports both v3 and v4. The v4 entry submits a parameterized `id = 42` SELECT through the executor's fixed optimizer callback, validates the optimizer Filter against the AST and parameter, independently resolves the relation through executor storage, and checks the projected row.
+- Verification: TinyCC SDK tests and sandbox-fixture compilation pass. The actual fixture packages successfully as ABI v4 without loading; the package test checks exact descriptor/entry symbols. Workspace build, format, warning-denied Clippy, and tests pass (129 commit tests; 3 cgroup tests ignored).
+- Remaining: execute this fixture through the confined optimizer and executor processes. Sudo remount returned success, but the container cgroup2 mount remained read-only (`EROFS` on controller writes), so the live callback, Filter evaluation, and result path remain unverified here. Bounded mutation plans also remain open.
+
 ## OP-1 dependency: bounded structured SELECT request decoder
 
 - Contract: [optimizer specification](../../specs/planner-compiler.md). The first request payload is a versioned, single-relation SELECT with explicit projections, optional bounded predicate tree, and optional LIMIT.
