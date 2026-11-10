@@ -128,7 +128,11 @@ def render(schema):
                 not isinstance(field_name, str)
                 or not field_name.isidentifier()
                 or field_name in trailing_names
-                or field.get("encoding") not in ("utf8", "bytes16_array")
+                or field.get("encoding") not in (
+                    "utf8",
+                    "bytes16_array",
+                    "u64_triplet_array",
+                )
                 or field.get("length_field") not in length_fields
             ):
                 raise ValueError(f"invalid trailing field in IPC payload {name}")

@@ -1,5 +1,13 @@
 # Toolchain Progress
 
+## TC-2: generated planner estimate collection declarations — implemented
+
+- Contract: estimate requests carry a count-delimited array of 16-byte column IDs; exact estimate responses carry a count-delimited array of three 64-bit population values per column.
+- Implementation: the shared payload schema now declares both trailing arrays. The generator accepts the population triple array encoding alongside its existing fixed-width ID array encoding.
+- Regression: generator drift check and the planner estimate-session regression pass.
+- Verification: generator `--check`, full workspace build/format/warning-denied Clippy/serial tests, and TinyCC SDK suite passed; commit integration tests reported 129 passed and 3 cgroup-dependent tests ignored.
+- Remaining: generated collection codecs and layouts for remaining executor/planner/supervisor payloads.
+
 ## TC-2: generated executor next-batch response variants — implemented
 
 - Contract: [internal IPC](../../specs/ipc-protocol.md) encodes next-batch responses with distinct finished and continuation headers; continuation includes a cursor before the row count.

@@ -1319,7 +1319,13 @@
         { "name": "planning_handle", "encoding": "bytes16" },
         { "name": "column_count", "encoding": "u16be" }
       ],
-      "trailing_fields": []
+      "trailing_fields": [
+        {
+          "name": "column_ids",
+          "encoding": "bytes16_array",
+          "length_field": "column_count"
+        }
+      ]
     },
     {
       "name": "PLANNER_ESTIMATE_SCAN_RESPONSE",
@@ -1330,7 +1336,13 @@
         { "name": "visible_rows", "encoding": "u64be" },
         { "name": "column_count", "encoding": "u16be" }
       ],
-      "trailing_fields": []
+      "trailing_fields": [
+        {
+          "name": "column_populations",
+          "encoding": "u64_triplet_array",
+          "length_field": "column_count"
+        }
+      ]
     }
   ]
 }
