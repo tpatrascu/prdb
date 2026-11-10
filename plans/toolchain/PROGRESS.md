@@ -1,5 +1,13 @@
 # Toolchain Progress
 
+## TC-2: generated executor cancellation-check response layout — implemented
+
+- Contract: cancellation checks return exactly payload version plus a boolean cancelled byte.
+- Implementation: Rust encoding and TinyCC SDK response validation use generated header sizes and offsets; the maintained C fixture also uses the generated fields.
+- Regression: Rust exact-byte tests cover both boolean values; the TinyCC fixture covers false, true, and invalid values.
+- Verification: generator drift, focused regression, locked workspace build/format/warning-denied Clippy/serial tests, and full maintained TinyCC SDK suite pass. Commit tests report 129 passed; three cgroup-dependent tests remain ignored.
+- Remaining: generate layouts/codecs for remaining supervisor event payloads and other internal IPC payloads.
+
 ## TC-2: generated supervisor terminal decision request layouts — implemented
 
 - Contract: finalize and abort requests contain exactly the supervisor payload version and reject unsupported versions or trailing bytes.

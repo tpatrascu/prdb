@@ -1256,6 +1256,15 @@
       "trailing_fields": []
     },
     {
+      "name": "EXECUTOR_CANCELLATION_CHECK_RESPONSE",
+      "version_constant": "EXECUTOR_BATCH_PAYLOAD_VERSION",
+      "fields": [
+        { "name": "version", "encoding": "u16be" },
+        { "name": "cancelled", "encoding": "u8" }
+      ],
+      "trailing_fields": []
+    },
+    {
       "name": "EXECUTOR_NEXT_BATCH_REQUEST",
       "version_constant": "EXECUTOR_BATCH_PAYLOAD_VERSION",
       "fields": [

@@ -6,6 +6,7 @@ use crate::metadata_discovery::{
     AuthorizedRelationDescription, ExecutorRowHandle, ExecutorScanCursor, ResolvedRelationHandle,
     VisibleColumn,
 };
+use crate::query_abi as generated;
 pub use crate::query_abi::{
     EXECUTOR_BATCH_PAYLOAD_VERSION, EXECUTOR_MUTATION_ACKNOWLEDGEMENT_HEADER_BYTES,
     EXECUTOR_MUTATION_ACKNOWLEDGEMENT_STATUS_OFFSET,
@@ -1289,9 +1290,7 @@ pub fn dispatch_executor_request(
             if !request.payload.is_empty() {
                 return Err(ExecutorRequestError::InvalidPayload);
             }
-            let mut payload = EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes().to_vec();
-            payload.push(u8::from(connection.check_cancellation()?));
-            payload
+            encode_cancellation_check_response(connection.check_cancellation()?)
         }
         _ => return Err(ExecutorRequestError::UnsupportedOperation(operation)),
     };
@@ -1300,6 +1299,16 @@ pub fn dispatch_executor_request(
         request_id: request.request_id,
         payload,
     })
+}
+
+fn encode_cancellation_check_response(cancelled: bool) -> Vec<u8> {
+    let mut payload =
+        vec![0; generated::EXECUTOR_CANCELLATION_CHECK_RESPONSE_HEADER_BYTES as usize];
+    let version = generated::EXECUTOR_CANCELLATION_CHECK_RESPONSE_VERSION_OFFSET as usize;
+    payload[version..version + 2].copy_from_slice(&EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes());
+    payload[generated::EXECUTOR_CANCELLATION_CHECK_RESPONSE_CANCELLED_OFFSET as usize] =
+        u8::from(cancelled);
+    payload
 }
 
 /// Serve executor requests on one provisioned stream. The stream's caller
@@ -1460,4 +1469,15 @@ pub fn serve_executor_resolve_relation<S: Read + Write>(
     transaction: &mut InvocationTransaction<'_>,
 ) -> Result<(), ExecutorConnectionError> {
     serve_executor(stream, transaction)
+}
+
+#[cfg(test)]
+mod cancellation_response_tests {
+    use super::encode_cancellation_check_response;
+
+    #[test]
+    fn cancellation_check_response_matches_wire_bytes() {
+        assert_eq!(encode_cancellation_check_response(false), [0, 1, 0]);
+        assert_eq!(encode_cancellation_check_response(true), [0, 1, 1]);
+    }
 }

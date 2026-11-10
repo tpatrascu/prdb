@@ -311,7 +311,7 @@ int main(void) {
                cursor) == PRDB_SDK_EXECUTOR_INVALID_ARGUMENT);
 
     const uint8_t empty_request = 0;
-    uint8_t cancellation_reply[3] = {0, 1, 0};
+    uint8_t cancellation_reply[PRDB_EXECUTOR_CANCELLATION_CHECK_RESPONSE_HEADER_BYTES] = {0, 1, 0};
     mock.expected_operation = PRDB_SDK_EXECUTOR_OP_CHECK_CANCELLATION;
     mock.expected_request = &empty_request;
     mock.expected_request_len = 0;
@@ -321,11 +321,11 @@ int main(void) {
     assert(prdb_sdk_executor_check_cancelled_v1(&host, &cancelled) ==
            PRDB_SDK_EXECUTOR_OK);
     assert(cancelled == 0 && mock.calls == 12);
-    cancellation_reply[2] = 1;
+    cancellation_reply[PRDB_EXECUTOR_CANCELLATION_CHECK_RESPONSE_CANCELLED_OFFSET] = 1;
     assert(prdb_sdk_executor_check_cancelled_v1(&host, &cancelled) ==
            PRDB_SDK_EXECUTOR_OK);
     assert(cancelled == 1 && mock.calls == 13);
-    cancellation_reply[2] = 2;
+    cancellation_reply[PRDB_EXECUTOR_CANCELLATION_CHECK_RESPONSE_CANCELLED_OFFSET] = 2;
     cancelled = 77;
     assert(prdb_sdk_executor_check_cancelled_v1(&host, &cancelled) ==
            PRDB_SDK_EXECUTOR_INVALID_PAYLOAD);

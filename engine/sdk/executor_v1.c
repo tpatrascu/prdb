@@ -368,15 +368,20 @@ int32_t prdb_sdk_executor_stage_delete_v1(
 int32_t prdb_sdk_executor_check_cancelled_v1(
     const prdb_host_api_v2 *host, int32_t *cancelled_out) {
     const uint8_t empty_request = 0;
-    uint8_t response[3];
+    uint8_t response[PRDB_EXECUTOR_CANCELLATION_CHECK_RESPONSE_HEADER_BYTES];
     uint64_t response_len = 0;
     int32_t status;
     if (cancelled_out == NULL) return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
     status = invoke(host, PRDB_SDK_EXECUTOR_OP_CHECK_CANCELLATION,
                     &empty_request, 0, response, sizeof(response), &response_len);
     if (status != PRDB_SDK_EXECUTOR_OK) return status;
-    if (response_len != sizeof(response) || read_u16(response) != 1 ||
-        response[2] > 1) return PRDB_SDK_EXECUTOR_INVALID_PAYLOAD;
-    *cancelled_out = (int32_t)response[2];
+    if (response_len != sizeof(response) ||
+        read_u16(response + PRDB_EXECUTOR_CANCELLATION_CHECK_RESPONSE_VERSION_OFFSET) !=
+            PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION ||
+        response[PRDB_EXECUTOR_CANCELLATION_CHECK_RESPONSE_CANCELLED_OFFSET] > 1) {
+        return PRDB_SDK_EXECUTOR_INVALID_PAYLOAD;
+    }
+    *cancelled_out = (int32_t)response[
+        PRDB_EXECUTOR_CANCELLATION_CHECK_RESPONSE_CANCELLED_OFFSET];
     return PRDB_SDK_EXECUTOR_OK;
 }
