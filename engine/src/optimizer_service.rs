@@ -1,6 +1,9 @@
 //! Invocation-bound structured query planning service.
 
-use crate::optimizer_binding::{MetadataBindError, bind_select_request_via_metadata};
+use crate::metadata_discovery::AuthorizedPlanRelation;
+use crate::optimizer_binding::{
+    MetadataBindError, bind_select_request, bind_select_request_via_metadata,
+};
 use crate::optimizer_plan::{PlanError, encode_plan_v1, plan_select_v1};
 use crate::transaction::PlannerMetadataConnection;
 use std::fmt;
@@ -43,6 +46,24 @@ pub fn optimize_select_v1(
     connection: &mut PlannerMetadataConnection<'_, '_>,
 ) -> Result<Vec<u8>, OptimizerError> {
     let bound = bind_select_request_via_metadata(request, connection)?;
+    encode_bound_select(bound)
+}
+
+/// Optimize a request using an authorized stable relation description
+/// obtained through a separate planner IPC connection. The relation record
+/// carries no storage capability and is still validated during binding.
+pub fn optimize_select_v1_with_relation(
+    request: &[u8],
+    relation: Option<AuthorizedPlanRelation>,
+) -> Result<Vec<u8>, OptimizerError> {
+    let bound = bind_select_request(request, relation)
+        .map_err(|error| OptimizerError::Bind(MetadataBindError::Bind(error)))?;
+    encode_bound_select(bound)
+}
+
+fn encode_bound_select(
+    bound: crate::optimizer_binding::BoundSelect,
+) -> Result<Vec<u8>, OptimizerError> {
     let plan = plan_select_v1(bound)?;
     Ok(encode_plan_v1(&plan)?)
 }

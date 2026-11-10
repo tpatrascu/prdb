@@ -42,10 +42,10 @@
 ## OP-3 dependency: serve optimizer submissions over a bounded socket
 
 - Behavior: a provisioned optimizer-submission stream validates request IDs and role, returns canonical plan payloads, and gives the same unavailable status for hidden/missing relations. Malformed framing, duplicate IDs, limit exhaustion, transport failures, and storage transaction errors abort the invocation.
-- Implementation: [`serve_optimizer_shared`](../../engine/src/optimizer_ipc.rs) serializes each request through the invocation mutex and its planner metadata connection, limits a connection to 256 unique requests, and validates every response plan. A real-redb UnixStream integration regression checks both a successful plan and non-disclosing unavailable response.
-- Boundary: this handler currently runs in its caller process as development scaffolding; it does not satisfy optimizer isolation and is not yet provisioned by the executor launcher.
-- Verification: focused real-redb optimizer socket test passed. Locked workspace build, format, warning-denied Clippy, serial workspace tests, and `git diff --check` passed (132 commit integration tests passed; 3 cgroup-dependent tests and 1 process test ignored; 81 Rust unit tests passed).
-- Remaining: launch a separate optimizer process, give it an invocation-bound planner-to-storage channel, provision the executor submission callback/channel, independently re-resolve plans in storage, and execute plans in the SDK.
+- Implementation: [`prdb-optimizer`](../../engine/src/bin/prdb-optimizer.rs) serves submissions in a separate process using only inherited submission and planner sockets. [`optimizer_process`](../../engine/src/optimizer_process.rs) validates each request, resolves stable authorized relation metadata through the planner socket, builds a plan, and validates the response before writing it. The previous in-process stream handler was removed. A real-redb subprocess integration regression checks successful and unavailable lookups.
+- Boundary: this proves separate-process protocol behavior in the integration test. Production supervisor launch, OS confinement/resource provisioning, and the executor callback/channel are not connected yet.
+- Verification: focused real-redb optimizer subprocess and protocol-loop tests passed. Generated ABI consistency, locked workspace build, format, warning-denied Clippy, serial workspace tests, and `git diff --check` passed (132 commit integration tests passed; 3 cgroup-dependent tests and 1 disconnected-submission process test ignored; 82 Rust unit tests passed).
+- Remaining: connect supervisor-owned process launch/confinement, provision executor submission and planner sockets, independently re-resolve plans in storage, and execute plans in the SDK.
 
 ## OP-3 dependency: expose stable authorized plan relation metadata
 

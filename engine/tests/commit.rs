@@ -26052,15 +26052,52 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
     })?;
     assert!(transaction.check_deadline().is_ok());
 
-    let optimizer_transaction = storage.begin_invocation(id(0x8b), actor, 9_999, 8, 512)?;
-    let shared_optimizer = std::sync::Arc::new(std::sync::Mutex::new(Some(optimizer_transaction)));
-    let (mut optimizer_client, mut optimizer_server) = std::os::unix::net::UnixStream::pair()?;
-    let optimizer_invocation = std::sync::Arc::clone(&shared_optimizer);
+    let mut optimizer_metadata_transaction =
+        storage.begin_invocation(id(0x8b), actor, 9_999, 8, 512)?;
+    let (optimizer_submission_worker, mut optimizer_client) =
+        std::os::unix::net::UnixStream::pair()?;
+    let (optimizer_planner_worker, mut optimizer_planner_storage) =
+        std::os::unix::net::UnixStream::pair()?;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    let submission_fd = optimizer_submission_worker.as_raw_fd();
+    let planner_fd = optimizer_planner_worker.as_raw_fd();
+    let mut optimizer = Command::new(env!("CARGO_BIN_EXE_prdb-optimizer"));
+    optimizer
+        .arg("--submission-fd")
+        .arg(submission_fd.to_string())
+        .arg("--planner-fd")
+        .arg(planner_fd.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: the child callback touches only the two live Unix-stream file
+    // descriptors captured above before exec, clearing their close-on-exec
+    // flag so the optimizer receives the intended channel endpoints.
+    unsafe {
+        optimizer.pre_exec(move || {
+            for descriptor in [submission_fd, planner_fd] {
+                // SAFETY: fcntl operates on inherited descriptors in the child.
+                let flags = libc::fcntl(descriptor, libc::F_GETFD);
+                if flags < 0
+                    || libc::fcntl(descriptor, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+    let mut optimizer = optimizer.spawn()?;
+    drop(optimizer_submission_worker);
+    drop(optimizer_planner_worker);
+    optimizer_client.set_read_timeout(Some(Duration::from_secs(5)))?;
     std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
-        let optimizer_thread = scope.spawn(move || {
-            prdb_engine::optimizer_ipc::serve_optimizer_shared(
-                &mut optimizer_server,
-                &optimizer_invocation,
+        let planner_thread = scope.spawn(|| {
+            serve_planner(
+                &mut optimizer_planner_storage,
+                &mut optimizer_metadata_transaction,
             )
         });
         prdb_engine::ipc::write_frame(
@@ -26108,18 +26145,14 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
         );
         optimizer_client.shutdown(Shutdown::Write)?;
         drop(optimizer_client);
-        optimizer_thread
+        let status = optimizer.wait()?;
+        assert!(status.success(), "optimizer child exited with {status}");
+        planner_thread
             .join()
-            .expect("optimizer server thread panicked")
-            .map_err(|error| format!("optimizer server failed: {error:?}"))?;
+            .expect("planner storage thread panicked")
+            .map_err(|error| format!("planner storage stream failed: {error:?}"))?;
         Ok(())
     })?;
-    if let Some(mut transaction) = shared_optimizer
-        .lock()
-        .map_err(|_| "optimizer transaction mutex poisoned")?
-        .take()
-    {
-        transaction.abort()?;
-    }
+    optimizer_metadata_transaction.abort()?;
     Ok(())
 }
