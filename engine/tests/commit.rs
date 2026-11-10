@@ -25702,3 +25702,224 @@ fn multirow_commit_assigns_one_sequence_and_conflict_aborts_the_whole_set()
     );
     Ok(())
 }
+
+#[test]
+fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::authorization::{Effect, Expr, Operation, Subject};
+    use prdb_engine::executor_ipc::ResolveRelationRequest;
+    use prdb_engine::ipc::{IpcFrame, Operation as IpcOperation};
+    use prdb_engine::planner_ipc::{
+        DescribeRelationResponse, EstimateScanRequest, EstimateScanResponse,
+        MAX_PLANNER_REQUESTS_PER_CONNECTION, serve_planner,
+    };
+    use prdb_engine::storage_manager::{
+        CreatePolicyRequest, CreateTableRequest, ObjectGrantPrivilege, ObjectGrantTarget,
+        PolicyKind, SetObjectGrantRequest, TableColumnDefinition,
+    };
+    use prdb_engine::transaction::MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION;
+    use std::net::Shutdown;
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let actor = id(0x81);
+    let admin_role = builtin_owner_id();
+    let mut setup_audit = identity_audit_event(0x82, admin_role, actor);
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage
+        .commit_catalog_and_audit(
+            id(0x82),
+            admin_role,
+            9_999,
+            &[
+                principal_write_with_name(actor, 1, 1, "planner_stats_owner"),
+                object_write_with_name(actor, 8, "planner_stats_owner"),
+                membership_write(actor, admin_role),
+                dependency_write(actor, admin_role, 5),
+            ],
+            &[setup_audit],
+        )
+        .map_err(|error| format!("planner fixture identity setup: {error:?}"))?;
+
+    let mut schema_audit = identity_audit_event(0x83, actor, actor);
+    schema_audit.correlation_id = id(0x83);
+    let schema = storage
+        .create_schema(id(0x83), actor, "planner_stats", actor, 9_999, schema_audit)
+        .map_err(|error| format!("planner fixture schema creation: {error:?}"))?;
+    let mut table_audit = identity_audit_event(0x84, actor, schema.schema_id);
+    table_audit.correlation_id = id(0x84);
+    let table = storage
+        .create_table(CreateTableRequest {
+            invocation_id: id(0x84),
+            authenticated_actor_id: actor,
+            schema_id: schema.schema_id,
+            name: "observations".to_owned(),
+            columns: vec![TableColumnDefinition {
+                name: "value".to_owned(),
+                scalar_type: ScalarType::Integer,
+                nullable: true,
+                generated_uuid_identity: false,
+                default: None,
+            }],
+            retention_deadline_us: 9_999,
+            audit_event: table_audit,
+        })
+        .map_err(|error| format!("planner fixture table creation: {error:?}"))?;
+
+    for (audit_id, invocation_id, object_id, privilege, target) in [
+        (
+            0x85,
+            id(0x85),
+            schema.schema_id,
+            ObjectGrantPrivilege::Usage,
+            ObjectGrantTarget::Object,
+        ),
+        (
+            0x86,
+            id(0x86),
+            table.table_id,
+            ObjectGrantPrivilege::Select,
+            ObjectGrantTarget::Object,
+        ),
+        (
+            0x89,
+            id(0x89),
+            table.table_id,
+            ObjectGrantPrivilege::Select,
+            ObjectGrantTarget::Column(table.column_ids[0]),
+        ),
+    ] {
+        let mut audit = identity_audit_event(audit_id, actor, object_id);
+        audit.correlation_id = invocation_id;
+        audit.action = AuditAction::AuthorityChange;
+        storage
+            .set_object_grant(SetObjectGrantRequest {
+                invocation_id,
+                authenticated_actor_id: actor,
+                grantee_id: actor,
+                object_id,
+                privilege,
+                target,
+                grant: true,
+                retention_deadline_us: 9_999,
+                audit_event: audit,
+            })
+            .map_err(|error| format!("planner fixture grant creation: {error:?}"))?;
+    }
+    let mut policy_audit = identity_audit_event(0x87, actor, table.table_id);
+    policy_audit.correlation_id = id(0x87);
+    storage
+        .create_policy(CreatePolicyRequest {
+            invocation_id: id(0x87),
+            authenticated_actor_id: actor,
+            table_id: table.table_id,
+            name: "planner_stats_select".to_owned(),
+            kind: PolicyKind::Row,
+            operation: Operation::Select,
+            effect: Effect::Allow,
+            recipients: vec![Subject::Principal(actor)],
+            target_column_ids: Vec::new(),
+            using_expression: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+            with_check_expression: None,
+            retention_deadline_us: 9_999,
+            audit_event: policy_audit,
+        })
+        .map_err(|error| format!("planner fixture policy creation: {error:?}"))?;
+
+    let mut transaction = storage.begin_invocation(id(0x88), actor, 9_999, 8, 512)?;
+    let (mut client, mut server) = std::os::unix::net::UnixStream::pair()?;
+    std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+        let planner = scope.spawn(|| serve_planner(&mut server, &mut transaction));
+        prdb_engine::ipc::write_frame(
+            &mut client,
+            &IpcFrame {
+                operation: IpcOperation::DescribeRelation as u16,
+                request_id: 1,
+                payload: ResolveRelationRequest {
+                    schema_name: "planner_stats".to_owned(),
+                    relation_name: "observations".to_owned(),
+                }
+                .encode()?,
+            },
+        )?;
+        let description = prdb_engine::ipc::read_frame(&mut client)?
+            .ok_or("planner stream closed after relation description")?;
+        let (handle, _) = DescribeRelationResponse::decode(&description.payload)?
+            .table
+            .ok_or("authorized relation was not described")?;
+
+        for request_id in 2..(2 + MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION as u64) {
+            prdb_engine::ipc::write_frame(
+                &mut client,
+                &IpcFrame {
+                    operation: IpcOperation::EstimateScan as u16,
+                    request_id,
+                    payload: EstimateScanRequest {
+                        handle: handle.clone(),
+                        column_ids: Vec::new(),
+                    }
+                    .encode()?,
+                },
+            )?;
+            let response = prdb_engine::ipc::read_frame(&mut client)?
+                .ok_or("planner stream closed before allowance exhaustion")?;
+            assert!(matches!(
+                EstimateScanResponse::decode(&response.payload)?,
+                EstimateScanResponse::Exact(_)
+            ));
+        }
+
+        let exhausted_id = 2 + MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION as u64;
+        prdb_engine::ipc::write_frame(
+            &mut client,
+            &IpcFrame {
+                operation: IpcOperation::EstimateScan as u16,
+                request_id: exhausted_id,
+                payload: EstimateScanRequest {
+                    handle,
+                    column_ids: Vec::new(),
+                }
+                .encode()?,
+            },
+        )?;
+        let exhausted = prdb_engine::ipc::read_frame(&mut client)?
+            .ok_or("planner stream closed on estimate fallback")?;
+        assert_eq!(
+            EstimateScanResponse::decode(&exhausted.payload)?,
+            EstimateScanResponse::Unknown
+        );
+
+        let follow_up_id = exhausted_id + 1;
+        assert!(follow_up_id < MAX_PLANNER_REQUESTS_PER_CONNECTION as u64);
+        prdb_engine::ipc::write_frame(
+            &mut client,
+            &IpcFrame {
+                operation: IpcOperation::DescribeRelation as u16,
+                request_id: follow_up_id,
+                payload: ResolveRelationRequest {
+                    schema_name: "planner_stats".to_owned(),
+                    relation_name: "observations".to_owned(),
+                }
+                .encode()?,
+            },
+        )?;
+        let follow_up = prdb_engine::ipc::read_frame(&mut client)?
+            .ok_or("planner stream closed after estimate fallback")?;
+        assert!(
+            DescribeRelationResponse::decode(&follow_up.payload)?
+                .table
+                .is_some()
+        );
+        client.shutdown(Shutdown::Write)?;
+        drop(client);
+
+        planner
+            .join()
+            .expect("planner server thread panicked")
+            .map_err(|error| format!("planner server failed: {error:?}"))?;
+        Ok(())
+    })?;
+    assert!(transaction.check_deadline().is_ok());
+    Ok(())
+}
