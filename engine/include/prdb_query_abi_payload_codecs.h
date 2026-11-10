@@ -33,4 +33,37 @@ static inline int prdb_decode_supervisor_invocation_control_request(const uint8_
     return 1;
 }
 
+static inline void prdb_encode_supervisor_admin_cancel_request(uint8_t payload[20],
+    const uint8_t invocation_id[16], uint16_t reason_code) {
+    payload[0] = (uint8_t)((PRDB_SUPERVISOR_PAYLOAD_VERSION >> 8) & 0xffu);
+    payload[1] = (uint8_t)(PRDB_SUPERVISOR_PAYLOAD_VERSION & 0xffu);
+    for (size_t i = 0; i < 16; ++i) {
+        payload[2 + i] = invocation_id[i];
+    }
+    payload[18] = (uint8_t)((reason_code >> 8) & 0xffu);
+    payload[19] = (uint8_t)(reason_code & 0xffu);
+}
+
+static inline int prdb_decode_supervisor_admin_cancel_request(const uint8_t *payload, size_t payload_len,
+    uint8_t invocation_id[16], uint16_t *reason_code) {
+    if (payload == NULL || payload_len != 20) {
+        return 0;
+    }
+    if (payload[0] != (uint8_t)((PRDB_SUPERVISOR_PAYLOAD_VERSION >> 8) & 0xffu) ||
+        payload[1] != (uint8_t)(PRDB_SUPERVISOR_PAYLOAD_VERSION & 0xffu)) {
+        return 0;
+    }
+    if (invocation_id == NULL) {
+        return 0;
+    }
+    for (size_t i = 0; i < 16; ++i) {
+        invocation_id[i] = payload[2 + i];
+    }
+    if (reason_code == NULL) {
+        return 0;
+    }
+    *reason_code = (uint16_t)(((uint16_t)payload[18] << 8) | payload[19]);
+    return 1;
+}
+
 #endif /* PRDB_QUERY_ABI_PAYLOAD_CODECS_H */
