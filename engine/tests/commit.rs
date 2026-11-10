@@ -25888,6 +25888,25 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
         bytes.push(0);
         bytes
     };
+    let encode_filtered_select = |schema_name: &str, relation_name: &str, column_name: &str| {
+        let mut bytes = vec![0, 1, 1, 0];
+        for name in [schema_name, relation_name] {
+            bytes.push(name.len() as u8);
+            bytes.extend_from_slice(name.as_bytes());
+        }
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.push(column_name.len() as u8);
+        bytes.extend_from_slice(column_name.as_bytes());
+        let mut predicate = vec![0x20, 0, 0x10, column_name.len() as u8];
+        predicate.extend_from_slice(column_name.as_bytes());
+        predicate.push(0x02);
+        predicate.extend_from_slice(&7i64.to_be_bytes());
+        bytes.extend_from_slice(&(predicate.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(&predicate);
+        bytes.push(1);
+        bytes.extend_from_slice(&3u32.to_be_bytes());
+        bytes
+    };
     let mut binding_transaction = storage.begin_invocation(id(0x8a), actor, 9_999, 8, 512)?;
     {
         let mut planner_connection = binding_transaction.open_planner_metadata_connection();
@@ -26146,6 +26165,7 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
     drop(optimizer_submission_worker);
     drop(optimizer_planner_worker);
     optimizer_client.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let mut filtered_plan_for_resolution = None;
     std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
         let planner_thread = scope.spawn(|| {
             serve_planner(
@@ -26186,12 +26206,45 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             &IpcFrame {
                 operation: IpcOperation::OptimizeSelect as u16,
                 request_id: 2,
+                payload: encode_filtered_select("planner_stats", "observations", "value"),
+            },
+        )?;
+        let filtered_frame = prdb_engine::ipc::read_frame(&mut optimizer_client)?
+            .ok_or("optimizer stream closed without a filtered plan response")?;
+        assert_eq!(filtered_frame.request_id, 2);
+        let filtered_response = OptimizerResponse::decode(&filtered_frame.payload)?;
+        assert_eq!(
+            filtered_response.status,
+            prdb_engine::optimizer_ipc::OptimizerStatus::Success
+        );
+        let filtered_plan_bytes = filtered_response
+            .plan
+            .as_deref()
+            .ok_or("successful filtered response omitted its plan")?;
+        let filtered_plan = decode_plan_v1(filtered_plan_bytes)?;
+        assert!(matches!(
+            filtered_plan.nodes.get(1),
+            Some(PlanNode::Filter(prdb_engine::optimizer_binding::BoundPredicate::Compare {
+                operator,
+                left,
+                right,
+                ..
+            })) if *operator == prdb_engine::optimizer_request::Comparison::Equal
+                && matches!(left.as_ref(), prdb_engine::optimizer_binding::BoundPredicate::Column(column) if column.column_id == table.column_ids[0])
+                && matches!(right.as_ref(), prdb_engine::optimizer_binding::BoundPredicate::Integer(7))
+        ));
+        filtered_plan_for_resolution = Some(filtered_plan.clone());
+        prdb_engine::ipc::write_frame(
+            &mut optimizer_client,
+            &IpcFrame {
+                operation: IpcOperation::OptimizeSelect as u16,
+                request_id: 3,
                 payload: encode_select("planner_stats", "hidden_or_missing", "value"),
             },
         )?;
         let unavailable_frame = prdb_engine::ipc::read_frame(&mut optimizer_client)?
             .ok_or("optimizer stream closed without an unavailable response")?;
-        assert_eq!(unavailable_frame.request_id, 2);
+        assert_eq!(unavailable_frame.request_id, 3);
         assert_eq!(
             OptimizerResponse::decode(&unavailable_frame.payload)?.status,
             prdb_engine::optimizer_ipc::OptimizerStatus::Unavailable
@@ -26204,6 +26257,58 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             .join()
             .expect("planner storage thread panicked")
             .map_err(|error| format!("planner storage stream failed: {error:?}"))?;
+        Ok(())
+    })?;
+    let filtered_plan =
+        filtered_plan_for_resolution.ok_or("optimizer did not return a filtered plan")?;
+    let (mut executor_plan_client, mut executor_plan_storage) =
+        std::os::unix::net::UnixStream::pair()?;
+    std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+        let executor = scope.spawn(|| {
+            prdb_engine::executor_ipc::serve_executor(
+                &mut executor_plan_storage,
+                &mut optimizer_metadata_transaction,
+            )
+        });
+        prdb_engine::ipc::write_frame(
+            &mut executor_plan_client,
+            &IpcFrame {
+                operation: IpcOperation::ResolvePlanRelation as u16,
+                request_id: 1,
+                payload: ResolveRelationRequest {
+                    schema_name: filtered_plan.relation.schema_name.clone(),
+                    relation_name: filtered_plan.relation.relation_name.clone(),
+                }
+                .encode()?,
+            },
+        )?;
+        let resolved_frame = prdb_engine::ipc::read_frame(&mut executor_plan_client)?
+            .ok_or("executor stream closed without plan identity response")?;
+        let resolved_relation = DescribePlanRelationResponse::decode(&resolved_frame.payload)?
+            .relation
+            .ok_or("executor could not independently resolve filtered plan relation")?;
+        assert_eq!(
+            resolved_relation.schema_id,
+            filtered_plan.relation.schema_id
+        );
+        assert_eq!(
+            resolved_relation.schema_version,
+            filtered_plan.relation.schema_version
+        );
+        assert_eq!(
+            resolved_relation.table_epoch,
+            filtered_plan.relation.table_epoch
+        );
+        assert_eq!(
+            resolved_relation.relation.relation_id,
+            filtered_plan.relation.relation_id
+        );
+        executor_plan_client.shutdown(Shutdown::Write)?;
+        drop(executor_plan_client);
+        executor
+            .join()
+            .expect("executor plan metadata thread panicked")
+            .map_err(|error| format!("executor plan metadata stream failed: {error:?}"))?;
         Ok(())
     })?;
     optimizer_metadata_transaction.abort()?;

@@ -168,3 +168,10 @@
 - Regression: TinyCC fixture checks successful filtered submission/execution/result emission and rejects a plan whose literal differs from the supplied parameter. Unsupported predicates remain on the existing SQL path.
 - Verification: focused and full maintained TinyCC SDK suites passed; generated ABI consistency, documentation link checks, and `git diff --check` passed.
 - Remaining: exercise the path through the confined optimizer/executor processes and channels; add bounded mutation plans.
+
+## OP-3 dependency: verify filtered optimizer process output against executor storage
+
+- Behavior: a parameterized equality SELECT crosses the real optimizer subprocess submission and planner channels; the returned Filter retains its bound column identity and literal, and executor storage independently resolves the plan's qualified relation over its own IPC channel.
+- Regression: `planner_stream_estimate_allowance_falls_back_without_aborting_invocation` now submits both an unfiltered request and `value = 7` with LIMIT, checks the decoded Filter node, then compares its schema/table identity with the executor channel response. The existing unavailable-relation check remains on the optimizer process stream.
+- Verification: the focused Rust process/channel integration test passed. Full workspace validation is recorded with the feature commit.
+- Remaining: run the SDK callback and bounded scan/result path against a real confined optimizer/executor invocation; add bounded mutation plans.
