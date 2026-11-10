@@ -422,7 +422,14 @@
 - Implementation: [`prdb_sdk_sql_execute_group_v18`](../../engine/include/prdb_sdk_sql_exec_v18.h) uses the bounded composite scan/aggregation path, binds every parameter leaf before scanning, constructs canonical BIGINT values for literal leaves, evaluates the postorder Boolean tree through the SQL truth helpers, and filters before the existing stable sorter and LIMIT.
 - Confined acceptance: the maintained `sql_v3_write_read.c` artifact executes `(COUNT(*) >= 2 OR COUNT(*) = 3) AND NOT COUNT(*) < 2`, checks the v18 callback metadata, and emits one composite SQLR frame. The Rust acceptance compares that frame byte-for-byte after result relay and verifies durable COMMITTED.
 - Verification: the full maintained TinyCC suite and `make -f engine/sdk/Makefile sandbox-query-fixture` passed. The repository cgroup probe reported a writable delegated cgroup v2 parent with `cpu memory pids` available and enabled; the opt-in `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` acceptance passed. The temporary child cgroup was removed. Rust format, whitespace, locked workspace build, warning-denied Clippy, and serial tests passed (129 commit tests; 3 cgroup-dependent tests ignored by default).
-- Remaining: compound HAVING expression fuzzing, broader NULL/UNKNOWN truth-table runner cases beyond the all-NULL SUM case, and other analytical stress/measurement work remain open.
+- Remaining: broader NULL/UNKNOWN truth-table runner cases beyond the all-NULL SUM case and other analytical stress/measurement work remain open; the v18 parser/binder fuzz pass is recorded below.
+
+## SQL-7 dependency: v18 compound HAVING parser and binder fuzz target — verified
+
+- Contract: fuzz the C parser independently from Rust protocol decoders, and run successful parses through the matching binder without executing query code.
+- Implementation: `engine/tests/fuzz/sql_v18_fuzz.c` exposes a libFuzzer entry point that parses up to the documented 65,536-byte SQL limit, checks sized/versioned AST invariants, and binds successful parses against a fixed two-column schema. Four checked-in seeds cover compound Boolean HAVING, NOT/parentheses, the maximum BIGINT literal, and malformed syntax. `make -f engine/sdk/Makefile fuzz-sql-v18` builds the parser, value, and batch SDK sources with Clang libFuzzer, AddressSanitizer, and UndefinedBehaviorSanitizer, uses fixed seed 18, and resets its generated corpus under `target/` before each run.
+- Verification: the target completed 10,000 mutations from the checked-in seed corpus with no crash or sanitizer finding (1,257 coverage counters); the standard TinyCC SDK suite remains separate from this optional Clang fuzz target.
+- Remaining: broader NULL/UNKNOWN truth-table runner cases and other analytical stress/measurement work remain open.
 
 ## Confined SQL acceptance fixture corrections — verified
 

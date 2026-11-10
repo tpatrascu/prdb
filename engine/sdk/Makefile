@@ -4,6 +4,7 @@ SHARED_LINKER ?= $(CC)
 PYTHON ?= python3
 TAR ?= tar
 GZIP ?= gzip
+FUZZ_CC ?= clang
 BUILD_DIR ?= target/sdk-v1
 INCLUDE_DIR ?= engine/include
 SDK_VALUE_SOURCE := engine/sdk/value_v1.c
@@ -77,6 +78,7 @@ SDK_SQL_V15_TEST := $(BUILD_DIR)/sdk-sql-select-v15
 SDK_SQL_V16_TEST := $(BUILD_DIR)/sdk-sql-select-v16
 SDK_SQL_V17_TEST := $(BUILD_DIR)/sdk-sql-select-v17
 SDK_SQL_V18_TEST := $(BUILD_DIR)/sdk-sql-select-v18
+SDK_SQL_V18_FUZZER := $(BUILD_DIR)/fuzz-sql-v18
 SDK_PLANNER_TEST := $(BUILD_DIR)/sdk-planner-v1
 SDK_EXECUTOR_TEST := $(BUILD_DIR)/sdk-executor-v1
 SDK_SQL_EXEC_TEST := $(BUILD_DIR)/sdk-sql-execute-v2
@@ -259,6 +261,17 @@ $(SDK_SQL_V17_TEST): engine/tests/fixtures/sdk_sql_select_v17.c $(SDK_ARCHIVE) $
 
 $(SDK_SQL_V18_TEST): engine/tests/fixtures/sdk_sql_select_v18.c $(SDK_ARCHIVE) $(INCLUDE_DIR)/prdb_sdk_sql_v18.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" "$<" "$(SDK_ARCHIVE)" -o "$@"
+
+$(SDK_SQL_V18_FUZZER): engine/tests/fuzz/sql_v18_fuzz.c $(SDK_SQL_SOURCE) $(SDK_VALUE_SOURCE) $(SDK_BATCH_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_v18.h | $(BUILD_DIR)
+	$(FUZZ_CC) -Wall -Wextra -Werror -Wno-unused-variable -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer -I"$(INCLUDE_DIR)" engine/tests/fuzz/sql_v18_fuzz.c $(SDK_SQL_SOURCE) $(SDK_VALUE_SOURCE) $(SDK_BATCH_SOURCE) -o "$@"
+
+fuzz-sql-v18: $(SDK_SQL_V18_FUZZER)
+	rm -rf "$(BUILD_DIR)/sql-v18-corpus"
+	mkdir -p "$(BUILD_DIR)/sql-v18-corpus"
+	cp engine/tests/fuzz/corpus/sql_v18/* "$(BUILD_DIR)/sql-v18-corpus/"
+	"$(SDK_SQL_V18_FUZZER)" -seed=18 -max_len=65536 -timeout=2 -runs=10000 "$(BUILD_DIR)/sql-v18-corpus"
+
+.PHONY: fuzz-sql-v18
 
 $(SDK_PLANNER_TEST): engine/tests/fixtures/sdk_planner_v1.c $(SDK_ARCHIVE) $(INCLUDE_DIR)/prdb_sdk_planner_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_v2.h $(INCLUDE_DIR)/prdb_sdk_batch_v1.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" "$<" "$(SDK_ARCHIVE)" -o "$@"
