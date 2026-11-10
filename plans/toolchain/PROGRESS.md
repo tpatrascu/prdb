@@ -1,5 +1,11 @@
 # Toolchain Progress
 
+## TC-1: locked release workspace build — verified
+
+- Contract: the workspace builds in release mode using the repository's locked dependency set and pinned development toolchain.
+- Verification: `XDG_CACHE_HOME=/tmp/prdb-nix-cache nix develop --offline --command cargo build --workspace --release --locked` passed; Cargo finished the optimized release build in 45.55 seconds.
+- Limitation: this validates Rust release compilation only. Release artifact packaging, supported Linux/libc profile selection, TinyCC shared-library compatibility, and end-to-end confined loading remain open plan items.
+
 ## TC-2: generated executor close-cursor request layout — implemented
 
 - Contract: close-cursor requests carry payload version and the connection-scoped cursor handle in the exact open-scan request shape.
