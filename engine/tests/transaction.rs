@@ -5380,6 +5380,132 @@ fn authorized_scan_estimate_counts_sanitized_cells_and_private_writes()
 }
 
 #[test]
+fn authorized_scan_estimate_returns_unknown_at_candidate_budget()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::statistics::{
+        AuthorizedScanEstimate, AuthorizedScanSummary, MAX_ESTIMATE_CANDIDATES,
+    };
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let table_id = id(0).table;
+    let schema_id = [0x23; 16];
+    let column_id = [0x22; 16];
+    let columns = [ColumnSchema {
+        scalar_type: ScalarType::Integer,
+        nullable: false,
+    }];
+    let row = |value: i32| encode_tuple(&columns, 1, &[Some(ScalarValue::Integer(value))]).unwrap();
+
+    let mut seed = InvocationTransaction::begin(
+        &database,
+        [0x51; 16],
+        [9; 16],
+        9_999,
+        MAX_ESTIMATE_CANDIDATES + 1,
+        4 * 1024 * 1024,
+    )?;
+    for index in 1..MAX_ESTIMATE_CANDIDATES {
+        seed.stage_put(
+            prdb_engine::overlay::RowId {
+                table: table_id,
+                row: (index as u128).to_be_bytes(),
+            },
+            &row(index as i32),
+        )?;
+    }
+    seed.commit()?;
+
+    let context = AuthorizationContext {
+        principal_id: [9; 16],
+        role_ids: std::collections::HashSet::new(),
+        scope: std::collections::HashSet::from([
+            (Operation::Usage, AccessTarget::Schema(schema_id)),
+            (Operation::Select, AccessTarget::Table(table_id)),
+            (
+                Operation::Select,
+                AccessTarget::Column {
+                    table_id,
+                    column_id,
+                },
+            ),
+        ]),
+    };
+    let grants = [
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Usage,
+            target: AccessTarget::Schema(schema_id),
+        },
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Select,
+            target: AccessTarget::Column {
+                table_id,
+                column_id,
+            },
+        },
+    ];
+    let table_allow = Policy {
+        subjects: vec![Subject::Principal([9; 16])],
+        operation: Operation::Select,
+        target: AccessTarget::Table(table_id),
+        effect: Effect::Allow,
+        using: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+        with_check: None,
+    };
+    let cell_allow = Policy {
+        target: AccessTarget::Column {
+            table_id,
+            column_id,
+        },
+        ..table_allow.clone()
+    };
+    let policies = [table_allow, cell_allow];
+    let projection = AuthorizedProjection {
+        columns: &columns,
+        column_ids: &[column_id],
+        schema_version: 1,
+        schema_id,
+        context: &context,
+        grants: &grants,
+        policies: &policies,
+        checks: &[],
+        policy_driving_columns: &[],
+        dependencies: &[],
+    };
+    let mut below_limit =
+        InvocationTransaction::begin(&database, [0x52; 16], [9; 16], 9_999, 1, 64)?;
+    assert_eq!(
+        below_limit.estimate_authorized_scan(table_id, &projection)?,
+        AuthorizedScanEstimate::Exact(AuthorizedScanSummary {
+            visible_rows: (MAX_ESTIMATE_CANDIDATES - 1) as u64,
+            columns: vec![prdb_engine::statistics::ColumnPopulation {
+                readable_values: (MAX_ESTIMATE_CANDIDATES - 1) as u64,
+                nulls: 0,
+                redacted: 0,
+            }],
+        })
+    );
+
+    let mut extra = InvocationTransaction::begin(&database, [0x53; 16], [9; 16], 9_999, 1, 64)?;
+    extra.stage_put(
+        prdb_engine::overlay::RowId {
+            table: table_id,
+            row: (MAX_ESTIMATE_CANDIDATES as u128).to_be_bytes(),
+        },
+        &row(MAX_ESTIMATE_CANDIDATES as i32),
+    )?;
+    extra.commit()?;
+    let mut at_limit = InvocationTransaction::begin(&database, [0x54; 16], [9; 16], 9_999, 1, 64)?;
+    assert_eq!(
+        at_limit.estimate_authorized_scan(table_id, &projection)?,
+        AuthorizedScanEstimate::Unknown
+    );
+    Ok(())
+}
+
+#[test]
 fn invocation_auto_indexes_row_writes() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
