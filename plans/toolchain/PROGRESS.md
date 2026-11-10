@@ -1,5 +1,13 @@
 # Toolchain Progress
 
+## TC-2: generated planner estimate-scan response header — implemented
+
+- Contract: [internal IPC](../../specs/ipc-protocol.md) defines exact estimate responses as planner payload version/status, visible-row count, column count, then bounded per-column population triples; UNKNOWN responses end after status.
+- Implementation: the shared schema now supports 64-bit fixed fields and declares the exact-response header. Rust response encoding/decoding uses generated offsets and header size while preserving the compact UNKNOWN form and explicit population-array codec.
+- Regression: the planner estimate-session integration exercises exact and UNKNOWN response decoding.
+- Verification: generator drift, focused planner regression, full workspace build/format/warning-denied Clippy/serial tests, and the full TinyCC SDK suite passed. Commit integration results: 129 passed, 3 cgroup-dependent tests ignored.
+- Remaining: generate layouts for remaining executor/planner/supervisor payloads and serialization helpers.
+
 ## TC-2: generated mutation acknowledgement validation — implemented
 
 - Contract: [internal IPC](../../specs/ipc-protocol.md) uses the same version/status acknowledgement for cursor close, row update, and row delete.

@@ -11,7 +11,11 @@ use crate::metadata_discovery::{
 pub use crate::query_abi::{
     PLANNER_ESTIMATE_SCAN_REQUEST_COLUMN_COUNT_OFFSET, PLANNER_ESTIMATE_SCAN_REQUEST_HEADER_BYTES,
     PLANNER_ESTIMATE_SCAN_REQUEST_PLANNING_HANDLE_OFFSET,
-    PLANNER_ESTIMATE_SCAN_REQUEST_VERSION_OFFSET, PLANNER_PAYLOAD_VERSION,
+    PLANNER_ESTIMATE_SCAN_REQUEST_VERSION_OFFSET,
+    PLANNER_ESTIMATE_SCAN_RESPONSE_COLUMN_COUNT_OFFSET,
+    PLANNER_ESTIMATE_SCAN_RESPONSE_HEADER_BYTES, PLANNER_ESTIMATE_SCAN_RESPONSE_STATUS_OFFSET,
+    PLANNER_ESTIMATE_SCAN_RESPONSE_VERSION_OFFSET,
+    PLANNER_ESTIMATE_SCAN_RESPONSE_VISIBLE_ROWS_OFFSET, PLANNER_PAYLOAD_VERSION,
 };
 use crate::statistics::{AuthorizedScanEstimate, AuthorizedScanSummary, ColumnPopulation};
 use crate::transaction::{PlannerMetadataConnection, TransactionError};
@@ -329,13 +333,25 @@ impl EstimateScanResponse {
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, PlannerRequestError> {
-        let mut payload = PLANNER_PAYLOAD_VERSION.to_be_bytes().to_vec();
         match self {
-            Self::Unknown => payload.push(1),
+            Self::Unknown => {
+                let mut payload = PLANNER_PAYLOAD_VERSION.to_be_bytes().to_vec();
+                payload.push(1);
+                ensure_response_size(&payload)?;
+                Ok(payload)
+            }
             Self::Exact(summary) => {
-                payload.push(0);
-                payload.extend_from_slice(&summary.visible_rows.to_be_bytes());
-                payload.extend_from_slice(
+                let mut payload = vec![0; PLANNER_ESTIMATE_SCAN_RESPONSE_HEADER_BYTES as usize];
+                let version_offset = PLANNER_ESTIMATE_SCAN_RESPONSE_VERSION_OFFSET as usize;
+                payload[version_offset..version_offset + 2]
+                    .copy_from_slice(&PLANNER_PAYLOAD_VERSION.to_be_bytes());
+                payload[PLANNER_ESTIMATE_SCAN_RESPONSE_STATUS_OFFSET as usize] = 0;
+                let visible_rows_offset =
+                    PLANNER_ESTIMATE_SCAN_RESPONSE_VISIBLE_ROWS_OFFSET as usize;
+                payload[visible_rows_offset..visible_rows_offset + 8]
+                    .copy_from_slice(&summary.visible_rows.to_be_bytes());
+                let count_offset = PLANNER_ESTIMATE_SCAN_RESPONSE_COLUMN_COUNT_OFFSET as usize;
+                payload[count_offset..count_offset + 2].copy_from_slice(
                     &u16::try_from(summary.columns.len())
                         .map_err(|_| PlannerRequestError::ResponseTooLarge)?
                         .to_be_bytes(),
@@ -345,22 +361,30 @@ impl EstimateScanResponse {
                     payload.extend_from_slice(&column.nulls.to_be_bytes());
                     payload.extend_from_slice(&column.redacted.to_be_bytes());
                 }
+                ensure_response_size(&payload)?;
+                Ok(payload)
             }
         }
-        ensure_response_size(&payload)?;
-        Ok(payload)
     }
 
     pub fn decode(payload: &[u8]) -> Result<Self, PlannerRequestError> {
-        if payload.len() < 3 || read_u16(payload, 0)? != PLANNER_PAYLOAD_VERSION {
+        let version_offset = PLANNER_ESTIMATE_SCAN_RESPONSE_VERSION_OFFSET as usize;
+        if payload.len() < 3 || read_u16(payload, version_offset)? != PLANNER_PAYLOAD_VERSION {
             return Err(PlannerRequestError::InvalidPayload);
         }
-        match payload[2] {
+        match payload[PLANNER_ESTIMATE_SCAN_RESPONSE_STATUS_OFFSET as usize] {
             1 if payload.len() == 3 => Ok(Self::Unknown),
-            0 if payload.len() >= 13 => {
-                let visible_rows = read_u64(payload, 3)?;
-                let count = read_u16(payload, 11)? as usize;
-                let expected = 13usize
+            0 if payload.len() >= PLANNER_ESTIMATE_SCAN_RESPONSE_HEADER_BYTES as usize => {
+                let visible_rows = read_u64(
+                    payload,
+                    PLANNER_ESTIMATE_SCAN_RESPONSE_VISIBLE_ROWS_OFFSET as usize,
+                )?;
+                let count = read_u16(
+                    payload,
+                    PLANNER_ESTIMATE_SCAN_RESPONSE_COLUMN_COUNT_OFFSET as usize,
+                )? as usize;
+                let header_bytes = PLANNER_ESTIMATE_SCAN_RESPONSE_HEADER_BYTES as usize;
+                let expected = header_bytes
                     .checked_add(
                         count
                             .checked_mul(24)
@@ -370,7 +394,7 @@ impl EstimateScanResponse {
                 if count > crate::tuple::MAX_COLUMNS || expected != payload.len() {
                     return Err(PlannerRequestError::InvalidPayload);
                 }
-                let mut offset = 13;
+                let mut offset = header_bytes;
                 let mut columns = Vec::with_capacity(count);
                 for _ in 0..count {
                     columns.push(ColumnPopulation {
