@@ -64,6 +64,14 @@
 - Verification: the targeted fixture and full maintained TinyCC SDK suite passed. Rust 1.95 locked workspace build, format check, warning-denied Clippy, and serial workspace tests passed (82 library tests and 129 commit tests passed; 3 cgroup-dependent commit tests and 1 cgroup-dependent process test were ignored). Generated ABI consistency and `git diff --check` passed.
 - Remaining: independently decode and validate plans in the executor, re-resolve plan relation identities through executor storage, and execute supported plan operators.
 
+## OP-3 dependency: independently decode basic plans in the C SDK — implemented
+
+- Behavior: the C SDK independently decodes canonical optimizer plan v1 for `Scan -> Project -> optional Limit`.
+- Boundary: it validates framing, nonzero stable relation/column IDs and epochs, ASCII identifiers, scalar type encodings, scan-column ordering/uniqueness, projection membership, node order, and trailing bytes. Relation names borrow the input payload; column records are copied into the result. Filter nodes return `UNSUPPORTED` until their bounded prefix trees receive independent structural and type validation.
+- Regression: the TinyCC fixture checks a hand-constructed plan, borrowed names and copied column metadata, projection-reference rejection, filter rejection, trailing-byte rejection, and undersized output records.
+- Verification: targeted fixture and full maintained TinyCC SDK suite passed. Rust 1.95 locked workspace build, format check, warning-denied Clippy, and serial workspace tests passed (82 library tests and 129 commit tests passed; 3 cgroup-dependent commit tests and 1 cgroup-dependent process test were ignored). Generated ABI consistency and `git diff --check` passed.
+- Remaining: decode/type-check filter predicates, independently resolve plan IDs through executor storage, and interpret validated nodes through SDK calls.
+
 ## OP-3 dependency: expose stable authorized plan relation metadata
 
 - Behavior: the optimizer can resolve exact qualified names to a pinned schema/table identity and declared column shape without receiving a storage handle or executor capability.
