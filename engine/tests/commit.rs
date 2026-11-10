@@ -25743,6 +25743,8 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
     use prdb_engine::optimizer_binding::{
         BindError, BoundColumn, MetadataBindError, bind_select_request_via_metadata,
     };
+    use prdb_engine::optimizer_plan::{PlanNode, decode_plan_v1};
+    use prdb_engine::optimizer_service::{OptimizerError, optimize_select_v1};
     use prdb_engine::planner_ipc::{
         DescribeRelationResponse, EstimateScanRequest, EstimateScanResponse,
         MAX_PLANNER_REQUESTS_PER_CONNECTION, serve_planner,
@@ -25896,6 +25898,32 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
                 nullable: true,
             }]
         );
+        let encoded_plan = optimize_select_v1(
+            &encode_select("planner_stats", "observations", "value"),
+            &mut planner_connection,
+        )?;
+        let plan = decode_plan_v1(&encoded_plan)?;
+        assert_eq!(plan.relation.schema_id, schema.schema_id);
+        assert_eq!(plan.relation.schema_version, 1);
+        assert_eq!(plan.relation.relation_id, table.table_id);
+        assert_eq!(plan.relation.table_epoch, 2);
+        assert!(
+            matches!(plan.nodes.first(), Some(PlanNode::Scan { columns }) if columns == &[BoundColumn {
+                column_id: table.column_ids[0],
+                ordinal: 0,
+                scalar_type: ScalarType::Integer,
+                nullable: true,
+            }])
+        );
+        assert!(matches!(
+            optimize_select_v1(
+                &encode_select("planner_stats", "hidden_or_missing", "value"),
+                &mut planner_connection,
+            ),
+            Err(OptimizerError::Bind(MetadataBindError::Bind(
+                BindError::RelationUnavailable
+            )))
+        ));
         assert!(matches!(
             bind_select_request_via_metadata(
                 &encode_select("planner_stats", "hidden_or_missing", "value"),
