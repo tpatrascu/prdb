@@ -15,4 +15,12 @@
 - Boundary: the helper receives no principal, grant, raw catalog, or storage handle and creates no executor permission. Its only metadata source is the planner connection opened on the admitted transaction.
 - Regression: three unit tests cover stable reference binding, non-disclosing relation absence/name mismatch, and unknown-column/type-incompatible rejection. A real-redb integration regression binds an authorized user table, checks schema ID/version, table ID/epoch, column ID/shape, and confirms a missing relation maps to `RelationUnavailable`.
 - Verification: focused binder tests, the focused planner stream/metadata integration regression, locked workspace build, formatting, warning-denied Clippy, serial workspace tests, and `git diff --check` passed (132 commit integration tests passed; 3 cgroup-dependent commit tests and 1 process test ignored).
-- Remaining: define additional literal coercions/SQL NULL semantics and produce a validated logical/physical plan. Isolated optimizer process, versioned plan output, and supervisor-bound submission channel remain open.
+- Remaining: define additional literal coercions/SQL NULL semantics. Isolated optimizer process, versioned plan output, and supervisor-bound submission channel remain open.
+
+## OP-3 dependency: lower a bound SELECT to a validated plan pipeline
+
+- Implementation: [`optimizer_plan`](../../engine/src/optimizer_plan.rs) creates a linear scan/filter/project/limit plan with schema ID/version, relation ID/write epoch, and stable column references. The scan reads the unique ordinal-sorted union of projection and predicate columns; output projection order and duplicates are preserved. The plan contains no planner handle, grant, or commit operation.
+- Validation: `validate_plan_v1` checks the pipeline shape, relation identity, unique sorted scan columns, projection membership, filter references/types, and predicate depth/node/fan-in/text bounds. The SDK and executor must repeat plan validation after serialized process transfer is added.
+- Regression: five unit tests verify pipeline construction and order, scan-column union, rejection of malformed order/duplicate limits, and rejection of non-Boolean, unscanned, or over-deep filters.
+- Verification: focused optimizer plan tests passed. Locked workspace build, format, warning-denied Clippy, serial workspace tests, and `git diff --check` passed (129 commit integration tests passed; 3 cgroup-dependent commit tests and 1 process test ignored).
+- Remaining: canonical plan encoding/decoding, executor-side independent resolution and interpretation, SDK integration, mutation plans, and optimizer process/channel integration.
