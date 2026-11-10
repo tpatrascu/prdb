@@ -264,9 +264,9 @@
 - Contract: key constraints use ordered, distinct nonzero column IDs and typed AdminClient PREPARE/START operations; storage remains authoritative for schema, nullability, authority, dependencies, backfill, and uniqueness.
 - Implementation: prdb-client exposes unique-create and primary-key-create with --table-id and --columns, and matching drop commands with --constraint-id. Creation reports generated constraint and backing-index IDs.
 - Red evidence: the first real-process run after column addition failed with `Commit(InvalidCatalog)`; the generated backing index had conflated its fixed format version with the table's schema version.
-- Regression: CLI parser coverage accepts ordered IDs and rejects empty, duplicate, and zero IDs. The real gateway/supervisor ADMIN lifecycle creates and drops a unique constraint after adding a column.
-- Verification: focused parser and process tests passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied workspace Clippy, and `cargo test --workspace --locked` passed under Rust/Cargo 1.95.0; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
-- Remaining: CHECK/FK constraint CLI, privilege and policy CLI, broader multi-process ADMIN DDL coverage, and confined artifact execution remain open.
+- Regression: CLI parser coverage accepts ordered IDs and rejects empty, duplicate, and zero IDs. The real gateway/supervisor ADMIN lifecycle now invokes `unique-create`, `unique-drop`, `primary-key-create`, and `primary-key-drop` through `prdb-client`; the primary-key flow first makes the column non-null and restores nullability after dropping the key. Typed AdminClient coverage continues to exercise constraint dependencies and backfill validation.
+- Verification: `cargo test --locked --test metadata_process authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_processes -- --exact --nocapture` passed (1 test). `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets --locked -- -D warnings` passed in the configured Nix shell.
+- Remaining: broaden process-level CLI coverage for other DDL families and complete remaining SDK packaging/release gates.
 
 ## SDK-5: system privilege grant/revoke CLI — implemented
 

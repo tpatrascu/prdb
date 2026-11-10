@@ -928,6 +928,99 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
         .drop_unique_constraint(unique_constraint.constraint_id)
         .map_err(|error| format!("process ADMIN drop_unique_constraint failed: {error}"))?;
     assert!(dropped_unique.commit_sequence > unique_constraint.commit_sequence);
+    let constraint_cli_address = address.to_string();
+    let constraint_cli_credentials = admin_cancel_credentials_path
+        .to_str()
+        .ok_or("credential path is not UTF-8")?;
+    let constraint_cli_table_id = encode_id_hex(&created_table.table_id);
+    let constraint_cli_column_ids = encode_id_hex(&created_table.column_ids[0]);
+    let create_unique_cli = Command::new(env!("CARGO_BIN_EXE_prdb-client"))
+        .args([
+            "unique-create",
+            "--address",
+            &constraint_cli_address,
+            "--credentials",
+            constraint_cli_credentials,
+            "--table-id",
+            &constraint_cli_table_id,
+            "--columns",
+            &constraint_cli_column_ids,
+        ])
+        .output()?;
+    assert!(
+        create_unique_cli.status.success(),
+        "unique-create CLI failed: {}",
+        String::from_utf8_lossy(&create_unique_cli.stderr)
+    );
+    let unique_cli_output = String::from_utf8_lossy(&create_unique_cli.stdout);
+    assert!(unique_cli_output.contains("created unique constraint "));
+    let unique_cli_id = unique_cli_output
+        .split_whitespace()
+        .nth(3)
+        .ok_or("unique-create output omitted the generated ID")?;
+    let drop_unique_cli = Command::new(env!("CARGO_BIN_EXE_prdb-client"))
+        .args([
+            "unique-drop",
+            "--address",
+            &constraint_cli_address,
+            "--credentials",
+            constraint_cli_credentials,
+            "--constraint-id",
+            unique_cli_id,
+        ])
+        .output()?;
+    assert!(
+        drop_unique_cli.status.success(),
+        "unique-drop CLI failed: {}",
+        String::from_utf8_lossy(&drop_unique_cli.stderr)
+    );
+    assert!(String::from_utf8_lossy(&drop_unique_cli.stdout).contains("dropped key constraint"));
+
+    admin.alter_column_nullability(created_table.table_id, created_table.column_ids[0], false)?;
+    let create_primary_key_cli = Command::new(env!("CARGO_BIN_EXE_prdb-client"))
+        .args([
+            "primary-key-create",
+            "--address",
+            &constraint_cli_address,
+            "--credentials",
+            constraint_cli_credentials,
+            "--table-id",
+            &constraint_cli_table_id,
+            "--columns",
+            &constraint_cli_column_ids,
+        ])
+        .output()?;
+    assert!(
+        create_primary_key_cli.status.success(),
+        "primary-key-create CLI failed: {}",
+        String::from_utf8_lossy(&create_primary_key_cli.stderr)
+    );
+    let primary_key_cli_output = String::from_utf8_lossy(&create_primary_key_cli.stdout);
+    assert!(primary_key_cli_output.contains("created primary-key constraint "));
+    let primary_key_cli_id = primary_key_cli_output
+        .split_whitespace()
+        .nth(3)
+        .ok_or("primary-key-create output omitted the generated ID")?;
+    let drop_primary_key_cli = Command::new(env!("CARGO_BIN_EXE_prdb-client"))
+        .args([
+            "primary-key-drop",
+            "--address",
+            &constraint_cli_address,
+            "--credentials",
+            constraint_cli_credentials,
+            "--constraint-id",
+            primary_key_cli_id,
+        ])
+        .output()?;
+    assert!(
+        drop_primary_key_cli.status.success(),
+        "primary-key-drop CLI failed: {}",
+        String::from_utf8_lossy(&drop_primary_key_cli.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&drop_primary_key_cli.stdout).contains("dropped key constraint")
+    );
+    admin.alter_column_nullability(created_table.table_id, created_table.column_ids[0], true)?;
     let check_constraint = admin.create_check_constraint(
         created_table.table_id,
         &prdb_engine::authorization::Expr::Literal(Some(prdb_engine::tuple::ScalarValue::Boolean(
