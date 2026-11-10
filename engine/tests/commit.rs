@@ -8370,12 +8370,15 @@ fn storage_manager_creates_and_drops_check_constraint() -> Result<(), Box<dyn st
             );
             assert!(row(&database, &table_row_key(id(82), insert_row_id))?.is_none());
             assert_eq!(commit_sequence(&database)?, before_race + 1);
+            let drop_invocation_id = id(0xd5);
+            let mut drop_audit = identity_audit_event(0xd6, actor, created_check.constraint_id);
+            drop_audit.correlation_id = drop_invocation_id;
             storage.drop_check_constraint(
-                id(0xd5),
+                drop_invocation_id,
                 actor,
                 created_check.constraint_id,
                 9_999,
-                identity_audit_event(0xd6, actor, created_check.constraint_id),
+                drop_audit,
             )?;
         }
         (insert_result, check_result) => panic!(

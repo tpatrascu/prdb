@@ -2132,3 +2132,10 @@
 - Implementation: no production change was needed; token verifier guards and the serialized redb commit boundary preserve the allowed outcomes.
 - Verification: the focused race passed in twenty fresh processes; `cargo fmt --all -- --check`, warning-denied workspace Clippy, and the serial commit integration target passed under Rust/Cargo 1.95.0. The commit target reported 127 passed and 3 delegated-cgroup tests ignored.
 - Remaining: repeated race coverage for other authority-changing DDL routes and broader concurrent schedules remains open.
+
+## SM-5 test-fixture correction: CHECK DDL race cleanup audit correlation — fixed
+
+- Red evidence: parallel `cargo test --workspace --locked` and default-parallel `cargo test --test commit` runs intermittently failed in `storage_manager_creates_and_drops_check_constraint` with `InvalidAudit`; the test passed alone and serially.
+- Cause: when the staged INSERT won the barrier race, cleanup used drop invocation ID `0xd5` with an audit event whose helper-default correlation ID was `0xd7`. The drop API correctly rejected the mismatched event.
+- Fix: the race-winning cleanup branch now sets the audit correlation ID to the actual drop invocation ID before calling `drop_check_constraint`.
+- Verification: default-parallel `cargo test --locked --test commit` passed (129 passed, 3 cgroup-dependent ignored), followed by `cargo test --workspace --locked`, which passed across all targets. Rust formatting passed; warning-denied workspace Clippy is recorded with this fix's handoff.
