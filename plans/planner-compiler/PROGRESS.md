@@ -72,6 +72,14 @@
 - Verification: targeted fixture and full maintained TinyCC SDK suite passed. Rust 1.95 locked workspace build, format check, warning-denied Clippy, and serial workspace tests passed (82 library tests and 129 commit tests passed; 3 cgroup-dependent commit tests and 1 cgroup-dependent process test were ignored). Generated ABI consistency and `git diff --check` passed.
 - Remaining: decode/type-check filter predicates, independently resolve plan IDs through executor storage, and interpret validated nodes through SDK calls.
 
+## OP-3 dependency: validate bounded filter plans in the C SDK — implemented
+
+- Behavior: `prdb_sdk_optimizer_decode_plan_with_filter_v1` accepts the full canonical plan v1 pipeline and returns a borrowed raw prefix predicate view alongside the decoded scan/project records.
+- Boundary: the decoder validates predicate tags and operators, UTF-8/text limits, column IDs against the scan shape, comparison operand compatibility, Boolean fan-in and NOT operands, depth 32/node 256 bounds, and a Boolean root. The existing basic decoder keeps its stable output record and returns `UNSUPPORTED` for filtered plans; callers use the new explicit filter-view entry point.
+- Regression: TinyCC fixtures cover a valid nested AND/NOT comparison, invalid root type, incompatible comparison operands, invalid UTF-8, filter absence, and output capacity errors.
+- Verification: targeted fixture and full maintained TinyCC SDK suite passed. Rust 1.95 locked workspace build, format check, warning-denied Clippy, and serial workspace tests passed (82 library tests and 129 commit tests passed; 3 cgroup-dependent commit tests and 1 cgroup-dependent process test were ignored). Generated ABI consistency and `git diff --check` passed.
+- Remaining: independently resolve plan IDs through executor storage, interpret validated nodes through SDK calls, and connect the plan decoder to optimizer submission results.
+
 ## OP-3 dependency: expose stable authorized plan relation metadata
 
 - Behavior: the optimizer can resolve exact qualified names to a pinned schema/table identity and declared column shape without receiving a storage handle or executor capability.

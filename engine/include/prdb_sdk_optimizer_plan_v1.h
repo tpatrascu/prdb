@@ -43,12 +43,30 @@ typedef struct prdb_sdk_optimizer_plan_v1 {
     uint32_t limit;
 } prdb_sdk_optimizer_plan_v1;
 
+/* A validated filter subtree borrows its canonical prefix bytes from the
+ * plan payload. It is absent when the plan has no Filter node. */
+typedef struct prdb_sdk_optimizer_filter_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint32_t present;
+    const uint8_t *prefix;
+    uint32_t prefix_len;
+} prdb_sdk_optimizer_filter_v1;
+
 /* Independently decodes the canonical plan v1 payload for the initial
- * Scan -> Project -> optional Limit subset. Filter plans return UNSUPPORTED
- * until their predicate tree is independently decoded and type checked.
- * Names borrow payload; the output record must not overlap it. */
+ * Scan -> Project -> optional Limit subset. Filter plans return UNSUPPORTED;
+ * use decode_plan_with_filter_v1 for the complete pipeline. Names borrow the
+ * payload; the output record must not overlap it. */
 int32_t prdb_sdk_optimizer_decode_plan_v1(
     const uint8_t *payload, uint64_t payload_len,
     prdb_sdk_optimizer_plan_v1 *out, uint32_t out_capacity);
+
+/* Decode all plan-v1 pipelines, independently validating a Filter node's
+ * bounded prefix tree, scanned column references, scalar compatibility, and
+ * Boolean root. `filter_out` is written only after the whole plan succeeds. */
+int32_t prdb_sdk_optimizer_decode_plan_with_filter_v1(
+    const uint8_t *payload, uint64_t payload_len,
+    prdb_sdk_optimizer_plan_v1 *out, uint32_t out_capacity,
+    prdb_sdk_optimizer_filter_v1 *filter_out, uint32_t filter_out_capacity);
 
 #endif /* PRDB_SDK_OPTIMIZER_PLAN_V1_H */

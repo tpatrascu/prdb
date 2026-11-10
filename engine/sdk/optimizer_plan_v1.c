@@ -142,15 +142,169 @@ static int read_column(plan_reader *reader,
     return 1;
 }
 
+typedef struct predicate_type {
+    uint8_t is_null;
+    uint8_t type_code;
+    uint8_t parameters[4];
+} predicate_type;
+
+static int valid_utf8(const uint8_t *bytes, uint32_t length) {
+    uint32_t offset = 0;
+    while (offset < length) {
+        uint8_t first = bytes[offset++];
+        uint32_t codepoint;
+        uint32_t continuation_count;
+        uint32_t minimum;
+        uint32_t index;
+        if (first <= 0x7f) continue;
+        if (first >= 0xc2 && first <= 0xdf) {
+            codepoint = first & 0x1f;
+            continuation_count = 1;
+            minimum = 0x80;
+        } else if (first >= 0xe0 && first <= 0xef) {
+            codepoint = first & 0x0f;
+            continuation_count = 2;
+            minimum = 0x800;
+        } else if (first >= 0xf0 && first <= 0xf4) {
+            codepoint = first & 0x07;
+            continuation_count = 3;
+            minimum = 0x10000;
+        } else {
+            return 0;
+        }
+        if (continuation_count > length - offset) return 0;
+        for (index = 0; index < continuation_count; ++index) {
+            uint8_t next = bytes[offset++];
+            if ((next & 0xc0) != 0x80) return 0;
+            codepoint = (codepoint << 6) | (next & 0x3f);
+        }
+        if (codepoint < minimum || codepoint > 0x10ffff ||
+            (codepoint >= 0xd800 && codepoint <= 0xdfff)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int same_type(const predicate_type *left, const predicate_type *right) {
+    return left->is_null || right->is_null ||
+           (left->type_code == right->type_code &&
+            memcmp(left->parameters, right->parameters, 4) == 0);
+}
+
+static int predicate_boolean(const predicate_type *type) {
+    return !type->is_null && type->type_code == 1 &&
+           all_zero(type->parameters, 4);
+}
+
+static int decode_predicate(plan_reader *reader,
+                            const prdb_sdk_optimizer_plan_column_v1 *columns,
+                            uint32_t column_count, uint32_t depth,
+                            uint32_t *nodes, predicate_type *type_out) {
+    uint8_t tag;
+    const uint8_t *bytes;
+    predicate_type type = {0};
+    if (depth > 32 || ++*nodes > 256 || !read_u8(reader, &tag)) return 0;
+    switch (tag) {
+        case 0x00:
+            type.is_null = 1;
+            break;
+        case 0x01:
+            if (!read_u8(reader, &tag) || tag > 1) return 0;
+            type.type_code = 1;
+            break;
+        case 0x02:
+            if (!take(reader, 8, &bytes)) return 0;
+            type.type_code = 3;
+            break;
+        case 0x03: {
+            uint16_t text_len;
+            if (!read_u16(reader, &text_len) || text_len > 4096 ||
+                !take(reader, text_len, &bytes) ||
+                !valid_utf8(bytes, text_len)) {
+                return 0;
+            }
+            type.type_code = 6;
+            break;
+        }
+        case 0x10: {
+            uint32_t index;
+            int found = 0;
+            if (!take(reader, 16, &bytes)) return 0;
+            for (index = 0; index < column_count; ++index) {
+                if (memcmp(bytes, columns[index].column_id, 16) == 0) {
+                    type.type_code = columns[index].type_code;
+                    memcpy(type.parameters,
+                           columns[index].type_parameters, 4);
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found) return 0;
+            break;
+        }
+        case 0x20: {
+            uint8_t comparison;
+            predicate_type left;
+            predicate_type right;
+            if (!read_u8(reader, &comparison) || comparison > 5 ||
+                !decode_predicate(reader, columns, column_count, depth + 1,
+                                  nodes, &left) ||
+                !decode_predicate(reader, columns, column_count, depth + 1,
+                                  nodes, &right) ||
+                !same_type(&left, &right)) {
+                return 0;
+            }
+            type.type_code = 1;
+            break;
+        }
+        case 0x30: case 0x31: {
+            uint8_t child_count;
+            uint32_t index;
+            if (!read_u8(reader, &child_count) || child_count < 2 ||
+                child_count > 16) {
+                return 0;
+            }
+            for (index = 0; index < child_count; ++index) {
+                predicate_type child;
+                if (!decode_predicate(reader, columns, column_count,
+                                      depth + 1, nodes, &child) ||
+                    !predicate_boolean(&child)) {
+                    return 0;
+                }
+            }
+            type.type_code = 1;
+            break;
+        }
+        case 0x32: {
+            predicate_type child;
+            if (!decode_predicate(reader, columns, column_count, depth + 1,
+                                  nodes, &child) ||
+                !predicate_boolean(&child)) {
+                return 0;
+            }
+            type.type_code = 1;
+            break;
+        }
+        default:
+            return 0;
+    }
+    *type_out = type;
+    return 1;
+}
+
 static int columns_equal(const prdb_sdk_optimizer_plan_column_v1 *left,
                          const prdb_sdk_optimizer_plan_column_v1 *right) {
     return memcmp(left, right, sizeof(*left)) == 0;
 }
 
-int32_t prdb_sdk_optimizer_decode_plan_v1(
+static int32_t decode_plan_internal(
     const uint8_t *payload, uint64_t payload_len,
-    prdb_sdk_optimizer_plan_v1 *out, uint32_t out_capacity) {
+    prdb_sdk_optimizer_plan_v1 *out, uint32_t out_capacity,
+    prdb_sdk_optimizer_filter_v1 *filter_out,
+    uint32_t filter_out_capacity, int allow_filter) {
     prdb_sdk_optimizer_plan_v1 decoded;
+    prdb_sdk_optimizer_filter_v1 decoded_filter = {0};
     plan_reader reader;
     uint16_t version;
     uint8_t kind;
@@ -162,9 +316,19 @@ int32_t prdb_sdk_optimizer_decode_plan_v1(
     uint32_t other;
     uint8_t has_limit = 0;
     uint32_t limit = 0;
+    uint8_t has_filter = 0;
 
     if (payload == NULL || out == NULL || out_capacity < sizeof(*out) ||
+        (allow_filter &&
+         (filter_out == NULL ||
+          filter_out_capacity < sizeof(*filter_out) ||
+          ranges_overlap(out, sizeof(*out), filter_out,
+                         sizeof(*filter_out)))) ||
         ranges_overlap(payload, payload_len, out, sizeof(*out))) {
+        return PRDB_SDK_OPTIMIZER_PLAN_INVALID_ARGUMENT;
+    }
+    if (allow_filter && ranges_overlap(payload, payload_len, filter_out,
+                                       sizeof(*filter_out))) {
         return PRDB_SDK_OPTIMIZER_PLAN_INVALID_ARGUMENT;
     }
     if (payload_len > PRDB_SDK_OPTIMIZER_MAX_PLAN_BYTES) {
@@ -240,7 +404,24 @@ int32_t prdb_sdk_optimizer_decode_plan_v1(
         return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
     }
     if (node_tag == 2) {
-        return PRDB_SDK_OPTIMIZER_PLAN_UNSUPPORTED;
+        uint64_t predicate_start = reader.offset;
+        uint32_t predicate_nodes = 0;
+        predicate_type predicate_type_out;
+        if (!allow_filter) return PRDB_SDK_OPTIMIZER_PLAN_UNSUPPORTED;
+        if (!decode_predicate(&reader, decoded.scan_columns,
+                              decoded.scan_column_count, 1, &predicate_nodes,
+                              &predicate_type_out) ||
+            !predicate_boolean(&predicate_type_out)) {
+            return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
+        }
+        has_filter = 1;
+        decoded_filter.present = 1;
+        decoded_filter.prefix = payload + predicate_start;
+        decoded_filter.prefix_len =
+            (uint32_t)(reader.offset - predicate_start);
+        if (!read_u8(&reader, &node_tag)) {
+            return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
+        }
     }
     if (node_tag != 3 || !read_u16(&reader, &count) || count == 0 ||
         count > PRDB_SDK_OPTIMIZER_PLAN_MAX_PROJECTIONS) {
@@ -263,14 +444,15 @@ int32_t prdb_sdk_optimizer_decode_plan_v1(
         if (!found) return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
     }
 
-    if (node_count == 3) {
+    if (node_count == (uint8_t)(3 + has_filter)) {
         if (!read_u8(&reader, &node_tag) || node_tag != 4 ||
             !read_u32(&reader, &limit)) {
             return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
         }
         has_limit = 1;
     }
-    if (node_count != (uint8_t)(2 + has_limit) || reader.offset != reader.length) {
+    if (node_count != (uint8_t)(2 + has_filter + has_limit) ||
+        reader.offset != reader.length) {
         return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
     }
     decoded.struct_size = sizeof(decoded);
@@ -278,5 +460,26 @@ int32_t prdb_sdk_optimizer_decode_plan_v1(
     decoded.has_limit = has_limit;
     decoded.limit = limit;
     *out = decoded;
+    if (allow_filter) {
+        decoded_filter.struct_size = sizeof(decoded_filter);
+        decoded_filter.abi_version = PRDB_SDK_OPTIMIZER_PLAN_ABI_V1_VERSION;
+        *filter_out = decoded_filter;
+    }
     return PRDB_SDK_OPTIMIZER_PLAN_OK;
+}
+
+int32_t prdb_sdk_optimizer_decode_plan_v1(
+    const uint8_t *payload, uint64_t payload_len,
+    prdb_sdk_optimizer_plan_v1 *out, uint32_t out_capacity) {
+    return decode_plan_internal(payload, payload_len, out, out_capacity, NULL,
+                                0, 0);
+}
+
+int32_t prdb_sdk_optimizer_decode_plan_with_filter_v1(
+    const uint8_t *payload, uint64_t payload_len,
+    prdb_sdk_optimizer_plan_v1 *out, uint32_t out_capacity,
+    prdb_sdk_optimizer_filter_v1 *filter_out,
+    uint32_t filter_out_capacity) {
+    return decode_plan_internal(payload, payload_len, out, out_capacity,
+                                filter_out, filter_out_capacity, 1);
 }
