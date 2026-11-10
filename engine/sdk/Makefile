@@ -337,7 +337,7 @@ abi-constants-check:
 	$(PYTHON) engine/tools/generate_query_abi.py --check
 
 abi-constants-test:
-	$(PYTHON) engine/tools/test_generate_query_abi.py
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) engine/tools/test_generate_query_abi.py
 
 .PHONY: abi-constants abi-constants-check abi-constants-test
 
