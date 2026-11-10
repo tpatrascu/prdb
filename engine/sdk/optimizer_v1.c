@@ -1,4 +1,5 @@
 #include "prdb_sdk_optimizer_v1.h"
+#include "prdb_query_abi_payload_codecs.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -273,10 +274,9 @@ static int32_t optimizer_encode_select_internal(
     }
 
     offset = 0;
-    write_u16(request + offset, 1);
-    offset += 2;
-    request[offset++] = 1;
-    request[offset++] = 0;
+    prdb_encode_optimizer_select_request(request,
+                                         PRDB_OPTIMIZER_SELECT_STATEMENT, 0);
+    offset = PRDB_OPTIMIZER_SELECT_REQUEST_HEADER_BYTES;
     request[offset++] = (uint8_t)schema_len;
     memcpy(request + offset, schema, schema_len);
     offset += schema_len;

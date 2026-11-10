@@ -488,6 +488,14 @@
 - Verification: generator drift/schema tests, locked workspace build, rustfmt check, warning-denied Clippy, serial workspace tests, and the complete maintained TinyCC SDK suite passed in the pinned Nix shell.
 - Remaining: migrate remaining hand-coded executor/planner/supervisor payload serializers and complete release profile and artifact gates.
 
+## TC-2: generated optimizer SELECT request prefix — implemented
+
+- Contract: [internal IPC](../../specs/ipc-protocol.md) and [toolchain](../../specs/toolchain.md). Optimizer SELECT requests begin with version, statement tag, and zero flags before variable relation, projection, predicate, and limit data.
+- Implementation: the shared schema now generates exact Rust and C prefix codecs. Rust consumes the generated decoder after preserving its unsupported-version error; the TinyCC SDK uses the generated encoder before appending the variable request tail.
+- Regression: generator tests assert both helpers; Rust optimizer parser tests cover malformed and unsupported requests, and the maintained TinyCC optimizer fixture checks SDK encoding.
+- Verification: generator drift/schema tests, locked workspace build, rustfmt check, warning-denied Clippy, serial workspace tests, and the full maintained TinyCC SDK suite passed in the pinned Nix shell.
+- Remaining: migrate remaining hand-coded executor/planner/supervisor payload serializers and complete release profile and artifact gates.
+
 ## TC-1: locked Nix development shell — implemented
 
 - Behavior: `nix develop --locked` provides the pinned x86_64-linux package set used for the engine and SDK checks. [`flake.nix`](../../flake.nix) and [`flake.lock`](../../flake.lock) pin Nixpkgs revision `718f670e845328e9c2cecdd832835712b2cbd065` with source NAR hash `sha256-Ee5BWo8sh3pGt70QUdRajnaginqFmWvrtdBc4gJzhks=`.

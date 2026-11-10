@@ -666,6 +666,34 @@ static inline int prdb_decode_optimizer_response_success(const uint8_t *payload,
     return 1;
 }
 
+static inline void prdb_encode_optimizer_select_request(uint8_t payload[4],
+    uint8_t statement, uint8_t flags) {
+    payload[0] = (uint8_t)((PRDB_OPTIMIZER_REQUEST_VERSION >> 8) & 0xffu);
+    payload[1] = (uint8_t)(PRDB_OPTIMIZER_REQUEST_VERSION & 0xffu);
+    payload[2] = statement;
+    payload[3] = flags;
+}
+
+static inline int prdb_decode_optimizer_select_request(const uint8_t *payload, size_t payload_len,
+    uint8_t *statement, uint8_t *flags) {
+    if (payload == NULL || payload_len < 4) {
+        return 0;
+    }
+    if (payload[0] != (uint8_t)((PRDB_OPTIMIZER_REQUEST_VERSION >> 8) & 0xffu) ||
+        payload[1] != (uint8_t)(PRDB_OPTIMIZER_REQUEST_VERSION & 0xffu)) {
+        return 0;
+    }
+    if (statement == NULL) {
+        return 0;
+    }
+    *statement = payload[2];
+    if (flags == NULL) {
+        return 0;
+    }
+    *flags = payload[3];
+    return 1;
+}
+
 static inline void prdb_encode_supervisor_invocation_control_request(uint8_t payload[18],
     const uint8_t invocation_id[16]) {
     payload[0] = (uint8_t)((PRDB_SUPERVISOR_PAYLOAD_VERSION >> 8) & 0xffu);

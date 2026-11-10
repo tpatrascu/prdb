@@ -1493,6 +1493,9 @@
     {
       "name": "OPTIMIZER_SELECT_REQUEST",
       "version_constant": "OPTIMIZER_REQUEST_VERSION",
+      "generate_rust_codec": true,
+      "generate_c_codec": true,
+      "codec_prefix": true,
       "fields": [
         { "name": "version", "encoding": "u16be" },
         { "name": "statement", "encoding": "u8" },

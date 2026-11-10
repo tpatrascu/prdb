@@ -457,6 +457,21 @@ pub const OPTIMIZER_SELECT_REQUEST_VERSION_OFFSET: u32 = 0;
 pub const OPTIMIZER_SELECT_REQUEST_STATEMENT_OFFSET: u32 = 2;
 pub const OPTIMIZER_SELECT_REQUEST_FLAGS_OFFSET: u32 = 3;
 pub const OPTIMIZER_SELECT_REQUEST_HEADER_BYTES: u32 = 4;
+pub fn encode_optimizer_select_request(statement: u8, flags: u8) -> [u8; 4] {
+    let mut payload = [0u8; 4];
+    payload[0..2].copy_from_slice(&OPTIMIZER_REQUEST_VERSION.to_be_bytes());
+    payload[2] = statement;
+    payload[3] = flags;
+    payload
+}
+
+pub fn decode_optimizer_select_request(payload: &[u8]) -> Option<(u8, u8)> {
+    if payload.len() < 4 || u16::from_be_bytes([payload[0], payload[1]]) != OPTIMIZER_REQUEST_VERSION {
+        return None;
+    }
+    Some((payload[2], payload[3]))
+}
+
 pub const SUPERVISOR_INVOCATION_CONTROL_REQUEST_VERSION_OFFSET: u32 = 0;
 pub const SUPERVISOR_INVOCATION_CONTROL_REQUEST_INVOCATION_ID_OFFSET: u32 = 2;
 pub const SUPERVISOR_INVOCATION_CONTROL_REQUEST_HEADER_BYTES: u32 = 18;

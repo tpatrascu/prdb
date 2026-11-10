@@ -99,6 +99,8 @@ class PayloadSchemaValidationTests(unittest.TestCase):
         self.assertIn("payload_len < 35", c_codecs)
         self.assertIn("prdb_encode_optimizer_response_success", c_codecs)
         self.assertIn("prdb_decode_optimizer_response_success", c_codecs)
+        self.assertIn("prdb_encode_optimizer_select_request", c_codecs)
+        self.assertIn("prdb_decode_optimizer_select_request", c_codecs)
         self.assertIn("prdb_encode_executor_stage_insert_request", c_codecs)
         self.assertIn("prdb_decode_executor_stage_insert_request", c_codecs)
         self.assertIn("prdb_encode_executor_stage_update_request", c_codecs)

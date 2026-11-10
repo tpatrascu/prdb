@@ -5,9 +5,9 @@
 //! bound planner service and the executor/storage path.
 
 use crate::query_abi::{
-    OPTIMIZER_REQUEST_VERSION, OPTIMIZER_SELECT_REQUEST_FLAGS_OFFSET,
-    OPTIMIZER_SELECT_REQUEST_HEADER_BYTES, OPTIMIZER_SELECT_REQUEST_STATEMENT_OFFSET,
+    OPTIMIZER_REQUEST_VERSION, OPTIMIZER_SELECT_REQUEST_HEADER_BYTES,
     OPTIMIZER_SELECT_REQUEST_VERSION_OFFSET, OPTIMIZER_SELECT_STATEMENT,
+    decode_optimizer_select_request,
 };
 
 pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
@@ -93,11 +93,12 @@ pub fn decode_select_request(bytes: &[u8]) -> Result<SelectRequest, RequestError
     if version != OPTIMIZER_REQUEST_VERSION {
         return Err(RequestError::UnsupportedVersion(version));
     }
-    let statement = bytes[OPTIMIZER_SELECT_REQUEST_STATEMENT_OFFSET as usize];
+    let (statement, flags) =
+        decode_optimizer_select_request(bytes).ok_or(RequestError::Truncated)?;
     if statement != OPTIMIZER_SELECT_STATEMENT {
         return Err(RequestError::UnsupportedStatement(statement));
     }
-    if bytes[OPTIMIZER_SELECT_REQUEST_FLAGS_OFFSET as usize] != 0 {
+    if flags != 0 {
         return Err(RequestError::InvalidValue);
     }
     let mut cursor = Cursor {
