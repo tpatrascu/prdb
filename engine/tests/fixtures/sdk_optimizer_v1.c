@@ -48,6 +48,11 @@ static prdb_host_api_v4 host_for(mock_optimizer *mock) {
 }
 
 int main(void) {
+    static const uint8_t sql[] = "SELECT name FROM items LIMIT 7;";
+    static const uint8_t schema[] = "public";
+    static const uint8_t expected_encoded[] = {
+        0, 1, 1, 0, 6, 'p', 'u', 'b', 'l', 'i', 'c', 5, 'i', 't', 'e', 'm',
+        's', 0, 1, 4, 'n', 'a', 'm', 'e', 0, 0, 0, 0, 1, 0, 0, 0, 7};
     static const uint8_t request[] = {0x11, 0x22, 0x33};
     static const uint8_t success[] = {0, 1, 0, 0, 0, 0, 3, 0xaa, 0xbb, 0xcc};
     static const uint8_t unavailable[] = {0, 1, 2};
@@ -58,6 +63,54 @@ int main(void) {
     uint8_t response[sizeof(success)] = {0};
     uint64_t response_len = 0;
     prdb_sdk_optimizer_response_v1 decoded = {0};
+    prdb_sdk_select_v2 statement = {0};
+    uint8_t encoded[128];
+    uint64_t encoded_len = 0;
+    uint32_t error_offset = 0;
+
+    assert(prdb_sdk_sql_parse_select_v2(
+               sql, sizeof(sql) - 1, &statement, sizeof(statement),
+               &error_offset) == PRDB_SDK_SQL_OK);
+    assert(prdb_sdk_optimizer_encode_select_v1(
+               &statement, schema, sizeof(schema) - 1, encoded,
+               sizeof(encoded), &encoded_len) ==
+           PRDB_SDK_OPTIMIZER_ENCODE_OK);
+    assert(encoded_len == sizeof(expected_encoded));
+    assert(memcmp(encoded, expected_encoded, sizeof(expected_encoded)) == 0);
+
+    memset(encoded, 0xa5, sizeof(encoded));
+    encoded_len = 0;
+    assert(prdb_sdk_optimizer_encode_select_v1(
+               &statement, schema, sizeof(schema) - 1, encoded, 1,
+               &encoded_len) ==
+           PRDB_SDK_OPTIMIZER_ENCODE_BUFFER_TOO_SMALL);
+    assert(encoded_len == sizeof(expected_encoded));
+    assert(encoded[0] == 0xa5);
+
+    {
+        static const uint8_t star_sql[] = "SELECT * FROM items;";
+        prdb_sdk_select_v2 star_statement = {0};
+        assert(prdb_sdk_sql_parse_select_v2(
+                   star_sql, sizeof(star_sql) - 1, &star_statement,
+                   sizeof(star_statement), &error_offset) == PRDB_SDK_SQL_OK);
+        assert(prdb_sdk_optimizer_encode_select_v1(
+                   &star_statement, schema, sizeof(schema) - 1, encoded,
+                   sizeof(encoded), &encoded_len) ==
+               PRDB_SDK_OPTIMIZER_ENCODE_UNSUPPORTED);
+    }
+    {
+        static const uint8_t predicate_sql[] =
+            "SELECT name FROM items WHERE id = $1;";
+        prdb_sdk_select_v2 predicate_statement = {0};
+        assert(prdb_sdk_sql_parse_select_v2(
+                   predicate_sql, sizeof(predicate_sql) - 1,
+                   &predicate_statement, sizeof(predicate_statement),
+                   &error_offset) == PRDB_SDK_SQL_OK);
+        assert(prdb_sdk_optimizer_encode_select_v1(
+                   &predicate_statement, schema, sizeof(schema) - 1, encoded,
+                   sizeof(encoded), &encoded_len) ==
+               PRDB_SDK_OPTIMIZER_ENCODE_UNSUPPORTED);
+    }
 
     assert(prdb_sdk_optimizer_submit_select_v1(
                &host, request, sizeof(request), response, sizeof(response),

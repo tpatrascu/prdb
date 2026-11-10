@@ -56,6 +56,14 @@
 - Verification: the full maintained TinyCC SDK suite passed, including this fixture. Workspace build, formatting, warning-denied Clippy, serial Rust tests, generated ABI check, and `git diff --check` also passed (129 commit integration tests; three cgroup-dependent tests ignored).
 - Remaining: serialize the supported SQL AST into canonical optimizer requests, independently decode/validate plans, re-resolve the relation, and route physical operators through SDK executor calls.
 
+## OP-3 dependency: encode simple SQL ASTs as optimizer requests — implemented
+
+- Behavior: the C SDK serializes an explicit-column, single-relation SQL v2 SELECT AST into canonical optimizer request v1, with a caller-supplied schema and optional LIMIT.
+- Boundary: `SELECT *` and every WHERE tree return `UNSUPPORTED`; the encoder does not silently discard either projection or predicate semantics. It checks ABI/version/AST shape, identifier and span bounds, request size, and output overlap; undersized buffers receive only the required length.
+- Regression: the TinyCC optimizer fixture parses `SELECT name FROM items LIMIT 7;`, compares the encoded bytes to the canonical request, checks undersized-buffer behavior, and verifies star and parameterized predicates are rejected.
+- Verification: the targeted fixture and full maintained TinyCC SDK suite passed. Rust 1.95 locked workspace build, format check, warning-denied Clippy, and serial workspace tests passed (82 library tests and 129 commit tests passed; 3 cgroup-dependent commit tests and 1 cgroup-dependent process test were ignored). Generated ABI consistency and `git diff --check` passed.
+- Remaining: independently decode and validate plans in the executor, re-resolve plan relation identities through executor storage, and execute supported plan operators.
+
 ## OP-3 dependency: expose stable authorized plan relation metadata
 
 - Behavior: the optimizer can resolve exact qualified names to a pinned schema/table identity and declared column shape without receiving a storage handle or executor capability.
