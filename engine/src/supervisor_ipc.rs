@@ -1601,24 +1601,15 @@ pub fn dispatch_supervisor_request(
 }
 
 fn valid_terminal_request(operation: Operation, payload: &[u8]) -> bool {
-    let (header_bytes, version_offset) = match operation {
-        Operation::FinalizeTransaction => (
-            generated::SUPERVISOR_FINALIZE_REQUEST_HEADER_BYTES,
-            generated::SUPERVISOR_FINALIZE_REQUEST_VERSION_OFFSET,
-        ),
-        Operation::AbortTransaction => (
-            generated::SUPERVISOR_ABORT_REQUEST_HEADER_BYTES,
-            generated::SUPERVISOR_ABORT_REQUEST_VERSION_OFFSET,
-        ),
-        _ => return false,
-    };
-    let version_offset = version_offset as usize;
-    header_bytes as usize == payload.len()
-        && payload
-            .get(version_offset..version_offset + 2)
-            .and_then(|bytes| bytes.try_into().ok())
-            .map(u16::from_be_bytes)
-            == Some(SUPERVISOR_PAYLOAD_VERSION)
+    match operation {
+        Operation::FinalizeTransaction => {
+            generated::decode_supervisor_finalize_request(payload).is_some()
+        }
+        Operation::AbortTransaction => {
+            generated::decode_supervisor_abort_request(payload).is_some()
+        }
+        _ => false,
+    }
 }
 
 fn encode_finalize_response(commit_sequence: u64) -> Vec<u8> {

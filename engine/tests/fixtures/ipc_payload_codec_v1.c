@@ -615,5 +615,22 @@ int main(void) {
         decoded_population_count != 1) {
         return 57;
     }
+    uint8_t finalize_request[2] = {0};
+    uint8_t abort_request[2] = {0};
+    prdb_encode_supervisor_finalize_request(finalize_request);
+    prdb_encode_supervisor_abort_request(abort_request);
+    if (finalize_request[0] != 0x00 || finalize_request[1] != 0x01 ||
+        abort_request[0] != 0x00 || abort_request[1] != 0x01 ||
+        !prdb_decode_supervisor_finalize_request(finalize_request,
+                                                  sizeof(finalize_request)) ||
+        !prdb_decode_supervisor_abort_request(abort_request,
+                                               sizeof(abort_request))) {
+        return 62;
+    }
+    finalize_request[1] = 0x02;
+    if (prdb_decode_supervisor_finalize_request(finalize_request,
+                                                 sizeof(finalize_request))) {
+        return 63;
+    }
     return 0;
 }

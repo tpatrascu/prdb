@@ -496,6 +496,14 @@
 - Verification: generator drift/schema tests, locked workspace build, rustfmt check, warning-denied Clippy, serial workspace tests, and the full maintained TinyCC SDK suite passed in the pinned Nix shell.
 - Remaining: migrate remaining hand-coded executor/planner/supervisor payload serializers and complete release profile and artifact gates.
 
+## TC-2: generated version-only supervisor terminal request codecs — implemented
+
+- Contract: [internal IPC](../../specs/ipc-protocol.md) requires finalize and abort requests to contain exactly the supervisor payload version.
+- Implementation: the generator now supports fixed codecs with no non-version fields, producing Rust `Option<()>` decoders and C validation helpers. Supervisor dispatch uses the generated Rust decoders for both operations.
+- Regression: generator tests assert both C helpers; the C wire fixture checks exact v1 bytes, round trips, and unsupported-version rejection. Rust malformed-request coverage still checks truncation, version, and trailing bytes.
+- Verification: generator drift/schema tests, locked workspace build, rustfmt check, warning-denied Clippy, serial workspace tests, and the full maintained TinyCC SDK suite passed in the pinned Nix shell.
+- Remaining: migrate remaining hand-coded executor/planner/supervisor payload serializers and complete release profile and artifact gates.
+
 ## TC-1: locked Nix development shell — implemented
 
 - Behavior: `nix develop --locked` provides the pinned x86_64-linux package set used for the engine and SDK checks. [`flake.nix`](../../flake.nix) and [`flake.lock`](../../flake.lock) pin Nixpkgs revision `718f670e845328e9c2cecdd832835712b2cbd065` with source NAR hash `sha256-Ee5BWo8sh3pGt70QUdRajnaginqFmWvrtdBc4gJzhks=`.

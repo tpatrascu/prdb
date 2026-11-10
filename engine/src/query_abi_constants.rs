@@ -682,5 +682,30 @@ pub fn decode_supervisor_abort_response(payload: &[u8]) -> Option<u8> {
 
 pub const SUPERVISOR_FINALIZE_REQUEST_VERSION_OFFSET: u32 = 0;
 pub const SUPERVISOR_FINALIZE_REQUEST_HEADER_BYTES: u32 = 2;
+pub fn encode_supervisor_finalize_request() -> [u8; 2] {
+    let mut payload = [0u8; 2];
+    payload[0..2].copy_from_slice(&SUPERVISOR_PAYLOAD_VERSION.to_be_bytes());
+    payload
+}
+
+pub fn decode_supervisor_finalize_request(payload: &[u8]) -> Option<()> {
+    if payload.len() != 2 || u16::from_be_bytes([payload[0], payload[1]]) != SUPERVISOR_PAYLOAD_VERSION {
+        return None;
+    }
+    Some(())
+}
+
 pub const SUPERVISOR_ABORT_REQUEST_VERSION_OFFSET: u32 = 0;
 pub const SUPERVISOR_ABORT_REQUEST_HEADER_BYTES: u32 = 2;
+pub fn encode_supervisor_abort_request() -> [u8; 2] {
+    let mut payload = [0u8; 2];
+    payload[0..2].copy_from_slice(&SUPERVISOR_PAYLOAD_VERSION.to_be_bytes());
+    payload
+}
+
+pub fn decode_supervisor_abort_request(payload: &[u8]) -> Option<()> {
+    if payload.len() != 2 || u16::from_be_bytes([payload[0], payload[1]]) != SUPERVISOR_PAYLOAD_VERSION {
+        return None;
+    }
+    Some(())
+}

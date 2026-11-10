@@ -1133,4 +1133,36 @@ static inline int prdb_decode_supervisor_abort_response(const uint8_t *payload, 
     return 1;
 }
 
+static inline void prdb_encode_supervisor_finalize_request(uint8_t payload[2]) {
+    payload[0] = (uint8_t)((PRDB_SUPERVISOR_PAYLOAD_VERSION >> 8) & 0xffu);
+    payload[1] = (uint8_t)(PRDB_SUPERVISOR_PAYLOAD_VERSION & 0xffu);
+}
+
+static inline int prdb_decode_supervisor_finalize_request(const uint8_t *payload, size_t payload_len) {
+    if (payload == NULL || payload_len != 2) {
+        return 0;
+    }
+    if (payload[0] != (uint8_t)((PRDB_SUPERVISOR_PAYLOAD_VERSION >> 8) & 0xffu) ||
+        payload[1] != (uint8_t)(PRDB_SUPERVISOR_PAYLOAD_VERSION & 0xffu)) {
+        return 0;
+    }
+    return 1;
+}
+
+static inline void prdb_encode_supervisor_abort_request(uint8_t payload[2]) {
+    payload[0] = (uint8_t)((PRDB_SUPERVISOR_PAYLOAD_VERSION >> 8) & 0xffu);
+    payload[1] = (uint8_t)(PRDB_SUPERVISOR_PAYLOAD_VERSION & 0xffu);
+}
+
+static inline int prdb_decode_supervisor_abort_request(const uint8_t *payload, size_t payload_len) {
+    if (payload == NULL || payload_len != 2) {
+        return 0;
+    }
+    if (payload[0] != (uint8_t)((PRDB_SUPERVISOR_PAYLOAD_VERSION >> 8) & 0xffu) ||
+        payload[1] != (uint8_t)(PRDB_SUPERVISOR_PAYLOAD_VERSION & 0xffu)) {
+        return 0;
+    }
+    return 1;
+}
+
 #endif /* PRDB_QUERY_ABI_PAYLOAD_CODECS_H */

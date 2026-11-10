@@ -223,8 +223,6 @@ def render(schema):
             encode_name = f"encode_{name.lower()}"
             decode_name = f"decode_{name.lower()}"
             value_fields = fields[1:]
-            if not value_fields:
-                raise ValueError(f"generated Rust codec for {name} requires a value field")
             for field in fields:
                 if field["encoding"] not in rust_types:
                     raise ValueError(f"unsupported generated Rust codec field in {name}")
@@ -232,7 +230,11 @@ def render(schema):
                 f"{field['name']}: {rust_types[field['encoding']]}" for field in value_fields
             )
             result_types = ", ".join(rust_types[field["encoding"]] for field in value_fields)
-            result_type = f"({result_types})" if len(value_fields) > 1 else result_types
+            result_type = (
+                f"({result_types})"
+                if len(value_fields) != 1
+                else result_types
+            )
             rust_lines.extend(
                 [
                     f"pub fn {encode_name}({arguments}) -> [u8; {offset}] {{",
@@ -309,7 +311,7 @@ def render(schema):
                 "bytes16": "uint8_t",
             }
             value_fields = fields[1:]
-            if not value_fields or any(field["encoding"] not in c_types for field in fields):
+            if any(field["encoding"] not in c_types for field in fields):
                 raise ValueError(f"unsupported generated C codec field in {name}")
             encode_name = f"prdb_encode_{name.lower()}"
             decode_name = f"prdb_decode_{name.lower()}"
@@ -321,10 +323,10 @@ def render(schema):
                     arguments.append(f"const uint8_t {field_name}[16]")
                 else:
                     arguments.append(f"{c_types[field['encoding']]} {field_name}")
+            encode_parameters = f",\n    {', '.join(arguments)}" if arguments else ""
             c_codec_lines.extend(
                 [
-                    f"static inline void {encode_name}(uint8_t payload[{offset}],",
-                    f"    {', '.join(arguments)}) {{",
+                    f"static inline void {encode_name}(uint8_t payload[{offset}]{encode_parameters}) {{",
                 ]
             )
             for field in fields:
@@ -367,10 +369,10 @@ def render(schema):
                     output_arguments.append(f"uint8_t {field_name}[16]")
                 else:
                     output_arguments.append(f"{c_types[field['encoding']]} *{field_name}")
+            decode_parameters = f",\n    {', '.join(output_arguments)}" if output_arguments else ""
             c_codec_lines.extend(
                 [
-                    f"static inline int {decode_name}(const uint8_t *payload, size_t payload_len,",
-                    f"    {', '.join(output_arguments)}) {{",
+                    f"static inline int {decode_name}(const uint8_t *payload, size_t payload_len{decode_parameters}) {{",
                     f"    if (payload == NULL || payload_len {'<' if codec_prefix else '!='} {offset}) {{",
                     "        return 0;",
                     "    }",
@@ -586,7 +588,7 @@ def render(schema):
     for version, lines in c_record_lines.items():
         lines.extend(["#endif", ""])
     return (
-        "\n".join(rust_lines),
+        "\n".join(rust_lines).rstrip() + "\n",
         "\n".join(c_lines),
         "\n".join(c_codec_lines),
         "\n".join(rust_layout_lines),
