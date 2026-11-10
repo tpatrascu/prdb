@@ -1,4 +1,5 @@
 #include "prdb_sdk_executor_v1.h"
+#include "prdb_query_abi_payload_codecs.h"
 
 #include <string.h>
 
@@ -179,10 +180,7 @@ int32_t prdb_sdk_executor_close_cursor_v1(
     uint8_t request[PRDB_EXECUTOR_CLOSE_CURSOR_REQUEST_HEADER_BYTES];
     int32_t status;
     if (cursor == NULL || cursor[0] != 7) return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
-    write_u16(request + PRDB_EXECUTOR_CLOSE_CURSOR_REQUEST_VERSION_OFFSET,
-              PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION);
-    memcpy(request + PRDB_EXECUTOR_CLOSE_CURSOR_REQUEST_CURSOR_HANDLE_OFFSET,
-           cursor, 16);
+    prdb_encode_executor_close_cursor_request(request, cursor);
     status = invoke(host, PRDB_SDK_EXECUTOR_OP_CLOSE_CURSOR, request, sizeof(request),
                     response, response_capacity, response_len);
     if (status != PRDB_SDK_EXECUTOR_OK) return status;

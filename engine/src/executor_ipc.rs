@@ -334,26 +334,14 @@ pub struct CloseCursorRequest {
 
 impl CloseCursorRequest {
     pub fn encode(&self) -> Vec<u8> {
-        let mut payload = vec![0; generated::EXECUTOR_CLOSE_CURSOR_REQUEST_HEADER_BYTES as usize];
-        let version_offset = generated::EXECUTOR_CLOSE_CURSOR_REQUEST_VERSION_OFFSET as usize;
-        payload[version_offset..version_offset + 2]
-            .copy_from_slice(&EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes());
-        let cursor_offset = generated::EXECUTOR_CLOSE_CURSOR_REQUEST_CURSOR_HANDLE_OFFSET as usize;
-        payload[cursor_offset..cursor_offset + 16].copy_from_slice(&self.cursor.to_bytes());
-        payload
+        generated::encode_executor_close_cursor_request(self.cursor.to_bytes()).to_vec()
     }
 
     pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
-        let version_offset = generated::EXECUTOR_CLOSE_CURSOR_REQUEST_VERSION_OFFSET as usize;
-        let cursor_offset = generated::EXECUTOR_CLOSE_CURSOR_REQUEST_CURSOR_HANDLE_OFFSET as usize;
-        if payload.len() != generated::EXECUTOR_CLOSE_CURSOR_REQUEST_HEADER_BYTES as usize
-            || u16::from_be_bytes([payload[version_offset], payload[version_offset + 1]])
-                != EXECUTOR_BATCH_PAYLOAD_VERSION
-        {
-            return Err(ExecutorRequestError::InvalidPayload);
-        }
+        let cursor = generated::decode_executor_close_cursor_request(payload)
+            .ok_or(ExecutorRequestError::InvalidPayload)?;
         Ok(Self {
-            cursor: ExecutorScanCursor::from_bytes(&payload[cursor_offset..cursor_offset + 16])
+            cursor: ExecutorScanCursor::from_bytes(&cursor)
                 .ok_or(ExecutorRequestError::InvalidPayload)?,
         })
     }

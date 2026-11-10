@@ -180,6 +180,20 @@ pub fn decode_executor_cancellation_check_response(payload: &[u8]) -> Option<u8>
 pub const EXECUTOR_CLOSE_CURSOR_REQUEST_VERSION_OFFSET: u32 = 0;
 pub const EXECUTOR_CLOSE_CURSOR_REQUEST_CURSOR_HANDLE_OFFSET: u32 = 2;
 pub const EXECUTOR_CLOSE_CURSOR_REQUEST_HEADER_BYTES: u32 = 18;
+pub fn encode_executor_close_cursor_request(cursor_handle: [u8; 16]) -> [u8; 18] {
+    let mut payload = [0u8; 18];
+    payload[0..2].copy_from_slice(&EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes());
+    payload[2..18].copy_from_slice(&cursor_handle);
+    payload
+}
+
+pub fn decode_executor_close_cursor_request(payload: &[u8]) -> Option<[u8; 16]> {
+    if payload.len() != 18 || u16::from_be_bytes([payload[0], payload[1]]) != EXECUTOR_BATCH_PAYLOAD_VERSION {
+        return None;
+    }
+    payload[2..18].try_into().ok()
+}
+
 pub const EXECUTOR_NEXT_BATCH_REQUEST_VERSION_OFFSET: u32 = 0;
 pub const EXECUTOR_NEXT_BATCH_REQUEST_CURSOR_HANDLE_OFFSET: u32 = 2;
 pub const EXECUTOR_NEXT_BATCH_REQUEST_MAX_SCANNED_OFFSET: u32 = 18;
