@@ -118,5 +118,46 @@ int main(void) {
                &binding, sizeof(binding)) ==
            PRDB_SDK_SQL_BIND_INVALID_STATEMENT);
     assert(memcmp(&binding, &previous, sizeof(binding)) == 0);
+
+    {
+        static const uint32_t inputs[] = {
+            PRDB_SDK_SQL_TRUTH_TRUE, PRDB_SDK_SQL_TRUTH_FALSE,
+            PRDB_SDK_SQL_TRUTH_UNKNOWN};
+        static const uint32_t and_expected[3][3] = {
+            {PRDB_SDK_SQL_TRUTH_TRUE, PRDB_SDK_SQL_TRUTH_FALSE,
+             PRDB_SDK_SQL_TRUTH_UNKNOWN},
+            {PRDB_SDK_SQL_TRUTH_FALSE, PRDB_SDK_SQL_TRUTH_FALSE,
+             PRDB_SDK_SQL_TRUTH_FALSE},
+            {PRDB_SDK_SQL_TRUTH_UNKNOWN, PRDB_SDK_SQL_TRUTH_FALSE,
+             PRDB_SDK_SQL_TRUTH_UNKNOWN}};
+        static const uint32_t or_expected[3][3] = {
+            {PRDB_SDK_SQL_TRUTH_TRUE, PRDB_SDK_SQL_TRUTH_TRUE,
+             PRDB_SDK_SQL_TRUTH_TRUE},
+            {PRDB_SDK_SQL_TRUTH_TRUE, PRDB_SDK_SQL_TRUTH_FALSE,
+             PRDB_SDK_SQL_TRUTH_UNKNOWN},
+            {PRDB_SDK_SQL_TRUTH_TRUE, PRDB_SDK_SQL_TRUTH_UNKNOWN,
+             PRDB_SDK_SQL_TRUTH_UNKNOWN}};
+        static const uint32_t not_expected[] = {
+            PRDB_SDK_SQL_TRUTH_FALSE, PRDB_SDK_SQL_TRUTH_TRUE,
+            PRDB_SDK_SQL_TRUTH_UNKNOWN};
+        for (uint32_t left = 0; left < 3; ++left) {
+            uint32_t truth = UINT32_MAX;
+            assert(prdb_sdk_sql_truth_not_v1(inputs[left], &truth) ==
+                   PRDB_SDK_SQL_EVAL_OK);
+            assert(truth == not_expected[left]);
+            for (uint32_t right = 0; right < 3; ++right) {
+                truth = UINT32_MAX;
+                assert(prdb_sdk_sql_truth_and_v1(
+                           inputs[left], inputs[right], &truth) ==
+                       PRDB_SDK_SQL_EVAL_OK);
+                assert(truth == and_expected[left][right]);
+                truth = UINT32_MAX;
+                assert(prdb_sdk_sql_truth_or_v1(
+                           inputs[left], inputs[right], &truth) ==
+                       PRDB_SDK_SQL_EVAL_OK);
+                assert(truth == or_expected[left][right]);
+            }
+        }
+    }
     return 0;
 }
