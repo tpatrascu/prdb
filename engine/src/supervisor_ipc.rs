@@ -7,7 +7,14 @@ pub use crate::query_abi::{
     SUPERVISOR_ADMIN_CANCEL_REQUEST_HEADER_BYTES,
     SUPERVISOR_ADMIN_CANCEL_REQUEST_INVOCATION_ID_OFFSET,
     SUPERVISOR_ADMIN_CANCEL_REQUEST_REASON_CODE_OFFSET,
-    SUPERVISOR_ADMIN_CANCEL_REQUEST_VERSION_OFFSET,
+    SUPERVISOR_ADMIN_CANCEL_REQUEST_VERSION_OFFSET, SUPERVISOR_CANCEL_RESULT_SIMPLE_HEADER_BYTES,
+    SUPERVISOR_CANCEL_RESULT_SIMPLE_STATUS_OFFSET, SUPERVISOR_CANCEL_RESULT_SIMPLE_VERSION_OFFSET,
+    SUPERVISOR_CANCEL_RESULT_TERMINAL_COMMIT_SEQUENCE_OFFSET,
+    SUPERVISOR_CANCEL_RESULT_TERMINAL_HEADER_BYTES,
+    SUPERVISOR_CANCEL_RESULT_TERMINAL_OUTCOME_STATUS_OFFSET,
+    SUPERVISOR_CANCEL_RESULT_TERMINAL_RETENTION_DEADLINE_OFFSET,
+    SUPERVISOR_CANCEL_RESULT_TERMINAL_STATUS_OFFSET,
+    SUPERVISOR_CANCEL_RESULT_TERMINAL_VERSION_OFFSET,
     SUPERVISOR_INVOCATION_CONTROL_REQUEST_HEADER_BYTES,
     SUPERVISOR_INVOCATION_CONTROL_REQUEST_INVOCATION_ID_OFFSET,
     SUPERVISOR_INVOCATION_CONTROL_REQUEST_VERSION_OFFSET, SUPERVISOR_PAYLOAD_VERSION,
@@ -1342,20 +1349,40 @@ fn encode_owner_cancellation_result(result: OwnerCancellationResult) -> Vec<u8> 
 }
 
 fn encode_cancellation_result(result: AdministrativeCancellationResult) -> Vec<u8> {
-    let mut payload = SUPERVISOR_PAYLOAD_VERSION.to_be_bytes().to_vec();
+    let mut payload = vec![0; SUPERVISOR_CANCEL_RESULT_SIMPLE_HEADER_BYTES as usize];
+    let simple_version_offset = SUPERVISOR_CANCEL_RESULT_SIMPLE_VERSION_OFFSET as usize;
+    payload[simple_version_offset..simple_version_offset + 2]
+        .copy_from_slice(&SUPERVISOR_PAYLOAD_VERSION.to_be_bytes());
     match result {
-        AdministrativeCancellationResult::Accepted => payload.push(0),
-        AdministrativeCancellationResult::TooLate => payload.push(1),
-        AdministrativeCancellationResult::Terminal(outcome) => {
-            payload.push(2);
-            payload.push(match outcome.status {
-                OutcomeStatus::Committed => 1,
-                OutcomeStatus::Aborted => 2,
-            });
-            payload.extend_from_slice(&outcome.commit_sequence.to_be_bytes());
-            payload.extend_from_slice(&outcome.retention_deadline_us.to_be_bytes());
+        AdministrativeCancellationResult::Accepted => {
+            payload[SUPERVISOR_CANCEL_RESULT_SIMPLE_STATUS_OFFSET as usize] = 0;
         }
-        AdministrativeCancellationResult::Unknown => payload.push(3),
+        AdministrativeCancellationResult::TooLate => {
+            payload[SUPERVISOR_CANCEL_RESULT_SIMPLE_STATUS_OFFSET as usize] = 1;
+        }
+        AdministrativeCancellationResult::Terminal(outcome) => {
+            payload = vec![0; SUPERVISOR_CANCEL_RESULT_TERMINAL_HEADER_BYTES as usize];
+            let version_offset = SUPERVISOR_CANCEL_RESULT_TERMINAL_VERSION_OFFSET as usize;
+            payload[version_offset..version_offset + 2]
+                .copy_from_slice(&SUPERVISOR_PAYLOAD_VERSION.to_be_bytes());
+            payload[SUPERVISOR_CANCEL_RESULT_TERMINAL_STATUS_OFFSET as usize] = 2;
+            payload[SUPERVISOR_CANCEL_RESULT_TERMINAL_OUTCOME_STATUS_OFFSET as usize] =
+                match outcome.status {
+                    OutcomeStatus::Committed => 1,
+                    OutcomeStatus::Aborted => 2,
+                };
+            let sequence_offset = SUPERVISOR_CANCEL_RESULT_TERMINAL_COMMIT_SEQUENCE_OFFSET as usize;
+            payload[sequence_offset..sequence_offset + 8]
+                .copy_from_slice(&outcome.commit_sequence.to_be_bytes());
+            let deadline_offset =
+                SUPERVISOR_CANCEL_RESULT_TERMINAL_RETENTION_DEADLINE_OFFSET as usize;
+            payload[deadline_offset..deadline_offset + 8]
+                .copy_from_slice(&outcome.retention_deadline_us.to_be_bytes());
+            return payload;
+        }
+        AdministrativeCancellationResult::Unknown => {
+            payload[SUPERVISOR_CANCEL_RESULT_SIMPLE_STATUS_OFFSET as usize] = 3;
+        }
     }
     payload
 }

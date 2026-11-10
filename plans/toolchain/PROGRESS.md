@@ -1,5 +1,13 @@
 # Toolchain Progress
 
+## TC-2: generated supervisor cancellation result variants — implemented
+
+- Contract: cancellation returns a short accepted/too-late/unknown status or a terminal result with outcome status, commit sequence, and retention deadline.
+- Implementation: the shared schema declares simple and terminal response layouts. The supervisor encoder writes both variants using generated header sizes and field offsets.
+- Regression: client status/cancel and authenticated multi-process ADMIN lifecycle tests pass for the result path.
+- Verification: generator drift, focused IPC/process regressions, workspace build/format/warning-denied Clippy/serial tests, and TinyCC SDK suite passed.
+- Remaining: generate layouts/codecs for remaining supervisor result and event payloads.
+
 ## TC-2: generated supervisor control request layouts — implemented
 
 - Contract: invocation status/cancel payloads bind authority to the provisioned channel; status/client cancel carry version plus invocation ID, while administrative cancel also carries the reason code.
