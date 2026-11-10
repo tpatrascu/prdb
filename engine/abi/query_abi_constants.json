@@ -1522,6 +1522,25 @@
         { "name": "retention_deadline", "encoding": "i64be" }
       ],
       "trailing_fields": []
+    },
+    {
+      "name": "SUPERVISOR_FINALIZE_RESPONSE",
+      "version_constant": "SUPERVISOR_PAYLOAD_VERSION",
+      "fields": [
+        { "name": "version", "encoding": "u16be" },
+        { "name": "status", "encoding": "u8" },
+        { "name": "commit_sequence", "encoding": "u64be" }
+      ],
+      "trailing_fields": []
+    },
+    {
+      "name": "SUPERVISOR_ABORT_RESPONSE",
+      "version_constant": "SUPERVISOR_PAYLOAD_VERSION",
+      "fields": [
+        { "name": "version", "encoding": "u16be" },
+        { "name": "status", "encoding": "u8" }
+      ],
+      "trailing_fields": []
     }
   ]
 }

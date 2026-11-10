@@ -1,5 +1,12 @@
 # Toolchain Progress
 
+## TC-2: generated supervisor terminal decision response layouts — implemented
+
+- Contract: finalize returns version, status 0, and commit sequence; abort returns version and status 0.
+- Implementation: schema layouts and generated-offset encoders cover both acknowledgements; independent exact-byte tests are added.
+- Verification: exact-byte fixtures, generator drift, locked workspace build/format/warning-denied Clippy/serial tests, and full maintained TinyCC SDK suite pass. Commit tests report 129 passed; three cgroup-dependent tests remain ignored.
+- Remaining: generate layouts/codecs for remaining supervisor event payloads and other internal IPC payloads.
+
 ## TC-2: generated supervisor status response variants — implemented
 
 - Contract: supervisor status returns unknown, active/committing with optional deadline, or terminal status with observation time, commit sequence, and retention deadline.

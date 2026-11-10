@@ -1511,7 +1511,7 @@ fn encode_active_status(
 
 #[cfg(test)]
 mod status_wire_tests {
-    use super::encode_supervisor_status;
+    use super::{encode_abort_response, encode_finalize_response, encode_supervisor_status};
     use crate::outcome::{InvocationOutcome, OutcomeStatus};
     use crate::storage_manager::{
         InvocationStatus, InvocationStatusConsistency, InvocationStatusSnapshot,
@@ -1577,6 +1577,15 @@ mod status_wire_tests {
             ]
         );
     }
+
+    #[test]
+    fn supervisor_terminal_responses_match_wire_bytes() {
+        assert_eq!(encode_abort_response(), [0, 1, 0]);
+        assert_eq!(
+            encode_finalize_response(0x0102_0304_0506_0708),
+            [0, 1, 0, 1, 2, 3, 4, 5, 6, 7, 8]
+        );
+    }
 }
 
 #[derive(Debug)]
@@ -1622,22 +1631,13 @@ pub fn dispatch_supervisor_request(
         .ok_or(SupervisorRequestError::InvalidPayload)?;
     let (payload, transaction_error) = match operation {
         Operation::FinalizeTransaction => match transaction.commit() {
-            Ok(sequence) => {
-                let mut payload = SUPERVISOR_PAYLOAD_VERSION.to_be_bytes().to_vec();
-                payload.push(0);
-                payload.extend_from_slice(&sequence.to_be_bytes());
-                (payload, None)
-            }
+            Ok(sequence) => (encode_finalize_response(sequence), None),
             Err(error) => (Vec::new(), Some(error)),
         },
         Operation::AbortTransaction => {
             let mut transaction = transaction;
             match transaction.abort() {
-                Ok(()) => {
-                    let mut payload = SUPERVISOR_PAYLOAD_VERSION.to_be_bytes().to_vec();
-                    payload.push(0);
-                    (payload, None)
-                }
+                Ok(()) => (encode_abort_response(), None),
                 Err(error) => (Vec::new(), Some(error)),
             }
         }
@@ -1655,6 +1655,24 @@ pub fn dispatch_supervisor_request(
         request_id: request.request_id,
         payload,
     })
+}
+
+fn encode_finalize_response(commit_sequence: u64) -> Vec<u8> {
+    let mut payload = vec![0; generated::SUPERVISOR_FINALIZE_RESPONSE_HEADER_BYTES as usize];
+    let version = generated::SUPERVISOR_FINALIZE_RESPONSE_VERSION_OFFSET as usize;
+    payload[version..version + 2].copy_from_slice(&SUPERVISOR_PAYLOAD_VERSION.to_be_bytes());
+    payload[generated::SUPERVISOR_FINALIZE_RESPONSE_STATUS_OFFSET as usize] = 0;
+    let sequence = generated::SUPERVISOR_FINALIZE_RESPONSE_COMMIT_SEQUENCE_OFFSET as usize;
+    payload[sequence..sequence + 8].copy_from_slice(&commit_sequence.to_be_bytes());
+    payload
+}
+
+fn encode_abort_response() -> Vec<u8> {
+    let mut payload = vec![0; generated::SUPERVISOR_ABORT_RESPONSE_HEADER_BYTES as usize];
+    let version = generated::SUPERVISOR_ABORT_RESPONSE_VERSION_OFFSET as usize;
+    payload[version..version + 2].copy_from_slice(&SUPERVISOR_PAYLOAD_VERSION.to_be_bytes());
+    payload[generated::SUPERVISOR_ABORT_RESPONSE_STATUS_OFFSET as usize] = 0;
+    payload
 }
 
 /// Serve a trusted supervisor's single invocation channel. Losing the
