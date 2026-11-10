@@ -1511,7 +1511,10 @@ fn encode_active_status(
 
 #[cfg(test)]
 mod status_wire_tests {
-    use super::{encode_abort_response, encode_finalize_response, encode_supervisor_status};
+    use super::{
+        encode_abort_response, encode_finalize_response, encode_supervisor_status,
+        valid_terminal_request,
+    };
     use crate::outcome::{InvocationOutcome, OutcomeStatus};
     use crate::storage_manager::{
         InvocationStatus, InvocationStatusConsistency, InvocationStatusSnapshot,
@@ -1586,6 +1589,28 @@ mod status_wire_tests {
             [0, 1, 0, 1, 2, 3, 4, 5, 6, 7, 8]
         );
     }
+
+    #[test]
+    fn supervisor_terminal_requests_require_exact_versioned_headers() {
+        assert!(valid_terminal_request(
+            crate::ipc::Operation::FinalizeTransaction,
+            &[0, 1]
+        ));
+        assert!(valid_terminal_request(
+            crate::ipc::Operation::AbortTransaction,
+            &[0, 1]
+        ));
+        for payload in [&[][..], &[0, 2][..], &[0, 1, 0][..]] {
+            assert!(!valid_terminal_request(
+                crate::ipc::Operation::FinalizeTransaction,
+                payload
+            ));
+            assert!(!valid_terminal_request(
+                crate::ipc::Operation::AbortTransaction,
+                payload
+            ));
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1620,10 +1645,7 @@ pub fn dispatch_supervisor_request(
             DispatchError::OperationNotAllowed { role, operation },
         ));
     }
-    if request.payload.len() != 2
-        || u16::from_be_bytes([request.payload[0], request.payload[1]])
-            != SUPERVISOR_PAYLOAD_VERSION
-    {
+    if !valid_terminal_request(operation, &request.payload) {
         return Err(SupervisorRequestError::InvalidPayload);
     }
     let transaction = invocation
@@ -1655,6 +1677,27 @@ pub fn dispatch_supervisor_request(
         request_id: request.request_id,
         payload,
     })
+}
+
+fn valid_terminal_request(operation: Operation, payload: &[u8]) -> bool {
+    let (header_bytes, version_offset) = match operation {
+        Operation::FinalizeTransaction => (
+            generated::SUPERVISOR_FINALIZE_REQUEST_HEADER_BYTES,
+            generated::SUPERVISOR_FINALIZE_REQUEST_VERSION_OFFSET,
+        ),
+        Operation::AbortTransaction => (
+            generated::SUPERVISOR_ABORT_REQUEST_HEADER_BYTES,
+            generated::SUPERVISOR_ABORT_REQUEST_VERSION_OFFSET,
+        ),
+        _ => return false,
+    };
+    let version_offset = version_offset as usize;
+    header_bytes as usize == payload.len()
+        && payload
+            .get(version_offset..version_offset + 2)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u16::from_be_bytes)
+            == Some(SUPERVISOR_PAYLOAD_VERSION)
 }
 
 fn encode_finalize_response(commit_sequence: u64) -> Vec<u8> {

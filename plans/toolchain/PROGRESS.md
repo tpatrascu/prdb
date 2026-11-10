@@ -1,5 +1,13 @@
 # Toolchain Progress
 
+## TC-2: generated supervisor terminal decision request layouts — implemented
+
+- Contract: finalize and abort requests contain exactly the supervisor payload version and reject unsupported versions or trailing bytes.
+- Implementation: shared layouts now describe each request and dispatch validates through their generated header sizes and version offsets.
+- Regression: valid finalize/abort bytes and truncated, unsupported-version, and trailing-byte payloads are covered.
+- Verification: malformed/valid request tests, generator drift, locked workspace build/format/warning-denied Clippy/serial tests, and full maintained TinyCC SDK suite pass. Commit tests report 129 passed; three cgroup-dependent tests remain ignored.
+- Remaining: generate layouts/codecs for remaining supervisor event payloads and other internal IPC payloads.
+
 ## TC-2: generated supervisor terminal decision response layouts — implemented
 
 - Contract: finalize returns version, status 0, and commit sequence; abort returns version and status 0.
