@@ -228,6 +228,10 @@ fn ipc_operation_allowlists_separate_executor_planner_and_control_roles() {
         Ok(())
     );
     assert_eq!(
+        authorize_operation(ServiceRole::Planner, Operation::DescribePlanRelation),
+        Ok(())
+    );
+    assert_eq!(
         authorize_operation(ServiceRole::OptimizerSubmission, Operation::OptimizeSelect),
         Ok(())
     );
@@ -258,6 +262,10 @@ fn ipc_operation_allowlists_separate_executor_planner_and_control_roles() {
         (ServiceRole::Executor, Operation::CommitAdministrativeDdl),
         (ServiceRole::Planner, Operation::OpenScan),
         (ServiceRole::Planner, Operation::OptimizeSelect),
+        (
+            ServiceRole::OptimizerSubmission,
+            Operation::DescribePlanRelation,
+        ),
         (ServiceRole::OptimizerSubmission, Operation::EstimateScan),
         (ServiceRole::OptimizerSubmission, Operation::OpenScan),
         (ServiceRole::Planner, Operation::FinalizeTransaction),

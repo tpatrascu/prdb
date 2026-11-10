@@ -6719,6 +6719,32 @@ impl PlannerMetadataConnection<'_, '_> {
         let Some((handle, relation)) = self.resolve_relation(schema_name, relation_name)? else {
             return Ok(None);
         };
+        let identity = self.attach_plan_identity(schema_name, relation)?;
+        Ok(Some((handle, identity)))
+    }
+
+    /// Resolve an authorized relation and stable plan identity without
+    /// creating a connection-local planning handle. This is the metadata
+    /// surface used by a separately isolated optimizer process.
+    pub fn describe_relation_for_plan(
+        &mut self,
+        schema_name: &str,
+        relation_name: &str,
+    ) -> Result<Option<AuthorizedPlanRelation>, TransactionError> {
+        let Some(relation) = self
+            .transaction
+            .resolve_catalog_authorized_relation(schema_name, relation_name)?
+        else {
+            return Ok(None);
+        };
+        self.attach_plan_identity(schema_name, relation).map(Some)
+    }
+
+    fn attach_plan_identity(
+        &mut self,
+        schema_name: &str,
+        relation: AuthorizedRelationDescription,
+    ) -> Result<AuthorizedPlanRelation, TransactionError> {
         let identity = if schema_name == "information_schema" {
             AuthorizedPlanRelation {
                 schema_id: crate::metadata_discovery::INFORMATION_SCHEMA_SCHEMA_ID,
@@ -6755,7 +6781,7 @@ impl PlannerMetadataConnection<'_, '_> {
                 relation,
             }
         };
-        Ok(Some((handle, identity)))
+        Ok(identity)
     }
 
     /// Revalidate the qualified name before returning its authorized schema.

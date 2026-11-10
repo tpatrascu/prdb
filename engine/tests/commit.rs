@@ -25747,8 +25747,8 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
     use prdb_engine::optimizer_plan::{PlanNode, decode_plan_v1};
     use prdb_engine::optimizer_service::{OptimizerError, optimize_select_v1};
     use prdb_engine::planner_ipc::{
-        DescribeRelationResponse, EstimateScanRequest, EstimateScanResponse,
-        MAX_PLANNER_REQUESTS_PER_CONNECTION, serve_planner,
+        DescribePlanRelationResponse, DescribeRelationResponse, EstimateScanRequest,
+        EstimateScanResponse, MAX_PLANNER_REQUESTS_PER_CONNECTION, serve_planner,
     };
     use prdb_engine::storage_manager::{
         CreatePolicyRequest, CreateTableRequest, ObjectGrantPrivilege, ObjectGrantTarget,
@@ -25957,7 +25957,29 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             .table
             .ok_or("authorized relation was not described")?;
 
-        for request_id in 2..(2 + MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION as u64) {
+        prdb_engine::ipc::write_frame(
+            &mut client,
+            &IpcFrame {
+                operation: IpcOperation::DescribePlanRelation as u16,
+                request_id: 2,
+                payload: ResolveRelationRequest {
+                    schema_name: "planner_stats".to_owned(),
+                    relation_name: "observations".to_owned(),
+                }
+                .encode()?,
+            },
+        )?;
+        let plan_relation = prdb_engine::ipc::read_frame(&mut client)?
+            .ok_or("planner stream closed before plan relation description")?;
+        let plan_relation = DescribePlanRelationResponse::decode(&plan_relation.payload)?
+            .relation
+            .ok_or("authorized plan relation was not described")?;
+        assert_eq!(plan_relation.schema_id, schema.schema_id);
+        assert_eq!(plan_relation.schema_version, 1);
+        assert_eq!(plan_relation.table_epoch, 2);
+        assert_eq!(plan_relation.relation.relation_id, table.table_id);
+
+        for request_id in 3..(3 + MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION as u64) {
             prdb_engine::ipc::write_frame(
                 &mut client,
                 &IpcFrame {
@@ -25978,7 +26000,7 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             ));
         }
 
-        let exhausted_id = 2 + MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION as u64;
+        let exhausted_id = 3 + MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION as u64;
         prdb_engine::ipc::write_frame(
             &mut client,
             &IpcFrame {

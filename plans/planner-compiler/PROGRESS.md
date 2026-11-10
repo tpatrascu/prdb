@@ -46,3 +46,10 @@
 - Boundary: this handler currently runs in its caller process as development scaffolding; it does not satisfy optimizer isolation and is not yet provisioned by the executor launcher.
 - Verification: focused real-redb optimizer socket test passed. Locked workspace build, format, warning-denied Clippy, serial workspace tests, and `git diff --check` passed (132 commit integration tests passed; 3 cgroup-dependent tests and 1 process test ignored; 81 Rust unit tests passed).
 - Remaining: launch a separate optimizer process, give it an invocation-bound planner-to-storage channel, provision the executor submission callback/channel, independently re-resolve plans in storage, and execute plans in the SDK.
+
+## OP-3 dependency: expose stable authorized plan relation metadata
+
+- Behavior: the optimizer can resolve exact qualified names to a pinned schema/table identity and declared column shape without receiving a storage handle or executor capability.
+- Implementation: planner operation `describe_plan_relation` (`0x1204`) calls the invocation-bound metadata resolver directly and returns schema ID/version, table ID/write epoch and authorized columns. It does not allocate a planner handle. The existing planner channel regression checks returned identities against the real-redb catalog; role tests reject the operation on the optimizer submission role.
+- Verification: focused planner channel regression passed. Generated ABI consistency, locked workspace build, format, warning-denied Clippy, serial workspace tests, and `git diff --check` passed (129 commit integration tests passed; 3 cgroup-dependent tests ignored; 81 Rust unit tests passed).
+- Remaining: implement the isolated optimizer process and give it a separate planner metadata socket alongside its submission socket.

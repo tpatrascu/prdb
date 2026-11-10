@@ -5,7 +5,9 @@ use crate::executor_ipc::{
     encode_visible_column, ensure_response_size,
 };
 use crate::ipc::{DispatchError, IpcFrame, Operation, ServiceRole, authorize_operation};
-use crate::metadata_discovery::{AuthorizedRelationDescription, PlanningTableHandle};
+use crate::metadata_discovery::{
+    AuthorizedPlanRelation, AuthorizedRelationDescription, PlanningTableHandle,
+};
 use crate::statistics::{AuthorizedScanEstimate, AuthorizedScanSummary, ColumnPopulation};
 use crate::transaction::{PlannerMetadataConnection, TransactionError};
 use std::io::{Read, Write};
@@ -64,6 +66,96 @@ impl From<TransactionError> for PlannerRequestError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DescribeRelationResponse {
     pub table: Option<(PlanningTableHandle, AuthorizedRelationDescription)>,
+}
+
+/// Authorized stable relation identity for optimizer binding. This response
+/// contains no connection-local planner token and grants no executor access.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DescribePlanRelationResponse {
+    pub relation: Option<AuthorizedPlanRelation>,
+}
+
+impl DescribePlanRelationResponse {
+    pub fn encode(&self) -> Result<Vec<u8>, PlannerRequestError> {
+        let mut payload = PLANNER_PAYLOAD_VERSION.to_be_bytes().to_vec();
+        match &self.relation {
+            None => payload.push(1),
+            Some(relation) => {
+                if relation.schema_id == [0; 16]
+                    || relation.schema_version == 0
+                    || relation.table_epoch == 0
+                    || relation.relation.relation_id == [0; 16]
+                    || relation.relation.columns.is_empty()
+                    || relation.relation.columns.len() > crate::tuple::MAX_COLUMNS
+                {
+                    return Err(PlannerRequestError::InvalidPayload);
+                }
+                payload.push(0);
+                payload.extend_from_slice(&relation.schema_id);
+                payload.extend_from_slice(&relation.schema_version.to_be_bytes());
+                payload.extend_from_slice(&relation.table_epoch.to_be_bytes());
+                payload.extend_from_slice(&relation.relation.relation_id);
+                encode_name(&mut payload, &relation.relation.name)?;
+                let count = u16::try_from(relation.relation.columns.len())
+                    .map_err(|_| PlannerRequestError::ResponseTooLarge)?;
+                payload.extend_from_slice(&count.to_be_bytes());
+                for column in &relation.relation.columns {
+                    encode_visible_column(&mut payload, column)?;
+                }
+            }
+        }
+        ensure_response_size(&payload)?;
+        Ok(payload)
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Self, PlannerRequestError> {
+        if payload.len() < 3 || read_u16(payload, 0)? != PLANNER_PAYLOAD_VERSION {
+            return Err(PlannerRequestError::InvalidPayload);
+        }
+        match payload[2] {
+            1 if payload.len() == 3 => Ok(Self { relation: None }),
+            0 if payload.len() >= 55 => {
+                let schema_id = read_array16(payload, 3)?;
+                let schema_version = read_u64(payload, 19)?;
+                let table_epoch = read_u64(payload, 27)?;
+                let relation_id = read_array16(payload, 35)?;
+                if schema_id == [0; 16]
+                    || schema_version == 0
+                    || table_epoch == 0
+                    || relation_id == [0; 16]
+                {
+                    return Err(PlannerRequestError::InvalidPayload);
+                }
+                let mut offset = 51;
+                let name = decode_name(payload, &mut offset)?;
+                let count = read_u16(payload, offset)? as usize;
+                offset += 2;
+                if count == 0 || count > crate::tuple::MAX_COLUMNS {
+                    return Err(PlannerRequestError::InvalidPayload);
+                }
+                let mut columns = Vec::with_capacity(count);
+                for _ in 0..count {
+                    columns.push(decode_visible_column(payload, &mut offset)?);
+                }
+                if offset != payload.len() {
+                    return Err(PlannerRequestError::InvalidPayload);
+                }
+                Ok(Self {
+                    relation: Some(AuthorizedPlanRelation {
+                        schema_id,
+                        schema_version,
+                        table_epoch,
+                        relation: AuthorizedRelationDescription {
+                            relation_id,
+                            name,
+                            columns,
+                        },
+                    }),
+                })
+            }
+            _ => Err(PlannerRequestError::InvalidPayload),
+        }
+    }
 }
 
 impl DescribeRelationResponse {
@@ -308,6 +400,14 @@ pub fn dispatch_planner_request(
             )
             .encode()?
         }
+        Operation::DescribePlanRelation => {
+            let decoded = ResolveRelationRequest::decode(&request.payload)?;
+            DescribePlanRelationResponse {
+                relation: connection
+                    .describe_relation_for_plan(&decoded.schema_name, &decoded.relation_name)?,
+            }
+            .encode()?
+        }
         _ => {
             return Err(PlannerRequestError::Dispatch(
                 DispatchError::OperationNotAllowed { role, operation },
@@ -465,6 +565,14 @@ fn read_u16(payload: &[u8], offset: usize) -> Result<u16, PlannerRequestError> {
         .try_into()
         .map_err(|_| PlannerRequestError::InvalidPayload)?;
     Ok(u16::from_be_bytes(bytes))
+}
+
+fn read_array16(payload: &[u8], offset: usize) -> Result<[u8; 16], PlannerRequestError> {
+    payload
+        .get(offset..offset + 16)
+        .ok_or(PlannerRequestError::InvalidPayload)?
+        .try_into()
+        .map_err(|_| PlannerRequestError::InvalidPayload)
 }
 
 fn read_u64(payload: &[u8], offset: usize) -> Result<u64, PlannerRequestError> {
