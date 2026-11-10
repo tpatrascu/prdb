@@ -1,5 +1,13 @@
 # Toolchain Progress
 
+## TC-2: generated executor next-batch response variants — implemented
+
+- Contract: [internal IPC](../../specs/ipc-protocol.md) encodes next-batch responses with distinct finished and continuation headers; continuation includes a cursor before the row count.
+- Implementation: the shared schema declares both fixed header variants. The Rust response codec chooses generated offsets when encoding and decoding each variant; row/cell records keep their existing bounded codec.
+- Regression: `executor_relation_socket_loop_ends_session_without_finalizing` passes through both response paths.
+- Verification: generator drift, exact focused integration test, full workspace build/format/warning-denied Clippy/serial tests, and the full TinyCC SDK suite passed. Commit integration results: 129 passed, 3 cgroup-dependent tests ignored.
+- Remaining: generate layouts for remaining executor/planner/supervisor payloads and serialization helpers.
+
 ## TC-2: generated planner estimate-scan response header — implemented
 
 - Contract: [internal IPC](../../specs/ipc-protocol.md) defines exact estimate responses as planner payload version/status, visible-row count, column count, then bounded per-column population triples; UNKNOWN responses end after status.

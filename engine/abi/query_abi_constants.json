@@ -1253,6 +1253,27 @@
       "trailing_fields": []
     },
     {
+      "name": "EXECUTOR_NEXT_BATCH_RESPONSE_FINISHED",
+      "version_constant": "EXECUTOR_BATCH_PAYLOAD_VERSION",
+      "fields": [
+        { "name": "version", "encoding": "u16be" },
+        { "name": "finished", "encoding": "u8" },
+        { "name": "row_count", "encoding": "u16be" }
+      ],
+      "trailing_fields": []
+    },
+    {
+      "name": "EXECUTOR_NEXT_BATCH_RESPONSE_CONTINUATION",
+      "version_constant": "EXECUTOR_BATCH_PAYLOAD_VERSION",
+      "fields": [
+        { "name": "version", "encoding": "u16be" },
+        { "name": "finished", "encoding": "u8" },
+        { "name": "cursor_handle", "encoding": "bytes16" },
+        { "name": "row_count", "encoding": "u16be" }
+      ],
+      "trailing_fields": []
+    },
+    {
       "name": "EXECUTOR_STAGE_DELETE_REQUEST",
       "version_constant": "EXECUTOR_BATCH_PAYLOAD_VERSION",
       "fields": [
