@@ -101,6 +101,8 @@ QUERY_ABI_V4_TEST := $(BUILD_DIR)/query-abi-v4-callbacks
 SDK_OPTIMIZER_TEST := $(BUILD_DIR)/sdk-optimizer-v1
 SDK_OPTIMIZER_PLAN_TEST := $(BUILD_DIR)/sdk-optimizer-plan-v1
 QUERY_ABI_GENERATED_HEADERS += $(INCLUDE_DIR)/prdb_query_abi_records_v4.h
+RELEASE_PROFILE_DIR ?= target/release-profile
+RELEASE_BINARIES := prdb-client prdb-executor prdb-gateway prdb-optimizer prdb-packager prdb-sandbox-probe prdb-supervisor
 
 .PHONY: all test
 
@@ -333,6 +335,17 @@ $(SQL_V3_RESTRICTED_METADATA_QUERY): $(SQL_V3_RESTRICTED_METADATA_OBJECT) $(SDK_
 
 .PHONY: sandbox-query-fixture
 sandbox-query-fixture: $(SQL_V3_CAUGHT_ERROR_QUERY) $(SQL_V3_WRITE_READ_QUERY) $(SQL_V3_RESTRICTED_METADATA_QUERY)
+
+.PHONY: release-profile
+release-profile: sandbox-query-fixture
+	test "$$(getconf GNU_LIBC_VERSION)" = "glibc 2.42"
+	NIX_DONT_SET_RPATH=1 cargo build --workspace --release --locked
+	mkdir -p "$(RELEASE_PROFILE_DIR)/bin" "$(RELEASE_PROFILE_DIR)/sdk/include" "$(RELEASE_PROFILE_DIR)/queries"
+	for binary in $(RELEASE_BINARIES); do cp "target/release/$$binary" "$(RELEASE_PROFILE_DIR)/bin/$$binary"; patchelf --remove-rpath "$(RELEASE_PROFILE_DIR)/bin/$$binary"; done
+	cp "$(SDK_ARCHIVE)" "$(RELEASE_PROFILE_DIR)/sdk/libprdb_sdk.a"
+	cp -R "$(INCLUDE_DIR)/." "$(RELEASE_PROFILE_DIR)/sdk/include/"
+	cp "$(SQL_V3_CAUGHT_ERROR_QUERY)" "$(SQL_V3_WRITE_READ_QUERY)" "$(SQL_V3_RESTRICTED_METADATA_QUERY)" "$(RELEASE_PROFILE_DIR)/queries/"
+	$(PYTHON) engine/tools/validate_release_profile.py "$(RELEASE_PROFILE_DIR)"
 
 abi-constants:
 	$(PYTHON) engine/tools/generate_query_abi.py

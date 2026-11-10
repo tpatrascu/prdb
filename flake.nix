@@ -18,6 +18,7 @@
           tinycc
           gcc
           binutils
+          patchelf
           gnumake
           python3
         ];

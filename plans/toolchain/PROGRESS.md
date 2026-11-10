@@ -544,6 +544,13 @@
 - Verification: generator drift/schema tests, locked workspace build, rustfmt check, warning-denied Clippy, serial workspace tests, and the full maintained TinyCC SDK suite passed in the pinned Nix shell.
 - Remaining: migrate remaining hand-coded supervisor/executor payload serializers and complete release profile and artifact gates.
 
+## TC-1 / TC-3: initial NixOS release-validation profile — implemented
+
+- Selected profile: `nixos-x86_64-glibc-2.42`, CPU baseline `x86_64-v1`, with the pinned Nixpkgs glibc 2.42-100 runtime. This is evidence for the exact NixOS profile tested on this host, not a claim for older glibc or other distributions.
+- Implementation: root Cargo release builds use `panic=abort`. `make -f engine/sdk/Makefile release-profile` stages seven engine binaries, the TinyCC SDK archive and headers, and three maintained query shared objects under `target/release-profile`; it removes the Nix shell RUNPATH from engine binaries and validates ELF64 x86_64, exact DT_NEEDED sets, GLIBC symbol ceilings, and non-executable query GNU_STACK. It writes `PROFILE.txt` and SHA-256 checksums for all staged files.
+- Verification: clean locked Cargo release build passed; all staged artifacts passed the validator, every checksum verified with `sha256sum -c`, four binaries accepted `--help`, and executor/optimizer binaries loaded and reported usage when required arguments were absent. The query fixtures depend only on `libc.so.6` and require at most GLIBC_2.14; engine binaries depend on `libgcc_s.so.1`, `libc.so.6`, and `ld-linux-x86-64.so.2` and require at most GLIBC_2.39.
+- Remaining: create signed distributable bundles with pinned TinyCC support files, measure clean SDK and per-query build timings, validate other runtime profiles, and complete sandbox compatibility/mismatch acceptance for the staged output.
+
 ## TC-1: locked Nix development shell — implemented
 
 - Behavior: `nix develop --locked` provides the pinned x86_64-linux package set used for the engine and SDK checks. [`flake.nix`](../../flake.nix) and [`flake.lock`](../../flake.lock) pin Nixpkgs revision `718f670e845328e9c2cecdd832835712b2cbd065` with source NAR hash `sha256-Ee5BWo8sh3pGt70QUdRajnaginqFmWvrtdBc4gJzhks=`.
