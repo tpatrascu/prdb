@@ -276,6 +276,13 @@
 - Verification: `cargo test --locked --test metadata_process authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_processes -- --exact --nocapture` passed (1 test). `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets --locked -- -D warnings` passed in the configured Nix shell.
 - Remaining: broaden process-level CLI coverage for remaining DDL families and complete remaining SDK packaging/release gates.
 
+## SDK-5: object grant/revoke CLI process path — verified
+
+- Contract: object and column privileges use the authenticated ADMIN control channel with a closed privilege set and an explicit object or column target; storage rechecks the actor's current authority.
+- Regression: the real gateway/supervisor ADMIN lifecycle invokes `object-grant` and `object-revoke` through `prdb-client` for a non-admin user and a column-scoped SELECT privilege. The command output confirms each durable operation completed.
+- Verification: `cargo test --locked --test metadata_process authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_processes -- --exact --nocapture` passed (1 test). `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets --locked -- -D warnings` passed in the configured Nix shell.
+- Remaining: extend process-level CLI coverage to other DDL families and complete remaining SDK packaging/release gates.
+
 ## SDK-5: foreign-key create/drop CLI — implemented
 
 - Contract: foreign-key administration uses ordered, distinct source column IDs and a target PRIMARY KEY/UNIQUE constraint ID; storage validates column correspondence, types, authority, existing rows, and dependencies.

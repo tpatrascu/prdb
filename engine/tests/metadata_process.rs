@@ -971,6 +971,65 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
         AdminObjectGrantTarget::Column(created_table.column_ids[0]),
     )?;
     assert!(revoked_select.commit_sequence > select_grant.commit_sequence);
+    let object_grant_address = address.to_string();
+    let object_grant_credentials = admin_cancel_credentials_path
+        .to_str()
+        .ok_or("credential path is not UTF-8")?;
+    let object_grant_grantee = encode_id_hex(&transfer_owner.identity_id);
+    let object_grant_table = encode_id_hex(&created_table.table_id);
+    let object_grant_column = encode_id_hex(&created_table.column_ids[0]);
+    let grant_object_cli = Command::new(env!("CARGO_BIN_EXE_prdb-client"))
+        .args([
+            "object-grant",
+            "--address",
+            &object_grant_address,
+            "--credentials",
+            object_grant_credentials,
+            "--grantee-id",
+            &object_grant_grantee,
+            "--object-id",
+            &object_grant_table,
+            "--privilege",
+            "select",
+            "--target-scope",
+            "column",
+            "--target-id",
+            &object_grant_column,
+        ])
+        .output()?;
+    assert!(
+        grant_object_cli.status.success(),
+        "object-grant CLI failed: {}",
+        String::from_utf8_lossy(&grant_object_cli.stderr)
+    );
+    assert!(String::from_utf8_lossy(&grant_object_cli.stdout).contains("granted object privilege"));
+    let revoke_object_cli = Command::new(env!("CARGO_BIN_EXE_prdb-client"))
+        .args([
+            "object-revoke",
+            "--address",
+            &object_grant_address,
+            "--credentials",
+            object_grant_credentials,
+            "--grantee-id",
+            &object_grant_grantee,
+            "--object-id",
+            &object_grant_table,
+            "--privilege",
+            "select",
+            "--target-scope",
+            "column",
+            "--target-id",
+            &object_grant_column,
+        ])
+        .output()?;
+    assert!(
+        revoke_object_cli.status.success(),
+        "object-revoke CLI failed: {}",
+        String::from_utf8_lossy(&revoke_object_cli.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&revoke_object_cli.stdout).contains("revoked object privilege")
+    );
     let dropped_unique = admin
         .drop_unique_constraint(unique_constraint.constraint_id)
         .map_err(|error| format!("process ADMIN drop_unique_constraint failed: {error}"))?;
