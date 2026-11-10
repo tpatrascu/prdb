@@ -5,6 +5,7 @@
 - Behavior: PMF1 encode/decode, ELF export inspection, TinyCC packaging, and the C PMF1 encoder accept ABI versions 1–4. ABI v4 requires its exact descriptor OBJECT and entry FUNC exports; ABI 5 remains rejected. The packager still inspects ELF as data and never loads the query.
 - Regression: Rust tests cover v4 manifest roundtrip, correct ELF symbols, mismatched entry rejection, and a real TinyCC package build using v4 exports. A second packaging test compiles the maintained optimizer SQL fixture and checks its v4 manifest without loading it. The package fixture's aborting constructor remains unexecuted. The maintained C manifest fixture checks v4 symbol derivation and unsupported-version rejection.
 - Verification: the focused Rust manifest and packaging tests, full workspace build/format/Clippy/tests, and `make -f engine/sdk/Makefile test` passed. Three sandbox START tests remain ignored because this host's cgroup2 mount remains read-only even after the authorized remount attempt.
+- Filesystem compatibility: publication uses `renameat2(RENAME_NOREPLACE)`. The repository's NFSv4.2 workspace mount returns `EINVAL`; the packager removes its staging directory and now reports `AtomicPublishUnsupported`. The same maintained fixture packages successfully to `/tmp` on ext4.
 - Remaining: execute the ABI v4 optimizer callback in the confined acceptance harness on a conforming cgroup host.
 
 ## SDK-1 dependency: canonical Rust PMF1 encoder — implemented

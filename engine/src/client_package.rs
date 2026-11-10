@@ -52,6 +52,7 @@ pub enum PackageError {
         status: ExitStatus,
         diagnostic: String,
     },
+    AtomicPublishUnsupported,
     Manifest(ManifestError),
     Io(io::Error),
 }
@@ -380,7 +381,11 @@ impl StagingDirectory {
             )
         };
         if result != 0 {
-            return Err(PackageError::Io(io::Error::last_os_error()));
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINVAL) {
+                return Err(PackageError::AtomicPublishUnsupported);
+            }
+            return Err(PackageError::Io(error));
         }
         self.published = true;
         Ok(())
