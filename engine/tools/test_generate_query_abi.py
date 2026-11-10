@@ -104,6 +104,8 @@ class PayloadSchemaValidationTests(unittest.TestCase):
         self.assertIn("prdb_decode_planner_estimate_scan_request", c_codecs)
         self.assertIn("prdb_encode_planner_estimate_scan_response", c_codecs)
         self.assertIn("prdb_decode_planner_estimate_scan_response", c_codecs)
+        self.assertIn("prdb_decode_planner_describe_relation_unavailable_response", c_codecs)
+        self.assertIn("prdb_decode_planner_describe_relation_available_response", c_codecs)
         self.assertIn("prdb_encode_executor_open_scan_request", c_codecs)
         self.assertIn("prdb_decode_executor_open_scan_request", c_codecs)
         self.assertIn("prdb_encode_executor_close_cursor_request", c_codecs)

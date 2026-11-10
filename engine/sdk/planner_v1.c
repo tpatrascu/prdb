@@ -1,4 +1,5 @@
 #include "prdb_sdk_planner_v1.h"
+#include "prdb_query_abi_payload_codecs.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -122,6 +123,7 @@ int32_t prdb_sdk_planner_decode_relation_v1(
     uint32_t offset = PRDB_PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_HEADER_BYTES;
     uint32_t column_count;
     uint8_t relation_id_is_zero = 1;
+    uint8_t status;
 
     if (payload == NULL || out == NULL || out_capacity < sizeof(*out)) {
         return PRDB_SDK_PLANNER_DECODE_INVALID_ARGUMENT;
@@ -134,32 +136,28 @@ int32_t prdb_sdk_planner_decode_relation_v1(
         PRDB_PLANNER_PAYLOAD_VERSION) {
         return PRDB_SDK_PLANNER_DECODE_UNSUPPORTED_VERSION;
     }
-    if (payload[PRDB_PLANNER_DESCRIBE_RELATION_UNAVAILABLE_RESPONSE_STATUS_OFFSET] == 1 &&
-        payload_len == PRDB_PLANNER_DESCRIBE_RELATION_UNAVAILABLE_RESPONSE_HEADER_BYTES) {
+    if (prdb_decode_planner_describe_relation_unavailable_response(
+            payload, (size_t)payload_len, &status) && status == 1) {
         result.struct_size = sizeof(result);
         result.abi_version = PRDB_SDK_PLANNER_ABI_V1_VERSION;
         *out = result;
         return PRDB_SDK_PLANNER_DECODE_UNAVAILABLE;
     }
-    if (payload[PRDB_PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_STATUS_OFFSET] != 0 ||
+    if (!prdb_decode_planner_describe_relation_available_response(
+            payload, (size_t)payload_len, &status, result.relation_id,
+            result.planning_handle) || status != 0 ||
         payload_len < PRDB_PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_HEADER_BYTES + 5) {
         return PRDB_SDK_PLANNER_DECODE_INVALID_PAYLOAD;
     }
     for (uint32_t index = 0; index < 16; ++index) {
-        relation_id_is_zero &=
-            payload[PRDB_PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_RELATION_ID_OFFSET + index] == 0;
+        relation_id_is_zero &= result.relation_id[index] == 0;
     }
     if (relation_id_is_zero) {
         return PRDB_SDK_PLANNER_DECODE_INVALID_PAYLOAD;
     }
-    memcpy(result.relation_id,
-           payload + PRDB_PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_RELATION_ID_OFFSET, 16);
-    if (payload[PRDB_PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_PLANNING_HANDLE_OFFSET] !=
-        PRDB_SDK_PLANNER_TABLE_HANDLE_KIND) {
+    if (result.planning_handle[0] != PRDB_SDK_PLANNER_TABLE_HANDLE_KIND) {
         return PRDB_SDK_PLANNER_DECODE_INVALID_PAYLOAD;
     }
-    memcpy(result.planning_handle,
-           payload + PRDB_PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_PLANNING_HANDLE_OFFSET, 16);
     if (!take_name(payload, payload_len, &offset, &result.name,
                    &result.name_len) ||
         (uint64_t)offset + 2 > payload_len) {
