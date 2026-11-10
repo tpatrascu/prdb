@@ -31,9 +31,8 @@ pub use crate::query_abi::{
     PLANNER_ESTIMATE_SCAN_REQUEST_PLANNING_HANDLE_OFFSET,
     PLANNER_ESTIMATE_SCAN_REQUEST_VERSION_OFFSET,
     PLANNER_ESTIMATE_SCAN_RESPONSE_COLUMN_COUNT_OFFSET,
-    PLANNER_ESTIMATE_SCAN_RESPONSE_HEADER_BYTES, PLANNER_ESTIMATE_SCAN_RESPONSE_STATUS_OFFSET,
-    PLANNER_ESTIMATE_SCAN_RESPONSE_VERSION_OFFSET,
-    PLANNER_ESTIMATE_SCAN_RESPONSE_VISIBLE_ROWS_OFFSET, PLANNER_PAYLOAD_VERSION,
+    PLANNER_ESTIMATE_SCAN_RESPONSE_HEADER_BYTES,
+    PLANNER_ESTIMATE_SCAN_RESPONSE_VISIBLE_ROWS_OFFSET,
 };
 use crate::statistics::{AuthorizedScanEstimate, AuthorizedScanSummary, ColumnPopulation};
 use crate::transaction::{PlannerMetadataConnection, TransactionError};
@@ -372,8 +371,8 @@ impl EstimateScanResponse {
     pub fn encode(&self) -> Result<Vec<u8>, PlannerRequestError> {
         match self {
             Self::Unknown => {
-                let mut payload = PLANNER_PAYLOAD_VERSION.to_be_bytes().to_vec();
-                payload.push(1);
+                let payload =
+                    crate::query_abi::encode_planner_estimate_scan_unknown_response(1).to_vec();
                 ensure_response_size(&payload)?;
                 Ok(payload)
             }
@@ -398,48 +397,41 @@ impl EstimateScanResponse {
     }
 
     pub fn decode(payload: &[u8]) -> Result<Self, PlannerRequestError> {
-        let version_offset = PLANNER_ESTIMATE_SCAN_RESPONSE_VERSION_OFFSET as usize;
-        if payload.len() < 3 || read_u16(payload, version_offset)? != PLANNER_PAYLOAD_VERSION {
+        if crate::query_abi::decode_planner_estimate_scan_unknown_response(payload) == Some(1) {
+            return Ok(Self::Unknown);
+        }
+        let (status, visible_rows, encoded_column_count) =
+            crate::query_abi::decode_planner_estimate_scan_response(payload)
+                .ok_or(PlannerRequestError::InvalidPayload)?;
+        if status != 0 {
             return Err(PlannerRequestError::InvalidPayload);
         }
-        match payload[PLANNER_ESTIMATE_SCAN_RESPONSE_STATUS_OFFSET as usize] {
-            1 if payload.len() == 3 => Ok(Self::Unknown),
-            0 if payload.len() >= PLANNER_ESTIMATE_SCAN_RESPONSE_HEADER_BYTES as usize => {
-                let (status, visible_rows, encoded_column_count) =
-                    crate::query_abi::decode_planner_estimate_scan_response(payload)
-                        .ok_or(PlannerRequestError::InvalidPayload)?;
-                if status != 0 {
-                    return Err(PlannerRequestError::InvalidPayload);
-                }
-                let count = usize::from(encoded_column_count);
-                let header_bytes = PLANNER_ESTIMATE_SCAN_RESPONSE_HEADER_BYTES as usize;
-                let expected = header_bytes
-                    .checked_add(
-                        count
-                            .checked_mul(24)
-                            .ok_or(PlannerRequestError::InvalidPayload)?,
-                    )
-                    .ok_or(PlannerRequestError::InvalidPayload)?;
-                if count > crate::tuple::MAX_COLUMNS || expected != payload.len() {
-                    return Err(PlannerRequestError::InvalidPayload);
-                }
-                let mut offset = header_bytes;
-                let mut columns = Vec::with_capacity(count);
-                for _ in 0..count {
-                    columns.push(ColumnPopulation {
-                        readable_values: read_u64(payload, offset)?,
-                        nulls: read_u64(payload, offset + 8)?,
-                        redacted: read_u64(payload, offset + 16)?,
-                    });
-                    offset += 24;
-                }
-                Ok(Self::Exact(AuthorizedScanSummary {
-                    visible_rows,
-                    columns,
-                }))
-            }
-            _ => Err(PlannerRequestError::InvalidPayload),
+        let count = usize::from(encoded_column_count);
+        let header_bytes = PLANNER_ESTIMATE_SCAN_RESPONSE_HEADER_BYTES as usize;
+        let expected = header_bytes
+            .checked_add(
+                count
+                    .checked_mul(24)
+                    .ok_or(PlannerRequestError::InvalidPayload)?,
+            )
+            .ok_or(PlannerRequestError::InvalidPayload)?;
+        if count > crate::tuple::MAX_COLUMNS || expected != payload.len() {
+            return Err(PlannerRequestError::InvalidPayload);
         }
+        let mut offset = header_bytes;
+        let mut columns = Vec::with_capacity(count);
+        for _ in 0..count {
+            columns.push(ColumnPopulation {
+                readable_values: read_u64(payload, offset)?,
+                nulls: read_u64(payload, offset + 8)?,
+                redacted: read_u64(payload, offset + 16)?,
+            });
+            offset += 24;
+        }
+        Ok(Self::Exact(AuthorizedScanSummary {
+            visible_rows,
+            columns,
+        }))
     }
 }
 

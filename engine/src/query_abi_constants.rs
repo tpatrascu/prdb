@@ -384,6 +384,23 @@ pub fn decode_planner_estimate_scan_request(payload: &[u8]) -> Option<([u8; 16],
     Some((payload[2..18].try_into().ok()?, u16::from_be_bytes(payload[18..20].try_into().ok()?)))
 }
 
+pub const PLANNER_ESTIMATE_SCAN_UNKNOWN_RESPONSE_VERSION_OFFSET: u32 = 0;
+pub const PLANNER_ESTIMATE_SCAN_UNKNOWN_RESPONSE_STATUS_OFFSET: u32 = 2;
+pub const PLANNER_ESTIMATE_SCAN_UNKNOWN_RESPONSE_HEADER_BYTES: u32 = 3;
+pub fn encode_planner_estimate_scan_unknown_response(status: u8) -> [u8; 3] {
+    let mut payload = [0u8; 3];
+    payload[0..2].copy_from_slice(&PLANNER_PAYLOAD_VERSION.to_be_bytes());
+    payload[2] = status;
+    payload
+}
+
+pub fn decode_planner_estimate_scan_unknown_response(payload: &[u8]) -> Option<u8> {
+    if payload.len() != 3 || u16::from_be_bytes([payload[0], payload[1]]) != PLANNER_PAYLOAD_VERSION {
+        return None;
+    }
+    Some(payload[2])
+}
+
 pub const PLANNER_ESTIMATE_SCAN_RESPONSE_VERSION_OFFSET: u32 = 0;
 pub const PLANNER_ESTIMATE_SCAN_RESPONSE_STATUS_OFFSET: u32 = 2;
 pub const PLANNER_ESTIMATE_SCAN_RESPONSE_VISIBLE_ROWS_OFFSET: u32 = 3;

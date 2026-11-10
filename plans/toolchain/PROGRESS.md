@@ -1,5 +1,13 @@
 # Toolchain Progress
 
+## TC-2: generated planner unknown-estimate response — implemented
+
+- Contract: planner estimate responses use an exact versioned header for either unknown status or an exact estimate prefix followed by bounded column populations.
+- Implementation: the shared ABI schema now generates the unknown-status response codec; Rust planner encoding and decoding consume it instead of hand-building and inspecting the version/status bytes.
+- Regression: `planner_stream_estimate_allowance_falls_back_without_aborting_invocation` exercises the unknown fallback alongside the exact estimate path.
+- Verification: ABI drift/schema tests, focused fallback regression, locked workspace build, format check, warning-denied Clippy, serial workspace tests (129 passed, 3 cgroup-dependent ignored), and maintained TinyCC SDK suite passed in the configured Nix shell.
+- Remaining: migrate other remaining hand-coded IPC layouts and complete release-profile, signature, runtime-support, timing, and sandbox acceptance gates.
+
 ## TC-2: generated executor relation response prefixes — implemented
 
 - Contract: executor relation resolution returns either an exact unavailable response or a successful fixed prefix containing relation identity and connection-scoped handle, followed by bounded relation metadata.

@@ -1,5 +1,13 @@
 # Optimizer Progress
 
+## OP-2 dependency: generated unknown estimate response — implemented
+
+- Contract: when an authorized estimate is unavailable or exceeds its allowance, planner IPC returns the exact versioned unknown response and keeps the invocation usable.
+- Implementation: the shared ABI schema now generates the unknown response encoder/decoder, and [`planner_ipc`](../../engine/src/planner_ipc.rs) uses them instead of duplicating version/status bytes. Exact estimate tails remain bounded and schema-driven.
+- Regression: `planner_stream_estimate_allowance_falls_back_without_aborting_invocation` verifies the unknown estimate is decoded and the invocation continues.
+- Verification: ABI drift/schema tests, focused fallback regression, locked workspace build, format check, warning-denied Clippy, serial workspace tests (129 passed, 3 cgroup-dependent ignored), and maintained TinyCC SDK suite passed in the configured Nix shell.
+- Remaining: optimizer binding/planning integration and execution remain open as described below.
+
 ## OP-3 ABI v4 SQL callback fixture — implemented; confined acceptance pending
 
 - Behavior: the maintained SQL write/read fixture now exports both v3 and v4. The v4 entry submits a parameterized `id = 42` SELECT through the executor's fixed optimizer callback, validates the optimizer Filter against the AST and parameter, independently resolves the relation through executor storage, and checks the projected row.

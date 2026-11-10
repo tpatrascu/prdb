@@ -1420,6 +1420,17 @@
       ]
     },
     {
+      "name": "PLANNER_ESTIMATE_SCAN_UNKNOWN_RESPONSE",
+      "version_constant": "PLANNER_PAYLOAD_VERSION",
+      "generate_rust_codec": true,
+      "generate_c_codec": true,
+      "fields": [
+        { "name": "version", "encoding": "u16be" },
+        { "name": "status", "encoding": "u8" }
+      ],
+      "trailing_fields": []
+    },
+    {
       "name": "PLANNER_ESTIMATE_SCAN_RESPONSE",
       "version_constant": "PLANNER_PAYLOAD_VERSION",
       "generate_rust_codec": true,
