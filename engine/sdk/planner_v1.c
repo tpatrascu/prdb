@@ -293,7 +293,8 @@ int32_t prdb_sdk_planner_describe_relation_v1(
     uint64_t response_capacity, uint64_t *response_len,
     prdb_sdk_planner_relation_v1 *out, uint32_t out_capacity,
     prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_capacity) {
-    uint8_t request[6 + 2 * PRDB_SDK_SQL_MAX_IDENTIFIER_BYTES];
+    uint8_t request[PRDB_EXECUTOR_RESOLVE_RELATION_REQUEST_HEADER_BYTES +
+                    2 * PRDB_SDK_SQL_MAX_IDENTIFIER_BYTES];
     int32_t callback_status;
     int32_t decode_status;
     uint32_t request_len;
@@ -305,15 +306,25 @@ int32_t prdb_sdk_planner_describe_relation_v1(
         columns == NULL || response_capacity > PRDB_SDK_PLANNER_MAX_RESPONSE_BYTES) {
         return PRDB_SDK_PLANNER_REQUEST_INVALID_ARGUMENT;
     }
-    request[0] = 0;
-    request[1] = PRDB_SDK_PLANNER_WIRE_V1_VERSION;
-    request[2] = (uint8_t)(schema_len >> 8);
-    request[3] = (uint8_t)schema_len;
-    request[4] = (uint8_t)(relation_name_len >> 8);
-    request[5] = (uint8_t)relation_name_len;
-    memcpy(request + 6, schema, schema_len);
-    memcpy(request + 6 + schema_len, relation_name, relation_name_len);
-    request_len = 6 + schema_len + relation_name_len;
+    request[PRDB_EXECUTOR_RESOLVE_RELATION_REQUEST_VERSION_OFFSET] =
+        (uint8_t)(PRDB_RESOLVE_RELATION_PAYLOAD_VERSION >> 8);
+    request[PRDB_EXECUTOR_RESOLVE_RELATION_REQUEST_VERSION_OFFSET + 1] =
+        (uint8_t)PRDB_RESOLVE_RELATION_PAYLOAD_VERSION;
+    request[PRDB_EXECUTOR_RESOLVE_RELATION_REQUEST_SCHEMA_NAME_LENGTH_OFFSET] =
+        (uint8_t)(schema_len >> 8);
+    request[PRDB_EXECUTOR_RESOLVE_RELATION_REQUEST_SCHEMA_NAME_LENGTH_OFFSET + 1] =
+        (uint8_t)schema_len;
+    request[PRDB_EXECUTOR_RESOLVE_RELATION_REQUEST_RELATION_NAME_LENGTH_OFFSET] =
+        (uint8_t)(relation_name_len >> 8);
+    request[PRDB_EXECUTOR_RESOLVE_RELATION_REQUEST_RELATION_NAME_LENGTH_OFFSET + 1] =
+        (uint8_t)relation_name_len;
+    memcpy(request + PRDB_EXECUTOR_RESOLVE_RELATION_REQUEST_HEADER_BYTES,
+           schema, schema_len);
+    memcpy(request + PRDB_EXECUTOR_RESOLVE_RELATION_REQUEST_HEADER_BYTES +
+               schema_len,
+           relation_name, relation_name_len);
+    request_len = PRDB_EXECUTOR_RESOLVE_RELATION_REQUEST_HEADER_BYTES +
+                  schema_len + relation_name_len;
     *response_len = 0;
     callback_status = host->planner_request(
         host->context, PRDB_SDK_PLANNER_OP_DESCRIBE_RELATION, request,

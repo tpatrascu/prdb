@@ -6,6 +6,8 @@
 - Implementation: `engine/abi/query_abi_constants.json` declares the fixed and length-delimited fields. The generator validates supported encodings, unique names, and length-field references, then emits matching Rust/C offsets and header size. Rust and TinyCC encoders use those generated values.
 - Regression: the Rust and C executor fixtures retain hand-checked request bytes, independently checking the generated layout. Generator `--check` verifies outputs have no drift.
 - Verification: generator drift check, locked workspace build, format, warning-denied Clippy, serial workspace tests (129 commit tests passed; 3 cgroup-dependent tests ignored), and the full maintained TinyCC SDK suite passed.
+- Follow-up: the C planner `describe_relation` helper shares the same generated request field offsets and version instead of maintaining its own literals. Its TinyCC fixture compares the emitted request against an independent exact-byte example.
+- Follow-up verification: the focused `sdk-planner-v1` TinyCC fixture passes after rebuilding the SDK archive. The Rust request codec is shared with the executor and its exact-byte transaction regression passes.
 - Remaining: extend the schema and generation to other IPC request/response payloads and codecs. This increment does not generate serializers.
 
 ## TC-2: generated IPC payload version registry — implemented
