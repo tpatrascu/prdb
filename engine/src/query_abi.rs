@@ -187,7 +187,8 @@ pub fn validate_descriptor_v4(descriptor: &QueryDescriptorV4) -> Result<(), Desc
 #[cfg(test)]
 mod generated_payload_tests {
     use super::{
-        decode_supervisor_invocation_control_request, encode_supervisor_invocation_control_request,
+        decode_supervisor_admin_cancel_request, decode_supervisor_invocation_control_request,
+        encode_supervisor_admin_cancel_request, encode_supervisor_invocation_control_request,
     };
 
     #[test]
@@ -213,6 +214,26 @@ mod generated_payload_tests {
         );
         assert_eq!(
             decode_supervisor_invocation_control_request(&encoded[..encoded.len() - 1]),
+            None
+        );
+    }
+
+    #[test]
+    fn generated_admin_cancel_codec_matches_wire_example() {
+        let encoded = encode_supervisor_admin_cancel_request([0x44; 16], 0x1234);
+        assert_eq!(
+            encoded,
+            [
+                0x00, 0x01, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44,
+                0x44, 0x44, 0x44, 0x44, 0x12, 0x34
+            ]
+        );
+        assert_eq!(
+            decode_supervisor_admin_cancel_request(&encoded),
+            Some(([0x44; 16], 0x1234))
+        );
+        assert_eq!(
+            decode_supervisor_admin_cancel_request(&encoded[..encoded.len() - 1]),
             None
         );
     }

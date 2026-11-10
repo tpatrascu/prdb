@@ -195,6 +195,21 @@ pub const SUPERVISOR_ADMIN_CANCEL_REQUEST_VERSION_OFFSET: u32 = 0;
 pub const SUPERVISOR_ADMIN_CANCEL_REQUEST_INVOCATION_ID_OFFSET: u32 = 2;
 pub const SUPERVISOR_ADMIN_CANCEL_REQUEST_REASON_CODE_OFFSET: u32 = 18;
 pub const SUPERVISOR_ADMIN_CANCEL_REQUEST_HEADER_BYTES: u32 = 20;
+pub fn encode_supervisor_admin_cancel_request(invocation_id: [u8; 16], reason_code: u16) -> [u8; 20] {
+    let mut payload = [0u8; 20];
+    payload[0..2].copy_from_slice(&SUPERVISOR_PAYLOAD_VERSION.to_be_bytes());
+    payload[2..18].copy_from_slice(&invocation_id);
+    payload[18..20].copy_from_slice(&reason_code.to_be_bytes());
+    payload
+}
+
+pub fn decode_supervisor_admin_cancel_request(payload: &[u8]) -> Option<([u8; 16], u16)> {
+    if payload.len() != 20 || u16::from_be_bytes([payload[0], payload[1]]) != SUPERVISOR_PAYLOAD_VERSION {
+        return None;
+    }
+    Some((payload[2..18].try_into().ok()?, u16::from_be_bytes(payload[18..20].try_into().ok()?)))
+}
+
 pub const SUPERVISOR_CANCEL_RESULT_SIMPLE_VERSION_OFFSET: u32 = 0;
 pub const SUPERVISOR_CANCEL_RESULT_SIMPLE_STATUS_OFFSET: u32 = 2;
 pub const SUPERVISOR_CANCEL_RESULT_SIMPLE_HEADER_BYTES: u32 = 3;

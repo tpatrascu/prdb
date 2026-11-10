@@ -1223,16 +1223,9 @@ pub fn dispatch_supervisor_control_request(
         Operation::SupervisorCancelInvocation
             if request.payload.len() == SUPERVISOR_ADMIN_CANCEL_REQUEST_HEADER_BYTES as usize =>
         {
-            let invocation_offset = SUPERVISOR_ADMIN_CANCEL_REQUEST_INVOCATION_ID_OFFSET as usize;
-            let invocation_id: [u8; 16] = request.payload
-                [invocation_offset..invocation_offset + 16]
-                .try_into()
-                .map_err(|_| SupervisorRequestError::InvalidPayload)?;
-            let reason_offset = SUPERVISOR_ADMIN_CANCEL_REQUEST_REASON_CODE_OFFSET as usize;
-            let reason_code = u16::from_be_bytes([
-                request.payload[reason_offset],
-                request.payload[reason_offset + 1],
-            ]);
+            let (invocation_id, reason_code) =
+                generated::decode_supervisor_admin_cancel_request(&request.payload)
+                    .ok_or(SupervisorRequestError::InvalidPayload)?;
             let now_us = crate::credentials::now_unix_micros().ok_or(
                 SupervisorRequestError::Transaction(TransactionError::ClockUnavailable),
             )?;

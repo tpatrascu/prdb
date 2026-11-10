@@ -230,6 +230,14 @@
 - Verification: `make -f engine/sdk/Makefile abi-constants-check abi-constants-test`, the focused codec test, full locked workspace build/format/warning-denied Clippy/serial Rust tests, and `make -f engine/sdk/Makefile test` all passed in the pinned Nix shell. Serial workspace tests included 132 commit integration tests; three cgroup-dependent commit tests and one cgroup-dependent metadata-process test remained ignored by default. Their explicit delegated-cgroup acceptances were previously run and recorded in the Linux sandbox and supervisor progress files.
 - Remaining: extend field-level schema and generated codecs to other payloads, add C serializer parity, and complete the release profile and artifact gates.
 
+## TC-2: generated administrative-cancel codec — implemented
+
+- Contract: [internal IPC](../../specs/ipc-protocol.md) and [toolchain](../../specs/toolchain.md). The administrative cancel request is the big-endian v1 payload version, a 16-byte invocation ID, and a big-endian u16 reason code; the decoder rejects invalid length or version.
+- Red/green evidence: the new multi-field wire regression first failed to compile because this payload had no generated codec. The schema now opts it into the fixed-width Rust codec generator, and supervisor administrative-cancel dispatch uses the generated decoder.
+- Regression: an independent 20-byte wire example checks encoding, tuple decoding, and truncated-payload rejection. Generator tests check both generated helper names and reject fixed-codec generation for trailing fields.
+- Verification: generator drift and schema tests, locked workspace build, rustfmt check, warning-denied Clippy, serial workspace tests, and the maintained TinyCC SDK suite all passed in the pinned Nix shell.
+- Remaining: extend field-level schema and generated codecs to other payloads, add C serializer parity, and complete the release profile and artifact gates.
+
 ## TC-1: locked Nix development shell — implemented
 
 - Behavior: `nix develop --locked` provides the pinned x86_64-linux package set used for the engine and SDK checks. [`flake.nix`](../../flake.nix) and [`flake.lock`](../../flake.lock) pin Nixpkgs revision `718f670e845328e9c2cecdd832835712b2cbd065` with source NAR hash `sha256-Ee5BWo8sh3pGt70QUdRajnaginqFmWvrtdBc4gJzhks=`.

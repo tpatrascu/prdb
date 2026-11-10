@@ -1466,6 +1466,7 @@
     {
       "name": "SUPERVISOR_ADMIN_CANCEL_REQUEST",
       "version_constant": "SUPERVISOR_PAYLOAD_VERSION",
+      "generate_rust_codec": true,
       "fields": [
         { "name": "version", "encoding": "u16be" },
         { "name": "invocation_id", "encoding": "bytes16" },
