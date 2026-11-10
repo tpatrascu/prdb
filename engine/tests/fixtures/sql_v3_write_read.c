@@ -394,6 +394,8 @@ static int32_t run_write_read_fixture(
         "linked_records.id AND grouped_records.right_key = "
         "linked_records.match_key LIMIT 2";
     static const uint8_t delete_sql[] = "DELETE FROM records WHERE id = $1";
+    static const uint8_t multi_insert_sql[] =
+        "INSERT INTO records VALUES ($1), ($2)";
     static const uint8_t schema[] = "sql_roundtrip";
     static const uint8_t empty_schema[] = "empty_roundtrip";
     static const uint8_t information_schema[] = "information_schema";
@@ -416,6 +418,7 @@ static int32_t run_write_read_fixture(
     uint8_t composite_grouped_result[256] = {0};
     uint8_t join_result[128] = {0};
     uint8_t insert_request[256] = {0};
+    uint8_t multi_insert_request[256] = {0};
     uint8_t update_request[256] = {0};
     uint8_t inserted_handle[16] = {0};
     uint8_t update_targets[PRDB_SDK_SQL_EXEC_MAX_MUTATION_TARGETS * 16] = {0};
@@ -446,6 +449,7 @@ static int32_t run_write_read_fixture(
     static uint8_t composite_join_materialized_bytes[
         PRDB_SDK_SQL_EXEC_V8_MAX_MATERIALIZED_BYTES];
     prdb_sdk_executor_insert_value_v1 insert_values[1] = {{0}};
+    prdb_sdk_executor_insert_value_v1 multi_insert_values[2] = {{0}};
     prdb_sdk_executor_update_patch_v1 update_patches[1] = {{0}};
     prdb_sdk_select_binding_v2 binding = {0};
     prdb_sdk_value_v1 cell_scratch[9] = {{0}};
@@ -476,6 +480,7 @@ static int32_t run_write_read_fixture(
         join_result, sizeof(join_result), 0, 0};
     uint32_t updated_count = 0;
     uint32_t deleted_count = 0;
+    uint32_t multi_inserted_count = UINT32_MAX;
     int32_t status;
 
     if (host == NULL || invocation == NULL ||
@@ -1198,6 +1203,35 @@ static int32_t run_write_read_fixture(
         cell_scratch, 1, verify_selected_value, &results);
     if (status != PRDB_SDK_SQL_EXEC_OK || results.row_count != 0) {
         static const uint8_t message[] = "fixture-error-final-select";
+        return report_failure(host, message, sizeof(message) - 1);
+    }
+
+    multi_insert_values[0].struct_size = sizeof(multi_insert_values[0]);
+    multi_insert_values[0].abi_version = PRDB_SDK_EXECUTOR_ABI_V1_VERSION;
+    multi_insert_values[0].state = PRDB_SDK_EXECUTOR_INSERT_VALUE;
+    multi_insert_values[0].value = parameter;
+    multi_insert_values[1] = multi_insert_values[0];
+    status = prdb_sdk_sql_execute_insert_v2(
+        host, schema, sizeof(schema) - 1, multi_insert_sql,
+        sizeof(multi_insert_sql) - 1, NULL, 0, planner_response,
+        sizeof(planner_response), executor_response,
+        sizeof(executor_response), multi_insert_request,
+        sizeof(multi_insert_request), planner_columns, 1, executor_columns,
+        1, multi_insert_values, 2, &multi_inserted_count);
+    if (status != PRDB_SDK_SQL_EXEC_OK || multi_inserted_count != 2) {
+        static const uint8_t message[] = "fixture-error-multi-insert";
+        return report_failure(host, message, sizeof(message) - 1);
+    }
+    results.row_count = 0;
+    status = prdb_sdk_sql_execute_select_v2(
+        host, schema, sizeof(schema) - 1, select_value_sql,
+        sizeof(select_value_sql) - 1, &parameter, 1, 16,
+        sizeof(batch_response), planner_response, sizeof(planner_response),
+        executor_response, sizeof(executor_response), batch_response,
+        sizeof(batch_response), planner_columns, 1, executor_columns, 1,
+        cell_scratch, 1, verify_selected_value, &results);
+    if (status != PRDB_SDK_SQL_EXEC_OK || results.row_count != 2) {
+        static const uint8_t message[] = "fixture-error-multi-insert-visible";
         return report_failure(host, message, sizeof(message) - 1);
     }
     return 0;
