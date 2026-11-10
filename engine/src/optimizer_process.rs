@@ -274,4 +274,48 @@ mod tests {
             Err(OptimizerProcessError::DuplicateRequestId)
         ));
     }
+
+    #[test]
+    fn process_protocol_enforces_connection_request_limit() {
+        let (mut submission_client, mut submission_server) = UnixStream::pair().unwrap();
+        let (mut planner_client, _planner_server) = UnixStream::pair().unwrap();
+        let optimizer_thread = std::thread::spawn(move || {
+            serve_optimizer_process(&mut submission_server, &mut planner_client)
+        });
+
+        for request_id in 1..=MAX_OPTIMIZER_REQUESTS_PER_CONNECTION as u64 {
+            crate::ipc::write_frame(
+                &mut submission_client,
+                &IpcFrame {
+                    operation: Operation::OptimizeSelect as u16,
+                    request_id,
+                    payload: Vec::new(),
+                },
+            )
+            .unwrap();
+            let response = crate::ipc::read_frame(&mut submission_client)
+                .unwrap()
+                .expect("invalid request remains recoverable within the stream budget");
+            assert_eq!(response.request_id, request_id);
+            assert_eq!(
+                OptimizerResponse::decode(&response.payload).unwrap().status,
+                OptimizerStatus::InvalidRequest
+            );
+        }
+
+        crate::ipc::write_frame(
+            &mut submission_client,
+            &IpcFrame {
+                operation: Operation::OptimizeSelect as u16,
+                request_id: MAX_OPTIMIZER_REQUESTS_PER_CONNECTION as u64 + 1,
+                payload: Vec::new(),
+            },
+        )
+        .unwrap();
+        submission_client.shutdown(Shutdown::Write).unwrap();
+        assert!(matches!(
+            optimizer_thread.join().unwrap(),
+            Err(OptimizerProcessError::RequestLimitExceeded)
+        ));
+    }
 }
