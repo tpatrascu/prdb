@@ -103,11 +103,8 @@ static uint32_t build_filter_plan(uint8_t *bytes,
     bytes[column_id_offset + 19] = 0; /* ordinal 0 */
     bytes[offset++] = 2;
     *predicate_offset = offset;
-    bytes[offset++] = 0x30; /* AND of comparison and TRUE */
-    bytes[offset++] = 2;
+    /* Comparison predicate: scanned column equals parameter value one. */
     put_integer_comparison(bytes, &offset, 1);
-    bytes[offset++] = 0x01;
-    bytes[offset++] = 1;
     bytes[offset++] = 3;
     put_u16(bytes, &offset, 1);
     column_id_offset = put_column(bytes, &offset, 3, 0);
@@ -512,6 +509,29 @@ int main(void) {
     uint8_t filtered_plan[512];
     uint32_t filtered_plan_len = build_filter_plan(filtered_plan,
                                                    &predicate_offset);
+    uint8_t sql_filtered[] = "SELECT c0 FROM items WHERE c0 = $1 LIMIT 1";
+    uint8_t filter_parameter_bytes[4] = {0, 0, 0, 1};
+    prdb_sdk_value_v1 filter_parameters[1] = {{
+        sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
+        PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_INTEGER,
+        filter_parameter_bytes, sizeof(filter_parameter_bytes)}};
+    assert(prdb_sdk_sql_parse_select_v2(
+               sql_filtered, sizeof(sql_filtered) - 1, &statement,
+               sizeof(statement), NULL) == PRDB_SDK_SQL_OK);
+    resolve.calls = 0;
+    assert(prdb_sdk_optimizer_validate_select_plan_with_parameters_v1(
+               &host, &statement, filter_parameters, 1,
+               (const uint8_t *)"public", 6, filtered_plan,
+               filtered_plan_len, response, sizeof(response), &response_len) ==
+           PRDB_SDK_OPTIMIZER_PLAN_OK);
+    assert(resolve.calls == 1);
+    filter_parameter_bytes[3] = 2;
+    assert(prdb_sdk_optimizer_validate_select_plan_with_parameters_v1(
+               &host, &statement, filter_parameters, 1,
+               (const uint8_t *)"public", 6, filtered_plan,
+               filtered_plan_len, response, sizeof(response), &response_len) ==
+           PRDB_SDK_OPTIMIZER_PLAN_IDENTITY_MISMATCH);
+    filter_parameter_bytes[3] = 1;
     resolve.calls = 0;
     projected_rows_seen = 0;
     assert(prdb_sdk_optimizer_execute_unfiltered_plan_v1(
@@ -705,6 +725,50 @@ int main(void) {
            resolve.statement_failures == 0);
 
     assert(prdb_sdk_sql_parse_select_v2(
+               sql_filtered, sizeof(sql_filtered) - 1, &statement,
+               sizeof(statement), NULL) == PRDB_SDK_SQL_OK);
+    resolve.optimizer_response_len = build_optimizer_response(
+        resolve.optimizer_response, filtered_plan, filtered_plan_len);
+    resolve.optimizer_calls = 0;
+    resolve.calls = 0;
+    resolve.event_count = 0;
+    projected_rows_seen = 0;
+    assert(prdb_sdk_optimizer_execute_select_ast_with_parameters_v1(
+               &host_v4, &statement, filter_parameters, 1,
+               (const uint8_t *)"public", 6, 2, sizeof(batch_response),
+               request, sizeof(request), optimizer_response,
+               sizeof(optimizer_response), response, sizeof(response),
+               scan_response, sizeof(scan_response), batch_response,
+               sizeof(batch_response), &acquired_relation,
+               sizeof(acquired_relation), acquired_columns, 4, source_cells, 4,
+               projected_values, 1, on_projected_row, NULL,
+               &total_rows) == PRDB_SDK_OPTIMIZER_PLAN_OK);
+    assert(resolve.optimizer_calls == 1 && resolve.calls == 7 &&
+           total_rows == 1 && projected_rows_seen == 1 &&
+           resolve.statement_failures == 0);
+    resolve.emitted_result_len = 0;
+    resolve.result_write_calls = 0;
+    assert(prdb_sdk_optimizer_execute_select_ast_with_parameters_to_result_v1(
+               &host_v4, &statement, filter_parameters, 1,
+               (const uint8_t *)"public", 6, 2, sizeof(batch_response),
+               request, sizeof(request), optimizer_response,
+               sizeof(optimizer_response), response, sizeof(response),
+               scan_response, sizeof(scan_response), batch_response,
+               sizeof(batch_response), &acquired_relation,
+               sizeof(acquired_relation), acquired_columns, 4, source_cells, 4,
+               projected_values, 1, result_record_buffer,
+               sizeof(result_record_buffer), &total_rows) ==
+           PRDB_SDK_OPTIMIZER_PLAN_OK);
+    assert(total_rows == 1 && resolve.result_write_calls == 1 &&
+           resolve.emitted_result_len == 27);
+    assert(memcmp(resolve.emitted_result, "SQLR", 4) == 0);
+    assert(resolve.emitted_result[8] == 0 && resolve.emitted_result[9] == 2 &&
+           memcmp(resolve.emitted_result + 10, "c0", 2) == 0);
+    assert(resolve.emitted_result[15] == PRDB_SDK_VALUE_TYPE_INTEGER &&
+           resolve.emitted_result[23] == 0 && resolve.emitted_result[24] == 0 &&
+           resolve.emitted_result[25] == 0 && resolve.emitted_result[26] == 1);
+
+    assert(prdb_sdk_sql_parse_select_v2(
                sql, sizeof(sql) - 1, &statement, sizeof(statement), NULL) ==
            PRDB_SDK_SQL_OK);
     resolve.optimizer_response[2] = PRDB_SDK_OPTIMIZER_STATUS_INTERNAL;
@@ -757,7 +821,7 @@ int main(void) {
                payload, payload_len, &decoded, sizeof(decoded), &filter,
                sizeof(filter)) == PRDB_SDK_OPTIMIZER_PLAN_OK);
     assert(filter.present == 1 && filter.prefix == payload + predicate_offset);
-    assert(filter.prefix_len == 32);
+    assert(filter.prefix_len == 28);
     assert(decoded.has_limit == 1 && decoded.limit == 1);
 
     memcpy(malformed, payload, payload_len);
@@ -767,7 +831,7 @@ int main(void) {
                sizeof(filter)) == PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD);
 
     memcpy(malformed, payload, payload_len);
-    malformed[predicate_offset + 21] = 0x01; /* Boolean versus INTEGER. */
+    malformed[predicate_offset + 19] = 0x01; /* Boolean versus INTEGER. */
     assert(prdb_sdk_optimizer_decode_plan_with_filter_v1(
                malformed, payload_len, &decoded, sizeof(decoded), &filter,
                sizeof(filter)) == PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD);

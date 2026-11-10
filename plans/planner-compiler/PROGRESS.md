@@ -158,4 +158,13 @@
 - Implementation: `prdb_sdk_optimizer_encode_select_with_parameters_v1` serializes comparisons, Boolean AND/OR/NOT trees, and Boolean/INTEGER/TEXT/NULL values into the bounded prefix representation expected by the Rust decoder. The compatibility encoder continues to reject WHERE trees.
 - Regression: TinyCC fixture checks an exact comparison request payload and rejects missing parameters; unfiltered request encoding remains byte-for-byte stable.
 - Verification: focused and full maintained TinyCC SDK suites passed; generated ABI consistency, documentation link checks, and `git diff --check` passed.
-- Remaining: connect the parameterized encoder to execution only after validating that the returned Filter matches the submitted AST and parameter values.
+- Remaining: route the validated parameterized bridge through a real optimizer/executor process and channel integration.
+
+
+## OP-3 dependency: submit and execute validated parameterized WHERE plans
+
+- Behavior: supported parameterized SELECT predicates are submitted to the optimizer, and the SDK rejects a returned Filter unless its operator tree, scanned column names, comparison operators, and values match the submitted AST and parameters. Matching plans execute through bounded filtered scans and can emit SQLR rows.
+- Implementation: `prdb_sdk_optimizer_execute_select_ast_with_parameters_v1` composes parameterized request encoding, ABI v4 optimizer submission, executor metadata validation, AST-to-Filter comparison, filtered batch execution, and sticky statement failure. `prdb_sdk_optimizer_execute_select_ast_with_parameters_to_result_v1` emits provisional SQLR records for matching rows.
+- Regression: TinyCC fixture checks successful filtered submission/execution/result emission and rejects a plan whose literal differs from the supplied parameter. Unsupported predicates remain on the existing SQL path.
+- Verification: focused and full maintained TinyCC SDK suites passed; generated ABI consistency, documentation link checks, and `git diff --check` passed.
+- Remaining: exercise the path through the confined optimizer/executor processes and channels; add bounded mutation plans.
