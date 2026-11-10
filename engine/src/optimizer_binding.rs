@@ -1,6 +1,8 @@
 //! Bind structured optimizer requests against invocation-authorized metadata.
 
-use crate::metadata_discovery::{AuthorizedRelationDescription, VisibleColumn};
+use crate::metadata_discovery::{
+    AuthorizedPlanRelation, AuthorizedRelationDescription, VisibleColumn,
+};
 use crate::optimizer_request::{Comparison, Predicate, RequestError, decode_select_request};
 use crate::transaction::{PlannerMetadataConnection, TransactionError};
 use crate::tuple::ScalarType;
@@ -9,7 +11,11 @@ use std::collections::HashSet;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BoundSelect {
     pub schema_name: String,
+    pub schema_id: [u8; 16],
+    pub schema_version: u64,
+    pub table_epoch: u64,
     pub relation_id: [u8; 16],
+    pub relation_name: String,
     pub projections: Vec<BoundColumn>,
     pub predicate: Option<BoundPredicate>,
     pub limit: Option<u32>,
@@ -87,7 +93,7 @@ impl From<RequestError> for BindError {
 /// undiscoverable relations share one result and never produce a partial plan.
 pub fn bind_select_request(
     request_bytes: &[u8],
-    relation: Option<AuthorizedRelationDescription>,
+    relation: Option<AuthorizedPlanRelation>,
 ) -> Result<BoundSelect, BindError> {
     let request = decode_select_request(request_bytes)?;
     bind_decoded_select(request, relation)
@@ -102,7 +108,7 @@ pub fn bind_select_request_via_metadata(
 ) -> Result<BoundSelect, MetadataBindError> {
     let request = decode_select_request(request_bytes).map_err(BindError::from)?;
     let relation = connection
-        .resolve_relation(&request.schema_name, &request.relation_name)
+        .resolve_relation_for_plan(&request.schema_name, &request.relation_name)
         .map_err(MetadataBindError::Transaction)?
         .map(|(_, description)| description);
     bind_decoded_select(request, relation).map_err(MetadataBindError::Bind)
@@ -110,22 +116,26 @@ pub fn bind_select_request_via_metadata(
 
 fn bind_decoded_select(
     request: crate::optimizer_request::SelectRequest,
-    relation: Option<AuthorizedRelationDescription>,
+    relation: Option<AuthorizedPlanRelation>,
 ) -> Result<BoundSelect, BindError> {
     let relation = relation.ok_or(BindError::RelationUnavailable)?;
-    if !relation.name.eq_ignore_ascii_case(&request.relation_name) {
+    if !relation
+        .relation
+        .name
+        .eq_ignore_ascii_case(&request.relation_name)
+    {
         return Err(BindError::RelationUnavailable);
     }
-    validate_relation_shape(&relation)?;
+    validate_relation_shape(&relation.relation)?;
     let mut projections = Vec::with_capacity(request.projections.len());
     for name in &request.projections {
-        projections.push(resolve_column(&relation.columns, name)?.into());
+        projections.push(resolve_column(&relation.relation.columns, name)?.into());
     }
     let predicate = request
         .predicate
         .as_ref()
         .map(|predicate| {
-            let (bound, scalar_type) = bind_predicate(predicate, &relation.columns)?;
+            let (bound, scalar_type) = bind_predicate(predicate, &relation.relation.columns)?;
             if scalar_type != Some(ScalarType::Boolean) {
                 return Err(BindError::InvalidQuery);
             }
@@ -134,7 +144,11 @@ fn bind_decoded_select(
         .transpose()?;
     Ok(BoundSelect {
         schema_name: request.schema_name,
-        relation_id: relation.relation_id,
+        schema_id: relation.schema_id,
+        schema_version: relation.schema_version,
+        table_epoch: relation.table_epoch,
+        relation_id: relation.relation.relation_id,
+        relation_name: relation.relation.name,
         projections,
         predicate,
         limit: request.limit,
@@ -283,26 +297,31 @@ mod tests {
         bytes
     }
 
-    fn relation() -> AuthorizedRelationDescription {
-        AuthorizedRelationDescription {
-            relation_id: [0x11; 16],
-            name: "items".to_owned(),
-            columns: vec![
-                VisibleColumn {
-                    column_id: [0x21; 16],
-                    name: "id".to_owned(),
-                    ordinal: 0,
-                    scalar_type: ScalarType::Integer,
-                    nullable: false,
-                },
-                VisibleColumn {
-                    column_id: [0x22; 16],
-                    name: "active".to_owned(),
-                    ordinal: 1,
-                    scalar_type: ScalarType::Boolean,
-                    nullable: true,
-                },
-            ],
+    fn relation() -> AuthorizedPlanRelation {
+        AuthorizedPlanRelation {
+            schema_id: [0x10; 16],
+            schema_version: 3,
+            table_epoch: 4,
+            relation: AuthorizedRelationDescription {
+                relation_id: [0x11; 16],
+                name: "items".to_owned(),
+                columns: vec![
+                    VisibleColumn {
+                        column_id: [0x21; 16],
+                        name: "id".to_owned(),
+                        ordinal: 0,
+                        scalar_type: ScalarType::Integer,
+                        nullable: false,
+                    },
+                    VisibleColumn {
+                        column_id: [0x22; 16],
+                        name: "active".to_owned(),
+                        ordinal: 1,
+                        scalar_type: ScalarType::Boolean,
+                        nullable: true,
+                    },
+                ],
+            },
         }
     }
 
@@ -310,7 +329,11 @@ mod tests {
     fn binds_only_authorized_relation_shape_and_stable_column_references() {
         let predicate = [0x20, 0, 0x10, 2, b'i', b'd', 0x02, 0, 0, 0, 0, 0, 0, 0, 7];
         let plan = bind_select_request(&request(&predicate, "ID"), Some(relation())).unwrap();
+        assert_eq!(plan.schema_id, [0x10; 16]);
+        assert_eq!(plan.schema_version, 3);
+        assert_eq!(plan.table_epoch, 4);
         assert_eq!(plan.relation_id, [0x11; 16]);
+        assert_eq!(plan.relation_name, "items");
         assert_eq!(
             plan.projections,
             [BoundColumn {
@@ -343,7 +366,7 @@ mod tests {
             Err(BindError::RelationUnavailable)
         );
         let mut wrong_relation = relation();
-        wrong_relation.name = "secret".to_owned();
+        wrong_relation.relation.name = "secret".to_owned();
         assert_eq!(
             bind_select_request(&bytes, Some(wrong_relation)),
             Err(BindError::RelationUnavailable)

@@ -25882,7 +25882,11 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             &mut planner_connection,
         )?;
         assert_eq!(bound.schema_name, "planner_stats");
+        assert_eq!(bound.schema_id, schema.schema_id);
+        assert_eq!(bound.schema_version, 1);
+        assert_eq!(bound.table_epoch, 2);
         assert_eq!(bound.relation_id, table.table_id);
+        assert_eq!(bound.relation_name, "observations");
         assert_eq!(
             bound.projections,
             [BoundColumn {

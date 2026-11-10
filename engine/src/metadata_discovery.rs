@@ -99,6 +99,16 @@ pub struct AuthorizedRelationDescription {
     pub columns: Vec<VisibleColumn>,
 }
 
+/// Authorized relation metadata paired with stable invocation-snapshot
+/// catalog identity for optimizer binding. It is not an executor capability.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthorizedPlanRelation {
+    pub schema_id: [u8; 16],
+    pub schema_version: u64,
+    pub table_epoch: u64,
+    pub relation: AuthorizedRelationDescription,
+}
+
 /// Opaque relation reference owned by one executor metadata connection.
 /// Possession identifies a previously resolved name but does not authorize a
 /// row read; the connection rechecks pinned catalog authority on use.

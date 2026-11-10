@@ -21,9 +21,9 @@ use crate::expression::{
 use crate::index_key::{DeriveIndexKeyError, derive_index_key};
 use crate::metadata::{EngineMetadata, Lifecycle};
 use crate::metadata_discovery::{
-    AuthorizedRelationDescription, COLUMN_CURSOR_TOKEN_KIND, ColumnScanCursor,
-    EXECUTOR_ROW_HANDLE_TOKEN_KIND, EXECUTOR_SCAN_CURSOR_TOKEN_KIND, ExecutorRowHandle,
-    ExecutorScanCursor, INFORMATION_SCHEMA_COLUMNS_CURSOR_TOKEN_KIND,
+    AuthorizedPlanRelation, AuthorizedRelationDescription, COLUMN_CURSOR_TOKEN_KIND,
+    ColumnScanCursor, EXECUTOR_ROW_HANDLE_TOKEN_KIND, EXECUTOR_SCAN_CURSOR_TOKEN_KIND,
+    ExecutorRowHandle, ExecutorScanCursor, INFORMATION_SCHEMA_COLUMNS_CURSOR_TOKEN_KIND,
     INFORMATION_SCHEMA_TABLES_CURSOR_TOKEN_KIND, InformationSchemaColumnRow,
     InformationSchemaColumnsCursor, InformationSchemaColumnsPage, InformationSchemaColumnsScanPage,
     InformationSchemaSchemataPage, InformationSchemaSchemataRow, InformationSchemaTableRow,
@@ -6707,6 +6707,55 @@ impl PlannerMetadataConnection<'_, '_> {
             },
         );
         Ok(Some((PlanningTableHandle { token }, description)))
+    }
+
+    /// Resolve an authorized planner relation together with pinned schema and
+    /// table identity needed to bind a stable logical plan.
+    pub fn resolve_relation_for_plan(
+        &mut self,
+        schema_name: &str,
+        relation_name: &str,
+    ) -> Result<Option<(PlanningTableHandle, AuthorizedPlanRelation)>, TransactionError> {
+        let Some((handle, relation)) = self.resolve_relation(schema_name, relation_name)? else {
+            return Ok(None);
+        };
+        let identity = if schema_name == "information_schema" {
+            AuthorizedPlanRelation {
+                schema_id: crate::metadata_discovery::INFORMATION_SCHEMA_SCHEMA_ID,
+                schema_version: 1,
+                table_epoch: 1,
+                relation,
+            }
+        } else {
+            let schema = self
+                .transaction
+                .load_catalog_table_schema(relation.relation_id)?;
+            if schema.schema_id == [0; 16]
+                || schema.schema_version == 0
+                || schema.write_epoch == 0
+                || schema.column_ids.len() != relation.columns.len()
+                || schema.columns.len() != relation.columns.len()
+                || relation
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .any(|(ordinal, column)| {
+                        column.ordinal as usize != ordinal
+                            || column.column_id != schema.column_ids[ordinal]
+                            || column.scalar_type != schema.columns[ordinal].scalar_type
+                            || column.nullable != schema.columns[ordinal].nullable
+                    })
+            {
+                return Err(TransactionError::CorruptCatalog);
+            }
+            AuthorizedPlanRelation {
+                schema_id: schema.schema_id,
+                schema_version: schema.schema_version,
+                table_epoch: schema.write_epoch,
+                relation,
+            }
+        };
+        Ok(Some((handle, identity)))
     }
 
     /// Revalidate the qualified name before returning its authorized schema.
