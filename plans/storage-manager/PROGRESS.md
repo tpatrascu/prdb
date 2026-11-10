@@ -1026,9 +1026,9 @@
 
 ## SU-5 verification: paired worker drain before terminal commit
 
-- Behavior: one token-admitted supervisor invocation serves planner and executor Unix streams concurrently; clean EOF on both drains the channels, after which the supervisor terminal request commits and storage records a durable COMMITTED outcome.
+- Behavior: one token-admitted supervisor invocation serves planner and executor Unix streams concurrently; a planner `describe_relation` request receives its correlated response through the provisioned channel, and clean EOF on both drains the channels before the supervisor terminal request commits and storage records a durable COMMITTED outcome.
 - Changed fixture: [real-redb paired worker stream regression](../../engine/tests/commit.rs).
-- Verification: focused `cargo test -p prdb-engine --test commit supervisor_drains_both_worker_channels_before_durable_finalize --locked` passed in the repository Nix shell.
+- Verification: the focused regression passes in the repository Nix shell.
 - Remaining: provision the streams to launched workers, observe their exit status, and require the worker process result before terminal commit.
 
 ## NP-2 / SM-6 dependency: handshake request dispatch

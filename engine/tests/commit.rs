@@ -20157,7 +20157,9 @@ fn process_exit_after_atomic_row_index_commit_preserves_publication()
 #[test]
 fn supervisor_drains_both_worker_channels_before_durable_finalize()
 -> Result<(), Box<dyn std::error::Error>> {
-    use prdb_engine::ipc::{IpcFrame, Operation, encode_frame, read_frame};
+    use prdb_engine::executor_ipc::ResolveRelationRequest;
+    use prdb_engine::ipc::{IpcFrame, Operation, encode_frame, read_frame, write_frame};
+    use prdb_engine::planner_ipc::DescribeRelationResponse;
     use prdb_engine::storage_manager::SupervisorInvocationError;
     use prdb_engine::supervisor_ipc::SUPERVISOR_PAYLOAD_VERSION;
     use std::io::Cursor;
@@ -20201,11 +20203,40 @@ fn supervisor_drains_both_worker_channels_before_durable_finalize()
         64,
     )?;
 
-    let (planner_worker, planner_storage) = UnixStream::pair()?;
+    let (mut planner_worker, planner_storage) = UnixStream::pair()?;
     let (executor_worker, executor_storage) = UnixStream::pair()?;
-    drop(planner_worker);
-    drop(executor_worker);
-    invocation.serve_worker_channels(planner_storage, executor_storage)?;
+    std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+        let serving =
+            scope.spawn(|| invocation.serve_worker_channels(planner_storage, executor_storage));
+        write_frame(
+            &mut planner_worker,
+            &IpcFrame {
+                operation: Operation::DescribeRelation as u16,
+                request_id: 1,
+                payload: ResolveRelationRequest {
+                    schema_name: "missing_schema".to_owned(),
+                    relation_name: "missing_relation".to_owned(),
+                }
+                .encode()?,
+            },
+        )?;
+        let response = read_frame(&mut planner_worker)?.ok_or("planner channel closed")?;
+        assert_eq!(response.operation, Operation::DescribeRelation as u16);
+        assert_eq!(response.request_id, 1);
+        assert!(
+            DescribeRelationResponse::decode(&response.payload)?
+                .table
+                .is_none()
+        );
+        planner_worker.shutdown(std::net::Shutdown::Write)?;
+        drop(planner_worker);
+        drop(executor_worker);
+        serving
+            .join()
+            .expect("worker-channel server thread panicked")
+            .map_err(|error| format!("worker-channel server failed: {error:?}"))?;
+        Ok(())
+    })?;
 
     assert!(matches!(
         invocation.serve_terminal(&mut Cursor::new(Vec::new())),
