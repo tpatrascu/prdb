@@ -2,11 +2,13 @@
 
 use crate::metadata_discovery::{AuthorizedRelationDescription, VisibleColumn};
 use crate::optimizer_request::{Comparison, Predicate, RequestError, decode_select_request};
+use crate::transaction::{PlannerMetadataConnection, TransactionError};
 use crate::tuple::ScalarType;
 use std::collections::HashSet;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BoundSelect {
+    pub schema_name: String,
     pub relation_id: [u8; 16],
     pub projections: Vec<BoundColumn>,
     pub predicate: Option<BoundPredicate>,
@@ -46,6 +48,26 @@ pub enum BindError {
     InvalidQuery,
 }
 
+#[derive(Debug)]
+pub enum MetadataBindError {
+    Bind(BindError),
+    Transaction(TransactionError),
+}
+
+impl std::fmt::Display for MetadataBindError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "optimizer metadata bind failed: {self:?}")
+    }
+}
+
+impl std::error::Error for MetadataBindError {}
+
+impl From<BindError> for MetadataBindError {
+    fn from(error: BindError) -> Self {
+        Self::Bind(error)
+    }
+}
+
 impl std::fmt::Display for BindError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "optimizer bind error: {self:?}")
@@ -68,6 +90,28 @@ pub fn bind_select_request(
     relation: Option<AuthorizedRelationDescription>,
 ) -> Result<BoundSelect, BindError> {
     let request = decode_select_request(request_bytes)?;
+    bind_decoded_select(request, relation)
+}
+
+/// Resolve the request's qualified relation through a planner connection
+/// opened on the invocation transaction, then bind it. The request cannot
+/// supply or override the invocation identity, grants, or connection role.
+pub fn bind_select_request_via_metadata(
+    request_bytes: &[u8],
+    connection: &mut PlannerMetadataConnection<'_, '_>,
+) -> Result<BoundSelect, MetadataBindError> {
+    let request = decode_select_request(request_bytes).map_err(BindError::from)?;
+    let relation = connection
+        .resolve_relation(&request.schema_name, &request.relation_name)
+        .map_err(MetadataBindError::Transaction)?
+        .map(|(_, description)| description);
+    bind_decoded_select(request, relation).map_err(MetadataBindError::Bind)
+}
+
+fn bind_decoded_select(
+    request: crate::optimizer_request::SelectRequest,
+    relation: Option<AuthorizedRelationDescription>,
+) -> Result<BoundSelect, BindError> {
     let relation = relation.ok_or(BindError::RelationUnavailable)?;
     if !relation.name.eq_ignore_ascii_case(&request.relation_name) {
         return Err(BindError::RelationUnavailable);
@@ -89,6 +133,7 @@ pub fn bind_select_request(
         })
         .transpose()?;
     Ok(BoundSelect {
+        schema_name: request.schema_name,
         relation_id: relation.relation_id,
         projections,
         predicate,

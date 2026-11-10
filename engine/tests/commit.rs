@@ -25740,6 +25740,9 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
     use prdb_engine::authorization::{Effect, Expr, Operation, Subject};
     use prdb_engine::executor_ipc::ResolveRelationRequest;
     use prdb_engine::ipc::{IpcFrame, Operation as IpcOperation};
+    use prdb_engine::optimizer_binding::{
+        BindError, BoundColumn, MetadataBindError, bind_select_request_via_metadata,
+    };
     use prdb_engine::planner_ipc::{
         DescribeRelationResponse, EstimateScanRequest, EstimateScanResponse,
         MAX_PLANNER_REQUESTS_PER_CONNECTION, serve_planner,
@@ -25857,6 +25860,47 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             audit_event: policy_audit,
         })
         .map_err(|error| format!("planner fixture policy creation: {error:?}"))?;
+
+    let encode_select = |schema_name: &str, relation_name: &str, column_name: &str| {
+        let mut bytes = vec![0, 1, 1, 0];
+        for name in [schema_name, relation_name] {
+            bytes.push(name.len() as u8);
+            bytes.extend_from_slice(name.as_bytes());
+        }
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.push(column_name.len() as u8);
+        bytes.extend_from_slice(column_name.as_bytes());
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.push(0);
+        bytes
+    };
+    let mut binding_transaction = storage.begin_invocation(id(0x8a), actor, 9_999, 8, 512)?;
+    {
+        let mut planner_connection = binding_transaction.open_planner_metadata_connection();
+        let bound = bind_select_request_via_metadata(
+            &encode_select("planner_stats", "observations", "value"),
+            &mut planner_connection,
+        )?;
+        assert_eq!(bound.schema_name, "planner_stats");
+        assert_eq!(bound.relation_id, table.table_id);
+        assert_eq!(
+            bound.projections,
+            [BoundColumn {
+                column_id: table.column_ids[0],
+                ordinal: 0,
+                scalar_type: ScalarType::Integer,
+                nullable: true,
+            }]
+        );
+        assert!(matches!(
+            bind_select_request_via_metadata(
+                &encode_select("planner_stats", "hidden_or_missing", "value"),
+                &mut planner_connection,
+            ),
+            Err(MetadataBindError::Bind(BindError::RelationUnavailable))
+        ));
+    }
+    binding_transaction.abort()?;
 
     let mut transaction = storage.begin_invocation(id(0x88), actor, 9_999, 8, 512)?;
     let (mut client, mut server) = std::os::unix::net::UnixStream::pair()?;
