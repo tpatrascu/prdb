@@ -16,8 +16,7 @@ pub use crate::query_abi::{
     SUPERVISOR_CANCEL_RESULT_TERMINAL_RETENTION_DEADLINE_OFFSET,
     SUPERVISOR_CANCEL_RESULT_TERMINAL_STATUS_OFFSET,
     SUPERVISOR_CANCEL_RESULT_TERMINAL_VERSION_OFFSET,
-    SUPERVISOR_INVOCATION_CONTROL_REQUEST_HEADER_BYTES,
-    SUPERVISOR_INVOCATION_CONTROL_REQUEST_VERSION_OFFSET, SUPERVISOR_PAYLOAD_VERSION,
+    SUPERVISOR_INVOCATION_CONTROL_REQUEST_HEADER_BYTES, SUPERVISOR_PAYLOAD_VERSION,
 };
 use crate::storage_manager::{
     AdministrativeCancellationError, AdministrativeCancellationResult, InvocationStatus,
@@ -1190,15 +1189,6 @@ pub fn dispatch_supervisor_control_request(
         Operation::from_code(request.operation).map_err(SupervisorRequestError::Dispatch)?;
     authorize_operation(role, operation).map_err(SupervisorRequestError::Dispatch)?;
     let invocation_header_bytes = SUPERVISOR_INVOCATION_CONTROL_REQUEST_HEADER_BYTES as usize;
-    let version_offset = SUPERVISOR_INVOCATION_CONTROL_REQUEST_VERSION_OFFSET as usize;
-    if request.payload.len() < invocation_header_bytes
-        || u16::from_be_bytes([
-            request.payload[version_offset],
-            request.payload[version_offset + 1],
-        ]) != SUPERVISOR_PAYLOAD_VERSION
-    {
-        return Err(SupervisorRequestError::InvalidPayload);
-    }
     let payload = match operation {
         Operation::SupervisorGetInvocationStatus
             if request.payload.len() == invocation_header_bytes =>

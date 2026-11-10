@@ -1,5 +1,12 @@
 # Internal IPC Progress
 
+## IPC-3 dependency: generated supervisor control request validation — implemented
+
+- Behavior: status and administrative-cancel requests are decoded and validated through their exact schema-generated operation layouts.
+- Implementation: [supervisor control dispatcher](../../engine/src/supervisor_ipc.rs) no longer manually reads the common version prefix before invoking those decoders.
+- Verification: focused owner-scoped status/cancel and control-socket tests passed; locked build, formatting, warning-denied Clippy, serial workspace tests (129 passed, 3 cgroup-dependent ignored), and TinyCC SDK suite passed.
+- Remaining: role/handle tests across real processes, queue/deadline hardening, and worker lifecycle coverage remain open.
+
 ## IPC-6 dependency: generated terminal request encoders — implemented
 
 - Behavior: the gateway sends the exact generated version-only request for finalize or abort and emits no terminal event for an unrelated operation.

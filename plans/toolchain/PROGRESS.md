@@ -1,5 +1,12 @@
 # Toolchain Progress
 
+## TC-2: remove duplicate supervisor control version parsing — implemented
+
+- Contract: supervisor status and administrative-cancel payload versions and exact lengths are validated by their generated operation-specific decoders.
+- Implementation: the shared dispatcher now routes request validation directly through the generated decoders; its previous manual shared-prefix version read is removed. The public payload-version constant remains available to existing clients and fixtures.
+- Regression and verification: owner-scoped client status/cancel and bounded control-socket regressions pass. Locked workspace build, format check, warning-denied Clippy, serial workspace tests (129 passed, 3 cgroup-dependent ignored), generated ABI checks, and maintained TinyCC SDK suite passed.
+- Remaining: other remaining payload migrations and release-profile, signed artifact, runtime-support, cross-profile, and sandbox acceptance gates are still open.
+
 ## TC-1 / TC-3: initial SDK and query build timing sample — measured
 
 - Profile and commands: pinned TinyCC 0.9.27-unstable-2025-01-06 on NixOS x86_64/glibc 2.42. Three separate `make -f engine/sdk/Makefile BUILD_DIR=<fresh-dir> all` runs built the SDK archive; a repeated no-op make measured warm incremental overhead. A maintained `sql_v3_write_read.c` fixture was compiled seven times with TinyCC `-Wall -Wextra -Werror -fPIC`, then linked seven times with the SDK archive using GNU `cc -shared -Wl,--no-eh-frame-hdr,-z,noexecstack`.
