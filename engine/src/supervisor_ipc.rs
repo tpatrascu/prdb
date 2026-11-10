@@ -1392,27 +1392,17 @@ fn encode_supervisor_status(
             *cancellation_requested,
         )),
         InvocationStatus::Terminal(outcome) => {
-            let mut payload =
-                vec![0; generated::SUPERVISOR_STATUS_TERMINAL_RESPONSE_HEADER_BYTES as usize];
-            payload[generated::SUPERVISOR_STATUS_TERMINAL_RESPONSE_VERSION_OFFSET as usize
-                ..generated::SUPERVISOR_STATUS_TERMINAL_RESPONSE_VERSION_OFFSET as usize + 2]
-                .copy_from_slice(&SUPERVISOR_PAYLOAD_VERSION.to_be_bytes());
-            payload[generated::SUPERVISOR_STATUS_TERMINAL_RESPONSE_STATUS_OFFSET as usize] =
-                match outcome.status {
-                    OutcomeStatus::Committed => 3,
-                    OutcomeStatus::Aborted => 4,
-                };
-            let observed =
-                generated::SUPERVISOR_STATUS_TERMINAL_RESPONSE_OBSERVED_AT_OFFSET as usize;
-            payload[observed..observed + 8].copy_from_slice(&snapshot.observed_at_us.to_be_bytes());
-            let sequence =
-                generated::SUPERVISOR_STATUS_TERMINAL_RESPONSE_COMMIT_SEQUENCE_OFFSET as usize;
-            payload[sequence..sequence + 8].copy_from_slice(&outcome.commit_sequence.to_be_bytes());
-            let deadline =
-                generated::SUPERVISOR_STATUS_TERMINAL_RESPONSE_RETENTION_DEADLINE_OFFSET as usize;
-            payload[deadline..deadline + 8]
-                .copy_from_slice(&outcome.retention_deadline_us.to_be_bytes());
-            Ok(payload)
+            let status = match outcome.status {
+                OutcomeStatus::Committed => 3,
+                OutcomeStatus::Aborted => 4,
+            };
+            Ok(generated::encode_supervisor_status_terminal_response(
+                status,
+                snapshot.observed_at_us,
+                outcome.commit_sequence,
+                outcome.retention_deadline_us,
+            )
+            .to_vec())
         }
     }
 }

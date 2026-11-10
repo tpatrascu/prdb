@@ -189,8 +189,9 @@ mod generated_payload_tests {
     use super::{
         decode_supervisor_admin_cancel_request, decode_supervisor_cancel_result_simple,
         decode_supervisor_cancel_result_terminal, decode_supervisor_invocation_control_request,
-        encode_supervisor_admin_cancel_request, encode_supervisor_cancel_result_simple,
-        encode_supervisor_cancel_result_terminal, encode_supervisor_invocation_control_request,
+        decode_supervisor_status_terminal_response, encode_supervisor_admin_cancel_request,
+        encode_supervisor_cancel_result_simple, encode_supervisor_cancel_result_terminal,
+        encode_supervisor_invocation_control_request, encode_supervisor_status_terminal_response,
     };
 
     #[test]
@@ -267,6 +268,22 @@ mod generated_payload_tests {
         assert_eq!(
             decode_supervisor_cancel_result_terminal(&encoded),
             Some((2, 1, 7, -2))
+        );
+    }
+
+    #[test]
+    fn generated_terminal_status_codec_preserves_signed_times() {
+        let encoded = encode_supervisor_status_terminal_response(4, -1, 7, -2);
+        assert_eq!(
+            encoded,
+            [
+                0x00, 0x01, 0x04, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x07, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe
+            ]
+        );
+        assert_eq!(
+            decode_supervisor_status_terminal_response(&encoded),
+            Some((4, -1, 7, -2))
         );
     }
 }

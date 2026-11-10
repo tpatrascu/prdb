@@ -230,6 +230,14 @@
 - Verification: `make -f engine/sdk/Makefile abi-constants-check abi-constants-test`, the focused codec test, full locked workspace build/format/warning-denied Clippy/serial Rust tests, and `make -f engine/sdk/Makefile test` all passed in the pinned Nix shell. Serial workspace tests included 132 commit integration tests; three cgroup-dependent commit tests and one cgroup-dependent metadata-process test remained ignored by default. Their explicit delegated-cgroup acceptances were previously run and recorded in the Linux sandbox and supervisor progress files.
 - Remaining: extend field-level schema and generated codecs to other payloads, add C serializer parity, and complete the release profile and artifact gates.
 
+## TC-2: generated terminal STATUS response codec — implemented
+
+- Contract: [internal IPC](../../specs/ipc-protocol.md) defines terminal STATUS as version, status, signed observed time, unsigned commit sequence, and signed retention deadline.
+- Red/green evidence: the signed timestamp regression initially failed to compile because this response lacked generated helpers. The schema now opts in the fixed-width codec, and terminal status responses use its encoder.
+- Regression: the independent wire example covers negative observation/retention times and a positive commit sequence, checking exact bytes and typed round-trip decoding.
+- Verification: generator drift/schema tests, locked workspace build, format check, warning-denied Clippy, serial workspace tests (96 library tests), and the maintained TinyCC SDK suite passed in the pinned Nix shell.
+- Remaining: extend field-level schema and generated codecs to other payloads, add C serializer parity, and complete the release profile and artifact gates.
+
 ## TC-2: generated terminal cancellation-result codec — implemented
 
 - Contract: [internal IPC](../../specs/ipc-protocol.md) specifies a terminal cancellation result as version, status, outcome status, `u64` commit sequence, and signed `i64` retention deadline. The shared schema had incorrectly declared the deadline `u64`; it now agrees with the wire contract and existing storage type without changing the field width or bytes.

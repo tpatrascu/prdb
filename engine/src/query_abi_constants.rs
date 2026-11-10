@@ -274,6 +274,23 @@ pub const SUPERVISOR_STATUS_TERMINAL_RESPONSE_OBSERVED_AT_OFFSET: u32 = 3;
 pub const SUPERVISOR_STATUS_TERMINAL_RESPONSE_COMMIT_SEQUENCE_OFFSET: u32 = 11;
 pub const SUPERVISOR_STATUS_TERMINAL_RESPONSE_RETENTION_DEADLINE_OFFSET: u32 = 19;
 pub const SUPERVISOR_STATUS_TERMINAL_RESPONSE_HEADER_BYTES: u32 = 27;
+pub fn encode_supervisor_status_terminal_response(status: u8, observed_at: i64, commit_sequence: u64, retention_deadline: i64) -> [u8; 27] {
+    let mut payload = [0u8; 27];
+    payload[0..2].copy_from_slice(&SUPERVISOR_PAYLOAD_VERSION.to_be_bytes());
+    payload[2] = status;
+    payload[3..11].copy_from_slice(&observed_at.to_be_bytes());
+    payload[11..19].copy_from_slice(&commit_sequence.to_be_bytes());
+    payload[19..27].copy_from_slice(&retention_deadline.to_be_bytes());
+    payload
+}
+
+pub fn decode_supervisor_status_terminal_response(payload: &[u8]) -> Option<(u8, i64, u64, i64)> {
+    if payload.len() != 27 || u16::from_be_bytes([payload[0], payload[1]]) != SUPERVISOR_PAYLOAD_VERSION {
+        return None;
+    }
+    Some((payload[2], i64::from_be_bytes(payload[3..11].try_into().ok()?), u64::from_be_bytes(payload[11..19].try_into().ok()?), i64::from_be_bytes(payload[19..27].try_into().ok()?)))
+}
+
 pub const SUPERVISOR_FINALIZE_RESPONSE_VERSION_OFFSET: u32 = 0;
 pub const SUPERVISOR_FINALIZE_RESPONSE_STATUS_OFFSET: u32 = 2;
 pub const SUPERVISOR_FINALIZE_RESPONSE_COMMIT_SEQUENCE_OFFSET: u32 = 3;
