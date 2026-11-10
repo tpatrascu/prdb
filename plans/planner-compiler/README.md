@@ -12,7 +12,7 @@ Define bounded query/logical/physical IR, type/operator validation, stable objec
 
 | ID | Observable test first | Minimum implementation and evidence |
 | --- | --- | --- |
-| OP-1 | Forged/malformed structured input, excessive nesting and unsupported types fail independently of the C parser | Rust decoder/validator in an isolated process with bounded queues/work and supervisor-bound submission channels |
+| OP-1 | Forged/malformed structured input, excessive nesting and unsupported types fail independently of the C parser | Bounded Rust v1 single-table SELECT request decoder implemented; isolated optimizer process, bounded queues/work, and supervisor-bound submission channels remain |
 | OP-2 | Hidden relation and nonexistent relation bind with non-disclosing behavior; planner cannot choose principal | Resolve approved logical schema at the pinned snapshot/default schema; deny raw catalogs and administrative DDL |
 | OP-3 | Reference single-table read/write plans execute correctly through the SDK with independently resolved handles | Produce scan/filter/project/limit and bounded mutation plans, stable catalog IDs/epochs, no planner-local handles or commit instructions |
 | OP-4 | Unknown estimate uses fixed heuristics while cancelled/expired planning terminates | Use dedicated role-bound storage estimates; cap each planner connection at 16 estimates independently of the 256-request stream cap, while preserving overall planning deadline/cancellation behavior |
