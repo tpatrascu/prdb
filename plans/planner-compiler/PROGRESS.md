@@ -111,6 +111,14 @@
 - Verification: focused and full maintained TinyCC SDK suites passed; generated ABI consistency, documentation link checks, and `git diff --check` passed.
 - Remaining: consume bounded batches, evaluate Filter, project rows, honor nonzero LIMIT, and emit SQL results.
 
+## OP-3 dependency: consume projected rows from bounded scan batches
+
+- Behavior: a stateful C executor consumes immutable bounded batches for an unfiltered plan, emits projection-ordered values, and stops after the plan's LIMIT. Filter nodes fail as unsupported before scan creation.
+- Implementation: `prdb_sdk_optimizer_scan_state_init_v1` copies validated projection records and limit state. `prdb_sdk_optimizer_consume_scan_batch_v1` validates each complete row against the resolved relation width, gathers projected values in plan order, borrows them only for the callback duration, and latches completion at the limit.
+- Regression: TinyCC fixture checks source-ordinal projection, callback value lifetime/type, limit completion across calls, and rejection of filtered plans.
+- Verification: focused and full maintained TinyCC SDK suites passed; generated ABI consistency, documentation link checks, and `git diff --check` passed.
+- Remaining: connect batch requests and cancellation polling to this state, evaluate Filter, encode and emit SQL results, and ensure cursors close on every failure path.
+
 ## OP-3 dependency: launch and confine the optimizer with each invocation
 
 - Behavior: production START launches optimizer and executor as separate confined processes in one invocation cgroup. The optimizer receives only its submission and planner sockets; storage serves its planner socket alongside executor planner and storage channels. Either launch failure cleans up the other process and invocation resources.

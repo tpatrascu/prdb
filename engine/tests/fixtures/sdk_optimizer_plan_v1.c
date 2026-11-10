@@ -225,6 +225,45 @@ static uint32_t build_executor_relation_response(uint8_t *bytes) {
     return offset;
 }
 
+static uint32_t build_row_batch(uint8_t *bytes) {
+    uint32_t offset = 0;
+    put_u16(bytes, &offset, 1);
+    bytes[offset++] = 1;
+    put_u16(bytes, &offset, 1);
+    bytes[offset++] = 8;
+    memset(bytes + offset, 0, 15);
+    offset += 15;
+    put_u16(bytes, &offset, 4);
+    for (uint32_t ordinal = 0; ordinal < 4; ++ordinal) {
+        bytes[offset++] = PRDB_SDK_VALUE_STATE_VALUE;
+        bytes[offset++] = ordinal == 3 ? PRDB_SDK_VALUE_TYPE_TEXT
+                                       : PRDB_SDK_VALUE_TYPE_INTEGER;
+        put_u32(bytes, &offset, ordinal == 3 ? 1 : 4);
+        if (ordinal == 3) {
+            bytes[offset++] = 'x';
+        } else {
+            memset(bytes + offset, 0, 3);
+            bytes[offset + 3] = (uint8_t)(ordinal + 1);
+            offset += 4;
+        }
+    }
+    return offset;
+}
+
+static uint32_t projected_rows_seen;
+
+static int32_t on_projected_row(
+    void *context, const prdb_sdk_optimizer_plan_column_v1 *projections,
+    const prdb_sdk_value_v1 *values, uint32_t projection_count) {
+    (void)context;
+    assert(projection_count == 1);
+    assert(projections[0].ordinal == 3);
+    assert(values[0].type_code == PRDB_SDK_VALUE_TYPE_TEXT);
+    assert(values[0].data_len == 1 && values[0].data[0] == 'x');
+    projected_rows_seen++;
+    return 0;
+}
+
 int main(void) {
     uint8_t payload[256] = {0};
     uint8_t malformed[sizeof(payload)];
@@ -239,6 +278,13 @@ int main(void) {
     static prdb_host_api_v2 host = {0};
     static prdb_sdk_executor_relation_v1 acquired_relation;
     static prdb_sdk_sql_column_shape_v2 acquired_columns[4];
+    static prdb_sdk_optimizer_scan_state_v1 scan_state;
+    static prdb_sdk_batch_v1 row_batch;
+    static prdb_sdk_value_v1 source_cells[4];
+    static prdb_sdk_value_v1 projected_values[1];
+    uint8_t row_batch_bytes[128];
+    uint32_t row_batch_len;
+    uint32_t delivered_rows = 0;
     uint8_t response[512];
     uint64_t response_len = 0;
     uint64_t scan_response_len = 0;
@@ -262,6 +308,40 @@ int main(void) {
     assert(decoded.scan_columns[0].ordinal == 3);
     assert(decoded.projections[0].type_code == 6);
     assert(decoded.has_limit == 1 && decoded.limit == 7);
+    assert(prdb_sdk_optimizer_scan_state_init_v1(
+               payload, payload_len, &scan_state, sizeof(scan_state)) ==
+           PRDB_SDK_OPTIMIZER_PLAN_OK);
+    row_batch_len = build_row_batch(row_batch_bytes);
+    assert(prdb_sdk_batch_open_v1(&row_batch, sizeof(row_batch), row_batch_bytes,
+                                  row_batch_len) == PRDB_SDK_BATCH_OK);
+    projected_rows_seen = 0;
+    assert(prdb_sdk_optimizer_consume_scan_batch_v1(
+               &scan_state, &row_batch, 4, source_cells, 4, projected_values,
+               1, on_projected_row, NULL, &delivered_rows) ==
+           PRDB_SDK_OPTIMIZER_PLAN_OK);
+    assert(delivered_rows == 1 && projected_rows_seen == 1);
+    uint8_t limit_one_plan[sizeof(payload)];
+    memcpy(limit_one_plan, payload, payload_len);
+    limit_one_plan[payload_len - 1] = 1;
+    assert(prdb_sdk_optimizer_scan_state_init_v1(
+               limit_one_plan, payload_len, &scan_state, sizeof(scan_state)) ==
+           PRDB_SDK_OPTIMIZER_PLAN_OK);
+    assert(prdb_sdk_optimizer_consume_scan_batch_v1(
+               &scan_state, &row_batch, 4, source_cells, 4, projected_values,
+               1, on_projected_row, NULL, &delivered_rows) ==
+           PRDB_SDK_OPTIMIZER_PLAN_OK);
+    assert(delivered_rows == 1 && scan_state.done == 1);
+    assert(prdb_sdk_optimizer_consume_scan_batch_v1(
+               &scan_state, &row_batch, 4, source_cells, 4, projected_values,
+               1, on_projected_row, NULL, &delivered_rows) ==
+           PRDB_SDK_OPTIMIZER_PLAN_OK);
+    assert(delivered_rows == 0 && projected_rows_seen == 2);
+    payload_len = build_filter_plan(payload, &predicate_offset);
+    assert(prdb_sdk_optimizer_scan_state_init_v1(
+               payload, payload_len, &scan_state, sizeof(scan_state)) ==
+           PRDB_SDK_OPTIMIZER_PLAN_UNSUPPORTED);
+    payload_len = build_plan(payload, &projected_id_offset,
+                              &project_node_offset);
 
     resolve.response_len = build_relation_response(resolve.response);
     resolve.executor_response_len = build_executor_relation_response(

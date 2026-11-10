@@ -749,6 +749,7 @@ int32_t prdb_sdk_optimizer_open_plan_scan_v1(
         plan_payload, plan_payload_len, &plan, sizeof(plan), &filter,
         sizeof(filter));
     if (status != PRDB_SDK_OPTIMIZER_PLAN_OK) return status;
+    if (filter.present != 0) return PRDB_SDK_OPTIMIZER_PLAN_UNSUPPORTED;
     status = prdb_sdk_optimizer_acquire_plan_relation_v1(
         host, plan_payload, plan_payload_len, relation_response,
         relation_response_capacity, relation_response_len,
@@ -770,5 +771,119 @@ int32_t prdb_sdk_optimizer_open_plan_scan_v1(
         return PRDB_SDK_OPTIMIZER_PLAN_CALLBACK_ERROR;
     }
     *scan_opened_out = 1;
+    return PRDB_SDK_OPTIMIZER_PLAN_OK;
+}
+
+int32_t prdb_sdk_optimizer_scan_state_init_v1(
+    const uint8_t *plan_payload, uint64_t plan_payload_len,
+    prdb_sdk_optimizer_scan_state_v1 *state_out,
+    uint32_t state_out_capacity) {
+    prdb_sdk_optimizer_plan_v1 plan = {0};
+    prdb_sdk_optimizer_filter_v1 filter = {0};
+    prdb_sdk_optimizer_scan_state_v1 state = {0};
+    int32_t status;
+    if (state_out == NULL || state_out_capacity < sizeof(*state_out) ||
+        ranges_overlap(state_out, sizeof(*state_out), plan_payload,
+                       plan_payload_len)) {
+        return PRDB_SDK_OPTIMIZER_PLAN_INVALID_ARGUMENT;
+    }
+    status = prdb_sdk_optimizer_decode_plan_with_filter_v1(
+        plan_payload, plan_payload_len, &plan, sizeof(plan), &filter,
+        sizeof(filter));
+    if (status != PRDB_SDK_OPTIMIZER_PLAN_OK) return status;
+    if (filter.present != 0) return PRDB_SDK_OPTIMIZER_PLAN_UNSUPPORTED;
+    state.struct_size = sizeof(state);
+    state.abi_version = PRDB_SDK_OPTIMIZER_PLAN_ABI_V1_VERSION;
+    state.projection_count = plan.projection_count;
+    state.has_limit = plan.has_limit;
+    state.limit = plan.limit;
+    state.done = plan.has_limit != 0 && plan.limit == 0;
+    memcpy(state.projections, plan.projections,
+           plan.projection_count * sizeof(plan.projections[0]));
+    *state_out = state;
+    return PRDB_SDK_OPTIMIZER_PLAN_OK;
+}
+
+int32_t prdb_sdk_optimizer_consume_scan_batch_v1(
+    prdb_sdk_optimizer_scan_state_v1 *state,
+    const prdb_sdk_batch_v1 *batch, uint32_t relation_column_count,
+    prdb_sdk_value_v1 *source_cells, uint32_t source_cell_capacity,
+    prdb_sdk_value_v1 *projected_values,
+    uint32_t projected_value_capacity,
+    prdb_sdk_optimizer_projected_row_v1_fn on_row, void *row_context,
+    uint32_t *delivered_rows_out) {
+    prdb_sdk_row_iterator_v1 rows = {0};
+    uint32_t delivered = 0;
+    int32_t status;
+    if (state == NULL || state->struct_size < sizeof(*state) ||
+        state->abi_version != PRDB_SDK_OPTIMIZER_PLAN_ABI_V1_VERSION ||
+        state->projection_count == 0 ||
+        state->projection_count > PRDB_SDK_OPTIMIZER_PLAN_MAX_PROJECTIONS ||
+        state->has_limit > 1 || state->done > 1 ||
+        (state->has_limit != 0 && state->delivered_rows > state->limit) ||
+        batch == NULL || relation_column_count == 0 || source_cells == NULL ||
+        relation_column_count > PRDB_SDK_BATCH_MAX_CELLS_PER_ROW ||
+        source_cell_capacity < relation_column_count || projected_values == NULL ||
+        projected_value_capacity < state->projection_count || on_row == NULL ||
+        delivered_rows_out == NULL) {
+        return PRDB_SDK_OPTIMIZER_PLAN_INVALID_ARGUMENT;
+    }
+    *delivered_rows_out = 0;
+    if (state->done != 0) return PRDB_SDK_OPTIMIZER_PLAN_OK;
+    for (uint32_t index = 0; index < state->projection_count; ++index) {
+        const prdb_sdk_optimizer_plan_column_v1 *projection =
+            &state->projections[index];
+        if (projection->ordinal >= relation_column_count ||
+            !valid_type(projection->type_code,
+                        projection->type_parameters)) {
+            return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
+        }
+    }
+    status = prdb_sdk_batch_rows_begin_v1(batch, &rows, sizeof(rows));
+    if (status != PRDB_SDK_BATCH_OK) {
+        return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
+    }
+    while (rows.rows_remaining != 0) {
+        prdb_sdk_row_v1 row = {0};
+        prdb_sdk_cell_iterator_v1 cells = {0};
+        status = prdb_sdk_batch_row_next_v1(&rows, &row, sizeof(row));
+        if (status != PRDB_SDK_BATCH_OK ||
+            row.cell_count != relation_column_count ||
+            prdb_sdk_row_cells_begin_v1(&row, &cells, sizeof(cells)) !=
+                PRDB_SDK_BATCH_OK) {
+            return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
+        }
+        for (uint32_t ordinal = 0; ordinal < relation_column_count; ++ordinal) {
+            if (prdb_sdk_cell_next_v1(&cells, &source_cells[ordinal],
+                                      sizeof(source_cells[ordinal])) !=
+                PRDB_SDK_BATCH_OK) {
+                return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
+            }
+        }
+        for (uint32_t index = 0; index < state->projection_count; ++index) {
+            const prdb_sdk_optimizer_plan_column_v1 *projection =
+                &state->projections[index];
+            const prdb_sdk_value_v1 *value =
+                &source_cells[projection->ordinal];
+            if (value->state == PRDB_SDK_VALUE_STATE_VALUE &&
+                value->type_code != projection->type_code) {
+                return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
+            }
+            projected_values[index] = *value;
+        }
+        if (on_row(row_context, state->projections, projected_values,
+                   state->projection_count) != 0) {
+            *delivered_rows_out = delivered;
+            return PRDB_SDK_OPTIMIZER_PLAN_ROW_CALLBACK_ERROR;
+        }
+        ++delivered;
+        ++state->delivered_rows;
+        if (state->has_limit != 0 &&
+            state->delivered_rows >= state->limit) {
+            state->done = 1;
+            break;
+        }
+    }
+    *delivered_rows_out = delivered;
     return PRDB_SDK_OPTIMIZER_PLAN_OK;
 }
