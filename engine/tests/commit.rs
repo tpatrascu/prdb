@@ -26322,6 +26322,73 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             assert_eq!(declared_column.scalar_type, planned_column.scalar_type);
             assert_eq!(declared_column.nullable, planned_column.nullable);
         }
+        prdb_engine::ipc::write_frame(
+            &mut executor_plan_client,
+            &IpcFrame {
+                operation: IpcOperation::ResolveRelation as u16,
+                request_id: 2,
+                payload: ResolveRelationRequest {
+                    schema_name: filtered_plan.relation.schema_name.clone(),
+                    relation_name: filtered_plan.relation.relation_name.clone(),
+                }
+                .encode()?,
+            },
+        )?;
+        let capability_frame = prdb_engine::ipc::read_frame(&mut executor_plan_client)?
+            .ok_or("executor stream closed without a relation capability")?;
+        assert_eq!(capability_frame.request_id, 2);
+        let (executor_handle, _) = match prdb_engine::executor_ipc::ResolveRelationResponse::decode(
+            &capability_frame.payload,
+        )? {
+            prdb_engine::executor_ipc::ResolveRelationResponse::Resolved {
+                handle,
+                description,
+            } => {
+                assert_eq!(description.relation_id, filtered_plan.relation.relation_id);
+                (handle, description)
+            }
+            prdb_engine::executor_ipc::ResolveRelationResponse::Unavailable => {
+                return Err("executor denied the validated plan relation".into());
+            }
+        };
+        prdb_engine::ipc::write_frame(
+            &mut executor_plan_client,
+            &IpcFrame {
+                operation: IpcOperation::OpenScan as u16,
+                request_id: 3,
+                payload: prdb_engine::executor_ipc::OpenScanRequest {
+                    relation: executor_handle,
+                    column_ids: planned_scan_columns
+                        .iter()
+                        .map(|column| column.column_id)
+                        .collect(),
+                }
+                .encode()?,
+            },
+        )?;
+        let scan_frame = prdb_engine::ipc::read_frame(&mut executor_plan_client)?
+            .ok_or("executor stream closed without a scan cursor")?;
+        assert_eq!(scan_frame.request_id, 3);
+        let scan_cursor = prdb_engine::executor_ipc::OpenScanResponse::decode(&scan_frame.payload)?;
+        prdb_engine::ipc::write_frame(
+            &mut executor_plan_client,
+            &IpcFrame {
+                operation: IpcOperation::NextBatch as u16,
+                request_id: 4,
+                payload: prdb_engine::executor_ipc::NextBatchRequest {
+                    cursor: scan_cursor.cursor,
+                    max_scanned: 8,
+                    max_bytes: 4096,
+                }
+                .encode()?,
+            },
+        )?;
+        let batch_frame = prdb_engine::ipc::read_frame(&mut executor_plan_client)?
+            .ok_or("executor stream closed without a scan batch")?;
+        assert_eq!(batch_frame.request_id, 4);
+        let batch = prdb_engine::executor_ipc::NextBatchResponse::decode(&batch_frame.payload)?;
+        assert!(batch.rows.is_empty());
+        assert!(batch.continuation.is_none());
         executor_plan_client.shutdown(Shutdown::Write)?;
         drop(executor_plan_client);
         executor
