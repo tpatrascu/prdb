@@ -1,5 +1,12 @@
 # Internal IPC Progress
 
+## IPC-2 dependency: generated executor relation response prefixes — implemented
+
+- Behavior: relation resolution encodes an exact unavailable variant or a successful fixed prefix followed by bounded authorized relation metadata.
+- Implementation: [shared ABI schema](../../engine/abi/query_abi_constants.json) now defines both response prefixes; [executor IPC](../../engine/src/executor_ipc.rs) uses the generated codecs and keeps handle validation and variable-tail parsing in Rust.
+- Regression and verification: exact-byte round-trip and malformed variant coverage pass, as do ABI generation checks, locked workspace build, formatting, warning-denied Clippy, serial workspace tests (129 passed, 3 cgroup-dependent ignored), and the maintained TinyCC SDK suite.
+- Remaining: other IPC payload migrations, process-level queue/deadline hardening, and worker lifecycle coverage remain open.
+
 ## IPC-6 dependency: generated terminal acknowledgement validation — implemented
 
 - Behavior: the gateway accepts storage finalize/abort acknowledgements only when the operation has its exact versioned response layout and a success status.

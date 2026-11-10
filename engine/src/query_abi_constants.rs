@@ -107,6 +107,44 @@ pub fn decode_executor_resolve_relation_request(payload: &[u8]) -> Option<(u16, 
     Some((u16::from_be_bytes(payload[2..4].try_into().ok()?), u16::from_be_bytes(payload[4..6].try_into().ok()?)))
 }
 
+pub const EXECUTOR_RESOLVE_RELATION_UNAVAILABLE_RESPONSE_VERSION_OFFSET: u32 = 0;
+pub const EXECUTOR_RESOLVE_RELATION_UNAVAILABLE_RESPONSE_STATUS_OFFSET: u32 = 2;
+pub const EXECUTOR_RESOLVE_RELATION_UNAVAILABLE_RESPONSE_HEADER_BYTES: u32 = 3;
+pub fn encode_executor_resolve_relation_unavailable_response(status: u8) -> [u8; 3] {
+    let mut payload = [0u8; 3];
+    payload[0..2].copy_from_slice(&RESOLVE_RELATION_PAYLOAD_VERSION.to_be_bytes());
+    payload[2] = status;
+    payload
+}
+
+pub fn decode_executor_resolve_relation_unavailable_response(payload: &[u8]) -> Option<u8> {
+    if payload.len() != 3 || u16::from_be_bytes([payload[0], payload[1]]) != RESOLVE_RELATION_PAYLOAD_VERSION {
+        return None;
+    }
+    Some(payload[2])
+}
+
+pub const EXECUTOR_RESOLVE_RELATION_AVAILABLE_RESPONSE_VERSION_OFFSET: u32 = 0;
+pub const EXECUTOR_RESOLVE_RELATION_AVAILABLE_RESPONSE_STATUS_OFFSET: u32 = 2;
+pub const EXECUTOR_RESOLVE_RELATION_AVAILABLE_RESPONSE_RELATION_ID_OFFSET: u32 = 3;
+pub const EXECUTOR_RESOLVE_RELATION_AVAILABLE_RESPONSE_RELATION_HANDLE_OFFSET: u32 = 19;
+pub const EXECUTOR_RESOLVE_RELATION_AVAILABLE_RESPONSE_HEADER_BYTES: u32 = 35;
+pub fn encode_executor_resolve_relation_available_response(status: u8, relation_id: [u8; 16], relation_handle: [u8; 16]) -> [u8; 35] {
+    let mut payload = [0u8; 35];
+    payload[0..2].copy_from_slice(&RESOLVE_RELATION_PAYLOAD_VERSION.to_be_bytes());
+    payload[2] = status;
+    payload[3..19].copy_from_slice(&relation_id);
+    payload[19..35].copy_from_slice(&relation_handle);
+    payload
+}
+
+pub fn decode_executor_resolve_relation_available_response(payload: &[u8]) -> Option<(u8, [u8; 16], [u8; 16])> {
+    if payload.len() < 35 || u16::from_be_bytes([payload[0], payload[1]]) != RESOLVE_RELATION_PAYLOAD_VERSION {
+        return None;
+    }
+    Some((payload[2], payload[3..19].try_into().ok()?, payload[19..35].try_into().ok()?))
+}
+
 pub const EXECUTOR_OPEN_SCAN_REQUEST_VERSION_OFFSET: u32 = 0;
 pub const EXECUTOR_OPEN_SCAN_REQUEST_RELATION_HANDLE_OFFSET: u32 = 2;
 pub const EXECUTOR_OPEN_SCAN_REQUEST_COLUMN_COUNT_OFFSET: u32 = 18;

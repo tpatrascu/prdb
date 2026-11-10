@@ -48,6 +48,70 @@ static inline int prdb_decode_executor_resolve_relation_request(const uint8_t *p
     return 1;
 }
 
+static inline void prdb_encode_executor_resolve_relation_unavailable_response(uint8_t payload[3],
+    uint8_t status) {
+    payload[0] = (uint8_t)((PRDB_RESOLVE_RELATION_PAYLOAD_VERSION >> 8) & 0xffu);
+    payload[1] = (uint8_t)(PRDB_RESOLVE_RELATION_PAYLOAD_VERSION & 0xffu);
+    payload[2] = status;
+}
+
+static inline int prdb_decode_executor_resolve_relation_unavailable_response(const uint8_t *payload, size_t payload_len,
+    uint8_t *status) {
+    if (payload == NULL || payload_len != 3) {
+        return 0;
+    }
+    if (payload[0] != (uint8_t)((PRDB_RESOLVE_RELATION_PAYLOAD_VERSION >> 8) & 0xffu) ||
+        payload[1] != (uint8_t)(PRDB_RESOLVE_RELATION_PAYLOAD_VERSION & 0xffu)) {
+        return 0;
+    }
+    if (status == NULL) {
+        return 0;
+    }
+    *status = payload[2];
+    return 1;
+}
+
+static inline void prdb_encode_executor_resolve_relation_available_response(uint8_t payload[35],
+    uint8_t status, const uint8_t relation_id[16], const uint8_t relation_handle[16]) {
+    payload[0] = (uint8_t)((PRDB_RESOLVE_RELATION_PAYLOAD_VERSION >> 8) & 0xffu);
+    payload[1] = (uint8_t)(PRDB_RESOLVE_RELATION_PAYLOAD_VERSION & 0xffu);
+    payload[2] = status;
+    for (size_t i = 0; i < 16; ++i) {
+        payload[3 + i] = relation_id[i];
+    }
+    for (size_t i = 0; i < 16; ++i) {
+        payload[19 + i] = relation_handle[i];
+    }
+}
+
+static inline int prdb_decode_executor_resolve_relation_available_response(const uint8_t *payload, size_t payload_len,
+    uint8_t *status, uint8_t relation_id[16], uint8_t relation_handle[16]) {
+    if (payload == NULL || payload_len < 35) {
+        return 0;
+    }
+    if (payload[0] != (uint8_t)((PRDB_RESOLVE_RELATION_PAYLOAD_VERSION >> 8) & 0xffu) ||
+        payload[1] != (uint8_t)(PRDB_RESOLVE_RELATION_PAYLOAD_VERSION & 0xffu)) {
+        return 0;
+    }
+    if (status == NULL) {
+        return 0;
+    }
+    *status = payload[2];
+    if (relation_id == NULL) {
+        return 0;
+    }
+    for (size_t i = 0; i < 16; ++i) {
+        relation_id[i] = payload[3 + i];
+    }
+    if (relation_handle == NULL) {
+        return 0;
+    }
+    for (size_t i = 0; i < 16; ++i) {
+        relation_handle[i] = payload[19 + i];
+    }
+    return 1;
+}
+
 static inline void prdb_encode_executor_open_scan_request(uint8_t payload[20],
     const uint8_t relation_handle[16], uint16_t column_count) {
     payload[0] = (uint8_t)((PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION >> 8) & 0xffu);

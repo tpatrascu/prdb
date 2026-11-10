@@ -29,7 +29,6 @@ pub use crate::query_abi::{
     EXECUTOR_STAGE_INSERT_RESPONSE_VERSION_OFFSET, EXECUTOR_STAGE_UPDATE_REQUEST_HEADER_BYTES,
     EXECUTOR_STAGE_UPDATE_REQUEST_PATCH_COUNT_OFFSET,
     EXECUTOR_STAGE_UPDATE_REQUEST_ROW_HANDLE_OFFSET, EXECUTOR_STAGE_UPDATE_REQUEST_VERSION_OFFSET,
-    RESOLVE_RELATION_PAYLOAD_VERSION,
 };
 use crate::transaction::{
     ExecutorMetadataConnection, InsertInput, InvocationTransaction, TransactionError,
@@ -39,7 +38,8 @@ use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
 const RESOLVE_REQUEST_HEADER_BYTES: usize = EXECUTOR_RESOLVE_RELATION_REQUEST_HEADER_BYTES as usize;
-const RESOLVE_RESPONSE_HEADER_BYTES: usize = 3;
+const RESOLVE_AVAILABLE_RESPONSE_HEADER_BYTES: usize =
+    crate::query_abi::EXECUTOR_RESOLVE_RELATION_AVAILABLE_RESPONSE_HEADER_BYTES as usize;
 pub const MAX_EXECUTOR_REQUESTS_PER_CONNECTION: usize = 256;
 pub const MAX_EXECUTOR_BATCH_CANDIDATES: u16 = 128;
 
@@ -107,16 +107,17 @@ pub enum ResolveRelationResponse {
 
 impl ResolveRelationResponse {
     pub fn encode(&self) -> Result<Vec<u8>, ExecutorRequestError> {
-        let mut payload = Vec::new();
-        payload.extend_from_slice(&RESOLVE_RELATION_PAYLOAD_VERSION.to_be_bytes());
-        match self {
+        let payload = match self {
             Self::Resolved {
                 handle,
                 description,
             } => {
-                payload.push(0);
-                payload.extend_from_slice(&description.relation_id);
-                payload.extend_from_slice(&handle.to_bytes());
+                let mut payload = generated::encode_executor_resolve_relation_available_response(
+                    0,
+                    description.relation_id,
+                    handle.to_bytes(),
+                )
+                .to_vec();
                 encode_name(&mut payload, &description.name)?;
                 let column_count = u16::try_from(description.columns.len())
                     .map_err(|_| ExecutorRequestError::ResponseTooLarge)?;
@@ -124,54 +125,52 @@ impl ResolveRelationResponse {
                 for column in &description.columns {
                     encode_visible_column(&mut payload, column)?;
                 }
+                payload
             }
-            Self::Unavailable => payload.push(1),
-        }
+            Self::Unavailable => {
+                generated::encode_executor_resolve_relation_unavailable_response(1).to_vec()
+            }
+        };
         ensure_response_size(&payload)?;
         Ok(payload)
     }
 
     pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
-        if payload.len() < RESOLVE_RESPONSE_HEADER_BYTES
-            || u16::from_be_bytes([payload[0], payload[1]]) != RESOLVE_RELATION_PAYLOAD_VERSION
-        {
+        if generated::decode_executor_resolve_relation_unavailable_response(payload) == Some(1) {
+            return Ok(Self::Unavailable);
+        }
+        if payload.len() < RESOLVE_AVAILABLE_RESPONSE_HEADER_BYTES {
             return Err(ExecutorRequestError::InvalidPayload);
         }
-        match (payload[2], payload.len()) {
-            (0, _) => {
-                if payload.len() < 40 {
-                    return Err(ExecutorRequestError::InvalidPayload);
-                }
-                let relation_id = payload[3..19]
-                    .try_into()
-                    .map_err(|_| ExecutorRequestError::InvalidPayload)?;
-                let handle = ResolvedRelationHandle::from_bytes(&payload[19..35])
-                    .ok_or(ExecutorRequestError::InvalidPayload)?;
-                let mut offset = 35;
-                let name = decode_name(payload, &mut offset)?;
-                let column_count = read_u16(payload, &mut offset)? as usize;
-                if column_count > crate::tuple::MAX_COLUMNS {
-                    return Err(ExecutorRequestError::InvalidPayload);
-                }
-                let mut columns = Vec::with_capacity(column_count);
-                for _ in 0..column_count {
-                    columns.push(decode_visible_column(payload, &mut offset)?);
-                }
-                if offset != payload.len() {
-                    return Err(ExecutorRequestError::InvalidPayload);
-                }
-                Ok(Self::Resolved {
-                    handle,
-                    description: AuthorizedRelationDescription {
-                        relation_id,
-                        name,
-                        columns,
-                    },
-                })
-            }
-            (1, RESOLVE_RESPONSE_HEADER_BYTES) => Ok(Self::Unavailable),
-            _ => Err(ExecutorRequestError::InvalidPayload),
+        let (status, relation_id, handle_bytes) =
+            generated::decode_executor_resolve_relation_available_response(payload)
+                .ok_or(ExecutorRequestError::InvalidPayload)?;
+        if status != 0 {
+            return Err(ExecutorRequestError::InvalidPayload);
         }
+        let handle = ResolvedRelationHandle::from_bytes(&handle_bytes)
+            .ok_or(ExecutorRequestError::InvalidPayload)?;
+        let mut offset = RESOLVE_AVAILABLE_RESPONSE_HEADER_BYTES;
+        let name = decode_name(payload, &mut offset)?;
+        let column_count = read_u16(payload, &mut offset)? as usize;
+        if column_count > crate::tuple::MAX_COLUMNS {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        let mut columns = Vec::with_capacity(column_count);
+        for _ in 0..column_count {
+            columns.push(decode_visible_column(payload, &mut offset)?);
+        }
+        if offset != payload.len() {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        Ok(Self::Resolved {
+            handle,
+            description: AuthorizedRelationDescription {
+                relation_id,
+                name,
+                columns,
+            },
+        })
     }
 }
 

@@ -1229,6 +1229,31 @@
       ]
     },
     {
+      "name": "EXECUTOR_RESOLVE_RELATION_UNAVAILABLE_RESPONSE",
+      "version_constant": "RESOLVE_RELATION_PAYLOAD_VERSION",
+      "generate_rust_codec": true,
+      "generate_c_codec": true,
+      "fields": [
+        { "name": "version", "encoding": "u16be" },
+        { "name": "status", "encoding": "u8" }
+      ],
+      "trailing_fields": []
+    },
+    {
+      "name": "EXECUTOR_RESOLVE_RELATION_AVAILABLE_RESPONSE",
+      "version_constant": "RESOLVE_RELATION_PAYLOAD_VERSION",
+      "generate_rust_codec": true,
+      "generate_c_codec": true,
+      "codec_prefix": true,
+      "fields": [
+        { "name": "version", "encoding": "u16be" },
+        { "name": "status", "encoding": "u8" },
+        { "name": "relation_id", "encoding": "bytes16" },
+        { "name": "relation_handle", "encoding": "bytes16" }
+      ],
+      "trailing_fields": []
+    },
+    {
       "name": "EXECUTOR_OPEN_SCAN_REQUEST",
       "version_constant": "EXECUTOR_BATCH_PAYLOAD_VERSION",
       "generate_rust_codec": true,

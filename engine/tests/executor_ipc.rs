@@ -1,12 +1,13 @@
 use prdb_engine::executor_ipc::{
-    MutationAcknowledgement, OpenScanResponse, StageDeleteRequest, StageInsertRequest,
-    StageInsertResponse, StageUpdateRequest,
+    MutationAcknowledgement, OpenScanResponse, ResolveRelationResponse, StageDeleteRequest,
+    StageInsertRequest, StageInsertResponse, StageUpdateRequest,
 };
 use prdb_engine::metadata_discovery::{
-    EXECUTOR_SCAN_CURSOR_TOKEN_KIND, ExecutorRowHandle, ExecutorScanCursor, ResolvedRelationHandle,
+    AuthorizedRelationDescription, EXECUTOR_SCAN_CURSOR_TOKEN_KIND, ExecutorRowHandle,
+    ExecutorScanCursor, ResolvedRelationHandle, VisibleColumn,
 };
 use prdb_engine::transaction::InsertInput;
-use prdb_engine::tuple::{FieldPatch, ScalarValue};
+use prdb_engine::tuple::{FieldPatch, ScalarType, ScalarValue};
 
 fn handle(kind: u8) -> [u8; 16] {
     let mut bytes = [0x5a; 16];
@@ -87,6 +88,41 @@ fn executor_open_scan_response_round_trips_generated_cursor_handle() {
     assert_eq!(&payload[2..], &cursor_bytes);
     assert_eq!(OpenScanResponse::decode(&payload).unwrap(), response);
     assert!(OpenScanResponse::decode(&payload[..payload.len() - 1]).is_err());
+}
+
+#[test]
+fn executor_relation_response_uses_generated_prefix_codecs() {
+    let relation_handle = ResolvedRelationHandle::from_bytes(&handle(6)).unwrap();
+    let response = ResolveRelationResponse::Resolved {
+        handle: relation_handle,
+        description: AuthorizedRelationDescription {
+            relation_id: [0x31; 16],
+            name: "items".to_owned(),
+            columns: vec![VisibleColumn {
+                column_id: [0x42; 16],
+                name: "id".to_owned(),
+                ordinal: 0,
+                scalar_type: ScalarType::Integer,
+                nullable: false,
+            }],
+        },
+    };
+    let payload = response.encode().unwrap();
+    assert_eq!(
+        &payload[..35],
+        &[&[0, 1, 0][..], &[0x31; 16], &handle(6)].concat()
+    );
+    assert_eq!(ResolveRelationResponse::decode(&payload).unwrap(), response);
+
+    let unavailable = ResolveRelationResponse::Unavailable.encode().unwrap();
+    assert_eq!(unavailable, [0, 1, 1]);
+    assert_eq!(
+        ResolveRelationResponse::decode(&unavailable).unwrap(),
+        ResolveRelationResponse::Unavailable
+    );
+    for malformed in [&[0, 1, 1, 0][..], &[0, 2, 1][..], &[0, 1, 2][..]] {
+        assert!(ResolveRelationResponse::decode(malformed).is_err());
+    }
 }
 
 #[test]

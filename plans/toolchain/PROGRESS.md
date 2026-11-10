@@ -1,5 +1,13 @@
 # Toolchain Progress
 
+## TC-2: generated executor relation response prefixes — implemented
+
+- Contract: executor relation resolution returns either an exact unavailable response or a successful fixed prefix containing relation identity and connection-scoped handle, followed by bounded relation metadata.
+- Implementation: the shared ABI schema generates Rust/C codecs for both response prefixes. The executor encoder and decoder now use those codecs while retaining semantic status/handle validation and the existing bounded name/column tail parser.
+- Regression: a maintained Rust fixture checks exact available and unavailable bytes, round-trips the resolved response, and rejects malformed unavailable variants.
+- Verification: schema drift tests, focused executor IPC regression, locked workspace build, format check, warning-denied Clippy, serial workspace tests (129 passed, 3 cgroup-dependent ignored), and full TinyCC SDK suite passed in the configured Nix shell.
+- Remaining: migrate the other remaining hand-coded IPC payload layouts and complete release-profile, signature, runtime-support, timing, and sandbox acceptance gates.
+
 ## TC-2: supervisor terminal response decoder integration — implemented
 
 - Contract: terminal finalize/abort acknowledgements must have the exact generated payload shape, supported version, and success status before the gateway relays a terminal event.
