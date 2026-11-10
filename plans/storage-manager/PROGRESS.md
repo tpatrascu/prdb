@@ -1845,6 +1845,12 @@
 - Measurement: redb 4.4.0, Rust 1.95.0, x86_64 Linux. Operational-only commit p50/p95/p99 was 6.169/11.787/17.016 ms; mixed-load p50/p95/p99 was 9.004/11.184/16.042 ms. The mixed writer phase completed in 0.582 s (440.2 commits/s) as the retained snapshot completed 8,557 full authorized scans and 34,228 point reads, observing only the original row values.
 - Scope: one synthetic local run. The percentile shift is not stable evidence of an improvement or regression. This measures the managed storage API with repeated authorized scans, not concurrent SQL analytics; repeatable runs, SQL joins, maintenance, growth/reclamation, and other storage profiles remain unmeasured.
 
+## SM-7: five-run commit-latency repeatability sample — measured
+
+- Method: five sequential release-harness runs, each using a fresh temporary READY redb instance on the same x86_64 Linux host; compilation was outside all runs.
+- Summary: median of the five run-level p50/p95/p99 values was 5.910/12.708/18.127 ms operational-only and 8.921/13.383/19.172 ms with the retained authorized snapshot scanning. Mixed throughput ranged 415.3–450.7 commits/s; each run completed 8,297–9,124 scans and preserved the snapshot values.
+- Scope: repeated runs on one host strengthen local repeatability only. They do not represent SQL joins/sorts, maintenance, long-duration retention, another filesystem, or production targets. The mixed p99 varied from 16.406 to 34.279 ms.
+
 ## SM-1 / SM-7: process crashes at durable commit I/O boundaries — verified
 
 - Contract: [redb storage recovery](../../specs/redb-storage.md) requires atomic rows, outcomes, and commit sequence after process exit; process termination does not prove power-loss durability.
