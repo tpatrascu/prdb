@@ -251,6 +251,13 @@
 - Verification: generator drift/schema tests, locked workspace build, format, warning-denied Clippy, serial workspace tests, and the complete maintained TinyCC suite passed.
 - Remaining: extend generated C codec parity to other fixed payloads and define safe bounded helpers for collections and variable-length payloads; complete release profile and artifact gates.
 
+## TC-2: C/Rust terminal supervisor response codec parity — verified
+
+- The shared schema now generates C codecs for terminal cancellation results and terminal STATUS responses. The C generator supports fixed u32/u64/i64 fields, including portable signed two's-complement decoding, and correctly copies 16-byte fields.
+- Regression: the maintained TinyCC fixture checks both independent wire examples byte-for-byte and round-trips negative timestamps/deadlines, unsigned commit sequences, and status bytes. Generator tests assert both helper pairs are emitted.
+- Verification: generated-file drift and schema tests, locked workspace build, format check, warning-denied Clippy, serial workspace tests (129 commit tests passed; 3 cgroup-dependent tests ignored by default), and the maintained TinyCC SDK suite passed in the pinned Nix shell.
+- Remaining: extend generated C codec parity to other fixed payloads and define safe bounded helpers for collections and variable-length payloads; complete release profile and artifact gates.
+
 ## TC-2: C/Rust administrative-cancel codec parity — verified
 
 - The C codec generator now also covers the administrative-cancel request with invocation ID and big-endian u16 reason code. Both the fixed 18-byte invocation-control request and 20-byte cancel request are emitted from the shared schema.

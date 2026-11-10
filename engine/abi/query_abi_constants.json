@@ -1491,6 +1491,7 @@
       "name": "SUPERVISOR_CANCEL_RESULT_TERMINAL",
       "version_constant": "SUPERVISOR_PAYLOAD_VERSION",
       "generate_rust_codec": true,
+      "generate_c_codec": true,
       "fields": [
         { "name": "version", "encoding": "u16be" },
         { "name": "status", "encoding": "u8" },
@@ -1540,6 +1541,7 @@
       "name": "SUPERVISOR_STATUS_TERMINAL_RESPONSE",
       "version_constant": "SUPERVISOR_PAYLOAD_VERSION",
       "generate_rust_codec": true,
+      "generate_c_codec": true,
       "fields": [
         { "name": "version", "encoding": "u16be" },
         { "name": "status", "encoding": "u8" },

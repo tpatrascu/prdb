@@ -296,6 +296,9 @@ def render(schema):
             c_types = {
                 "u8": "uint8_t",
                 "u16be": "uint16_t",
+                "u32be": "uint32_t",
+                "u64be": "uint64_t",
+                "i64be": "int64_t",
                 "bytes16": "uint8_t",
             }
             value_fields = fields[1:]
@@ -331,18 +334,20 @@ def render(schema):
                     )
                 elif field_encoding == "u8":
                     c_codec_lines.append(f"    payload[{field_offset}] = {field_name};")
-                elif field_encoding == "u16be":
+                elif field_encoding == "bytes16":
                     c_codec_lines.extend(
                         [
-                            f"    payload[{field_offset}] = (uint8_t)(({field_name} >> 8) & 0xffu);",
-                            f"    payload[{field_offset + 1}] = (uint8_t)({field_name} & 0xffu);",
+                            "    for (size_t i = 0; i < 16; ++i) {",
+                            f"        payload[{field_offset} + i] = {field_name}[i];",
+                            "    }",
                         ]
                     )
                 else:
                     c_codec_lines.extend(
                         [
-                            f"    for (size_t i = 0; i < 16; ++i) {{",
-                            f"        payload[{field_offset} + i] = {field_name}[i];",
+                            f"    uint64_t {field_name}_wire = (uint64_t){field_name};",
+                            f"    for (size_t i = 0; i < {field_widths[field_encoding]}; ++i) {{",
+                            f"        payload[{field_offset} + i] = (uint8_t)({field_name}_wire >> (({field_widths[field_encoding]} - 1 - i) * 8));",
                             "    }",
                         ]
                     )
@@ -390,9 +395,29 @@ def render(schema):
                     if field_encoding == "u8":
                         c_codec_lines.append(f"    *{field_name} = payload[{field_offset}];")
                     else:
-                        c_codec_lines.append(
-                            f"    *{field_name} = (uint16_t)(((uint16_t)payload[{field_offset}] << 8) | payload[{field_offset + 1}]);"
+                        width = field_widths[field_encoding]
+                        c_codec_lines.extend(
+                            [
+                                f"    uint64_t {field_name}_wire_value = 0;",
+                                f"    for (size_t i = 0; i < {width}; ++i) {{",
+                                f"        {field_name}_wire_value = ({field_name}_wire_value << 8) | payload[{field_offset} + i];",
+                                "    }",
+                            ]
                         )
+                        if field_encoding == "i64be":
+                            c_codec_lines.extend(
+                                [
+                                    f"    if ({field_name}_wire_value <= (uint64_t)INT64_MAX) {{",
+                                    f"        *{field_name} = (int64_t){field_name}_wire_value;",
+                                    "    } else {",
+                                    f"        *{field_name} = -1 - (int64_t)(UINT64_MAX - {field_name}_wire_value);",
+                                    "    }",
+                                ]
+                            )
+                        else:
+                            c_codec_lines.append(
+                                f"    *{field_name} = ({c_types[field_encoding]}){field_name}_wire_value;"
+                            )
             c_codec_lines.extend(["    return 1;", "}", ""])
 
     constant_values = {item["rust_name"]: item["value"] for item in constants}

@@ -18,6 +18,17 @@ int main(void) {
         0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x12, 0x34,
     };
     const uint8_t simple_expected[3] = {0x00, 0x01, 0x03};
+    const uint8_t terminal_cancel_expected[20] = {
+        0x00, 0x01, 0x02, 0x01,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe,
+    };
+    const uint8_t terminal_status_expected[27] = {
+        0x00, 0x01, 0x04,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe,
+    };
     uint8_t payload[18] = {0};
     uint8_t decoded[16] = {0};
     uint8_t cancel_payload[20] = {0};
@@ -25,6 +36,12 @@ int main(void) {
     uint16_t decoded_reason = 0;
     uint8_t simple_payload[3] = {0};
     uint8_t decoded_status = 0;
+    uint8_t terminal_cancel_payload[20] = {0};
+    uint8_t terminal_status_payload[27] = {0};
+    uint8_t decoded_outcome_status = 0;
+    uint64_t decoded_commit_sequence = 0;
+    int64_t decoded_retention_deadline = 0;
+    int64_t decoded_observed_at = 0;
 
     prdb_encode_supervisor_invocation_control_request(payload, invocation_id);
     for (size_t i = 0; i < sizeof(expected); ++i) {
@@ -81,6 +98,44 @@ int main(void) {
             simple_payload, sizeof(simple_payload), &decoded_status) ||
         decoded_status != 3) {
         return 11;
+    }
+    prdb_encode_supervisor_cancel_result_terminal(
+        terminal_cancel_payload, 2, 1, 7, -2);
+    for (size_t i = 0; i < sizeof(terminal_cancel_expected); ++i) {
+        if (terminal_cancel_payload[i] != terminal_cancel_expected[i]) {
+            return 12;
+        }
+    }
+    decoded_status = 0;
+    decoded_outcome_status = 0;
+    decoded_commit_sequence = 0;
+    decoded_retention_deadline = 0;
+    if (!prdb_decode_supervisor_cancel_result_terminal(
+            terminal_cancel_payload, sizeof(terminal_cancel_payload),
+            &decoded_status, &decoded_outcome_status,
+            &decoded_commit_sequence, &decoded_retention_deadline) ||
+        decoded_status != 2 || decoded_outcome_status != 1 ||
+        decoded_commit_sequence != 7 || decoded_retention_deadline != -2) {
+        return 13;
+    }
+    prdb_encode_supervisor_status_terminal_response(
+        terminal_status_payload, 4, -1, 7, -2);
+    for (size_t i = 0; i < sizeof(terminal_status_expected); ++i) {
+        if (terminal_status_payload[i] != terminal_status_expected[i]) {
+            return 14;
+        }
+    }
+    decoded_status = 0;
+    decoded_observed_at = 0;
+    decoded_commit_sequence = 0;
+    decoded_retention_deadline = 0;
+    if (!prdb_decode_supervisor_status_terminal_response(
+            terminal_status_payload, sizeof(terminal_status_payload),
+            &decoded_status, &decoded_observed_at, &decoded_commit_sequence,
+            &decoded_retention_deadline) ||
+        decoded_status != 4 || decoded_observed_at != -1 ||
+        decoded_commit_sequence != 7 || decoded_retention_deadline != -2) {
+        return 15;
     }
     return 0;
 }

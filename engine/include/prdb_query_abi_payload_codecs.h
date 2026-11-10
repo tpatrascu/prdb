@@ -40,8 +40,10 @@ static inline void prdb_encode_supervisor_admin_cancel_request(uint8_t payload[2
     for (size_t i = 0; i < 16; ++i) {
         payload[2 + i] = invocation_id[i];
     }
-    payload[18] = (uint8_t)((reason_code >> 8) & 0xffu);
-    payload[19] = (uint8_t)(reason_code & 0xffu);
+    uint64_t reason_code_wire = (uint64_t)reason_code;
+    for (size_t i = 0; i < 2; ++i) {
+        payload[18 + i] = (uint8_t)(reason_code_wire >> ((2 - 1 - i) * 8));
+    }
 }
 
 static inline int prdb_decode_supervisor_admin_cancel_request(const uint8_t *payload, size_t payload_len,
@@ -62,7 +64,11 @@ static inline int prdb_decode_supervisor_admin_cancel_request(const uint8_t *pay
     if (reason_code == NULL) {
         return 0;
     }
-    *reason_code = (uint16_t)(((uint16_t)payload[18] << 8) | payload[19]);
+    uint64_t reason_code_wire_value = 0;
+    for (size_t i = 0; i < 2; ++i) {
+        reason_code_wire_value = (reason_code_wire_value << 8) | payload[18 + i];
+    }
+    *reason_code = (uint16_t)reason_code_wire_value;
     return 1;
 }
 
@@ -86,6 +92,129 @@ static inline int prdb_decode_supervisor_cancel_result_simple(const uint8_t *pay
         return 0;
     }
     *status = payload[2];
+    return 1;
+}
+
+static inline void prdb_encode_supervisor_cancel_result_terminal(uint8_t payload[20],
+    uint8_t status, uint8_t outcome_status, uint64_t commit_sequence, int64_t retention_deadline) {
+    payload[0] = (uint8_t)((PRDB_SUPERVISOR_PAYLOAD_VERSION >> 8) & 0xffu);
+    payload[1] = (uint8_t)(PRDB_SUPERVISOR_PAYLOAD_VERSION & 0xffu);
+    payload[2] = status;
+    payload[3] = outcome_status;
+    uint64_t commit_sequence_wire = (uint64_t)commit_sequence;
+    for (size_t i = 0; i < 8; ++i) {
+        payload[4 + i] = (uint8_t)(commit_sequence_wire >> ((8 - 1 - i) * 8));
+    }
+    uint64_t retention_deadline_wire = (uint64_t)retention_deadline;
+    for (size_t i = 0; i < 8; ++i) {
+        payload[12 + i] = (uint8_t)(retention_deadline_wire >> ((8 - 1 - i) * 8));
+    }
+}
+
+static inline int prdb_decode_supervisor_cancel_result_terminal(const uint8_t *payload, size_t payload_len,
+    uint8_t *status, uint8_t *outcome_status, uint64_t *commit_sequence, int64_t *retention_deadline) {
+    if (payload == NULL || payload_len != 20) {
+        return 0;
+    }
+    if (payload[0] != (uint8_t)((PRDB_SUPERVISOR_PAYLOAD_VERSION >> 8) & 0xffu) ||
+        payload[1] != (uint8_t)(PRDB_SUPERVISOR_PAYLOAD_VERSION & 0xffu)) {
+        return 0;
+    }
+    if (status == NULL) {
+        return 0;
+    }
+    *status = payload[2];
+    if (outcome_status == NULL) {
+        return 0;
+    }
+    *outcome_status = payload[3];
+    if (commit_sequence == NULL) {
+        return 0;
+    }
+    uint64_t commit_sequence_wire_value = 0;
+    for (size_t i = 0; i < 8; ++i) {
+        commit_sequence_wire_value = (commit_sequence_wire_value << 8) | payload[4 + i];
+    }
+    *commit_sequence = (uint64_t)commit_sequence_wire_value;
+    if (retention_deadline == NULL) {
+        return 0;
+    }
+    uint64_t retention_deadline_wire_value = 0;
+    for (size_t i = 0; i < 8; ++i) {
+        retention_deadline_wire_value = (retention_deadline_wire_value << 8) | payload[12 + i];
+    }
+    if (retention_deadline_wire_value <= (uint64_t)INT64_MAX) {
+        *retention_deadline = (int64_t)retention_deadline_wire_value;
+    } else {
+        *retention_deadline = -1 - (int64_t)(UINT64_MAX - retention_deadline_wire_value);
+    }
+    return 1;
+}
+
+static inline void prdb_encode_supervisor_status_terminal_response(uint8_t payload[27],
+    uint8_t status, int64_t observed_at, uint64_t commit_sequence, int64_t retention_deadline) {
+    payload[0] = (uint8_t)((PRDB_SUPERVISOR_PAYLOAD_VERSION >> 8) & 0xffu);
+    payload[1] = (uint8_t)(PRDB_SUPERVISOR_PAYLOAD_VERSION & 0xffu);
+    payload[2] = status;
+    uint64_t observed_at_wire = (uint64_t)observed_at;
+    for (size_t i = 0; i < 8; ++i) {
+        payload[3 + i] = (uint8_t)(observed_at_wire >> ((8 - 1 - i) * 8));
+    }
+    uint64_t commit_sequence_wire = (uint64_t)commit_sequence;
+    for (size_t i = 0; i < 8; ++i) {
+        payload[11 + i] = (uint8_t)(commit_sequence_wire >> ((8 - 1 - i) * 8));
+    }
+    uint64_t retention_deadline_wire = (uint64_t)retention_deadline;
+    for (size_t i = 0; i < 8; ++i) {
+        payload[19 + i] = (uint8_t)(retention_deadline_wire >> ((8 - 1 - i) * 8));
+    }
+}
+
+static inline int prdb_decode_supervisor_status_terminal_response(const uint8_t *payload, size_t payload_len,
+    uint8_t *status, int64_t *observed_at, uint64_t *commit_sequence, int64_t *retention_deadline) {
+    if (payload == NULL || payload_len != 27) {
+        return 0;
+    }
+    if (payload[0] != (uint8_t)((PRDB_SUPERVISOR_PAYLOAD_VERSION >> 8) & 0xffu) ||
+        payload[1] != (uint8_t)(PRDB_SUPERVISOR_PAYLOAD_VERSION & 0xffu)) {
+        return 0;
+    }
+    if (status == NULL) {
+        return 0;
+    }
+    *status = payload[2];
+    if (observed_at == NULL) {
+        return 0;
+    }
+    uint64_t observed_at_wire_value = 0;
+    for (size_t i = 0; i < 8; ++i) {
+        observed_at_wire_value = (observed_at_wire_value << 8) | payload[3 + i];
+    }
+    if (observed_at_wire_value <= (uint64_t)INT64_MAX) {
+        *observed_at = (int64_t)observed_at_wire_value;
+    } else {
+        *observed_at = -1 - (int64_t)(UINT64_MAX - observed_at_wire_value);
+    }
+    if (commit_sequence == NULL) {
+        return 0;
+    }
+    uint64_t commit_sequence_wire_value = 0;
+    for (size_t i = 0; i < 8; ++i) {
+        commit_sequence_wire_value = (commit_sequence_wire_value << 8) | payload[11 + i];
+    }
+    *commit_sequence = (uint64_t)commit_sequence_wire_value;
+    if (retention_deadline == NULL) {
+        return 0;
+    }
+    uint64_t retention_deadline_wire_value = 0;
+    for (size_t i = 0; i < 8; ++i) {
+        retention_deadline_wire_value = (retention_deadline_wire_value << 8) | payload[19 + i];
+    }
+    if (retention_deadline_wire_value <= (uint64_t)INT64_MAX) {
+        *retention_deadline = (int64_t)retention_deadline_wire_value;
+    } else {
+        *retention_deadline = -1 - (int64_t)(UINT64_MAX - retention_deadline_wire_value);
+    }
     return 1;
 }
 
