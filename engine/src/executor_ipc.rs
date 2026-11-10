@@ -1265,9 +1265,7 @@ pub fn dispatch_executor_request(
         Operation::CloseCursor => {
             let decoded = CloseCursorRequest::decode(&request.payload)?;
             connection.close_relation_scan(&decoded.cursor)?;
-            let mut payload = EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes().to_vec();
-            payload.push(0);
-            payload
+            MutationAcknowledgement.encode()
         }
         Operation::StageInsert => {
             let decoded = StageInsertRequest::decode(&request.payload)?;
