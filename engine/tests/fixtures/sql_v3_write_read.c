@@ -9,6 +9,7 @@
 #include "prdb_sdk_sql_exec_v13.h"
 #include "prdb_sdk_sql_exec_v15.h"
 #include "prdb_sdk_sql_exec_v17.h"
+#include "prdb_sdk_sql_exec_v18.h"
 #include "prdb_sdk_sql_exec_v16.h"
 #include "prdb_sdk_sql_result_v1.h"
 #include "prdb_sdk_executor_v1.h"
@@ -140,6 +141,22 @@ static int32_t write_grouped_composite_count_v17(
     const prdb_sdk_select_binding_v17 *binding) {
     if (binding == NULL || binding->has_having_literal != 1 ||
         binding->having_literal != UINT64_C(1)) {
+        return 1;
+    }
+    return write_grouped_composite_count(
+        opaque, group_keys, group_key_count, aggregate_value,
+        matching_row_count, &binding->base.base.base);
+}
+
+static int32_t write_grouped_composite_count_v18(
+    void *opaque, const prdb_sdk_value_v1 *group_keys,
+    uint32_t group_key_count, const prdb_sdk_value_v1 *aggregate_value,
+    uint64_t matching_row_count,
+    const prdb_sdk_select_binding_v18 *binding) {
+    if (binding == NULL || binding->having_node_count != 6 ||
+        binding->having_root != 5 ||
+        binding->having_type_code != PRDB_SDK_VALUE_TYPE_BIGINT ||
+        binding->base.base.has_having != 0) {
         return 1;
     }
     return write_grouped_composite_count(
@@ -402,6 +419,12 @@ static int32_t run_write_read_fixture(
     static const uint8_t select_composite_literal_sql[] =
         "SELECT left_key, right_key, COUNT(*) FROM grouped_records "
         "GROUP BY left_key, right_key HAVING COUNT(*) >= 1 "
+        "ORDER BY right_key DESC NULLS LAST, COUNT(*) DESC, "
+        "left_key ASC NULLS LAST LIMIT 2";
+    static const uint8_t select_composite_boolean_sql[] =
+        "SELECT left_key, right_key, COUNT(*) FROM grouped_records "
+        "GROUP BY left_key, right_key HAVING "
+        "(COUNT(*) >= 2 OR COUNT(*) = 3) AND NOT COUNT(*) < 2 "
         "ORDER BY right_key DESC NULLS LAST, COUNT(*) DESC, "
         "left_key ASC NULLS LAST LIMIT 2";
     static const uint8_t select_join_sql[] =
@@ -1081,6 +1104,22 @@ static int32_t run_write_read_fixture(
     if (status != PRDB_SDK_SQL_EXEC_OK ||
         composite_grouped_results.row_count != 2) {
         static const uint8_t message[] = "fixture-error-composite-literal";
+        return report_failure(host, message, sizeof(message) - 1);
+    }
+
+    composite_grouped_results.row_count = 0;
+    composite_grouped_results.output_len = 0;
+    status = prdb_sdk_sql_execute_group_v18(
+        host, schema, sizeof(schema) - 1, select_composite_boolean_sql,
+        sizeof(select_composite_boolean_sql) - 1, NULL, 0, 16,
+        sizeof(batch_response), planner_response, sizeof(planner_response),
+        executor_response, sizeof(executor_response), batch_response,
+        sizeof(batch_response), planner_columns, 9, executor_columns, 9,
+        cell_scratch, 9, grouped_materialized, sizeof(grouped_materialized),
+        write_grouped_composite_count_v18, &composite_grouped_results);
+    if (status != PRDB_SDK_SQL_EXEC_OK ||
+        composite_grouped_results.row_count != 1) {
+        static const uint8_t message[] = "fixture-error-composite-boolean";
         return report_failure(host, message, sizeof(message) - 1);
     }
 
