@@ -258,6 +258,27 @@ int main(void) {
         decoded_optimizer_failure_status != 4) {
         return 27;
     }
+    const uint8_t optimizer_success_expected[10] = {
+        0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x03, 0xaa, 0xbb, 0xcc,
+    };
+    uint8_t optimizer_success_payload[10] = {0};
+    uint32_t decoded_optimizer_plan_length = 0;
+    prdb_encode_optimizer_response_success(
+        optimizer_success_payload, 0, 3);
+    optimizer_success_payload[7] = 0xaa;
+    optimizer_success_payload[8] = 0xbb;
+    optimizer_success_payload[9] = 0xcc;
+    for (size_t i = 0; i < sizeof(optimizer_success_expected); ++i) {
+        if (optimizer_success_payload[i] != optimizer_success_expected[i]) {
+            return 49;
+        }
+    }
+    if (!prdb_decode_optimizer_response_success(
+            optimizer_success_payload, sizeof(optimizer_success_payload),
+            &decoded_optimizer_failure_status, &decoded_optimizer_plan_length) ||
+        decoded_optimizer_failure_status != 0 || decoded_optimizer_plan_length != 3) {
+        return 50;
+    }
     const uint8_t cancellation_check_expected[3] = {0x00, 0x01, 0x01};
     uint8_t cancellation_check_payload[3] = {0};
     uint8_t decoded_cancelled = 0;

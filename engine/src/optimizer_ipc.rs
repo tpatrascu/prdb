@@ -77,18 +77,13 @@ impl OptimizerResponse {
                     return Err(OptimizerPayloadError::PlanTooLarge);
                 }
                 decode_plan_v1(plan).map_err(|_| OptimizerPayloadError::InvalidPlan)?;
-                let mut output = vec![0; OPTIMIZER_RESPONSE_SUCCESS_HEADER_BYTES as usize];
-                let version_offset = OPTIMIZER_RESPONSE_SUCCESS_VERSION_OFFSET as usize;
-                output[version_offset..version_offset + 2]
-                    .copy_from_slice(&OPTIMIZER_RESPONSE_VERSION.to_be_bytes());
-                output[OPTIMIZER_RESPONSE_SUCCESS_STATUS_OFFSET as usize] =
-                    OptimizerStatus::Success as u8;
-                let length_offset = OPTIMIZER_RESPONSE_SUCCESS_PLAN_LENGTH_OFFSET as usize;
-                output[length_offset..length_offset + 4].copy_from_slice(
-                    &u32::try_from(plan.len())
-                        .map_err(|_| OptimizerPayloadError::PlanTooLarge)?
-                        .to_be_bytes(),
-                );
+                let plan_length =
+                    u32::try_from(plan.len()).map_err(|_| OptimizerPayloadError::PlanTooLarge)?;
+                let mut output = crate::query_abi::encode_optimizer_response_success(
+                    OptimizerStatus::Success as u8,
+                    plan_length,
+                )
+                .to_vec();
                 output.extend_from_slice(plan);
                 Ok(output)
             }
@@ -127,12 +122,14 @@ impl OptimizerResponse {
         if bytes.len() < OPTIMIZER_RESPONSE_SUCCESS_HEADER_BYTES as usize {
             return Err(OptimizerPayloadError::InvalidResponse);
         }
-        let length_offset = OPTIMIZER_RESPONSE_SUCCESS_PLAN_LENGTH_OFFSET as usize;
-        let len = u32::from_be_bytes(
-            bytes[length_offset..length_offset + 4]
-                .try_into()
-                .map_err(|_| OptimizerPayloadError::InvalidResponse)?,
-        ) as usize;
+        let (success_status, encoded_plan_length) =
+            crate::query_abi::decode_optimizer_response_success(bytes)
+                .ok_or(OptimizerPayloadError::InvalidResponse)?;
+        if success_status != OptimizerStatus::Success as u8 {
+            return Err(OptimizerPayloadError::InvalidResponse);
+        }
+        let len = usize::try_from(encoded_plan_length)
+            .map_err(|_| OptimizerPayloadError::InvalidResponse)?;
         let header_bytes = OPTIMIZER_RESPONSE_SUCCESS_HEADER_BYTES as usize;
         if len == 0 || len > MAX_PLAN_BYTES || bytes.len() != header_bytes + len {
             return Err(OptimizerPayloadError::InvalidResponse);

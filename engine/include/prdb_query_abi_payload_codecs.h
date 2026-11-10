@@ -308,6 +308,41 @@ static inline int prdb_decode_optimizer_response_failure(const uint8_t *payload,
     return 1;
 }
 
+static inline void prdb_encode_optimizer_response_success(uint8_t payload[7],
+    uint8_t status, uint32_t plan_length) {
+    payload[0] = (uint8_t)((PRDB_OPTIMIZER_RESPONSE_VERSION >> 8) & 0xffu);
+    payload[1] = (uint8_t)(PRDB_OPTIMIZER_RESPONSE_VERSION & 0xffu);
+    payload[2] = status;
+    uint64_t plan_length_wire = (uint64_t)plan_length;
+    for (size_t i = 0; i < 4; ++i) {
+        payload[3 + i] = (uint8_t)(plan_length_wire >> ((4 - 1 - i) * 8));
+    }
+}
+
+static inline int prdb_decode_optimizer_response_success(const uint8_t *payload, size_t payload_len,
+    uint8_t *status, uint32_t *plan_length) {
+    if (payload == NULL || payload_len < 7) {
+        return 0;
+    }
+    if (payload[0] != (uint8_t)((PRDB_OPTIMIZER_RESPONSE_VERSION >> 8) & 0xffu) ||
+        payload[1] != (uint8_t)(PRDB_OPTIMIZER_RESPONSE_VERSION & 0xffu)) {
+        return 0;
+    }
+    if (status == NULL) {
+        return 0;
+    }
+    *status = payload[2];
+    if (plan_length == NULL) {
+        return 0;
+    }
+    uint64_t plan_length_wire_value = 0;
+    for (size_t i = 0; i < 4; ++i) {
+        plan_length_wire_value = (plan_length_wire_value << 8) | payload[3 + i];
+    }
+    *plan_length = (uint32_t)plan_length_wire_value;
+    return 1;
+}
+
 static inline void prdb_encode_supervisor_invocation_control_request(uint8_t payload[18],
     const uint8_t invocation_id[16]) {
     payload[0] = (uint8_t)((PRDB_SUPERVISOR_PAYLOAD_VERSION >> 8) & 0xffu);

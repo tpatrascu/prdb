@@ -33,6 +33,8 @@ class PayloadSchemaValidationTests(unittest.TestCase):
         self.assertIn("decode_supervisor_cancel_result_terminal", rust)
         self.assertIn("encode_supervisor_status_terminal_response", rust)
         self.assertIn("decode_supervisor_status_terminal_response", rust)
+        self.assertIn("encode_optimizer_response_success", rust)
+        self.assertIn("decode_optimizer_response_success", rust)
         self.assertIn("encode_planner_describe_relation_available_response", rust)
         self.assertIn("decode_planner_describe_relation_available_response", rust)
         self.assertIn("encode_planner_describe_plan_relation_available_response", rust)
@@ -80,6 +82,10 @@ class PayloadSchemaValidationTests(unittest.TestCase):
         self.assertIn("prdb_decode_planner_describe_plan_relation_available_response", c_codecs)
         self.assertIn("payload.len() < 35", rust)
         self.assertIn("payload_len < 35", c_codecs)
+        self.assertIn("prdb_encode_optimizer_response_success", c_codecs)
+        self.assertIn("prdb_decode_optimizer_response_success", c_codecs)
+        self.assertIn("payload.len() < 7", rust)
+        self.assertIn("payload_len < 7", c_codecs)
 
     def test_payload_version_must_be_a_leading_u16(self):
         malformed = copy.deepcopy(self.schema)

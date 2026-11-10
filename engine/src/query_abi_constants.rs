@@ -317,6 +317,21 @@ pub const OPTIMIZER_RESPONSE_SUCCESS_VERSION_OFFSET: u32 = 0;
 pub const OPTIMIZER_RESPONSE_SUCCESS_STATUS_OFFSET: u32 = 2;
 pub const OPTIMIZER_RESPONSE_SUCCESS_PLAN_LENGTH_OFFSET: u32 = 3;
 pub const OPTIMIZER_RESPONSE_SUCCESS_HEADER_BYTES: u32 = 7;
+pub fn encode_optimizer_response_success(status: u8, plan_length: u32) -> [u8; 7] {
+    let mut payload = [0u8; 7];
+    payload[0..2].copy_from_slice(&OPTIMIZER_RESPONSE_VERSION.to_be_bytes());
+    payload[2] = status;
+    payload[3..7].copy_from_slice(&plan_length.to_be_bytes());
+    payload
+}
+
+pub fn decode_optimizer_response_success(payload: &[u8]) -> Option<(u8, u32)> {
+    if payload.len() < 7 || u16::from_be_bytes([payload[0], payload[1]]) != OPTIMIZER_RESPONSE_VERSION {
+        return None;
+    }
+    Some((payload[2], u32::from_be_bytes(payload[3..7].try_into().ok()?)))
+}
+
 pub const OPTIMIZER_SELECT_REQUEST_VERSION_OFFSET: u32 = 0;
 pub const OPTIMIZER_SELECT_REQUEST_STATEMENT_OFFSET: u32 = 2;
 pub const OPTIMIZER_SELECT_REQUEST_FLAGS_OFFSET: u32 = 3;
