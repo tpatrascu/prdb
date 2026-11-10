@@ -20214,8 +20214,8 @@ fn supervisor_drains_both_worker_channels_before_durable_finalize()
                 operation: Operation::DescribeRelation as u16,
                 request_id: 1,
                 payload: ResolveRelationRequest {
-                    schema_name: "missing_schema".to_owned(),
-                    relation_name: "missing_relation".to_owned(),
+                    schema_name: "information_schema".to_owned(),
+                    relation_name: "tables".to_owned(),
                 }
                 .encode()?,
             },
@@ -20226,7 +20226,7 @@ fn supervisor_drains_both_worker_channels_before_durable_finalize()
         assert!(
             DescribeRelationResponse::decode(&response.payload)?
                 .table
-                .is_none()
+                .is_some()
         );
         planner_worker.shutdown(std::net::Shutdown::Write)?;
         drop(planner_worker);
