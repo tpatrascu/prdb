@@ -38,3 +38,11 @@
 - Implementation: operation `0x1203`, generated Rust/C constants, `OptimizerSubmission` role allowlisting, and canonical response payload encoder/decoder are defined in `optimizer_ipc`. Request structure remains the canonical SELECT v1 payload and its 64 KiB decoder. This only defines and validates payloads; no socket handler or executor callback is connected yet.
 - Verification: generated ABI files matched the schema. Locked workspace build, format, warning-denied Clippy, serial workspace tests, and `git diff --check` passed (129 commit integration tests passed; 3 cgroup-dependent tests ignored; 81 Rust unit tests passed).
 - Remaining: connect the submission socket to `optimize_select_v1`, launch the optimizer in its own process, independently re-resolve plan references through the executor channel, and interpret plans in the SDK.
+
+## OP-3 dependency: serve optimizer submissions over a bounded socket
+
+- Behavior: a provisioned optimizer-submission stream validates request IDs and role, returns canonical plan payloads, and gives the same unavailable status for hidden/missing relations. Malformed framing, duplicate IDs, limit exhaustion, transport failures, and storage transaction errors abort the invocation.
+- Implementation: [`serve_optimizer_shared`](../../engine/src/optimizer_ipc.rs) serializes each request through the invocation mutex and its planner metadata connection, limits a connection to 256 unique requests, and validates every response plan. A real-redb UnixStream integration regression checks both a successful plan and non-disclosing unavailable response.
+- Boundary: this handler currently runs in its caller process as development scaffolding; it does not satisfy optimizer isolation and is not yet provisioned by the executor launcher.
+- Verification: focused real-redb optimizer socket test passed. Locked workspace build, format, warning-denied Clippy, serial workspace tests, and `git diff --check` passed (132 commit integration tests passed; 3 cgroup-dependent tests and 1 process test ignored; 81 Rust unit tests passed).
+- Remaining: launch a separate optimizer process, give it an invocation-bound planner-to-storage channel, provision the executor submission callback/channel, independently re-resolve plans in storage, and execute plans in the SDK.

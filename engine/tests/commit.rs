@@ -25743,6 +25743,7 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
     use prdb_engine::optimizer_binding::{
         BindError, BoundColumn, MetadataBindError, bind_select_request_via_metadata,
     };
+    use prdb_engine::optimizer_ipc::OptimizerResponse;
     use prdb_engine::optimizer_plan::{PlanNode, decode_plan_v1};
     use prdb_engine::optimizer_service::{OptimizerError, optimize_select_v1};
     use prdb_engine::planner_ipc::{
@@ -26028,5 +26029,75 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
         Ok(())
     })?;
     assert!(transaction.check_deadline().is_ok());
+
+    let optimizer_transaction = storage.begin_invocation(id(0x8b), actor, 9_999, 8, 512)?;
+    let shared_optimizer = std::sync::Arc::new(std::sync::Mutex::new(Some(optimizer_transaction)));
+    let (mut optimizer_client, mut optimizer_server) = std::os::unix::net::UnixStream::pair()?;
+    let optimizer_invocation = std::sync::Arc::clone(&shared_optimizer);
+    std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+        let optimizer_thread = scope.spawn(move || {
+            prdb_engine::optimizer_ipc::serve_optimizer_shared(
+                &mut optimizer_server,
+                &optimizer_invocation,
+            )
+        });
+        prdb_engine::ipc::write_frame(
+            &mut optimizer_client,
+            &IpcFrame {
+                operation: IpcOperation::OptimizeSelect as u16,
+                request_id: 1,
+                payload: encode_select("planner_stats", "observations", "value"),
+            },
+        )?;
+        let optimizer_frame = prdb_engine::ipc::read_frame(&mut optimizer_client)?
+            .ok_or("optimizer stream closed without a plan response")?;
+        assert_eq!(
+            optimizer_frame.operation,
+            IpcOperation::OptimizeSelect as u16
+        );
+        assert_eq!(optimizer_frame.request_id, 1);
+        let optimizer_response = OptimizerResponse::decode(&optimizer_frame.payload)?;
+        assert_eq!(
+            optimizer_response.status,
+            prdb_engine::optimizer_ipc::OptimizerStatus::Success
+        );
+        let plan = decode_plan_v1(
+            optimizer_response
+                .plan
+                .as_deref()
+                .ok_or("successful optimizer response omitted its plan")?,
+        )?;
+        assert_eq!(plan.relation.schema_id, schema.schema_id);
+        assert_eq!(plan.relation.relation_id, table.table_id);
+        prdb_engine::ipc::write_frame(
+            &mut optimizer_client,
+            &IpcFrame {
+                operation: IpcOperation::OptimizeSelect as u16,
+                request_id: 2,
+                payload: encode_select("planner_stats", "hidden_or_missing", "value"),
+            },
+        )?;
+        let unavailable_frame = prdb_engine::ipc::read_frame(&mut optimizer_client)?
+            .ok_or("optimizer stream closed without an unavailable response")?;
+        assert_eq!(unavailable_frame.request_id, 2);
+        assert_eq!(
+            OptimizerResponse::decode(&unavailable_frame.payload)?.status,
+            prdb_engine::optimizer_ipc::OptimizerStatus::Unavailable
+        );
+        optimizer_client.shutdown(Shutdown::Write)?;
+        drop(optimizer_client);
+        optimizer_thread
+            .join()
+            .expect("optimizer server thread panicked")
+            .map_err(|error| format!("optimizer server failed: {error:?}"))?;
+        Ok(())
+    })?;
+    if let Some(mut transaction) = shared_optimizer
+        .lock()
+        .map_err(|_| "optimizer transaction mutex poisoned")?
+        .take()
+    {
+        transaction.abort()?;
+    }
     Ok(())
 }

@@ -1,12 +1,17 @@
 //! Versioned request/response payloads for executor-to-optimizer submission.
 
+use crate::ipc::{DispatchError, IpcFrame, Operation, ServiceRole, authorize_operation};
 use crate::optimizer_binding::{BindError, MetadataBindError};
 use crate::optimizer_plan::{MAX_PLAN_BYTES, decode_plan_v1};
 use crate::optimizer_request::{RequestError, SelectRequest, decode_select_request};
 use crate::optimizer_service::OptimizerError;
+use crate::transaction::{InvocationTransaction, TransactionError};
+use std::io::{Read, Write};
+use std::sync::{Arc, Mutex};
 
 pub const OPTIMIZER_RESPONSE_VERSION: u16 = 1;
 pub const OPTIMIZER_RESPONSE_HEADER_BYTES: usize = 3;
+pub const MAX_OPTIMIZER_REQUESTS_PER_CONNECTION: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -30,6 +35,18 @@ pub enum OptimizerPayloadError {
     InvalidResponse,
     PlanTooLarge,
     InvalidPlan,
+}
+
+#[derive(Debug)]
+pub enum OptimizerConnectionError {
+    Frame(crate::ipc::FrameError),
+    Dispatch(DispatchError),
+    Abort(TransactionError),
+    Response(OptimizerPayloadError),
+    RequestLimitExceeded,
+    DuplicateRequestId,
+    SharedInvocationUnavailable,
+    SharedInvocationPoisoned,
 }
 
 impl std::fmt::Display for OptimizerPayloadError {
@@ -143,6 +160,117 @@ pub fn status_for_error(error: &OptimizerError) -> OptimizerStatus {
         OptimizerError::Bind(MetadataBindError::Bind(BindError::InvalidMetadata))
         | OptimizerError::Bind(MetadataBindError::Transaction(_)) => OptimizerStatus::Internal,
     }
+}
+
+/// Serve executor-to-optimizer submissions against one invocation. Metadata
+/// authority comes only from the invocation's planner connection. The
+/// optimizer submission role cannot issue planner estimates or storage scans.
+pub fn serve_optimizer_shared<S: Read + Write>(
+    stream: &mut S,
+    invocation: &Arc<Mutex<Option<InvocationTransaction<'_>>>>,
+) -> Result<(), OptimizerConnectionError> {
+    let mut state = crate::transaction::PlannerMetadataSessionState::default();
+    let mut request_ids = std::collections::HashSet::new();
+    loop {
+        let request = match crate::ipc::read_frame(stream) {
+            Ok(Some(request)) => request,
+            Ok(None) => return Ok(()),
+            Err(error) => {
+                abort_shared_invocation(invocation)?;
+                return Err(OptimizerConnectionError::Frame(error));
+            }
+        };
+        if request_ids.len() >= MAX_OPTIMIZER_REQUESTS_PER_CONNECTION {
+            abort_shared_invocation(invocation)?;
+            return Err(OptimizerConnectionError::RequestLimitExceeded);
+        }
+        if !request_ids.insert(request.request_id) {
+            abort_shared_invocation(invocation)?;
+            return Err(OptimizerConnectionError::DuplicateRequestId);
+        }
+        let operation = match Operation::from_code(request.operation) {
+            Ok(operation) => operation,
+            Err(error) => {
+                abort_shared_invocation(invocation)?;
+                return Err(OptimizerConnectionError::Dispatch(error));
+            }
+        };
+        if let Err(error) = authorize_operation(ServiceRole::OptimizerSubmission, operation) {
+            abort_shared_invocation(invocation)?;
+            return Err(OptimizerConnectionError::Dispatch(error));
+        }
+        let result = {
+            let mut invocation = match invocation.lock() {
+                Ok(invocation) => invocation,
+                Err(poisoned) => {
+                    let mut invocation = poisoned.into_inner();
+                    if let Some(mut transaction) = invocation.take() {
+                        let _ = transaction.abort();
+                    }
+                    return Err(OptimizerConnectionError::SharedInvocationPoisoned);
+                }
+            };
+            let transaction = invocation
+                .as_mut()
+                .ok_or(OptimizerConnectionError::SharedInvocationUnavailable)?;
+            let mut connection =
+                transaction.open_planner_metadata_connection_with_state(std::mem::take(&mut state));
+            let result =
+                crate::optimizer_service::optimize_select_v1(&request.payload, &mut connection);
+            state = connection.detach();
+            result
+        };
+        let response = match result {
+            Ok(plan) => OptimizerResponse::success(plan),
+            Err(error @ OptimizerError::Bind(MetadataBindError::Transaction(_))) => {
+                abort_shared_invocation(invocation)?;
+                let OptimizerError::Bind(MetadataBindError::Transaction(transaction_error)) = error
+                else {
+                    unreachable!()
+                };
+                return Err(OptimizerConnectionError::Abort(transaction_error));
+            }
+            Err(error) => OptimizerResponse::failure(status_for_error(&error)),
+        }
+        .and_then(|response| response.encode())
+        .map(|payload| IpcFrame {
+            operation: request.operation,
+            request_id: request.request_id,
+            payload,
+        });
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                abort_shared_invocation(invocation)?;
+                return Err(OptimizerConnectionError::Response(error));
+            }
+        };
+        if let Err(error) = crate::ipc::write_frame(stream, &response) {
+            abort_shared_invocation(invocation)?;
+            return Err(OptimizerConnectionError::Frame(error));
+        }
+    }
+}
+
+fn abort_shared_invocation(
+    invocation: &Arc<Mutex<Option<InvocationTransaction<'_>>>>,
+) -> Result<(), OptimizerConnectionError> {
+    let mut invocation = match invocation.lock() {
+        Ok(invocation) => invocation,
+        Err(poisoned) => {
+            let mut invocation = poisoned.into_inner();
+            if let Some(mut transaction) = invocation.take() {
+                let _ = transaction.abort();
+            }
+            return Err(OptimizerConnectionError::SharedInvocationPoisoned);
+        }
+    };
+    if let Some(transaction) = invocation.as_mut() {
+        transaction
+            .abort()
+            .map_err(OptimizerConnectionError::Abort)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
