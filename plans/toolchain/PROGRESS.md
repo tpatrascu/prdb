@@ -222,6 +222,14 @@
 - Verification: `make -f engine/sdk/Makefile abi-constants-check`, locked workspace build, format check, warning-denied Clippy, serial workspace tests, and `make -f engine/sdk/Makefile test` passed in the locked Nix development shell. The commit integration suite reported 129 passed and 3 cgroup-dependent tests ignored.
 - Remaining: define/generate IPC payload field schemas and serializers, complete C/Rust serialization parity, and validate the release Linux/libc/runtime profile and release artifacts. TC-2 remains partial.
 
+## TC-2: generated fixed supervisor control codec — implemented
+
+- Contract: [internal IPC](../../specs/ipc-protocol.md) and [toolchain](../../specs/toolchain.md). The supervisor invocation-control request is exactly a big-endian v1 payload version followed by a 16-byte invocation ID; truncated, extended, and unsupported-version payloads are rejected.
+- Red/green evidence: the byte-exact codec regression first failed to compile because generated encoder/decoder functions were absent. The generator now emits opt-in Rust codecs for fixed-width schema payloads, and both supervisor and gateway control dispatch use the generated decoder.
+- Regression: the independent wire example checks exact encoded bytes, round-trip decoding, invalid version rejection, and truncation rejection. Generator tests assert the helper output and reject attempts to generate a fixed codec for trailing fields.
+- Verification: `make -f engine/sdk/Makefile abi-constants-check abi-constants-test`, the focused codec test, full locked workspace build/format/warning-denied Clippy/serial Rust tests, and `make -f engine/sdk/Makefile test` all passed in the pinned Nix shell. Serial workspace tests included 132 commit integration tests; three cgroup-dependent commit tests and one cgroup-dependent metadata-process test remained ignored by default. Their explicit delegated-cgroup acceptances were previously run and recorded in the Linux sandbox and supervisor progress files.
+- Remaining: extend field-level schema and generated codecs to other payloads, add C serializer parity, and complete the release profile and artifact gates.
+
 ## TC-1: locked Nix development shell — implemented
 
 - Behavior: `nix develop --locked` provides the pinned x86_64-linux package set used for the engine and SDK checks. [`flake.nix`](../../flake.nix) and [`flake.lock`](../../flake.lock) pin Nixpkgs revision `718f670e845328e9c2cecdd832835712b2cbd065` with source NAR hash `sha256-Ee5BWo8sh3pGt70QUdRajnaginqFmWvrtdBc4gJzhks=`.

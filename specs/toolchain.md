@@ -59,6 +59,8 @@ Release gates include TinyCC shared-library/archive compatibility; C/Rust size/a
 
 The repository now has a locked Nix development shell for the Rust/TinyCC development profile, including the Nixpkgs-pinned TinyCC source revision, source hash, and compiler/support output hashes. Release target/libc/runtime selection, interface header generation, release build commands, and panic profiles remain implementation work. If shared-library compatibility fails, fix/document the toolchain profile rather than silently changing compilers or weakening confinement.
 
+For fixed-width IPC payloads, the shared schema may request generated Rust encode/decode helpers. These helpers encode the schema version and fixed fields in network byte order, require the exact payload length and supported version when decoding, and are checked against independent wire examples. Variable-length payloads still use explicit bounded codecs; generated C serializer parity remains separate work.
+
 ## References
 
 [TinyCC's manual](https://bellard.org/tcc/tcc-doc.html) documents C compilation, shared-library output, and libtcc; its published manual describes an older release, so target support must be checked against the actual pinned build. [Rust linkage documentation](https://doc.rust-lang.org/reference/linkage.html) distinguishes Rust-specific outputs from C-compatible library artifacts; no Rust-native ABI is exposed by this design.

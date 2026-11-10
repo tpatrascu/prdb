@@ -177,6 +177,20 @@ pub const OPTIMIZER_SELECT_REQUEST_HEADER_BYTES: u32 = 4;
 pub const SUPERVISOR_INVOCATION_CONTROL_REQUEST_VERSION_OFFSET: u32 = 0;
 pub const SUPERVISOR_INVOCATION_CONTROL_REQUEST_INVOCATION_ID_OFFSET: u32 = 2;
 pub const SUPERVISOR_INVOCATION_CONTROL_REQUEST_HEADER_BYTES: u32 = 18;
+pub fn encode_supervisor_invocation_control_request(invocation_id: [u8; 16]) -> [u8; 18] {
+    let mut payload = [0u8; 18];
+    payload[0..2].copy_from_slice(&SUPERVISOR_PAYLOAD_VERSION.to_be_bytes());
+    payload[2..18].copy_from_slice(&invocation_id);
+    payload
+}
+
+pub fn decode_supervisor_invocation_control_request(payload: &[u8]) -> Option<[u8; 16]> {
+    if payload.len() != 18 || u16::from_be_bytes([payload[0], payload[1]]) != SUPERVISOR_PAYLOAD_VERSION {
+        return None;
+    }
+    payload[2..18].try_into().ok()
+}
+
 pub const SUPERVISOR_ADMIN_CANCEL_REQUEST_VERSION_OFFSET: u32 = 0;
 pub const SUPERVISOR_ADMIN_CANCEL_REQUEST_INVOCATION_ID_OFFSET: u32 = 2;
 pub const SUPERVISOR_ADMIN_CANCEL_REQUEST_REASON_CODE_OFFSET: u32 = 18;

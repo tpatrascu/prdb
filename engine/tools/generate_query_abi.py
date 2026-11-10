@@ -110,6 +110,7 @@ def render(schema):
             raise ValueError(f"payload {name} must start with its u16 version constant")
         payload_names.add(name)
         field_names = set()
+        field_offsets = {}
         offset = 0
         field_widths = {
             "u8": 1,
@@ -129,6 +130,7 @@ def render(schema):
             ):
                 raise ValueError(f"invalid fixed field in IPC payload {name}")
             field_names.add(field_name)
+            field_offsets[field_name] = offset
             constant_stem = f"{name}_{field_name.upper()}_OFFSET"
             rust_name = constant_stem
             c_name = f"PRDB_{constant_stem}"
@@ -182,6 +184,97 @@ def render(schema):
         c_names.add(c_header_name)
         rust_lines.append(f"pub const {header_name}: u32 = {offset};")
         c_lines.append(f"#define {c_header_name} UINT32_C({offset})")
+
+        generate_rust_codec = payload.get("generate_rust_codec", False)
+        if not isinstance(generate_rust_codec, bool):
+            raise ValueError(f"generate_rust_codec must be Boolean for {name}")
+        if generate_rust_codec:
+            if trailing_fields:
+                raise ValueError(
+                    f"generated fixed Rust codec cannot encode trailing fields in {name}"
+                )
+            rust_types = {
+                "u8": "u8",
+                "u16be": "u16",
+                "u32be": "u32",
+                "u64be": "u64",
+                "i64be": "i64",
+                "bytes16": "[u8; 16]",
+            }
+            encode_name = f"encode_{name.lower()}"
+            decode_name = f"decode_{name.lower()}"
+            value_fields = fields[1:]
+            if not value_fields:
+                raise ValueError(f"generated Rust codec for {name} requires a value field")
+            for field in fields:
+                if field["encoding"] not in rust_types:
+                    raise ValueError(f"unsupported generated Rust codec field in {name}")
+            arguments = ", ".join(
+                f"{field['name']}: {rust_types[field['encoding']]}" for field in value_fields
+            )
+            result_types = ", ".join(rust_types[field["encoding"]] for field in value_fields)
+            result_type = f"({result_types})" if len(value_fields) > 1 else result_types
+            rust_lines.extend(
+                [
+                    f"pub fn {encode_name}({arguments}) -> [u8; {offset}] {{",
+                    f"    let mut payload = [0u8; {offset}];",
+                ]
+            )
+            for field in fields:
+                field_name = field["name"]
+                field_encoding = field["encoding"]
+                field_offset = field_offsets[field_name]
+                field_end = field_offset + field_widths[field_encoding]
+                if field_name == "version":
+                    rust_lines.append(
+                        f"    payload[{field_offset}..{field_end}].copy_from_slice(&{version_constant}.to_be_bytes());"
+                    )
+                elif field_encoding == "u8":
+                    rust_lines.append(f"    payload[{field_offset}] = {field_name};")
+                elif field_encoding == "bytes16":
+                    rust_lines.append(
+                        f"    payload[{field_offset}..{field_end}].copy_from_slice(&{field_name});"
+                    )
+                else:
+                    rust_lines.append(
+                        f"    payload[{field_offset}..{field_end}].copy_from_slice(&{field_name}.to_be_bytes());"
+                    )
+            rust_lines.extend(["    payload", "}", ""])
+            rust_lines.extend(
+                [
+                    f"pub fn {decode_name}(payload: &[u8]) -> Option<{result_type}> {{",
+                    f"    if payload.len() != {offset} || u16::from_be_bytes([payload[0], payload[1]]) != {version_constant} {{",
+                    "        return None;",
+                    "    }",
+                ]
+            )
+            decoded_values = []
+            for field in value_fields:
+                field_name = field["name"]
+                field_encoding = field["encoding"]
+                field_offset = field_offsets[field_name]
+                field_end = field_offset + field_widths[field_encoding]
+                if field_encoding == "u8":
+                    decoded_values.append(f"payload[{field_offset}]")
+                elif field_encoding == "bytes16":
+                    decoded_values.append(
+                        f"payload[{field_offset}..{field_end}].try_into().ok()"
+                        + ("" if len(value_fields) == 1 else "?")
+                    )
+                else:
+                    decoded_values.append(
+                        f"{rust_types[field_encoding]}::from_be_bytes(payload[{field_offset}..{field_end}].try_into().ok()?)"
+                    )
+            decoded = ", ".join(decoded_values)
+            if len(decoded_values) == 1:
+                decoded_field_encoding = value_fields[0]["encoding"]
+                if decoded_field_encoding == "bytes16":
+                    rust_lines.append(f"    {decoded}")
+                else:
+                    rust_lines.append(f"    Some({decoded})")
+            else:
+                rust_lines.append(f"    Some(({decoded}))")
+            rust_lines.extend(["}", ""])
 
     constant_values = {item["rust_name"]: item["value"] for item in constants}
     frame_fields = (

@@ -17,7 +17,6 @@ pub use crate::query_abi::{
     SUPERVISOR_CANCEL_RESULT_TERMINAL_STATUS_OFFSET,
     SUPERVISOR_CANCEL_RESULT_TERMINAL_VERSION_OFFSET,
     SUPERVISOR_INVOCATION_CONTROL_REQUEST_HEADER_BYTES,
-    SUPERVISOR_INVOCATION_CONTROL_REQUEST_INVOCATION_ID_OFFSET,
     SUPERVISOR_INVOCATION_CONTROL_REQUEST_VERSION_OFFSET, SUPERVISOR_PAYLOAD_VERSION,
 };
 use crate::storage_manager::{
@@ -1210,12 +1209,9 @@ pub fn dispatch_supervisor_control_request(
         Operation::SupervisorGetInvocationStatus
             if request.payload.len() == invocation_header_bytes =>
         {
-            let invocation_offset =
-                SUPERVISOR_INVOCATION_CONTROL_REQUEST_INVOCATION_ID_OFFSET as usize;
-            let invocation_id: [u8; 16] = request.payload
-                [invocation_offset..invocation_offset + 16]
-                .try_into()
-                .map_err(|_| SupervisorRequestError::InvalidPayload)?;
+            let invocation_id =
+                generated::decode_supervisor_invocation_control_request(&request.payload)
+                    .ok_or(SupervisorRequestError::InvalidPayload)?;
             let now_us = crate::credentials::now_unix_micros().ok_or(
                 SupervisorRequestError::Transaction(TransactionError::ClockUnavailable),
             )?;
@@ -1290,23 +1286,14 @@ pub fn dispatch_client_control_request(
     let operation =
         Operation::from_code(request.operation).map_err(SupervisorRequestError::Dispatch)?;
     authorize_operation(role, operation).map_err(SupervisorRequestError::Dispatch)?;
-    let header_bytes = SUPERVISOR_INVOCATION_CONTROL_REQUEST_HEADER_BYTES as usize;
-    let version_offset = SUPERVISOR_INVOCATION_CONTROL_REQUEST_VERSION_OFFSET as usize;
     if !matches!(
         operation,
         Operation::ClientGetInvocationStatus | Operation::ClientCancelInvocation
-    ) || request.payload.len() != header_bytes
-        || u16::from_be_bytes([
-            request.payload[version_offset],
-            request.payload[version_offset + 1],
-        ]) != SUPERVISOR_PAYLOAD_VERSION
-    {
+    ) {
         return Err(SupervisorRequestError::InvalidPayload);
     }
-    let invocation_offset = SUPERVISOR_INVOCATION_CONTROL_REQUEST_INVOCATION_ID_OFFSET as usize;
-    let invocation_id: [u8; 16] = request.payload[invocation_offset..invocation_offset + 16]
-        .try_into()
-        .map_err(|_| SupervisorRequestError::InvalidPayload)?;
+    let invocation_id = generated::decode_supervisor_invocation_control_request(&request.payload)
+        .ok_or(SupervisorRequestError::InvalidPayload)?;
     let now_us = crate::credentials::now_unix_micros().ok_or(
         SupervisorRequestError::Transaction(TransactionError::ClockUnavailable),
     )?;

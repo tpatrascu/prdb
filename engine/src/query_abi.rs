@@ -183,3 +183,37 @@ pub fn validate_descriptor_v4(descriptor: &QueryDescriptorV4) -> Result<(), Desc
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod generated_payload_tests {
+    use super::{
+        decode_supervisor_invocation_control_request, encode_supervisor_invocation_control_request,
+    };
+
+    #[test]
+    fn generated_supervisor_control_codec_matches_wire_example() {
+        let encoded = encode_supervisor_invocation_control_request([0x5a; 16]);
+        assert_eq!(
+            encoded,
+            [
+                0x00, 0x01, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a,
+                0x5a, 0x5a, 0x5a, 0x5a
+            ]
+        );
+        assert_eq!(
+            decode_supervisor_invocation_control_request(&encoded),
+            Some([0x5a; 16])
+        );
+
+        let mut wrong_version = encoded;
+        wrong_version[1] = 2;
+        assert_eq!(
+            decode_supervisor_invocation_control_request(&wrong_version),
+            None
+        );
+        assert_eq!(
+            decode_supervisor_invocation_control_request(&encoded[..encoded.len() - 1]),
+            None
+        );
+    }
+}

@@ -23,6 +23,8 @@ class PayloadSchemaValidationTests(unittest.TestCase):
     def test_current_schema_renders(self):
         rust, c, *_ = GENERATOR.render(self.schema)
         self.assertIn("EXECUTOR_NEXT_BATCH_RESPONSE_CONTINUATION_HEADER_BYTES", rust)
+        self.assertIn("encode_supervisor_invocation_control_request", rust)
+        self.assertIn("decode_supervisor_invocation_control_request", rust)
         self.assertIn("PRDB_PLANNER_ESTIMATE_SCAN_RESPONSE_HEADER_BYTES", c)
 
     def test_payload_version_must_be_a_leading_u16(self):
@@ -40,6 +42,20 @@ class PayloadSchemaValidationTests(unittest.TestCase):
         )
         request["fields"][2]["encoding"] = "u32be"
         with self.assertRaisesRegex(ValueError, "must use a u16 count"):
+            GENERATOR.render(malformed)
+
+    def test_generated_fixed_codec_rejects_trailing_fields(self):
+        malformed = copy.deepcopy(self.schema)
+        request = next(
+            payload
+            for payload in malformed["payload_schemas"]
+            if payload["name"] == "SUPERVISOR_INVOCATION_CONTROL_REQUEST"
+        )
+        request["fields"].append({"name": "tail_length", "encoding": "u32be"})
+        request["trailing_fields"] = [
+            {"name": "tail", "encoding": "bytes", "length_field": "tail_length"}
+        ]
+        with self.assertRaisesRegex(ValueError, "cannot encode trailing fields"):
             GENERATOR.render(malformed)
 
 
