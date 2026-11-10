@@ -103,6 +103,14 @@
 - Verification: focused and full maintained TinyCC SDK suites passed; generated ABI consistency, documentation link checks, and `git diff --check` passed.
 - Remaining: open a scan using the validated capability and interpret bounded plan operators.
 
+## OP-3 dependency: open a scan only after plan validation
+
+- Behavior: the SDK validates a physical plan through executor metadata, acquires the ordinary executor handle, and opens its full scan. A zero LIMIT produces an empty result without creating a cursor.
+- Implementation: `prdb_sdk_optimizer_open_plan_scan_v1` composes plan decoding, stable-identity comparison, executor relation resolution, and full-scan open. It returns the checked relation metadata and connection-local cursor token in caller-owned buffers.
+- Regression: TinyCC fixture verifies the metadata and capability requests precede `open_scan`, the returned cursor has kind 7, and LIMIT 0 performs no cursor request.
+- Verification: focused and full maintained TinyCC SDK suites passed; generated ABI consistency, documentation link checks, and `git diff --check` passed.
+- Remaining: consume bounded batches, evaluate Filter, project rows, honor nonzero LIMIT, and emit SQL results.
+
 ## OP-3 dependency: launch and confine the optimizer with each invocation
 
 - Behavior: production START launches optimizer and executor as separate confined processes in one invocation cgroup. The optimizer receives only its submission and planner sockets; storage serves its planner socket alongside executor planner and storage channels. Either launch failure cleans up the other process and invocation resources.

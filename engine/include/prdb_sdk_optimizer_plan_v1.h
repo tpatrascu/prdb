@@ -93,4 +93,17 @@ int32_t prdb_sdk_optimizer_acquire_plan_relation_v1(
     uint32_t relation_out_capacity,
     prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_capacity);
 
+/* Acquire the checked relation capability and open its full scan. A zero
+ * LIMIT returns success with scan_opened_out=0 and a zero cursor. Relation
+ * names and column metadata borrow relation_response; cursor bytes are copied. */
+int32_t prdb_sdk_optimizer_open_plan_scan_v1(
+    const prdb_host_api_v2 *host, const uint8_t *plan_payload,
+    uint64_t plan_payload_len, uint8_t *relation_response,
+    uint64_t relation_response_capacity, uint64_t *relation_response_len,
+    uint8_t *scan_response, uint64_t scan_response_capacity,
+    uint64_t *scan_response_len, prdb_sdk_executor_relation_v1 *relation_out,
+    uint32_t relation_out_capacity,
+    prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_capacity,
+    uint8_t cursor_out[16], uint32_t *scan_opened_out);
+
 #endif /* PRDB_SDK_OPTIMIZER_PLAN_V1_H */
