@@ -23,6 +23,7 @@ pub mod linux_sandbox;
 pub mod metadata;
 pub mod metadata_discovery;
 pub mod optimizer_binding;
+pub mod optimizer_ipc;
 pub mod optimizer_plan;
 pub mod optimizer_request;
 pub mod optimizer_service;

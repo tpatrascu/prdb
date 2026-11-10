@@ -24,6 +24,7 @@ pub enum ServiceRole {
     Bootstrap,
     Executor,
     Planner,
+    OptimizerSubmission,
     Supervisor,
     Gateway,
     AdminControl,
@@ -46,6 +47,7 @@ pub enum Operation {
     ExecutorCheckCancellation = crate::query_abi::IPC_OP_EXECUTOR_CHECK_CANCELLATION,
     DescribeRelation = crate::query_abi::IPC_OP_DESCRIBE_RELATION,
     EstimateScan = crate::query_abi::IPC_OP_ESTIMATE_SCAN,
+    OptimizeSelect = crate::query_abi::IPC_OP_OPTIMIZE_SELECT,
     FinalizeTransaction = crate::query_abi::IPC_OP_FINALIZE_TRANSACTION,
     AbortTransaction = crate::query_abi::IPC_OP_ABORT_TRANSACTION,
     SupervisorCancelInvocation = crate::query_abi::IPC_OP_SUPERVISOR_CANCEL_INVOCATION,
@@ -92,6 +94,7 @@ impl Operation {
             }
             crate::query_abi::IPC_OP_DESCRIBE_RELATION => Ok(Self::DescribeRelation),
             crate::query_abi::IPC_OP_ESTIMATE_SCAN => Ok(Self::EstimateScan),
+            crate::query_abi::IPC_OP_OPTIMIZE_SELECT => Ok(Self::OptimizeSelect),
             crate::query_abi::IPC_OP_FINALIZE_TRANSACTION => Ok(Self::FinalizeTransaction),
             crate::query_abi::IPC_OP_ABORT_TRANSACTION => Ok(Self::AbortTransaction),
             crate::query_abi::IPC_OP_SUPERVISOR_CANCEL_INVOCATION => {
@@ -168,6 +171,7 @@ pub fn authorize_operation(role: ServiceRole, operation: Operation) -> Result<()
             operation,
             Operation::DescribeRelation | Operation::EstimateScan
         ),
+        ServiceRole::OptimizerSubmission => matches!(operation, Operation::OptimizeSelect),
         ServiceRole::Supervisor => matches!(
             operation,
             Operation::FinalizeTransaction

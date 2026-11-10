@@ -650,6 +650,13 @@
       "c_type": "UINT16_C"
     },
     {
+      "rust_name": "IPC_OP_OPTIMIZE_SELECT",
+      "rust_type": "u16",
+      "value": 4611,
+      "c_name": "PRDB_IPC_OP_OPTIMIZE_SELECT",
+      "c_type": "UINT16_C"
+    },
+    {
       "rust_name": "IPC_OP_FINALIZE_TRANSACTION",
       "rust_type": "u16",
       "value": 4865,

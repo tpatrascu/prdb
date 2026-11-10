@@ -24,3 +24,17 @@
 - Regression: eight unit tests verify pipeline construction/order, scan-column union, malformed order/duplicate limits, invalid filters/references/depth/types, canonical byte round-trip, and malformed version/type/truncated/trailing payload rejection.
 - Verification: focused optimizer plan tests passed. Locked workspace build, format, warning-denied Clippy, serial workspace tests, and `git diff --check` passed (129 commit integration tests passed; 3 cgroup-dependent commit tests and 1 process test ignored).
 - Remaining: assign/transfer the plan over the supervisor-bound channel, independently re-resolve the relation through executor storage, interpret the plan through the SDK, and implement mutation plans and optimizer process isolation.
+
+## OP-3 dependency: compose invocation-bound optimizer service
+
+- Behavior: one library entry point decodes, resolves and binds a structured request through the invocation's planner metadata connection, lowers it, and returns canonical plan bytes without transferring planner handles or authority.
+- Implementation: [`optimizer_service`](../../engine/src/optimizer_service.rs) composes the existing binder and plan validator/encoder. The real-redb planner regression now invokes it, decodes the returned plan, and checks schema/table IDs and pinned epochs; unavailable relations map to a non-disclosing bind result.
+- Verification: locked workspace build, format, warning-denied Clippy, serial workspace tests, and `git diff --check` passed (129 commit integration tests passed; 3 cgroup-dependent tests ignored).
+- Remaining: bounded submission IPC, isolated optimizer process and supervisor channel, independent executor-side relation resolution, SDK interpretation, and mutation plans.
+
+## OP-3 dependency: define optimizer submission payload and role
+
+- Behavior: reserve one role-specific operation for SELECT submissions and accept a successful response only when it contains a complete independently validated plan; errors use a small non-disclosing status set.
+- Implementation: operation `0x1203`, generated Rust/C constants, `OptimizerSubmission` role allowlisting, and canonical response payload encoder/decoder are defined in `optimizer_ipc`. Request structure remains the canonical SELECT v1 payload and its 64 KiB decoder. This only defines and validates payloads; no socket handler or executor callback is connected yet.
+- Verification: generated ABI files matched the schema. Locked workspace build, format, warning-denied Clippy, serial workspace tests, and `git diff --check` passed (129 commit integration tests passed; 3 cgroup-dependent tests ignored; 81 Rust unit tests passed).
+- Remaining: connect the submission socket to `optimize_select_v1`, launch the optimizer in its own process, independently re-resolve plan references through the executor channel, and interpret plans in the SDK.

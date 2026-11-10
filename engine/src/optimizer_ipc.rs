@@ -1,0 +1,214 @@
+//! Versioned request/response payloads for executor-to-optimizer submission.
+
+use crate::optimizer_binding::{BindError, MetadataBindError};
+use crate::optimizer_plan::{MAX_PLAN_BYTES, decode_plan_v1};
+use crate::optimizer_request::{RequestError, SelectRequest, decode_select_request};
+use crate::optimizer_service::OptimizerError;
+
+pub const OPTIMIZER_RESPONSE_VERSION: u16 = 1;
+pub const OPTIMIZER_RESPONSE_HEADER_BYTES: usize = 3;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum OptimizerStatus {
+    Success = 0,
+    InvalidRequest = 1,
+    Unavailable = 2,
+    Rejected = 3,
+    Internal = 4,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OptimizerResponse {
+    pub status: OptimizerStatus,
+    pub plan: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OptimizerPayloadError {
+    InvalidRequest(RequestError),
+    InvalidResponse,
+    PlanTooLarge,
+    InvalidPlan,
+}
+
+impl std::fmt::Display for OptimizerPayloadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "optimizer IPC payload error: {self:?}")
+    }
+}
+
+impl std::error::Error for OptimizerPayloadError {}
+
+/// Validate and own a submitted request before it reaches planning code.
+pub fn decode_optimizer_request(bytes: &[u8]) -> Result<SelectRequest, OptimizerPayloadError> {
+    decode_select_request(bytes).map_err(OptimizerPayloadError::InvalidRequest)
+}
+
+impl OptimizerResponse {
+    pub fn success(plan: Vec<u8>) -> Result<Self, OptimizerPayloadError> {
+        if plan.is_empty() || plan.len() > MAX_PLAN_BYTES {
+            return Err(OptimizerPayloadError::PlanTooLarge);
+        }
+        decode_plan_v1(&plan).map_err(|_| OptimizerPayloadError::InvalidPlan)?;
+        Ok(Self {
+            status: OptimizerStatus::Success,
+            plan: Some(plan),
+        })
+    }
+
+    pub fn failure(status: OptimizerStatus) -> Result<Self, OptimizerPayloadError> {
+        if status == OptimizerStatus::Success {
+            return Err(OptimizerPayloadError::InvalidResponse);
+        }
+        Ok(Self { status, plan: None })
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, OptimizerPayloadError> {
+        let mut output = Vec::with_capacity(OPTIMIZER_RESPONSE_HEADER_BYTES + 4 + 256);
+        output.extend_from_slice(&OPTIMIZER_RESPONSE_VERSION.to_be_bytes());
+        output.push(self.status as u8);
+        match (&self.status, &self.plan) {
+            (OptimizerStatus::Success, Some(plan)) => {
+                if plan.is_empty() || plan.len() > MAX_PLAN_BYTES {
+                    return Err(OptimizerPayloadError::PlanTooLarge);
+                }
+                decode_plan_v1(plan).map_err(|_| OptimizerPayloadError::InvalidPlan)?;
+                output.extend_from_slice(
+                    &u32::try_from(plan.len())
+                        .map_err(|_| OptimizerPayloadError::PlanTooLarge)?
+                        .to_be_bytes(),
+                );
+                output.extend_from_slice(plan);
+            }
+            (OptimizerStatus::Success, None) | (_, Some(_)) => {
+                return Err(OptimizerPayloadError::InvalidResponse);
+            }
+            (_, None) => {}
+        }
+        Ok(output)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, OptimizerPayloadError> {
+        if bytes.len() < OPTIMIZER_RESPONSE_HEADER_BYTES
+            || u16::from_be_bytes([bytes[0], bytes[1]]) != OPTIMIZER_RESPONSE_VERSION
+        {
+            return Err(OptimizerPayloadError::InvalidResponse);
+        }
+        let status = match bytes[2] {
+            0 => OptimizerStatus::Success,
+            1 => OptimizerStatus::InvalidRequest,
+            2 => OptimizerStatus::Unavailable,
+            3 => OptimizerStatus::Rejected,
+            4 => OptimizerStatus::Internal,
+            _ => return Err(OptimizerPayloadError::InvalidResponse),
+        };
+        if status != OptimizerStatus::Success {
+            if bytes.len() != OPTIMIZER_RESPONSE_HEADER_BYTES {
+                return Err(OptimizerPayloadError::InvalidResponse);
+            }
+            return Ok(Self { status, plan: None });
+        }
+        if bytes.len() < OPTIMIZER_RESPONSE_HEADER_BYTES + 4 {
+            return Err(OptimizerPayloadError::InvalidResponse);
+        }
+        let len = u32::from_be_bytes(
+            bytes[3..7]
+                .try_into()
+                .map_err(|_| OptimizerPayloadError::InvalidResponse)?,
+        ) as usize;
+        if len == 0 || len > MAX_PLAN_BYTES || bytes.len() != 7 + len {
+            return Err(OptimizerPayloadError::InvalidResponse);
+        }
+        let plan = bytes[7..].to_vec();
+        decode_plan_v1(&plan).map_err(|_| OptimizerPayloadError::InvalidPlan)?;
+        Ok(Self {
+            status,
+            plan: Some(plan),
+        })
+    }
+}
+
+/// Collapse planner failures to a small non-disclosing wire status set.
+pub fn status_for_error(error: &OptimizerError) -> OptimizerStatus {
+    match error {
+        OptimizerError::Bind(MetadataBindError::Bind(BindError::Request(_))) => {
+            OptimizerStatus::InvalidRequest
+        }
+        OptimizerError::Bind(MetadataBindError::Bind(BindError::RelationUnavailable)) => {
+            OptimizerStatus::Unavailable
+        }
+        OptimizerError::Bind(MetadataBindError::Bind(BindError::InvalidQuery))
+        | OptimizerError::Plan(_) => OptimizerStatus::Rejected,
+        OptimizerError::Bind(MetadataBindError::Bind(BindError::InvalidMetadata))
+        | OptimizerError::Bind(MetadataBindError::Transaction(_)) => OptimizerStatus::Internal,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::optimizer_binding::{BoundColumn, BoundSelect};
+    use crate::optimizer_plan::{encode_plan_v1, plan_select_v1};
+    use crate::tuple::ScalarType;
+
+    fn plan_bytes() -> Vec<u8> {
+        let bound = BoundSelect {
+            schema_name: "public".to_owned(),
+            schema_id: [1; 16],
+            schema_version: 1,
+            table_epoch: 1,
+            relation_id: [2; 16],
+            relation_name: "items".to_owned(),
+            projections: vec![BoundColumn {
+                column_id: [3; 16],
+                ordinal: 0,
+                scalar_type: ScalarType::Integer,
+                nullable: true,
+            }],
+            predicate: None,
+            limit: None,
+        };
+        encode_plan_v1(&plan_select_v1(bound).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn optimizer_responses_roundtrip_only_validated_plans() {
+        let plan = plan_bytes();
+        let response = OptimizerResponse::success(plan.clone()).unwrap();
+        assert_eq!(
+            OptimizerResponse::decode(&response.encode().unwrap()),
+            Ok(response)
+        );
+        let failure = OptimizerResponse::failure(OptimizerStatus::Unavailable).unwrap();
+        assert_eq!(
+            OptimizerResponse::decode(&failure.encode().unwrap()),
+            Ok(failure)
+        );
+    }
+
+    #[test]
+    fn optimizer_responses_reject_malformed_status_lengths_and_plans() {
+        assert_eq!(
+            OptimizerResponse::decode(&[0, 1, 0, 0, 0, 0, 1, 0]),
+            Err(OptimizerPayloadError::InvalidPlan)
+        );
+        assert_eq!(
+            OptimizerResponse::decode(&[0, 1, 9]),
+            Err(OptimizerPayloadError::InvalidResponse)
+        );
+        assert_eq!(
+            OptimizerResponse::decode(&[0, 1, 2, 0]),
+            Err(OptimizerPayloadError::InvalidResponse)
+        );
+        let mut trailing = OptimizerResponse::success(plan_bytes())
+            .unwrap()
+            .encode()
+            .unwrap();
+        trailing.push(0);
+        assert_eq!(
+            OptimizerResponse::decode(&trailing),
+            Err(OptimizerPayloadError::InvalidResponse)
+        );
+    }
+}
