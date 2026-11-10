@@ -4,8 +4,8 @@ use crate::optimizer_binding::{BindError, MetadataBindError};
 use crate::optimizer_plan::{MAX_PLAN_BYTES, decode_plan_v1};
 use crate::optimizer_request::{RequestError, SelectRequest, decode_select_request};
 use crate::optimizer_service::OptimizerError;
+pub use crate::query_abi::OPTIMIZER_RESPONSE_VERSION;
 
-pub const OPTIMIZER_RESPONSE_VERSION: u16 = 1;
 pub const OPTIMIZER_RESPONSE_HEADER_BYTES: usize = 3;
 pub const MAX_OPTIMIZER_REQUESTS_PER_CONNECTION: usize = 256;
 

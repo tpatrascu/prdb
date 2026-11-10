@@ -6,6 +6,7 @@ use crate::metadata_discovery::{
     AuthorizedRelationDescription, ExecutorRowHandle, ExecutorScanCursor, ResolvedRelationHandle,
     VisibleColumn,
 };
+pub use crate::query_abi::{EXECUTOR_BATCH_PAYLOAD_VERSION, RESOLVE_RELATION_PAYLOAD_VERSION};
 use crate::transaction::{
     ExecutorMetadataConnection, InsertInput, InvocationTransaction, TransactionError,
 };
@@ -13,12 +14,10 @@ use crate::tuple::{FieldPatch, ScalarType, ScalarValue};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
-pub const RESOLVE_RELATION_PAYLOAD_VERSION: u16 = 1;
 const RESOLVE_REQUEST_HEADER_BYTES: usize = 6;
 const RESOLVE_RESPONSE_HEADER_BYTES: usize = 3;
 pub const MAX_EXECUTOR_REQUESTS_PER_CONNECTION: usize = 256;
 pub const MAX_EXECUTOR_BATCH_CANDIDATES: u16 = 128;
-pub const EXECUTOR_BATCH_PAYLOAD_VERSION: u16 = 1;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolveRelationRequest {

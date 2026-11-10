@@ -1160,6 +1160,41 @@
       "value": "prdb_query_main_v4",
       "c_name": "PRDB_QUERY_ENTRY_V4_SYMBOL",
       "c_type": "string"
+    },
+    {
+      "rust_name": "RESOLVE_RELATION_PAYLOAD_VERSION",
+      "rust_type": "u16",
+      "value": 1,
+      "c_name": "PRDB_RESOLVE_RELATION_PAYLOAD_VERSION",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "EXECUTOR_BATCH_PAYLOAD_VERSION",
+      "rust_type": "u16",
+      "value": 1,
+      "c_name": "PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "PLANNER_PAYLOAD_VERSION",
+      "rust_type": "u16",
+      "value": 1,
+      "c_name": "PRDB_PLANNER_PAYLOAD_VERSION",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "SUPERVISOR_PAYLOAD_VERSION",
+      "rust_type": "u16",
+      "value": 1,
+      "c_name": "PRDB_SUPERVISOR_PAYLOAD_VERSION",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "OPTIMIZER_RESPONSE_VERSION",
+      "rust_type": "u16",
+      "value": 1,
+      "c_name": "PRDB_OPTIMIZER_RESPONSE_VERSION",
+      "c_type": "UINT16_C"
     }
   ]
 }

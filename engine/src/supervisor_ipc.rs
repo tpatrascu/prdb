@@ -3,6 +3,7 @@
 use crate::audit::{AuditAction, AuditEvent, AuditResult};
 use crate::ipc::{DispatchError, IpcFrame, Operation, ServiceRole, authorize_operation};
 use crate::outcome::OutcomeStatus;
+pub use crate::query_abi::SUPERVISOR_PAYLOAD_VERSION;
 use crate::storage_manager::{
     AdministrativeCancellationError, AdministrativeCancellationResult, InvocationStatus,
     InvocationStatusError, OwnerCancellationResult, StorageManager,
@@ -18,7 +19,6 @@ use zeroize::Zeroize;
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 
-pub const SUPERVISOR_PAYLOAD_VERSION: u16 = 1;
 pub const MAX_SUPERVISOR_REQUESTS_PER_CONNECTION: usize = 16;
 
 #[derive(Debug)]

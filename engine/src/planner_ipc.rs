@@ -8,12 +8,12 @@ use crate::ipc::{DispatchError, IpcFrame, Operation, ServiceRole, authorize_oper
 use crate::metadata_discovery::{
     AuthorizedPlanRelation, AuthorizedRelationDescription, PlanningTableHandle,
 };
+pub use crate::query_abi::PLANNER_PAYLOAD_VERSION;
 use crate::statistics::{AuthorizedScanEstimate, AuthorizedScanSummary, ColumnPopulation};
 use crate::transaction::{PlannerMetadataConnection, TransactionError};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
-pub const PLANNER_PAYLOAD_VERSION: u16 = 1;
 const DESCRIBE_HEADER_BYTES: usize = 3;
 const ESTIMATE_HEADER_BYTES: usize = 20;
 pub const MAX_PLANNER_REQUESTS_PER_CONNECTION: usize = 256;
