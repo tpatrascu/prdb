@@ -10,14 +10,17 @@ mod worker {
         IpcFrame, Operation, ServiceRole, authorize_operation, read_frame, write_frame,
     };
     use prdb_engine::query_abi::{
-        BorrowedInvocationV1, HostApiV1, HostApiV2, HostApiV3, InvocationV2, InvocationV3,
-        MAX_IPC_REQUEST_BYTES, MAX_RESULT_CHUNK_BYTES, MAX_TOTAL_RESULT_BYTES,
-        QUERY_ABI_V2_VERSION, QUERY_ABI_V3_VERSION, QUERY_ABI_VERSION, QUERY_DESCRIPTOR_SYMBOL,
-        QUERY_DESCRIPTOR_V2_SYMBOL, QUERY_DESCRIPTOR_V3_SYMBOL, QUERY_ENTRY_SYMBOL,
-        QUERY_ENTRY_V2_SYMBOL, QUERY_ENTRY_V3_SYMBOL, QUERY_STATEMENT_FAILURE_SQL,
-        QueryDescriptorV1, QueryDescriptorV2, QueryDescriptorV3, QueryIpcRequestV2, QueryMainV1,
-        QueryMainV2, QueryMainV3, QueryStatementFailureV3, QueryWriteResultV2,
+        BorrowedInvocationV1, HostApiV1, HostApiV2, HostApiV3, HostApiV4, InvocationV2,
+        InvocationV3, InvocationV4, MAX_IPC_REQUEST_BYTES, MAX_RESULT_CHUNK_BYTES,
+        MAX_TOTAL_RESULT_BYTES, QUERY_ABI_V2_VERSION, QUERY_ABI_V3_VERSION, QUERY_ABI_V4_VERSION,
+        QUERY_ABI_VERSION, QUERY_DESCRIPTOR_SYMBOL, QUERY_DESCRIPTOR_V2_SYMBOL,
+        QUERY_DESCRIPTOR_V3_SYMBOL, QUERY_DESCRIPTOR_V4_SYMBOL, QUERY_ENTRY_SYMBOL,
+        QUERY_ENTRY_V2_SYMBOL, QUERY_ENTRY_V3_SYMBOL, QUERY_ENTRY_V4_SYMBOL,
+        QUERY_STATEMENT_FAILURE_SQL, QueryDescriptorV1, QueryDescriptorV2, QueryDescriptorV3,
+        QueryDescriptorV4, QueryIpcRequestV2, QueryMainV1, QueryMainV2, QueryMainV3, QueryMainV4,
+        QueryOptimizerRequestV4, QueryStatementFailureV3, QueryWriteResultV2,
         validate_descriptor_v1, validate_descriptor_v2, validate_descriptor_v3,
+        validate_descriptor_v4,
     };
     use std::ffi::{CStr, CString, OsStr, c_void};
     use std::io::{self, Read, Write};
@@ -229,8 +232,12 @@ mod worker {
             return Err(dynamic_loader_error("dlopen"));
         }
 
-        // Prefer v3, then v2. An invalid descriptor is rejected rather than
+        // Prefer v4, then v3 and v2. An invalid descriptor is rejected rather than
         // falling back to a second ABI exported by the same library.
+        let v4_descriptor_symbol = CString::new(QUERY_DESCRIPTOR_V4_SYMBOL).expect("static symbol");
+        if let Some(descriptor_address) = lookup_optional_symbol(handle, &v4_descriptor_symbol)? {
+            return unsafe { execute_v4_library(handle, descriptor_address, args) };
+        }
         let v3_descriptor_symbol = CString::new(QUERY_DESCRIPTOR_V3_SYMBOL).expect("static symbol");
         if let Some(descriptor_address) = lookup_optional_symbol(handle, &v3_descriptor_symbol)? {
             return unsafe { execute_v3_library(handle, descriptor_address, args) };
@@ -290,6 +297,79 @@ mod worker {
         // library finalizers must not run during host cleanup.
         let _ = handle;
         Ok(status)
+    }
+
+    unsafe fn execute_v4_library(
+        handle: *mut libc::c_void,
+        descriptor_address: *mut libc::c_void,
+        args: WorkerArgs,
+    ) -> io::Result<i32> {
+        if !(descriptor_address as usize).is_multiple_of(std::mem::align_of::<QueryDescriptorV4>())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "query v4 descriptor has invalid alignment",
+            ));
+        }
+        // SAFETY: malformed native records can fault only this disposable,
+        // confined worker. Copy before validation to avoid retaining a library pointer.
+        let descriptor = unsafe { descriptor_address.cast::<QueryDescriptorV4>().read() };
+        validate_descriptor_v4(&descriptor).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("query ABI v4 descriptor rejected: {error:?}"),
+            )
+        })?;
+
+        let entry_symbol = CString::new(QUERY_ENTRY_V4_SYMBOL).expect("static symbol");
+        let entry_address = lookup_symbol(handle, &entry_symbol)?;
+        // SAFETY: the validated descriptor declares this ABI and entry point.
+        let entry: QueryMainV4 = unsafe { std::mem::transmute(entry_address) };
+
+        let parameters = read_parameters(args.parameters_fd)?;
+        let parameters_len = u64::try_from(parameters.len()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "parameters length overflow")
+        })?;
+        let parameters_ptr = if parameters.is_empty() {
+            std::ptr::null()
+        } else {
+            parameters.as_ptr()
+        };
+        let invocation = InvocationV4 {
+            struct_size: std::mem::size_of::<InvocationV4>() as u32,
+            abi_version: QUERY_ABI_V4_VERSION,
+            parameters: parameters_ptr,
+            parameters_len,
+        };
+        // SAFETY: the trusted launcher supplied distinct inherited socket fds.
+        let context = unsafe {
+            CallbackContext::from_raw_fds(
+                args.planner_fd,
+                args.executor_fd,
+                args.optimizer_fd,
+                args.result_fd,
+            )
+        };
+        // Keep callback state alive until the worker's immediate `_exit`, even
+        // if hostile library code retains the context pointer on another thread.
+        let context = Box::leak(Box::new(context));
+        let host = HostApiV4 {
+            v3: HostApiV3 {
+                struct_size: std::mem::size_of::<HostApiV3>() as u32,
+                abi_version: QUERY_ABI_V3_VERSION,
+                context: (context as *mut CallbackContext).cast(),
+                executor_request: Some(executor_request_v2 as QueryIpcRequestV2),
+                planner_request: Some(planner_request_v2 as QueryIpcRequestV2),
+                write_result: Some(write_result_v2 as QueryWriteResultV2),
+                statement_failure: Some(statement_failure_v3 as QueryStatementFailureV3),
+            },
+            optimizer_request: Some(optimizer_request_v4 as QueryOptimizerRequestV4),
+        };
+        // SAFETY: all host and invocation storage remains alive through the call.
+        let status = unsafe { entry(&host, &invocation) };
+        let latched_statement_failure = context.statement_failed.load(Ordering::SeqCst);
+        let _ = handle;
+        Ok(query_exit_status(status, latched_statement_failure))
     }
 
     unsafe fn execute_v3_library(
@@ -512,7 +592,7 @@ mod worker {
     struct CallbackContext {
         executor: IpcChannel,
         planner: IpcChannel,
-        _optimizer: UnixStream,
+        optimizer: IpcChannel,
         result: Mutex<UnixStream>,
         total_result_bytes: AtomicU64,
         statement_failed: AtomicBool,
@@ -530,14 +610,15 @@ mod worker {
             let planner = unsafe { IpcChannel::from_raw_fd(planner_fd, ServiceRole::Planner) };
             // SAFETY: same descriptor ownership contract as the planner fd.
             let executor = unsafe { IpcChannel::from_raw_fd(executor_fd, ServiceRole::Executor) };
-            // SAFETY: the optimizer submission fd stays open for this worker's lifetime.
-            let optimizer = unsafe { UnixStream::from_raw_fd(optimizer_fd) };
+            // SAFETY: the optimizer submission fd is a distinct connected Unix stream.
+            let optimizer =
+                unsafe { IpcChannel::from_raw_fd(optimizer_fd, ServiceRole::OptimizerSubmission) };
             // SAFETY: the result fd is a distinct connected Unix stream.
             let result = unsafe { UnixStream::from_raw_fd(result_fd) };
             Self {
                 executor,
                 planner,
-                _optimizer: optimizer,
+                optimizer,
                 result: Mutex::new(result),
                 total_result_bytes: AtomicU64::new(0),
                 statement_failed: AtomicBool::new(false),
@@ -604,6 +685,28 @@ mod worker {
         )
     }
 
+    unsafe extern "C" fn optimizer_request_v4(
+        context: *mut c_void,
+        request: *const u8,
+        request_len: u64,
+        response: *mut u8,
+        response_capacity: u64,
+        response_len: *mut u64,
+    ) -> i32 {
+        callback_ipc_v2(
+            context,
+            ServiceRole::OptimizerSubmission,
+            Operation::OptimizeSelect as u16,
+            IpcCallbackBuffers {
+                request,
+                request_len,
+                response,
+                response_capacity,
+                response_len,
+            },
+        )
+    }
+
     struct IpcCallbackBuffers {
         request: *const u8,
         request_len: u64,
@@ -647,6 +750,7 @@ mod worker {
             let channel = match role {
                 ServiceRole::Executor => &context.executor,
                 ServiceRole::Planner => &context.planner,
+                ServiceRole::OptimizerSubmission => &context.optimizer,
                 _ => return CALLBACK_INVALID_ARGUMENT,
             };
             let payload = match channel.request(operation, request_bytes.to_vec()) {
@@ -819,6 +923,15 @@ mod worker {
             result: UnixStream,
         ) -> CallbackContext {
             let (optimizer, _optimizer_peer) = UnixStream::pair().unwrap();
+            callback_context_with_optimizer(planner, executor, optimizer, result)
+        }
+
+        fn callback_context_with_optimizer(
+            planner: UnixStream,
+            executor: UnixStream,
+            optimizer: UnixStream,
+            result: UnixStream,
+        ) -> CallbackContext {
             // SAFETY: each stream contributes one unique fd and ownership is
             // transferred into the callback context.
             unsafe {
@@ -829,6 +942,70 @@ mod worker {
                     result.into_raw_fd(),
                 )
             }
+        }
+
+        #[test]
+        fn optimizer_callback_uses_fixed_operation_and_bounded_response() {
+            let (planner, _planner_peer) = UnixStream::pair().unwrap();
+            let (executor, _executor_peer) = UnixStream::pair().unwrap();
+            let (optimizer, mut optimizer_peer) = UnixStream::pair().unwrap();
+            let (result, _result_peer) = UnixStream::pair().unwrap();
+            let context = callback_context_with_optimizer(planner, executor, optimizer, result);
+            let context_ptr = (&context as *const CallbackContext).cast_mut().cast();
+            let server = std::thread::spawn(move || {
+                for request_id in 1..=2 {
+                    let request = read_frame(&mut optimizer_peer).unwrap().unwrap();
+                    assert_eq!(request.operation, Operation::OptimizeSelect as u16);
+                    assert_eq!(request.request_id, request_id);
+                    assert_eq!(request.payload, b"select request");
+                    write_frame(
+                        &mut optimizer_peer,
+                        &IpcFrame {
+                            operation: request.operation,
+                            request_id,
+                            payload: vec![0xa1, 0xb2, 0xc3],
+                        },
+                    )
+                    .unwrap();
+                }
+            });
+
+            let request = b"select request";
+            let mut response = [0x7f; 3];
+            let mut response_len = 0;
+            // SAFETY: all callback buffers and context remain live and sized.
+            let status = unsafe {
+                optimizer_request_v4(
+                    context_ptr,
+                    request.as_ptr(),
+                    request.len() as u64,
+                    response.as_mut_ptr(),
+                    response.len() as u64,
+                    &mut response_len,
+                )
+            };
+            assert_eq!(status, CALLBACK_OK);
+            assert_eq!(response_len, 3);
+            assert_eq!(response, [0xa1, 0xb2, 0xc3]);
+
+            let mut small_response = [0x7f; 2];
+            response_len = 0;
+            // SAFETY: callback buffers remain live; undersizing is reported
+            // without copying any response bytes.
+            let status = unsafe {
+                optimizer_request_v4(
+                    context_ptr,
+                    request.as_ptr(),
+                    request.len() as u64,
+                    small_response.as_mut_ptr(),
+                    small_response.len() as u64,
+                    &mut response_len,
+                )
+            };
+            assert_eq!(status, CALLBACK_RESPONSE_TOO_SMALL);
+            assert_eq!(response_len, 3);
+            assert_eq!(small_response, [0x7f; 2]);
+            server.join().unwrap();
         }
 
         #[test]

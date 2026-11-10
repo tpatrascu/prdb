@@ -1,6 +1,6 @@
 //! Versioned C entry-point contracts for query libraries. V1 carries only
 //! parameters; v2 adds bounded role-bound IPC/results, and v3 adds a sticky
-//! statement-failure callback.
+//! statement-failure callback, and v4 adds bounded optimizer submission.
 
 use std::ffi::c_int;
 include!("query_abi_constants.rs");
@@ -28,10 +28,23 @@ pub type QueryWriteResultV2 =
 pub type QueryStatementFailureV3 =
     unsafe extern "C" fn(context: *mut std::ffi::c_void, failure_code: u32) -> i32;
 
+/// Dedicated bounded callback for a SELECT request on the optimizer channel.
+/// The operation is fixed to OptimizeSelect; query code cannot choose another
+/// operation or use this endpoint for storage authority.
+pub type QueryOptimizerRequestV4 = unsafe extern "C" fn(
+    context: *mut std::ffi::c_void,
+    request: *const u8,
+    request_len: u64,
+    response: *mut u8,
+    response_capacity: u64,
+    response_len: *mut u64,
+) -> i32;
+
 include!("query_abi_records.rs");
 
 pub type QueryMainV2 = unsafe extern "C" fn(*const HostApiV2, *const InvocationV2) -> c_int;
 pub type QueryMainV3 = unsafe extern "C" fn(*const HostApiV3, *const InvocationV3) -> c_int;
+pub type QueryMainV4 = unsafe extern "C" fn(*const HostApiV4, *const InvocationV4) -> c_int;
 
 pub type QueryMainV1 = unsafe extern "C" fn(*const HostApiV1, *const InvocationV1) -> c_int;
 
@@ -100,6 +113,7 @@ pub enum DescriptorV2Error {
 }
 
 pub type DescriptorV3Error = DescriptorV2Error;
+pub type DescriptorV4Error = DescriptorV2Error;
 
 /// Check the descriptor exported by a query library against this host's v1
 /// layouts before looking up or calling the entry point.
@@ -148,6 +162,23 @@ pub fn validate_descriptor_v3(descriptor: &QueryDescriptorV3) -> Result<(), Desc
         return Err(DescriptorV2Error::HostApiSize);
     }
     if descriptor.invocation_size != std::mem::size_of::<InvocationV3>() as u32 {
+        return Err(DescriptorV2Error::InvocationSize);
+    }
+    Ok(())
+}
+
+/// Check the exported v4 descriptor before resolving its entry point.
+pub fn validate_descriptor_v4(descriptor: &QueryDescriptorV4) -> Result<(), DescriptorV4Error> {
+    if descriptor.struct_size != std::mem::size_of::<QueryDescriptorV4>() as u32 {
+        return Err(DescriptorV2Error::StructSize);
+    }
+    if descriptor.abi_version != QUERY_ABI_V4_VERSION {
+        return Err(DescriptorV2Error::AbiVersion);
+    }
+    if descriptor.host_api_size != std::mem::size_of::<HostApiV4>() as u32 {
+        return Err(DescriptorV2Error::HostApiSize);
+    }
+    if descriptor.invocation_size != std::mem::size_of::<InvocationV4>() as u32 {
         return Err(DescriptorV2Error::InvocationSize);
     }
     Ok(())

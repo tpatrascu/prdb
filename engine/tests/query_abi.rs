@@ -1,10 +1,11 @@
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
 use prdb_engine::query_abi::{
-    BorrowedInvocationV1, HostApiV1, HostApiV2, HostApiV3, InvocationV1, InvocationV2,
-    InvocationV3, ParameterError, QUERY_ABI_V2_VERSION, QUERY_ABI_V3_VERSION, QUERY_ABI_VERSION,
-    QueryDescriptorV1, QueryDescriptorV2, QueryDescriptorV3, validate_descriptor_v1,
-    validate_descriptor_v2, validate_descriptor_v3,
+    BorrowedInvocationV1, HostApiV1, HostApiV2, HostApiV3, HostApiV4, InvocationV1, InvocationV2,
+    InvocationV3, InvocationV4, ParameterError, QUERY_ABI_V2_VERSION, QUERY_ABI_V3_VERSION,
+    QUERY_ABI_V4_VERSION, QUERY_ABI_VERSION, QueryDescriptorV1, QueryDescriptorV2,
+    QueryDescriptorV3, QueryDescriptorV4, validate_descriptor_v1, validate_descriptor_v2,
+    validate_descriptor_v3, validate_descriptor_v4,
 };
 
 #[test]
@@ -60,6 +61,33 @@ fn query_abi_v3_layout_and_descriptor_match_the_c_contract() {
     invalid = valid;
     invalid.host_api_size -= 1;
     assert!(validate_descriptor_v3(&invalid).is_err());
+}
+
+#[test]
+fn query_abi_v4_preserves_v3_host_prefix_and_adds_optimizer_callback() {
+    assert_eq!(std::mem::size_of::<HostApiV4>(), 56);
+    assert_eq!(std::mem::align_of::<HostApiV4>(), 8);
+    assert_eq!(std::mem::offset_of!(HostApiV4, v3), 0);
+    assert_eq!(std::mem::offset_of!(HostApiV4, optimizer_request), 48);
+    assert_eq!(std::mem::size_of::<InvocationV4>(), 24);
+    assert_eq!(std::mem::size_of::<QueryDescriptorV4>(), 16);
+
+    let valid = QueryDescriptorV4 {
+        struct_size: std::mem::size_of::<QueryDescriptorV4>() as u32,
+        abi_version: QUERY_ABI_V4_VERSION,
+        host_api_size: std::mem::size_of::<HostApiV4>() as u32,
+        invocation_size: std::mem::size_of::<InvocationV4>() as u32,
+    };
+    assert!(validate_descriptor_v4(&valid).is_ok());
+    let mut invalid = valid;
+    invalid.abi_version = QUERY_ABI_V3_VERSION;
+    assert!(validate_descriptor_v4(&invalid).is_err());
+    invalid = valid;
+    invalid.host_api_size -= 1;
+    assert!(validate_descriptor_v4(&invalid).is_err());
+    invalid = valid;
+    invalid.invocation_size -= 1;
+    assert!(validate_descriptor_v4(&invalid).is_err());
 }
 
 #[test]

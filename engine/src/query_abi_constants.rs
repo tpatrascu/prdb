@@ -77,3 +77,6 @@ pub const IPC_GATEWAY_ERROR_INVALID_STATE: &str = "{\"code\":\"invalid_state\",\
 pub const IPC_GATEWAY_ERROR_UNAUTHENTICATED: &str = "{\"code\":\"unauthenticated\",\"message\":\"Authentication is required.\"}";
 pub const IPC_GATEWAY_ERROR_RESOURCE_LIMIT: &str = "{\"code\":\"resource_limit\",\"message\":\"Request exceeds a configured limit.\"}";
 pub const IPC_GATEWAY_ERROR_UNAVAILABLE: &str = "{\"code\":\"unavailable\",\"message\":\"Requested resource is unavailable.\"}";
+pub const QUERY_ABI_V4_VERSION: u32 = 4;
+pub const QUERY_DESCRIPTOR_V4_SYMBOL: &str = "prdb_query_descriptor_v4";
+pub const QUERY_ENTRY_V4_SYMBOL: &str = "prdb_query_main_v4";

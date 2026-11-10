@@ -457,6 +457,133 @@
         "PartialEq"
       ],
       "kind": "record"
+    },
+    {
+      "c_type": "prdb_host_api_v4",
+      "rust_type": "HostApiV4",
+      "size": 56,
+      "alignment": 8,
+      "fields": [
+        {
+          "name": "v3",
+          "offset": 0,
+          "c_type": "prdb_host_api_v3",
+          "rust_type": "HostApiV3",
+          "c_name": "v3",
+          "rust_name": "v3"
+        },
+        {
+          "name": "optimizer_request",
+          "offset": 48,
+          "c_type": "prdb_query_optimizer_request_v4_fn",
+          "rust_type": "Option<QueryOptimizerRequestV4>",
+          "c_name": "optimizer_request",
+          "rust_name": "optimizer_request"
+        }
+      ],
+      "version": "4",
+      "derives": [
+        "Clone",
+        "Copy"
+      ],
+      "kind": "record"
+    },
+    {
+      "c_type": "prdb_invocation_v4",
+      "rust_type": "InvocationV4",
+      "size": 24,
+      "alignment": 8,
+      "fields": [
+        {
+          "name": "struct_size",
+          "offset": 0,
+          "c_type": "uint32_t",
+          "rust_type": "u32",
+          "c_name": "struct_size",
+          "rust_name": "struct_size"
+        },
+        {
+          "name": "abi_version",
+          "offset": 4,
+          "c_type": "uint32_t",
+          "rust_type": "u32",
+          "c_name": "abi_version",
+          "rust_name": "abi_version"
+        },
+        {
+          "name": "parameters",
+          "offset": 8,
+          "c_type": "const uint8_t *",
+          "rust_type": "*const u8",
+          "c_name": "parameters",
+          "rust_name": "parameters"
+        },
+        {
+          "name": "parameters_len",
+          "offset": 16,
+          "c_type": "uint64_t",
+          "rust_type": "u64",
+          "c_name": "parameters_len",
+          "rust_name": "parameters_len"
+        }
+      ],
+      "version": "4",
+      "derives": [
+        "Clone",
+        "Copy"
+      ],
+      "kind": "alias",
+      "alias_c_type": "prdb_invocation_v2",
+      "alias_rust_type": "InvocationV2"
+    },
+    {
+      "c_type": "prdb_query_descriptor_v4_record",
+      "rust_type": "QueryDescriptorV4",
+      "size": 16,
+      "alignment": 4,
+      "fields": [
+        {
+          "name": "struct_size",
+          "offset": 0,
+          "c_type": "uint32_t",
+          "rust_type": "u32",
+          "c_name": "struct_size",
+          "rust_name": "struct_size"
+        },
+        {
+          "name": "abi_version",
+          "offset": 4,
+          "c_type": "uint32_t",
+          "rust_type": "u32",
+          "c_name": "abi_version",
+          "rust_name": "abi_version"
+        },
+        {
+          "name": "host_api_size",
+          "offset": 8,
+          "c_type": "uint32_t",
+          "rust_type": "u32",
+          "c_name": "host_api_size",
+          "rust_name": "host_api_size"
+        },
+        {
+          "name": "invocation_size",
+          "offset": 12,
+          "c_type": "uint32_t",
+          "rust_type": "u32",
+          "c_name": "invocation_size",
+          "rust_name": "invocation_size"
+        }
+      ],
+      "version": "4",
+      "derives": [
+        "Clone",
+        "Copy",
+        "Debug",
+        "Eq",
+        "PartialEq"
+      ],
+      "kind": "record"
     }
   ],
   "constants": [
@@ -1004,6 +1131,27 @@
       "rust_type": "&str",
       "value": "{\"code\":\"unavailable\",\"message\":\"Requested resource is unavailable.\"}",
       "c_name": "PRDB_IPC_GATEWAY_ERROR_UNAVAILABLE",
+      "c_type": "string"
+    },
+    {
+      "rust_name": "QUERY_ABI_V4_VERSION",
+      "rust_type": "u32",
+      "value": 4,
+      "c_name": "PRDB_QUERY_ABI_V4_VERSION",
+      "c_type": "UINT32_C"
+    },
+    {
+      "rust_name": "QUERY_DESCRIPTOR_V4_SYMBOL",
+      "rust_type": "&str",
+      "value": "prdb_query_descriptor_v4",
+      "c_name": "PRDB_QUERY_DESCRIPTOR_V4_SYMBOL",
+      "c_type": "string"
+    },
+    {
+      "rust_name": "QUERY_ENTRY_V4_SYMBOL",
+      "rust_type": "&str",
+      "value": "prdb_query_main_v4",
+      "c_name": "PRDB_QUERY_ENTRY_V4_SYMBOL",
       "c_type": "string"
     }
   ]

@@ -65,3 +65,22 @@ const _: [(); 4] = [(); core::mem::offset_of!(QueryDescriptorV3, abi_version)];
 const _: [(); 8] = [(); core::mem::offset_of!(QueryDescriptorV3, host_api_size)];
 const _: [(); 12] = [(); core::mem::offset_of!(QueryDescriptorV3, invocation_size)];
 
+const _: [(); 56] = [(); core::mem::size_of::<HostApiV4>()];
+const _: [(); 8] = [(); core::mem::align_of::<HostApiV4>()];
+const _: [(); 0] = [(); core::mem::offset_of!(HostApiV4, v3)];
+const _: [(); 48] = [(); core::mem::offset_of!(HostApiV4, optimizer_request)];
+
+const _: [(); 24] = [(); core::mem::size_of::<InvocationV4>()];
+const _: [(); 8] = [(); core::mem::align_of::<InvocationV4>()];
+const _: [(); 0] = [(); core::mem::offset_of!(InvocationV4, struct_size)];
+const _: [(); 4] = [(); core::mem::offset_of!(InvocationV4, abi_version)];
+const _: [(); 8] = [(); core::mem::offset_of!(InvocationV4, parameters)];
+const _: [(); 16] = [(); core::mem::offset_of!(InvocationV4, parameters_len)];
+
+const _: [(); 16] = [(); core::mem::size_of::<QueryDescriptorV4>()];
+const _: [(); 4] = [(); core::mem::align_of::<QueryDescriptorV4>()];
+const _: [(); 0] = [(); core::mem::offset_of!(QueryDescriptorV4, struct_size)];
+const _: [(); 4] = [(); core::mem::offset_of!(QueryDescriptorV4, abi_version)];
+const _: [(); 8] = [(); core::mem::offset_of!(QueryDescriptorV4, host_api_size)];
+const _: [(); 12] = [(); core::mem::offset_of!(QueryDescriptorV4, invocation_size)];
+

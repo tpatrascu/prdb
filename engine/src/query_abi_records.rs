@@ -75,3 +75,20 @@ pub struct QueryDescriptorV3 {
     pub invocation_size: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct HostApiV4 {
+    pub v3: HostApiV3,
+    pub optimizer_request: Option<QueryOptimizerRequestV4>,
+}
+
+pub type InvocationV4 = InvocationV2;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct QueryDescriptorV4 {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub host_api_size: u32,
+    pub invocation_size: u32,
+}
+

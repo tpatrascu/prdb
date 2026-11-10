@@ -82,5 +82,8 @@
 #define PRDB_IPC_GATEWAY_ERROR_UNAUTHENTICATED "{\"code\":\"unauthenticated\",\"message\":\"Authentication is required.\"}"
 #define PRDB_IPC_GATEWAY_ERROR_RESOURCE_LIMIT "{\"code\":\"resource_limit\",\"message\":\"Request exceeds a configured limit.\"}"
 #define PRDB_IPC_GATEWAY_ERROR_UNAVAILABLE "{\"code\":\"unavailable\",\"message\":\"Requested resource is unavailable.\"}"
+#define PRDB_QUERY_ABI_V4_VERSION UINT32_C(4)
+#define PRDB_QUERY_DESCRIPTOR_V4_SYMBOL "prdb_query_descriptor_v4"
+#define PRDB_QUERY_ENTRY_V4_SYMBOL "prdb_query_main_v4"
 
 #endif /* PRDB_QUERY_ABI_CONSTANTS_H */
