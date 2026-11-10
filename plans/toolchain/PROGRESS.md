@@ -448,6 +448,14 @@
 - Verification: generator drift/schema tests, locked workspace build, rustfmt check, warning-denied Clippy, serial workspace tests, and the complete maintained TinyCC SDK suite passed in the pinned Nix shell.
 - Remaining: migrate the remaining hand-coded executor/planner/supervisor payload serializers and complete release profile and artifact gates.
 
+## TC-2: generated TinyCC stage-delete request encoder — implemented
+
+- Contract: [internal IPC](../../specs/ipc-protocol.md) and [toolchain](../../specs/toolchain.md). Stage-delete carries the batch payload version and opaque row handle.
+- Implementation: the maintained TinyCC executor SDK now builds this request with the generated C encoder; Rust already uses the generated request codec.
+- Regression: generator tests assert the C encoder and decoder; the maintained TinyCC executor fixture covers the SDK mutation path, and the executor socket-loop regression covers the Rust request path.
+- Verification: generator drift/schema tests, locked workspace build, rustfmt check, warning-denied Clippy, serial workspace tests, and the complete maintained TinyCC SDK suite passed in the pinned Nix shell.
+- Remaining: migrate the remaining hand-coded executor/planner/supervisor payload serializers and complete release profile and artifact gates.
+
 ## TC-1: locked Nix development shell — implemented
 
 - Behavior: `nix develop --locked` provides the pinned x86_64-linux package set used for the engine and SDK checks. [`flake.nix`](../../flake.nix) and [`flake.lock`](../../flake.lock) pin Nixpkgs revision `718f670e845328e9c2cecdd832835712b2cbd065` with source NAR hash `sha256-Ee5BWo8sh3pGt70QUdRajnaginqFmWvrtdBc4gJzhks=`.

@@ -340,10 +340,7 @@ int32_t prdb_sdk_executor_stage_delete_v1(
     if (row_handle == NULL || row_handle[0] != PRDB_SDK_BATCH_ROW_TOKEN_KIND) {
         return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
     }
-    write_u16(request + PRDB_EXECUTOR_STAGE_DELETE_REQUEST_VERSION_OFFSET,
-              PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION);
-    memcpy(request + PRDB_EXECUTOR_STAGE_DELETE_REQUEST_ROW_HANDLE_OFFSET,
-           row_handle, 16);
+    prdb_encode_executor_stage_delete_request(request, row_handle);
     status = invoke(host, PRDB_SDK_EXECUTOR_OP_STAGE_DELETE, request,
                     sizeof(request), response, response_capacity, response_len);
     if (status != PRDB_SDK_EXECUTOR_OK) return status;
