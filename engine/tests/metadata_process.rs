@@ -774,6 +774,53 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
     let revoked = admin
         .revoke_system_privilege(created_role.identity_id, AdminSystemPrivilege::CreateSchema)?;
     assert!(revoked.commit_sequence > granted.commit_sequence);
+    let privilege_cli_address = address.to_string();
+    let privilege_cli_credentials = admin_cancel_credentials_path
+        .to_str()
+        .ok_or("credential path is not UTF-8")?;
+    let privilege_cli_grantee = encode_id_hex(&created_role.identity_id);
+    let grant_privilege_cli = Command::new(env!("CARGO_BIN_EXE_prdb-client"))
+        .args([
+            "system-privilege-grant",
+            "--address",
+            &privilege_cli_address,
+            "--credentials",
+            privilege_cli_credentials,
+            "--grantee-id",
+            &privilege_cli_grantee,
+            "--privilege",
+            "manage_roles",
+        ])
+        .output()?;
+    assert!(
+        grant_privilege_cli.status.success(),
+        "system-privilege-grant CLI failed: {}",
+        String::from_utf8_lossy(&grant_privilege_cli.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&grant_privilege_cli.stdout).contains("granted system privilege")
+    );
+    let revoke_privilege_cli = Command::new(env!("CARGO_BIN_EXE_prdb-client"))
+        .args([
+            "system-privilege-revoke",
+            "--address",
+            &privilege_cli_address,
+            "--credentials",
+            privilege_cli_credentials,
+            "--grantee-id",
+            &privilege_cli_grantee,
+            "--privilege",
+            "manage_roles",
+        ])
+        .output()?;
+    assert!(
+        revoke_privilege_cli.status.success(),
+        "system-privilege-revoke CLI failed: {}",
+        String::from_utf8_lossy(&revoke_privilege_cli.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&revoke_privilege_cli.stdout).contains("revoked system privilege")
+    );
     let dropped = admin.drop_role(created_role.identity_id)?;
     assert!(dropped.commit_sequence > revoked.commit_sequence);
 

@@ -272,9 +272,9 @@
 
 - Contract: only the closed database-scoped privilege set (manage_users, manage_roles, create_schema) is accepted; the authenticated AdminClient and storage revalidate administrator authority.
 - Implementation: prdb-client exposes system-privilege-grant and system-privilege-revoke with grantee ID and typed privilege value.
-- Regression: the parser accepts all three values and rejects case changes and unsupported privilege names. The real gateway/supervisor ADMIN lifecycle grants and revokes create_schema for a role.
-- Verification: focused parser and process regressions, CLI help inspection, full workspace build, format, warning-denied Clippy, and tests passed under Rust/Cargo 1.95.0; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
-- Remaining: policy CLI, additional live ADMIN DDL coverage, and confined artifact execution remain open.
+- Regression: the parser accepts all three values and rejects case changes and unsupported privilege names. The real gateway/supervisor ADMIN lifecycle exercises typed `AdminClient` grant/revoke and invokes `system-privilege-grant`/`system-privilege-revoke` through `prdb-client` for a role.
+- Verification: `cargo test --locked --test metadata_process authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_processes -- --exact --nocapture` passed (1 test). `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets --locked -- -D warnings` passed in the configured Nix shell.
+- Remaining: broaden process-level CLI coverage for remaining DDL families and complete remaining SDK packaging/release gates.
 
 ## SDK-5: foreign-key create/drop CLI — implemented
 
