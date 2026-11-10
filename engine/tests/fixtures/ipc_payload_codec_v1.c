@@ -48,6 +48,9 @@ int main(void) {
     uint8_t finalize_payload[11] = {0};
     uint64_t decoded_finalize_sequence = 0;
     uint8_t decoded_finalize_status = 0;
+    const uint8_t abort_expected[3] = {0x00, 0x01, 0x00};
+    uint8_t abort_payload[3] = {0};
+    uint8_t decoded_abort_status = 0;
 
     prdb_encode_supervisor_invocation_control_request(payload, invocation_id);
     for (size_t i = 0; i < sizeof(expected); ++i) {
@@ -156,6 +159,17 @@ int main(void) {
         decoded_finalize_status != 0 ||
         decoded_finalize_sequence != UINT64_C(0x0102030405060708)) {
         return 17;
+    }
+    prdb_encode_supervisor_abort_response(abort_payload, 0);
+    for (size_t i = 0; i < sizeof(abort_expected); ++i) {
+        if (abort_payload[i] != abort_expected[i]) {
+            return 18;
+        }
+    }
+    if (!prdb_decode_supervisor_abort_response(
+            abort_payload, sizeof(abort_payload), &decoded_abort_status) ||
+        decoded_abort_status != 0) {
+        return 19;
     }
     return 0;
 }

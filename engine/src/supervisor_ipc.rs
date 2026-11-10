@@ -1663,11 +1663,7 @@ fn encode_finalize_response(commit_sequence: u64) -> Vec<u8> {
 }
 
 fn encode_abort_response() -> Vec<u8> {
-    let mut payload = vec![0; generated::SUPERVISOR_ABORT_RESPONSE_HEADER_BYTES as usize];
-    let version = generated::SUPERVISOR_ABORT_RESPONSE_VERSION_OFFSET as usize;
-    payload[version..version + 2].copy_from_slice(&SUPERVISOR_PAYLOAD_VERSION.to_be_bytes());
-    payload[generated::SUPERVISOR_ABORT_RESPONSE_STATUS_OFFSET as usize] = 0;
-    payload
+    generated::encode_supervisor_abort_response(0).to_vec()
 }
 
 /// Serve a trusted supervisor's single invocation channel. Losing the
