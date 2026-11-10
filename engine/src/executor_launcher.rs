@@ -22,6 +22,7 @@ const COOPERATIVE_CANCELLATION_GRACE: Duration = Duration::from_millis(500);
 #[derive(Clone, Debug)]
 pub struct ExecutorLaunchConfig {
     pub executor_path: PathBuf,
+    pub optimizer_path: PathBuf,
     pub scratch_parent: PathBuf,
     /// Runtime files/directories needed by the dynamic loader and executor.
     /// The caller must supply the exact deployment profile, such as the
@@ -54,9 +55,10 @@ impl std::error::Error for ExecutorLaunchError {}
 /// observation; use `observe_exit_with_results` when those bytes need relay.
 pub struct RunningExecutor {
     child: Child,
+    optimizer_child: Option<Child>,
     cgroup: Option<WorkerCgroup>,
     artifact_directory: Option<PrivateArtifactDirectory>,
-    worker_channels: Option<(UnixStream, UnixStream)>,
+    worker_channels: Option<(UnixStream, UnixStream, UnixStream)>,
     result_stream: Option<UnixStream>,
     cleanup_timeout: Duration,
 }
@@ -65,6 +67,7 @@ pub struct RunningExecutor {
 /// admission callback succeeds.
 pub struct PreparedExecutor {
     command: Command,
+    optimizer_command: Option<Command>,
     parameters: Option<File>,
     cgroup: Option<WorkerCgroup>,
     artifact_directory: Option<PrivateArtifactDirectory>,
@@ -79,6 +82,10 @@ struct WorkerChannelPair {
     executor_supervisor: UnixStream,
     result_worker: UnixStream,
     result_supervisor: UnixStream,
+    optimizer_submission_worker: UnixStream,
+    optimizer_submission_optimizer: UnixStream,
+    optimizer_planner_optimizer: UnixStream,
+    optimizer_planner_supervisor: UnixStream,
 }
 
 impl WorkerChannelPair {
@@ -86,6 +93,8 @@ impl WorkerChannelPair {
         let (planner_worker, planner_supervisor) = UnixStream::pair()?;
         let (executor_worker, executor_supervisor) = UnixStream::pair()?;
         let (result_worker, result_supervisor) = UnixStream::pair()?;
+        let (optimizer_submission_worker, optimizer_submission_optimizer) = UnixStream::pair()?;
+        let (optimizer_planner_optimizer, optimizer_planner_supervisor) = UnixStream::pair()?;
         Ok(Self {
             planner_worker,
             planner_supervisor,
@@ -93,20 +102,36 @@ impl WorkerChannelPair {
             executor_supervisor,
             result_worker,
             result_supervisor,
+            optimizer_submission_worker,
+            optimizer_submission_optimizer,
+            optimizer_planner_optimizer,
+            optimizer_planner_supervisor,
         })
     }
 
-    fn worker_fds(&self) -> [i32; 3] {
+    fn worker_fds(&self) -> [i32; 4] {
         [
             self.planner_worker.as_raw_fd(),
             self.executor_worker.as_raw_fd(),
+            self.optimizer_submission_worker.as_raw_fd(),
             self.result_worker.as_raw_fd(),
         ]
     }
 
-    fn into_supervisor_streams(self) -> ((UnixStream, UnixStream), UnixStream) {
+    fn optimizer_fds(&self) -> [i32; 2] {
+        [
+            self.optimizer_submission_optimizer.as_raw_fd(),
+            self.optimizer_planner_optimizer.as_raw_fd(),
+        ]
+    }
+
+    fn into_supervisor_streams(self) -> ((UnixStream, UnixStream, UnixStream), UnixStream) {
         (
-            (self.planner_supervisor, self.executor_supervisor),
+            (
+                self.planner_supervisor,
+                self.executor_supervisor,
+                self.optimizer_planner_supervisor,
+            ),
             self.result_supervisor,
         )
     }
@@ -151,14 +176,21 @@ impl RunningExecutor {
             std::thread::scope(|scope| {
                 let result_thread =
                     scope.spawn(move || drain_result_stream(result_stream, result_tx));
-                let storage_task = self.worker_channels.take().map(|(planner, executor)| {
-                    let (storage_tx, storage_rx) = std::sync::mpsc::channel();
-                    let storage_thread = scope.spawn(move || {
-                        let result = invocation.serve_worker_channels(planner, executor);
-                        let _ = storage_tx.send(result);
-                    });
-                    (storage_thread, storage_rx)
-                });
+                let storage_task =
+                    self.worker_channels
+                        .take()
+                        .map(|(planner, executor, optimizer_planner)| {
+                            let (storage_tx, storage_rx) = std::sync::mpsc::channel();
+                            let storage_thread = scope.spawn(move || {
+                                let result = invocation.serve_worker_channels(
+                                    planner,
+                                    executor,
+                                    optimizer_planner,
+                                );
+                                let _ = storage_tx.send(result);
+                            });
+                            (storage_thread, storage_rx)
+                        });
 
                 let mut result_done = false;
                 let mut storage_done = storage_task.is_none();
@@ -265,12 +297,33 @@ impl RunningExecutor {
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
+        let optimizer_result = if let Some(mut optimizer) = self.optimizer_child.take() {
+            if result.is_err() {
+                let _ = optimizer.kill();
+            }
+            optimizer
+                .wait()
+                .map_err(SupervisorInvocationError::WorkerProcessIo)
+                .and_then(|status| {
+                    if status.success() {
+                        Ok(())
+                    } else {
+                        Err(SupervisorInvocationError::WorkerProcessIo(
+                            io::Error::other(format!("optimizer exited with status {status}")),
+                        ))
+                    }
+                })
+        } else {
+            Ok(())
+        };
         self.artifact_directory.take();
-        match (primary_error, result) {
-            (Some(_), Err(error @ SupervisorInvocationError::WorkerCgroupIo(_))) => Err(error),
-            (Some(_), Err(error @ SupervisorInvocationError::WorkerProcessIo(_))) => Err(error),
-            (Some(error), _) => Err(error),
-            (None, result) => result,
+        match (primary_error, result, optimizer_result) {
+            (Some(_), Err(error @ SupervisorInvocationError::WorkerCgroupIo(_)), _) => Err(error),
+            (Some(_), Err(error @ SupervisorInvocationError::WorkerProcessIo(_)), _) => Err(error),
+            (Some(error), _, _) => Err(error),
+            (None, Err(error), _) => Err(error),
+            (None, Ok(_), Err(error)) => Err(error),
+            (None, Ok(status), Ok(())) => Ok(status),
         }
     }
 
@@ -281,11 +334,11 @@ impl RunningExecutor {
         &mut self,
         invocation: &SupervisorInvocation<'_>,
     ) -> Result<(), SupervisorInvocationError> {
-        let (planner, executor) = self
+        let (planner, executor, optimizer_planner) = self
             .worker_channels
             .take()
             .ok_or(SupervisorInvocationError::Closed)?;
-        invocation.serve_worker_channels(planner, executor)
+        invocation.serve_worker_channels(planner, executor, optimizer_planner)
     }
 
     fn kill_reap_and_cleanup(&mut self) {
@@ -294,6 +347,10 @@ impl RunningExecutor {
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if let Some(optimizer) = self.optimizer_child.as_mut() {
+            let _ = optimizer.kill();
+            let _ = optimizer.wait();
+        }
         if let Some(cgroup) = self.cgroup.take() {
             let _ = cgroup.cleanup(self.cleanup_timeout);
         }
@@ -307,10 +364,18 @@ impl Drop for RunningExecutor {
             let _ = cgroup.kill_all();
             let _ = self.child.kill();
             let _ = self.child.wait();
+            if let Some(optimizer) = self.optimizer_child.as_mut() {
+                let _ = optimizer.kill();
+                let _ = optimizer.wait();
+            }
             let _ = cgroup.cleanup(self.cleanup_timeout);
         } else if self.child.try_wait().ok().flatten().is_none() {
             let _ = self.child.kill();
             let _ = self.child.wait();
+            if let Some(optimizer) = self.optimizer_child.as_mut() {
+                let _ = optimizer.kill();
+                let _ = optimizer.wait();
+            }
         }
         self.artifact_directory.take();
         self.worker_channels.take();
@@ -468,8 +533,9 @@ fn prepare_executor(
     config: &ExecutorLaunchConfig,
 ) -> Result<PreparedExecutor, ExecutorLaunchError> {
     match build_command(submission, &cgroup, &channels, config) {
-        Ok((command, parameters, artifact_directory)) => Ok(PreparedExecutor {
+        Ok((command, optimizer_command, parameters, artifact_directory)) => Ok(PreparedExecutor {
             command,
+            optimizer_command: Some(optimizer_command),
             parameters: Some(parameters),
             cgroup: Some(cgroup),
             artifact_directory: Some(artifact_directory),
@@ -495,6 +561,22 @@ impl PreparedExecutor {
     }
 
     pub fn spawn(mut self) -> Result<RunningExecutor, ExecutorLaunchError> {
+        let mut optimizer_command = self
+            .optimizer_command
+            .take()
+            .expect("prepared optimizer command");
+        let mut optimizer_child = match optimizer_command.spawn() {
+            Ok(child) => child,
+            Err(launch_error) => {
+                return Err(ExecutorLaunchError {
+                    launch_error,
+                    cleanup_error: self
+                        .cgroup
+                        .take()
+                        .and_then(|cgroup| cgroup.cleanup(self.cleanup_timeout).err()),
+                });
+            }
+        };
         match self.command.spawn() {
             Ok(child) => {
                 self.parameters.take();
@@ -505,6 +587,7 @@ impl PreparedExecutor {
                 let (supervisor_streams, result_stream) = channels.into_supervisor_streams();
                 Ok(RunningExecutor {
                     child,
+                    optimizer_child: Some(optimizer_child),
                     cgroup: self.cgroup.take(),
                     artifact_directory: self.artifact_directory.take(),
                     worker_channels: Some(supervisor_streams),
@@ -513,11 +596,14 @@ impl PreparedExecutor {
                 })
             }
             Err(launch_error) => Err(ExecutorLaunchError {
+                cleanup_error: {
+                    let _ = optimizer_child.kill();
+                    let _ = optimizer_child.wait();
+                    self.cgroup
+                        .take()
+                        .and_then(|cgroup| cgroup.cleanup(self.cleanup_timeout).err())
+                },
                 launch_error,
-                cleanup_error: self
-                    .cgroup
-                    .take()
-                    .and_then(|cgroup| cgroup.cleanup(self.cleanup_timeout).err()),
             }),
         }
     }
@@ -540,7 +626,7 @@ fn build_command(
     cgroup: &WorkerCgroup,
     channels: &WorkerChannelPair,
     config: &ExecutorLaunchConfig,
-) -> io::Result<(Command, File, PrivateArtifactDirectory)> {
+) -> io::Result<(Command, Command, File, PrivateArtifactDirectory)> {
     let executor_path = config.executor_path.canonicalize()?;
     if !executor_path.is_file() {
         return Err(io::Error::new(
@@ -554,6 +640,13 @@ fn build_command(
         submission.artifact(),
     )?;
     let parameters = create_sealed_parameters(submission.parameters())?;
+    let optimizer_path = config.optimizer_path.canonicalize()?;
+    if !optimizer_path.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "optimizer path is not a regular file",
+        ));
+    }
 
     let mut policy = LandlockPolicy::default();
     policy.allow_read_execute(&executor_path)?;
@@ -566,7 +659,7 @@ fn build_command(
     }
     let ruleset = LandlockRuleset::new(&policy)?;
 
-    let [planner_fd, executor_fd, result_fd] = channels.worker_fds();
+    let [planner_fd, executor_fd, optimizer_fd, result_fd] = channels.worker_fds();
     let mut command = Command::new(executor_path);
     command
         .arg("--library")
@@ -577,16 +670,50 @@ fn build_command(
         .arg(planner_fd.to_string())
         .arg("--executor-fd")
         .arg(executor_fd.to_string())
+        .arg("--optimizer-fd")
+        .arg(optimizer_fd.to_string())
         .arg("--result-fd")
         .arg(result_fd.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let mut inherited_fds = vec![parameters.as_raw_fd(), planner_fd, executor_fd, result_fd];
+    let mut inherited_fds = vec![
+        parameters.as_raw_fd(),
+        planner_fd,
+        executor_fd,
+        optimizer_fd,
+        result_fd,
+    ];
     inherited_fds.sort_unstable();
     inherited_fds.dedup();
     configure_worker_command(&mut command, cgroup.path(), &ruleset, &inherited_fds)?;
-    Ok((command, parameters, artifact_directory))
+
+    let mut optimizer_policy = LandlockPolicy::default();
+    optimizer_policy.allow_read_execute(&optimizer_path)?;
+    for path in &config.runtime_read_execute {
+        optimizer_policy.allow_read_execute(path)?;
+    }
+    for path in &config.runtime_read_only {
+        optimizer_policy.allow_read(path)?;
+    }
+    let optimizer_ruleset = LandlockRuleset::new(&optimizer_policy)?;
+    let [optimizer_submission_fd, optimizer_planner_fd] = channels.optimizer_fds();
+    let mut optimizer_command = Command::new(optimizer_path);
+    optimizer_command
+        .arg("--submission-fd")
+        .arg(optimizer_submission_fd.to_string())
+        .arg("--planner-fd")
+        .arg(optimizer_planner_fd.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    configure_worker_command(
+        &mut optimizer_command,
+        cgroup.path(),
+        &optimizer_ruleset,
+        &[optimizer_submission_fd, optimizer_planner_fd],
+    )?;
+    Ok((command, optimizer_command, parameters, artifact_directory))
 }
 
 struct PrivateArtifactDirectory {
@@ -717,32 +844,44 @@ mod tests {
         use std::io::{Read, Write};
 
         let channels = WorkerChannelPair::new().unwrap();
-        let [planner_fd, executor_fd, result_fd] = channels.worker_fds();
+        let [planner_fd, executor_fd, optimizer_fd, result_fd] = channels.worker_fds();
+        let [optimizer_submission_fd, optimizer_planner_fd] = channels.optimizer_fds();
         assert!(planner_fd >= 3);
         assert!(executor_fd >= 3);
+        assert!(optimizer_fd >= 3);
         assert!(result_fd >= 3);
         assert_ne!(planner_fd, executor_fd);
         assert_ne!(planner_fd, result_fd);
         assert_ne!(executor_fd, result_fd);
+        assert_ne!(optimizer_fd, planner_fd);
+        assert_ne!(optimizer_fd, executor_fd);
+        assert_ne!(optimizer_fd, result_fd);
+        assert_ne!(optimizer_submission_fd, optimizer_planner_fd);
 
         let mut planner_peer = channels.planner_supervisor.try_clone().unwrap();
         let mut executor_peer = channels.executor_supervisor.try_clone().unwrap();
         let mut result_peer = channels.result_supervisor.try_clone().unwrap();
+        let mut optimizer_peer = channels.optimizer_submission_optimizer.try_clone().unwrap();
+        let mut optimizer_worker_peer = channels.optimizer_submission_worker.try_clone().unwrap();
         let mut planner_worker = channels.planner_worker;
         let mut executor_worker = channels.executor_worker;
         let mut result_worker = channels.result_worker;
         planner_worker.write_all(b"planner").unwrap();
         executor_worker.write_all(b"executor").unwrap();
         result_worker.write_all(b"result").unwrap();
+        optimizer_worker_peer.write_all(b"opt").unwrap();
         let mut planner_request = [0; 7];
         let mut executor_request = [0; 8];
         let mut result = [0; 6];
+        let mut optimizer = [0; 3];
         planner_peer.read_exact(&mut planner_request).unwrap();
         executor_peer.read_exact(&mut executor_request).unwrap();
         result_peer.read_exact(&mut result).unwrap();
+        optimizer_peer.read_exact(&mut optimizer).unwrap();
         assert_eq!(&planner_request, b"planner");
         assert_eq!(&executor_request, b"executor");
         assert_eq!(&result, b"result");
+        assert_eq!(&optimizer, b"opt");
     }
 
     #[test]

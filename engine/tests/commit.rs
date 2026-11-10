@@ -12359,6 +12359,7 @@ fn admin_cancellation_sync_failure_quarantines_until_reopen()
                 analytical_resource_limits: None,
                 launch: prdb_engine::executor_launcher::ExecutorLaunchConfig {
                     executor_path: std::env::current_exe()?,
+                    optimizer_path: std::env::current_exe()?,
                     scratch_parent: std::env::temp_dir(),
                     runtime_read_execute: Vec::new(),
                     runtime_read_only: Vec::new(),
@@ -19836,6 +19837,9 @@ fn gateway_service_listener_binds_peer_and_serves_hello() -> Result<(), Box<dyn 
                         analytical_resource_limits: None,
                         launch: prdb_engine::executor_launcher::ExecutorLaunchConfig {
                             executor_path: executor_path.clone(),
+                            optimizer_path: std::path::PathBuf::from(env!(
+                                "CARGO_BIN_EXE_prdb-optimizer"
+                            )),
                             scratch_parent: std::env::temp_dir(),
                             runtime_read_execute: Vec::new(),
                             runtime_read_only: Vec::new(),
@@ -20205,9 +20209,11 @@ fn supervisor_drains_both_worker_channels_before_durable_finalize()
 
     let (mut planner_worker, planner_storage) = UnixStream::pair()?;
     let (executor_worker, executor_storage) = UnixStream::pair()?;
+    let (_optimizer_worker, optimizer_storage) = UnixStream::pair()?;
     std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
-        let serving =
-            scope.spawn(|| invocation.serve_worker_channels(planner_storage, executor_storage));
+        let serving = scope.spawn(|| {
+            invocation.serve_worker_channels(planner_storage, executor_storage, optimizer_storage)
+        });
         write_frame(
             &mut planner_worker,
             &IpcFrame {
@@ -20231,6 +20237,7 @@ fn supervisor_drains_both_worker_channels_before_durable_finalize()
         planner_worker.shutdown(std::net::Shutdown::Write)?;
         drop(planner_worker);
         drop(executor_worker);
+        drop(_optimizer_worker);
         serving
             .join()
             .expect("worker-channel server thread panicked")
@@ -20516,6 +20523,7 @@ fn sandboxed_v3_sql_error_latches_failure_and_durably_aborts_after_partial_outpu
         analytical_resource_limits: None,
         launch: prdb_engine::executor_launcher::ExecutorLaunchConfig {
             executor_path: PathBuf::from(env!("CARGO_BIN_EXE_prdb-executor")),
+            optimizer_path: PathBuf::from(env!("CARGO_BIN_EXE_prdb-optimizer")),
             scratch_parent: std::env::temp_dir(),
             runtime_read_execute: required_paths("PRDB_TEST_RUNTIME_READ_EXECUTE")?,
             runtime_read_only: required_paths("PRDB_TEST_RUNTIME_READ_ONLY")?,
@@ -20829,6 +20837,7 @@ fn sandboxed_v3_metadata_submission_commits_over_tcp() -> Result<(), Box<dyn std
         analytical_resource_limits: None,
         launch: prdb_engine::executor_launcher::ExecutorLaunchConfig {
             executor_path: PathBuf::from(env!("CARGO_BIN_EXE_prdb-executor")),
+            optimizer_path: PathBuf::from(env!("CARGO_BIN_EXE_prdb-optimizer")),
             scratch_parent: std::env::temp_dir(),
             runtime_read_execute: required_paths("PRDB_TEST_RUNTIME_READ_EXECUTE")?,
             runtime_read_only: required_paths("PRDB_TEST_RUNTIME_READ_ONLY")?,
@@ -22098,6 +22107,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         analytical_resource_limits: None,
         launch: prdb_engine::executor_launcher::ExecutorLaunchConfig {
             executor_path: PathBuf::from(env!("CARGO_BIN_EXE_prdb-executor")),
+            optimizer_path: PathBuf::from(env!("CARGO_BIN_EXE_prdb-optimizer")),
             scratch_parent: std::env::temp_dir(),
             runtime_read_execute: required_paths("PRDB_TEST_RUNTIME_READ_EXECUTE")?,
             runtime_read_only: required_paths("PRDB_TEST_RUNTIME_READ_ONLY")?,
@@ -23116,6 +23126,7 @@ fn sealed_start_admits_only_current_credentials_and_enforces_request_deadline()
         analytical_resource_limits: None,
         launch: prdb_engine::executor_launcher::ExecutorLaunchConfig {
             executor_path: std::env::current_exe()?,
+            optimizer_path: std::env::current_exe()?,
             scratch_parent: std::env::temp_dir(),
             runtime_read_execute: Vec::new(),
             runtime_read_only: Vec::new(),

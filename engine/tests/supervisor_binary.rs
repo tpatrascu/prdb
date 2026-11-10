@@ -169,6 +169,8 @@ fn supervisor_and_gateway_binaries_cover_submission_status_cancel_and_start_pref
         root.to_str().expect("UTF-8 invalid cgroup path"),
         "--executor",
         env!("CARGO_BIN_EXE_prdb-executor"),
+        "--optimizer",
+        env!("CARGO_BIN_EXE_prdb-optimizer"),
         "--scratch-parent",
         root.to_str().expect("UTF-8 scratch path"),
         "--runtime-read-execute",

@@ -39,6 +39,7 @@ mod service {
         gateway_uid: Option<u32>,
         cgroup_parent: Option<PathBuf>,
         executor: Option<PathBuf>,
+        optimizer: Option<PathBuf>,
         scratch_parent: Option<PathBuf>,
         runtime_read_execute: Vec<PathBuf>,
         runtime_read_only: Vec<PathBuf>,
@@ -83,7 +84,7 @@ mod service {
         println!(
             "prdb-supervisor [options]\n\
              Required: --instance-dir PATH --service-socket PATH --gateway-uid UID\n\
-             --cgroup-parent PATH --executor PATH --scratch-parent PATH\n\
+             --cgroup-parent PATH --executor PATH --optimizer PATH --scratch-parent PATH\n\
              --runtime-read-execute PATH (repeatable) --runtime-profile NAME\n\
              --cpu-baseline NAME --sdk-release NUMBER --allowed-dependency NAME (repeatable)\n\
              --retention-seconds N --max-rows N --max-bytes N\n\
@@ -109,6 +110,7 @@ mod service {
         let gateway_uid = required(options.gateway_uid, "--gateway-uid")?;
         let cgroup_parent = required(options.cgroup_parent, "--cgroup-parent")?;
         let executor_path = required(options.executor, "--executor")?;
+        let optimizer_path = required(options.optimizer, "--optimizer")?;
         let scratch_parent = required(options.scratch_parent, "--scratch-parent")?;
         let cpu_baseline = required(options.profile_cpu, "--cpu-baseline")?;
         let runtime_profile = required(options.profile_runtime, "--runtime-profile")?;
@@ -244,6 +246,7 @@ mod service {
                 analytical_resource_limits,
                 launch: ExecutorLaunchConfig {
                     executor_path,
+                    optimizer_path,
                     scratch_parent,
                     runtime_read_execute: options.runtime_read_execute,
                     runtime_read_only: options.runtime_read_only,
@@ -383,6 +386,7 @@ mod service {
                 "--gateway-uid" => set!(gateway_uid, value.parse::<u32>()?),
                 "--cgroup-parent" => set!(cgroup_parent, PathBuf::from(value)),
                 "--executor" => set!(executor, PathBuf::from(value)),
+                "--optimizer" => set!(optimizer, PathBuf::from(value)),
                 "--scratch-parent" => set!(scratch_parent, PathBuf::from(value)),
                 "--runtime-read-execute" => options.runtime_read_execute.push(value.into()),
                 "--runtime-read-only" => options.runtime_read_only.push(value.into()),

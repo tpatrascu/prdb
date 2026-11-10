@@ -50,6 +50,7 @@ mod worker {
         parameters_fd: i32,
         planner_fd: i32,
         executor_fd: i32,
+        optimizer_fd: i32,
         result_fd: i32,
     }
 
@@ -84,14 +85,15 @@ mod worker {
     }
 
     fn parse_args(values: &[std::ffi::OsString]) -> Result<WorkerArgs, String> {
-        if values.len() != 10
+        if values.len() != 12
             || values[0] != "--library"
             || values[2] != "--parameters-fd"
             || values[4] != "--planner-fd"
             || values[6] != "--executor-fd"
-            || values[8] != "--result-fd"
+            || values[8] != "--optimizer-fd"
+            || values[10] != "--result-fd"
         {
-            return Err("usage: prdb-executor --library ABSOLUTE_PATH --parameters-fd FD --planner-fd FD --executor-fd FD --result-fd FD (or --self-check)".to_owned());
+            return Err("usage: prdb-executor --library ABSOLUTE_PATH --parameters-fd FD --planner-fd FD --executor-fd FD --optimizer-fd FD --result-fd FD (or --self-check)".to_owned());
         }
         let library = PathBuf::from(&values[1]);
         if !library.is_absolute() {
@@ -112,15 +114,31 @@ mod worker {
             .ok_or_else(|| "executor descriptor is not UTF-8".to_owned())?
             .parse::<i32>()
             .map_err(|_| "invalid executor descriptor".to_owned())?;
-        let result_fd = values[9]
+        let optimizer_fd = values[9]
+            .to_str()
+            .ok_or_else(|| "optimizer descriptor is not UTF-8".to_owned())?
+            .parse::<i32>()
+            .map_err(|_| "invalid optimizer descriptor".to_owned())?;
+        let result_fd = values[11]
             .to_str()
             .ok_or_else(|| "result descriptor is not UTF-8".to_owned())?
             .parse::<i32>()
             .map_err(|_| "invalid result descriptor".to_owned())?;
-        if parameters_fd < 3 || planner_fd < 3 || executor_fd < 3 || result_fd < 3 {
+        if parameters_fd < 3
+            || planner_fd < 3
+            || executor_fd < 3
+            || optimizer_fd < 3
+            || result_fd < 3
+        {
             return Err("worker descriptors must be greater than stderr".to_owned());
         }
-        let descriptors = [parameters_fd, planner_fd, executor_fd, result_fd];
+        let descriptors = [
+            parameters_fd,
+            planner_fd,
+            executor_fd,
+            optimizer_fd,
+            result_fd,
+        ];
         if descriptors
             .iter()
             .enumerate()
@@ -133,6 +151,7 @@ mod worker {
             parameters_fd,
             planner_fd,
             executor_fd,
+            optimizer_fd,
             result_fd,
         })
     }
@@ -317,7 +336,12 @@ mod worker {
         };
         // SAFETY: the trusted launcher supplied distinct inherited socket fds.
         let context = unsafe {
-            CallbackContext::from_raw_fds(args.planner_fd, args.executor_fd, args.result_fd)
+            CallbackContext::from_raw_fds(
+                args.planner_fd,
+                args.executor_fd,
+                args.optimizer_fd,
+                args.result_fd,
+            )
         };
         // Keep callback state alive until the worker's immediate `_exit`, even
         // if hostile library code retains the context pointer on another thread.
@@ -386,7 +410,12 @@ mod worker {
         };
         // SAFETY: the trusted launcher supplied distinct inherited socket fds.
         let context = unsafe {
-            CallbackContext::from_raw_fds(args.planner_fd, args.executor_fd, args.result_fd)
+            CallbackContext::from_raw_fds(
+                args.planner_fd,
+                args.executor_fd,
+                args.optimizer_fd,
+                args.result_fd,
+            )
         };
         // Keep callback state alive until the worker's immediate `_exit`, even
         // if hostile library code retains the context pointer on another thread.
@@ -483,23 +512,32 @@ mod worker {
     struct CallbackContext {
         executor: IpcChannel,
         planner: IpcChannel,
+        _optimizer: UnixStream,
         result: Mutex<UnixStream>,
         total_result_bytes: AtomicU64,
         statement_failed: AtomicBool,
     }
 
     impl CallbackContext {
-        unsafe fn from_raw_fds(planner_fd: i32, executor_fd: i32, result_fd: i32) -> Self {
+        unsafe fn from_raw_fds(
+            planner_fd: i32,
+            executor_fd: i32,
+            optimizer_fd: i32,
+            result_fd: i32,
+        ) -> Self {
             // SAFETY: the trusted launcher passes distinct, open socket fds and
             // transfers ownership to this invocation context.
             let planner = unsafe { IpcChannel::from_raw_fd(planner_fd, ServiceRole::Planner) };
             // SAFETY: same descriptor ownership contract as the planner fd.
             let executor = unsafe { IpcChannel::from_raw_fd(executor_fd, ServiceRole::Executor) };
+            // SAFETY: the optimizer submission fd stays open for this worker's lifetime.
+            let optimizer = unsafe { UnixStream::from_raw_fd(optimizer_fd) };
             // SAFETY: the result fd is a distinct connected Unix stream.
             let result = unsafe { UnixStream::from_raw_fd(result_fd) };
             Self {
                 executor,
                 planner,
+                _optimizer: optimizer,
                 result: Mutex::new(result),
                 total_result_bytes: AtomicU64::new(0),
                 statement_failed: AtomicBool::new(false),
@@ -780,12 +818,14 @@ mod worker {
             executor: UnixStream,
             result: UnixStream,
         ) -> CallbackContext {
+            let (optimizer, _optimizer_peer) = UnixStream::pair().unwrap();
             // SAFETY: each stream contributes one unique fd and ownership is
             // transferred into the callback context.
             unsafe {
                 CallbackContext::from_raw_fds(
                     planner.into_raw_fd(),
                     executor.into_raw_fd(),
+                    optimizer.into_raw_fd(),
                     result.into_raw_fd(),
                 )
             }

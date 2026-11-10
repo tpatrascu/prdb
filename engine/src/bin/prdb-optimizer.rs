@@ -16,6 +16,10 @@ fn main() {
             std::process::exit(2);
         }
     };
+    if let Err(error) = initialize_optimizer() {
+        eprintln!("prdb-optimizer: setup failed: {error}");
+        std::process::exit(70);
+    }
     // SAFETY: the supervisor passes two distinct connected Unix-stream fds
     // and transfers ownership to this process.
     let mut submission = unsafe { UnixStream::from_raw_fd(submission_fd) };
@@ -27,6 +31,17 @@ fn main() {
         eprintln!("prdb-optimizer: {error}");
         std::process::exit(70);
     }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn initialize_optimizer() -> std::io::Result<()> {
+    // The launcher already installs no_new_privs before exec. Setting it here
+    // as well keeps direct invocations fail-closed before the syscall filter.
+    // SAFETY: PR_SET_NO_NEW_PRIVS takes only scalar arguments.
+    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    prdb_engine::linux_sandbox::install_worker_seccomp_filter()
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

@@ -1590,6 +1590,7 @@ mod tests {
         let admission_called = std::sync::atomic::AtomicBool::new(false);
         let config = crate::executor_launcher::ExecutorLaunchConfig {
             executor_path: std::path::PathBuf::from("/missing/prdb-executor"),
+            optimizer_path: std::path::PathBuf::from("/missing/prdb-optimizer"),
             scratch_parent: std::env::temp_dir(),
             runtime_read_execute: Vec::new(),
             runtime_read_only: Vec::new(),

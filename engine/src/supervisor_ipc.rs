@@ -1620,6 +1620,7 @@ mod worker_result_event_tests {
             analytical_resource_limits: Some(analytical),
             launch: crate::executor_launcher::ExecutorLaunchConfig {
                 executor_path: std::env::current_exe().unwrap(),
+                optimizer_path: std::env::current_exe().unwrap(),
                 scratch_parent: std::env::temp_dir(),
                 runtime_read_execute: Vec::new(),
                 runtime_read_only: Vec::new(),
@@ -1831,6 +1832,7 @@ mod worker_result_event_tests {
                 analytical_resource_limits: None,
                 launch: crate::executor_launcher::ExecutorLaunchConfig {
                     executor_path: std::env::current_exe().unwrap(),
+                    optimizer_path: std::env::current_exe().unwrap(),
                     scratch_parent: std::env::temp_dir(),
                     runtime_read_execute: Vec::new(),
                     runtime_read_only: Vec::new(),
@@ -1960,6 +1962,7 @@ mod worker_result_event_tests {
                 analytical_resource_limits: None,
                 launch: crate::executor_launcher::ExecutorLaunchConfig {
                     executor_path: std::env::current_exe().expect("current executable"),
+                    optimizer_path: std::env::current_exe().expect("current executable"),
                     scratch_parent: std::env::temp_dir(),
                     runtime_read_execute: Vec::new(),
                     runtime_read_only: Vec::new(),

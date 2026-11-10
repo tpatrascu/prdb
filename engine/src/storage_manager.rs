@@ -1329,41 +1329,51 @@ impl SupervisorInvocation<'_> {
         Ok(())
     }
 
-    /// Serve provisioned planner and executor Unix streams concurrently.
-    /// Poll hard deadlines while either stream is idle, preserve the executor
-    /// cancellation response window, stop the peer after a handler error, and
-    /// return only after both handlers have drained.
+    /// Serve executor, executor-planner, and optimizer-planner Unix streams
+    /// concurrently against this invocation. Poll deadlines while streams are
+    /// idle, stop every peer after handler failure, and drain all handlers.
     pub fn serve_worker_channels(
         &self,
         mut planner_stream: std::os::unix::net::UnixStream,
         mut executor_stream: std::os::unix::net::UnixStream,
+        mut optimizer_planner_stream: std::os::unix::net::UnixStream,
     ) -> Result<(), SupervisorInvocationError> {
         use std::net::Shutdown;
-
-        let stop_planner = match planner_stream.try_clone() {
-            Ok(stream) => stream,
+        let stop_streams = || -> std::io::Result<(
+            std::os::unix::net::UnixStream,
+            std::os::unix::net::UnixStream,
+            std::os::unix::net::UnixStream,
+        )> {
+            Ok((
+                planner_stream.try_clone()?,
+                executor_stream.try_clone()?,
+                optimizer_planner_stream.try_clone()?,
+            ))
+        };
+        let (stop_planner, stop_executor, stop_optimizer) = match stop_streams() {
+            Ok(streams) => streams,
             Err(error) => {
                 self.abort_owned_invocation();
                 return Err(SupervisorInvocationError::WorkerChannelIo(error));
             }
         };
-        let stop_executor = match executor_stream.try_clone() {
-            Ok(stream) => stream,
-            Err(error) => {
+        let planner_peers = match (stop_executor.try_clone(), stop_optimizer.try_clone()) {
+            (Ok(executor), Ok(optimizer)) => (executor, optimizer),
+            (Err(error), _) | (_, Err(error)) => {
                 self.abort_owned_invocation();
                 return Err(SupervisorInvocationError::WorkerChannelIo(error));
             }
         };
-        let planner_peer = match stop_executor.try_clone() {
-            Ok(stream) => stream,
-            Err(error) => {
+        let executor_peers = match (stop_planner.try_clone(), stop_optimizer.try_clone()) {
+            (Ok(planner), Ok(optimizer)) => (planner, optimizer),
+            (Err(error), _) | (_, Err(error)) => {
                 self.abort_owned_invocation();
                 return Err(SupervisorInvocationError::WorkerChannelIo(error));
             }
         };
-        let executor_peer = match stop_planner.try_clone() {
-            Ok(stream) => stream,
-            Err(error) => {
+        let optimizer_peers = match (stop_planner.try_clone(), stop_executor.try_clone()) {
+            (Ok(planner), Ok(executor)) => (planner, executor),
+            (Err(error), _) | (_, Err(error)) => {
                 self.abort_owned_invocation();
                 return Err(SupervisorInvocationError::WorkerChannelIo(error));
             }
@@ -1378,9 +1388,10 @@ impl SupervisorInvocation<'_> {
                 }))
                 .unwrap_or(Err(SupervisorInvocationError::WorkerHandlerPanicked));
                 if result.is_err() {
-                    let _ = planner_peer.shutdown(Shutdown::Both);
+                    let _ = planner_peers.0.shutdown(Shutdown::Both);
+                    let _ = planner_peers.1.shutdown(Shutdown::Both);
                 }
-                let _ = planner_completed.send((true, result));
+                let _ = planner_completed.send((0u8, result));
             });
             let executor_completed = completed_tx.clone();
             let executor = scope.spawn(move || {
@@ -1389,64 +1400,65 @@ impl SupervisorInvocation<'_> {
                 }))
                 .unwrap_or(Err(SupervisorInvocationError::WorkerHandlerPanicked));
                 if result.is_err() {
-                    let _ = executor_peer.shutdown(Shutdown::Both);
+                    let _ = executor_peers.0.shutdown(Shutdown::Both);
+                    let _ = executor_peers.1.shutdown(Shutdown::Both);
                 }
-                let _ = executor_completed.send((false, result));
+                let _ = executor_completed.send((1u8, result));
+            });
+            let optimizer_completed = completed_tx.clone();
+            let optimizer = scope.spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.serve_planner(&mut optimizer_planner_stream)
+                }))
+                .unwrap_or(Err(SupervisorInvocationError::WorkerHandlerPanicked));
+                if result.is_err() {
+                    let _ = optimizer_peers.0.shutdown(Shutdown::Both);
+                    let _ = optimizer_peers.1.shutdown(Shutdown::Both);
+                }
+                let _ = optimizer_completed.send((2u8, result));
             });
             drop(completed_tx);
 
-            let mut planner_result = None;
-            let mut executor_result = None;
+            let mut results = [None, None, None];
             let mut completed = 0;
             let mut deadline_error = None;
-            while completed < 2 {
+            while completed < 3 {
                 match completed_rx.recv_timeout(SUPERVISOR_IDLE_POLL_INTERVAL) {
-                    Ok((is_planner, result)) => {
+                    Ok((index, result)) => {
                         completed += 1;
-                        if is_planner {
-                            planner_result = Some(result);
-                        } else {
-                            executor_result = Some(result);
-                        }
+                        results[index as usize] = Some(result);
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                         if let Err(error) = self.check_worker_deadline() {
                             deadline_error = Some(error);
                             let _ = stop_planner.shutdown(Shutdown::Both);
                             let _ = stop_executor.shutdown(Shutdown::Both);
+                            let _ = stop_optimizer.shutdown(Shutdown::Both);
                             break;
                         }
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                 }
             }
-            while completed < 2 {
-                let Ok((is_planner, result)) = completed_rx.recv() else {
+            while completed < 3 {
+                let Ok((index, result)) = completed_rx.recv() else {
                     break;
                 };
                 completed += 1;
-                if is_planner {
-                    planner_result = Some(result);
-                } else {
-                    executor_result = Some(result);
-                }
+                results[index as usize] = Some(result);
             }
 
             let planner_panicked = planner.join().is_err();
             let executor_panicked = executor.join().is_err();
-            if planner_panicked || executor_panicked {
+            let optimizer_panicked = optimizer.join().is_err();
+            if planner_panicked || executor_panicked || optimizer_panicked {
                 self.abort_owned_invocation();
                 return Err(SupervisorInvocationError::WorkerHandlerPanicked);
             }
             if let Some(error) = deadline_error {
                 return Err(error);
             }
-            if planner_result.as_ref().is_some_and(|result| {
-                matches!(
-                    result,
-                    Err(SupervisorInvocationError::WorkerHandlerPanicked)
-                )
-            }) || executor_result.as_ref().is_some_and(|result| {
+            if results.iter().flatten().any(|result| {
                 matches!(
                     result,
                     Err(SupervisorInvocationError::WorkerHandlerPanicked)
@@ -1455,8 +1467,9 @@ impl SupervisorInvocation<'_> {
                 self.abort_owned_invocation();
                 return Err(SupervisorInvocationError::WorkerHandlerPanicked);
             }
-            planner_result.unwrap_or(Err(SupervisorInvocationError::Closed))?;
-            executor_result.unwrap_or(Err(SupervisorInvocationError::Closed))?;
+            for result in results {
+                result.unwrap_or(Err(SupervisorInvocationError::Closed))?;
+            }
             Ok(())
         })
     }
@@ -11047,10 +11060,16 @@ mod worker_storage_lifetime_tests {
         };
         let (planner_worker, planner_storage) = UnixStream::pair()?;
         let (executor_worker, executor_storage) = UnixStream::pair()?;
+        let (optimizer_worker, optimizer_storage) = UnixStream::pair()?;
 
         std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
-            let service =
-                scope.spawn(|| invocation.serve_worker_channels(planner_storage, executor_storage));
+            let service = scope.spawn(|| {
+                invocation.serve_worker_channels(
+                    planner_storage,
+                    executor_storage,
+                    optimizer_storage,
+                )
+            });
             let active_channel_deadline = Instant::now() + Duration::from_secs(2);
             loop {
                 let active = invocation
@@ -11058,7 +11077,7 @@ mod worker_storage_lifetime_tests {
                     .lock()
                     .map_err(|_| std::io::Error::other("channel state poisoned"))?
                     .active_worker_channels;
-                if active == 2 {
+                if active == 3 {
                     break;
                 }
                 assert!(Instant::now() < active_channel_deadline);
@@ -11072,6 +11091,7 @@ mod worker_storage_lifetime_tests {
             ));
             drop(planner_worker);
             drop(executor_worker);
+            drop(optimizer_worker);
             let service_result = service
                 .join()
                 .map_err(|_| std::io::Error::other("worker-channel service panicked"))?;
