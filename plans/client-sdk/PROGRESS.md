@@ -1,5 +1,12 @@
 # Client SDK Progress
 
+## SDK-3/SDK-5: authenticated metadata discovery CLI — implemented
+
+- Contract: [Client SDK](../../specs/client-sdk.md). `prdb-client discover` lists only authenticated visible schemas, relations, and declared columns, with optional exact-name schema/relation filters. Relation filtering requires a schema. Output is tab-separated, uses lowercase IDs, preserves ordinal order, and includes the declared scalar type and nullability.
+- Red/green evidence: a unit fixture checks every initial scalar type spelling and parameterized DECIMAL/VARCHAR metadata. The real gateway/supervisor process test runs the compiled CLI over the authenticated control path for `information_schema.schemata` and checks the schema, relation, and first ordered column records.
+- Verification: focused `prdb-client` unit tests and `authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_processes` passed. Locked workspace build, format check, warning-denied Clippy, serial workspace tests, and `make -f engine/sdk/Makefile test` also passed; the commit suite reported 129 passed and 3 cgroup-dependent tests ignored.
+- Remaining: finish other separate-process ADMIN families and SDK packaging/release gates; confined artifact execution remains governed by the Linux sandbox host requirements.
+
 ## SDK-3 dependency: ABI v4 PMF1 and query packaging — implemented
 
 - Behavior: PMF1 encode/decode, ELF export inspection, TinyCC packaging, and the C PMF1 encoder accept ABI versions 1–4. ABI v4 requires its exact descriptor OBJECT and entry FUNC exports; ABI 5 remains rejected. The packager still inspects ELF as data and never loads the query.
@@ -48,13 +55,13 @@
 - Behavior: `SubmissionClient` negotiates query-mode protocol v1.0, authenticates with the token ID/secret, validates the private package, PREPAREs it, uploads artifact and parameter chunks in order, verifies every acknowledged offset, and SEALs it. It can then START once, persist a no-overwrite invocation receipt before transmission, stream provisional data, parse the matching supervisor terminal event, and query STATUS on a new authenticated connection after an uncertain START reply.
 - Security: caller token-secret memory and temporary AUTH frames are zeroized. Package inputs must be private regular files; PMF1, PSC1, sidecar digest, and size bounds are checked before the network request. START is never automatically replayed.
 - Regression: a mock TCP peer verifies handshake/auth, PMF1/PSC1 and SHA-256 preparation fields, a compiled query upload, 300 KB parameters split across chunks, exact offsets, SEAL, receipt-before-START ordering, coalesced START/data/terminal frames, committed status, and zeroized token-secret input. The existing real-binary TCP test remains the gateway/supervisor admission evidence.
-- Remaining: expose a user-facing CLI and credential-file lifecycle, wire the scope builder to a network metadata-discovery API, and exercise successful START through a delegated-cgroup sandbox on a host that supports it.
+- Remaining: broaden live client coverage and finish SDK packaging/release gates; successful START acceptance requires the delegated-cgroup sandbox host described in the Linux sandbox plan.
 
 ## SDK-3 dependency: build PSC1 from discovery records — implemented
 
 - Behavior: `RequestedScopeBuilder` accepts authorized schema/relation/column metadata records, adds schema USAGE for selected data objects, encodes table- or column-level operations in canonical PSC1 byte order, deduplicates repeated selections, and enforces the 200-record limit without partial updates.
 - Red/green evidence: tests compare a mixed schema/table/column selection byte-for-byte, decode the result independently, reject invalid operation/zero-ID/empty selections, and prove a selection that would exceed the record limit leaves the previous builder state unchanged.
-- Remaining: the external client still needs a network API for authorized metadata discovery; the builder itself accepts only records supplied by the caller and grants no authority.
+- Remaining: the builder accepts only records supplied by the authenticated `MetadataClient`; the new `discover` CLI exposes those records, and neither component grants authority.
 
 ## SDK-1 initial borrowed value view — implemented
 
@@ -67,7 +74,7 @@
 - Typed accessors: value state, Boolean, signed 16/32/64-bit scalars, Date, TimestampTz and borrowed raw payload accessors validate state/type and preserve NULL versus REDACTED. Signed conversion handles negative values and minimum representable boundaries without out-of-range signed casts.
 - Regression: the expanded value fixture initially failed to compile because `prdb_sdk_value_state_v1` and the typed getters were absent; after implementation it passes against the TinyCC archive, including negative/minimum signed values, no-value statuses, type mismatch, and borrowed text bytes.
 - Query host ABI v3: [`prdb_query_abi_v3.h`](../../engine/include/prdb_query_abi_v3.h) adds a sticky SQL statement-failure callback while preserving v1/v2 entry points. The trusted executor latches the callback and forces a nonzero worker exit after user entry returns, so a caught SQL API error still reaches supervisor abort handling. Rust/C layout and descriptor checks and the SDK SELECT fixture cover the new boundary.
-- Remaining: add generated bindings before claiming SDK-1 complete; complete the C SQL/runtime result format and client cancellation surface; connect requested-scope selection to metadata discovery.
+- Remaining: add generated bindings before claiming SDK-1 complete and complete the C SQL/runtime result format. Client cancellation and authenticated metadata discovery are implemented in later increments.
 
 ## SDK-1: owned batch-result lifetime — implemented
 
@@ -75,7 +82,7 @@
 - Red/green evidence: the maintained batch fixture first failed to compile because the owned-batch header was absent. It now checks copy isolation, full validation, borrowed views into the owned copy, active-wrapper rejection, malformed/unsupported payload rejection, release invalidation, idempotent release, and wrapper reuse.
 - Implementation: `owned_batch_v1.c` owns the copy and exposes copy/open/release functions; release clears the wrapper and permits reuse. The API reuses the existing batch decoder so owned and directly borrowed payloads receive identical validation.
 - Verification: the maintained TinyCC SDK suite passed with `make -f engine/sdk/Makefile BUILD_DIR=/tmp/prdb-sdk-owned-batch test` under TinyCC 0.9.27-unstable-2025-01-06. Rust 1.95.0 workspace build, format, warning-denied Clippy, and full tests also passed; the commit integration target reported 124 passed and 3 cgroup-dependent ignored.
-- Remaining: generated bindings, the C SQL/runtime result format, client cancellation, and metadata discovery networking remain open.
+- Remaining: generated bindings and the C SQL/runtime result format remain open. Client cancellation and authenticated metadata discovery are implemented in later increments.
 
 ## SDK-5 dependency: typed ordinary-index AdminClient — implemented
 

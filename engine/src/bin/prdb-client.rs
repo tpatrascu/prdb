@@ -29,6 +29,7 @@ Submission output is provisional until a committed terminal event. START is neve
 if its reply is uncertain, use status with the invocation ID and a newly authenticated connection.\n\
 Scope files contain only permissions visible to the authenticated identity and remain a request ceiling.\n\
 Token secrets are saved only to mode-0600 credential files and are never printed.\n\
+  prdb-client discover --address IP:PORT --credentials FILE [--schema NAME [--relation NAME]]\n\n\
   prdb-client token-issue --address IP:PORT --credentials ADMIN_FILE --user-id HEX\n\
     --label TEXT --ttl-seconds N --output-credentials FILE\n\
   prdb-client token-revoke --address IP:PORT --credentials ADMIN_FILE --token-id HEX\n\n\
@@ -129,6 +130,7 @@ fn run() -> Result<(), String> {
         "cancel" => cancel(address, credentials_path, &mut fields),
         "admin-cancel" => admin_cancel(address, credentials_path, &mut fields),
         "scope" => scope(address, credentials_path, &mut fields),
+        "discover" => discover(address, credentials_path, &mut fields),
         "token-issue" => token_issue(address, credentials_path, &mut fields),
         "token-revoke" => token_revoke(address, credentials_path, &mut fields),
         "schema-create" | "schema-rename" | "schema-drop" | "schema-owner-set" | "table-create"
@@ -1209,6 +1211,107 @@ fn scope(
     Ok(())
 }
 
+fn discover(
+    address: SocketAddr,
+    credentials_path: PathBuf,
+    fields: &mut HashMap<String, std::ffi::OsString>,
+) -> Result<(), String> {
+    let schema_name = fields
+        .remove("--schema")
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| "--schema must be UTF-8".to_owned())
+        })
+        .transpose()?;
+    let relation_name = fields
+        .remove("--relation")
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| "--relation must be UTF-8".to_owned())
+        })
+        .transpose()?;
+    reject_unknown(fields)?;
+    if schema_name.is_none() && relation_name.is_some() {
+        return Err("--relation requires --schema".to_owned());
+    }
+
+    let mut credentials =
+        read_client_credentials(credentials_path).map_err(|error| error.to_string())?;
+    let mut client = MetadataClient::connect_authenticated(
+        address,
+        credentials.token_id,
+        &mut credentials.token_secret,
+    )
+    .map_err(|error| error.to_string())?;
+    let schemas = client.list_schemas().map_err(|error| error.to_string())?;
+    for schema in &schemas {
+        println!("schema\t{}\t{}", lower_hex(&schema.schema_id), schema.name);
+    }
+
+    let Some(schema_name) = schema_name else {
+        return Ok(());
+    };
+    let schema = schemas
+        .iter()
+        .find(|schema| schema.name == schema_name)
+        .ok_or_else(|| format!("schema {schema_name:?} is not visible"))?;
+    let relations = client
+        .list_relations(schema.schema_id)
+        .map_err(|error| error.to_string())?;
+    for relation in &relations {
+        println!(
+            "relation\t{}\t{}\t{}",
+            lower_hex(&schema.schema_id),
+            lower_hex(&relation.relation_id),
+            relation.name
+        );
+    }
+
+    if let Some(relation_name) = relation_name {
+        let relation = relations
+            .iter()
+            .find(|relation| relation.name == relation_name)
+            .ok_or_else(|| format!("relation {relation_name:?} is not visible"))?;
+        let columns = client
+            .list_columns(schema.schema_id, relation.relation_id)
+            .map_err(|error| error.to_string())?;
+        for column in columns {
+            println!(
+                "column\t{}\t{}\t{}\t{}\t{}\t{}",
+                lower_hex(&relation.relation_id),
+                column.ordinal,
+                lower_hex(&column.column_id),
+                format_scalar_type(&column.scalar_type),
+                if column.nullable {
+                    "nullable"
+                } else {
+                    "not-null"
+                },
+                column.name
+            );
+        }
+    }
+    Ok(())
+}
+
+fn format_scalar_type(scalar_type: &ScalarType) -> String {
+    match scalar_type {
+        ScalarType::Boolean => "boolean".to_owned(),
+        ScalarType::SmallInt => "smallint".to_owned(),
+        ScalarType::Integer => "integer".to_owned(),
+        ScalarType::BigInt => "bigint".to_owned(),
+        ScalarType::Decimal { precision, scale } => format!("decimal({precision},{scale})"),
+        ScalarType::Text => "text".to_owned(),
+        ScalarType::Varchar { max_chars } => format!("varchar({max_chars})"),
+        ScalarType::Bytea => "bytea".to_owned(),
+        ScalarType::Uuid => "uuid".to_owned(),
+        ScalarType::Date => "date".to_owned(),
+        ScalarType::TimestampTz => "timestamptz".to_owned(),
+    }
+}
+
 fn parse_operations(value: &str) -> Result<Vec<Operation>, String> {
     let mut operations = Vec::new();
     for name in split_names(value, "--operations")? {
@@ -1974,6 +2077,30 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn discovery_type_formatter_preserves_declared_parameters() {
+        assert_eq!(format_scalar_type(&ScalarType::Boolean), "boolean");
+        assert_eq!(format_scalar_type(&ScalarType::SmallInt), "smallint");
+        assert_eq!(format_scalar_type(&ScalarType::Integer), "integer");
+        assert_eq!(format_scalar_type(&ScalarType::BigInt), "bigint");
+        assert_eq!(
+            format_scalar_type(&ScalarType::Decimal {
+                precision: 18,
+                scale: 4,
+            }),
+            "decimal(18,4)"
+        );
+        assert_eq!(format_scalar_type(&ScalarType::Text), "text");
+        assert_eq!(
+            format_scalar_type(&ScalarType::Varchar { max_chars: 240 }),
+            "varchar(240)"
+        );
+        assert_eq!(format_scalar_type(&ScalarType::Bytea), "bytea");
+        assert_eq!(format_scalar_type(&ScalarType::Uuid), "uuid");
+        assert_eq!(format_scalar_type(&ScalarType::Date), "date");
+        assert_eq!(format_scalar_type(&ScalarType::TimestampTz), "timestamptz");
     }
 
     #[test]

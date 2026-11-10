@@ -622,6 +622,48 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
             .relation_id,
     )?;
     assert!(!columns.is_empty());
+    let schemata_relation = relations
+        .iter()
+        .find(|relation| relation.name == "schemata")
+        .ok_or("information_schema.schemata was missing")?;
+    let discover_credentials_path = root.join("discover.credentials");
+    let discover_credentials = ClientCredentials {
+        token_id,
+        token_secret: admin_control_secret,
+    };
+    write_client_credentials(&discover_credentials_path, &discover_credentials)?;
+    drop(discover_credentials);
+    let address_text = address.to_string();
+    let schema_id_text =
+        encode_id_hex(&prdb_engine::metadata_discovery::INFORMATION_SCHEMA_SCHEMA_ID);
+    let relation_id_text = encode_id_hex(&schemata_relation.relation_id);
+    let discover = Command::new(env!("CARGO_BIN_EXE_prdb-client"))
+        .args([
+            "discover",
+            "--address",
+            &address_text,
+            "--credentials",
+            discover_credentials_path
+                .to_str()
+                .ok_or("non-UTF-8 credential path")?,
+            "--schema",
+            "information_schema",
+            "--relation",
+            "schemata",
+        ])
+        .output()?;
+    assert!(
+        discover.status.success(),
+        "discover CLI failed: {}",
+        String::from_utf8_lossy(&discover.stderr)
+    );
+    let discover_output = String::from_utf8(discover.stdout)?;
+    assert!(discover_output.contains(&format!("schema\t{schema_id_text}\tinformation_schema")));
+    assert!(discover_output.contains(&format!(
+        "relation\t{schema_id_text}\t{relation_id_text}\tschemata"
+    )));
+    assert!(discover_output.contains(&format!("column\t{relation_id_text}\t0\t")));
+    remove_client_credentials(&discover_credentials_path)?;
     assert!(
         metadata
             .list_relations(restricted_schema_id)?
