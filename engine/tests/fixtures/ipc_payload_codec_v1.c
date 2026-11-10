@@ -632,5 +632,25 @@ int main(void) {
                                                  sizeof(finalize_request))) {
         return 63;
     }
+    uint8_t finished_batch[5] = {0};
+    uint8_t continuing_batch[22] = {0};
+    uint8_t batch_cursor[16] = {7};
+    uint8_t decoded_batch_cursor[16] = {0};
+    uint8_t finished_flag = 0;
+    uint16_t decoded_row_count = 0;
+    prdb_encode_executor_next_batch_response_finished(finished_batch, 1, 0);
+    prdb_encode_executor_next_batch_response_continuation(
+        continuing_batch, 0, batch_cursor, 2);
+    continuing_batch[21] = 0xaa;
+    if (!prdb_decode_executor_next_batch_response_finished(
+            finished_batch, sizeof(finished_batch), &finished_flag,
+            &decoded_row_count) || finished_flag != 1 || decoded_row_count != 0 ||
+        !prdb_decode_executor_next_batch_response_continuation(
+            continuing_batch, sizeof(continuing_batch), &finished_flag,
+            decoded_batch_cursor, &decoded_row_count) ||
+        finished_flag != 0 || decoded_row_count != 2 ||
+        memcmp(decoded_batch_cursor, batch_cursor, sizeof(batch_cursor)) != 0) {
+        return 64;
+    }
     return 0;
 }

@@ -13,20 +13,11 @@ pub use crate::query_abi::{
     EXECUTOR_MUTATION_ACKNOWLEDGEMENT_VERSION_OFFSET,
     EXECUTOR_NEXT_BATCH_REQUEST_CURSOR_HANDLE_OFFSET, EXECUTOR_NEXT_BATCH_REQUEST_HEADER_BYTES,
     EXECUTOR_NEXT_BATCH_REQUEST_MAX_BYTES_OFFSET, EXECUTOR_NEXT_BATCH_REQUEST_MAX_SCANNED_OFFSET,
-    EXECUTOR_NEXT_BATCH_REQUEST_VERSION_OFFSET,
-    EXECUTOR_NEXT_BATCH_RESPONSE_CONTINUATION_CURSOR_HANDLE_OFFSET,
-    EXECUTOR_NEXT_BATCH_RESPONSE_CONTINUATION_FINISHED_OFFSET,
-    EXECUTOR_NEXT_BATCH_RESPONSE_CONTINUATION_HEADER_BYTES,
-    EXECUTOR_NEXT_BATCH_RESPONSE_CONTINUATION_ROW_COUNT_OFFSET,
-    EXECUTOR_NEXT_BATCH_RESPONSE_CONTINUATION_VERSION_OFFSET,
-    EXECUTOR_NEXT_BATCH_RESPONSE_FINISHED_FINISHED_OFFSET,
-    EXECUTOR_NEXT_BATCH_RESPONSE_FINISHED_HEADER_BYTES,
-    EXECUTOR_NEXT_BATCH_RESPONSE_FINISHED_ROW_COUNT_OFFSET,
-    EXECUTOR_NEXT_BATCH_RESPONSE_FINISHED_VERSION_OFFSET,
-    EXECUTOR_OPEN_SCAN_REQUEST_COLUMN_COUNT_OFFSET, EXECUTOR_OPEN_SCAN_REQUEST_HEADER_BYTES,
-    EXECUTOR_OPEN_SCAN_REQUEST_RELATION_HANDLE_OFFSET, EXECUTOR_OPEN_SCAN_REQUEST_VERSION_OFFSET,
-    EXECUTOR_OPEN_SCAN_RESPONSE_CURSOR_HANDLE_OFFSET, EXECUTOR_OPEN_SCAN_RESPONSE_HEADER_BYTES,
-    EXECUTOR_OPEN_SCAN_RESPONSE_VERSION_OFFSET, EXECUTOR_RESOLVE_RELATION_REQUEST_HEADER_BYTES,
+    EXECUTOR_NEXT_BATCH_REQUEST_VERSION_OFFSET, EXECUTOR_OPEN_SCAN_REQUEST_COLUMN_COUNT_OFFSET,
+    EXECUTOR_OPEN_SCAN_REQUEST_HEADER_BYTES, EXECUTOR_OPEN_SCAN_REQUEST_RELATION_HANDLE_OFFSET,
+    EXECUTOR_OPEN_SCAN_REQUEST_VERSION_OFFSET, EXECUTOR_OPEN_SCAN_RESPONSE_CURSOR_HANDLE_OFFSET,
+    EXECUTOR_OPEN_SCAN_RESPONSE_HEADER_BYTES, EXECUTOR_OPEN_SCAN_RESPONSE_VERSION_OFFSET,
+    EXECUTOR_RESOLVE_RELATION_REQUEST_HEADER_BYTES,
     EXECUTOR_RESOLVE_RELATION_REQUEST_RELATION_NAME_LENGTH_OFFSET,
     EXECUTOR_RESOLVE_RELATION_REQUEST_SCHEMA_NAME_LENGTH_OFFSET,
     EXECUTOR_RESOLVE_RELATION_REQUEST_VERSION_OFFSET, EXECUTOR_STAGE_DELETE_REQUEST_HEADER_BYTES,
@@ -597,36 +588,17 @@ impl NextBatchResponse {
         validate_batch_limits(1, max_bytes)?;
         let max_bytes =
             usize::try_from(max_bytes).map_err(|_| ExecutorRequestError::ResponseTooLarge)?;
-        let (header_bytes, version_offset, finished_offset, row_count_offset) =
-            if self.continuation.is_some() {
-                (
-                    EXECUTOR_NEXT_BATCH_RESPONSE_CONTINUATION_HEADER_BYTES,
-                    EXECUTOR_NEXT_BATCH_RESPONSE_CONTINUATION_VERSION_OFFSET,
-                    EXECUTOR_NEXT_BATCH_RESPONSE_CONTINUATION_FINISHED_OFFSET,
-                    EXECUTOR_NEXT_BATCH_RESPONSE_CONTINUATION_ROW_COUNT_OFFSET,
-                )
-            } else {
-                (
-                    EXECUTOR_NEXT_BATCH_RESPONSE_FINISHED_HEADER_BYTES,
-                    EXECUTOR_NEXT_BATCH_RESPONSE_FINISHED_VERSION_OFFSET,
-                    EXECUTOR_NEXT_BATCH_RESPONSE_FINISHED_FINISHED_OFFSET,
-                    EXECUTOR_NEXT_BATCH_RESPONSE_FINISHED_ROW_COUNT_OFFSET,
-                )
-            };
-        let mut payload = vec![0; header_bytes as usize];
-        let version_offset = version_offset as usize;
-        payload[version_offset..version_offset + 2]
-            .copy_from_slice(&EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes());
-        payload[finished_offset as usize] = u8::from(self.continuation.is_none());
-        if let Some(cursor) = &self.continuation {
-            let cursor_offset =
-                EXECUTOR_NEXT_BATCH_RESPONSE_CONTINUATION_CURSOR_HANDLE_OFFSET as usize;
-            payload[cursor_offset..cursor_offset + 16].copy_from_slice(&cursor.to_bytes());
-        }
         let row_count =
             u16::try_from(self.rows.len()).map_err(|_| ExecutorRequestError::ResponseTooLarge)?;
-        let row_count_offset = row_count_offset as usize;
-        payload[row_count_offset..row_count_offset + 2].copy_from_slice(&row_count.to_be_bytes());
+        let mut payload = match &self.continuation {
+            Some(cursor) => generated::encode_executor_next_batch_response_continuation(
+                0,
+                cursor.to_bytes(),
+                row_count,
+            )
+            .to_vec(),
+            None => generated::encode_executor_next_batch_response_finished(1, row_count).to_vec(),
+        };
         ensure_batch_size(&payload, max_bytes)?;
         for row in &self.rows {
             payload.extend_from_slice(&row.handle.to_bytes());
@@ -646,50 +618,35 @@ impl NextBatchResponse {
         if payload.len() > crate::ipc::MAX_PAYLOAD_BYTES || payload.len() < 5 {
             return Err(ExecutorRequestError::InvalidPayload);
         }
-        let version_offset = EXECUTOR_NEXT_BATCH_RESPONSE_FINISHED_VERSION_OFFSET as usize;
-        if u16::from_be_bytes([payload[version_offset], payload[version_offset + 1]])
-            != EXECUTOR_BATCH_PAYLOAD_VERSION
-        {
-            return Err(ExecutorRequestError::InvalidPayload);
-        }
-        let finished_offset = EXECUTOR_NEXT_BATCH_RESPONSE_FINISHED_FINISHED_OFFSET as usize;
-        let finished = payload[finished_offset];
+        let (finished, finished_row_count) =
+            generated::decode_executor_next_batch_response_finished(payload)
+                .ok_or(ExecutorRequestError::InvalidPayload)?;
         if finished > 1 {
             return Err(ExecutorRequestError::InvalidPayload);
         }
-        let continuation = if finished == 0 {
-            let header_bytes = EXECUTOR_NEXT_BATCH_RESPONSE_CONTINUATION_HEADER_BYTES as usize;
-            let cursor_offset =
-                EXECUTOR_NEXT_BATCH_RESPONSE_CONTINUATION_CURSOR_HANDLE_OFFSET as usize;
-            if payload.len() < header_bytes {
+        let (continuation, header_bytes, row_count) = if finished == 0 {
+            let (continued_finished, cursor, row_count) =
+                generated::decode_executor_next_batch_response_continuation(payload)
+                    .ok_or(ExecutorRequestError::InvalidPayload)?;
+            if continued_finished != 0 {
                 return Err(ExecutorRequestError::InvalidPayload);
             }
-            Some(
-                ExecutorScanCursor::from_bytes(
-                    payload[cursor_offset..cursor_offset + 16]
-                        .try_into()
-                        .map_err(|_| ExecutorRequestError::InvalidPayload)?,
-                )
-                .ok_or(ExecutorRequestError::InvalidPayload)?,
-            )
-        } else {
-            None
-        };
-        let (header_bytes, row_count_offset) = if continuation.is_some() {
             (
-                EXECUTOR_NEXT_BATCH_RESPONSE_CONTINUATION_HEADER_BYTES as usize,
-                EXECUTOR_NEXT_BATCH_RESPONSE_CONTINUATION_ROW_COUNT_OFFSET as usize,
+                Some(
+                    ExecutorScanCursor::from_bytes(&cursor)
+                        .ok_or(ExecutorRequestError::InvalidPayload)?,
+                ),
+                generated::EXECUTOR_NEXT_BATCH_RESPONSE_CONTINUATION_HEADER_BYTES as usize,
+                row_count,
             )
         } else {
             (
-                EXECUTOR_NEXT_BATCH_RESPONSE_FINISHED_HEADER_BYTES as usize,
-                EXECUTOR_NEXT_BATCH_RESPONSE_FINISHED_ROW_COUNT_OFFSET as usize,
+                None,
+                generated::EXECUTOR_NEXT_BATCH_RESPONSE_FINISHED_HEADER_BYTES as usize,
+                finished_row_count,
             )
         };
-        let row_count = usize::from(u16::from_be_bytes([
-            payload[row_count_offset],
-            payload[row_count_offset + 1],
-        ]));
+        let row_count = usize::from(row_count);
         let mut offset = header_bytes;
         if row_count > usize::from(MAX_EXECUTOR_BATCH_CANDIDATES) {
             return Err(ExecutorRequestError::InvalidPayload);

@@ -219,11 +219,42 @@ pub const EXECUTOR_NEXT_BATCH_RESPONSE_FINISHED_VERSION_OFFSET: u32 = 0;
 pub const EXECUTOR_NEXT_BATCH_RESPONSE_FINISHED_FINISHED_OFFSET: u32 = 2;
 pub const EXECUTOR_NEXT_BATCH_RESPONSE_FINISHED_ROW_COUNT_OFFSET: u32 = 3;
 pub const EXECUTOR_NEXT_BATCH_RESPONSE_FINISHED_HEADER_BYTES: u32 = 5;
+pub fn encode_executor_next_batch_response_finished(finished: u8, row_count: u16) -> [u8; 5] {
+    let mut payload = [0u8; 5];
+    payload[0..2].copy_from_slice(&EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes());
+    payload[2] = finished;
+    payload[3..5].copy_from_slice(&row_count.to_be_bytes());
+    payload
+}
+
+pub fn decode_executor_next_batch_response_finished(payload: &[u8]) -> Option<(u8, u16)> {
+    if payload.len() < 5 || u16::from_be_bytes([payload[0], payload[1]]) != EXECUTOR_BATCH_PAYLOAD_VERSION {
+        return None;
+    }
+    Some((payload[2], u16::from_be_bytes(payload[3..5].try_into().ok()?)))
+}
+
 pub const EXECUTOR_NEXT_BATCH_RESPONSE_CONTINUATION_VERSION_OFFSET: u32 = 0;
 pub const EXECUTOR_NEXT_BATCH_RESPONSE_CONTINUATION_FINISHED_OFFSET: u32 = 2;
 pub const EXECUTOR_NEXT_BATCH_RESPONSE_CONTINUATION_CURSOR_HANDLE_OFFSET: u32 = 3;
 pub const EXECUTOR_NEXT_BATCH_RESPONSE_CONTINUATION_ROW_COUNT_OFFSET: u32 = 19;
 pub const EXECUTOR_NEXT_BATCH_RESPONSE_CONTINUATION_HEADER_BYTES: u32 = 21;
+pub fn encode_executor_next_batch_response_continuation(finished: u8, cursor_handle: [u8; 16], row_count: u16) -> [u8; 21] {
+    let mut payload = [0u8; 21];
+    payload[0..2].copy_from_slice(&EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes());
+    payload[2] = finished;
+    payload[3..19].copy_from_slice(&cursor_handle);
+    payload[19..21].copy_from_slice(&row_count.to_be_bytes());
+    payload
+}
+
+pub fn decode_executor_next_batch_response_continuation(payload: &[u8]) -> Option<(u8, [u8; 16], u16)> {
+    if payload.len() < 21 || u16::from_be_bytes([payload[0], payload[1]]) != EXECUTOR_BATCH_PAYLOAD_VERSION {
+        return None;
+    }
+    Some((payload[2], payload[3..19].try_into().ok()?, u16::from_be_bytes(payload[19..21].try_into().ok()?)))
+}
+
 pub const EXECUTOR_STAGE_DELETE_REQUEST_VERSION_OFFSET: u32 = 0;
 pub const EXECUTOR_STAGE_DELETE_REQUEST_ROW_HANDLE_OFFSET: u32 = 2;
 pub const EXECUTOR_STAGE_DELETE_REQUEST_HEADER_BYTES: u32 = 18;

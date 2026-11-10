@@ -1303,6 +1303,9 @@
     {
       "name": "EXECUTOR_NEXT_BATCH_RESPONSE_FINISHED",
       "version_constant": "EXECUTOR_BATCH_PAYLOAD_VERSION",
+      "generate_rust_codec": true,
+      "generate_c_codec": true,
+      "codec_prefix": true,
       "fields": [
         { "name": "version", "encoding": "u16be" },
         { "name": "finished", "encoding": "u8" },
@@ -1313,6 +1316,9 @@
     {
       "name": "EXECUTOR_NEXT_BATCH_RESPONSE_CONTINUATION",
       "version_constant": "EXECUTOR_BATCH_PAYLOAD_VERSION",
+      "generate_rust_codec": true,
+      "generate_c_codec": true,
+      "codec_prefix": true,
       "fields": [
         { "name": "version", "encoding": "u16be" },
         { "name": "finished", "encoding": "u8" },
