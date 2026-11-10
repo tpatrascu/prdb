@@ -1,5 +1,13 @@
 # Toolchain Progress
 
+## TC-2: generated planner estimate-scan request header — implemented
+
+- Contract: [internal IPC](../../specs/ipc-protocol.md) defines estimate-scan as planner payload version, connection-local planning handle, column count, and a fixed-width column-ID list.
+- Implementation: the shared schema declares the fixed header fields. Rust planner request encoding and decoding consume generated offsets and header size; the trailing ID array retains its explicit bounded codec.
+- Regression: the planner estimate-budget session regression passes through the request codec.
+- Verification: generator drift, focused planner regression, full workspace build/format/warning-denied Clippy/serial tests, and the full TinyCC SDK suite passed. Commit integration results: 129 passed, 3 cgroup-dependent tests ignored.
+- Remaining: generate layouts for remaining executor/planner/supervisor payloads and serialization helpers.
+
 ## TC-2: generated executor stage-insert request header — implemented
 
 - Contract: [internal IPC](../../specs/ipc-protocol.md) defines stage-insert as the batch payload version, relation handle, value count, and bounded value records.

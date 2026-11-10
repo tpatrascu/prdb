@@ -8,14 +8,18 @@ use crate::ipc::{DispatchError, IpcFrame, Operation, ServiceRole, authorize_oper
 use crate::metadata_discovery::{
     AuthorizedPlanRelation, AuthorizedRelationDescription, PlanningTableHandle,
 };
-pub use crate::query_abi::PLANNER_PAYLOAD_VERSION;
+pub use crate::query_abi::{
+    PLANNER_ESTIMATE_SCAN_REQUEST_COLUMN_COUNT_OFFSET, PLANNER_ESTIMATE_SCAN_REQUEST_HEADER_BYTES,
+    PLANNER_ESTIMATE_SCAN_REQUEST_PLANNING_HANDLE_OFFSET,
+    PLANNER_ESTIMATE_SCAN_REQUEST_VERSION_OFFSET, PLANNER_PAYLOAD_VERSION,
+};
 use crate::statistics::{AuthorizedScanEstimate, AuthorizedScanSummary, ColumnPopulation};
 use crate::transaction::{PlannerMetadataConnection, TransactionError};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
 const DESCRIBE_HEADER_BYTES: usize = 3;
-const ESTIMATE_HEADER_BYTES: usize = 20;
+const ESTIMATE_HEADER_BYTES: usize = PLANNER_ESTIMATE_SCAN_REQUEST_HEADER_BYTES as usize;
 pub const MAX_PLANNER_REQUESTS_PER_CONNECTION: usize = 256;
 
 #[derive(Debug)]
@@ -247,9 +251,14 @@ impl EstimateScanRequest {
         {
             return Err(PlannerRequestError::InvalidPayload);
         }
-        let mut payload = PLANNER_PAYLOAD_VERSION.to_be_bytes().to_vec();
-        payload.extend_from_slice(&self.handle.to_bytes());
-        payload.extend_from_slice(
+        let mut payload = vec![0; ESTIMATE_HEADER_BYTES];
+        let version_offset = PLANNER_ESTIMATE_SCAN_REQUEST_VERSION_OFFSET as usize;
+        payload[version_offset..version_offset + 2]
+            .copy_from_slice(&PLANNER_PAYLOAD_VERSION.to_be_bytes());
+        let handle_offset = PLANNER_ESTIMATE_SCAN_REQUEST_PLANNING_HANDLE_OFFSET as usize;
+        payload[handle_offset..handle_offset + 16].copy_from_slice(&self.handle.to_bytes());
+        let count_offset = PLANNER_ESTIMATE_SCAN_REQUEST_COLUMN_COUNT_OFFSET as usize;
+        payload[count_offset..count_offset + 2].copy_from_slice(
             &u16::try_from(self.column_ids.len())
                 .map_err(|_| PlannerRequestError::InvalidPayload)?
                 .to_be_bytes(),
@@ -262,13 +271,17 @@ impl EstimateScanRequest {
     }
 
     pub fn decode(payload: &[u8]) -> Result<Self, PlannerRequestError> {
-        if payload.len() < ESTIMATE_HEADER_BYTES || read_u16(payload, 0)? != PLANNER_PAYLOAD_VERSION
+        let version_offset = PLANNER_ESTIMATE_SCAN_REQUEST_VERSION_OFFSET as usize;
+        if payload.len() < ESTIMATE_HEADER_BYTES
+            || read_u16(payload, version_offset)? != PLANNER_PAYLOAD_VERSION
         {
             return Err(PlannerRequestError::InvalidPayload);
         }
-        let handle = PlanningTableHandle::from_bytes(&payload[2..18])
+        let handle_offset = PLANNER_ESTIMATE_SCAN_REQUEST_PLANNING_HANDLE_OFFSET as usize;
+        let handle = PlanningTableHandle::from_bytes(&payload[handle_offset..handle_offset + 16])
             .ok_or(PlannerRequestError::InvalidPayload)?;
-        let count = read_u16(payload, 18)? as usize;
+        let count_offset = PLANNER_ESTIMATE_SCAN_REQUEST_COLUMN_COUNT_OFFSET as usize;
+        let count = read_u16(payload, count_offset)? as usize;
         let expected = ESTIMATE_HEADER_BYTES
             .checked_add(
                 count
