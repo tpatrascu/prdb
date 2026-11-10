@@ -176,12 +176,12 @@ int32_t prdb_sdk_executor_next_batch_v1(
 int32_t prdb_sdk_executor_close_cursor_v1(
     const prdb_host_api_v2 *host, const uint8_t cursor[16], uint8_t *response,
     uint64_t response_capacity, uint64_t *response_len) {
-    uint8_t request[PRDB_EXECUTOR_OPEN_SCAN_RESPONSE_HEADER_BYTES];
+    uint8_t request[PRDB_EXECUTOR_CLOSE_CURSOR_REQUEST_HEADER_BYTES];
     int32_t status;
     if (cursor == NULL || cursor[0] != 7) return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
-    write_u16(request + PRDB_EXECUTOR_OPEN_SCAN_RESPONSE_VERSION_OFFSET,
+    write_u16(request + PRDB_EXECUTOR_CLOSE_CURSOR_REQUEST_VERSION_OFFSET,
               PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION);
-    memcpy(request + PRDB_EXECUTOR_OPEN_SCAN_RESPONSE_CURSOR_HANDLE_OFFSET,
+    memcpy(request + PRDB_EXECUTOR_CLOSE_CURSOR_REQUEST_CURSOR_HANDLE_OFFSET,
            cursor, 16);
     status = invoke(host, PRDB_SDK_EXECUTOR_OP_CLOSE_CURSOR, request, sizeof(request),
                     response, response_capacity, response_len);

@@ -1,5 +1,13 @@
 # Toolchain Progress
 
+## TC-2: generated executor close-cursor request layout — implemented
+
+- Contract: close-cursor requests carry payload version and the connection-scoped cursor handle in the exact open-scan request shape.
+- Implementation: a dedicated shared schema layout now drives the Rust and TinyCC request codecs instead of reusing the open-scan response layout.
+- Regression: the executor socket-loop verifies the close acknowledgement; TinyCC executor fixture validates cursor close success and failures.
+- Verification: focused executor socket-loop regression, TinyCC SDK suite, generator drift, locked workspace build/format/warning-denied Clippy/serial tests pass. Commit tests report 129 passed; three cgroup-dependent tests remain ignored.
+- Remaining: generate layouts/codecs for remaining supervisor event payloads and other internal IPC payloads.
+
 ## TC-2: generated executor cancellation-check response layout — implemented
 
 - Contract: cancellation checks return exactly payload version plus a boolean cancelled byte.
