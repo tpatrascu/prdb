@@ -114,16 +114,16 @@
 ## OP-3 dependency: consume projected rows from bounded scan batches
 
 - Behavior: a bounded C executor runs an unfiltered plan over immutable storage batches, emits projection-ordered values, polls cancellation, stops at LIMIT, and closes early cursors. Filter plans fail as unsupported before scan creation.
-- Implementation: `prdb_sdk_optimizer_execute_unfiltered_plan_v1` composes validated metadata/capability/scan setup with a 126-page budget so two IPC calls per page plus setup and an early close stay within the 256-request executor stream limit. It polls cancellation, applies the stateful projection/LIMIT batch consumer, and closes the cursor on cancellation or early stop. Values borrow the current batch only during the result callback.
+- Implementation: `prdb_sdk_optimizer_execute_unfiltered_plan_v1` composes validated metadata/capability/scan setup with a 126-page budget so two IPC calls per page plus setup and an early close stay within the 256-request executor stream limit. The SQL optimizer bridge additionally spends one request checking the returned plan against the submitted AST, so its effective page ceiling is 125. It polls cancellation, applies the stateful projection/LIMIT batch consumer, and closes the cursor on cancellation or early stop. Values borrow the current batch only during the result callback.
 - Regression: TinyCC fixture checks source-ordinal projection, callback value/type, limit completion, request order, cursor close after early LIMIT, cancellation abort/cleanup, and rejection of filtered plans.
 - Verification: focused and full maintained TinyCC SDK suites passed; generated ABI consistency, documentation link checks, and `git diff --check` passed.
 - Remaining: evaluate Filter predicates, encode and emit SQL results, and add a real executor channel integration covering the plan-driven batch path.
 
 ## OP-3 dependency: connect optimizer submission to unfiltered SQL execution
 
-- Behavior: a parsed explicit-projection SELECT is encoded and submitted through ABI v4, its successful plan is validated against executor metadata, and the unfiltered plan is run through bounded storage pages. Unsupported predicates return to the existing SQL path without latching statement failure; optimizer or execution failures latch failure.
-- Implementation: `prdb_sdk_optimizer_execute_select_ast_v1` composes canonical request encoding, the dedicated optimizer callback, response decoding, and the bounded executor plan runner.
-- Regression: TinyCC fixture submits a parsed SELECT, checks optimizer/executor callback order and one projected result, verifies WHERE fallback makes no optimizer call, and checks that optimizer error status latches statement failure.
+- Behavior: a parsed explicit-projection SELECT is encoded and submitted through ABI v4, its successful plan is checked against the submitted relation/projection order/LIMIT and executor-authorized column names, and the unfiltered plan is run through bounded storage pages. Unsupported predicates return to the existing SQL path without latching statement failure; optimizer or execution failures latch failure.
+- Implementation: `prdb_sdk_optimizer_execute_select_ast_v1` composes canonical request encoding, the dedicated optimizer callback, response decoding, query-to-plan semantic checks, and the bounded executor plan runner. The extra metadata request is included in the 125-page budget.
+- Regression: TinyCC fixture submits a parsed SELECT, checks optimizer/executor callback order and one projected result, rejects a changed projection before scanning, verifies WHERE fallback makes no optimizer call, and checks that optimizer error status latches statement failure.
 - Verification: focused and full maintained TinyCC SDK suites passed; generated ABI consistency, documentation link checks, and `git diff --check` passed.
 - Remaining: evaluate optimizer Filter plans, compare output plan semantics with the submitted SELECT, encode/emit SQL results, and exercise the path with a real optimizer/executor IPC invocation.
 

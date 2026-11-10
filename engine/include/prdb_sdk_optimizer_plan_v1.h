@@ -7,7 +7,7 @@
 #define PRDB_SDK_OPTIMIZER_PLAN_ABI_V1_VERSION UINT32_C(1)
 #define PRDB_SDK_OPTIMIZER_PLAN_MAX_SCAN_COLUMNS UINT32_C(256)
 #define PRDB_SDK_OPTIMIZER_PLAN_MAX_PROJECTIONS UINT32_C(128)
-#define PRDB_SDK_OPTIMIZER_PLAN_MAX_NEXT_REQUESTS UINT32_C(126)
+#define PRDB_SDK_OPTIMIZER_PLAN_MAX_NEXT_REQUESTS UINT32_C(125)
 
 #define PRDB_SDK_OPTIMIZER_PLAN_OK INT32_C(0)
 #define PRDB_SDK_OPTIMIZER_PLAN_INVALID_ARGUMENT INT32_C(1)
@@ -180,5 +180,14 @@ int32_t prdb_sdk_optimizer_execute_select_ast_v1(
     uint32_t projected_value_capacity,
     prdb_sdk_optimizer_projected_row_v1_fn on_row, void *row_context,
     uint32_t *delivered_rows_out);
+
+/* Verify that a returned plan represents the submitted SQL relation,
+ * projection names/order, and LIMIT using executor-authorized column names. */
+int32_t prdb_sdk_optimizer_validate_select_plan_v1(
+    const prdb_host_api_v2 *host, const prdb_sdk_select_v2 *statement,
+    const uint8_t *schema, uint32_t schema_len,
+    const uint8_t *plan_payload, uint64_t plan_payload_len,
+    uint8_t *response, uint64_t response_capacity,
+    uint64_t *response_len);
 
 #endif /* PRDB_SDK_OPTIMIZER_PLAN_V1_H */

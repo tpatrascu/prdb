@@ -490,6 +490,35 @@ int main(void) {
     assert(prdb_sdk_sql_parse_select_v2(
                sql, sizeof(sql) - 1, &statement, sizeof(statement), NULL) ==
            PRDB_SDK_SQL_OK);
+    resolve.calls = 0;
+    assert(prdb_sdk_optimizer_validate_select_plan_v1(
+               &host, &statement, (const uint8_t *)"public", 6, limit_one_plan,
+               payload_len, response, sizeof(response), &response_len) ==
+           PRDB_SDK_OPTIMIZER_PLAN_OK);
+    assert(resolve.calls == 1);
+    uint8_t sql_wrong_projection[] = "SELECT c2 FROM items LIMIT 1";
+    assert(prdb_sdk_sql_parse_select_v2(
+               sql_wrong_projection, sizeof(sql_wrong_projection) - 1,
+               &statement, sizeof(statement), NULL) == PRDB_SDK_SQL_OK);
+    uint32_t calls_before_projection_mismatch = resolve.calls;
+    assert(prdb_sdk_optimizer_validate_select_plan_v1(
+               &host, &statement, (const uint8_t *)"public", 6, limit_one_plan,
+               payload_len, response, sizeof(response), &response_len) ==
+           PRDB_SDK_OPTIMIZER_PLAN_IDENTITY_MISMATCH);
+    assert(resolve.calls == calls_before_projection_mismatch + 1);
+    uint8_t sql_wrong_limit[] = "SELECT c3 FROM items LIMIT 2";
+    assert(prdb_sdk_sql_parse_select_v2(
+               sql_wrong_limit, sizeof(sql_wrong_limit) - 1, &statement,
+               sizeof(statement), NULL) == PRDB_SDK_SQL_OK);
+    calls_before_projection_mismatch = resolve.calls;
+    assert(prdb_sdk_optimizer_validate_select_plan_v1(
+               &host, &statement, (const uint8_t *)"public", 6, limit_one_plan,
+               payload_len, response, sizeof(response), &response_len) ==
+           PRDB_SDK_OPTIMIZER_PLAN_IDENTITY_MISMATCH);
+    assert(resolve.calls == calls_before_projection_mismatch);
+    assert(prdb_sdk_sql_parse_select_v2(
+               sql, sizeof(sql) - 1, &statement, sizeof(statement), NULL) ==
+           PRDB_SDK_SQL_OK);
     resolve.optimizer_response_len = build_optimizer_response(
         resolve.optimizer_response, limit_one_plan, payload_len);
     host_v4.v3.struct_size = sizeof(host_v4.v3);
@@ -512,16 +541,17 @@ int main(void) {
                sizeof(acquired_relation), acquired_columns, 4, source_cells, 4,
                projected_values, 1, on_projected_row, NULL,
                &total_rows) == PRDB_SDK_OPTIMIZER_PLAN_OK);
-    assert(resolve.optimizer_calls == 1 && resolve.calls == 6);
+    assert(resolve.optimizer_calls == 1 && resolve.calls == 7);
     assert(resolve.statement_failures == 0 && total_rows == 1 &&
            projected_rows_seen == 1);
-    assert(resolve.event_count == 7 && resolve.events[0] == UINT16_C(0xffff));
+    assert(resolve.event_count == 8 && resolve.events[0] == UINT16_C(0xffff));
     assert(resolve.events[1] == PRDB_IPC_OP_RESOLVE_PLAN_RELATION);
-    assert(resolve.events[2] == PRDB_SDK_EXECUTOR_OP_RESOLVE_RELATION);
-    assert(resolve.events[3] == PRDB_SDK_EXECUTOR_OP_OPEN_SCAN);
-    assert(resolve.events[4] == PRDB_SDK_EXECUTOR_OP_CHECK_CANCELLATION);
-    assert(resolve.events[5] == PRDB_SDK_EXECUTOR_OP_NEXT_BATCH);
-    assert(resolve.events[6] == PRDB_SDK_EXECUTOR_OP_CLOSE_CURSOR);
+    assert(resolve.events[2] == PRDB_IPC_OP_RESOLVE_PLAN_RELATION);
+    assert(resolve.events[3] == PRDB_SDK_EXECUTOR_OP_RESOLVE_RELATION);
+    assert(resolve.events[4] == PRDB_SDK_EXECUTOR_OP_OPEN_SCAN);
+    assert(resolve.events[5] == PRDB_SDK_EXECUTOR_OP_CHECK_CANCELLATION);
+    assert(resolve.events[6] == PRDB_SDK_EXECUTOR_OP_NEXT_BATCH);
+    assert(resolve.events[7] == PRDB_SDK_EXECUTOR_OP_CLOSE_CURSOR);
 
     uint8_t sql_with_filter[] = "SELECT c3 FROM items WHERE c3 = $1";
     assert(prdb_sdk_sql_parse_select_v2(
