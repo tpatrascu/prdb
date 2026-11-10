@@ -386,3 +386,8 @@
 - Implementation: the runner reserves six calls for relation resolution/open/close and eight for post-scan cancellation checks; each counted scan page reserves one cancellation poll and one batch fetch. It aborts before exceeding the shared page budget.
 - Verification: `make -f engine/sdk/Makefile test` passed with TinyCC 0.9.27-unstable-2025-01-06. Locked workspace build, rustfmt check, warning-denied Clippy, and all workspace tests passed (128 commit tests passed; 3 cgroup-dependent tests ignored). `git diff --check` passed. This increment's cancellation and request ceiling are covered by the maintained TinyCC executor fixture; no separate sandboxed v16 cancellation acceptance was run.
 - Remaining: broader mixed-workload measurements, spill, and stress coverage of cancellation during long-running callbacks remain open.
+
+## Confined SQL acceptance fixture corrections — verified
+
+- The delegated-cgroup SQL DML acceptance now exercises its multi-row `INSERT ... VALUES ($1), ($2)` with both bound values populated. Previously it passed a null/empty parameter array, so the fixture emitted its error marker instead of testing the intended successful DML sequence.
+- Verification: the confined SQL commit acceptance and durable-abort acceptance both pass. The latter confirms a caught SQL error after partial output still produces a durable abort. The complete maintained TinyCC suite and locked Rust workspace format/build/Clippy/serial test gates pass.

@@ -38,6 +38,39 @@ pub struct ExecutorLaunchError {
     pub cleanup_error: Option<io::Error>,
 }
 
+fn wait_for_optimizer_exit(
+    optimizer: &mut Child,
+    timeout: Duration,
+) -> Result<(), SupervisorInvocationError> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match optimizer.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => {
+                return Err(SupervisorInvocationError::WorkerProcessIo(
+                    io::Error::other(format!("optimizer exited with status {status}")),
+                ));
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let _ = optimizer.kill();
+                let _ = optimizer.wait();
+                return Err(SupervisorInvocationError::WorkerProcessIo(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "optimizer did not exit after its channels closed",
+                )));
+            }
+            Err(error) => {
+                let _ = optimizer.kill();
+                let _ = optimizer.wait();
+                return Err(SupervisorInvocationError::WorkerProcessIo(error));
+            }
+        }
+    }
+}
+
 impl std::fmt::Display for ExecutorLaunchError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "executor launch failed: {}", self.launch_error)?;
@@ -287,6 +320,18 @@ impl RunningExecutor {
             self.kill_reap_and_cleanup();
             return Err(error);
         }
+        // The optimizer is a child in the same cgroup. Reap it before the
+        // cgroup cleanup checks pids.current, otherwise its zombie can keep
+        // the group populated until this parent later calls wait().
+        let optimizer_result = self
+            .optimizer_child
+            .take()
+            .map(|mut optimizer| wait_for_optimizer_exit(&mut optimizer, self.cleanup_timeout))
+            .unwrap_or(Ok(()));
+        if optimizer_result.is_err() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
         let cgroup = self
             .cgroup
             .take()
@@ -297,25 +342,6 @@ impl RunningExecutor {
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
-        let optimizer_result = if let Some(mut optimizer) = self.optimizer_child.take() {
-            if result.is_err() {
-                let _ = optimizer.kill();
-            }
-            optimizer
-                .wait()
-                .map_err(SupervisorInvocationError::WorkerProcessIo)
-                .and_then(|status| {
-                    if status.success() {
-                        Ok(())
-                    } else {
-                        Err(SupervisorInvocationError::WorkerProcessIo(
-                            io::Error::other(format!("optimizer exited with status {status}")),
-                        ))
-                    }
-                })
-        } else {
-            Ok(())
-        };
         self.artifact_directory.take();
         match (primary_error, result, optimizer_result) {
             (Some(_), Err(error @ SupervisorInvocationError::WorkerCgroupIo(_)), _) => Err(error),
@@ -792,10 +818,35 @@ fn create_sealed_parameters(parameters: &[u8]) -> io::Result<File> {
 mod tests {
     use super::{
         PrivateArtifactDirectory, WorkerChannelPair, create_sealed_parameters, drain_result_stream,
+        wait_for_optimizer_exit,
     };
     use std::io::{self, Read, Seek, SeekFrom, Write};
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn optimizer_child_is_reaped_before_cgroup_cleanup() {
+        let mut successful = std::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        assert!(
+            wait_for_optimizer_exit(&mut successful, std::time::Duration::from_secs(1)).is_ok()
+        );
+
+        let mut stalled = std::process::Command::new("sh")
+            .args(["-c", "exec sleep 5"])
+            .spawn()
+            .unwrap();
+        let error = wait_for_optimizer_exit(&mut stalled, std::time::Duration::from_millis(20))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            crate::storage_manager::SupervisorInvocationError::WorkerProcessIo(ref error)
+                if error.kind() == io::ErrorKind::TimedOut
+        ));
+        assert!(stalled.try_wait().unwrap().is_some());
+    }
 
     #[test]
     fn staged_artifact_is_private_read_only_and_removed_on_drop() {

@@ -104,8 +104,9 @@
 
 - Behavior: a valid sealed TinyCC submission cannot enter storage admission when the configured cgroup parent is an ordinary directory. The real supervisor/gateway path returns the generic `unavailable` error, and a new authenticated connection sees the invocation as `unknown`.
 - Regression: the binary test uses its private temporary directory as the deliberately invalid cgroup parent, making the preflight failure deterministic without depending on host cgroup permissions. The artifact is never loaded.
-- Verification: the focused real-binary test passes alongside full workspace build/format/Clippy/tests and maintained TinyCC SDK tests. Two positive sandbox START tests remain ignored pending writable cgroup delegation.
-- Remaining: successful sandboxed START and terminal outcome relay remain gated on a conforming delegated-cgroup host.
+- Verification: the focused real-binary preflight test passes alongside full workspace build/format/Clippy/tests and maintained TinyCC SDK tests. Positive sandbox tests remain ignored in the default suite because they require writable cgroup delegation; the four delegated-cgroup acceptances are run explicitly as recorded below.
+- Verification update: the positive delegated-cgroup path is now exercised by the ignored SQL commit, SQL durable-abort, authenticated metadata TCP, and disconnected-submission gateway-restart acceptances. These confirm confined START plus terminal outcome relay and recovery on a provisioned Linux host. Full locked workspace build, format, warning-denied Clippy, serial tests, and maintained TinyCC tests pass.
+- Remaining: continue SDK and gateway process-boundary coverage for the separately managed client APIs and remaining protocol plan items.
 
 ## NP-6: authenticated ADMIN ordinary-index operations — implemented
 

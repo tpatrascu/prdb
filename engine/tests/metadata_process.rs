@@ -1228,7 +1228,8 @@ fn disconnected_submission_is_reconciled_after_gateway_restart()
     let artifact_path = root.join("query.so");
     std::fs::write(
         &source,
-        "#include \"prdb_query_abi_v3.h\"\n\
+        "#include <stddef.h>\n\
+         #include \"prdb_query_abi_v3.h\"\n\
          const prdb_query_descriptor_v3_record prdb_query_descriptor_v3 = {\n\
              sizeof(prdb_query_descriptor_v3_record), 3,\n\
              sizeof(prdb_host_api_v3), sizeof(prdb_invocation_v3)\n\

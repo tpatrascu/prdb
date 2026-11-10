@@ -454,6 +454,7 @@ static int32_t run_write_read_fixture(
     prdb_sdk_select_binding_v2 binding = {0};
     prdb_sdk_value_v1 cell_scratch[9] = {{0}};
     prdb_sdk_value_v1 parameter = {0};
+    prdb_sdk_value_v1 multi_insert_parameters[2] = {{0}};
     prdb_sdk_value_v1 metadata_parameter = {0};
     prdb_sdk_value_v1 records_table_parameter = {0};
     prdb_sdk_value_v1 records_metadata_parameters[2] = {{0}};
@@ -1211,9 +1212,11 @@ static int32_t run_write_read_fixture(
     multi_insert_values[0].state = PRDB_SDK_EXECUTOR_INSERT_VALUE;
     multi_insert_values[0].value = parameter;
     multi_insert_values[1] = multi_insert_values[0];
+    multi_insert_parameters[0] = parameter;
+    multi_insert_parameters[1] = parameter;
     status = prdb_sdk_sql_execute_insert_v2(
         host, schema, sizeof(schema) - 1, multi_insert_sql,
-        sizeof(multi_insert_sql) - 1, NULL, 0, planner_response,
+        sizeof(multi_insert_sql) - 1, multi_insert_parameters, 2, planner_response,
         sizeof(planner_response), executor_response,
         sizeof(executor_response), multi_insert_request,
         sizeof(multi_insert_request), planner_columns, 1, executor_columns,

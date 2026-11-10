@@ -124,7 +124,8 @@
 - Behavior: with a regular directory configured as the cgroup parent, the real binaries reject START with the sanitized `unavailable` error before storage admission; a fresh authenticated session reports `unknown` for the invocation.
 - Regression: covered in the TinyCC upload/status/cancel binary test. The fixture is compiled and sealed, then discarded without loading or execution.
 - Verification: the focused integration and full Rust/TinyCC validation pass. This proves the fail-closed boundary on an invalid host profile, not successful worker launch.
-- Remaining: successful cgroup provisioning, confinement installation, and execution still need a delegated-cgroup Linux host.
+- Verification update: successful cgroup provisioning, confinement installation, and execution now pass on a delegated-cgroup Linux host. The configured SQL commit, SQL durable-abort, authenticated metadata TCP, and disconnected-submission gateway-restart acceptances all ran through confined query execution. During acceptance, supervisor cleanup exposed an ordering bug: the optimizer child was still a zombie when cgroup emptiness was checked. The supervisor now waits for and reaps the optimizer before checking the worker cgroup, with bounded kill-and-reap handling on timeout. The dedicated optimizer reaping unit test and all four ignored process acceptances pass. Full locked workspace build, format check, warning-denied Clippy, serial workspace tests, and maintained TinyCC tests pass.
+- Remaining: continue process-level worker failure and resource cleanup coverage; broaden sandbox acceptance across the remaining SQL and cancellation behaviors.
 
 ## SU-5 / SM-6: metadata control reads across real service processes — verified
 
