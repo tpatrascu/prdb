@@ -14,6 +14,7 @@
 #include "prdb_sdk_sql_v14.h"
 #include "prdb_sdk_sql_v15.h"
 #include "prdb_sdk_sql_v16.h"
+#include "prdb_sdk_sql_v17.h"
 #include "prdb_sdk_sql_dml_v1.h"
 #include "prdb_sdk_sql_dml_v2.h"
 
@@ -5409,6 +5410,272 @@ int32_t prdb_sdk_sql_bind_select_v16(
         result.join_keys[index] =
             (prdb_sdk_sql_join_key_binding_v16){left_bound, right_bound};
     }
+    *out = result;
+    return PRDB_SDK_SQL_BIND_OK;
+}
+
+static int32_t parse_nonnegative_bigint_literal(parser *state, uint64_t *out) {
+    uint64_t value = 0;
+    if (state->current.kind != TOKEN_NUMBER) {
+        state->error_offset = state->current.offset;
+        return PRDB_SDK_SQL_SYNTAX_ERROR;
+    }
+    for (uint32_t index = 0; index < state->current.length; ++index) {
+        uint32_t digit =
+            (uint32_t)(state->sql[state->current.offset + index] - '0');
+        if (value > (UINT64_C(0x7fffffffffffffff) - digit) / 10) {
+            state->error_offset = state->current.offset;
+            return PRDB_SDK_SQL_LIMIT_EXCEEDED;
+        }
+        value = value * 10 + digit;
+    }
+    *out = value;
+    return PRDB_SDK_SQL_OK;
+}
+
+int32_t prdb_sdk_sql_parse_select_v17(const uint8_t *sql, uint64_t sql_len,
+                                      prdb_sdk_select_v17 *out,
+                                      uint32_t out_capacity,
+                                      uint32_t *error_offset_out) {
+    uint8_t base_sql[PRDB_SDK_SQL_MAX_QUERY_BYTES];
+    parser scan, having;
+    prdb_sdk_select_v17 result = {0};
+    token having_token = {TOKEN_END, 0, 0};
+    uint32_t group_by_end = 0, clause_end;
+    int saw_group = 0;
+    int32_t status;
+
+    if (error_offset_out != NULL) *error_offset_out = 0;
+    if (sql == NULL || out == NULL || out_capacity < sizeof(*out)) {
+        return PRDB_SDK_SQL_INVALID_ARGUMENT;
+    }
+    if (sql_len == 0) return PRDB_SDK_SQL_SYNTAX_ERROR;
+    if (sql_len > PRDB_SDK_SQL_MAX_QUERY_BYTES) {
+        if (error_offset_out != NULL) {
+            *error_offset_out = (uint32_t)PRDB_SDK_SQL_MAX_QUERY_BYTES;
+        }
+        return PRDB_SDK_SQL_LIMIT_EXCEEDED;
+    }
+
+    scan = (parser){sql, (uint32_t)sql_len, 0, {TOKEN_END, 0, 0}, 0,
+                    PRDB_SDK_SQL_OK};
+    status = advance(&scan);
+    if (status != PRDB_SDK_SQL_OK) goto failed_v17;
+    while (scan.current.kind != TOKEN_END &&
+           scan.current.kind != TOKEN_SEMICOLON) {
+        if (token_is_keyword(&scan, "GROUP")) {
+            saw_group = 1;
+        } else if (saw_group && token_is_keyword(&scan, "BY")) {
+            group_by_end = scan.current.offset + scan.current.length;
+            saw_group = 0;
+        } else {
+            saw_group = 0;
+        }
+        if (token_is_keyword(&scan, "HAVING")) {
+            if (having_token.kind != TOKEN_END) {
+                status = PRDB_SDK_SQL_SYNTAX_ERROR;
+                scan.error_offset = scan.current.offset;
+                goto failed_v17;
+            }
+            having_token = scan.current;
+        }
+        status = advance(&scan);
+        if (status != PRDB_SDK_SQL_OK) goto failed_v17;
+    }
+
+    if (having_token.kind == TOKEN_END) {
+        status = prdb_sdk_sql_parse_select_v15(
+            sql, sql_len, &result.base, sizeof(result.base), error_offset_out);
+        if (status != PRDB_SDK_SQL_OK) return status;
+        result.base.base.base.base.base.sql = sql;
+    } else {
+        if (group_by_end == 0 || having_token.offset < group_by_end) {
+            status = PRDB_SDK_SQL_SYNTAX_ERROR;
+            scan.error_offset = having_token.offset;
+            goto failed_v17;
+        }
+        memcpy(base_sql, sql, (size_t)sql_len);
+        clause_end = (uint32_t)sql_len;
+        having = (parser){sql, (uint32_t)sql_len,
+                          having_token.offset + having_token.length,
+                          {TOKEN_END, 0, 0}, 0, PRDB_SDK_SQL_OK};
+        status = advance(&having);
+        if (status != PRDB_SDK_SQL_OK) goto failed_having_v17;
+        while (having.current.kind != TOKEN_END &&
+               having.current.kind != TOKEN_SEMICOLON) {
+            if (token_is_keyword(&having, "ORDER") ||
+                token_is_keyword(&having, "LIMIT")) {
+                clause_end = having.current.offset;
+                break;
+            }
+            status = advance(&having);
+            if (status != PRDB_SDK_SQL_OK) goto failed_having_v17;
+        }
+        if (clause_end < having_token.offset) {
+            status = PRDB_SDK_SQL_SYNTAX_ERROR;
+            having.error_offset = having_token.offset;
+            goto failed_having_v17;
+        }
+        for (uint32_t index = having_token.offset; index < clause_end; ++index) {
+            base_sql[index] = ' ';
+        }
+        status = prdb_sdk_sql_parse_select_v15(
+            base_sql, sql_len, &result.base, sizeof(result.base),
+            error_offset_out);
+        if (status != PRDB_SDK_SQL_OK) return status;
+        result.base.base.base.base.base.sql = sql;
+
+        having = (parser){sql, (uint32_t)sql_len,
+                          having_token.offset + having_token.length,
+                          {TOKEN_END, 0, 0}, 0, PRDB_SDK_SQL_OK};
+        status = advance(&having);
+        if (status != PRDB_SDK_SQL_OK) goto failed_having_v17;
+        {
+            prdb_sdk_select_v7 *grouped =
+                &result.base.base.base.base;
+            uint32_t parsed_kind;
+            if (token_is_keyword(&having, "COUNT")) {
+                parsed_kind = PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR;
+            } else if (token_is_keyword(&having, "MIN")) {
+                parsed_kind = PRDB_SDK_SQL_V7_AGGREGATE_MIN;
+            } else if (token_is_keyword(&having, "MAX")) {
+                parsed_kind = PRDB_SDK_SQL_V7_AGGREGATE_MAX;
+            } else if (token_is_keyword(&having, "SUM")) {
+                parsed_kind = PRDB_SDK_SQL_V7_AGGREGATE_SUM;
+            } else if (token_is_keyword(&having, "AVG")) {
+                parsed_kind = PRDB_SDK_SQL_V7_AGGREGATE_AVG;
+            } else {
+                status = PRDB_SDK_SQL_SYNTAX_ERROR;
+                having.error_offset = having.current.offset;
+                goto failed_having_v17;
+            }
+            if (parsed_kind != grouped->aggregate_kind) {
+                status = PRDB_SDK_SQL_SYNTAX_ERROR;
+                having.error_offset = having.current.offset;
+                goto failed_having_v17;
+            }
+            status = advance(&having);
+            if (status != PRDB_SDK_SQL_OK ||
+                having.current.kind != TOKEN_LEFT_PAREN) {
+                status = status == PRDB_SDK_SQL_OK
+                             ? PRDB_SDK_SQL_SYNTAX_ERROR
+                             : status;
+                having.error_offset = having.current.offset;
+                goto failed_having_v17;
+            }
+            status = advance(&having);
+            if (status != PRDB_SDK_SQL_OK) goto failed_having_v17;
+            if (parsed_kind == PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR) {
+                if (having.current.kind != TOKEN_STAR) {
+                    status = PRDB_SDK_SQL_SYNTAX_ERROR;
+                    having.error_offset = having.current.offset;
+                    goto failed_having_v17;
+                }
+            } else if (having.current.kind != TOKEN_IDENTIFIER ||
+                       !span_matches_name(
+                           &grouped->base,
+                           grouped->aggregate_column,
+                           sql + having.current.offset,
+                           having.current.length)) {
+                status = PRDB_SDK_SQL_SYNTAX_ERROR;
+                having.error_offset = having.current.offset;
+                goto failed_having_v17;
+            }
+            status = advance(&having);
+            if (status != PRDB_SDK_SQL_OK ||
+                having.current.kind != TOKEN_RIGHT_PAREN) {
+                status = status == PRDB_SDK_SQL_OK
+                             ? PRDB_SDK_SQL_SYNTAX_ERROR
+                             : status;
+                having.error_offset = having.current.offset;
+                goto failed_having_v17;
+            }
+            status = advance(&having);
+            if (status != PRDB_SDK_SQL_OK) goto failed_having_v17;
+            status = comparison_code(having.current.kind,
+                                     &result.base.base.having_comparison);
+            if (status != PRDB_SDK_SQL_OK) {
+                having.error_offset = having.current.offset;
+                goto failed_having_v17;
+            }
+            status = advance(&having);
+            if (status != PRDB_SDK_SQL_OK) goto failed_having_v17;
+            if (having.current.kind == TOKEN_PARAMETER) {
+                status = parse_unsigned(
+                    &having, having.current,
+                    PRDB_SDK_SQL_MAX_PARAMETER_INDEX, 0,
+                    &result.base.base.having_parameter_index);
+                if (status != PRDB_SDK_SQL_OK) goto failed_having_v17;
+            } else {
+                status = parse_nonnegative_bigint_literal(
+                    &having, &result.having_literal);
+                if (status != PRDB_SDK_SQL_OK) goto failed_having_v17;
+                result.has_having_literal = 1;
+                /* The frozen v15 binder derives the selected aggregate type
+                 * through its existing parameter binding path. V17 replaces
+                 * this placeholder operand in the v17 runner. */
+                result.base.base.having_parameter_index = 1;
+            }
+            result.base.base.has_having = 1;
+            status = advance(&having);
+            if (status != PRDB_SDK_SQL_OK) goto failed_having_v17;
+            if (!token_is_keyword(&having, "ORDER") &&
+                !token_is_keyword(&having, "LIMIT") &&
+                having.current.kind != TOKEN_SEMICOLON &&
+                having.current.kind != TOKEN_END) {
+                status = PRDB_SDK_SQL_SYNTAX_ERROR;
+                having.error_offset = having.current.offset;
+                goto failed_having_v17;
+            }
+        }
+    }
+    result.struct_size = sizeof(result);
+    result.abi_version = PRDB_SDK_SQL_ABI_V17_VERSION;
+    *out = result;
+    return PRDB_SDK_SQL_OK;
+
+failed_having_v17:
+    if (error_offset_out != NULL) *error_offset_out = having.error_offset;
+    return fail_at(&having, status);
+failed_v17:
+    if (error_offset_out != NULL) *error_offset_out = scan.error_offset;
+    return fail_at(&scan, status);
+}
+
+int32_t prdb_sdk_sql_bind_select_v17(
+    const prdb_sdk_select_v17 *statement, const uint8_t *relation_name,
+    uint32_t relation_name_len,
+    const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count,
+    prdb_sdk_select_binding_v17 *out, uint32_t out_capacity) {
+    prdb_sdk_select_binding_v17 result = {0};
+    int32_t status;
+
+    if (statement == NULL || out == NULL || out_capacity < sizeof(*out)) {
+        return PRDB_SDK_SQL_BIND_INVALID_ARGUMENT;
+    }
+    if (statement->struct_size < sizeof(*statement) ||
+        statement->abi_version != PRDB_SDK_SQL_ABI_V17_VERSION ||
+        statement->has_having_literal > 1 ||
+        statement->having_literal > UINT64_C(0x7fffffffffffffff) ||
+        (statement->has_having_literal == 0 &&
+         statement->having_literal != 0) ||
+        (statement->has_having_literal == 1 &&
+         (statement->base.base.has_having != 1 ||
+          statement->base.base.having_parameter_index != 1))) {
+        return PRDB_SDK_SQL_BIND_INVALID_STATEMENT;
+    }
+    status = prdb_sdk_sql_bind_select_v15(
+        &statement->base, relation_name, relation_name_len, columns,
+        column_count, &result.base, sizeof(result.base));
+    if (status != PRDB_SDK_SQL_BIND_OK) return status;
+    if (statement->has_having_literal &&
+        result.base.base.having_type_code != PRDB_SDK_VALUE_TYPE_BIGINT) {
+        return PRDB_SDK_SQL_BIND_V17_LITERAL_TYPE_MISMATCH;
+    }
+    result.has_having_literal = statement->has_having_literal;
+    result.having_literal = statement->having_literal;
+    result.struct_size = sizeof(result);
+    result.abi_version = PRDB_SDK_SQL_ABI_V17_VERSION;
     *out = result;
     return PRDB_SDK_SQL_BIND_OK;
 }

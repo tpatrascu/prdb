@@ -387,6 +387,13 @@
 - Verification: `make -f engine/sdk/Makefile test` passed with TinyCC 0.9.27-unstable-2025-01-06. Locked workspace build, rustfmt check, warning-denied Clippy, and all workspace tests passed (128 commit tests passed; 3 cgroup-dependent tests ignored). `git diff --check` passed. This increment's cancellation and request ceiling are covered by the maintained TinyCC executor fixture; no separate sandboxed v16 cancellation acceptance was run.
 - Remaining: broader mixed-workload measurements, spill, and stress coverage of cancellation during long-running callbacks remain open.
 
+## SQL-7 dependency: v17 nonnegative BIGINT HAVING literal parser and binder — implemented
+
+- Contract: [SQL library](../../specs/sql-library.md). V17 preserves v15 composite GROUP BY, parameterized selected-aggregate HAVING, ORDER BY, and LIMIT, and accepts a nonnegative integer literal up to `INT64_MAX` as the HAVING comparison's right operand. Binding accepts it only when the selected aggregate result is BIGINT; earlier AST and binding versions remain unchanged.
+- Red/green evidence: the maintained v17 fixture first failed to link because the versioned parser and binder were absent. It now checks literal parsing with composite ORDER BY/LIMIT, parameter compatibility, overflow and negative rejection, aggregate-expression matching, v15 rejection, BIGINT type binding, Decimal-result rejection, malformed literal-bound rejection, and output preservation on binding failure.
+- Implementation: [`prdb_sdk_sql_v17.h`](../../engine/include/prdb_sdk_sql_v17.h) embeds the v15 records. The parser masks only the HAVING clause while reusing the frozen v15 parser for the rest of the statement, then validates the selected aggregate/comparison and records the literal. The binder reuses v15 schema/aggregate resolution and rejects non-BIGINT literals and tampered values above `INT64_MAX`.
+- Verification: the focused TinyCC fixture passed with `-Wall -Wextra -Werror` after a forced rebuild, proving the header dependency is included in the SDK build. This increment adds grammar and binding only; the bounded grouped runner still needs to supply literal values to aggregate comparison, and compound Boolean HAVING remains open.
+
 ## Confined SQL acceptance fixture corrections — verified
 
 - The delegated-cgroup SQL DML acceptance now exercises its multi-row `INSERT ... VALUES ($1), ($2)` with both bound values populated. Previously it passed a null/empty parameter array, so the fixture emitted its error marker instead of testing the intended successful DML sequence.
