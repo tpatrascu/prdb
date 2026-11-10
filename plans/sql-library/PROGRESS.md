@@ -399,7 +399,13 @@
 - Contract: [SQL library](../../specs/sql-library.md). Execute the v17 composite grouping query with either a nonnegative BIGINT literal or the unchanged v15 parameter operand; apply HAVING before composite ordering and LIMIT, and emit no callback for groups that fail the predicate.
 - Red/green evidence: the maintained grouped executor fixture initially failed to link because `prdb_sdk_sql_execute_group_v17` was absent. It now checks literal and parameter execution over a three-group input, verifies literal metadata in the v17 callback binding, observes only the qualifying SUM group, and confirms an overflowing literal fails before any scan or callback.
 - Implementation: [`prdb_sdk_sql_exec_v17.h`](../../engine/include/prdb_sdk_sql_exec_v17.h) exposes the runner with a v17 callback binding. The shared bounded v13-v15 grouped execution path now accepts v17 parse/bind mode and creates canonical big-endian BIGINT bytes for the literal, then reuses the existing aggregate comparison, stable ordering, LIMIT, cancellation, and output validation.
-- Verification: focused `sdk_sql_execute_v10` fixture passed after a forced full TinyCC rebuild; `make -f engine/sdk/Makefile test` and the locked Rust workspace build, format, warning-denied Clippy, and serial test suite passed. No confined v17 query artifact acceptance is added in this increment; compound Boolean HAVING and other literal types remain open.
+- Verification: focused `sdk_sql_execute_v10` fixture passed after a forced full TinyCC rebuild; `make -f engine/sdk/Makefile test` and the locked Rust workspace build, format, warning-denied Clippy, and serial test suite passed. Compound Boolean HAVING and other literal types remain open.
+
+## SQL-7 dependency: v17 literal HAVING confined acceptance — verified
+
+- Integration: the maintained `sql_v3_write_read.c` artifact executes a v17 composite `COUNT(*) >= 1` literal query in the confined executor, verifies the literal in the callback binding, and writes the ordered results through SQLR and gateway relay. The Rust acceptance checks the two exact frames and durable COMMITTED outcome alongside the existing v15 parameterized HAVING results.
+- Verification: `make -f engine/sdk/Makefile sandbox-query-fixture` compiled the artifacts with TinyCC and linked them with the maintained linker. `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` passed through the delegated cgroup, runtime allowlist, confined worker, result relay, and storage commit. The temporary delegated cgroup was removed after the run.
+- Remaining: compound Boolean HAVING, other literal types, and stress/measurement work remain open.
 
 ## Confined SQL acceptance fixture corrections — verified
 

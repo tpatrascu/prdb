@@ -22505,6 +22505,36 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         ]
         .concat()
     );
+    let grouped_composite_literal_first =
+        read_frame(&mut gateway)?.ok_or("missing first literal HAVING SQLR result")?;
+    assert_eq!(
+        grouped_composite_literal_first.payload,
+        [
+            b"SQLR".as_slice(),
+            &[
+                0, 1, 0, 3, 0, 8, b'l', b'e', b'f', b't', b'_', b'k', b'e', b'y', 0, 0, 0, 3, 0, 0,
+                0, 0, 0, 0, 4, 0, 0, 0, 2, 0, 9, b'r', b'i', b'g', b'h', b't', b'_', b'k', b'e',
+                b'y', 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 9, 0, 5, b'c', b'o', b'u', b'n',
+                b't', 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 1,
+            ][..],
+        ]
+        .concat()
+    );
+    let grouped_composite_literal_second =
+        read_frame(&mut gateway)?.ok_or("missing second literal HAVING SQLR result")?;
+    assert_eq!(
+        grouped_composite_literal_second.payload,
+        [
+            b"SQLR".as_slice(),
+            &[
+                0, 1, 0, 3, 0, 8, b'l', b'e', b'f', b't', b'_', b'k', b'e', b'y', 0, 0, 0, 3, 0, 0,
+                0, 0, 0, 0, 4, 0, 0, 0, 1, 0, 9, b'r', b'i', b'g', b'h', b't', b'_', b'k', b'e',
+                b'y', 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 7, 0, 5, b'c', b'o', b'u', b'n',
+                b't', 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 2,
+            ][..],
+        ]
+        .concat()
+    );
     let grouped_sum = read_frame(&mut gateway)?.ok_or("missing grouped SUM SQLR result")?;
     assert_eq!(grouped_sum.operation, Operation::GatewayResultData as u16);
     assert_eq!(grouped_sum.request_id, accepted.request_id);
