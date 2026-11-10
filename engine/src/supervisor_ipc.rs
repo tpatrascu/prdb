@@ -1408,57 +1408,26 @@ fn encode_active_status(
     deadline_at_us: Option<i64>,
     cancellation_requested: bool,
 ) -> Vec<u8> {
-    let (
-        mut payload,
-        observed_offset,
-        started_offset,
-        has_deadline_offset,
-        deadline_offset,
-        cancel_offset,
-    ) = if deadline_at_us.is_some() {
-        (vec![0; generated::SUPERVISOR_STATUS_ACTIVE_WITH_DEADLINE_RESPONSE_HEADER_BYTES as usize],
-             generated::SUPERVISOR_STATUS_ACTIVE_WITH_DEADLINE_RESPONSE_OBSERVED_AT_OFFSET,
-             generated::SUPERVISOR_STATUS_ACTIVE_WITH_DEADLINE_RESPONSE_STARTED_AT_OFFSET,
-             generated::SUPERVISOR_STATUS_ACTIVE_WITH_DEADLINE_RESPONSE_HAS_DEADLINE_OFFSET,
-             Some(generated::SUPERVISOR_STATUS_ACTIVE_WITH_DEADLINE_RESPONSE_DEADLINE_AT_OFFSET),
-             generated::SUPERVISOR_STATUS_ACTIVE_WITH_DEADLINE_RESPONSE_CANCELLATION_REQUESTED_OFFSET)
-    } else {
-        (
-            vec![0; generated::SUPERVISOR_STATUS_ACTIVE_NO_DEADLINE_RESPONSE_HEADER_BYTES as usize],
-            generated::SUPERVISOR_STATUS_ACTIVE_NO_DEADLINE_RESPONSE_OBSERVED_AT_OFFSET,
-            generated::SUPERVISOR_STATUS_ACTIVE_NO_DEADLINE_RESPONSE_STARTED_AT_OFFSET,
-            generated::SUPERVISOR_STATUS_ACTIVE_NO_DEADLINE_RESPONSE_HAS_DEADLINE_OFFSET,
-            None,
-            generated::SUPERVISOR_STATUS_ACTIVE_NO_DEADLINE_RESPONSE_CANCELLATION_REQUESTED_OFFSET,
+    if let Some(deadline_at_us) = deadline_at_us {
+        generated::encode_supervisor_status_active_with_deadline_response(
+            status,
+            observed_at_us,
+            started_at_us,
+            1,
+            deadline_at_us,
+            u8::from(cancellation_requested),
         )
-    };
-    let version_offset = if deadline_at_us.is_some() {
-        generated::SUPERVISOR_STATUS_ACTIVE_WITH_DEADLINE_RESPONSE_VERSION_OFFSET
+        .to_vec()
     } else {
-        generated::SUPERVISOR_STATUS_ACTIVE_NO_DEADLINE_RESPONSE_VERSION_OFFSET
-    } as usize;
-    let status_offset = if deadline_at_us.is_some() {
-        generated::SUPERVISOR_STATUS_ACTIVE_WITH_DEADLINE_RESPONSE_STATUS_OFFSET
-    } else {
-        generated::SUPERVISOR_STATUS_ACTIVE_NO_DEADLINE_RESPONSE_STATUS_OFFSET
-    } as usize;
-    payload[version_offset..version_offset + 2]
-        .copy_from_slice(&SUPERVISOR_PAYLOAD_VERSION.to_be_bytes());
-    payload[status_offset] = status;
-    for (offset, value) in [
-        (observed_offset, observed_at_us),
-        (started_offset, started_at_us),
-    ] {
-        let offset = offset as usize;
-        payload[offset..offset + 8].copy_from_slice(&value.to_be_bytes());
+        generated::encode_supervisor_status_active_no_deadline_response(
+            status,
+            observed_at_us,
+            started_at_us,
+            0,
+            u8::from(cancellation_requested),
+        )
+        .to_vec()
     }
-    payload[has_deadline_offset as usize] = u8::from(deadline_at_us.is_some());
-    if let (Some(offset), Some(deadline)) = (deadline_offset, deadline_at_us) {
-        let offset = offset as usize;
-        payload[offset..offset + 8].copy_from_slice(&deadline.to_be_bytes());
-    }
-    payload[cancel_offset as usize] = u8::from(cancellation_requested);
-    payload
 }
 
 #[cfg(test)]

@@ -274,6 +274,24 @@ pub const SUPERVISOR_STATUS_ACTIVE_NO_DEADLINE_RESPONSE_STARTED_AT_OFFSET: u32 =
 pub const SUPERVISOR_STATUS_ACTIVE_NO_DEADLINE_RESPONSE_HAS_DEADLINE_OFFSET: u32 = 19;
 pub const SUPERVISOR_STATUS_ACTIVE_NO_DEADLINE_RESPONSE_CANCELLATION_REQUESTED_OFFSET: u32 = 20;
 pub const SUPERVISOR_STATUS_ACTIVE_NO_DEADLINE_RESPONSE_HEADER_BYTES: u32 = 21;
+pub fn encode_supervisor_status_active_no_deadline_response(status: u8, observed_at: i64, started_at: i64, has_deadline: u8, cancellation_requested: u8) -> [u8; 21] {
+    let mut payload = [0u8; 21];
+    payload[0..2].copy_from_slice(&SUPERVISOR_PAYLOAD_VERSION.to_be_bytes());
+    payload[2] = status;
+    payload[3..11].copy_from_slice(&observed_at.to_be_bytes());
+    payload[11..19].copy_from_slice(&started_at.to_be_bytes());
+    payload[19] = has_deadline;
+    payload[20] = cancellation_requested;
+    payload
+}
+
+pub fn decode_supervisor_status_active_no_deadline_response(payload: &[u8]) -> Option<(u8, i64, i64, u8, u8)> {
+    if payload.len() != 21 || u16::from_be_bytes([payload[0], payload[1]]) != SUPERVISOR_PAYLOAD_VERSION {
+        return None;
+    }
+    Some((payload[2], i64::from_be_bytes(payload[3..11].try_into().ok()?), i64::from_be_bytes(payload[11..19].try_into().ok()?), payload[19], payload[20]))
+}
+
 pub const SUPERVISOR_STATUS_ACTIVE_WITH_DEADLINE_RESPONSE_VERSION_OFFSET: u32 = 0;
 pub const SUPERVISOR_STATUS_ACTIVE_WITH_DEADLINE_RESPONSE_STATUS_OFFSET: u32 = 2;
 pub const SUPERVISOR_STATUS_ACTIVE_WITH_DEADLINE_RESPONSE_OBSERVED_AT_OFFSET: u32 = 3;
@@ -282,6 +300,25 @@ pub const SUPERVISOR_STATUS_ACTIVE_WITH_DEADLINE_RESPONSE_HAS_DEADLINE_OFFSET: u
 pub const SUPERVISOR_STATUS_ACTIVE_WITH_DEADLINE_RESPONSE_DEADLINE_AT_OFFSET: u32 = 20;
 pub const SUPERVISOR_STATUS_ACTIVE_WITH_DEADLINE_RESPONSE_CANCELLATION_REQUESTED_OFFSET: u32 = 28;
 pub const SUPERVISOR_STATUS_ACTIVE_WITH_DEADLINE_RESPONSE_HEADER_BYTES: u32 = 29;
+pub fn encode_supervisor_status_active_with_deadline_response(status: u8, observed_at: i64, started_at: i64, has_deadline: u8, deadline_at: i64, cancellation_requested: u8) -> [u8; 29] {
+    let mut payload = [0u8; 29];
+    payload[0..2].copy_from_slice(&SUPERVISOR_PAYLOAD_VERSION.to_be_bytes());
+    payload[2] = status;
+    payload[3..11].copy_from_slice(&observed_at.to_be_bytes());
+    payload[11..19].copy_from_slice(&started_at.to_be_bytes());
+    payload[19] = has_deadline;
+    payload[20..28].copy_from_slice(&deadline_at.to_be_bytes());
+    payload[28] = cancellation_requested;
+    payload
+}
+
+pub fn decode_supervisor_status_active_with_deadline_response(payload: &[u8]) -> Option<(u8, i64, i64, u8, i64, u8)> {
+    if payload.len() != 29 || u16::from_be_bytes([payload[0], payload[1]]) != SUPERVISOR_PAYLOAD_VERSION {
+        return None;
+    }
+    Some((payload[2], i64::from_be_bytes(payload[3..11].try_into().ok()?), i64::from_be_bytes(payload[11..19].try_into().ok()?), payload[19], i64::from_be_bytes(payload[20..28].try_into().ok()?), payload[28]))
+}
+
 pub const SUPERVISOR_STATUS_TERMINAL_RESPONSE_VERSION_OFFSET: u32 = 0;
 pub const SUPERVISOR_STATUS_TERMINAL_RESPONSE_STATUS_OFFSET: u32 = 2;
 pub const SUPERVISOR_STATUS_TERMINAL_RESPONSE_OBSERVED_AT_OFFSET: u32 = 3;

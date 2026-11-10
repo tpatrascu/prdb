@@ -51,6 +51,28 @@ int main(void) {
     const uint8_t abort_expected[3] = {0x00, 0x01, 0x00};
     uint8_t abort_payload[3] = {0};
     uint8_t decoded_abort_status = 0;
+    const uint8_t active_no_deadline_expected[21] = {
+        0x00, 0x01, 0x01,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
+        0x00, 0x01,
+    };
+    const uint8_t active_with_deadline_expected[29] = {
+        0x00, 0x01, 0x02,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
+        0x01,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe,
+        0x00,
+    };
+    uint8_t active_no_deadline_payload[21] = {0};
+    uint8_t active_with_deadline_payload[29] = {0};
+    uint8_t decoded_active_status = 0;
+    int64_t decoded_active_observed_at = 0;
+    int64_t decoded_active_started_at = 0;
+    uint8_t decoded_has_deadline = 0;
+    int64_t decoded_active_deadline_at = 0;
+    uint8_t decoded_active_cancellation_requested = 0;
 
     prdb_encode_supervisor_invocation_control_request(payload, invocation_id);
     for (size_t i = 0; i < sizeof(expected); ++i) {
@@ -184,6 +206,42 @@ int main(void) {
             unknown_status_payload, sizeof(unknown_status_payload),
             &decoded_unknown_status) || decoded_unknown_status != 0) {
         return 21;
+    }
+    prdb_encode_supervisor_status_active_no_deadline_response(
+        active_no_deadline_payload, 1, -1, 3, 0, 1);
+    for (size_t i = 0; i < sizeof(active_no_deadline_expected); ++i) {
+        if (active_no_deadline_payload[i] != active_no_deadline_expected[i]) {
+            return 22;
+        }
+    }
+    if (!prdb_decode_supervisor_status_active_no_deadline_response(
+            active_no_deadline_payload, sizeof(active_no_deadline_payload),
+            &decoded_active_status, &decoded_active_observed_at,
+            &decoded_active_started_at, &decoded_has_deadline,
+            &decoded_active_cancellation_requested) ||
+        decoded_active_status != 1 || decoded_active_observed_at != -1 ||
+        decoded_active_started_at != 3 || decoded_has_deadline != 0 ||
+        decoded_active_cancellation_requested != 1) {
+        return 23;
+    }
+    prdb_encode_supervisor_status_active_with_deadline_response(
+        active_with_deadline_payload, 2, -1, 3, 1, -2, 0);
+    for (size_t i = 0; i < sizeof(active_with_deadline_expected); ++i) {
+        if (active_with_deadline_payload[i] != active_with_deadline_expected[i]) {
+            return 24;
+        }
+    }
+    if (!prdb_decode_supervisor_status_active_with_deadline_response(
+            active_with_deadline_payload, sizeof(active_with_deadline_payload),
+            &decoded_active_status, &decoded_active_observed_at,
+            &decoded_active_started_at, &decoded_has_deadline,
+            &decoded_active_deadline_at,
+            &decoded_active_cancellation_requested) ||
+        decoded_active_status != 2 || decoded_active_observed_at != -1 ||
+        decoded_active_started_at != 3 || decoded_has_deadline != 1 ||
+        decoded_active_deadline_at != -2 ||
+        decoded_active_cancellation_requested != 0) {
+        return 25;
     }
     return 0;
 }

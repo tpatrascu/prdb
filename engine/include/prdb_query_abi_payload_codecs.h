@@ -174,6 +174,152 @@ static inline int prdb_decode_supervisor_status_unknown_response(const uint8_t *
     return 1;
 }
 
+static inline void prdb_encode_supervisor_status_active_no_deadline_response(uint8_t payload[21],
+    uint8_t status, int64_t observed_at, int64_t started_at, uint8_t has_deadline, uint8_t cancellation_requested) {
+    payload[0] = (uint8_t)((PRDB_SUPERVISOR_PAYLOAD_VERSION >> 8) & 0xffu);
+    payload[1] = (uint8_t)(PRDB_SUPERVISOR_PAYLOAD_VERSION & 0xffu);
+    payload[2] = status;
+    uint64_t observed_at_wire = (uint64_t)observed_at;
+    for (size_t i = 0; i < 8; ++i) {
+        payload[3 + i] = (uint8_t)(observed_at_wire >> ((8 - 1 - i) * 8));
+    }
+    uint64_t started_at_wire = (uint64_t)started_at;
+    for (size_t i = 0; i < 8; ++i) {
+        payload[11 + i] = (uint8_t)(started_at_wire >> ((8 - 1 - i) * 8));
+    }
+    payload[19] = has_deadline;
+    payload[20] = cancellation_requested;
+}
+
+static inline int prdb_decode_supervisor_status_active_no_deadline_response(const uint8_t *payload, size_t payload_len,
+    uint8_t *status, int64_t *observed_at, int64_t *started_at, uint8_t *has_deadline, uint8_t *cancellation_requested) {
+    if (payload == NULL || payload_len != 21) {
+        return 0;
+    }
+    if (payload[0] != (uint8_t)((PRDB_SUPERVISOR_PAYLOAD_VERSION >> 8) & 0xffu) ||
+        payload[1] != (uint8_t)(PRDB_SUPERVISOR_PAYLOAD_VERSION & 0xffu)) {
+        return 0;
+    }
+    if (status == NULL) {
+        return 0;
+    }
+    *status = payload[2];
+    if (observed_at == NULL) {
+        return 0;
+    }
+    uint64_t observed_at_wire_value = 0;
+    for (size_t i = 0; i < 8; ++i) {
+        observed_at_wire_value = (observed_at_wire_value << 8) | payload[3 + i];
+    }
+    if (observed_at_wire_value <= (uint64_t)INT64_MAX) {
+        *observed_at = (int64_t)observed_at_wire_value;
+    } else {
+        *observed_at = -1 - (int64_t)(UINT64_MAX - observed_at_wire_value);
+    }
+    if (started_at == NULL) {
+        return 0;
+    }
+    uint64_t started_at_wire_value = 0;
+    for (size_t i = 0; i < 8; ++i) {
+        started_at_wire_value = (started_at_wire_value << 8) | payload[11 + i];
+    }
+    if (started_at_wire_value <= (uint64_t)INT64_MAX) {
+        *started_at = (int64_t)started_at_wire_value;
+    } else {
+        *started_at = -1 - (int64_t)(UINT64_MAX - started_at_wire_value);
+    }
+    if (has_deadline == NULL) {
+        return 0;
+    }
+    *has_deadline = payload[19];
+    if (cancellation_requested == NULL) {
+        return 0;
+    }
+    *cancellation_requested = payload[20];
+    return 1;
+}
+
+static inline void prdb_encode_supervisor_status_active_with_deadline_response(uint8_t payload[29],
+    uint8_t status, int64_t observed_at, int64_t started_at, uint8_t has_deadline, int64_t deadline_at, uint8_t cancellation_requested) {
+    payload[0] = (uint8_t)((PRDB_SUPERVISOR_PAYLOAD_VERSION >> 8) & 0xffu);
+    payload[1] = (uint8_t)(PRDB_SUPERVISOR_PAYLOAD_VERSION & 0xffu);
+    payload[2] = status;
+    uint64_t observed_at_wire = (uint64_t)observed_at;
+    for (size_t i = 0; i < 8; ++i) {
+        payload[3 + i] = (uint8_t)(observed_at_wire >> ((8 - 1 - i) * 8));
+    }
+    uint64_t started_at_wire = (uint64_t)started_at;
+    for (size_t i = 0; i < 8; ++i) {
+        payload[11 + i] = (uint8_t)(started_at_wire >> ((8 - 1 - i) * 8));
+    }
+    payload[19] = has_deadline;
+    uint64_t deadline_at_wire = (uint64_t)deadline_at;
+    for (size_t i = 0; i < 8; ++i) {
+        payload[20 + i] = (uint8_t)(deadline_at_wire >> ((8 - 1 - i) * 8));
+    }
+    payload[28] = cancellation_requested;
+}
+
+static inline int prdb_decode_supervisor_status_active_with_deadline_response(const uint8_t *payload, size_t payload_len,
+    uint8_t *status, int64_t *observed_at, int64_t *started_at, uint8_t *has_deadline, int64_t *deadline_at, uint8_t *cancellation_requested) {
+    if (payload == NULL || payload_len != 29) {
+        return 0;
+    }
+    if (payload[0] != (uint8_t)((PRDB_SUPERVISOR_PAYLOAD_VERSION >> 8) & 0xffu) ||
+        payload[1] != (uint8_t)(PRDB_SUPERVISOR_PAYLOAD_VERSION & 0xffu)) {
+        return 0;
+    }
+    if (status == NULL) {
+        return 0;
+    }
+    *status = payload[2];
+    if (observed_at == NULL) {
+        return 0;
+    }
+    uint64_t observed_at_wire_value = 0;
+    for (size_t i = 0; i < 8; ++i) {
+        observed_at_wire_value = (observed_at_wire_value << 8) | payload[3 + i];
+    }
+    if (observed_at_wire_value <= (uint64_t)INT64_MAX) {
+        *observed_at = (int64_t)observed_at_wire_value;
+    } else {
+        *observed_at = -1 - (int64_t)(UINT64_MAX - observed_at_wire_value);
+    }
+    if (started_at == NULL) {
+        return 0;
+    }
+    uint64_t started_at_wire_value = 0;
+    for (size_t i = 0; i < 8; ++i) {
+        started_at_wire_value = (started_at_wire_value << 8) | payload[11 + i];
+    }
+    if (started_at_wire_value <= (uint64_t)INT64_MAX) {
+        *started_at = (int64_t)started_at_wire_value;
+    } else {
+        *started_at = -1 - (int64_t)(UINT64_MAX - started_at_wire_value);
+    }
+    if (has_deadline == NULL) {
+        return 0;
+    }
+    *has_deadline = payload[19];
+    if (deadline_at == NULL) {
+        return 0;
+    }
+    uint64_t deadline_at_wire_value = 0;
+    for (size_t i = 0; i < 8; ++i) {
+        deadline_at_wire_value = (deadline_at_wire_value << 8) | payload[20 + i];
+    }
+    if (deadline_at_wire_value <= (uint64_t)INT64_MAX) {
+        *deadline_at = (int64_t)deadline_at_wire_value;
+    } else {
+        *deadline_at = -1 - (int64_t)(UINT64_MAX - deadline_at_wire_value);
+    }
+    if (cancellation_requested == NULL) {
+        return 0;
+    }
+    *cancellation_requested = payload[28];
+    return 1;
+}
+
 static inline void prdb_encode_supervisor_status_terminal_response(uint8_t payload[27],
     uint8_t status, int64_t observed_at, uint64_t commit_sequence, int64_t retention_deadline) {
     payload[0] = (uint8_t)((PRDB_SUPERVISOR_PAYLOAD_VERSION >> 8) & 0xffu);
