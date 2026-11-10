@@ -7596,6 +7596,57 @@ fn storage_manager_creates_named_unique_index_and_backfills_atomically()
     drop(index_record);
     drop(catalog);
     drop(read);
+
+    let mut old_value_prefix = created.index_id.to_vec();
+    old_value_prefix.extend(prdb_engine::index_key::encode_sql_tuple(
+        &schema.columns,
+        &[Some(ScalarValue::Bytea(b"one".to_vec()))],
+    )?);
+    let old_snapshot = prdb_engine::snapshot::RowSnapshot::new(database.begin_read()?);
+    let old_membership = old_snapshot.scan_index_prefix(&old_value_prefix, None, 8)?;
+    assert_eq!(old_membership.candidates.len(), 1);
+    assert_eq!(old_membership.candidates[0].locator.row_id, id(0xd3));
+
+    let mut update = storage.begin_invocation(id(0xe7), actor, 9_999, 1, 1024)?;
+    let update_schema = update.load_catalog_table_schema(id(82))?;
+    update.load_catalog_indexes(&update_schema)?;
+    let updated_tuple = encode_tuple(
+        &update_schema.columns,
+        update_schema.schema_version,
+        &[Some(ScalarValue::Bytea(b"changed".to_vec()))],
+    )?;
+    update.stage_put(
+        prdb_engine::overlay::RowId {
+            table: id(82),
+            row: id(0xd3),
+        },
+        &updated_tuple,
+    )?;
+    assert_eq!(update.commit()?, 4);
+
+    let current_snapshot = prdb_engine::snapshot::RowSnapshot::new(database.begin_read()?);
+    assert_eq!(
+        old_snapshot
+            .scan_index_prefix(&old_value_prefix, None, 8)?
+            .candidates[0]
+            .locator,
+        old_membership.candidates[0].locator
+    );
+    let current_old_membership = current_snapshot.scan_index_prefix(&old_value_prefix, None, 8)?;
+    assert!(current_old_membership.candidates.is_empty());
+    let mut new_value_prefix = created.index_id.to_vec();
+    new_value_prefix.extend(prdb_engine::index_key::encode_sql_tuple(
+        &schema.columns,
+        &[Some(ScalarValue::Bytea(b"changed".to_vec()))],
+    )?);
+    let current_new_membership = current_snapshot.scan_index_prefix(&new_value_prefix, None, 8)?;
+    assert_eq!(current_new_membership.candidates.len(), 1);
+    assert_eq!(
+        current_new_membership.candidates[0].locator.row_id,
+        id(0xd3)
+    );
+    assert_eq!(current_new_membership.candidates[0].locator.row_version, 4);
+
     let drop_invocation = id(0xd9);
     let mut drop_audit = identity_audit_event(0xda, actor, created.index_id);
     drop_audit.correlation_id = drop_invocation;
@@ -7609,7 +7660,7 @@ fn storage_manager_creates_named_unique_index_and_backfills_atomically()
         })
         .map_err(|error| format!("named unique index drop failed: {error:?}"))?;
     assert_eq!(dropped.index_id, created.index_id);
-    assert_eq!(dropped.commit_sequence, 4);
+    assert_eq!(dropped.commit_sequence, 5);
     assert_eq!(
         lookup_outcome(&database, drop_invocation, actor, 1)?
             .ok_or("missing named-index drop outcome")?
@@ -7680,7 +7731,7 @@ fn storage_manager_creates_named_unique_index_and_backfills_atomically()
             audit_event: policy_audit,
         })
         .map_err(|error| format!("row policy creation failed: {error:?}"))?;
-    assert_eq!(policy.commit_sequence, 5);
+    assert_eq!(policy.commit_sequence, 6);
     assert!(matches!(
         stale_policy_writer.commit(),
         Err(prdb_engine::transaction::TransactionError::Commit(
