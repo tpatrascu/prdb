@@ -312,6 +312,82 @@ fn packager_compiles_and_atomically_publishes_metadata_without_loading_query() {
     fs::remove_dir_all(temp).unwrap();
 }
 
+#[test]
+fn packager_validates_abi_v4_exports_on_the_maintained_optimizer_fixture() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let temp = unique_temp_dir();
+    fs::create_dir(&temp).unwrap();
+    let sdk_build = temp.join("sdk");
+    let scope = temp.join("scope.psc1");
+    let package = temp.join("package");
+    let mut scope_bytes = b"PSC1\0\x01\x02\x02".to_vec();
+    scope_bytes.extend([1; 16]);
+    fs::write(&scope, &scope_bytes).unwrap();
+
+    let build = Command::new("make")
+        .current_dir(&root)
+        .args([
+            "-f",
+            "engine/sdk/Makefile",
+            &format!("BUILD_DIR={}", sdk_build.display()),
+            "all",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let status = Command::new(env!("CARGO_BIN_EXE_prdb-packager"))
+        .arg("--source")
+        .arg(root.join("engine/tests/fixtures/sql_v3_write_read.c"))
+        .arg("--sdk-archive")
+        .arg(sdk_build.join("libprdb_sdk.a"))
+        .arg("--include-dir")
+        .arg(root.join("engine/include"))
+        .arg("--scope")
+        .arg(&scope)
+        .arg("--output-dir")
+        .arg(&package)
+        .args([
+            "--abi",
+            "4",
+            "--sdk-release",
+            "1",
+            "--cpu-baseline",
+            "x86_64-v1",
+            "--runtime-profile",
+            "test-runtime",
+            "--compiler-identity",
+            "TinyCC optimizer fixture test",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        status.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&status.stdout),
+        String::from_utf8_lossy(&status.stderr)
+    );
+
+    let manifest = decode_manifest_v1(&fs::read(package.join("manifest.pmf1")).unwrap())
+        .expect("decode maintained fixture manifest");
+    assert_eq!(manifest.native_abi_version, 4);
+    assert_eq!(manifest.descriptor_symbol, "prdb_query_descriptor_v4");
+    assert_eq!(manifest.entry_point_symbol, "prdb_query_main_v4");
+    assert!(fs::metadata(package.join("query.so")).unwrap().len() > 100_000);
+    assert_eq!(
+        fs::read(package.join("requested_scope.psc1")).unwrap(),
+        scope_bytes
+    );
+    fs::remove_dir_all(temp).unwrap();
+}
+
 fn read_client_frame(stream: &mut TcpStream, decoder: &mut ClientFrameDecoder) -> ClientFrame {
     let mut bytes = [0; 4096];
     loop {
