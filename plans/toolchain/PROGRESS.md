@@ -504,6 +504,14 @@
 - Verification: generator drift/schema tests, locked workspace build, rustfmt check, warning-denied Clippy, serial workspace tests, and the full maintained TinyCC SDK suite passed in the pinned Nix shell.
 - Remaining: migrate remaining hand-coded executor/planner/supervisor payload serializers and complete release profile and artifact gates.
 
+## TC-2: generated TinyCC planner relation-resolution request prefix — implemented
+
+- Contract: [internal IPC](../../specs/ipc-protocol.md) and [toolchain](../../specs/toolchain.md). Planner relation requests share the fixed version-and-two-length prefix followed by bounded schema and relation names.
+- Implementation: the TinyCC planner SDK now uses the generated C prefix encoder before appending its validated identifier bytes; Rust executor and optimizer paths already consume the same schema-generated prefix.
+- Regression: the maintained TinyCC planner fixture checks exact request bytes and lengths through its mock callback.
+- Verification: generator drift/schema tests, locked workspace build, rustfmt check, warning-denied Clippy, serial workspace tests, and the complete maintained TinyCC SDK suite passed in the pinned Nix shell.
+- Remaining: migrate remaining hand-coded executor/planner/supervisor payload serializers and complete release profile and artifact gates.
+
 ## TC-1: locked Nix development shell — implemented
 
 - Behavior: `nix develop --locked` provides the pinned x86_64-linux package set used for the engine and SDK checks. [`flake.nix`](../../flake.nix) and [`flake.lock`](../../flake.lock) pin Nixpkgs revision `718f670e845328e9c2cecdd832835712b2cbd065` with source NAR hash `sha256-Ee5BWo8sh3pGt70QUdRajnaginqFmWvrtdBc4gJzhks=`.

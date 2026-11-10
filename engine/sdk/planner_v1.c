@@ -310,18 +310,8 @@ int32_t prdb_sdk_planner_describe_relation_v1(
         columns == NULL || response_capacity > PRDB_SDK_PLANNER_MAX_RESPONSE_BYTES) {
         return PRDB_SDK_PLANNER_REQUEST_INVALID_ARGUMENT;
     }
-    request[PRDB_EXECUTOR_RESOLVE_RELATION_REQUEST_VERSION_OFFSET] =
-        (uint8_t)(PRDB_RESOLVE_RELATION_PAYLOAD_VERSION >> 8);
-    request[PRDB_EXECUTOR_RESOLVE_RELATION_REQUEST_VERSION_OFFSET + 1] =
-        (uint8_t)PRDB_RESOLVE_RELATION_PAYLOAD_VERSION;
-    request[PRDB_EXECUTOR_RESOLVE_RELATION_REQUEST_SCHEMA_NAME_LENGTH_OFFSET] =
-        (uint8_t)(schema_len >> 8);
-    request[PRDB_EXECUTOR_RESOLVE_RELATION_REQUEST_SCHEMA_NAME_LENGTH_OFFSET + 1] =
-        (uint8_t)schema_len;
-    request[PRDB_EXECUTOR_RESOLVE_RELATION_REQUEST_RELATION_NAME_LENGTH_OFFSET] =
-        (uint8_t)(relation_name_len >> 8);
-    request[PRDB_EXECUTOR_RESOLVE_RELATION_REQUEST_RELATION_NAME_LENGTH_OFFSET + 1] =
-        (uint8_t)relation_name_len;
+    prdb_encode_executor_resolve_relation_request(
+        request, (uint16_t)schema_len, (uint16_t)relation_name_len);
     memcpy(request + PRDB_EXECUTOR_RESOLVE_RELATION_REQUEST_HEADER_BYTES,
            schema, schema_len);
     memcpy(request + PRDB_EXECUTOR_RESOLVE_RELATION_REQUEST_HEADER_BYTES +
