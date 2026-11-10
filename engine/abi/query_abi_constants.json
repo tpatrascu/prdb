@@ -1421,6 +1421,8 @@
     {
       "name": "OPTIMIZER_RESPONSE_FAILURE",
       "version_constant": "OPTIMIZER_RESPONSE_VERSION",
+      "generate_rust_codec": true,
+      "generate_c_codec": true,
       "fields": [
         { "name": "version", "encoding": "u16be" },
         { "name": "status", "encoding": "u8" }

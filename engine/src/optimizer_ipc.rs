@@ -96,12 +96,7 @@ impl OptimizerResponse {
                 Err(OptimizerPayloadError::InvalidResponse)
             }
             (_, None) => {
-                let mut output = vec![0; OPTIMIZER_RESPONSE_HEADER_BYTES];
-                let version_offset = OPTIMIZER_RESPONSE_FAILURE_VERSION_OFFSET as usize;
-                output[version_offset..version_offset + 2]
-                    .copy_from_slice(&OPTIMIZER_RESPONSE_VERSION.to_be_bytes());
-                output[OPTIMIZER_RESPONSE_FAILURE_STATUS_OFFSET as usize] = self.status as u8;
-                Ok(output)
+                Ok(crate::query_abi::encode_optimizer_response_failure(self.status as u8).to_vec())
             }
         }
     }

@@ -166,6 +166,20 @@ pub const PLANNER_DESCRIBE_PLAN_RELATION_AVAILABLE_RESPONSE_HEADER_BYTES: u32 = 
 pub const OPTIMIZER_RESPONSE_FAILURE_VERSION_OFFSET: u32 = 0;
 pub const OPTIMIZER_RESPONSE_FAILURE_STATUS_OFFSET: u32 = 2;
 pub const OPTIMIZER_RESPONSE_FAILURE_HEADER_BYTES: u32 = 3;
+pub fn encode_optimizer_response_failure(status: u8) -> [u8; 3] {
+    let mut payload = [0u8; 3];
+    payload[0..2].copy_from_slice(&OPTIMIZER_RESPONSE_VERSION.to_be_bytes());
+    payload[2] = status;
+    payload
+}
+
+pub fn decode_optimizer_response_failure(payload: &[u8]) -> Option<u8> {
+    if payload.len() != 3 || u16::from_be_bytes([payload[0], payload[1]]) != OPTIMIZER_RESPONSE_VERSION {
+        return None;
+    }
+    Some(payload[2])
+}
+
 pub const OPTIMIZER_RESPONSE_SUCCESS_VERSION_OFFSET: u32 = 0;
 pub const OPTIMIZER_RESPONSE_SUCCESS_STATUS_OFFSET: u32 = 2;
 pub const OPTIMIZER_RESPONSE_SUCCESS_PLAN_LENGTH_OFFSET: u32 = 3;

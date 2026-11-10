@@ -286,6 +286,13 @@
 - Verification: generated-file drift and schema tests, locked workspace build, format check, warning-denied Clippy, serial workspace tests (129 commit tests passed; 3 cgroup-dependent tests ignored by default), and the maintained TinyCC SDK suite passed in the pinned Nix shell.
 - Remaining: extend generated C codec parity to other fixed payloads and define safe bounded helpers for collections and variable-length payloads; complete release profile and artifact gates.
 
+## TC-2: C/Rust optimizer failure response codec parity — verified
+
+- The shared schema generates the fixed optimizer failure response codec in Rust and C. Rust failure encoding now uses the generated helper; variable success-plan bytes remain length-bounded by their existing codec.
+- Regression: the existing optimizer response round-trip test still passes. The TinyCC fixture checks the three-byte independent example and typed status round trip; generator tests assert both C helpers.
+- Verification: generated-file drift and schema tests, locked workspace build, format check, warning-denied Clippy, serial workspace tests (129 commit tests passed; 3 cgroup-dependent tests ignored by default), and the maintained TinyCC SDK suite passed in the pinned Nix shell.
+- Remaining: add C parity for other suitable fixed IPC payloads and define safe bounded helpers for collections and variable-length payloads; complete release profile and artifact gates.
+
 ## TC-2: C/Rust administrative-cancel codec parity — verified
 
 - The C codec generator now also covers the administrative-cancel request with invocation ID and big-endian u16 reason code. Both the fixed 18-byte invocation-control request and 20-byte cancel request are emitted from the shared schema.

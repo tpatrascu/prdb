@@ -243,5 +243,20 @@ int main(void) {
         decoded_active_cancellation_requested != 0) {
         return 25;
     }
+    const uint8_t optimizer_failure_expected[3] = {0x00, 0x01, 0x04};
+    uint8_t optimizer_failure_payload[3] = {0};
+    uint8_t decoded_optimizer_failure_status = 0;
+    prdb_encode_optimizer_response_failure(optimizer_failure_payload, 4);
+    for (size_t i = 0; i < sizeof(optimizer_failure_expected); ++i) {
+        if (optimizer_failure_payload[i] != optimizer_failure_expected[i]) {
+            return 26;
+        }
+    }
+    if (!prdb_decode_optimizer_response_failure(
+            optimizer_failure_payload, sizeof(optimizer_failure_payload),
+            &decoded_optimizer_failure_status) ||
+        decoded_optimizer_failure_status != 4) {
+        return 27;
+    }
     return 0;
 }
