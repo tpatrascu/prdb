@@ -1,5 +1,13 @@
 # Toolchain Progress
 
+## TC-2: generated optimizer response variants — implemented
+
+- Contract: optimizer responses use a version/status failure header, or a success header with u32 plan length followed by validated plan bytes.
+- Implementation: the shared schema declares both variants and the raw byte tail. The Rust optimizer response codec consumes generated offsets and header sizes for both paths.
+- Regression: optimizer response tests pass for validated plans, statuses, malformed lengths, malformed status values, and invalid plans.
+- Verification: generator drift, focused optimizer codec tests, workspace build/format/warning-denied Clippy/serial tests, and full TinyCC SDK suite passed; 3 cgroup-dependent commit tests remain ignored by default.
+- Remaining: generate layouts/codecs for remaining executor/planner/supervisor payloads.
+
 ## TC-2: generated stable plan-relation response prefixes — implemented
 
 - Contract: optimizer metadata receives either version/status-only unavailability or a success prefix containing schema identity/version, table epoch, and relation identity before the variable relation description.

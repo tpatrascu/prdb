@@ -144,6 +144,7 @@ def render(schema):
                 or field_name in trailing_names
                 or encoding not in (
                     "utf8",
+                    "bytes",
                     "bytes16_array",
                     "u64_triplet_array",
                 )
@@ -155,6 +156,11 @@ def render(schema):
                 and fields_by_name[length_field].get("encoding") != "u16be"
             ):
                 raise ValueError(f"collection {field_name} must use a u16 count")
+            if (
+                encoding == "bytes"
+                and fields_by_name[length_field].get("encoding") != "u32be"
+            ):
+                raise ValueError(f"byte payload {field_name} must use a u32 length")
             trailing_names.add(field_name)
         header_name = f"{name}_HEADER_BYTES"
         c_header_name = f"PRDB_{header_name}"

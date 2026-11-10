@@ -4,9 +4,14 @@ use crate::optimizer_binding::{BindError, MetadataBindError};
 use crate::optimizer_plan::{MAX_PLAN_BYTES, decode_plan_v1};
 use crate::optimizer_request::{RequestError, SelectRequest, decode_select_request};
 use crate::optimizer_service::OptimizerError;
-pub use crate::query_abi::OPTIMIZER_RESPONSE_VERSION;
+pub use crate::query_abi::{
+    OPTIMIZER_RESPONSE_FAILURE_HEADER_BYTES, OPTIMIZER_RESPONSE_FAILURE_STATUS_OFFSET,
+    OPTIMIZER_RESPONSE_FAILURE_VERSION_OFFSET, OPTIMIZER_RESPONSE_SUCCESS_HEADER_BYTES,
+    OPTIMIZER_RESPONSE_SUCCESS_PLAN_LENGTH_OFFSET, OPTIMIZER_RESPONSE_SUCCESS_STATUS_OFFSET,
+    OPTIMIZER_RESPONSE_SUCCESS_VERSION_OFFSET, OPTIMIZER_RESPONSE_VERSION,
+};
 
-pub const OPTIMIZER_RESPONSE_HEADER_BYTES: usize = 3;
+pub const OPTIMIZER_RESPONSE_HEADER_BYTES: usize = OPTIMIZER_RESPONSE_FAILURE_HEADER_BYTES as usize;
 pub const MAX_OPTIMIZER_REQUESTS_PER_CONNECTION: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,37 +71,51 @@ impl OptimizerResponse {
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, OptimizerPayloadError> {
-        let mut output = Vec::with_capacity(OPTIMIZER_RESPONSE_HEADER_BYTES + 4 + 256);
-        output.extend_from_slice(&OPTIMIZER_RESPONSE_VERSION.to_be_bytes());
-        output.push(self.status as u8);
         match (&self.status, &self.plan) {
             (OptimizerStatus::Success, Some(plan)) => {
                 if plan.is_empty() || plan.len() > MAX_PLAN_BYTES {
                     return Err(OptimizerPayloadError::PlanTooLarge);
                 }
                 decode_plan_v1(plan).map_err(|_| OptimizerPayloadError::InvalidPlan)?;
-                output.extend_from_slice(
+                let mut output = vec![0; OPTIMIZER_RESPONSE_SUCCESS_HEADER_BYTES as usize];
+                let version_offset = OPTIMIZER_RESPONSE_SUCCESS_VERSION_OFFSET as usize;
+                output[version_offset..version_offset + 2]
+                    .copy_from_slice(&OPTIMIZER_RESPONSE_VERSION.to_be_bytes());
+                output[OPTIMIZER_RESPONSE_SUCCESS_STATUS_OFFSET as usize] =
+                    OptimizerStatus::Success as u8;
+                let length_offset = OPTIMIZER_RESPONSE_SUCCESS_PLAN_LENGTH_OFFSET as usize;
+                output[length_offset..length_offset + 4].copy_from_slice(
                     &u32::try_from(plan.len())
                         .map_err(|_| OptimizerPayloadError::PlanTooLarge)?
                         .to_be_bytes(),
                 );
                 output.extend_from_slice(plan);
+                Ok(output)
             }
             (OptimizerStatus::Success, None) | (_, Some(_)) => {
-                return Err(OptimizerPayloadError::InvalidResponse);
+                Err(OptimizerPayloadError::InvalidResponse)
             }
-            (_, None) => {}
+            (_, None) => {
+                let mut output = vec![0; OPTIMIZER_RESPONSE_HEADER_BYTES];
+                let version_offset = OPTIMIZER_RESPONSE_FAILURE_VERSION_OFFSET as usize;
+                output[version_offset..version_offset + 2]
+                    .copy_from_slice(&OPTIMIZER_RESPONSE_VERSION.to_be_bytes());
+                output[OPTIMIZER_RESPONSE_FAILURE_STATUS_OFFSET as usize] = self.status as u8;
+                Ok(output)
+            }
         }
-        Ok(output)
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, OptimizerPayloadError> {
         if bytes.len() < OPTIMIZER_RESPONSE_HEADER_BYTES
-            || u16::from_be_bytes([bytes[0], bytes[1]]) != OPTIMIZER_RESPONSE_VERSION
+            || u16::from_be_bytes([
+                bytes[OPTIMIZER_RESPONSE_FAILURE_VERSION_OFFSET as usize],
+                bytes[OPTIMIZER_RESPONSE_FAILURE_VERSION_OFFSET as usize + 1],
+            ]) != OPTIMIZER_RESPONSE_VERSION
         {
             return Err(OptimizerPayloadError::InvalidResponse);
         }
-        let status = match bytes[2] {
+        let status = match bytes[OPTIMIZER_RESPONSE_FAILURE_STATUS_OFFSET as usize] {
             0 => OptimizerStatus::Success,
             1 => OptimizerStatus::InvalidRequest,
             2 => OptimizerStatus::Unavailable,
@@ -110,18 +129,20 @@ impl OptimizerResponse {
             }
             return Ok(Self { status, plan: None });
         }
-        if bytes.len() < OPTIMIZER_RESPONSE_HEADER_BYTES + 4 {
+        if bytes.len() < OPTIMIZER_RESPONSE_SUCCESS_HEADER_BYTES as usize {
             return Err(OptimizerPayloadError::InvalidResponse);
         }
+        let length_offset = OPTIMIZER_RESPONSE_SUCCESS_PLAN_LENGTH_OFFSET as usize;
         let len = u32::from_be_bytes(
-            bytes[3..7]
+            bytes[length_offset..length_offset + 4]
                 .try_into()
                 .map_err(|_| OptimizerPayloadError::InvalidResponse)?,
         ) as usize;
-        if len == 0 || len > MAX_PLAN_BYTES || bytes.len() != 7 + len {
+        let header_bytes = OPTIMIZER_RESPONSE_SUCCESS_HEADER_BYTES as usize;
+        if len == 0 || len > MAX_PLAN_BYTES || bytes.len() != header_bytes + len {
             return Err(OptimizerPayloadError::InvalidResponse);
         }
-        let plan = bytes[7..].to_vec();
+        let plan = bytes[header_bytes..].to_vec();
         decode_plan_v1(&plan).map_err(|_| OptimizerPayloadError::InvalidPlan)?;
         Ok(Self {
             status,

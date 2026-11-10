@@ -1385,6 +1385,31 @@
         { "name": "relation_id", "encoding": "bytes16" }
       ],
       "trailing_fields": []
+    },
+    {
+      "name": "OPTIMIZER_RESPONSE_FAILURE",
+      "version_constant": "OPTIMIZER_RESPONSE_VERSION",
+      "fields": [
+        { "name": "version", "encoding": "u16be" },
+        { "name": "status", "encoding": "u8" }
+      ],
+      "trailing_fields": []
+    },
+    {
+      "name": "OPTIMIZER_RESPONSE_SUCCESS",
+      "version_constant": "OPTIMIZER_RESPONSE_VERSION",
+      "fields": [
+        { "name": "version", "encoding": "u16be" },
+        { "name": "status", "encoding": "u8" },
+        { "name": "plan_length", "encoding": "u32be" }
+      ],
+      "trailing_fields": [
+        {
+          "name": "plan",
+          "encoding": "bytes",
+          "length_field": "plan_length"
+        }
+      ]
     }
   ]
 }
