@@ -714,6 +714,13 @@
       "c_type": "UINT16_C"
     },
     {
+      "rust_name": "IPC_OP_RESOLVE_PLAN_RELATION",
+      "rust_type": "u16",
+      "value": 4357,
+      "c_name": "PRDB_IPC_OP_RESOLVE_PLAN_RELATION",
+      "c_type": "UINT16_C"
+    },
+    {
       "rust_name": "IPC_OP_OPEN_SCAN",
       "rust_type": "u16",
       "value": 4354,

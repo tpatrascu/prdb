@@ -5905,6 +5905,46 @@ impl<'db> InvocationTransaction<'db> {
     }
 }
 
+fn attach_plan_identity(
+    transaction: &mut InvocationTransaction<'_>,
+    schema_name: &str,
+    relation: AuthorizedRelationDescription,
+) -> Result<AuthorizedPlanRelation, TransactionError> {
+    if schema_name == "information_schema" {
+        return Ok(AuthorizedPlanRelation {
+            schema_id: crate::metadata_discovery::INFORMATION_SCHEMA_SCHEMA_ID,
+            schema_version: 1,
+            table_epoch: 1,
+            relation,
+        });
+    }
+    let schema = transaction.load_catalog_table_schema(relation.relation_id)?;
+    if schema.schema_id == [0; 16]
+        || schema.schema_version == 0
+        || schema.write_epoch == 0
+        || schema.column_ids.len() != relation.columns.len()
+        || schema.columns.len() != relation.columns.len()
+        || relation
+            .columns
+            .iter()
+            .enumerate()
+            .any(|(ordinal, column)| {
+                column.ordinal as usize != ordinal
+                    || column.column_id != schema.column_ids[ordinal]
+                    || column.scalar_type != schema.columns[ordinal].scalar_type
+                    || column.nullable != schema.columns[ordinal].nullable
+            })
+    {
+        return Err(TransactionError::CorruptCatalog);
+    }
+    Ok(AuthorizedPlanRelation {
+        schema_id: schema.schema_id,
+        schema_version: schema.schema_version,
+        table_epoch: schema.write_epoch,
+        relation,
+    })
+}
+
 impl ExecutorMetadataConnection<'_, '_> {
     /// Poll the invocation's cancellation and deadline state. Expired or
     /// cancelled invocations are aborted before returning `true`.
@@ -5956,6 +5996,23 @@ impl ExecutorMetadataConnection<'_, '_> {
             },
         );
         Ok(Some((handle, description)))
+    }
+
+    /// Re-resolve a plan's qualified relation name against this invocation's
+    /// pinned authorized catalog and return its stable logical identity. This
+    /// creates no executor handle or row-access capability.
+    pub fn describe_relation_for_plan(
+        &mut self,
+        schema_name: &str,
+        relation_name: &str,
+    ) -> Result<Option<AuthorizedPlanRelation>, TransactionError> {
+        let Some(relation) = self
+            .transaction
+            .resolve_catalog_authorized_relation(schema_name, relation_name)?
+        else {
+            return Ok(None);
+        };
+        attach_plan_identity(self.transaction, schema_name, relation).map(Some)
     }
 
     /// Re-resolve the saved qualified name against this connection's pinned
@@ -6719,7 +6776,7 @@ impl PlannerMetadataConnection<'_, '_> {
         let Some((handle, relation)) = self.resolve_relation(schema_name, relation_name)? else {
             return Ok(None);
         };
-        let identity = self.attach_plan_identity(schema_name, relation)?;
+        let identity = attach_plan_identity(self.transaction, schema_name, relation)?;
         Ok(Some((handle, identity)))
     }
 
@@ -6737,51 +6794,7 @@ impl PlannerMetadataConnection<'_, '_> {
         else {
             return Ok(None);
         };
-        self.attach_plan_identity(schema_name, relation).map(Some)
-    }
-
-    fn attach_plan_identity(
-        &mut self,
-        schema_name: &str,
-        relation: AuthorizedRelationDescription,
-    ) -> Result<AuthorizedPlanRelation, TransactionError> {
-        let identity = if schema_name == "information_schema" {
-            AuthorizedPlanRelation {
-                schema_id: crate::metadata_discovery::INFORMATION_SCHEMA_SCHEMA_ID,
-                schema_version: 1,
-                table_epoch: 1,
-                relation,
-            }
-        } else {
-            let schema = self
-                .transaction
-                .load_catalog_table_schema(relation.relation_id)?;
-            if schema.schema_id == [0; 16]
-                || schema.schema_version == 0
-                || schema.write_epoch == 0
-                || schema.column_ids.len() != relation.columns.len()
-                || schema.columns.len() != relation.columns.len()
-                || relation
-                    .columns
-                    .iter()
-                    .enumerate()
-                    .any(|(ordinal, column)| {
-                        column.ordinal as usize != ordinal
-                            || column.column_id != schema.column_ids[ordinal]
-                            || column.scalar_type != schema.columns[ordinal].scalar_type
-                            || column.nullable != schema.columns[ordinal].nullable
-                    })
-            {
-                return Err(TransactionError::CorruptCatalog);
-            }
-            AuthorizedPlanRelation {
-                schema_id: schema.schema_id,
-                schema_version: schema.schema_version,
-                table_epoch: schema.write_epoch,
-                relation,
-            }
-        };
-        Ok(identity)
+        attach_plan_identity(self.transaction, schema_name, relation).map(Some)
     }
 
     /// Revalidate the qualified name before returning its authorized schema.

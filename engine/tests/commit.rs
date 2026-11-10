@@ -26063,6 +26063,48 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
     })?;
     assert!(transaction.check_deadline().is_ok());
 
+    let (mut executor_client, mut executor_storage) = std::os::unix::net::UnixStream::pair()?;
+    std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+        let executor = scope.spawn(|| {
+            prdb_engine::executor_ipc::serve_executor(&mut executor_storage, &mut transaction)
+        });
+        for (request_id, relation_name) in [(1, "observations"), (2, "hidden_or_missing")] {
+            prdb_engine::ipc::write_frame(
+                &mut executor_client,
+                &IpcFrame {
+                    operation: IpcOperation::ResolvePlanRelation as u16,
+                    request_id,
+                    payload: ResolveRelationRequest {
+                        schema_name: "planner_stats".to_owned(),
+                        relation_name: relation_name.to_owned(),
+                    }
+                    .encode()?,
+                },
+            )?;
+            let response = prdb_engine::ipc::read_frame(&mut executor_client)?
+                .ok_or("executor stream closed before plan relation response")?;
+            let relation = DescribePlanRelationResponse::decode(&response.payload)?.relation;
+            if request_id == 1 {
+                let relation =
+                    relation.ok_or("executor did not re-resolve authorized plan relation")?;
+                assert_eq!(relation.schema_id, schema.schema_id);
+                assert_eq!(relation.schema_version, 1);
+                assert_eq!(relation.table_epoch, 2);
+                assert_eq!(relation.relation.relation_id, table.table_id);
+                assert_eq!(relation.relation.columns[0].column_id, table.column_ids[0]);
+            } else {
+                assert!(relation.is_none());
+            }
+        }
+        executor_client.shutdown(Shutdown::Write)?;
+        drop(executor_client);
+        executor
+            .join()
+            .expect("executor metadata server thread panicked")
+            .map_err(|error| format!("executor metadata server failed: {error:?}"))?;
+        Ok(())
+    })?;
+
     let mut optimizer_metadata_transaction =
         storage.begin_invocation(id(0x8b), actor, 9_999, 8, 512)?;
     let (optimizer_submission_worker, mut optimizer_client) =

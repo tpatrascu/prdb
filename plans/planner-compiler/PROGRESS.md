@@ -87,6 +87,13 @@
 - Verification: focused planner channel regression passed. Generated ABI consistency, locked workspace build, format, warning-denied Clippy, serial workspace tests, and `git diff --check` passed (129 commit integration tests passed; 3 cgroup-dependent tests ignored; 81 Rust unit tests passed).
 - Remaining: production process launch now gives the optimizer separate submission and planner metadata sockets; executor callback integration, executor-side re-resolution, and SDK interpretation remain.
 
+## OP-3 dependency: re-resolve stable plan identity through executor storage
+
+- Behavior: the executor independently checks a decoded plan's qualified relation against the same invocation-pinned authorized catalog and returns stable schema/table/column identities without creating a storage handle.
+- Implementation: executor operation `resolve_plan_relation` (`0x1105`) reuses the versioned qualified-name request and the planner `describe_plan_relation` response encoding. Shared identity assembly validates catalog schema metadata for both roles. Executor-role allowlisting permits the operation while planner-role use is rejected; a real-storage IPC regression verifies the pinned identity and that hidden/missing relations are indistinguishable.
+- Verification: focused real-storage executor IPC regression and operation-role test passed; formatting and generated ABI checks passed. Full workspace and TinyCC suite validation is pending for this increment.
+- Remaining: connect the C SDK to `0x1105`, compare all plan identity and scan-shape fields before resolving a scan capability, then interpret the validated operators.
+
 ## OP-3 dependency: launch and confine the optimizer with each invocation
 
 - Behavior: production START launches optimizer and executor as separate confined processes in one invocation cgroup. The optimizer receives only its submission and planner sockets; storage serves its planner socket alongside executor planner and storage channels. Either launch failure cleans up the other process and invocation resources.

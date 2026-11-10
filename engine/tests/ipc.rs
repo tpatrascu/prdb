@@ -177,6 +177,7 @@ fn ipc_operation_codes_are_fixed_and_unknown_codes_fail_closed() {
     assert_eq!(Operation::BootstrapDeliverCredential as u16, 0x0101);
     assert_eq!(Operation::BootstrapAcknowledgeDelivery as u16, 0x0102);
     assert_eq!(Operation::ResolveRelation as u16, 0x1101);
+    assert_eq!(Operation::ResolvePlanRelation as u16, 0x1105);
     assert_eq!(Operation::EstimateScan as u16, 0x1202);
     assert_eq!(Operation::CommitAdministrativeDdl as u16, 0x1501);
     assert_eq!(
@@ -224,6 +225,10 @@ fn ipc_operation_allowlists_separate_executor_planner_and_control_roles() {
         Ok(())
     );
     assert_eq!(
+        authorize_operation(ServiceRole::Executor, Operation::ResolvePlanRelation),
+        Ok(())
+    );
+    assert_eq!(
         authorize_operation(ServiceRole::Planner, Operation::EstimateScan),
         Ok(())
     );
@@ -261,6 +266,7 @@ fn ipc_operation_allowlists_separate_executor_planner_and_control_roles() {
         (ServiceRole::Executor, Operation::FinalizeTransaction),
         (ServiceRole::Executor, Operation::CommitAdministrativeDdl),
         (ServiceRole::Planner, Operation::OpenScan),
+        (ServiceRole::Planner, Operation::ResolvePlanRelation),
         (ServiceRole::Planner, Operation::OptimizeSelect),
         (
             ServiceRole::OptimizerSubmission,

@@ -38,6 +38,7 @@ pub enum Operation {
     BootstrapDeliverCredential = crate::query_abi::IPC_OP_BOOTSTRAP_DELIVER_CREDENTIAL,
     BootstrapAcknowledgeDelivery = crate::query_abi::IPC_OP_BOOTSTRAP_ACKNOWLEDGE_DELIVERY,
     ResolveRelation = crate::query_abi::IPC_OP_RESOLVE_RELATION,
+    ResolvePlanRelation = crate::query_abi::IPC_OP_RESOLVE_PLAN_RELATION,
     OpenScan = crate::query_abi::IPC_OP_OPEN_SCAN,
     NextBatch = crate::query_abi::IPC_OP_NEXT_BATCH,
     CloseCursor = crate::query_abi::IPC_OP_CLOSE_CURSOR,
@@ -84,6 +85,7 @@ impl Operation {
                 Ok(Self::BootstrapAcknowledgeDelivery)
             }
             crate::query_abi::IPC_OP_RESOLVE_RELATION => Ok(Self::ResolveRelation),
+            crate::query_abi::IPC_OP_RESOLVE_PLAN_RELATION => Ok(Self::ResolvePlanRelation),
             crate::query_abi::IPC_OP_OPEN_SCAN => Ok(Self::OpenScan),
             crate::query_abi::IPC_OP_NEXT_BATCH => Ok(Self::NextBatch),
             crate::query_abi::IPC_OP_CLOSE_CURSOR => Ok(Self::CloseCursor),
@@ -161,6 +163,7 @@ pub fn authorize_operation(role: ServiceRole, operation: Operation) -> Result<()
         ServiceRole::Executor => matches!(
             operation,
             Operation::ResolveRelation
+                | Operation::ResolvePlanRelation
                 | Operation::OpenScan
                 | Operation::NextBatch
                 | Operation::CloseCursor
