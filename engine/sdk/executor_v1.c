@@ -329,13 +329,15 @@ int32_t prdb_sdk_executor_stage_update_v1(
 int32_t prdb_sdk_executor_stage_delete_v1(
     const prdb_host_api_v2 *host, const uint8_t row_handle[16],
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len) {
-    uint8_t request[18];
+    uint8_t request[PRDB_EXECUTOR_STAGE_DELETE_REQUEST_HEADER_BYTES];
     int32_t status;
     if (row_handle == NULL || row_handle[0] != PRDB_SDK_BATCH_ROW_TOKEN_KIND) {
         return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
     }
-    write_u16(request, 1);
-    memcpy(request + 2, row_handle, 16);
+    write_u16(request + PRDB_EXECUTOR_STAGE_DELETE_REQUEST_VERSION_OFFSET,
+              PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION);
+    memcpy(request + PRDB_EXECUTOR_STAGE_DELETE_REQUEST_ROW_HANDLE_OFFSET,
+           row_handle, 16);
     status = invoke(host, PRDB_SDK_EXECUTOR_OP_STAGE_DELETE, request,
                     sizeof(request), response, response_capacity, response_len);
     if (status != PRDB_SDK_EXECUTOR_OK) return status;

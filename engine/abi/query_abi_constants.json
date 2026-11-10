@@ -1251,6 +1251,15 @@
         { "name": "max_bytes", "encoding": "u32be" }
       ],
       "trailing_fields": []
+    },
+    {
+      "name": "EXECUTOR_STAGE_DELETE_REQUEST",
+      "version_constant": "EXECUTOR_BATCH_PAYLOAD_VERSION",
+      "fields": [
+        { "name": "version", "encoding": "u16be" },
+        { "name": "row_handle", "encoding": "bytes16" }
+      ],
+      "trailing_fields": []
     }
   ]
 }
