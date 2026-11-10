@@ -334,15 +334,6 @@ int32_t prdb_sdk_optimizer_encode_select_with_parameters_v1(
         request_capacity, request_len);
 }
 
-static uint16_t read_u16(const uint8_t *bytes) {
-    return (uint16_t)(((uint16_t)bytes[0] << 8) | bytes[1]);
-}
-
-static uint32_t read_u32(const uint8_t *bytes) {
-    return ((uint32_t)bytes[0] << 24) | ((uint32_t)bytes[1] << 16) |
-           ((uint32_t)bytes[2] << 8) | (uint32_t)bytes[3];
-}
-
 static int ranges_overlap(const void *left, uint64_t left_len,
                           const void *right, uint64_t right_len) {
     uintptr_t left_start = (uintptr_t)left;
@@ -374,10 +365,6 @@ int32_t prdb_sdk_optimizer_decode_response_v1(
         ranges_overlap(payload, payload_len, out, sizeof(*out))) {
         return PRDB_SDK_OPTIMIZER_RESULT_INVALID_ARGUMENT;
     }
-    if (read_u16(payload) != PRDB_SDK_OPTIMIZER_RESPONSE_V1_VERSION) {
-        return PRDB_SDK_OPTIMIZER_RESULT_INVALID_RESPONSE;
-    }
-
     decoded.struct_size = sizeof(decoded);
     decoded.abi_version = PRDB_SDK_OPTIMIZER_ABI_V1_VERSION;
     decoded.status = payload[2];
@@ -387,16 +374,21 @@ int32_t prdb_sdk_optimizer_decode_response_v1(
         return PRDB_SDK_OPTIMIZER_RESULT_INVALID_RESPONSE;
     }
     if (decoded.status != PRDB_SDK_OPTIMIZER_STATUS_SUCCESS) {
-        if (payload_len != 3) {
+        uint8_t response_status;
+        if (!prdb_decode_optimizer_response_failure(
+                payload, (size_t)payload_len, &response_status) ||
+            response_status != decoded.status) {
             return PRDB_SDK_OPTIMIZER_RESULT_INVALID_RESPONSE;
         }
         *out = decoded;
         return PRDB_SDK_OPTIMIZER_RESULT_OK;
     }
-    if (payload_len < 7) {
+    uint8_t response_status;
+    if (!prdb_decode_optimizer_response_success(
+            payload, (size_t)payload_len, &response_status, &plan_len) ||
+        response_status != decoded.status) {
         return PRDB_SDK_OPTIMIZER_RESULT_INVALID_RESPONSE;
     }
-    plan_len = read_u32(payload + 3);
     if (plan_len == 0 || plan_len > PRDB_SDK_OPTIMIZER_MAX_PLAN_BYTES ||
         payload_len != (uint64_t)7 + plan_len) {
         return PRDB_SDK_OPTIMIZER_RESULT_INVALID_RESPONSE;
