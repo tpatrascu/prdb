@@ -139,19 +139,20 @@ int32_t prdb_sdk_executor_next_batch_v1(
     uint16_t max_candidates, uint32_t max_bytes, uint8_t *response,
     uint64_t response_capacity, uint64_t *response_len,
     prdb_sdk_batch_v1 *batch, uint32_t batch_out_capacity) {
-    uint8_t request[24];
+    uint8_t request[PRDB_EXECUTOR_NEXT_BATCH_REQUEST_HEADER_BYTES];
     int32_t status;
     if (cursor == NULL || cursor[0] != 7 || max_candidates == 0 ||
         max_candidates > PRDB_SDK_BATCH_MAX_ROWS || max_bytes < 8 ||
         max_bytes > PRDB_SDK_BATCH_MAX_BYTES || batch == NULL ||
         batch_out_capacity < sizeof(*batch)) return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
-    write_u16(request, 1);
-    memcpy(request + 2, cursor, 16);
-    write_u16(request + 18, max_candidates);
-    request[20] = (uint8_t)(max_bytes >> 24);
-    request[21] = (uint8_t)(max_bytes >> 16);
-    request[22] = (uint8_t)(max_bytes >> 8);
-    request[23] = (uint8_t)max_bytes;
+    write_u16(request + PRDB_EXECUTOR_NEXT_BATCH_REQUEST_VERSION_OFFSET,
+              PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION);
+    memcpy(request + PRDB_EXECUTOR_NEXT_BATCH_REQUEST_CURSOR_HANDLE_OFFSET,
+           cursor, 16);
+    write_u16(request + PRDB_EXECUTOR_NEXT_BATCH_REQUEST_MAX_SCANNED_OFFSET,
+              max_candidates);
+    write_u32(request + PRDB_EXECUTOR_NEXT_BATCH_REQUEST_MAX_BYTES_OFFSET,
+              max_bytes);
     status = invoke(host, PRDB_SDK_EXECUTOR_OP_NEXT_BATCH, request, sizeof(request),
                     response, response_capacity, response_len);
     if (status != PRDB_SDK_EXECUTOR_OK) return status;

@@ -1,5 +1,13 @@
 # Toolchain Progress
 
+## TC-2: generated executor next-batch request schema — implemented
+
+- Contract: [internal IPC](../../specs/ipc-protocol.md) defines the next-batch request as version, opaque cursor handle, scan limit, and byte limit.
+- Implementation: the shared schema now describes the fixed-width request fields, including the 32-bit byte limit. Rust and TinyCC encoders use generated offsets and header size.
+- Regression: the Rust relation socket-loop regression and maintained TinyCC executor fixture exercise the request encoding.
+- Verification: generator drift, workspace build/format/warning-denied Clippy, serial Rust tests (129 commit tests passed; 3 cgroup-dependent tests ignored), and the full TinyCC SDK suite passed.
+- Remaining: generate layouts for remaining executor/planner/supervisor payloads and serialization helpers.
+
 ## TC-2: generated executor close-cursor payload schema — implemented
 
 - Contract: [internal IPC](../../specs/ipc-protocol.md) defines close-cursor as version plus opaque cursor handle and a version/status acknowledgement.

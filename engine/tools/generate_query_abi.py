@@ -89,7 +89,7 @@ def render(schema):
         payload_names.add(name)
         field_names = set()
         offset = 0
-        field_widths = {"u8": 1, "u16be": 2, "bytes16": 16}
+        field_widths = {"u8": 1, "u16be": 2, "u32be": 4, "bytes16": 16}
         for field in fields:
             field_name = field.get("name")
             if (

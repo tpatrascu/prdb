@@ -10,10 +10,13 @@ pub use crate::query_abi::{
     EXECUTOR_BATCH_PAYLOAD_VERSION, EXECUTOR_MUTATION_ACKNOWLEDGEMENT_HEADER_BYTES,
     EXECUTOR_MUTATION_ACKNOWLEDGEMENT_STATUS_OFFSET,
     EXECUTOR_MUTATION_ACKNOWLEDGEMENT_VERSION_OFFSET,
-    EXECUTOR_OPEN_SCAN_REQUEST_COLUMN_COUNT_OFFSET, EXECUTOR_OPEN_SCAN_REQUEST_HEADER_BYTES,
-    EXECUTOR_OPEN_SCAN_REQUEST_RELATION_HANDLE_OFFSET, EXECUTOR_OPEN_SCAN_REQUEST_VERSION_OFFSET,
-    EXECUTOR_OPEN_SCAN_RESPONSE_CURSOR_HANDLE_OFFSET, EXECUTOR_OPEN_SCAN_RESPONSE_HEADER_BYTES,
-    EXECUTOR_OPEN_SCAN_RESPONSE_VERSION_OFFSET, EXECUTOR_RESOLVE_RELATION_REQUEST_HEADER_BYTES,
+    EXECUTOR_NEXT_BATCH_REQUEST_CURSOR_HANDLE_OFFSET, EXECUTOR_NEXT_BATCH_REQUEST_HEADER_BYTES,
+    EXECUTOR_NEXT_BATCH_REQUEST_MAX_BYTES_OFFSET, EXECUTOR_NEXT_BATCH_REQUEST_MAX_SCANNED_OFFSET,
+    EXECUTOR_NEXT_BATCH_REQUEST_VERSION_OFFSET, EXECUTOR_OPEN_SCAN_REQUEST_COLUMN_COUNT_OFFSET,
+    EXECUTOR_OPEN_SCAN_REQUEST_HEADER_BYTES, EXECUTOR_OPEN_SCAN_REQUEST_RELATION_HANDLE_OFFSET,
+    EXECUTOR_OPEN_SCAN_REQUEST_VERSION_OFFSET, EXECUTOR_OPEN_SCAN_RESPONSE_CURSOR_HANDLE_OFFSET,
+    EXECUTOR_OPEN_SCAN_RESPONSE_HEADER_BYTES, EXECUTOR_OPEN_SCAN_RESPONSE_VERSION_OFFSET,
+    EXECUTOR_RESOLVE_RELATION_REQUEST_HEADER_BYTES,
     EXECUTOR_RESOLVE_RELATION_REQUEST_RELATION_NAME_LENGTH_OFFSET,
     EXECUTOR_RESOLVE_RELATION_REQUEST_SCHEMA_NAME_LENGTH_OFFSET,
     EXECUTOR_RESOLVE_RELATION_REQUEST_VERSION_OFFSET, RESOLVE_RELATION_PAYLOAD_VERSION,
@@ -314,24 +317,40 @@ pub struct NextBatchRequest {
 impl NextBatchRequest {
     pub fn encode(&self) -> Result<Vec<u8>, ExecutorRequestError> {
         validate_batch_limits(self.max_scanned, self.max_bytes)?;
-        let mut payload = EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes().to_vec();
-        payload.extend_from_slice(&self.cursor.to_bytes());
-        payload.extend_from_slice(&self.max_scanned.to_be_bytes());
-        payload.extend_from_slice(&self.max_bytes.to_be_bytes());
+        let mut payload = vec![0; EXECUTOR_NEXT_BATCH_REQUEST_HEADER_BYTES as usize];
+        let version_offset = EXECUTOR_NEXT_BATCH_REQUEST_VERSION_OFFSET as usize;
+        payload[version_offset..version_offset + 2]
+            .copy_from_slice(&EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes());
+        let cursor_offset = EXECUTOR_NEXT_BATCH_REQUEST_CURSOR_HANDLE_OFFSET as usize;
+        payload[cursor_offset..cursor_offset + 16].copy_from_slice(&self.cursor.to_bytes());
+        let scanned_offset = EXECUTOR_NEXT_BATCH_REQUEST_MAX_SCANNED_OFFSET as usize;
+        payload[scanned_offset..scanned_offset + 2]
+            .copy_from_slice(&self.max_scanned.to_be_bytes());
+        let bytes_offset = EXECUTOR_NEXT_BATCH_REQUEST_MAX_BYTES_OFFSET as usize;
+        payload[bytes_offset..bytes_offset + 4].copy_from_slice(&self.max_bytes.to_be_bytes());
         Ok(payload)
     }
 
     pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
-        if payload.len() != 24
-            || u16::from_be_bytes([payload[0], payload[1]]) != EXECUTOR_BATCH_PAYLOAD_VERSION
+        let version_offset = EXECUTOR_NEXT_BATCH_REQUEST_VERSION_OFFSET as usize;
+        let cursor_offset = EXECUTOR_NEXT_BATCH_REQUEST_CURSOR_HANDLE_OFFSET as usize;
+        let scanned_offset = EXECUTOR_NEXT_BATCH_REQUEST_MAX_SCANNED_OFFSET as usize;
+        let bytes_offset = EXECUTOR_NEXT_BATCH_REQUEST_MAX_BYTES_OFFSET as usize;
+        if payload.len() != EXECUTOR_NEXT_BATCH_REQUEST_HEADER_BYTES as usize
+            || u16::from_be_bytes([payload[version_offset], payload[version_offset + 1]])
+                != EXECUTOR_BATCH_PAYLOAD_VERSION
         {
             return Err(ExecutorRequestError::InvalidPayload);
         }
         let request = Self {
-            cursor: ExecutorScanCursor::from_bytes(&payload[2..18])
+            cursor: ExecutorScanCursor::from_bytes(&payload[cursor_offset..cursor_offset + 16])
                 .ok_or(ExecutorRequestError::InvalidPayload)?,
-            max_scanned: u16::from_be_bytes([payload[18], payload[19]]),
-            max_bytes: u32::from_be_bytes(payload[20..24].try_into().expect("fixed payload")),
+            max_scanned: u16::from_be_bytes([payload[scanned_offset], payload[scanned_offset + 1]]),
+            max_bytes: u32::from_be_bytes(
+                payload[bytes_offset..bytes_offset + 4]
+                    .try_into()
+                    .expect("fixed payload"),
+            ),
         };
         validate_batch_limits(request.max_scanned, request.max_bytes)?;
         Ok(request)

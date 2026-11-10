@@ -1240,6 +1240,17 @@
         { "name": "status", "encoding": "u8" }
       ],
       "trailing_fields": []
+    },
+    {
+      "name": "EXECUTOR_NEXT_BATCH_REQUEST",
+      "version_constant": "EXECUTOR_BATCH_PAYLOAD_VERSION",
+      "fields": [
+        { "name": "version", "encoding": "u16be" },
+        { "name": "cursor_handle", "encoding": "bytes16" },
+        { "name": "max_scanned", "encoding": "u16be" },
+        { "name": "max_bytes", "encoding": "u32be" }
+      ],
+      "trailing_fields": []
     }
   ]
 }
