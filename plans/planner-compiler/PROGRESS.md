@@ -90,9 +90,10 @@
 ## OP-3 dependency: re-resolve stable plan identity through executor storage
 
 - Behavior: the executor independently checks a decoded plan's qualified relation against the same invocation-pinned authorized catalog and returns stable schema/table/column identities without creating a storage handle.
-- Implementation: executor operation `resolve_plan_relation` (`0x1105`) reuses the versioned qualified-name request and the planner `describe_plan_relation` response encoding. Shared identity assembly validates catalog schema metadata for both roles. Executor-role allowlisting permits the operation while planner-role use is rejected; a real-storage IPC regression verifies the pinned identity and that hidden/missing relations are indistinguishable.
-- Verification: focused real-storage executor IPC regression and operation-role test passed; formatting and generated ABI checks passed. Full workspace and TinyCC suite validation is pending for this increment.
-- Remaining: connect the C SDK to `0x1105`, compare all plan identity and scan-shape fields before resolving a scan capability, then interpret the validated operators.
+- Implementation: executor operation `resolve_plan_relation` (`0x1105`) reuses the versioned qualified-name request and the planner `describe_plan_relation` response encoding. Shared identity assembly validates catalog schema metadata for both roles. Executor-role allowlisting permits the operation while planner-role use is rejected; a real-storage IPC regression verifies the pinned identity and that hidden/missing relations are indistinguishable. C helper `prdb_sdk_optimizer_validate_executor_relation_v1` re-decodes the full plan, requests this metadata, and checks all stable identities plus each scanned column's ID, ordinal, type parameters, and nullability.
+- Regression: TinyCC fixture checks successful identity matching, stale epoch rejection, scanned column ID mismatch, unavailable relation, and undersized response handling.
+- Verification: Rust workspace and TinyCC suite passed for the preceding IPC increment. The current C helper's focused fixture passed; full workspace/TinyCC validation and diff checks are pending for this increment.
+- Remaining: resolve the executor scan capability only after identity match, then interpret the validated operators.
 
 ## OP-3 dependency: launch and confine the optimizer with each invocation
 

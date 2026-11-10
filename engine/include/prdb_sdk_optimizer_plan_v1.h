@@ -11,6 +11,10 @@
 #define PRDB_SDK_OPTIMIZER_PLAN_INVALID_ARGUMENT INT32_C(1)
 #define PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD INT32_C(2)
 #define PRDB_SDK_OPTIMIZER_PLAN_UNSUPPORTED INT32_C(3)
+#define PRDB_SDK_OPTIMIZER_PLAN_UNAVAILABLE INT32_C(4)
+#define PRDB_SDK_OPTIMIZER_PLAN_IDENTITY_MISMATCH INT32_C(5)
+#define PRDB_SDK_OPTIMIZER_PLAN_CALLBACK_ERROR INT32_C(6)
+#define PRDB_SDK_OPTIMIZER_PLAN_RESPONSE_TOO_SMALL INT32_C(7)
 
 /* Plan names borrow the encoded payload. Column arrays are owned by this
  * output record and contain stable catalog IDs, never executor handles. */
@@ -68,5 +72,13 @@ int32_t prdb_sdk_optimizer_decode_plan_with_filter_v1(
     const uint8_t *payload, uint64_t payload_len,
     prdb_sdk_optimizer_plan_v1 *out, uint32_t out_capacity,
     prdb_sdk_optimizer_filter_v1 *filter_out, uint32_t filter_out_capacity);
+
+/* Re-resolve a validated plan's qualified relation through executor storage
+ * and require its stable identity and scanned column definitions to match.
+ * The response buffer remains caller-owned. No executor handle is returned. */
+int32_t prdb_sdk_optimizer_validate_executor_relation_v1(
+    const prdb_host_api_v2 *host, const uint8_t *plan_payload,
+    uint64_t plan_payload_len, uint8_t *response,
+    uint64_t response_capacity, uint64_t *response_len);
 
 #endif /* PRDB_SDK_OPTIMIZER_PLAN_V1_H */

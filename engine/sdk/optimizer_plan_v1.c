@@ -483,3 +483,168 @@ int32_t prdb_sdk_optimizer_decode_plan_with_filter_v1(
     return decode_plan_internal(payload, payload_len, out, out_capacity,
                                 filter_out, filter_out_capacity, 1);
 }
+
+static uint16_t response_u16(const uint8_t *bytes, uint64_t offset) {
+    return (uint16_t)(((uint16_t)bytes[offset] << 8) | bytes[offset + 1]);
+}
+
+static uint32_t response_u32(const uint8_t *bytes, uint64_t offset) {
+    return ((uint32_t)bytes[offset] << 24) |
+           ((uint32_t)bytes[offset + 1] << 16) |
+           ((uint32_t)bytes[offset + 2] << 8) | bytes[offset + 3];
+}
+
+static uint64_t response_u64(const uint8_t *bytes, uint64_t offset) {
+    return ((uint64_t)response_u32(bytes, offset) << 32) |
+           response_u32(bytes, offset + 4);
+}
+
+static int response_identifier(const uint8_t *bytes, uint32_t length) {
+    return valid_identifier(bytes, length);
+}
+
+int32_t prdb_sdk_optimizer_validate_executor_relation_v1(
+    const prdb_host_api_v2 *host, const uint8_t *plan_payload,
+    uint64_t plan_payload_len, uint8_t *response,
+    uint64_t response_capacity, uint64_t *response_len) {
+    prdb_sdk_optimizer_plan_v1 plan = {0};
+    prdb_sdk_optimizer_filter_v1 filter = {0};
+    uint8_t request[6 + 2 * 63];
+    uint64_t offset;
+    uint32_t schema_len;
+    uint32_t relation_len;
+    uint32_t column_count;
+    uint32_t scan_index = 0;
+    int32_t callback_status;
+    int32_t plan_status;
+
+    if (host == NULL || host->struct_size < sizeof(*host) ||
+        host->abi_version != PRDB_QUERY_ABI_V2_VERSION ||
+        host->executor_request == NULL || plan_payload == NULL ||
+        response == NULL || response_len == NULL ||
+        response_capacity > PRDB_QUERY_MAX_IPC_RESPONSE_BYTES ||
+        response_capacity < 3 ||
+        plan_payload_len > PRDB_SDK_OPTIMIZER_MAX_PLAN_BYTES ||
+        ranges_overlap(plan_payload, plan_payload_len, response,
+                       response_capacity)) {
+        return PRDB_SDK_OPTIMIZER_PLAN_INVALID_ARGUMENT;
+    }
+    plan_status = prdb_sdk_optimizer_decode_plan_with_filter_v1(
+        plan_payload, plan_payload_len, &plan, sizeof(plan), &filter,
+        sizeof(filter));
+    if (plan_status != PRDB_SDK_OPTIMIZER_PLAN_OK) return plan_status;
+
+    schema_len = plan.schema_name_len;
+    relation_len = plan.relation_name_len;
+    request[0] = 0;
+    request[1] = 1;
+    request[2] = (uint8_t)(schema_len >> 8);
+    request[3] = (uint8_t)schema_len;
+    request[4] = (uint8_t)(relation_len >> 8);
+    request[5] = (uint8_t)relation_len;
+    memcpy(request + 6, plan.schema_name, schema_len);
+    memcpy(request + 6 + schema_len, plan.relation_name, relation_len);
+    *response_len = 0;
+    callback_status = host->executor_request(
+        host->context, PRDB_IPC_OP_RESOLVE_PLAN_RELATION, request,
+        6 + schema_len + relation_len, response, response_capacity,
+        response_len);
+    if (callback_status == PRDB_QUERY_CALLBACK_RESPONSE_TOO_SMALL) {
+        return PRDB_SDK_OPTIMIZER_PLAN_RESPONSE_TOO_SMALL;
+    }
+    if (callback_status != PRDB_QUERY_CALLBACK_OK ||
+        *response_len > response_capacity || *response_len < 3) {
+        return PRDB_SDK_OPTIMIZER_PLAN_CALLBACK_ERROR;
+    }
+    if (response_u16(response, 0) != 1) {
+        return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
+    }
+    if (response[2] == 1 && *response_len == 3) {
+        return PRDB_SDK_OPTIMIZER_PLAN_UNAVAILABLE;
+    }
+    if (response[2] != 0 || *response_len < 55) {
+        return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
+    }
+    if (memcmp(response + 3, plan.schema_id, 16) != 0 ||
+        response_u64(response, 19) != plan.schema_version ||
+        response_u64(response, 27) != plan.table_epoch ||
+        memcmp(response + 35, plan.relation_id, 16) != 0) {
+        return PRDB_SDK_OPTIMIZER_PLAN_IDENTITY_MISMATCH;
+    }
+    offset = 51;
+    if (offset + 2 > *response_len) {
+        return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
+    }
+    relation_len = response_u16(response, offset);
+    offset += 2;
+    if (relation_len == 0 || relation_len > 63 ||
+        offset + relation_len + 2 > *response_len ||
+        !response_identifier(response + offset, relation_len)) {
+        return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
+    }
+    if (relation_len != plan.relation_name_len ||
+        memcmp(response + offset, plan.relation_name, relation_len) != 0) {
+        return PRDB_SDK_OPTIMIZER_PLAN_IDENTITY_MISMATCH;
+    }
+    offset += relation_len;
+    column_count = response_u16(response, offset);
+    offset += 2;
+    if (column_count == 0 || column_count > 4096) {
+        return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
+    }
+    for (uint32_t ordinal = 0; ordinal < column_count; ++ordinal) {
+        uint32_t column_ordinal;
+        uint8_t nullable;
+        uint8_t type_code;
+        const uint8_t *column_id;
+        const uint8_t *parameters;
+        uint32_t column_name_len;
+        if (offset + 28 > *response_len) {
+            return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
+        }
+        column_id = response + offset;
+        if (all_zero(column_id, 16)) {
+            return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
+        }
+        offset += 16;
+        column_ordinal = response_u32(response, offset);
+        offset += 4;
+        nullable = response[offset++];
+        type_code = response[offset++];
+        parameters = response + offset;
+        offset += 4;
+        if (column_ordinal != ordinal || nullable > 1 ||
+            !valid_type(type_code, parameters) || offset + 2 > *response_len) {
+            return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
+        }
+        column_name_len = response_u16(response, offset);
+        offset += 2;
+        if (column_name_len == 0 || column_name_len > 63 ||
+            offset + column_name_len > *response_len ||
+            !response_identifier(response + offset, column_name_len)) {
+            return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
+        }
+        offset += column_name_len;
+        if (scan_index < plan.scan_column_count &&
+            plan.scan_columns[scan_index].ordinal < ordinal) {
+            return PRDB_SDK_OPTIMIZER_PLAN_IDENTITY_MISMATCH;
+        }
+        if (scan_index < plan.scan_column_count &&
+            plan.scan_columns[scan_index].ordinal == ordinal) {
+            const prdb_sdk_optimizer_plan_column_v1 *expected =
+                &plan.scan_columns[scan_index++];
+            if (memcmp(column_id, expected->column_id, 16) != 0 ||
+                type_code != expected->type_code || nullable != expected->nullable ||
+                memcmp(parameters, expected->type_parameters, 4) != 0) {
+                return PRDB_SDK_OPTIMIZER_PLAN_IDENTITY_MISMATCH;
+            }
+        }
+    }
+    if (offset != *response_len) {
+        return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
+    }
+    if (scan_index != plan.scan_column_count) {
+        return PRDB_SDK_OPTIMIZER_PLAN_IDENTITY_MISMATCH;
+    }
+    return PRDB_SDK_OPTIMIZER_PLAN_OK;
+}
