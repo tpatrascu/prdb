@@ -116,6 +116,7 @@ def render(schema):
             "u16be": 2,
             "u32be": 4,
             "u64be": 8,
+            "i64be": 8,
             "bytes16": 16,
         }
         for field in fields:

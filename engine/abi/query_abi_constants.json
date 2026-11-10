@@ -1474,6 +1474,54 @@
         { "name": "retention_deadline", "encoding": "u64be" }
       ],
       "trailing_fields": []
+    },
+    {
+      "name": "SUPERVISOR_STATUS_UNKNOWN_RESPONSE",
+      "version_constant": "SUPERVISOR_PAYLOAD_VERSION",
+      "fields": [
+        { "name": "version", "encoding": "u16be" },
+        { "name": "status", "encoding": "u8" }
+      ],
+      "trailing_fields": []
+    },
+    {
+      "name": "SUPERVISOR_STATUS_ACTIVE_NO_DEADLINE_RESPONSE",
+      "version_constant": "SUPERVISOR_PAYLOAD_VERSION",
+      "fields": [
+        { "name": "version", "encoding": "u16be" },
+        { "name": "status", "encoding": "u8" },
+        { "name": "observed_at", "encoding": "i64be" },
+        { "name": "started_at", "encoding": "i64be" },
+        { "name": "has_deadline", "encoding": "u8" },
+        { "name": "cancellation_requested", "encoding": "u8" }
+      ],
+      "trailing_fields": []
+    },
+    {
+      "name": "SUPERVISOR_STATUS_ACTIVE_WITH_DEADLINE_RESPONSE",
+      "version_constant": "SUPERVISOR_PAYLOAD_VERSION",
+      "fields": [
+        { "name": "version", "encoding": "u16be" },
+        { "name": "status", "encoding": "u8" },
+        { "name": "observed_at", "encoding": "i64be" },
+        { "name": "started_at", "encoding": "i64be" },
+        { "name": "has_deadline", "encoding": "u8" },
+        { "name": "deadline_at", "encoding": "i64be" },
+        { "name": "cancellation_requested", "encoding": "u8" }
+      ],
+      "trailing_fields": []
+    },
+    {
+      "name": "SUPERVISOR_STATUS_TERMINAL_RESPONSE",
+      "version_constant": "SUPERVISOR_PAYLOAD_VERSION",
+      "fields": [
+        { "name": "version", "encoding": "u16be" },
+        { "name": "status", "encoding": "u8" },
+        { "name": "observed_at", "encoding": "i64be" },
+        { "name": "commit_sequence", "encoding": "u64be" },
+        { "name": "retention_deadline", "encoding": "i64be" }
+      ],
+      "trailing_fields": []
     }
   ]
 }

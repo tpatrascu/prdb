@@ -3,6 +3,7 @@
 use crate::audit::{AuditAction, AuditEvent, AuditResult};
 use crate::ipc::{DispatchError, IpcFrame, Operation, ServiceRole, authorize_operation};
 use crate::outcome::OutcomeStatus;
+use crate::query_abi as generated;
 pub use crate::query_abi::{
     SUPERVISOR_ADMIN_CANCEL_REQUEST_HEADER_BYTES,
     SUPERVISOR_ADMIN_CANCEL_REQUEST_INVOCATION_ID_OFFSET,
@@ -1390,9 +1391,13 @@ fn encode_cancellation_result(result: AdministrativeCancellationResult) -> Vec<u
 fn encode_supervisor_status(
     snapshot: Option<&crate::storage_manager::InvocationStatusSnapshot>,
 ) -> Result<Vec<u8>, SupervisorRequestError> {
-    let mut payload = SUPERVISOR_PAYLOAD_VERSION.to_be_bytes().to_vec();
     let Some(snapshot) = snapshot else {
-        payload.push(0); // Unknown or not owned by this principal.
+        let mut payload =
+            vec![0; generated::SUPERVISOR_STATUS_UNKNOWN_RESPONSE_HEADER_BYTES as usize];
+        let version_offset = generated::SUPERVISOR_STATUS_UNKNOWN_RESPONSE_VERSION_OFFSET as usize;
+        payload[version_offset..version_offset + 2]
+            .copy_from_slice(&SUPERVISOR_PAYLOAD_VERSION.to_be_bytes());
+        payload[generated::SUPERVISOR_STATUS_UNKNOWN_RESPONSE_STATUS_OFFSET as usize] = 0;
         return Ok(payload);
     };
     match &snapshot.status {
@@ -1400,55 +1405,178 @@ fn encode_supervisor_status(
             started_at_us,
             deadline_at_us,
             cancellation_requested,
-        } => encode_active_status(
-            &mut payload,
+        } => Ok(encode_active_status(
             1,
             snapshot.observed_at_us,
             *started_at_us,
             *deadline_at_us,
             *cancellation_requested,
-        ),
+        )),
         InvocationStatus::Committing {
             started_at_us,
             deadline_at_us,
             cancellation_requested,
-        } => encode_active_status(
-            &mut payload,
+        } => Ok(encode_active_status(
             2,
             snapshot.observed_at_us,
             *started_at_us,
             *deadline_at_us,
             *cancellation_requested,
-        ),
+        )),
         InvocationStatus::Terminal(outcome) => {
-            payload.push(match outcome.status {
-                OutcomeStatus::Committed => 3,
-                OutcomeStatus::Aborted => 4,
-            });
-            payload.extend_from_slice(&snapshot.observed_at_us.to_be_bytes());
-            payload.extend_from_slice(&outcome.commit_sequence.to_be_bytes());
-            payload.extend_from_slice(&outcome.retention_deadline_us.to_be_bytes());
+            let mut payload =
+                vec![0; generated::SUPERVISOR_STATUS_TERMINAL_RESPONSE_HEADER_BYTES as usize];
+            payload[generated::SUPERVISOR_STATUS_TERMINAL_RESPONSE_VERSION_OFFSET as usize
+                ..generated::SUPERVISOR_STATUS_TERMINAL_RESPONSE_VERSION_OFFSET as usize + 2]
+                .copy_from_slice(&SUPERVISOR_PAYLOAD_VERSION.to_be_bytes());
+            payload[generated::SUPERVISOR_STATUS_TERMINAL_RESPONSE_STATUS_OFFSET as usize] =
+                match outcome.status {
+                    OutcomeStatus::Committed => 3,
+                    OutcomeStatus::Aborted => 4,
+                };
+            let observed =
+                generated::SUPERVISOR_STATUS_TERMINAL_RESPONSE_OBSERVED_AT_OFFSET as usize;
+            payload[observed..observed + 8].copy_from_slice(&snapshot.observed_at_us.to_be_bytes());
+            let sequence =
+                generated::SUPERVISOR_STATUS_TERMINAL_RESPONSE_COMMIT_SEQUENCE_OFFSET as usize;
+            payload[sequence..sequence + 8].copy_from_slice(&outcome.commit_sequence.to_be_bytes());
+            let deadline =
+                generated::SUPERVISOR_STATUS_TERMINAL_RESPONSE_RETENTION_DEADLINE_OFFSET as usize;
+            payload[deadline..deadline + 8]
+                .copy_from_slice(&outcome.retention_deadline_us.to_be_bytes());
+            Ok(payload)
         }
     }
-    Ok(payload)
 }
 
 fn encode_active_status(
-    payload: &mut Vec<u8>,
     status: u8,
     observed_at_us: i64,
     started_at_us: i64,
     deadline_at_us: Option<i64>,
     cancellation_requested: bool,
-) {
-    payload.push(status);
-    payload.extend_from_slice(&observed_at_us.to_be_bytes());
-    payload.extend_from_slice(&started_at_us.to_be_bytes());
-    payload.push(u8::from(deadline_at_us.is_some()));
-    if let Some(deadline_at_us) = deadline_at_us {
-        payload.extend_from_slice(&deadline_at_us.to_be_bytes());
+) -> Vec<u8> {
+    let (
+        mut payload,
+        observed_offset,
+        started_offset,
+        has_deadline_offset,
+        deadline_offset,
+        cancel_offset,
+    ) = if deadline_at_us.is_some() {
+        (vec![0; generated::SUPERVISOR_STATUS_ACTIVE_WITH_DEADLINE_RESPONSE_HEADER_BYTES as usize],
+             generated::SUPERVISOR_STATUS_ACTIVE_WITH_DEADLINE_RESPONSE_OBSERVED_AT_OFFSET,
+             generated::SUPERVISOR_STATUS_ACTIVE_WITH_DEADLINE_RESPONSE_STARTED_AT_OFFSET,
+             generated::SUPERVISOR_STATUS_ACTIVE_WITH_DEADLINE_RESPONSE_HAS_DEADLINE_OFFSET,
+             Some(generated::SUPERVISOR_STATUS_ACTIVE_WITH_DEADLINE_RESPONSE_DEADLINE_AT_OFFSET),
+             generated::SUPERVISOR_STATUS_ACTIVE_WITH_DEADLINE_RESPONSE_CANCELLATION_REQUESTED_OFFSET)
+    } else {
+        (
+            vec![0; generated::SUPERVISOR_STATUS_ACTIVE_NO_DEADLINE_RESPONSE_HEADER_BYTES as usize],
+            generated::SUPERVISOR_STATUS_ACTIVE_NO_DEADLINE_RESPONSE_OBSERVED_AT_OFFSET,
+            generated::SUPERVISOR_STATUS_ACTIVE_NO_DEADLINE_RESPONSE_STARTED_AT_OFFSET,
+            generated::SUPERVISOR_STATUS_ACTIVE_NO_DEADLINE_RESPONSE_HAS_DEADLINE_OFFSET,
+            None,
+            generated::SUPERVISOR_STATUS_ACTIVE_NO_DEADLINE_RESPONSE_CANCELLATION_REQUESTED_OFFSET,
+        )
+    };
+    let version_offset = if deadline_at_us.is_some() {
+        generated::SUPERVISOR_STATUS_ACTIVE_WITH_DEADLINE_RESPONSE_VERSION_OFFSET
+    } else {
+        generated::SUPERVISOR_STATUS_ACTIVE_NO_DEADLINE_RESPONSE_VERSION_OFFSET
+    } as usize;
+    let status_offset = if deadline_at_us.is_some() {
+        generated::SUPERVISOR_STATUS_ACTIVE_WITH_DEADLINE_RESPONSE_STATUS_OFFSET
+    } else {
+        generated::SUPERVISOR_STATUS_ACTIVE_NO_DEADLINE_RESPONSE_STATUS_OFFSET
+    } as usize;
+    payload[version_offset..version_offset + 2]
+        .copy_from_slice(&SUPERVISOR_PAYLOAD_VERSION.to_be_bytes());
+    payload[status_offset] = status;
+    for (offset, value) in [
+        (observed_offset, observed_at_us),
+        (started_offset, started_at_us),
+    ] {
+        let offset = offset as usize;
+        payload[offset..offset + 8].copy_from_slice(&value.to_be_bytes());
     }
-    payload.push(u8::from(cancellation_requested));
+    payload[has_deadline_offset as usize] = u8::from(deadline_at_us.is_some());
+    if let (Some(offset), Some(deadline)) = (deadline_offset, deadline_at_us) {
+        let offset = offset as usize;
+        payload[offset..offset + 8].copy_from_slice(&deadline.to_be_bytes());
+    }
+    payload[cancel_offset as usize] = u8::from(cancellation_requested);
+    payload
+}
+
+#[cfg(test)]
+mod status_wire_tests {
+    use super::encode_supervisor_status;
+    use crate::outcome::{InvocationOutcome, OutcomeStatus};
+    use crate::storage_manager::{
+        InvocationStatus, InvocationStatusConsistency, InvocationStatusSnapshot,
+    };
+
+    fn snapshot(observed_at_us: i64, status: InvocationStatus) -> InvocationStatusSnapshot {
+        InvocationStatusSnapshot {
+            observed_at_us,
+            consistency: InvocationStatusConsistency::BestEffort,
+            status,
+        }
+    }
+
+    #[test]
+    fn supervisor_status_variants_match_wire_bytes() {
+        assert_eq!(encode_supervisor_status(None).unwrap(), [0, 1, 0]);
+
+        let no_deadline = snapshot(
+            1,
+            InvocationStatus::Active {
+                started_at_us: 2,
+                deadline_at_us: None,
+                cancellation_requested: false,
+            },
+        );
+        assert_eq!(
+            encode_supervisor_status(Some(&no_deadline)).unwrap(),
+            [
+                0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0
+            ]
+        );
+
+        let with_deadline = snapshot(
+            3,
+            InvocationStatus::Committing {
+                started_at_us: 4,
+                deadline_at_us: Some(5),
+                cancellation_requested: true,
+            },
+        );
+        assert_eq!(
+            encode_supervisor_status(Some(&with_deadline)).unwrap(),
+            [
+                0, 1, 2, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 4, 1, 0, 0, 0, 0, 0, 0, 0, 5,
+                1
+            ]
+        );
+
+        let terminal = snapshot(
+            6,
+            InvocationStatus::Terminal(InvocationOutcome {
+                status: OutcomeStatus::Committed,
+                invocation_id: [0; 16],
+                principal_id: [0; 16],
+                commit_sequence: 7,
+                retention_deadline_us: 8,
+            }),
+        );
+        assert_eq!(
+            encode_supervisor_status(Some(&terminal)).unwrap(),
+            [
+                0, 1, 3, 0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 8
+            ]
+        );
+    }
 }
 
 #[derive(Debug)]

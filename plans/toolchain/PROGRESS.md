@@ -1,5 +1,13 @@
 # Toolchain Progress
 
+## TC-2: generated supervisor status response variants — implemented
+
+- Contract: supervisor status returns unknown, active/committing with optional deadline, or terminal status with observation time, commit sequence, and retention deadline.
+- Implementation: the shared schema declares all four fixed response shapes. The Rust supervisor encoder allocates the matching generated header and writes values at generated offsets.
+- Regression: exact-byte coverage checks unknown, active without deadline, committing with deadline, and committed terminal forms.
+- Verification: generator drift, focused exact-byte regression, locked workspace build/format/warning-denied Clippy/serial tests, and full maintained TinyCC SDK suite pass. Commit tests report 129 passed; three cgroup-dependent tests remain ignored.
+- Remaining: generate layouts/codecs for remaining supervisor result and event payloads.
+
 ## TC-2: generated supervisor cancellation result variants — implemented
 
 - Contract: cancellation returns a short accepted/too-late/unknown status or a terminal result with outcome status, commit sequence, and retention deadline.
