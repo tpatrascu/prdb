@@ -47,6 +47,15 @@
 - Verification: focused real-redb optimizer subprocess and protocol-loop tests passed. Generated ABI consistency, locked workspace build, format, warning-denied Clippy, serial workspace tests, and `git diff --check` passed (132 commit integration tests passed; 3 cgroup-dependent tests and 1 disconnected-submission process test ignored; 82 Rust unit tests passed).
 - Remaining: expose optimizer submission through the executor query ABI, independently re-resolve plans in storage, and execute plans in the SDK.
 
+## OP-3 dependency: C SDK optimizer response envelope — implemented
+
+- Behavior: the C SDK can submit an already encoded bounded SELECT request through the ABI v4 optimizer callback and decode the canonical response version/status/length envelope. Successful responses expose borrowed plan bytes; errors expose no plan. Malformed versions, statuses, lengths, trailing bytes, oversized plans, and overlapping output/payload records are rejected.
+- Implementation: [`prdb_sdk_optimizer_v1.h`](../../engine/include/prdb_sdk_optimizer_v1.h) and [`optimizer_v1.c`](../../engine/sdk/optimizer_v1.c) provide the status decoder and callback wrapper. The result record borrows plan bytes from the caller's response buffer.
+- Regression: [`sdk_optimizer_v1.c`](../../engine/tests/fixtures/sdk_optimizer_v1.c) checks successful plans, unavailable status, callback I/O errors, response capacity behavior, and malformed payload rejection under TinyCC.
+- Limitation: this step does not serialize a parsed SQL AST, validate plan structure, resolve relation IDs through executor storage, or execute plan operators.
+- Verification: the full maintained TinyCC SDK suite passed, including this fixture. Workspace build, formatting, warning-denied Clippy, serial Rust tests, generated ABI check, and `git diff --check` also passed (129 commit integration tests; three cgroup-dependent tests ignored).
+- Remaining: serialize the supported SQL AST into canonical optimizer requests, independently decode/validate plans, re-resolve the relation, and route physical operators through SDK executor calls.
+
 ## OP-3 dependency: expose stable authorized plan relation metadata
 
 - Behavior: the optimizer can resolve exact qualified names to a pinned schema/table identity and declared column shape without receiving a storage handle or executor capability.
