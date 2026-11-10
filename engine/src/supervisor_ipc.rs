@@ -277,14 +277,7 @@ pub fn finalize_gateway_invocation_and_send_terminal<'db, W: Write>(
     })?;
     let valid = response.operation == operation as u16
         && response.request_id == 1
-        && response.payload.len()
-            == match decision {
-                GatewayTerminalDecision::Commit => 11,
-                GatewayTerminalDecision::Abort(_) => 3,
-            }
-        && u16::from_be_bytes([response.payload[0], response.payload[1]])
-            == SUPERVISOR_PAYLOAD_VERSION
-        && response.payload[2] == 0;
+        && valid_terminal_response(operation, &response.payload);
     if !valid {
         return Err(GatewayTerminalRelayError::InvalidStorageResponse);
     }
@@ -1509,6 +1502,31 @@ mod status_wire_tests {
             encode_finalize_response(0x0102_0304_0506_0708),
             [0, 1, 0, 1, 2, 3, 4, 5, 6, 7, 8]
         );
+        assert!(super::valid_terminal_response(
+            crate::ipc::Operation::FinalizeTransaction,
+            &[0, 1, 0, 1, 2, 3, 4, 5, 6, 7, 8]
+        ));
+        assert!(super::valid_terminal_response(
+            crate::ipc::Operation::AbortTransaction,
+            &[0, 1, 0]
+        ));
+        for payload in [
+            &[][..],
+            &[0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0][..],
+            &[0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0][..],
+            &[0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0][..],
+        ] {
+            assert!(!super::valid_terminal_response(
+                crate::ipc::Operation::FinalizeTransaction,
+                payload
+            ));
+        }
+        for payload in [&[][..], &[0, 2, 0][..], &[0, 1, 1][..], &[0, 1, 0, 0][..]] {
+            assert!(!super::valid_terminal_response(
+                crate::ipc::Operation::AbortTransaction,
+                payload
+            ));
+        }
     }
 
     #[test]
@@ -1607,6 +1625,17 @@ fn valid_terminal_request(operation: Operation, payload: &[u8]) -> bool {
         }
         Operation::AbortTransaction => {
             generated::decode_supervisor_abort_request(payload).is_some()
+        }
+        _ => false,
+    }
+}
+
+fn valid_terminal_response(operation: Operation, payload: &[u8]) -> bool {
+    match operation {
+        Operation::FinalizeTransaction => generated::decode_supervisor_finalize_response(payload)
+            .is_some_and(|(status, _)| status == 0),
+        Operation::AbortTransaction => {
+            generated::decode_supervisor_abort_response(payload).is_some_and(|status| status == 0)
         }
         _ => false,
     }

@@ -1,5 +1,12 @@
 # Toolchain Progress
 
+## TC-2: supervisor terminal response decoder integration — implemented
+
+- Contract: terminal finalize/abort acknowledgements must have the exact generated payload shape, supported version, and success status before the gateway relays a terminal event.
+- Red evidence: the new regression did not compile because the relay had no typed response validator. The relay now dispatches to the schema-generated finalize/abort decoders; malformed, unsupported-version, nonzero-status, and trailing-byte payloads are rejected.
+- Verification: focused `supervisor_terminal_responses_match_wire_bytes` passed. Locked workspace build, format check, warning-denied Clippy, serial workspace tests (129 passed, 3 cgroup-dependent ignored), generated ABI drift/schema tests, and the full maintained TinyCC SDK suite passed in the configured Nix shell.
+- Remaining: replace other remaining hand-coded IPC payload validation and complete release-profile, signature, runtime-support, timing, and sandbox acceptance gates.
+
 ## TC-1: locked release workspace build — verified
 
 - Contract: the workspace builds in release mode using the repository's locked dependency set and pinned development toolchain.

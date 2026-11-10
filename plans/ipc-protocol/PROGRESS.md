@@ -1,5 +1,12 @@
 # Internal IPC Progress
 
+## IPC-6 dependency: generated terminal acknowledgement validation — implemented
+
+- Behavior: the gateway accepts storage finalize/abort acknowledgements only when the operation has its exact versioned response layout and a success status.
+- Implementation: [supervisor terminal relay](../../engine/src/supervisor_ipc.rs) now uses shared schema-generated decoders rather than duplicating response widths and offsets.
+- Regression and verification: valid responses and truncated, unsupported-version, nonzero-status, and trailing-byte responses are covered. The focused regression and full locked Rust/TinyCC validation suite passed; the serial workspace suite reported 129 passed and 3 cgroup-dependent ignored tests.
+- Remaining: additional hand-coded IPC payload validation, process-level queue/deadline hardening, and worker lifecycle coverage remain open.
+
 ## IPC-6 dependency: canonical gateway error payload validation — implemented
 
 - Behavior and contract: [`GatewayClientError`](../../specs/ipc-protocol.md) is a supervisor-to-gateway event whose payload must be one of the five fixed, sanitized v1 JSON errors. The gateway now compares the complete payload bytes against that allowlist before encoding a client ERROR frame; an unknown category, modified message, extra field, malformed JSON, or other payload closes the connection as a mismatched service response.
