@@ -45,6 +45,16 @@ int32_t prdb_sdk_sql_write_result_row_v1(
     uint32_t cell_scratch_capacity, uint8_t *output,
     uint64_t output_capacity, uint64_t *output_len);
 
+/* Encode and emit one already projected single-relation row as SQLR v1.
+ * Projection ordinals select names and declared types from the authorized
+ * relation shape; values are borrowed only for this call. */
+int32_t prdb_sdk_sql_write_projected_result_v1(
+    const prdb_host_api_v3 *host,
+    const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count,
+    const uint32_t *projection_ordinals,
+    const prdb_sdk_value_v1 *projected_values, uint32_t projection_count,
+    uint8_t *output, uint64_t output_capacity, uint64_t *output_len);
+
 /* Encodes one joined projection row as SQLR v1 using each binding's source
  * side, ordinal, and declared column metadata. VALUE, NULL, and REDACTED
  * projection states are preserved. All inputs and output must be disjoint. */

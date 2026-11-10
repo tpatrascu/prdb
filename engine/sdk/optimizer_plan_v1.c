@@ -1,5 +1,6 @@
 #include "prdb_sdk_optimizer_plan_v1.h"
 #include "prdb_sdk_sql_v1.h"
+#include "prdb_sdk_sql_result_v1.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -1446,4 +1447,71 @@ int32_t prdb_sdk_optimizer_execute_select_ast_v1(
         status = PRDB_SDK_OPTIMIZER_PLAN_CALLBACK_ERROR;
     }
     return latch_optimizer_statement_failure(host, status);
+}
+
+typedef struct optimizer_result_context_v1 {
+    const prdb_host_api_v3 *host;
+    const prdb_sdk_sql_column_shape_v2 *columns;
+    const prdb_sdk_executor_relation_v1 *relation;
+    uint8_t *record_buffer;
+    uint64_t record_capacity;
+} optimizer_result_context_v1;
+
+static int32_t emit_optimizer_projected_row_v1(
+    void *context, const prdb_sdk_optimizer_plan_column_v1 *projections,
+    const prdb_sdk_value_v1 *values, uint32_t projection_count) {
+    optimizer_result_context_v1 *result = context;
+    uint32_t ordinals[PRDB_SDK_OPTIMIZER_PLAN_MAX_PROJECTIONS];
+    uint64_t record_len = 0;
+    if (result == NULL || projections == NULL || values == NULL ||
+        projection_count == 0 ||
+        projection_count > PRDB_SDK_OPTIMIZER_PLAN_MAX_PROJECTIONS) {
+        return -1;
+    }
+    for (uint32_t index = 0; index < projection_count; ++index)
+        ordinals[index] = projections[index].ordinal;
+    return prdb_sdk_sql_write_projected_result_v1(
+               result->host, result->columns, result->relation->column_count,
+               ordinals, values, projection_count, result->record_buffer,
+               result->record_capacity, &record_len) == PRDB_SDK_SQL_RESULT_OK
+               ? 0
+               : -1;
+}
+
+int32_t prdb_sdk_optimizer_execute_select_ast_to_result_v1(
+    const prdb_host_api_v4 *host, const prdb_sdk_select_v2 *statement,
+    const uint8_t *schema, uint32_t schema_len, uint16_t max_candidates,
+    uint32_t max_batch_bytes, uint8_t *request, uint64_t request_capacity,
+    uint8_t *optimizer_response, uint64_t optimizer_response_capacity,
+    uint8_t *relation_response, uint64_t relation_response_capacity,
+    uint8_t *scan_response, uint64_t scan_response_capacity,
+    uint8_t *batch_response, uint64_t batch_response_capacity,
+    prdb_sdk_executor_relation_v1 *relation_out,
+    uint32_t relation_out_capacity,
+    prdb_sdk_sql_column_shape_v2 *relation_columns,
+    uint32_t relation_column_capacity, prdb_sdk_value_v1 *source_cells,
+    uint32_t source_cell_capacity, prdb_sdk_value_v1 *projected_values,
+    uint32_t projected_value_capacity, uint8_t *result_record_buffer,
+    uint64_t result_record_capacity, uint32_t *delivered_rows_out) {
+    optimizer_result_context_v1 result = {0};
+    if (host == NULL || host->v3.write_result == NULL || relation_out == NULL ||
+        relation_columns == NULL || relation_column_capacity == 0 ||
+        result_record_buffer == NULL || result_record_capacity == 0) {
+        return PRDB_SDK_OPTIMIZER_PLAN_INVALID_ARGUMENT;
+    }
+    result.host = &host->v3;
+    result.columns = relation_columns;
+    result.relation = relation_out;
+    result.record_buffer = result_record_buffer;
+    result.record_capacity = result_record_capacity;
+    return prdb_sdk_optimizer_execute_select_ast_v1(
+        host, statement, schema, schema_len, max_candidates, max_batch_bytes,
+        request, request_capacity, optimizer_response,
+        optimizer_response_capacity, relation_response,
+        relation_response_capacity, scan_response, scan_response_capacity,
+        batch_response, batch_response_capacity, relation_out,
+        relation_out_capacity, relation_columns, relation_column_capacity,
+        source_cells, source_cell_capacity, projected_values,
+        projected_value_capacity, emit_optimizer_projected_row_v1, &result,
+        delivered_rows_out);
 }

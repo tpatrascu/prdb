@@ -131,6 +131,8 @@ typedef struct resolve_context {
     uint32_t batch_response_len;
     uint8_t cancellation_response[3];
     uint8_t close_response[3];
+    uint8_t emitted_result[256];
+    uint32_t emitted_result_len;
     uint8_t optimizer_response[512];
     uint32_t optimizer_response_len;
     uint32_t calls;
@@ -164,6 +166,19 @@ static int32_t statement_failure(void *context, uint32_t failure_code) {
     resolve_context *resolved = (resolve_context *)context;
     assert(failure_code == PRDB_QUERY_STATEMENT_FAILURE_SQL);
     resolved->statement_failures++;
+    return PRDB_QUERY_CALLBACK_OK;
+}
+
+static int32_t write_result(void *context, const uint8_t *bytes,
+                            uint64_t bytes_len) {
+    resolve_context *resolved = (resolve_context *)context;
+    if (bytes_len > sizeof(resolved->emitted_result) -
+                        resolved->emitted_result_len) {
+        return PRDB_QUERY_CALLBACK_LIMIT_EXCEEDED;
+    }
+    memcpy(resolved->emitted_result + resolved->emitted_result_len, bytes,
+           (size_t)bytes_len);
+    resolved->emitted_result_len += (uint32_t)bytes_len;
     return PRDB_QUERY_CALLBACK_OK;
 }
 
@@ -383,6 +398,7 @@ int main(void) {
     static prdb_sdk_value_v1 projected_values[1];
     uint8_t row_batch_bytes[128];
     uint8_t batch_response[128];
+    uint8_t result_record_buffer[256];
     uint8_t scan_response[18];
     uint32_t row_batch_len;
     uint32_t delivered_rows = 0;
@@ -581,6 +597,7 @@ int main(void) {
     host_v4.v3.abi_version = PRDB_QUERY_ABI_V3_VERSION;
     host_v4.v3.context = &resolve;
     host_v4.v3.executor_request = resolve_plan_relation;
+    host_v4.v3.write_result = write_result;
     host_v4.v3.statement_failure = statement_failure;
     host_v4.optimizer_request = optimizer_request;
     resolve.optimizer_calls = 0;
@@ -608,6 +625,33 @@ int main(void) {
     assert(resolve.events[5] == PRDB_SDK_EXECUTOR_OP_CHECK_CANCELLATION);
     assert(resolve.events[6] == PRDB_SDK_EXECUTOR_OP_NEXT_BATCH);
     assert(resolve.events[7] == PRDB_SDK_EXECUTOR_OP_CLOSE_CURSOR);
+
+    resolve.calls = 0;
+    resolve.event_count = 0;
+    resolve.emitted_result_len = 0;
+    assert(prdb_sdk_optimizer_execute_select_ast_to_result_v1(
+               &host_v4, &statement, (const uint8_t *)"public", 6, 2,
+               sizeof(batch_response), request, sizeof(request),
+               optimizer_response, sizeof(optimizer_response), response,
+               sizeof(response), scan_response, sizeof(scan_response),
+               batch_response, sizeof(batch_response), &acquired_relation,
+               sizeof(acquired_relation), acquired_columns, 4, source_cells, 4,
+               projected_values, 1, result_record_buffer,
+               sizeof(result_record_buffer), &total_rows) ==
+           PRDB_SDK_OPTIMIZER_PLAN_OK);
+    assert(total_rows == 1 && resolve.emitted_result_len > 8);
+    assert(memcmp(resolve.emitted_result, "SQLR", 4) == 0);
+    assert(resolve.emitted_result[4] == 0 && resolve.emitted_result[5] == 1);
+    assert(resolve.emitted_result[6] == 0 && resolve.emitted_result[7] == 1);
+    assert(resolve.emitted_result[8] == 0 && resolve.emitted_result[9] == 2);
+    assert(memcmp(resolve.emitted_result + 10, "c3", 2) == 0);
+    assert(resolve.emitted_result[12] == 0 && resolve.emitted_result[13] == 0 &&
+           resolve.emitted_result[14] == 0 &&
+           resolve.emitted_result[15] == PRDB_SDK_VALUE_TYPE_TEXT);
+    assert(resolve.emitted_result[18] == PRDB_SDK_VALUE_STATE_VALUE);
+    assert(resolve.emitted_result[19] == 0 && resolve.emitted_result[20] == 0 &&
+           resolve.emitted_result[21] == 0 && resolve.emitted_result[22] == 1);
+    assert(resolve.emitted_result[23] == 'x');
 
     uint8_t sql_with_filter[] = "SELECT c3 FROM items WHERE c3 = $1";
     assert(prdb_sdk_sql_parse_select_v2(

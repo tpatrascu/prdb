@@ -125,7 +125,7 @@
 - Implementation: `prdb_sdk_optimizer_consume_plan_batch_v1` decodes the bounded prefix tree, resolves scanned columns by stable ID and ordinal, evaluates scalar comparisons through the shared SQL evaluator, and integrates with the bounded executor scan loop. False and UNKNOWN rows do not count toward LIMIT.
 - Regression: TinyCC fixture checks that a matching row emits, a nonmatching row is skipped, and the bounded executor completes a Filter scan with early LIMIT and cursor close.
 - Verification: focused and full maintained TinyCC SDK suites passed; generated ABI consistency, documentation link checks, and `git diff --check` passed.
-- Remaining: submit WHERE predicates through the SQL optimizer bridge, emit SQL result records, and add a real process/channel execution fixture.
+- Remaining: submit WHERE predicates through the SQL optimizer bridge and add a real process/channel execution fixture. SQLR row emission is implemented in the following increment.
 
 ## OP-3 dependency: connect optimizer submission to unfiltered SQL execution
 
@@ -133,7 +133,7 @@
 - Implementation: `prdb_sdk_optimizer_execute_select_ast_v1` composes canonical request encoding, the dedicated optimizer callback, response decoding, query-to-plan semantic checks, and the bounded executor plan runner. The extra metadata request is included in the 125-page budget.
 - Regression: TinyCC fixture submits a parsed SELECT, checks optimizer/executor callback order and one projected result, rejects a changed projection before scanning, verifies WHERE fallback makes no optimizer call, and checks that optimizer error status latches statement failure.
 - Verification: focused and full maintained TinyCC SDK suites passed; generated ABI consistency, documentation link checks, and `git diff --check` passed.
-- Remaining: submit WHERE predicates through the SQL optimizer bridge, encode/emit SQL results, and exercise the path with a real optimizer/executor IPC invocation. Returned unfiltered plans are compared with the submitted SELECT; the bridge leaves WHERE queries on the established SQL path.
+- Remaining: submit WHERE predicates through the SQL optimizer bridge, encode/emit SQL results, and exercise the path with a real optimizer/executor IPC invocation. Returned unfiltered plans are compared with the submitted SELECT and emitted as SQLR rows; the bridge leaves WHERE queries on the established SQL path.
 
 ## OP-3 dependency: launch and confine the optimizer with each invocation
 
@@ -141,3 +141,12 @@
 - Implementation: `ExecutorLaunchConfig` and `prdb-supervisor --optimizer` select the optimizer executable. The launcher stages independent command policies, starts and reaps both children, and retains the optimizer endpoint in the executor. Storage drains three worker channels concurrently and aborts all peers on handler failure. The optimizer installs `no_new_privs` and the worker seccomp filter before serving.
 - Verification: the serial workspace suite passed (82 library unit tests; 129 commit integration tests; three cgroup-dependent commit tests and one cgroup-dependent process test ignored). After the final child-reaping change, workspace build, formatting, warning-denied Clippy, and all four launcher unit tests passed. Generated ABI consistency and `git diff --check` passed. End-to-end confined launch remains unverified because the host has no delegated cgroup test fixture.
 - Remaining: route an optimizer request from the executor ABI, validate returned plans again against executor storage, and interpret SELECT plans through SDK operations.
+
+
+## OP-3 dependency: emit projected optimizer rows as SQLR records
+
+- Behavior: the supported optimizer SELECT path writes each projected row as a provisional SQLR v1 record using executor-authorized column names and declared types. Result callback failures fail the statement so the invocation cannot commit partial output.
+- Implementation: `prdb_sdk_sql_write_projected_result_v1` encodes and writes a projected single-relation row in host-sized chunks. `prdb_sdk_optimizer_execute_select_ast_to_result_v1` adapts bounded plan execution to that writer.
+- Regression: TinyCC fixture executes a submitted SELECT through ABI v4, captures the SQLR record, and checks its projection name, type, state, and bytes.
+- Verification: focused and full maintained TinyCC SDK suites passed; generated ABI consistency, documentation link checks, and `git diff --check` passed.
+- Remaining: submit WHERE predicates through the optimizer bridge and add a real process/channel execution fixture.
