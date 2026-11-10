@@ -122,34 +122,15 @@ impl DescribePlanRelationResponse {
                 {
                     return Err(PlannerRequestError::InvalidPayload);
                 }
-                let mut payload = vec![
-                    0;
-                    PLANNER_DESCRIBE_PLAN_RELATION_AVAILABLE_RESPONSE_HEADER_BYTES
-                        as usize
-                ];
-                let version_offset =
-                    PLANNER_DESCRIBE_PLAN_RELATION_AVAILABLE_RESPONSE_VERSION_OFFSET as usize;
-                payload[version_offset..version_offset + 2]
-                    .copy_from_slice(&PLANNER_PAYLOAD_VERSION.to_be_bytes());
-                payload[PLANNER_DESCRIBE_PLAN_RELATION_AVAILABLE_RESPONSE_STATUS_OFFSET as usize] =
-                    0;
-                let schema_id_offset =
-                    PLANNER_DESCRIBE_PLAN_RELATION_AVAILABLE_RESPONSE_SCHEMA_ID_OFFSET as usize;
-                payload[schema_id_offset..schema_id_offset + 16]
-                    .copy_from_slice(&relation.schema_id);
-                let schema_version_offset =
-                    PLANNER_DESCRIBE_PLAN_RELATION_AVAILABLE_RESPONSE_SCHEMA_VERSION_OFFSET
-                        as usize;
-                payload[schema_version_offset..schema_version_offset + 8]
-                    .copy_from_slice(&relation.schema_version.to_be_bytes());
-                let table_epoch_offset =
-                    PLANNER_DESCRIBE_PLAN_RELATION_AVAILABLE_RESPONSE_TABLE_EPOCH_OFFSET as usize;
-                payload[table_epoch_offset..table_epoch_offset + 8]
-                    .copy_from_slice(&relation.table_epoch.to_be_bytes());
-                let relation_id_offset =
-                    PLANNER_DESCRIBE_PLAN_RELATION_AVAILABLE_RESPONSE_RELATION_ID_OFFSET as usize;
-                payload[relation_id_offset..relation_id_offset + 16]
-                    .copy_from_slice(&relation.relation.relation_id);
+                let mut payload =
+                    crate::query_abi::encode_planner_describe_plan_relation_available_response(
+                        0,
+                        relation.schema_id,
+                        relation.schema_version,
+                        relation.table_epoch,
+                        relation.relation.relation_id,
+                    )
+                    .to_vec();
                 encode_name(&mut payload, &relation.relation.name)?;
                 let count = u16::try_from(relation.relation.columns.len())
                     .map_err(|_| PlannerRequestError::ResponseTooLarge)?;
@@ -164,75 +145,58 @@ impl DescribePlanRelationResponse {
     }
 
     pub fn decode(payload: &[u8]) -> Result<Self, PlannerRequestError> {
-        let version_offset =
-            PLANNER_DESCRIBE_PLAN_RELATION_UNAVAILABLE_RESPONSE_VERSION_OFFSET as usize;
-        if payload.len() < PLANNER_DESCRIBE_PLAN_RELATION_UNAVAILABLE_RESPONSE_HEADER_BYTES as usize
-            || read_u16(payload, version_offset)? != PLANNER_PAYLOAD_VERSION
+        if payload.len()
+            == PLANNER_DESCRIBE_PLAN_RELATION_UNAVAILABLE_RESPONSE_HEADER_BYTES as usize
+        {
+            return match crate::query_abi::decode_planner_describe_plan_relation_unavailable_response(payload) {
+                Some(1) => Ok(Self { relation: None }),
+                _ => Err(PlannerRequestError::InvalidPayload),
+            };
+        }
+        let (status, schema_id, schema_version, table_epoch, relation_id) =
+            crate::query_abi::decode_planner_describe_plan_relation_available_response(payload)
+                .ok_or(PlannerRequestError::InvalidPayload)?;
+        if status != 0
+            || payload.len()
+                < PLANNER_DESCRIBE_PLAN_RELATION_AVAILABLE_RESPONSE_HEADER_BYTES as usize + 5
         {
             return Err(PlannerRequestError::InvalidPayload);
         }
-        match payload[PLANNER_DESCRIBE_PLAN_RELATION_UNAVAILABLE_RESPONSE_STATUS_OFFSET as usize] {
-            1 if payload.len()
-                == PLANNER_DESCRIBE_PLAN_RELATION_UNAVAILABLE_RESPONSE_HEADER_BYTES as usize =>
+        {
+            if schema_id == [0; 16]
+                || schema_version == 0
+                || table_epoch == 0
+                || relation_id == [0; 16]
             {
-                Ok(Self { relation: None })
+                return Err(PlannerRequestError::InvalidPayload);
             }
-            0 if payload.len()
-                >= PLANNER_DESCRIBE_PLAN_RELATION_AVAILABLE_RESPONSE_HEADER_BYTES as usize + 5 =>
-            {
-                let schema_id = read_array16(
-                    payload,
-                    PLANNER_DESCRIBE_PLAN_RELATION_AVAILABLE_RESPONSE_SCHEMA_ID_OFFSET as usize,
-                )?;
-                let schema_version = read_u64(
-                    payload,
-                    PLANNER_DESCRIBE_PLAN_RELATION_AVAILABLE_RESPONSE_SCHEMA_VERSION_OFFSET
-                        as usize,
-                )?;
-                let table_epoch = read_u64(
-                    payload,
-                    PLANNER_DESCRIBE_PLAN_RELATION_AVAILABLE_RESPONSE_TABLE_EPOCH_OFFSET as usize,
-                )?;
-                let relation_id = read_array16(
-                    payload,
-                    PLANNER_DESCRIBE_PLAN_RELATION_AVAILABLE_RESPONSE_RELATION_ID_OFFSET as usize,
-                )?;
-                if schema_id == [0; 16]
-                    || schema_version == 0
-                    || table_epoch == 0
-                    || relation_id == [0; 16]
-                {
-                    return Err(PlannerRequestError::InvalidPayload);
-                }
-                let mut offset =
-                    PLANNER_DESCRIBE_PLAN_RELATION_AVAILABLE_RESPONSE_HEADER_BYTES as usize;
-                let name = decode_name(payload, &mut offset)?;
-                let count = read_u16(payload, offset)? as usize;
-                offset += 2;
-                if count == 0 || count > crate::tuple::MAX_COLUMNS {
-                    return Err(PlannerRequestError::InvalidPayload);
-                }
-                let mut columns = Vec::with_capacity(count);
-                for _ in 0..count {
-                    columns.push(decode_visible_column(payload, &mut offset)?);
-                }
-                if offset != payload.len() {
-                    return Err(PlannerRequestError::InvalidPayload);
-                }
-                Ok(Self {
-                    relation: Some(AuthorizedPlanRelation {
-                        schema_id,
-                        schema_version,
-                        table_epoch,
-                        relation: AuthorizedRelationDescription {
-                            relation_id,
-                            name,
-                            columns,
-                        },
-                    }),
-                })
+            let mut offset =
+                PLANNER_DESCRIBE_PLAN_RELATION_AVAILABLE_RESPONSE_HEADER_BYTES as usize;
+            let name = decode_name(payload, &mut offset)?;
+            let count = read_u16(payload, offset)? as usize;
+            offset += 2;
+            if count == 0 || count > crate::tuple::MAX_COLUMNS {
+                return Err(PlannerRequestError::InvalidPayload);
             }
-            _ => Err(PlannerRequestError::InvalidPayload),
+            let mut columns = Vec::with_capacity(count);
+            for _ in 0..count {
+                columns.push(decode_visible_column(payload, &mut offset)?);
+            }
+            if offset != payload.len() {
+                return Err(PlannerRequestError::InvalidPayload);
+            }
+            Ok(Self {
+                relation: Some(AuthorizedPlanRelation {
+                    schema_id,
+                    schema_version,
+                    table_epoch,
+                    relation: AuthorizedRelationDescription {
+                        relation_id,
+                        name,
+                        columns,
+                    },
+                }),
+            })
         }
     }
 }
@@ -249,19 +213,12 @@ impl DescribeRelationResponse {
             }
             Some((handle, description)) => {
                 let mut payload =
-                    vec![0; PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_HEADER_BYTES as usize];
-                let version_offset =
-                    PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_VERSION_OFFSET as usize;
-                payload[version_offset..version_offset + 2]
-                    .copy_from_slice(&PLANNER_PAYLOAD_VERSION.to_be_bytes());
-                payload[PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_STATUS_OFFSET as usize] = 0;
-                let relation_id_offset =
-                    PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_RELATION_ID_OFFSET as usize;
-                payload[relation_id_offset..relation_id_offset + 16]
-                    .copy_from_slice(&description.relation_id);
-                let handle_offset =
-                    PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_PLANNING_HANDLE_OFFSET as usize;
-                payload[handle_offset..handle_offset + 16].copy_from_slice(&handle.to_bytes());
+                    crate::query_abi::encode_planner_describe_relation_available_response(
+                        0,
+                        description.relation_id,
+                        handle.to_bytes(),
+                    )
+                    .to_vec();
                 encode_name(&mut payload, &description.name)?;
                 let count = u16::try_from(description.columns.len())
                     .map_err(|_| PlannerRequestError::ResponseTooLarge)?;
@@ -276,56 +233,50 @@ impl DescribeRelationResponse {
     }
 
     pub fn decode(payload: &[u8]) -> Result<Self, PlannerRequestError> {
-        let version_offset = PLANNER_DESCRIBE_RELATION_UNAVAILABLE_RESPONSE_VERSION_OFFSET as usize;
-        if payload.len() < DESCRIBE_HEADER_BYTES
-            || read_u16(payload, version_offset)? != PLANNER_PAYLOAD_VERSION
+        if payload.len() == DESCRIBE_HEADER_BYTES {
+            return match crate::query_abi::decode_planner_describe_relation_unavailable_response(
+                payload,
+            ) {
+                Some(1) => Ok(Self { table: None }),
+                _ => Err(PlannerRequestError::InvalidPayload),
+            };
+        }
+        let (status, relation_id, handle_bytes) =
+            crate::query_abi::decode_planner_describe_relation_available_response(payload)
+                .ok_or(PlannerRequestError::InvalidPayload)?;
+        if status != 0
+            || payload.len()
+                < PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_HEADER_BYTES as usize + 5
         {
             return Err(PlannerRequestError::InvalidPayload);
         }
-        match payload[PLANNER_DESCRIBE_RELATION_UNAVAILABLE_RESPONSE_STATUS_OFFSET as usize] {
-            1 if payload.len() == DESCRIBE_HEADER_BYTES => Ok(Self { table: None }),
-            0 => {
-                if payload.len()
-                    < PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_HEADER_BYTES as usize + 5
-                {
-                    return Err(PlannerRequestError::InvalidPayload);
-                }
-                let relation_id_offset =
-                    PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_RELATION_ID_OFFSET as usize;
-                let relation_id = payload[relation_id_offset..relation_id_offset + 16]
-                    .try_into()
-                    .map_err(|_| PlannerRequestError::InvalidPayload)?;
-                let handle_offset =
-                    PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_PLANNING_HANDLE_OFFSET as usize;
-                let handle =
-                    PlanningTableHandle::from_bytes(&payload[handle_offset..handle_offset + 16])
-                        .ok_or(PlannerRequestError::InvalidPayload)?;
-                let mut offset = PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_HEADER_BYTES as usize;
-                let name = decode_name(payload, &mut offset)?;
-                let count = read_u16(payload, offset)? as usize;
-                offset += 2;
-                if count > crate::tuple::MAX_COLUMNS {
-                    return Err(PlannerRequestError::InvalidPayload);
-                }
-                let mut columns = Vec::with_capacity(count);
-                for _ in 0..count {
-                    columns.push(decode_visible_column(payload, &mut offset)?);
-                }
-                if offset != payload.len() {
-                    return Err(PlannerRequestError::InvalidPayload);
-                }
-                Ok(Self {
-                    table: Some((
-                        handle,
-                        AuthorizedRelationDescription {
-                            relation_id,
-                            name,
-                            columns,
-                        },
-                    )),
-                })
+        {
+            let handle = PlanningTableHandle::from_bytes(&handle_bytes)
+                .ok_or(PlannerRequestError::InvalidPayload)?;
+            let mut offset = PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_HEADER_BYTES as usize;
+            let name = decode_name(payload, &mut offset)?;
+            let count = read_u16(payload, offset)? as usize;
+            offset += 2;
+            if count > crate::tuple::MAX_COLUMNS {
+                return Err(PlannerRequestError::InvalidPayload);
             }
-            _ => Err(PlannerRequestError::InvalidPayload),
+            let mut columns = Vec::with_capacity(count);
+            for _ in 0..count {
+                columns.push(decode_visible_column(payload, &mut offset)?);
+            }
+            if offset != payload.len() {
+                return Err(PlannerRequestError::InvalidPayload);
+            }
+            Ok(Self {
+                table: Some((
+                    handle,
+                    AuthorizedRelationDescription {
+                        relation_id,
+                        name,
+                        columns,
+                    },
+                )),
+            })
         }
     }
 }
@@ -698,14 +649,6 @@ fn read_u16(payload: &[u8], offset: usize) -> Result<u16, PlannerRequestError> {
         .try_into()
         .map_err(|_| PlannerRequestError::InvalidPayload)?;
     Ok(u16::from_be_bytes(bytes))
-}
-
-fn read_array16(payload: &[u8], offset: usize) -> Result<[u8; 16], PlannerRequestError> {
-    payload
-        .get(offset..offset + 16)
-        .ok_or(PlannerRequestError::InvalidPayload)?
-        .try_into()
-        .map_err(|_| PlannerRequestError::InvalidPayload)
 }
 
 fn read_u64(payload: &[u8], offset: usize) -> Result<u64, PlannerRequestError> {

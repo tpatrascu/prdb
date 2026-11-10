@@ -59,7 +59,7 @@ Release gates include TinyCC shared-library/archive compatibility; C/Rust size/a
 
 The repository now has a locked Nix development shell for the Rust/TinyCC development profile, including the Nixpkgs-pinned TinyCC source revision, source hash, and compiler/support output hashes. Release target/libc/runtime selection, interface header generation, release build commands, and panic profiles remain implementation work. If shared-library compatibility fails, fix/document the toolchain profile rather than silently changing compilers or weakening confinement.
 
-For fixed-width IPC payloads, the shared schema may request generated Rust and C encode/decode helpers. These helpers encode the schema version and fixed fields in network byte order, require the exact payload length and supported version when decoding, and are checked against independent wire examples. Generated C codecs support u8, u16, u32, u64, i64, and 16-byte fields. Variable-length payloads still use explicit bounded codecs.
+For fixed-width IPC payloads, the shared schema may request generated Rust and C encode/decode helpers. These helpers encode the schema version and fixed fields in network byte order, require the exact payload length and supported version when decoding, and are checked against independent wire examples. A schema may mark a helper as a prefix codec when fixed fields precede a variable tail; its decoder requires at least the prefix size and supported version, while the caller validates the remaining bytes with its bounded codec. Generated C codecs support u8, u16, u32, u64, i64, and 16-byte fields. Variable-length payloads still use explicit bounded codecs.
 
 ## References
 

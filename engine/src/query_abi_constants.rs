@@ -237,6 +237,22 @@ pub const PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_STATUS_OFFSET: u32 = 2;
 pub const PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_RELATION_ID_OFFSET: u32 = 3;
 pub const PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_PLANNING_HANDLE_OFFSET: u32 = 19;
 pub const PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_HEADER_BYTES: u32 = 35;
+pub fn encode_planner_describe_relation_available_response(status: u8, relation_id: [u8; 16], planning_handle: [u8; 16]) -> [u8; 35] {
+    let mut payload = [0u8; 35];
+    payload[0..2].copy_from_slice(&PLANNER_PAYLOAD_VERSION.to_be_bytes());
+    payload[2] = status;
+    payload[3..19].copy_from_slice(&relation_id);
+    payload[19..35].copy_from_slice(&planning_handle);
+    payload
+}
+
+pub fn decode_planner_describe_relation_available_response(payload: &[u8]) -> Option<(u8, [u8; 16], [u8; 16])> {
+    if payload.len() < 35 || u16::from_be_bytes([payload[0], payload[1]]) != PLANNER_PAYLOAD_VERSION {
+        return None;
+    }
+    Some((payload[2], payload[3..19].try_into().ok()?, payload[19..35].try_into().ok()?))
+}
+
 pub const PLANNER_DESCRIBE_PLAN_RELATION_UNAVAILABLE_RESPONSE_VERSION_OFFSET: u32 = 0;
 pub const PLANNER_DESCRIBE_PLAN_RELATION_UNAVAILABLE_RESPONSE_STATUS_OFFSET: u32 = 2;
 pub const PLANNER_DESCRIBE_PLAN_RELATION_UNAVAILABLE_RESPONSE_HEADER_BYTES: u32 = 3;
@@ -261,6 +277,25 @@ pub const PLANNER_DESCRIBE_PLAN_RELATION_AVAILABLE_RESPONSE_SCHEMA_VERSION_OFFSE
 pub const PLANNER_DESCRIBE_PLAN_RELATION_AVAILABLE_RESPONSE_TABLE_EPOCH_OFFSET: u32 = 27;
 pub const PLANNER_DESCRIBE_PLAN_RELATION_AVAILABLE_RESPONSE_RELATION_ID_OFFSET: u32 = 35;
 pub const PLANNER_DESCRIBE_PLAN_RELATION_AVAILABLE_RESPONSE_HEADER_BYTES: u32 = 51;
+pub fn encode_planner_describe_plan_relation_available_response(status: u8, schema_id: [u8; 16], schema_version: u64, table_epoch: u64, relation_id: [u8; 16]) -> [u8; 51] {
+    let mut payload = [0u8; 51];
+    payload[0..2].copy_from_slice(&PLANNER_PAYLOAD_VERSION.to_be_bytes());
+    payload[2] = status;
+    payload[3..19].copy_from_slice(&schema_id);
+    payload[19..27].copy_from_slice(&schema_version.to_be_bytes());
+    payload[27..35].copy_from_slice(&table_epoch.to_be_bytes());
+    payload[35..51].copy_from_slice(&relation_id);
+    payload
+}
+
+#[allow(clippy::type_complexity)]
+pub fn decode_planner_describe_plan_relation_available_response(payload: &[u8]) -> Option<(u8, [u8; 16], u64, u64, [u8; 16])> {
+    if payload.len() < 51 || u16::from_be_bytes([payload[0], payload[1]]) != PLANNER_PAYLOAD_VERSION {
+        return None;
+    }
+    Some((payload[2], payload[3..19].try_into().ok()?, u64::from_be_bytes(payload[19..27].try_into().ok()?), u64::from_be_bytes(payload[27..35].try_into().ok()?), payload[35..51].try_into().ok()?))
+}
+
 pub const OPTIMIZER_RESPONSE_FAILURE_VERSION_OFFSET: u32 = 0;
 pub const OPTIMIZER_RESPONSE_FAILURE_STATUS_OFFSET: u32 = 2;
 pub const OPTIMIZER_RESPONSE_FAILURE_HEADER_BYTES: u32 = 3;
@@ -355,6 +390,7 @@ pub fn encode_supervisor_cancel_result_terminal(status: u8, outcome_status: u8, 
     payload
 }
 
+#[allow(clippy::type_complexity)]
 pub fn decode_supervisor_cancel_result_terminal(payload: &[u8]) -> Option<(u8, u8, u64, i64)> {
     if payload.len() != 20 || u16::from_be_bytes([payload[0], payload[1]]) != SUPERVISOR_PAYLOAD_VERSION {
         return None;
@@ -397,6 +433,7 @@ pub fn encode_supervisor_status_active_no_deadline_response(status: u8, observed
     payload
 }
 
+#[allow(clippy::type_complexity)]
 pub fn decode_supervisor_status_active_no_deadline_response(payload: &[u8]) -> Option<(u8, i64, i64, u8, u8)> {
     if payload.len() != 21 || u16::from_be_bytes([payload[0], payload[1]]) != SUPERVISOR_PAYLOAD_VERSION {
         return None;
@@ -424,6 +461,7 @@ pub fn encode_supervisor_status_active_with_deadline_response(status: u8, observ
     payload
 }
 
+#[allow(clippy::type_complexity)]
 pub fn decode_supervisor_status_active_with_deadline_response(payload: &[u8]) -> Option<(u8, i64, i64, u8, i64, u8)> {
     if payload.len() != 29 || u16::from_be_bytes([payload[0], payload[1]]) != SUPERVISOR_PAYLOAD_VERSION {
         return None;
@@ -447,6 +485,7 @@ pub fn encode_supervisor_status_terminal_response(status: u8, observed_at: i64, 
     payload
 }
 
+#[allow(clippy::type_complexity)]
 pub fn decode_supervisor_status_terminal_response(payload: &[u8]) -> Option<(u8, i64, u64, i64)> {
     if payload.len() != 27 || u16::from_be_bytes([payload[0], payload[1]]) != SUPERVISOR_PAYLOAD_VERSION {
         return None;

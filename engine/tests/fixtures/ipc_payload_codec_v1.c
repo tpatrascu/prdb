@@ -399,5 +399,64 @@ int main(void) {
         decoded_planner_unavailable_status != 1) {
         return 44;
     }
+    uint8_t planner_relation_id[16];
+    uint8_t planner_handle[16];
+    uint8_t decoded_planner_relation_id[16] = {0};
+    uint8_t decoded_planner_handle[16] = {0};
+    for (size_t i = 0; i < 16; ++i) {
+        planner_relation_id[i] = 0x11;
+        planner_handle[i] = 0x22;
+    }
+    uint8_t planner_available_prefix[36] = {0};
+    prdb_encode_planner_describe_relation_available_response(
+        planner_available_prefix, 0, planner_relation_id, planner_handle);
+    planner_available_prefix[35] = 0xaa;
+    if (planner_available_prefix[0] != 0x00 || planner_available_prefix[1] != 0x01 ||
+        planner_available_prefix[2] != 0x00 ||
+        !prdb_decode_planner_describe_relation_available_response(
+            planner_available_prefix, sizeof(planner_available_prefix),
+            &decoded_planner_unavailable_status, decoded_planner_relation_id,
+            decoded_planner_handle) || decoded_planner_unavailable_status != 0) {
+        return 45;
+    }
+    for (size_t i = 0; i < 16; ++i) {
+        if (decoded_planner_relation_id[i] != planner_relation_id[i] ||
+            decoded_planner_handle[i] != planner_handle[i]) {
+            return 46;
+        }
+    }
+    uint8_t planner_schema_id[16];
+    uint8_t planner_plan_relation_id[16];
+    uint8_t decoded_planner_schema_id[16] = {0};
+    uint8_t decoded_planner_plan_relation_id[16] = {0};
+    for (size_t i = 0; i < 16; ++i) {
+        planner_schema_id[i] = 0x33;
+        planner_plan_relation_id[i] = 0x44;
+    }
+    uint8_t planner_plan_available_prefix[52] = {0};
+    uint64_t decoded_schema_version = 0;
+    uint64_t decoded_table_epoch = 0;
+    prdb_encode_planner_describe_plan_relation_available_response(
+        planner_plan_available_prefix, 0, planner_schema_id, 3, 4,
+        planner_plan_relation_id);
+    planner_plan_available_prefix[51] = 0xbb;
+    if (planner_plan_available_prefix[0] != 0x00 ||
+        planner_plan_available_prefix[1] != 0x01 ||
+        planner_plan_available_prefix[2] != 0x00 ||
+        !prdb_decode_planner_describe_plan_relation_available_response(
+            planner_plan_available_prefix, sizeof(planner_plan_available_prefix),
+            &decoded_planner_unavailable_status, decoded_planner_schema_id,
+            &decoded_schema_version, &decoded_table_epoch,
+            decoded_planner_plan_relation_id) ||
+        decoded_planner_unavailable_status != 0 || decoded_schema_version != 3 ||
+        decoded_table_epoch != 4) {
+        return 47;
+    }
+    for (size_t i = 0; i < 16; ++i) {
+        if (decoded_planner_schema_id[i] != planner_schema_id[i] ||
+            decoded_planner_plan_relation_id[i] != planner_plan_relation_id[i]) {
+            return 48;
+        }
+    }
     return 0;
 }

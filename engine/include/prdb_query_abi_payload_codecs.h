@@ -156,6 +156,47 @@ static inline int prdb_decode_planner_describe_relation_unavailable_response(con
     return 1;
 }
 
+static inline void prdb_encode_planner_describe_relation_available_response(uint8_t payload[35],
+    uint8_t status, const uint8_t relation_id[16], const uint8_t planning_handle[16]) {
+    payload[0] = (uint8_t)((PRDB_PLANNER_PAYLOAD_VERSION >> 8) & 0xffu);
+    payload[1] = (uint8_t)(PRDB_PLANNER_PAYLOAD_VERSION & 0xffu);
+    payload[2] = status;
+    for (size_t i = 0; i < 16; ++i) {
+        payload[3 + i] = relation_id[i];
+    }
+    for (size_t i = 0; i < 16; ++i) {
+        payload[19 + i] = planning_handle[i];
+    }
+}
+
+static inline int prdb_decode_planner_describe_relation_available_response(const uint8_t *payload, size_t payload_len,
+    uint8_t *status, uint8_t relation_id[16], uint8_t planning_handle[16]) {
+    if (payload == NULL || payload_len < 35) {
+        return 0;
+    }
+    if (payload[0] != (uint8_t)((PRDB_PLANNER_PAYLOAD_VERSION >> 8) & 0xffu) ||
+        payload[1] != (uint8_t)(PRDB_PLANNER_PAYLOAD_VERSION & 0xffu)) {
+        return 0;
+    }
+    if (status == NULL) {
+        return 0;
+    }
+    *status = payload[2];
+    if (relation_id == NULL) {
+        return 0;
+    }
+    for (size_t i = 0; i < 16; ++i) {
+        relation_id[i] = payload[3 + i];
+    }
+    if (planning_handle == NULL) {
+        return 0;
+    }
+    for (size_t i = 0; i < 16; ++i) {
+        planning_handle[i] = payload[19 + i];
+    }
+    return 1;
+}
+
 static inline void prdb_encode_planner_describe_plan_relation_unavailable_response(uint8_t payload[3],
     uint8_t status) {
     payload[0] = (uint8_t)((PRDB_PLANNER_PAYLOAD_VERSION >> 8) & 0xffu);
@@ -176,6 +217,71 @@ static inline int prdb_decode_planner_describe_plan_relation_unavailable_respons
         return 0;
     }
     *status = payload[2];
+    return 1;
+}
+
+static inline void prdb_encode_planner_describe_plan_relation_available_response(uint8_t payload[51],
+    uint8_t status, const uint8_t schema_id[16], uint64_t schema_version, uint64_t table_epoch, const uint8_t relation_id[16]) {
+    payload[0] = (uint8_t)((PRDB_PLANNER_PAYLOAD_VERSION >> 8) & 0xffu);
+    payload[1] = (uint8_t)(PRDB_PLANNER_PAYLOAD_VERSION & 0xffu);
+    payload[2] = status;
+    for (size_t i = 0; i < 16; ++i) {
+        payload[3 + i] = schema_id[i];
+    }
+    uint64_t schema_version_wire = (uint64_t)schema_version;
+    for (size_t i = 0; i < 8; ++i) {
+        payload[19 + i] = (uint8_t)(schema_version_wire >> ((8 - 1 - i) * 8));
+    }
+    uint64_t table_epoch_wire = (uint64_t)table_epoch;
+    for (size_t i = 0; i < 8; ++i) {
+        payload[27 + i] = (uint8_t)(table_epoch_wire >> ((8 - 1 - i) * 8));
+    }
+    for (size_t i = 0; i < 16; ++i) {
+        payload[35 + i] = relation_id[i];
+    }
+}
+
+static inline int prdb_decode_planner_describe_plan_relation_available_response(const uint8_t *payload, size_t payload_len,
+    uint8_t *status, uint8_t schema_id[16], uint64_t *schema_version, uint64_t *table_epoch, uint8_t relation_id[16]) {
+    if (payload == NULL || payload_len < 51) {
+        return 0;
+    }
+    if (payload[0] != (uint8_t)((PRDB_PLANNER_PAYLOAD_VERSION >> 8) & 0xffu) ||
+        payload[1] != (uint8_t)(PRDB_PLANNER_PAYLOAD_VERSION & 0xffu)) {
+        return 0;
+    }
+    if (status == NULL) {
+        return 0;
+    }
+    *status = payload[2];
+    if (schema_id == NULL) {
+        return 0;
+    }
+    for (size_t i = 0; i < 16; ++i) {
+        schema_id[i] = payload[3 + i];
+    }
+    if (schema_version == NULL) {
+        return 0;
+    }
+    uint64_t schema_version_wire_value = 0;
+    for (size_t i = 0; i < 8; ++i) {
+        schema_version_wire_value = (schema_version_wire_value << 8) | payload[19 + i];
+    }
+    *schema_version = (uint64_t)schema_version_wire_value;
+    if (table_epoch == NULL) {
+        return 0;
+    }
+    uint64_t table_epoch_wire_value = 0;
+    for (size_t i = 0; i < 8; ++i) {
+        table_epoch_wire_value = (table_epoch_wire_value << 8) | payload[27 + i];
+    }
+    *table_epoch = (uint64_t)table_epoch_wire_value;
+    if (relation_id == NULL) {
+        return 0;
+    }
+    for (size_t i = 0; i < 16; ++i) {
+        relation_id[i] = payload[35 + i];
+    }
     return 1;
 }
 

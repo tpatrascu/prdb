@@ -33,6 +33,10 @@ class PayloadSchemaValidationTests(unittest.TestCase):
         self.assertIn("decode_supervisor_cancel_result_terminal", rust)
         self.assertIn("encode_supervisor_status_terminal_response", rust)
         self.assertIn("decode_supervisor_status_terminal_response", rust)
+        self.assertIn("encode_planner_describe_relation_available_response", rust)
+        self.assertIn("decode_planner_describe_relation_available_response", rust)
+        self.assertIn("encode_planner_describe_plan_relation_available_response", rust)
+        self.assertIn("decode_planner_describe_plan_relation_available_response", rust)
         self.assertIn("PRDB_PLANNER_ESTIMATE_SCAN_RESPONSE_HEADER_BYTES", c)
         self.assertIn("prdb_encode_supervisor_invocation_control_request", c_codecs)
         self.assertIn("prdb_decode_supervisor_invocation_control_request", c_codecs)
@@ -70,6 +74,12 @@ class PayloadSchemaValidationTests(unittest.TestCase):
         self.assertIn("prdb_decode_planner_describe_relation_unavailable_response", c_codecs)
         self.assertIn("prdb_encode_planner_describe_plan_relation_unavailable_response", c_codecs)
         self.assertIn("prdb_decode_planner_describe_plan_relation_unavailable_response", c_codecs)
+        self.assertIn("prdb_encode_planner_describe_relation_available_response", c_codecs)
+        self.assertIn("prdb_decode_planner_describe_relation_available_response", c_codecs)
+        self.assertIn("prdb_encode_planner_describe_plan_relation_available_response", c_codecs)
+        self.assertIn("prdb_decode_planner_describe_plan_relation_available_response", c_codecs)
+        self.assertIn("payload.len() < 35", rust)
+        self.assertIn("payload_len < 35", c_codecs)
 
     def test_payload_version_must_be_a_leading_u16(self):
         malformed = copy.deepcopy(self.schema)
@@ -101,6 +111,37 @@ class PayloadSchemaValidationTests(unittest.TestCase):
         ]
         with self.assertRaisesRegex(ValueError, "cannot encode trailing fields"):
             GENERATOR.render(malformed)
+
+    def test_prefix_mode_must_be_boolean_and_opt_into_a_codec(self):
+        malformed = copy.deepcopy(self.schema)
+        request = next(
+            payload
+            for payload in malformed["payload_schemas"]
+            if payload["name"] == "SUPERVISOR_INVOCATION_CONTROL_REQUEST"
+        )
+        request["codec_prefix"] = "yes"
+        with self.assertRaisesRegex(ValueError, "codec_prefix must be Boolean"):
+            GENERATOR.render(malformed)
+
+        request["codec_prefix"] = True
+        request["generate_rust_codec"] = False
+        request["generate_c_codec"] = False
+        with self.assertRaisesRegex(ValueError, "codec_prefix requires a generated codec"):
+            GENERATOR.render(malformed)
+
+    def test_prefix_codec_can_cover_a_header_with_a_bounded_trailing_field(self):
+        schema = copy.deepcopy(self.schema)
+        response = next(
+            payload
+            for payload in schema["payload_schemas"]
+            if payload["name"] == "OPTIMIZER_RESPONSE_SUCCESS"
+        )
+        response["generate_rust_codec"] = True
+        response["generate_c_codec"] = True
+        response["codec_prefix"] = True
+        rust, _, c_codecs, *_ = GENERATOR.render(schema)
+        self.assertIn("payload.len() < 7", rust)
+        self.assertIn("payload_len < 7", c_codecs)
 
 
 if __name__ == "__main__":

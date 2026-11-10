@@ -199,8 +199,16 @@ def render(schema):
         generate_rust_codec = payload.get("generate_rust_codec", False)
         if not isinstance(generate_rust_codec, bool):
             raise ValueError(f"generate_rust_codec must be Boolean for {name}")
+        generate_c_codec = payload.get("generate_c_codec", False)
+        if not isinstance(generate_c_codec, bool):
+            raise ValueError(f"generate_c_codec must be Boolean for {name}")
+        codec_prefix = payload.get("codec_prefix", False)
+        if not isinstance(codec_prefix, bool):
+            raise ValueError(f"codec_prefix must be Boolean for {name}")
+        if codec_prefix and not (generate_rust_codec or generate_c_codec):
+            raise ValueError(f"codec_prefix requires a generated codec in {name}")
         if generate_rust_codec:
-            if trailing_fields:
+            if trailing_fields and not codec_prefix:
                 raise ValueError(
                     f"generated fixed Rust codec cannot encode trailing fields in {name}"
                 )
@@ -251,10 +259,12 @@ def render(schema):
                         f"    payload[{field_offset}..{field_end}].copy_from_slice(&{field_name}.to_be_bytes());"
                     )
             rust_lines.extend(["    payload", "}", ""])
+            if len(value_fields) >= 4:
+                rust_lines.append("#[allow(clippy::type_complexity)]")
             rust_lines.extend(
                 [
                     f"pub fn {decode_name}(payload: &[u8]) -> Option<{result_type}> {{",
-                    f"    if payload.len() != {offset} || u16::from_be_bytes([payload[0], payload[1]]) != {version_constant} {{",
+                    f"    if payload.len() {'<' if codec_prefix else '!='} {offset} || u16::from_be_bytes([payload[0], payload[1]]) != {version_constant} {{",
                     "        return None;",
                     "    }",
                 ]
@@ -287,11 +297,8 @@ def render(schema):
                 rust_lines.append(f"    Some(({decoded}))")
             rust_lines.extend(["}", ""])
 
-        generate_c_codec = payload.get("generate_c_codec", False)
-        if not isinstance(generate_c_codec, bool):
-            raise ValueError(f"generate_c_codec must be Boolean for {name}")
         if generate_c_codec:
-            if trailing_fields:
+            if trailing_fields and not codec_prefix:
                 raise ValueError(f"generated fixed C codec cannot encode trailing fields in {name}")
             c_types = {
                 "u8": "uint8_t",
@@ -364,7 +371,7 @@ def render(schema):
                 [
                     f"static inline int {decode_name}(const uint8_t *payload, size_t payload_len,",
                     f"    {', '.join(output_arguments)}) {{",
-                    f"    if (payload == NULL || payload_len != {offset}) {{",
+                    f"    if (payload == NULL || payload_len {'<' if codec_prefix else '!='} {offset}) {{",
                     "        return 0;",
                     "    }",
                     f"    if (payload[0] != (uint8_t)(({c_version_constant} >> 8) & 0xffu) ||",
