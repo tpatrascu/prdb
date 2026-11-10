@@ -1,8 +1,10 @@
 use prdb_engine::executor_ipc::{
-    MutationAcknowledgement, StageDeleteRequest, StageInsertRequest, StageInsertResponse,
-    StageUpdateRequest,
+    MutationAcknowledgement, OpenScanResponse, StageDeleteRequest, StageInsertRequest,
+    StageInsertResponse, StageUpdateRequest,
 };
-use prdb_engine::metadata_discovery::{ExecutorRowHandle, ResolvedRelationHandle};
+use prdb_engine::metadata_discovery::{
+    EXECUTOR_SCAN_CURSOR_TOKEN_KIND, ExecutorRowHandle, ExecutorScanCursor, ResolvedRelationHandle,
+};
 use prdb_engine::transaction::InsertInput;
 use prdb_engine::tuple::{FieldPatch, ScalarValue};
 
@@ -71,6 +73,20 @@ fn executor_mutation_payloads_round_trip_canonical_values_and_handles() {
         MutationAcknowledgement::decode(&MutationAcknowledgement.encode()).unwrap(),
         MutationAcknowledgement
     );
+}
+
+#[test]
+fn executor_open_scan_response_round_trips_generated_cursor_handle() {
+    let mut cursor_bytes = [0x5a; 16];
+    cursor_bytes[0] = EXECUTOR_SCAN_CURSOR_TOKEN_KIND;
+    let response = OpenScanResponse {
+        cursor: ExecutorScanCursor::from_bytes(&cursor_bytes).unwrap(),
+    };
+    let payload = response.encode();
+    assert_eq!(&payload[..2], &[0x00, 0x01]);
+    assert_eq!(&payload[2..], &cursor_bytes);
+    assert_eq!(OpenScanResponse::decode(&payload).unwrap(), response);
+    assert!(OpenScanResponse::decode(&payload[..payload.len() - 1]).is_err());
 }
 
 #[test]

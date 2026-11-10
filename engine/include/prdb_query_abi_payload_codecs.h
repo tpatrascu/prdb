@@ -6,6 +6,33 @@
 #include <stddef.h>
 #include <stdint.h>
 
+static inline void prdb_encode_executor_open_scan_response(uint8_t payload[18],
+    const uint8_t cursor_handle[16]) {
+    payload[0] = (uint8_t)((PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION >> 8) & 0xffu);
+    payload[1] = (uint8_t)(PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION & 0xffu);
+    for (size_t i = 0; i < 16; ++i) {
+        payload[2 + i] = cursor_handle[i];
+    }
+}
+
+static inline int prdb_decode_executor_open_scan_response(const uint8_t *payload, size_t payload_len,
+    uint8_t cursor_handle[16]) {
+    if (payload == NULL || payload_len != 18) {
+        return 0;
+    }
+    if (payload[0] != (uint8_t)((PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION >> 8) & 0xffu) ||
+        payload[1] != (uint8_t)(PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION & 0xffu)) {
+        return 0;
+    }
+    if (cursor_handle == NULL) {
+        return 0;
+    }
+    for (size_t i = 0; i < 16; ++i) {
+        cursor_handle[i] = payload[2 + i];
+    }
+    return 1;
+}
+
 static inline void prdb_encode_executor_mutation_acknowledgement(uint8_t payload[3],
     uint8_t status) {
     payload[0] = (uint8_t)((PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION >> 8) & 0xffu);

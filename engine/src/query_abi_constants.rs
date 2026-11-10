@@ -99,6 +99,20 @@ pub const EXECUTOR_OPEN_SCAN_REQUEST_HEADER_BYTES: u32 = 20;
 pub const EXECUTOR_OPEN_SCAN_RESPONSE_VERSION_OFFSET: u32 = 0;
 pub const EXECUTOR_OPEN_SCAN_RESPONSE_CURSOR_HANDLE_OFFSET: u32 = 2;
 pub const EXECUTOR_OPEN_SCAN_RESPONSE_HEADER_BYTES: u32 = 18;
+pub fn encode_executor_open_scan_response(cursor_handle: [u8; 16]) -> [u8; 18] {
+    let mut payload = [0u8; 18];
+    payload[0..2].copy_from_slice(&EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes());
+    payload[2..18].copy_from_slice(&cursor_handle);
+    payload
+}
+
+pub fn decode_executor_open_scan_response(payload: &[u8]) -> Option<[u8; 16]> {
+    if payload.len() != 18 || u16::from_be_bytes([payload[0], payload[1]]) != EXECUTOR_BATCH_PAYLOAD_VERSION {
+        return None;
+    }
+    payload[2..18].try_into().ok()
+}
+
 pub const EXECUTOR_MUTATION_ACKNOWLEDGEMENT_VERSION_OFFSET: u32 = 0;
 pub const EXECUTOR_MUTATION_ACKNOWLEDGEMENT_STATUS_OFFSET: u32 = 2;
 pub const EXECUTOR_MUTATION_ACKNOWLEDGEMENT_HEADER_BYTES: u32 = 3;

@@ -286,5 +286,33 @@ int main(void) {
             &decoded_mutation_ack_status) || decoded_mutation_ack_status != 0) {
         return 31;
     }
+    const uint8_t open_scan_response_expected[18] = {
+        0x00, 0x01,
+        0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a,
+        0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a,
+    };
+    uint8_t open_scan_response_payload[18] = {0};
+    uint8_t open_scan_response_cursor[16] = {0};
+    for (size_t i = 0; i < sizeof(open_scan_response_cursor); ++i) {
+        open_scan_response_cursor[i] = 0x5a;
+    }
+    uint8_t decoded_open_scan_response_cursor[16] = {0};
+    prdb_encode_executor_open_scan_response(
+        open_scan_response_payload, open_scan_response_cursor);
+    for (size_t i = 0; i < sizeof(open_scan_response_expected); ++i) {
+        if (open_scan_response_payload[i] != open_scan_response_expected[i]) {
+            return 32;
+        }
+    }
+    if (!prdb_decode_executor_open_scan_response(
+            open_scan_response_payload, sizeof(open_scan_response_payload),
+            decoded_open_scan_response_cursor)) {
+        return 33;
+    }
+    for (size_t i = 0; i < sizeof(open_scan_response_cursor); ++i) {
+        if (decoded_open_scan_response_cursor[i] != open_scan_response_cursor[i]) {
+            return 34;
+        }
+    }
     return 0;
 }
