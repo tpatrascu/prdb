@@ -409,6 +409,13 @@
 - Verification: generator drift and schema tests, locked workspace build, rustfmt check, warning-denied Clippy, serial workspace tests, and the maintained TinyCC SDK suite all passed in the pinned Nix shell.
 - Remaining: extend field-level schema and generated codecs to other payloads, add C serializer parity, and complete the release profile and artifact gates.
 
+## TC-2: generated executor relation-resolution request prefix codec — implemented
+
+- Contract: [internal IPC](../../specs/ipc-protocol.md) and [toolchain](../../specs/toolchain.md). The request has a fixed v1 prefix containing the schema-name and relation-name byte lengths, followed by the bounded UTF-8 names. The generated Rust and C codecs handle the fixed version-and-length prefix; role-specific code validates and consumes the variable UTF-8 tail.
+- Regression: the maintained TinyCC C fixture checks the exact prefix bytes, decodes both lengths, and appends the UTF-8 tail. The executor socket regression covers relation resolution through the request path.
+- Verification: schema generation and drift tests, locked workspace build, rustfmt check, warning-denied Clippy, serial workspace tests (129 passed; 3 cgroup-gated tests ignored), and the full maintained TinyCC SDK suite passed in the pinned Nix shell.
+- Remaining: extend generated schemas and codecs to the remaining IPC payloads, then complete release profile and artifact gates.
+
 ## TC-1: locked Nix development shell — implemented
 
 - Behavior: `nix develop --locked` provides the pinned x86_64-linux package set used for the engine and SDK checks. [`flake.nix`](../../flake.nix) and [`flake.lock`](../../flake.lock) pin Nixpkgs revision `718f670e845328e9c2cecdd832835712b2cbd065` with source NAR hash `sha256-Ee5BWo8sh3pGt70QUdRajnaginqFmWvrtdBc4gJzhks=`.

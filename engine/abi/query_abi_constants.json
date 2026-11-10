@@ -1215,6 +1215,9 @@
     {
       "name": "EXECUTOR_RESOLVE_RELATION_REQUEST",
       "version_constant": "RESOLVE_RELATION_PAYLOAD_VERSION",
+      "generate_rust_codec": true,
+      "generate_c_codec": true,
+      "codec_prefix": true,
       "fields": [
         { "name": "version", "encoding": "u16be" },
         { "name": "schema_name_length", "encoding": "u16be" },

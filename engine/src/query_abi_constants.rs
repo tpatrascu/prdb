@@ -92,6 +92,21 @@ pub const EXECUTOR_RESOLVE_RELATION_REQUEST_VERSION_OFFSET: u32 = 0;
 pub const EXECUTOR_RESOLVE_RELATION_REQUEST_SCHEMA_NAME_LENGTH_OFFSET: u32 = 2;
 pub const EXECUTOR_RESOLVE_RELATION_REQUEST_RELATION_NAME_LENGTH_OFFSET: u32 = 4;
 pub const EXECUTOR_RESOLVE_RELATION_REQUEST_HEADER_BYTES: u32 = 6;
+pub fn encode_executor_resolve_relation_request(schema_name_length: u16, relation_name_length: u16) -> [u8; 6] {
+    let mut payload = [0u8; 6];
+    payload[0..2].copy_from_slice(&RESOLVE_RELATION_PAYLOAD_VERSION.to_be_bytes());
+    payload[2..4].copy_from_slice(&schema_name_length.to_be_bytes());
+    payload[4..6].copy_from_slice(&relation_name_length.to_be_bytes());
+    payload
+}
+
+pub fn decode_executor_resolve_relation_request(payload: &[u8]) -> Option<(u16, u16)> {
+    if payload.len() < 6 || u16::from_be_bytes([payload[0], payload[1]]) != RESOLVE_RELATION_PAYLOAD_VERSION {
+        return None;
+    }
+    Some((u16::from_be_bytes(payload[2..4].try_into().ok()?), u16::from_be_bytes(payload[4..6].try_into().ok()?)))
+}
+
 pub const EXECUTOR_OPEN_SCAN_REQUEST_VERSION_OFFSET: u32 = 0;
 pub const EXECUTOR_OPEN_SCAN_REQUEST_RELATION_HANDLE_OFFSET: u32 = 2;
 pub const EXECUTOR_OPEN_SCAN_REQUEST_COLUMN_COUNT_OFFSET: u32 = 18;

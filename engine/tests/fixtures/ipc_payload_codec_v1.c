@@ -1,5 +1,7 @@
 #include "prdb_query_abi_payload_codecs.h"
 
+#include <string.h>
+
 int main(void) {
     const uint8_t invocation_id[16] = {
         0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a,
@@ -574,6 +576,27 @@ int main(void) {
         if (decoded_open_scan_relation[i] != open_scan_relation[i]) {
             return 59;
         }
+    }
+    const uint8_t resolve_relation_expected[14] = {
+        0x00, 0x01, 0x00, 0x03, 0x00, 0x05,
+        'a', 'p', 'p', 'i', 't', 'e', 'm', 's',
+    };
+    uint8_t resolve_relation_payload[14] = {0};
+    uint16_t decoded_schema_name_length = 0;
+    uint16_t decoded_relation_name_length = 0;
+    prdb_encode_executor_resolve_relation_request(
+        resolve_relation_payload, 3, 5);
+    memcpy(resolve_relation_payload + 6, "appitems", 8);
+    for (size_t i = 0; i < sizeof(resolve_relation_expected); ++i) {
+        if (resolve_relation_payload[i] != resolve_relation_expected[i]) {
+            return 60;
+        }
+    }
+    if (!prdb_decode_executor_resolve_relation_request(
+            resolve_relation_payload, sizeof(resolve_relation_payload),
+            &decoded_schema_name_length, &decoded_relation_name_length) ||
+        decoded_schema_name_length != 3 || decoded_relation_name_length != 5) {
+        return 61;
     }
     uint8_t estimate_response[37] = {0};
     uint8_t decoded_estimate_status = 0xff;

@@ -6,6 +6,48 @@
 #include <stddef.h>
 #include <stdint.h>
 
+static inline void prdb_encode_executor_resolve_relation_request(uint8_t payload[6],
+    uint16_t schema_name_length, uint16_t relation_name_length) {
+    payload[0] = (uint8_t)((PRDB_RESOLVE_RELATION_PAYLOAD_VERSION >> 8) & 0xffu);
+    payload[1] = (uint8_t)(PRDB_RESOLVE_RELATION_PAYLOAD_VERSION & 0xffu);
+    uint64_t schema_name_length_wire = (uint64_t)schema_name_length;
+    for (size_t i = 0; i < 2; ++i) {
+        payload[2 + i] = (uint8_t)(schema_name_length_wire >> ((2 - 1 - i) * 8));
+    }
+    uint64_t relation_name_length_wire = (uint64_t)relation_name_length;
+    for (size_t i = 0; i < 2; ++i) {
+        payload[4 + i] = (uint8_t)(relation_name_length_wire >> ((2 - 1 - i) * 8));
+    }
+}
+
+static inline int prdb_decode_executor_resolve_relation_request(const uint8_t *payload, size_t payload_len,
+    uint16_t *schema_name_length, uint16_t *relation_name_length) {
+    if (payload == NULL || payload_len < 6) {
+        return 0;
+    }
+    if (payload[0] != (uint8_t)((PRDB_RESOLVE_RELATION_PAYLOAD_VERSION >> 8) & 0xffu) ||
+        payload[1] != (uint8_t)(PRDB_RESOLVE_RELATION_PAYLOAD_VERSION & 0xffu)) {
+        return 0;
+    }
+    if (schema_name_length == NULL) {
+        return 0;
+    }
+    uint64_t schema_name_length_wire_value = 0;
+    for (size_t i = 0; i < 2; ++i) {
+        schema_name_length_wire_value = (schema_name_length_wire_value << 8) | payload[2 + i];
+    }
+    *schema_name_length = (uint16_t)schema_name_length_wire_value;
+    if (relation_name_length == NULL) {
+        return 0;
+    }
+    uint64_t relation_name_length_wire_value = 0;
+    for (size_t i = 0; i < 2; ++i) {
+        relation_name_length_wire_value = (relation_name_length_wire_value << 8) | payload[4 + i];
+    }
+    *relation_name_length = (uint16_t)relation_name_length_wire_value;
+    return 1;
+}
+
 static inline void prdb_encode_executor_open_scan_request(uint8_t payload[20],
     const uint8_t relation_handle[16], uint16_t column_count) {
     payload[0] = (uint8_t)((PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION >> 8) & 0xffu);
