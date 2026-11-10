@@ -363,6 +363,13 @@
 - Verification: generated-file drift and six schema tests, focused planner estimate integration regression, fresh TinyCC prefix fixture, locked workspace build, format check, warning-denied Clippy, serial workspace tests (129 commit tests passed; 3 cgroup-dependent tests ignored by default), and maintained TinyCC SDK suite passed in the pinned Nix shell.
 - Remaining: generate codecs for additional variable payloads and bounded collections; complete release profile and artifact gates.
 
+## TC-2: generated executor OPEN SCAN request prefix codec — verified
+
+- The shared schema generates the OPEN SCAN request prefix containing the resolved relation handle and column count in Rust and C.
+- Executor Rust encoding and decoding use the generated prefix helper, then retain existing bounded column-ID array, duplicate, zero-ID, and exact-length checks. The maintained TinyCC fixture checks relation-handle/count decoding with an appended column ID; executor socket and information-schema scan regressions pass.
+- Verification: generated-file drift and six schema tests, focused executor scan socket regressions, fresh TinyCC prefix fixture, locked workspace build, format check, warning-denied Clippy, serial workspace tests (129 commit tests passed; 3 cgroup-dependent tests ignored by default), and maintained TinyCC SDK suite passed in the pinned Nix shell.
+- Remaining: generate codecs for additional variable payloads and bounded collections; complete release profile and artifact gates.
+
 ## TC-2: C/Rust administrative-cancel codec parity — verified
 
 - The C codec generator now also covers the administrative-cancel request with invocation ID and big-endian u16 reason code. Both the fixed 18-byte invocation-control request and 20-byte cancel request are emitted from the shared schema.

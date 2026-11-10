@@ -6,6 +6,45 @@
 #include <stddef.h>
 #include <stdint.h>
 
+static inline void prdb_encode_executor_open_scan_request(uint8_t payload[20],
+    const uint8_t relation_handle[16], uint16_t column_count) {
+    payload[0] = (uint8_t)((PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION >> 8) & 0xffu);
+    payload[1] = (uint8_t)(PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION & 0xffu);
+    for (size_t i = 0; i < 16; ++i) {
+        payload[2 + i] = relation_handle[i];
+    }
+    uint64_t column_count_wire = (uint64_t)column_count;
+    for (size_t i = 0; i < 2; ++i) {
+        payload[18 + i] = (uint8_t)(column_count_wire >> ((2 - 1 - i) * 8));
+    }
+}
+
+static inline int prdb_decode_executor_open_scan_request(const uint8_t *payload, size_t payload_len,
+    uint8_t relation_handle[16], uint16_t *column_count) {
+    if (payload == NULL || payload_len < 20) {
+        return 0;
+    }
+    if (payload[0] != (uint8_t)((PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION >> 8) & 0xffu) ||
+        payload[1] != (uint8_t)(PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION & 0xffu)) {
+        return 0;
+    }
+    if (relation_handle == NULL) {
+        return 0;
+    }
+    for (size_t i = 0; i < 16; ++i) {
+        relation_handle[i] = payload[2 + i];
+    }
+    if (column_count == NULL) {
+        return 0;
+    }
+    uint64_t column_count_wire_value = 0;
+    for (size_t i = 0; i < 2; ++i) {
+        column_count_wire_value = (column_count_wire_value << 8) | payload[18 + i];
+    }
+    *column_count = (uint16_t)column_count_wire_value;
+    return 1;
+}
+
 static inline void prdb_encode_executor_open_scan_response(uint8_t payload[18],
     const uint8_t cursor_handle[16]) {
     payload[0] = (uint8_t)((PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION >> 8) & 0xffu);

@@ -229,14 +229,8 @@ impl OpenScanRequest {
         }
         let count = u16::try_from(self.column_ids.len())
             .map_err(|_| ExecutorRequestError::InvalidPayload)?;
-        let mut payload = vec![0; EXECUTOR_OPEN_SCAN_REQUEST_HEADER_BYTES as usize];
-        let version_offset = EXECUTOR_OPEN_SCAN_REQUEST_VERSION_OFFSET as usize;
-        payload[version_offset..version_offset + 2]
-            .copy_from_slice(&EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes());
-        let handle_offset = EXECUTOR_OPEN_SCAN_REQUEST_RELATION_HANDLE_OFFSET as usize;
-        payload[handle_offset..handle_offset + 16].copy_from_slice(&self.relation.to_bytes());
-        let count_offset = EXECUTOR_OPEN_SCAN_REQUEST_COLUMN_COUNT_OFFSET as usize;
-        payload[count_offset..count_offset + 2].copy_from_slice(&count.to_be_bytes());
+        let mut payload =
+            generated::encode_executor_open_scan_request(self.relation.to_bytes(), count).to_vec();
         for column_id in &self.column_ids {
             payload.extend_from_slice(column_id);
         }
@@ -248,22 +242,12 @@ impl OpenScanRequest {
 
     pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
         let header_bytes = EXECUTOR_OPEN_SCAN_REQUEST_HEADER_BYTES as usize;
-        let version_offset = EXECUTOR_OPEN_SCAN_REQUEST_VERSION_OFFSET as usize;
-        if payload.len() < header_bytes
-            || u16::from_be_bytes([payload[version_offset], payload[version_offset + 1]])
-                != EXECUTOR_BATCH_PAYLOAD_VERSION
-        {
-            return Err(ExecutorRequestError::InvalidPayload);
-        }
-        let handle_offset = EXECUTOR_OPEN_SCAN_REQUEST_RELATION_HANDLE_OFFSET as usize;
-        let relation =
-            ResolvedRelationHandle::from_bytes(&payload[handle_offset..handle_offset + 16])
+        let (relation_bytes, encoded_column_count) =
+            generated::decode_executor_open_scan_request(payload)
                 .ok_or(ExecutorRequestError::InvalidPayload)?;
-        let count_offset = EXECUTOR_OPEN_SCAN_REQUEST_COLUMN_COUNT_OFFSET as usize;
-        let column_count = usize::from(u16::from_be_bytes([
-            payload[count_offset],
-            payload[count_offset + 1],
-        ]));
+        let relation = ResolvedRelationHandle::from_bytes(&relation_bytes)
+            .ok_or(ExecutorRequestError::InvalidPayload)?;
+        let column_count = usize::from(encoded_column_count);
         if column_count > crate::tuple::MAX_COLUMNS
             || payload.len() != header_bytes + column_count * 16
         {

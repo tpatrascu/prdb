@@ -551,6 +551,30 @@ int main(void) {
             return 56;
         }
     }
+    uint8_t open_scan_relation[16];
+    uint8_t open_scan_column_id[16];
+    uint8_t decoded_open_scan_relation[16] = {0};
+    for (size_t i = 0; i < 16; ++i) {
+        open_scan_relation[i] = 0x99;
+        open_scan_column_id[i] = 0xaa;
+    }
+    uint8_t open_scan_request[36] = {0};
+    uint16_t decoded_open_scan_column_count = 0;
+    prdb_encode_executor_open_scan_request(open_scan_request, open_scan_relation, 1);
+    for (size_t i = 0; i < 16; ++i) {
+        open_scan_request[20 + i] = open_scan_column_id[i];
+    }
+    if (open_scan_request[0] != 0x00 || open_scan_request[1] != 0x01 ||
+        !prdb_decode_executor_open_scan_request(
+            open_scan_request, sizeof(open_scan_request), decoded_open_scan_relation,
+            &decoded_open_scan_column_count) || decoded_open_scan_column_count != 1) {
+        return 58;
+    }
+    for (size_t i = 0; i < 16; ++i) {
+        if (decoded_open_scan_relation[i] != open_scan_relation[i]) {
+            return 59;
+        }
+    }
     uint8_t estimate_response[37] = {0};
     uint8_t decoded_estimate_status = 0xff;
     uint64_t decoded_visible_rows = 0;

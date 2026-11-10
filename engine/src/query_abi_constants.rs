@@ -96,6 +96,21 @@ pub const EXECUTOR_OPEN_SCAN_REQUEST_VERSION_OFFSET: u32 = 0;
 pub const EXECUTOR_OPEN_SCAN_REQUEST_RELATION_HANDLE_OFFSET: u32 = 2;
 pub const EXECUTOR_OPEN_SCAN_REQUEST_COLUMN_COUNT_OFFSET: u32 = 18;
 pub const EXECUTOR_OPEN_SCAN_REQUEST_HEADER_BYTES: u32 = 20;
+pub fn encode_executor_open_scan_request(relation_handle: [u8; 16], column_count: u16) -> [u8; 20] {
+    let mut payload = [0u8; 20];
+    payload[0..2].copy_from_slice(&EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes());
+    payload[2..18].copy_from_slice(&relation_handle);
+    payload[18..20].copy_from_slice(&column_count.to_be_bytes());
+    payload
+}
+
+pub fn decode_executor_open_scan_request(payload: &[u8]) -> Option<([u8; 16], u16)> {
+    if payload.len() < 20 || u16::from_be_bytes([payload[0], payload[1]]) != EXECUTOR_BATCH_PAYLOAD_VERSION {
+        return None;
+    }
+    Some((payload[2..18].try_into().ok()?, u16::from_be_bytes(payload[18..20].try_into().ok()?)))
+}
+
 pub const EXECUTOR_OPEN_SCAN_RESPONSE_VERSION_OFFSET: u32 = 0;
 pub const EXECUTOR_OPEN_SCAN_RESPONSE_CURSOR_HANDLE_OFFSET: u32 = 2;
 pub const EXECUTOR_OPEN_SCAN_RESPONSE_HEADER_BYTES: u32 = 18;
