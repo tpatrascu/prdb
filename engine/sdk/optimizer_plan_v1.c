@@ -1,6 +1,7 @@
 #include "prdb_sdk_optimizer_plan_v1.h"
 #include "prdb_sdk_sql_v1.h"
 #include "prdb_sdk_sql_result_v1.h"
+#include "prdb_query_abi_payload_codecs.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -709,6 +710,11 @@ int32_t prdb_sdk_optimizer_validate_executor_relation_v1(
     uint32_t relation_len;
     uint32_t column_count;
     uint32_t scan_index = 0;
+    uint8_t relation_status;
+    uint8_t response_schema_id[16];
+    uint8_t response_relation_id[16];
+    uint64_t response_schema_version;
+    uint64_t response_table_epoch;
     int32_t callback_status;
     int32_t plan_status;
 
@@ -730,12 +736,8 @@ int32_t prdb_sdk_optimizer_validate_executor_relation_v1(
 
     schema_len = plan.schema_name_len;
     relation_len = plan.relation_name_len;
-    request[0] = 0;
-    request[1] = 1;
-    request[2] = (uint8_t)(schema_len >> 8);
-    request[3] = (uint8_t)schema_len;
-    request[4] = (uint8_t)(relation_len >> 8);
-    request[5] = (uint8_t)relation_len;
+    prdb_encode_executor_resolve_relation_request(
+        request, (uint16_t)schema_len, (uint16_t)relation_len);
     memcpy(request + 6, plan.schema_name, schema_len);
     memcpy(request + 6 + schema_len, plan.relation_name, relation_len);
     *response_len = 0;
@@ -750,19 +752,22 @@ int32_t prdb_sdk_optimizer_validate_executor_relation_v1(
         *response_len > response_capacity || *response_len < 3) {
         return PRDB_SDK_OPTIMIZER_PLAN_CALLBACK_ERROR;
     }
-    if (response_u16(response, 0) != 1) {
-        return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
-    }
-    if (response[2] == 1 && *response_len == 3) {
+    if (prdb_decode_planner_describe_plan_relation_unavailable_response(
+            response, (size_t)*response_len, &relation_status) &&
+        relation_status == 1) {
         return PRDB_SDK_OPTIMIZER_PLAN_UNAVAILABLE;
     }
-    if (response[2] != 0 || *response_len < 55) {
+    if (!prdb_decode_planner_describe_plan_relation_available_response(
+            response, (size_t)*response_len, &relation_status,
+            response_schema_id, &response_schema_version,
+            &response_table_epoch, response_relation_id) ||
+        relation_status != 0 || *response_len < 55) {
         return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
     }
-    if (memcmp(response + 3, plan.schema_id, 16) != 0 ||
-        response_u64(response, 19) != plan.schema_version ||
-        response_u64(response, 27) != plan.table_epoch ||
-        memcmp(response + 35, plan.relation_id, 16) != 0) {
+    if (memcmp(response_schema_id, plan.schema_id, 16) != 0 ||
+        response_schema_version != plan.schema_version ||
+        response_table_epoch != plan.table_epoch ||
+        memcmp(response_relation_id, plan.relation_id, 16) != 0) {
         return PRDB_SDK_OPTIMIZER_PLAN_IDENTITY_MISMATCH;
     }
     offset = 51;
