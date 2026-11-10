@@ -7529,6 +7529,62 @@ fn storage_manager_creates_named_unique_index_and_backfills_atomically()
     );
     assert_eq!(read.open_table(schema::INDEXES)?.iter()?.count(), 2);
     assert_eq!(read.open_table(schema::ROW_INDEXES)?.iter()?.count(), 2);
+    let index_table = read.open_table(schema::INDEXES)?;
+    let row_table = read.open_table(ROWS)?;
+    let table_prefix = id(82);
+    let mut reference_scan = Vec::new();
+    for entry in row_table.range::<&[u8]>(table_prefix.as_slice()..)? {
+        let (row_key, row_value) = entry?;
+        let row_key = row_key.value();
+        if !row_key.starts_with(&table_prefix) {
+            break;
+        }
+        if row_key.len() != 32 {
+            return Err("malformed row key in reference scan".into());
+        }
+        let row_id: [u8; 16] = row_key[16..].try_into()?;
+        let row_record = RowRecord::decode(row_value.value())?;
+        let tuple = decode_tuple(&schema.columns, schema.schema_version, &row_record.payload)?;
+        let Some(Some(ScalarValue::Bytea(value))) = tuple.values.first().cloned() else {
+            return Err("reference row lacks its indexed BYTEA value".into());
+        };
+        reference_scan.push((value, row_id));
+    }
+    reference_scan.sort();
+
+    let mut persisted_index_scan = Vec::new();
+    for entry in index_table.range::<&[u8]>(created.index_id.as_slice()..)? {
+        let (index_key, locator_value) = entry?;
+        let index_key = index_key.value();
+        if !index_key.starts_with(&created.index_id) {
+            break;
+        }
+        let locator = IndexLocator::decode_for_key(index_key, locator_value.value())?;
+        let row_key = table_row_key(id(82), locator.row_id);
+        let row_record = RowRecord::decode(
+            row_table
+                .get(row_key.as_slice())?
+                .ok_or("index points to a missing row")?
+                .value(),
+        )?;
+        assert_eq!(locator.row_version, row_record.row_version);
+        let derived = prdb_engine::index_key::derive_index_key(
+            created.index_id,
+            locator.row_id,
+            schema.schema_version,
+            &schema.column_ids,
+            &schema.columns,
+            &row_record.payload,
+            &[id(84)],
+        )?;
+        assert_eq!(derived.key, index_key);
+        let tuple = decode_tuple(&schema.columns, schema.schema_version, &row_record.payload)?;
+        let Some(Some(ScalarValue::Bytea(value))) = tuple.values.first().cloned() else {
+            return Err("indexed row lacks its indexed BYTEA value".into());
+        };
+        persisted_index_scan.push((value, locator.row_id));
+    }
+    assert_eq!(persisted_index_scan, reference_scan);
     drop(index_record);
     drop(catalog);
     drop(read);
