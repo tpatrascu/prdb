@@ -59,7 +59,8 @@ int32_t prdb_sdk_executor_resolve_relation_v1(
     uint64_t response_capacity, uint64_t *response_len,
     prdb_sdk_executor_relation_v1 *out, uint32_t out_capacity,
     prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_capacity) {
-    uint8_t request[6 + 2 * PRDB_SDK_SQL_MAX_IDENTIFIER_BYTES];
+    uint8_t request[PRDB_EXECUTOR_RESOLVE_RELATION_REQUEST_HEADER_BYTES +
+                    2 * PRDB_SDK_SQL_MAX_IDENTIFIER_BYTES];
     prdb_sdk_executor_relation_v1 result = {0};
     const uint8_t *name;
     uint32_t name_len;
@@ -70,13 +71,23 @@ int32_t prdb_sdk_executor_resolve_relation_v1(
         out_capacity < sizeof(*out) || columns == NULL) {
         return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
     }
-    write_u16(request, 1);
-    write_u16(request + 2, (uint16_t)schema_len);
-    write_u16(request + 4, (uint16_t)relation_len);
-    memcpy(request + 6, schema, schema_len);
-    memcpy(request + 6 + schema_len, relation, relation_len);
+    write_u16(request + PRDB_EXECUTOR_RESOLVE_RELATION_REQUEST_VERSION_OFFSET,
+              PRDB_RESOLVE_RELATION_PAYLOAD_VERSION);
+    write_u16(request +
+                  PRDB_EXECUTOR_RESOLVE_RELATION_REQUEST_SCHEMA_NAME_LENGTH_OFFSET,
+              (uint16_t)schema_len);
+    write_u16(request +
+                  PRDB_EXECUTOR_RESOLVE_RELATION_REQUEST_RELATION_NAME_LENGTH_OFFSET,
+              (uint16_t)relation_len);
+    memcpy(request + PRDB_EXECUTOR_RESOLVE_RELATION_REQUEST_HEADER_BYTES,
+           schema, schema_len);
+    memcpy(request + PRDB_EXECUTOR_RESOLVE_RELATION_REQUEST_HEADER_BYTES +
+               schema_len,
+           relation, relation_len);
     status = invoke(host, PRDB_SDK_EXECUTOR_OP_RESOLVE_RELATION, request,
-                    6 + schema_len + relation_len, response, response_capacity,
+                    PRDB_EXECUTOR_RESOLVE_RELATION_REQUEST_HEADER_BYTES +
+                        schema_len + relation_len,
+                    response, response_capacity,
                     response_len);
     if (status != PRDB_SDK_EXECUTOR_OK) return status;
     status = prdb_sdk_executor_decode_relation_v1(

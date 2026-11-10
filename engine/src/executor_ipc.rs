@@ -6,7 +6,12 @@ use crate::metadata_discovery::{
     AuthorizedRelationDescription, ExecutorRowHandle, ExecutorScanCursor, ResolvedRelationHandle,
     VisibleColumn,
 };
-pub use crate::query_abi::{EXECUTOR_BATCH_PAYLOAD_VERSION, RESOLVE_RELATION_PAYLOAD_VERSION};
+pub use crate::query_abi::{
+    EXECUTOR_BATCH_PAYLOAD_VERSION, EXECUTOR_RESOLVE_RELATION_REQUEST_HEADER_BYTES,
+    EXECUTOR_RESOLVE_RELATION_REQUEST_RELATION_NAME_LENGTH_OFFSET,
+    EXECUTOR_RESOLVE_RELATION_REQUEST_SCHEMA_NAME_LENGTH_OFFSET,
+    EXECUTOR_RESOLVE_RELATION_REQUEST_VERSION_OFFSET, RESOLVE_RELATION_PAYLOAD_VERSION,
+};
 use crate::transaction::{
     ExecutorMetadataConnection, InsertInput, InvocationTransaction, TransactionError,
 };
@@ -14,8 +19,13 @@ use crate::tuple::{FieldPatch, ScalarType, ScalarValue};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
-const RESOLVE_REQUEST_HEADER_BYTES: usize = 6;
+const RESOLVE_REQUEST_HEADER_BYTES: usize = EXECUTOR_RESOLVE_RELATION_REQUEST_HEADER_BYTES as usize;
 const RESOLVE_RESPONSE_HEADER_BYTES: usize = 3;
+const RESOLVE_VERSION_OFFSET: usize = EXECUTOR_RESOLVE_RELATION_REQUEST_VERSION_OFFSET as usize;
+const RESOLVE_SCHEMA_LENGTH_OFFSET: usize =
+    EXECUTOR_RESOLVE_RELATION_REQUEST_SCHEMA_NAME_LENGTH_OFFSET as usize;
+const RESOLVE_RELATION_LENGTH_OFFSET: usize =
+    EXECUTOR_RESOLVE_RELATION_REQUEST_RELATION_NAME_LENGTH_OFFSET as usize;
 pub const MAX_EXECUTOR_REQUESTS_PER_CONNECTION: usize = 256;
 pub const MAX_EXECUTOR_BATCH_CANDIDATES: u16 = 128;
 
@@ -38,12 +48,13 @@ impl ResolveRelationRequest {
         {
             return Err(ExecutorRequestError::InvalidPayload);
         }
-        let mut payload = Vec::with_capacity(
-            RESOLVE_REQUEST_HEADER_BYTES + self.schema_name.len() + self.relation_name.len(),
-        );
-        payload.extend_from_slice(&RESOLVE_RELATION_PAYLOAD_VERSION.to_be_bytes());
-        payload.extend_from_slice(&schema_len.to_be_bytes());
-        payload.extend_from_slice(&relation_len.to_be_bytes());
+        let mut payload = vec![0; RESOLVE_REQUEST_HEADER_BYTES];
+        payload[RESOLVE_VERSION_OFFSET..RESOLVE_VERSION_OFFSET + 2]
+            .copy_from_slice(&RESOLVE_RELATION_PAYLOAD_VERSION.to_be_bytes());
+        payload[RESOLVE_SCHEMA_LENGTH_OFFSET..RESOLVE_SCHEMA_LENGTH_OFFSET + 2]
+            .copy_from_slice(&schema_len.to_be_bytes());
+        payload[RESOLVE_RELATION_LENGTH_OFFSET..RESOLVE_RELATION_LENGTH_OFFSET + 2]
+            .copy_from_slice(&relation_len.to_be_bytes());
         payload.extend_from_slice(self.schema_name.as_bytes());
         payload.extend_from_slice(self.relation_name.as_bytes());
         Ok(payload)
@@ -51,12 +62,21 @@ impl ResolveRelationRequest {
 
     pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
         if payload.len() < RESOLVE_REQUEST_HEADER_BYTES
-            || u16::from_be_bytes([payload[0], payload[1]]) != RESOLVE_RELATION_PAYLOAD_VERSION
+            || u16::from_be_bytes([
+                payload[RESOLVE_VERSION_OFFSET],
+                payload[RESOLVE_VERSION_OFFSET + 1],
+            ]) != RESOLVE_RELATION_PAYLOAD_VERSION
         {
             return Err(ExecutorRequestError::InvalidPayload);
         }
-        let schema_len = usize::from(u16::from_be_bytes([payload[2], payload[3]]));
-        let relation_len = usize::from(u16::from_be_bytes([payload[4], payload[5]]));
+        let schema_len = usize::from(u16::from_be_bytes([
+            payload[RESOLVE_SCHEMA_LENGTH_OFFSET],
+            payload[RESOLVE_SCHEMA_LENGTH_OFFSET + 1],
+        ]));
+        let relation_len = usize::from(u16::from_be_bytes([
+            payload[RESOLVE_RELATION_LENGTH_OFFSET],
+            payload[RESOLVE_RELATION_LENGTH_OFFSET + 1],
+        ]));
         let expected_len = RESOLVE_REQUEST_HEADER_BYTES
             .checked_add(schema_len)
             .and_then(|len| len.checked_add(relation_len))

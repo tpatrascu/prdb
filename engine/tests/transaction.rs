@@ -2774,6 +2774,12 @@ fn executor_resolve_relation_ipc_dispatch_returns_only_authorized_handle()
         request_id: 41,
         payload: encode_request("app", "metrics"),
     };
+    assert_eq!(
+        request.payload,
+        [
+            0, 1, 0, 3, 0, 7, b'a', b'p', b'p', b'm', b'e', b't', b'r', b'i', b'c', b's'
+        ]
+    );
     let response =
         dispatch_executor_resolve_relation(ServiceRole::Executor, &mut connection, &request)?;
     assert_eq!(response.operation, request.operation);

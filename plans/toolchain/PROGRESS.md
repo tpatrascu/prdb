@@ -1,5 +1,13 @@
 # Toolchain Progress
 
+## TC-2: generated executor relation request field schema — implemented
+
+- Contract: [internal IPC](../../specs/ipc-protocol.md) and [toolchain](../../specs/toolchain.md). The variable-length executor relation-resolution request has a six-byte fixed header: big-endian version, schema-name length, and relation-name length, followed by the two UTF-8 names in that order.
+- Implementation: `engine/abi/query_abi_constants.json` declares the fixed and length-delimited fields. The generator validates supported encodings, unique names, and length-field references, then emits matching Rust/C offsets and header size. Rust and TinyCC encoders use those generated values.
+- Regression: the Rust and C executor fixtures retain hand-checked request bytes, independently checking the generated layout. Generator `--check` verifies outputs have no drift.
+- Verification: generator drift check, locked workspace build, format, warning-denied Clippy, serial workspace tests (129 commit tests passed; 3 cgroup-dependent tests ignored), and the full maintained TinyCC SDK suite passed.
+- Remaining: extend the schema and generation to other IPC request/response payloads and codecs. This increment does not generate serializers.
+
 ## TC-2: generated IPC payload version registry — implemented
 
 - Contract: [Toolchain](../../specs/toolchain.md). The shared interface schema now owns the executor relation/batch, planner, supervisor, and optimizer response payload-version constants.

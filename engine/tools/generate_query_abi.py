@@ -66,6 +66,73 @@ def render(schema):
         rust_lines.append(f"pub const {rust_name}: {rust_type} = {rust_value};")
         c_lines.append(f"#define {c_name} {c_value}")
 
+    payload_schemas = schema.get("payload_schemas")
+    if not isinstance(payload_schemas, list) or not payload_schemas:
+        raise ValueError("schema must contain at least one IPC payload schema")
+    payload_names = set()
+    for payload in payload_schemas:
+        name = payload.get("name")
+        version_constant = payload.get("version_constant")
+        fields = payload.get("fields")
+        trailing_fields = payload.get("trailing_fields")
+        if (
+            not isinstance(name, str)
+            or not name.isidentifier()
+            or name in payload_names
+            or not isinstance(fields, list)
+            or not fields
+            or not isinstance(trailing_fields, list)
+        ):
+            raise ValueError("invalid IPC payload schema")
+        if version_constant not in {item["rust_name"] for item in constants}:
+            raise ValueError(f"unknown payload version constant for {name}")
+        payload_names.add(name)
+        field_names = set()
+        offset = 0
+        for field in fields:
+            field_name = field.get("name")
+            if (
+                not isinstance(field_name, str)
+                or not field_name.isidentifier()
+                or field_name in field_names
+                or field.get("encoding") != "u16be"
+            ):
+                raise ValueError(f"invalid fixed field in IPC payload {name}")
+            field_names.add(field_name)
+            constant_stem = f"{name}_{field_name.upper()}_OFFSET"
+            rust_name = constant_stem
+            c_name = f"PRDB_{constant_stem}"
+            if rust_name in rust_names or c_name in c_names:
+                raise ValueError(f"duplicate generated IPC field constant {constant_stem}")
+            rust_names.add(rust_name)
+            c_names.add(c_name)
+            rust_lines.append(f"pub const {rust_name}: u32 = {offset};")
+            c_lines.append(f"#define {c_name} UINT32_C({offset})")
+            offset += 2
+        length_fields = {
+            field["name"] for field in fields if field["name"].endswith("_length")
+        }
+        trailing_names = set()
+        for field in trailing_fields:
+            field_name = field.get("name")
+            if (
+                not isinstance(field_name, str)
+                or not field_name.isidentifier()
+                or field_name in trailing_names
+                or field.get("encoding") != "utf8"
+                or field.get("length_field") not in length_fields
+            ):
+                raise ValueError(f"invalid trailing field in IPC payload {name}")
+            trailing_names.add(field_name)
+        header_name = f"{name}_HEADER_BYTES"
+        c_header_name = f"PRDB_{header_name}"
+        if header_name in rust_names or c_header_name in c_names:
+            raise ValueError(f"duplicate generated IPC header constant {header_name}")
+        rust_names.add(header_name)
+        c_names.add(c_header_name)
+        rust_lines.append(f"pub const {header_name}: u32 = {offset};")
+        c_lines.append(f"#define {c_header_name} UINT32_C({offset})")
+
     constant_values = {item["rust_name"]: item["value"] for item in constants}
     frame_fields = (
         ("IPC_FRAME_MAGIC_OFFSET", "IPC_FRAME_MAGIC_LEN", "IPC_FRAME_VERSION_OFFSET"),

@@ -1196,5 +1196,20 @@
       "c_name": "PRDB_OPTIMIZER_RESPONSE_VERSION",
       "c_type": "UINT16_C"
     }
+  ],
+  "payload_schemas": [
+    {
+      "name": "EXECUTOR_RESOLVE_RELATION_REQUEST",
+      "version_constant": "RESOLVE_RELATION_PAYLOAD_VERSION",
+      "fields": [
+        { "name": "version", "encoding": "u16be" },
+        { "name": "schema_name_length", "encoding": "u16be" },
+        { "name": "relation_name_length", "encoding": "u16be" }
+      ],
+      "trailing_fields": [
+        { "name": "schema_name", "encoding": "utf8", "length_field": "schema_name_length" },
+        { "name": "relation_name", "encoding": "utf8", "length_field": "relation_name_length" }
+      ]
+    }
   ]
 }
