@@ -314,5 +314,34 @@ int main(void) {
             return 34;
         }
     }
+    const uint8_t stage_insert_response_expected[18] = {
+        0x00, 0x01, 0x08,
+        0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a,
+        0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a,
+    };
+    uint8_t stage_insert_response_handle[16] = {0};
+    stage_insert_response_handle[0] = 0x08;
+    for (size_t i = 1; i < sizeof(stage_insert_response_handle); ++i) {
+        stage_insert_response_handle[i] = 0x5a;
+    }
+    uint8_t stage_insert_response_payload[18] = {0};
+    uint8_t decoded_stage_insert_response_handle[16] = {0};
+    prdb_encode_executor_stage_insert_response(
+        stage_insert_response_payload, stage_insert_response_handle);
+    for (size_t i = 0; i < sizeof(stage_insert_response_expected); ++i) {
+        if (stage_insert_response_payload[i] != stage_insert_response_expected[i]) {
+            return 35;
+        }
+    }
+    if (!prdb_decode_executor_stage_insert_response(
+            stage_insert_response_payload, sizeof(stage_insert_response_payload),
+            decoded_stage_insert_response_handle)) {
+        return 36;
+    }
+    for (size_t i = 0; i < sizeof(stage_insert_response_handle); ++i) {
+        if (decoded_stage_insert_response_handle[i] != stage_insert_response_handle[i]) {
+            return 37;
+        }
+    }
     return 0;
 }

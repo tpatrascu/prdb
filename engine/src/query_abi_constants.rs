@@ -170,6 +170,20 @@ pub const EXECUTOR_STAGE_DELETE_REQUEST_HEADER_BYTES: u32 = 18;
 pub const EXECUTOR_STAGE_INSERT_RESPONSE_VERSION_OFFSET: u32 = 0;
 pub const EXECUTOR_STAGE_INSERT_RESPONSE_ROW_HANDLE_OFFSET: u32 = 2;
 pub const EXECUTOR_STAGE_INSERT_RESPONSE_HEADER_BYTES: u32 = 18;
+pub fn encode_executor_stage_insert_response(row_handle: [u8; 16]) -> [u8; 18] {
+    let mut payload = [0u8; 18];
+    payload[0..2].copy_from_slice(&EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes());
+    payload[2..18].copy_from_slice(&row_handle);
+    payload
+}
+
+pub fn decode_executor_stage_insert_response(payload: &[u8]) -> Option<[u8; 16]> {
+    if payload.len() != 18 || u16::from_be_bytes([payload[0], payload[1]]) != EXECUTOR_BATCH_PAYLOAD_VERSION {
+        return None;
+    }
+    payload[2..18].try_into().ok()
+}
+
 pub const EXECUTOR_STAGE_UPDATE_REQUEST_VERSION_OFFSET: u32 = 0;
 pub const EXECUTOR_STAGE_UPDATE_REQUEST_ROW_HANDLE_OFFSET: u32 = 2;
 pub const EXECUTOR_STAGE_UPDATE_REQUEST_PATCH_COUNT_OFFSET: u32 = 18;
