@@ -481,3 +481,66 @@ fn composite_index_keys_order_nulls_and_row_suffixes_independently() {
     assert!(null_key.has_null);
     assert_eq!(null_key.key, keys[4]);
 }
+
+#[test]
+fn nullable_composite_components_sort_after_values_at_each_position() {
+    let columns = [
+        ColumnSchema {
+            scalar_type: ScalarType::Integer,
+            nullable: true,
+        },
+        ColumnSchema {
+            scalar_type: ScalarType::Text,
+            nullable: true,
+        },
+        ColumnSchema {
+            scalar_type: ScalarType::Boolean,
+            nullable: true,
+        },
+    ];
+    let pairs = [
+        (
+            [
+                Some(ScalarValue::Integer(1)),
+                Some(ScalarValue::Text("x".into())),
+                Some(ScalarValue::Boolean(false)),
+            ],
+            [
+                None,
+                Some(ScalarValue::Text("x".into())),
+                Some(ScalarValue::Boolean(false)),
+            ],
+        ),
+        (
+            [
+                Some(ScalarValue::Integer(1)),
+                Some(ScalarValue::Text("".into())),
+                Some(ScalarValue::Boolean(false)),
+            ],
+            [
+                Some(ScalarValue::Integer(1)),
+                None,
+                Some(ScalarValue::Boolean(false)),
+            ],
+        ),
+        (
+            [
+                Some(ScalarValue::Integer(1)),
+                Some(ScalarValue::Text("x".into())),
+                Some(ScalarValue::Boolean(false)),
+            ],
+            [
+                Some(ScalarValue::Integer(1)),
+                Some(ScalarValue::Text("x".into())),
+                None,
+            ],
+        ),
+    ];
+
+    for (value, null_at_component) in pairs {
+        let value_key = encode_sql_tuple(&columns, &value).unwrap();
+        let null_key = encode_sql_tuple(&columns, &null_at_component).unwrap();
+        assert!(value_key < null_key);
+        assert_eq!(null_key.iter().filter(|byte| **byte == 0xff).count(), 1);
+    }
+}

@@ -3,7 +3,7 @@
 ## SM-2: persisted index scan matches the row reference scan — verified
 
 - Contract: persisted index entries must identify exactly the committed rows in a reference table scan, preserve the indexed value order, point to the current row version, and rederive from the tuple.
-- Regression: `storage_manager_creates_named_unique_index_and_backfills_atomically` now scans the persisted index prefix and compares its decoded values/row IDs with a separately scanned and naturally sorted row table. It validates every locator version and rederives every key from its row tuple. `composite_index_keys_order_nulls_and_row_suffixes_independently` covers composite ordering, NULL placement, and duplicate-tuple suffix ordering.
+- Regression: `storage_manager_creates_named_unique_index_and_backfills_atomically` now scans the persisted index prefix and compares its decoded values/row IDs with a separately scanned and naturally sorted row table. It validates every locator version and rederives every key from its row tuple. `composite_index_keys_order_nulls_and_row_suffixes_independently` covers composite ordering and duplicate-tuple suffix ordering; `nullable_composite_components_sort_after_values_at_each_position` independently checks NULL ordering at each of three component positions.
 - Verification: focused persisted scan and composite-key tests pass. Locked workspace build, format, warning-denied Clippy, and serial tests pass; the commit integration target reports 129 passed and three cgroup-dependent tests ignored.
 - Remaining: authorized index-scan behavior and authorization-error parity remain open; this fixture validates persisted candidate membership only.
 
