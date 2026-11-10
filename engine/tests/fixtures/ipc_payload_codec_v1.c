@@ -171,5 +171,19 @@ int main(void) {
         decoded_abort_status != 0) {
         return 19;
     }
+    const uint8_t unknown_status_expected[3] = {0x00, 0x01, 0x00};
+    uint8_t unknown_status_payload[3] = {0};
+    uint8_t decoded_unknown_status = 0xff;
+    prdb_encode_supervisor_status_unknown_response(unknown_status_payload, 0);
+    for (size_t i = 0; i < sizeof(unknown_status_expected); ++i) {
+        if (unknown_status_payload[i] != unknown_status_expected[i]) {
+            return 20;
+        }
+    }
+    if (!prdb_decode_supervisor_status_unknown_response(
+            unknown_status_payload, sizeof(unknown_status_payload),
+            &decoded_unknown_status) || decoded_unknown_status != 0) {
+        return 21;
+    }
     return 0;
 }

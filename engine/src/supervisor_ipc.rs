@@ -1360,13 +1360,7 @@ fn encode_supervisor_status(
     snapshot: Option<&crate::storage_manager::InvocationStatusSnapshot>,
 ) -> Result<Vec<u8>, SupervisorRequestError> {
     let Some(snapshot) = snapshot else {
-        let mut payload =
-            vec![0; generated::SUPERVISOR_STATUS_UNKNOWN_RESPONSE_HEADER_BYTES as usize];
-        let version_offset = generated::SUPERVISOR_STATUS_UNKNOWN_RESPONSE_VERSION_OFFSET as usize;
-        payload[version_offset..version_offset + 2]
-            .copy_from_slice(&SUPERVISOR_PAYLOAD_VERSION.to_be_bytes());
-        payload[generated::SUPERVISOR_STATUS_UNKNOWN_RESPONSE_STATUS_OFFSET as usize] = 0;
-        return Ok(payload);
+        return Ok(generated::encode_supervisor_status_unknown_response(0).to_vec());
     };
     match &snapshot.status {
         InvocationStatus::Active {

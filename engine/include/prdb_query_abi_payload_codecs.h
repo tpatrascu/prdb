@@ -151,6 +151,29 @@ static inline int prdb_decode_supervisor_cancel_result_terminal(const uint8_t *p
     return 1;
 }
 
+static inline void prdb_encode_supervisor_status_unknown_response(uint8_t payload[3],
+    uint8_t status) {
+    payload[0] = (uint8_t)((PRDB_SUPERVISOR_PAYLOAD_VERSION >> 8) & 0xffu);
+    payload[1] = (uint8_t)(PRDB_SUPERVISOR_PAYLOAD_VERSION & 0xffu);
+    payload[2] = status;
+}
+
+static inline int prdb_decode_supervisor_status_unknown_response(const uint8_t *payload, size_t payload_len,
+    uint8_t *status) {
+    if (payload == NULL || payload_len != 3) {
+        return 0;
+    }
+    if (payload[0] != (uint8_t)((PRDB_SUPERVISOR_PAYLOAD_VERSION >> 8) & 0xffu) ||
+        payload[1] != (uint8_t)(PRDB_SUPERVISOR_PAYLOAD_VERSION & 0xffu)) {
+        return 0;
+    }
+    if (status == NULL) {
+        return 0;
+    }
+    *status = payload[2];
+    return 1;
+}
+
 static inline void prdb_encode_supervisor_status_terminal_response(uint8_t payload[27],
     uint8_t status, int64_t observed_at, uint64_t commit_sequence, int64_t retention_deadline) {
     payload[0] = (uint8_t)((PRDB_SUPERVISOR_PAYLOAD_VERSION >> 8) & 0xffu);

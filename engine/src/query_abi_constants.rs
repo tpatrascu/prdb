@@ -253,6 +253,20 @@ pub fn decode_supervisor_cancel_result_terminal(payload: &[u8]) -> Option<(u8, u
 pub const SUPERVISOR_STATUS_UNKNOWN_RESPONSE_VERSION_OFFSET: u32 = 0;
 pub const SUPERVISOR_STATUS_UNKNOWN_RESPONSE_STATUS_OFFSET: u32 = 2;
 pub const SUPERVISOR_STATUS_UNKNOWN_RESPONSE_HEADER_BYTES: u32 = 3;
+pub fn encode_supervisor_status_unknown_response(status: u8) -> [u8; 3] {
+    let mut payload = [0u8; 3];
+    payload[0..2].copy_from_slice(&SUPERVISOR_PAYLOAD_VERSION.to_be_bytes());
+    payload[2] = status;
+    payload
+}
+
+pub fn decode_supervisor_status_unknown_response(payload: &[u8]) -> Option<u8> {
+    if payload.len() != 3 || u16::from_be_bytes([payload[0], payload[1]]) != SUPERVISOR_PAYLOAD_VERSION {
+        return None;
+    }
+    Some(payload[2])
+}
+
 pub const SUPERVISOR_STATUS_ACTIVE_NO_DEADLINE_RESPONSE_VERSION_OFFSET: u32 = 0;
 pub const SUPERVISOR_STATUS_ACTIVE_NO_DEADLINE_RESPONSE_STATUS_OFFSET: u32 = 2;
 pub const SUPERVISOR_STATUS_ACTIVE_NO_DEADLINE_RESPONSE_OBSERVED_AT_OFFSET: u32 = 3;
