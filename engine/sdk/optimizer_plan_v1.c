@@ -1004,3 +1004,96 @@ int32_t prdb_sdk_optimizer_execute_unfiltered_plan_v1(
     *delivered_rows_out = total_delivered;
     return final_status;
 }
+
+static int32_t latch_optimizer_statement_failure(
+    const prdb_host_api_v4 *host, int32_t status) {
+    if (status != PRDB_SDK_OPTIMIZER_PLAN_OK &&
+        status != PRDB_SDK_OPTIMIZER_PLAN_INVALID_ARGUMENT &&
+        host != NULL && host->v3.statement_failure != NULL) {
+        (void)host->v3.statement_failure(
+            host->v3.context, PRDB_QUERY_STATEMENT_FAILURE_SQL);
+    }
+    return status;
+}
+
+int32_t prdb_sdk_optimizer_execute_select_ast_v1(
+    const prdb_host_api_v4 *host, const prdb_sdk_select_v2 *statement,
+    const uint8_t *schema, uint32_t schema_len, uint16_t max_candidates,
+    uint32_t max_batch_bytes, uint8_t *request, uint64_t request_capacity,
+    uint8_t *optimizer_response, uint64_t optimizer_response_capacity,
+    uint8_t *relation_response, uint64_t relation_response_capacity,
+    uint8_t *scan_response, uint64_t scan_response_capacity,
+    uint8_t *batch_response, uint64_t batch_response_capacity,
+    prdb_sdk_executor_relation_v1 *relation_out,
+    uint32_t relation_out_capacity,
+    prdb_sdk_sql_column_shape_v2 *relation_columns,
+    uint32_t relation_column_capacity, prdb_sdk_value_v1 *source_cells,
+    uint32_t source_cell_capacity, prdb_sdk_value_v1 *projected_values,
+    uint32_t projected_value_capacity,
+    prdb_sdk_optimizer_projected_row_v1_fn on_row, void *row_context,
+    uint32_t *delivered_rows_out) {
+    prdb_sdk_optimizer_response_v1 decoded_response = {0};
+    prdb_host_api_v2 base_host = {0};
+    uint64_t request_len = 0;
+    uint64_t optimizer_response_len = 0;
+    int32_t status;
+
+    if (host == NULL || host->v3.struct_size < sizeof(host->v3) ||
+        host->v3.abi_version != PRDB_QUERY_ABI_V3_VERSION ||
+        host->v3.executor_request == NULL ||
+        host->v3.statement_failure == NULL || host->optimizer_request == NULL ||
+        delivered_rows_out == NULL) {
+        return PRDB_SDK_OPTIMIZER_PLAN_INVALID_ARGUMENT;
+    }
+    *delivered_rows_out = 0;
+    status = prdb_sdk_optimizer_encode_select_v1(
+        statement, schema, schema_len, request, request_capacity, &request_len);
+    if (status == PRDB_SDK_OPTIMIZER_ENCODE_UNSUPPORTED) {
+        return PRDB_SDK_OPTIMIZER_PLAN_UNSUPPORTED;
+    }
+    if (status == PRDB_SDK_OPTIMIZER_ENCODE_BUFFER_TOO_SMALL ||
+        status == PRDB_SDK_OPTIMIZER_ENCODE_LIMIT_EXCEEDED) {
+        return PRDB_SDK_OPTIMIZER_PLAN_RESPONSE_TOO_SMALL;
+    }
+    if (status != PRDB_SDK_OPTIMIZER_ENCODE_OK) {
+        return PRDB_SDK_OPTIMIZER_PLAN_INVALID_ARGUMENT;
+    }
+    status = prdb_sdk_optimizer_submit_select_v1(
+        host, request, request_len, optimizer_response,
+        optimizer_response_capacity, &optimizer_response_len,
+        &decoded_response, sizeof(decoded_response));
+    if (status == PRDB_SDK_OPTIMIZER_RESULT_RESPONSE_TOO_SMALL) {
+        status = PRDB_SDK_OPTIMIZER_PLAN_RESPONSE_TOO_SMALL;
+    } else if (status != PRDB_SDK_OPTIMIZER_RESULT_OK) {
+        status = status == PRDB_SDK_OPTIMIZER_RESULT_INVALID_ARGUMENT
+                     ? PRDB_SDK_OPTIMIZER_PLAN_INVALID_ARGUMENT
+                     : PRDB_SDK_OPTIMIZER_PLAN_CALLBACK_ERROR;
+    } else if (decoded_response.status ==
+               PRDB_SDK_OPTIMIZER_STATUS_UNAVAILABLE) {
+        status = PRDB_SDK_OPTIMIZER_PLAN_UNAVAILABLE;
+    } else if (decoded_response.status !=
+               PRDB_SDK_OPTIMIZER_STATUS_SUCCESS) {
+        status = PRDB_SDK_OPTIMIZER_PLAN_CALLBACK_ERROR;
+    }
+    if (status != PRDB_SDK_OPTIMIZER_PLAN_OK) {
+        return latch_optimizer_statement_failure(host, status);
+    }
+    base_host.struct_size = sizeof(base_host);
+    base_host.abi_version = PRDB_QUERY_ABI_V2_VERSION;
+    base_host.context = host->v3.context;
+    base_host.executor_request = host->v3.executor_request;
+    base_host.planner_request = host->v3.planner_request;
+    base_host.write_result = host->v3.write_result;
+    status = prdb_sdk_optimizer_execute_unfiltered_plan_v1(
+        &base_host, decoded_response.plan, decoded_response.plan_len,
+        max_candidates, max_batch_bytes, relation_response,
+        relation_response_capacity, scan_response, scan_response_capacity,
+        batch_response, batch_response_capacity, relation_out,
+        relation_out_capacity, relation_columns, relation_column_capacity,
+        source_cells, source_cell_capacity, projected_values,
+        projected_value_capacity, on_row, row_context, delivered_rows_out);
+    if (status == PRDB_SDK_OPTIMIZER_PLAN_UNSUPPORTED) {
+        status = PRDB_SDK_OPTIMIZER_PLAN_CALLBACK_ERROR;
+    }
+    return latch_optimizer_statement_failure(host, status);
+}

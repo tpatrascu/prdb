@@ -119,6 +119,14 @@
 - Verification: focused and full maintained TinyCC SDK suites passed; generated ABI consistency, documentation link checks, and `git diff --check` passed.
 - Remaining: evaluate Filter predicates, encode and emit SQL results, and add a real executor channel integration covering the plan-driven batch path.
 
+## OP-3 dependency: connect optimizer submission to unfiltered SQL execution
+
+- Behavior: a parsed explicit-projection SELECT is encoded and submitted through ABI v4, its successful plan is validated against executor metadata, and the unfiltered plan is run through bounded storage pages. Unsupported predicates return to the existing SQL path without latching statement failure; optimizer or execution failures latch failure.
+- Implementation: `prdb_sdk_optimizer_execute_select_ast_v1` composes canonical request encoding, the dedicated optimizer callback, response decoding, and the bounded executor plan runner.
+- Regression: TinyCC fixture submits a parsed SELECT, checks optimizer/executor callback order and one projected result, verifies WHERE fallback makes no optimizer call, and checks that optimizer error status latches statement failure.
+- Verification: focused and full maintained TinyCC SDK suites passed; generated ABI consistency, documentation link checks, and `git diff --check` passed.
+- Remaining: evaluate optimizer Filter plans, compare output plan semantics with the submitted SELECT, encode/emit SQL results, and exercise the path with a real optimizer/executor IPC invocation.
+
 ## OP-3 dependency: launch and confine the optimizer with each invocation
 
 - Behavior: production START launches optimizer and executor as separate confined processes in one invocation cgroup. The optimizer receives only its submission and planner sockets; storage serves its planner socket alongside executor planner and storage channels. Either launch failure cleans up the other process and invocation resources.
