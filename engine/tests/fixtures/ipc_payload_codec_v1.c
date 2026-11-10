@@ -343,5 +343,29 @@ int main(void) {
             return 37;
         }
     }
+    const uint8_t stage_delete_request_expected[18] = {
+        0x00, 0x01, 0x08,
+        0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a,
+        0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a,
+    };
+    uint8_t stage_delete_request_payload[18] = {0};
+    uint8_t decoded_stage_delete_request_handle[16] = {0};
+    prdb_encode_executor_stage_delete_request(
+        stage_delete_request_payload, stage_insert_response_handle);
+    for (size_t i = 0; i < sizeof(stage_delete_request_expected); ++i) {
+        if (stage_delete_request_payload[i] != stage_delete_request_expected[i]) {
+            return 38;
+        }
+    }
+    if (!prdb_decode_executor_stage_delete_request(
+            stage_delete_request_payload, sizeof(stage_delete_request_payload),
+            decoded_stage_delete_request_handle)) {
+        return 39;
+    }
+    for (size_t i = 0; i < sizeof(stage_insert_response_handle); ++i) {
+        if (decoded_stage_delete_request_handle[i] != stage_insert_response_handle[i]) {
+            return 40;
+        }
+    }
     return 0;
 }

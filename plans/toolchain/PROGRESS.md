@@ -321,6 +321,13 @@
 - Verification: generated-file drift and schema tests, locked workspace build, format check, warning-denied Clippy, serial workspace tests (129 commit tests passed; 3 cgroup-dependent tests ignored by default), and the maintained TinyCC SDK suite passed in the pinned Nix shell.
 - Remaining: add C parity for other suitable fixed IPC payloads and define safe bounded helpers for collections and variable-length payloads; complete release profile and artifact gates.
 
+## TC-2: C/Rust executor STAGE DELETE request codec parity — verified
+
+- The shared schema generates the fixed STAGE DELETE request codec in Rust and C. Rust request encoding and exact-length/version decoding now use the generated helpers before validating the row-handle kind.
+- Regression: the existing Rust mutation round-trip test covers the request. The TinyCC fixture checks the independent 18-byte request and row-handle round trip; generator tests assert both C helper names.
+- Verification: generated-file drift and schema tests, locked workspace build, format check, warning-denied Clippy, serial workspace tests (129 commit tests passed; 3 cgroup-dependent tests ignored by default), and the maintained TinyCC SDK suite passed in the pinned Nix shell.
+- Remaining: add C parity for other suitable fixed IPC payloads and define safe bounded helpers for collections and variable-length payloads; complete release profile and artifact gates.
+
 ## TC-2: C/Rust administrative-cancel codec parity — verified
 
 - The C codec generator now also covers the administrative-cancel request with invocation ID and big-endian u16 reason code. Both the fixed 18-byte invocation-control request and 20-byte cancel request are emitted from the shared schema.
