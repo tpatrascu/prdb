@@ -1,5 +1,13 @@
 # Toolchain Progress
 
+## TC-2: maintained payload schema validation tests — implemented
+
+- Behavior: the SDK test target checks that the shared payload schema renders and rejects invalid version/count field widths.
+- Implementation: `engine/tools/test_generate_query_abi.py` provides three standard-library unit tests; `abi-constants-test` is part of the maintained TinyCC `test` target.
+- Regression: the focused test script and the Make target both pass all three cases.
+- Verification: full locked Rust workspace checks and maintained TinyCC SDK suite pass with the new target enabled.
+- Remaining: complete serializer generation and cover remaining IPC payloads.
+
 ## TC-2: validate payload version and collection count fields — implemented
 
 - Contract: every payload version is a u16 field first in the payload and references a u16 version constant; count-delimited fixed-width collections use a u16 count.
