@@ -230,6 +230,20 @@
 - Verification: `make -f engine/sdk/Makefile abi-constants-check abi-constants-test`, the focused codec test, full locked workspace build/format/warning-denied Clippy/serial Rust tests, and `make -f engine/sdk/Makefile test` all passed in the pinned Nix shell. Serial workspace tests included 132 commit integration tests; three cgroup-dependent commit tests and one cgroup-dependent metadata-process test remained ignored by default. Their explicit delegated-cgroup acceptances were previously run and recorded in the Linux sandbox and supervisor progress files.
 - Remaining: extend field-level schema and generated codecs to other payloads, add C serializer parity, and complete the release profile and artifact gates.
 
+## TC-2: C/Rust invocation-control codec parity — implemented
+
+- Contract: [internal IPC](../../specs/ipc-protocol.md) defines the fixed invocation-control payload shared by Rust supervisor code and C consumers. Both implementations must encode version 1 and the 16-byte invocation ID identically, and reject malformed lengths or versions on decode.
+- Implementation: the shared schema can now opt fixed payloads into C codec generation for u8, u16, and bytes16 fields. The generated C header includes the generated constants header and uses the C-prefixed version constant. Rust fixed codecs also support signed and unsigned 64-bit fields.
+- Red/green evidence: the maintained TinyCC fixture initially failed to compile because generated code referred to the Rust constant name instead of its C macro. Correcting the C name mapping made compilation succeed; the fixture now verifies an independent 18-byte wire example, round-trip data, unsupported version, and truncated length.
+- Verification: generator drift/schema tests, locked workspace build, format check, warning-denied Clippy, serial Rust tests, and the complete maintained TinyCC SDK suite passed in the pinned Nix shell.
+- Remaining: extend generated field codecs and cross-language parity to more payloads, especially variable-length collections, and complete release profile and artifact gates.
+
+## TC-2: C/Rust invocation-control codec parity — verified
+
+- The generated C and Rust codecs now consume the same fixed-width schema for the supervisor invocation-control request. The maintained TinyCC C fixture and Rust regression independently compare both implementations with the same 18-byte wire example, including exact decode, truncation rejection, and unsupported-version rejection.
+- Verification: `make -f engine/sdk/Makefile abi-constants-check abi-constants-test`, locked workspace build, rustfmt check, warning-denied Clippy, serial workspace tests, and the complete maintained TinyCC suite passed. The SDK suite now compiles and runs `ipc-payload-codec-v1` with the pinned TinyCC build.
+- Remaining: extend generated C codec parity to other fixed payloads and define safe bounded helpers for collections and variable-length payloads; complete release profile and artifact gates.
+
 ## TC-2: generated terminal STATUS response codec — implemented
 
 - Contract: [internal IPC](../../specs/ipc-protocol.md) defines terminal STATUS as version, status, signed observed time, unsigned commit sequence, and signed retention deadline.

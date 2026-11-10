@@ -21,7 +21,7 @@ class PayloadSchemaValidationTests(unittest.TestCase):
         self.schema = json.loads(SCHEMA_PATH.read_text())
 
     def test_current_schema_renders(self):
-        rust, c, *_ = GENERATOR.render(self.schema)
+        rust, c, c_codecs, *_ = GENERATOR.render(self.schema)
         self.assertIn("EXECUTOR_NEXT_BATCH_RESPONSE_CONTINUATION_HEADER_BYTES", rust)
         self.assertIn("encode_supervisor_invocation_control_request", rust)
         self.assertIn("decode_supervisor_invocation_control_request", rust)
@@ -34,6 +34,8 @@ class PayloadSchemaValidationTests(unittest.TestCase):
         self.assertIn("encode_supervisor_status_terminal_response", rust)
         self.assertIn("decode_supervisor_status_terminal_response", rust)
         self.assertIn("PRDB_PLANNER_ESTIMATE_SCAN_RESPONSE_HEADER_BYTES", c)
+        self.assertIn("prdb_encode_supervisor_invocation_control_request", c_codecs)
+        self.assertIn("prdb_decode_supervisor_invocation_control_request", c_codecs)
 
     def test_payload_version_must_be_a_leading_u16(self):
         malformed = copy.deepcopy(self.schema)
