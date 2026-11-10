@@ -1434,6 +1434,25 @@
         { "name": "flags", "encoding": "u8" }
       ],
       "trailing_fields": []
+    },
+    {
+      "name": "SUPERVISOR_INVOCATION_CONTROL_REQUEST",
+      "version_constant": "SUPERVISOR_PAYLOAD_VERSION",
+      "fields": [
+        { "name": "version", "encoding": "u16be" },
+        { "name": "invocation_id", "encoding": "bytes16" }
+      ],
+      "trailing_fields": []
+    },
+    {
+      "name": "SUPERVISOR_ADMIN_CANCEL_REQUEST",
+      "version_constant": "SUPERVISOR_PAYLOAD_VERSION",
+      "fields": [
+        { "name": "version", "encoding": "u16be" },
+        { "name": "invocation_id", "encoding": "bytes16" },
+        { "name": "reason_code", "encoding": "u16be" }
+      ],
+      "trailing_fields": []
     }
   ]
 }

@@ -3,7 +3,15 @@
 use crate::audit::{AuditAction, AuditEvent, AuditResult};
 use crate::ipc::{DispatchError, IpcFrame, Operation, ServiceRole, authorize_operation};
 use crate::outcome::OutcomeStatus;
-pub use crate::query_abi::SUPERVISOR_PAYLOAD_VERSION;
+pub use crate::query_abi::{
+    SUPERVISOR_ADMIN_CANCEL_REQUEST_HEADER_BYTES,
+    SUPERVISOR_ADMIN_CANCEL_REQUEST_INVOCATION_ID_OFFSET,
+    SUPERVISOR_ADMIN_CANCEL_REQUEST_REASON_CODE_OFFSET,
+    SUPERVISOR_ADMIN_CANCEL_REQUEST_VERSION_OFFSET,
+    SUPERVISOR_INVOCATION_CONTROL_REQUEST_HEADER_BYTES,
+    SUPERVISOR_INVOCATION_CONTROL_REQUEST_INVOCATION_ID_OFFSET,
+    SUPERVISOR_INVOCATION_CONTROL_REQUEST_VERSION_OFFSET, SUPERVISOR_PAYLOAD_VERSION,
+};
 use crate::storage_manager::{
     AdministrativeCancellationError, AdministrativeCancellationResult, InvocationStatus,
     InvocationStatusError, OwnerCancellationResult, StorageManager,
@@ -1180,15 +1188,24 @@ pub fn dispatch_supervisor_control_request(
     let operation =
         Operation::from_code(request.operation).map_err(SupervisorRequestError::Dispatch)?;
     authorize_operation(role, operation).map_err(SupervisorRequestError::Dispatch)?;
-    if request.payload.len() < 2
-        || u16::from_be_bytes([request.payload[0], request.payload[1]])
-            != SUPERVISOR_PAYLOAD_VERSION
+    let invocation_header_bytes = SUPERVISOR_INVOCATION_CONTROL_REQUEST_HEADER_BYTES as usize;
+    let version_offset = SUPERVISOR_INVOCATION_CONTROL_REQUEST_VERSION_OFFSET as usize;
+    if request.payload.len() < invocation_header_bytes
+        || u16::from_be_bytes([
+            request.payload[version_offset],
+            request.payload[version_offset + 1],
+        ]) != SUPERVISOR_PAYLOAD_VERSION
     {
         return Err(SupervisorRequestError::InvalidPayload);
     }
     let payload = match operation {
-        Operation::SupervisorGetInvocationStatus if request.payload.len() == 18 => {
-            let invocation_id: [u8; 16] = request.payload[2..]
+        Operation::SupervisorGetInvocationStatus
+            if request.payload.len() == invocation_header_bytes =>
+        {
+            let invocation_offset =
+                SUPERVISOR_INVOCATION_CONTROL_REQUEST_INVOCATION_ID_OFFSET as usize;
+            let invocation_id: [u8; 16] = request.payload
+                [invocation_offset..invocation_offset + 16]
                 .try_into()
                 .map_err(|_| SupervisorRequestError::InvalidPayload)?;
             let now_us = crate::credentials::now_unix_micros().ok_or(
@@ -1199,11 +1216,19 @@ pub fn dispatch_supervisor_control_request(
                 .map_err(SupervisorRequestError::Status)?;
             encode_supervisor_status(snapshot.as_ref())?
         }
-        Operation::SupervisorCancelInvocation if request.payload.len() == 20 => {
-            let invocation_id: [u8; 16] = request.payload[2..18]
+        Operation::SupervisorCancelInvocation
+            if request.payload.len() == SUPERVISOR_ADMIN_CANCEL_REQUEST_HEADER_BYTES as usize =>
+        {
+            let invocation_offset = SUPERVISOR_ADMIN_CANCEL_REQUEST_INVOCATION_ID_OFFSET as usize;
+            let invocation_id: [u8; 16] = request.payload
+                [invocation_offset..invocation_offset + 16]
                 .try_into()
                 .map_err(|_| SupervisorRequestError::InvalidPayload)?;
-            let reason_code = u16::from_be_bytes([request.payload[18], request.payload[19]]);
+            let reason_offset = SUPERVISOR_ADMIN_CANCEL_REQUEST_REASON_CODE_OFFSET as usize;
+            let reason_code = u16::from_be_bytes([
+                request.payload[reason_offset],
+                request.payload[reason_offset + 1],
+            ]);
             let now_us = crate::credentials::now_unix_micros().ok_or(
                 SupervisorRequestError::Transaction(TransactionError::ClockUnavailable),
             )?;
@@ -1257,16 +1282,21 @@ pub fn dispatch_client_control_request(
     let operation =
         Operation::from_code(request.operation).map_err(SupervisorRequestError::Dispatch)?;
     authorize_operation(role, operation).map_err(SupervisorRequestError::Dispatch)?;
+    let header_bytes = SUPERVISOR_INVOCATION_CONTROL_REQUEST_HEADER_BYTES as usize;
+    let version_offset = SUPERVISOR_INVOCATION_CONTROL_REQUEST_VERSION_OFFSET as usize;
     if !matches!(
         operation,
         Operation::ClientGetInvocationStatus | Operation::ClientCancelInvocation
-    ) || request.payload.len() != 18
-        || u16::from_be_bytes([request.payload[0], request.payload[1]])
-            != SUPERVISOR_PAYLOAD_VERSION
+    ) || request.payload.len() != header_bytes
+        || u16::from_be_bytes([
+            request.payload[version_offset],
+            request.payload[version_offset + 1],
+        ]) != SUPERVISOR_PAYLOAD_VERSION
     {
         return Err(SupervisorRequestError::InvalidPayload);
     }
-    let invocation_id: [u8; 16] = request.payload[2..]
+    let invocation_offset = SUPERVISOR_INVOCATION_CONTROL_REQUEST_INVOCATION_ID_OFFSET as usize;
+    let invocation_id: [u8; 16] = request.payload[invocation_offset..invocation_offset + 16]
         .try_into()
         .map_err(|_| SupervisorRequestError::InvalidPayload)?;
     let now_us = crate::credentials::now_unix_micros().ok_or(

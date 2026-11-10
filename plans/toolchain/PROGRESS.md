@@ -1,5 +1,13 @@
 # Toolchain Progress
 
+## TC-2: generated supervisor control request layouts — implemented
+
+- Contract: invocation status/cancel payloads bind authority to the provisioned channel; status/client cancel carry version plus invocation ID, while administrative cancel also carries the reason code.
+- Implementation: the shared schema declares status/client control and administrative cancellation request fields. Supervisor Rust dispatchers validate lengths, versions, invocation IDs, and reason codes using generated header offsets/sizes.
+- Regression: metadata/admin process integration, exact client status/cancel non-enumeration, and TCP cancellation-during-commit regressions pass.
+- Verification: generator drift, focused control tests, full workspace build/format/warning-denied Clippy/serial tests, and complete TinyCC SDK suite passed.
+- Remaining: generate layouts/codecs for remaining supervisor result and event payloads.
+
 ## TC-2: generated optimizer SELECT request prefix — implemented
 
 - Contract: the optimizer's bounded structured SELECT request starts with version, statement tag, and zero flags before its variable relation/projection/predicate fields.
