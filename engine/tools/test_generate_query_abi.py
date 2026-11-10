@@ -58,6 +58,8 @@ class PayloadSchemaValidationTests(unittest.TestCase):
         self.assertIn("prdb_decode_optimizer_response_failure", c_codecs)
         self.assertIn("prdb_encode_executor_cancellation_check_response", c_codecs)
         self.assertIn("prdb_decode_executor_cancellation_check_response", c_codecs)
+        self.assertIn("prdb_encode_executor_mutation_acknowledgement", c_codecs)
+        self.assertIn("prdb_decode_executor_mutation_acknowledgement", c_codecs)
 
     def test_payload_version_must_be_a_leading_u16(self):
         malformed = copy.deepcopy(self.schema)

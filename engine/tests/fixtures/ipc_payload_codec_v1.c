@@ -272,5 +272,19 @@ int main(void) {
             &decoded_cancelled) || decoded_cancelled != 1) {
         return 29;
     }
+    const uint8_t mutation_ack_expected[3] = {0x00, 0x01, 0x00};
+    uint8_t mutation_ack_payload[3] = {0};
+    uint8_t decoded_mutation_ack_status = 0xff;
+    prdb_encode_executor_mutation_acknowledgement(mutation_ack_payload, 0);
+    for (size_t i = 0; i < sizeof(mutation_ack_expected); ++i) {
+        if (mutation_ack_payload[i] != mutation_ack_expected[i]) {
+            return 30;
+        }
+    }
+    if (!prdb_decode_executor_mutation_acknowledgement(
+            mutation_ack_payload, sizeof(mutation_ack_payload),
+            &decoded_mutation_ack_status) || decoded_mutation_ack_status != 0) {
+        return 31;
+    }
     return 0;
 }

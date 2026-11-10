@@ -702,21 +702,11 @@ pub struct MutationAcknowledgement;
 
 impl MutationAcknowledgement {
     pub fn encode(&self) -> Vec<u8> {
-        let mut payload = vec![0; EXECUTOR_MUTATION_ACKNOWLEDGEMENT_HEADER_BYTES as usize];
-        let version_offset = EXECUTOR_MUTATION_ACKNOWLEDGEMENT_VERSION_OFFSET as usize;
-        payload[version_offset..version_offset + 2]
-            .copy_from_slice(&EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes());
-        payload[EXECUTOR_MUTATION_ACKNOWLEDGEMENT_STATUS_OFFSET as usize] = 0;
-        payload
+        generated::encode_executor_mutation_acknowledgement(0).to_vec()
     }
 
     pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
-        let version_offset = EXECUTOR_MUTATION_ACKNOWLEDGEMENT_VERSION_OFFSET as usize;
-        if payload.len() != EXECUTOR_MUTATION_ACKNOWLEDGEMENT_HEADER_BYTES as usize
-            || u16::from_be_bytes([payload[version_offset], payload[version_offset + 1]])
-                != EXECUTOR_BATCH_PAYLOAD_VERSION
-            || payload[EXECUTOR_MUTATION_ACKNOWLEDGEMENT_STATUS_OFFSET as usize] != 0
-        {
+        if generated::decode_executor_mutation_acknowledgement(payload) != Some(0) {
             return Err(ExecutorRequestError::InvalidPayload);
         }
         Ok(Self)

@@ -1249,6 +1249,8 @@
     {
       "name": "EXECUTOR_MUTATION_ACKNOWLEDGEMENT",
       "version_constant": "EXECUTOR_BATCH_PAYLOAD_VERSION",
+      "generate_rust_codec": true,
+      "generate_c_codec": true,
       "fields": [
         { "name": "version", "encoding": "u16be" },
         { "name": "status", "encoding": "u8" }
