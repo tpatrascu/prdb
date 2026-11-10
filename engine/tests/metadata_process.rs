@@ -765,7 +765,6 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
         String::from_utf8_lossy(&admin_cancel_command.stdout).trim(),
         "committed"
     );
-    remove_client_credentials(&admin_cancel_credentials_path)?;
     let created_role = admin.create_role("process_admin_role")?;
     assert_ne!(created_role.identity_id, [0; 16]);
     let renamed = admin.rename_role(created_role.identity_id, "process_admin_role_v2")?;
@@ -1065,6 +1064,80 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
         .map_err(|error| format!("process ADMIN drop_index failed: {error}"))?;
     assert!(repeated_rebuild.commit_sequence > rebuilt_index.commit_sequence);
     assert!(dropped_index.commit_sequence > repeated_rebuild.commit_sequence);
+    let index_cli_address = address.to_string();
+    let index_cli_credentials = admin_cancel_credentials_path
+        .to_str()
+        .ok_or("credential path is not UTF-8")?;
+    let index_cli_table_id = encode_id_hex(&created_table.table_id);
+    let index_cli_column_ids = encode_id_hex(&created_table.column_ids[0]);
+    let create_index_cli = Command::new(env!("CARGO_BIN_EXE_prdb-client"))
+        .args([
+            "index-create",
+            "--address",
+            &index_cli_address,
+            "--credentials",
+            index_cli_credentials,
+            "--table-id",
+            &index_cli_table_id,
+            "--name",
+            "process_cli_index",
+            "--columns",
+            &index_cli_column_ids,
+            "--unique",
+            "true",
+        ])
+        .output()?;
+    assert!(
+        create_index_cli.status.success(),
+        "index-create CLI failed: {}",
+        String::from_utf8_lossy(&create_index_cli.stderr)
+    );
+    let create_index_output = String::from_utf8_lossy(&create_index_cli.stdout);
+    assert!(create_index_output.contains("created index "));
+    let cli_index_id = create_index_output
+        .split_whitespace()
+        .nth(2)
+        .ok_or("index-create output omitted the generated ID")?;
+    assert_eq!(cli_index_id.len(), 32);
+    let rebuild_index_cli = Command::new(env!("CARGO_BIN_EXE_prdb-client"))
+        .args([
+            "index-rebuild",
+            "--address",
+            &index_cli_address,
+            "--credentials",
+            index_cli_credentials,
+            "--index-id",
+            cli_index_id,
+            "--columns",
+            &index_cli_column_ids,
+            "--unique",
+            "false",
+        ])
+        .output()?;
+    assert!(
+        rebuild_index_cli.status.success(),
+        "index-rebuild CLI failed: {}",
+        String::from_utf8_lossy(&rebuild_index_cli.stderr)
+    );
+    assert!(String::from_utf8_lossy(&rebuild_index_cli.stdout).contains("rebuilt index"));
+    let drop_index_cli = Command::new(env!("CARGO_BIN_EXE_prdb-client"))
+        .args([
+            "index-drop",
+            "--address",
+            &index_cli_address,
+            "--credentials",
+            index_cli_credentials,
+            "--index-id",
+            cli_index_id,
+        ])
+        .output()?;
+    assert!(
+        drop_index_cli.status.success(),
+        "index-drop CLI failed: {}",
+        String::from_utf8_lossy(&drop_index_cli.stderr)
+    );
+    assert!(String::from_utf8_lossy(&drop_index_cli.stdout).contains("dropped index"));
+    remove_client_credentials(&admin_cancel_credentials_path)?;
     let renamed_table = admin.rename_table(created_table.table_id, "process_admin_table_v2")?;
     let dropped_source_table = admin.drop_table(source_table.table_id)?;
     let dropped_table = admin.drop_table(created_table.table_id)?;

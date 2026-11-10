@@ -243,13 +243,13 @@
 - Verification: focused CLI and process tests passed; final workspace build, formatting, warning-denied Clippy, and full test suite passed after isolating and rerunning the known intermittent CHECK lifecycle test. Commit integration had 124 passed and 3 cgroup-dependent ignored.
 - Remaining: index, constraint, privilege, and policy CLI commands; broader live-process DDL coverage; and confined artifact execution remain open.
 
-## SDK-5: ordinary index CLI and process coverage — partial
+## SDK-5: ordinary index CLI and process coverage — implemented
 
 - Contract: index administration stays on the authenticated AdminClient channel and uses ordered, distinct nonzero column IDs.
 - Implementation: CLI commands now expose ordinary index create, rebuild, and drop; the uniqueness flag defaults to false.
-- Regression: command parsing checks canonical IDs and duplicate detection. The real process test exercises index create, rebuild to a changed uniqueness profile, and drop; typed-client and ADMIN dispatcher coverage also exercise rebuild.
-- Verification: focused CLI parser and real-process index lifecycle tests passed; full workspace build, format, warning-denied Clippy, and tests passed. The commit integration target had 124 passed and 3 cgroup-dependent ignored.
-- Remaining: constraint, privilege, and policy CLI operations remain pending.
+- Regression: command parsing checks canonical IDs and duplicate detection. The real gateway/supervisor process test invokes `prdb-client index-create`, `index-rebuild` with a changed uniqueness profile, and `index-drop` using a private credential file; the typed-client and ADMIN dispatcher regressions also cover rebuild.
+- Verification: `cargo test --locked --test metadata_process authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_processes -- --exact --nocapture` passed (1 test). `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets --locked -- -D warnings` passed in the configured Nix shell.
+- Remaining: broaden process-level CLI coverage for other DDL families and complete remaining SDK packaging/release gates.
 
 ## SDK-5 / SM-5: repeat same-profile index rebuild — implemented
 
