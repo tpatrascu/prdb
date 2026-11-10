@@ -2,6 +2,8 @@ TCC ?= tcc
 TCC_AR ?= $(TCC) -ar
 SHARED_LINKER ?= $(CC)
 PYTHON ?= python3
+TAR ?= tar
+GZIP ?= gzip
 BUILD_DIR ?= target/sdk-v1
 INCLUDE_DIR ?= engine/include
 SDK_VALUE_SOURCE := engine/sdk/value_v1.c
@@ -102,6 +104,7 @@ SDK_OPTIMIZER_TEST := $(BUILD_DIR)/sdk-optimizer-v1
 SDK_OPTIMIZER_PLAN_TEST := $(BUILD_DIR)/sdk-optimizer-plan-v1
 QUERY_ABI_GENERATED_HEADERS += $(INCLUDE_DIR)/prdb_query_abi_records_v4.h
 RELEASE_PROFILE_DIR ?= target/release-profile
+RELEASE_PROFILE_ARCHIVE ?= target/prdb-release-profile.tar.gz
 RELEASE_BINARIES := prdb-client prdb-executor prdb-gateway prdb-optimizer prdb-packager prdb-sandbox-probe prdb-supervisor
 
 .PHONY: all test
@@ -346,6 +349,13 @@ release-profile: sandbox-query-fixture
 	cp -R "$(INCLUDE_DIR)/." "$(RELEASE_PROFILE_DIR)/sdk/include/"
 	cp "$(SQL_V3_CAUGHT_ERROR_QUERY)" "$(SQL_V3_WRITE_READ_QUERY)" "$(SQL_V3_RESTRICTED_METADATA_QUERY)" "$(RELEASE_PROFILE_DIR)/queries/"
 	$(PYTHON) engine/tools/validate_release_profile.py "$(RELEASE_PROFILE_DIR)"
+
+.PHONY: release-profile-package
+release-profile-package: release-profile
+	$(TAR) --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner -C "$(RELEASE_PROFILE_DIR)" -cf "$(RELEASE_PROFILE_ARCHIVE).tmp" .
+	$(GZIP) -n -c "$(RELEASE_PROFILE_ARCHIVE).tmp" > "$(RELEASE_PROFILE_ARCHIVE)"
+	rm "$(RELEASE_PROFILE_ARCHIVE).tmp"
+	sha256sum "$(RELEASE_PROFILE_ARCHIVE)" > "$(RELEASE_PROFILE_ARCHIVE).sha256"
 
 abi-constants:
 	$(PYTHON) engine/tools/generate_query_abi.py

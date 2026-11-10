@@ -551,6 +551,12 @@
 - Verification: clean locked Cargo release build passed; all staged artifacts passed the validator, every checksum verified with `sha256sum -c`, four binaries accepted `--help`, and executor/optimizer binaries loaded and reported usage when required arguments were absent. The query fixtures depend only on `libc.so.6` and require at most GLIBC_2.14; engine binaries depend on `libgcc_s.so.1`, `libc.so.6`, and `ld-linux-x86-64.so.2` and require at most GLIBC_2.39.
 - Remaining: create signed distributable bundles with pinned TinyCC support files, measure clean SDK and per-query build timings, validate other runtime profiles, and complete sandbox compatibility/mismatch acceptance for the staged output.
 
+## TC-5: deterministic checkable release-profile archive — implemented
+
+- Implementation: `make -f engine/sdk/Makefile release-profile-package` writes a normalized tarball from the validated profile staging tree and a detached SHA-256 checksum file. Tar entry order, timestamps, numeric ownership, and gzip timestamps are fixed for repeatable output.
+- Verification: the release-profile validator passed on the selected NixOS x86_64/glibc 2.42 host; checksum verification and repeat-build byte comparison are part of the acceptance for this archive.
+- Remaining: the archive is checkable but unsigned; package the pinned compiler/runtime support closure and complete cross-profile release acceptance.
+
 ## TC-1: locked Nix development shell — implemented
 
 - Behavior: `nix develop --locked` provides the pinned x86_64-linux package set used for the engine and SDK checks. [`flake.nix`](../../flake.nix) and [`flake.lock`](../../flake.lock) pin Nixpkgs revision `718f670e845328e9c2cecdd832835712b2cbd065` with source NAR hash `sha256-Ee5BWo8sh3pGt70QUdRajnaginqFmWvrtdBc4gJzhks=`.

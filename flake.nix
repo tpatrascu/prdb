@@ -20,6 +20,8 @@
           binutils
           patchelf
           gnumake
+          gnutar
+          gzip
           python3
         ];
       };
