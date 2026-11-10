@@ -106,18 +106,9 @@ impl DescribePlanRelationResponse {
     pub fn encode(&self) -> Result<Vec<u8>, PlannerRequestError> {
         match &self.relation {
             None => {
-                let mut payload = vec![
-                    0;
-                    PLANNER_DESCRIBE_PLAN_RELATION_UNAVAILABLE_RESPONSE_HEADER_BYTES
-                        as usize
-                ];
-                let version_offset =
-                    PLANNER_DESCRIBE_PLAN_RELATION_UNAVAILABLE_RESPONSE_VERSION_OFFSET as usize;
-                payload[version_offset..version_offset + 2]
-                    .copy_from_slice(&PLANNER_PAYLOAD_VERSION.to_be_bytes());
-                payload
-                    [PLANNER_DESCRIBE_PLAN_RELATION_UNAVAILABLE_RESPONSE_STATUS_OFFSET as usize] =
-                    1;
+                let payload =
+                    crate::query_abi::encode_planner_describe_plan_relation_unavailable_response(1)
+                        .to_vec();
                 ensure_response_size(&payload)?;
                 Ok(payload)
             }
@@ -250,12 +241,9 @@ impl DescribeRelationResponse {
     pub fn encode(&self) -> Result<Vec<u8>, PlannerRequestError> {
         match &self.table {
             None => {
-                let mut payload = vec![0; DESCRIBE_HEADER_BYTES];
-                let version_offset =
-                    PLANNER_DESCRIBE_RELATION_UNAVAILABLE_RESPONSE_VERSION_OFFSET as usize;
-                payload[version_offset..version_offset + 2]
-                    .copy_from_slice(&PLANNER_PAYLOAD_VERSION.to_be_bytes());
-                payload[PLANNER_DESCRIBE_RELATION_UNAVAILABLE_RESPONSE_STATUS_OFFSET as usize] = 1;
+                let payload =
+                    crate::query_abi::encode_planner_describe_relation_unavailable_response(1)
+                        .to_vec();
                 ensure_response_size(&payload)?;
                 Ok(payload)
             }

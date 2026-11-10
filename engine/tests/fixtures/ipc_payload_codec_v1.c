@@ -367,5 +367,37 @@ int main(void) {
             return 40;
         }
     }
+    const uint8_t planner_unavailable_expected[3] = {0x00, 0x01, 0x01};
+    uint8_t planner_unavailable_payload[3] = {0};
+    uint8_t decoded_planner_unavailable_status = 0;
+    prdb_encode_planner_describe_relation_unavailable_response(
+        planner_unavailable_payload, 1);
+    for (size_t i = 0; i < sizeof(planner_unavailable_expected); ++i) {
+        if (planner_unavailable_payload[i] != planner_unavailable_expected[i]) {
+            return 41;
+        }
+    }
+    if (!prdb_decode_planner_describe_relation_unavailable_response(
+            planner_unavailable_payload, sizeof(planner_unavailable_payload),
+            &decoded_planner_unavailable_status) ||
+        decoded_planner_unavailable_status != 1) {
+        return 42;
+    }
+    uint8_t planner_plan_unavailable_payload[3] = {0};
+    decoded_planner_unavailable_status = 0;
+    prdb_encode_planner_describe_plan_relation_unavailable_response(
+        planner_plan_unavailable_payload, 1);
+    for (size_t i = 0; i < sizeof(planner_unavailable_expected); ++i) {
+        if (planner_plan_unavailable_payload[i] != planner_unavailable_expected[i]) {
+            return 43;
+        }
+    }
+    if (!prdb_decode_planner_describe_plan_relation_unavailable_response(
+            planner_plan_unavailable_payload,
+            sizeof(planner_plan_unavailable_payload),
+            &decoded_planner_unavailable_status) ||
+        decoded_planner_unavailable_status != 1) {
+        return 44;
+    }
     return 0;
 }

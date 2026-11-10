@@ -1389,6 +1389,8 @@
     {
       "name": "PLANNER_DESCRIBE_RELATION_UNAVAILABLE_RESPONSE",
       "version_constant": "PLANNER_PAYLOAD_VERSION",
+      "generate_rust_codec": true,
+      "generate_c_codec": true,
       "fields": [
         { "name": "version", "encoding": "u16be" },
         { "name": "status", "encoding": "u8" }
@@ -1409,6 +1411,8 @@
     {
       "name": "PLANNER_DESCRIBE_PLAN_RELATION_UNAVAILABLE_RESPONSE",
       "version_constant": "PLANNER_PAYLOAD_VERSION",
+      "generate_rust_codec": true,
+      "generate_c_codec": true,
       "fields": [
         { "name": "version", "encoding": "u16be" },
         { "name": "status", "encoding": "u8" }

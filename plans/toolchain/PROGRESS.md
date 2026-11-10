@@ -328,6 +328,13 @@
 - Verification: generated-file drift and schema tests, locked workspace build, format check, warning-denied Clippy, serial workspace tests (129 commit tests passed; 3 cgroup-dependent tests ignored by default), and the maintained TinyCC SDK suite passed in the pinned Nix shell.
 - Remaining: add C parity for other suitable fixed IPC payloads and define safe bounded helpers for collections and variable-length payloads; complete release profile and artifact gates.
 
+## TC-2: C/Rust planner unavailable-response codec parity — verified
+
+- The shared schema generates fixed unavailable responses for both relation-description variants in Rust and C. Planner response encoding now uses the generated Rust helpers; variable available-response fields keep their existing bounded codecs.
+- Regression: the planner fallback integration test passes. The TinyCC fixture checks both independent three-byte unavailable examples and decoded status values; generator tests assert both C helper pairs.
+- Verification: generated-file drift and schema tests, locked workspace build, format check, warning-denied Clippy, serial workspace tests (129 commit tests passed; 3 cgroup-dependent tests ignored by default), and the maintained TinyCC SDK suite passed in the pinned Nix shell.
+- Remaining: add C parity for other suitable fixed IPC payloads and define safe bounded helpers for collections and variable-length payloads; complete release profile and artifact gates.
+
 ## TC-2: C/Rust administrative-cancel codec parity — verified
 
 - The C codec generator now also covers the administrative-cancel request with invocation ID and big-endian u16 reason code. Both the fixed 18-byte invocation-control request and 20-byte cancel request are emitted from the shared schema.
