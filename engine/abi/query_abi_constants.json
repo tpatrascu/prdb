@@ -1269,6 +1269,16 @@
         { "name": "row_handle", "encoding": "bytes16" }
       ],
       "trailing_fields": []
+    },
+    {
+      "name": "EXECUTOR_STAGE_UPDATE_REQUEST",
+      "version_constant": "EXECUTOR_BATCH_PAYLOAD_VERSION",
+      "fields": [
+        { "name": "version", "encoding": "u16be" },
+        { "name": "row_handle", "encoding": "bytes16" },
+        { "name": "patch_count", "encoding": "u16be" }
+      ],
+      "trailing_fields": []
     }
   ]
 }

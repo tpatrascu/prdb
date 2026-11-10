@@ -269,7 +269,7 @@ int32_t prdb_sdk_executor_stage_update_v1(
     uint8_t *request, uint64_t request_capacity, uint8_t *response,
     uint64_t response_capacity, uint64_t *response_len) {
     uint8_t seen[PRDB_SDK_BATCH_MAX_CELLS_PER_ROW / 8] = {0};
-    uint64_t offset = 20;
+    uint64_t offset = PRDB_EXECUTOR_STAGE_UPDATE_REQUEST_HEADER_BYTES;
     int32_t status;
     if (row_handle == NULL || row_handle[0] != PRDB_SDK_BATCH_ROW_TOKEN_KIND ||
         patches == NULL || patch_count > PRDB_SDK_BATCH_MAX_CELLS_PER_ROW ||
@@ -278,9 +278,12 @@ int32_t prdb_sdk_executor_stage_update_v1(
         return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
     }
     if (request_capacity < offset) return PRDB_SDK_EXECUTOR_RESPONSE_TOO_SMALL;
-    write_u16(request, 1);
-    memcpy(request + 2, row_handle, 16);
-    write_u16(request + 18, patch_count);
+    write_u16(request + PRDB_EXECUTOR_STAGE_UPDATE_REQUEST_VERSION_OFFSET,
+              PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION);
+    memcpy(request + PRDB_EXECUTOR_STAGE_UPDATE_REQUEST_ROW_HANDLE_OFFSET,
+           row_handle, 16);
+    write_u16(request + PRDB_EXECUTOR_STAGE_UPDATE_REQUEST_PATCH_COUNT_OFFSET,
+              patch_count);
     for (uint16_t i = 0; i < patch_count; ++i) {
         const prdb_sdk_executor_update_patch_v1 *patch = &patches[i];
         if (patch->struct_size < sizeof(*patch) ||
