@@ -26181,6 +26181,21 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             &IpcFrame {
                 operation: IpcOperation::OptimizeSelect as u16,
                 request_id: 1,
+                payload: Vec::new(),
+            },
+        )?;
+        let invalid_frame = prdb_engine::ipc::read_frame(&mut optimizer_client)?
+            .ok_or("optimizer stream closed after a malformed request")?;
+        assert_eq!(invalid_frame.request_id, 1);
+        assert_eq!(
+            OptimizerResponse::decode(&invalid_frame.payload)?.status,
+            prdb_engine::optimizer_ipc::OptimizerStatus::InvalidRequest
+        );
+        prdb_engine::ipc::write_frame(
+            &mut optimizer_client,
+            &IpcFrame {
+                operation: IpcOperation::OptimizeSelect as u16,
+                request_id: 2,
                 payload: encode_select("planner_stats", "observations", "value"),
             },
         )?;
@@ -26190,7 +26205,7 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             optimizer_frame.operation,
             IpcOperation::OptimizeSelect as u16
         );
-        assert_eq!(optimizer_frame.request_id, 1);
+        assert_eq!(optimizer_frame.request_id, 2);
         let optimizer_response = OptimizerResponse::decode(&optimizer_frame.payload)?;
         assert_eq!(
             optimizer_response.status,
@@ -26208,13 +26223,13 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             &mut optimizer_client,
             &IpcFrame {
                 operation: IpcOperation::OptimizeSelect as u16,
-                request_id: 2,
+                request_id: 3,
                 payload: encode_filtered_select("planner_stats", "observations", "value"),
             },
         )?;
         let filtered_frame = prdb_engine::ipc::read_frame(&mut optimizer_client)?
             .ok_or("optimizer stream closed without a filtered plan response")?;
-        assert_eq!(filtered_frame.request_id, 2);
+        assert_eq!(filtered_frame.request_id, 3);
         let filtered_response = OptimizerResponse::decode(&filtered_frame.payload)?;
         assert_eq!(
             filtered_response.status,
@@ -26241,13 +26256,13 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             &mut optimizer_client,
             &IpcFrame {
                 operation: IpcOperation::OptimizeSelect as u16,
-                request_id: 3,
+                request_id: 4,
                 payload: encode_select("planner_stats", "hidden_or_missing", "value"),
             },
         )?;
         let unavailable_frame = prdb_engine::ipc::read_frame(&mut optimizer_client)?
             .ok_or("optimizer stream closed without an unavailable response")?;
-        assert_eq!(unavailable_frame.request_id, 3);
+        assert_eq!(unavailable_frame.request_id, 4);
         assert_eq!(
             OptimizerResponse::decode(&unavailable_frame.payload)?.status,
             prdb_engine::optimizer_ipc::OptimizerStatus::Unavailable

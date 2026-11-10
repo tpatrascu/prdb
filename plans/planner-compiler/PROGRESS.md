@@ -175,3 +175,10 @@
 - Regression: `planner_stream_estimate_allowance_falls_back_without_aborting_invocation` submits both an unfiltered request and `value = 7` with LIMIT, checks the decoded Filter node, compares schema/table identity plus every scanned column's ID, ordinal, type, and nullability with executor metadata, and confirms the empty fixture table returns no rows and no continuation. The existing unavailable-relation check remains on the optimizer process stream.
 - Verification: focused Rust process/channel integration and format check passed. Workspace build, formatting, and warning-denied Clippy passed; the full workspace test run hit `InvalidAudit` in `storage_manager_creates_and_drops_check_constraint`, which passed alone, and the serial commit integration suite passed (129 passed, 3 cgroup-dependent tests ignored). The new scan assertion is being verified separately.
 - Remaining: run the C SDK callback, Filter evaluation, and result path against a real confined optimizer/executor invocation; add bounded mutation plans.
+
+## OP-1 / OP-3 dependency: malformed optimizer requests fail without stopping the process
+
+- Behavior: a structurally malformed request receives `InvalidRequest` without reaching planner metadata, and the same optimizer subprocess remains able to serve a later valid request.
+- Regression: `planner_stream_estimate_allowance_falls_back_without_aborting_invocation` now sends an empty SELECT payload to the real optimizer child, verifies the status and request ID, then proceeds through valid unfiltered and filtered submissions plus the unavailable-relation case.
+- Verification: the focused real-process integration test passed. Locked workspace build, formatting, warning-denied Clippy, and full tests passed; 3 cgroup-dependent commit tests and 1 cgroup-dependent process test were ignored.
+- Remaining: exercise malformed framing/duplicate request IDs over the optimizer process and run the SDK callback, Filter evaluation, and result path in a confined invocation.
