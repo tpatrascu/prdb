@@ -407,6 +407,14 @@
 - Verification: `make -f engine/sdk/Makefile sandbox-query-fixture` compiled the artifacts with TinyCC and linked them with the maintained linker. `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` passed through the delegated cgroup, runtime allowlist, confined worker, result relay, and storage commit. The temporary delegated cgroup was removed after the run.
 - Remaining: compound Boolean HAVING, other literal types, and stress/measurement work remain open.
 
+## SQL-7 dependency: v18 compound HAVING parser and binder — implemented
+
+- Contract: [SQL library](../../specs/sql-library.md). V18 adds bounded AND/OR/NOT HAVING expressions with parentheses, exact selected-aggregate comparisons, positional parameters or nonnegative BIGINT literals, SQL three-valued semantics, a 64-node limit, and a nesting limit of 32. V1-v17 layouts stay unchanged.
+- Red/green evidence: the maintained v18 fixture first failed to link because the parser and binder entry points were absent. It now checks precedence and postorder children for `(SUM(c) >= 5 OR SUM(c) = $2) AND NOT SUM(c) < 20`, selected-aggregate matching, parameter/literal metadata, the 64-node and depth bounds, BIGINT typing, Decimal literal rejection, malformed literal tampering, and output preservation on binding failure.
+- Implementation: [`prdb_sdk_sql_v18.h`](../../engine/include/prdb_sdk_sql_v18.h) defines the sized AST/binding and operand variants. The parser masks HAVING while reusing the frozen v15 parser for composite grouping, ORDER BY, and LIMIT, then builds a bounded postorder Boolean tree. The binder validates tree shape/reachability and derives aggregate operand metadata through the v15 binder while keeping embedded v15 HAVING fields neutral.
+- Verification: focused TinyCC v18 fixture and full `make -f engine/sdk/Makefile test` passed. Locked Rust workspace build, format, warning-denied Clippy, serial tests (129 commit tests passed; 3 cgroup-dependent tests ignored), and `git diff --check` passed.
+- Remaining: v18 grouped execution must bind every referenced parameter, evaluate the Boolean tree with SQL three-valued logic for all groups before callbacks, then filter before ordering and LIMIT. Confined v18 acceptance remains open.
+
 ## Confined SQL acceptance fixture corrections — verified
 
 - The delegated-cgroup SQL DML acceptance now exercises its multi-row `INSERT ... VALUES ($1), ($2)` with both bound values populated. Previously it passed a null/empty parameter array, so the fixture emitted its error marker instead of testing the intended successful DML sequence.
