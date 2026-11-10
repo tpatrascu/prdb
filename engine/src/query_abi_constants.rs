@@ -202,10 +202,40 @@ pub const EXECUTOR_STAGE_UPDATE_REQUEST_VERSION_OFFSET: u32 = 0;
 pub const EXECUTOR_STAGE_UPDATE_REQUEST_ROW_HANDLE_OFFSET: u32 = 2;
 pub const EXECUTOR_STAGE_UPDATE_REQUEST_PATCH_COUNT_OFFSET: u32 = 18;
 pub const EXECUTOR_STAGE_UPDATE_REQUEST_HEADER_BYTES: u32 = 20;
+pub fn encode_executor_stage_update_request(row_handle: [u8; 16], patch_count: u16) -> [u8; 20] {
+    let mut payload = [0u8; 20];
+    payload[0..2].copy_from_slice(&EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes());
+    payload[2..18].copy_from_slice(&row_handle);
+    payload[18..20].copy_from_slice(&patch_count.to_be_bytes());
+    payload
+}
+
+pub fn decode_executor_stage_update_request(payload: &[u8]) -> Option<([u8; 16], u16)> {
+    if payload.len() < 20 || u16::from_be_bytes([payload[0], payload[1]]) != EXECUTOR_BATCH_PAYLOAD_VERSION {
+        return None;
+    }
+    Some((payload[2..18].try_into().ok()?, u16::from_be_bytes(payload[18..20].try_into().ok()?)))
+}
+
 pub const EXECUTOR_STAGE_INSERT_REQUEST_VERSION_OFFSET: u32 = 0;
 pub const EXECUTOR_STAGE_INSERT_REQUEST_RELATION_HANDLE_OFFSET: u32 = 2;
 pub const EXECUTOR_STAGE_INSERT_REQUEST_VALUE_COUNT_OFFSET: u32 = 18;
 pub const EXECUTOR_STAGE_INSERT_REQUEST_HEADER_BYTES: u32 = 20;
+pub fn encode_executor_stage_insert_request(relation_handle: [u8; 16], value_count: u16) -> [u8; 20] {
+    let mut payload = [0u8; 20];
+    payload[0..2].copy_from_slice(&EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes());
+    payload[2..18].copy_from_slice(&relation_handle);
+    payload[18..20].copy_from_slice(&value_count.to_be_bytes());
+    payload
+}
+
+pub fn decode_executor_stage_insert_request(payload: &[u8]) -> Option<([u8; 16], u16)> {
+    if payload.len() < 20 || u16::from_be_bytes([payload[0], payload[1]]) != EXECUTOR_BATCH_PAYLOAD_VERSION {
+        return None;
+    }
+    Some((payload[2..18].try_into().ok()?, u16::from_be_bytes(payload[18..20].try_into().ok()?)))
+}
+
 pub const PLANNER_ESTIMATE_SCAN_REQUEST_VERSION_OFFSET: u32 = 0;
 pub const PLANNER_ESTIMATE_SCAN_REQUEST_PLANNING_HANDLE_OFFSET: u32 = 2;
 pub const PLANNER_ESTIMATE_SCAN_REQUEST_COLUMN_COUNT_OFFSET: u32 = 18;

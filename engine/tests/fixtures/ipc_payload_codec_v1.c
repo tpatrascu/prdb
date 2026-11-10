@@ -479,5 +479,49 @@ int main(void) {
             return 48;
         }
     }
+    uint8_t stage_insert_relation[16];
+    uint8_t decoded_stage_insert_relation[16] = {0};
+    for (size_t i = 0; i < 16; ++i) {
+        stage_insert_relation[i] = 0x55;
+    }
+    uint8_t stage_insert_prefix[21] = {0};
+    uint16_t decoded_stage_insert_count = 0;
+    prdb_encode_executor_stage_insert_request(
+        stage_insert_prefix, stage_insert_relation, 1);
+    stage_insert_prefix[20] = 0xee;
+    if (stage_insert_prefix[0] != 0x00 || stage_insert_prefix[1] != 0x01 ||
+        !prdb_decode_executor_stage_insert_request(
+            stage_insert_prefix, sizeof(stage_insert_prefix),
+            decoded_stage_insert_relation, &decoded_stage_insert_count) ||
+        decoded_stage_insert_count != 1) {
+        return 51;
+    }
+    for (size_t i = 0; i < 16; ++i) {
+        if (decoded_stage_insert_relation[i] != stage_insert_relation[i]) {
+            return 52;
+        }
+    }
+    uint8_t stage_update_handle[16];
+    uint8_t decoded_stage_update_handle[16] = {0};
+    for (size_t i = 0; i < 16; ++i) {
+        stage_update_handle[i] = 0x66;
+    }
+    uint8_t stage_update_prefix[21] = {0};
+    uint16_t decoded_stage_update_count = 0;
+    prdb_encode_executor_stage_update_request(
+        stage_update_prefix, stage_update_handle, 1);
+    stage_update_prefix[20] = 0xdd;
+    if (stage_update_prefix[0] != 0x00 || stage_update_prefix[1] != 0x01 ||
+        !prdb_decode_executor_stage_update_request(
+            stage_update_prefix, sizeof(stage_update_prefix),
+            decoded_stage_update_handle, &decoded_stage_update_count) ||
+        decoded_stage_update_count != 1) {
+        return 53;
+    }
+    for (size_t i = 0; i < 16; ++i) {
+        if (decoded_stage_update_handle[i] != stage_update_handle[i]) {
+            return 54;
+        }
+    }
     return 0;
 }

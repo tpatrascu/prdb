@@ -133,6 +133,84 @@ static inline int prdb_decode_executor_stage_insert_response(const uint8_t *payl
     return 1;
 }
 
+static inline void prdb_encode_executor_stage_update_request(uint8_t payload[20],
+    const uint8_t row_handle[16], uint16_t patch_count) {
+    payload[0] = (uint8_t)((PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION >> 8) & 0xffu);
+    payload[1] = (uint8_t)(PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION & 0xffu);
+    for (size_t i = 0; i < 16; ++i) {
+        payload[2 + i] = row_handle[i];
+    }
+    uint64_t patch_count_wire = (uint64_t)patch_count;
+    for (size_t i = 0; i < 2; ++i) {
+        payload[18 + i] = (uint8_t)(patch_count_wire >> ((2 - 1 - i) * 8));
+    }
+}
+
+static inline int prdb_decode_executor_stage_update_request(const uint8_t *payload, size_t payload_len,
+    uint8_t row_handle[16], uint16_t *patch_count) {
+    if (payload == NULL || payload_len < 20) {
+        return 0;
+    }
+    if (payload[0] != (uint8_t)((PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION >> 8) & 0xffu) ||
+        payload[1] != (uint8_t)(PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION & 0xffu)) {
+        return 0;
+    }
+    if (row_handle == NULL) {
+        return 0;
+    }
+    for (size_t i = 0; i < 16; ++i) {
+        row_handle[i] = payload[2 + i];
+    }
+    if (patch_count == NULL) {
+        return 0;
+    }
+    uint64_t patch_count_wire_value = 0;
+    for (size_t i = 0; i < 2; ++i) {
+        patch_count_wire_value = (patch_count_wire_value << 8) | payload[18 + i];
+    }
+    *patch_count = (uint16_t)patch_count_wire_value;
+    return 1;
+}
+
+static inline void prdb_encode_executor_stage_insert_request(uint8_t payload[20],
+    const uint8_t relation_handle[16], uint16_t value_count) {
+    payload[0] = (uint8_t)((PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION >> 8) & 0xffu);
+    payload[1] = (uint8_t)(PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION & 0xffu);
+    for (size_t i = 0; i < 16; ++i) {
+        payload[2 + i] = relation_handle[i];
+    }
+    uint64_t value_count_wire = (uint64_t)value_count;
+    for (size_t i = 0; i < 2; ++i) {
+        payload[18 + i] = (uint8_t)(value_count_wire >> ((2 - 1 - i) * 8));
+    }
+}
+
+static inline int prdb_decode_executor_stage_insert_request(const uint8_t *payload, size_t payload_len,
+    uint8_t relation_handle[16], uint16_t *value_count) {
+    if (payload == NULL || payload_len < 20) {
+        return 0;
+    }
+    if (payload[0] != (uint8_t)((PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION >> 8) & 0xffu) ||
+        payload[1] != (uint8_t)(PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION & 0xffu)) {
+        return 0;
+    }
+    if (relation_handle == NULL) {
+        return 0;
+    }
+    for (size_t i = 0; i < 16; ++i) {
+        relation_handle[i] = payload[2 + i];
+    }
+    if (value_count == NULL) {
+        return 0;
+    }
+    uint64_t value_count_wire_value = 0;
+    for (size_t i = 0; i < 2; ++i) {
+        value_count_wire_value = (value_count_wire_value << 8) | payload[18 + i];
+    }
+    *value_count = (uint16_t)value_count_wire_value;
+    return 1;
+}
+
 static inline void prdb_encode_planner_describe_relation_unavailable_response(uint8_t payload[3],
     uint8_t status) {
     payload[0] = (uint8_t)((PRDB_PLANNER_PAYLOAD_VERSION >> 8) & 0xffu);

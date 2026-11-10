@@ -1336,6 +1336,9 @@
     {
       "name": "EXECUTOR_STAGE_UPDATE_REQUEST",
       "version_constant": "EXECUTOR_BATCH_PAYLOAD_VERSION",
+      "generate_rust_codec": true,
+      "generate_c_codec": true,
+      "codec_prefix": true,
       "fields": [
         { "name": "version", "encoding": "u16be" },
         { "name": "row_handle", "encoding": "bytes16" },
@@ -1346,6 +1349,9 @@
     {
       "name": "EXECUTOR_STAGE_INSERT_REQUEST",
       "version_constant": "EXECUTOR_BATCH_PAYLOAD_VERSION",
+      "generate_rust_codec": true,
+      "generate_c_codec": true,
+      "codec_prefix": true,
       "fields": [
         { "name": "version", "encoding": "u16be" },
         { "name": "relation_handle", "encoding": "bytes16" },

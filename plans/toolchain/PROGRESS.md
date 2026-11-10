@@ -349,6 +349,13 @@
 - Verification: generated-file drift and six schema tests, focused optimizer response round-trip, fresh TinyCC codec fixture, locked workspace build, format check, warning-denied Clippy, serial workspace tests (129 commit tests passed; 3 cgroup-dependent tests ignored by default), and maintained TinyCC SDK suite passed in the pinned Nix shell.
 - Remaining: generate serializers for additional variable payloads and bounded collections; complete release profile and artifact gates.
 
+## TC-2: generated executor mutation request prefix codecs — verified
+
+- The schema now generates fixed prefixes for STAGE INSERT (relation handle and value count) and STAGE UPDATE (row handle and patch count) in Rust and C.
+- Rust mutation encoding and decoding use the generated prefix helpers, then retain the existing bounded value and patch record codecs. The TinyCC fixture verifies both prefixes, field round trips, and acceptance of appended mutation bytes; existing executor mutation tests cover the Rust record round trips.
+- Verification: generated-file drift and six schema tests, focused executor mutation regression, fresh TinyCC prefix fixture, locked workspace build, format check, warning-denied Clippy, serial workspace tests (129 commit tests passed; 3 cgroup-dependent tests ignored by default), and the maintained TinyCC SDK suite passed in the pinned Nix shell.
+- Remaining: generate codecs for additional variable payloads and bounded collections; complete release profile and artifact gates.
+
 ## TC-2: C/Rust administrative-cancel codec parity — verified
 
 - The C codec generator now also covers the administrative-cancel request with invocation ID and big-endian u16 reason code. Both the fixed 18-byte invocation-control request and 20-byte cancel request are emitted from the shared schema.
