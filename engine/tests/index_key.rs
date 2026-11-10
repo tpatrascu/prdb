@@ -409,3 +409,75 @@ fn catalog_index_key_rejects_zero_index_and_row_ids() {
         Err(DeriveIndexKeyError::InvalidDefinition)
     );
 }
+
+#[test]
+fn composite_index_keys_order_nulls_and_row_suffixes_independently() {
+    let schema_columns = [
+        ColumnSchema {
+            scalar_type: ScalarType::Integer,
+            nullable: false,
+        },
+        ColumnSchema {
+            scalar_type: ScalarType::Text,
+            nullable: true,
+        },
+    ];
+    let schema_ids = [[0x10; 16], [0x20; 16]];
+    let rows = [
+        (1, Some("a"), 2),
+        (1, Some("a"), 1),
+        (1, Some("b"), 3),
+        (2, Some("a"), 4),
+        (2, None, 5),
+        (2, Some("a"), 6),
+    ];
+    let keys = rows
+        .iter()
+        .map(|(integer, text, suffix)| {
+            let values = [
+                Some(ScalarValue::Integer(*integer)),
+                text.map(|text| ScalarValue::Text(text.to_string())),
+            ];
+            let tuple = encode_tuple(&schema_columns, 1, &values).unwrap();
+            derive_index_key(
+                [0x22; 16],
+                [*suffix; 16],
+                1,
+                &schema_ids,
+                &schema_columns,
+                &tuple,
+                &schema_ids,
+            )
+            .unwrap()
+            .key
+        })
+        .collect::<Vec<_>>();
+
+    // Component order is (INTEGER, TEXT); NULL sorts after every non-NULL
+    // component, and duplicate tuples are then ordered by their row UUID suffix.
+    let expected_order = [1, 0, 2, 3, 5, 4];
+    let mut actual_order = (0..keys.len()).collect::<Vec<_>>();
+    actual_order.sort_by(|left, right| keys[*left].cmp(&keys[*right]));
+    assert_eq!(actual_order, expected_order);
+
+    let duplicate_prefix_len = keys[0].len() - 16;
+    assert_eq!(
+        &keys[0][..duplicate_prefix_len],
+        &keys[1][..duplicate_prefix_len]
+    );
+    assert_eq!(&keys[0][duplicate_prefix_len..], &[2; 16]);
+    assert_eq!(&keys[1][duplicate_prefix_len..], &[1; 16]);
+    assert_eq!(keys[4][16 + 5], 0xff);
+    let null_key = derive_index_key(
+        [0x22; 16],
+        [5; 16],
+        1,
+        &schema_ids,
+        &schema_columns,
+        &encode_tuple(&schema_columns, 1, &[Some(ScalarValue::Integer(2)), None]).unwrap(),
+        &schema_ids,
+    )
+    .unwrap();
+    assert!(null_key.has_null);
+    assert_eq!(null_key.key, keys[4]);
+}

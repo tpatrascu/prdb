@@ -1,5 +1,12 @@
 # Storage Manager Progress
 
+## SM-2: composite key ordering with NULLs and row suffixes — verified
+
+- Contract: composite secondary-index keys follow component definition order, encode SQL NULL after non-NULL component values, and use the row UUID suffix to disambiguate otherwise identical tuples.
+- Regression: `composite_index_keys_order_nulls_and_row_suffixes_independently` checks a hand-ordered multi-column fixture, duplicate-tuple suffix order, NULL marker position, and the independent `has_null` signal returned by key derivation.
+- Verification: focused index-key regression, locked workspace build/format/warning-denied Clippy, and serial workspace tests pass.
+- Remaining: persisted index-scan equivalence and authorization-error comparison remain open.
+
 ## SM-6 dependency: C executor stage-delete bridge — partial
 
 - Contract: [IPC protocol](../../specs/ipc-protocol.md) mutation payload v1 and [client SDK](../../specs/client-sdk.md). A C query can submit a connection-local kind-8 row handle for deletion and must accept only the version/status-0 acknowledgement. Authority and row-version checks remain in trusted storage.
@@ -51,7 +58,7 @@
 - Regression: a compiling real-redb commit test first accepted a key one byte above the proposed limit and committed its row. It now verifies rejection as `InvalidIndex`, unchanged commit sequence, and no row publication.
 - Implementation: transaction staging and the serialized storage commit both reject over-limit keys, so direct trusted commit callers cannot bypass the logical bound. The low-level key composer remains an encoding helper and may construct bytes that cannot be persisted.
 - Verification: the focused real-redb regression passed both the over-limit rejection and exact-limit acceptance cases. The full TinyCC suite and `cargo build --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, and `git diff --check` all passed in the configured Nix shell. The commit integration target passed all 106 tests.
-- Remaining: independent composite/null/suffix properties and index-scan equivalence remain open.
+- Remaining: persisted index-scan equivalence remains open; independent composite/null/suffix coverage is recorded above.
 
 ## SM-2: typed component ordering evidence — verified
 
@@ -59,7 +66,7 @@
 - Regression: the first test run was rejected during setup because `i128::MIN` exceeds `DECIMAL(38)` precision. Replacing it with signed 38-digit values made the focused property pass.
 - Evidence: the integration regression independently sorts representative BOOLEAN, signed integer, DECIMAL(38), TEXT, VARCHAR, BYTEA, UUID, DATE and TIMESTAMPTZ values by their native Rust order, then checks the encoded key bytes increase strictly.
 - Verification: all 11 tests in `cargo test -p prdb-engine --test index_key --locked` passed; `cargo fmt --all -- --check`, workspace Clippy with warnings denied, and `git diff --check` also passed. The regression adds ordering evidence only; it changes no runtime implementation.
-- Remaining: broader composite/null/suffix properties and persisted index-scan equivalence remain open.
+- Remaining: additional edge-property cases and persisted index-scan equivalence remain open.
 
 ## SM-3: bounded private overlay primitive — in progress
 
