@@ -276,12 +276,7 @@ int32_t prdb_sdk_executor_stage_update_v1(
         return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
     }
     if (request_capacity < offset) return PRDB_SDK_EXECUTOR_RESPONSE_TOO_SMALL;
-    write_u16(request + PRDB_EXECUTOR_STAGE_UPDATE_REQUEST_VERSION_OFFSET,
-              PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION);
-    memcpy(request + PRDB_EXECUTOR_STAGE_UPDATE_REQUEST_ROW_HANDLE_OFFSET,
-           row_handle, 16);
-    write_u16(request + PRDB_EXECUTOR_STAGE_UPDATE_REQUEST_PATCH_COUNT_OFFSET,
-              patch_count);
+    prdb_encode_executor_stage_update_request(request, row_handle, patch_count);
     for (uint16_t i = 0; i < patch_count; ++i) {
         const prdb_sdk_executor_update_patch_v1 *patch = &patches[i];
         if (patch->struct_size < sizeof(*patch) ||

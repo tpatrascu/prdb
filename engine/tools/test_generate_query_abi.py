@@ -82,6 +82,7 @@ class PayloadSchemaValidationTests(unittest.TestCase):
         self.assertIn("prdb_decode_executor_open_scan_response", c_codecs)
         self.assertIn("prdb_encode_executor_stage_insert_response", c_codecs)
         self.assertIn("prdb_decode_executor_stage_insert_response", c_codecs)
+        self.assertIn("prdb_encode_executor_stage_update_request", c_codecs)
         self.assertIn("prdb_encode_executor_stage_delete_request", c_codecs)
         self.assertIn("prdb_decode_executor_stage_delete_request", c_codecs)
         self.assertIn("prdb_decode_executor_stage_insert_response", c_codecs)
