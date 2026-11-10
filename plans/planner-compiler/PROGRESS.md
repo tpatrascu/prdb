@@ -150,3 +150,12 @@
 - Regression: TinyCC fixture executes a submitted SELECT through ABI v4, captures the SQLR record, checks its projection name/type/state/bytes, and verifies a failed result callback latches statement failure.
 - Verification: focused and full maintained TinyCC SDK suites passed; generated ABI consistency, documentation link checks, and `git diff --check` passed.
 - Remaining: submit WHERE predicates through the optimizer bridge and add a real process/channel execution fixture.
+
+
+## OP-3 dependency: encode bounded SQL predicates in optimizer requests
+
+- Behavior: callers can serialize parsed single-relation SELECT predicates and supplied positional values into the existing optimizer request v1 format without changing the ABI wire version. Unsupported forms remain eligible for the existing SQL path.
+- Implementation: `prdb_sdk_optimizer_encode_select_with_parameters_v1` serializes comparisons, Boolean AND/OR/NOT trees, and Boolean/INTEGER/TEXT/NULL values into the bounded prefix representation expected by the Rust decoder. The compatibility encoder continues to reject WHERE trees.
+- Regression: TinyCC fixture checks an exact comparison request payload and rejects missing parameters; unfiltered request encoding remains byte-for-byte stable.
+- Verification: focused and full maintained TinyCC SDK suites passed; generated ABI consistency, documentation link checks, and `git diff --check` passed.
+- Remaining: connect the parameterized encoder to execution only after validating that the returned Filter matches the submitted AST and parameter values.

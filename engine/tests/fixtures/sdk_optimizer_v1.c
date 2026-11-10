@@ -101,7 +101,16 @@ int main(void) {
     {
         static const uint8_t predicate_sql[] =
             "SELECT name FROM items WHERE id = $1;";
+        static const uint8_t expected_predicate_request[] = {
+            0, 1, 1, 0, 6, 'p', 'u', 'b', 'l', 'i', 'c', 5, 'i', 't', 'e',
+            'm', 's', 0, 1, 4, 'n', 'a', 'm', 'e', 0, 0, 0, 15, 0x20, 0,
+            0x10, 2, 'i', 'd', 0x02, 0, 0, 0, 0, 0, 0, 0, 7, 0};
         prdb_sdk_select_v2 predicate_statement = {0};
+        uint8_t integer_bytes[4] = {0, 0, 0, 7};
+        prdb_sdk_value_v1 parameters[1] = {{
+            sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
+            PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_INTEGER,
+            integer_bytes, sizeof(integer_bytes)}};
         assert(prdb_sdk_sql_parse_select_v2(
                    predicate_sql, sizeof(predicate_sql) - 1,
                    &predicate_statement, sizeof(predicate_statement),
@@ -110,6 +119,18 @@ int main(void) {
                    &predicate_statement, schema, sizeof(schema) - 1, encoded,
                    sizeof(encoded), &encoded_len) ==
                PRDB_SDK_OPTIMIZER_ENCODE_UNSUPPORTED);
+        assert(prdb_sdk_optimizer_encode_select_with_parameters_v1(
+                   &predicate_statement, parameters, 1, schema,
+                   sizeof(schema) - 1, encoded, sizeof(encoded),
+                   &encoded_len) == PRDB_SDK_OPTIMIZER_ENCODE_OK);
+        assert(encoded_len == sizeof(expected_predicate_request));
+        assert(memcmp(encoded, expected_predicate_request,
+                      sizeof(expected_predicate_request)) == 0);
+        assert(prdb_sdk_optimizer_encode_select_with_parameters_v1(
+                   &predicate_statement, NULL, 0, schema,
+                   sizeof(schema) - 1, encoded, sizeof(encoded),
+                   &encoded_len) ==
+               PRDB_SDK_OPTIMIZER_ENCODE_INVALID_ARGUMENT);
     }
 
     assert(prdb_sdk_optimizer_submit_select_v1(

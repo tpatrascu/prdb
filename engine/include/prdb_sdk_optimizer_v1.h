@@ -41,13 +41,19 @@ typedef struct prdb_sdk_optimizer_response_v1 {
 } prdb_sdk_optimizer_response_v1;
 
 /* Encode an explicit-column, single-relation SELECT AST as optimizer request
- * v1. This first encoder supports no WHERE tree; predicates remain on the SQL
- * executor path until request v2 carries positional parameters. Schema is
- * supplied explicitly by the caller and is never inferred by this helper.
- * On ENCODE_BUFFER_TOO_SMALL, request_len receives the required byte count
- * and the request buffer is unchanged. */
+ * v1. This compatibility form supports no WHERE tree. */
 int32_t prdb_sdk_optimizer_encode_select_v1(
     const prdb_sdk_select_v2 *statement,
+    const uint8_t *schema, uint32_t schema_len,
+    uint8_t *request, uint64_t request_capacity, uint64_t *request_len);
+
+/* Encode the same request with bounded parameterized comparisons and Boolean
+ * predicates. The current subset supports Boolean, INTEGER, TEXT/VARCHAR, and
+ * NULL parameters; IS [NOT] NULL, SELECT *, and other value types return
+ * UNSUPPORTED. */
+int32_t prdb_sdk_optimizer_encode_select_with_parameters_v1(
+    const prdb_sdk_select_v2 *statement,
+    const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     const uint8_t *schema, uint32_t schema_len,
     uint8_t *request, uint64_t request_capacity, uint64_t *request_len);
 
