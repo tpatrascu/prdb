@@ -244,6 +244,13 @@
 - Verification: `make -f engine/sdk/Makefile abi-constants-check abi-constants-test`, locked workspace build, rustfmt check, warning-denied Clippy, serial workspace tests, and the complete maintained TinyCC suite passed. The SDK suite now compiles and runs `ipc-payload-codec-v1` with the pinned TinyCC build.
 - Remaining: extend generated C codec parity to other fixed payloads and define safe bounded helpers for collections and variable-length payloads; complete release profile and artifact gates.
 
+## TC-2: C/Rust simple cancellation-result codec parity — verified
+
+- The generated C header now covers the fixed simple cancellation result as well, exercising a single u8 status field after the version. Its bytes match the Rust encoder and the existing internal IPC contract.
+- Regression: the maintained TinyCC fixture checks the independent three-byte example and typed status round trip, alongside invocation-control and administrative-cancel request parity.
+- Verification: generator drift/schema tests, locked workspace build, format, warning-denied Clippy, serial workspace tests, and the complete maintained TinyCC suite passed.
+- Remaining: extend generated C codec parity to other fixed payloads and define safe bounded helpers for collections and variable-length payloads; complete release profile and artifact gates.
+
 ## TC-2: C/Rust administrative-cancel codec parity — verified
 
 - The C codec generator now also covers the administrative-cancel request with invocation ID and big-endian u16 reason code. Both the fixed 18-byte invocation-control request and 20-byte cancel request are emitted from the shared schema.

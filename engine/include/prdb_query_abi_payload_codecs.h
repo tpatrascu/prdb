@@ -66,4 +66,27 @@ static inline int prdb_decode_supervisor_admin_cancel_request(const uint8_t *pay
     return 1;
 }
 
+static inline void prdb_encode_supervisor_cancel_result_simple(uint8_t payload[3],
+    uint8_t status) {
+    payload[0] = (uint8_t)((PRDB_SUPERVISOR_PAYLOAD_VERSION >> 8) & 0xffu);
+    payload[1] = (uint8_t)(PRDB_SUPERVISOR_PAYLOAD_VERSION & 0xffu);
+    payload[2] = status;
+}
+
+static inline int prdb_decode_supervisor_cancel_result_simple(const uint8_t *payload, size_t payload_len,
+    uint8_t *status) {
+    if (payload == NULL || payload_len != 3) {
+        return 0;
+    }
+    if (payload[0] != (uint8_t)((PRDB_SUPERVISOR_PAYLOAD_VERSION >> 8) & 0xffu) ||
+        payload[1] != (uint8_t)(PRDB_SUPERVISOR_PAYLOAD_VERSION & 0xffu)) {
+        return 0;
+    }
+    if (status == NULL) {
+        return 0;
+    }
+    *status = payload[2];
+    return 1;
+}
+
 #endif /* PRDB_QUERY_ABI_PAYLOAD_CODECS_H */

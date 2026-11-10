@@ -38,6 +38,8 @@ class PayloadSchemaValidationTests(unittest.TestCase):
         self.assertIn("prdb_decode_supervisor_invocation_control_request", c_codecs)
         self.assertIn("prdb_encode_supervisor_admin_cancel_request", c_codecs)
         self.assertIn("prdb_decode_supervisor_admin_cancel_request", c_codecs)
+        self.assertIn("prdb_encode_supervisor_cancel_result_simple", c_codecs)
+        self.assertIn("prdb_decode_supervisor_cancel_result_simple", c_codecs)
 
     def test_payload_version_must_be_a_leading_u16(self):
         malformed = copy.deepcopy(self.schema)

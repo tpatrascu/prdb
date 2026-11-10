@@ -17,11 +17,14 @@ int main(void) {
         0x00, 0x01, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44,
         0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x12, 0x34,
     };
+    const uint8_t simple_expected[3] = {0x00, 0x01, 0x03};
     uint8_t payload[18] = {0};
     uint8_t decoded[16] = {0};
     uint8_t cancel_payload[20] = {0};
     uint8_t cancel_decoded[16] = {0};
     uint16_t decoded_reason = 0;
+    uint8_t simple_payload[3] = {0};
+    uint8_t decoded_status = 0;
 
     prdb_encode_supervisor_invocation_control_request(payload, invocation_id);
     for (size_t i = 0; i < sizeof(expected); ++i) {
@@ -67,6 +70,17 @@ int main(void) {
         if (cancel_decoded[i] != cancel_id[i]) {
             return 9;
         }
+    }
+    prdb_encode_supervisor_cancel_result_simple(simple_payload, 3);
+    for (size_t i = 0; i < sizeof(simple_expected); ++i) {
+        if (simple_payload[i] != simple_expected[i]) {
+            return 10;
+        }
+    }
+    if (!prdb_decode_supervisor_cancel_result_simple(
+            simple_payload, sizeof(simple_payload), &decoded_status) ||
+        decoded_status != 3) {
+        return 11;
     }
     return 0;
 }
