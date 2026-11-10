@@ -1,5 +1,12 @@
 # Toolchain Progress
 
+## TC-2: generated response codec C/Rust parity — verified
+
+- Behavior: generated C helpers for executor relation-resolution response variants and planner unknown estimates must encode/decode the same wire fields as the Rust codecs.
+- Regression: the maintained TinyCC IPC payload fixture checks exact version/status/identity/handle bytes, round-trips both executor variants, round-trips the planner unknown response, and rejects a non-exact unavailable payload length.
+- Verification: generator drift/schema tests and the full maintained TinyCC SDK suite passed with `-Wall -Wextra -Werror` in the configured shell.
+- Remaining: generated-codec parity is not end-to-end process interoperability; other payloads, release gates, and confined integration remain open.
+
 ## TC-2: generated planner unknown-estimate response — implemented
 
 - Contract: planner estimate responses use an exact versioned header for either unknown status or an exact estimate prefix followed by bounded column populations.

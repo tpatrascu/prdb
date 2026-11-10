@@ -652,5 +652,43 @@ int main(void) {
         memcmp(decoded_batch_cursor, batch_cursor, sizeof(batch_cursor)) != 0) {
         return 64;
     }
+    uint8_t relation_id[16] = {0x31};
+    uint8_t relation_handle[16] = {6};
+    uint8_t relation_status = 0xff;
+    uint8_t decoded_relation_id[16] = {0};
+    uint8_t decoded_relation_handle[16] = {0};
+    uint8_t available_relation[35] = {0};
+    uint8_t unavailable_relation[3] = {0};
+    prdb_encode_executor_resolve_relation_available_response(
+        available_relation, 0, relation_id, relation_handle);
+    if (available_relation[0] != 0x00 || available_relation[1] != 0x01 ||
+        available_relation[2] != 0 || available_relation[3] != 0x31 ||
+        available_relation[19] != 6 ||
+        !prdb_decode_executor_resolve_relation_available_response(
+            available_relation, sizeof(available_relation), &relation_status,
+            decoded_relation_id, decoded_relation_handle) ||
+        relation_status != 0 ||
+        memcmp(decoded_relation_id, relation_id, sizeof(relation_id)) != 0 ||
+        memcmp(decoded_relation_handle, relation_handle, sizeof(relation_handle)) != 0) {
+        return 65;
+    }
+    prdb_encode_executor_resolve_relation_unavailable_response(
+        unavailable_relation, 1);
+    relation_status = 0xff;
+    if (!prdb_decode_executor_resolve_relation_unavailable_response(
+            unavailable_relation, sizeof(unavailable_relation), &relation_status) ||
+        relation_status != 1 ||
+        prdb_decode_executor_resolve_relation_unavailable_response(
+            unavailable_relation, sizeof(unavailable_relation) - 1, &relation_status)) {
+        return 66;
+    }
+    uint8_t unknown_estimate[3] = {0};
+    prdb_encode_planner_estimate_scan_unknown_response(unknown_estimate, 1);
+    relation_status = 0xff;
+    if (!prdb_decode_planner_estimate_scan_unknown_response(
+            unknown_estimate, sizeof(unknown_estimate), &relation_status) ||
+        relation_status != 1 || unknown_estimate[0] != 0 || unknown_estimate[1] != 1) {
+        return 67;
+    }
     return 0;
 }
