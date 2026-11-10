@@ -109,21 +109,27 @@ int32_t prdb_sdk_executor_open_full_scan_v1(
     const prdb_host_api_v2 *host, const uint8_t executor_handle[16],
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len,
     uint8_t cursor_out[16]) {
-    uint8_t request[20] = {0};
+    uint8_t request[PRDB_EXECUTOR_OPEN_SCAN_REQUEST_HEADER_BYTES] = {0};
     uint8_t cursor[16];
     int32_t status;
     if (executor_handle == NULL || executor_handle[0] != 6 || cursor_out == NULL) {
         return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
     }
-    write_u16(request, 1);
-    memcpy(request + 2, executor_handle, 16);
+    write_u16(request + PRDB_EXECUTOR_OPEN_SCAN_REQUEST_VERSION_OFFSET,
+              PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION);
+    memcpy(request + PRDB_EXECUTOR_OPEN_SCAN_REQUEST_RELATION_HANDLE_OFFSET,
+           executor_handle, 16);
     status = invoke(host, PRDB_SDK_EXECUTOR_OP_OPEN_SCAN, request, sizeof(request),
                     response, response_capacity, response_len);
     if (status != PRDB_SDK_EXECUTOR_OK) return status;
-    if (*response_len != 18 || read_u16(response) != 1 || response[2] != 7) {
+    if (*response_len != PRDB_EXECUTOR_OPEN_SCAN_RESPONSE_HEADER_BYTES ||
+        read_u16(response + PRDB_EXECUTOR_OPEN_SCAN_RESPONSE_VERSION_OFFSET) !=
+            PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION ||
+        response[PRDB_EXECUTOR_OPEN_SCAN_RESPONSE_CURSOR_HANDLE_OFFSET] != 7) {
         return PRDB_SDK_EXECUTOR_INVALID_PAYLOAD;
     }
-    memcpy(cursor, response + 2, 16);
+    memcpy(cursor, response + PRDB_EXECUTOR_OPEN_SCAN_RESPONSE_CURSOR_HANDLE_OFFSET,
+           16);
     memcpy(cursor_out, cursor, 16);
     return PRDB_SDK_EXECUTOR_OK;
 }

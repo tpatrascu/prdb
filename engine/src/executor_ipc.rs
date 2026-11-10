@@ -7,7 +7,11 @@ use crate::metadata_discovery::{
     VisibleColumn,
 };
 pub use crate::query_abi::{
-    EXECUTOR_BATCH_PAYLOAD_VERSION, EXECUTOR_RESOLVE_RELATION_REQUEST_HEADER_BYTES,
+    EXECUTOR_BATCH_PAYLOAD_VERSION, EXECUTOR_OPEN_SCAN_REQUEST_COLUMN_COUNT_OFFSET,
+    EXECUTOR_OPEN_SCAN_REQUEST_HEADER_BYTES, EXECUTOR_OPEN_SCAN_REQUEST_RELATION_HANDLE_OFFSET,
+    EXECUTOR_OPEN_SCAN_REQUEST_VERSION_OFFSET, EXECUTOR_OPEN_SCAN_RESPONSE_CURSOR_HANDLE_OFFSET,
+    EXECUTOR_OPEN_SCAN_RESPONSE_HEADER_BYTES, EXECUTOR_OPEN_SCAN_RESPONSE_VERSION_OFFSET,
+    EXECUTOR_RESOLVE_RELATION_REQUEST_HEADER_BYTES,
     EXECUTOR_RESOLVE_RELATION_REQUEST_RELATION_NAME_LENGTH_OFFSET,
     EXECUTOR_RESOLVE_RELATION_REQUEST_SCHEMA_NAME_LENGTH_OFFSET,
     EXECUTOR_RESOLVE_RELATION_REQUEST_VERSION_OFFSET, RESOLVE_RELATION_PAYLOAD_VERSION,
@@ -201,9 +205,14 @@ impl OpenScanRequest {
         }
         let count = u16::try_from(self.column_ids.len())
             .map_err(|_| ExecutorRequestError::InvalidPayload)?;
-        let mut payload = EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes().to_vec();
-        payload.extend_from_slice(&self.relation.to_bytes());
-        payload.extend_from_slice(&count.to_be_bytes());
+        let mut payload = vec![0; EXECUTOR_OPEN_SCAN_REQUEST_HEADER_BYTES as usize];
+        let version_offset = EXECUTOR_OPEN_SCAN_REQUEST_VERSION_OFFSET as usize;
+        payload[version_offset..version_offset + 2]
+            .copy_from_slice(&EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes());
+        let handle_offset = EXECUTOR_OPEN_SCAN_REQUEST_RELATION_HANDLE_OFFSET as usize;
+        payload[handle_offset..handle_offset + 16].copy_from_slice(&self.relation.to_bytes());
+        let count_offset = EXECUTOR_OPEN_SCAN_REQUEST_COLUMN_COUNT_OFFSET as usize;
+        payload[count_offset..count_offset + 2].copy_from_slice(&count.to_be_bytes());
         for column_id in &self.column_ids {
             payload.extend_from_slice(column_id);
         }
@@ -214,19 +223,30 @@ impl OpenScanRequest {
     }
 
     pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
-        if payload.len() < 20
-            || u16::from_be_bytes([payload[0], payload[1]]) != EXECUTOR_BATCH_PAYLOAD_VERSION
+        let header_bytes = EXECUTOR_OPEN_SCAN_REQUEST_HEADER_BYTES as usize;
+        let version_offset = EXECUTOR_OPEN_SCAN_REQUEST_VERSION_OFFSET as usize;
+        if payload.len() < header_bytes
+            || u16::from_be_bytes([payload[version_offset], payload[version_offset + 1]])
+                != EXECUTOR_BATCH_PAYLOAD_VERSION
         {
             return Err(ExecutorRequestError::InvalidPayload);
         }
-        let relation = ResolvedRelationHandle::from_bytes(&payload[2..18])
-            .ok_or(ExecutorRequestError::InvalidPayload)?;
-        let column_count = usize::from(u16::from_be_bytes([payload[18], payload[19]]));
-        if column_count > crate::tuple::MAX_COLUMNS || payload.len() != 20 + column_count * 16 {
+        let handle_offset = EXECUTOR_OPEN_SCAN_REQUEST_RELATION_HANDLE_OFFSET as usize;
+        let relation =
+            ResolvedRelationHandle::from_bytes(&payload[handle_offset..handle_offset + 16])
+                .ok_or(ExecutorRequestError::InvalidPayload)?;
+        let count_offset = EXECUTOR_OPEN_SCAN_REQUEST_COLUMN_COUNT_OFFSET as usize;
+        let column_count = usize::from(u16::from_be_bytes([
+            payload[count_offset],
+            payload[count_offset + 1],
+        ]));
+        if column_count > crate::tuple::MAX_COLUMNS
+            || payload.len() != header_bytes + column_count * 16
+        {
             return Err(ExecutorRequestError::InvalidPayload);
         }
         let mut column_ids = Vec::with_capacity(column_count);
-        for chunk in payload[20..].chunks_exact(16) {
+        for chunk in payload[header_bytes..].chunks_exact(16) {
             column_ids.push(
                 chunk
                     .try_into()
@@ -257,19 +277,26 @@ pub struct OpenScanResponse {
 
 impl OpenScanResponse {
     pub fn encode(&self) -> Vec<u8> {
-        let mut payload = EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes().to_vec();
-        payload.extend_from_slice(&self.cursor.to_bytes());
+        let mut payload = vec![0; EXECUTOR_OPEN_SCAN_RESPONSE_HEADER_BYTES as usize];
+        let version_offset = EXECUTOR_OPEN_SCAN_RESPONSE_VERSION_OFFSET as usize;
+        payload[version_offset..version_offset + 2]
+            .copy_from_slice(&EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes());
+        let cursor_offset = EXECUTOR_OPEN_SCAN_RESPONSE_CURSOR_HANDLE_OFFSET as usize;
+        payload[cursor_offset..cursor_offset + 16].copy_from_slice(&self.cursor.to_bytes());
         payload
     }
 
     pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
-        if payload.len() != 18
-            || u16::from_be_bytes([payload[0], payload[1]]) != EXECUTOR_BATCH_PAYLOAD_VERSION
+        let version_offset = EXECUTOR_OPEN_SCAN_RESPONSE_VERSION_OFFSET as usize;
+        let cursor_offset = EXECUTOR_OPEN_SCAN_RESPONSE_CURSOR_HANDLE_OFFSET as usize;
+        if payload.len() != EXECUTOR_OPEN_SCAN_RESPONSE_HEADER_BYTES as usize
+            || u16::from_be_bytes([payload[version_offset], payload[version_offset + 1]])
+                != EXECUTOR_BATCH_PAYLOAD_VERSION
         {
             return Err(ExecutorRequestError::InvalidPayload);
         }
         Ok(Self {
-            cursor: ExecutorScanCursor::from_bytes(&payload[2..])
+            cursor: ExecutorScanCursor::from_bytes(&payload[cursor_offset..cursor_offset + 16])
                 .ok_or(ExecutorRequestError::InvalidPayload)?,
         })
     }

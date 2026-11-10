@@ -1210,6 +1210,27 @@
         { "name": "schema_name", "encoding": "utf8", "length_field": "schema_name_length" },
         { "name": "relation_name", "encoding": "utf8", "length_field": "relation_name_length" }
       ]
+    },
+    {
+      "name": "EXECUTOR_OPEN_SCAN_REQUEST",
+      "version_constant": "EXECUTOR_BATCH_PAYLOAD_VERSION",
+      "fields": [
+        { "name": "version", "encoding": "u16be" },
+        { "name": "relation_handle", "encoding": "bytes16" },
+        { "name": "column_count", "encoding": "u16be" }
+      ],
+      "trailing_fields": [
+        { "name": "column_ids", "encoding": "bytes16_array", "length_field": "column_count" }
+      ]
+    },
+    {
+      "name": "EXECUTOR_OPEN_SCAN_RESPONSE",
+      "version_constant": "EXECUTOR_BATCH_PAYLOAD_VERSION",
+      "fields": [
+        { "name": "version", "encoding": "u16be" },
+        { "name": "cursor_handle", "encoding": "bytes16" }
+      ],
+      "trailing_fields": []
     }
   ]
 }

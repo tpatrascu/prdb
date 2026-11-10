@@ -1,5 +1,13 @@
 # Toolchain Progress
 
+## TC-2: generated executor open-scan request/response schemas — implemented
+
+- Contract: [internal IPC](../../specs/ipc-protocol.md) defines the open-scan request as version, relation handle, column count, and optional column-ID list; its response is version plus cursor handle.
+- Implementation: the shared schema now models 16-byte fields and length-counted arrays in addition to u16 fields and UTF-8 tails. The generator emits Rust/C offsets and header lengths. Rust request/response codecs and TinyCC SDK request/response checks consume those generated constants.
+- Regression: `executor_relation_socket_loop_ends_session_without_finalizing` exercises the Rust request path; the maintained `sdk_executor_v1.c` fixture checks exact request and response bytes.
+- Verification: focused Rust/C regressions, generator drift, full workspace build/format/Clippy/serial tests (129 commit tests passed; 3 cgroup-dependent tests ignored), and the complete maintained TinyCC SDK suite passed.
+- Remaining: field-level generation still covers only qualified relation resolution and open-scan payloads. Other IPC messages and serializer generation remain open.
+
 ## TC-2: generated executor relation request field schema — implemented
 
 - Contract: [internal IPC](../../specs/ipc-protocol.md) and [toolchain](../../specs/toolchain.md). The variable-length executor relation-resolution request has a six-byte fixed header: big-endian version, schema-name length, and relation-name length, followed by the two UTF-8 names in that order.

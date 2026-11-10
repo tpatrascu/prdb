@@ -89,13 +89,14 @@ def render(schema):
         payload_names.add(name)
         field_names = set()
         offset = 0
+        field_widths = {"u16be": 2, "bytes16": 16}
         for field in fields:
             field_name = field.get("name")
             if (
                 not isinstance(field_name, str)
                 or not field_name.isidentifier()
                 or field_name in field_names
-                or field.get("encoding") != "u16be"
+                or field.get("encoding") not in field_widths
             ):
                 raise ValueError(f"invalid fixed field in IPC payload {name}")
             field_names.add(field_name)
@@ -108,9 +109,11 @@ def render(schema):
             c_names.add(c_name)
             rust_lines.append(f"pub const {rust_name}: u32 = {offset};")
             c_lines.append(f"#define {c_name} UINT32_C({offset})")
-            offset += 2
+            offset += field_widths[field["encoding"]]
         length_fields = {
-            field["name"] for field in fields if field["name"].endswith("_length")
+            field["name"]
+            for field in fields
+            if field["name"].endswith(("_length", "_count"))
         }
         trailing_names = set()
         for field in trailing_fields:
@@ -119,7 +122,7 @@ def render(schema):
                 not isinstance(field_name, str)
                 or not field_name.isidentifier()
                 or field_name in trailing_names
-                or field.get("encoding") != "utf8"
+                or field.get("encoding") not in ("utf8", "bytes16_array")
                 or field.get("length_field") not in length_fields
             ):
                 raise ValueError(f"invalid trailing field in IPC payload {name}")
