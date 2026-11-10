@@ -1362,6 +1362,9 @@
     {
       "name": "PLANNER_ESTIMATE_SCAN_REQUEST",
       "version_constant": "PLANNER_PAYLOAD_VERSION",
+      "generate_rust_codec": true,
+      "generate_c_codec": true,
+      "codec_prefix": true,
       "fields": [
         { "name": "version", "encoding": "u16be" },
         { "name": "planning_handle", "encoding": "bytes16" },
@@ -1378,6 +1381,9 @@
     {
       "name": "PLANNER_ESTIMATE_SCAN_RESPONSE",
       "version_constant": "PLANNER_PAYLOAD_VERSION",
+      "generate_rust_codec": true,
+      "generate_c_codec": true,
+      "codec_prefix": true,
       "fields": [
         { "name": "version", "encoding": "u16be" },
         { "name": "status", "encoding": "u8" },

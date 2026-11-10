@@ -211,6 +211,92 @@ static inline int prdb_decode_executor_stage_insert_request(const uint8_t *paylo
     return 1;
 }
 
+static inline void prdb_encode_planner_estimate_scan_request(uint8_t payload[20],
+    const uint8_t planning_handle[16], uint16_t column_count) {
+    payload[0] = (uint8_t)((PRDB_PLANNER_PAYLOAD_VERSION >> 8) & 0xffu);
+    payload[1] = (uint8_t)(PRDB_PLANNER_PAYLOAD_VERSION & 0xffu);
+    for (size_t i = 0; i < 16; ++i) {
+        payload[2 + i] = planning_handle[i];
+    }
+    uint64_t column_count_wire = (uint64_t)column_count;
+    for (size_t i = 0; i < 2; ++i) {
+        payload[18 + i] = (uint8_t)(column_count_wire >> ((2 - 1 - i) * 8));
+    }
+}
+
+static inline int prdb_decode_planner_estimate_scan_request(const uint8_t *payload, size_t payload_len,
+    uint8_t planning_handle[16], uint16_t *column_count) {
+    if (payload == NULL || payload_len < 20) {
+        return 0;
+    }
+    if (payload[0] != (uint8_t)((PRDB_PLANNER_PAYLOAD_VERSION >> 8) & 0xffu) ||
+        payload[1] != (uint8_t)(PRDB_PLANNER_PAYLOAD_VERSION & 0xffu)) {
+        return 0;
+    }
+    if (planning_handle == NULL) {
+        return 0;
+    }
+    for (size_t i = 0; i < 16; ++i) {
+        planning_handle[i] = payload[2 + i];
+    }
+    if (column_count == NULL) {
+        return 0;
+    }
+    uint64_t column_count_wire_value = 0;
+    for (size_t i = 0; i < 2; ++i) {
+        column_count_wire_value = (column_count_wire_value << 8) | payload[18 + i];
+    }
+    *column_count = (uint16_t)column_count_wire_value;
+    return 1;
+}
+
+static inline void prdb_encode_planner_estimate_scan_response(uint8_t payload[13],
+    uint8_t status, uint64_t visible_rows, uint16_t column_count) {
+    payload[0] = (uint8_t)((PRDB_PLANNER_PAYLOAD_VERSION >> 8) & 0xffu);
+    payload[1] = (uint8_t)(PRDB_PLANNER_PAYLOAD_VERSION & 0xffu);
+    payload[2] = status;
+    uint64_t visible_rows_wire = (uint64_t)visible_rows;
+    for (size_t i = 0; i < 8; ++i) {
+        payload[3 + i] = (uint8_t)(visible_rows_wire >> ((8 - 1 - i) * 8));
+    }
+    uint64_t column_count_wire = (uint64_t)column_count;
+    for (size_t i = 0; i < 2; ++i) {
+        payload[11 + i] = (uint8_t)(column_count_wire >> ((2 - 1 - i) * 8));
+    }
+}
+
+static inline int prdb_decode_planner_estimate_scan_response(const uint8_t *payload, size_t payload_len,
+    uint8_t *status, uint64_t *visible_rows, uint16_t *column_count) {
+    if (payload == NULL || payload_len < 13) {
+        return 0;
+    }
+    if (payload[0] != (uint8_t)((PRDB_PLANNER_PAYLOAD_VERSION >> 8) & 0xffu) ||
+        payload[1] != (uint8_t)(PRDB_PLANNER_PAYLOAD_VERSION & 0xffu)) {
+        return 0;
+    }
+    if (status == NULL) {
+        return 0;
+    }
+    *status = payload[2];
+    if (visible_rows == NULL) {
+        return 0;
+    }
+    uint64_t visible_rows_wire_value = 0;
+    for (size_t i = 0; i < 8; ++i) {
+        visible_rows_wire_value = (visible_rows_wire_value << 8) | payload[3 + i];
+    }
+    *visible_rows = (uint64_t)visible_rows_wire_value;
+    if (column_count == NULL) {
+        return 0;
+    }
+    uint64_t column_count_wire_value = 0;
+    for (size_t i = 0; i < 2; ++i) {
+        column_count_wire_value = (column_count_wire_value << 8) | payload[11 + i];
+    }
+    *column_count = (uint16_t)column_count_wire_value;
+    return 1;
+}
+
 static inline void prdb_encode_planner_describe_relation_unavailable_response(uint8_t payload[3],
     uint8_t status) {
     payload[0] = (uint8_t)((PRDB_PLANNER_PAYLOAD_VERSION >> 8) & 0xffu);

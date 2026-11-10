@@ -523,5 +523,50 @@ int main(void) {
             return 54;
         }
     }
+    uint8_t estimate_handle[16];
+    uint8_t estimate_column_id[16];
+    uint8_t decoded_estimate_handle[16] = {0};
+    uint8_t decoded_estimate_column_id[16] = {0};
+    for (size_t i = 0; i < 16; ++i) {
+        estimate_handle[i] = 0x77;
+        estimate_column_id[i] = 0x88;
+    }
+    uint8_t estimate_request[36] = {0};
+    uint16_t decoded_estimate_column_count = 0;
+    prdb_encode_planner_estimate_scan_request(
+        estimate_request, estimate_handle, 1);
+    estimate_request[20] = 0x00;
+    estimate_request[21] = 0x01;
+    for (size_t i = 0; i < 16; ++i) {
+        estimate_request[22 + i] = estimate_column_id[i];
+    }
+    if (estimate_request[0] != 0x00 || estimate_request[1] != 0x01 ||
+        !prdb_decode_planner_estimate_scan_request(
+            estimate_request, sizeof(estimate_request), decoded_estimate_handle,
+            &decoded_estimate_column_count) || decoded_estimate_column_count != 1) {
+        return 55;
+    }
+    for (size_t i = 0; i < 16; ++i) {
+        if (decoded_estimate_handle[i] != estimate_handle[i]) {
+            return 56;
+        }
+    }
+    uint8_t estimate_response[37] = {0};
+    uint8_t decoded_estimate_status = 0xff;
+    uint64_t decoded_visible_rows = 0;
+    uint16_t decoded_population_count = 0;
+    prdb_encode_planner_estimate_scan_response(estimate_response, 0, 9, 1);
+    estimate_response[13] = 0x00;
+    estimate_response[20] = 0x01;
+    estimate_response[28] = 0x02;
+    estimate_response[36] = 0x03;
+    if (estimate_response[0] != 0x00 || estimate_response[1] != 0x01 ||
+        !prdb_decode_planner_estimate_scan_response(
+            estimate_response, sizeof(estimate_response), &decoded_estimate_status,
+            &decoded_visible_rows, &decoded_population_count) ||
+        decoded_estimate_status != 0 || decoded_visible_rows != 9 ||
+        decoded_population_count != 1) {
+        return 57;
+    }
     return 0;
 }

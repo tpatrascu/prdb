@@ -356,6 +356,13 @@
 - Verification: generated-file drift and six schema tests, focused executor mutation regression, fresh TinyCC prefix fixture, locked workspace build, format check, warning-denied Clippy, serial workspace tests (129 commit tests passed; 3 cgroup-dependent tests ignored by default), and the maintained TinyCC SDK suite passed in the pinned Nix shell.
 - Remaining: generate codecs for additional variable payloads and bounded collections; complete release profile and artifact gates.
 
+## TC-2: generated planner estimate prefix codecs — verified
+
+- The shared schema generates the estimate request prefix (planning handle and column count) and exact response prefix (status, visible-row estimate, and population count) in Rust and C.
+- Planner Rust encoders and decoders use the generated helpers, then keep the existing count, size, duplicate-ID, and triplet-array validation. The TinyCC fixture checks both header layouts, decoded typed values, and acceptance of appended collection bytes.
+- Verification: generated-file drift and six schema tests, focused planner estimate integration regression, fresh TinyCC prefix fixture, locked workspace build, format check, warning-denied Clippy, serial workspace tests (129 commit tests passed; 3 cgroup-dependent tests ignored by default), and maintained TinyCC SDK suite passed in the pinned Nix shell.
+- Remaining: generate codecs for additional variable payloads and bounded collections; complete release profile and artifact gates.
+
 ## TC-2: C/Rust administrative-cancel codec parity — verified
 
 - The C codec generator now also covers the administrative-cancel request with invocation ID and big-endian u16 reason code. Both the fixed 18-byte invocation-control request and 20-byte cancel request are emitted from the shared schema.

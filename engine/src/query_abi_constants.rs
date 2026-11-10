@@ -240,11 +240,42 @@ pub const PLANNER_ESTIMATE_SCAN_REQUEST_VERSION_OFFSET: u32 = 0;
 pub const PLANNER_ESTIMATE_SCAN_REQUEST_PLANNING_HANDLE_OFFSET: u32 = 2;
 pub const PLANNER_ESTIMATE_SCAN_REQUEST_COLUMN_COUNT_OFFSET: u32 = 18;
 pub const PLANNER_ESTIMATE_SCAN_REQUEST_HEADER_BYTES: u32 = 20;
+pub fn encode_planner_estimate_scan_request(planning_handle: [u8; 16], column_count: u16) -> [u8; 20] {
+    let mut payload = [0u8; 20];
+    payload[0..2].copy_from_slice(&PLANNER_PAYLOAD_VERSION.to_be_bytes());
+    payload[2..18].copy_from_slice(&planning_handle);
+    payload[18..20].copy_from_slice(&column_count.to_be_bytes());
+    payload
+}
+
+pub fn decode_planner_estimate_scan_request(payload: &[u8]) -> Option<([u8; 16], u16)> {
+    if payload.len() < 20 || u16::from_be_bytes([payload[0], payload[1]]) != PLANNER_PAYLOAD_VERSION {
+        return None;
+    }
+    Some((payload[2..18].try_into().ok()?, u16::from_be_bytes(payload[18..20].try_into().ok()?)))
+}
+
 pub const PLANNER_ESTIMATE_SCAN_RESPONSE_VERSION_OFFSET: u32 = 0;
 pub const PLANNER_ESTIMATE_SCAN_RESPONSE_STATUS_OFFSET: u32 = 2;
 pub const PLANNER_ESTIMATE_SCAN_RESPONSE_VISIBLE_ROWS_OFFSET: u32 = 3;
 pub const PLANNER_ESTIMATE_SCAN_RESPONSE_COLUMN_COUNT_OFFSET: u32 = 11;
 pub const PLANNER_ESTIMATE_SCAN_RESPONSE_HEADER_BYTES: u32 = 13;
+pub fn encode_planner_estimate_scan_response(status: u8, visible_rows: u64, column_count: u16) -> [u8; 13] {
+    let mut payload = [0u8; 13];
+    payload[0..2].copy_from_slice(&PLANNER_PAYLOAD_VERSION.to_be_bytes());
+    payload[2] = status;
+    payload[3..11].copy_from_slice(&visible_rows.to_be_bytes());
+    payload[11..13].copy_from_slice(&column_count.to_be_bytes());
+    payload
+}
+
+pub fn decode_planner_estimate_scan_response(payload: &[u8]) -> Option<(u8, u64, u16)> {
+    if payload.len() < 13 || u16::from_be_bytes([payload[0], payload[1]]) != PLANNER_PAYLOAD_VERSION {
+        return None;
+    }
+    Some((payload[2], u64::from_be_bytes(payload[3..11].try_into().ok()?), u16::from_be_bytes(payload[11..13].try_into().ok()?)))
+}
+
 pub const PLANNER_DESCRIBE_RELATION_UNAVAILABLE_RESPONSE_VERSION_OFFSET: u32 = 0;
 pub const PLANNER_DESCRIBE_RELATION_UNAVAILABLE_RESPONSE_STATUS_OFFSET: u32 = 2;
 pub const PLANNER_DESCRIBE_RELATION_UNAVAILABLE_RESPONSE_HEADER_BYTES: u32 = 3;
