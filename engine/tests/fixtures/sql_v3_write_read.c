@@ -11,12 +11,40 @@
 #include "prdb_sdk_sql_exec_v16.h"
 #include "prdb_sdk_sql_result_v1.h"
 #include "prdb_sdk_executor_v1.h"
+#include "prdb_sdk_optimizer_plan_v1.h"
 
 #include <string.h>
 
 const prdb_query_descriptor_v3_record prdb_query_descriptor_v3 = {
     sizeof(prdb_query_descriptor_v3_record), PRDB_QUERY_ABI_V3_VERSION,
     sizeof(prdb_host_api_v3), sizeof(prdb_invocation_v3)};
+const prdb_query_descriptor_v4_record prdb_query_descriptor_v4 = {
+    sizeof(prdb_query_descriptor_v4_record), PRDB_QUERY_ABI_V4_VERSION,
+    sizeof(prdb_host_api_v4), sizeof(prdb_invocation_v4)};
+
+typedef struct optimizer_result_context {
+    uint32_t row_count;
+    uint32_t matched_expected_value;
+} optimizer_result_context;
+
+static int32_t verify_optimizer_row(
+    void *opaque, const prdb_sdk_optimizer_plan_column_v1 *projections,
+    const prdb_sdk_value_v1 *values, uint32_t projection_count) {
+    optimizer_result_context *context = (optimizer_result_context *)opaque;
+    static const uint8_t expected_value[4] = {0, 0, 0, 42};
+    if (context == NULL || projections == NULL || values == NULL ||
+        projection_count != 1 ||
+        projections[0].type_code != PRDB_SDK_VALUE_TYPE_INTEGER ||
+        values[0].state != PRDB_SDK_VALUE_STATE_VALUE ||
+        values[0].type_code != PRDB_SDK_VALUE_TYPE_INTEGER ||
+        values[0].data == NULL || values[0].data_len != sizeof(expected_value)) {
+        return 1;
+    }
+    context->matched_expected_value =
+        memcmp(values[0].data, expected_value, sizeof(expected_value)) == 0;
+    ++context->row_count;
+    return context->matched_expected_value ? 0 : 1;
+}
 
 typedef struct result_context {
     const prdb_host_api_v3 *host;
@@ -314,8 +342,9 @@ static int32_t report_failure(const prdb_host_api_v3 *host,
     return 1;
 }
 
-int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
-                           const prdb_invocation_v3 *invocation) {
+static int32_t run_write_read_fixture(
+    const prdb_host_api_v3 *host, const prdb_invocation_v3 *invocation,
+    const prdb_host_api_v4 *optimizer_host) {
     static const uint8_t insert_sql[] = "INSERT INTO records VALUES (NULL)";
     static const uint8_t select_null_sql[] =
         "SELECT id FROM records WHERE id IS NULL";
@@ -336,6 +365,8 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
         "UPDATE records SET id = $1 WHERE id IS NULL";
     static const uint8_t select_value_sql[] =
         "SELECT id FROM records WHERE id = $1";
+    static const uint8_t optimizer_select_sql[] =
+        "SELECT id FROM records WHERE id = $1 LIMIT 1";
     static const uint8_t select_grouped_min_sql[] =
         "SELECT id, MIN(id) FROM records GROUP BY id";
     static const uint8_t select_grouped_sum_sql[] =
@@ -1101,6 +1132,49 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
         return report_failure(host, message, sizeof(message) - 1);
     }
 
+    if (optimizer_host != NULL) {
+        prdb_sdk_select_v2 optimizer_statement = {0};
+        uint8_t optimizer_request[4096] = {0};
+        uint8_t optimizer_response[4096] = {0};
+        uint8_t relation_response[4096] = {0};
+        uint8_t scan_response[4096] = {0};
+        uint8_t optimizer_batch[4096] = {0};
+        uint8_t optimizer_parameter_bytes[4] = {0, 0, 0, 42};
+        prdb_sdk_value_v1 optimizer_parameter = {
+            sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
+            PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_INTEGER,
+            optimizer_parameter_bytes, sizeof(optimizer_parameter_bytes)};
+        prdb_sdk_executor_relation_v1 optimizer_relation = {0};
+        prdb_sdk_sql_column_shape_v2 optimizer_columns[1] = {{0}};
+        prdb_sdk_value_v1 optimizer_source_cells[1] = {{0}};
+        prdb_sdk_value_v1 optimizer_projected_values[1] = {{0}};
+        optimizer_result_context optimizer_results = {0};
+        uint32_t optimizer_rows = 0;
+        uint32_t parse_error_offset = 0;
+        if (optimizer_host->optimizer_request == NULL ||
+            prdb_sdk_sql_parse_select_v2(
+                optimizer_select_sql, sizeof(optimizer_select_sql) - 1,
+                &optimizer_statement, sizeof(optimizer_statement),
+                &parse_error_offset) != PRDB_SDK_SQL_OK ||
+            prdb_sdk_optimizer_execute_select_ast_with_parameters_v1(
+                optimizer_host, &optimizer_statement, &optimizer_parameter, 1,
+                schema, sizeof(schema) - 1, 16, sizeof(optimizer_batch),
+                optimizer_request, sizeof(optimizer_request),
+                optimizer_response, sizeof(optimizer_response),
+                relation_response, sizeof(relation_response), scan_response,
+                sizeof(scan_response), optimizer_batch,
+                sizeof(optimizer_batch), &optimizer_relation,
+                sizeof(optimizer_relation), optimizer_columns, 1,
+                optimizer_source_cells, 1, optimizer_projected_values, 1,
+                verify_optimizer_row, &optimizer_results, &optimizer_rows) !=
+                PRDB_SDK_OPTIMIZER_PLAN_OK ||
+            optimizer_rows != 1 || optimizer_results.row_count != 1 ||
+            !optimizer_results.matched_expected_value) {
+            static const uint8_t message[] = "fixture-error-optimizer-filter";
+            return report_failure(host, message, sizeof(message) - 1);
+        }
+    }
+
     status = prdb_sdk_sql_execute_delete_v1(
         host, schema, sizeof(schema) - 1, delete_sql, sizeof(delete_sql) - 1,
         &parameter, 1, 16, sizeof(batch_response), planner_response,
@@ -1127,4 +1201,19 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
         return report_failure(host, message, sizeof(message) - 1);
     }
     return 0;
+}
+
+int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
+                           const prdb_invocation_v3 *invocation) {
+    return run_write_read_fixture(host, invocation, NULL);
+}
+
+int32_t prdb_query_main_v4(const prdb_host_api_v4 *host,
+                           const prdb_invocation_v4 *invocation) {
+    if (host == NULL || host->v3.struct_size < sizeof(host->v3) ||
+        host->v3.abi_version != PRDB_QUERY_ABI_V3_VERSION ||
+        host->optimizer_request == NULL) {
+        return 1;
+    }
+    return run_write_read_fixture(&host->v3, invocation, host);
 }

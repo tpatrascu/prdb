@@ -1,5 +1,12 @@
 # SQL Library Progress
 
+## SQL-3 ABI v4 optimizer callback in maintained SQL artifact — implemented; confined acceptance pending
+
+- Contract: [client SDK ABI v4](../../specs/client-sdk.md), [optimizer](../../specs/planner-compiler.md), and [sandbox acceptance](SANDBOX_TEST.md). The existing write/read query fixture exports v3 compatibility and v4 entry points; the executor's v4 preference now reaches the fixed-operation optimizer callback.
+- Behavior: after updating `records.id` to 42, the v4 entry parses `SELECT id FROM records WHERE id = $1 LIMIT 1`, submits it through the optimizer process, validates the returned filtered plan and storage-resolved relation, and confirms one projected integer value equals 42. Failure is reported through the established statement failure callback; the fixture emits no extra success result frames.
+- Verification: `make -f engine/sdk/Makefile test`, `make -f engine/sdk/Makefile sandbox-query-fixture`, workspace build, format check, warning-denied Clippy, and `cargo test --workspace --locked` passed after the edit (129 commit tests passed; 3 cgroup tests ignored). `prdb-packager` compiled the actual fixture with TinyCC and validated/published its ABI v4 PMF1 artifact in `/tmp` without loading it. The ignored sandboxed acceptance cannot run on this read-only cgroup host, so optimizer-to-storage execution remains unverified here.
+- Remaining: run `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` through the confined executor on a host with the documented delegated cgroup and runtime profile.
+
 ## SQL-1 first bounded SELECT parser — implemented
 
 - Contract: [`prdb_sdk_sql_v1.h`](../../engine/include/prdb_sdk_sql_v1.h) defines the v1 sized/versioned borrowed-span AST for explicit column projections or `*`, one unqualified relation, one comparison against `$n` or `IS [NOT] NULL`, optional LIMIT and one optional semicolon. Keywords are case-insensitive; identifier source spelling is preserved.
