@@ -1119,7 +1119,22 @@ fn authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_proce
         .is_err()
     );
     assert_eq!(revoked_secret, [0; 32]);
-    remove_client_credentials(&credential_path)?;
+    let credential_path_text = credential_path
+        .to_str()
+        .ok_or("credential path is not UTF-8")?;
+    let remove_credential_command = Command::new(env!("CARGO_BIN_EXE_prdb-client"))
+        .args(["credential-remove", "--credentials", credential_path_text])
+        .output()?;
+    assert!(
+        remove_credential_command.status.success(),
+        "credential-remove CLI failed: {}",
+        String::from_utf8_lossy(&remove_credential_command.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&remove_credential_command.stdout)
+            .contains("removed credential file")
+    );
+    assert!(!credential_path.exists());
     drop(admin);
 
     let mut outcome_status_client =

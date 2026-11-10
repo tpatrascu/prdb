@@ -152,7 +152,8 @@
 
 - Behavior: `prdb-client credential-remove --credentials FILE` removes a valid owner-only credential file without requiring a network connection. It reuses the credential module's ownership, regular-file, and mode-0600 checks and reports local file removal without exposing token material.
 - Contract: [client SDK](../../specs/client-sdk.md) now distinguishes local credential-file deletion from server-side `token-revoke`.
-- Regression: the maintained CLI unit test creates a private credential file, runs the removal command handler, and confirms the file is gone; credential module tests separately cover symlink and unsafe-mode rejection.
+- Regression: the maintained CLI unit test creates a private credential file, runs the removal command handler, and confirms the file is gone; the authenticated gateway/supervisor process test invokes the compiled `prdb-client credential-remove` command after token revocation and confirms the file is removed. Credential module tests separately cover symlink and unsafe-mode rejection.
+- Verification: the focused `authenticated_metadata_and_admin_lifecycle_cross_gateway_and_supervisor_processes` test and rustfmt checks pass.
 - Remaining: CLI credential lifecycle now supports issue, private save, read, and local removal. Admin CLI breadth and real multi-process ADMIN path coverage continue below.
 
 ## SDK-3 dependency: basic submit/status CLI — implemented
