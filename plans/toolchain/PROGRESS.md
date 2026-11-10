@@ -1,5 +1,12 @@
 # Toolchain Progress
 
+## TC-1 / TC-3: initial SDK and query build timing sample — measured
+
+- Profile and commands: pinned TinyCC 0.9.27-unstable-2025-01-06 on NixOS x86_64/glibc 2.42. Three separate `make -f engine/sdk/Makefile BUILD_DIR=<fresh-dir> all` runs built the SDK archive; a repeated no-op make measured warm incremental overhead. A maintained `sql_v3_write_read.c` fixture was compiled seven times with TinyCC `-Wall -Wextra -Werror -fPIC`, then linked seven times with the SDK archive using GNU `cc -shared -Wl,--no-eh-frame-hdr,-z,noexecstack`.
+- Results: cold SDK archive builds 217.3, 208.8, 220.8 ms; warm no-op 3.1 ms; per-query compilation 6.6–8.5 ms; per-query linking 32.8–40.6 ms. Each query measurement excludes SDK archive construction; load, execution, and commit are not included.
+- Limitation: `make` emitted a 21 ms clock-skew warning for a fresh build directory despite the timestamp normalization attempt. Treat this as a host-local sample, not a performance guarantee; rerun after clock synchronization for clean timing evidence. No latency target is set.
+- Remaining: broader compiler/runtime profiles, runtime support packaging, signed artifacts, and confined compatibility gates remain open.
+
 ## TC-2: generated supervisor terminal request encoders — implemented
 
 - Contract: finalize and abort requests carry exactly the shared supervisor payload version.
