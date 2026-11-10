@@ -20506,10 +20506,10 @@ fn supervisor_worker_exit_failure_is_reaped_and_durably_aborted()
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-#[test]
-#[ignore = "requires a delegated cgroup and the built TinyCC v3 query fixture"]
-fn sandboxed_v3_sql_error_latches_failure_and_durably_aborts_after_partial_output()
--> Result<(), Box<dyn std::error::Error>> {
+fn run_sandboxed_v3_sql_error_fixture(
+    artifact_env: &str,
+    expect_network_denial: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::client_protocol::{ClientConnectionSession, ClientFrame, ClientMode};
     use prdb_engine::ipc::{Operation, read_frame};
     use prdb_engine::outcome::OutcomeStatus;
@@ -20554,19 +20554,37 @@ fn sandboxed_v3_sql_error_latches_failure_and_durably_aborts_after_partial_outpu
     let cgroup_parent = std::env::var_os("PRDB_TEST_CGROUP_PARENT")
         .map(PathBuf::from)
         .ok_or("PRDB_TEST_CGROUP_PARENT must name a delegated cgroup v2 parent")?;
-    let artifact_path = std::env::var_os("PRDB_TEST_QUERY_ARTIFACT")
+    let artifact_path = std::env::var_os(artifact_env)
         .map(PathBuf::from)
-        .ok_or("PRDB_TEST_QUERY_ARTIFACT must name sql-v3-caught-error.so")?;
+        .ok_or_else(|| format!("{artifact_env} must name its TinyCC artifact"))?;
+    let network_probe_listener = if expect_network_denial {
+        Some(std::net::TcpListener::bind(("127.0.0.1", 0))?)
+    } else {
+        None
+    };
     if !cgroup_parent.is_absolute() || !artifact_path.is_absolute() {
         return Err("sandbox test paths must be absolute".into());
     }
-    let constructor_marker = PathBuf::from("/tmp/prdb-sandbox-constructor-probe");
+    let constructor_marker = PathBuf::from(if expect_network_denial {
+        "/tmp/prdb-sandbox-network-constructor-probe"
+    } else {
+        "/tmp/prdb-sandbox-constructor-probe"
+    });
     match std::fs::remove_file(&constructor_marker) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    let artifact = std::fs::read(&artifact_path)?;
+    let mut artifact = std::fs::read(&artifact_path)?;
+    if let Some(listener) = &network_probe_listener {
+        const PORT_PLACEHOLDER: &[u8] = b"PRDB_PORT_00000";
+        let offset = artifact
+            .windows(PORT_PLACEHOLDER.len())
+            .position(|window| window == PORT_PLACEHOLDER)
+            .ok_or("network-constructor artifact is missing its port placeholder")?;
+        let port = format!("{:05}", listener.local_addr()?.port());
+        artifact[offset + 10..offset + 15].copy_from_slice(port.as_bytes());
+    }
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
     let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros())?;
@@ -20692,9 +20710,7 @@ fn sandboxed_v3_sql_error_latches_failure_and_durably_aborts_after_partial_outpu
     );
     staging.finish_started(owner, reservation.invocation_id)?;
 
-    let provisional = read_frame(&mut gateway)?.ok_or("missing provisional SQL output")?;
-    assert_eq!(provisional.operation, Operation::GatewayResultData as u16);
-    assert_eq!(provisional.request_id, accepted.request_id);
+    let first_frame = read_frame(&mut gateway)?.ok_or("missing worker result")?;
     let constructor_escaped = constructor_marker.exists();
     if constructor_escaped {
         std::fs::remove_file(&constructor_marker)?;
@@ -20703,8 +20719,24 @@ fn sandboxed_v3_sql_error_latches_failure_and_durably_aborts_after_partial_outpu
         !constructor_escaped,
         "native constructor created a file outside its invocation scratch"
     );
-    assert_eq!(provisional.payload, b"partial SQL output");
-    let terminal = read_frame(&mut gateway)?.ok_or("missing aborted terminal event")?;
+    let terminal = if expect_network_denial {
+        if first_frame.operation == Operation::GatewayTerminal as u16 {
+            first_frame
+        } else {
+            assert_eq!(first_frame.operation, Operation::GatewayResultData as u16);
+            assert_eq!(first_frame.request_id, accepted.request_id);
+            assert_eq!(
+                first_frame.payload,
+                b"constructor network connection blocked"
+            );
+            read_frame(&mut gateway)?.ok_or("missing aborted terminal event")?
+        }
+    } else {
+        assert_eq!(first_frame.operation, Operation::GatewayResultData as u16);
+        assert_eq!(first_frame.request_id, accepted.request_id);
+        assert_eq!(first_frame.payload, b"partial SQL output");
+        read_frame(&mut gateway)?.ok_or("missing aborted terminal event")?
+    };
     assert_eq!(terminal.operation, Operation::GatewayTerminal as u16);
     assert_eq!(terminal.request_id, accepted.request_id);
     assert!(String::from_utf8(terminal.payload)?.contains("\"outcome\":\"aborted\""));
@@ -20716,6 +20748,22 @@ fn sandboxed_v3_sql_error_latches_failure_and_durably_aborts_after_partial_outpu
         OutcomeStatus::Aborted
     );
     Ok(())
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+#[ignore = "requires a delegated cgroup and the built TinyCC v3 query fixture"]
+fn sandboxed_v3_sql_error_latches_failure_and_durably_aborts_after_partial_output()
+-> Result<(), Box<dyn std::error::Error>> {
+    run_sandboxed_v3_sql_error_fixture("PRDB_TEST_QUERY_ARTIFACT", false)
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+#[ignore = "requires a delegated cgroup and the built TinyCC network-constructor fixture"]
+fn sandboxed_v3_constructor_cannot_connect_to_host_loopback()
+-> Result<(), Box<dyn std::error::Error>> {
+    run_sandboxed_v3_sql_error_fixture("PRDB_TEST_NETWORK_CONSTRUCTOR_ARTIFACT", true)
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

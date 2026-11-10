@@ -39,7 +39,14 @@
 - Behavior: Landlock must already constrain filesystem access while the query library's native constructor runs, before `prdb_query_main_v3` is called.
 - Regression: `sql_v3_caught_error.c` now has a constructor that attempts to create and write a marker under `/tmp`. It reports a distinct result if the operation succeeds. The confined SQL error acceptance requires the ordinary entry-point output and confirms no marker file was created, then still verifies durable ABORTED after the caught SQL error.
 - Verification: `sandboxed_v3_sql_error_latches_failure_and_durably_aborts_after_partial_output` passed through the delegated cgroup, clean executor, Landlock, seccomp, result relay, and storage outcome path on the current Linux x86_64 profile. `make -f engine/sdk/Makefile sandbox-query-fixture` built the artifact with TinyCC; the temporary cgroup leaf was removed by the test.
-- Remaining: constructor probes for network, process, dependency initialization, and additional kernel/runtime profiles remain open.
+- Remaining: constructor probes for process access, dependency initialization, and additional kernel/runtime profiles remain open. File-write and host-loopback connection attempts are covered in the follow-up below.
+
+## SB-3: native constructor filesystem and network restrictions — verified
+
+- Behavior: filesystem and network namespace restrictions are active during native query-library constructors, before the query entry point.
+- Regression: the maintained caught-error fixture's constructor attempts to create/write outside invocation scratch. A separately compiled variant also tries to connect to a host loopback listener. The confined acceptance checks the marker remains absent and accepts either a pre-entry worker termination or an explicit blocked-connection result; a successful connection emits a distinct failure payload.
+- Verification: both `sandboxed_v3_sql_error_latches_failure_and_durably_aborts_after_partial_output` and `sandboxed_v3_constructor_cannot_connect_to_host_loopback` passed through the delegated cgroup, clean executor, Landlock, seccomp, and storage abort path. The TinyCC artifact build and full SDK suite passed. Locked workspace build, formatting, warning-denied Clippy, serial workspace tests (129 commit tests passed; 4 cgroup tests ignored), and `git diff --check` passed.
+- Remaining: constructor process-access and dependency-initialization probes, more hostile syscall cases, and additional runtime/kernel profiles remain open.
 
 ## SB-2 dependency: rootless worker namespaces — implemented
 
