@@ -131,14 +131,10 @@ int32_t prdb_sdk_executor_open_full_scan_v1(
     status = invoke(host, PRDB_SDK_EXECUTOR_OP_OPEN_SCAN, request, sizeof(request),
                     response, response_capacity, response_len);
     if (status != PRDB_SDK_EXECUTOR_OK) return status;
-    if (*response_len != PRDB_EXECUTOR_OPEN_SCAN_RESPONSE_HEADER_BYTES ||
-        read_u16(response + PRDB_EXECUTOR_OPEN_SCAN_RESPONSE_VERSION_OFFSET) !=
-            PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION ||
-        response[PRDB_EXECUTOR_OPEN_SCAN_RESPONSE_CURSOR_HANDLE_OFFSET] != 7) {
+    if (!prdb_decode_executor_open_scan_response(
+            response, (size_t)*response_len, cursor) || cursor[0] != 7) {
         return PRDB_SDK_EXECUTOR_INVALID_PAYLOAD;
     }
-    memcpy(cursor, response + PRDB_EXECUTOR_OPEN_SCAN_RESPONSE_CURSOR_HANDLE_OFFSET,
-           16);
     memcpy(cursor_out, cursor, 16);
     return PRDB_SDK_EXECUTOR_OK;
 }

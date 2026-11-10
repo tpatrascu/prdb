@@ -432,6 +432,14 @@
 - Verification: generator drift/schema tests, locked workspace build, rustfmt check, warning-denied Clippy, serial workspace tests (129 passed; 3 cgroup-gated tests ignored), and the complete maintained TinyCC SDK suite passed in the pinned Nix shell.
 - Remaining: generate serializers for remaining executor/planner/supervisor payloads, then complete release profile and artifact gates.
 
+## TC-2: generated TinyCC open-scan response decoder — implemented
+
+- Contract: [internal IPC](../../specs/ipc-protocol.md) and [toolchain](../../specs/toolchain.md). The open-scan response is the batch payload version plus an opaque cursor handle.
+- Implementation: the maintained TinyCC executor SDK now uses the generated C decoder to validate exact length and version and extract the handle before checking its executor cursor kind.
+- Regression: the rebuilt TinyCC executor fixture exercises successful and invalid host responses; the Rust executor socket-loop regression continues to cover the matching server path.
+- Verification: generator drift/schema checks, locked workspace build, rustfmt check, warning-denied Clippy, serial workspace tests, and the full maintained TinyCC SDK suite passed in the pinned Nix shell.
+- Remaining: migrate the remaining hand-coded executor/planner/supervisor payload serializers and complete release profile and artifact gates.
+
 ## TC-1: locked Nix development shell — implemented
 
 - Behavior: `nix develop --locked` provides the pinned x86_64-linux package set used for the engine and SDK checks. [`flake.nix`](../../flake.nix) and [`flake.lock`](../../flake.lock) pin Nixpkgs revision `718f670e845328e9c2cecdd832835712b2cbd065` with source NAR hash `sha256-Ee5BWo8sh3pGt70QUdRajnaginqFmWvrtdBc4gJzhks=`.
