@@ -252,10 +252,14 @@ int32_t prdb_sdk_executor_stage_insert_v1(
     status = invoke(host, PRDB_SDK_EXECUTOR_OP_STAGE_INSERT, request, offset,
                     response, response_capacity, response_len);
     if (status != PRDB_SDK_EXECUTOR_OK) return status;
-    if (*response_len != 18 || read_u16(response) != 1 || response[2] != 8) {
+    if (*response_len != PRDB_EXECUTOR_STAGE_INSERT_RESPONSE_HEADER_BYTES ||
+        read_u16(response + PRDB_EXECUTOR_STAGE_INSERT_RESPONSE_VERSION_OFFSET) !=
+            PRDB_EXECUTOR_BATCH_PAYLOAD_VERSION ||
+        response[PRDB_EXECUTOR_STAGE_INSERT_RESPONSE_ROW_HANDLE_OFFSET] != 8) {
         return PRDB_SDK_EXECUTOR_INVALID_PAYLOAD;
     }
-    memcpy(row_handle_out, response + 2, 16);
+    memcpy(row_handle_out,
+           response + PRDB_EXECUTOR_STAGE_INSERT_RESPONSE_ROW_HANDLE_OFFSET, 16);
     return PRDB_SDK_EXECUTOR_OK;
 }
 

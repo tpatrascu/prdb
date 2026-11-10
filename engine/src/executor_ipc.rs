@@ -21,7 +21,8 @@ pub use crate::query_abi::{
     EXECUTOR_RESOLVE_RELATION_REQUEST_SCHEMA_NAME_LENGTH_OFFSET,
     EXECUTOR_RESOLVE_RELATION_REQUEST_VERSION_OFFSET, EXECUTOR_STAGE_DELETE_REQUEST_HEADER_BYTES,
     EXECUTOR_STAGE_DELETE_REQUEST_ROW_HANDLE_OFFSET, EXECUTOR_STAGE_DELETE_REQUEST_VERSION_OFFSET,
-    RESOLVE_RELATION_PAYLOAD_VERSION,
+    EXECUTOR_STAGE_INSERT_RESPONSE_HEADER_BYTES, EXECUTOR_STAGE_INSERT_RESPONSE_ROW_HANDLE_OFFSET,
+    EXECUTOR_STAGE_INSERT_RESPONSE_VERSION_OFFSET, RESOLVE_RELATION_PAYLOAD_VERSION,
 };
 use crate::transaction::{
     ExecutorMetadataConnection, InsertInput, InvocationTransaction, TransactionError,
@@ -472,19 +473,26 @@ pub struct StageInsertResponse {
 
 impl StageInsertResponse {
     pub fn encode(&self) -> Vec<u8> {
-        let mut payload = EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes().to_vec();
-        payload.extend_from_slice(&self.handle.to_bytes());
+        let mut payload = vec![0; EXECUTOR_STAGE_INSERT_RESPONSE_HEADER_BYTES as usize];
+        let version_offset = EXECUTOR_STAGE_INSERT_RESPONSE_VERSION_OFFSET as usize;
+        payload[version_offset..version_offset + 2]
+            .copy_from_slice(&EXECUTOR_BATCH_PAYLOAD_VERSION.to_be_bytes());
+        let handle_offset = EXECUTOR_STAGE_INSERT_RESPONSE_ROW_HANDLE_OFFSET as usize;
+        payload[handle_offset..handle_offset + 16].copy_from_slice(&self.handle.to_bytes());
         payload
     }
 
     pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
-        if payload.len() != 18
-            || u16::from_be_bytes([payload[0], payload[1]]) != EXECUTOR_BATCH_PAYLOAD_VERSION
+        let version_offset = EXECUTOR_STAGE_INSERT_RESPONSE_VERSION_OFFSET as usize;
+        let handle_offset = EXECUTOR_STAGE_INSERT_RESPONSE_ROW_HANDLE_OFFSET as usize;
+        if payload.len() != EXECUTOR_STAGE_INSERT_RESPONSE_HEADER_BYTES as usize
+            || u16::from_be_bytes([payload[version_offset], payload[version_offset + 1]])
+                != EXECUTOR_BATCH_PAYLOAD_VERSION
         {
             return Err(ExecutorRequestError::InvalidPayload);
         }
         Ok(Self {
-            handle: ExecutorRowHandle::from_bytes(&payload[2..])
+            handle: ExecutorRowHandle::from_bytes(&payload[handle_offset..handle_offset + 16])
                 .ok_or(ExecutorRequestError::InvalidPayload)?,
         })
     }

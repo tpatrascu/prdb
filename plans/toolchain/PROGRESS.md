@@ -1,5 +1,13 @@
 # Toolchain Progress
 
+## TC-2: generated executor stage-insert response schema — implemented
+
+- Contract: [internal IPC](../../specs/ipc-protocol.md) defines the stage-insert success response as the batch payload version followed by an opaque row handle.
+- Implementation: the shared schema declares the fixed response layout. Rust and TinyCC response codecs use generated offsets and header size.
+- Regression: the Rust mutation codec round-trip and maintained TinyCC executor fixture check the response shape and row-handle bytes.
+- Verification: generator drift, focused Rust mutation tests, workspace build/format/warning-denied Clippy/serial tests (129 commit tests passed; 3 cgroup-dependent tests ignored), and the full TinyCC SDK suite passed.
+- Remaining: generate layouts for remaining executor/planner/supervisor payloads and serialization helpers.
+
 ## TC-2: generated executor stage-delete request schema — implemented
 
 - Contract: [internal IPC](../../specs/ipc-protocol.md) defines stage-delete as the batch payload version followed by an opaque row handle.
