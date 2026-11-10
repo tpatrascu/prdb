@@ -147,6 +147,6 @@
 
 - Behavior: the supported optimizer SELECT path writes each projected row as a provisional SQLR v1 record using executor-authorized column names and declared types. Result callback failures fail the statement so the invocation cannot commit partial output.
 - Implementation: `prdb_sdk_sql_write_projected_result_v1` encodes and writes a projected single-relation row in host-sized chunks. `prdb_sdk_optimizer_execute_select_ast_to_result_v1` adapts bounded plan execution to that writer.
-- Regression: TinyCC fixture executes a submitted SELECT through ABI v4, captures the SQLR record, and checks its projection name, type, state, and bytes.
+- Regression: TinyCC fixture executes a submitted SELECT through ABI v4, captures the SQLR record, checks its projection name/type/state/bytes, and verifies a failed result callback latches statement failure.
 - Verification: focused and full maintained TinyCC SDK suites passed; generated ABI consistency, documentation link checks, and `git diff --check` passed.
 - Remaining: submit WHERE predicates through the optimizer bridge and add a real process/channel execution fixture.
