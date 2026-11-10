@@ -114,7 +114,7 @@
 ## OP-3 dependency: consume projected rows from bounded scan batches
 
 - Behavior: a bounded C executor runs an unfiltered plan over immutable storage batches, emits projection-ordered values, polls cancellation, stops at LIMIT, and closes early cursors. Filter plans fail as unsupported before scan creation.
-- Implementation: `prdb_sdk_optimizer_execute_unfiltered_plan_v1` composes validated metadata/capability/scan setup with a 253-request page budget, cancellation checks, the stateful projection/LIMIT batch consumer, and cursor cleanup on cancellation or early stop. Values borrow the current batch only during the result callback.
+- Implementation: `prdb_sdk_optimizer_execute_unfiltered_plan_v1` composes validated metadata/capability/scan setup with a 126-page budget so two IPC calls per page plus setup and an early close stay within the 256-request executor stream limit. It polls cancellation, applies the stateful projection/LIMIT batch consumer, and closes the cursor on cancellation or early stop. Values borrow the current batch only during the result callback.
 - Regression: TinyCC fixture checks source-ordinal projection, callback value/type, limit completion, request order, cursor close after early LIMIT, cancellation abort/cleanup, and rejection of filtered plans.
 - Verification: focused and full maintained TinyCC SDK suites passed; generated ABI consistency, documentation link checks, and `git diff --check` passed.
 - Remaining: evaluate Filter predicates, encode and emit SQL results, and add a real executor channel integration covering the plan-driven batch path.
