@@ -213,6 +213,20 @@ pub fn decode_supervisor_admin_cancel_request(payload: &[u8]) -> Option<([u8; 16
 pub const SUPERVISOR_CANCEL_RESULT_SIMPLE_VERSION_OFFSET: u32 = 0;
 pub const SUPERVISOR_CANCEL_RESULT_SIMPLE_STATUS_OFFSET: u32 = 2;
 pub const SUPERVISOR_CANCEL_RESULT_SIMPLE_HEADER_BYTES: u32 = 3;
+pub fn encode_supervisor_cancel_result_simple(status: u8) -> [u8; 3] {
+    let mut payload = [0u8; 3];
+    payload[0..2].copy_from_slice(&SUPERVISOR_PAYLOAD_VERSION.to_be_bytes());
+    payload[2] = status;
+    payload
+}
+
+pub fn decode_supervisor_cancel_result_simple(payload: &[u8]) -> Option<u8> {
+    if payload.len() != 3 || u16::from_be_bytes([payload[0], payload[1]]) != SUPERVISOR_PAYLOAD_VERSION {
+        return None;
+    }
+    Some(payload[2])
+}
+
 pub const SUPERVISOR_CANCEL_RESULT_TERMINAL_VERSION_OFFSET: u32 = 0;
 pub const SUPERVISOR_CANCEL_RESULT_TERMINAL_STATUS_OFFSET: u32 = 2;
 pub const SUPERVISOR_CANCEL_RESULT_TERMINAL_OUTCOME_STATUS_OFFSET: u32 = 3;

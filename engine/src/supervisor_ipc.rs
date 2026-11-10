@@ -1330,19 +1330,15 @@ fn encode_owner_cancellation_result(result: OwnerCancellationResult) -> Vec<u8> 
 }
 
 fn encode_cancellation_result(result: AdministrativeCancellationResult) -> Vec<u8> {
-    let mut payload = vec![0; SUPERVISOR_CANCEL_RESULT_SIMPLE_HEADER_BYTES as usize];
-    let simple_version_offset = SUPERVISOR_CANCEL_RESULT_SIMPLE_VERSION_OFFSET as usize;
-    payload[simple_version_offset..simple_version_offset + 2]
-        .copy_from_slice(&SUPERVISOR_PAYLOAD_VERSION.to_be_bytes());
     match result {
         AdministrativeCancellationResult::Accepted => {
-            payload[SUPERVISOR_CANCEL_RESULT_SIMPLE_STATUS_OFFSET as usize] = 0;
+            generated::encode_supervisor_cancel_result_simple(0).to_vec()
         }
         AdministrativeCancellationResult::TooLate => {
-            payload[SUPERVISOR_CANCEL_RESULT_SIMPLE_STATUS_OFFSET as usize] = 1;
+            generated::encode_supervisor_cancel_result_simple(1).to_vec()
         }
         AdministrativeCancellationResult::Terminal(outcome) => {
-            payload = vec![0; SUPERVISOR_CANCEL_RESULT_TERMINAL_HEADER_BYTES as usize];
+            let mut payload = vec![0; SUPERVISOR_CANCEL_RESULT_TERMINAL_HEADER_BYTES as usize];
             let version_offset = SUPERVISOR_CANCEL_RESULT_TERMINAL_VERSION_OFFSET as usize;
             payload[version_offset..version_offset + 2]
                 .copy_from_slice(&SUPERVISOR_PAYLOAD_VERSION.to_be_bytes());
@@ -1359,13 +1355,12 @@ fn encode_cancellation_result(result: AdministrativeCancellationResult) -> Vec<u
                 SUPERVISOR_CANCEL_RESULT_TERMINAL_RETENTION_DEADLINE_OFFSET as usize;
             payload[deadline_offset..deadline_offset + 8]
                 .copy_from_slice(&outcome.retention_deadline_us.to_be_bytes());
-            return payload;
+            payload
         }
         AdministrativeCancellationResult::Unknown => {
-            payload[SUPERVISOR_CANCEL_RESULT_SIMPLE_STATUS_OFFSET as usize] = 3;
+            generated::encode_supervisor_cancel_result_simple(3).to_vec()
         }
     }
-    payload
 }
 
 fn encode_supervisor_status(

@@ -230,6 +230,14 @@
 - Verification: `make -f engine/sdk/Makefile abi-constants-check abi-constants-test`, the focused codec test, full locked workspace build/format/warning-denied Clippy/serial Rust tests, and `make -f engine/sdk/Makefile test` all passed in the pinned Nix shell. Serial workspace tests included 132 commit integration tests; three cgroup-dependent commit tests and one cgroup-dependent metadata-process test remained ignored by default. Their explicit delegated-cgroup acceptances were previously run and recorded in the Linux sandbox and supervisor progress files.
 - Remaining: extend field-level schema and generated codecs to other payloads, add C serializer parity, and complete the release profile and artifact gates.
 
+## TC-2: generated simple cancellation-result codec — implemented
+
+- Contract: [internal IPC](../../specs/ipc-protocol.md) and [toolchain](../../specs/toolchain.md). A simple cancellation result is the v1 payload version plus one status byte. The generated codec validates exact length and version; role-specific code remains responsible for interpreting the status set.
+- Red/green evidence: the codec regression initially failed to compile because the schema had no generated helper. The schema now opts in the simple result payload, and supervisor cancellation response encoding uses the generated function for accepted, too-late, and unknown results.
+- Regression: an independent three-byte example checks encoding, decoding, and truncated-payload rejection. Generator render tests assert helper generation for all opted-in fixed payloads.
+- Verification: generator drift/schema tests, locked workspace build, format check, warning-denied Clippy, serial workspace tests (including 94 library tests), and the full maintained TinyCC SDK suite passed in the pinned Nix shell.
+- Remaining: extend field-level schema and generated codecs to other payloads, add C serializer parity, and complete the release profile and artifact gates.
+
 ## TC-2: generated administrative-cancel codec — implemented
 
 - Contract: [internal IPC](../../specs/ipc-protocol.md) and [toolchain](../../specs/toolchain.md). The administrative cancel request is the big-endian v1 payload version, a 16-byte invocation ID, and a big-endian u16 reason code; the decoder rejects invalid length or version.
