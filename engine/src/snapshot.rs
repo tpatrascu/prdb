@@ -1,12 +1,13 @@
 //! Read-only row access through an invocation's retained redb snapshot.
 use crate::catalog::{CatalogRecord, InvalidCatalogRecord, decode_registered_envelope};
 use crate::expression::decode_catalog_expression_record;
-use crate::index_locator::IndexLocator;
+use crate::index_locator::{IndexLocator, LocatorError};
 use crate::schema::{CATALOG, ENGINE_META, INDEXES, ROWS};
 use redb::ReadTransaction;
 
 pub const MAX_CATALOG_FAMILY_SCAN: usize = 65_536;
 pub(crate) const MAX_ROW_SCAN_PAGE: usize = 1_024;
+const MAX_INDEX_SCAN_PAGE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum SnapshotError {
@@ -14,6 +15,10 @@ pub(crate) enum SnapshotError {
     InvalidCursor,
     InvalidScanLimit,
     InvalidRowKey,
+    InvalidIndexPrefix,
+    InvalidIndexCursor,
+    InvalidIndexKey,
+    InvalidIndexLocator,
     InvalidCatalogRecord,
     RecordLimitExceeded,
     Storage(String),
@@ -30,6 +35,21 @@ impl std::error::Error for SnapshotError {}
 /// Owns one redb read transaction for the lifetime of the invocation snapshot.
 pub struct RowSnapshot {
     transaction: ReadTransaction,
+}
+
+/// One validated row/version candidate returned by an ordered index prefix scan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IndexCandidate {
+    pub key: Vec<u8>,
+    pub locator: IndexLocator,
+}
+
+/// A bounded page from one pinned index prefix. A continuation is the last
+/// complete key; pass it back to resume strictly after that key.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IndexScanPage {
+    pub candidates: Vec<IndexCandidate>,
+    pub continuation: Option<Vec<u8>>,
 }
 
 impl RowSnapshot {
@@ -122,6 +142,76 @@ impl RowSnapshot {
                     .map_err(Into::into)
             })
             .transpose()
+    }
+
+    /// Return a bounded page of validated locators whose complete keys share
+    /// `prefix`. Prefixes are search bounds, not stored keys. The returned
+    /// candidates are untrusted until the transaction layer resolves them
+    /// against this same snapshot/overlay and applies authorization.
+    pub fn scan_index_prefix(
+        &self,
+        prefix: &[u8],
+        after_key: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<IndexScanPage, Box<dyn std::error::Error>> {
+        if prefix.len() < 16
+            || prefix.len().saturating_add(16) > crate::index_key::MAX_INDEX_KEY_BYTES
+            || prefix[..16] == [0; 16]
+        {
+            return Err(Box::new(SnapshotError::InvalidIndexPrefix));
+        }
+        if limit == 0 || limit > MAX_ROW_SCAN_PAGE {
+            return Err(Box::new(SnapshotError::InvalidScanLimit));
+        }
+        if after_key.is_some_and(|key| {
+            !key.starts_with(prefix)
+                || key.len() < prefix.len() + 16
+                || key.len() > crate::index_key::MAX_INDEX_KEY_BYTES
+        }) {
+            return Err(Box::new(SnapshotError::InvalidIndexCursor));
+        }
+
+        let start_key = after_key.unwrap_or(prefix);
+        let table = self.transaction.open_table(INDEXES)?;
+        let mut candidates = Vec::with_capacity(limit);
+        let mut page_bytes = 0usize;
+        let mut has_more = false;
+        for entry in table.range::<&[u8]>(start_key..)? {
+            let (key, value) = entry?;
+            let key = key.value();
+            if !key.starts_with(prefix) {
+                break;
+            }
+            if after_key.is_some_and(|after| key <= after) {
+                continue;
+            }
+            if candidates.len() == limit
+                || page_bytes.saturating_add(key.len()) > MAX_INDEX_SCAN_PAGE_BYTES
+            {
+                has_more = true;
+                break;
+            }
+            if key.len() < prefix.len() + 16 || key.len() > crate::index_key::MAX_INDEX_KEY_BYTES {
+                return Err(Box::new(SnapshotError::InvalidIndexKey));
+            }
+            let locator = IndexLocator::decode_for_key(key, value.value())
+                .map_err(|_: LocatorError| SnapshotError::InvalidIndexLocator)?;
+            if locator.row_id == [0; 16] {
+                return Err(Box::new(SnapshotError::InvalidIndexLocator));
+            }
+            candidates.push(IndexCandidate {
+                key: key.to_vec(),
+                locator,
+            });
+            page_bytes += key.len();
+        }
+        let continuation = has_more
+            .then(|| candidates.last().map(|candidate| candidate.key.clone()))
+            .flatten();
+        Ok(IndexScanPage {
+            candidates,
+            continuation,
+        })
     }
 
     /// Copy and validate one logical catalog record from this pinned snapshot.

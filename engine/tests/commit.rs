@@ -7529,7 +7529,6 @@ fn storage_manager_creates_named_unique_index_and_backfills_atomically()
     );
     assert_eq!(read.open_table(schema::INDEXES)?.iter()?.count(), 2);
     assert_eq!(read.open_table(schema::ROW_INDEXES)?.iter()?.count(), 2);
-    let index_table = read.open_table(schema::INDEXES)?;
     let row_table = read.open_table(ROWS)?;
     let table_prefix = id(82);
     let mut reference_scan = Vec::new();
@@ -7552,37 +7551,46 @@ fn storage_manager_creates_named_unique_index_and_backfills_atomically()
     }
     reference_scan.sort();
 
+    let pinned = prdb_engine::snapshot::RowSnapshot::new(database.begin_read()?);
+    let first_index_page = pinned.scan_index_prefix(&created.index_id, None, 1)?;
+    assert_eq!(first_index_page.candidates.len(), 1);
+    let second_index_page = pinned.scan_index_prefix(
+        &created.index_id,
+        first_index_page.continuation.as_deref(),
+        1,
+    )?;
+    assert_eq!(second_index_page.candidates.len(), 1);
+    assert!(second_index_page.continuation.is_none());
+    let candidates = first_index_page
+        .candidates
+        .into_iter()
+        .chain(second_index_page.candidates)
+        .collect::<Vec<_>>();
     let mut persisted_index_scan = Vec::new();
-    for entry in index_table.range::<&[u8]>(created.index_id.as_slice()..)? {
-        let (index_key, locator_value) = entry?;
-        let index_key = index_key.value();
-        if !index_key.starts_with(&created.index_id) {
-            break;
-        }
-        let locator = IndexLocator::decode_for_key(index_key, locator_value.value())?;
-        let row_key = table_row_key(id(82), locator.row_id);
+    for candidate in candidates {
+        let row_key = table_row_key(id(82), candidate.locator.row_id);
         let row_record = RowRecord::decode(
             row_table
                 .get(row_key.as_slice())?
                 .ok_or("index points to a missing row")?
                 .value(),
         )?;
-        assert_eq!(locator.row_version, row_record.row_version);
+        assert_eq!(candidate.locator.row_version, row_record.row_version);
         let derived = prdb_engine::index_key::derive_index_key(
             created.index_id,
-            locator.row_id,
+            candidate.locator.row_id,
             schema.schema_version,
             &schema.column_ids,
             &schema.columns,
             &row_record.payload,
             &[id(84)],
         )?;
-        assert_eq!(derived.key, index_key);
+        assert_eq!(derived.key, candidate.key);
         let tuple = decode_tuple(&schema.columns, schema.schema_version, &row_record.payload)?;
         let Some(Some(ScalarValue::Bytea(value))) = tuple.values.first().cloned() else {
             return Err("indexed row lacks its indexed BYTEA value".into());
         };
-        persisted_index_scan.push((value, locator.row_id));
+        persisted_index_scan.push((value, candidate.locator.row_id));
     }
     assert_eq!(persisted_index_scan, reference_scan);
     drop(index_record);

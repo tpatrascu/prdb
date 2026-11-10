@@ -7479,8 +7479,12 @@ fn map_snapshot_scan_error(error: SnapshotError) -> TransactionError {
     match error {
         SnapshotError::InvalidTableId
         | SnapshotError::InvalidCursor
-        | SnapshotError::InvalidScanLimit => TransactionError::InvalidScanRequest,
-        SnapshotError::InvalidRowKey => TransactionError::CorruptRowKey,
+        | SnapshotError::InvalidScanLimit
+        | SnapshotError::InvalidIndexPrefix
+        | SnapshotError::InvalidIndexCursor => TransactionError::InvalidScanRequest,
+        SnapshotError::InvalidRowKey
+        | SnapshotError::InvalidIndexKey
+        | SnapshotError::InvalidIndexLocator => TransactionError::CorruptRowKey,
         SnapshotError::InvalidCatalogRecord | SnapshotError::RecordLimitExceeded => {
             TransactionError::CorruptCatalog
         }
