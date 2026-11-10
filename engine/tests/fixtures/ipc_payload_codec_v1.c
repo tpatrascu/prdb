@@ -29,6 +29,9 @@ int main(void) {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07,
         0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe,
     };
+    const uint8_t finalize_expected[11] = {
+        0x00, 0x01, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+    };
     uint8_t payload[18] = {0};
     uint8_t decoded[16] = {0};
     uint8_t cancel_payload[20] = {0};
@@ -42,6 +45,9 @@ int main(void) {
     uint64_t decoded_commit_sequence = 0;
     int64_t decoded_retention_deadline = 0;
     int64_t decoded_observed_at = 0;
+    uint8_t finalize_payload[11] = {0};
+    uint64_t decoded_finalize_sequence = 0;
+    uint8_t decoded_finalize_status = 0;
 
     prdb_encode_supervisor_invocation_control_request(payload, invocation_id);
     for (size_t i = 0; i < sizeof(expected); ++i) {
@@ -136,6 +142,20 @@ int main(void) {
         decoded_status != 4 || decoded_observed_at != -1 ||
         decoded_commit_sequence != 7 || decoded_retention_deadline != -2) {
         return 15;
+    }
+    prdb_encode_supervisor_finalize_response(
+        finalize_payload, 0, UINT64_C(0x0102030405060708));
+    for (size_t i = 0; i < sizeof(finalize_expected); ++i) {
+        if (finalize_payload[i] != finalize_expected[i]) {
+            return 16;
+        }
+    }
+    if (!prdb_decode_supervisor_finalize_response(
+            finalize_payload, sizeof(finalize_payload),
+            &decoded_finalize_status, &decoded_finalize_sequence) ||
+        decoded_finalize_status != 0 ||
+        decoded_finalize_sequence != UINT64_C(0x0102030405060708)) {
+        return 17;
     }
     return 0;
 }

@@ -295,6 +295,21 @@ pub const SUPERVISOR_FINALIZE_RESPONSE_VERSION_OFFSET: u32 = 0;
 pub const SUPERVISOR_FINALIZE_RESPONSE_STATUS_OFFSET: u32 = 2;
 pub const SUPERVISOR_FINALIZE_RESPONSE_COMMIT_SEQUENCE_OFFSET: u32 = 3;
 pub const SUPERVISOR_FINALIZE_RESPONSE_HEADER_BYTES: u32 = 11;
+pub fn encode_supervisor_finalize_response(status: u8, commit_sequence: u64) -> [u8; 11] {
+    let mut payload = [0u8; 11];
+    payload[0..2].copy_from_slice(&SUPERVISOR_PAYLOAD_VERSION.to_be_bytes());
+    payload[2] = status;
+    payload[3..11].copy_from_slice(&commit_sequence.to_be_bytes());
+    payload
+}
+
+pub fn decode_supervisor_finalize_response(payload: &[u8]) -> Option<(u8, u64)> {
+    if payload.len() != 11 || u16::from_be_bytes([payload[0], payload[1]]) != SUPERVISOR_PAYLOAD_VERSION {
+        return None;
+    }
+    Some((payload[2], u64::from_be_bytes(payload[3..11].try_into().ok()?)))
+}
+
 pub const SUPERVISOR_ABORT_RESPONSE_VERSION_OFFSET: u32 = 0;
 pub const SUPERVISOR_ABORT_RESPONSE_STATUS_OFFSET: u32 = 2;
 pub const SUPERVISOR_ABORT_RESPONSE_HEADER_BYTES: u32 = 3;

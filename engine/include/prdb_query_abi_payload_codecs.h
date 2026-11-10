@@ -218,4 +218,39 @@ static inline int prdb_decode_supervisor_status_terminal_response(const uint8_t 
     return 1;
 }
 
+static inline void prdb_encode_supervisor_finalize_response(uint8_t payload[11],
+    uint8_t status, uint64_t commit_sequence) {
+    payload[0] = (uint8_t)((PRDB_SUPERVISOR_PAYLOAD_VERSION >> 8) & 0xffu);
+    payload[1] = (uint8_t)(PRDB_SUPERVISOR_PAYLOAD_VERSION & 0xffu);
+    payload[2] = status;
+    uint64_t commit_sequence_wire = (uint64_t)commit_sequence;
+    for (size_t i = 0; i < 8; ++i) {
+        payload[3 + i] = (uint8_t)(commit_sequence_wire >> ((8 - 1 - i) * 8));
+    }
+}
+
+static inline int prdb_decode_supervisor_finalize_response(const uint8_t *payload, size_t payload_len,
+    uint8_t *status, uint64_t *commit_sequence) {
+    if (payload == NULL || payload_len != 11) {
+        return 0;
+    }
+    if (payload[0] != (uint8_t)((PRDB_SUPERVISOR_PAYLOAD_VERSION >> 8) & 0xffu) ||
+        payload[1] != (uint8_t)(PRDB_SUPERVISOR_PAYLOAD_VERSION & 0xffu)) {
+        return 0;
+    }
+    if (status == NULL) {
+        return 0;
+    }
+    *status = payload[2];
+    if (commit_sequence == NULL) {
+        return 0;
+    }
+    uint64_t commit_sequence_wire_value = 0;
+    for (size_t i = 0; i < 8; ++i) {
+        commit_sequence_wire_value = (commit_sequence_wire_value << 8) | payload[3 + i];
+    }
+    *commit_sequence = (uint64_t)commit_sequence_wire_value;
+    return 1;
+}
+
 #endif /* PRDB_QUERY_ABI_PAYLOAD_CODECS_H */
