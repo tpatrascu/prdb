@@ -1,5 +1,13 @@
 # Toolchain Progress
 
+## TC-2: generated stable plan-relation response prefixes — implemented
+
+- Contract: optimizer metadata receives either version/status-only unavailability or a success prefix containing schema identity/version, table epoch, and relation identity before the variable relation description.
+- Implementation: the shared schema declares both response prefixes. The Rust planner codec uses generated offsets and header sizes for encoding and decoding; the bounded relation-name and column codec remains explicit.
+- Regression: planner estimate-session and concurrent planner/executor drain integration regressions pass through available and unavailable response handling.
+- Verification: generator drift, focused planner integration tests, workspace build/format/warning-denied Clippy/serial tests, and full TinyCC SDK suite passed; 3 cgroup-dependent commit tests remain ignored by default.
+- Remaining: generate layouts and codecs for remaining executor/planner/supervisor payloads.
+
 ## TC-2: generated planner relation-description response prefixes — implemented
 
 - Contract: planner relation description returns either a version/status-only unavailable response or a success prefix with relation ID and planning handle before the variable name and column records.

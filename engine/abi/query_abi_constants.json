@@ -1363,6 +1363,28 @@
         { "name": "planning_handle", "encoding": "bytes16" }
       ],
       "trailing_fields": []
+    },
+    {
+      "name": "PLANNER_DESCRIBE_PLAN_RELATION_UNAVAILABLE_RESPONSE",
+      "version_constant": "PLANNER_PAYLOAD_VERSION",
+      "fields": [
+        { "name": "version", "encoding": "u16be" },
+        { "name": "status", "encoding": "u8" }
+      ],
+      "trailing_fields": []
+    },
+    {
+      "name": "PLANNER_DESCRIBE_PLAN_RELATION_AVAILABLE_RESPONSE",
+      "version_constant": "PLANNER_PAYLOAD_VERSION",
+      "fields": [
+        { "name": "version", "encoding": "u16be" },
+        { "name": "status", "encoding": "u8" },
+        { "name": "schema_id", "encoding": "bytes16" },
+        { "name": "schema_version", "encoding": "u64be" },
+        { "name": "table_epoch", "encoding": "u64be" },
+        { "name": "relation_id", "encoding": "bytes16" }
+      ],
+      "trailing_fields": []
     }
   ]
 }
