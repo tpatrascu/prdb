@@ -573,6 +573,15 @@ int main(void) {
                payload_len, response, sizeof(response), &response_len) ==
            PRDB_SDK_OPTIMIZER_PLAN_OK);
     assert(resolve.calls == 1);
+    uint8_t sql_mixed_case[] = "SELECT C3 FROM ITEMS LIMIT 1";
+    assert(prdb_sdk_sql_parse_select_v2(
+               sql_mixed_case, sizeof(sql_mixed_case) - 1, &statement,
+               sizeof(statement), NULL) == PRDB_SDK_SQL_OK);
+    assert(prdb_sdk_optimizer_validate_select_plan_v1(
+               &host, &statement, (const uint8_t *)"public", 6, limit_one_plan,
+               payload_len, response, sizeof(response), &response_len) ==
+           PRDB_SDK_OPTIMIZER_PLAN_OK);
+    assert(resolve.calls == 2);
     uint8_t sql_wrong_projection[] = "SELECT c2 FROM items LIMIT 1";
     assert(prdb_sdk_sql_parse_select_v2(
                sql_wrong_projection, sizeof(sql_wrong_projection) - 1,

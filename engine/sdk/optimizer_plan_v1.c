@@ -1275,6 +1275,21 @@ static int32_t latch_optimizer_statement_failure(
     return status;
 }
 
+static int identifier_equal_ascii_casefold(const uint8_t *left,
+                                           const uint8_t *right,
+                                           uint32_t length) {
+    for (uint32_t index = 0; index < length; ++index) {
+        uint8_t left_byte = left[index];
+        uint8_t right_byte = right[index];
+        if (left_byte >= 'A' && left_byte <= 'Z')
+            left_byte = (uint8_t)(left_byte + ('a' - 'A'));
+        if (right_byte >= 'A' && right_byte <= 'Z')
+            right_byte = (uint8_t)(right_byte + ('a' - 'A'));
+        if (left_byte != right_byte) return 0;
+    }
+    return 1;
+}
+
 int32_t prdb_sdk_optimizer_validate_select_plan_v1(
     const prdb_host_api_v2 *host, const prdb_sdk_select_v2 *statement,
     const uint8_t *schema, uint32_t schema_len,
@@ -1318,9 +1333,9 @@ int32_t prdb_sdk_optimizer_validate_select_plan_v1(
     if (filter.present != 0 || plan.schema_name_len != schema_len ||
         memcmp(plan.schema_name, schema, schema_len) != 0 ||
         plan.relation_name_len != statement->relation.length ||
-        memcmp(plan.relation_name,
-               statement->sql + statement->relation.offset,
-               statement->relation.length) != 0 ||
+        !identifier_equal_ascii_casefold(
+            plan.relation_name, statement->sql + statement->relation.offset,
+            statement->relation.length) ||
         plan.projection_count != statement->projection_count ||
         plan.has_limit != statement->has_limit ||
         (plan.has_limit != 0 && plan.limit != statement->limit)) {
@@ -1349,9 +1364,9 @@ int32_t prdb_sdk_optimizer_validate_select_plan_v1(
                 statement->projection[projection_index];
             if (projection->ordinal == ordinal &&
                 (column_name_len != requested.length ||
-                 memcmp(response + offset,
-                        statement->sql + requested.offset,
-                        requested.length) != 0)) {
+                 !identifier_equal_ascii_casefold(
+                     response + offset, statement->sql + requested.offset,
+                     requested.length))) {
                 return PRDB_SDK_OPTIMIZER_PLAN_IDENTITY_MISMATCH;
             }
         }
