@@ -1396,3 +1396,11 @@
 - Regression evidence: the TinyCC query fixture's `V` mode submits the request through the optimizer callback and validates the two-key filtered ordered binding, resolved predicate column, and COUNT(column) input type in its group callback. The null-test tautology preserves the test rows while exercising the statement-16 filter plan. `PRDB_TEST_COUNT_COLUMN_ONLY=1` runs the artifact through the confined executor, gateway result relay, and durable commit, checking exact SQLR rows `(2,9,3)`, `(1,7,1)`, and `(3,11,0)`.
 - Verification: `make -f engine/sdk/Makefile sandbox-query-fixture` passed. The focused serial `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` acceptance passed in `prdb-count-column-filtered-opt-relay-114399.service` with delegated `cpu memory pids` and the documented runtime profile.
 - Remaining: broader analytical scalar/workload coverage, secure spill, and target-hardware measurements.
+
+## SQL-7 follow-up: Boolean COUNT(column) — verified SDK slice
+
+- Contract: `COUNT(column)` counts every VALUE cell of a supported scalar type, including Boolean FALSE, while excluding NULL. The result remains BIGINT and follows the ordinary grouped SQLR encoding.
+- Fixture diagnosis: the first Boolean run exposed stale mock metadata (first the grouping-key type, then the optimizer relation's aggregate-column type); these caused plan-shape and executor-re-resolution failures. Updating the test plan and relation metadata to match the BOOLEAN schema let the maintained production SDK path exercise the scalar successfully.
+- Regression evidence: the maintained v10 executor fixture groups FALSE and TRUE together, confirms both count as values, keeps an all-NULL group at zero, checks the optimizer plan and binding declare a BOOLEAN aggregate input, and encodes the BIGINT result as SQLR. Existing Decimal confined COUNT(column) coverage continues to exercise statement 16 through the real optimizer and gateway.
+- Verification: the complete `make -f engine/sdk/Makefile test` suite and the maintained `sdk-sql-execute-v10` fixture passed with TinyCC `-Wall -Wextra -Werror`; `git diff --check` passed.
+- Remaining: confined COUNT(column) coverage beyond Decimal and broader analytical scalar/workload cases, secure spill, and target-hardware measurements.
