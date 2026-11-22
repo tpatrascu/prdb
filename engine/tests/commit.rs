@@ -40340,6 +40340,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    let count_bigint_only = std::env::var_os("PRDB_TEST_COUNT_BIGINT_ONLY").is_some();
+
     struct AcceptFixture {
         requested_scope: Vec<u8>,
         inner: Arc<VersionedSubmissionMetadataValidator>,
@@ -40673,37 +40675,47 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     let decimal_table_invocation = id(0xf0);
     let mut decimal_table_audit = identity_audit_event(0xf1, user_id, schema.schema_id);
     decimal_table_audit.correlation_id = decimal_table_invocation;
+    let mut decimal_columns = vec![
+        TableColumnDefinition {
+            name: "left_key".to_owned(),
+            scalar_type: ScalarType::Integer,
+            nullable: false,
+            generated_uuid_identity: false,
+            default: None,
+        },
+        TableColumnDefinition {
+            name: "right_key".to_owned(),
+            scalar_type: ScalarType::Integer,
+            nullable: false,
+            generated_uuid_identity: false,
+            default: None,
+        },
+        TableColumnDefinition {
+            name: "decimal_value".to_owned(),
+            scalar_type: ScalarType::Decimal {
+                precision: 4,
+                scale: 2,
+            },
+            nullable: true,
+            generated_uuid_identity: false,
+            default: None,
+        },
+    ];
+    if count_bigint_only {
+        decimal_columns.push(TableColumnDefinition {
+            name: "bigint_value".to_owned(),
+            scalar_type: ScalarType::BigInt,
+            nullable: true,
+            generated_uuid_identity: false,
+            default: None,
+        });
+    }
     let decimal_table = storage.create_table(CreateTableRequest {
         invocation_id: decimal_table_invocation,
         authenticated_actor_id: user_id,
         schema_id: schema.schema_id,
         name: "decimal_grouped_records".to_owned(),
-        columns: vec![
-            TableColumnDefinition {
-                name: "left_key".to_owned(),
-                scalar_type: ScalarType::Integer,
-                nullable: false,
-                generated_uuid_identity: false,
-                default: None,
-            },
-            TableColumnDefinition {
-                name: "right_key".to_owned(),
-                scalar_type: ScalarType::Integer,
-                nullable: false,
-                generated_uuid_identity: false,
-                default: None,
-            },
-            TableColumnDefinition {
-                name: "decimal_value".to_owned(),
-                scalar_type: ScalarType::Decimal {
-                    precision: 4,
-                    scale: 2,
-                },
-                nullable: true,
-                generated_uuid_identity: false,
-                default: None,
-            },
-        ],
+        columns: decimal_columns,
         retention_deadline_us: now + 3_600_000_000,
         audit_event: decimal_table_audit,
     })?;
@@ -40776,7 +40788,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         now + 3_600_000_000,
         &composite_rows,
     )?;
-    let decimal_schema = [
+    let mut decimal_schema = vec![
         ColumnSchema {
             scalar_type: ScalarType::Integer,
             nullable: false,
@@ -40793,28 +40805,36 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             nullable: true,
         },
     ];
+    if count_bigint_only {
+        decimal_schema.push(ColumnSchema {
+            scalar_type: ScalarType::BigInt,
+            nullable: true,
+        });
+    }
     let decimal_rows = [
-        (0xf3, 1, 7, Some(100)),
-        (0xf4, 1, 7, None),
-        (0xf5, 2, 9, Some(100)),
-        (0xf6, 2, 9, Some(125)),
-        (0xf7, 2, 9, Some(225)),
-        (0xf8, 3, 11, None),
+        (0xf3, 1, 7, Some(100), Some(2)),
+        (0xf4, 1, 7, None, None),
+        (0xf5, 2, 9, Some(100), Some(6)),
+        (0xf6, 2, 9, Some(125), Some(9)),
+        (0xf7, 2, 9, Some(225), Some(12)),
+        (0xf8, 3, 11, None, None),
     ]
     .into_iter()
-    .map(|(row_id, left, right, decimal_value)| {
+    .map(|(row_id, left, right, decimal_value, bigint_value)| {
         Ok(RowWrite {
             key: table_row_key(decimal_table.table_id, id(row_id)),
             expected_version: None,
-            payload: Some(encode_tuple(
-                &decimal_schema,
-                1,
-                &[
+            payload: Some(encode_tuple(&decimal_schema, 1, &{
+                let mut values = vec![
                     Some(ScalarValue::Integer(left)),
                     Some(ScalarValue::Integer(right)),
                     decimal_value.map(ScalarValue::Decimal),
-                ],
-            )?),
+                ];
+                if count_bigint_only {
+                    values.push(bigint_value.map(ScalarValue::BigInt));
+                }
+                values
+            })?),
         })
     })
     .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
@@ -41153,6 +41173,9 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         dependency_write(user_id, operational_pressure_table.column_ids[0], 5),
         dependency_write(user_id, operational_pressure_table.column_ids[1], 5),
     ];
+    if count_bigint_only {
+        authority_writes.push(dependency_write(user_id, decimal_table.column_ids[3], 5));
+    }
     authority_writes.extend((2..=5).map(|privilege| {
         grant_write(
             user_id,
@@ -41957,7 +41980,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         false,
         "sandbox_decimal_group_select_policy",
     )?;
-    for (column_id, policy_id, name) in [
+    let mut decimal_cell_policies = vec![
         (
             decimal_table.column_ids[0],
             id(0xfc),
@@ -41973,7 +41996,15 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             id(0xfe),
             "sandbox_decimal_group_value_cell_policy",
         ),
-    ] {
+    ];
+    if count_bigint_only {
+        decimal_cell_policies.push((
+            decimal_table.column_ids[3],
+            id(0xc0),
+            "sandbox_decimal_group_bigint_cell_policy",
+        ));
+    }
+    for (column_id, policy_id, name) in decimal_cell_policies {
         add_table_policy(
             decimal_table.table_id,
             column_id,
@@ -42403,6 +42434,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     if std::env::var_os("PRDB_TEST_ORDERED_ANALYTICAL_ONLY").is_some()
         || filtered_composite_only
         || count_column_only
+        || count_bigint_only
     {
         let mut ordered_client = ClientConnectionSession::default();
         ordered_client.accept_hello(ClientMode::Query, "sandbox-ordered-analytical-sum")?;
@@ -42410,6 +42442,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         let ordered_owner = ordered_client.staging_owner()?;
         let ordered_parameter = [if count_column_only {
             b'V'
+        } else if count_bigint_only {
+            b'B'
         } else if filtered_composite_only {
             b'Q'
         } else {
@@ -42509,7 +42543,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         );
         staging.finish_started(ordered_owner, ordered_reservation.invocation_id)?;
         let mut ordered_frames = ordered_frames.into_iter();
-        if count_column_only {
+        if count_column_only || count_bigint_only {
             fn expected_count_column_row(left_key: i32, right_key: i32, count: i64) -> Vec<u8> {
                 fn append_field(output: &mut Vec<u8>, name: &[u8], type_code: u32, value: &[u8]) {
                     output.extend_from_slice(&(name.len() as u16).to_be_bytes());

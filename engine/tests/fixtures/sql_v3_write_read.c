@@ -927,6 +927,7 @@ static int32_t write_grouped_composite_sum_optimizer(
         aggregate_value->data == NULL || aggregate_value->data_len != 8 ||
         !decode_range_integer(&group_keys[0], &left_key) ||
         !decode_range_integer(&group_keys[1], &right_key)) {
+        if (context != NULL) context->output_len = 101;
         return 1;
     }
     for (uint32_t index = 0; index < 8; ++index) {
@@ -976,6 +977,7 @@ static int32_t write_grouped_composite_count_column_optimizer_v24(
         aggregate_value->data == NULL || aggregate_value->data_len != 8 ||
         !decode_range_integer(&group_keys[0], &left_key) ||
         !decode_range_integer(&group_keys[1], &right_key)) {
+        if (context != NULL) context->output_len = 101;
         return 1;
     }
     for (uint32_t index = 0; index < 8; ++index)
@@ -990,6 +992,7 @@ static int32_t write_grouped_composite_count_column_optimizer_v24(
          (left_key != 3 || right_key != 11 || count != 0 ||
           matching_row_count != 1)) ||
         context->row_count >= 3) {
+        context->output_len = 102;
         return 1;
     }
     projection = &binding->base.base.base.base;
@@ -997,20 +1000,36 @@ static int32_t write_grouped_composite_count_column_optimizer_v24(
     if (projection->group_key_count != 2 ||
         projection->base.aggregate_kind !=
             PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN ||
-        projection->base.aggregate_column.type_code !=
-            PRDB_SDK_VALUE_TYPE_DECIMAL || ordering->order_count != 2 ||
+        (projection->base.aggregate_column.type_code !=
+             PRDB_SDK_VALUE_TYPE_DECIMAL &&
+         projection->base.aggregate_column.type_code !=
+             PRDB_SDK_VALUE_TYPE_BIGINT) ||
+        ordering->order_count != 2 ||
         projection->base.base.predicate_count == 0 ||
-        projection->base.base.predicate_columns[0].ordinal != 2 ||
+        projection->base.base.predicate_columns[0].ordinal !=
+            (projection->base.aggregate_column.type_code ==
+                     PRDB_SDK_VALUE_TYPE_BIGINT
+                 ? 3
+                 : 2) ||
         ordering->order_items[0].item.kind !=
             PRDB_SDK_SQL_V10_ORDER_AGGREGATE ||
         ordering->order_items[1].item.kind !=
             PRDB_SDK_SQL_V10_ORDER_GROUP_KEY ||
-        ordering->order_items[1].item.group_key_index != 0 ||
-        prdb_sdk_sql_write_group_composite_result_v1(
-            context->host, projection, context->columns, 3, group_keys,
+        ordering->order_items[1].item.group_key_index != 0) {
+        context->output_len = 103;
+        return 1;
+    }
+    if (prdb_sdk_sql_write_group_composite_result_v1(
+            context->host, projection, context->columns,
+            projection->base.aggregate_column.type_code ==
+                    PRDB_SDK_VALUE_TYPE_BIGINT
+                ? 4
+                : 3,
+            group_keys,
             group_key_count, aggregate_value, matching_row_count,
             context->output, context->output_capacity,
             &context->output_len) != PRDB_SDK_SQL_RESULT_OK) {
+        context->output_len = 104;
         return 1;
     }
     ++context->row_count;
@@ -2158,7 +2177,8 @@ static int32_t run_write_read_fixture(
         return report_failure(host, message, sizeof(message) - 1);
     }
     if (invocation->parameters_len == 1 && invocation->parameters != NULL &&
-        (invocation->parameters[0] == 'V' || invocation->parameters[0] == 'C')) {
+        (invocation->parameters[0] == 'V' || invocation->parameters[0] == 'C' ||
+         invocation->parameters[0] == 'B')) {
         static const uint8_t visible_count_column_sql[] =
             "SELECT left_key, right_key, COUNT(decimal_value) "
             "FROM decimal_grouped_records "
@@ -2172,14 +2192,23 @@ static int32_t run_write_read_fixture(
             "GROUP BY left_key, right_key "
             "HAVING COUNT(decimal_value) >= 0 "
             "ORDER BY COUNT(decimal_value) DESC NULLS LAST, left_key ASC";
-        const uint8_t *count_column_sql =
-            invocation->parameters[0] == 'C' ? redacted_count_column_sql
-                                             : visible_count_column_sql;
-        const uint64_t count_column_sql_len =
-            invocation->parameters[0] == 'C'
-                ? sizeof(redacted_count_column_sql) - 1
-                : sizeof(visible_count_column_sql) - 1;
+        static const uint8_t visible_bigint_count_column_sql[] =
+            "SELECT left_key, right_key, COUNT(bigint_value) "
+            "FROM decimal_grouped_records "
+            "WHERE bigint_value IS NULL OR bigint_value IS NOT NULL "
+            "GROUP BY left_key, right_key "
+            "HAVING COUNT(bigint_value) >= 0 "
+            "ORDER BY COUNT(bigint_value) DESC NULLS LAST, left_key ASC";
+        const int bigint_count_column = invocation->parameters[0] == 'B';
         const int redacted_count_column = invocation->parameters[0] == 'C';
+        const uint8_t *count_column_sql = redacted_count_column
+            ? redacted_count_column_sql
+            : bigint_count_column ? visible_bigint_count_column_sql
+                                  : visible_count_column_sql;
+        const uint64_t count_column_sql_len = redacted_count_column
+            ? sizeof(redacted_count_column_sql) - 1
+            : bigint_count_column ? sizeof(visible_bigint_count_column_sql) - 1
+                                  : sizeof(visible_count_column_sql) - 1;
         composite_grouped_results.row_count = 0;
         composite_grouped_results.output_len = 0;
         composite_grouped_results.column_count = 3;
@@ -2207,8 +2236,13 @@ static int32_t run_write_read_fixture(
         if (status == PRDB_SDK_SQL_EXEC_OK &&
             composite_grouped_results.row_count == 3) return 0;
         static uint8_t message[] = "fixture-error-count-column-optimizer-0";
-        if (status >= 0 && status <= 9)
+        if (composite_grouped_results.output_len >= 101 &&
+            composite_grouped_results.output_len <= 104) {
+            message[sizeof(message) - 2] =
+                (uint8_t)('0' + composite_grouped_results.output_len - 100);
+        } else if (status >= 0 && status <= 9) {
             message[sizeof(message) - 2] = (uint8_t)('0' + status);
+        }
         return report_failure(host, message, sizeof(message) - 1);
     }
     if (invocation->parameters_len == 1 && invocation->parameters != NULL &&

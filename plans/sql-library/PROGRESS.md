@@ -1,5 +1,12 @@
 # SQL Library Progress
 
+## SQL-7 follow-up: confined BIGINT COUNT(column) optimizer relay — verified
+
+- Contract: optimizer-backed statement 16 / plan kind 16 counts VALUE cells in a nullable BIGINT aggregate input, keeps an all-NULL group with count zero, and only counts rows visible under row and cell policies.
+- Regression evidence: the confined fixture adds a nullable BIGINT measure to the authorized Decimal grouping table and runs `COUNT(bigint_value)` with a null-test WHERE tree, compound HAVING, and aggregate-descending/group-key ordering. The acceptance checks exact SQLR rows `(2,9,3)`, `(1,7,1)`, and `(3,11,0)`, then confirms the durable COMMITTED outcome. The added measure has its own dependency epoch, grants, and cell-allow policy.
+- Verification: the focused serial delegated-cgroup acceptance passed for both `PRDB_TEST_COUNT_BIGINT_ONLY=1` and the existing `PRDB_TEST_COUNT_COLUMN_ONLY=1`; the maintained TinyCC SDK suite, sandbox fixture build, locked workspace build, format check, warning-denied Clippy, and `git diff --check` passed. The final full serial delegated-cgroup workspace run reported 204 commit tests passed and one failure: `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` returned `Invocation(Closed)` after its operational saturation and indexed-range phase. A focused default-mode rerun reached the same `Invocation(Closed)` after those phases. Remaining workspace targets did not run after the commit-test target failed.
+- Remaining: confined COUNT(column) coverage for more scalar types and broader analytical workloads; secure spill, target-hardware measurements, and mixed-workload optimization remain open.
+
 ## SQL-7 follow-up: TEXT COUNT(column) — verified SDK slice
 
 - Contract: v24 optimizer-backed `COUNT(column)` counts every VALUE cell regardless of its TEXT contents; an empty TEXT value counts, while NULL does not. All-NULL groups remain present with a zero BIGINT result.
