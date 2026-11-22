@@ -101,6 +101,9 @@ static int encode_optimizer_parameter(
                                 sizeof(prefix)) &&
                predicate_append(output, capacity, offset, value->data, 4);
     }
+    case PRDB_SDK_VALUE_TYPE_BIGINT:
+        return predicate_append_u8(output, capacity, offset, 0x02) &&
+               predicate_append(output, capacity, offset, value->data, 8);
     case PRDB_SDK_VALUE_TYPE_TEXT:
         return value->data_len <= 4096 && value->data_len <= UINT16_MAX &&
                predicate_append_u8(output, capacity, offset, 0x03) &&

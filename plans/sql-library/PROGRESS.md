@@ -1,5 +1,12 @@
 # SQL Library Progress
 
+## SQL-7 follow-up: BIGINT optimizer predicate parameters — SDK support added
+
+- Contract: filtered optimizer predicates encode a BIGINT value with the existing signed 64-bit tag `0x02` and its eight-byte big-endian representation; INTEGER remains sign-extended to the same wire form.
+- Regression evidence: the TinyCC SDK fixture checks exact statement-15 request bytes for a BIGINT threshold and parses/binds a filtered v24 `COUNT(column)` statement before encoding its ordered statement-16 request.
+- Verification: the maintained TinyCC SDK suite, sandbox fixture build, locked workspace build, format check, and warning-denied Clippy passed. The focused confined filtered BIGINT COUNT attempt still aborts with `SQL_EXEC_BIND_ERROR` in the optimizer API path; it is not accepted as end-to-end coverage yet.
+- Remaining: trace the filtered v24 optimizer handoff failure and restore the confined exact SQLR/commit acceptance before treating this slice as complete.
+
 ## SQL-7 follow-up: confined BIGINT COUNT(column) optimizer relay — verified
 
 - Contract: optimizer-backed statement 16 / plan kind 16 counts VALUE cells in a nullable BIGINT aggregate input, keeps an all-NULL group with count zero, and only counts rows visible under row and cell policies.

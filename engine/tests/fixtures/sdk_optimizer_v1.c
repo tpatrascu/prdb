@@ -1,4 +1,5 @@
 #include "prdb_sdk_optimizer_v1.h"
+#include "prdb_sdk_sql_v24.h"
 
 #include <assert.h>
 #include <string.h>
@@ -410,6 +411,67 @@ int main(void) {
         assert(encoded_len == sizeof(expected_filtered_composite_group_sum_request));
         assert(memcmp(encoded, expected_filtered_composite_group_sum_request,
                       encoded_len) == 0);
+    }
+    {
+        static const uint8_t bigint_filtered_aggregate_sql[] =
+            "SELECT active, id, SUM(amount) FROM items "
+            "WHERE amount >= $1 GROUP BY active, id";
+        static const uint8_t expected_bigint_filtered_aggregate_request[] = {
+            0, 1, 15, 0, 6, 'p', 'u', 'b', 'l', 'i', 'c', 5, 'i', 't', 'e',
+            'm', 's', 2, 6, 'a', 'c', 't', 'i', 'v', 'e', 2, 'i', 'd', 4, 6,
+            'a', 'm', 'o', 'u', 'n', 't', 0, 0, 0, 19, 0x20, 5, 0x10, 6,
+            'a', 'm', 'o', 'u', 'n', 't', 0x02, 0, 0, 0, 0, 0, 0, 0, 9, 0};
+        uint8_t bigint_bytes[8] = {0, 0, 0, 0, 0, 0, 0, 9};
+        prdb_sdk_value_v1 parameters[1] = {{
+            sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
+            PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_BIGINT,
+            bigint_bytes, sizeof(bigint_bytes)}};
+        prdb_sdk_select_v13 statement = {0};
+        assert(prdb_sdk_sql_parse_select_v13(
+                   bigint_filtered_aggregate_sql,
+                   sizeof(bigint_filtered_aggregate_sql) - 1, &statement,
+                   sizeof(statement), &error_offset) == PRDB_SDK_SQL_OK);
+        assert(prdb_sdk_optimizer_encode_filtered_composite_group_aggregate_v1(
+                   &statement, parameters, 1, schema, sizeof(schema) - 1,
+                   encoded, sizeof(encoded), &encoded_len) ==
+               PRDB_SDK_OPTIMIZER_ENCODE_OK);
+        assert(encoded_len == sizeof(expected_bigint_filtered_aggregate_request));
+        assert(memcmp(encoded, expected_bigint_filtered_aggregate_request,
+                      encoded_len) == 0);
+    }
+    {
+        static const uint8_t filtered_count_sql[] =
+            "SELECT left_key, right_key, COUNT(bigint_value) "
+            "FROM decimal_grouped_records "
+            "WHERE bigint_value IS NULL OR bigint_value >= $1 "
+            "GROUP BY left_key, right_key "
+            "HAVING COUNT(bigint_value) >= 0 "
+            "ORDER BY COUNT(bigint_value) DESC NULLS LAST, left_key ASC";
+        uint8_t bigint_bytes[8] = {0, 0, 0, 0, 0, 0, 0, 9};
+        prdb_sdk_value_v1 parameters[1] = {{
+            sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
+            PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_BIGINT,
+            bigint_bytes, sizeof(bigint_bytes)}};
+        prdb_sdk_select_v24 parsed = {0};
+        prdb_sdk_select_binding_v24 binding = {0};
+        static const uint8_t relation[] = "decimal_grouped_records";
+        static const prdb_sdk_sql_column_shape_v2 columns[] = {
+            {(const uint8_t *)"left_key", 8, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
+            {(const uint8_t *)"right_key", 9, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
+            {(const uint8_t *)"decimal_value", 13, 2, PRDB_SDK_VALUE_TYPE_DECIMAL, 4, 2},
+            {(const uint8_t *)"bigint_value", 12, 3, PRDB_SDK_VALUE_TYPE_BIGINT, 0, 0}};
+        uint8_t ordered_encoded[128];
+        uint64_t ordered_encoded_len = 0;
+        assert(prdb_sdk_sql_parse_select_v24(
+                   filtered_count_sql, sizeof(filtered_count_sql) - 1,
+                   &parsed, sizeof(parsed), &error_offset) == PRDB_SDK_SQL_OK);
+        assert(prdb_sdk_sql_bind_select_v24(
+                   &parsed, relation, sizeof(relation) - 1, columns, 4,
+                   &binding, sizeof(binding)) == PRDB_SDK_SQL_BIND_OK);
+        assert(prdb_sdk_optimizer_encode_ordered_filtered_composite_group_aggregate_v1(
+                   &parsed.base.base.base, parameters, 1, schema,
+                   sizeof(schema) - 1, ordered_encoded, sizeof(ordered_encoded),
+                   &ordered_encoded_len) == PRDB_SDK_OPTIMIZER_ENCODE_OK);
     }
     assert(prdb_sdk_optimizer_submit_group_count_v1(
                &host_v5, encoded, encoded_len, response, sizeof(response),
