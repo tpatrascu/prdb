@@ -45121,6 +45121,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
 
         for (mode, client_name) in [
             (b'P', "sandbox-sql-grouped-parameter-scale"),
+            (b'J', "sandbox-sql-join-parameter-scale"),
             (b'R', "sandbox-sql-redacted-aggregate"),
             (b'N', "sandbox-sql-redacted-null-filter"),
             (b'H', "sandbox-sql-redacted-null-having"),

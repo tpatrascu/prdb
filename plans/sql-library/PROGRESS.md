@@ -1298,10 +1298,20 @@
 - Follow-up: match PSP1's declared parameter type and Decimal scale against each bound grouped WHERE and HAVING operand, then extend optimizer and mixed-workload coverage.
 
 
-## SQL-7 follow-up: type declarations in grouped parameters — in progress
+## SQL-7 follow-up: type declarations in grouped parameters — verified
 
 - Grouped dispatch carries PSP1 metadata into the v24 runner and the legacy v10 fallback. Every referenced WHERE and HAVING comparison requires the declared scalar type and exact Decimal scale of its bound operand before opening a scan. Hidden COUNT(*) expects BIGINT. The validation also applies to typed NULL, repeated placeholders, short-circuited branches, and LIMIT 0. Row SELECT and grouped runners share the parameter binding check.
 - The initial TinyCC dispatcher fixture accepted a wrong-scale Decimal WHERE parameter under LIMIT 0. It now rejects mismatched WHERE and HAVING declarations before OPEN_SCAN or SQLR output, including a typed NULL with a mismatched declaration and one placeholder used against WHERE and AVG operands with different scales. Matching Decimal scale with smaller declared precision and matching typed NULLs succeed.
 - The confined fixture uses the same typed parameter in WHERE and HAVING and checks the existing DECIMAL(38,2) sum of `3.50`. The mismatch invocation changes only the declaration's scale, before installing a redaction policy. The fixture catches the SQL error and the acceptance requires one terminal ABORTED frame, zero SQLR frames, and a durable ABORTED outcome.
-- The pinned TinyCC SDK suite, shared SDK checks, fixture packaging, release profile, locked Rust build, rustfmt and warning-denied Clippy passed. The full serial workspace suite is running in the delegated user service.
+- The pinned TinyCC SDK suite, shared SDK checks, fixture packaging, release profile, locked Rust build, rustfmt and warning-denied Clippy passed. The full serial workspace suite passed in the delegated user service (the retained `/tmp/prdb-join-workspace.log` records successful completion).
 - Follow-up: extend the optimizer request and plan contract to cover compound HAVING while keeping evaluation over authorized grouped results.
+
+
+## SQL-7 follow-up: typed parameters in filtered joins — verified
+
+- The v20 dispatcher previously dropped PSP1 parameter metadata. A maintained regression reproduced an incorrectly accepted Decimal scale mismatch under LIMIT 0. The dispatcher now calls the additive `prdb_sdk_sql_execute_inner_join_typed_v20` entry point, sharing the grouped/row parameter declaration check before either scan opens. Existing untyped and optimizer APIs preserve their value-only contract.
+- The dispatcher fixture checks matching and mismatched Decimal scales, matching typed NULL, and wrong-type typed NULL, including mismatches without LIMIT 0. It requires no scan or output on rejection and exactly one statement-failure latch. Existing successful filtered-join SQLR coverage continues through the typed dispatcher.
+- Added confined mode `J`: a filtered Decimal self-join catches a declaration scale mismatch under LIMIT 0; acceptance requires worker failure, no result frames, and durable ABORTED status.
+- Verification: focused dispatcher regression failed with metadata discarded; restored implementation passed the full maintained TinyCC SDK suite, including shared-library tests. Sandbox artifacts, release-profile validation, locked workspace build, rustfmt, warning-denied Clippy, delegated host probe, and `git diff --check` passed. The focused confined `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` acceptance passed, then the full serial workspace suite passed in delegated `prdb-join-types-workspace.service` with sandbox and process tests enabled.
+- Commit: `Validate typed parameters in filtered joins`.
+- Remaining: broaden analytical workload diversity, secure spill, repeatable target-hardware measurements, and mixed-workload optimization remain open.

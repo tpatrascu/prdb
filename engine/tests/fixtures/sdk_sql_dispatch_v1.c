@@ -619,6 +619,63 @@ static int test_grouped_parameter_metadata(void) {
     return 0;
 }
 
+static int test_join_parameter_metadata(void) {
+    static const uint8_t sql[] =
+        "SELECT l.id, r.score FROM widgets AS l INNER JOIN widgets AS r "
+        "ON l.id = r.id AND l.score = r.score "
+        "WHERE r.score >= $1 LIMIT 0";
+    static const struct {
+        uint8_t type, scale, is_null;
+        int accepted;
+    } cases[] = {
+        {PRDB_SDK_VALUE_TYPE_DECIMAL, 1, 0, 0},
+        {PRDB_SDK_VALUE_TYPE_DECIMAL, 2, 0, 1},
+        {PRDB_SDK_VALUE_TYPE_DECIMAL, 1, 1, 0},
+        {PRDB_SDK_VALUE_TYPE_DECIMAL, 2, 1, 1},
+        {PRDB_SDK_VALUE_TYPE_INTEGER, 0, 1, 0},
+    };
+    for (uint32_t index = 0; index < sizeof(cases) / sizeof(cases[0]); ++index) {
+        uint8_t parameters[] = {
+            'P', 'S', 'P', '1', 0, 1, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        dispatch_test_context context = {0};
+        prdb_host_api_v3 host = {
+            sizeof(host), PRDB_QUERY_ABI_V3_VERSION, &context,
+            join_executor_request, fail_planner_request, discard_result,
+            count_statement_failure};
+        parameters[11] = cases[index].type;
+        parameters[12] = cases[index].type == PRDB_SDK_VALUE_TYPE_DECIMAL ? 4 : 0;
+        parameters[13] = cases[index].scale;
+        parameters[14] = cases[index].is_null;
+        parameters[19] = cases[index].is_null ? 0 : 16;
+        context.group_success = 1;
+        context.planner_reply_len = make_group_relation(
+            context.planner_reply, PRDB_SDK_PLANNER_TABLE_HANDLE_KIND, 0x22,
+            PRDB_SDK_VALUE_TYPE_DECIMAL);
+        context.executor_reply_len = make_group_relation(
+            context.executor_reply, 6, 0x22, PRDB_SDK_VALUE_TYPE_DECIMAL);
+        /* Rejected declarations must also fail without a LIMIT shortcut. */
+        uint64_t sql_len = sizeof(sql) - 1;
+        if (!cases[index].accepted && index % 2 == 0) {
+            sql_len -= sizeof(" LIMIT 0") - 1;
+        }
+        int32_t status = prdb_sdk_sql_run_statement_v1(
+            &host, (const uint8_t *)"app", 3, sql, sql_len,
+            parameters, 20 + parameters[19]);
+        if (status != (cases[index].accepted ? PRDB_SDK_SQL_DISPATCH_OK
+                                            : PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR) ||
+            context.failure_calls != (uint32_t)!cases[index].accepted ||
+            context.join_open_calls != 0 || context.result_calls != 0) {
+            fprintf(stderr, "join metadata case %u returned %d, failure=%u scans=%u results=%u\n",
+                    index, status, context.failure_calls,
+                    context.join_open_calls, context.result_calls);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int test_dispatch_filtered_join_emits_sqlr(void) {
     static const uint8_t sql[] =
         "SELECT l.id, r.score FROM widgets AS l INNER JOIN widgets AS r "
@@ -853,6 +910,7 @@ int main(void) {
         return 1;
     }
     if (test_grouped_parameter_metadata() != 0) return 1;
+    if (test_join_parameter_metadata() != 0) return 1;
     if (test_dispatch_filtered_join_emits_sqlr() != 0) {
         fputs("filtered JOIN dispatch did not emit expected SQLR\n", stderr);
         return 1;

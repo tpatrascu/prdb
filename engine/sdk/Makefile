@@ -231,7 +231,7 @@ $(SDK_SQL_EXEC_V8_OBJECT): $(SDK_SQL_EXEC_V8_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql
 $(SDK_SQL_EXEC_V16_OBJECT): $(SDK_SQL_EXEC_V16_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_exec_v16.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v8.h $(INCLUDE_DIR)/prdb_sdk_sql_v16.h $(INCLUDE_DIR)/prdb_sdk_sql_join_v2.h $(INCLUDE_DIR)/prdb_sdk_executor_v1.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
-$(SDK_SQL_EXEC_V19_OBJECT): $(SDK_SQL_EXEC_V19_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_exec_v19.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v16.h $(INCLUDE_DIR)/prdb_sdk_sql_v19.h $(INCLUDE_DIR)/prdb_sdk_sql_v20.h $(INCLUDE_DIR)/prdb_sdk_sql_join_v2.h $(INCLUDE_DIR)/prdb_sdk_executor_v1.h $(INCLUDE_DIR)/prdb_sdk_optimizer_v1.h $(INCLUDE_DIR)/prdb_sdk_optimizer_plan_v1.h $(INCLUDE_DIR)/prdb_query_abi_v5.h | $(BUILD_DIR)
+$(SDK_SQL_EXEC_V19_OBJECT): $(SDK_SQL_EXEC_V19_SOURCE) engine/sdk/sql_parameter_internal.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v20.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v19.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v16.h $(INCLUDE_DIR)/prdb_sdk_sql_v19.h $(INCLUDE_DIR)/prdb_sdk_sql_v20.h $(INCLUDE_DIR)/prdb_sdk_sql_join_v2.h $(INCLUDE_DIR)/prdb_sdk_executor_v1.h $(INCLUDE_DIR)/prdb_sdk_optimizer_v1.h $(INCLUDE_DIR)/prdb_sdk_optimizer_plan_v1.h $(INCLUDE_DIR)/prdb_query_abi_v5.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
 $(SDK_SQL_RESULT_OBJECT): $(SDK_SQL_RESULT_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_result_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_v2.h $(INCLUDE_DIR)/prdb_sdk_sql_v5.h $(INCLUDE_DIR)/prdb_sdk_sql_v6.h $(INCLUDE_DIR)/prdb_sdk_sql_v8.h $(INCLUDE_DIR)/prdb_sdk_sql_v13.h $(INCLUDE_DIR)/prdb_sdk_batch_v1.h $(INCLUDE_DIR)/prdb_sdk_value_v1.h | $(BUILD_DIR)
@@ -255,7 +255,7 @@ $(SDK_ARCHIVE): $(SDK_OBJECTS)
 $(SDK_PIC_OBJECT_DIR):
 	mkdir -p "$@"
 
-$(SDK_PIC_OBJECT_DIR)/sql_exec_v2.o $(SDK_PIC_OBJECT_DIR)/sql_exec_v7.o: engine/sdk/sql_parameter_internal.h
+$(SDK_PIC_OBJECT_DIR)/sql_exec_v2.o $(SDK_PIC_OBJECT_DIR)/sql_exec_v7.o $(SDK_PIC_OBJECT_DIR)/sql_exec_v19.o: engine/sdk/sql_parameter_internal.h
 
 $(SDK_PIC_OBJECT_DIR)/%.o: engine/sdk/%.c $(wildcard $(INCLUDE_DIR)/*.h) | $(SDK_PIC_OBJECT_DIR)
 	$(TCC) -Wall -Wextra -Werror -fPIC -I"$(INCLUDE_DIR)" -c "$<" -o "$@"

@@ -542,8 +542,8 @@ int32_t prdb_sdk_sql_run_v1(
             PRDB_SDK_SQL_EXEC_V8_MAX_ROWS, materialized_bytes,
             SQL_DISPATCH_BATCH_BYTES, write_join_sqlr_row_v8, &result);
     } else if (is_join) {
-        status = prdb_sdk_sql_execute_inner_join_v20(
-            host, schema, schema_len, sql, sql_len, values, parameter_count,
+        status = prdb_sdk_sql_execute_inner_join_typed_v20(
+            host, schema, schema_len, sql, sql_len, values, metadata, parameter_count,
             SQL_DISPATCH_CANDIDATES, SQL_DISPATCH_BATCH_BYTES,
             planner_response, SQL_DISPATCH_RESPONSE_BYTES,
             right_planner_response, SQL_DISPATCH_RESPONSE_BYTES,

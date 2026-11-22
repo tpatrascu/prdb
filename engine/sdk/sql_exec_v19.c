@@ -2,6 +2,7 @@
 #include "prdb_sdk_sql_exec_v20.h"
 #include "prdb_sdk_optimizer_plan_v1.h"
 #include "prdb_sdk_optimizer_v1.h"
+#include "sql_parameter_internal.h"
 
 #include <string.h>
 
@@ -599,7 +600,8 @@ static int32_t execute_inner_join_v20_with_page_limit(
     const prdb_host_api_v3 *host,
     const uint8_t *schema, uint32_t schema_len,
     const uint8_t *sql, uint64_t sql_len,
-    const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
+    const prdb_sdk_value_v1 *parameters,
+    const prdb_sdk_sql_parameter_metadata_v1 *metadata, uint32_t parameter_count,
     uint16_t max_candidates, uint32_t max_batch_bytes,
     uint8_t *left_planner_response, uint64_t left_planner_response_capacity,
     uint8_t *right_planner_response, uint64_t right_planner_response_capacity,
@@ -713,12 +715,11 @@ static int32_t execute_inner_join_v20_with_page_limit(
         return fail_statement_v19(host, PRDB_SDK_SQL_EXEC_BIND_ERROR);
     }
     if (statement.has_where == 1 && statement.parameter_index != 0) {
-        status = prdb_sdk_sql_bind_parameter_v1(
-            statement.parameter_index, parameters, parameter_count,
+        status = bind_sql_parameter(
+            statement.parameter_index, parameters, metadata, parameter_count,
             binding.where_column.type_code,
             binding.where_column.decimal_precision,
-            binding.where_column.decimal_scale, &bound_parameter,
-            sizeof(bound_parameter));
+            binding.where_column.decimal_scale, &bound_parameter);
         if (status != PRDB_SDK_SQL_EVAL_OK) {
             return fail_statement_v19(host,
                                      PRDB_SDK_SQL_EXEC_EVALUATION_ERROR);
@@ -838,7 +839,51 @@ int32_t prdb_sdk_sql_execute_inner_join_v20(
     uint8_t *materialized_bytes, uint64_t materialized_bytes_capacity,
     prdb_sdk_sql_join_result_row_v20_fn on_row, void *result_context) {
     return execute_inner_join_v20_with_page_limit(
-        host, schema, schema_len, sql, sql_len, parameters, parameter_count,
+        host, schema, schema_len, sql, sql_len, parameters, NULL, parameter_count,
+        max_candidates, max_batch_bytes, left_planner_response,
+        left_planner_response_capacity, right_planner_response,
+        right_planner_response_capacity, left_executor_response,
+        left_executor_response_capacity, right_executor_response,
+        right_executor_response_capacity, batch_response,
+        batch_response_capacity, left_planner_columns,
+        left_planner_column_capacity, right_planner_columns,
+        right_planner_column_capacity, left_executor_columns,
+        left_executor_column_capacity, right_executor_columns,
+        right_executor_column_capacity, cell_scratch, cell_scratch_capacity,
+        left_rows, left_row_capacity, right_rows, right_row_capacity,
+        materialized_bytes, materialized_bytes_capacity, on_row,
+        result_context, SQL_EXEC_V20_MAX_SCAN_PAGES);
+}
+
+int32_t prdb_sdk_sql_execute_inner_join_typed_v20(
+    const prdb_host_api_v3 *host,
+    const uint8_t *schema, uint32_t schema_len,
+    const uint8_t *sql, uint64_t sql_len,
+    const prdb_sdk_value_v1 *parameters,
+    const prdb_sdk_sql_parameter_metadata_v1 *metadata, uint32_t parameter_count,
+    uint16_t max_candidates, uint32_t max_batch_bytes,
+    uint8_t *left_planner_response, uint64_t left_planner_response_capacity,
+    uint8_t *right_planner_response, uint64_t right_planner_response_capacity,
+    uint8_t *left_executor_response, uint64_t left_executor_response_capacity,
+    uint8_t *right_executor_response, uint64_t right_executor_response_capacity,
+    uint8_t *batch_response, uint64_t batch_response_capacity,
+    prdb_sdk_sql_column_shape_v2 *left_planner_columns,
+    uint32_t left_planner_column_capacity,
+    prdb_sdk_sql_column_shape_v2 *right_planner_columns,
+    uint32_t right_planner_column_capacity,
+    prdb_sdk_sql_column_shape_v2 *left_executor_columns,
+    uint32_t left_executor_column_capacity,
+    prdb_sdk_sql_column_shape_v2 *right_executor_columns,
+    uint32_t right_executor_column_capacity,
+    prdb_sdk_value_v1 *cell_scratch, uint32_t cell_scratch_capacity,
+    prdb_sdk_sql_join_materialized_row_v16 *left_rows,
+    uint32_t left_row_capacity,
+    prdb_sdk_sql_join_materialized_row_v16 *right_rows,
+    uint32_t right_row_capacity,
+    uint8_t *materialized_bytes, uint64_t materialized_bytes_capacity,
+    prdb_sdk_sql_join_result_row_v20_fn on_row, void *result_context) {
+    return execute_inner_join_v20_with_page_limit(
+        host, schema, schema_len, sql, sql_len, parameters, metadata, parameter_count,
         max_candidates, max_batch_bytes, left_planner_response,
         left_planner_response_capacity, right_planner_response,
         right_planner_response_capacity, left_executor_response,
@@ -1126,7 +1171,7 @@ int32_t prdb_sdk_sql_execute_inner_join_optimizer_v20(
         return fail_statement_v19(&host->v4.v3,
                                   PRDB_SDK_SQL_EXEC_SHAPE_MISMATCH);
     return execute_inner_join_v20_with_page_limit(
-        &host->v4.v3, schema, schema_len, sql, sql_len, parameters,
+        &host->v4.v3, schema, schema_len, sql, sql_len, parameters, NULL,
         parameter_count, max_candidates, max_batch_bytes,
         left_planner_response, left_planner_response_capacity,
         right_planner_response, right_planner_response_capacity,

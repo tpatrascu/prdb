@@ -1964,6 +1964,25 @@ static int32_t run_write_read_fixture(
         return 1;
     }
     if (invocation->parameters_len == 1 && invocation->parameters != NULL &&
+        invocation->parameters[0] == 'J') {
+        static const uint8_t join_sql[] =
+            "SELECT a.right_key, b.right_key FROM decimal_grouped_records AS a "
+            "INNER JOIN decimal_grouped_records AS b ON "
+            "a.left_key = b.left_key AND a.right_key = b.right_key "
+            "WHERE b.decimal_value >= $1 LIMIT 0";
+        uint8_t mismatched_parameter[sizeof(min_amount_parameter)];
+        memcpy(mismatched_parameter, min_amount_parameter,
+               sizeof(mismatched_parameter));
+        mismatched_parameter[13] = 1;
+        status = prdb_sdk_sql_run_statement_v1(
+            host, schema, sizeof(schema) - 1, join_sql, sizeof(join_sql) - 1,
+            mismatched_parameter, sizeof(mismatched_parameter));
+        /* Catch the bind error so only the host latch can abort on success. */
+        if (status == PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR) return 0;
+        static const uint8_t message[] = "fixture-error-join-parameter-scale";
+        return report_failure(host, message, sizeof(message) - 1);
+    }
+    if (invocation->parameters_len == 1 && invocation->parameters != NULL &&
         invocation->parameters[0] == 'P') {
         uint8_t mismatched_parameter[sizeof(min_amount_parameter)];
         memcpy(mismatched_parameter, min_amount_parameter,
