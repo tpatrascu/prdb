@@ -4040,6 +4040,13 @@ int main(void) {
                    capture.second_keys[1] == 3 &&
                    capture.aggregates[1] == 3 &&
                    mock.statement_failed == 0);
+            reset_scan(&mock, &capture, 1);
+            optimizer_having_status = run_query_v24_optimizer_having(
+                &mock, v24_optimizer_having_sql,
+                sizeof(v24_optimizer_having_sql) - 1, 1, &capture,
+                on_group_v24_optimizer_having);
+            assert(optimizer_having_status != PRDB_SDK_SQL_EXEC_OK);
+            assert(capture.calls == 0 && mock.statement_failed == 1);
             {
                 const int32_t restored_keys[] = {1, 1, 2};
                 const int32_t restored_values[] = {9, 9, 5};
