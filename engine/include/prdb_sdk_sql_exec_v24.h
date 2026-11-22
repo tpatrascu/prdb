@@ -51,4 +51,27 @@ int32_t prdb_sdk_sql_execute_group_typed_v24(
     uint64_t materialized_bytes_capacity,
     prdb_sdk_sql_group_row_v24_fn on_group, void *result_context);
 
+/* Uses an optimizer source plan for a composite grouped query with compound
+ * HAVING. The plan covers authorized scans and aggregate inputs; HAVING is
+ * evaluated by the bounded v24 runner over the resulting authorized groups. */
+int32_t prdb_sdk_sql_execute_group_composite_having_optimizer_v24(
+    const prdb_host_api_v5 *host, const uint8_t *schema,
+    uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
+    const prdb_sdk_value_v1 *parameters,
+    const prdb_sdk_sql_parameter_metadata_v1 *parameter_metadata,
+    uint32_t parameter_count,
+    uint16_t max_candidates, uint32_t max_batch_bytes,
+    uint8_t *optimizer_request, uint64_t optimizer_request_capacity,
+    uint8_t *optimizer_response, uint64_t optimizer_response_capacity,
+    uint8_t *planner_response, uint64_t planner_response_capacity,
+    uint8_t *executor_response, uint64_t executor_response_capacity,
+    uint8_t *batch_response, uint64_t batch_response_capacity,
+    prdb_sdk_sql_column_shape_v2 *planner_columns,
+    uint32_t planner_column_capacity,
+    prdb_sdk_sql_column_shape_v2 *executor_columns,
+    uint32_t executor_column_capacity,
+    prdb_sdk_value_v1 *cell_scratch, uint32_t cell_scratch_capacity,
+    uint8_t *materialized_bytes, uint64_t materialized_bytes_capacity,
+    prdb_sdk_sql_group_row_v24_fn on_group, void *result_context);
+
 #endif /* PRDB_SDK_SQL_EXEC_V24_H */

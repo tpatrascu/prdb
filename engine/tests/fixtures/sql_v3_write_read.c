@@ -16,6 +16,7 @@
 #include "prdb_sdk_sql_exec_v20.h"
 #include "prdb_sdk_sql_exec_v21.h"
 #include "prdb_sdk_sql_exec_v23.h"
+#include "prdb_sdk_sql_exec_v24.h"
 #include "prdb_sdk_sql_dispatch_v1.h"
 #include "prdb_sdk_sql_exec_v4.h"
 #include "prdb_sdk_sql_result_v1.h"
@@ -887,6 +888,17 @@ static int32_t write_grouped_composite_sum_optimizer(
     return 0;
 }
 
+static int32_t write_grouped_composite_sum_optimizer_v24(
+    void *opaque, const prdb_sdk_value_v1 *group_keys,
+    uint32_t group_key_count, const prdb_sdk_value_v1 *aggregate_value,
+    uint64_t matching_row_count,
+    const prdb_sdk_select_binding_v21 *binding) {
+    if (binding == NULL) return 1;
+    return write_grouped_composite_sum_optimizer(
+        opaque, group_keys, group_key_count, aggregate_value,
+        matching_row_count, &binding->base.base.base.base);
+}
+
 static int32_t write_grouped_composite_count(
     void *opaque, const prdb_sdk_value_v1 *group_keys,
     uint32_t group_key_count, const prdb_sdk_value_v1 *aggregate_value,
@@ -1417,7 +1429,8 @@ static int32_t run_write_read_fixture(
         "ORDER BY left_key DESC LIMIT 2";
     static const uint8_t select_composite_sum_optimizer_sql[] =
         "SELECT left_key, right_key, SUM(left_key) FROM grouped_records "
-        "GROUP BY left_key, right_key LIMIT 2";
+        "GROUP BY left_key, right_key HAVING SUM(left_key) >= 2 AND "
+        "COUNT(*) >= 1 LIMIT 2";
     static const uint8_t select_composite_min_optimizer_sql[] =
         "SELECT left_key, right_key, MIN(left_key) FROM grouped_records "
         "GROUP BY left_key, right_key ORDER BY MIN(left_key) DESC NULLS LAST, "
@@ -3173,11 +3186,11 @@ static int32_t run_write_read_fixture(
     composite_grouped_results.row_count = 0;
     composite_grouped_results.output_len = 0;
     if (optimizer_host_v5 != NULL) {
-        status = prdb_sdk_sql_execute_group_composite_aggregate_optimizer_v1(
+        status = prdb_sdk_sql_execute_group_composite_having_optimizer_v24(
             optimizer_host_v5, schema, sizeof(schema) - 1,
             select_composite_sum_optimizer_sql,
-            sizeof(select_composite_sum_optimizer_sql) - 1, 16,
-            sizeof(batch_response), group_count_optimizer_request,
+            sizeof(select_composite_sum_optimizer_sql) - 1, NULL, NULL, 0,
+            16, sizeof(batch_response), group_count_optimizer_request,
             sizeof(group_count_optimizer_request),
             group_count_optimizer_response,
             sizeof(group_count_optimizer_response), planner_response,
@@ -3185,10 +3198,11 @@ static int32_t run_write_read_fixture(
             sizeof(executor_response), batch_response,
             sizeof(batch_response), planner_columns, 9, executor_columns, 9,
             cell_scratch, 9, grouped_materialized,
-            sizeof(grouped_materialized), write_grouped_composite_sum_optimizer,
+            sizeof(grouped_materialized),
+            write_grouped_composite_sum_optimizer_v24,
             &composite_grouped_results);
     } else {
-        status = prdb_sdk_sql_execute_group_v13(
+        status = prdb_sdk_sql_execute_group_v24(
             host, schema, sizeof(schema) - 1,
             select_composite_sum_optimizer_sql,
             sizeof(select_composite_sum_optimizer_sql) - 1, NULL, 0, 16,
@@ -3197,7 +3211,8 @@ static int32_t run_write_read_fixture(
             sizeof(executor_response), batch_response,
             sizeof(batch_response), planner_columns, 9, executor_columns, 9,
             cell_scratch, 9, grouped_materialized,
-            sizeof(grouped_materialized), write_grouped_composite_sum_optimizer,
+            sizeof(grouped_materialized),
+            write_grouped_composite_sum_optimizer_v24,
             &composite_grouped_results);
     }
     if (status != PRDB_SDK_SQL_EXEC_OK ||

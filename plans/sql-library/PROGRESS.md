@@ -1306,6 +1306,14 @@
 - The pinned TinyCC SDK suite, shared SDK checks, fixture packaging, release profile, locked Rust build, rustfmt and warning-denied Clippy passed. The full serial workspace suite passed in the delegated user service (the retained `/tmp/prdb-join-workspace.log` records successful completion).
 - Follow-up: extend the optimizer request and plan contract to cover compound HAVING while keeping evaluation over authorized grouped results.
 
+## SQL-7 follow-up: optimizer-backed composite compound HAVING — verified
+
+- Contract: [SQL library](../../specs/sql-library.md). V24 composite grouping with compound HAVING can use the existing optimizer plans for source/aggregate inputs: statement 13 / plan kind 13 without WHERE, and statement 15 / plan kind 15 with WHERE. The optimizer does not evaluate HAVING; the SDK validates the plan against the v24 AST and evaluates typed HAVING over authorized grouped rows.
+- Red/green evidence: the maintained `sdk-sql-execute-v10` fixture exercises `SUM(score) IS NOT NULL AND COUNT(*) IS NOT NULL` through the optimizer-gated v24 API and checks both callback groups and bindings. The initial test failed while the API was absent; the implementation passes it.
+- Confined evidence: `sql_v3_write_read.c` now sends the composite SUM query with `SUM(left_key) >= 2 AND COUNT(*) >= 1` through the optimizer gate. The fallback path uses the same query via the v24 grouped runner, and the acceptance compares the exact SQLR rows from the confined query artifact.
+- Verification: the focused TinyCC executor fixture and complete pinned TinyCC SDK suite passed. `make sandbox-query-fixture` built the confined artifact; `make release-profile` validated ten engine binaries and one query fixture. Workspace build, rustfmt, warning-denied Clippy, and `git diff --check` passed. The full serial locked workspace suite passed inside a delegated `systemd --user` unit with all sandbox and process tests enabled, including `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` for the updated query.
+- Remaining: optimizer-gated v24 currently requires two to eight keys and rejects ORDER BY. Single-key and ordered compound HAVING optimizer coverage, broader analytical workloads, secure spill, and target-hardware measurements remain open.
+
 
 ## SQL-7 follow-up: typed parameters in filtered joins — verified
 

@@ -12,6 +12,7 @@
 #include "prdb_sdk_sql_exec_v21.h"
 #include "prdb_sdk_sql_exec_v22.h"
 #include "prdb_sdk_sql_exec_v23.h"
+#include "prdb_sdk_sql_exec_v24.h"
 #include "prdb_sdk_sql_result_v1.h"
 #include "prdb_query_abi_payload_codecs.h"
 
@@ -2796,6 +2797,67 @@ static int32_t run_query_v23_decimal(mock_state *mock, const uint8_t *sql,
         materialized_bytes, sizeof(materialized_bytes), on_group, capture);
 }
 
+static int32_t on_group_v24_optimizer_having(
+    void *context, const prdb_sdk_value_v1 *keys, uint32_t key_count,
+    const prdb_sdk_value_v1 *aggregate, uint64_t rows,
+    const prdb_sdk_select_binding_v21 *binding) {
+    group_capture *capture = context;
+    int64_t aggregate_value = 0;
+    assert(key_count == 2 && rows == 1 && binding != NULL);
+    assert(binding->base.having_node_count >= 3);
+    assert(capture->mock->batch_finished != 0);
+    assert(prdb_sdk_value_get_integer_v1(
+               &keys[0], &capture->keys[capture->calls]) ==
+           PRDB_SDK_VALUE_ACCESS_OK);
+    assert(prdb_sdk_value_get_integer_v1(
+               &keys[1], &capture->second_keys[capture->calls]) ==
+           PRDB_SDK_VALUE_ACCESS_OK);
+    assert(prdb_sdk_value_get_bigint_v1(aggregate, &aggregate_value) ==
+           PRDB_SDK_VALUE_ACCESS_OK);
+    capture->aggregates[capture->calls] = (int32_t)aggregate_value;
+    ++capture->calls;
+    return 0;
+}
+
+static int32_t run_query_v24_optimizer_having(
+    mock_state *mock, const uint8_t *sql, uint64_t sql_len,
+    uint64_t arena_capacity, group_capture *capture) {
+    static const uint8_t schema[] = "app";
+    static const uint8_t id_name[] = "id";
+    static const uint8_t score_name[] = "score";
+    uint8_t optimizer_request_bytes[4096] = {0};
+    uint8_t optimizer_response[4096] = {0};
+    uint8_t planner_response[256] = {0};
+    uint8_t executor_response[512] = {0};
+    uint8_t batch_response[8192] = {0};
+    uint8_t materialized_bytes[4096] = {0};
+    prdb_sdk_sql_column_shape_v2 planner_columns[2] = {
+        {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
+        {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
+    prdb_sdk_sql_column_shape_v2 executor_columns[2] = {
+        {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
+        {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
+    prdb_sdk_value_v1 cell_scratch[2] = {{0}};
+    prdb_host_api_v5 host = {0};
+    host.v4.v3 = (prdb_host_api_v3){
+        sizeof(prdb_host_api_v3), PRDB_QUERY_ABI_V3_VERSION, mock,
+        executor_request, planner_request, NULL, statement_failure};
+    host.v4.optimizer_request = unused_optimizer_request;
+    host.optimizer_request = optimizer_request;
+    mock->optimizer_enabled = 0;
+    mock->optimizer_aggregate_kind = PRDB_SDK_SQL_V7_AGGREGATE_SUM;
+    return prdb_sdk_sql_execute_group_composite_having_optimizer_v24(
+        &host, schema, sizeof(schema) - 1, sql, sql_len, NULL, NULL, 0,
+        mock->max_candidates == 0 ? 4 : (uint16_t)mock->max_candidates,
+        mock->max_candidates > 3 ? 8192 : 512,
+        optimizer_request_bytes, sizeof(optimizer_request_bytes),
+        optimizer_response, sizeof(optimizer_response), planner_response,
+        sizeof(planner_response), executor_response, sizeof(executor_response),
+        batch_response, sizeof(batch_response), planner_columns, 2,
+        executor_columns, 2, cell_scratch, 2, materialized_bytes,
+        arena_capacity, on_group_v24_optimizer_having, capture);
+}
+
 static int32_t run_query_v21_decimal_wide_sum(
     mock_state *mock, const uint8_t *sql, uint64_t sql_len,
     group_capture *capture) {
@@ -3107,6 +3169,9 @@ int main(void) {
     static const uint8_t v14_having_sql[] =
         "SELECT id, score, SUM(score) FROM widgets GROUP BY id, score "
         "HAVING SUM(score) >= $1";
+    static const uint8_t v24_optimizer_having_sql[] =
+        "SELECT id, score, SUM(score) FROM widgets GROUP BY id, score "
+        "HAVING SUM(score) IS NOT NULL AND COUNT(*) IS NOT NULL";
     static const uint8_t v15_order_sql[] =
         "SELECT id, score, COUNT(*) FROM widgets GROUP BY id, score "
         "HAVING COUNT(*) >= $1 ORDER BY score DESC NULLS LAST, "
@@ -3706,6 +3771,56 @@ int main(void) {
                    capture.keys[0] == 1 && capture.second_keys[0] == 9 &&
                    capture.aggregates[0] == 18 && capture.row_counts[0] == 2 &&
                    mock.statement_failed == 0);
+        }
+        {
+            const int32_t having_keys[] = {1, 1, 2};
+            const int32_t having_values[] = {0, 2, 3};
+            const uint8_t having_states[] = {
+                PRDB_SDK_VALUE_STATE_NULL,
+                PRDB_SDK_VALUE_STATE_VALUE,
+                PRDB_SDK_VALUE_STATE_VALUE};
+            mock.planner_len = make_relation(
+                mock.planner, PRDB_SDK_PLANNER_TABLE_HANDLE_KIND, 0x99,
+                PRDB_SDK_VALUE_TYPE_INTEGER);
+            mock.executor_len = make_relation(
+                mock.executor, 6, 0x22, PRDB_SDK_VALUE_TYPE_INTEGER);
+            mock.batch_len = make_rows(mock.batch, 1, having_keys,
+                                       having_values, having_states, 3);
+            reset_scan(&mock, &capture, 1);
+            int32_t optimizer_having_status = run_query_v24_optimizer_having(
+                &mock, v24_optimizer_having_sql,
+                sizeof(v24_optimizer_having_sql) - 1, 4096, &capture);
+            if (optimizer_having_status != PRDB_SDK_SQL_EXEC_OK) {
+                fprintf(stderr,
+                        "v24 optimizer HAVING returned %d, failed=%u, planner=%u, executor=%u, optimizer=%u\n",
+                        optimizer_having_status, mock.statement_failed,
+                        mock.planner_calls, mock.executor_calls,
+                        mock.optimizer_enabled);
+            }
+            assert(optimizer_having_status == PRDB_SDK_SQL_EXEC_OK);
+            assert(mock.optimizer_enabled == 1 &&
+                   mock.optimizer_relation_resolves == 1 &&
+                   capture.calls == 2 && capture.keys[0] == 1 &&
+                   capture.second_keys[0] == 2 &&
+                   capture.aggregates[0] == 2 && capture.keys[1] == 2 &&
+                   capture.second_keys[1] == 3 &&
+                   capture.aggregates[1] == 3 &&
+                   mock.statement_failed == 0);
+            {
+                const int32_t restored_keys[] = {1, 1, 2};
+                const int32_t restored_values[] = {9, 9, 5};
+                const uint8_t restored_states[] = {
+                    PRDB_SDK_VALUE_STATE_VALUE,
+                    PRDB_SDK_VALUE_STATE_VALUE,
+                    PRDB_SDK_VALUE_STATE_VALUE};
+                mock.planner_len = make_relation(
+                    mock.planner, PRDB_SDK_PLANNER_TABLE_HANDLE_KIND, 0x99,
+                    PRDB_SDK_VALUE_TYPE_INTEGER);
+                mock.executor_len = make_relation(
+                    mock.executor, 6, 0x22, PRDB_SDK_VALUE_TYPE_INTEGER);
+                mock.batch_len = make_rows(mock.batch, 1, restored_keys,
+                                           restored_values, restored_states, 3);
+            }
         }
         reset_scan(&mock, &capture, 1);
         assert(run_query_v14(&mock, v14_having_sql,
