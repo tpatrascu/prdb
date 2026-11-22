@@ -3075,6 +3075,80 @@ static int32_t run_query_v24_optimizer_having(
         arena_capacity, on_group, capture);
 }
 
+static int32_t run_query_v24_count_column(
+    mock_state *mock, const uint8_t *sql, uint64_t sql_len,
+    group_capture *capture,
+    prdb_sdk_sql_group_row_v24_fn on_group) {
+    static const uint8_t schema[] = "app";
+    static const uint8_t id_name[] = "id";
+    static const uint8_t score_name[] = "score";
+    uint8_t planner_response[256] = {0};
+    uint8_t executor_response[512] = {0};
+    uint8_t batch_response[8192] = {0};
+    uint8_t optimizer_request_bytes[4096] = {0};
+    uint8_t optimizer_response[4096] = {0};
+    uint8_t materialized_bytes[4096] = {0};
+    prdb_sdk_sql_column_shape_v2 planner_columns[2] = {
+        {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
+        {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
+    prdb_sdk_sql_column_shape_v2 executor_columns[2] = {
+        {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
+        {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
+    prdb_sdk_value_v1 cell_scratch[2] = {{0}};
+    prdb_host_api_v5 host = {0};
+    host.v4.v3 = (prdb_host_api_v3){
+        sizeof(prdb_host_api_v3), PRDB_QUERY_ABI_V3_VERSION, mock,
+        executor_request, planner_request, NULL, statement_failure};
+    host.v4.optimizer_request = unused_optimizer_request;
+    host.optimizer_request = optimizer_request;
+    return prdb_sdk_sql_execute_group_having_optimizer_v24(
+        &host, schema, sizeof(schema) - 1, sql, sql_len, NULL, NULL, 0,
+        mock->max_candidates == 0 ? 4 : (uint16_t)mock->max_candidates,
+        mock->max_candidates > 3 ? 8192 : 512, optimizer_request_bytes,
+        sizeof(optimizer_request_bytes), optimizer_response,
+        sizeof(optimizer_response), planner_response,
+        sizeof(planner_response), executor_response,
+        sizeof(executor_response), batch_response, sizeof(batch_response),
+        planner_columns, 2, executor_columns, 2, cell_scratch, 2,
+        materialized_bytes, sizeof(materialized_bytes), on_group, capture);
+}
+
+static int32_t on_count_column_group(
+    void *opaque, const prdb_sdk_value_v1 *group_keys,
+    uint32_t group_key_count, const prdb_sdk_value_v1 *aggregate_value,
+    uint64_t matching_row_count,
+    const prdb_sdk_select_binding_v21 *projection_binding) {
+    group_capture *capture = (group_capture *)opaque;
+    int32_t key = 0;
+    int64_t count = -1;
+    (void)projection_binding;
+    assert(group_key_count == 1 && aggregate_value != NULL);
+    assert(prdb_sdk_value_get_integer_v1(&group_keys[0], &key) ==
+           PRDB_SDK_VALUE_ACCESS_OK);
+    assert(prdb_sdk_value_get_bigint_v1(aggregate_value, &count) ==
+           PRDB_SDK_VALUE_ACCESS_OK);
+    assert(capture->calls < 3);
+    assert(key == (int64_t)capture->calls + 1);
+    assert(count == (capture->calls == 0 ? 1 : 0));
+    assert(matching_row_count == (capture->calls == 0 ? 2 : 1));
+    {
+        static const prdb_sdk_sql_column_shape_v2 columns[] = {
+            {(const uint8_t *)"id", 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
+            {(const uint8_t *)"score", 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
+        uint8_t sqlr[256] = {0};
+        uint64_t sqlr_len = 0;
+        const prdb_sdk_select_binding_v13 *binding =
+            &projection_binding->base.base.base.base;
+        assert(prdb_sdk_sql_encode_group_composite_result_v1(
+                   binding, columns, 2, group_keys, 1, aggregate_value,
+                   matching_row_count, sqlr, sizeof(sqlr), &sqlr_len) ==
+               PRDB_SDK_SQL_RESULT_OK);
+        assert(sqlr_len != 0);
+    }
+    ++capture->calls;
+    return 0;
+}
+
 static int32_t run_query_v21_decimal_wide_sum(
     mock_state *mock, const uint8_t *sql, uint64_t sql_len,
     group_capture *capture) {
@@ -5018,6 +5092,43 @@ int main(void) {
                    PRDB_SDK_SQL_EXEC_OK);
             assert(capture.calls == 2 && mock.executor_calls > 0 &&
                    mock.statement_failed == 0);
+        }
+
+        {
+            static const uint8_t count_column_sql[] =
+                "SELECT id, COUNT(score) FROM widgets GROUP BY id";
+            const int32_t keys[] = {1, 1, 2, 3};
+            const int32_t scores[] = {0, 9, 0, 0};
+            const uint8_t states[] = {
+                PRDB_SDK_VALUE_STATE_NULL, PRDB_SDK_VALUE_STATE_VALUE,
+                PRDB_SDK_VALUE_STATE_NULL, PRDB_SDK_VALUE_STATE_NULL};
+            mock.planner_len = make_relation(
+                mock.planner, PRDB_SDK_PLANNER_TABLE_HANDLE_KIND, 0x99,
+                PRDB_SDK_VALUE_TYPE_INTEGER);
+            mock.executor_len = make_relation(
+                mock.executor, 6, 0x22, PRDB_SDK_VALUE_TYPE_INTEGER);
+            mock.batch_len = make_rows(mock.batch, 1, keys, scores, states, 4);
+            reset_scan(&mock, &capture, 1);
+            assert(run_query_v24_count_column(
+                       &mock, count_column_sql, sizeof(count_column_sql) - 1,
+                       &capture, on_count_column_group) ==
+                   PRDB_SDK_SQL_EXEC_OK);
+            assert(capture.calls == 3 && mock.statement_failed == 0);
+            {
+                const int32_t redacted_keys[] = {1};
+                const int32_t redacted_scores[] = {0};
+                const uint8_t redacted_states[] = {
+                    PRDB_SDK_VALUE_STATE_REDACTED};
+                mock.batch_len = make_rows(mock.batch, 1, redacted_keys,
+                                           redacted_scores, redacted_states, 1);
+                reset_scan(&mock, &capture, 1);
+                assert(run_query_v24_count_column(
+                           &mock, count_column_sql,
+                           sizeof(count_column_sql) - 1, &capture,
+                           on_count_column_group) ==
+                       PRDB_SDK_SQL_EXEC_EVALUATION_ERROR);
+                assert(capture.calls == 0 && mock.statement_failed == 1);
+            }
         }
     }
     run_grouped_scalar_order_matrix(&mock);

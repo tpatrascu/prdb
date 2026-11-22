@@ -5,7 +5,8 @@
 
 #define PRDB_SDK_SQL_ABI_V24_VERSION UINT32_C(24)
 
-/* V24 uses the v23 layouts and supports one to eight grouping keys. */
+/* V24 uses the v23 layouts, supports one to eight grouping keys, and adds
+ * COUNT(column) alongside the prior aggregate forms. */
 typedef prdb_sdk_select_v23 prdb_sdk_select_v24;
 typedef prdb_sdk_select_binding_v23 prdb_sdk_select_binding_v24;
 

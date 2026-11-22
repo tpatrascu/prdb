@@ -868,8 +868,9 @@ int32_t prdb_sdk_sql_encode_group_composite_result_v1(
         binding->base.has_group_by != 1 ||
         binding->base.aggregate_kind <
             PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR ||
-        binding->base.aggregate_kind > PRDB_SDK_SQL_V7_AGGREGATE_AVG ||
-        binding->group_key_count < 2 ||
+        binding->base.aggregate_kind >
+            PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN ||
+        binding->group_key_count < 1 ||
         binding->group_key_count > PRDB_SDK_SQL_V13_MAX_GROUP_KEYS ||
         binding->group_key_count != group_key_count ||
         group_key_count > UINT16_MAX - 1 || column_count == 0) {
@@ -916,6 +917,34 @@ int32_t prdb_sdk_sql_encode_group_composite_result_v1(
         count_value.data = count_bytes;
         count_value.data_len = sizeof(count_bytes);
         result_value = &count_value;
+        aggregate_name = count_column_name_v1;
+        aggregate_name_len = sizeof(count_column_name_v1) - 1;
+    } else if (aggregate_kind ==
+               PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN) {
+        uint32_t aggregate_ordinal = binding->base.aggregate_column.ordinal;
+        const prdb_sdk_sql_column_shape_v2 *input;
+        if (aggregate_ordinal >= column_count)
+            return PRDB_SDK_SQL_RESULT_INVALID_BINDING;
+        input = &columns[aggregate_ordinal];
+        if (aggregate_value == NULL ||
+            !valid_column_shape_v1(input, aggregate_ordinal) ||
+            input->type_code != binding->base.aggregate_column.type_code ||
+            input->decimal_precision !=
+                binding->base.aggregate_column.decimal_precision ||
+            input->decimal_scale !=
+                binding->base.aggregate_column.decimal_scale ||
+            prdb_sdk_value_validate_v1(aggregate_value) !=
+                PRDB_SDK_VALUE_VALID ||
+            aggregate_value->state != PRDB_SDK_VALUE_STATE_VALUE ||
+            aggregate_value->type_code != PRDB_SDK_VALUE_TYPE_BIGINT ||
+            aggregate_value->data_len != 8) {
+            return PRDB_SDK_SQL_RESULT_INVALID_ROW;
+        }
+        aggregate_column.name = count_column_name_v1;
+        aggregate_column.name_len = sizeof(count_column_name_v1) - 1;
+        aggregate_column.ordinal = column_count;
+        aggregate_column.type_code = PRDB_SDK_VALUE_TYPE_BIGINT;
+        result_value = aggregate_value;
         aggregate_name = count_column_name_v1;
         aggregate_name_len = sizeof(count_column_name_v1) - 1;
     } else {

@@ -272,7 +272,9 @@ static int32_t write_group_sqlr_tuple(
     uint64_t output_len = 0;
     if (context == NULL || binding == NULL) return 1;
     composite_binding = &binding->base.base.base.base;
-    if (group_key_count == 1)
+    if (group_key_count == 1 &&
+        composite_binding->base.aggregate_kind !=
+            PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN)
         return write_group_sqlr_single_key(
             opaque, group_keys, aggregate_value, matching_row_count,
             &composite_binding->base);

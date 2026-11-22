@@ -51,5 +51,33 @@ int main(void) {
     assert(prdb_sdk_sql_bind_select_v24(
         &statement, decimal_relation, sizeof(decimal_relation) - 1,
         decimal_columns, 3, &binding, sizeof(binding)) == PRDB_SDK_SQL_BIND_OK);
+    {
+        static const uint8_t count_column_sql[] =
+            "SELECT id, COUNT(score) FROM records GROUP BY id "
+            "HAVING COUNT(score) >= $1 "
+            "ORDER BY COUNT(score) DESC LIMIT 2";
+        static const prdb_sdk_sql_column_shape_v2 count_columns[] = {
+            {(const uint8_t *)"id", 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
+            {(const uint8_t *)"score", 5, 1, PRDB_SDK_VALUE_TYPE_BOOLEAN, 0, 0}};
+        assert(prdb_sdk_sql_parse_select_v24(
+                   count_column_sql, sizeof(count_column_sql) - 1,
+                   &statement, sizeof(statement), NULL) ==
+               PRDB_SDK_SQL_OK);
+        assert(statement.base.base.base.base.base.base.aggregate_kind ==
+               PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN);
+        assert(prdb_sdk_sql_bind_select_v24(
+                   &statement, relation, sizeof(relation) - 1, count_columns,
+                   2, &binding, sizeof(binding)) == PRDB_SDK_SQL_BIND_OK);
+        assert(binding.base.base.base.base.base.base.aggregate_column.ordinal ==
+               1);
+        assert(binding.base.base.having_type_code ==
+               PRDB_SDK_VALUE_TYPE_BIGINT);
+        assert(binding.base.base.base.order_count == 1);
+        assert(binding.base.base.base.order_items[0].type_code ==
+               PRDB_SDK_VALUE_TYPE_BIGINT);
+        assert(prdb_sdk_sql_parse_select_v23(
+                   count_column_sql, sizeof(count_column_sql) - 1, &legacy,
+                   sizeof(legacy), NULL) == PRDB_SDK_SQL_SYNTAX_ERROR);
+    }
     return 0;
 }

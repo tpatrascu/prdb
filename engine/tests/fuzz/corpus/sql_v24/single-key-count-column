@@ -1,0 +1,1 @@
+SELECT id, COUNT(score) FROM records GROUP BY id HAVING COUNT(score) >= $1 ORDER BY COUNT(score) DESC LIMIT 2
