@@ -1,6 +1,7 @@
 #include "prdb_sdk_sql_exec_v2.h"
 #include "prdb_sdk_sql_exec_v3.h"
 #include "prdb_sdk_sql_dml_v3.h"
+#include "sql_parameter_internal.h"
 
 #include <string.h>
 
@@ -209,39 +210,13 @@ static int32_t execute_select_internal(
         if (node->node_kind == PRDB_SDK_SQL_PREDICATE_COMPARE) {
             const prdb_sdk_sql_bound_column_v2 *column =
                 &binding.predicate_columns[index];
-            prdb_sdk_select_v1 parameter_statement = {0};
             prdb_sdk_value_v1 bound_parameter = {0};
-            parameter_statement.struct_size = sizeof(parameter_statement);
-            parameter_statement.abi_version = PRDB_SDK_SQL_ABI_V1_VERSION;
-            parameter_statement.sql = sql;
-            parameter_statement.sql_len = sql_len;
-            parameter_statement.has_where = 1;
-            parameter_statement.parameter_index = node->parameter_index;
-            status = prdb_sdk_sql_bind_select_parameter_v1(
-                &parameter_statement, parameters, parameter_count,
-                column->type_code, column->decimal_precision,
-                column->decimal_scale, &bound_parameter,
-                sizeof(bound_parameter));
+            status = bind_sql_parameter(
+                node->parameter_index, parameters, parameter_metadata,
+                parameter_count, column->type_code, column->decimal_precision,
+                column->decimal_scale, &bound_parameter);
             if (status != PRDB_SDK_SQL_EVAL_OK) {
                 return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_BIND_ERROR);
-            }
-            if (parameter_metadata != NULL) {
-                const prdb_sdk_sql_parameter_metadata_v1 *metadata =
-                    &parameter_metadata[node->parameter_index - 1];
-                if (metadata->struct_size < sizeof(*metadata) ||
-                    metadata->abi_version !=
-                        PRDB_SDK_SQL_PARAMETER_METADATA_ABI_V1_VERSION ||
-                    metadata->type_code != column->type_code ||
-                    metadata->reserved[0] != 0 || metadata->reserved[1] != 0 ||
-                    (column->type_code == PRDB_SDK_VALUE_TYPE_DECIMAL &&
-                     (metadata->decimal_precision == 0 ||
-                      metadata->decimal_precision > 38 ||
-                      metadata->decimal_scale != column->decimal_scale)) ||
-                    (column->type_code != PRDB_SDK_VALUE_TYPE_DECIMAL &&
-                     (metadata->decimal_precision != 0 ||
-                      metadata->decimal_scale != 0))) {
-                    return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_BIND_ERROR);
-                }
             }
         }
     }

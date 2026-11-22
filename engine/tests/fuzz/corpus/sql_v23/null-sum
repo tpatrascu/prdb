@@ -1,0 +1,1 @@
+SELECT id, score, SUM(score) FROM widgets GROUP BY id, score HAVING SUM(score) IS NULL

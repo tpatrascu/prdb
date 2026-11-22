@@ -1,0 +1,1 @@
+SELECT id, score, SUM(score) FROM widgets GROUP BY id, score HAVING COUNT(*) IS NOT NULL AND SUM(score) >= -1.25e-2

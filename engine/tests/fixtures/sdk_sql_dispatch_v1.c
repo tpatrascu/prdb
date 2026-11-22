@@ -11,8 +11,10 @@ typedef struct dispatch_test_context {
     uint32_t planner_calls;
     uint32_t failure_calls;
     uint32_t group_success;
+    uint32_t open_calls;
     uint32_t next_calls;
     uint32_t result_calls;
+    uint32_t insert_calls;
     uint32_t result_len;
     uint32_t join_open_calls;
     uint32_t join_next_calls[2];
@@ -113,8 +115,8 @@ static void put_name(uint8_t *bytes, uint32_t *offset, const char *name) {
     *offset += length;
 }
 
-static uint32_t make_integer_relation(uint8_t *bytes, uint8_t handle_kind,
-                                      uint8_t handle_fill) {
+static uint32_t make_group_relation(uint8_t *bytes, uint8_t handle_kind,
+                                      uint8_t handle_fill, uint8_t score_type) {
     uint32_t offset = 0;
     put_u16(bytes, &offset, 1);
     bytes[offset++] = 0;
@@ -127,14 +129,21 @@ static uint32_t make_integer_relation(uint8_t *bytes, uint8_t handle_kind,
         memset(bytes + offset, (int)(0x33 + index), 16); offset += 16;
         put_u32_at(bytes, &offset, index);
         bytes[offset++] = 1;
-        bytes[offset++] = PRDB_SDK_VALUE_TYPE_INTEGER;
-        bytes[offset++] = 0;
-        bytes[offset++] = 0;
+        uint8_t type = index == 0 ? PRDB_SDK_VALUE_TYPE_INTEGER : score_type;
+        bytes[offset++] = type;
+        bytes[offset++] = type == PRDB_SDK_VALUE_TYPE_DECIMAL ? 10 : 0;
+        bytes[offset++] = type == PRDB_SDK_VALUE_TYPE_DECIMAL ? 2 : 0;
         bytes[offset++] = 0;
         bytes[offset++] = 0;
         put_name(bytes, &offset, index == 0 ? "id" : "score");
     }
     return offset;
+}
+
+static uint32_t make_integer_relation(uint8_t *bytes, uint8_t handle_kind,
+                                      uint8_t handle_fill) {
+    return make_group_relation(bytes, handle_kind, handle_fill,
+                                  PRDB_SDK_VALUE_TYPE_INTEGER);
 }
 
 static uint32_t make_integer_relation_named(uint8_t *bytes,
@@ -191,7 +200,7 @@ static int32_t join_planner_request(
     return PRDB_QUERY_CALLBACK_OK;
 }
 
-static uint32_t make_group_rows(uint8_t *bytes) {
+static uint32_t make_group_rows_with_score_type(uint8_t *bytes, uint8_t score_type) {
     uint32_t offset = 0;
     put_u16(bytes, &offset, 1);
     bytes[offset++] = 1;
@@ -202,12 +211,24 @@ static uint32_t make_group_rows(uint8_t *bytes) {
         put_u16(bytes, &offset, 2);
         for (uint32_t cell = 0; cell < 2; ++cell) {
             bytes[offset++] = PRDB_SDK_VALUE_STATE_VALUE;
-            bytes[offset++] = PRDB_SDK_VALUE_TYPE_INTEGER;
-            put_u32_at(bytes, &offset, 4);
-            put_u32_at(bytes, &offset, cell == 0 ? 1 : 3);
+            uint8_t type = cell == 0 ? PRDB_SDK_VALUE_TYPE_INTEGER : score_type;
+            bytes[offset++] = type;
+            if (type == PRDB_SDK_VALUE_TYPE_DECIMAL) {
+                put_u32_at(bytes, &offset, 16);
+                memset(bytes + offset, 0, 12);
+                offset += 12;
+                put_u32_at(bytes, &offset, 300);
+            } else {
+                put_u32_at(bytes, &offset, 4);
+                put_u32_at(bytes, &offset, cell == 0 ? 1 : 3);
+            }
         }
     }
     return offset;
+}
+
+static uint32_t make_group_rows(uint8_t *bytes) {
+    return make_group_rows_with_score_type(bytes, PRDB_SDK_VALUE_TYPE_INTEGER);
 }
 
 static int32_t fail_planner_request(
@@ -248,6 +269,21 @@ static int32_t unused_executor_request(
             return PRDB_QUERY_CALLBACK_RESPONSE_TOO_SMALL;
         memcpy(response, context->executor_reply, context->executor_reply_len);
         *response_len = context->executor_reply_len;
+    } else if (operation == PRDB_SDK_EXECUTOR_OP_STAGE_INSERT) {
+        static const uint8_t insert_cells[] = {
+            0, 2,
+            PRDB_SDK_EXECUTOR_INSERT_VALUE, PRDB_SDK_VALUE_TYPE_INTEGER,
+            0, 0, 0, 4, 0xff, 0xff, 0xff, 0xd6,
+            PRDB_SDK_EXECUTOR_INSERT_NULL};
+        uint8_t reply[18] = {0, 1, 8};
+        if (request_len != 18 + sizeof(insert_cells) ||
+            memcmp(request + 18, insert_cells, sizeof(insert_cells)) != 0 ||
+            sizeof(reply) > response_capacity)
+            return PRDB_QUERY_CALLBACK_INVALID_ARGUMENT;
+        memset(reply + 3, 0x44, 15);
+        memcpy(response, reply, sizeof(reply));
+        *response_len = sizeof(reply);
+        ++context->insert_calls;
     } else if (operation == PRDB_SDK_EXECUTOR_OP_CHECK_CANCELLATION) {
         static const uint8_t reply[] = {0, 1, 0};
         if (request_len != 0 || sizeof(reply) > response_capacity)
@@ -255,6 +291,7 @@ static int32_t unused_executor_request(
         memcpy(response, reply, sizeof(reply));
         *response_len = sizeof(reply);
     } else if (operation == PRDB_SDK_EXECUTOR_OP_OPEN_SCAN) {
+        ++context->open_calls;
         uint8_t reply[18] = {0, 1, 7};
         memset(reply + 3, 0x44, 15);
         if (request_len == 0 || sizeof(reply) > response_capacity)
@@ -346,6 +383,28 @@ static uint32_t read_u32(const uint8_t *bytes) {
            ((uint32_t)bytes[2] << 8) | bytes[3];
 }
 
+static int test_dispatch_insert_normalizes_signed_parameter(void) {
+    static const uint8_t sql[] = "INSERT INTO widgets VALUES ($1, NULL)";
+    static const uint8_t parameters[] = {
+        'P', 'S', 'P', '1', 0, 1, 0, 0,
+        0, 0, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0, 0, 0,
+        0, 0, 0, 4, 0xd6, 0xff, 0xff, 0xff};
+    dispatch_test_context context = {0};
+    prdb_host_api_v3 host = {
+        sizeof(host), PRDB_QUERY_ABI_V3_VERSION, &context,
+        unused_executor_request, fail_planner_request, discard_result,
+        count_statement_failure};
+    context.group_success = 1;
+    context.planner_reply_len = make_integer_relation(
+        context.planner_reply, PRDB_SDK_PLANNER_TABLE_HANDLE_KIND, 0x22);
+    context.executor_reply_len = make_integer_relation(
+        context.executor_reply, 6, 0x22);
+    return prdb_sdk_sql_run_statement_v1(
+               &host, (const uint8_t *)"app", 3, sql, sizeof(sql) - 1,
+               parameters, sizeof(parameters)) != PRDB_SDK_SQL_DISPATCH_OK ||
+           context.insert_calls != 1 || context.failure_calls != 0;
+}
+
 static int test_dispatch_grouped_select_emits_sqlr(void) {
     static const uint8_t sql[] =
         "SELECT id, score, SUM(score) FROM widgets GROUP BY id, score "
@@ -424,9 +483,8 @@ static int test_dispatch_grouped_select_emits_sqlr(void) {
     return 0;
 }
 
-static int test_dispatch_single_key_grouped_select_emits_sqlr(void) {
-    static const uint8_t sql[] =
-        "SELECT id, SUM(score) FROM widgets GROUP BY id";
+static int test_dispatch_single_key_grouped_select_emits_sqlr(
+    const uint8_t *sql, uint64_t sql_len) {
     dispatch_test_context context = {0};
     prdb_host_api_v3 host = {0};
     uint32_t offset = 0;
@@ -446,7 +504,7 @@ static int test_dispatch_single_key_grouped_select_emits_sqlr(void) {
     host.write_result = discard_result;
     host.statement_failure = count_statement_failure;
     if (prdb_sdk_sql_run_statement_v1(
-            &host, (const uint8_t *)"app", 3, sql, sizeof(sql) - 1,
+            &host, (const uint8_t *)"app", 3, sql, sql_len,
             NULL, 0) != PRDB_SDK_SQL_DISPATCH_OK ||
         context.planner_calls != 1 || context.failure_calls != 0 ||
         context.result_calls != 1 || context.result_len < 8 ||
@@ -488,6 +546,79 @@ static int test_dispatch_single_key_grouped_select_emits_sqlr(void) {
     return 0;
 }
 
+static int test_grouped_parameter_metadata(void) {
+    static const char where_sql[] =
+        "SELECT id, SUM(score) FROM widgets WHERE score >= $1 "
+        "GROUP BY id LIMIT 0";
+    static const char having_sql[] =
+        "SELECT id, SUM(score) FROM widgets GROUP BY id "
+        "HAVING SUM(score) >= $1";
+    static const char mixed_sql[] =
+        "SELECT id, SUM(score) FROM widgets WHERE score >= $1 "
+        "GROUP BY id HAVING SUM(score) >= $1";
+    static const char different_operand_scales_sql[] =
+        "SELECT id, AVG(score) FROM widgets WHERE score >= $1 "
+        "GROUP BY id HAVING AVG(score) >= $1";
+    static const char hidden_count_sql[] =
+        "SELECT id, SUM(score) FROM widgets GROUP BY id "
+        "HAVING SUM(score) IS NOT NULL OR COUNT(*) > $1";
+    static const struct {
+        const char *sql;
+        uint8_t type, scale, is_null;
+        int accepted;
+    } cases[] = {
+        {where_sql, PRDB_SDK_VALUE_TYPE_DECIMAL, 1, 0, 0},
+        {where_sql, PRDB_SDK_VALUE_TYPE_DECIMAL, 2, 0, 1},
+        {having_sql, PRDB_SDK_VALUE_TYPE_DECIMAL, 1, 1, 0},
+        {having_sql, PRDB_SDK_VALUE_TYPE_DECIMAL, 2, 1, 1},
+        {mixed_sql, PRDB_SDK_VALUE_TYPE_DECIMAL, 1, 0, 0},
+        {mixed_sql, PRDB_SDK_VALUE_TYPE_DECIMAL, 2, 0, 1},
+        {different_operand_scales_sql, PRDB_SDK_VALUE_TYPE_DECIMAL, 2, 0, 0},
+        {hidden_count_sql, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 1, 0},
+        {hidden_count_sql, PRDB_SDK_VALUE_TYPE_BIGINT, 0, 1, 1},
+    };
+    for (uint32_t index = 0; index < sizeof(cases) / sizeof(cases[0]); ++index) {
+        uint8_t parameters[] = {
+            'P', 'S', 'P', '1', 0, 1, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        dispatch_test_context context = {0};
+        prdb_host_api_v3 host = {
+            sizeof(host), PRDB_QUERY_ABI_V3_VERSION, &context,
+            unused_executor_request, fail_planner_request, discard_result,
+            count_statement_failure};
+        parameters[11] = cases[index].type;
+        parameters[12] = cases[index].type == PRDB_SDK_VALUE_TYPE_DECIMAL ? 4 : 0;
+        parameters[13] = cases[index].scale;
+        parameters[14] = cases[index].is_null;
+        parameters[19] = cases[index].is_null ? 0 : 16;
+        context.group_success = 1;
+        context.planner_reply_len = make_group_relation(
+            context.planner_reply, PRDB_SDK_PLANNER_TABLE_HANDLE_KIND, 0x22,
+            PRDB_SDK_VALUE_TYPE_DECIMAL);
+        context.executor_reply_len = make_group_relation(
+            context.executor_reply, 6, 0x22, PRDB_SDK_VALUE_TYPE_DECIMAL);
+        context.batch_reply_len = make_group_rows_with_score_type(
+            context.batch_reply, PRDB_SDK_VALUE_TYPE_DECIMAL);
+        int32_t status = prdb_sdk_sql_run_statement_v1(
+            &host, (const uint8_t *)"app", 3,
+            (const uint8_t *)cases[index].sql, strlen(cases[index].sql),
+            parameters, 20 + parameters[19]);
+        uint32_t scans = cases[index].accepted && cases[index].sql != where_sql;
+        uint32_t rows = scans && cases[index].sql != having_sql;
+        if (status != (cases[index].accepted ? PRDB_SDK_SQL_DISPATCH_OK
+                                            : PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR) ||
+            context.failure_calls != (uint32_t)!cases[index].accepted ||
+            context.planner_calls != 1 || context.open_calls != scans ||
+            context.result_calls != rows) {
+            fprintf(stderr, "grouped metadata case %u returned %d, opened %u scans, emitted %u rows\n",
+                    index, status, context.open_calls, context.result_calls);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int test_dispatch_filtered_join_emits_sqlr(void) {
     static const uint8_t sql[] =
         "SELECT l.id, r.score FROM widgets AS l INNER JOIN widgets AS r "
@@ -496,7 +627,7 @@ static int test_dispatch_filtered_join_emits_sqlr(void) {
     static const uint8_t parameters[] = {
         'P', 'S', 'P', '1', 0, 1, 0, 0,
         0, 0, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0, 0, 0,
-        0, 0, 0, 4, 0, 0, 0, 3
+        0, 0, 0, 4, 3, 0, 0, 0
     };
     dispatch_test_context context = {0};
     prdb_host_api_v3 host = {0};
@@ -700,14 +831,28 @@ int main(void) {
         fputs("interactive statement dispatcher did not route supported DML\n", stderr);
         return 1;
     }
+    if (test_dispatch_insert_normalizes_signed_parameter() != 0) {
+        fputs("INSERT dispatcher did not normalize signed PSP1 input\n", stderr);
+        return 1;
+    }
     if (test_dispatch_grouped_select_emits_sqlr() != 0) {
         fputs("grouped SELECT dispatch did not emit expected SQLR\n", stderr);
         return 1;
     }
-    if (test_dispatch_single_key_grouped_select_emits_sqlr() != 0) {
+    static const uint8_t single_key_sql[] =
+        "SELECT id, SUM(score) FROM widgets GROUP BY id";
+    static const uint8_t single_key_having_sql[] =
+        "SELECT id, SUM(score) FROM widgets GROUP BY id "
+        "HAVING SUM(score) IS NOT NULL AND (COUNT(*) >= 2 OR SUM(score) > 10) "
+        "ORDER BY SUM(score) DESC NULLS LAST, id ASC LIMIT 1";
+    if (test_dispatch_single_key_grouped_select_emits_sqlr(
+            single_key_sql, sizeof(single_key_sql) - 1) != 0 ||
+        test_dispatch_single_key_grouped_select_emits_sqlr(
+            single_key_having_sql, sizeof(single_key_having_sql) - 1) != 0) {
         fputs("single-key grouped SELECT dispatch did not emit expected SQLR\n", stderr);
         return 1;
     }
+    if (test_grouped_parameter_metadata() != 0) return 1;
     if (test_dispatch_filtered_join_emits_sqlr() != 0) {
         fputs("filtered JOIN dispatch did not emit expected SQLR\n", stderr);
         return 1;

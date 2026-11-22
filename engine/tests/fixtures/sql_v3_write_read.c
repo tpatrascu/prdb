@@ -15,6 +15,7 @@
 #include "prdb_sdk_sql_exec_v19.h"
 #include "prdb_sdk_sql_exec_v20.h"
 #include "prdb_sdk_sql_exec_v21.h"
+#include "prdb_sdk_sql_exec_v23.h"
 #include "prdb_sdk_sql_dispatch_v1.h"
 #include "prdb_sdk_sql_exec_v4.h"
 #include "prdb_sdk_sql_result_v1.h"
@@ -1358,6 +1359,20 @@ static int32_t verify_information_schema_name(
                                        value.data_len);
 }
 
+static int32_t count_unexpected_group(
+    void *context, const prdb_sdk_value_v1 *group_keys,
+    uint32_t group_key_count, const prdb_sdk_value_v1 *aggregate_value,
+    uint64_t matching_row_count,
+    const prdb_sdk_select_binding_v21 *binding) {
+    (void)group_keys;
+    (void)group_key_count;
+    (void)aggregate_value;
+    (void)matching_row_count;
+    (void)binding;
+    ++*(uint32_t *)context;
+    return 0;
+}
+
 static int32_t report_failure(const prdb_host_api_v3 *host,
                               const uint8_t *message, uint64_t length) {
     (void)host->write_result(host->context, message, length);
@@ -1548,7 +1563,9 @@ static int32_t run_write_read_fixture(
     static const uint8_t select_composite_hidden_count_dispatch_sql[] =
         "SELECT left_key, right_key, SUM(decimal_value) "
         "FROM decimal_grouped_records GROUP BY left_key, right_key "
-        "HAVING COUNT(*) >= 2 AND SUM(decimal_value) >= 4.50e0";
+        "HAVING COUNT(*) IS NOT NULL AND COUNT(*) >= 2 "
+        "AND SUM(decimal_value) IS NOT NULL "
+        "AND SUM(decimal_value) >= 4.50e0";
     static const uint8_t select_composite_avg_numeric_v21_sql[] =
         "SELECT left_key, right_key, AVG(decimal_value) "
         "FROM decimal_grouped_records "
@@ -1582,8 +1599,19 @@ static int32_t run_write_read_fixture(
     static const uint8_t filtered_join_parameter_block[] = {
         'P', 'S', 'P', '1', 0, 1, 0, 0,
         0, 0, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0, 0, 0,
-        0, 0, 0, 4, 0, 0, 0, 42
+        0, 0, 0, 4, 42, 0, 0, 0
     };
+    static const uint8_t single_key_having_sql[] =
+        "SELECT right_key, SUM(decimal_value) FROM decimal_grouped_records "
+        "WHERE (decimal_value IS NULL OR decimal_value >= $1) GROUP BY right_key "
+        "HAVING SUM(decimal_value) IS NULL OR "
+        "(COUNT(*) >= 2 AND SUM(decimal_value) >= $1) "
+        "ORDER BY SUM(decimal_value) DESC NULLS LAST, right_key LIMIT 1";
+    static const uint8_t min_amount_parameter[] = {
+        'P', 'S', 'P', '1', 0, 1, 0, 0,
+        0, 0, 0, PRDB_SDK_VALUE_TYPE_DECIMAL, 4, 2, 0, 0,
+        0, 0, 0, 16,
+        125, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     static const uint8_t delete_sql[] = "DELETE FROM records WHERE id = $1";
     static const uint8_t multi_insert_sql[] =
         "INSERT INTO records VALUES ($1), ($2)";
@@ -1934,6 +1962,42 @@ static int32_t run_write_read_fixture(
             return report_failure(host, message, sizeof(message) - 1);
         }
         return 1;
+    }
+    if (invocation->parameters_len == 1 && invocation->parameters != NULL &&
+        invocation->parameters[0] == 'P') {
+        uint8_t mismatched_parameter[sizeof(min_amount_parameter)];
+        memcpy(mismatched_parameter, min_amount_parameter,
+               sizeof(mismatched_parameter));
+        mismatched_parameter[13] = 1; /* Declares 12.5, while the operand scale is 2. */
+        status = prdb_sdk_sql_run_statement_v1(
+            host, schema, sizeof(schema) - 1, single_key_having_sql,
+            sizeof(single_key_having_sql) - 1, mismatched_parameter,
+            sizeof(mismatched_parameter));
+        /* Catch the bind error so only the host latch can abort on success. */
+        if (status == PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR) return 0;
+        static const uint8_t message[] = "fixture-error-grouped-parameter-scale";
+        return report_failure(host, message, sizeof(message) - 1);
+    }
+    if (invocation->parameters_len == 1 && invocation->parameters != NULL &&
+        invocation->parameters[0] == 'H') {
+        static const uint8_t redacted_having_sql[] =
+            "SELECT left_key, right_key, SUM(decimal_value) "
+            "FROM decimal_grouped_records GROUP BY left_key, right_key "
+            "HAVING COUNT(*) IS NULL AND SUM(decimal_value) IS NULL";
+        uint32_t callbacks = 0;
+        status = prdb_sdk_sql_execute_group_v23(
+            host, schema, sizeof(schema) - 1, redacted_having_sql,
+            sizeof(redacted_having_sql) - 1, NULL, 0, 16,
+            sizeof(batch_response), planner_response, sizeof(planner_response),
+            executor_response, sizeof(executor_response), batch_response,
+            sizeof(batch_response), planner_columns, 9, executor_columns, 9,
+            cell_scratch, 9, grouped_materialized, sizeof(grouped_materialized),
+            count_unexpected_group, &callbacks);
+        /* Catch the precise error and rely on the host latch to abort. */
+        if (status == PRDB_SDK_SQL_EXEC_EVALUATION_ERROR && callbacks == 0)
+            return 0;
+        static const uint8_t message[] = "fixture-error-redacted-having";
+        return report_failure(host, message, sizeof(message) - 1);
     }
     if (invocation->parameters_len == 1 && invocation->parameters != NULL &&
         (invocation->parameters[0] == 'A' || invocation->parameters[0] == 'B' ||
@@ -2362,6 +2426,30 @@ static int32_t run_write_read_fixture(
                 if (status >= 0 && status <= 9) {
                     message[sizeof(message) - 2] = (uint8_t)('0' + status);
                 }
+                return report_failure(host, message, sizeof(message) - 1);
+            }
+        }
+        if (invocation->parameters[0] == 'A') {
+            static const uint8_t null_having_sql[] =
+                "SELECT left_key, right_key, SUM(decimal_value) "
+                "FROM decimal_grouped_records GROUP BY left_key, right_key "
+                "HAVING SUM(decimal_value) IS NULL "
+                "AND COUNT(*) IS NOT NULL AND COUNT(*) >= 1 "
+                "ORDER BY left_key LIMIT 1";
+            status = prdb_sdk_sql_run_statement_v1(
+                host, schema, sizeof(schema) - 1, null_having_sql,
+                sizeof(null_having_sql) - 1, NULL, 0);
+            if (status != PRDB_SDK_SQL_DISPATCH_OK) {
+                static const uint8_t message[] = "fixture-error-null-having";
+                return report_failure(host, message, sizeof(message) - 1);
+            }
+
+            status = prdb_sdk_sql_run_statement_v1(
+                host, schema, sizeof(schema) - 1, single_key_having_sql,
+                sizeof(single_key_having_sql) - 1, min_amount_parameter,
+                sizeof(min_amount_parameter));
+            if (status != PRDB_SDK_SQL_DISPATCH_OK) {
+                static const uint8_t message[] = "fixture-error-single-key-having";
                 return report_failure(host, message, sizeof(message) - 1);
             }
         }

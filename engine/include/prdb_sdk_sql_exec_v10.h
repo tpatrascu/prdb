@@ -28,4 +28,26 @@ int32_t prdb_sdk_sql_execute_group_v10(
     uint8_t *materialized_bytes, uint64_t materialized_bytes_capacity,
     prdb_sdk_sql_group_row_v10_fn on_group, void *result_context);
 
+/* Match each referenced parameter declaration against the bound predicate.
+ * Values use normal SDK scalar encoding. The one-based metadata array is
+ * required when parameter_count is nonzero, including for typed NULLs. */
+int32_t prdb_sdk_sql_execute_group_typed_v10(
+    const prdb_host_api_v3 *host,
+    const uint8_t *schema, uint32_t schema_len,
+    const uint8_t *sql, uint64_t sql_len,
+    const prdb_sdk_value_v1 *parameters,
+    const prdb_sdk_sql_parameter_metadata_v1 *parameter_metadata,
+    uint32_t parameter_count,
+    uint16_t max_candidates, uint32_t max_batch_bytes,
+    uint8_t *planner_response, uint64_t planner_response_capacity,
+    uint8_t *executor_response, uint64_t executor_response_capacity,
+    uint8_t *batch_response, uint64_t batch_response_capacity,
+    prdb_sdk_sql_column_shape_v2 *planner_columns,
+    uint32_t planner_column_capacity,
+    prdb_sdk_sql_column_shape_v2 *executor_columns,
+    uint32_t executor_column_capacity,
+    prdb_sdk_value_v1 *cell_scratch, uint32_t cell_scratch_capacity,
+    uint8_t *materialized_bytes, uint64_t materialized_bytes_capacity,
+    prdb_sdk_sql_group_row_v10_fn on_group, void *result_context);
+
 #endif /* PRDB_SDK_SQL_EXEC_V10_H */

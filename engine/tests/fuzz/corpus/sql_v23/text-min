@@ -1,0 +1,1 @@
+SELECT id, score, MIN(score) FROM widgets GROUP BY id, score HAVING MIN(score) IS NOT NULL AND COUNT(*) >= 2

@@ -13,8 +13,9 @@
 #define PRDB_SDK_SQL_DISPATCH_RESOURCE_ERROR INT32_C(3)
 #define PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR INT32_C(4)
 
-/* Decodes a canonical PSP1 block into borrowed SQL values and separate type
- * metadata. The values borrow the input block until the caller returns. */
+/* Decodes a canonical PSP1 block into borrowed payloads and type metadata.
+ * Fixed-width signed payloads retain PSP1's little-endian representation.
+ * The statement dispatchers normalize these before calling SDK runners. */
 int32_t prdb_sdk_sql_decode_parameters_v1(
     const uint8_t *parameters, uint64_t parameters_len,
     prdb_sdk_value_v1 *values, uint32_t values_capacity,

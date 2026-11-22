@@ -11,11 +11,13 @@
 #include "prdb_sdk_sql_exec_v18.h"
 #include "prdb_sdk_sql_exec_v21.h"
 #include "prdb_sdk_sql_exec_v22.h"
+#include "prdb_sdk_sql_exec_v23.h"
 #include "prdb_sdk_sql_result_v1.h"
 #include "prdb_query_abi_payload_codecs.h"
 
 #include <assert.h>
 #include <string.h>
+#include <stdio.h>
 
 typedef struct mock_state {
     uint8_t planner[512];
@@ -2746,6 +2748,54 @@ static int32_t run_query_v22_decimal(mock_state *mock, const uint8_t *sql,
         materialized_bytes, sizeof(materialized_bytes), on_group, capture);
 }
 
+static int32_t on_group_v23_null_test(
+    void *context, const prdb_sdk_value_v1 *keys, uint32_t key_count,
+    const prdb_sdk_value_v1 *aggregate, uint64_t rows,
+    const prdb_sdk_select_binding_v21 *binding) {
+    group_capture *capture = context;
+    assert(key_count == 2 && capture->mock->batch_finished);
+    assert(binding != NULL && rows == 2);
+    assert(prdb_sdk_value_get_integer_v1(&keys[0],
+        &capture->keys[capture->calls]) == PRDB_SDK_VALUE_ACCESS_OK);
+    capture->aggregates[capture->calls] = aggregate == NULL ? 99 :
+        (aggregate->state == PRDB_SDK_VALUE_STATE_NULL ? -1 : 1);
+    ++capture->calls;
+    return 0;
+}
+
+static int32_t run_query_v23_decimal(mock_state *mock, const uint8_t *sql,
+                                     uint64_t sql_len,
+                                     const prdb_sdk_value_v1 *parameters,
+                                     uint32_t parameter_count,
+                                     prdb_sdk_sql_group_row_v23_fn on_group,
+                                     group_capture *capture) {
+    static const uint8_t schema[] = "app";
+    static const uint8_t id_name[] = "id";
+    static const uint8_t score_name[] = "score";
+    uint8_t planner_response[256] = {0};
+    uint8_t executor_response[256] = {0};
+    uint8_t batch_response[8192] = {0};
+    uint8_t materialized_bytes[4096] = {0};
+    prdb_sdk_sql_column_shape_v2 planner_columns[2] = {
+        {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
+        {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_DECIMAL, 10, 2}};
+    prdb_sdk_sql_column_shape_v2 executor_columns[2] = {
+        {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
+        {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_DECIMAL, 10, 2}};
+    prdb_sdk_value_v1 cell_scratch[2] = {{0}};
+    prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
+                             mock, executor_request, planner_request, NULL,
+                             statement_failure};
+    return prdb_sdk_sql_execute_group_v23(
+        &host, schema, sizeof(schema) - 1, sql, sql_len, parameters,
+        parameter_count,
+        mock->max_candidates == 0 ? 4 : (uint16_t)mock->max_candidates, 8192,
+        planner_response, sizeof(planner_response), executor_response,
+        sizeof(executor_response), batch_response, sizeof(batch_response),
+        planner_columns, 2, executor_columns, 2, cell_scratch, 2,
+        materialized_bytes, sizeof(materialized_bytes), on_group, capture);
+}
+
 static int32_t run_query_v21_decimal_wide_sum(
     mock_state *mock, const uint8_t *sql, uint64_t sql_len,
     group_capture *capture) {
@@ -4004,6 +4054,85 @@ int main(void) {
                      &capture) == PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
     assert(capture.calls == 0 && mock.next_calls == 1 &&
            mock.executor_calls == 4 && mock.statement_failed == 1);
+
+    {
+        /* Two all-NULL rows form (1,NULL); two values form (2,3.00). */
+        const int32_t null_keys[] = {1, 1, 2, 2};
+        const int64_t null_values[] = {0, 0, 300, 300};
+        const uint8_t states[] = {PRDB_SDK_VALUE_STATE_NULL,
+            PRDB_SDK_VALUE_STATE_NULL, PRDB_SDK_VALUE_STATE_VALUE,
+            PRDB_SDK_VALUE_STATE_VALUE};
+        mock.planner_len = make_decimal_relation(
+            mock.planner, PRDB_SDK_PLANNER_TABLE_HANDLE_KIND, 0x99, 10, 2);
+        mock.executor_len = make_decimal_relation(mock.executor, 6, 0x22, 10, 2);
+        mock.batch_len = make_decimal_rows(mock.batch, 1, null_keys,
+                                           null_values, states, 4);
+        const char *aggregates[] = {"SUM", "AVG", "MIN", "MAX"};
+        for (uint32_t i = 0; i < 4; ++i) {
+            char sql[512];
+            snprintf(sql, sizeof(sql),
+                "SELECT id, score, %s(score) FROM widgets GROUP BY id, score "
+                "HAVING %s(score) IS NULL AND COUNT(*) IS NOT NULL "
+                "AND COUNT(*) >= 2 ORDER BY id DESC LIMIT 1",
+                aggregates[i], aggregates[i]);
+            reset_scan(&mock, &capture, 1);
+            assert(run_query_v23_decimal(&mock, (const uint8_t *)sql,
+                strlen(sql), NULL, 0, on_group_v23_null_test, &capture) ==
+                PRDB_SDK_SQL_EXEC_OK);
+            assert(capture.calls == 1 && capture.keys[0] == 1 &&
+                   capture.aggregates[0] == -1 && !mock.statement_failed);
+            snprintf(sql, sizeof(sql),
+                "SELECT id, score, %s(score) FROM widgets GROUP BY id, score "
+                "HAVING NOT %s(score) IS NULL AND COUNT(*) >= 2",
+                aggregates[i], aggregates[i]);
+            reset_scan(&mock, &capture, 1);
+            assert(run_query_v23_decimal(&mock, (const uint8_t *)sql,
+                strlen(sql), NULL, 0, on_group_v23_null_test, &capture) ==
+                PRDB_SDK_SQL_EXEC_OK);
+            assert(capture.calls == 1 && capture.keys[0] == 2 &&
+                   capture.aggregates[0] == 1 && !mock.statement_failed);
+        }
+        {
+            prdb_sdk_value_v1 null_parameter = {
+                sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
+                PRDB_SDK_VALUE_STATE_NULL, 0, NULL, 0};
+            const char *or_sql = "SELECT id, score, SUM(score) FROM widgets "
+                "GROUP BY id, score HAVING SUM(score) IS NULL "
+                "OR SUM(score) >= $1";
+            reset_scan(&mock, &capture, 1);
+            assert(run_query_v23_decimal(&mock, (const uint8_t *)or_sql,
+                strlen(or_sql), &null_parameter, 1, on_group_v23_null_test,
+                &capture) == PRDB_SDK_SQL_EXEC_OK);
+            assert(capture.calls == 1 && capture.keys[0] == 1 &&
+                   capture.aggregates[0] == -1 && !mock.statement_failed);
+            const char *nonnull_sql = "SELECT id, score, SUM(score) FROM widgets "
+                "GROUP BY id, score HAVING SUM(score) IS NOT NULL";
+            reset_scan(&mock, &capture, 1);
+            assert(run_query_v23_decimal(&mock, (const uint8_t *)nonnull_sql,
+                strlen(nonnull_sql), NULL, 0, on_group_v23_null_test,
+                &capture) == PRDB_SDK_SQL_EXEC_OK);
+            assert(capture.calls == 1 && capture.keys[0] == 2 &&
+                   capture.aggregates[0] == 1 && !mock.statement_failed);
+        }
+        const char *count_sql = "SELECT id, score, COUNT(*) FROM widgets "
+            "GROUP BY id, score HAVING COUNT(*) IS NULL";
+        reset_scan(&mock, &capture, 1);
+        assert(run_query_v23_decimal(&mock, (const uint8_t *)count_sql,
+            strlen(count_sql), NULL, 0, on_group_v23_null_test, &capture) ==
+            PRDB_SDK_SQL_EXEC_OK);
+        assert(capture.calls == 0 && !mock.statement_failed);
+        const char *redacted_sql = "SELECT id, score, SUM(score) FROM widgets "
+            "GROUP BY id, score HAVING SUM(score) IS NULL";
+        const uint8_t denied[] = {PRDB_SDK_VALUE_STATE_NULL,
+            PRDB_SDK_VALUE_STATE_REDACTED};
+        mock.batch_len = make_decimal_rows(mock.batch, 1, null_keys,
+                                           null_values, denied, 2);
+        reset_scan(&mock, &capture, 1);
+        assert(run_query_v23_decimal(&mock, (const uint8_t *)redacted_sql,
+            strlen(redacted_sql), NULL, 0, on_group_v23_null_test, &capture) ==
+            PRDB_SDK_SQL_EXEC_EVALUATION_ERROR);
+        assert(capture.calls == 0 && mock.statement_failed);
+    }
 
     {
         const int64_t decimal_coefficients[] = {900, 300, 500};

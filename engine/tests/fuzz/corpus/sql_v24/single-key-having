@@ -1,0 +1,1 @@
+SELECT id, SUM(score) FROM widgets WHERE score IS NULL OR score >= $1 GROUP BY id HAVING SUM(score) IS NULL OR COUNT(*) >= 2 ORDER BY SUM(score) DESC NULLS LAST, id LIMIT 2

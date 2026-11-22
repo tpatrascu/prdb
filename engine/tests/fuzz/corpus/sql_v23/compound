@@ -1,0 +1,1 @@
+SELECT id, score, AVG(score) FROM widgets GROUP BY id, score HAVING NOT AVG(score) IS NOT NULL OR COUNT(*) IS NULL ORDER BY id LIMIT 1

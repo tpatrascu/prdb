@@ -1146,7 +1146,7 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
                     && sql_results.iter().all(|(ordinal, result)| {
                         matches!(*ordinal, 1 | 2)
                             && result.starts_with(b"SQLR")
-                            && result.ends_with(&[7, 0, 0, 0])
+                            && result.ends_with(&7i32.to_be_bytes())
                     })
                     && sql_results[0].1 == sql_results[1].1,
                 "RUNAS saw a foreign staged row or missed its own staged INSERT: {sql_results:?}"
@@ -1304,7 +1304,7 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
                             == 2
                     })
                     && second_sql_results.iter().all(|(_, result)| {
-                        result.starts_with(b"SQLR") && result.ends_with(&[7, 0, 0, 0])
+                        result.starts_with(b"SQLR") && result.ends_with(&7i32.to_be_bytes())
                     }),
                 "second RUNAS package did not read both transactions' own staged rows: {second_sql_results:?}"
             );
@@ -1556,9 +1556,9 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
             assert_eq!(
                 durable_rows,
                 [
-                    [7, 0, 0, 0].to_vec(),
-                    [7, 0, 0, 0].to_vec(),
-                    [9, 0, 0, 0].to_vec(),
+                    7i32.to_be_bytes().to_vec(),
+                    7i32.to_be_bytes().to_vec(),
+                    9i32.to_be_bytes().to_vec(),
                 ]
             );
             drop(client);
@@ -1735,9 +1735,9 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
             assert_eq!(
                 rows_after_revocation,
                 [
-                    [7, 0, 0, 0].to_vec(),
-                    [7, 0, 0, 0].to_vec(),
-                    [9, 0, 0, 0].to_vec(),
+                    7i32.to_be_bytes().to_vec(),
+                    7i32.to_be_bytes().to_vec(),
+                    9i32.to_be_bytes().to_vec(),
                 ],
                 "the revoked actor's staged row became visible after rejected COMMIT"
             );

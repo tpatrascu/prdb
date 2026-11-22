@@ -45020,6 +45020,33 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             );
         }
         {
+            let frame = aggregate_frames
+                .next()
+                .ok_or("missing all-NULL SUM HAVING SQLR row")?;
+            assert_eq!(frame.operation, Operation::GatewayResultData as u16);
+            assert_eq!(frame.request_id, aggregate_accepted.request_id);
+            assert_eq!(
+                frame.payload,
+                expected_null_aggregate_row(b"sum", 5, 38, 2, 3, 11)
+            );
+        }
+        {
+            let frame = aggregate_frames
+                .next()
+                .ok_or("missing single-key SUM HAVING SQLR row")?;
+            assert_eq!(frame.operation, Operation::GatewayResultData as u16);
+            assert_eq!(frame.request_id, aggregate_accepted.request_id);
+            let expected = [
+                b"SQLR\x00\x01\x00\x02".as_slice(),
+                b"\x00\x09right_key\x00\x00\x00\x03\x00\x00\x00\x00\x00\x00\x04",
+                &9i32.to_be_bytes(),
+                b"\x00\x03sum\x00\x00\x00\x05\x26\x02\x00\x00\x00\x00\x10",
+                &350i128.to_be_bytes(),
+            ]
+            .concat();
+            assert_eq!(frame.payload, expected);
+        }
+        {
             let mut group_key = b"0000".to_vec();
             group_key.extend(std::iter::repeat_n(b'a', 8_168));
             let mut expected = b"SQLR".to_vec();
@@ -45092,246 +45119,151 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             OutcomeStatus::Committed
         );
 
-        let redacted_policy_invocation = id(0xac);
-        let mut redacted_policy_audit =
-            identity_audit_event(0xad, user_id, decimal_table.column_ids[2]);
-        redacted_policy_audit.correlation_id = redacted_policy_invocation;
-        storage
-            .create_policy(CreatePolicyRequest {
-                invocation_id: redacted_policy_invocation,
-                authenticated_actor_id: user_id,
-                table_id: decimal_table.table_id,
-                name: "sandbox_decimal_group_redacted_value_policy".to_owned(),
-                kind: PolicyKind::Cell,
-                operation: prdb_engine::authorization::Operation::Select,
-                effect: prdb_engine::authorization::Effect::Restrict,
-                recipients: vec![prdb_engine::authorization::Subject::Principal(user_id)],
-                target_column_ids: vec![decimal_table.column_ids[2]],
-                using_expression: Some(prdb_engine::authorization::Expr::Literal(Some(
-                    ScalarValue::Boolean(false),
-                ))),
-                with_check_expression: None,
-                retention_deadline_us: now + 3_600_000_000,
-                audit_event: redacted_policy_audit,
-            })
-            .map_err(|error| format!("create confined redaction policy: {error:?}"))?;
-        let mut redacted_client = ClientConnectionSession::default();
-        redacted_client.accept_hello(ClientMode::Query, "sandbox-sql-redacted-aggregate")?;
-        redacted_client.authenticate(&storage, token_id, &secret)?;
-        let redacted_owner = redacted_client.staging_owner()?;
-        let redacted_parameter = [b'R'];
-        let redacted_reservation = staging.prepare(
-            redacted_owner,
-            PrepareSubmission {
-                manifest_version: 1,
-                manifest: manifest.clone(),
-                artifact_bytes: u64::try_from(artifact.len())?,
-                artifact_sha256: Sha256::digest(&artifact).into(),
-                scope_version: 1,
-                requested_scope: requested_scope.clone(),
-                parameter_bytes: 1,
-                parameter_sha256: Sha256::digest(redacted_parameter).into(),
-                deadline_ms: 30_000,
-                workload_class: WorkloadClass::Analytical,
-            },
-        )?;
-        let mut redacted_offset = 0;
-        for chunk in artifact.chunks(prdb_engine::supervisor::MAX_CHUNK_BYTES) {
-            redacted_offset = staging.upload_chunk(
+        for (mode, client_name) in [
+            (b'P', "sandbox-sql-grouped-parameter-scale"),
+            (b'R', "sandbox-sql-redacted-aggregate"),
+            (b'N', "sandbox-sql-redacted-null-filter"),
+            (b'H', "sandbox-sql-redacted-null-having"),
+        ] {
+            // Run the parameter mismatch against visible values first.
+            if mode == b'R' {
+                let redacted_policy_invocation = id(0xac);
+                let mut redacted_policy_audit =
+                    identity_audit_event(0xad, user_id, decimal_table.column_ids[2]);
+                redacted_policy_audit.correlation_id = redacted_policy_invocation;
+                storage
+                    .create_policy(CreatePolicyRequest {
+                        invocation_id: redacted_policy_invocation,
+                        authenticated_actor_id: user_id,
+                        table_id: decimal_table.table_id,
+                        name: "sandbox_decimal_group_redacted_value_policy".to_owned(),
+                        kind: PolicyKind::Cell,
+                        operation: prdb_engine::authorization::Operation::Select,
+                        effect: prdb_engine::authorization::Effect::Restrict,
+                        recipients: vec![prdb_engine::authorization::Subject::Principal(user_id)],
+                        target_column_ids: vec![decimal_table.column_ids[2]],
+                        using_expression: Some(prdb_engine::authorization::Expr::Literal(Some(
+                            ScalarValue::Boolean(false),
+                        ))),
+                        with_check_expression: None,
+                        retention_deadline_us: now + 3_600_000_000,
+                        audit_event: redacted_policy_audit,
+                    })
+                    .map_err(|error| format!("create confined redaction policy: {error:?}"))?;
+            }
+            let mut redacted_client = ClientConnectionSession::default();
+            redacted_client.accept_hello(ClientMode::Query, client_name)?;
+            redacted_client.authenticate(&storage, token_id, &secret)?;
+            let redacted_owner = redacted_client.staging_owner()?;
+            let redacted_parameter = [mode];
+            let redacted_reservation = staging.prepare(
+                redacted_owner,
+                PrepareSubmission {
+                    manifest_version: 1,
+                    manifest: manifest.clone(),
+                    artifact_bytes: u64::try_from(artifact.len())?,
+                    artifact_sha256: Sha256::digest(&artifact).into(),
+                    scope_version: 1,
+                    requested_scope: requested_scope.clone(),
+                    parameter_bytes: 1,
+                    parameter_sha256: Sha256::digest(redacted_parameter).into(),
+                    deadline_ms: 30_000,
+                    workload_class: WorkloadClass::Analytical,
+                },
+            )?;
+            let mut redacted_offset = 0;
+            for chunk in artifact.chunks(prdb_engine::supervisor::MAX_CHUNK_BYTES) {
+                redacted_offset = staging.upload_chunk(
+                    redacted_owner,
+                    redacted_reservation.invocation_id,
+                    ChunkKind::Artifact,
+                    redacted_offset,
+                    chunk,
+                )?;
+            }
+            staging.upload_chunk(
                 redacted_owner,
                 redacted_reservation.invocation_id,
-                ChunkKind::Artifact,
-                redacted_offset,
-                chunk,
+                ChunkKind::Parameters,
+                0,
+                &redacted_parameter,
             )?;
-        }
-        staging.upload_chunk(
-            redacted_owner,
-            redacted_reservation.invocation_id,
-            ChunkKind::Parameters,
-            0,
-            &redacted_parameter,
-        )?;
-        staging.seal(redacted_owner, redacted_reservation.invocation_id)?;
-        let redacted_invocation_hex = redacted_reservation
-            .invocation_id
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        let (redacted_accepted, mut redacted_invocation, mut redacted_executor) = redacted_client
-            .handle_start_request_with_executor(
-            &storage,
-            &staging,
-            ClientFrame {
-                kind: 7,
-                request_id: 1,
-                response_sequence: 0,
-                payload: format!("{{\"invocation_id\":\"{redacted_invocation_hex}\"}}")
-                    .into_bytes(),
-            },
-            GatewayAdmissionConfig {
-                retention_period_us: 3_600_000_000,
-                max_rows: 128,
-                max_bytes: 1_048_576,
-            },
-            &runtime,
-        )?;
-        assert_eq!(redacted_accepted.payload, b"{\"state\":\"accepted\"}");
-        let (mut redacted_service, mut redacted_gateway) = UnixStream::pair()?;
-        redacted_gateway.set_read_timeout(Some(Duration::from_secs(10)))?;
-        let redacted_reader = std::thread::spawn(move || {
-            let mut frames = Vec::new();
-            while let Some(frame) = prdb_engine::ipc::read_frame(&mut redacted_gateway)? {
-                let terminal = frame.operation == Operation::GatewayTerminal as u16;
-                frames.push(frame);
-                if terminal {
-                    break;
-                }
-            }
-            Ok::<_, prdb_engine::ipc::FrameError>(frames)
-        });
-        let redacted_decision = observe_executor_relay_and_finalize_gateway(
-            &storage,
-            &mut redacted_invocation,
-            &mut redacted_executor,
-            &mut redacted_service,
-            redacted_accepted.request_id,
-        )?;
-        let redacted_frames = redacted_reader
-            .join()
-            .map_err(|_| "redacted aggregate gateway reader panicked")??;
-        assert_eq!(
-            redacted_decision,
-            GatewayTerminalDecision::Abort(GatewayAbortReason::WorkerFailure)
-        );
-        assert!(
-            !redacted_frames
+            staging.seal(redacted_owner, redacted_reservation.invocation_id)?;
+            let redacted_invocation_hex = redacted_reservation
+                .invocation_id
                 .iter()
-                .any(|frame| frame.operation == Operation::GatewayResultData as u16)
-        );
-        assert!(redacted_frames.iter().any(|frame| {
-            frame.operation == Operation::GatewayTerminal as u16
-                && String::from_utf8_lossy(&frame.payload).contains("\"outcome\":\"aborted\"")
-        }));
-        assert_eq!(
-            storage
-                .lookup_invocation_outcome(redacted_reservation.invocation_id, user_id, now + 1,)?
-                .ok_or("missing confined redacted aggregate outcome")?
-                .status,
-            OutcomeStatus::Aborted
-        );
-        staging.finish_started(redacted_owner, redacted_reservation.invocation_id)?;
-
-        let mut redacted_null_client = ClientConnectionSession::default();
-        redacted_null_client.accept_hello(ClientMode::Query, "sandbox-sql-redacted-null-filter")?;
-        redacted_null_client.authenticate(&storage, token_id, &secret)?;
-        let redacted_null_owner = redacted_null_client.staging_owner()?;
-        let redacted_null_parameter = [b'N'];
-        let redacted_null_reservation = staging.prepare(
-            redacted_null_owner,
-            PrepareSubmission {
-                manifest_version: 1,
-                manifest: manifest.clone(),
-                artifact_bytes: u64::try_from(artifact.len())?,
-                artifact_sha256: Sha256::digest(&artifact).into(),
-                scope_version: 1,
-                requested_scope: requested_scope.clone(),
-                parameter_bytes: 1,
-                parameter_sha256: Sha256::digest(redacted_null_parameter).into(),
-                deadline_ms: 30_000,
-                workload_class: WorkloadClass::Analytical,
-            },
-        )?;
-        let mut redacted_null_offset = 0;
-        for chunk in artifact.chunks(prdb_engine::supervisor::MAX_CHUNK_BYTES) {
-            redacted_null_offset = staging.upload_chunk(
-                redacted_null_owner,
-                redacted_null_reservation.invocation_id,
-                ChunkKind::Artifact,
-                redacted_null_offset,
-                chunk,
-            )?;
-        }
-        staging.upload_chunk(
-            redacted_null_owner,
-            redacted_null_reservation.invocation_id,
-            ChunkKind::Parameters,
-            0,
-            &redacted_null_parameter,
-        )?;
-        staging.seal(redacted_null_owner, redacted_null_reservation.invocation_id)?;
-        let redacted_null_invocation_hex = redacted_null_reservation
-            .invocation_id
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        let (redacted_null_accepted, mut redacted_null_invocation, mut redacted_null_executor) =
-            redacted_null_client.handle_start_request_with_executor(
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            let (redacted_accepted, mut redacted_invocation, mut redacted_executor) =
+                redacted_client.handle_start_request_with_executor(
+                    &storage,
+                    &staging,
+                    ClientFrame {
+                        kind: 7,
+                        request_id: 1,
+                        response_sequence: 0,
+                        payload: format!("{{\"invocation_id\":\"{redacted_invocation_hex}\"}}")
+                            .into_bytes(),
+                    },
+                    GatewayAdmissionConfig {
+                        retention_period_us: 3_600_000_000,
+                        max_rows: 128,
+                        max_bytes: 1_048_576,
+                    },
+                    &runtime,
+                )?;
+            assert_eq!(redacted_accepted.payload, b"{\"state\":\"accepted\"}");
+            let (mut redacted_service, mut redacted_gateway) = UnixStream::pair()?;
+            redacted_gateway.set_read_timeout(Some(Duration::from_secs(10)))?;
+            let redacted_reader = std::thread::spawn(move || {
+                let mut frames = Vec::new();
+                while let Some(frame) = prdb_engine::ipc::read_frame(&mut redacted_gateway)? {
+                    let terminal = frame.operation == Operation::GatewayTerminal as u16;
+                    frames.push(frame);
+                    if terminal {
+                        break;
+                    }
+                }
+                Ok::<_, prdb_engine::ipc::FrameError>(frames)
+            });
+            let redacted_decision = observe_executor_relay_and_finalize_gateway(
                 &storage,
-                &staging,
-                ClientFrame {
-                    kind: 7,
-                    request_id: 1,
-                    response_sequence: 0,
-                    payload: format!("{{\"invocation_id\":\"{redacted_null_invocation_hex}\"}}")
-                        .into_bytes(),
-                },
-                GatewayAdmissionConfig {
-                    retention_period_us: 3_600_000_000,
-                    max_rows: 128,
-                    max_bytes: 1_048_576,
-                },
-                &runtime,
+                &mut redacted_invocation,
+                &mut redacted_executor,
+                &mut redacted_service,
+                redacted_accepted.request_id,
             )?;
-        assert_eq!(redacted_null_accepted.payload, b"{\"state\":\"accepted\"}");
-        let (mut redacted_null_service, mut redacted_null_gateway) = UnixStream::pair()?;
-        redacted_null_gateway.set_read_timeout(Some(Duration::from_secs(10)))?;
-        let redacted_null_reader = std::thread::spawn(move || {
-            let mut frames = Vec::new();
-            while let Some(frame) = prdb_engine::ipc::read_frame(&mut redacted_null_gateway)? {
-                let terminal = frame.operation == Operation::GatewayTerminal as u16;
-                frames.push(frame);
-                if terminal {
-                    break;
-                }
-            }
-            Ok::<_, prdb_engine::ipc::FrameError>(frames)
-        });
-        let redacted_null_decision = observe_executor_relay_and_finalize_gateway(
-            &storage,
-            &mut redacted_null_invocation,
-            &mut redacted_null_executor,
-            &mut redacted_null_service,
-            redacted_null_accepted.request_id,
-        )?;
-        let redacted_null_frames = redacted_null_reader
-            .join()
-            .map_err(|_| "redacted NULL filter gateway reader panicked")??;
-        assert_eq!(
-            redacted_null_decision,
-            GatewayTerminalDecision::Abort(GatewayAbortReason::WorkerFailure)
-        );
-        assert!(
-            !redacted_null_frames
-                .iter()
-                .any(|frame| frame.operation == Operation::GatewayResultData as u16)
-        );
-        assert!(redacted_null_frames.iter().any(|frame| {
-            frame.operation == Operation::GatewayTerminal as u16
-                && String::from_utf8_lossy(&frame.payload).contains("\"outcome\":\"aborted\"")
-        }));
-        assert_eq!(
-            storage
-                .lookup_invocation_outcome(
-                    redacted_null_reservation.invocation_id,
-                    user_id,
-                    now + 1,
-                )?
-                .ok_or("missing confined redacted NULL filter outcome")?
-                .status,
-            OutcomeStatus::Aborted
-        );
-        staging.finish_started(redacted_null_owner, redacted_null_reservation.invocation_id)?;
+            let redacted_frames = redacted_reader
+                .join()
+                .map_err(|_| "redacted aggregate gateway reader panicked")??;
+            assert_eq!(
+                redacted_decision,
+                GatewayTerminalDecision::Abort(GatewayAbortReason::WorkerFailure),
+                "{client_name}"
+            );
+            assert_eq!(
+                redacted_frames.len(),
+                1,
+                "{client_name} relayed unexpected frames: {redacted_frames:?}"
+            );
+            let terminal = &redacted_frames[0];
+            assert_eq!(terminal.operation, Operation::GatewayTerminal as u16);
+            assert_eq!(terminal.request_id, redacted_accepted.request_id);
+            assert!(String::from_utf8_lossy(&terminal.payload).contains("\"outcome\":\"aborted\""));
+            assert_eq!(
+                storage
+                    .lookup_invocation_outcome(
+                        redacted_reservation.invocation_id,
+                        user_id,
+                        now + 1
+                    )?
+                    .ok_or("missing confined redacted aggregate outcome")?
+                    .status,
+                OutcomeStatus::Aborted,
+                "{client_name}"
+            );
+            staging.finish_started(redacted_owner, redacted_reservation.invocation_id)?;
+        }
 
         let mut bigint_scope_records = vec![
             [vec![1, 1], schema.schema_id.to_vec()].concat(),
