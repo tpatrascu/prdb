@@ -1,5 +1,12 @@
 # SQL Library Progress
 
+## SQL-7 follow-up: TEXT COUNT(column) — verified SDK slice
+
+- Contract: v24 optimizer-backed `COUNT(column)` counts every VALUE cell regardless of its TEXT contents; an empty TEXT value counts, while NULL does not. All-NULL groups remain present with a zero BIGINT result.
+- Regression evidence: `sdk-sql-execute-v10` supplies TEXT values (`alpha`, empty string, and `omega`) and a NULL through the optimizer-gated runner. The group callback validates the TEXT aggregate binding, counts `2, 0, 1`, matching row counts, and SQLR encoding.
+- Verification: the complete `nix develop --no-update-lock-file -c make -f engine/sdk/Makefile test` suite passed with the pinned TinyCC toolchain; `git diff --check` passed.
+- Remaining: confined COUNT(column) coverage beyond Decimal and broader analytical workloads; secure spill, target-hardware measurements, and mixed-workload optimization remain open.
+
 ## SQL-7 follow-up: confined filtered ordered aggregate — verified
 
 - Contract: the confined query path accepts a filtered composite aggregate with compound HAVING and ORDER BY through optimizer statement 16 / plan kind 16, then relays the selected SQLR result before commit.

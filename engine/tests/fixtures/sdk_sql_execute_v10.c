@@ -764,6 +764,34 @@ static uint32_t make_smallint_count_rows(uint8_t *p) {
     return offset;
 }
 
+static uint32_t make_text_count_rows(uint8_t *p) {
+    static const int32_t keys[] = {1, 1, 2, 3};
+    static const uint8_t states[] = {
+        PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_STATE_VALUE,
+        PRDB_SDK_VALUE_STATE_NULL, PRDB_SDK_VALUE_STATE_VALUE};
+    static const uint8_t *const values[] = {
+        (const uint8_t *)"alpha", (const uint8_t *)"", NULL,
+        (const uint8_t *)"omega"};
+    static const uint32_t lengths[] = {5, 0, 0, 5};
+    uint32_t offset = 0;
+    put_u16(p, &offset, 1);
+    p[offset++] = 1;
+    put_u16(p, &offset, 4);
+    for (uint32_t index = 0; index < 4; ++index) {
+        p[offset++] = 8;
+        memset(p + offset, (int)(index + 1), 15);
+        offset += 15;
+        put_u16(p, &offset, 2);
+        append_integer_cell(p, &offset, keys[index]);
+        if (states[index] == PRDB_SDK_VALUE_STATE_VALUE)
+            append_typed_cell(p, &offset, PRDB_SDK_VALUE_TYPE_TEXT,
+                              values[index], lengths[index]);
+        else
+            p[offset++] = states[index];
+    }
+    return offset;
+}
+
 static uint32_t make_nullable_composite_rows(uint8_t *p) {
     static const uint8_t first_states[] = {
         PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_STATE_VALUE,
@@ -3299,6 +3327,43 @@ static int32_t on_smallint_count_column_group(
     return 0;
 }
 
+static int32_t on_text_count_column_group(
+    void *opaque, const prdb_sdk_value_v1 *group_keys,
+    uint32_t group_key_count, const prdb_sdk_value_v1 *aggregate_value,
+    uint64_t matching_row_count,
+    const prdb_sdk_select_binding_v21 *projection_binding) {
+    group_capture *capture = opaque;
+    int32_t key = 0;
+    int64_t count = -1;
+    static const prdb_sdk_sql_column_shape_v2 columns[] = {
+        {(const uint8_t *)"id", 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
+        {(const uint8_t *)"score", 5, 1, PRDB_SDK_VALUE_TYPE_TEXT, 0, 0}};
+    uint8_t sqlr[256] = {0};
+    uint64_t sqlr_len = 0;
+    assert(group_key_count == 1 && aggregate_value != NULL);
+    assert(projection_binding != NULL &&
+           projection_binding->base.base.base.base.base.aggregate_kind ==
+               PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN &&
+           projection_binding->base.base.base.base.base.aggregate_column
+                   .type_code == PRDB_SDK_VALUE_TYPE_TEXT);
+    assert(prdb_sdk_value_get_integer_v1(&group_keys[0], &key) ==
+           PRDB_SDK_VALUE_ACCESS_OK);
+    assert(prdb_sdk_value_get_bigint_v1(aggregate_value, &count) ==
+           PRDB_SDK_VALUE_ACCESS_OK);
+    assert(capture->calls < 3);
+    assert(key == (int32_t)capture->calls + 1);
+    assert(count == (capture->calls == 0 ? 2 : capture->calls == 2 ? 1 : 0));
+    assert(matching_row_count == (capture->calls == 0 ? 2 : 1));
+    assert(prdb_sdk_sql_encode_group_composite_result_v1(
+               &projection_binding->base.base.base.base,
+               columns, 2, group_keys, 1, aggregate_value,
+               matching_row_count, sqlr, sizeof(sqlr), &sqlr_len) ==
+           PRDB_SDK_SQL_RESULT_OK);
+    assert(sqlr_len != 0);
+    ++capture->calls;
+    return 0;
+}
+
 static int32_t on_count_column_group(
     void *opaque, const prdb_sdk_value_v1 *group_keys,
     uint32_t group_key_count, const prdb_sdk_value_v1 *aggregate_value,
@@ -5337,6 +5402,23 @@ int main(void) {
                 &capture, PRDB_SDK_VALUE_TYPE_BOOLEAN,
                 on_boolean_count_column_group);
             assert(boolean_status == PRDB_SDK_SQL_EXEC_OK);
+            assert(capture.calls == 3 && mock.optimizer_enabled == 1 &&
+                   mock.optimizer_relation_resolves == 1 &&
+                   mock.statement_failed == 0);
+
+            mock.planner_len = make_relation_with_types(
+                mock.planner, PRDB_SDK_PLANNER_TABLE_HANDLE_KIND, 0x99,
+                PRDB_SDK_VALUE_TYPE_INTEGER, PRDB_SDK_VALUE_TYPE_TEXT);
+            mock.executor_len = make_relation_with_types(
+                mock.executor, 6, 0x22, PRDB_SDK_VALUE_TYPE_INTEGER,
+                PRDB_SDK_VALUE_TYPE_TEXT);
+            mock.batch_len = make_text_count_rows(mock.batch);
+            reset_scan(&mock, &capture, 1);
+            int32_t text_status = run_query_v24_count_column(
+                &mock, boolean_count_sql, sizeof(boolean_count_sql) - 1,
+                &capture, PRDB_SDK_VALUE_TYPE_TEXT,
+                on_text_count_column_group);
+            assert(text_status == PRDB_SDK_SQL_EXEC_OK);
             assert(capture.calls == 3 && mock.optimizer_enabled == 1 &&
                    mock.optimizer_relation_resolves == 1 &&
                    mock.statement_failed == 0);
