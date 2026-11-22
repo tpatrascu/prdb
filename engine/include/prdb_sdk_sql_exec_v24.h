@@ -51,10 +51,10 @@ int32_t prdb_sdk_sql_execute_group_typed_v24(
     uint64_t materialized_bytes_capacity,
     prdb_sdk_sql_group_row_v24_fn on_group, void *result_context);
 
-/* Uses an optimizer source plan for a composite grouped query with compound
- * HAVING. The plan covers authorized scans and aggregate inputs; HAVING is
- * evaluated by the bounded v24 runner over the resulting authorized groups. */
-int32_t prdb_sdk_sql_execute_group_composite_having_optimizer_v24(
+/* Uses an optimizer source plan for a grouped query with compound HAVING.
+ * The plan covers authorized scans and aggregate inputs; HAVING is evaluated
+ * by the bounded v24 runner over the resulting authorized groups. */
+int32_t prdb_sdk_sql_execute_group_having_optimizer_v24(
     const prdb_host_api_v5 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     const prdb_sdk_value_v1 *parameters,

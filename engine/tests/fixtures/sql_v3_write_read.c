@@ -3186,7 +3186,7 @@ static int32_t run_write_read_fixture(
     composite_grouped_results.row_count = 0;
     composite_grouped_results.output_len = 0;
     if (optimizer_host_v5 != NULL) {
-        status = prdb_sdk_sql_execute_group_composite_having_optimizer_v24(
+        status = prdb_sdk_sql_execute_group_having_optimizer_v24(
             optimizer_host_v5, schema, sizeof(schema) - 1,
             select_composite_sum_optimizer_sql,
             sizeof(select_composite_sum_optimizer_sql) - 1, NULL, NULL, 0,
