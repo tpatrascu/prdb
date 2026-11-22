@@ -2158,31 +2158,52 @@ static int32_t run_write_read_fixture(
         return report_failure(host, message, sizeof(message) - 1);
     }
     if (invocation->parameters_len == 1 && invocation->parameters != NULL &&
-        invocation->parameters[0] == 'V') {
-        static const uint8_t count_column_sql[] =
+        (invocation->parameters[0] == 'V' || invocation->parameters[0] == 'C')) {
+        static const uint8_t visible_count_column_sql[] =
             "SELECT left_key, right_key, COUNT(decimal_value) "
             "FROM decimal_grouped_records "
             "WHERE decimal_value IS NULL OR decimal_value IS NOT NULL "
             "GROUP BY left_key, right_key "
             "HAVING COUNT(decimal_value) >= 0 "
             "ORDER BY COUNT(decimal_value) DESC NULLS LAST, left_key ASC";
+        static const uint8_t redacted_count_column_sql[] =
+            "SELECT left_key, right_key, COUNT(decimal_value) "
+            "FROM decimal_grouped_records WHERE left_key IS NOT NULL "
+            "GROUP BY left_key, right_key "
+            "HAVING COUNT(decimal_value) >= 0 "
+            "ORDER BY COUNT(decimal_value) DESC NULLS LAST, left_key ASC";
+        const uint8_t *count_column_sql =
+            invocation->parameters[0] == 'C' ? redacted_count_column_sql
+                                             : visible_count_column_sql;
+        const uint64_t count_column_sql_len =
+            invocation->parameters[0] == 'C'
+                ? sizeof(redacted_count_column_sql) - 1
+                : sizeof(visible_count_column_sql) - 1;
+        const int redacted_count_column = invocation->parameters[0] == 'C';
         composite_grouped_results.row_count = 0;
         composite_grouped_results.output_len = 0;
         composite_grouped_results.column_count = 3;
         status = prdb_sdk_sql_execute_group_having_optimizer_v24(
             optimizer_host_v5, schema, sizeof(schema) - 1, count_column_sql,
-            sizeof(count_column_sql) - 1, NULL, NULL, 0, 16,
-            sizeof(batch_response), group_count_optimizer_request,
-            sizeof(group_count_optimizer_request),
-            group_count_optimizer_response,
-            sizeof(group_count_optimizer_response), planner_response,
-            sizeof(planner_response), executor_response,
-            sizeof(executor_response), batch_response,
-            sizeof(batch_response), planner_columns, 9, executor_columns, 9,
-            cell_scratch, 9, grouped_materialized,
-            sizeof(grouped_materialized),
+            count_column_sql_len, NULL, NULL, 0, 16, sizeof(batch_response),
+            group_count_optimizer_request, sizeof(group_count_optimizer_request),
+            group_count_optimizer_response, sizeof(group_count_optimizer_response),
+            planner_response, sizeof(planner_response), executor_response,
+            sizeof(executor_response), batch_response, sizeof(batch_response),
+            planner_columns, 9, executor_columns, 9, cell_scratch, 9,
+            grouped_materialized, sizeof(grouped_materialized),
             write_grouped_composite_count_column_optimizer_v24,
             &composite_grouped_results);
+        if (redacted_count_column) {
+            if (status == PRDB_SDK_SQL_EXEC_EVALUATION_ERROR &&
+                composite_grouped_results.row_count == 0 &&
+                composite_grouped_results.output_len == 0) {
+                return 1;
+            }
+            static const uint8_t message[] =
+                "fixture-error-redacted-count-column-not-rejected";
+            return report_failure(host, message, sizeof(message) - 1);
+        }
         if (status == PRDB_SDK_SQL_EXEC_OK &&
             composite_grouped_results.row_count == 3) return 0;
         static uint8_t message[] = "fixture-error-count-column-optimizer-0";

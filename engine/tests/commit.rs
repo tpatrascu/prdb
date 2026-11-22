@@ -45162,6 +45162,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             (b'P', "sandbox-sql-grouped-parameter-scale"),
             (b'J', "sandbox-sql-join-parameter-scale"),
             (b'R', "sandbox-sql-redacted-aggregate"),
+            (b'C', "sandbox-sql-redacted-count-column"),
             (b'N', "sandbox-sql-redacted-null-filter"),
             (b'H', "sandbox-sql-redacted-null-having"),
         ] {
