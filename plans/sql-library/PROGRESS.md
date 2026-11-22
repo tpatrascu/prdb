@@ -1,5 +1,12 @@
 # SQL Library Progress
 
+## SQL-7 follow-up: confined filtered ordered aggregate — verified
+
+- Contract: the confined query path accepts a filtered composite aggregate with compound HAVING and ORDER BY through optimizer statement 16 / plan kind 16, then relays the selected SQLR result before commit.
+- Regression: the isolated `PRDB_TEST_FILTERED_COMPOSITE_ONLY=1` mode filters the Decimal input by a typed key parameter and nullable predicate, checks `SUM(decimal_value) IS NOT NULL AND COUNT(*) >= 1`, validates aggregate and group-key sort metadata, and relays the exact `(1,7)` `DECIMAL(38,2)` result `1.00`.
+- Verification: the sandbox query fixture and full maintained TinyCC SDK suite passed, and the focused serial delegated-cgroup `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` acceptance passed. `git diff --check` passed.
+- Remaining: broader analytical workload diversity, secure spill, target-hardware measurements, and mixed-workload optimization remain open.
+
 ## SQL-7 follow-up: compose WHERE with compound HAVING — verified
 
 - Contract: row filtering runs before grouped aggregation, and the resulting groups then pass through compound HAVING before callbacks.
