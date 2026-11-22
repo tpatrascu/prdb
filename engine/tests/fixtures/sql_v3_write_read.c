@@ -959,6 +959,62 @@ static int32_t write_grouped_composite_sum_optimizer_v24(
         matching_row_count, &binding->base.base.base.base);
 }
 
+static int32_t write_grouped_composite_count_column_optimizer_v24(
+    void *opaque, const prdb_sdk_value_v1 *group_keys,
+    uint32_t group_key_count, const prdb_sdk_value_v1 *aggregate_value,
+    uint64_t matching_row_count,
+    const prdb_sdk_select_binding_v21 *binding) {
+    composite_grouped_result_context *context = opaque;
+    const prdb_sdk_select_binding_v13 *projection;
+    const prdb_sdk_select_binding_v15 *ordering;
+    int32_t left_key = 0, right_key = 0;
+    uint64_t count = 0;
+    if (context == NULL || binding == NULL || group_keys == NULL ||
+        aggregate_value == NULL || group_key_count != 2 ||
+        aggregate_value->state != PRDB_SDK_VALUE_STATE_VALUE ||
+        aggregate_value->type_code != PRDB_SDK_VALUE_TYPE_BIGINT ||
+        aggregate_value->data == NULL || aggregate_value->data_len != 8 ||
+        !decode_range_integer(&group_keys[0], &left_key) ||
+        !decode_range_integer(&group_keys[1], &right_key)) {
+        return 1;
+    }
+    for (uint32_t index = 0; index < 8; ++index)
+        count = (count << 8) | aggregate_value->data[index];
+    if ((context->row_count == 0 &&
+         (left_key != 2 || right_key != 9 || count != 3 ||
+          matching_row_count != 3)) ||
+        (context->row_count == 1 &&
+         (left_key != 1 || right_key != 7 || count != 1 ||
+          matching_row_count != 2)) ||
+        (context->row_count == 2 &&
+         (left_key != 3 || right_key != 11 || count != 0 ||
+          matching_row_count != 1)) ||
+        context->row_count >= 3) {
+        return 1;
+    }
+    projection = &binding->base.base.base.base;
+    ordering = &binding->base.base;
+    if (projection->group_key_count != 2 ||
+        projection->base.aggregate_kind !=
+            PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN ||
+        projection->base.aggregate_column.type_code !=
+            PRDB_SDK_VALUE_TYPE_DECIMAL || ordering->order_count != 2 ||
+        ordering->order_items[0].item.kind !=
+            PRDB_SDK_SQL_V10_ORDER_AGGREGATE ||
+        ordering->order_items[1].item.kind !=
+            PRDB_SDK_SQL_V10_ORDER_GROUP_KEY ||
+        ordering->order_items[1].item.group_key_index != 0 ||
+        prdb_sdk_sql_write_group_composite_result_v1(
+            context->host, projection, context->columns, 3, group_keys,
+            group_key_count, aggregate_value, matching_row_count,
+            context->output, context->output_capacity,
+            &context->output_len) != PRDB_SDK_SQL_RESULT_OK) {
+        return 1;
+    }
+    ++context->row_count;
+    return 0;
+}
+
 static int32_t write_grouped_composite_count(
     void *opaque, const prdb_sdk_value_v1 *group_keys,
     uint32_t group_key_count, const prdb_sdk_value_v1 *aggregate_value,
@@ -2104,12 +2160,30 @@ static int32_t run_write_read_fixture(
         static const uint8_t count_column_sql[] =
             "SELECT left_key, right_key, COUNT(decimal_value) "
             "FROM decimal_grouped_records GROUP BY left_key, right_key "
+            "HAVING COUNT(decimal_value) >= 0 "
             "ORDER BY COUNT(decimal_value) DESC NULLS LAST, left_key ASC";
-        status = prdb_sdk_sql_run_statement_v1(
-            host, schema, sizeof(schema) - 1, count_column_sql,
-            sizeof(count_column_sql) - 1, NULL, 0);
-        if (status == PRDB_SDK_SQL_DISPATCH_OK) return 0;
-        static const uint8_t message[] = "fixture-error-count-column-dispatch";
+        composite_grouped_results.row_count = 0;
+        composite_grouped_results.output_len = 0;
+        composite_grouped_results.column_count = 3;
+        status = prdb_sdk_sql_execute_group_having_optimizer_v24(
+            optimizer_host_v5, schema, sizeof(schema) - 1, count_column_sql,
+            sizeof(count_column_sql) - 1, NULL, NULL, 0, 16,
+            sizeof(batch_response), group_count_optimizer_request,
+            sizeof(group_count_optimizer_request),
+            group_count_optimizer_response,
+            sizeof(group_count_optimizer_response), planner_response,
+            sizeof(planner_response), executor_response,
+            sizeof(executor_response), batch_response,
+            sizeof(batch_response), planner_columns, 9, executor_columns, 9,
+            cell_scratch, 9, grouped_materialized,
+            sizeof(grouped_materialized),
+            write_grouped_composite_count_column_optimizer_v24,
+            &composite_grouped_results);
+        if (status == PRDB_SDK_SQL_EXEC_OK &&
+            composite_grouped_results.row_count == 3) return 0;
+        static uint8_t message[] = "fixture-error-count-column-optimizer-0";
+        if (status >= 0 && status <= 9)
+            message[sizeof(message) - 2] = (uint8_t)('0' + status);
         return report_failure(host, message, sizeof(message) - 1);
     }
     if (invocation->parameters_len == 1 && invocation->parameters != NULL &&
