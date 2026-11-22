@@ -1769,7 +1769,7 @@ mod tests {
 
     #[test]
     fn binds_ordered_group_aggregate_to_authorized_columns_and_types() {
-        for kind in 1..=5 {
+        for kind in 1..=6 {
             let bound = bind_ordered_group_aggregate_request(
                 &ordered_group_aggregate_request(kind, (kind != 1).then_some("amount")),
                 Some(relation()),
@@ -1888,7 +1888,7 @@ mod tests {
 
     #[test]
     fn binds_ordered_composite_aggregates_to_authorized_columns() {
-        for kind in 1..=5 {
+        for kind in 1..=6 {
             let bound = bind_ordered_composite_group_aggregate_request(
                 &ordered_composite_group_aggregate_request(kind),
                 Some(relation()),

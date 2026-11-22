@@ -240,7 +240,7 @@ static uint32_t build_ordered_eight_key_aggregate_plan(mock_state *mock) {
             mock->optimizer_plan, offset, (uint8_t)(0x33 + index), index,
             PRDB_SDK_VALUE_TYPE_INTEGER, index == 8);
     mock->optimizer_plan[offset++] = 14;
-    mock->optimizer_plan[offset++] = PRDB_SDK_SQL_V7_AGGREGATE_SUM;
+    mock->optimizer_plan[offset++] = (uint8_t)mock->optimizer_aggregate_kind;
     mock->optimizer_plan[offset++] = 8;
     for (uint32_t index = 0; index < 8; ++index)
         offset = put_optimizer_column(
@@ -353,7 +353,7 @@ static uint32_t build_single_aggregate_plan(mock_state *mock) {
     offset = put_optimizer_column(mock->optimizer_plan, offset, 0x34, 1,
                                   PRDB_SDK_VALUE_TYPE_INTEGER, 1);
     mock->optimizer_plan[offset++] = 11;
-    mock->optimizer_plan[offset++] = PRDB_SDK_SQL_V7_AGGREGATE_SUM;
+    mock->optimizer_plan[offset++] = (uint8_t)mock->optimizer_aggregate_kind;
     offset = put_optimizer_column(mock->optimizer_plan, offset, 0x33, 0,
                                   PRDB_SDK_VALUE_TYPE_INTEGER, 1);
     mock->optimizer_plan[offset++] = 1;
@@ -832,7 +832,7 @@ static int32_t optimizer_request(void *context, uint16_t operation,
             memcmp(request + offset, "id", 2) != 0)
             return PRDB_QUERY_CALLBACK_PROTOCOL_ERROR;
         offset += group_name_len;
-        if (request[offset++] != PRDB_SDK_SQL_V7_AGGREGATE_SUM)
+        if (request[offset++] != mock->optimizer_aggregate_kind)
             return PRDB_QUERY_CALLBACK_PROTOCOL_ERROR;
         aggregate_name_len = request[offset++];
         if (aggregate_name_len != 5 || request_len - offset != 5 + 1 + 6 + 1 ||
@@ -858,7 +858,7 @@ static int32_t optimizer_request(void *context, uint16_t operation,
             memcmp(request + offset, "id", 2) != 0)
             return PRDB_QUERY_CALLBACK_PROTOCOL_ERROR;
         offset += group_name_len;
-        if (request[offset++] != PRDB_SDK_SQL_V7_AGGREGATE_SUM)
+        if (request[offset++] != mock->optimizer_aggregate_kind)
             return PRDB_QUERY_CALLBACK_PROTOCOL_ERROR;
         aggregate_name_len = request[offset++];
         if (aggregate_name_len != 5 || request_len - offset != 6 ||
@@ -3082,6 +3082,14 @@ static int32_t run_query_v24_count_column(
     static const uint8_t schema[] = "app";
     static const uint8_t id_name[] = "id";
     static const uint8_t score_name[] = "score";
+    static const uint8_t zero_count_bytes[8] = {0};
+    const prdb_sdk_value_v1 count_parameter = {
+        sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
+        PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_BIGINT,
+        zero_count_bytes, sizeof(zero_count_bytes)};
+    const prdb_sdk_sql_parameter_metadata_v1 count_metadata = {
+        sizeof(count_metadata), PRDB_SDK_SQL_PARAMETER_METADATA_ABI_V1_VERSION,
+        PRDB_SDK_VALUE_TYPE_BIGINT, 0, 0, {0, 0}};
     uint8_t planner_response[256] = {0};
     uint8_t executor_response[512] = {0};
     uint8_t batch_response[8192] = {0};
@@ -3101,8 +3109,12 @@ static int32_t run_query_v24_count_column(
         executor_request, planner_request, NULL, statement_failure};
     host.v4.optimizer_request = unused_optimizer_request;
     host.optimizer_request = optimizer_request;
+    mock->optimizer_enabled = 1;
+    mock->optimizer_aggregate_kind =
+        PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN;
     return prdb_sdk_sql_execute_group_having_optimizer_v24(
-        &host, schema, sizeof(schema) - 1, sql, sql_len, NULL, NULL, 0,
+        &host, schema, sizeof(schema) - 1, sql, sql_len, &count_parameter,
+        &count_metadata, 1,
         mock->max_candidates == 0 ? 4 : (uint16_t)mock->max_candidates,
         mock->max_candidates > 3 ? 8192 : 512, optimizer_request_bytes,
         sizeof(optimizer_request_bytes), optimizer_response,
@@ -5096,7 +5108,8 @@ int main(void) {
 
         {
             static const uint8_t count_column_sql[] =
-                "SELECT id, COUNT(score) FROM widgets GROUP BY id";
+                "SELECT id, COUNT(score) FROM widgets GROUP BY id "
+                "HAVING COUNT(score) >= $1";
             const int32_t keys[] = {1, 1, 2, 3};
             const int32_t scores[] = {0, 9, 0, 0};
             const uint8_t states[] = {
@@ -5109,11 +5122,13 @@ int main(void) {
                 mock.executor, 6, 0x22, PRDB_SDK_VALUE_TYPE_INTEGER);
             mock.batch_len = make_rows(mock.batch, 1, keys, scores, states, 4);
             reset_scan(&mock, &capture, 1);
-            assert(run_query_v24_count_column(
-                       &mock, count_column_sql, sizeof(count_column_sql) - 1,
-                       &capture, on_count_column_group) ==
-                   PRDB_SDK_SQL_EXEC_OK);
-            assert(capture.calls == 3 && mock.statement_failed == 0);
+            int32_t count_column_status = run_query_v24_count_column(
+                &mock, count_column_sql, sizeof(count_column_sql) - 1,
+                &capture, on_count_column_group);
+            assert(count_column_status == PRDB_SDK_SQL_EXEC_OK);
+            assert(capture.calls == 3 && mock.optimizer_enabled == 1 &&
+                   mock.optimizer_relation_resolves == 1 &&
+                   mock.statement_failed == 0);
             {
                 const int32_t redacted_keys[] = {1};
                 const int32_t redacted_scores[] = {0};

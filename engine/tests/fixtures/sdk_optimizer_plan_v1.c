@@ -1,6 +1,7 @@
 #include "prdb_sdk_optimizer_plan_v1.h"
 #include "prdb_sdk_optimizer_v2.h"
 #include "prdb_sdk_sql_exec_v3.h"
+#include "prdb_sdk_sql_v24.h"
 #include "prdb_query_abi_payload_codecs.h"
 
 #include <assert.h>
@@ -1449,7 +1450,11 @@ int main(void) {
     static prdb_sdk_select_binding_v13 composite_group_count_binding;
     static prdb_sdk_select_v13 composite_group_aggregate_statement;
     static prdb_sdk_select_binding_v13 composite_group_aggregate_binding;
+    static prdb_sdk_select_v24 count_column_statement;
+    static prdb_sdk_select_binding_v24 count_column_binding;
     static prdb_sdk_sql_column_shape_v2 composite_group_aggregate_columns[3];
+    static uint8_t count_column_optimizer_request[512];
+    static uint64_t count_column_optimizer_request_len;
     static prdb_sdk_select_v15 ordered_composite_group_count_statement;
     static prdb_sdk_select_binding_v15 ordered_composite_group_count_binding;
     static prdb_sdk_sql_column_shape_v2 ordered_composite_group_count_columns[2];
@@ -2792,6 +2797,38 @@ int main(void) {
                    composite_group_aggregate_payload_len) ==
                PRDB_SDK_OPTIMIZER_PLAN_OK);
     }
+    static const uint8_t count_column_composite_sql[] =
+        "SELECT active, id, COUNT(amount) FROM items "
+        "GROUP BY active, id LIMIT 5";
+    assert(prdb_sdk_sql_parse_select_v24(
+               count_column_composite_sql,
+               sizeof(count_column_composite_sql) - 1,
+               &count_column_statement, sizeof(count_column_statement), NULL) ==
+           PRDB_SDK_SQL_OK);
+    assert(prdb_sdk_sql_bind_select_v24(
+               &count_column_statement, (const uint8_t *)"items", 5,
+               composite_group_aggregate_columns, 3, &count_column_binding,
+               sizeof(count_column_binding)) == PRDB_SDK_SQL_BIND_OK);
+    assert(count_column_statement.base.base.base.base.base.base.aggregate_kind ==
+           PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN);
+    assert(prdb_sdk_optimizer_encode_composite_group_aggregate_v1(
+               &count_column_statement.base.base.base.base.base,
+               (const uint8_t *)"public", 6, count_column_optimizer_request,
+               sizeof(count_column_optimizer_request),
+               &count_column_optimizer_request_len) ==
+           PRDB_SDK_OPTIMIZER_ENCODE_OK);
+    assert(count_column_optimizer_request_len > 30 &&
+           count_column_optimizer_request[28] ==
+               PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN);
+    uint32_t count_column_plan_len = build_composite_group_aggregate_plan(
+        composite_group_aggregate_payload,
+        PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN);
+    assert(prdb_sdk_optimizer_match_composite_group_aggregate_plan_v1(
+               &count_column_statement.base.base.base.base.base,
+               &count_column_binding.base.base.base.base.base,
+               (const uint8_t *)"public", 6,
+               composite_group_aggregate_payload, count_column_plan_len) ==
+           PRDB_SDK_OPTIMIZER_PLAN_OK);
     uint32_t filtered_composite_group_aggregate_payload_len =
         build_filtered_composite_group_aggregate_plan(
             filtered_composite_group_aggregate_payload);

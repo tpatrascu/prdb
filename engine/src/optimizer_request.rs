@@ -617,7 +617,7 @@ pub fn decode_group_aggregate_request(bytes: &[u8]) -> Result<GroupAggregateRequ
     let relation_name = cursor.identifier()?;
     let group_key_name = cursor.identifier()?;
     let aggregate_kind = cursor.u8()?;
-    if !(1..=5).contains(&aggregate_kind) {
+    if !(1..=6).contains(&aggregate_kind) {
         return Err(RequestError::InvalidValue);
     }
     let aggregate_column_name = if aggregate_kind == 1 {
@@ -688,7 +688,7 @@ pub fn decode_composite_group_aggregate_request(
         group_key_names.push(name);
     }
     let aggregate_kind = cursor.u8()?;
-    if !(1..=5).contains(&aggregate_kind) {
+    if !(1..=6).contains(&aggregate_kind) {
         return Err(RequestError::InvalidValue);
     }
     let aggregate_column_name = if aggregate_kind == 1 {
@@ -762,7 +762,7 @@ pub fn decode_filtered_composite_group_aggregate_request(
         group_key_names.push(name);
     }
     let aggregate_kind = cursor.u8()?;
-    if !(1..=5).contains(&aggregate_kind) {
+    if !(1..=6).contains(&aggregate_kind) {
         return Err(RequestError::InvalidValue);
     }
     let aggregate_column_name = if aggregate_kind == 1 {
@@ -879,7 +879,7 @@ pub fn decode_ordered_group_aggregate_request(
     let relation_name = cursor.identifier()?;
     let group_key_name = cursor.identifier()?;
     let aggregate_kind = cursor.u8()?;
-    if !(1..=5).contains(&aggregate_kind) {
+    if !(1..=6).contains(&aggregate_kind) {
         return Err(RequestError::InvalidValue);
     }
     let aggregate_column_name = if aggregate_kind == 1 {
@@ -1149,7 +1149,7 @@ pub fn decode_ordered_composite_group_aggregate_request(
         group_key_names.push(name);
     }
     let aggregate_kind = cursor.u8()?;
-    if !(1..=5).contains(&aggregate_kind) {
+    if !(1..=6).contains(&aggregate_kind) {
         return Err(RequestError::InvalidValue);
     }
     let aggregate_column_name = if aggregate_kind == 1 {
@@ -1994,14 +1994,14 @@ mod tests {
 
     #[test]
     fn decodes_single_key_aggregate_request_and_rejects_invalid_shapes() {
-        for kind in 1..=5 {
+        for kind in 1..=6 {
             let request = decode_group_aggregate_request(&group_aggregate_request(kind)).unwrap();
             assert_eq!(request.aggregate_kind, kind);
             assert_eq!(request.aggregate_column_name.is_some(), kind != 1);
             assert_eq!(request.limit, Some(5));
         }
         let mut bad_kind = group_aggregate_request(4);
-        bad_kind[4 + 1 + 6 + 1 + 5 + 1 + 8] = 6;
+        bad_kind[4 + 1 + 6 + 1 + 5 + 1 + 8] = 7;
         assert_eq!(
             decode_group_aggregate_request(&bad_kind),
             Err(RequestError::InvalidValue)
@@ -2016,7 +2016,7 @@ mod tests {
 
     #[test]
     fn decodes_ordered_single_key_aggregate_and_rejects_invalid_sorts() {
-        for kind in 1..=5 {
+        for kind in 1..=6 {
             let request =
                 decode_ordered_group_aggregate_request(&ordered_group_aggregate_request(kind))
                     .unwrap();
@@ -2136,7 +2136,7 @@ mod tests {
 
     #[test]
     fn decodes_ordered_composite_aggregate_requests_for_every_aggregate_kind() {
-        for kind in 1..=5 {
+        for kind in 1..=6 {
             let request = decode_ordered_composite_group_aggregate_request(
                 &ordered_composite_group_aggregate_request(kind),
             )

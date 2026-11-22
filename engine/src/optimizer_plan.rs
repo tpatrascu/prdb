@@ -1152,7 +1152,7 @@ pub fn decode_group_aggregate_plan_v1(bytes: &[u8]) -> Result<GroupAggregatePlan
 pub fn validate_group_aggregate_plan_v1(plan: &GroupAggregatePlanV1) -> Result<(), PlanError> {
     validate_relation(&plan.relation)?;
     validate_columns(&plan.scan_columns)?;
-    if !(1..=5).contains(&plan.aggregate_kind)
+    if !(1..=6).contains(&plan.aggregate_kind)
         || plan.group_key.column_id == [0; 16]
         || !valid_scalar_type(plan.group_key.scalar_type)
     {
@@ -1161,7 +1161,7 @@ pub fn validate_group_aggregate_plan_v1(plan: &GroupAggregatePlanV1) -> Result<(
     let mut expected = vec![plan.group_key.clone()];
     match (plan.aggregate_kind, &plan.aggregate_column) {
         (1, None) => {}
-        (2..=5, Some(column))
+        (2..=6, Some(column))
             if column.column_id != [0; 16] && valid_scalar_type(column.scalar_type) =>
         {
             if (plan.aggregate_kind == 4 || plan.aggregate_kind == 5)
@@ -2072,7 +2072,7 @@ pub fn validate_filtered_composite_group_aggregate_plan_v1(
     validate_relation(&plan.relation)?;
     validate_columns(&plan.scan_columns)?;
     if !(1..=crate::optimizer_request::MAX_GROUP_KEYS).contains(&plan.group_keys.len())
-        || !(1..=5).contains(&plan.aggregate_kind)
+        || !(1..=6).contains(&plan.aggregate_kind)
         || plan
             .group_keys
             .iter()
@@ -2087,7 +2087,7 @@ pub fn validate_filtered_composite_group_aggregate_plan_v1(
     }
     match (plan.aggregate_kind, &plan.aggregate_column) {
         (1, None) => {}
-        (2..=5, Some(column))
+        (2..=6, Some(column))
             if column.column_id != [0; 16] && valid_scalar_type(column.scalar_type) =>
         {
             if matches!(plan.aggregate_kind, 4 | 5) && !is_numeric_type(column.scalar_type) {
@@ -2129,7 +2129,7 @@ pub fn validate_composite_group_aggregate_plan_v1(
     validate_columns(&plan.scan_columns)?;
     if !(crate::optimizer_request::MIN_GROUP_KEYS..=crate::optimizer_request::MAX_GROUP_KEYS)
         .contains(&plan.group_keys.len())
-        || !(1..=5).contains(&plan.aggregate_kind)
+        || !(1..=6).contains(&plan.aggregate_kind)
         || plan
             .group_keys
             .iter()
@@ -2144,7 +2144,7 @@ pub fn validate_composite_group_aggregate_plan_v1(
     }
     match (plan.aggregate_kind, &plan.aggregate_column) {
         (1, None) => {}
-        (2..=5, Some(column))
+        (2..=6, Some(column))
             if column.column_id != [0; 16] && valid_scalar_type(column.scalar_type) =>
         {
             if matches!(plan.aggregate_kind, 4 | 5) && !is_numeric_type(column.scalar_type) {
@@ -5431,12 +5431,31 @@ mod tests {
             validate_group_aggregate_plan_v1(&invalid),
             Err(PlanError::InvalidColumnReference)
         );
+
+        let count_column_plan = plan_group_aggregate_v1(BoundGroupAggregate {
+            schema_name: "public".into(),
+            schema_id: [1; 16],
+            schema_version: 1,
+            table_epoch: 1,
+            relation_id: [2; 16],
+            relation_name: "items".into(),
+            group_key: column(1, 0, ScalarType::Integer),
+            aggregate_kind: 6,
+            aggregate_column: Some(column(3, 2, ScalarType::Boolean)),
+            limit: None,
+        })
+        .unwrap();
+        let bytes = encode_group_aggregate_plan_v1(&count_column_plan).unwrap();
+        assert_eq!(
+            decode_group_aggregate_plan_v1(&bytes).unwrap(),
+            count_column_plan
+        );
     }
 
     #[test]
     fn ordered_group_aggregate_plan_roundtrips_and_rejects_bad_order_sources() {
         let mut avg_plan = None;
-        for aggregate_kind in 1..=5 {
+        for aggregate_kind in 1..=6 {
             let plan = plan_ordered_group_aggregate_v1(BoundOrderedGroupAggregate {
                 schema_name: "public".into(),
                 schema_id: [1; 16],

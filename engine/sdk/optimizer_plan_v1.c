@@ -1928,7 +1928,7 @@ int32_t prdb_sdk_optimizer_decode_group_aggregate_plan_v1(
     if (scan_count < 1 || scan_count > 2) return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
     for (uint32_t i = 0; i < scan_count; ++i)
         if (!read_column(&reader, &decoded.plan.scan_columns[i]) || (i && decoded.plan.scan_columns[i-1].ordinal >= decoded.plan.scan_columns[i].ordinal)) return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
-    if (!read_u8(&reader, &tag) || tag != 11 || !read_u8(&reader, &aggregate_kind) || aggregate_kind < 1 || aggregate_kind > 5 || !read_column(&reader, &decoded.group_key) || !read_u8(&reader, &flag) || flag > 1)
+    if (!read_u8(&reader, &tag) || tag != 11 || !read_u8(&reader, &aggregate_kind) || aggregate_kind < 1 || aggregate_kind > PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN || !read_column(&reader, &decoded.group_key) || !read_u8(&reader, &flag) || flag > 1)
         return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
     decoded.aggregate_kind = aggregate_kind;
     decoded.has_aggregate_column = flag;
@@ -2009,7 +2009,7 @@ int32_t prdb_sdk_optimizer_decode_composite_group_aggregate_plan_v1(
     }
     if (!read_u8(&reader, &tag) || tag != 13 ||
         !read_u8(&reader, &aggregate_kind) || aggregate_kind < 1 ||
-        aggregate_kind > 5 || !read_u8(&reader, &key_count) ||
+        aggregate_kind > PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN || !read_u8(&reader, &key_count) ||
         key_count < PRDB_SDK_SQL_V13_MIN_GROUP_KEYS ||
         key_count > PRDB_SDK_SQL_V13_MAX_GROUP_KEYS)
         return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
@@ -2159,7 +2159,7 @@ int32_t prdb_sdk_optimizer_decode_filtered_composite_group_aggregate_plan_v1(
     }
     if (!read_u8(&reader, &tag) || tag != 15 ||
         !read_u8(&reader, &aggregate_kind) || aggregate_kind < 1 ||
-        aggregate_kind > 5 || !read_u8(&reader, &key_count) ||
+        aggregate_kind > PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN || !read_u8(&reader, &key_count) ||
         key_count < 1 ||
         key_count > PRDB_SDK_SQL_V13_MAX_GROUP_KEYS)
         return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
@@ -2313,7 +2313,7 @@ int32_t prdb_sdk_optimizer_decode_ordered_filtered_composite_group_aggregate_pla
     }
     node_offset = reader.offset;
     if (!read_u8(&reader, &tag) || tag != 16 || !read_u8(&reader, &aggregate_kind) ||
-        aggregate_kind < 1 || aggregate_kind > 5 || !read_u8(&reader, &key_count) ||
+        aggregate_kind < 1 || aggregate_kind > PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN || !read_u8(&reader, &key_count) ||
         key_count < 1 || key_count > PRDB_SDK_SQL_V13_MAX_GROUP_KEYS)
         return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
     decoded.group_key_count = key_count;
@@ -2443,7 +2443,7 @@ int32_t prdb_sdk_optimizer_decode_ordered_composite_group_aggregate_plan_v1(
     }
     if (!read_u8(&reader, &tag) || tag != 14 ||
         !read_u8(&reader, &aggregate_kind) || aggregate_kind < 1 ||
-        aggregate_kind > 5 || !read_u8(&reader, &key_count) ||
+        aggregate_kind > PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN || !read_u8(&reader, &key_count) ||
         key_count < PRDB_SDK_SQL_V13_MIN_GROUP_KEYS ||
         key_count > PRDB_SDK_SQL_V13_MAX_GROUP_KEYS)
         return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
@@ -2595,7 +2595,7 @@ int32_t prdb_sdk_optimizer_decode_ordered_group_aggregate_plan_v1(
     }
     if (!read_u8(&reader, &tag) || tag != 12 ||
         !read_u8(&reader, &aggregate_kind) || aggregate_kind < 1 ||
-        aggregate_kind > 5 || !read_column(&reader, &decoded.group_key) ||
+        aggregate_kind > PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN || !read_column(&reader, &decoded.group_key) ||
         !read_u8(&reader, &flag) || flag > 1)
         return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
     decoded.aggregate_kind = aggregate_kind;
@@ -3020,7 +3020,7 @@ int32_t prdb_sdk_optimizer_match_composite_group_aggregate_plan_v1(
         statement->group_key_count > PRDB_SDK_SQL_V13_MAX_GROUP_KEYS ||
         statement->base.has_group_by != 1 ||
         statement->base.aggregate_kind < PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR ||
-        statement->base.aggregate_kind > PRDB_SDK_SQL_V7_AGGREGATE_AVG ||
+        statement->base.aggregate_kind > PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN ||
         statement->base.base.projection_count != 1 ||
         statement->base.base.projection_star != 0 ||
         statement->base.base.predicate_count != 0 ||
@@ -3224,7 +3224,7 @@ int32_t prdb_sdk_optimizer_match_filtered_composite_group_aggregate_plan_v1(
         statement->group_key_count > PRDB_SDK_SQL_V13_MAX_GROUP_KEYS ||
         statement->base.has_group_by != 1 ||
         statement->base.aggregate_kind < PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR ||
-        statement->base.aggregate_kind > PRDB_SDK_SQL_V7_AGGREGATE_AVG ||
+        statement->base.aggregate_kind > PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN ||
         statement->base.base.projection_count != 1 ||
         statement->base.base.projection_star != 0 ||
         statement->base.base.predicate_count == 0 ||
@@ -3313,7 +3313,7 @@ int32_t prdb_sdk_optimizer_match_ordered_filtered_composite_group_aggregate_plan
         statement->order_count > PRDB_SDK_SQL_V15_MAX_ORDER_KEYS ||
         statement->base.base.group_key_count < 1 || statement->base.base.group_key_count > 8 ||
         statement->base.base.base.aggregate_kind < PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR ||
-        statement->base.base.base.aggregate_kind > PRDB_SDK_SQL_V7_AGGREGATE_AVG ||
+        statement->base.base.base.aggregate_kind > PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN ||
         statement->base.base.base.base.projection_count != 1 ||
         statement->base.base.base.base.projection_star != 0 ||
         statement->base.base.base.base.predicate_count == 0 ||
@@ -3451,7 +3451,7 @@ int32_t prdb_sdk_optimizer_match_ordered_composite_group_aggregate_plan_v1(
         statement->base.base.base.aggregate_kind <
             PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR ||
         statement->base.base.base.aggregate_kind >
-            PRDB_SDK_SQL_V7_AGGREGATE_AVG ||
+            PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN ||
         statement->base.base.base.base.projection_count != 1 ||
         statement->base.base.base.base.projection_star != 0 ||
         statement->base.base.base.base.predicate_count != 0 ||
@@ -3542,7 +3542,7 @@ int32_t prdb_sdk_optimizer_match_group_aggregate_plan_v1(
     int32_t status;
     if (statement == NULL || binding == NULL || schema == NULL || plan_payload == NULL || schema_len == 0 || schema_len > 63 ||
         statement->struct_size != sizeof(*statement) || statement->abi_version != PRDB_SDK_SQL_ABI_V7_VERSION ||
-        statement->has_group_by != 1 || statement->aggregate_kind < PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR || statement->aggregate_kind > PRDB_SDK_SQL_V7_AGGREGATE_AVG ||
+        statement->has_group_by != 1 || statement->aggregate_kind < PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR || statement->aggregate_kind > PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN ||
         statement->base.projection_count != 1 || statement->base.projection_star != 0 || statement->base.predicate_count != 0 || statement->base.has_limit > 1 ||
         binding->struct_size != sizeof(*binding) || binding->abi_version != PRDB_SDK_SQL_ABI_V7_VERSION || binding->has_group_by != 1 || binding->aggregate_kind != statement->aggregate_kind)
         return PRDB_SDK_OPTIMIZER_PLAN_INVALID_ARGUMENT;
@@ -3609,7 +3609,7 @@ int32_t prdb_sdk_optimizer_match_ordered_group_aggregate_plan_v1(
         statement_v7->abi_version != PRDB_SDK_SQL_ABI_V7_VERSION ||
         statement_v7->has_group_by != 1 ||
         statement_v7->aggregate_kind < PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR ||
-        statement_v7->aggregate_kind > PRDB_SDK_SQL_V7_AGGREGATE_AVG ||
+        statement_v7->aggregate_kind > PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN ||
         statement->base.base.base.has_having != 0 ||
         statement->base.base.has_order_by != 1 ||
         base->struct_size != sizeof(*base) ||

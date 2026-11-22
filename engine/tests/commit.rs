@@ -42511,12 +42511,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         let mut ordered_frames = ordered_frames.into_iter();
         if count_column_only {
             fn expected_count_column_row(left_key: i32, right_key: i32, count: i64) -> Vec<u8> {
-                fn append_field(
-                    output: &mut Vec<u8>,
-                    name: &[u8],
-                    type_code: u32,
-                    value: &[u8],
-                ) {
+                fn append_field(output: &mut Vec<u8>, name: &[u8], type_code: u32, value: &[u8]) {
                     output.extend_from_slice(&(name.len() as u16).to_be_bytes());
                     output.extend_from_slice(name);
                     output.extend_from_slice(&type_code.to_be_bytes());

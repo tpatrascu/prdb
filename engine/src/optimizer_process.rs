@@ -2018,7 +2018,7 @@ mod tests {
 
     #[test]
     fn process_protocol_dispatches_composite_aggregate_families_and_returns_validated_plans() {
-        for kind in 1..=5 {
+        for kind in 1..=6 {
             assert!(
                 crate::optimizer_request::decode_ordered_composite_group_aggregate_request(
                     &ordered_composite_group_aggregate_request(kind)
@@ -2033,7 +2033,7 @@ mod tests {
                 planner_server
                     .set_read_timeout(Some(std::time::Duration::from_secs(5)))
                     .unwrap();
-                for expected_request_id in 257..270 {
+                for expected_request_id in 257..=271 {
                     let request = crate::ipc::read_frame(&mut planner_server)
                         .unwrap()
                         .expect("optimizer must resolve composite aggregate relation");
@@ -2094,7 +2094,7 @@ mod tests {
             submission_client
                 .set_read_timeout(Some(std::time::Duration::from_secs(5)))
                 .unwrap();
-            for kind in 1..=5 {
+            for kind in 1..=6 {
                 crate::ipc::write_frame(
                     &mut submission_client,
                     &IpcFrame {
@@ -2201,7 +2201,7 @@ mod tests {
             assert_eq!(plan.order_items[0].group_key_index, Some(0));
             assert_eq!(plan.order_items[1].source, 1);
             assert_eq!(plan.limit, Some(5));
-            for kind in 1..=5 {
+            for kind in 1..=6 {
                 crate::ipc::write_frame(
                     &mut submission_client,
                     &IpcFrame {
@@ -2244,7 +2244,7 @@ mod tests {
                 planner_server
                     .set_read_timeout(Some(std::time::Duration::from_secs(5)))
                     .unwrap();
-                for expected_request_id in 257..=262 {
+                for expected_request_id in 257..=263 {
                     let request = crate::ipc::read_frame(&mut planner_server)
                         .unwrap()
                         .expect("optimizer must resolve eight-key aggregate relation");
@@ -2300,7 +2300,7 @@ mod tests {
             submission_client
                 .set_read_timeout(Some(std::time::Duration::from_secs(5)))
                 .unwrap();
-            for kind in 1..=5 {
+            for kind in 1..=6 {
                 let request_id = 700 + u64::from(kind);
                 crate::ipc::write_frame(
                     &mut submission_client,
@@ -2350,7 +2350,7 @@ mod tests {
                 &mut submission_client,
                 &IpcFrame {
                     operation: Operation::OptimizeGroupCount as u16,
-                    request_id: 706,
+                    request_id: 707,
                     payload: eight_key_ordered_group_aggregate_request(),
                 },
             )
@@ -2358,7 +2358,7 @@ mod tests {
             let response = crate::ipc::read_frame(&mut submission_client)
                 .unwrap()
                 .expect("optimizer must return an ordered eight-key aggregate plan");
-            assert_eq!(response.request_id, 706);
+            assert_eq!(response.request_id, 707);
             let response = OptimizerResponse::decode(&response.payload).unwrap();
             assert_eq!(response.status, OptimizerStatus::Success);
             let plan = crate::optimizer_plan::decode_ordered_composite_group_aggregate_plan_v1(

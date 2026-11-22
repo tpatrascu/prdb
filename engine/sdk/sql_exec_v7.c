@@ -2390,19 +2390,6 @@ int32_t prdb_sdk_sql_execute_group_having_optimizer_v24(
         sql, sql_len, &statement, sizeof(statement), NULL);
     if (status != PRDB_SDK_SQL_OK)
         return fail_statement(&host->v4.v3, PRDB_SDK_SQL_EXEC_BIND_ERROR);
-    if (statement.base.base.base.base.base.base.aggregate_kind ==
-        PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN) {
-        return prdb_sdk_sql_execute_group_typed_v24(
-            &host->v4.v3, schema, schema_len, sql, sql_len, parameters,
-            parameter_metadata, parameter_count, max_candidates,
-            max_batch_bytes, planner_response, planner_response_capacity,
-            executor_response, executor_response_capacity, batch_response,
-            batch_response_capacity, planner_columns,
-            planner_column_capacity, executor_columns,
-            executor_column_capacity, cell_scratch, cell_scratch_capacity,
-            materialized_bytes, materialized_bytes_capacity, on_group,
-            result_context);
-    }
     statement_v13 = &statement.base.base.base.base.base;
     statement_v15 = &statement.base.base.base;
     if (statement.base.base.having_node_count == 0 ||

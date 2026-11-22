@@ -696,7 +696,7 @@ int32_t prdb_sdk_optimizer_encode_composite_group_aggregate_v1(
         statement->group_key_count > PRDB_SDK_SQL_V13_MAX_GROUP_KEYS ||
         statement->base.has_group_by != 1 ||
         statement->base.aggregate_kind < PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR ||
-        statement->base.aggregate_kind > PRDB_SDK_SQL_V7_AGGREGATE_AVG ||
+        statement->base.aggregate_kind > PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN ||
         statement->base.base.projection_count != 1 ||
         statement->base.base.projection_star != 0 ||
         statement->base.base.predicate_count != 0 ||
@@ -828,7 +828,7 @@ int32_t prdb_sdk_optimizer_encode_filtered_composite_group_aggregate_v1(
         base->sql_len > PRDB_SDK_SQL_MAX_QUERY_BYTES ||
         !span_is_identifier(base, base->relation) ||
         aggregate->aggregate_kind < PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR ||
-        aggregate->aggregate_kind > PRDB_SDK_SQL_V7_AGGREGATE_AVG ||
+        aggregate->aggregate_kind > PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN ||
         (aggregate->aggregate_kind == PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR
              ? aggregate->aggregate_column.length != 0
              : !span_is_identifier(base, aggregate->aggregate_column)))
@@ -1142,7 +1142,7 @@ int32_t prdb_sdk_optimizer_encode_ordered_composite_group_aggregate_v1(
         statement->base.base.base.aggregate_kind <
             PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR ||
         statement->base.base.base.aggregate_kind >
-            PRDB_SDK_SQL_V7_AGGREGATE_AVG ||
+            PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN ||
         statement->base.has_having != 0 || statement->order_count == 0 ||
         statement->order_count > PRDB_SDK_SQL_V15_MAX_ORDER_KEYS ||
         statement->base.base.base.base.has_limit > 1 || schema_len == 0 ||
@@ -1233,7 +1233,7 @@ int32_t prdb_sdk_optimizer_encode_group_aggregate_v1(
     uint8_t header[4] = {0, 1, PRDB_OPTIMIZER_GROUP_AGGREGATE_STATEMENT, 0};
     if (statement == NULL || schema == NULL || request == NULL || request_len == NULL ||
         statement->struct_size != sizeof(*statement) || statement->abi_version != PRDB_SDK_SQL_ABI_V7_VERSION ||
-        statement->has_group_by != 1 || statement->aggregate_kind < PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR || statement->aggregate_kind > PRDB_SDK_SQL_V7_AGGREGATE_AVG ||
+        statement->has_group_by != 1 || statement->aggregate_kind < PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR || statement->aggregate_kind > PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN ||
         statement->base.projection_count != 1 || statement->base.projection_star != 0 || statement->base.predicate_count != 0 || statement->base.has_limit > 1 ||
         schema_len == 0 || schema_len > 63 || !valid_identifier(schema, schema_len) || request_capacity > OPTIMIZER_REQUEST_MAX_BYTES)
         return request_capacity > OPTIMIZER_REQUEST_MAX_BYTES ? PRDB_SDK_OPTIMIZER_ENCODE_LIMIT_EXCEEDED : PRDB_SDK_OPTIMIZER_ENCODE_INVALID_ARGUMENT;
@@ -1295,7 +1295,8 @@ int32_t prdb_sdk_optimizer_encode_ordered_group_aggregate_v1(
     if (statement_v7->struct_size != sizeof(*statement_v7) ||
         statement_v7->abi_version != PRDB_SDK_SQL_ABI_V7_VERSION ||
         statement_v7->has_group_by != 1 || statement_v7->aggregate_kind < 1 ||
-        statement_v7->aggregate_kind > 5 || base->projection_count != 1 ||
+        statement_v7->aggregate_kind > PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN ||
+        base->projection_count != 1 ||
         base->projection_star != 0 || base->predicate_count != 0 ||
         base->has_limit > 1 ||
         statement->base.base.base.has_having != 0 || schema_len == 0)
