@@ -2126,7 +2126,7 @@ int32_t prdb_sdk_optimizer_decode_filtered_composite_group_aggregate_plan_v1(
         !take(&reader, 2, &bytes))
         return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
     scan_count = read_be_u16(bytes);
-    if (scan_count < PRDB_SDK_SQL_V13_MIN_GROUP_KEYS ||
+    if (scan_count < 1 ||
         scan_count > PRDB_SDK_OPTIMIZER_PLAN_MAX_SCAN_COLUMNS)
         return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
     decoded.plan.scan_column_count = scan_count;
@@ -2160,7 +2160,7 @@ int32_t prdb_sdk_optimizer_decode_filtered_composite_group_aggregate_plan_v1(
     if (!read_u8(&reader, &tag) || tag != 15 ||
         !read_u8(&reader, &aggregate_kind) || aggregate_kind < 1 ||
         aggregate_kind > 5 || !read_u8(&reader, &key_count) ||
-        key_count < PRDB_SDK_SQL_V13_MIN_GROUP_KEYS ||
+        key_count < 1 ||
         key_count > PRDB_SDK_SQL_V13_MAX_GROUP_KEYS)
         return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
     decoded.group_key_count = key_count;
@@ -3068,7 +3068,7 @@ int32_t prdb_sdk_optimizer_match_filtered_composite_group_aggregate_plan_v1(
         statement->base.abi_version != PRDB_SDK_SQL_ABI_V7_VERSION ||
         statement->base.base.struct_size != sizeof(statement->base.base) ||
         statement->base.base.abi_version != PRDB_SDK_SQL_ABI_V2_VERSION ||
-        statement->group_key_count < PRDB_SDK_SQL_V13_MIN_GROUP_KEYS ||
+        statement->group_key_count < 1 ||
         statement->group_key_count > PRDB_SDK_SQL_V13_MAX_GROUP_KEYS ||
         statement->base.has_group_by != 1 ||
         statement->base.aggregate_kind < PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR ||

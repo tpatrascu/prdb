@@ -2365,8 +2365,7 @@ int32_t prdb_sdk_sql_execute_group_having_optimizer_v24(
     if (statement.base.base.having_node_count == 0 ||
         statement_v13->group_key_count == 0 ||
         (statement_v13->base.base.predicate_count != 0 &&
-         (statement_v13->group_key_count == 1 ||
-          statement_v15->order_count != 0)) ||
+         statement_v15->order_count != 0) ||
         (statement_v13->group_key_count == 1 &&
          statement_v15->order_count > PRDB_SDK_SQL_V12_MAX_ORDER_KEYS))
         return fail_statement(&host->v4.v3, PRDB_SDK_SQL_EXEC_BIND_ERROR);
@@ -2394,7 +2393,12 @@ int32_t prdb_sdk_sql_execute_group_having_optimizer_v24(
     binding_v13 = &binding.base.base.base.base.base;
     binding_v15 = &binding.base.base.base;
 
-    if (statement_v13->group_key_count == 1) {
+    if (statement_v13->base.base.predicate_count != 0) {
+        status = prdb_sdk_optimizer_encode_filtered_composite_group_aggregate_v1(
+            statement_v13, parameters, parameter_count, schema, schema_len,
+            optimizer_request, optimizer_request_capacity,
+            &optimizer_request_len);
+    } else if (statement_v13->group_key_count == 1) {
         if (statement_v15->order_count != 0) {
             ordered_single_statement.struct_size =
                 sizeof(ordered_single_statement);
@@ -2480,11 +2484,6 @@ int32_t prdb_sdk_sql_execute_group_having_optimizer_v24(
                 &statement_v13->base, schema, schema_len, optimizer_request,
                 optimizer_request_capacity, &optimizer_request_len);
         }
-    } else if (statement_v13->base.base.predicate_count != 0) {
-        status = prdb_sdk_optimizer_encode_filtered_composite_group_aggregate_v1(
-            statement_v13, parameters, parameter_count, schema, schema_len,
-            optimizer_request, optimizer_request_capacity,
-            &optimizer_request_len);
     } else if (statement_v15->order_count != 0) {
         status = prdb_sdk_optimizer_encode_ordered_composite_group_aggregate_v1(
             statement_v15, schema, schema_len, optimizer_request,
@@ -2502,7 +2501,11 @@ int32_t prdb_sdk_sql_execute_group_having_optimizer_v24(
         sizeof(optimizer));
     if (status != PRDB_SDK_OPTIMIZER_RESULT_OK)
         return fail_statement(&host->v4.v3, PRDB_SDK_SQL_EXEC_PLANNER_ERROR);
-    if (statement_v13->group_key_count == 1) {
+    if (statement_v13->base.base.predicate_count != 0) {
+        status = prdb_sdk_optimizer_match_filtered_composite_group_aggregate_plan_v1(
+            statement_v13, binding_v13, parameters, parameter_count, schema,
+            schema_len, optimizer.plan, optimizer.plan_len);
+    } else if (statement_v13->group_key_count == 1) {
         if (statement_v15->order_count != 0) {
             status = prdb_sdk_optimizer_match_ordered_group_aggregate_plan_v1(
                 &ordered_single_statement, &ordered_single_binding, schema,
@@ -2512,10 +2515,6 @@ int32_t prdb_sdk_sql_execute_group_having_optimizer_v24(
                 &statement_v13->base, &binding_v13->base, schema, schema_len,
                 optimizer.plan, optimizer.plan_len);
         }
-    } else if (statement_v13->base.base.predicate_count != 0) {
-        status = prdb_sdk_optimizer_match_filtered_composite_group_aggregate_plan_v1(
-            statement_v13, binding_v13, parameters, parameter_count, schema,
-            schema_len, optimizer.plan, optimizer.plan_len);
     } else if (statement_v15->order_count != 0) {
         status = prdb_sdk_optimizer_match_ordered_composite_group_aggregate_plan_v1(
             statement_v15, binding_v15, schema, schema_len, optimizer.plan,

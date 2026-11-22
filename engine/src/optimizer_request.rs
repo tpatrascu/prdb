@@ -743,7 +743,7 @@ pub fn decode_filtered_composite_group_aggregate_request(
     let schema_name = cursor.identifier()?;
     let relation_name = cursor.identifier()?;
     let group_key_count = usize::from(cursor.u8()?);
-    if !(MIN_GROUP_KEYS..=MAX_GROUP_KEYS).contains(&group_key_count) {
+    if !(1..=MAX_GROUP_KEYS).contains(&group_key_count) {
         return Err(RequestError::InvalidValue);
     }
     let mut group_key_names = Vec::with_capacity(group_key_count);
@@ -1688,6 +1688,25 @@ mod tests {
         bytes
     }
 
+    fn filtered_single_group_aggregate_request(predicate: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![
+            0,
+            OPTIMIZER_REQUEST_VERSION as u8,
+            OPTIMIZER_FILTERED_COMPOSITE_GROUP_AGGREGATE_STATEMENT,
+            0,
+        ];
+        name("public", &mut bytes);
+        name("items", &mut bytes);
+        bytes.push(1);
+        name("category", &mut bytes);
+        bytes.push(4);
+        name("amount", &mut bytes);
+        u32_bytes(predicate.len(), &mut bytes);
+        bytes.extend_from_slice(predicate);
+        bytes.extend_from_slice(&[1, 0, 0, 0, 9]);
+        bytes
+    }
+
     #[test]
     fn decodes_filtered_composite_group_aggregate_request() {
         let predicate = [
@@ -1731,6 +1750,23 @@ mod tests {
         .unwrap();
         assert_eq!(
             not_null_request.predicate,
+            Predicate::IsNotNull(Box::new(Predicate::Column("amount".to_owned())))
+        );
+    }
+
+    #[test]
+    fn decodes_filtered_single_group_aggregate_request() {
+        let predicate = [0x41, 0x10, 6, b'a', b'm', b'o', b'u', b'n', b't'];
+        let request = decode_filtered_composite_group_aggregate_request(
+            &filtered_single_group_aggregate_request(&predicate),
+        )
+        .unwrap();
+        assert_eq!(request.group_key_names, ["category"]);
+        assert_eq!(request.aggregate_kind, 4);
+        assert_eq!(request.aggregate_column_name.as_deref(), Some("amount"));
+        assert_eq!(request.limit, Some(9));
+        assert_eq!(
+            request.predicate,
             Predicate::IsNotNull(Box::new(Predicate::Column("amount".to_owned())))
         );
     }

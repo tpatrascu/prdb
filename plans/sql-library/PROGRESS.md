@@ -1312,7 +1312,7 @@
 - Red/green evidence: the maintained `sdk-sql-execute-v10` fixture exercises `SUM(score) IS NOT NULL AND COUNT(*) IS NOT NULL` through the optimizer-gated v24 API and checks both callback groups and bindings. The initial test failed while the API was absent; the implementation passes it.
 - Confined evidence: `sql_v3_write_read.c` now sends the composite SUM query with `SUM(left_key) >= 2 AND COUNT(*) >= 1` through the optimizer gate. The fallback path uses the same query via the v24 grouped runner, and the acceptance compares the exact SQLR rows from the confined query artifact.
 - Verification: the focused TinyCC executor fixture and complete pinned TinyCC SDK suite passed. `make sandbox-query-fixture` built the confined artifact; `make release-profile` validated ten engine binaries and one query fixture. Workspace build, rustfmt, warning-denied Clippy, and `git diff --check` passed. The full serial locked workspace suite passed inside a delegated `systemd --user` unit with all sandbox and process tests enabled, including `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` for the updated query.
-- Remaining: optimizer-gated v24 cannot combine WHERE with ORDER BY because the current filtered aggregate plan lacks sort keys; one-key WHERE support also lacks a matching request. Broader analytical workloads, secure spill, and target-hardware measurements remain open.
+- Remaining: optimizer-gated v24 cannot combine WHERE with ORDER BY because the current filtered aggregate plan lacks sort keys. Broader analytical workloads, secure spill, and target-hardware measurements remain open.
 
 ## SQL-7 follow-up: optimizer-backed single-key compound HAVING — verified
 
@@ -1327,6 +1327,13 @@
 - Regression evidence: the maintained `sdk-sql-execute-v10` fixture exercises a single-key kind-11 query with two sort items, explicit independent directions and NULL placement, and a NULL aggregate input. It verifies the groups are filtered and sorted before callbacks. The confined query artifact adds ORDER BY to its composite SUM/HAVING query, exercising the real planner's kind-14 path and exact SQLR relay.
 - Verification: focused TinyCC executor fixture passed; `make test sandbox-query-fixture`, release-profile validation, locked workspace build, rustfmt, warning-denied Clippy, and `git diff --check` passed. The full serial locked workspace suite passed in delegated `prdb-ordered-having-check-33857.service` with the confined SQL acceptance enabled.
 - Remaining: filtered composite WHERE plus ORDER BY/HAVING cannot use current plan kind 15, and one-key filtered aggregates have no optimizer request. Broader analytical workloads, secure spill, and target-hardware measurements remain open.
+
+## SQL-7 follow-up: optimizer-backed filtered single-key compound HAVING — verified
+
+- Contract: the v24 compound-HAVING optimizer entry point now routes filtered one-key queries through statement 15 / plan kind 15 without ORDER BY. The request and plan still scan the authorized filter, group, and aggregate input columns; the SDK independently matches the filter and evaluates typed HAVING.
+- Regression evidence: the maintained `sdk-sql-execute-v10` fixture submits `WHERE id IS NOT NULL` with a compound HAVING, validates the kind-15 request and one-key plan, and checks the resulting groups. Rust request, plan round-trip, and optimizer-process tests cover one group key.
+- Verification: the focused TinyCC executor fixture passed; the complete pinned TinyCC SDK suite, sandbox fixture build, release-profile validation, locked workspace build, rustfmt, warning-denied Clippy, and `git diff --check` passed. The full serial locked workspace suite passed in delegated `prdb-single-filter-workspace-final-52612.service`, including the confined SQL acceptance. Rust request decoding and the optimizer-process case passed for the one-key statement-15 request.
+- Remaining: filtered composite WHERE plus ORDER BY/HAVING cannot use current plan kind 15. Broader analytical workloads, secure spill, and target-hardware measurements remain open.
 
 
 ## SQL-7 follow-up: typed parameters in filtered joins — verified

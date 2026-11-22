@@ -120,9 +120,10 @@ int32_t prdb_sdk_optimizer_encode_composite_group_aggregate_v1(
     const uint8_t *schema, uint32_t schema_len,
     uint8_t *request, uint64_t request_capacity, uint64_t *request_len);
 
-/* Encode composite GROUP BY with one aggregate and a bounded WHERE tree as
- * statement 15. Parameters follow the v2 comparison encoding. HAVING and
- * ORDER BY remain outside this request subset. */
+/* Encode filtered GROUP BY with one aggregate as statement 15. The v24
+ * optimizer bridge may supply one key; v13 SQL parsing remains composite-only.
+ * Parameters follow the v2 comparison encoding. HAVING and ORDER BY remain
+ * outside this request subset. */
 int32_t prdb_sdk_optimizer_encode_filtered_composite_group_aggregate_v1(
     const prdb_sdk_select_v13 *statement,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,

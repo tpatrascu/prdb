@@ -810,7 +810,7 @@ int32_t prdb_sdk_optimizer_encode_filtered_composite_group_aggregate_v1(
         statement->base.abi_version != PRDB_SDK_SQL_ABI_V7_VERSION ||
         statement->base.base.struct_size != sizeof(statement->base.base) ||
         statement->base.base.abi_version != PRDB_SDK_SQL_ABI_V2_VERSION ||
-        statement->group_key_count < PRDB_SDK_SQL_V13_MIN_GROUP_KEYS ||
+        statement->group_key_count < 1 ||
         statement->group_key_count > PRDB_SDK_SQL_V13_MAX_GROUP_KEYS ||
         statement->base.has_group_by != 1 || statement->base.base.projection_count != 1 ||
         statement->base.base.projection_star != 0 || statement->base.base.predicate_count == 0 ||

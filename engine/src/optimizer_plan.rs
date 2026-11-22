@@ -2067,8 +2067,7 @@ pub fn validate_filtered_composite_group_aggregate_plan_v1(
 ) -> Result<(), PlanError> {
     validate_relation(&plan.relation)?;
     validate_columns(&plan.scan_columns)?;
-    if !(crate::optimizer_request::MIN_GROUP_KEYS..=crate::optimizer_request::MAX_GROUP_KEYS)
-        .contains(&plan.group_keys.len())
+    if !(1..=crate::optimizer_request::MAX_GROUP_KEYS).contains(&plan.group_keys.len())
         || !(1..=5).contains(&plan.aggregate_kind)
         || plan
             .group_keys
@@ -2392,7 +2391,7 @@ pub fn decode_filtered_composite_group_aggregate_plan_v1(
         )?)
         .ok_or(PlanError::Truncated)?;
     let scan_count = usize::from(reader.u16()?);
-    if !(crate::optimizer_request::MIN_GROUP_KEYS..=MAX_PLAN_SCAN_COLUMNS).contains(&scan_count) {
+    if !(1..=MAX_PLAN_SCAN_COLUMNS).contains(&scan_count) {
         return Err(PlanError::InvalidColumnReference);
     }
     let mut scan_columns = Vec::with_capacity(scan_count);
@@ -2407,9 +2406,7 @@ pub fn decode_filtered_composite_group_aggregate_plan_v1(
     }
     let aggregate_kind = reader.u8()?;
     let key_count = usize::from(reader.u8()?);
-    if !(crate::optimizer_request::MIN_GROUP_KEYS..=crate::optimizer_request::MAX_GROUP_KEYS)
-        .contains(&key_count)
-    {
+    if !(1..=crate::optimizer_request::MAX_GROUP_KEYS).contains(&key_count) {
         return Err(PlanError::InvalidColumnReference);
     }
     let mut group_keys = Vec::with_capacity(key_count);
@@ -5597,6 +5594,32 @@ mod tests {
         assert_eq!(
             decode_filtered_composite_group_aggregate_plan_v1(&bytes).unwrap(),
             plan
+        );
+
+        let single_key_plan =
+            plan_filtered_composite_group_aggregate_v1(BoundFilteredCompositeGroupAggregate {
+                schema_name: "sales".to_owned(),
+                schema_id: [0x10; 16],
+                schema_version: 4,
+                table_epoch: 6,
+                relation_id: [0x20; 16],
+                relation_name: "orders".to_owned(),
+                group_keys: vec![second],
+                aggregate_kind: 4,
+                aggregate_column: Some(amount),
+                predicate: BoundPredicate::IsNotNull(Box::new(BoundPredicate::Column(
+                    first.clone(),
+                ))),
+                limit: Some(7),
+            })
+            .unwrap();
+        assert_eq!(single_key_plan.group_keys.len(), 1);
+        assert_eq!(single_key_plan.scan_columns.len(), 3);
+        let single_key_bytes =
+            encode_filtered_composite_group_aggregate_plan_v1(&single_key_plan).unwrap();
+        assert_eq!(
+            decode_filtered_composite_group_aggregate_plan_v1(&single_key_bytes).unwrap(),
+            single_key_plan
         );
 
         let mut invalid = plan;
