@@ -42399,12 +42399,22 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         },
     };
     let filtered_composite_only = std::env::var_os("PRDB_TEST_FILTERED_COMPOSITE_ONLY").is_some();
-    if std::env::var_os("PRDB_TEST_ORDERED_ANALYTICAL_ONLY").is_some() || filtered_composite_only {
+    let count_column_only = std::env::var_os("PRDB_TEST_COUNT_COLUMN_ONLY").is_some();
+    if std::env::var_os("PRDB_TEST_ORDERED_ANALYTICAL_ONLY").is_some()
+        || filtered_composite_only
+        || count_column_only
+    {
         let mut ordered_client = ClientConnectionSession::default();
         ordered_client.accept_hello(ClientMode::Query, "sandbox-ordered-analytical-sum")?;
         ordered_client.authenticate(&storage, token_id, &secret)?;
         let ordered_owner = ordered_client.staging_owner()?;
-        let ordered_parameter = [if filtered_composite_only { b'Q' } else { b'W' }];
+        let ordered_parameter = [if count_column_only {
+            b'V'
+        } else if filtered_composite_only {
+            b'Q'
+        } else {
+            b'W'
+        }];
         let ordered_reservation = staging.prepare(
             ordered_owner,
             PrepareSubmission {
@@ -42499,7 +42509,41 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         );
         staging.finish_started(ordered_owner, ordered_reservation.invocation_id)?;
         let mut ordered_frames = ordered_frames.into_iter();
-        if filtered_composite_only {
+        if count_column_only {
+            fn expected_count_column_row(left_key: i32, right_key: i32, count: i64) -> Vec<u8> {
+                fn append_field(
+                    output: &mut Vec<u8>,
+                    name: &[u8],
+                    type_code: u32,
+                    value: &[u8],
+                ) {
+                    output.extend_from_slice(&(name.len() as u16).to_be_bytes());
+                    output.extend_from_slice(name);
+                    output.extend_from_slice(&type_code.to_be_bytes());
+                    output.extend_from_slice(&[0, 0, 0]);
+                    output.extend_from_slice(&(value.len() as u32).to_be_bytes());
+                    output.extend_from_slice(value);
+                }
+                let mut output = b"SQLR".to_vec();
+                output.extend_from_slice(&1u16.to_be_bytes());
+                output.extend_from_slice(&3u16.to_be_bytes());
+                append_field(&mut output, b"left_key", 3, &left_key.to_be_bytes());
+                append_field(&mut output, b"right_key", 3, &right_key.to_be_bytes());
+                append_field(&mut output, b"count", 4, &count.to_be_bytes());
+                output
+            }
+            for (left_key, right_key, count) in [(2, 9, 3), (1, 7, 1), (3, 11, 0)] {
+                let frame = ordered_frames
+                    .next()
+                    .ok_or("missing confined COUNT(column) SQLR row")?;
+                assert_eq!(frame.operation, Operation::GatewayResultData as u16);
+                assert_eq!(frame.request_id, ordered_accepted.request_id);
+                assert_eq!(
+                    frame.payload,
+                    expected_count_column_row(left_key, right_key, count)
+                );
+            }
+        } else if filtered_composite_only {
             fn expected_filtered_sum_row(
                 left_key: i32,
                 right_key: i32,

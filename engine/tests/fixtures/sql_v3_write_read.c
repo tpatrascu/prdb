@@ -2100,6 +2100,19 @@ static int32_t run_write_read_fixture(
         return report_failure(host, message, sizeof(message) - 1);
     }
     if (invocation->parameters_len == 1 && invocation->parameters != NULL &&
+        invocation->parameters[0] == 'V') {
+        static const uint8_t count_column_sql[] =
+            "SELECT left_key, right_key, COUNT(decimal_value) "
+            "FROM decimal_grouped_records GROUP BY left_key, right_key "
+            "ORDER BY COUNT(decimal_value) DESC NULLS LAST, left_key ASC";
+        status = prdb_sdk_sql_run_statement_v1(
+            host, schema, sizeof(schema) - 1, count_column_sql,
+            sizeof(count_column_sql) - 1, NULL, 0);
+        if (status == PRDB_SDK_SQL_DISPATCH_OK) return 0;
+        static const uint8_t message[] = "fixture-error-count-column-dispatch";
+        return report_failure(host, message, sizeof(message) - 1);
+    }
+    if (invocation->parameters_len == 1 && invocation->parameters != NULL &&
         (invocation->parameters[0] == 'A' || invocation->parameters[0] == 'B' ||
          invocation->parameters[0] == 'R' || invocation->parameters[0] == 'W' ||
          invocation->parameters[0] == 'Q' || invocation->parameters[0] == 'N')) {

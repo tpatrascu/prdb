@@ -10,6 +10,8 @@ The `sandboxed_v3_shared_sql_library_resolves_loads_and_durably_aborts_on_sql_er
 
 The `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` acceptance installs the test SDK into a temporary instance repository and submits a query-only package containing the query, manifest, scope, and parameters. The server resolves and pins the exact SDK release at START; the confined executor loads the staged dependency and completes the SQL transaction. No SDK library bytes are included in the package or query upload.
 
+Set `PRDB_TEST_COUNT_COLUMN_ONLY=1` to isolate the v24 `COUNT(decimal_value)` relay case in this acceptance. It runs through the SQL statement dispatcher against three Decimal groups and verifies the exact SQLR records: counts 3, 1, and 0 in ordered output, including the all-NULL group. The invocation still runs inside the normal delegated-cgroup executor path and must commit durably.
+
 The aggregate `A` invocation also calls the general SQL dispatcher with v23 compound HAVING: `SUM(decimal_value) IS NULL AND COUNT(*) IS NOT NULL AND COUNT(*) >= 1`, followed by ordering and LIMIT. Only the committed all-NULL group `(3,11)` survives, and the gateway checks its exact SQLR row with a NULL DECIMAL(38,2) sum before the durable COMMITTED outcome. The primary hidden-count dispatch query additionally requires both COUNT(*) and SUM to be non-NULL, preserving its existing exact `4.50` result.
 
 The aggregate `A` invocation also exercises v24 through the same dispatcher. A typed Decimal WHERE parameter keeps NULL rows and excludes amounts below `1.25` before grouping. Compound HAVING keeps the all-NULL groups and the two-row group. ORDER BY with NULLS LAST and LIMIT 1 selects right_key `9` and exact DECIMAL(38,2) SUM `3.50`. The gateway verifies the two-column SQLR frame and durable COMMITTED result.
@@ -74,6 +76,7 @@ Configure these environment variables in the shell command run by the unit:
 - `PRDB_TEST_WRITE_READ_QUERY_ARTIFACT`: absolute path to `target/sdk-v1/sql-v3-write-read.so`.
 - `PRDB_TEST_ORDERED_ANALYTICAL_ONLY`: optionally set to `1` to isolate the high-cardinality ordered SUM branch of the confined write/read acceptance.
 - `PRDB_TEST_FILTERED_COMPOSITE_ONLY`: optionally set to `1` to isolate the filtered ordered composite aggregate branch. It submits `SUM(decimal_value)` grouped by two keys with `WHERE left_key = $1 AND (decimal_value IS NULL OR decimal_value IS NOT NULL)`, compound `HAVING SUM(decimal_value) IS NOT NULL AND COUNT(*) >= 1`, and three `ORDER BY` items. It binds `$1` to `1`, verifies the null-test branches retain the two rows in `(1,7)`, checks sort metadata, and relays the exact DECIMAL(38,2) sum `1.00` through the gateway before commit. This exercises optimizer statement 16 / plan kind 16.
+- `PRDB_TEST_COUNT_COLUMN_ONLY`: optionally set to `1` to isolate the confined v24 `COUNT(column)` SQLR relay case. It checks non-NULL counting and zero for an all-NULL group through the dispatcher and gateway.
 - `PRDB_TEST_RESTRICTED_METADATA_QUERY_ARTIFACT`: absolute path to `target/sdk-v1/sql-v3-restricted-metadata.so`, used by the restricted-principal metadata acceptance.
 - `PRDB_TEST_NETWORK_CONSTRUCTOR_ARTIFACT`: absolute path to `target/sdk-v1/sql-v3-network-constructor.so`.
 - `PRDB_TEST_FORGED_HANDLE_QUERY_ARTIFACT`: absolute path to `target/sdk-v1/sql-v3-forged-relation-handle.so`.
