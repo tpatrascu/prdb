@@ -2324,6 +2324,10 @@ int32_t prdb_sdk_sql_execute_group_having_optimizer_v24(
     prdb_sdk_select_binding_v24 binding = {0};
     prdb_sdk_select_v13 *statement_v13;
     prdb_sdk_select_binding_v13 *binding_v13;
+    prdb_sdk_select_v15 *statement_v15;
+    prdb_sdk_select_binding_v15 *binding_v15;
+    prdb_sdk_select_v12 ordered_single_statement = {0};
+    prdb_sdk_select_binding_v12 ordered_single_binding = {0};
     prdb_sdk_planner_relation_v1 planned = {0};
     prdb_sdk_optimizer_response_v1 optimizer = {0};
     prdb_host_api_v2 host_v2;
@@ -2357,11 +2361,14 @@ int32_t prdb_sdk_sql_execute_group_having_optimizer_v24(
     if (status != PRDB_SDK_SQL_OK)
         return fail_statement(&host->v4.v3, PRDB_SDK_SQL_EXEC_BIND_ERROR);
     statement_v13 = &statement.base.base.base.base.base;
+    statement_v15 = &statement.base.base.base;
     if (statement.base.base.having_node_count == 0 ||
-        statement.base.base.base.order_count != 0 ||
         statement_v13->group_key_count == 0 ||
+        (statement_v13->base.base.predicate_count != 0 &&
+         (statement_v13->group_key_count == 1 ||
+          statement_v15->order_count != 0)) ||
         (statement_v13->group_key_count == 1 &&
-         statement_v13->base.base.predicate_count != 0))
+         statement_v15->order_count > PRDB_SDK_SQL_V12_MAX_ORDER_KEYS))
         return fail_statement(&host->v4.v3, PRDB_SDK_SQL_EXEC_BIND_ERROR);
 
     host_v2 = (prdb_host_api_v2){sizeof(prdb_host_api_v2),
@@ -2385,16 +2392,103 @@ int32_t prdb_sdk_sql_execute_group_having_optimizer_v24(
     if (status != PRDB_SDK_SQL_BIND_OK)
         return fail_statement(&host->v4.v3, PRDB_SDK_SQL_EXEC_BIND_ERROR);
     binding_v13 = &binding.base.base.base.base.base;
+    binding_v15 = &binding.base.base.base;
 
     if (statement_v13->group_key_count == 1) {
-        status = prdb_sdk_optimizer_encode_group_aggregate_v1(
-            &statement_v13->base, schema, schema_len, optimizer_request,
-            optimizer_request_capacity, &optimizer_request_len);
+        if (statement_v15->order_count != 0) {
+            ordered_single_statement.struct_size =
+                sizeof(ordered_single_statement);
+            ordered_single_statement.abi_version =
+                PRDB_SDK_SQL_ABI_V12_VERSION;
+            ordered_single_statement.base.struct_size =
+                sizeof(ordered_single_statement.base);
+            ordered_single_statement.base.abi_version =
+                PRDB_SDK_SQL_ABI_V11_VERSION;
+            ordered_single_statement.base.base.struct_size =
+                sizeof(ordered_single_statement.base.base);
+            ordered_single_statement.base.base.abi_version =
+                PRDB_SDK_SQL_ABI_V10_VERSION;
+            ordered_single_statement.base.base.base.struct_size =
+                sizeof(ordered_single_statement.base.base.base);
+            ordered_single_statement.base.base.base.abi_version =
+                PRDB_SDK_SQL_ABI_V9_VERSION;
+            ordered_single_statement.base.base.base.base =
+                statement_v13->base;
+            ordered_single_statement.base.base.has_order_by = 1;
+            ordered_single_statement.order_count = statement_v15->order_count;
+            ordered_single_binding.struct_size =
+                sizeof(ordered_single_binding);
+            ordered_single_binding.abi_version =
+                PRDB_SDK_SQL_ABI_V12_VERSION;
+            ordered_single_binding.base.struct_size =
+                sizeof(ordered_single_binding.base);
+            ordered_single_binding.base.abi_version =
+                PRDB_SDK_SQL_ABI_V11_VERSION;
+            ordered_single_binding.base.base.struct_size =
+                sizeof(ordered_single_binding.base.base);
+            ordered_single_binding.base.base.abi_version =
+                PRDB_SDK_SQL_ABI_V10_VERSION;
+            ordered_single_binding.base.base.base.struct_size =
+                sizeof(ordered_single_binding.base.base.base);
+            ordered_single_binding.base.base.base.abi_version =
+                PRDB_SDK_SQL_ABI_V9_VERSION;
+            ordered_single_binding.base.base.base.base = binding_v13->base;
+            ordered_single_binding.order_count = binding_v15->order_count;
+            for (uint32_t index = 0; index < statement_v15->order_count;
+                 ++index) {
+                const prdb_sdk_sql_order_item_v15 *source =
+                    &statement_v15->order_items[index];
+                const prdb_sdk_sql_bound_order_item_v15 *bound =
+                    &binding_v15->order_items[index];
+                prdb_sdk_sql_order_item_v12 *item =
+                    &ordered_single_statement.order_items[index];
+                prdb_sdk_sql_bound_order_item_v12 *bound_item =
+                    &ordered_single_binding.order_items[index];
+                item->kind = source->kind;
+                item->direction = source->direction;
+                item->null_order = source->null_order;
+                bound_item->item = *item;
+                bound_item->type_code = bound->type_code;
+                bound_item->decimal_precision = bound->decimal_precision;
+                bound_item->decimal_scale = bound->decimal_scale;
+            }
+            ordered_single_statement.base.base.order_kind =
+                ordered_single_statement.order_items[0].kind;
+            ordered_single_statement.base.base.order_direction =
+                ordered_single_statement.order_items[0].direction;
+            ordered_single_statement.base.null_order =
+                ordered_single_statement.order_items[0].null_order;
+            ordered_single_binding.base.base.has_order_by = 1;
+            ordered_single_binding.base.base.order_kind =
+                ordered_single_binding.order_items[0].item.kind;
+            ordered_single_binding.base.base.order_direction =
+                ordered_single_binding.order_items[0].item.direction;
+            ordered_single_binding.base.base.order_type_code =
+                ordered_single_binding.order_items[0].type_code;
+            ordered_single_binding.base.base.order_decimal_precision =
+                ordered_single_binding.order_items[0].decimal_precision;
+            ordered_single_binding.base.base.order_decimal_scale =
+                ordered_single_binding.order_items[0].decimal_scale;
+            ordered_single_binding.base.null_order =
+                ordered_single_binding.order_items[0].item.null_order;
+            status = prdb_sdk_optimizer_encode_ordered_group_aggregate_v1(
+                &ordered_single_statement, schema, schema_len,
+                optimizer_request, optimizer_request_capacity,
+                &optimizer_request_len);
+        } else {
+            status = prdb_sdk_optimizer_encode_group_aggregate_v1(
+                &statement_v13->base, schema, schema_len, optimizer_request,
+                optimizer_request_capacity, &optimizer_request_len);
+        }
     } else if (statement_v13->base.base.predicate_count != 0) {
         status = prdb_sdk_optimizer_encode_filtered_composite_group_aggregate_v1(
             statement_v13, parameters, parameter_count, schema, schema_len,
             optimizer_request, optimizer_request_capacity,
             &optimizer_request_len);
+    } else if (statement_v15->order_count != 0) {
+        status = prdb_sdk_optimizer_encode_ordered_composite_group_aggregate_v1(
+            statement_v15, schema, schema_len, optimizer_request,
+            optimizer_request_capacity, &optimizer_request_len);
     } else {
         status = prdb_sdk_optimizer_encode_composite_group_aggregate_v1(
             statement_v13, schema, schema_len, optimizer_request,
@@ -2409,13 +2503,23 @@ int32_t prdb_sdk_sql_execute_group_having_optimizer_v24(
     if (status != PRDB_SDK_OPTIMIZER_RESULT_OK)
         return fail_statement(&host->v4.v3, PRDB_SDK_SQL_EXEC_PLANNER_ERROR);
     if (statement_v13->group_key_count == 1) {
-        status = prdb_sdk_optimizer_match_group_aggregate_plan_v1(
-            &statement_v13->base, &binding_v13->base, schema, schema_len,
-            optimizer.plan, optimizer.plan_len);
+        if (statement_v15->order_count != 0) {
+            status = prdb_sdk_optimizer_match_ordered_group_aggregate_plan_v1(
+                &ordered_single_statement, &ordered_single_binding, schema,
+                schema_len, optimizer.plan, optimizer.plan_len);
+        } else {
+            status = prdb_sdk_optimizer_match_group_aggregate_plan_v1(
+                &statement_v13->base, &binding_v13->base, schema, schema_len,
+                optimizer.plan, optimizer.plan_len);
+        }
     } else if (statement_v13->base.base.predicate_count != 0) {
         status = prdb_sdk_optimizer_match_filtered_composite_group_aggregate_plan_v1(
             statement_v13, binding_v13, parameters, parameter_count, schema,
             schema_len, optimizer.plan, optimizer.plan_len);
+    } else if (statement_v15->order_count != 0) {
+        status = prdb_sdk_optimizer_match_ordered_composite_group_aggregate_plan_v1(
+            statement_v15, binding_v15, schema, schema_len, optimizer.plan,
+            optimizer.plan_len);
     } else {
         status = prdb_sdk_optimizer_match_composite_group_aggregate_plan_v1(
             statement_v13, binding_v13, schema, schema_len, optimizer.plan,

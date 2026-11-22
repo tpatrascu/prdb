@@ -1430,7 +1430,7 @@ static int32_t run_write_read_fixture(
     static const uint8_t select_composite_sum_optimizer_sql[] =
         "SELECT left_key, right_key, SUM(left_key) FROM grouped_records "
         "GROUP BY left_key, right_key HAVING SUM(left_key) >= 2 AND "
-        "COUNT(*) >= 1 LIMIT 2";
+        "COUNT(*) >= 1 ORDER BY left_key ASC LIMIT 2";
     static const uint8_t select_composite_min_optimizer_sql[] =
         "SELECT left_key, right_key, MIN(left_key) FROM grouped_records "
         "GROUP BY left_key, right_key ORDER BY MIN(left_key) DESC NULLS LAST, "

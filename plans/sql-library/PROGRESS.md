@@ -1312,7 +1312,7 @@
 - Red/green evidence: the maintained `sdk-sql-execute-v10` fixture exercises `SUM(score) IS NOT NULL AND COUNT(*) IS NOT NULL` through the optimizer-gated v24 API and checks both callback groups and bindings. The initial test failed while the API was absent; the implementation passes it.
 - Confined evidence: `sql_v3_write_read.c` now sends the composite SUM query with `SUM(left_key) >= 2 AND COUNT(*) >= 1` through the optimizer gate. The fallback path uses the same query via the v24 grouped runner, and the acceptance compares the exact SQLR rows from the confined query artifact.
 - Verification: the focused TinyCC executor fixture and complete pinned TinyCC SDK suite passed. `make sandbox-query-fixture` built the confined artifact; `make release-profile` validated ten engine binaries and one query fixture. Workspace build, rustfmt, warning-denied Clippy, and `git diff --check` passed. The full serial locked workspace suite passed inside a delegated `systemd --user` unit with all sandbox and process tests enabled, including `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` for the updated query.
-- Remaining: optimizer-gated v24 currently rejects ORDER BY and one-key queries with WHERE because no matching plan request is defined. Ordered compound HAVING optimizer coverage, broader analytical workloads, secure spill, and target-hardware measurements remain open.
+- Remaining: optimizer-gated v24 cannot combine WHERE with ORDER BY because the current filtered aggregate plan lacks sort keys; one-key WHERE support also lacks a matching request. Broader analytical workloads, secure spill, and target-hardware measurements remain open.
 
 ## SQL-7 follow-up: optimizer-backed single-key compound HAVING — verified
 
@@ -1320,6 +1320,13 @@
 - Regression evidence: the maintained `sdk-sql-execute-v10` fixture calls the v24 optimizer gate for `SUM(score) IS NOT NULL AND COUNT(*) IS NOT NULL` grouped by one key. It verifies that kind 10 is submitted, the independent plan matcher and executor relation validation pass, only the two non-NULL groups reach callbacks, and their aggregate values are exact.
 - Verification: the focused TinyCC executor fixture passed with `-Wall -Wextra -Werror`; the complete `make test sandbox-query-fixture` suite, release-profile validation, locked workspace build, rustfmt check, warning-denied Clippy, and `git diff --check` passed. The full serial locked workspace suite passed inside the delegated `systemd --user` service, including the confined SQL acceptance.
 - Remaining: ordered compound-HAVING optimizer coverage, filtered one-key plan support, broader analytical workloads, secure spill, and target-hardware measurements remain open.
+
+## SQL-7 follow-up: optimizer-backed ordered compound HAVING — verified
+
+- Contract: [SQL library](../../specs/sql-library.md). A single-key v24 compound-HAVING query without WHERE can reuse statement 11 / plan kind 11 (up to two order items); a composite query without WHERE can reuse statement 14 / plan kind 14 (up to nine order items). The SDK independently matches the source/aggregate/sort plan and evaluates compound HAVING, ordering, and LIMIT over authorized grouped rows.
+- Regression evidence: the maintained `sdk-sql-execute-v10` fixture exercises a single-key kind-11 query with two sort items, explicit independent directions and NULL placement, and a NULL aggregate input. It verifies the groups are filtered and sorted before callbacks. The confined query artifact adds ORDER BY to its composite SUM/HAVING query, exercising the real planner's kind-14 path and exact SQLR relay.
+- Verification: focused TinyCC executor fixture passed; `make test sandbox-query-fixture`, release-profile validation, locked workspace build, rustfmt, warning-denied Clippy, and `git diff --check` passed. The full serial locked workspace suite passed in delegated `prdb-ordered-having-check-33857.service` with the confined SQL acceptance enabled.
+- Remaining: filtered composite WHERE plus ORDER BY/HAVING cannot use current plan kind 15, and one-key filtered aggregates have no optimizer request. Broader analytical workloads, secure spill, and target-hardware measurements remain open.
 
 
 ## SQL-7 follow-up: typed parameters in filtered joins — verified
