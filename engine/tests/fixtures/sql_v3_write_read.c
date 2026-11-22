@@ -999,6 +999,8 @@ static int32_t write_grouped_composite_count_column_optimizer_v24(
             PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN ||
         projection->base.aggregate_column.type_code !=
             PRDB_SDK_VALUE_TYPE_DECIMAL || ordering->order_count != 2 ||
+        projection->base.base.predicate_count == 0 ||
+        projection->base.base.predicate_columns[0].ordinal != 2 ||
         ordering->order_items[0].item.kind !=
             PRDB_SDK_SQL_V10_ORDER_AGGREGATE ||
         ordering->order_items[1].item.kind !=
@@ -2159,7 +2161,9 @@ static int32_t run_write_read_fixture(
         invocation->parameters[0] == 'V') {
         static const uint8_t count_column_sql[] =
             "SELECT left_key, right_key, COUNT(decimal_value) "
-            "FROM decimal_grouped_records GROUP BY left_key, right_key "
+            "FROM decimal_grouped_records "
+            "WHERE decimal_value IS NULL OR decimal_value IS NOT NULL "
+            "GROUP BY left_key, right_key "
             "HAVING COUNT(decimal_value) >= 0 "
             "ORDER BY COUNT(decimal_value) DESC NULLS LAST, left_key ASC";
         composite_grouped_results.row_count = 0;
