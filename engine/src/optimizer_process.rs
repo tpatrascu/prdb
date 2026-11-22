@@ -106,10 +106,10 @@ pub fn serve_optimizer_process<S: Read + Write, P: Read + Write>(
                 ]
             }),
             Operation::OptimizeGroupCount => {
-                if request.payload.get(2)
-                    == Some(
-                        &crate::query_abi::OPTIMIZER_FILTERED_COMPOSITE_GROUP_AGGREGATE_STATEMENT,
-                    )
+                if request.payload.get(2).is_some_and(|statement| {
+                    *statement == crate::query_abi::OPTIMIZER_FILTERED_COMPOSITE_GROUP_AGGREGATE_STATEMENT
+                        || *statement == crate::query_abi::OPTIMIZER_ORDERED_FILTERED_COMPOSITE_GROUP_AGGREGATE_STATEMENT
+                })
                 {
                     crate::optimizer_request::decode_filtered_composite_group_aggregate_request(
                         &request.payload,
@@ -255,10 +255,10 @@ pub fn serve_optimizer_process<S: Read + Write, P: Read + Write>(
                 )
             }
             Operation::OptimizeGroupCount => {
-                if request.payload.get(2)
-                    == Some(
-                        &crate::query_abi::OPTIMIZER_FILTERED_COMPOSITE_GROUP_AGGREGATE_STATEMENT,
-                    )
+                if request.payload.get(2).is_some_and(|statement| {
+                    *statement == crate::query_abi::OPTIMIZER_FILTERED_COMPOSITE_GROUP_AGGREGATE_STATEMENT
+                        || *statement == crate::query_abi::OPTIMIZER_ORDERED_FILTERED_COMPOSITE_GROUP_AGGREGATE_STATEMENT
+                })
                 {
                     crate::optimizer_service::optimize_filtered_composite_group_aggregate_v1_with_relation(
                         &request.payload,
@@ -814,6 +814,14 @@ mod tests {
         bytes.extend_from_slice(&(predicate.len() as u32).to_be_bytes());
         bytes.extend_from_slice(&predicate);
         bytes.extend_from_slice(&[1, 0, 0, 0, 5]);
+        bytes
+    }
+
+    fn ordered_filtered_composite_group_aggregate_request() -> Vec<u8> {
+        let mut bytes = filtered_composite_group_aggregate_request();
+        bytes[2] = crate::query_abi::OPTIMIZER_ORDERED_FILTERED_COMPOSITE_GROUP_AGGREGATE_STATEMENT;
+        bytes.truncate(bytes.len() - 5);
+        bytes.extend_from_slice(&[2, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 5]);
         bytes
     }
 
@@ -2025,7 +2033,7 @@ mod tests {
                 planner_server
                     .set_read_timeout(Some(std::time::Duration::from_secs(5)))
                     .unwrap();
-                for expected_request_id in 257..269 {
+                for expected_request_id in 257..270 {
                     let request = crate::ipc::read_frame(&mut planner_server)
                         .unwrap()
                         .expect("optimizer must resolve composite aggregate relation");
@@ -2169,6 +2177,29 @@ mod tests {
             assert_eq!(plan.group_keys.len(), 1);
             assert_eq!(plan.group_keys[0].ordinal, 0);
             assert_eq!(plan.scan_columns.len(), 2);
+            assert_eq!(plan.limit, Some(5));
+            crate::ipc::write_frame(
+                &mut submission_client,
+                &IpcFrame {
+                    operation: Operation::OptimizeGroupCount as u16,
+                    request_id: 38,
+                    payload: ordered_filtered_composite_group_aggregate_request(),
+                },
+            )
+            .unwrap();
+            let response = crate::ipc::read_frame(&mut submission_client)
+                .unwrap()
+                .expect("optimizer must return an ordered filtered composite plan");
+            assert_eq!(response.request_id, 38);
+            let response = OptimizerResponse::decode(&response.payload).unwrap();
+            assert_eq!(response.status, OptimizerStatus::Success);
+            let plan = crate::optimizer_plan::decode_filtered_composite_group_aggregate_plan_v1(
+                response.plan.as_deref().unwrap(),
+            )
+            .unwrap();
+            assert_eq!(plan.order_items.len(), 2);
+            assert_eq!(plan.order_items[0].group_key_index, Some(0));
+            assert_eq!(plan.order_items[1].source, 1);
             assert_eq!(plan.limit, Some(5));
             for kind in 1..=5 {
                 crate::ipc::write_frame(

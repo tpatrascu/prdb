@@ -138,7 +138,7 @@ static uint32_t build_composite_aggregate_plan(mock_state *mock,
                                   PRDB_SDK_VALUE_TYPE_INTEGER, 1);
     offset = put_optimizer_column(mock->optimizer_plan, offset, 0x34, 1,
                                   PRDB_SDK_VALUE_TYPE_INTEGER, 1);
-    if (plan_kind == 15) {
+    if (plan_kind == 15 || plan_kind == 16) {
         uint8_t id[16];
         prdb_encode_optimizer_plan_filter_node_record(
             mock->optimizer_plan + offset, 2);
@@ -179,8 +179,15 @@ static uint32_t build_composite_aggregate_plan(mock_state *mock,
         offset = put_optimizer_column(mock->optimizer_plan, offset, 0x34, 1,
                                       PRDB_SDK_VALUE_TYPE_INTEGER, 1);
     }
-    mock->optimizer_plan[offset++] = plan_kind == 15 ? 1 : 0;
-    if (plan_kind == 15) put_u32(mock->optimizer_plan, &offset, 5);
+    if (plan_kind == 16) {
+        static const uint8_t ordered_items[] = {
+            3, 0, 0, 0, 1, 0, 1, 1, 0, 1, 1, 0};
+        memcpy(mock->optimizer_plan + offset, ordered_items,
+               sizeof(ordered_items));
+        offset += sizeof(ordered_items);
+    }
+    mock->optimizer_plan[offset++] = (plan_kind == 15 || plan_kind == 16) ? 1 : 0;
+    if (plan_kind == 15 || plan_kind == 16) put_u32(mock->optimizer_plan, &offset, 5);
     mock->optimizer_plan_len = offset;
 
     prdb_encode_planner_describe_plan_relation_available_response(
@@ -900,7 +907,7 @@ static int32_t optimizer_request(void *context, uint16_t operation,
             return PRDB_QUERY_CALLBACK_PROTOCOL_ERROR;
         if (build_ordered_eight_key_aggregate_plan(mock) == 0)
             return PRDB_QUERY_CALLBACK_INTERNAL_ERROR;
-    } else if (statement_kind == 15) {
+    } else if (statement_kind == 15 || statement_kind == 16) {
         static const uint8_t expected_filter[] = {
             0x20, 0, 0x10, 2, 'i', 'd', 0x02, 0, 0, 0, 0, 0, 0, 0, 1};
         static const uint8_t expected_single_filter[] = {
@@ -923,7 +930,7 @@ static int32_t optimizer_request(void *context, uint16_t operation,
                         ((uint32_t)request[offset + 2] << 8) | request[offset + 3];
         offset += 4;
         if (request_len - offset < predicate_len ||
-            (key_count == 1
+            (statement_kind == 16 || key_count == 1
                  ? predicate_len != sizeof(expected_single_filter) ||
                        memcmp(request + offset, expected_single_filter,
                               sizeof(expected_single_filter)) != 0
@@ -932,12 +939,20 @@ static int32_t optimizer_request(void *context, uint16_t operation,
                               sizeof(expected_filter)) != 0))
             return PRDB_QUERY_CALLBACK_PROTOCOL_ERROR;
         offset += predicate_len;
+        if (statement_kind == 16) {
+            static const uint8_t expected_order[] = {
+                3, 0, 0, 0, 1, 0, 1, 1, 0, 1, 1, 0};
+            if (request_len - offset != sizeof(expected_order) + 5 ||
+                memcmp(request + offset, expected_order, sizeof(expected_order)) != 0)
+                return PRDB_QUERY_CALLBACK_PROTOCOL_ERROR;
+            offset += sizeof(expected_order);
+        }
         if (request_len - offset != 5 || request[offset++] != 1 ||
             request[offset++] != 0 || request[offset++] != 0 ||
             request[offset++] != 0 || request[offset++] != 5)
             return PRDB_QUERY_CALLBACK_PROTOCOL_ERROR;
-        if (build_composite_aggregate_plan(mock, 15, key_count,
-                                           key_count == 1) == 0)
+        if (build_composite_aggregate_plan(mock, statement_kind, key_count,
+                                           statement_kind == 16 || key_count == 1) == 0)
             return PRDB_QUERY_CALLBACK_INTERNAL_ERROR;
     } else if (key_count != 2 ||
                aggregate_kind != mock->optimizer_aggregate_kind) {
@@ -3385,6 +3400,11 @@ int main(void) {
         "SELECT id, SUM(score) FROM widgets GROUP BY id "
         "HAVING SUM(score) IS NOT NULL AND COUNT(*) IS NOT NULL "
         "ORDER BY SUM(score) DESC NULLS LAST, id ASC NULLS FIRST";
+    static const uint8_t v24_optimizer_filtered_ordered_composite_having_sql[] =
+        "SELECT id, score, SUM(score) FROM widgets WHERE id IS NOT NULL "
+        "GROUP BY id, score HAVING SUM(score) IS NOT NULL AND "
+        "COUNT(*) IS NOT NULL ORDER BY id ASC NULLS FIRST, score DESC "
+        "NULLS LAST, SUM(score) DESC NULLS LAST LIMIT 5";
     static const uint8_t v15_order_sql[] =
         "SELECT id, score, COUNT(*) FROM widgets GROUP BY id, score "
         "HAVING COUNT(*) >= $1 ORDER BY score DESC NULLS LAST, "
@@ -4020,6 +4040,52 @@ int main(void) {
                    capture.second_keys[1] == 3 &&
                    capture.aggregates[1] == 3 &&
                    mock.statement_failed == 0);
+            {
+                const int32_t restored_keys[] = {1, 1, 2};
+                const int32_t restored_values[] = {9, 9, 5};
+                const uint8_t restored_states[] = {
+                    PRDB_SDK_VALUE_STATE_VALUE,
+                    PRDB_SDK_VALUE_STATE_VALUE,
+                    PRDB_SDK_VALUE_STATE_VALUE};
+                mock.planner_len = make_relation(
+                    mock.planner, PRDB_SDK_PLANNER_TABLE_HANDLE_KIND, 0x99,
+                    PRDB_SDK_VALUE_TYPE_INTEGER);
+                mock.executor_len = make_relation(
+                    mock.executor, 6, 0x22, PRDB_SDK_VALUE_TYPE_INTEGER);
+                mock.batch_len = make_rows(mock.batch, 1, restored_keys,
+                                           restored_values, restored_states, 3);
+            }
+        }
+        {
+            const int32_t having_keys[] = {1, 1, 2};
+            const int32_t having_values[] = {0, 2, 3};
+            const uint8_t having_states[] = {
+                PRDB_SDK_VALUE_STATE_NULL,
+                PRDB_SDK_VALUE_STATE_VALUE,
+                PRDB_SDK_VALUE_STATE_VALUE};
+            mock.planner_len = make_relation(
+                mock.planner, PRDB_SDK_PLANNER_TABLE_HANDLE_KIND, 0x99,
+                PRDB_SDK_VALUE_TYPE_INTEGER);
+            mock.executor_len = make_relation(
+                mock.executor, 6, 0x22, PRDB_SDK_VALUE_TYPE_INTEGER);
+            mock.batch_len = make_rows(mock.batch, 1, having_keys,
+                                       having_values, having_states, 3);
+            reset_scan(&mock, &capture, 1);
+            int32_t filtered_ordered_status = run_query_v24_optimizer_having(
+                &mock, v24_optimizer_filtered_ordered_composite_having_sql,
+                sizeof(v24_optimizer_filtered_ordered_composite_having_sql) - 1,
+                4096, &capture, on_group_v24_optimizer_having);
+            if (filtered_ordered_status != PRDB_SDK_SQL_EXEC_OK) {
+                fprintf(stderr,
+                        "v24 filtered ordered composite optimizer HAVING returned %d, failed=%u, planner=%u, executor=%u, optimizer=%u\n",
+                        filtered_ordered_status, mock.statement_failed,
+                        mock.planner_calls, mock.executor_calls,
+                        mock.optimizer_enabled);
+            }
+            assert(filtered_ordered_status == PRDB_SDK_SQL_EXEC_OK);
+            assert(mock.optimizer_enabled == 1 &&
+                   mock.optimizer_relation_resolves == 1 &&
+                   capture.calls == 2 && mock.statement_failed == 0);
             {
                 const int32_t restored_keys[] = {1, 1, 2};
                 const int32_t restored_values[] = {9, 9, 5};

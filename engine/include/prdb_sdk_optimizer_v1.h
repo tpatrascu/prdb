@@ -130,6 +130,13 @@ int32_t prdb_sdk_optimizer_encode_filtered_composite_group_aggregate_v1(
     const uint8_t *schema, uint32_t schema_len,
     uint8_t *request, uint64_t request_capacity, uint64_t *request_len);
 
+/* Encode filtered grouped aggregation with v15 ORDER BY as statement 16. */
+int32_t prdb_sdk_optimizer_encode_ordered_filtered_composite_group_aggregate_v1(
+    const prdb_sdk_select_v15 *statement,
+    const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
+    const uint8_t *schema, uint32_t schema_len,
+    uint8_t *request, uint64_t request_capacity, uint64_t *request_len);
+
 int32_t prdb_sdk_optimizer_encode_ordered_composite_group_count_v1(
     const prdb_sdk_select_v15 *statement,
     const uint8_t *schema, uint32_t schema_len,

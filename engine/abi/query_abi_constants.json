@@ -1508,6 +1508,13 @@
       "c_type": "UINT8_C"
     },
     {
+      "rust_name": "OPTIMIZER_ORDERED_FILTERED_COMPOSITE_GROUP_AGGREGATE_STATEMENT",
+      "rust_type": "u8",
+      "value": 16,
+      "c_name": "PRDB_OPTIMIZER_ORDERED_FILTERED_COMPOSITE_GROUP_AGGREGATE_STATEMENT",
+      "c_type": "UINT8_C"
+    },
+    {
       "rust_name": "OPTIMIZER_PLAN_UPDATE_NODE",
       "rust_type": "u8",
       "value": 6,

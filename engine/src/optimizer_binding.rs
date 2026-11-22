@@ -113,6 +113,7 @@ pub struct BoundFilteredCompositeGroupAggregate {
     pub aggregate_kind: u8,
     pub aggregate_column: Option<BoundColumn>,
     pub predicate: BoundPredicate,
+    pub order_items: Vec<CompositeGroupCountOrderItem>,
     pub limit: Option<u32>,
 }
 
@@ -554,6 +555,7 @@ fn bind_decoded_filtered_composite_group_aggregate(
         aggregate_kind: request.aggregate_kind,
         aggregate_column: aggregate_column.map(Into::into),
         predicate,
+        order_items: request.order_items,
         limit: request.limit,
     })
 }

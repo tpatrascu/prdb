@@ -243,6 +243,20 @@ typedef struct prdb_sdk_optimizer_filtered_composite_group_aggregate_plan_v1 {
     prdb_sdk_optimizer_plan_column_v1 aggregate_column;
 } prdb_sdk_optimizer_filtered_composite_group_aggregate_plan_v1;
 
+typedef struct prdb_sdk_optimizer_ordered_filtered_composite_group_aggregate_plan_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    prdb_sdk_optimizer_plan_v1 plan;
+    prdb_sdk_optimizer_filter_v1 filter;
+    uint32_t group_key_count;
+    prdb_sdk_optimizer_plan_column_v1 group_keys[8];
+    uint32_t aggregate_kind;
+    uint32_t has_aggregate_column;
+    prdb_sdk_optimizer_plan_column_v1 aggregate_column;
+    uint32_t order_count;
+    prdb_sdk_optimizer_composite_order_item_v1 order_items[9];
+} prdb_sdk_optimizer_ordered_filtered_composite_group_aggregate_plan_v1;
+
 typedef struct prdb_sdk_optimizer_ordered_composite_group_aggregate_plan_v1 {
     uint32_t struct_size;
     uint32_t abi_version;
@@ -378,6 +392,11 @@ int32_t prdb_sdk_optimizer_decode_filtered_composite_group_aggregate_plan_v1(
     prdb_sdk_optimizer_filtered_composite_group_aggregate_plan_v1 *out,
     uint32_t out_capacity);
 
+int32_t prdb_sdk_optimizer_decode_ordered_filtered_composite_group_aggregate_plan_v1(
+    const uint8_t *payload, uint64_t payload_len,
+    prdb_sdk_optimizer_ordered_filtered_composite_group_aggregate_plan_v1 *out,
+    uint32_t out_capacity);
+
 int32_t prdb_sdk_optimizer_decode_ordered_composite_group_aggregate_plan_v1(
     const uint8_t *payload, uint64_t payload_len,
     prdb_sdk_optimizer_ordered_composite_group_aggregate_plan_v1 *out,
@@ -417,6 +436,13 @@ int32_t prdb_sdk_optimizer_match_composite_group_aggregate_plan_v1(
 int32_t prdb_sdk_optimizer_match_filtered_composite_group_aggregate_plan_v1(
     const prdb_sdk_select_v13 *statement,
     const prdb_sdk_select_binding_v13 *binding,
+    const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
+    const uint8_t *schema, uint32_t schema_len,
+    const uint8_t *plan_payload, uint64_t plan_payload_len);
+
+int32_t prdb_sdk_optimizer_match_ordered_filtered_composite_group_aggregate_plan_v1(
+    const prdb_sdk_select_v15 *statement,
+    const prdb_sdk_select_binding_v15 *binding,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     const uint8_t *schema, uint32_t schema_len,
     const uint8_t *plan_payload, uint64_t plan_payload_len);

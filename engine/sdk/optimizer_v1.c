@@ -934,6 +934,108 @@ int32_t prdb_sdk_optimizer_encode_filtered_composite_group_aggregate_v1(
     return PRDB_SDK_OPTIMIZER_ENCODE_OK;
 }
 
+int32_t prdb_sdk_optimizer_encode_ordered_filtered_composite_group_aggregate_v1(
+    const prdb_sdk_select_v15 *statement,
+    const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
+    const uint8_t *schema, uint32_t schema_len,
+    uint8_t *request, uint64_t request_capacity, uint64_t *request_len) {
+    uint8_t intermediate[OPTIMIZER_REQUEST_MAX_BYTES];
+    uint64_t intermediate_len = 0;
+    uint64_t old_limit_bytes;
+    uint64_t rewritten_len;
+    uint64_t output_offset;
+    uint8_t header[4] = {0, 1, PRDB_OPTIMIZER_ORDERED_FILTERED_COMPOSITE_GROUP_AGGREGATE_STATEMENT, 0};
+    uint8_t seen_keys = 0;
+    uint32_t aggregate_seen = 0;
+    const prdb_sdk_select_v13 *aggregate;
+    int32_t status;
+    if (statement == NULL || request == NULL || request_len == NULL ||
+        statement->struct_size != sizeof(*statement) ||
+        statement->abi_version != PRDB_SDK_SQL_ABI_V15_VERSION ||
+        statement->base.struct_size != sizeof(statement->base) ||
+        statement->base.abi_version != PRDB_SDK_SQL_ABI_V14_VERSION ||
+        statement->base.has_having != 0 || statement->order_count == 0 ||
+        statement->order_count > PRDB_SDK_SQL_V15_MAX_ORDER_KEYS ||
+        statement->base.base.base.base.predicate_count == 0)
+        return PRDB_SDK_OPTIMIZER_ENCODE_INVALID_ARGUMENT;
+    aggregate = &statement->base.base;
+    status = prdb_sdk_optimizer_encode_filtered_composite_group_aggregate_v1(
+        aggregate, parameters, parameter_count, schema, schema_len,
+        intermediate, sizeof(intermediate), &intermediate_len);
+    if (status != PRDB_SDK_OPTIMIZER_ENCODE_OK) return status;
+    old_limit_bytes = aggregate->base.base.has_limit ? 5 : 1;
+    if (intermediate_len < old_limit_bytes + 1)
+        return PRDB_SDK_OPTIMIZER_ENCODE_UNSUPPORTED;
+    rewritten_len = intermediate_len + 1;
+    for (uint32_t index = 0; index < statement->order_count; ++index) {
+        const prdb_sdk_sql_order_item_v15 *item = &statement->order_items[index];
+        uint64_t item_len;
+        if (item->direction > PRDB_SDK_SQL_V10_ORDER_DESCENDING ||
+            item->null_order > PRDB_SDK_SQL_V11_NULLS_LAST)
+            return PRDB_SDK_OPTIMIZER_ENCODE_UNSUPPORTED;
+        if (item->kind == PRDB_SDK_SQL_V10_ORDER_GROUP_KEY &&
+            item->group_key_index < aggregate->group_key_count &&
+            !(seen_keys & (1u << item->group_key_index))) {
+            seen_keys |= (uint8_t)(1u << item->group_key_index);
+            item_len = 4;
+        }
+        else if (item->kind == PRDB_SDK_SQL_V10_ORDER_AGGREGATE &&
+                 item->group_key_index == 0 && !aggregate_seen) {
+            aggregate_seen = 1;
+            item_len = 3;
+        }
+        else
+            return PRDB_SDK_OPTIMIZER_ENCODE_UNSUPPORTED;
+        if (rewritten_len > OPTIMIZER_REQUEST_MAX_BYTES - item_len)
+            return PRDB_SDK_OPTIMIZER_ENCODE_LIMIT_EXCEEDED;
+        rewritten_len += item_len;
+    }
+    if (rewritten_len > OPTIMIZER_REQUEST_MAX_BYTES)
+        return PRDB_SDK_OPTIMIZER_ENCODE_LIMIT_EXCEEDED;
+    *request_len = rewritten_len;
+    if (request_capacity < rewritten_len)
+        return PRDB_SDK_OPTIMIZER_ENCODE_BUFFER_TOO_SMALL;
+    if (ranges_overlap(request, request_capacity, statement, sizeof(*statement)) ||
+        ranges_overlap(request, request_capacity, schema, schema_len) ||
+        ranges_overlap(request, request_capacity, aggregate->base.base.sql,
+                       aggregate->base.base.sql_len) ||
+        ranges_overlap(request_len, sizeof(*request_len), request, request_capacity) ||
+        ranges_overlap(request_len, sizeof(*request_len), statement, sizeof(*statement)) ||
+        ranges_overlap(request_len, sizeof(*request_len), schema, schema_len) ||
+        ranges_overlap(request_len, sizeof(*request_len), aggregate->base.base.sql,
+                       aggregate->base.base.sql_len) ||
+        ranges_overlap(request_len, sizeof(*request_len), parameters,
+                       (uint64_t)parameter_count * sizeof(*parameters)) ||
+        ranges_overlap(request, request_capacity, parameters,
+                       (uint64_t)parameter_count * sizeof(*parameters)))
+        return PRDB_SDK_OPTIMIZER_ENCODE_INVALID_ARGUMENT;
+    for (uint32_t index = 0; index < parameter_count; ++index) {
+        if (parameters[index].data_len != 0 &&
+            (ranges_overlap(request, request_capacity, parameters[index].data,
+                            parameters[index].data_len) ||
+             ranges_overlap(request_len, sizeof(*request_len), parameters[index].data,
+                            parameters[index].data_len)))
+            return PRDB_SDK_OPTIMIZER_ENCODE_INVALID_ARGUMENT;
+    }
+    memcpy(request, intermediate, (size_t)(intermediate_len - old_limit_bytes));
+    memcpy(request, header, sizeof(header));
+    output_offset = intermediate_len - old_limit_bytes;
+    request[output_offset++] = (uint8_t)statement->order_count;
+    for (uint32_t index = 0; index < statement->order_count; ++index) {
+        const prdb_sdk_sql_order_item_v15 *item = &statement->order_items[index];
+        request[output_offset++] = item->kind == PRDB_SDK_SQL_V10_ORDER_GROUP_KEY ? 0 : 1;
+        if (item->kind == PRDB_SDK_SQL_V10_ORDER_GROUP_KEY)
+            request[output_offset++] = (uint8_t)item->group_key_index;
+        request[output_offset++] = (uint8_t)item->direction;
+        request[output_offset++] = (uint8_t)(
+            item->null_order == PRDB_SDK_SQL_V11_NULL_ORDER_DEFAULT ||
+            item->null_order == PRDB_SDK_SQL_V11_NULLS_FIRST);
+    }
+    memcpy(request + output_offset, intermediate + intermediate_len - old_limit_bytes,
+           (size_t)old_limit_bytes);
+    return PRDB_SDK_OPTIMIZER_ENCODE_OK;
+}
+
 int32_t prdb_sdk_optimizer_encode_ordered_composite_group_count_v1(
     const prdb_sdk_select_v15 *statement, const uint8_t *schema,
     uint32_t schema_len, uint8_t *request, uint64_t request_capacity,

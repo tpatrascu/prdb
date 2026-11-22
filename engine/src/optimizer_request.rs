@@ -135,6 +135,7 @@ pub struct FilteredCompositeGroupAggregateRequest {
     /// Absent only for COUNT(*).
     pub aggregate_column_name: Option<String>,
     pub predicate: Predicate,
+    pub order_items: Vec<CompositeGroupCountOrderItem>,
     pub limit: Option<u32>,
 }
 
@@ -730,7 +731,10 @@ pub fn decode_filtered_composite_group_aggregate_request(
     }
     let (statement, flags) =
         decode_optimizer_select_request(bytes).ok_or(RequestError::Truncated)?;
-    if statement != OPTIMIZER_FILTERED_COMPOSITE_GROUP_AGGREGATE_STATEMENT {
+    if statement != OPTIMIZER_FILTERED_COMPOSITE_GROUP_AGGREGATE_STATEMENT
+        && statement
+            != crate::query_abi::OPTIMIZER_ORDERED_FILTERED_COMPOSITE_GROUP_AGGREGATE_STATEMENT
+    {
         return Err(RequestError::UnsupportedStatement(statement));
     }
     if flags != 0 {
@@ -779,6 +783,51 @@ pub fn decode_filtered_composite_group_aggregate_request(
     if !parser.cursor.is_empty() {
         return Err(RequestError::TrailingBytes);
     }
+    let mut order_items = Vec::new();
+    if statement == crate::query_abi::OPTIMIZER_ORDERED_FILTERED_COMPOSITE_GROUP_AGGREGATE_STATEMENT
+    {
+        let order_count = usize::from(cursor.u8()?);
+        if !(1..=group_key_count + 1).contains(&order_count) {
+            return Err(RequestError::InvalidValue);
+        }
+        let mut seen_group_keys = 0u8;
+        let mut seen_aggregate = false;
+        order_items.reserve(order_count);
+        for _ in 0..order_count {
+            let source = cursor.u8()?;
+            let group_key_index = if source == 0 {
+                let key_index = cursor.u8()?;
+                if usize::from(key_index) >= group_key_count
+                    || seen_group_keys & (1 << key_index) != 0
+                {
+                    return Err(RequestError::InvalidValue);
+                }
+                seen_group_keys |= 1 << key_index;
+                Some(key_index)
+            } else if source == 1 && !seen_aggregate {
+                seen_aggregate = true;
+                None
+            } else {
+                return Err(RequestError::InvalidValue);
+            };
+            let descending = match cursor.u8()? {
+                0 => false,
+                1 => true,
+                _ => return Err(RequestError::InvalidValue),
+            };
+            let nulls_first = match cursor.u8()? {
+                0 => false,
+                1 => true,
+                _ => return Err(RequestError::InvalidValue),
+            };
+            order_items.push(CompositeGroupCountOrderItem {
+                source,
+                group_key_index,
+                descending,
+                nulls_first,
+            });
+        }
+    }
     let limit = match cursor.u8()? {
         0 => None,
         1 => Some(cursor.u32()?),
@@ -794,6 +843,7 @@ pub fn decode_filtered_composite_group_aggregate_request(
         aggregate_kind,
         aggregate_column_name,
         predicate,
+        order_items,
         limit,
     })
 }
@@ -1720,6 +1770,31 @@ mod tests {
         assert_eq!(request.aggregate_kind, 4);
         assert_eq!(request.aggregate_column_name.as_deref(), Some("amount"));
         assert_eq!(request.limit, Some(9));
+
+        let mut ordered = filtered_composite_group_aggregate_request(&predicate);
+        ordered[2] =
+            crate::query_abi::OPTIMIZER_ORDERED_FILTERED_COMPOSITE_GROUP_AGGREGATE_STATEMENT;
+        ordered.truncate(ordered.len() - 5);
+        ordered.extend_from_slice(&[2, 0, 0, 1, 0, 1, 0, 1, 1, 0, 0, 0, 9]);
+        let ordered_request = decode_filtered_composite_group_aggregate_request(&ordered).unwrap();
+        assert_eq!(
+            ordered_request.order_items,
+            [
+                CompositeGroupCountOrderItem {
+                    source: 0,
+                    group_key_index: Some(0),
+                    descending: true,
+                    nulls_first: false
+                },
+                CompositeGroupCountOrderItem {
+                    source: 1,
+                    group_key_index: None,
+                    descending: false,
+                    nulls_first: true
+                },
+            ]
+        );
+        assert_eq!(ordered_request.limit, Some(9));
 
         let mut trailing = filtered_composite_group_aggregate_request(&predicate);
         trailing.push(0);
