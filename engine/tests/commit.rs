@@ -42624,7 +42624,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             prdb_engine::spill::SpillBroker::open(prdb_engine::spill::SpillConfig {
                 parent: parent.clone(),
                 max_bytes_per_invocation: if spill_quota_only { 1 } else { 8 * 1024 * 1024 },
-                max_io_bytes_per_invocation: if spill_pressure_cancel_only {
+                max_io_bytes_per_invocation: if spill_pressure_only || spill_pressure_cancel_only {
                     1024 * 1024 * 1024
                 } else {
                     32 * 1024 * 1024

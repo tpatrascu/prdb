@@ -70,8 +70,8 @@ int32_t prdb_query_main_v6(const prdb_host_api_v6 *host,
             prdb_sdk_spill_destroy_v1(host, &pressure_stream);
             return 1;
         }
-        if (invocation->parameters[0] == 'K') {
-            /* Keep broker I/O active long enough for concurrent cancellation. */
+        if (invocation->parameters[0] == 'P' || invocation->parameters[0] == 'K') {
+            /* Sustained broker traffic overlaps operational load; K also cancels it. */
             for (uint32_t index = 0; index < 512; ++index) {
                 prdb_sdk_spill_stream_v1 stream = {0};
                 if (prdb_sdk_spill_create_v1(host, &stream) != 0 ||
