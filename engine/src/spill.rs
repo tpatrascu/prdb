@@ -11,9 +11,10 @@ use getrandom::fill as random_fill;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::fs::File;
-use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -123,6 +124,8 @@ struct BrokerInner {
     _lock: OwnedFd,
     state: Mutex<BrokerState>,
     cancellation: Mutex<HashMap<SpillPackage, Arc<AtomicBool>>>,
+    #[cfg(test)]
+    append_io_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 struct BrokerState {
@@ -149,6 +152,7 @@ struct StreamState {
     length: u64,
     reserved: u64,
     sealed: bool,
+    io_lock: Arc<Mutex<()>>,
 }
 
 impl SpillBroker {
@@ -223,6 +227,8 @@ impl SpillBroker {
                 failed_closed: false,
             }),
             cancellation: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            append_io_hook: Mutex::new(None),
         })))
     }
 
@@ -347,6 +353,7 @@ impl SpillBroker {
                     length: 0,
                     reserved: 0,
                     sealed: false,
+                    io_lock: Arc::new(Mutex::new(())),
                 },
             );
             return Ok(handle);
@@ -365,21 +372,21 @@ impl SpillBroker {
         if bytes.is_empty() || bytes.len() > MAX_IPC_REQUEST_BYTES as usize - HANDLE_BYTES {
             return Err(SpillError::ResponseLimit);
         }
-        let mut state = self
-            .0
-            .state
-            .lock()
-            .map_err(|_| SpillError::AccountingFailure)?;
-        if state.failed_closed {
-            return Err(SpillError::AccountingFailure);
-        }
-        let service_cap = self.0.config.max_service_bytes;
-        let per_invocation_cap = self.0.config.max_bytes_per_invocation;
-        let service_reserved = state.service_reserved;
+        let io_lock = self.stream_io_lock(package, handle)?;
+        let _io_guard = io_lock.lock().map_err(|_| SpillError::AccountingFailure)?;
         let allocation_unit = self.0.allocation_unit;
-        let mut write_failed = false;
-        let mut reserved_delta = 0;
-        {
+        let (file, offset, new_len, allocation_size, delta) = {
+            let mut state = self
+                .0
+                .state
+                .lock()
+                .map_err(|_| SpillError::AccountingFailure)?;
+            if state.failed_closed {
+                return Err(SpillError::AccountingFailure);
+            }
+            let service_cap = self.0.config.max_service_bytes;
+            let per_invocation_cap = self.0.config.max_bytes_per_invocation;
+            let service_reserved = state.service_reserved;
             let session = session_mut(&mut state, package)?;
             charge_operation(session, &self.0.config)?;
             charge_io(session, bytes.len() as u64, &self.0.config)?;
@@ -387,14 +394,19 @@ impl SpillBroker {
                 .streams
                 .get_mut(&handle)
                 .ok_or(SpillError::InvalidHandle)?;
+            if !Arc::ptr_eq(&io_lock, &stream.io_lock) {
+                return Err(SpillError::InvalidHandle);
+            }
             if stream.sealed {
                 return Err(SpillError::ClosedSession);
             }
-            let new_len = stream
-                .length
+            let offset = stream.length;
+            let new_len = offset
                 .checked_add(bytes.len() as u64)
                 .ok_or(SpillError::AllocationLimit)?;
             let wanted = round_allocation(new_len, allocation_unit)?;
+            let allocation_size =
+                libc::off_t::try_from(wanted).map_err(|_| SpillError::AllocationLimit)?;
             let delta = wanted.saturating_sub(stream.reserved);
             if session
                 .allocated
@@ -411,51 +423,157 @@ impl SpillBroker {
             {
                 return Err(SpillError::AllocationLimit);
             }
-            if delta > 0 {
-                let size =
-                    libc::off_t::try_from(wanted).map_err(|_| SpillError::AllocationLimit)?;
-                // SAFETY: posix_fallocate operates on the broker-owned regular file.
-                let result = unsafe { libc::posix_fallocate(stream.file.as_raw_fd(), 0, size) };
-                if result != 0 {
-                    return Err(SpillError::Io);
-                }
-                stream.reserved = wanted;
-                session.allocated += delta;
-                reserved_delta = delta;
+            let file = stream.file.try_clone().map_err(|_| SpillError::Io)?;
+            stream.reserved = wanted;
+            session.allocated += delta;
+            state.service_reserved += delta;
+            (file, offset, new_len, allocation_size, delta)
+        };
+
+        if delta > 0 {
+            #[cfg(test)]
+            if let Some(hook) = self
+                .0
+                .append_io_hook
+                .lock()
+                .map_err(|_| SpillError::AccountingFailure)?
+                .clone()
+            {
+                hook();
             }
-            stream
-                .file
-                .seek(SeekFrom::Start(stream.length))
-                .map_err(|_| SpillError::Io)?;
-            if stream.file.write_all(bytes).is_err() {
-                write_failed = true;
-            } else {
-                stream.length = new_len;
+            // SAFETY: posix_fallocate operates on the broker-owned regular file.
+            let result = unsafe { libc::posix_fallocate(file.as_raw_fd(), 0, allocation_size) };
+            if result != 0 {
+                let mut state = self
+                    .0
+                    .state
+                    .lock()
+                    .map_err(|_| SpillError::AccountingFailure)?;
+                let session = state
+                    .sessions
+                    .get_mut(&package)
+                    .ok_or(SpillError::ClosedSession)?;
+                let stream = session
+                    .streams
+                    .get_mut(&handle)
+                    .ok_or(SpillError::InvalidHandle)?;
+                stream.reserved = stream
+                    .reserved
+                    .checked_sub(delta)
+                    .ok_or(SpillError::AccountingFailure)?;
+                session.allocated = session
+                    .allocated
+                    .checked_sub(delta)
+                    .ok_or(SpillError::AccountingFailure)?;
+                state.service_reserved = state
+                    .service_reserved
+                    .checked_sub(delta)
+                    .ok_or(SpillError::AccountingFailure)?;
+                return Err(SpillError::Io);
             }
         }
-        state.service_reserved = service_reserved
-            .checked_add(reserved_delta)
-            .ok_or(SpillError::AccountingFailure)?;
-        if write_failed {
+
+        let mut written = 0usize;
+        while written < bytes.len() {
+            match file.write_at(&bytes[written..], offset + written as u64) {
+                Ok(0) => {
+                    self.poison_after_spill_io_failure()?;
+                    return Err(SpillError::AccountingFailure);
+                }
+                Ok(count) => written += count,
+                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                Err(_) => {
+                    self.poison_after_spill_io_failure()?;
+                    return Err(SpillError::AccountingFailure);
+                }
+            }
+        }
+
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .map_err(|_| SpillError::AccountingFailure)?;
+        let session = state
+            .sessions
+            .get_mut(&package)
+            .ok_or(SpillError::ClosedSession)?;
+        let stream = session
+            .streams
+            .get_mut(&handle)
+            .ok_or(SpillError::InvalidHandle)?;
+        if !Arc::ptr_eq(&io_lock, &stream.io_lock) || stream.length != offset {
             state.failed_closed = true;
             return Err(SpillError::AccountingFailure);
         }
+        stream.length = new_len;
         Ok(())
     }
 
-    pub fn seal(&self, package: SpillPackage, handle: SpillHandle) -> Result<(), SpillError> {
+    fn stream_io_lock(
+        &self,
+        package: SpillPackage,
+        handle: SpillHandle,
+    ) -> Result<Arc<Mutex<()>>, SpillError> {
         let mut state = self
             .0
             .state
             .lock()
             .map_err(|_| SpillError::AccountingFailure)?;
         let session = session_mut(&mut state, package)?;
-        charge_operation(session, &self.0.config)?;
+        session
+            .streams
+            .get(&handle)
+            .map(|stream| Arc::clone(&stream.io_lock))
+            .ok_or(SpillError::InvalidHandle)
+    }
+
+    fn poison_after_spill_io_failure(&self) -> Result<(), SpillError> {
+        self.0
+            .state
+            .lock()
+            .map_err(|_| SpillError::AccountingFailure)?
+            .failed_closed = true;
+        Ok(())
+    }
+
+    pub fn seal(&self, package: SpillPackage, handle: SpillHandle) -> Result<(), SpillError> {
+        let io_lock = self.stream_io_lock(package, handle)?;
+        let _io_guard = io_lock.lock().map_err(|_| SpillError::AccountingFailure)?;
+        let file = {
+            let mut state = self
+                .0
+                .state
+                .lock()
+                .map_err(|_| SpillError::AccountingFailure)?;
+            let session = session_mut(&mut state, package)?;
+            charge_operation(session, &self.0.config)?;
+            let stream = session
+                .streams
+                .get(&handle)
+                .ok_or(SpillError::InvalidHandle)?;
+            if !Arc::ptr_eq(&io_lock, &stream.io_lock) {
+                return Err(SpillError::InvalidHandle);
+            }
+            stream.file.try_clone().map_err(|_| SpillError::Io)?
+        };
+        file.sync_data().map_err(|_| SpillError::Io)?;
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .map_err(|_| SpillError::AccountingFailure)?;
+        let session = state
+            .sessions
+            .get_mut(&package)
+            .ok_or(SpillError::ClosedSession)?;
         let stream = session
             .streams
             .get_mut(&handle)
             .ok_or(SpillError::InvalidHandle)?;
-        stream.file.sync_data().map_err(|_| SpillError::Io)?;
+        if !Arc::ptr_eq(&io_lock, &stream.io_lock) {
+            return Err(SpillError::InvalidHandle);
+        }
         stream.sealed = true;
         Ok(())
     }
@@ -470,18 +588,23 @@ impl SpillBroker {
         if out.len() as u64 > self.0.config.max_response_bytes {
             return Err(SpillError::ResponseLimit);
         }
-        let mut state = self
-            .0
-            .state
-            .lock()
-            .map_err(|_| SpillError::AccountingFailure)?;
-        let session = session_mut(&mut state, package)?;
-        charge_operation(session, &self.0.config)?;
-        let count = {
+        let io_lock = self.stream_io_lock(package, handle)?;
+        let _io_guard = io_lock.lock().map_err(|_| SpillError::AccountingFailure)?;
+        let (file, count) = {
+            let mut state = self
+                .0
+                .state
+                .lock()
+                .map_err(|_| SpillError::AccountingFailure)?;
+            let session = session_mut(&mut state, package)?;
+            charge_operation(session, &self.0.config)?;
             let stream = session
                 .streams
                 .get(&handle)
                 .ok_or(SpillError::InvalidHandle)?;
+            if !Arc::ptr_eq(&io_lock, &stream.io_lock) {
+                return Err(SpillError::InvalidHandle);
+            }
             if !stream.sealed {
                 return Err(SpillError::ClosedSession);
             }
@@ -489,26 +612,27 @@ impl SpillBroker {
                 return Err(SpillError::InvalidRange);
             }
             let available = stream.length - offset;
-            usize::try_from(available.min(out.len() as u64))
-                .map_err(|_| SpillError::InvalidRange)?
+            let count = usize::try_from(available.min(out.len() as u64))
+                .map_err(|_| SpillError::InvalidRange)?;
+            let file = stream.file.try_clone().map_err(|_| SpillError::Io)?;
+            charge_io(session, count as u64, &self.0.config)?;
+            (file, count)
         };
-        charge_io(session, count as u64, &self.0.config)?;
-        let stream = session
-            .streams
-            .get_mut(&handle)
-            .ok_or(SpillError::InvalidHandle)?;
-        stream
-            .file
-            .seek(SeekFrom::Start(offset))
-            .map_err(|_| SpillError::Io)?;
-        stream
-            .file
-            .read_exact(&mut out[..count])
-            .map_err(|_| SpillError::Io)?;
+        let mut read = 0usize;
+        while read < count {
+            match file.read_at(&mut out[read..count], offset + read as u64) {
+                Ok(0) => return Err(SpillError::Io),
+                Ok(length) => read += length,
+                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                Err(_) => return Err(SpillError::Io),
+            }
+        }
         Ok(count)
     }
 
     pub fn destroy(&self, package: SpillPackage, handle: SpillHandle) -> Result<(), SpillError> {
+        let io_lock = self.stream_io_lock(package, handle)?;
+        let _io_guard = io_lock.lock().map_err(|_| SpillError::AccountingFailure)?;
         let mut state = self
             .0
             .state
@@ -516,6 +640,13 @@ impl SpillBroker {
             .map_err(|_| SpillError::AccountingFailure)?;
         let session = session_mut(&mut state, package)?;
         charge_operation(session, &self.0.config)?;
+        if !session
+            .streams
+            .get(&handle)
+            .is_some_and(|stream| Arc::ptr_eq(&io_lock, &stream.io_lock))
+        {
+            return Err(SpillError::InvalidHandle);
+        }
         let stream = session
             .streams
             .remove(&handle)
@@ -548,6 +679,28 @@ impl SpillBroker {
     /// Close package namespace and release every unlinked descriptor. Cleanup
     /// inconsistencies poison the broker so later admissions fail closed.
     pub fn close_package(&self, package: SpillPackage) -> Result<(), SpillError> {
+        let stream_locks = {
+            let mut state = self
+                .0
+                .state
+                .lock()
+                .map_err(|_| SpillError::AccountingFailure)?;
+            let Some(session) = state.sessions.get_mut(&package) else {
+                return Ok(());
+            };
+            session.closed = true;
+            session
+                .streams
+                .values()
+                .map(|stream| Arc::clone(&stream.io_lock))
+                .collect::<Vec<_>>()
+        };
+        // Drain any operation that passed admission before `closed` was set.
+        // New operations fail session_mut and cannot enter disk I/O.
+        for io_lock in stream_locks {
+            drop(io_lock.lock().map_err(|_| SpillError::AccountingFailure)?);
+        }
+
         let mut state = self
             .0
             .state
@@ -556,7 +709,6 @@ impl SpillBroker {
         let Some(mut session) = state.sessions.remove(&package) else {
             return Ok(());
         };
-        session.closed = true;
         let released = session.allocated;
         session.streams.clear();
         session.directory.take();
@@ -1276,6 +1428,147 @@ mod tests {
         assert_eq!(active_thread.join().unwrap(), Ok(()));
         broker.close_package(stalled_package).unwrap();
         broker.close_package(active_package).unwrap();
+    }
+
+    #[test]
+    fn one_package_append_io_does_not_hold_the_service_state_lock() {
+        let scratch = Scratch::new();
+        let broker = SpillBroker::open(config(&scratch.0)).unwrap();
+        let blocked_package = package(15);
+        let active_package = package(16);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        broker
+            .open_package(blocked_package, WorkloadClass::Analytical, deadline)
+            .unwrap();
+        broker
+            .open_package(active_package, WorkloadClass::Analytical, deadline)
+            .unwrap();
+        let blocked_handle = broker.create(blocked_package).unwrap();
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        *broker.0.append_io_hook.lock().unwrap() = Some(Arc::new(move || {
+            entered_tx.send(()).unwrap();
+            release_rx.lock().unwrap().recv().unwrap();
+        }));
+
+        let appending_broker = broker.clone();
+        let append_thread = std::thread::spawn(move || {
+            appending_broker.append(blocked_package, blocked_handle, b"blocked disk write")
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("append did not reach the controlled I/O point");
+
+        let (progress_tx, progress_rx) = std::sync::mpsc::channel();
+        let active_broker = broker.clone();
+        let create_thread = std::thread::spawn(move || {
+            let result = active_broker.create(active_package);
+            let _ = progress_tx.send(result);
+        });
+        let independent_package_progressed =
+            progress_rx.recv_timeout(Duration::from_millis(100)).is_ok();
+
+        release_tx.send(()).unwrap();
+        assert_eq!(append_thread.join().unwrap(), Ok(()));
+        create_thread.join().unwrap();
+        assert!(
+            independent_package_progressed,
+            "one package's disk I/O must not hold the broker-wide state lock"
+        );
+        broker.close_package(blocked_package).unwrap();
+        broker.close_package(active_package).unwrap();
+    }
+
+    #[test]
+    fn package_close_waits_for_inflight_append_before_releasing_quota() {
+        let scratch = Scratch::new();
+        let mut limits = config(&scratch.0);
+        limits.max_bytes_per_invocation = 4096;
+        limits.max_service_bytes = 4096;
+        let broker = SpillBroker::open(limits).unwrap();
+        let owner = package(17);
+        broker
+            .open_package(
+                owner,
+                WorkloadClass::Analytical,
+                Instant::now() + Duration::from_secs(10),
+            )
+            .unwrap();
+        let handle = broker.create(owner).unwrap();
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        *broker.0.append_io_hook.lock().unwrap() = Some(Arc::new(move || {
+            entered_tx.send(()).unwrap();
+            release_rx.lock().unwrap().recv().unwrap();
+        }));
+        let appending_broker = broker.clone();
+        let append_thread =
+            std::thread::spawn(move || appending_broker.append(owner, handle, &[0xA5; 4096]));
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("append did not reach the controlled I/O point");
+
+        let (close_started_tx, close_started_rx) = std::sync::mpsc::channel();
+        let (close_result_tx, close_result_rx) = std::sync::mpsc::channel();
+        let closing_broker = broker.clone();
+        let close_thread = std::thread::spawn(move || {
+            close_started_tx.send(()).unwrap();
+            let _ = close_result_tx.send(closing_broker.close_package(owner));
+        });
+        close_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("package close thread did not start");
+        let close_deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            match broker.create(owner) {
+                Err(SpillError::ClosedSession) => break,
+                Ok(handle) => {
+                    let _ = broker.destroy(owner, handle);
+                }
+                Err(error) => panic!("unexpected response while closing package: {error:?}"),
+            }
+            assert!(
+                Instant::now() < close_deadline,
+                "close did not stop new stream admissions"
+            );
+            std::thread::yield_now();
+        }
+        assert!(
+            close_result_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "package close must wait for its active stream I/O"
+        );
+
+        release_tx.send(()).unwrap();
+        assert_eq!(append_thread.join().unwrap(), Ok(()));
+        assert_eq!(
+            close_result_rx
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap(),
+            Ok(())
+        );
+        close_thread.join().unwrap();
+        *broker.0.append_io_hook.lock().unwrap() = None;
+
+        broker
+            .open_package(
+                owner,
+                WorkloadClass::Analytical,
+                Instant::now() + Duration::from_secs(10),
+            )
+            .unwrap();
+        let replacement = broker.create(owner).unwrap();
+        assert_eq!(
+            broker.append(owner, replacement, &[0x5A; 4096]),
+            Ok(()),
+            "closing the prior package must release its physical quota"
+        );
+        broker.close_package(owner).unwrap();
     }
 
     #[test]
