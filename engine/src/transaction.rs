@@ -11400,6 +11400,10 @@ enum EstimateValue {
     Integer(i64),
     Decimal(i128),
     Text(String),
+    Bytea(Vec<u8>),
+    Uuid([u8; 16]),
+    Date(i32),
+    TimestampTz(i64),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -11409,6 +11413,10 @@ enum EstimateValueKind {
     Integer,
     Decimal,
     Text,
+    Bytea,
+    Uuid,
+    Date,
+    TimestampTz,
 }
 
 fn valid_estimate_predicate(
@@ -11496,25 +11504,22 @@ fn estimate_predicate_kind(
                 }
                 ScalarType::Decimal { .. } => Some(EstimateValueKind::Decimal),
                 ScalarType::Text | ScalarType::Varchar { .. } => Some(EstimateValueKind::Text),
-                ScalarType::Bytea
-                | ScalarType::Uuid
-                | ScalarType::Date
-                | ScalarType::TimestampTz => None,
+                ScalarType::Bytea => Some(EstimateValueKind::Bytea),
+                ScalarType::Uuid => Some(EstimateValueKind::Uuid),
+                ScalarType::Date => Some(EstimateValueKind::Date),
+                ScalarType::TimestampTz => Some(EstimateValueKind::TimestampTz),
             }
         }
         BoundPredicate::Compare { left, right, .. } => {
             let left_kind = estimate_predicate_kind(left, projection)?;
             let right_kind = estimate_predicate_kind(right, projection)?;
-            let decimal_types_match = match (left.as_ref(), right.as_ref()) {
-                (BoundPredicate::Column(left_column), BoundPredicate::Column(right_column))
-                    if left_kind == EstimateValueKind::Decimal
-                        && right_kind == EstimateValueKind::Decimal =>
-                {
+            let column_types_match = match (left.as_ref(), right.as_ref()) {
+                (BoundPredicate::Column(left_column), BoundPredicate::Column(right_column)) => {
                     left_column.scalar_type == right_column.scalar_type
                 }
                 _ => true,
             };
-            (decimal_types_match
+            (column_types_match
                 && (left_kind == right_kind
                     || left_kind == EstimateValueKind::Null
                     || right_kind == EstimateValueKind::Null))
@@ -11614,7 +11619,11 @@ fn evaluate_estimate_predicate(
                         EstimateValue::Null => EstimateTruth::Unknown,
                         EstimateValue::Integer(_)
                         | EstimateValue::Decimal(_)
-                        | EstimateValue::Text(_) => return None,
+                        | EstimateValue::Text(_)
+                        | EstimateValue::Bytea(_)
+                        | EstimateValue::Uuid(_)
+                        | EstimateValue::Date(_)
+                        | EstimateValue::TimestampTz(_) => return None,
                     };
                     truth = if is_and {
                         estimate_and(truth, child_truth)
@@ -11635,7 +11644,11 @@ fn evaluate_estimate_predicate(
                     EstimateValue::Null => Some(EstimateValue::Null),
                     EstimateValue::Integer(_)
                     | EstimateValue::Decimal(_)
-                    | EstimateValue::Text(_) => None,
+                    | EstimateValue::Text(_)
+                    | EstimateValue::Bytea(_)
+                    | EstimateValue::Uuid(_)
+                    | EstimateValue::Date(_)
+                    | EstimateValue::TimestampTz(_) => None,
                 }
             }
             BoundPredicate::IsNull(child) | BoundPredicate::IsNotNull(child) => {
@@ -11671,7 +11684,13 @@ fn evaluate_estimate_predicate(
         EstimateValue::Boolean(true) => Some(EstimateTruth::True),
         EstimateValue::Boolean(false) => Some(EstimateTruth::False),
         EstimateValue::Null => Some(EstimateTruth::Unknown),
-        EstimateValue::Integer(_) | EstimateValue::Decimal(_) | EstimateValue::Text(_) => None,
+        EstimateValue::Integer(_)
+        | EstimateValue::Decimal(_)
+        | EstimateValue::Text(_)
+        | EstimateValue::Bytea(_)
+        | EstimateValue::Uuid(_)
+        | EstimateValue::Date(_)
+        | EstimateValue::TimestampTz(_) => None,
     }
 }
 
@@ -11686,12 +11705,13 @@ fn scalar_estimate_value(value: &crate::tuple::ScalarValue) -> Option<EstimateVa
         ScalarValue::Text(value) | ScalarValue::Varchar(value) if value.len() <= 4096 => {
             Some(EstimateValue::Text(value.clone()))
         }
-        ScalarValue::Text(_)
-        | ScalarValue::Varchar(_)
-        | ScalarValue::Bytea(_)
-        | ScalarValue::Uuid(_)
-        | ScalarValue::Date(_)
-        | ScalarValue::TimestampTz(_) => None,
+        ScalarValue::Bytea(value) if value.len() <= 4096 => {
+            Some(EstimateValue::Bytea(value.clone()))
+        }
+        ScalarValue::Uuid(value) => Some(EstimateValue::Uuid(*value)),
+        ScalarValue::Date(value) => Some(EstimateValue::Date(*value)),
+        ScalarValue::TimestampTz(value) => Some(EstimateValue::TimestampTz(*value)),
+        ScalarValue::Text(_) | ScalarValue::Varchar(_) | ScalarValue::Bytea(_) => None,
     }
 }
 
@@ -11707,6 +11727,10 @@ fn compare_estimate_values(
         (EstimateValue::Integer(left), EstimateValue::Integer(right)) => left.cmp(right),
         (EstimateValue::Decimal(left), EstimateValue::Decimal(right)) => left.cmp(right),
         (EstimateValue::Text(left), EstimateValue::Text(right)) => left.cmp(right),
+        (EstimateValue::Bytea(left), EstimateValue::Bytea(right)) => left.cmp(right),
+        (EstimateValue::Uuid(left), EstimateValue::Uuid(right)) => left.cmp(right),
+        (EstimateValue::Date(left), EstimateValue::Date(right)) => left.cmp(right),
+        (EstimateValue::TimestampTz(left), EstimateValue::TimestampTz(right)) => left.cmp(right),
         _ => return None,
     };
     let result = match operator {

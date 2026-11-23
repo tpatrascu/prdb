@@ -1,12 +1,12 @@
 # Statistics Service Progress
 
-## ST-2 / OP-4 follow-up: exact DECIMAL column predicate estimates — implementation
+## ST-2 / OP-4 follow-up: exact same-typed scalar column estimates — implementation
 
-- Contract: a bounded predicate estimate may compare two authorized DECIMAL columns when binding has established identical precision and scale. The estimator compares their stored scaled-integer values; it still returns `Unknown` for DECIMAL literals and cross-type coercions, which the optimizer request format does not support.
-- Red/green: the real-redb transaction regression first returned `Unknown` for a three-row population with fully readable DECIMAL columns. It now verifies exact equality, less-than, and not-equal counts, including SQL NULL non-matches.
-- Implementation: predicate validation/evaluation now recognizes the DECIMAL scalar kind and compares the existing `i128` scaled values. It continues to inspect only authorized projected cells under the same candidate, row-byte, policy, cache, and allowance limits.
-- Verification: focused transaction regression passed. Format, lint, build, planner-channel, and full delegated-cgroup suite validation remain required for this slice.
-- Remaining: DECIMAL literals/coercion and predicate estimate comparisons for BYTEA, UUID, DATE, and TIMESTAMPTZ remain unsupported; broader candidate comparison and target-host workload evidence remain open.
+- Contract: the bounded estimator compares authorized columns when both operands have the identical scalar type: BOOLEAN, SMALLINT, INTEGER, BIGINT, DECIMAL, TEXT, VARCHAR, BYTEA, UUID, DATE, or TIMESTAMPTZ. DECIMAL precision/scale must match; TEXT, VARCHAR, and BYTEA values are capped at 4 KiB each. Existing Boolean/integer/text literals remain supported; DECIMAL, BYTEA, UUID, DATE, and TIMESTAMPTZ literals and cross-type coercions remain unsupported.
+- Red/green: the real-redb regression first failed with `Unknown` on the BYTEA pair. It now checks exact equality and inequality counts for all eleven scalar types, with duplicate and SQL NULL cases, and verifies the 4 KiB variable-value fallback.
+- Implementation: the trusted evaluator now mirrors same-type column binding and existing scalar comparison order for these types while retaining authorized projections, candidate/row-byte bounds, policy restrictions, cache invalidation, and the shared estimate allowance.
+- Verification: focused transaction regression passed. Format, lint, build, planner-channel, and full delegated-cgroup suite validation remain required for this expanded slice.
+- Remaining: additional literal encodings/coercions, broader candidate comparison, and target-host workload evidence remain open.
 
 ## ST-2 / OP-4 / SQL-10 follow-up: composite index-prefix nested-loop joins — implemented
 

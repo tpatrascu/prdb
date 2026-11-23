@@ -7163,6 +7163,268 @@ fn authorized_predicate_estimate_compares_readable_decimal_columns()
 }
 
 #[test]
+fn authorized_predicate_estimate_compares_readable_scalar_columns()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::optimizer_binding::{BoundColumn, BoundPredicate};
+    use prdb_engine::optimizer_request::Comparison;
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let cases = [
+        (
+            ScalarType::Boolean,
+            ScalarValue::Boolean(false),
+            ScalarValue::Boolean(false),
+            ScalarValue::Boolean(true),
+        ),
+        (
+            ScalarType::SmallInt,
+            ScalarValue::SmallInt(1),
+            ScalarValue::SmallInt(1),
+            ScalarValue::SmallInt(2),
+        ),
+        (
+            ScalarType::Integer,
+            ScalarValue::Integer(10),
+            ScalarValue::Integer(10),
+            ScalarValue::Integer(11),
+        ),
+        (
+            ScalarType::BigInt,
+            ScalarValue::BigInt(20),
+            ScalarValue::BigInt(20),
+            ScalarValue::BigInt(21),
+        ),
+        (
+            ScalarType::Decimal {
+                precision: 8,
+                scale: 2,
+            },
+            ScalarValue::Decimal(1_100),
+            ScalarValue::Decimal(1_100),
+            ScalarValue::Decimal(1_200),
+        ),
+        (
+            ScalarType::Text,
+            ScalarValue::Text("same".to_owned()),
+            ScalarValue::Text("left".to_owned()),
+            ScalarValue::Text("right".to_owned()),
+        ),
+        (
+            ScalarType::Varchar { max_chars: 32 },
+            ScalarValue::Varchar("same".to_owned()),
+            ScalarValue::Varchar("left".to_owned()),
+            ScalarValue::Varchar("right".to_owned()),
+        ),
+        (
+            ScalarType::Bytea,
+            ScalarValue::Bytea(vec![1, 2]),
+            ScalarValue::Bytea(vec![1, 2]),
+            ScalarValue::Bytea(vec![1, 3]),
+        ),
+        (
+            ScalarType::Uuid,
+            ScalarValue::Uuid([1; 16]),
+            ScalarValue::Uuid([1; 16]),
+            ScalarValue::Uuid([2; 16]),
+        ),
+        (
+            ScalarType::Date,
+            ScalarValue::Date(10),
+            ScalarValue::Date(10),
+            ScalarValue::Date(11),
+        ),
+        (
+            ScalarType::TimestampTz,
+            ScalarValue::TimestampTz(100),
+            ScalarValue::TimestampTz(100),
+            ScalarValue::TimestampTz(101),
+        ),
+    ];
+    let columns: Vec<_> = cases
+        .iter()
+        .flat_map(|(scalar_type, _, _, _)| {
+            [
+                ColumnSchema {
+                    scalar_type: *scalar_type,
+                    nullable: true,
+                },
+                ColumnSchema {
+                    scalar_type: *scalar_type,
+                    nullable: true,
+                },
+            ]
+        })
+        .collect();
+    let column_ids: Vec<_> = (1..=columns.len())
+        .map(|ordinal| [ordinal as u8; 16])
+        .collect();
+    let table_id = id(0).table;
+    let equal_values: Vec<_> = cases
+        .iter()
+        .flat_map(|(_, equal, _, _)| [Some(equal.clone()), Some(equal.clone())])
+        .collect();
+    let unequal_values: Vec<_> = cases
+        .iter()
+        .flat_map(|(_, _, left, right)| [Some(left.clone()), Some(right.clone())])
+        .collect();
+    let null_values = vec![None; columns.len()];
+    let mut seed = InvocationTransaction::begin(&database, [0x61; 16], [9; 16], 9_999, 8, 65_536)?;
+    for (row_id, values) in [(1, equal_values), (2, unequal_values), (3, null_values)] {
+        seed.stage_put(id(row_id), &encode_tuple(&columns, 1, &values)?)?;
+    }
+    seed.commit()?;
+
+    let schema_id = [0x62; 16];
+    let mut scope = std::collections::HashSet::from([
+        (Operation::Usage, AccessTarget::Schema(schema_id)),
+        (Operation::Select, AccessTarget::Table(table_id)),
+    ]);
+    let mut grants = vec![Grant {
+        subject: Subject::Principal([9; 16]),
+        operation: Operation::Usage,
+        target: AccessTarget::Schema(schema_id),
+    }];
+    let mut policies = vec![Policy {
+        subjects: vec![Subject::Principal([9; 16])],
+        operation: Operation::Select,
+        target: AccessTarget::Table(table_id),
+        effect: Effect::Allow,
+        using: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+        with_check: None,
+    }];
+    for column_id in &column_ids {
+        let target = AccessTarget::Column {
+            table_id,
+            column_id: *column_id,
+        };
+        scope.insert((Operation::Select, target));
+        grants.push(Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Select,
+            target,
+        });
+        policies.push(Policy {
+            subjects: vec![Subject::Principal([9; 16])],
+            operation: Operation::Select,
+            target,
+            effect: Effect::Allow,
+            using: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+            with_check: None,
+        });
+    }
+    let context = AuthorizationContext {
+        principal_id: [9; 16],
+        role_ids: std::collections::HashSet::new(),
+        scope,
+    };
+    let projection = AuthorizedProjection {
+        columns: &columns,
+        column_ids: &column_ids,
+        schema_version: 1,
+        schema_id,
+        context: &context,
+        grants: &grants,
+        policies: &policies,
+        checks: &[],
+        policy_driving_columns: &[],
+        dependencies: &[],
+    };
+    let mut observer =
+        InvocationTransaction::begin(&database, [0x63; 16], [9; 16], 9_999, 8, 65_536)?;
+    for (case_index, (scalar_type, _, _, _)) in cases.iter().enumerate() {
+        let left_ordinal = case_index * 2;
+        let right_ordinal = left_ordinal + 1;
+        let predicate = |operator| BoundPredicate::Compare {
+            operator,
+            left: Box::new(BoundPredicate::Column(BoundColumn {
+                column_id: column_ids[left_ordinal],
+                ordinal: left_ordinal as u32,
+                scalar_type: *scalar_type,
+                nullable: true,
+            })),
+            right: Box::new(BoundPredicate::Column(BoundColumn {
+                column_id: column_ids[right_ordinal],
+                ordinal: right_ordinal as u32,
+                scalar_type: *scalar_type,
+                nullable: true,
+            })),
+        };
+        assert_eq!(
+            observer.estimate_authorized_predicate_at_most(
+                table_id,
+                &projection,
+                &predicate(Comparison::Equal),
+                3,
+            )?,
+            Some((3, 1)),
+            "equality estimate for {scalar_type:?}"
+        );
+        assert_eq!(
+            observer.estimate_authorized_predicate_at_most(
+                table_id,
+                &projection,
+                &predicate(Comparison::NotEqual),
+                3,
+            )?,
+            Some((3, 1)),
+            "inequality estimate for {scalar_type:?}"
+        );
+        assert_eq!(
+            observer.estimate_authorized_predicate_at_most(
+                table_id,
+                &projection,
+                &predicate(Comparison::Less),
+                3,
+            )?,
+            Some((3, 1)),
+            "ordered estimate for {scalar_type:?}"
+        );
+    }
+    let bytea_case = cases
+        .iter()
+        .position(|(scalar_type, _, _, _)| *scalar_type == ScalarType::Bytea)
+        .expect("fixture has a BYTEA comparison pair");
+    let bytea_left_ordinal = bytea_case * 2;
+    let bytea_right_ordinal = bytea_left_ordinal + 1;
+    let mut oversized_values: Vec<_> = cases
+        .iter()
+        .flat_map(|(_, equal, _, _)| [Some(equal.clone()), Some(equal.clone())])
+        .collect();
+    oversized_values[bytea_left_ordinal] = Some(ScalarValue::Bytea(vec![7; 4097]));
+    oversized_values[bytea_right_ordinal] = Some(ScalarValue::Bytea(vec![7; 4097]));
+    let oversized_predicate = BoundPredicate::Compare {
+        operator: Comparison::Equal,
+        left: Box::new(BoundPredicate::Column(BoundColumn {
+            column_id: column_ids[bytea_left_ordinal],
+            ordinal: bytea_left_ordinal as u32,
+            scalar_type: ScalarType::Bytea,
+            nullable: true,
+        })),
+        right: Box::new(BoundPredicate::Column(BoundColumn {
+            column_id: column_ids[bytea_right_ordinal],
+            ordinal: bytea_right_ordinal as u32,
+            scalar_type: ScalarType::Bytea,
+            nullable: true,
+        })),
+    };
+    let mut oversized =
+        InvocationTransaction::begin(&database, [0x64; 16], [9; 16], 9_999, 8, 65_536)?;
+    oversized.stage_put(id(4), &encode_tuple(&columns, 1, &oversized_values)?)?;
+    assert_eq!(
+        oversized.estimate_authorized_predicate_at_most(
+            table_id,
+            &projection,
+            &oversized_predicate,
+            4,
+        )?,
+        None,
+        "oversized variable-width predicate cells must fall back without partial counts"
+    );
+    Ok(())
+}
+
+#[test]
 fn authorized_join_estimate_counts_duplicate_matches_and_private_overlay()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
