@@ -43,6 +43,22 @@ pub fn gateway_result_bytes_relayed_total() -> u64 {
     GATEWAY_RESULT_BYTES_RELAYED_TOTAL.load(Ordering::Relaxed)
 }
 
+pub(crate) fn run_statistics_maintenance_tick(
+    manager: &StorageManager<'_>,
+    after_table_id: &mut Option<[u8; 16]>,
+) -> Result<(), crate::statistics::StatisticsMaintenanceError> {
+    let Some(table_id) = manager.next_committed_population_table_id(*after_table_id)? else {
+        return Ok(());
+    };
+    *after_table_id = Some(table_id);
+    match manager.collect_committed_table_population(table_id) {
+        Ok(_)
+        | Err(crate::statistics::StatisticsMaintenanceError::Busy)
+        | Err(crate::statistics::StatisticsMaintenanceError::InvalidRequest) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 fn record_gateway_result_bytes(bytes: usize) {
     let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
     saturating_add_counter(&GATEWAY_RESULT_BYTES_RELAYED_TOTAL, bytes);
@@ -199,6 +215,7 @@ pub struct GatewayServiceListenerConfig {
     pub accept_poll_interval: Duration,
     pub outcome_maintenance_interval: Duration,
     pub outcome_maintenance_batch: usize,
+    pub statistics_maintenance_interval: Duration,
 }
 
 #[cfg(unix)]
@@ -208,6 +225,7 @@ pub enum GatewayServiceListenerError {
     StorageReopenRequired,
     Staging(crate::supervisor::StagingError),
     OutcomeMaintenance(crate::outcome::OutcomeMaintenanceError),
+    StatisticsMaintenance(crate::statistics::StatisticsMaintenanceError),
     InteractiveTransaction(crate::storage_manager::InteractiveTransactionError),
     Io(io::Error),
     WorkerPanicked,
@@ -646,6 +664,7 @@ where
         || runtime.listener.idle_timeout.is_zero()
         || runtime.listener.accept_poll_interval.is_zero()
         || runtime.listener.outcome_maintenance_interval.is_zero()
+        || runtime.listener.statistics_maintenance_interval.is_zero()
         || runtime.listener.outcome_maintenance_batch == 0
         || runtime.listener.outcome_maintenance_batch > crate::outcome::MAX_OUTCOME_PRUNE_BATCH
         || runtime.admission.retention_period_us <= 0
@@ -658,6 +677,9 @@ where
     let limiter = crate::gateway::GatewayConnectionLimiter::new(runtime.listener.max_connections)
         .map_err(|_| GatewayServiceListenerError::InvalidConfig)?;
     let mut next_outcome_maintenance = std::time::Instant::now();
+    let mut next_statistics_maintenance =
+        std::time::Instant::now() + runtime.listener.statistics_maintenance_interval;
+    let mut statistics_after_table_id = None;
     let audit_jsonl_path = std::env::var_os("PRDB_AUDIT_JSONL_PATH").map(PathBuf::from);
     let mut next_audit_delivery = std::time::Instant::now();
 
@@ -666,6 +688,7 @@ where
         let mut accept_error = None;
         let mut staging_error = None;
         let mut outcome_maintenance_error = None;
+        let mut statistics_maintenance_error = None;
         let mut interactive_transaction_reap_error = None;
         let mut storage_reopen_required = false;
         while !shutdown.load(Ordering::Acquire) {
@@ -691,6 +714,16 @@ where
                     && let Err(error) = manager.reap_interactive_transactions(now_us, 256)
                 {
                     interactive_transaction_reap_error = Some(error);
+                    break;
+                }
+            }
+            if std::time::Instant::now() >= next_statistics_maintenance {
+                next_statistics_maintenance =
+                    std::time::Instant::now() + runtime.listener.statistics_maintenance_interval;
+                if let Err(error) =
+                    run_statistics_maintenance_tick(manager, &mut statistics_after_table_id)
+                {
+                    statistics_maintenance_error = Some(error);
                     break;
                 }
             }
@@ -815,6 +848,8 @@ where
             Err(GatewayServiceListenerError::OutcomeMaintenance(error))
         } else if let Some(error) = interactive_transaction_reap_error {
             Err(GatewayServiceListenerError::InteractiveTransaction(error))
+        } else if let Some(error) = statistics_maintenance_error {
+            Err(GatewayServiceListenerError::StatisticsMaintenance(error))
         } else if let Some(error) = accept_error {
             Err(GatewayServiceListenerError::Io(error))
         } else {
@@ -2503,6 +2538,7 @@ mod worker_result_event_tests {
                 accept_poll_interval: Duration::from_millis(1),
                 outcome_maintenance_interval: Duration::from_secs(60),
                 outcome_maintenance_batch: crate::outcome::MAX_OUTCOME_PRUNE_BATCH,
+                statistics_maintenance_interval: Duration::from_secs(60),
             },
         };
 
@@ -2634,6 +2670,7 @@ mod worker_result_event_tests {
                 accept_poll_interval: Duration::from_millis(1),
                 outcome_maintenance_interval: Duration::from_millis(1),
                 outcome_maintenance_batch: crate::outcome::MAX_OUTCOME_PRUNE_BATCH,
+                statistics_maintenance_interval: Duration::from_secs(60),
             },
         };
         super::serve_gateway_service_listener(

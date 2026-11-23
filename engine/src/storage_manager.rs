@@ -207,6 +207,45 @@ mod statistics_collection_tests {
     }
 
     #[test]
+    fn committed_population_scheduler_cycles_table_catalog_without_listing_all_tables()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (path, database) = database_with_rows(&[])?;
+        let storage =
+            StorageManager::from_validated_database(&database, StorageManagerConfig::default())?;
+        let table_id = [0x44; 16];
+        let mut cursor = None;
+        crate::supervisor_ipc::run_statistics_maintenance_tick(&storage, &mut cursor)?;
+        assert_eq!(cursor, Some(table_id));
+        let mut stats_key = COMMITTED_POPULATION_KEY_PREFIX.to_vec();
+        stats_key.extend_from_slice(&table_id);
+        let read = database.begin_read()?;
+        let stats = read.open_table(STATS)?;
+        let value = stats
+            .get(stats_key.as_slice())?
+            .ok_or("scheduled statistics record missing")?;
+        assert_eq!(
+            CommittedPopulationRecord::decode_record(table_id, value.value())?,
+            CommittedPopulationRecord::Exact {
+                table_id,
+                snapshot_sequence: 1,
+                rows: 0,
+            }
+        );
+        drop(value);
+        drop(stats);
+        drop(read);
+        assert_eq!(
+            storage.next_committed_population_table_id(cursor)?,
+            Some(table_id),
+            "the cursor wraps after the last table"
+        );
+        drop(storage);
+        drop(database);
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
     fn committed_population_collection_is_bounded_and_snapshot_tagged()
     -> Result<(), Box<dyn std::error::Error>> {
         let (path, database) = database_with_rows(&[1, 2])?;
@@ -3404,6 +3443,66 @@ impl<'db> StorageManager<'db> {
 
     pub(crate) fn database(&self) -> &'db Database {
         self.database
+    }
+
+    /// Select the next table catalog key for the background statistics cursor.
+    /// This reads only one table definition per tick and wraps at the end, so
+    /// a large catalog does not require materializing its full table list.
+    pub(crate) fn next_committed_population_table_id(
+        &self,
+        after: Option<[u8; 16]>,
+    ) -> Result<Option<[u8; 16]>, StatisticsMaintenanceError> {
+        if self.admissions.database_uncertain.load(Ordering::Acquire) {
+            return Err(StatisticsMaintenanceError::InvalidRequest);
+        }
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|error| StatisticsMaintenanceError::Storage(error.to_string()))?;
+        let catalog = read
+            .open_table(CATALOG)
+            .map_err(|error| StatisticsMaintenanceError::Storage(error.to_string()))?;
+        let family_prefix = 5u16.to_be_bytes();
+        let after_key = after.map(|table_id| id_catalog_key(5, table_id));
+
+        for pass in 0..if after_key.is_some() { 2 } else { 1 } {
+            let start = if pass == 0 {
+                after_key.as_deref().unwrap_or(family_prefix.as_slice())
+            } else {
+                family_prefix.as_slice()
+            };
+            for entry in catalog
+                .range(start..)
+                .map_err(|error| StatisticsMaintenanceError::Storage(error.to_string()))?
+            {
+                let (key, value) = entry
+                    .map_err(|error| StatisticsMaintenanceError::Storage(error.to_string()))?;
+                let key = key.value().to_vec();
+                if !key.starts_with(&family_prefix) {
+                    break;
+                }
+                if pass == 0 && after_key.as_ref().is_some_and(|cursor| key <= *cursor) {
+                    continue;
+                }
+                if key.len() != 19 || key[2] != 1 {
+                    return Err(StatisticsMaintenanceError::Storage(
+                        "invalid table catalog key".into(),
+                    ));
+                }
+                let bytes = value.value().to_vec();
+                let record = decode_registered_envelope(&bytes)
+                    .map_err(|error| StatisticsMaintenanceError::Storage(error.to_string()))?;
+                if record.family_code != 5 || record.logical_key != key {
+                    return Err(StatisticsMaintenanceError::Storage(
+                        "invalid table catalog record".into(),
+                    ));
+                }
+                return Ok(Some(key[3..19].try_into().map_err(|_| {
+                    StatisticsMaintenanceError::Storage("invalid table catalog ID".into())
+                })?));
+            }
+        }
+        Ok(None)
     }
 
     /// Collect a bounded committed row population from one redb snapshot.

@@ -20641,6 +20641,7 @@ fn admin_cancellation_sync_failure_quarantines_until_reopen()
                 accept_poll_interval: Duration::from_millis(1),
                 outcome_maintenance_interval: Duration::from_secs(60),
                 outcome_maintenance_batch: prdb_engine::outcome::MAX_OUTCOME_PRUNE_BATCH,
+                statistics_maintenance_interval: Duration::from_secs(60),
             },
         };
         assert!(matches!(
@@ -33015,6 +33016,7 @@ fn gateway_service_listener_authenticates_control_admin_over_socket()
                         accept_poll_interval: Duration::from_millis(5),
                         outcome_maintenance_interval: Duration::from_secs(60),
                         outcome_maintenance_batch: prdb_engine::outcome::MAX_OUTCOME_PRUNE_BATCH,
+                        statistics_maintenance_interval: Duration::from_secs(60),
                     },
                 },
                 shutdown_server,
