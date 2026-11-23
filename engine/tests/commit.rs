@@ -52360,6 +52360,101 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
         Ok(())
     })?;
 
+    let denied_executor_invocation = id(0xa1);
+    let mut denied_executor_transaction =
+        storage.begin_invocation(denied_executor_invocation, actor, 9_999, 1, 64)?;
+    let (mut denied_executor_client, mut denied_executor_server) =
+        std::os::unix::net::UnixStream::pair()?;
+    denied_executor_client.set_read_timeout(Some(Duration::from_secs(5)))?;
+    std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+        let executor = scope.spawn(move || {
+            prdb_engine::executor_ipc::serve_executor(
+                &mut denied_executor_server,
+                &mut denied_executor_transaction,
+            )
+        });
+        prdb_engine::ipc::write_frame(
+            &mut denied_executor_client,
+            &IpcFrame {
+                operation: IpcOperation::EstimateScan as u16,
+                request_id: 1,
+                payload: Vec::new(),
+            },
+        )?;
+        denied_executor_client.shutdown(Shutdown::Write)?;
+        let result = executor.join().expect("executor denial server panicked");
+        assert!(matches!(
+            result,
+            Err(prdb_engine::executor_ipc::ExecutorConnectionError::Request(
+                prdb_engine::executor_ipc::ExecutorRequestError::Dispatch(
+                    prdb_engine::ipc::DispatchError::OperationNotAllowed {
+                        role: prdb_engine::ipc::ServiceRole::Executor,
+                        operation: IpcOperation::EstimateScan,
+                    }
+                )
+            ))
+        ));
+        assert!(
+            prdb_engine::ipc::read_frame(&mut denied_executor_client)
+                .map_err(|error| format!("executor denial stream did not close: {error:?}"))?
+                .is_none()
+        );
+        Ok(())
+    })?;
+    assert_eq!(
+        storage
+            .lookup_invocation_outcome(denied_executor_invocation, actor, 9_998)?
+            .ok_or("executor estimate denial did not durably abort")?
+            .status,
+        OutcomeStatus::Aborted
+    );
+
+    let denied_planner_invocation = id(0xa2);
+    let mut denied_planner_transaction =
+        storage.begin_invocation(denied_planner_invocation, actor, 9_999, 1, 64)?;
+    let (mut denied_planner_client, mut denied_planner_server) =
+        std::os::unix::net::UnixStream::pair()?;
+    denied_planner_client.set_read_timeout(Some(Duration::from_secs(5)))?;
+    std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+        let planner = scope.spawn(move || {
+            serve_planner(&mut denied_planner_server, &mut denied_planner_transaction)
+        });
+        prdb_engine::ipc::write_frame(
+            &mut denied_planner_client,
+            &IpcFrame {
+                operation: IpcOperation::OpenScan as u16,
+                request_id: 1,
+                payload: Vec::new(),
+            },
+        )?;
+        denied_planner_client.shutdown(Shutdown::Write)?;
+        let result = planner.join().expect("planner denial server panicked");
+        assert!(matches!(
+            result,
+            Err(prdb_engine::planner_ipc::PlannerConnectionError::Request(
+                prdb_engine::planner_ipc::PlannerRequestError::Dispatch(
+                    prdb_engine::ipc::DispatchError::OperationNotAllowed {
+                        role: prdb_engine::ipc::ServiceRole::Planner,
+                        operation: IpcOperation::OpenScan,
+                    }
+                )
+            ))
+        ));
+        assert!(
+            prdb_engine::ipc::read_frame(&mut denied_planner_client)
+                .map_err(|error| format!("planner denial stream did not close: {error:?}"))?
+                .is_none()
+        );
+        Ok(())
+    })?;
+    assert_eq!(
+        storage
+            .lookup_invocation_outcome(denied_planner_invocation, actor, 9_998)?
+            .ok_or("planner scan denial did not durably abort")?
+            .status,
+        OutcomeStatus::Aborted
+    );
+
     let mut optimizer_metadata_transaction =
         storage.begin_invocation(id(0x8b), actor, 9_999, 8, 512)?;
     let (optimizer_submission_worker, mut optimizer_client) =

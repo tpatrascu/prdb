@@ -180,3 +180,7 @@
 - `Overlay` now exposes an internal checked write generation that advances on each successful put, delete, replacement, or removal. The planner cache drops entries from older generations before lookup, conservatively invalidating on every private row mutation so own-write visibility cannot return stale estimates.
 - Red/green: the shared planner-channel regression repeats an identical predicate after a synchronized private insert. Before generation validation it returned stale `(5,1)`; afterward it returns `(6,2)`. Overlay generation, exact predicate/private-write estimate, and candidate-cap tests pass.
 - Workspace build, formatting, warning-denied Clippy, maintained TinyCC tests, sandbox fixture, delegated-cgroup preflight, and full serial delegated-cgroup workspace acceptance remain to be run for this increment.
+## ST-1 follow-up: enforce planner/executor roles through provisioned streams — verified
+
+- Regression: the real planner and executor IPC servers now receive cross-role requests over Unix streams. An executor `EstimateScan` and planner `OpenScan` each produce no response, return `OperationNotAllowed` for their provisioned role, and record durable ABORTED outcomes.
+- Verification: `planner_stream_estimate_allowance_falls_back_without_aborting_invocation` passed with both new channel-level denial cases. Workspace build, formatting, warning-denied Clippy, maintained TinyCC tests, sandbox fixture build, delegated-cgroup preflight, and the full serial delegated-cgroup workspace suite passed.
