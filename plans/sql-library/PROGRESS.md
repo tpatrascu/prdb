@@ -1549,7 +1549,7 @@
 
 - Contract: simultaneous analytical packages can reserve and reclaim the full shared spill allocation on a configured mounted filesystem without exceeding the service cap or retaining package reservations after close.
 - Regression evidence: the opt-in `optional_configured_filesystem_sustains_shared_allocation_pressure` probe runs four rounds of two concurrent 8 MiB package allocations, asserts the broker reaches exactly its 16 MiB service cap, closes both packages, and checks service accounting returns to zero. Its first run caught an oversized fixture append; limiting chunks to the 1 MiB IPC request minus the 16-byte handle fixed the fixture.
-- Verification: the probe passed on this host's NFSv4.2 workspace mount, allocating and reclaiming 64 MiB total in 251 ms. This is one bounded local measurement and does not establish sustained device saturation or production filesystem support. Rust formatting, warning-denied engine all-target Clippy, and `git diff --check` passed.
+- Verification: the probe passed on this host's NFSv4.2 workspace mount, allocating and reclaiming 64 MiB total in 251 ms, and on the host's `/var/tmp` ext4 filesystem in 74 ms. These are bounded local measurements and do not establish sustained device saturation or production filesystem support. Rust formatting, warning-denied engine all-target Clippy, and `git diff --check` passed.
 - Remaining: deployment filesystem matrix, sustained storage-device saturation with concurrent operational commit/cancellation load, and broader confined result comparisons across workload shapes.
 
 ## SQL-9 follow-up: sustained confined broker writes during operational commits — implemented
