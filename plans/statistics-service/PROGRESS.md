@@ -184,3 +184,10 @@
 
 - Regression: the real planner and executor IPC servers now receive cross-role requests over Unix streams. An executor `EstimateScan` and planner `OpenScan` each produce no response, return `OperationNotAllowed` for their provisioned role, and record durable ABORTED outcomes.
 - Verification: `planner_stream_estimate_allowance_falls_back_without_aborting_invocation` passed with both new channel-level denial cases. Workspace build, formatting, warning-denied Clippy, maintained TinyCC tests, sandbox fixture build, delegated-cgroup preflight, and the full serial delegated-cgroup workspace suite passed.
+
+## ST-4 follow-up: synchronous estimate cancellation and channel draining — verified
+
+- Architecture: each estimate runs inline on its provisioned planner request stream; it creates no detached planner task. Estimate-specific budget/candidate exhaustion returns `Unknown` without partial counts, while cancellation and deadline expiry remain terminal.
+- Acceptance evidence: transaction and planner-stream tests cover cancellation/deadline during estimation. `cancellation_during_optimizer_predicate_estimate_kills_process_tree_without_fallback` and `deadline_during_optimizer_predicate_estimate_kills_process_tree_without_fallback` verify the optimizer process tree is terminated, the invocation durably aborts, and the worker cgroup is drained. `supervisor_drains_both_worker_channels_before_durable_finalize` verifies both provisioned channels drain before finalization.
+- Verification: focused planner stream tests and the complete serial delegated-cgroup workspace suite passed. The ST-1 follow-up validation also passed workspace build, formatting, warning-denied Clippy, maintained TinyCC tests, sandbox fixture build, and cgroup preflight.
+- Scope: this closes task-draining requirements for the current synchronous design. If asynchronous estimate scheduling is introduced later, it needs its own task ownership, snapshot-pin, cancellation, and drain acceptance.

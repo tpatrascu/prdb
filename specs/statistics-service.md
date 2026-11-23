@@ -74,7 +74,7 @@ Keep collection and expensive estimates off the operational critical path when b
 
 Estimate against the invocation's MVCC snapshot plus its successful private writes. Include a transaction-local write generation in estimate/cache validity and reject reuse after mutations. Never expose one invocation's private writes to another. Background collectors use their own registered committed snapshots, no private overlays, and publish catalog updates atomically.
 
-Collectors and estimation tasks hold their own storage-managed snapshot/version pins. Release them on completion or drained cancellation so reclamation cannot race an in-flight scan. Apply independent work budgets and avoid holding catalog locks while scanning or sending replies. See [concurrency and MVCC](concurrency-mvcc.md).
+Background collectors and any future asynchronous estimation tasks hold their own storage-managed snapshot/version pins. Release them on completion or drained cancellation so reclamation cannot race an in-flight scan. The current planner estimate request runs synchronously on its provisioned stream using the invocation-pinned snapshot; there is no detached estimation task or separate estimate pin to drain. Apply independent work budgets and avoid holding catalog locks while scanning or sending replies. See [concurrency and MVCC](concurrency-mvcc.md).
 
 ## Catalog Integration
 
