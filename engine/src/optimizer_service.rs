@@ -769,7 +769,7 @@ mod tests {
     }
 
     #[test]
-    fn larger_join_cardinality_estimates_choose_the_smaller_indexed_outer_side() {
+    fn medium_join_cardinality_estimates_keep_hash_join() {
         let mut indexed_left = join_relation("lefts", 0x31);
         indexed_left.range_access_paths =
             vec![crate::metadata_discovery::AuthorizedRangeAccessPath {
@@ -791,7 +791,29 @@ mod tests {
         )
         .unwrap();
         let plan = decode_join_select_plan_v1(&encoded).unwrap();
-        let index_join = plan.index_nested_loop.expect("indexed join expected");
+        assert!(plan.index_nested_loop.is_none());
+    }
+
+    #[test]
+    fn one_known_small_join_input_orients_to_the_opposite_index() {
+        let mut indexed_right = join_relation("rights", 0x41);
+        indexed_right.range_access_paths =
+            vec![crate::metadata_discovery::AuthorizedRangeAccessPath {
+                index_id: [0x71; 16],
+                column_ids: vec![[0x51; 16]],
+            }];
+        let encoded = optimize_join_select_v1_with_relations_and_estimates(
+            &filtered_join_select_request(),
+            Some(join_relation("lefts", 0x31)),
+            Some(indexed_right),
+            Some(4),
+            Some(96),
+        )
+        .unwrap();
+        let plan = decode_join_select_plan_v1(&encoded).unwrap();
+        let index_join = plan
+            .index_nested_loop
+            .expect("small input should use index");
         assert_eq!(
             index_join.outer_side,
             crate::optimizer_request::JoinRelationSide::Left

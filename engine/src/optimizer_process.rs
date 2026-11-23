@@ -1678,16 +1678,9 @@ mod tests {
             assert_eq!(plan.right_scan_columns.len(), 3);
             assert_eq!(plan.join_keys.len(), 2);
             assert_eq!(plan.limit, Some(5));
-            let index_join = plan
-                .index_nested_loop
-                .expect("estimate-guided index join expected");
-            assert_eq!(
-                index_join.outer_side,
-                crate::optimizer_request::JoinRelationSide::Left
-            );
-            assert_eq!(
-                index_join.inner_side,
-                crate::optimizer_request::JoinRelationSide::Right
+            assert!(
+                plan.index_nested_loop.is_none(),
+                "known medium-sized inputs should retain hash join"
             );
 
             crate::ipc::write_frame(

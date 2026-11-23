@@ -4295,10 +4295,10 @@ pub fn plan_join_select_v1(bound: BoundJoinSelect) -> Result<JoinSelectPlanV1, P
     plan_join_select_v1_with_estimates(bound, None, None)
 }
 
-/// Lower a join and use exact small authorized populations to choose a
-/// bounded indexed nested-loop orientation. If both inputs are known small,
-/// retain hash join; if estimates do not identify a small outer input, retain
-/// the deterministic index preference used by the original plan contract.
+/// Lower a join and use exact authorized populations to choose a physical
+/// strategy. A known small outer input may use an eligible index on the other
+/// side. When both known inputs exceed the measured small-input region, prefer
+/// hash join; unknown estimates retain the deterministic index preference.
 pub fn plan_join_select_v1_with_estimates(
     bound: BoundJoinSelect,
     left_visible_rows: Option<u64>,
@@ -4452,23 +4452,31 @@ fn select_index_nested_loop_join(
         return None;
     }
     match (left_visible_rows, right_visible_rows) {
-        (Some(left_rows), Some(right_rows)) => {
-            if left_rows <= SMALL_POPULATION_SCAN_ROWS && right_rows <= SMALL_POPULATION_SCAN_ROWS {
-                return None;
-            }
-            if left_rows < right_rows {
-                return right;
-            }
-            if right_rows < left_rows {
-                return left;
-            }
+        (Some(left_rows), Some(right_rows))
+            if left_rows <= SMALL_POPULATION_SCAN_ROWS
+                && right_rows <= SMALL_POPULATION_SCAN_ROWS =>
+        {
+            return None;
         }
-        (Some(left_rows), None) if left_rows <= JOIN_POPULATION_ESTIMATE_MAX_ROWS => {
+        (Some(left_rows), Some(right_rows))
+            if left_rows <= SMALL_POPULATION_SCAN_ROWS
+                && right_rows > SMALL_POPULATION_SCAN_ROWS =>
+        {
             return right;
         }
-        (None, Some(right_rows)) if right_rows <= JOIN_POPULATION_ESTIMATE_MAX_ROWS => {
+        (Some(left_rows), Some(right_rows))
+            if right_rows <= SMALL_POPULATION_SCAN_ROWS
+                && left_rows > SMALL_POPULATION_SCAN_ROWS =>
+        {
             return left;
         }
+        (Some(left_rows), None) if (1..=SMALL_POPULATION_SCAN_ROWS).contains(&left_rows) => {
+            return right;
+        }
+        (None, Some(right_rows)) if (1..=SMALL_POPULATION_SCAN_ROWS).contains(&right_rows) => {
+            return left;
+        }
+        (Some(_), Some(_)) => return None,
         _ => {}
     }
 
