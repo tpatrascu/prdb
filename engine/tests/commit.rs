@@ -31221,6 +31221,87 @@ fn token_authenticated_catalog_scans_redact_cells_per_principal()
         OutcomeStatus::Committed
     );
 
+    admin_execute(&format!(
+        "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"objects.grant\",\"arguments\":{{\"grantee_id\":\"{}\",\"object_id\":\"{}\",\"privilege\":\"insert\",\"target_scope\":\"object\",\"target_id\":\"{}\"}}}}",
+        id_wire(first_user_id),
+        id_wire(table_id),
+        id_wire(table_id)
+    ))?;
+    for insert_column_id in [column_id, nullable_column_id] {
+        admin_execute(&format!(
+            "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"objects.grant\",\"arguments\":{{\"grantee_id\":\"{}\",\"object_id\":\"{}\",\"privilege\":\"insert\",\"target_scope\":\"column\",\"target_id\":\"{}\"}}}}",
+            id_wire(first_user_id),
+            id_wire(table_id),
+            id_wire(insert_column_id)
+        ))?;
+    }
+    for (kind, target_columns, name) in [
+        ("row", String::new(), "overlay_insert_row"),
+        (
+            "cell",
+            format!("\"{}\"", id_wire(column_id)),
+            "overlay_insert_key",
+        ),
+        (
+            "cell",
+            format!("\"{}\"", id_wire(nullable_column_id)),
+            "overlay_insert_nullable",
+        ),
+    ] {
+        admin_execute(&format!(
+            "{{\"phase\":\"prepare\",\"operation_version\":1,\"operation\":\"policies.create\",\"arguments\":{{\"table_id\":\"{}\",\"name\":\"{name}\",\"kind\":\"{kind}\",\"policy_operation\":\"insert\",\"effect\":\"allow\",\"recipients\":[\"user:{}\"],\"target_column_ids\":[{target_columns}],\"using_expression_eir1\":null,\"with_check_expression_eir1\":\"{expression}\"}}}}",
+            id_wire(table_id),
+            id_wire(first_user_id)
+        ))?;
+    }
+    let (mut overlay_invocation, _) = storage.begin_token_authenticated_invocation(
+        id(0x83),
+        first_token_id,
+        &first_secret,
+        retention_deadline_us,
+        4,
+        4096,
+    )?;
+    {
+        let mut executor = overlay_invocation.open_executor_metadata_connection();
+        let (relation, _) = executor
+            .resolve_relation("cell_views", "records")?
+            .ok_or("authorized write relation was unavailable")?;
+        executor
+            .stage_insert(
+                &relation,
+                &[
+                    prdb_engine::transaction::InsertInput::Value(Some(ScalarValue::Bytea(vec![
+                        0x56,
+                    ]))),
+                    prdb_engine::transaction::InsertInput::Value(None),
+                ],
+            )
+            .map_err(|error| format!("stage private index-overlay insert failed: {error:?}"))?;
+    }
+    let overlay_range = |value: Vec<u8>| {
+        Some(prdb_engine::transaction::AuthorizedIndexRangeBound {
+            value: ScalarValue::Bytea(value),
+            inclusive: true,
+        })
+    };
+    assert_eq!(
+        executor_ipc_scan_index_range(
+            &mut overlay_invocation,
+            "cell_views",
+            "records",
+            range_index_id,
+            overlay_range(vec![0x56]),
+            overlay_range(vec![0x56]),
+            vec![column_id],
+        )?,
+        prdb_engine::executor_ipc::ScanIndexRangeResponse::Rows(vec![vec![SanitizedCell::Value(
+            ScalarValue::Bytea(vec![0x56])
+        ),]]),
+        "exact-key range lookup must see a staged row through its private index overlay"
+    );
+    overlay_invocation.abort()?;
+
     let (mut first_invocation, first_roles) = storage.begin_token_authenticated_invocation(
         id(0x81),
         first_token_id,
@@ -31397,6 +31478,19 @@ fn token_authenticated_catalog_scans_redact_cells_per_principal()
             vec![column_id],
         )?,
         prdb_engine::executor_ipc::ScanIndexRangeResponse::Rows(vec![]),
+    );
+    assert_eq!(
+        executor_ipc_scan_index_range(
+            &mut first_invocation,
+            "cell_views",
+            "records",
+            range_index_id,
+            range_bound(vec![0x56]),
+            range_bound(vec![0x56]),
+            vec![column_id],
+        )?,
+        prdb_engine::executor_ipc::ScanIndexRangeResponse::Rows(vec![]),
+        "aborted private index membership must not leak to another invocation"
     );
     for value in [vec![0x53], vec![0x55; 9]] {
         assert_eq!(
