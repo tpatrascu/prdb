@@ -32,6 +32,8 @@ Acceptance must prove that the executor receives neither scratch paths nor file 
 
 ## Acceptance and Handoff
 
+Physical filesystem exhaustion is also exercised by the confined SQL-9 disk-full acceptance: it fills a separate ext4 filesystem after broker startup and verifies that a spill ORDER BY allocation failure emits no SQLR rows and resolves as durable ABORTED. The reproducible setup and environment variables are in [`SANDBOX_TEST.md`](SANDBOX_TEST.md).
+
 Maintain a feature/type/operator matrix against specs and compare interpreter results/errors with small independent authorized-view fixtures. Fuzz the C parser separately from Rust query/plan decoders. C unit executables are maintained SDK tests; query artifacts run only through the sandbox harness. Initial SQL completion does not complete analytical support. First behavior: one supported SELECT parse fixture and one unsupported-statement error, once grammar and bounds are specified.
 
 ### Analytical test coverage

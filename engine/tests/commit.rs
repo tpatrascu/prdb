@@ -35,6 +35,91 @@ use std::time::Duration;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
+struct SpillDiskFullFixture {
+    filler_path: std::path::PathBuf,
+    spill_parent: std::path::PathBuf,
+    filler_created: std::cell::Cell<bool>,
+}
+
+impl SpillDiskFullFixture {
+    fn new(filesystem_root: &std::path::Path, spill_parent: &std::path::Path) -> Self {
+        Self {
+            filler_path: filesystem_root.join("prdb-spill-test-filler"),
+            spill_parent: spill_parent.to_path_buf(),
+            filler_created: std::cell::Cell::new(false),
+        }
+    }
+
+    fn fill_until_below_eight_kibibytes(&self) -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let filler = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&self.filler_path)?;
+        self.filler_created.set(true);
+        let block = 1024 * 1024u64;
+        let tail_block = 4 * 1024u64;
+        let available_headroom = 8 * 1024u64;
+        let mut offset = 0u64;
+        loop {
+            let mut capacity: libc::statvfs = unsafe { std::mem::zeroed() };
+            // SAFETY: fstatvfs writes capacity for this live filler-file descriptor.
+            if unsafe { libc::fstatvfs(filler.as_raw_fd(), &mut capacity) } != 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            let available = capacity.f_bavail.saturating_mul(capacity.f_frsize);
+            if available < available_headroom {
+                break;
+            }
+            let length = if available > 2 * block {
+                block
+            } else {
+                tail_block
+            };
+            let start = libc::off_t::try_from(offset)?;
+            let length = libc::off_t::try_from(length)?;
+            // SAFETY: posix_fallocate reserves blocks in this test-owned regular file.
+            let result = unsafe { libc::posix_fallocate(filler.as_raw_fd(), start, length) };
+            if result != 0 {
+                if result == libc::ENOSPC {
+                    break;
+                }
+                return Err(std::io::Error::from_raw_os_error(result).into());
+            }
+            offset = offset
+                .checked_add(u64::try_from(length)?)
+                .ok_or("spill disk-full fixture offset overflow")?;
+        }
+        let mut capacity: libc::statvfs = unsafe { std::mem::zeroed() };
+        // SAFETY: fstatvfs writes capacity for this live filler-file descriptor.
+        if unsafe { libc::fstatvfs(filler.as_raw_fd(), &mut capacity) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let available = capacity.f_bavail.saturating_mul(capacity.f_frsize);
+        if available >= available_headroom {
+            return Err(format!(
+                "could not leave less than 8 KiB free on spill filesystem ({available} bytes remain)"
+            )
+            .into());
+        }
+        drop(filler);
+        Ok(())
+    }
+}
+
+impl Drop for SpillDiskFullFixture {
+    fn drop(&mut self) {
+        if self.filler_created.replace(false) {
+            let _ = std::fs::remove_file(&self.filler_path);
+        }
+        let _ = std::fs::remove_file(self.spill_parent.join(".prdb-spill.lock"));
+        let _ = std::fs::remove_dir(&self.spill_parent);
+    }
+}
+
 #[derive(Debug)]
 struct FailNextSyncBackend {
     inner: redb::backends::FileBackend,
@@ -40356,6 +40441,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     let spill_join_only = std::env::var_os("PRDB_TEST_SPILL_JOIN_ONLY").is_some();
     let spill_crash_only = std::env::var_os("PRDB_TEST_SPILL_CRASH_ONLY").is_some();
     let spill_pressure_only = std::env::var_os("PRDB_TEST_SPILL_PRESSURE_ONLY").is_some();
+    let spill_disk_full_only = std::env::var_os("PRDB_TEST_SPILL_DISK_FULL_ONLY").is_some();
     let spill_enabled_only = spill_quota_only
         || spill_only
         || spill_limit_only
@@ -40364,7 +40450,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         || spill_redacted_only
         || spill_join_only
         || spill_crash_only
-        || spill_pressure_only;
+        || spill_pressure_only
+        || spill_disk_full_only;
     let spill_query_mode = spill_enabled_only || spill_disabled_only;
 
     struct AcceptFixture {
@@ -42509,10 +42596,20 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
+    let spill_test_root = std::env::var_os("PRDB_TEST_SPILL_TEST_ROOT").map(PathBuf::from);
+    if spill_disk_full_only && spill_test_root.is_none() {
+        return Err("PRDB_TEST_SPILL_TEST_ROOT is required for the disk-full acceptance".into());
+    }
+    let spill_root = spill_test_root.unwrap_or_else(|| fixture.0.clone());
     let spill_parent = if spill_enabled_only {
         use std::os::unix::fs::PermissionsExt;
 
-        let path = fixture.0.join("spill-parent");
+        if !spill_root.is_absolute() || !spill_root.is_dir() {
+            return Err(
+                "PRDB_TEST_SPILL_TEST_ROOT must name an existing absolute directory".into(),
+            );
+        }
+        let path = spill_root.join("spill-parent");
         std::fs::create_dir(&path)?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
         Some(path)
@@ -42535,6 +42632,14 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     } else {
         None
     };
+    let spill_disk_full = if spill_disk_full_only {
+        let parent = spill_parent
+            .as_ref()
+            .ok_or("disk-full acceptance must have a spill parent")?;
+        Some(SpillDiskFullFixture::new(&spill_root, parent))
+    } else {
+        None
+    };
     let runtime = GatewayExecutorConfig {
         cgroup_parent,
         resource_limits: prdb_engine::linux_sandbox::WorkerResourceLimits {
@@ -42554,6 +42659,9 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             cleanup_timeout: Duration::from_secs(2),
         },
     };
+    if let Some(spill_disk_full) = spill_disk_full.as_ref() {
+        spill_disk_full.fill_until_below_eight_kibibytes()?;
+    }
     let filtered_composite_only = std::env::var_os("PRDB_TEST_FILTERED_COMPOSITE_ONLY").is_some();
     let count_column_only = std::env::var_os("PRDB_TEST_COUNT_COLUMN_ONLY").is_some();
     if std::env::var_os("PRDB_TEST_ORDERED_ANALYTICAL_ONLY").is_some()
@@ -42569,6 +42677,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         || spill_join_only
         || spill_crash_only
         || spill_pressure_only
+        || spill_disk_full_only
     {
         let mut ordered_client = ClientConnectionSession::default();
         ordered_client.accept_hello(ClientMode::Query, "sandbox-ordered-analytical-sum")?;
@@ -42576,6 +42685,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         let ordered_owner = ordered_client.staging_owner()?;
         let ordered_parameter = [if spill_limit_only {
             b'L'
+        } else if spill_disk_full_only {
+            b'F'
         } else if spill_only || spill_quota_only || spill_disabled_only {
             b'S'
         } else if spill_sort_only {
@@ -42749,10 +42860,10 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         let ordered_frames = ordered_reader
             .join()
             .map_err(|_| "ordered analytical gateway reader panicked")??;
-        if spill_quota_only || spill_crash_only || spill_redacted_only {
+        if spill_quota_only || spill_crash_only || spill_redacted_only || spill_disk_full_only {
             assert!(
                 matches!(ordered_decision, GatewayTerminalDecision::Abort(_)),
-                "spill quota, redacted key, or worker crash must abort; frames: {:?}",
+                "spill quota, filesystem exhaustion, redacted key, or worker crash must abort; frames: {:?}",
                 ordered_frames
                     .iter()
                     .map(|frame| (
@@ -42761,7 +42872,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                     ))
                     .collect::<Vec<_>>()
             );
-            if spill_quota_only || spill_redacted_only {
+            if spill_quota_only || spill_redacted_only || spill_disk_full_only {
                 assert!(
                     ordered_frames
                         .iter()
@@ -43014,7 +43125,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                     expected_count_column_row(left_key, right_key, count)
                 );
             }
-        } else if spill_quota_only || spill_redacted_only {
+        } else if spill_quota_only || spill_redacted_only || spill_disk_full_only {
             assert!(
                 ordered_frames
                     .as_slice()
@@ -43110,7 +43221,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         assert_eq!(terminal.operation, Operation::GatewayTerminal as u16);
         assert_eq!(terminal.request_id, ordered_accepted.request_id);
         assert!(String::from_utf8(terminal.payload)?.contains(
-            if spill_quota_only || spill_crash_only || spill_redacted_only {
+            if spill_quota_only || spill_crash_only || spill_redacted_only || spill_disk_full_only {
                 "\"outcome\":\"aborted\""
             } else {
                 "\"outcome\":\"committed\""
@@ -43121,7 +43232,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 .lookup_invocation_outcome(ordered_reservation.invocation_id, user_id, now + 1)?
                 .ok_or("missing ordered SUM outcome")?
                 .status,
-            if spill_quota_only || spill_crash_only || spill_redacted_only {
+            if spill_quota_only || spill_crash_only || spill_redacted_only || spill_disk_full_only {
                 OutcomeStatus::Aborted
             } else {
                 OutcomeStatus::Committed
@@ -43136,6 +43247,15 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 }),
                 "spill invocation directory must be removed when the package ends"
             );
+        }
+        if spill_disk_full_only {
+            let parent = spill_parent
+                .as_ref()
+                .ok_or("disk-full acceptance must have a spill parent")?
+                .clone();
+            drop(runtime);
+            drop(spill_disk_full);
+            assert!(!parent.exists(), "disk-full test scratch should be removed");
         }
         return Ok(());
     }

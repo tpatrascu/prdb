@@ -49,6 +49,12 @@ int32_t prdb_query_main_v6(const prdb_host_api_v6 *host,
         *crash_address = 1;
         return 1;
     }
+    if (invocation->parameters[0] == 'F') {
+        int32_t status = prdb_sdk_sql_run_statement_v2(
+            host, schema, sizeof(schema) - 1, spill_ordered_rows_sql,
+            sizeof(spill_ordered_rows_sql) - 1, NULL, 0);
+        return status == PRDB_SDK_SQL_DISPATCH_OK ? 0 : 1;
+    }
     prdb_sdk_spill_stream_v1 pressure_stream = {0};
     if (invocation->parameters[0] == 'P') {
         static const uint8_t pressure_bytes[PRDB_SDK_SPILL_MAX_IO_BYTES];

@@ -127,4 +127,8 @@ The `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` test has focused ABI 
 
 ## Indexed range equivalence
 
+For physical disk-full coverage, set `PRDB_TEST_SPILL_DISK_FULL_ONLY=1`, `PRDB_TEST_SPILL_QUERY_ARTIFACT` to `target/sdk-v1/sql-v6-spill.so`, and `PRDB_TEST_SPILL_TEST_ROOT` to a dedicated writable ext4 filesystem directory. The filesystem must have more than the configured 16 MiB service headroom when the broker opens. The test then allocates a filler file until fewer than 8 KiB remain and executes SQL `ORDER BY left_key` through the confined spill sorter; it requires zero result-data frames and a durable ABORTED outcome. Use a disposable loopback filesystem separate from the database and shared host filesystems. The filler file is removed when the test exits, including panic unwinding. Unmount and remove the loopback image after the run.
+
+The existing `PRDB_TEST_SPILL_QUOTA_ONLY=1` mode remains the broker allocation-quota rejection check. The physical disk-full mode drives the underlying filesystem allocator to ENOSPC after broker startup, exercising the SQL failure latch and terminal abort path under a real allocation error.
+
 The confined write/read fixture submits the two-sided INTEGER predicate `left_key >= $1 AND left_key < $2` against the authorized non-unique `grouped_left_key_range` index. It collects optimizer output and the normal authorized full-row SQL scan output from the same invocation snapshot and compares value order and duplicate multiplicity. The existing delegated acceptance therefore checks range-hint matching, executor range submission, filtering/projection, and equivalence across the real confined process path.
