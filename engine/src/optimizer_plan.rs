@@ -122,6 +122,15 @@ pub struct JoinSelectPlanV1 {
     pub join_keys: Vec<(BoundColumn, BoundColumn)>,
     pub limit: Option<u32>,
     pub filter: Option<BoundJoinFilter>,
+    pub index_nested_loop: Option<IndexNestedLoopJoinV1>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IndexNestedLoopJoinV1 {
+    pub outer_side: JoinRelationSide,
+    pub inner_side: JoinRelationSide,
+    pub index_id: [u8; 16],
+    pub key_column: BoundColumn,
 }
 
 /// Bounded single-key COUNT(*) grouping plan. The scan carries only the
@@ -223,6 +232,7 @@ const PLAN_KIND_DELETE: u8 = 2;
 const PLAN_KIND_UPDATE: u8 = 3;
 const PLAN_KIND_JOIN_SELECT: u8 = 4;
 const PLAN_KIND_FILTERED_JOIN_SELECT: u8 = 12;
+const PLAN_KIND_INDEX_NESTED_LOOP_JOIN: u8 = 17;
 const DELETE_SINK_NODE: u8 = 5;
 const PLAN_KIND_GROUP_COUNT: u8 = 5;
 const PLAN_KIND_COMPOSITE_GROUP_COUNT: u8 = 6;
@@ -515,13 +525,16 @@ pub fn decode_plan_v1(bytes: &[u8]) -> Result<SingleTablePlanV1, PlanError> {
 }
 
 /// Encode an independently validated two-relation join plan. Unfiltered joins
-/// retain kind 4; v20 qualified-filter joins use kind 12.
+/// use kind 4, filtered joins use kind 12, and authorized index nested-loop
+/// joins use the additive kind 17.
 pub fn encode_join_select_plan_v1(plan: &JoinSelectPlanV1) -> Result<Vec<u8>, PlanError> {
     validate_join_select_plan_v1(plan)?;
     let mut output = Vec::with_capacity(256);
     output.extend_from_slice(&crate::query_abi::encode_optimizer_plan_header_record(
         1,
-        if plan.filter.is_some() {
+        if plan.index_nested_loop.is_some() {
+            PLAN_KIND_INDEX_NESTED_LOOP_JOIN
+        } else if plan.filter.is_some() {
             PLAN_KIND_FILTERED_JOIN_SELECT
         } else {
             PLAN_KIND_JOIN_SELECT
@@ -570,6 +583,9 @@ pub fn encode_join_select_plan_v1(plan: &JoinSelectPlanV1) -> Result<Vec<u8>, Pl
             output.extend_from_slice(&limit.to_be_bytes());
         }
     }
+    if plan.index_nested_loop.is_some() {
+        output.push(u8::from(plan.filter.is_some()));
+    }
     if let Some(filter) = &plan.filter {
         output.push(match filter.relation_side {
             JoinRelationSide::Left => 0,
@@ -594,6 +610,18 @@ pub fn encode_join_select_plan_v1(plan: &JoinSelectPlanV1) -> Result<Vec<u8>, Pl
             }
         }
     }
+    if let Some(index_join) = &plan.index_nested_loop {
+        output.push(match index_join.outer_side {
+            JoinRelationSide::Left => 0,
+            JoinRelationSide::Right => 1,
+        });
+        output.push(match index_join.inner_side {
+            JoinRelationSide::Left => 0,
+            JoinRelationSide::Right => 1,
+        });
+        output.extend_from_slice(&index_join.index_id);
+        put_column(&mut output, &index_join.key_column);
+    }
     if output.len() > MAX_PLAN_BYTES {
         return Err(PlanError::TooLarge);
     }
@@ -610,7 +638,11 @@ pub fn decode_join_select_plan_v1(bytes: &[u8]) -> Result<JoinSelectPlanV1, Plan
     if version != 1 {
         return Err(PlanError::UnsupportedVersion(version));
     }
-    if !matches!(kind, PLAN_KIND_JOIN_SELECT | PLAN_KIND_FILTERED_JOIN_SELECT) || reserved != 0 {
+    if !matches!(
+        kind,
+        PLAN_KIND_JOIN_SELECT | PLAN_KIND_FILTERED_JOIN_SELECT | PLAN_KIND_INDEX_NESTED_LOOP_JOIN
+    ) || reserved != 0
+    {
         return Err(PlanError::InvalidEncoding);
     }
     let mut reader = PlanReader {
@@ -694,7 +726,16 @@ pub fn decode_join_select_plan_v1(bytes: &[u8]) -> Result<JoinSelectPlanV1, Plan
         )),
         _ => return Err(PlanError::InvalidEncoding),
     };
-    let filter = if kind == PLAN_KIND_FILTERED_JOIN_SELECT {
+    let has_filter = if kind == PLAN_KIND_INDEX_NESTED_LOOP_JOIN {
+        match reader.u8()? {
+            0 => false,
+            1 => true,
+            _ => return Err(PlanError::InvalidEncoding),
+        }
+    } else {
+        kind == PLAN_KIND_FILTERED_JOIN_SELECT
+    };
+    let filter = if has_filter {
         let relation_side = match reader.u8()? {
             0 => JoinRelationSide::Left,
             1 => JoinRelationSide::Right,
@@ -735,6 +776,30 @@ pub fn decode_join_select_plan_v1(bytes: &[u8]) -> Result<JoinSelectPlanV1, Plan
     } else {
         None
     };
+    let index_nested_loop = if kind == PLAN_KIND_INDEX_NESTED_LOOP_JOIN {
+        let outer_side = match reader.u8()? {
+            0 => JoinRelationSide::Left,
+            1 => JoinRelationSide::Right,
+            _ => return Err(PlanError::InvalidEncoding),
+        };
+        let inner_side = match reader.u8()? {
+            0 => JoinRelationSide::Left,
+            1 => JoinRelationSide::Right,
+            _ => return Err(PlanError::InvalidEncoding),
+        };
+        let index_id = reader
+            .take(16)?
+            .try_into()
+            .map_err(|_| PlanError::Truncated)?;
+        Some(IndexNestedLoopJoinV1 {
+            outer_side,
+            inner_side,
+            index_id,
+            key_column: reader.column()?,
+        })
+    } else {
+        None
+    };
     if reader.offset != bytes.len() {
         return Err(PlanError::TrailingBytes);
     }
@@ -750,6 +815,7 @@ pub fn decode_join_select_plan_v1(bytes: &[u8]) -> Result<JoinSelectPlanV1, Plan
         join_keys,
         limit,
         filter,
+        index_nested_loop,
     };
     validate_join_select_plan_v1(&plan)?;
     Ok(plan)
@@ -834,6 +900,41 @@ pub fn validate_join_select_plan_v1(plan: &JoinSelectPlanV1) -> Result<(), PlanE
             if index == 0 || index > crate::optimizer_request::MAX_PARAMETER_INDEX
         ) {
             return Err(PlanError::InvalidEncoding);
+        }
+    }
+    if let Some(index_join) = &plan.index_nested_loop {
+        if index_join.outer_side == index_join.inner_side
+            || index_join.index_id == [0; 16]
+            || !matches!(
+                index_join.key_column.scalar_type,
+                ScalarType::Boolean | ScalarType::Integer | ScalarType::Text
+            )
+        {
+            return Err(PlanError::InvalidColumnReference);
+        }
+        let (inner_scan, matching_key) = match index_join.inner_side {
+            JoinRelationSide::Left => (
+                &plan.left_scan_columns,
+                plan.join_keys
+                    .iter()
+                    .find(|(inner, _)| inner == &index_join.key_column),
+            ),
+            JoinRelationSide::Right => (
+                &plan.right_scan_columns,
+                plan.join_keys
+                    .iter()
+                    .find(|(_, inner)| inner == &index_join.key_column),
+            ),
+        };
+        if !inner_scan.contains(&index_join.key_column) || matching_key.is_none() {
+            return Err(PlanError::InvalidColumnReference);
+        }
+        let expected_outer = match index_join.inner_side {
+            JoinRelationSide::Left => JoinRelationSide::Right,
+            JoinRelationSide::Right => JoinRelationSide::Left,
+        };
+        if index_join.outer_side != expected_outer {
+            return Err(PlanError::InvalidColumnReference);
         }
     }
     Ok(())
@@ -4189,6 +4290,7 @@ fn is_point_probe_literal(column: &BoundColumn, value: &BoundPredicate) -> bool 
 /// Lower authorized join bindings to a canonical join plan. Each scan reads
 /// the ordinal-sorted union of its projected and equality-key columns.
 pub fn plan_join_select_v1(bound: BoundJoinSelect) -> Result<JoinSelectPlanV1, PlanError> {
+    let index_nested_loop = select_index_nested_loop_join(&bound);
     let relation = |relation: crate::optimizer_binding::BoundJoinRelation| RelationReference {
         schema_name: bound.schema_name.clone(),
         schema_id: bound.schema_id,
@@ -4245,9 +4347,90 @@ pub fn plan_join_select_v1(bound: BoundJoinSelect) -> Result<JoinSelectPlanV1, P
             .collect(),
         limit: bound.limit,
         filter: bound.filter,
+        index_nested_loop,
     };
     validate_join_select_plan_v1(&plan)?;
     Ok(plan)
+}
+
+fn select_index_nested_loop_join(bound: &BoundJoinSelect) -> Option<IndexNestedLoopJoinV1> {
+    fn eligible(
+        paths: impl Iterator<Item = ([u8; 16], Vec<[u8; 16]>)>,
+        key_columns: &[BoundColumn],
+        side: JoinRelationSide,
+    ) -> Option<IndexNestedLoopJoinV1> {
+        let mut paths = paths
+            .filter(|(index_id, columns)| *index_id != [0; 16] && !columns.is_empty())
+            .collect::<Vec<_>>();
+        paths.sort_by_key(|(index_id, _)| *index_id);
+        for (index_id, column_ids) in paths {
+            let Some(key_column) = key_columns
+                .iter()
+                .find(|column| column.column_id == column_ids[0])
+            else {
+                continue;
+            };
+            if matches!(
+                key_column.scalar_type,
+                ScalarType::Boolean | ScalarType::Integer | ScalarType::Text
+            ) {
+                return Some(IndexNestedLoopJoinV1 {
+                    outer_side: match side {
+                        JoinRelationSide::Left => JoinRelationSide::Right,
+                        JoinRelationSide::Right => JoinRelationSide::Left,
+                    },
+                    inner_side: side,
+                    index_id,
+                    key_column: key_column.clone(),
+                });
+            }
+        }
+        None
+    }
+
+    let right = eligible(
+        bound
+            .right_relation
+            .unique_access_paths
+            .iter()
+            .map(|path| (path.index_id, path.column_ids.clone()))
+            .chain(
+                bound
+                    .right_relation
+                    .range_access_paths
+                    .iter()
+                    .map(|path| (path.index_id, path.column_ids.clone())),
+            ),
+        &bound
+            .join_keys
+            .iter()
+            .map(|key| key.right_column.clone())
+            .collect::<Vec<_>>(),
+        JoinRelationSide::Right,
+    );
+    if right.is_some() {
+        return right;
+    }
+    eligible(
+        bound
+            .left_relation
+            .unique_access_paths
+            .iter()
+            .map(|path| (path.index_id, path.column_ids.clone()))
+            .chain(
+                bound
+                    .left_relation
+                    .range_access_paths
+                    .iter()
+                    .map(|path| (path.index_id, path.column_ids.clone())),
+            ),
+        &bound
+            .join_keys
+            .iter()
+            .map(|key| key.left_column.clone())
+            .collect::<Vec<_>>(),
+        JoinRelationSide::Left,
+    )
 }
 
 /// Validate the structural invariants an executor must check independently
@@ -5856,6 +6039,7 @@ mod tests {
             join_keys: vec![(left_key, right_key), (left_key2, right_key2)],
             limit: Some(9),
             filter: None,
+            index_nested_loop: None,
         };
         let bytes = encode_join_select_plan_v1(&plan).unwrap();
         assert_eq!(decode_join_select_plan_v1(&bytes).unwrap(), plan);

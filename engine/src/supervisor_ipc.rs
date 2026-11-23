@@ -1065,7 +1065,7 @@ fn dispatch_gateway_client_request_inner<'db>(
                 .payload
                 .split_first()
                 .ok_or(GatewayRequestError::InvalidPayload)?;
-            if !matches!(kind, 4 | 5 | 12 | 19) {
+            if !matches!(kind, 4 | 5 | 12 | 17 | 19) {
                 return Err(GatewayRequestError::InvalidPayload);
             }
             session

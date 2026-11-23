@@ -653,6 +653,69 @@ mod tests {
     }
 
     #[test]
+    fn filtered_join_select_uses_authorized_inner_index_for_nested_loop_plan() {
+        let mut indexed_right = join_relation("rights", 0x41);
+        indexed_right.range_access_paths =
+            vec![crate::metadata_discovery::AuthorizedRangeAccessPath {
+                index_id: [0x71; 16],
+                column_ids: vec![[0x51; 16]],
+            }];
+        let encoded = optimize_join_select_v1_with_relations(
+            &filtered_join_select_request(),
+            Some(join_relation("lefts", 0x31)),
+            Some(indexed_right),
+        )
+        .unwrap();
+        let (_, kind, _) = crate::query_abi::decode_optimizer_plan_header_record(&encoded)
+            .expect("optimizer must return a plan header");
+        assert_eq!(
+            kind, 17,
+            "an authorized inner index should select nested loop"
+        );
+        let plan = decode_join_select_plan_v1(&encoded).unwrap();
+        let index_join = plan.index_nested_loop.expect("kind 17 index strategy");
+        assert_eq!(
+            index_join.outer_side,
+            crate::optimizer_request::JoinRelationSide::Left
+        );
+        assert_eq!(
+            index_join.inner_side,
+            crate::optimizer_request::JoinRelationSide::Right
+        );
+        assert_eq!(index_join.index_id, [0x71; 16]);
+        assert_eq!(index_join.key_column.column_id, [0x51; 16]);
+        assert!(plan.filter.is_some());
+    }
+
+    #[test]
+    fn filtered_join_select_uses_left_index_as_fallback_inner() {
+        let mut indexed_left = join_relation("lefts", 0x31);
+        indexed_left.range_access_paths =
+            vec![crate::metadata_discovery::AuthorizedRangeAccessPath {
+                index_id: [0x72; 16],
+                column_ids: vec![[0x41; 16]],
+            }];
+        let encoded = optimize_join_select_v1_with_relations(
+            &filtered_join_select_request(),
+            Some(indexed_left),
+            Some(join_relation("rights", 0x41)),
+        )
+        .unwrap();
+        let plan = decode_join_select_plan_v1(&encoded).unwrap();
+        let index_join = plan.index_nested_loop.expect("kind 17 index strategy");
+        assert_eq!(
+            index_join.outer_side,
+            crate::optimizer_request::JoinRelationSide::Right
+        );
+        assert_eq!(
+            index_join.inner_side,
+            crate::optimizer_request::JoinRelationSide::Left
+        );
+        assert_eq!(index_join.index_id, [0x72; 16]);
+        assert_eq!(index_join.key_column.column_id, [0x41; 16]);
+    }
+
+    #[test]
     fn ordered_group_count_plan_carries_authorized_sort_items_and_limit() {
         let encoded = optimize_ordered_group_count_v1_with_relation(
             &ordered_group_count_request(),

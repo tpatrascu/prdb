@@ -202,6 +202,8 @@ pub struct BoundJoinRelation {
     pub relation_id: [u8; 16],
     pub relation_name: String,
     pub table_epoch: u64,
+    pub unique_access_paths: Vec<AuthorizedUniqueAccessPath>,
+    pub range_access_paths: Vec<AuthorizedRangeAccessPath>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1019,11 +1021,15 @@ fn bind_decoded_join_select(
             relation_id: left_relation.relation.relation_id,
             relation_name: left_relation.relation.name,
             table_epoch: left_relation.table_epoch,
+            unique_access_paths: left_relation.unique_access_paths,
+            range_access_paths: left_relation.range_access_paths,
         },
         right_relation: BoundJoinRelation {
             relation_id: right_relation.relation.relation_id,
             relation_name: right_relation.relation.name,
             table_epoch: right_relation.table_epoch,
+            unique_access_paths: right_relation.unique_access_paths,
+            range_access_paths: right_relation.range_access_paths,
         },
         projections,
         join_keys,

@@ -19,6 +19,10 @@
 #define SQL_EXEC_V20_SPILL_MAX_SCAN_PAGES UINT32_C(112)
 #define SQL_EXEC_V20_OPTIMIZER_MAX_SCAN_PAGES UINT32_C(117)
 #define SQL_EXEC_V19_JOIN_POLL_INTERVAL UINT32_C(2048)
+#define SQL_EXEC_V19_INDEX_OUTER_MAX_ROWS UINT32_C(128)
+#define SQL_EXEC_V19_INDEX_CANDIDATE_LIMIT UINT32_C(16384)
+#define SQL_EXEC_V19_INDEX_MAX_SCAN_PAGES UINT32_C(48)
+#define SQL_EXEC_V19_INDEX_REQUEST_BYTES UINT32_C(16384)
 
 static int32_t fail_statement_v19(const prdb_host_api_v3 *host,
                                  int32_t status) {
@@ -237,6 +241,157 @@ static int32_t materialize_relation_v19(
     return final_status;
 }
 
+static int32_t execute_index_nested_loop_v19(
+    const prdb_host_api_v3 *host_v3, const prdb_host_api_v2 *host,
+    const prdb_sdk_select_binding_v19 *binding,
+    const prdb_sdk_optimizer_index_join_plan_v1 *plan,
+    const prdb_sdk_executor_relation_v1 *left_relation,
+    const prdb_sdk_executor_relation_v1 *right_relation,
+    const prdb_sdk_sql_join_materialized_row_v16 *outer_rows,
+    uint32_t outer_count, uint8_t *inner_response,
+    uint64_t inner_response_capacity, uint8_t *materialized_bytes,
+    uint64_t materialized_capacity, uint64_t *materialized_used,
+    prdb_sdk_value_v1 *cell_scratch, uint32_t cell_scratch_capacity,
+    prdb_sdk_sql_join_result_row_v19_fn on_row, void *result_context,
+    uint32_t has_limit, uint32_t limit) {
+    uint8_t request[SQL_EXEC_V19_INDEX_REQUEST_BYTES];
+    uint8_t packed_ids[PRDB_SDK_EXECUTOR_MAX_COLUMN_IDS * 16];
+    uint32_t inner_side = plan->inner_side;
+    uint32_t outer_side = plan->outer_side;
+    const prdb_sdk_executor_relation_v1 *inner_relation =
+        inner_side == PRDB_SDK_SQL_V8_LEFT ? left_relation : right_relation;
+    const prdb_sdk_optimizer_join_relation_v1 *inner_shape =
+        inner_side == PRDB_SDK_SQL_V8_LEFT ? &plan->join.left_relation
+                                           : &plan->join.right_relation;
+    uint32_t key_index = UINT32_MAX;
+    uint32_t emitted = 0, candidates = 0;
+    int32_t status;
+
+    if (binding->base.join_key_count == 0 ||
+        inner_shape->scan_column_count > PRDB_SDK_EXECUTOR_MAX_COLUMN_IDS ||
+        inner_shape->scan_column_count == 0 || outer_count >
+            SQL_EXEC_V19_INDEX_OUTER_MAX_ROWS) {
+        return fail_statement_v19(host_v3, PRDB_SDK_SQL_EXEC_SHAPE_MISMATCH);
+    }
+    for (uint32_t key = 0; key < binding->base.join_key_count; ++key) {
+        const prdb_sdk_sql_bound_column_v2 *inner_column =
+            inner_side == PRDB_SDK_SQL_V8_LEFT
+                ? &binding->base.join_keys[key].left : &binding->base.join_keys[key].right;
+        if (inner_column->ordinal == plan->key_column.ordinal &&
+            inner_column->type_code == plan->key_column.type_code) {
+            key_index = key;
+            break;
+        }
+    }
+    if (key_index == UINT32_MAX) {
+        return fail_statement_v19(host_v3, PRDB_SDK_SQL_EXEC_SHAPE_MISMATCH);
+    }
+    for (uint32_t column = 0; column < inner_shape->scan_column_count; ++column) {
+        if (inner_shape->scan_columns[column].ordinal >= cell_scratch_capacity) {
+            return fail_statement_v19(host_v3, PRDB_SDK_SQL_EXEC_SHAPE_MISMATCH);
+        }
+        memcpy(packed_ids + column * 16,
+               inner_shape->scan_columns[column].column_id, 16);
+    }
+    for (uint32_t outer_index = 0; outer_index < outer_count; ++outer_index) {
+        const prdb_sdk_value_v1 *probe = &outer_rows[outer_index].join_keys[key_index];
+        prdb_sdk_index_range_v1 range = {0};
+        prdb_sdk_index_range_row_iterator_v1 rows = {0};
+        uint64_t response_len = 0;
+        if ((outer_index % 16) == 0) {
+            status = check_cancelled_v19(host);
+            if (status != PRDB_SDK_SQL_EXEC_OK)
+                return fail_statement_v19(host_v3, status);
+        }
+        if (probe->state == PRDB_SDK_VALUE_STATE_NULL) continue;
+        if (probe->state != PRDB_SDK_VALUE_STATE_VALUE ||
+            probe->type_code != plan->key_column.type_code ||
+            probe->data_len > PRDB_SDK_VALUE_MAX_BYTES)
+            return fail_statement_v19(host_v3, PRDB_SDK_SQL_EXEC_EVALUATION_ERROR);
+        status = prdb_sdk_executor_scan_index_range_v1(
+            host, inner_relation->executor_handle, plan->index_id, probe, 1,
+            probe, 1, packed_ids, (uint16_t)inner_shape->scan_column_count,
+            request, sizeof(request), inner_response, inner_response_capacity,
+            &response_len, &range, sizeof(range));
+        if (status != PRDB_SDK_EXECUTOR_OK)
+            return fail_statement_v19(host_v3,
+                status == PRDB_SDK_EXECUTOR_UNAVAILABLE
+                    ? PRDB_SDK_SQL_EXEC_MATERIALIZATION_LIMIT
+                    : PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
+        if (prdb_sdk_index_range_rows_begin_v1(&range, &rows, sizeof(rows)) !=
+            PRDB_SDK_BATCH_OK)
+            return fail_statement_v19(host_v3, PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
+        while (rows.rows_remaining != 0) {
+            prdb_sdk_index_range_row_v1 row = {0};
+            prdb_sdk_cell_iterator_v1 cells = {0};
+            prdb_sdk_value_v1 left_keys[8] = {{0}}, right_keys[8] = {{0}};
+            prdb_sdk_value_v1 inner_keys[8] = {{0}};
+            prdb_sdk_value_v1 projected[PRDB_SDK_SQL_MAX_PROJECTION_COLUMNS] = {{0}};
+            uint32_t matches = 1;
+            if (++candidates > SQL_EXEC_V19_INDEX_CANDIDATE_LIMIT)
+                return fail_statement_v19(host_v3, PRDB_SDK_SQL_EXEC_MATERIALIZATION_LIMIT);
+            if ((candidates % 1024) == 0) {
+                status = check_cancelled_v19(host);
+                if (status != PRDB_SDK_SQL_EXEC_OK)
+                    return fail_statement_v19(host_v3, status);
+            }
+            if (prdb_sdk_index_range_row_next_v1(&rows, &row, sizeof(row)) !=
+                    PRDB_SDK_BATCH_OK || row.cell_count != inner_shape->scan_column_count ||
+                prdb_sdk_index_range_row_cells_begin_v1(&row, &cells, sizeof(cells)) !=
+                    PRDB_SDK_BATCH_OK)
+                return fail_statement_v19(host_v3, PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
+            for (uint32_t i = 0; i < row.cell_count; ++i) {
+                prdb_sdk_value_v1 value = {0};
+                const prdb_sdk_optimizer_plan_column_v1 *column = &inner_shape->scan_columns[i];
+                if (prdb_sdk_cell_next_v1(&cells, &value, sizeof(value)) != PRDB_SDK_BATCH_OK ||
+                    value.type_code != column->type_code || column->ordinal >= cell_scratch_capacity)
+                    return fail_statement_v19(host_v3, PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
+                cell_scratch[column->ordinal] = value;
+            }
+            for (uint32_t key = 0; key < binding->base.join_key_count; ++key) {
+                const prdb_sdk_sql_join_key_binding_v16 *key_binding = &binding->base.join_keys[key];
+                const prdb_sdk_value_v1 *outer_key = &outer_rows[outer_index].join_keys[key];
+                const prdb_sdk_sql_bound_column_v2 *inner_key =
+                    inner_side == PRDB_SDK_SQL_V8_LEFT ? &key_binding->left : &key_binding->right;
+                const prdb_sdk_value_v1 *inner_value = &cell_scratch[inner_key->ordinal];
+                uint32_t truth = PRDB_SDK_SQL_TRUTH_UNKNOWN;
+                status = copy_value_v19(inner_value, &inner_keys[key],
+                    materialized_bytes, materialized_capacity, materialized_used);
+                if (status != PRDB_SDK_SQL_EXEC_OK)
+                    return fail_statement_v19(host_v3, status);
+                if (outer_side == PRDB_SDK_SQL_V8_LEFT) {
+                    left_keys[key] = *outer_key; right_keys[key] = inner_keys[key];
+                } else { left_keys[key] = inner_keys[key]; right_keys[key] = *outer_key; }
+                status = prdb_sdk_sql_compare_v1(&left_keys[key], &right_keys[key],
+                    PRDB_SDK_SQL_COMPARE_EQUAL, key_binding->left.decimal_scale,
+                    key_binding->right.decimal_scale, &truth);
+                if (status != PRDB_SDK_SQL_EVAL_OK)
+                    return fail_statement_v19(host_v3, PRDB_SDK_SQL_EXEC_EVALUATION_ERROR);
+                if (truth != PRDB_SDK_SQL_TRUTH_TRUE) { matches = 0; break; }
+            }
+            if (!matches) continue;
+            for (uint32_t projection = 0; projection < binding->base.base.projection_count; ++projection) {
+                const prdb_sdk_sql_join_projection_binding_v8 *p = &binding->base.base.projections[projection];
+                if (p->relation_side == outer_side) {
+                    projected[projection] = outer_rows[outer_index].projections[projection];
+                } else {
+                    status = copy_value_v19(&cell_scratch[p->column.ordinal],
+                        &projected[projection], materialized_bytes,
+                        materialized_capacity, materialized_used);
+                    if (status != PRDB_SDK_SQL_EXEC_OK)
+                        return fail_statement_v19(host_v3, status);
+                }
+            }
+            if (on_row(result_context, projected, binding->base.base.projection_count, binding) !=
+                PRDB_QUERY_CALLBACK_OK)
+                return fail_statement_v19(host_v3, PRDB_SDK_SQL_EXEC_RESULT_ERROR);
+            if (plan->has_filter == 0 && ++emitted >= limit && has_limit)
+                return PRDB_SDK_SQL_EXEC_OK;
+        }
+    }
+    return PRDB_SDK_SQL_EXEC_OK;
+}
+
 static int32_t execute_inner_join_v19_with_page_limit(
     const prdb_host_api_v3 *host_v3,
     const uint8_t *schema, uint32_t schema_len,
@@ -262,7 +417,8 @@ static int32_t execute_inner_join_v19_with_page_limit(
     uint32_t right_row_capacity,
     uint8_t *materialized_bytes, uint64_t materialized_bytes_capacity,
     prdb_sdk_sql_join_result_row_v19_fn on_row, void *result_context,
-    uint32_t max_scan_pages) {
+    uint32_t max_scan_pages,
+    const prdb_sdk_optimizer_index_join_plan_v1 *index_plan) {
     prdb_sdk_select_v19 statement = {0};
     prdb_sdk_select_binding_v19 binding = {0};
     prdb_sdk_planner_relation_v1 planned_left = {0}, planned_right = {0};
@@ -395,6 +551,40 @@ static int32_t execute_inner_join_v19_with_page_limit(
         return PRDB_SDK_SQL_EXEC_OK;
     }
 
+    if (index_plan != NULL) {
+        const uint32_t outer_side = index_plan->outer_side;
+        const prdb_sdk_executor_relation_v1 *outer_relation =
+            outer_side == PRDB_SDK_SQL_V8_LEFT ? &resolved_left : &resolved_right;
+        prdb_sdk_sql_join_materialized_row_v16 *outer_rows =
+            outer_side == PRDB_SDK_SQL_V8_LEFT ? left_rows : right_rows;
+        uint32_t outer_row_capacity = outer_side == PRDB_SDK_SQL_V8_LEFT
+            ? left_row_capacity : right_row_capacity;
+        uint32_t outer_row_count = 0;
+        if (outer_row_capacity > SQL_EXEC_V19_INDEX_OUTER_MAX_ROWS)
+            outer_row_capacity = SQL_EXEC_V19_INDEX_OUTER_MAX_ROWS;
+        status = materialize_relation_v19(
+            host, outer_relation, &binding.base, outer_side, max_candidates,
+            max_batch_bytes,
+            outer_side == PRDB_SDK_SQL_V8_LEFT ? left_executor_response : right_executor_response,
+            outer_side == PRDB_SDK_SQL_V8_LEFT ? left_executor_response_capacity : right_executor_response_capacity,
+            batch_response, batch_response_capacity, cell_scratch,
+            cell_scratch_capacity, outer_rows, outer_row_capacity,
+            &outer_row_count, &total_pages, SQL_EXEC_V19_INDEX_MAX_SCAN_PAGES,
+            materialized_bytes, materialized_bytes_capacity, &materialized_used);
+        if (status != PRDB_SDK_SQL_EXEC_OK)
+            return fail_statement_v19(host_v3, status);
+        return execute_index_nested_loop_v19(
+            host_v3, host, &binding, index_plan, &resolved_left,
+            &resolved_right, outer_rows, outer_row_count,
+            index_plan->inner_side == PRDB_SDK_SQL_V8_LEFT
+                ? left_executor_response : right_executor_response,
+            index_plan->inner_side == PRDB_SDK_SQL_V8_LEFT
+                ? left_executor_response_capacity : right_executor_response_capacity,
+            materialized_bytes, materialized_bytes_capacity, &materialized_used,
+            cell_scratch, cell_scratch_capacity, on_row, result_context,
+            statement.base.base.has_limit, statement.base.base.limit);
+    }
+
     status = materialize_relation_v19(
         host, &resolved_left, &binding.base,
         PRDB_SDK_SQL_V8_LEFT, max_candidates, max_batch_bytes,
@@ -522,7 +712,7 @@ int32_t prdb_sdk_sql_execute_inner_join_v19(
         cell_scratch_capacity, left_rows, left_row_capacity, right_rows,
         right_row_capacity, materialized_bytes,
         materialized_bytes_capacity, on_row, result_context,
-        SQL_EXEC_V19_MAX_SCAN_PAGES);
+        SQL_EXEC_V19_MAX_SCAN_PAGES, NULL);
 }
 
 typedef struct join_v20_callback_context {
@@ -1096,7 +1286,8 @@ static int32_t execute_inner_join_v20_with_page_limit(
     uint32_t right_row_capacity,
     uint8_t *materialized_bytes, uint64_t materialized_bytes_capacity,
     prdb_sdk_sql_join_result_row_v20_fn on_row, void *result_context,
-    uint32_t scan_page_limit) {
+    uint32_t scan_page_limit,
+    const prdb_sdk_optimizer_index_join_plan_v1 *index_plan) {
     prdb_sdk_select_v20 statement = {0};
     prdb_sdk_select_binding_v20 binding = {0};
     prdb_sdk_select_v1 predicate = {0};
@@ -1307,7 +1498,7 @@ static int32_t execute_inner_join_v20_with_page_limit(
             cell_scratch, cell_scratch_capacity,
             left_rows, left_row_capacity, right_rows, right_row_capacity,
             materialized_bytes, materialized_bytes_capacity,
-            join_v20_filter_and_emit, &callback, scan_page_limit);
+            join_v20_filter_and_emit, &callback, scan_page_limit, index_plan);
     }
     if (status == PRDB_SDK_SQL_EXEC_RESULT_ERROR &&
         callback.callback_failure != 0) {
@@ -1356,7 +1547,7 @@ int32_t prdb_sdk_sql_execute_inner_join_v20(
         right_executor_column_capacity, cell_scratch, cell_scratch_capacity,
         left_rows, left_row_capacity, right_rows, right_row_capacity,
         materialized_bytes, materialized_bytes_capacity, on_row,
-        result_context, SQL_EXEC_V20_MAX_SCAN_PAGES);
+        result_context, SQL_EXEC_V20_MAX_SCAN_PAGES, NULL);
 }
 
 int32_t prdb_sdk_sql_execute_inner_join_typed_v20(
@@ -1400,7 +1591,7 @@ int32_t prdb_sdk_sql_execute_inner_join_typed_v20(
         right_executor_column_capacity, cell_scratch, cell_scratch_capacity,
         left_rows, left_row_capacity, right_rows, right_row_capacity,
         materialized_bytes, materialized_bytes_capacity, on_row,
-        result_context, SQL_EXEC_V20_MAX_SCAN_PAGES);
+        result_context, SQL_EXEC_V20_MAX_SCAN_PAGES, NULL);
 }
 
 int32_t prdb_sdk_sql_execute_inner_join_typed_spill_v21(
@@ -1453,7 +1644,7 @@ int32_t prdb_sdk_sql_execute_inner_join_typed_spill_v21(
         right_executor_column_capacity, cell_scratch, cell_scratch_capacity,
         left_rows, left_row_capacity, right_rows, right_row_capacity,
         materialized_bytes, materialized_bytes_capacity, on_row,
-        result_context, SQL_EXEC_V20_SPILL_MAX_SCAN_PAGES);
+        result_context, SQL_EXEC_V20_SPILL_MAX_SCAN_PAGES, NULL);
 }
 
 int32_t prdb_sdk_sql_execute_inner_join_optimizer_v1(
@@ -1488,6 +1679,7 @@ int32_t prdb_sdk_sql_execute_inner_join_optimizer_v1(
     prdb_sdk_planner_relation_v1 planned_left = {0};
     prdb_sdk_planner_relation_v1 planned_right = {0};
     prdb_sdk_optimizer_response_v1 optimizer_result = {0};
+    prdb_sdk_optimizer_index_join_plan_v1 index_plan = {0};
     prdb_host_api_v2 base_host;
     uint64_t request_len = 0;
     uint64_t optimizer_response_len = 0;
@@ -1584,6 +1776,15 @@ int32_t prdb_sdk_sql_execute_inner_join_optimizer_v1(
     if (status != PRDB_SDK_OPTIMIZER_PLAN_OK)
         return fail_statement_v19(&host->v4.v3,
                                   PRDB_SDK_SQL_EXEC_SHAPE_MISMATCH);
+    if (optimizer_result.plan[2] ==
+        PRDB_SDK_OPTIMIZER_PLAN_KIND_INDEX_NESTED_LOOP_JOIN) {
+        status = prdb_sdk_optimizer_decode_index_join_plan_v1(
+            optimizer_result.plan, optimizer_result.plan_len,
+            &index_plan, sizeof(index_plan));
+        if (status != PRDB_SDK_OPTIMIZER_PLAN_OK || index_plan.has_filter != 0)
+            return fail_statement_v19(&host->v4.v3,
+                                      PRDB_SDK_SQL_EXEC_SHAPE_MISMATCH);
+    }
 
     return execute_inner_join_v19_with_page_limit(
         &host->v4.v3, schema, schema_len, sql, sql_len, max_candidates,
@@ -1599,7 +1800,10 @@ int32_t prdb_sdk_sql_execute_inner_join_optimizer_v1(
         right_executor_column_capacity, cell_scratch, cell_scratch_capacity,
         left_rows, left_row_capacity, right_rows, right_row_capacity,
         materialized_bytes, materialized_bytes_capacity, on_row,
-        result_context, SQL_EXEC_V19_OPTIMIZER_MAX_SCAN_PAGES);
+        result_context, SQL_EXEC_V19_OPTIMIZER_MAX_SCAN_PAGES,
+        optimizer_result.plan_len >= 3 && optimizer_result.plan[2] ==
+            PRDB_SDK_OPTIMIZER_PLAN_KIND_INDEX_NESTED_LOOP_JOIN
+            ? &index_plan : NULL);
 }
 
 int32_t prdb_sdk_sql_execute_inner_join_optimizer_v20(
@@ -1635,6 +1839,7 @@ int32_t prdb_sdk_sql_execute_inner_join_optimizer_v20(
     prdb_sdk_planner_relation_v1 planned_left = {0};
     prdb_sdk_planner_relation_v1 planned_right = {0};
     prdb_sdk_optimizer_response_v1 optimizer_result = {0};
+    prdb_sdk_optimizer_index_join_plan_v1 index_plan = {0};
     prdb_host_api_v2 base_host;
     uint64_t request_len = 0;
     uint64_t optimizer_response_len = 0;
@@ -1727,6 +1932,15 @@ int32_t prdb_sdk_sql_execute_inner_join_optimizer_v20(
     if (status != PRDB_SDK_OPTIMIZER_PLAN_OK)
         return fail_statement_v19(&host->v4.v3,
                                   PRDB_SDK_SQL_EXEC_SHAPE_MISMATCH);
+    if (optimizer_result.plan[2] ==
+        PRDB_SDK_OPTIMIZER_PLAN_KIND_INDEX_NESTED_LOOP_JOIN) {
+        status = prdb_sdk_optimizer_decode_index_join_plan_v1(
+            optimizer_result.plan, optimizer_result.plan_len,
+            &index_plan, sizeof(index_plan));
+        if (status != PRDB_SDK_OPTIMIZER_PLAN_OK || index_plan.has_filter != 1)
+            return fail_statement_v19(&host->v4.v3,
+                                      PRDB_SDK_SQL_EXEC_SHAPE_MISMATCH);
+    }
     return execute_inner_join_v20_with_page_limit(
         &host->v4.v3, NULL, schema, schema_len, sql, sql_len, parameters, NULL,
         parameter_count, max_candidates, max_batch_bytes,
@@ -1741,5 +1955,8 @@ int32_t prdb_sdk_sql_execute_inner_join_optimizer_v20(
         right_executor_column_capacity, cell_scratch, cell_scratch_capacity,
         left_rows, left_row_capacity, right_rows, right_row_capacity,
         materialized_bytes, materialized_bytes_capacity, on_row,
-        result_context, SQL_EXEC_V20_OPTIMIZER_MAX_SCAN_PAGES);
+        result_context, SQL_EXEC_V20_OPTIMIZER_MAX_SCAN_PAGES,
+        optimizer_result.plan_len >= 3 && optimizer_result.plan[2] ==
+            PRDB_SDK_OPTIMIZER_PLAN_KIND_INDEX_NESTED_LOOP_JOIN
+            ? &index_plan : NULL);
 }
