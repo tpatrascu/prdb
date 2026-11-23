@@ -1964,4 +1964,41 @@ mod cancellation_response_tests {
             ScanIndexRangeResponse::Unavailable
         );
     }
+
+    #[test]
+    fn index_range_bounds_roundtrip_every_sql_scalar_type() {
+        let mut relation_bytes = [0u8; 16];
+        relation_bytes[0] = 6;
+        relation_bytes[1] = 1;
+        let values = [
+            ScalarValue::Boolean(true),
+            ScalarValue::SmallInt(-31),
+            ScalarValue::Integer(-700),
+            ScalarValue::BigInt(-9_000_000_001),
+            ScalarValue::Decimal(123_456),
+            ScalarValue::Text("equality probe".to_owned()),
+            ScalarValue::Varchar("varchar probe".to_owned()),
+            ScalarValue::Bytea(vec![0, 1, 0xff]),
+            ScalarValue::Uuid([0x42; 16]),
+            ScalarValue::Date(20_000),
+            ScalarValue::TimestampTz(1_700_000_000_000_000),
+        ];
+        for value in values {
+            let request = ScanIndexRangeRequest {
+                relation: ResolvedRelationHandle::from_bytes(&relation_bytes).unwrap(),
+                index_id: [9; 16],
+                lower: Some(AuthorizedIndexRangeBound {
+                    value: value.clone(),
+                    inclusive: true,
+                }),
+                upper: Some(AuthorizedIndexRangeBound {
+                    value,
+                    inclusive: true,
+                }),
+                column_ids: vec![[7; 16]],
+            };
+            let encoded = request.encode().unwrap();
+            assert_eq!(ScanIndexRangeRequest::decode(&encoded).unwrap(), request);
+        }
+    }
 }

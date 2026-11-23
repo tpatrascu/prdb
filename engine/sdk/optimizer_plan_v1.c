@@ -1437,10 +1437,7 @@ static int32_t decode_join_plan_internal(
                                                 : &decoded.right_relation,
                                 index_key_out) ||
             !valid_type(index_key_out->type_code,
-                        index_key_out->type_parameters) ||
-            (index_key_out->type_code != 1 &&
-             index_key_out->type_code != 3 &&
-             index_key_out->type_code != 6))
+                        index_key_out->type_parameters))
             return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
         for (index = 0; index < decoded.join_key_count; ++index) {
             const prdb_sdk_optimizer_join_key_v1 *key =

@@ -741,6 +741,47 @@ mod tests {
     }
 
     #[test]
+    fn every_ordered_index_scalar_can_drive_an_indexed_join() {
+        let key_types = [
+            ScalarType::Boolean,
+            ScalarType::SmallInt,
+            ScalarType::Integer,
+            ScalarType::BigInt,
+            ScalarType::Decimal {
+                precision: 12,
+                scale: 2,
+            },
+            ScalarType::Text,
+            ScalarType::Varchar { max_chars: 40 },
+            ScalarType::Bytea,
+            ScalarType::Uuid,
+            ScalarType::Date,
+            ScalarType::TimestampTz,
+        ];
+        for key_type in key_types {
+            let mut left = join_relation("lefts", 0x31);
+            let mut right = join_relation("rights", 0x41);
+            left.relation.columns[0].scalar_type = key_type;
+            right.relation.columns[0].scalar_type = key_type;
+            right.range_access_paths = vec![crate::metadata_discovery::AuthorizedRangeAccessPath {
+                index_id: [0x71; 16],
+                column_ids: vec![[0x51; 16]],
+            }];
+            let encoded = optimize_join_select_v1_with_relations(
+                &filtered_join_select_request(),
+                Some(left),
+                Some(right),
+            )
+            .unwrap();
+            let plan = decode_join_select_plan_v1(&encoded).unwrap();
+            let index_join = plan
+                .index_nested_loop
+                .expect("ordered scalar leading-key index should support nested loop");
+            assert_eq!(index_join.key_column.scalar_type, key_type);
+        }
+    }
+
+    #[test]
     fn filtered_join_select_uses_left_index_as_fallback_inner() {
         let mut indexed_left = join_relation("lefts", 0x31);
         indexed_left.range_access_paths =

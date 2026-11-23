@@ -936,10 +936,7 @@ pub fn validate_join_select_plan_v1(plan: &JoinSelectPlanV1) -> Result<(), PlanE
     if let Some(index_join) = &plan.index_nested_loop {
         if index_join.outer_side == index_join.inner_side
             || index_join.index_id == [0; 16]
-            || !matches!(
-                index_join.key_column.scalar_type,
-                ScalarType::Boolean | ScalarType::Integer | ScalarType::Text
-            )
+            || !is_supported_index_join_key(&index_join.key_column)
         {
             return Err(PlanError::InvalidColumnReference);
         }
@@ -4418,10 +4415,7 @@ fn select_index_nested_loop_join(
             else {
                 continue;
             };
-            if matches!(
-                key_column.scalar_type,
-                ScalarType::Boolean | ScalarType::Integer | ScalarType::Text
-            ) {
+            if is_supported_index_join_key(key_column) {
                 return Some(IndexNestedLoopJoinV1 {
                     outer_side: match side {
                         JoinRelationSide::Left => JoinRelationSide::Right,
@@ -4631,6 +4625,10 @@ fn is_supported_range_key(column: &BoundColumn) -> bool {
         column.scalar_type,
         ScalarType::Boolean | ScalarType::Integer | ScalarType::Text
     )
+}
+
+fn is_supported_index_join_key(column: &BoundColumn) -> bool {
+    valid_scalar_type(column.scalar_type)
 }
 
 fn validate_relation(relation: &RelationReference) -> Result<(), PlanError> {

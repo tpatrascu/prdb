@@ -252,6 +252,20 @@ static uint32_t build_optimizer_index_join_plan(uint8_t *bytes) {
     return offset;
 }
 
+static void set_join_id_columns_decimal(uint8_t *bytes, uint32_t length) {
+    for (uint32_t offset = 0; offset + 25 <= length; ++offset) {
+        uint32_t byte = 0;
+        while (byte < 16 && bytes[offset + byte] == 0x31) ++byte;
+        if (byte == 16 && bytes[offset + 20] == 3) {
+            bytes[offset + 20] = 5; /* DECIMAL */
+            bytes[offset + 21] = 12;
+            bytes[offset + 22] = 2;
+            bytes[offset + 23] = 0;
+            bytes[offset + 24] = 0;
+        }
+    }
+}
+
 static uint32_t build_optimizer_filtered_index_join_plan(uint8_t *bytes) {
     uint32_t offset = build_optimizer_join_plan(bytes);
     bytes[2] = PRDB_SDK_OPTIMIZER_PLAN_KIND_INDEX_NESTED_LOOP_JOIN;
@@ -1104,6 +1118,20 @@ int main(void) {
         threshold_bytes, sizeof(threshold_bytes)};
     mock_state mock = {0};
     row_capture capture = {0};
+
+    {
+        uint8_t decimal_plan[4096] = {0};
+        prdb_sdk_optimizer_index_join_plan_v1 decoded = {0};
+        uint32_t decimal_plan_len =
+            build_optimizer_index_join_plan(decimal_plan);
+        set_join_id_columns_decimal(decimal_plan, decimal_plan_len);
+        assert(prdb_sdk_optimizer_decode_index_join_plan_v1(
+                   decimal_plan, decimal_plan_len, &decoded,
+                   sizeof(decoded)) == PRDB_SDK_OPTIMIZER_PLAN_OK);
+        assert(decoded.key_column.type_code == PRDB_SDK_VALUE_TYPE_DECIMAL &&
+               decoded.key_column.type_parameters[0] == 12 &&
+               decoded.key_column.type_parameters[1] == 2);
+    }
 
     for (uint32_t index = 0; index < 2; ++index) {
         mock.planner_len[index] =
