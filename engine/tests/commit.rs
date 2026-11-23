@@ -41385,7 +41385,12 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         authority_writes.push(dependency_write(user_id, decimal_table.column_ids[3], 5));
     }
     if spill_join_oversize_only || spill_join_text_only {
-        authority_writes.push(dependency_write(user_id, decimal_table.column_ids[4], 5));
+        let payload_column_index = if count_bigint_only { 4 } else { 3 };
+        authority_writes.push(dependency_write(
+            user_id,
+            decimal_table.column_ids[payload_column_index],
+            5,
+        ));
     }
     authority_writes.extend((2..=5).map(|privilege| {
         grant_write(
@@ -42213,6 +42218,14 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             decimal_table.column_ids[3],
             id(0xc0),
             "sandbox_decimal_group_bigint_cell_policy",
+        ));
+    }
+    if spill_join_oversize_only || spill_join_text_only {
+        let payload_column_index = if count_bigint_only { 4 } else { 3 };
+        decimal_cell_policies.push((
+            decimal_table.column_ids[payload_column_index],
+            id(0xc1),
+            "sandbox_decimal_group_payload_cell_policy",
         ));
     }
     for (column_id, policy_id, name) in decimal_cell_policies {
@@ -43275,9 +43288,9 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             assert_eq!(
                 values,
                 [
-                    (1, None),
-                    (1, None),
                     (3, None),
+                    (1, None),
+                    (1, None),
                     (2, Some("echo".to_owned())),
                     (2, Some("echo".to_owned())),
                     (2, Some("echo".to_owned())),
