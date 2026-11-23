@@ -62,6 +62,8 @@ Build the artifacts, SDK release, and installable release profile:
 nix develop --no-update-lock-file -c make -f engine/sdk/Makefile release-profile
 ```
 
+Run this target after changing the SDK or query fixtures before using the acceptance environment below. It rebuilds the SDK release under `target/sdk-v1/` and copies that release into `target/release-profile/sdk/releases/`. The process tests use `PRDB_TEST_INSTALLED_SDK_RELEASE_DIR`, which points into `target/release-profile/`; rebuilding only the SDK release leaves that test input stale. If the SDK release was rebuilt separately, rerun `release-profile` before acceptance. Check that `PRDB_TEST_INSTALLED_SDK_RELEASE_DIR` names the release directory in the profile produced by this command, rather than a different or older profile.
+
 This builds `sql-v3-caught-error.so`, `sql-v3-shared-library.so`, `sql-v3-missing-dependency.so`, `sql-v3-network-constructor.so`, `sql-v3-write-read.so`, and `sql-v3-restricted-metadata.so`, plus the regular and hostile-constructor `libprdb_sql.so.1` releases and their metadata. These are untrusted native libraries and query artifacts and must only be loaded through the sandboxed executor tests.
 
 Run the full workspace test suite inside a delegated `systemd --user` unit. A direct `cargo test` from a desktop application scope is not a useful preflight: that scope may omit the `cpu` controller even when the host mount is writable. The repository launcher moves its process into a child cgroup, enables the delegated controllers on the unit cgroup, and exports the absolute parent path for the test.
