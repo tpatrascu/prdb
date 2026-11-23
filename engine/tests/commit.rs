@@ -42593,7 +42593,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         } else if count_column_only {
             b'V'
         } else if count_bigint_only {
-            b'B'
+            b'I'
         } else if filtered_composite_only {
             b'Q'
         } else {
@@ -45711,7 +45711,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             redacted_client.accept_hello(ClientMode::Query, client_name)?;
             redacted_client.authenticate(&storage, token_id, &secret)?;
             let redacted_owner = redacted_client.staging_owner()?;
-            let redacted_parameter = [mode];
+            let redacted_parameter = [if mode == b'C' { b'Z' } else { mode }];
             let redacted_reservation = staging.prepare(
                 redacted_owner,
                 PrepareSubmission {

@@ -2177,8 +2177,8 @@ static int32_t run_write_read_fixture(
         return report_failure(host, message, sizeof(message) - 1);
     }
     if (invocation->parameters_len == 1 && invocation->parameters != NULL &&
-        (invocation->parameters[0] == 'V' || invocation->parameters[0] == 'C' ||
-         invocation->parameters[0] == 'B')) {
+        (invocation->parameters[0] == 'V' || invocation->parameters[0] == 'Z' ||
+         invocation->parameters[0] == 'I')) {
         static const uint8_t visible_count_column_sql[] =
             "SELECT left_key, right_key, COUNT(decimal_value) "
             "FROM decimal_grouped_records "
@@ -2199,8 +2199,8 @@ static int32_t run_write_read_fixture(
             "GROUP BY left_key, right_key "
             "HAVING COUNT(bigint_value) >= 0 "
             "ORDER BY COUNT(bigint_value) DESC NULLS LAST, left_key ASC";
-        const int bigint_count_column = invocation->parameters[0] == 'B';
-        const int redacted_count_column = invocation->parameters[0] == 'C';
+        const int bigint_count_column = invocation->parameters[0] == 'I';
+        const int redacted_count_column = invocation->parameters[0] == 'Z';
         const uint8_t *count_column_sql = redacted_count_column
             ? redacted_count_column_sql
             : bigint_count_column ? visible_bigint_count_column_sql

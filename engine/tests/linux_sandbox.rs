@@ -456,6 +456,8 @@ fn executor_host_rejects_direct_unconfined_launch_before_library_loading() {
             "6",
             "--result-fd",
             "7",
+            "--spill-fd",
+            "-1",
         ])
         .output()
         .unwrap();
