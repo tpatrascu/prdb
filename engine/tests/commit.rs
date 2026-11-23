@@ -40441,6 +40441,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     let spill_join_only = std::env::var_os("PRDB_TEST_SPILL_JOIN_ONLY").is_some();
     let spill_crash_only = std::env::var_os("PRDB_TEST_SPILL_CRASH_ONLY").is_some();
     let spill_pressure_only = std::env::var_os("PRDB_TEST_SPILL_PRESSURE_ONLY").is_some();
+    let spill_pressure_cancel_only =
+        std::env::var_os("PRDB_TEST_SPILL_PRESSURE_CANCEL_ONLY").is_some();
     let spill_disk_full_only = std::env::var_os("PRDB_TEST_SPILL_DISK_FULL_ONLY").is_some();
     let spill_enabled_only = spill_quota_only
         || spill_only
@@ -40451,6 +40453,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         || spill_join_only
         || spill_crash_only
         || spill_pressure_only
+        || spill_pressure_cancel_only
         || spill_disk_full_only;
     let spill_query_mode = spill_enabled_only || spill_disabled_only;
 
@@ -40978,7 +40981,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             });
         }
     }
-    if spill_pressure_only {
+    if spill_pressure_only || spill_pressure_cancel_only {
         for index in 0..128u16 {
             let left_key = i32::from(index % 3 + 1);
             let mut values = vec![
@@ -42621,7 +42624,11 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             prdb_engine::spill::SpillBroker::open(prdb_engine::spill::SpillConfig {
                 parent: parent.clone(),
                 max_bytes_per_invocation: if spill_quota_only { 1 } else { 8 * 1024 * 1024 },
-                max_io_bytes_per_invocation: 32 * 1024 * 1024,
+                max_io_bytes_per_invocation: if spill_pressure_cancel_only {
+                    1024 * 1024 * 1024
+                } else {
+                    32 * 1024 * 1024
+                },
                 max_streams_per_invocation: 16,
                 max_operations_per_invocation: 4096,
                 max_response_bytes: 64 * 1024,
@@ -42677,6 +42684,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         || spill_join_only
         || spill_crash_only
         || spill_pressure_only
+        || spill_pressure_cancel_only
         || spill_disk_full_only
     {
         let mut ordered_client = ClientConnectionSession::default();
@@ -42701,6 +42709,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             b'X'
         } else if spill_pressure_only {
             b'P'
+        } else if spill_pressure_cancel_only {
+            b'K'
         } else if count_column_only {
             b'V'
         } else if count_bigint_only {
@@ -42761,7 +42771,11 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 },
                 GatewayAdmissionConfig {
                     retention_period_us: 3_600_000_000,
-                    max_rows: if spill_pressure_only { 2048 } else { 128 },
+                    max_rows: if spill_pressure_only || spill_pressure_cancel_only {
+                        2048
+                    } else {
+                        128
+                    },
                     max_bytes: 1_048_576,
                 },
                 &runtime,
@@ -42770,15 +42784,22 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         let (mut ordered_service, mut ordered_gateway) = UnixStream::pair()?;
         ordered_gateway.set_read_timeout(Some(Duration::from_secs(10)))?;
         let (pressure_trigger_tx, pressure_trigger_rx) = std::sync::mpsc::channel();
-        let mut pressure_trigger_tx = spill_pressure_only.then_some(pressure_trigger_tx);
+        let (cancel_trigger_tx, cancel_trigger_rx) = std::sync::mpsc::channel();
+        let mut pressure_trigger_tx =
+            (spill_pressure_only || spill_pressure_cancel_only).then_some(pressure_trigger_tx);
+        let mut cancel_trigger_tx = spill_pressure_cancel_only.then_some(cancel_trigger_tx);
         let ordered_reader = std::thread::spawn(move || {
             let mut frames = Vec::new();
             while let Some(frame) = prdb_engine::ipc::read_frame(&mut ordered_gateway)? {
                 if frame.operation == Operation::GatewayResultData as u16
                     && frame.payload == b"spill-pressure-started"
-                    && let Some(trigger) = pressure_trigger_tx.take()
                 {
-                    let _ = trigger.send(());
+                    if let Some(trigger) = pressure_trigger_tx.take() {
+                        let _ = trigger.send(());
+                    }
+                    if let Some(trigger) = cancel_trigger_tx.take() {
+                        let _ = trigger.send(());
+                    }
                 }
                 let terminal = frame.operation == Operation::GatewayTerminal as u16;
                 frames.push(frame);
@@ -42788,12 +42809,13 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             }
             Ok::<_, prdb_engine::ipc::FrameError>(frames)
         });
-        let ordered_decision = if spill_pressure_only {
+        let ordered_decision = if spill_pressure_only || spill_pressure_cancel_only {
             let query_started_at = std::time::Instant::now();
             let (
                 decision,
                 (operational_started_at, operational_finished_at, read_count, commit_count),
                 query_finished_at,
+                cancellation,
             ) = std::thread::scope(|scope| {
                 let storage_ref = &storage;
                 let operational_table_id = composite_table.table_id;
@@ -42820,6 +42842,27 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                         commits.len(),
                     ))
                 });
+                let cancellation_worker = if spill_pressure_cancel_only {
+                    let storage_ref = &storage;
+                    let invocation_id = ordered_reservation.invocation_id;
+                    Some(scope.spawn(move || -> Result<_, String> {
+                        cancel_trigger_rx
+                            .recv_timeout(Duration::from_secs(5))
+                            .map_err(|error| {
+                                format!("spill cancellation marker was not relayed: {error}")
+                            })?;
+                        std::thread::sleep(Duration::from_millis(75));
+                        let requested_at = std::time::Instant::now();
+                        let result = storage_ref
+                            .cancel_owned_invocation(user_id, invocation_id, now + 3_600_000_000)
+                            .map_err(|error| {
+                                format!("cancel spill pressure invocation: {error:?}")
+                            })?;
+                        Ok((requested_at, std::time::Instant::now(), result))
+                    }))
+                } else {
+                    None
+                };
                 let decision = observe_executor_relay_and_finalize_gateway(
                     &storage,
                     &mut ordered_invocation,
@@ -42832,7 +42875,22 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                     .join()
                     .map_err(|_| std::io::Error::other("spill pressure worker panicked"))?
                     .map_err(std::io::Error::other)?;
-                Ok::<_, Box<dyn std::error::Error>>((decision, operational, query_finished_at))
+                let cancellation = cancellation_worker
+                    .map(|worker| {
+                        worker
+                            .join()
+                            .map_err(|_| {
+                                std::io::Error::other("spill cancellation worker panicked")
+                            })?
+                            .map_err(std::io::Error::other)
+                    })
+                    .transpose()?;
+                Ok::<_, Box<dyn std::error::Error>>((
+                    decision,
+                    operational,
+                    query_finished_at,
+                    cancellation,
+                ))
             })?;
             assert!(
                 operational_started_at < query_finished_at
@@ -42841,6 +42899,23 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             );
             assert_eq!(read_count, 64, "expected 64 operational point reads");
             assert_eq!(commit_count, 64, "expected 64 operational commits");
+            if spill_pressure_cancel_only {
+                let (cancel_started_at, cancel_finished_at, result) =
+                    cancellation.ok_or("spill pressure cancellation was not observed")?;
+                assert_eq!(
+                    result,
+                    prdb_engine::storage_manager::OwnerCancellationResult::Accepted
+                );
+                assert!(
+                    operational_started_at < cancel_started_at
+                        && operational_finished_at > cancel_started_at,
+                    "operational reads/commits did not overlap cancellation under spill pressure"
+                );
+                assert!(
+                    cancel_finished_at.duration_since(cancel_started_at) < Duration::from_secs(2)
+                );
+                assert!(matches!(&decision, GatewayTerminalDecision::Abort(_)));
+            }
             eprintln!(
                 "broker-backed SQL sort overlapped {read_count} operational reads and {commit_count} commits for {} ms",
                 query_finished_at
@@ -42860,10 +42935,15 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         let ordered_frames = ordered_reader
             .join()
             .map_err(|_| "ordered analytical gateway reader panicked")??;
-        if spill_quota_only || spill_crash_only || spill_redacted_only || spill_disk_full_only {
+        if spill_quota_only
+            || spill_crash_only
+            || spill_redacted_only
+            || spill_disk_full_only
+            || spill_pressure_cancel_only
+        {
             assert!(
                 matches!(ordered_decision, GatewayTerminalDecision::Abort(_)),
-                "spill quota, filesystem exhaustion, redacted key, or worker crash must abort; frames: {:?}",
+                "spill quota, filesystem exhaustion, cancellation, redacted key, or worker crash must abort; frames: {:?}",
                 ordered_frames
                     .iter()
                     .map(|frame| (
@@ -43007,6 +43087,18 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 assert_eq!(frame.request_id, ordered_accepted.request_id);
                 assert_eq!(frame.payload, expected_spilled_decimal(value));
             }
+        } else if spill_pressure_cancel_only {
+            let marker = ordered_frames
+                .next()
+                .ok_or("missing spill pressure start marker before cancellation")?;
+            assert_eq!(marker.operation, Operation::GatewayResultData as u16);
+            assert_eq!(marker.payload, b"spill-pressure-started");
+            assert!(
+                ordered_frames
+                    .as_slice()
+                    .iter()
+                    .all(|frame| frame.operation != Operation::GatewayResultData as u16)
+            );
         } else if spill_pressure_only {
             fn expected_pressure_order_key(left_key: Option<i32>) -> Vec<u8> {
                 let mut output = b"SQLR".to_vec();
@@ -43125,7 +43217,11 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                     expected_count_column_row(left_key, right_key, count)
                 );
             }
-        } else if spill_quota_only || spill_redacted_only || spill_disk_full_only {
+        } else if spill_quota_only
+            || spill_redacted_only
+            || spill_disk_full_only
+            || spill_pressure_cancel_only
+        {
             assert!(
                 ordered_frames
                     .as_slice()
@@ -43221,7 +43317,12 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         assert_eq!(terminal.operation, Operation::GatewayTerminal as u16);
         assert_eq!(terminal.request_id, ordered_accepted.request_id);
         assert!(String::from_utf8(terminal.payload)?.contains(
-            if spill_quota_only || spill_crash_only || spill_redacted_only || spill_disk_full_only {
+            if spill_quota_only
+                || spill_crash_only
+                || spill_redacted_only
+                || spill_disk_full_only
+                || spill_pressure_cancel_only
+            {
                 "\"outcome\":\"aborted\""
             } else {
                 "\"outcome\":\"committed\""
@@ -43232,7 +43333,12 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 .lookup_invocation_outcome(ordered_reservation.invocation_id, user_id, now + 1)?
                 .ok_or("missing ordered SUM outcome")?
                 .status,
-            if spill_quota_only || spill_crash_only || spill_redacted_only || spill_disk_full_only {
+            if spill_quota_only
+                || spill_crash_only
+                || spill_redacted_only
+                || spill_disk_full_only
+                || spill_pressure_cancel_only
+            {
                 OutcomeStatus::Aborted
             } else {
                 OutcomeStatus::Committed

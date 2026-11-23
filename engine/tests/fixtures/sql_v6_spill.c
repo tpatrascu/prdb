@@ -56,7 +56,7 @@ int32_t prdb_query_main_v6(const prdb_host_api_v6 *host,
         return status == PRDB_SDK_SQL_DISPATCH_OK ? 0 : 1;
     }
     prdb_sdk_spill_stream_v1 pressure_stream = {0};
-    if (invocation->parameters[0] == 'P') {
+    if (invocation->parameters[0] == 'P' || invocation->parameters[0] == 'K') {
         static const uint8_t pressure_bytes[PRDB_SDK_SPILL_MAX_IO_BYTES];
         static const uint8_t pressure_marker[] = "spill-pressure-started";
         if (prdb_sdk_spill_create_v1(host, &pressure_stream) != 0 ||
@@ -70,6 +70,19 @@ int32_t prdb_query_main_v6(const prdb_host_api_v6 *host,
             prdb_sdk_spill_destroy_v1(host, &pressure_stream);
             return 1;
         }
+        if (invocation->parameters[0] == 'K') {
+            /* Keep broker I/O active long enough for concurrent cancellation. */
+            for (uint32_t index = 0; index < 512; ++index) {
+                prdb_sdk_spill_stream_v1 stream = {0};
+                if (prdb_sdk_spill_create_v1(host, &stream) != 0 ||
+                    prdb_sdk_spill_append_v1(host, &stream, pressure_bytes,
+                                             sizeof(pressure_bytes) - 16u) != 0 ||
+                    prdb_sdk_spill_seal_v1(host, &stream) != 0 ||
+                    prdb_sdk_spill_destroy_v1(host, &stream) != 0) {
+                    return 1;
+                }
+            }
+        }
     }
     const uint8_t *sql = NULL;
     uint64_t sql_len = 0;
@@ -80,7 +93,8 @@ int32_t prdb_query_main_v6(const prdb_host_api_v6 *host,
         sql = spill_group_limit_sql;
         sql_len = sizeof(spill_group_limit_sql) - 1;
     } else if (invocation->parameters[0] == 'O' ||
-               invocation->parameters[0] == 'P') {
+               invocation->parameters[0] == 'P' ||
+               invocation->parameters[0] == 'K') {
         sql = spill_ordered_rows_sql;
         sql_len = sizeof(spill_ordered_rows_sql) - 1;
     } else if (invocation->parameters[0] == 'D' ||
@@ -95,7 +109,7 @@ int32_t prdb_query_main_v6(const prdb_host_api_v6 *host,
     }
     int32_t status = prdb_sdk_sql_run_statement_v2(
         host, schema, sizeof(schema) - 1, sql, sql_len, NULL, 0);
-    if (invocation->parameters[0] == 'P' &&
+    if ((invocation->parameters[0] == 'P' || invocation->parameters[0] == 'K') &&
         prdb_sdk_spill_destroy_v1(host, &pressure_stream) != 0) {
         return 1;
     }
