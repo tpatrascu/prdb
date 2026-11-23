@@ -55,7 +55,7 @@ pub(crate) const FANOUT_AWARE_JOIN_OUTER_MAX_ROWS: u64 = 16;
 pub(crate) const FANOUT_AWARE_JOIN_INPUT_RATIO: u64 = 8;
 const FANOUT_AWARE_JOIN_MAX_PAIRS_PER_OUTER_ROW: u64 = 4;
 /// Maximum row count probed for optimizer join orientation.
-pub const JOIN_POPULATION_ESTIMATE_MAX_ROWS: u64 = 128;
+pub const JOIN_POPULATION_ESTIMATE_MAX_ROWS: u64 = 512;
 
 pub fn apply_population_scan_heuristic(
     plan: &mut SingleTablePlanV1,

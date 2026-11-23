@@ -88,7 +88,7 @@ fn run_in_directory(data_directory: &std::path::Path) -> Result<(), Box<dyn Erro
         nullable: false,
     }];
     let column_ids = [COLUMN_ID];
-    let total_rows: usize = DATASET_ROWS.iter().sum();
+    let total_rows: usize = DATASET_ROWS.iter().sum::<usize>() + 2 * 512;
     let mut seed = InvocationTransaction::begin(
         database,
         invocation_id(1),
@@ -101,6 +101,17 @@ fn run_in_directory(data_directory: &std::path::Path) -> Result<(), Box<dyn Erro
         let table = table_id(dataset);
         for number in 1..=row_count {
             let payload = encode_tuple(&columns, 1, &[Some(ScalarValue::Integer(number as i32))])?;
+            seed.stage_put(row_id(table, number), &payload)?;
+        }
+    }
+    for dataset in 4..=5 {
+        let table = table_id(dataset);
+        for number in 1..=512 {
+            let payload = encode_tuple(
+                &columns,
+                1,
+                &[Some(ScalarValue::Integer((number % 64) as i32))],
+            )?;
             seed.stage_put(row_id(table, number), &payload)?;
         }
     }
@@ -140,11 +151,147 @@ fn run_in_directory(data_directory: &std::path::Path) -> Result<(), Box<dyn Erro
             );
         }
     }
+    let join_profile = benchmark_join_estimate(database, 512, &columns, &column_ids)?;
+    println!(
+        "join estimate: 512 authorized INTEGER rows per side; median {:.3} ms; p95 {:.3} ms",
+        as_millis(join_profile.median),
+        as_millis(join_profile.p95)
+    );
     println!(
         "scope: estimate call only; database bootstrap, seeding, compilation, and planner IPC excluded"
     );
     drop(instance);
     Ok(())
+}
+
+fn benchmark_join_estimate(
+    database: &redb::Database,
+    row_count: usize,
+    columns: &[ColumnSchema],
+    column_ids: &[[u8; 16]],
+) -> Result<TimingProfile, Box<dyn Error>> {
+    let left_table = table_id(4);
+    let right_table = table_id(5);
+    let context = AuthorizationContext {
+        principal_id: PRINCIPAL_ID,
+        role_ids: HashSet::new(),
+        scope: HashSet::from([
+            (Operation::Usage, AccessTarget::Schema(SCHEMA_ID)),
+            (Operation::Select, AccessTarget::Table(left_table)),
+            (Operation::Select, AccessTarget::Table(right_table)),
+            (
+                Operation::Select,
+                AccessTarget::Column {
+                    table_id: left_table,
+                    column_id: COLUMN_ID,
+                },
+            ),
+            (
+                Operation::Select,
+                AccessTarget::Column {
+                    table_id: right_table,
+                    column_id: COLUMN_ID,
+                },
+            ),
+        ]),
+    };
+    let grants = [
+        Grant {
+            subject: Subject::Principal(PRINCIPAL_ID),
+            operation: Operation::Usage,
+            target: AccessTarget::Schema(SCHEMA_ID),
+        },
+        Grant {
+            subject: Subject::Principal(PRINCIPAL_ID),
+            operation: Operation::Select,
+            target: AccessTarget::Column {
+                table_id: left_table,
+                column_id: COLUMN_ID,
+            },
+        },
+        Grant {
+            subject: Subject::Principal(PRINCIPAL_ID),
+            operation: Operation::Select,
+            target: AccessTarget::Column {
+                table_id: right_table,
+                column_id: COLUMN_ID,
+            },
+        },
+    ];
+    let table_policy = |table_id| Policy {
+        subjects: vec![Subject::Principal(PRINCIPAL_ID)],
+        operation: Operation::Select,
+        target: AccessTarget::Table(table_id),
+        effect: Effect::Allow,
+        using: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+        with_check: None,
+    };
+    let policies = [
+        table_policy(left_table),
+        Policy {
+            target: AccessTarget::Column {
+                table_id: left_table,
+                column_id: COLUMN_ID,
+            },
+            ..table_policy(left_table)
+        },
+        table_policy(right_table),
+        Policy {
+            target: AccessTarget::Column {
+                table_id: right_table,
+                column_id: COLUMN_ID,
+            },
+            ..table_policy(right_table)
+        },
+    ];
+    let projection = AuthorizedProjection {
+        columns,
+        column_ids,
+        schema_version: 1,
+        schema_id: SCHEMA_ID,
+        context: &context,
+        grants: &grants,
+        policies: &policies,
+        checks: &[],
+        policy_driving_columns: &[],
+        dependencies: &[],
+    };
+    let left_keys = [COLUMN_ID];
+    let right_keys = [COLUMN_ID];
+    let expected_pairs = 4_096;
+    let mut elapsed = Vec::with_capacity(ESTIMATE_RUNS);
+    for run_number in 0..ESTIMATE_RUNS {
+        let mut invocation = InvocationTransaction::begin(
+            database,
+            invocation_id(10_000 + row_count * ESTIMATE_RUNS + run_number),
+            PRINCIPAL_ID,
+            i64::MAX,
+            1,
+            64,
+        )?;
+        let started = Instant::now();
+        let estimate = invocation.estimate_authorized_join_cardinality_at_most(
+            left_table,
+            &projection,
+            &left_keys,
+            right_table,
+            &projection,
+            &right_keys,
+            row_count as u64,
+        )?;
+        elapsed.push(started.elapsed());
+        if estimate != Some(expected_pairs) {
+            return Err(format!(
+                "join estimate at {row_count} rows per side returned {estimate:?}, expected {expected_pairs}"
+            )
+            .into());
+        }
+    }
+    elapsed.sort_unstable();
+    Ok(TimingProfile {
+        median: elapsed[elapsed.len() / 2],
+        p95: elapsed[((elapsed.len() - 1) * 95).div_ceil(100)],
+    })
 }
 
 fn benchmark_dataset(

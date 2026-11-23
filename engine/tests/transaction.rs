@@ -7118,7 +7118,7 @@ fn authorized_join_estimate_counts_duplicate_matches_and_private_overlay()
     seed.commit()?;
 
     let mut planner =
-        InvocationTransaction::begin(&database, [0x78; 16], [9; 16], 9_999, 32, 4096)?;
+        InvocationTransaction::begin(&database, [0x78; 16], [9; 16], 9_999, 512, 1_048_576)?;
     let left_ids = [left_key];
     let right_ids = [right_key];
     assert_eq!(
@@ -7173,10 +7173,10 @@ fn authorized_join_estimate_counts_duplicate_matches_and_private_overlay()
             right_table,
             &right_projection,
             &right_ids,
-            129,
+            513,
         )?,
         None,
-        "join-cardinality work remains capped at 128 rows per side"
+        "join-cardinality work remains capped at 512 rows per side"
     );
 
     planner.stage_put(numbered_row_id(left_table, 5), &row(Some(7)))?;
@@ -7192,6 +7192,57 @@ fn authorized_join_estimate_counts_duplicate_matches_and_private_overlay()
         )?,
         Some(10),
         "the estimate must reflect the invocation's private overlay"
+    );
+    for number in 100..226 {
+        planner.stage_put(numbered_row_id(left_table, number), &row(Some(7)))?;
+    }
+    for number in 100..225 {
+        planner.stage_put(numbered_row_id(right_table, number), &row(Some(7)))?;
+    }
+    assert_eq!(
+        planner.estimate_authorized_join_cardinality_at_most(
+            left_table,
+            &left_projection,
+            &left_ids,
+            right_table,
+            &right_projection,
+            &right_ids,
+            512,
+        )?,
+        Some(16_513),
+        "a 512-row bound must estimate populations above the old 128-row ceiling"
+    );
+    planner.commit()?;
+    let mut oversized =
+        InvocationTransaction::begin(&database, [0x79; 16], [9; 16], 9_999, 512, 1_048_576)?;
+    for number in 1_000..1_382 {
+        oversized.stage_put(numbered_row_id(left_table, number), &row(Some(7)))?;
+    }
+    assert_eq!(
+        oversized.estimate_authorized_join_cardinality_at_most(
+            left_table,
+            &left_projection,
+            &left_ids,
+            right_table,
+            &right_projection,
+            &right_ids,
+            512,
+        )?,
+        None,
+        "a 513-row population must produce Unknown without a partial count"
+    );
+    assert_eq!(
+        oversized.estimate_authorized_join_cardinality_at_most(
+            left_table,
+            &left_projection,
+            &left_ids,
+            right_table,
+            &right_projection,
+            &right_ids,
+            513,
+        )?,
+        None,
+        "join-cardinality work remains capped at the declared bound"
     );
     Ok(())
 }

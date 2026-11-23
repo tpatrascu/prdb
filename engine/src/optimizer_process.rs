@@ -1857,7 +1857,10 @@ mod tests {
                         assert_eq!(estimate_request.schema_name, "public");
                         assert_eq!(estimate_request.left_relation_name, "lefts");
                         assert_eq!(estimate_request.right_relation_name, "rights");
-                        assert_eq!(estimate_request.maximum_rows, 128);
+                        assert_eq!(
+                            estimate_request.maximum_rows,
+                            crate::statistics::MAX_JOIN_ESTIMATE_ROWS
+                        );
                         assert_eq!(
                             estimate_request.left_key_column_ids,
                             vec![[0x41; 16], [0x42; 16]]

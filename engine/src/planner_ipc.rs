@@ -1497,21 +1497,22 @@ mod scan_estimate_request_tests {
 
         let join_estimate = DescribePlanRelationRequest {
             include_scan_estimate: false,
-            population_estimate_max_rows: Some(128),
+            population_estimate_max_rows: Some(512),
             ..opted_in
         };
         let encoded = join_estimate.encode().unwrap();
-        assert_eq!(&encoded[encoded.len() - 4..], &[0x52, 0x07, 0, 128]);
+        assert_eq!(&encoded[encoded.len() - 4..], &[0x52, 0x07, 2, 0]);
         assert_eq!(
             DescribePlanRelationRequest::decode(&encoded).unwrap(),
             join_estimate
         );
         let mut over_budget = encoded;
-        *over_budget.last_mut().unwrap() = 129;
+        let budget_offset = over_budget.len() - 2;
+        over_budget[budget_offset..].copy_from_slice(&513u16.to_be_bytes());
         assert!(DescribePlanRelationRequest::decode(&over_budget).is_err());
         assert!(
             DescribePlanRelationRequest {
-                population_estimate_max_rows: Some(129),
+                population_estimate_max_rows: Some(513),
                 ..join_estimate.clone()
             }
             .encode()
@@ -1520,7 +1521,7 @@ mod scan_estimate_request_tests {
         assert!(
             DescribePlanRelationRequest {
                 include_scan_estimate: true,
-                population_estimate_max_rows: Some(128),
+                population_estimate_max_rows: Some(512),
                 ..join_estimate
             }
             .encode()
@@ -1599,7 +1600,7 @@ mod join_estimate_request_tests {
             right_relation_name: "items".to_owned(),
             left_key_column_ids: vec![[0x11; 16], [0x12; 16]],
             right_key_column_ids: vec![[0x21; 16], [0x22; 16]],
-            maximum_rows: 128,
+            maximum_rows: 512,
         };
         let encoded = request.encode().unwrap();
         assert_eq!(&encoded[..2], &[0x52, 0x08]);
@@ -1619,7 +1620,7 @@ mod join_estimate_request_tests {
         }
 
         let mut malformed = encoded.clone();
-        malformed[2..4].copy_from_slice(&129u16.to_be_bytes());
+        malformed[2..4].copy_from_slice(&513u16.to_be_bytes());
         assert!(EstimateJoinRequest::decode(&malformed).is_err());
         let mut mismatched_keys = request.clone();
         mismatched_keys.right_key_column_ids.pop();

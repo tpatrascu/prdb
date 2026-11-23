@@ -51821,9 +51821,9 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
     use prdb_engine::optimizer_service::{OptimizerError, optimize_select_v1};
     use prdb_engine::planner_ipc::{
         DescribePlanRelationRequest, DescribePlanRelationResponse, DescribeRelationResponse,
-        EstimatePredicateRequest, EstimatePredicateResponse, EstimateScanRequest,
-        EstimateScanResponse, MAX_PLANNER_REQUESTS_PER_CONNECTION, serve_planner,
-        serve_planner_shared_with_observer,
+        EstimateJoinRequest, EstimateJoinResponse, EstimatePredicateRequest,
+        EstimatePredicateResponse, EstimateScanRequest, EstimateScanResponse,
+        MAX_PLANNER_REQUESTS_PER_CONNECTION, serve_planner, serve_planner_shared_with_observer,
     };
     use prdb_engine::storage_manager::{
         CreatePolicyRequest, CreateTableRequest, ObjectGrantPrivilege, ObjectGrantTarget,
@@ -52699,6 +52699,64 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             .status,
         OutcomeStatus::Aborted
     );
+
+    let mut large_join_estimate =
+        storage.begin_invocation(id(0xa3), actor, 9_999, 512, 1_048_576)?;
+    for row_number in 1..=130u8 {
+        large_join_estimate.stage_put(
+            prdb_engine::overlay::RowId {
+                table: table.table_id,
+                row: id(row_number),
+            },
+            &encode_tuple(
+                &[ColumnSchema {
+                    scalar_type: ScalarType::Integer,
+                    nullable: true,
+                }],
+                1,
+                &[Some(ScalarValue::Integer(7))],
+            )?,
+        )?;
+    }
+    let (mut large_join_client, mut large_join_server) = std::os::unix::net::UnixStream::pair()?;
+    large_join_client.set_read_timeout(Some(Duration::from_secs(5)))?;
+    std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+        let planner =
+            scope.spawn(|| serve_planner(&mut large_join_server, &mut large_join_estimate));
+        prdb_engine::ipc::write_frame(
+            &mut large_join_client,
+            &IpcFrame {
+                operation: IpcOperation::EstimateScan as u16,
+                request_id: 1,
+                payload: EstimateJoinRequest {
+                    schema_name: "planner_stats".to_owned(),
+                    left_relation_name: "observations".to_owned(),
+                    right_relation_name: "observations".to_owned(),
+                    left_key_column_ids: vec![table.column_ids[0]],
+                    right_key_column_ids: vec![table.column_ids[0]],
+                    maximum_rows: 512,
+                }
+                .encode()?,
+            },
+        )?;
+        let response = prdb_engine::ipc::read_frame(&mut large_join_client)?
+            .ok_or("planner stream closed before the 512-row join estimate")?;
+        assert_eq!(response.request_id, 1);
+        assert_eq!(
+            EstimateJoinResponse::decode(&response.payload)?,
+            EstimateJoinResponse::Exact {
+                joined_rows: 130 * 130,
+            }
+        );
+        large_join_client.shutdown(Shutdown::Write)?;
+        drop(large_join_client);
+        planner
+            .join()
+            .expect("large join estimate planner thread panicked")
+            .map_err(|error| format!("large join estimate planner failed: {error:?}"))?;
+        Ok(())
+    })?;
+    large_join_estimate.abort()?;
 
     let mut optimizer_metadata_transaction =
         storage.begin_invocation(id(0x8b), actor, 9_999, 8, 512)?;
