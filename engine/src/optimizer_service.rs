@@ -136,8 +136,10 @@ fn estimate_join_relation_population(
     else {
         return Ok(None);
     };
-    let estimate = connection
-        .estimate_small_population(&handle, crate::optimizer_plan::SMALL_POPULATION_SCAN_ROWS);
+    let estimate = connection.estimate_population_at_most(
+        &handle,
+        crate::optimizer_plan::JOIN_POPULATION_ESTIMATE_MAX_ROWS,
+    );
     let close = connection.close_relation(&handle);
     match (estimate, close) {
         (Err(error), _) => Err(OptimizerError::Bind(MetadataBindError::Transaction(error))),
@@ -767,7 +769,7 @@ mod tests {
     }
 
     #[test]
-    fn join_cardinality_estimates_choose_the_smaller_indexed_outer_side() {
+    fn larger_join_cardinality_estimates_choose_the_smaller_indexed_outer_side() {
         let mut indexed_left = join_relation("lefts", 0x31);
         indexed_left.range_access_paths =
             vec![crate::metadata_discovery::AuthorizedRangeAccessPath {
@@ -784,8 +786,8 @@ mod tests {
             &filtered_join_select_request(),
             Some(indexed_left),
             Some(indexed_right.clone()),
-            Some(4),
-            None,
+            Some(64),
+            Some(96),
         )
         .unwrap();
         let plan = decode_join_select_plan_v1(&encoded).unwrap();

@@ -188,9 +188,8 @@ pub fn serve_optimizer_process<S: Read + Write, P: Read + Write>(
             next_planner_request_id = next_planner_request_id
                 .checked_add(1)
                 .ok_or(OptimizerProcessError::RequestLimitExceeded)?;
-            let include_scan_estimate = (operation == Operation::OptimizeSelect
-                && request.payload.get(2) == Some(&crate::query_abi::OPTIMIZER_SELECT_STATEMENT))
-                || operation == Operation::OptimizeJoinSelect;
+            let include_scan_estimate = operation == Operation::OptimizeSelect
+                && request.payload.get(2) == Some(&crate::query_abi::OPTIMIZER_SELECT_STATEMENT);
             let planner_request = IpcFrame {
                 operation: Operation::DescribePlanRelation as u16,
                 request_id: planner_request_id,
@@ -198,6 +197,8 @@ pub fn serve_optimizer_process<S: Read + Write, P: Read + Write>(
                     schema_name,
                     relation_name,
                     include_scan_estimate,
+                    population_estimate_max_rows: (operation == Operation::OptimizeJoinSelect)
+                        .then_some(crate::optimizer_plan::JOIN_POPULATION_ESTIMATE_MAX_ROWS),
                 }
                 .encode()
                 .map_err(OptimizerProcessError::PlannerPayload)?,
@@ -484,6 +485,7 @@ mod tests {
     use crate::tuple::ScalarType;
     use std::net::Shutdown;
     use std::os::unix::net::UnixStream;
+    use std::time::Duration;
 
     fn select_request() -> Vec<u8> {
         let mut bytes = vec![0, 1, 1, 0];
@@ -1561,6 +1563,12 @@ mod tests {
     fn process_protocol_resolves_both_join_relations_and_returns_a_validated_join_plan() {
         let (mut submission_client, mut submission_server) = UnixStream::pair().unwrap();
         let (mut planner_client, mut planner_server) = UnixStream::pair().unwrap();
+        submission_client
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        planner_server
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
         std::thread::scope(|scope| {
             let planner_thread = scope.spawn(|| {
                 for (request_id, name, relation_id, base_column_id) in [
@@ -1576,7 +1584,11 @@ mod tests {
                     assert_eq!(request.request_id, request_id);
                     assert_eq!(decoded.schema_name, "public");
                     assert_eq!(decoded.relation_name, name);
-                    assert!(decoded.include_scan_estimate);
+                    assert!(!decoded.include_scan_estimate);
+                    assert_eq!(
+                        decoded.population_estimate_max_rows,
+                        Some(crate::optimizer_plan::JOIN_POPULATION_ESTIMATE_MAX_ROWS)
+                    );
                     let mut range_access_paths = Vec::new();
                     if name == "rights" {
                         range_access_paths.push(
@@ -1628,7 +1640,7 @@ mod tests {
                             payload: DescribePlanRelationResponse {
                                 relation: Some(relation),
                                 proven_empty: false,
-                                visible_rows_estimate: (name == "lefts").then_some(4),
+                                visible_rows_estimate: Some(if name == "lefts" { 64 } else { 96 }),
                             }
                             .encode()
                             .unwrap(),

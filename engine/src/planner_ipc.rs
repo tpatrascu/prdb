@@ -111,6 +111,7 @@ const MAX_PLAN_UNIQUE_ACCESS_PATHS: usize = 256;
 const RANGE_ACCESS_PATHS_MARKER: [u8; 2] = [0x52, 0x01];
 const EMPTY_POPULATION_MARKER: [u8; 2] = [0x52, 0x02];
 const SCAN_ESTIMATE_REQUEST_MARKER: [u8; 2] = [0x52, 0x03];
+const POPULATION_ESTIMATE_LIMIT_MARKER: [u8; 2] = [0x52, 0x07];
 const CARDINALITY_ESTIMATE_MARKER: [u8; 2] = [0x52, 0x04];
 const PREDICATE_ESTIMATE_REQUEST_MARKER: [u8; 2] = [0x52, 0x05];
 const PREDICATE_ESTIMATE_RESPONSE_MARKER: [u8; 2] = [0x52, 0x06];
@@ -122,6 +123,8 @@ pub struct DescribePlanRelationRequest {
     pub schema_name: String,
     pub relation_name: String,
     pub include_scan_estimate: bool,
+    /// A larger bounded row-count probe requested by join planning.
+    pub population_estimate_max_rows: Option<u64>,
 }
 
 impl DescribePlanRelationRequest {
@@ -131,30 +134,60 @@ impl DescribePlanRelationRequest {
             relation_name: self.relation_name.clone(),
         }
         .encode()?;
+        if self.include_scan_estimate && self.population_estimate_max_rows.is_some() {
+            return Err(PlannerRequestError::InvalidPayload);
+        }
         if self.include_scan_estimate {
             payload.extend_from_slice(&SCAN_ESTIMATE_REQUEST_MARKER);
             payload.push(1);
+        } else if let Some(maximum_rows) = self.population_estimate_max_rows {
+            if maximum_rows <= crate::optimizer_plan::SMALL_POPULATION_SCAN_ROWS
+                || maximum_rows > crate::optimizer_plan::JOIN_POPULATION_ESTIMATE_MAX_ROWS
+            {
+                return Err(PlannerRequestError::InvalidPayload);
+            }
+            payload.extend_from_slice(&POPULATION_ESTIMATE_LIMIT_MARKER);
+            payload.extend_from_slice(
+                &u16::try_from(maximum_rows)
+                    .map_err(|_| PlannerRequestError::InvalidPayload)?
+                    .to_be_bytes(),
+            );
         }
         ensure_response_size(&payload)?;
         Ok(payload)
     }
 
     pub fn decode(payload: &[u8]) -> Result<Self, PlannerRequestError> {
-        let (base, include_scan_estimate) = if payload.len() >= 3
+        let (base, include_scan_estimate, population_estimate_max_rows) = if payload.len() >= 4
+            && payload[payload.len() - 4..payload.len() - 2] == POPULATION_ESTIMATE_LIMIT_MARKER
+        {
+            let maximum_rows = u64::from(u16::from_be_bytes(
+                payload[payload.len() - 2..]
+                    .try_into()
+                    .map_err(|_| PlannerRequestError::InvalidPayload)?,
+            ));
+            if maximum_rows <= crate::optimizer_plan::SMALL_POPULATION_SCAN_ROWS
+                || maximum_rows > crate::optimizer_plan::JOIN_POPULATION_ESTIMATE_MAX_ROWS
+            {
+                return Err(PlannerRequestError::InvalidPayload);
+            }
+            (&payload[..payload.len() - 4], false, Some(maximum_rows))
+        } else if payload.len() >= 3
             && payload[payload.len() - 3..payload.len() - 1] == SCAN_ESTIMATE_REQUEST_MARKER
         {
             if payload[payload.len() - 1] != 1 {
                 return Err(PlannerRequestError::InvalidPayload);
             }
-            (&payload[..payload.len() - 3], true)
+            (&payload[..payload.len() - 3], true, None)
         } else {
-            (payload, false)
+            (payload, false, None)
         };
         let decoded = ResolveRelationRequest::decode(base)?;
         Ok(Self {
             schema_name: decoded.schema_name,
             relation_name: decoded.relation_name,
             include_scan_estimate,
+            population_estimate_max_rows,
         })
     }
 }
@@ -1014,14 +1047,19 @@ pub fn dispatch_planner_request(
         }
         Operation::DescribePlanRelation => {
             let decoded = DescribePlanRelationRequest::decode(&request.payload)?;
-            let (relation, visible_rows_estimate) = if decoded.include_scan_estimate {
+            let estimate_max_rows = decoded.population_estimate_max_rows.or_else(|| {
+                decoded
+                    .include_scan_estimate
+                    .then_some(crate::optimizer_plan::SMALL_POPULATION_SCAN_ROWS)
+            });
+            let (relation, visible_rows_estimate) = if let Some(estimate_max_rows) =
+                estimate_max_rows
+            {
                 if let Some((handle, relation)) = connection
                     .resolve_relation_for_plan(&decoded.schema_name, &decoded.relation_name)?
                 {
-                    let estimate = connection.estimate_small_population(
-                        &handle,
-                        crate::optimizer_plan::SMALL_POPULATION_SCAN_ROWS,
-                    );
+                    let estimate =
+                        connection.estimate_population_at_most(&handle, estimate_max_rows);
                     connection.close_relation(&handle)?;
                     (Some(relation), estimate?)
                 } else {
@@ -1222,6 +1260,7 @@ mod scan_estimate_request_tests {
             schema_name: "public".to_owned(),
             relation_name: "items".to_owned(),
             include_scan_estimate: false,
+            population_estimate_max_rows: None,
         };
         assert_eq!(
             DescribePlanRelationRequest::decode(&request.encode().unwrap()).unwrap(),
@@ -1240,6 +1279,38 @@ mod scan_estimate_request_tests {
         let mut malformed = encoded;
         *malformed.last_mut().unwrap() = 0;
         assert!(DescribePlanRelationRequest::decode(&malformed).is_err());
+
+        let join_estimate = DescribePlanRelationRequest {
+            include_scan_estimate: false,
+            population_estimate_max_rows: Some(128),
+            ..opted_in
+        };
+        let encoded = join_estimate.encode().unwrap();
+        assert_eq!(&encoded[encoded.len() - 4..], &[0x52, 0x07, 0, 128]);
+        assert_eq!(
+            DescribePlanRelationRequest::decode(&encoded).unwrap(),
+            join_estimate
+        );
+        let mut over_budget = encoded;
+        *over_budget.last_mut().unwrap() = 129;
+        assert!(DescribePlanRelationRequest::decode(&over_budget).is_err());
+        assert!(
+            DescribePlanRelationRequest {
+                population_estimate_max_rows: Some(129),
+                ..join_estimate.clone()
+            }
+            .encode()
+            .is_err()
+        );
+        assert!(
+            DescribePlanRelationRequest {
+                include_scan_estimate: true,
+                population_estimate_max_rows: Some(128),
+                ..join_estimate
+            }
+            .encode()
+            .is_err()
+        );
     }
 
     #[test]

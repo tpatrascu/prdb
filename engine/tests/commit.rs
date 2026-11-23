@@ -52058,6 +52058,7 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
                     schema_name: "planner_stats".to_owned(),
                     relation_name: "observations".to_owned(),
                     include_scan_estimate: true,
+                    population_estimate_max_rows: None,
                 }
                 .encode()?,
             },
@@ -52075,6 +52076,25 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
         assert_eq!(plan_relation.table_epoch, 3);
         assert_eq!(plan_relation.relation.relation_id, table.table_id);
 
+        prdb_engine::ipc::write_frame(
+            &mut client,
+            &IpcFrame {
+                operation: IpcOperation::DescribePlanRelation as u16,
+                request_id: 3,
+                payload: DescribePlanRelationRequest {
+                    schema_name: "planner_stats".to_owned(),
+                    relation_name: "observations".to_owned(),
+                    include_scan_estimate: false,
+                    population_estimate_max_rows: Some(128),
+                }
+                .encode()?,
+            },
+        )?;
+        let join_population = prdb_engine::ipc::read_frame(&mut client)?
+            .ok_or("planner stream closed before join population estimate")?;
+        let join_population = DescribePlanRelationResponse::decode(&join_population.payload)?;
+        assert_eq!(join_population.visible_rows_estimate, Some(1));
+
         let estimate_predicate = prdb_engine::optimizer_binding::BoundPredicate::Compare {
             operator: prdb_engine::optimizer_request::Comparison::Equal,
             left: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Column(
@@ -52091,7 +52111,7 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             &mut client,
             &IpcFrame {
                 operation: IpcOperation::EstimateScan as u16,
-                request_id: 3,
+                request_id: 4,
                 payload: EstimatePredicateRequest::from_bound_predicate(
                     "planner_stats".to_owned(),
                     "observations".to_owned(),
@@ -52110,7 +52130,7 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             }
         );
 
-        for request_id in 4..(2 + MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION as u64) {
+        for request_id in 5..(2 + MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION as u64) {
             prdb_engine::ipc::write_frame(
                 &mut client,
                 &IpcFrame {
@@ -52169,6 +52189,7 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
                     schema_name: "planner_stats".to_owned(),
                     relation_name: "observations".to_owned(),
                     include_scan_estimate: true,
+                    population_estimate_max_rows: None,
                 }
                 .encode()?,
             },

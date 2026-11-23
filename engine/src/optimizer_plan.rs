@@ -49,6 +49,8 @@ pub struct SingleTablePlanV1 {
 /// authorized populations. The cutoff is conservative and based on a local
 /// storage API profile; it is not an end-to-end SQL cost estimate.
 pub const SMALL_POPULATION_SCAN_ROWS: u64 = 4;
+/// Maximum row count probed for optimizer join orientation.
+pub const JOIN_POPULATION_ESTIMATE_MAX_ROWS: u64 = 128;
 
 pub fn apply_population_scan_heuristic(
     plan: &mut SingleTablePlanV1,
@@ -4446,26 +4448,25 @@ fn select_index_nested_loop_join(
         JoinRelationSide::Left,
     );
 
-    const SMALL_INPUT_ROWS: u64 = 4;
     if left_visible_rows == Some(0) || right_visible_rows == Some(0) {
         return None;
     }
     match (left_visible_rows, right_visible_rows) {
         (Some(left_rows), Some(right_rows)) => {
-            if left_rows <= SMALL_INPUT_ROWS && right_rows <= SMALL_INPUT_ROWS {
+            if left_rows <= SMALL_POPULATION_SCAN_ROWS && right_rows <= SMALL_POPULATION_SCAN_ROWS {
                 return None;
             }
-            if left_rows <= SMALL_INPUT_ROWS && right_rows > SMALL_INPUT_ROWS {
+            if left_rows < right_rows {
                 return right;
             }
-            if right_rows <= SMALL_INPUT_ROWS && left_rows > SMALL_INPUT_ROWS {
+            if right_rows < left_rows {
                 return left;
             }
         }
-        (Some(left_rows), None) if (1..=SMALL_INPUT_ROWS).contains(&left_rows) => {
+        (Some(left_rows), None) if left_rows <= JOIN_POPULATION_ESTIMATE_MAX_ROWS => {
             return right;
         }
-        (None, Some(right_rows)) if (1..=SMALL_INPUT_ROWS).contains(&right_rows) => {
+        (None, Some(right_rows)) if right_rows <= JOIN_POPULATION_ESTIMATE_MAX_ROWS => {
             return left;
         }
         _ => {}

@@ -7356,7 +7356,7 @@ fn unique_constraint_uses_its_backing_index_for_invocation_writes()
         policy_driving_columns: &[],
         dependencies: &[],
     };
-    let visible_row_count = index_profile_rows + 1;
+    let visible_row_count = index_profile_rows + 2;
     let expected_small_population = (visible_row_count
         <= prdb_engine::optimizer_plan::SMALL_POPULATION_SCAN_ROWS)
         .then_some(visible_row_count);
@@ -7367,6 +7367,17 @@ fn unique_constraint_uses_its_backing_index_for_invocation_writes()
             prdb_engine::optimizer_plan::SMALL_POPULATION_SCAN_ROWS,
         )?,
         expected_small_population
+    );
+    let expected_join_population = (visible_row_count
+        <= prdb_engine::optimizer_plan::JOIN_POPULATION_ESTIMATE_MAX_ROWS)
+        .then_some(visible_row_count);
+    assert_eq!(
+        invocation.estimate_authorized_population_at_most(
+            table_id,
+            &projection,
+            prdb_engine::optimizer_plan::JOIN_POPULATION_ESTIMATE_MAX_ROWS,
+        )?,
+        expected_join_population
     );
     let range_bound = || prdb_engine::transaction::AuthorizedIndexRangeBound {
         value: ScalarValue::Bytea(b"duplicate".to_vec()),
@@ -7434,7 +7445,7 @@ fn unique_constraint_uses_its_backing_index_for_invocation_writes()
                 prdb_engine::optimizer_plan::SMALL_POPULATION_SCAN_ROWS,
             )?;
             small_population_probe_times.push(started.elapsed());
-            let total_rows = index_profile_rows + 1;
+            let total_rows = index_profile_rows + 2;
             let expected_population = (total_rows
                 <= prdb_engine::optimizer_plan::SMALL_POPULATION_SCAN_ROWS)
                 .then_some(total_rows);
@@ -7501,7 +7512,7 @@ fn unique_constraint_uses_its_backing_index_for_invocation_writes()
         let small_population_probe = median_and_p95_ms(&mut small_population_probe_times);
         eprintln!(
             "index access benchmark: numbered_rows={index_profile_rows}, total_rows={}, runs={RUNS}, small-population probe median/p95={:.3}/{:.3} ms, point probe median/p95={:.3}/{:.3} ms, range median/p95={:.3}/{:.3} ms, authorized scan+filter median/p95={:.3}/{:.3} ms",
-            index_profile_rows + 1,
+            index_profile_rows + 2,
             small_population_probe.0,
             small_population_probe.1,
             point_probe.0,

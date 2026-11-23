@@ -10318,7 +10318,7 @@ impl PlannerMetadataConnection<'_, '_> {
 
     /// Probe whether a table's authorized view is at most a small row bound.
     /// Unlike a full column summary, this stops after the bound plus one row.
-    pub fn estimate_small_population(
+    pub fn estimate_population_at_most(
         &mut self,
         handle: &PlanningTableHandle,
         maximum_rows: u64,
