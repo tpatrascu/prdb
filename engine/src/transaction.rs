@@ -43,6 +43,7 @@ use crate::schema::{ENGINE_META, OUTCOMES, PRINCIPAL_NAMES};
 use crate::snapshot::{MAX_CATALOG_FAMILY_SCAN, MAX_ROW_SCAN_PAGE, RowSnapshot, SnapshotError};
 use crate::statistics::{
     AuthorizedScanEstimate, AuthorizedScanSummary, ColumnPopulation, MAX_ESTIMATE_CANDIDATES,
+    MAX_PREDICATE_ESTIMATE_ROWS,
 };
 use crate::storage_manager::{InvocationAdmissionMetrics, InvocationAdmissionPermit};
 use crate::tuple::{
@@ -2214,8 +2215,7 @@ impl<'db> InvocationTransaction<'db> {
         maximum_rows: u64,
     ) -> Result<Option<(u64, u64)>, TransactionError> {
         self.check_deadline()?;
-        const MAX_PREDICATE_ROWS: u64 = 4;
-        if maximum_rows > MAX_PREDICATE_ROWS
+        if maximum_rows > MAX_PREDICATE_ESTIMATE_ROWS
             || !valid_estimate_projection(table_id, projection)
             || !valid_estimate_predicate(predicate, projection, 32, 256)
         {
@@ -10421,7 +10421,7 @@ impl PlannerMetadataConnection<'_, '_> {
             relation.relation.relation_id,
             &projection,
             &predicate,
-            4,
+            MAX_PREDICATE_ESTIMATE_ROWS,
         )
     }
 

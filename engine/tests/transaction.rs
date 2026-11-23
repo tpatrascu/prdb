@@ -6552,7 +6552,7 @@ fn authorized_scan_estimate_counts_sanitized_cells_and_private_writes()
             table_id,
             &projection,
             &hidden_predicate,
-            4,
+            128,
         )?,
         None
     );
@@ -6577,6 +6577,26 @@ fn authorized_scan_estimate_counts_sanitized_cells_and_private_writes()
             4,
         )?,
         None
+    );
+    assert_eq!(
+        boundary_probe.estimate_authorized_predicate_at_most(
+            table_id,
+            &projection,
+            &predicate,
+            128,
+        )?,
+        Some((5, 1)),
+        "predicate estimates should cover exact populations larger than four rows"
+    );
+    assert_eq!(
+        boundary_probe.estimate_authorized_predicate_at_most(
+            table_id,
+            &projection,
+            &predicate,
+            129,
+        )?,
+        None,
+        "predicate estimate limit must remain explicitly bounded"
     );
     boundary_probe.abort()?;
     assert_eq!(
@@ -6760,7 +6780,7 @@ fn authorized_scan_estimate_counts_sanitized_cells_and_private_writes()
             table_id,
             &filtered_projection,
             &predicate,
-            4,
+            128,
         )?,
         None,
         "value-dependent row policy must suppress predicate estimates"
@@ -6770,7 +6790,7 @@ fn authorized_scan_estimate_counts_sanitized_cells_and_private_writes()
             table_id,
             &filtered_projection,
             &predicate,
-            4,
+            128,
         )?,
         None
     );
@@ -6815,7 +6835,7 @@ fn authorized_scan_estimate_counts_sanitized_cells_and_private_writes()
             table_id,
             &filtered_projection,
             &predicate,
-            4,
+            128,
         )?,
         None,
         "adding invisible candidates must not change the released estimate"

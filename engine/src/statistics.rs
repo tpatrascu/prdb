@@ -2,6 +2,8 @@
 
 /// Maximum row candidates inspected by one on-demand estimate.
 pub const MAX_ESTIMATE_CANDIDATES: usize = 16_384;
+/// Maximum visible population for exact planner predicate estimates.
+pub const MAX_PREDICATE_ESTIMATE_ROWS: u64 = 128;
 
 /// Result of a bounded authorized scan summary. Unknown estimates contain no
 /// partial counts, so callers can use fixed heuristics without learning how

@@ -3,8 +3,12 @@ use prdb_engine::authorization::{
     Policy, Subject,
 };
 use prdb_engine::bootstrap;
+use prdb_engine::optimizer_binding::{BoundColumn, BoundPredicate};
+use prdb_engine::optimizer_request::Comparison;
 use prdb_engine::overlay::RowId;
-use prdb_engine::statistics::{AuthorizedScanEstimate, MAX_ESTIMATE_CANDIDATES};
+use prdb_engine::statistics::{
+    AuthorizedScanEstimate, MAX_ESTIMATE_CANDIDATES, MAX_PREDICATE_ESTIMATE_ROWS,
+};
 use prdb_engine::transaction::InvocationTransaction;
 use prdb_engine::tuple::{ColumnSchema, ScalarType, ScalarValue, encode_tuple};
 use std::collections::HashSet;
@@ -14,11 +18,27 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zeroize::Zeroize;
 
-const DATASET_ROWS: [usize; 3] = [1_024, 8_192, MAX_ESTIMATE_CANDIDATES - 1];
+const DATASET_ROWS: [usize; 4] = [
+    1_024,
+    8_192,
+    MAX_ESTIMATE_CANDIDATES - 1,
+    MAX_PREDICATE_ESTIMATE_ROWS as usize,
+];
 const ESTIMATE_RUNS: usize = 11;
 const SCHEMA_ID: [u8; 16] = [0x72; 16];
 const COLUMN_ID: [u8; 16] = [0x73; 16];
 const PRINCIPAL_ID: [u8; 16] = [0x74; 16];
+
+struct TimingProfile {
+    median: Duration,
+    p95: Duration,
+}
+
+struct DatasetProfile {
+    row_count: usize,
+    population_estimate: TimingProfile,
+    predicate_estimate: Option<TimingProfile>,
+}
 
 fn table_id(dataset: usize) -> [u8; 16] {
     [0x71 + dataset as u8; 16]
@@ -104,12 +124,21 @@ fn run_in_directory(data_directory: &std::path::Path) -> Result<(), Box<dyn Erro
     println!(
         "estimate runs per dataset: {ESTIMATE_RUNS}; candidate budget {MAX_ESTIMATE_CANDIDATES}"
     );
-    for (row_count, median, p95) in results {
+    for result in results {
         println!(
             "dataset: {row_count} authorized INTEGER rows; median {:.3} ms; p95 {:.3} ms",
-            as_millis(median),
-            as_millis(p95)
+            as_millis(result.population_estimate.median),
+            as_millis(result.population_estimate.p95),
+            row_count = result.row_count
         );
+        if let Some(predicate_result) = result.predicate_estimate {
+            println!(
+                "predicate estimate: {row_count} authorized INTEGER rows; one equality match; median {:.3} ms; p95 {:.3} ms",
+                as_millis(predicate_result.median),
+                as_millis(predicate_result.p95),
+                row_count = result.row_count
+            );
+        }
     }
     println!(
         "scope: estimate call only; database bootstrap, seeding, compilation, and planner IPC excluded"
@@ -124,7 +153,7 @@ fn benchmark_dataset(
     row_count: usize,
     columns: &[ColumnSchema],
     column_ids: &[[u8; 16]],
-) -> Result<(usize, Duration, Duration), Box<dyn Error>> {
+) -> Result<DatasetProfile, Box<dyn Error>> {
     let table = table_id(dataset);
     let context = AuthorizationContext {
         principal_id: PRINCIPAL_ID,
@@ -211,7 +240,52 @@ fn benchmark_dataset(
     elapsed.sort_unstable();
     let median = elapsed[elapsed.len() / 2];
     let p95 = elapsed[((elapsed.len() - 1) * 95).div_ceil(100)];
-    Ok((row_count, median, p95))
+    let predicate_result = if row_count == MAX_PREDICATE_ESTIMATE_ROWS as usize {
+        let predicate = BoundPredicate::Compare {
+            operator: Comparison::Equal,
+            left: Box::new(BoundPredicate::Column(BoundColumn {
+                column_id: COLUMN_ID,
+                ordinal: 0,
+                scalar_type: ScalarType::Integer,
+                nullable: false,
+            })),
+            right: Box::new(BoundPredicate::Integer(64)),
+        };
+        let mut predicate_elapsed = Vec::with_capacity(ESTIMATE_RUNS);
+        for run_number in 0..ESTIMATE_RUNS {
+            let mut invocation = InvocationTransaction::begin(
+                database,
+                invocation_id(dataset * ESTIMATE_RUNS * 2 + run_number + ESTIMATE_RUNS + 2),
+                PRINCIPAL_ID,
+                i64::MAX,
+                1,
+                64,
+            )?;
+            let started = Instant::now();
+            let estimate = invocation.estimate_authorized_predicate_at_most(
+                table,
+                &projection,
+                &predicate,
+                MAX_PREDICATE_ESTIMATE_ROWS,
+            )?;
+            predicate_elapsed.push(started.elapsed());
+            if estimate != Some((row_count as u64, 1)) {
+                return Err("predicate estimate did not match the seeded authorized rows".into());
+            }
+        }
+        predicate_elapsed.sort_unstable();
+        Some((
+            predicate_elapsed[predicate_elapsed.len() / 2],
+            predicate_elapsed[((predicate_elapsed.len() - 1) * 95).div_ceil(100)],
+        ))
+    } else {
+        None
+    };
+    Ok(DatasetProfile {
+        row_count,
+        population_estimate: TimingProfile { median, p95 },
+        predicate_estimate: predicate_result.map(|(median, p95)| TimingProfile { median, p95 }),
+    })
 }
 
 fn as_millis(duration: Duration) -> f64 {

@@ -52028,6 +52028,22 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             &[Some(ScalarValue::Integer(7))],
         )?,
     )?;
+    for (row_id, value) in [(0x8d, 8), (0x8e, 9), (0x8f, 10), (0x90, 11)] {
+        transaction.stage_put(
+            prdb_engine::overlay::RowId {
+                table: table.table_id,
+                row: id(row_id),
+            },
+            &encode_tuple(
+                &[ColumnSchema {
+                    scalar_type: ScalarType::Integer,
+                    nullable: true,
+                }],
+                1,
+                &[Some(ScalarValue::Integer(value))],
+            )?,
+        )?;
+    }
     let (mut client, mut server) = std::os::unix::net::UnixStream::pair()?;
     std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
         let planner = scope.spawn(|| serve_planner(&mut server, &mut transaction));
@@ -52067,7 +52083,7 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             .ok_or("planner stream closed before plan relation description")?;
         let plan_relation_response = DescribePlanRelationResponse::decode(&plan_relation.payload)?;
         assert!(!plan_relation_response.proven_empty);
-        assert_eq!(plan_relation_response.visible_rows_estimate, Some(1));
+        assert_eq!(plan_relation_response.visible_rows_estimate, None);
         let plan_relation = plan_relation_response
             .relation
             .ok_or("authorized plan relation was not described")?;
@@ -52093,7 +52109,7 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
         let join_population = prdb_engine::ipc::read_frame(&mut client)?
             .ok_or("planner stream closed before join population estimate")?;
         let join_population = DescribePlanRelationResponse::decode(&join_population.payload)?;
-        assert_eq!(join_population.visible_rows_estimate, Some(1));
+        assert_eq!(join_population.visible_rows_estimate, Some(5));
 
         let estimate_predicate = prdb_engine::optimizer_binding::BoundPredicate::Compare {
             operator: prdb_engine::optimizer_request::Comparison::Equal,
@@ -52125,7 +52141,7 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
         assert_eq!(
             EstimatePredicateResponse::decode(&predicate_estimate.payload)?,
             EstimatePredicateResponse::Exact {
-                visible_rows: 1,
+                visible_rows: 5,
                 matching_rows: 1,
             }
         );
@@ -52148,9 +52164,9 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             assert_eq!(
                 EstimateScanResponse::decode(&response.payload)?,
                 EstimateScanResponse::Exact(prdb_engine::statistics::AuthorizedScanSummary {
-                    visible_rows: 1,
+                    visible_rows: 5,
                     columns: vec![prdb_engine::statistics::ColumnPopulation {
-                        readable_values: 1,
+                        readable_values: 5,
                         nulls: 0,
                         redacted: 0,
                     }],
