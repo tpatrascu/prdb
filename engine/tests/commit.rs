@@ -40536,10 +40536,18 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         std::env::var_os("PRDB_TEST_INDEXED_JOIN_FANOUT4_BENCHMARK_ONLY").is_some();
     let indexed_join_fanout_five_benchmark_only =
         std::env::var_os("PRDB_TEST_INDEXED_JOIN_FANOUT5_BENCHMARK_ONLY").is_some();
+    let indexed_join_fanout_sixteen_benchmark_only =
+        std::env::var_os("PRDB_TEST_INDEXED_JOIN_FANOUT16_BENCHMARK_ONLY").is_some();
     let indexed_join_fanout_benchmark_only =
         std::env::var_os("PRDB_TEST_INDEXED_JOIN_FANOUT_BENCHMARK_ONLY").is_some()
             || indexed_join_fanout_four_benchmark_only
-            || indexed_join_fanout_five_benchmark_only;
+            || indexed_join_fanout_five_benchmark_only
+            || indexed_join_fanout_sixteen_benchmark_only;
+    let indexed_join_fanout_outer_rows: u16 = if indexed_join_fanout_sixteen_benchmark_only {
+        16
+    } else {
+        9
+    };
     let indexed_join_fanout: u16 = if indexed_join_fanout_four_benchmark_only {
         4
     } else if indexed_join_fanout_five_benchmark_only {
@@ -40552,6 +40560,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             std::env::var_os("PRDB_TEST_INDEXED_JOIN_FANOUT_BENCHMARK_ONLY").is_some(),
             indexed_join_fanout_four_benchmark_only,
             indexed_join_fanout_five_benchmark_only,
+            indexed_join_fanout_sixteen_benchmark_only,
         ]
         .into_iter()
         .filter(|enabled| *enabled)
@@ -41042,7 +41051,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     // Keep the authorized-view population above the optimizer's small-scan
     // cutoff so the confined range acceptance exercises ScanIndexRange.
     let composite_seed_rows = if indexed_join_fanout_benchmark_only {
-        (0..9u8)
+        (0..u8::try_from(indexed_join_fanout_outer_rows)?)
             .map(|index| {
                 let key = i32::from(index);
                 (0xd3 + index, key, key)
@@ -41438,7 +41447,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     let joined_seed_rows = if indexed_join_fanout_benchmark_only {
         (0..128u16)
             .map(|index| {
-                let key = if index < 9 * indexed_join_fanout {
+                let key = if index < indexed_join_fanout_outer_rows * indexed_join_fanout {
                     i32::from(index / indexed_join_fanout)
                 } else {
                     1000 + i32::from(index)
@@ -42800,7 +42809,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             prdb_engine::statistics::MAX_JOIN_ESTIMATE_ROWS,
         )?;
     let expected_join_pairs = if indexed_join_fanout_benchmark_only {
-        u64::from(9 * indexed_join_fanout)
+        u64::from(indexed_join_fanout_outer_rows * indexed_join_fanout)
     } else if indexed_join_skew_benchmark_only {
         1024
     } else if indexed_join_asymmetric_benchmark_only || indexed_join_benchmark_only {
@@ -42904,7 +42913,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             if indexed_join_skew_benchmark_only {
                 8
             } else if indexed_join_fanout_benchmark_only {
-                9
+                usize::from(indexed_join_fanout_outer_rows)
             } else if indexed_join_asymmetric_benchmark_only {
                 4
             } else if indexed_join_benchmark_only {
@@ -43037,7 +43046,9 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         ordered_client.authenticate(&storage, token_id, &secret)?;
         let ordered_owner = ordered_client.staging_owner()?;
         let ordered_parameter = [if indexed_join_fanout_benchmark_only {
-            if indexed_join_fanout == 4 {
+            if indexed_join_fanout_sixteen_benchmark_only {
+                b'A'
+            } else if indexed_join_fanout == 4 {
                 b'4'
             } else if indexed_join_fanout == 5 {
                 b'5'
@@ -43212,7 +43223,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 let storage_ref = &storage;
                 let operational_table_id = composite_table.table_id;
                 let expected_operational_scan_rows = if indexed_join_fanout_benchmark_only {
-                    9
+                    usize::from(indexed_join_fanout_outer_rows)
                 } else if indexed_join_skew_benchmark_only {
                     8
                 } else if indexed_join_asymmetric_benchmark_only {
@@ -43587,8 +43598,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             assert_eq!(indexed_samples.len(), expected_indexed_samples);
             assert_eq!(hash_samples.len(), expected_hash_samples);
             eprintln!(
-                "SQL-10 mixed-load join latency (ns), same invocation snapshot and 128-row join input, indexed fanout {}: indexed={indexed_samples:?} hash={hash_samples:?}",
-                indexed_join_fanout
+                "SQL-10 mixed-load join latency (ns), same invocation snapshot and 128-row indexed input, outer_rows={}, fanout {}: indexed={indexed_samples:?} hash={hash_samples:?}",
+                indexed_join_fanout_outer_rows, indexed_join_fanout
             );
             let (load_started, load_finished) = operational_load_interval
                 .ok_or("indexed/hash join benchmark did not overlap operational load")?;

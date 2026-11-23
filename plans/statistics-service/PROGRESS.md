@@ -1,5 +1,11 @@
 # Statistics Service Progress
 
+## ST-2 / OP-7 follow-up: profile the 16-row low-fanout boundary — measured
+
+- Harness: added `PRDB_TEST_INDEXED_JOIN_FANOUT16_BENCHMARK_ONLY` to the maintained confined SQL acceptance. It seeds 16 outer rows and a 128-row indexed input with one match per outer row, checks 16 equivalent pairs and the indexed plan, and runs the same operational read/commit load as the 9-row fanout profiles.
+- Evidence: five fresh-database delegated-cgroup runs each completed 192 operational reads and 192 commits. Indexed median-of-run p50 was 243.5 ms (230.9–259.1 ms range); hash was 305.7 ms (289.4–313.7 ms range). This extends the local low-fanout observation to 16 outer rows; it does not establish deployment performance or a general cost model.
+- Verification: the five focused confined acceptance runs passed. The maintained TinyCC fixture was rebuilt with the SDK sandbox-query-fixture target; Rust formatting, workspace build, warning-denied Clippy, and `git diff --check` are recorded after this harness change below.
+
 ## ST-2 / OP-4 follow-up: exact same-typed scalar column estimates — implementation
 
 - Contract: the bounded estimator compares authorized columns when both operands have the identical scalar type: BOOLEAN, SMALLINT, INTEGER, BIGINT, DECIMAL, TEXT, VARCHAR, BYTEA, UUID, DATE, or TIMESTAMPTZ. DECIMAL precision/scale must match; TEXT, VARCHAR, and BYTEA values are capped at 4 KiB each. Existing Boolean/integer/text literals remain supported; DECIMAL, BYTEA, UUID, DATE, and TIMESTAMPTZ literals and cross-type coercions remain unsupported.
