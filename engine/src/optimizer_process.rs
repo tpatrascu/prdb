@@ -188,8 +188,9 @@ pub fn serve_optimizer_process<S: Read + Write, P: Read + Write>(
             next_planner_request_id = next_planner_request_id
                 .checked_add(1)
                 .ok_or(OptimizerProcessError::RequestLimitExceeded)?;
-            let include_scan_estimate = operation == Operation::OptimizeSelect
-                && request.payload.get(2) == Some(&crate::query_abi::OPTIMIZER_SELECT_STATEMENT);
+            let include_scan_estimate = (operation == Operation::OptimizeSelect
+                && request.payload.get(2) == Some(&crate::query_abi::OPTIMIZER_SELECT_STATEMENT))
+                || operation == Operation::OptimizeJoinSelect;
             let planner_request = IpcFrame {
                 operation: Operation::DescribePlanRelation as u16,
                 request_id: planner_request_id,
@@ -248,10 +249,12 @@ pub fn serve_optimizer_process<S: Read + Write, P: Read + Write>(
                 )
             }
             Operation::OptimizeJoinSelect => {
-                crate::optimizer_service::optimize_join_select_v1_with_relations(
+                crate::optimizer_service::optimize_join_select_v1_with_relations_and_estimates(
                     &request.payload,
                     relations.remove(0),
                     relations.remove(0),
+                    visible_rows_estimates.first().copied().flatten(),
+                    visible_rows_estimates.get(1).copied().flatten(),
                 )
             }
             Operation::OptimizeGroupCount => {
@@ -1573,6 +1576,16 @@ mod tests {
                     assert_eq!(request.request_id, request_id);
                     assert_eq!(decoded.schema_name, "public");
                     assert_eq!(decoded.relation_name, name);
+                    assert!(decoded.include_scan_estimate);
+                    let mut range_access_paths = Vec::new();
+                    if name == "rights" {
+                        range_access_paths.push(
+                            crate::metadata_discovery::AuthorizedRangeAccessPath {
+                                index_id: [0x71; 16],
+                                column_ids: vec![[base_column_id; 16]],
+                            },
+                        );
+                    }
                     let relation = AuthorizedPlanRelation {
                         schema_id: [1; 16],
                         schema_version: 3,
@@ -1605,7 +1618,7 @@ mod tests {
                             ],
                         },
                         unique_access_paths: Vec::new(),
-                        range_access_paths: Vec::new(),
+                        range_access_paths,
                     };
                     crate::ipc::write_frame(
                         &mut planner_server,
@@ -1615,7 +1628,7 @@ mod tests {
                             payload: DescribePlanRelationResponse {
                                 relation: Some(relation),
                                 proven_empty: false,
-                                visible_rows_estimate: None,
+                                visible_rows_estimate: (name == "lefts").then_some(4),
                             }
                             .encode()
                             .unwrap(),
@@ -1653,6 +1666,17 @@ mod tests {
             assert_eq!(plan.right_scan_columns.len(), 3);
             assert_eq!(plan.join_keys.len(), 2);
             assert_eq!(plan.limit, Some(5));
+            let index_join = plan
+                .index_nested_loop
+                .expect("estimate-guided index join expected");
+            assert_eq!(
+                index_join.outer_side,
+                crate::optimizer_request::JoinRelationSide::Left
+            );
+            assert_eq!(
+                index_join.inner_side,
+                crate::optimizer_request::JoinRelationSide::Right
+            );
 
             crate::ipc::write_frame(
                 &mut submission_client,

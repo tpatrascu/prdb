@@ -4290,7 +4290,20 @@ fn is_point_probe_literal(column: &BoundColumn, value: &BoundPredicate) -> bool 
 /// Lower authorized join bindings to a canonical join plan. Each scan reads
 /// the ordinal-sorted union of its projected and equality-key columns.
 pub fn plan_join_select_v1(bound: BoundJoinSelect) -> Result<JoinSelectPlanV1, PlanError> {
-    let index_nested_loop = select_index_nested_loop_join(&bound);
+    plan_join_select_v1_with_estimates(bound, None, None)
+}
+
+/// Lower a join and use exact small authorized populations to choose a
+/// bounded indexed nested-loop orientation. If both inputs are known small,
+/// retain hash join; if estimates do not identify a small outer input, retain
+/// the deterministic index preference used by the original plan contract.
+pub fn plan_join_select_v1_with_estimates(
+    bound: BoundJoinSelect,
+    left_visible_rows: Option<u64>,
+    right_visible_rows: Option<u64>,
+) -> Result<JoinSelectPlanV1, PlanError> {
+    let index_nested_loop =
+        select_index_nested_loop_join(&bound, left_visible_rows, right_visible_rows);
     let relation = |relation: crate::optimizer_binding::BoundJoinRelation| RelationReference {
         schema_name: bound.schema_name.clone(),
         schema_id: bound.schema_id,
@@ -4353,7 +4366,11 @@ pub fn plan_join_select_v1(bound: BoundJoinSelect) -> Result<JoinSelectPlanV1, P
     Ok(plan)
 }
 
-fn select_index_nested_loop_join(bound: &BoundJoinSelect) -> Option<IndexNestedLoopJoinV1> {
+fn select_index_nested_loop_join(
+    bound: &BoundJoinSelect,
+    left_visible_rows: Option<u64>,
+    right_visible_rows: Option<u64>,
+) -> Option<IndexNestedLoopJoinV1> {
     fn eligible(
         paths: impl Iterator<Item = ([u8; 16], Vec<[u8; 16]>)>,
         key_columns: &[BoundColumn],
@@ -4408,10 +4425,7 @@ fn select_index_nested_loop_join(bound: &BoundJoinSelect) -> Option<IndexNestedL
             .collect::<Vec<_>>(),
         JoinRelationSide::Right,
     );
-    if right.is_some() {
-        return right;
-    }
-    eligible(
+    let left = eligible(
         bound
             .left_relation
             .unique_access_paths
@@ -4430,7 +4444,34 @@ fn select_index_nested_loop_join(bound: &BoundJoinSelect) -> Option<IndexNestedL
             .map(|key| key.left_column.clone())
             .collect::<Vec<_>>(),
         JoinRelationSide::Left,
-    )
+    );
+
+    const SMALL_INPUT_ROWS: u64 = 4;
+    if left_visible_rows == Some(0) || right_visible_rows == Some(0) {
+        return None;
+    }
+    match (left_visible_rows, right_visible_rows) {
+        (Some(left_rows), Some(right_rows)) => {
+            if left_rows <= SMALL_INPUT_ROWS && right_rows <= SMALL_INPUT_ROWS {
+                return None;
+            }
+            if left_rows <= SMALL_INPUT_ROWS && right_rows > SMALL_INPUT_ROWS {
+                return right;
+            }
+            if right_rows <= SMALL_INPUT_ROWS && left_rows > SMALL_INPUT_ROWS {
+                return left;
+            }
+        }
+        (Some(left_rows), None) if (1..=SMALL_INPUT_ROWS).contains(&left_rows) => {
+            return right;
+        }
+        (None, Some(right_rows)) if (1..=SMALL_INPUT_ROWS).contains(&right_rows) => {
+            return left;
+        }
+        _ => {}
+    }
+
+    right.or(left)
 }
 
 /// Validate the structural invariants an executor must check independently

@@ -28,7 +28,7 @@ use crate::optimizer_plan::{
     encode_ordered_select_plan_v1, encode_plan_v1, encode_update_plan_v1,
     plan_composite_group_aggregate_v1, plan_composite_group_count_v1, plan_delete_v1,
     plan_filtered_composite_group_aggregate_v1, plan_group_aggregate_v1, plan_group_count_v1,
-    plan_join_select_v1, plan_ordered_composite_group_aggregate_v1,
+    plan_join_select_v1_with_estimates, plan_ordered_composite_group_aggregate_v1,
     plan_ordered_composite_group_count_v1, plan_ordered_group_aggregate_v1,
     plan_ordered_group_count_v1, plan_ordered_select_v1, plan_select_v1, plan_update_v1,
 };
@@ -112,7 +112,38 @@ pub fn optimize_join_select_v1(
     connection: &mut PlannerMetadataConnection<'_, '_>,
 ) -> Result<Vec<u8>, OptimizerError> {
     let bound = bind_join_select_request_via_metadata(request, connection)?;
-    encode_bound_join_select(bound)
+    let left_rows = estimate_join_relation_population(
+        connection,
+        &bound.schema_name,
+        &bound.left_relation.relation_name,
+    )?;
+    let right_rows = estimate_join_relation_population(
+        connection,
+        &bound.schema_name,
+        &bound.right_relation.relation_name,
+    )?;
+    encode_bound_join_select_with_estimates(bound, left_rows, right_rows)
+}
+
+fn estimate_join_relation_population(
+    connection: &mut PlannerMetadataConnection<'_, '_>,
+    schema_name: &str,
+    relation_name: &str,
+) -> Result<Option<u64>, OptimizerError> {
+    let Some((handle, _)) = connection
+        .resolve_relation_for_plan(schema_name, relation_name)
+        .map_err(|error| OptimizerError::Bind(MetadataBindError::Transaction(error)))?
+    else {
+        return Ok(None);
+    };
+    let estimate = connection
+        .estimate_small_population(&handle, crate::optimizer_plan::SMALL_POPULATION_SCAN_ROWS);
+    let close = connection.close_relation(&handle);
+    match (estimate, close) {
+        (Err(error), _) => Err(OptimizerError::Bind(MetadataBindError::Transaction(error))),
+        (Ok(_), Err(error)) => Err(OptimizerError::Bind(MetadataBindError::Transaction(error))),
+        (Ok(estimate), Ok(())) => Ok(estimate),
+    }
 }
 
 /// Optimize a join request using two independently authorized stable
@@ -122,9 +153,27 @@ pub fn optimize_join_select_v1_with_relations(
     left_relation: Option<AuthorizedPlanRelation>,
     right_relation: Option<AuthorizedPlanRelation>,
 ) -> Result<Vec<u8>, OptimizerError> {
+    optimize_join_select_v1_with_relations_and_estimates(
+        request,
+        left_relation,
+        right_relation,
+        None,
+        None,
+    )
+}
+
+/// Optimize a join using bounded, invocation-authorized row-count estimates
+/// when available. Unknown estimates retain the deterministic legacy choice.
+pub fn optimize_join_select_v1_with_relations_and_estimates(
+    request: &[u8],
+    left_relation: Option<AuthorizedPlanRelation>,
+    right_relation: Option<AuthorizedPlanRelation>,
+    left_visible_rows: Option<u64>,
+    right_visible_rows: Option<u64>,
+) -> Result<Vec<u8>, OptimizerError> {
     let bound = bind_join_select_request(request, left_relation, right_relation)
         .map_err(|error| OptimizerError::Bind(MetadataBindError::Bind(error)))?;
-    encode_bound_join_select(bound)
+    encode_bound_join_select_with_estimates(bound, left_visible_rows, right_visible_rows)
 }
 
 /// Resolve, bind, lower, and encode one canonical DELETE request using only
@@ -359,10 +408,12 @@ fn encode_bound_ordered_select(
     Ok(encode_ordered_select_plan_v1(&plan)?)
 }
 
-fn encode_bound_join_select(
+fn encode_bound_join_select_with_estimates(
     bound: crate::optimizer_binding::BoundJoinSelect,
+    left_visible_rows: Option<u64>,
+    right_visible_rows: Option<u64>,
 ) -> Result<Vec<u8>, OptimizerError> {
-    let plan = plan_join_select_v1(bound)?;
+    let plan = plan_join_select_v1_with_estimates(bound, left_visible_rows, right_visible_rows)?;
     Ok(encode_join_select_plan_v1(&plan)?)
 }
 
@@ -663,7 +714,7 @@ mod tests {
         let encoded = optimize_join_select_v1_with_relations(
             &filtered_join_select_request(),
             Some(join_relation("lefts", 0x31)),
-            Some(indexed_right),
+            Some(indexed_right.clone()),
         )
         .unwrap();
         let (_, kind, _) = crate::query_abi::decode_optimizer_plan_header_record(&encoded)
@@ -713,6 +764,78 @@ mod tests {
         );
         assert_eq!(index_join.index_id, [0x72; 16]);
         assert_eq!(index_join.key_column.column_id, [0x41; 16]);
+    }
+
+    #[test]
+    fn join_cardinality_estimates_choose_the_smaller_indexed_outer_side() {
+        let mut indexed_left = join_relation("lefts", 0x31);
+        indexed_left.range_access_paths =
+            vec![crate::metadata_discovery::AuthorizedRangeAccessPath {
+                index_id: [0x72; 16],
+                column_ids: vec![[0x41; 16]],
+            }];
+        let mut indexed_right = join_relation("rights", 0x41);
+        indexed_right.range_access_paths =
+            vec![crate::metadata_discovery::AuthorizedRangeAccessPath {
+                index_id: [0x71; 16],
+                column_ids: vec![[0x51; 16]],
+            }];
+        let encoded = optimize_join_select_v1_with_relations_and_estimates(
+            &filtered_join_select_request(),
+            Some(indexed_left),
+            Some(indexed_right.clone()),
+            Some(4),
+            None,
+        )
+        .unwrap();
+        let plan = decode_join_select_plan_v1(&encoded).unwrap();
+        let index_join = plan.index_nested_loop.expect("indexed join expected");
+        assert_eq!(
+            index_join.outer_side,
+            crate::optimizer_request::JoinRelationSide::Left
+        );
+        assert_eq!(
+            index_join.inner_side,
+            crate::optimizer_request::JoinRelationSide::Right
+        );
+        assert_eq!(index_join.index_id, [0x71; 16]);
+    }
+
+    #[test]
+    fn join_with_two_known_small_inputs_keeps_hash_join() {
+        let mut indexed_left = join_relation("lefts", 0x31);
+        indexed_left.range_access_paths =
+            vec![crate::metadata_discovery::AuthorizedRangeAccessPath {
+                index_id: [0x72; 16],
+                column_ids: vec![[0x41; 16]],
+            }];
+        let mut indexed_right = join_relation("rights", 0x41);
+        indexed_right.range_access_paths =
+            vec![crate::metadata_discovery::AuthorizedRangeAccessPath {
+                index_id: [0x71; 16],
+                column_ids: vec![[0x51; 16]],
+            }];
+        let encoded = optimize_join_select_v1_with_relations_and_estimates(
+            &filtered_join_select_request(),
+            Some(indexed_left),
+            Some(indexed_right.clone()),
+            Some(4),
+            Some(2),
+        )
+        .unwrap();
+        let plan = decode_join_select_plan_v1(&encoded).unwrap();
+        assert!(plan.index_nested_loop.is_none());
+
+        let empty_outer = optimize_join_select_v1_with_relations_and_estimates(
+            &filtered_join_select_request(),
+            Some(join_relation("lefts", 0x31)),
+            Some(indexed_right),
+            Some(0),
+            None,
+        )
+        .unwrap();
+        let plan = decode_join_select_plan_v1(&empty_outer).unwrap();
+        assert!(plan.index_nested_loop.is_none());
     }
 
     #[test]
