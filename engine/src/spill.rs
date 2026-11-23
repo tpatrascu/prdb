@@ -1584,6 +1584,50 @@ mod tests {
     }
 
     #[test]
+    fn optional_configured_filesystem_supports_reserved_spill() {
+        let Some(parent) = std::env::var_os("PRDB_TEST_SPILL_FILESYSTEM_ROOT") else {
+            return;
+        };
+        let scratch = Scratch::new_in(Path::new(&parent));
+        let mut limits = config(&scratch.0);
+        limits.max_bytes_per_invocation = 2 * 1024 * 1024;
+        limits.max_io_bytes_per_invocation = 4 * 1024 * 1024;
+        limits.max_response_bytes = 16 * 1024;
+        limits.max_service_bytes = 4 * 1024 * 1024;
+        let broker = SpillBroker::open(limits).unwrap_or_else(|error| {
+            panic!("configured spill filesystem could not reserve physical allocation: {error:?}")
+        });
+        let owner = package(23);
+        broker
+            .open_package(
+                owner,
+                WorkloadClass::Analytical,
+                Instant::now() + Duration::from_secs(10),
+            )
+            .unwrap();
+        let handle = broker.create(owner).unwrap();
+        let expected = [0xA7; 8192];
+        broker.append(owner, handle, &expected).unwrap();
+        broker.seal(owner, handle).unwrap();
+        let mut actual = vec![0; expected.len()];
+        assert_eq!(
+            broker.read_at(owner, handle, 0, &mut actual),
+            Ok(expected.len())
+        );
+        assert_eq!(actual, expected);
+        broker.close_package(owner).unwrap();
+        let remaining = std::fs::read_dir(&scratch.0)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            remaining,
+            vec![std::ffi::OsString::from(".prdb-spill.lock")]
+        );
+        drop(broker);
+    }
+
+    #[test]
     fn broker_restart_removes_orphaned_stream_files_and_package_directories() {
         let scratch = Scratch::new();
         let first = SpillBroker::open(config(&scratch.0)).unwrap();

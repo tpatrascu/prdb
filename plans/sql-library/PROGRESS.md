@@ -1530,3 +1530,10 @@
 - Regression evidence: ABI v6 fixture mode `K` streams repeated 1 MiB append/seal/destroy operations over the real broker channel and emits a provisional start marker. The confined acceptance starts four operational workers for 64 authorized point reads and 64 durable commits, then issues owner cancellation while the spill loop is active.
 - Verification: the focused delegated-cgroup acceptance passed. Cancellation was accepted during the spill interval; all 64 reads and 64 durable commits completed, the spill invocation resolved ABORTED, and no result rows followed the provisional marker. The active query overlapped the operational sample for 130 ms. `make -f engine/sdk/Makefile sandbox-query-fixture`, focused Rust integration build, warning-denied Clippy, formatting, and `git diff --check` passed.
 - Remaining: longer service-wide disk saturation measurements, supported production filesystem deployment validation, and broader confined result comparisons across workload shapes remain open.
+
+## SQL-9 follow-up: configured filesystem broker smoke probe — verified locally
+
+- Contract: the broker must only use a mounted filesystem after its startup allocation probe succeeds; stream allocation, I/O, and package cleanup must work through the broker without exposing scratch paths or descriptors to the query process.
+- Test: opt-in `PRDB_TEST_SPILL_FILESYSTEM_ROOT` points the broker unit fixture at an existing directory on the selected mount. It opens the broker, reserves physical spill allocation, round-trips an 8 KiB stream, closes the package, and checks that only the broker lock file remains.
+- Verification: the focused unit test passed on the host's NFSv4.2 workspace mount. Its first run exposed a test-fixture issue: the default 4 KiB response limit rejected the 8 KiB read; raising the probe's response cap to 16 KiB made the intended filesystem operation pass. This was test setup correction, not a product behavior regression.
+- Remaining: this single mount smoke test does not establish deployment support or cover exhaustion/recovery; the supported filesystem matrix and longer service-wide saturation measurements remain open.

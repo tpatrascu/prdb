@@ -34,6 +34,8 @@ Acceptance must prove that the executor receives neither scratch paths nor file 
 
 Physical filesystem exhaustion is also exercised by the confined SQL-9 disk-full acceptance: it fills a separate ext4 filesystem after broker startup and verifies that a spill ORDER BY allocation failure emits no SQLR rows and resolves as durable ABORTED. The reproducible setup and environment variables are in [`SANDBOX_TEST.md`](SANDBOX_TEST.md).
 
+The opt-in `PRDB_TEST_SPILL_FILESYSTEM_ROOT` broker probe also passed on this host's NFSv4.2 workspace mount. It opened the broker, reserved spill allocation, round-tripped an 8 KiB stream, and reclaimed the package files. This single development-host smoke test does not establish NFS deployment support or replace the target-filesystem allocation, exhaustion, locking, and recovery matrix.
+
 The `PRDB_TEST_SPILL_PRESSURE_CANCEL_ONLY` acceptance runs concurrent broker appends/seals while four operational workers perform 64 point reads and 64 durable commits, then requests owner cancellation during spill activity. It verifies that cancellation is accepted and the operational work finishes while the spill invocation durably aborts. Longer service-wide saturation and target-filesystem validation remain deployment work.
 
 Maintain a feature/type/operator matrix against specs and compare interpreter results/errors with small independent authorized-view fixtures. Fuzz the C parser separately from Rust query/plan decoders. C unit executables are maintained SDK tests; query artifacts run only through the sandbox harness. Initial SQL completion does not complete analytical support. First behavior: one supported SELECT parse fixture and one unsupported-statement error, once grammar and bounds are specified.

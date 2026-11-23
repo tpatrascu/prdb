@@ -134,3 +134,15 @@ The existing `PRDB_TEST_SPILL_QUOTA_ONLY=1` mode remains the broker allocation-q
 `PRDB_TEST_SPILL_PRESSURE_CANCEL_ONLY=1` runs 1 MiB append/seal/destroy cycles on the confined worker's broker channel and relays a start marker while the writes continue. The delegated harness starts four operational workers for 64 authorized point reads and 64 durable commits and requests owner cancellation during the spill sequence. It checks cancellation completes within two seconds, every operational read and commit finishes, and the spill invocation records ABORTED with no SQL result rows after the start marker. This is a local concurrent pressure/cancellation check; it does not replace longer saturation measurements on deployment storage.
 
 The confined write/read fixture submits the two-sided INTEGER predicate `left_key >= $1 AND left_key < $2` against the authorized non-unique `grouped_left_key_range` index. It collects optimizer output and the normal authorized full-row SQL scan output from the same invocation snapshot and compares value order and duplicate multiplicity. The existing delegated acceptance therefore checks range-hint matching, executor range submission, filtering/projection, and equivalence across the real confined process path.
+# Spill filesystem smoke probe
+
+To exercise broker startup, physical allocation reservation, stream read/write, and package cleanup on a mounted filesystem, set `PRDB_TEST_SPILL_FILESYSTEM_ROOT` to an existing directory on that filesystem and run:
+
+```sh
+PRDB_TEST_SPILL_FILESYSTEM_ROOT=/absolute/path/on/mount \
+  nix develop --no-update-lock-file -c cargo test -p prdb-engine \
+  spill::tests::optional_configured_filesystem_supports_reserved_spill \
+  --locked -- --exact --nocapture
+```
+
+The probe is opt-in and does not fill the filesystem. A passing result is only a smoke test for the selected mount; deployment acceptance still needs the supported filesystem matrix, including exhaustion and recovery behavior.
