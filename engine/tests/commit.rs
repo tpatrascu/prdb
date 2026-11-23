@@ -52057,7 +52057,7 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
                 &mut server,
                 &service_transaction,
                 |operation, request_id| {
-                    if operation == IpcOperation::EstimateScan as u16 && request_id == 6 {
+                    if operation == IpcOperation::EstimateScan as u16 && request_id == 7 {
                         let mut invocation = observer_transaction
                             .lock()
                             .expect("shared planner invocation lock");
@@ -52149,6 +52149,29 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
         let join_population = DescribePlanRelationResponse::decode(&join_population.payload)?;
         assert_eq!(join_population.visible_rows_estimate, Some(5));
 
+        prdb_engine::ipc::write_frame(
+            &mut client,
+            &IpcFrame {
+                operation: IpcOperation::DescribePlanRelation as u16,
+                request_id: 4,
+                payload: DescribePlanRelationRequest {
+                    schema_name: "planner_stats".to_owned(),
+                    relation_name: "observations".to_owned(),
+                    include_scan_estimate: false,
+                    population_estimate_max_rows: Some(128),
+                }
+                .encode()?,
+            },
+        )?;
+        let repeated_population = prdb_engine::ipc::read_frame(&mut client)?
+            .ok_or("planner stream closed before repeated population estimate")?;
+        assert_eq!(
+            DescribePlanRelationResponse::decode(&repeated_population.payload)?
+                .visible_rows_estimate,
+            Some(5),
+            "an unchanged planner session must reuse its exact population estimate"
+        );
+
         let estimate_predicate = prdb_engine::optimizer_binding::BoundPredicate::Compare {
             operator: prdb_engine::optimizer_request::Comparison::Equal,
             left: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Column(
@@ -52165,7 +52188,7 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             &mut client,
             &IpcFrame {
                 operation: IpcOperation::EstimateScan as u16,
-                request_id: 4,
+                request_id: 5,
                 payload: EstimatePredicateRequest::from_bound_predicate(
                     "planner_stats".to_owned(),
                     "observations".to_owned(),
@@ -52188,7 +52211,7 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             &mut client,
             &IpcFrame {
                 operation: IpcOperation::EstimateScan as u16,
-                request_id: 5,
+                request_id: 6,
                 payload: EstimatePredicateRequest::from_bound_predicate(
                     "planner_stats".to_owned(),
                     "observations".to_owned(),
@@ -52212,7 +52235,7 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             &mut client,
             &IpcFrame {
                 operation: IpcOperation::EstimateScan as u16,
-                request_id: 6,
+                request_id: 7,
                 payload: EstimatePredicateRequest::from_bound_predicate(
                     "planner_stats".to_owned(),
                     "observations".to_owned(),
@@ -52232,7 +52255,30 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             "a private write between identical estimates must invalidate session reuse"
         );
 
-        for request_id in 7..(2 + MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION as u64) {
+        prdb_engine::ipc::write_frame(
+            &mut client,
+            &IpcFrame {
+                operation: IpcOperation::DescribePlanRelation as u16,
+                request_id: 8,
+                payload: DescribePlanRelationRequest {
+                    schema_name: "planner_stats".to_owned(),
+                    relation_name: "observations".to_owned(),
+                    include_scan_estimate: false,
+                    population_estimate_max_rows: Some(128),
+                }
+                .encode()?,
+            },
+        )?;
+        let post_write_population = prdb_engine::ipc::read_frame(&mut client)?
+            .ok_or("planner stream closed before post-write population estimate")?;
+        assert_eq!(
+            DescribePlanRelationResponse::decode(&post_write_population.payload)?
+                .visible_rows_estimate,
+            Some(6),
+            "a private write must invalidate the cached population estimate"
+        );
+
+        for request_id in 9..(2 + MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION as u64) {
             prdb_engine::ipc::write_frame(
                 &mut client,
                 &IpcFrame {

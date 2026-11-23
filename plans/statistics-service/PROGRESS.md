@@ -206,3 +206,9 @@
 - A storage regression drives the gateway's scheduled maintenance tick, checks the persisted exact record and cursor wraparound, and confirms this path does not materialize the table list. The focused regression passes.
 - Verification: format check, locked workspace build, warning-denied Clippy, and the complete serial delegated-cgroup workspace suite pass. The suite includes 377 library tests, 205 commit integration tests, 3 metadata-process tests, 79 transaction tests, and all remaining workspace targets.
 - Remaining: no trusted consumer reads the global records yet; collection currently covers only row population. Richer physical statistics, consumer freshness validation, and mixed-load/target-host evidence remain open.
+
+## ST-5 follow-up: reuse exact population probes within a planner session — verified slice
+
+- Population estimates are cached by relation ID, schema ID/version, and requested row bound inside `PlannerMetadataSessionState`. The cache remains bound to the planner's invocation snapshot and authorization context; every request, including a cache hit, consumes the 16-request allowance. A changed private-write generation invalidates cached population and predicate estimates. Unknown results are not cached.
+- `planner_stream_estimate_allowance_falls_back_without_aborting_invocation` now repeats an exact population estimate over the real planner stream, verifies a private insert changes the next estimate from five to six, and confirms cache hits do not bypass the cumulative allowance.
+- Verification: the focused planner-stream integration regression and two cache unit tests pass. Format check, locked workspace build, warning-denied Clippy, and full serial delegated-cgroup workspace suite pass. The suite includes 379 library tests, 205 commit integration tests, 3 metadata-process tests, 79 transaction tests, and all remaining workspace targets.

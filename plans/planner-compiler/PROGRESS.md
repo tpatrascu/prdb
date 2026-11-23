@@ -748,3 +748,9 @@
 - Exact predicate estimates can be reused only inside the same planner session, for identical relation/schema identity, qualified names, predicate bytes, and candidate bound. The invocation snapshot and authorization context remain session-scoped; the cumulative planner estimate allowance applies to cache hits, Unknown is not cached, and results never cross sessions.
 - A checked overlay write generation changes on successful mutations and invalidates prior entries. The shared-channel regression observes an identical estimate before and after an invocation-private insert; its initial stale-cache failure returned `(5,1)` instead of `(6,2)`, and now passes with the updated count.
 - Verification: workspace build, format check, warning-denied Clippy, maintained TinyCC tests and sandbox fixture passed. The delegated cgroup probe found writable `cpu memory pids`; the complete serial delegated-cgroup workspace suite passed, including the shared planner-session invalidation regression.
+
+## OP-6 follow-up: cache bounded population probes — implementation
+
+- `PlannerMetadataSessionState` now preserves exact population-probe cache entries across request detach/reattach, keyed by relation ID, schema ID/version, and row bound. Cache hits still consume one planner estimate allowance; changed overlay generations invalidate population and predicate entries. Unknown probes are not cached.
+- The real planner-stream allowance regression now checks repeated population estimates, a changed result after a staged private row, and allowance exhaustion after cache hits.
+- Verification: the focused planner-stream integration regression and two exact/unknown cache unit tests passed. Format check, locked workspace build, warning-denied Clippy, and full serial delegated-cgroup workspace suite passed, including 379 library tests, 205 commit integration tests, 3 metadata-process tests, 79 transaction tests, and all remaining workspace targets.

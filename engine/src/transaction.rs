@@ -347,14 +347,15 @@ pub(crate) struct ExecutorMetadataSessionState {
 }
 
 /// Planner metadata session with opaque, connection-local table handles.
-/// Exact predicate estimates may be reused while the invocation and its
-/// private-write generation remain unchanged.
+/// Exact predicate and population estimates may be reused while the invocation
+/// and its private-write generation remain unchanged.
 pub struct PlannerMetadataConnection<'connection, 'db> {
     transaction: &'connection mut InvocationTransaction<'db>,
     handles: HashMap<[u8; 16], PlannerTableHandleState>,
     used_tokens: HashSet<[u8; 16]>,
     estimate_requests: usize,
     predicate_estimates: HashMap<PredicateEstimateCacheKey, (u64, (u64, u64))>,
+    population_estimates: HashMap<PopulationEstimateCacheKey, (u64, u64)>,
 }
 
 #[derive(Default)]
@@ -363,6 +364,7 @@ pub(crate) struct PlannerMetadataSessionState {
     used_tokens: HashSet<[u8; 16]>,
     estimate_requests: usize,
     predicate_estimates: HashMap<PredicateEstimateCacheKey, (u64, (u64, u64))>,
+    population_estimates: HashMap<PopulationEstimateCacheKey, (u64, u64)>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -373,6 +375,14 @@ struct PredicateEstimateCacheKey {
     schema_name: String,
     relation_name: String,
     predicate_bytes: Vec<u8>,
+    maximum_rows: u64,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct PopulationEstimateCacheKey {
+    relation_id: [u8; 16],
+    schema_id: [u8; 16],
+    schema_version: u64,
     maximum_rows: u64,
 }
 
@@ -875,6 +885,7 @@ impl<'db> InvocationTransaction<'db> {
             used_tokens: state.used_tokens,
             estimate_requests: state.estimate_requests,
             predicate_estimates: state.predicate_estimates,
+            population_estimates: state.population_estimates,
         }
     }
 
@@ -10162,6 +10173,7 @@ impl PlannerMetadataConnection<'_, '_> {
             used_tokens: self.used_tokens,
             estimate_requests: self.estimate_requests,
             predicate_estimates: self.predicate_estimates,
+            population_estimates: self.population_estimates,
         }
     }
 
@@ -10404,6 +10416,13 @@ impl PlannerMetadataConnection<'_, '_> {
         let state = self
             .transaction
             .load_catalog_estimate_projection(description.relation_id)?;
+        let cache_key = PopulationEstimateCacheKey {
+            relation_id: description.relation_id,
+            schema_id: state.schema.schema_id,
+            schema_version: state.schema.schema_version,
+            maximum_rows,
+        };
+        let write_generation = self.transaction.overlay.generation();
         let projection = AuthorizedProjection {
             columns: &state.schema.columns,
             column_ids: &state.schema.column_ids,
@@ -10416,10 +10435,19 @@ impl PlannerMetadataConnection<'_, '_> {
             policy_driving_columns: &state.policy_driving_columns,
             dependencies: &[],
         };
-        self.transaction.estimate_authorized_population_at_most(
-            description.relation_id,
-            &projection,
-            maximum_rows,
+        self.transaction.check_deadline()?;
+        let transaction = &mut *self.transaction;
+        cached_population_estimate(
+            &mut self.population_estimates,
+            cache_key,
+            write_generation,
+            || {
+                transaction.estimate_authorized_population_at_most(
+                    description.relation_id,
+                    &projection,
+                    maximum_rows,
+                )
+            },
         )
     }
 
@@ -10527,6 +10555,23 @@ fn consume_planner_estimate_budget(requests: &mut usize) -> bool {
     }
     *requests += 1;
     true
+}
+
+fn cached_population_estimate<E>(
+    cache: &mut HashMap<PopulationEstimateCacheKey, (u64, u64)>,
+    key: PopulationEstimateCacheKey,
+    write_generation: u64,
+    estimate: impl FnOnce() -> Result<Option<u64>, E>,
+) -> Result<Option<u64>, E> {
+    cache.retain(|_, (generation, _)| *generation == write_generation);
+    if let Some((_, exact_rows)) = cache.get(&key) {
+        return Ok(Some(*exact_rows));
+    }
+    let exact_rows = estimate()?;
+    if let Some(exact_rows) = exact_rows {
+        cache.insert(key, (write_generation, exact_rows));
+    }
+    Ok(exact_rows)
 }
 
 fn index_component_unconditionally_readable(
@@ -11617,5 +11662,69 @@ mod planner_estimate_budget_tests {
         assert_eq!(requests, MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION);
         assert!(!consume_planner_estimate_budget(&mut requests));
         assert_eq!(requests, MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION);
+    }
+}
+
+#[cfg(test)]
+mod planner_population_estimate_cache_tests {
+    use super::{PopulationEstimateCacheKey, cached_population_estimate};
+    use std::cell::Cell;
+    use std::collections::HashMap;
+
+    fn key(maximum_rows: u64) -> PopulationEstimateCacheKey {
+        PopulationEstimateCacheKey {
+            relation_id: [1; 16],
+            schema_id: [2; 16],
+            schema_version: 3,
+            maximum_rows,
+        }
+    }
+
+    #[test]
+    fn exact_population_cache_hits_and_private_write_generation_invalidates() {
+        let mut cache = HashMap::new();
+        let compute_calls = Cell::new(0);
+        assert_eq!(
+            cached_population_estimate(&mut cache, key(128), 0, || {
+                compute_calls.set(compute_calls.get() + 1);
+                Ok::<_, ()>(Some(5))
+            }),
+            Ok(Some(5))
+        );
+        assert_eq!(
+            cached_population_estimate(&mut cache, key(128), 0, || {
+                compute_calls.set(compute_calls.get() + 1);
+                Ok::<_, ()>(Some(99))
+            }),
+            Ok(Some(5))
+        );
+        assert_eq!(compute_calls.get(), 1, "the exact result must be reused");
+
+        assert_eq!(
+            cached_population_estimate(&mut cache, key(128), 1, || {
+                compute_calls.set(compute_calls.get() + 1);
+                Ok::<_, ()>(Some(6))
+            }),
+            Ok(Some(6))
+        );
+        assert_eq!(compute_calls.get(), 2);
+        assert_eq!(cache.len(), 1, "old-generation entries are discarded");
+    }
+
+    #[test]
+    fn unknown_population_estimates_are_not_cached() {
+        let mut cache = HashMap::new();
+        let compute_calls = Cell::new(0);
+        for _ in 0..2 {
+            assert_eq!(
+                cached_population_estimate(&mut cache, key(128), 0, || {
+                    compute_calls.set(compute_calls.get() + 1);
+                    Ok::<_, ()>(None)
+                }),
+                Ok(None)
+            );
+        }
+        assert_eq!(compute_calls.get(), 2);
+        assert!(cache.is_empty());
     }
 }
