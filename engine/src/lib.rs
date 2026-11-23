@@ -48,6 +48,8 @@ pub mod row_record;
 pub mod schema;
 pub mod sdk_registry;
 pub mod snapshot;
+#[cfg(target_os = "linux")]
+pub mod spill;
 pub mod startup;
 pub mod statistics;
 pub mod storage_manager;

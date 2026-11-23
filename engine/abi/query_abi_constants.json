@@ -609,7 +609,10 @@
         }
       ],
       "version": "5",
-      "derives": ["Clone", "Copy"],
+      "derives": [
+        "Clone",
+        "Copy"
+      ],
       "kind": "record"
     },
     {
@@ -652,7 +655,13 @@
         }
       ],
       "version": "5",
-      "derives": ["Clone", "Copy", "Debug", "Eq", "PartialEq"],
+      "derives": [
+        "Clone",
+        "Copy",
+        "Debug",
+        "Eq",
+        "PartialEq"
+      ],
       "kind": "alias",
       "alias_c_type": "prdb_invocation_v2",
       "alias_rust_type": "InvocationV2"
@@ -697,7 +706,143 @@
         }
       ],
       "version": "5",
-      "derives": ["Clone", "Copy", "Debug", "Eq", "PartialEq"],
+      "derives": [
+        "Clone",
+        "Copy",
+        "Debug",
+        "Eq",
+        "PartialEq"
+      ],
+      "kind": "record"
+    },
+    {
+      "c_type": "prdb_host_api_v6",
+      "rust_type": "HostApiV6",
+      "size": 72,
+      "alignment": 8,
+      "fields": [
+        {
+          "name": "v5",
+          "offset": 0,
+          "c_type": "prdb_host_api_v5",
+          "rust_type": "HostApiV5",
+          "c_name": "v5",
+          "rust_name": "v5"
+        },
+        {
+          "name": "spill_request",
+          "offset": 64,
+          "c_type": "prdb_query_spill_request_v1_fn",
+          "rust_type": "Option<QuerySpillRequestV1>",
+          "c_name": "spill_request",
+          "rust_name": "spill_request"
+        }
+      ],
+      "version": "6",
+      "derives": [
+        "Clone",
+        "Copy"
+      ],
+      "kind": "record"
+    },
+    {
+      "c_type": "prdb_invocation_v6",
+      "rust_type": "InvocationV6",
+      "size": 24,
+      "alignment": 8,
+      "fields": [
+        {
+          "name": "struct_size",
+          "offset": 0,
+          "c_type": "uint32_t",
+          "rust_type": "u32",
+          "c_name": "struct_size",
+          "rust_name": "struct_size"
+        },
+        {
+          "name": "abi_version",
+          "offset": 4,
+          "c_type": "uint32_t",
+          "rust_type": "u32",
+          "c_name": "abi_version",
+          "rust_name": "abi_version"
+        },
+        {
+          "name": "parameters",
+          "offset": 8,
+          "c_type": "const uint8_t *",
+          "rust_type": "*const u8",
+          "c_name": "parameters",
+          "rust_name": "parameters"
+        },
+        {
+          "name": "parameters_len",
+          "offset": 16,
+          "c_type": "uint64_t",
+          "rust_type": "u64",
+          "c_name": "parameters_len",
+          "rust_name": "parameters_len"
+        }
+      ],
+      "version": "6",
+      "derives": [
+        "Clone",
+        "Copy",
+        "Debug",
+        "Eq",
+        "PartialEq"
+      ],
+      "kind": "alias",
+      "alias_c_type": "prdb_invocation_v2",
+      "alias_rust_type": "InvocationV2"
+    },
+    {
+      "c_type": "prdb_query_descriptor_v6_record",
+      "rust_type": "QueryDescriptorV6",
+      "size": 16,
+      "alignment": 4,
+      "fields": [
+        {
+          "name": "struct_size",
+          "offset": 0,
+          "c_type": "uint32_t",
+          "rust_type": "u32",
+          "c_name": "struct_size",
+          "rust_name": "struct_size"
+        },
+        {
+          "name": "abi_version",
+          "offset": 4,
+          "c_type": "uint32_t",
+          "rust_type": "u32",
+          "c_name": "abi_version",
+          "rust_name": "abi_version"
+        },
+        {
+          "name": "host_api_size",
+          "offset": 8,
+          "c_type": "uint32_t",
+          "rust_type": "u32",
+          "c_name": "host_api_size",
+          "rust_name": "host_api_size"
+        },
+        {
+          "name": "invocation_size",
+          "offset": 12,
+          "c_type": "uint32_t",
+          "rust_type": "u32",
+          "c_name": "invocation_size",
+          "rust_name": "invocation_size"
+        }
+      ],
+      "version": "6",
+      "derives": [
+        "Clone",
+        "Copy",
+        "Debug",
+        "Eq",
+        "PartialEq"
+      ],
       "kind": "record"
     }
   ],
@@ -1534,6 +1679,167 @@
       "value": 1,
       "c_name": "PRDB_OPTIMIZER_UPDATE_NULL_VALUE",
       "c_type": "UINT8_C"
+    },
+    {
+      "rust_name": "QUERY_ABI_V6_VERSION",
+      "rust_type": "u32",
+      "value": 6,
+      "c_name": "PRDB_QUERY_ABI_V6_VERSION",
+      "c_type": "UINT32_C"
+    },
+    {
+      "rust_name": "QUERY_DESCRIPTOR_V6_SYMBOL",
+      "rust_type": "&str",
+      "value": "prdb_query_descriptor_v6",
+      "c_name": "PRDB_QUERY_DESCRIPTOR_V6_SYMBOL",
+      "c_type": "string"
+    },
+    {
+      "rust_name": "QUERY_ENTRY_V6_SYMBOL",
+      "rust_type": "&str",
+      "value": "prdb_query_main_v6",
+      "c_name": "PRDB_QUERY_ENTRY_V6_SYMBOL",
+      "c_type": "string"
+    },
+    {
+      "rust_name": "SPILL_CHANNEL_MAGIC",
+      "rust_type": "&str",
+      "value": "PSPL",
+      "c_name": "PRDB_SPILL_CHANNEL_MAGIC",
+      "c_type": "string"
+    },
+    {
+      "rust_name": "SPILL_CHANNEL_VERSION",
+      "rust_type": "u16",
+      "value": 1,
+      "c_name": "PRDB_SPILL_CHANNEL_VERSION",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "SPILL_CHANNEL_HEADER_BYTES",
+      "rust_type": "u32",
+      "value": 20,
+      "c_name": "PRDB_SPILL_CHANNEL_HEADER_BYTES",
+      "c_type": "UINT32_C"
+    },
+    {
+      "rust_name": "SPILL_OP_CREATE",
+      "rust_type": "u16",
+      "value": 1,
+      "c_name": "PRDB_SPILL_OP_CREATE",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "SPILL_OP_APPEND",
+      "rust_type": "u16",
+      "value": 2,
+      "c_name": "PRDB_SPILL_OP_APPEND",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "SPILL_OP_SEAL",
+      "rust_type": "u16",
+      "value": 3,
+      "c_name": "PRDB_SPILL_OP_SEAL",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "SPILL_OP_READ_AT",
+      "rust_type": "u16",
+      "value": 4,
+      "c_name": "PRDB_SPILL_OP_READ_AT",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "SPILL_OP_DESTROY",
+      "rust_type": "u16",
+      "value": 5,
+      "c_name": "PRDB_SPILL_OP_DESTROY",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "SPILL_STATUS_OK",
+      "rust_type": "u16",
+      "value": 0,
+      "c_name": "PRDB_SPILL_STATUS_OK",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "SPILL_STATUS_INVALID_HANDLE",
+      "rust_type": "u16",
+      "value": 1,
+      "c_name": "PRDB_SPILL_STATUS_INVALID_HANDLE",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "SPILL_STATUS_INVALID_RANGE",
+      "rust_type": "u16",
+      "value": 2,
+      "c_name": "PRDB_SPILL_STATUS_INVALID_RANGE",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "SPILL_STATUS_STREAM_LIMIT",
+      "rust_type": "u16",
+      "value": 3,
+      "c_name": "PRDB_SPILL_STATUS_STREAM_LIMIT",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "SPILL_STATUS_OPERATION_LIMIT",
+      "rust_type": "u16",
+      "value": 4,
+      "c_name": "PRDB_SPILL_STATUS_OPERATION_LIMIT",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "SPILL_STATUS_IO_LIMIT",
+      "rust_type": "u16",
+      "value": 5,
+      "c_name": "PRDB_SPILL_STATUS_IO_LIMIT",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "SPILL_STATUS_ALLOCATION_LIMIT",
+      "rust_type": "u16",
+      "value": 6,
+      "c_name": "PRDB_SPILL_STATUS_ALLOCATION_LIMIT",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "SPILL_STATUS_RESPONSE_LIMIT",
+      "rust_type": "u16",
+      "value": 7,
+      "c_name": "PRDB_SPILL_STATUS_RESPONSE_LIMIT",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "SPILL_STATUS_CANCELLED",
+      "rust_type": "u16",
+      "value": 8,
+      "c_name": "PRDB_SPILL_STATUS_CANCELLED",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "SPILL_STATUS_DISABLED",
+      "rust_type": "u16",
+      "value": 9,
+      "c_name": "PRDB_SPILL_STATUS_DISABLED",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "SPILL_STATUS_CLOSED",
+      "rust_type": "u16",
+      "value": 10,
+      "c_name": "PRDB_SPILL_STATUS_CLOSED",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "SPILL_STATUS_INTERNAL",
+      "rust_type": "u16",
+      "value": 255,
+      "c_name": "PRDB_SPILL_STATUS_INTERNAL",
+      "c_type": "UINT16_C"
     }
   ],
   "payload_schemas": [
@@ -1544,13 +1850,30 @@
       "generate_c_codec": true,
       "codec_prefix": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "schema_name_length", "encoding": "u16be" },
-        { "name": "relation_name_length", "encoding": "u16be" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "schema_name_length",
+          "encoding": "u16be"
+        },
+        {
+          "name": "relation_name_length",
+          "encoding": "u16be"
+        }
       ],
       "trailing_fields": [
-        { "name": "schema_name", "encoding": "utf8", "length_field": "schema_name_length" },
-        { "name": "relation_name", "encoding": "utf8", "length_field": "relation_name_length" }
+        {
+          "name": "schema_name",
+          "encoding": "utf8",
+          "length_field": "schema_name_length"
+        },
+        {
+          "name": "relation_name",
+          "encoding": "utf8",
+          "length_field": "relation_name_length"
+        }
       ]
     },
     {
@@ -1559,8 +1882,14 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "status", "encoding": "u8" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "status",
+          "encoding": "u8"
+        }
       ],
       "trailing_fields": []
     },
@@ -1571,14 +1900,32 @@
       "generate_c_codec": true,
       "codec_prefix": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "status", "encoding": "u8" },
-        { "name": "relation_id", "encoding": "bytes16" },
-        { "name": "relation_handle", "encoding": "bytes16" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "status",
+          "encoding": "u8"
+        },
+        {
+          "name": "relation_id",
+          "encoding": "bytes16"
+        },
+        {
+          "name": "relation_handle",
+          "encoding": "bytes16"
+        }
       ],
       "trailing_fields": [
-        { "name": "relation_name", "encoding": "length_prefixed_utf8" },
-        { "name": "column_count", "encoding": "u16be" }
+        {
+          "name": "relation_name",
+          "encoding": "length_prefixed_utf8"
+        },
+        {
+          "name": "column_count",
+          "encoding": "u16be"
+        }
       ]
     },
     {
@@ -1588,12 +1935,25 @@
       "generate_c_codec": true,
       "codec_prefix": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "relation_handle", "encoding": "bytes16" },
-        { "name": "column_count", "encoding": "u16be" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "relation_handle",
+          "encoding": "bytes16"
+        },
+        {
+          "name": "column_count",
+          "encoding": "u16be"
+        }
       ],
       "trailing_fields": [
-        { "name": "column_ids", "encoding": "bytes16_array", "length_field": "column_count" }
+        {
+          "name": "column_ids",
+          "encoding": "bytes16_array",
+          "length_field": "column_count"
+        }
       ]
     },
     {
@@ -1603,11 +1963,26 @@
       "generate_c_codec": true,
       "codec_prefix": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "relation_handle", "encoding": "bytes16" },
-        { "name": "index_id", "encoding": "bytes16" },
-        { "name": "key_count", "encoding": "u16be" },
-        { "name": "column_count", "encoding": "u16be" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "relation_handle",
+          "encoding": "bytes16"
+        },
+        {
+          "name": "index_id",
+          "encoding": "bytes16"
+        },
+        {
+          "name": "key_count",
+          "encoding": "u16be"
+        },
+        {
+          "name": "column_count",
+          "encoding": "u16be"
+        }
       ],
       "trailing_fields": []
     },
@@ -1618,9 +1993,18 @@
       "generate_c_codec": true,
       "codec_prefix": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "relation_handle", "encoding": "bytes16" },
-        { "name": "index_id", "encoding": "bytes16" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "relation_handle",
+          "encoding": "bytes16"
+        },
+        {
+          "name": "index_id",
+          "encoding": "bytes16"
+        }
       ],
       "trailing_fields": []
     },
@@ -1630,8 +2014,14 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "cursor_handle", "encoding": "bytes16" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "cursor_handle",
+          "encoding": "bytes16"
+        }
       ],
       "trailing_fields": []
     },
@@ -1641,8 +2031,14 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "status", "encoding": "u8" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "status",
+          "encoding": "u8"
+        }
       ],
       "trailing_fields": []
     },
@@ -1652,8 +2048,14 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "cancelled", "encoding": "u8" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "cancelled",
+          "encoding": "u8"
+        }
       ],
       "trailing_fields": []
     },
@@ -1663,8 +2065,14 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "cursor_handle", "encoding": "bytes16" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "cursor_handle",
+          "encoding": "bytes16"
+        }
       ],
       "trailing_fields": []
     },
@@ -1674,10 +2082,22 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "cursor_handle", "encoding": "bytes16" },
-        { "name": "max_scanned", "encoding": "u16be" },
-        { "name": "max_bytes", "encoding": "u32be" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "cursor_handle",
+          "encoding": "bytes16"
+        },
+        {
+          "name": "max_scanned",
+          "encoding": "u16be"
+        },
+        {
+          "name": "max_bytes",
+          "encoding": "u32be"
+        }
       ],
       "trailing_fields": []
     },
@@ -1688,9 +2108,18 @@
       "generate_c_codec": true,
       "codec_prefix": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "finished", "encoding": "u8" },
-        { "name": "row_count", "encoding": "u16be" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "finished",
+          "encoding": "u8"
+        },
+        {
+          "name": "row_count",
+          "encoding": "u16be"
+        }
       ],
       "trailing_fields": []
     },
@@ -1701,10 +2130,22 @@
       "generate_c_codec": true,
       "codec_prefix": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "finished", "encoding": "u8" },
-        { "name": "cursor_handle", "encoding": "bytes16" },
-        { "name": "row_count", "encoding": "u16be" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "finished",
+          "encoding": "u8"
+        },
+        {
+          "name": "cursor_handle",
+          "encoding": "bytes16"
+        },
+        {
+          "name": "row_count",
+          "encoding": "u16be"
+        }
       ],
       "trailing_fields": []
     },
@@ -1714,8 +2155,14 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "row_handle", "encoding": "bytes16" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "row_handle",
+          "encoding": "bytes16"
+        }
       ],
       "trailing_fields": []
     },
@@ -1725,8 +2172,14 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "row_handle", "encoding": "bytes16" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "row_handle",
+          "encoding": "bytes16"
+        }
       ],
       "trailing_fields": []
     },
@@ -1737,9 +2190,18 @@
       "generate_c_codec": true,
       "codec_prefix": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "row_handle", "encoding": "bytes16" },
-        { "name": "patch_count", "encoding": "u16be" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "row_handle",
+          "encoding": "bytes16"
+        },
+        {
+          "name": "patch_count",
+          "encoding": "u16be"
+        }
       ],
       "trailing_fields": []
     },
@@ -1750,9 +2212,18 @@
       "generate_c_codec": true,
       "codec_prefix": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "relation_handle", "encoding": "bytes16" },
-        { "name": "value_count", "encoding": "u16be" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "relation_handle",
+          "encoding": "bytes16"
+        },
+        {
+          "name": "value_count",
+          "encoding": "u16be"
+        }
       ],
       "trailing_fields": []
     },
@@ -1763,9 +2234,18 @@
       "generate_c_codec": true,
       "codec_prefix": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "planning_handle", "encoding": "bytes16" },
-        { "name": "column_count", "encoding": "u16be" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "planning_handle",
+          "encoding": "bytes16"
+        },
+        {
+          "name": "column_count",
+          "encoding": "u16be"
+        }
       ],
       "trailing_fields": [
         {
@@ -1781,8 +2261,14 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "status", "encoding": "u8" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "status",
+          "encoding": "u8"
+        }
       ],
       "trailing_fields": []
     },
@@ -1793,10 +2279,22 @@
       "generate_c_codec": true,
       "codec_prefix": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "status", "encoding": "u8" },
-        { "name": "visible_rows", "encoding": "u64be" },
-        { "name": "column_count", "encoding": "u16be" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "status",
+          "encoding": "u8"
+        },
+        {
+          "name": "visible_rows",
+          "encoding": "u64be"
+        },
+        {
+          "name": "column_count",
+          "encoding": "u16be"
+        }
       ],
       "trailing_fields": [
         {
@@ -1812,8 +2310,14 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "status", "encoding": "u8" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "status",
+          "encoding": "u8"
+        }
       ],
       "trailing_fields": []
     },
@@ -1824,14 +2328,32 @@
       "generate_c_codec": true,
       "codec_prefix": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "status", "encoding": "u8" },
-        { "name": "relation_id", "encoding": "bytes16" },
-        { "name": "planning_handle", "encoding": "bytes16" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "status",
+          "encoding": "u8"
+        },
+        {
+          "name": "relation_id",
+          "encoding": "bytes16"
+        },
+        {
+          "name": "planning_handle",
+          "encoding": "bytes16"
+        }
       ],
       "trailing_fields": [
-        { "name": "relation_name", "encoding": "length_prefixed_utf8" },
-        { "name": "column_count", "encoding": "u16be" }
+        {
+          "name": "relation_name",
+          "encoding": "length_prefixed_utf8"
+        },
+        {
+          "name": "column_count",
+          "encoding": "u16be"
+        }
       ]
     },
     {
@@ -1840,8 +2362,14 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "status", "encoding": "u8" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "status",
+          "encoding": "u8"
+        }
       ],
       "trailing_fields": []
     },
@@ -1852,16 +2380,40 @@
       "generate_c_codec": true,
       "codec_prefix": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "status", "encoding": "u8" },
-        { "name": "schema_id", "encoding": "bytes16" },
-        { "name": "schema_version", "encoding": "u64be" },
-        { "name": "table_epoch", "encoding": "u64be" },
-        { "name": "relation_id", "encoding": "bytes16" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "status",
+          "encoding": "u8"
+        },
+        {
+          "name": "schema_id",
+          "encoding": "bytes16"
+        },
+        {
+          "name": "schema_version",
+          "encoding": "u64be"
+        },
+        {
+          "name": "table_epoch",
+          "encoding": "u64be"
+        },
+        {
+          "name": "relation_id",
+          "encoding": "bytes16"
+        }
       ],
       "trailing_fields": [
-        { "name": "relation_name", "encoding": "length_prefixed_utf8" },
-        { "name": "column_count", "encoding": "u16be" }
+        {
+          "name": "relation_name",
+          "encoding": "length_prefixed_utf8"
+        },
+        {
+          "name": "column_count",
+          "encoding": "u16be"
+        }
       ]
     },
     {
@@ -1870,8 +2422,14 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "status", "encoding": "u8" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "status",
+          "encoding": "u8"
+        }
       ],
       "trailing_fields": []
     },
@@ -1882,9 +2440,18 @@
       "generate_c_codec": true,
       "codec_prefix": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "status", "encoding": "u8" },
-        { "name": "plan_length", "encoding": "u32be" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "status",
+          "encoding": "u8"
+        },
+        {
+          "name": "plan_length",
+          "encoding": "u32be"
+        }
       ],
       "trailing_fields": [
         {
@@ -1901,9 +2468,18 @@
       "generate_c_codec": true,
       "codec_prefix": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "statement", "encoding": "u8" },
-        { "name": "flags", "encoding": "u8" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "statement",
+          "encoding": "u8"
+        },
+        {
+          "name": "flags",
+          "encoding": "u8"
+        }
       ],
       "trailing_fields": []
     },
@@ -1913,8 +2489,14 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "invocation_id", "encoding": "bytes16" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "invocation_id",
+          "encoding": "bytes16"
+        }
       ],
       "trailing_fields": []
     },
@@ -1924,9 +2506,18 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "invocation_id", "encoding": "bytes16" },
-        { "name": "reason_code", "encoding": "u16be" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "invocation_id",
+          "encoding": "bytes16"
+        },
+        {
+          "name": "reason_code",
+          "encoding": "u16be"
+        }
       ],
       "trailing_fields": []
     },
@@ -1936,8 +2527,14 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "status", "encoding": "u8" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "status",
+          "encoding": "u8"
+        }
       ],
       "trailing_fields": []
     },
@@ -1947,11 +2544,26 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "status", "encoding": "u8" },
-        { "name": "outcome_status", "encoding": "u8" },
-        { "name": "commit_sequence", "encoding": "u64be" },
-        { "name": "retention_deadline", "encoding": "i64be" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "status",
+          "encoding": "u8"
+        },
+        {
+          "name": "outcome_status",
+          "encoding": "u8"
+        },
+        {
+          "name": "commit_sequence",
+          "encoding": "u64be"
+        },
+        {
+          "name": "retention_deadline",
+          "encoding": "i64be"
+        }
       ],
       "trailing_fields": []
     },
@@ -1961,8 +2573,14 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "status", "encoding": "u8" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "status",
+          "encoding": "u8"
+        }
       ],
       "trailing_fields": []
     },
@@ -1972,12 +2590,30 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "status", "encoding": "u8" },
-        { "name": "observed_at", "encoding": "i64be" },
-        { "name": "started_at", "encoding": "i64be" },
-        { "name": "has_deadline", "encoding": "u8" },
-        { "name": "cancellation_requested", "encoding": "u8" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "status",
+          "encoding": "u8"
+        },
+        {
+          "name": "observed_at",
+          "encoding": "i64be"
+        },
+        {
+          "name": "started_at",
+          "encoding": "i64be"
+        },
+        {
+          "name": "has_deadline",
+          "encoding": "u8"
+        },
+        {
+          "name": "cancellation_requested",
+          "encoding": "u8"
+        }
       ],
       "trailing_fields": []
     },
@@ -1987,13 +2623,34 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "status", "encoding": "u8" },
-        { "name": "observed_at", "encoding": "i64be" },
-        { "name": "started_at", "encoding": "i64be" },
-        { "name": "has_deadline", "encoding": "u8" },
-        { "name": "deadline_at", "encoding": "i64be" },
-        { "name": "cancellation_requested", "encoding": "u8" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "status",
+          "encoding": "u8"
+        },
+        {
+          "name": "observed_at",
+          "encoding": "i64be"
+        },
+        {
+          "name": "started_at",
+          "encoding": "i64be"
+        },
+        {
+          "name": "has_deadline",
+          "encoding": "u8"
+        },
+        {
+          "name": "deadline_at",
+          "encoding": "i64be"
+        },
+        {
+          "name": "cancellation_requested",
+          "encoding": "u8"
+        }
       ],
       "trailing_fields": []
     },
@@ -2003,11 +2660,26 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "status", "encoding": "u8" },
-        { "name": "observed_at", "encoding": "i64be" },
-        { "name": "commit_sequence", "encoding": "u64be" },
-        { "name": "retention_deadline", "encoding": "i64be" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "status",
+          "encoding": "u8"
+        },
+        {
+          "name": "observed_at",
+          "encoding": "i64be"
+        },
+        {
+          "name": "commit_sequence",
+          "encoding": "u64be"
+        },
+        {
+          "name": "retention_deadline",
+          "encoding": "i64be"
+        }
       ],
       "trailing_fields": []
     },
@@ -2017,9 +2689,18 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "status", "encoding": "u8" },
-        { "name": "commit_sequence", "encoding": "u64be" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "status",
+          "encoding": "u8"
+        },
+        {
+          "name": "commit_sequence",
+          "encoding": "u64be"
+        }
       ],
       "trailing_fields": []
     },
@@ -2029,8 +2710,14 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "status", "encoding": "u8" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "status",
+          "encoding": "u8"
+        }
       ],
       "trailing_fields": []
     },
@@ -2040,7 +2727,10 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        }
       ],
       "trailing_fields": []
     },
@@ -2050,7 +2740,10 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        }
       ],
       "trailing_fields": []
     }
@@ -2062,14 +2755,32 @@
       "generate_c_codec": true,
       "codec_prefix": true,
       "fields": [
-        { "name": "column_id", "encoding": "bytes16" },
-        { "name": "ordinal", "encoding": "u32be" },
-        { "name": "nullable", "encoding": "u8" },
-        { "name": "type_code", "encoding": "u8" },
-        { "name": "type_parameters", "encoding": "bytes4" }
+        {
+          "name": "column_id",
+          "encoding": "bytes16"
+        },
+        {
+          "name": "ordinal",
+          "encoding": "u32be"
+        },
+        {
+          "name": "nullable",
+          "encoding": "u8"
+        },
+        {
+          "name": "type_code",
+          "encoding": "u8"
+        },
+        {
+          "name": "type_parameters",
+          "encoding": "bytes4"
+        }
       ],
       "trailing_fields": [
-        { "name": "column_name", "encoding": "length_prefixed_utf8" }
+        {
+          "name": "column_name",
+          "encoding": "length_prefixed_utf8"
+        }
       ]
     },
     {
@@ -2077,7 +2788,10 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "column_count", "encoding": "u16be" }
+        {
+          "name": "column_count",
+          "encoding": "u16be"
+        }
       ],
       "trailing_fields": []
     },
@@ -2086,7 +2800,10 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "bound_flag", "encoding": "u8" }
+        {
+          "name": "bound_flag",
+          "encoding": "u8"
+        }
       ],
       "trailing_fields": []
     },
@@ -2096,11 +2813,21 @@
       "generate_c_codec": true,
       "codec_prefix": true,
       "fields": [
-        { "name": "type_code", "encoding": "u8" },
-        { "name": "value_length", "encoding": "u32be" }
+        {
+          "name": "type_code",
+          "encoding": "u8"
+        },
+        {
+          "name": "value_length",
+          "encoding": "u32be"
+        }
       ],
       "trailing_fields": [
-        { "name": "value_bytes", "encoding": "bytes", "length_field": "value_length" }
+        {
+          "name": "value_bytes",
+          "encoding": "bytes",
+          "length_field": "value_length"
+        }
       ]
     },
     {
@@ -2108,7 +2835,10 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "ordinal", "encoding": "u32be" }
+        {
+          "name": "ordinal",
+          "encoding": "u32be"
+        }
       ],
       "trailing_fields": []
     },
@@ -2118,8 +2848,14 @@
       "generate_c_codec": true,
       "codec_prefix": true,
       "fields": [
-        { "name": "row_handle", "encoding": "bytes16" },
-        { "name": "cell_count", "encoding": "u16be" }
+        {
+          "name": "row_handle",
+          "encoding": "bytes16"
+        },
+        {
+          "name": "cell_count",
+          "encoding": "u16be"
+        }
       ],
       "trailing_fields": []
     },
@@ -2128,8 +2864,14 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "version", "encoding": "u8" },
-        { "name": "status", "encoding": "u8" }
+        {
+          "name": "version",
+          "encoding": "u8"
+        },
+        {
+          "name": "status",
+          "encoding": "u8"
+        }
       ],
       "trailing_fields": []
     },
@@ -2139,9 +2881,18 @@
       "generate_c_codec": true,
       "codec_prefix": true,
       "fields": [
-        { "name": "version", "encoding": "u8" },
-        { "name": "status", "encoding": "u8" },
-        { "name": "row_count", "encoding": "u16be" }
+        {
+          "name": "version",
+          "encoding": "u8"
+        },
+        {
+          "name": "status",
+          "encoding": "u8"
+        },
+        {
+          "name": "row_count",
+          "encoding": "u16be"
+        }
       ],
       "trailing_fields": []
     },
@@ -2150,7 +2901,10 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "cell_count", "encoding": "u16be" }
+        {
+          "name": "cell_count",
+          "encoding": "u16be"
+        }
       ],
       "trailing_fields": []
     },
@@ -2159,8 +2913,14 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "version", "encoding": "u8" },
-        { "name": "status", "encoding": "u8" }
+        {
+          "name": "version",
+          "encoding": "u8"
+        },
+        {
+          "name": "status",
+          "encoding": "u8"
+        }
       ],
       "trailing_fields": []
     },
@@ -2169,8 +2929,14 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "version", "encoding": "u8" },
-        { "name": "status", "encoding": "u8" }
+        {
+          "name": "version",
+          "encoding": "u8"
+        },
+        {
+          "name": "status",
+          "encoding": "u8"
+        }
       ],
       "trailing_fields": []
     },
@@ -2180,8 +2946,14 @@
       "generate_c_codec": true,
       "codec_prefix": true,
       "fields": [
-        { "name": "version", "encoding": "u8" },
-        { "name": "status", "encoding": "u8" }
+        {
+          "name": "version",
+          "encoding": "u8"
+        },
+        {
+          "name": "status",
+          "encoding": "u8"
+        }
       ],
       "trailing_fields": []
     },
@@ -2190,7 +2962,10 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "state_code", "encoding": "u8" }
+        {
+          "name": "state_code",
+          "encoding": "u8"
+        }
       ],
       "trailing_fields": []
     },
@@ -2199,7 +2974,10 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "state_code", "encoding": "u8" }
+        {
+          "name": "state_code",
+          "encoding": "u8"
+        }
       ],
       "trailing_fields": []
     },
@@ -2209,11 +2987,26 @@
       "generate_c_codec": true,
       "codec_prefix": true,
       "fields": [
-        { "name": "magic", "encoding": "u32be" },
-        { "name": "version", "encoding": "u16be" },
-        { "name": "operation", "encoding": "u16be" },
-        { "name": "request_id", "encoding": "u64be" },
-        { "name": "payload_length", "encoding": "u32be" }
+        {
+          "name": "magic",
+          "encoding": "u32be"
+        },
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "operation",
+          "encoding": "u16be"
+        },
+        {
+          "name": "request_id",
+          "encoding": "u64be"
+        },
+        {
+          "name": "payload_length",
+          "encoding": "u32be"
+        }
       ],
       "trailing_fields": []
     },
@@ -2223,9 +3016,18 @@
       "generate_c_codec": true,
       "codec_prefix": true,
       "fields": [
-        { "name": "version", "encoding": "u16be" },
-        { "name": "kind", "encoding": "u8" },
-        { "name": "reserved", "encoding": "u8" }
+        {
+          "name": "version",
+          "encoding": "u16be"
+        },
+        {
+          "name": "kind",
+          "encoding": "u8"
+        },
+        {
+          "name": "reserved",
+          "encoding": "u8"
+        }
       ],
       "trailing_fields": []
     },
@@ -2234,7 +3036,10 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "node_count", "encoding": "u8" }
+        {
+          "name": "node_count",
+          "encoding": "u8"
+        }
       ],
       "trailing_fields": []
     },
@@ -2243,7 +3048,10 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "node_tag", "encoding": "u8" }
+        {
+          "name": "node_tag",
+          "encoding": "u8"
+        }
       ],
       "trailing_fields": []
     },
@@ -2252,11 +3060,26 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "column_id", "encoding": "bytes16" },
-        { "name": "ordinal", "encoding": "u32be" },
-        { "name": "type_code", "encoding": "u8" },
-        { "name": "type_parameters", "encoding": "bytes4" },
-        { "name": "nullable", "encoding": "u8" }
+        {
+          "name": "column_id",
+          "encoding": "bytes16"
+        },
+        {
+          "name": "ordinal",
+          "encoding": "u32be"
+        },
+        {
+          "name": "type_code",
+          "encoding": "u8"
+        },
+        {
+          "name": "type_parameters",
+          "encoding": "bytes4"
+        },
+        {
+          "name": "nullable",
+          "encoding": "u8"
+        }
       ],
       "trailing_fields": []
     },
@@ -2265,8 +3088,14 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "schema_id", "encoding": "bytes16" },
-        { "name": "schema_version", "encoding": "u64be" }
+        {
+          "name": "schema_id",
+          "encoding": "bytes16"
+        },
+        {
+          "name": "schema_version",
+          "encoding": "u64be"
+        }
       ],
       "trailing_fields": []
     },
@@ -2275,8 +3104,14 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "relation_id", "encoding": "bytes16" },
-        { "name": "table_epoch", "encoding": "u64be" }
+        {
+          "name": "relation_id",
+          "encoding": "bytes16"
+        },
+        {
+          "name": "table_epoch",
+          "encoding": "u64be"
+        }
       ],
       "trailing_fields": []
     },
@@ -2285,8 +3120,14 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "node_tag", "encoding": "u8" },
-        { "name": "column_count", "encoding": "u16be" }
+        {
+          "name": "node_tag",
+          "encoding": "u8"
+        },
+        {
+          "name": "column_count",
+          "encoding": "u16be"
+        }
       ],
       "trailing_fields": []
     },
@@ -2295,8 +3136,14 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "node_tag", "encoding": "u8" },
-        { "name": "row_limit", "encoding": "u32be" }
+        {
+          "name": "node_tag",
+          "encoding": "u8"
+        },
+        {
+          "name": "row_limit",
+          "encoding": "u32be"
+        }
       ],
       "trailing_fields": []
     },
@@ -2305,8 +3152,14 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "node_tag", "encoding": "u8" },
-        { "name": "text_length", "encoding": "u16be" }
+        {
+          "name": "node_tag",
+          "encoding": "u8"
+        },
+        {
+          "name": "text_length",
+          "encoding": "u16be"
+        }
       ],
       "trailing_fields": []
     },
@@ -2315,8 +3168,14 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "node_tag", "encoding": "u8" },
-        { "name": "integer_value", "encoding": "i64be" }
+        {
+          "name": "node_tag",
+          "encoding": "u8"
+        },
+        {
+          "name": "integer_value",
+          "encoding": "i64be"
+        }
       ],
       "trailing_fields": []
     },
@@ -2325,8 +3184,14 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "node_tag", "encoding": "u8" },
-        { "name": "column_id", "encoding": "bytes16" }
+        {
+          "name": "node_tag",
+          "encoding": "u8"
+        },
+        {
+          "name": "column_id",
+          "encoding": "bytes16"
+        }
       ],
       "trailing_fields": []
     },
@@ -2335,8 +3200,14 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "node_tag", "encoding": "u8" },
-        { "name": "comparison_operator", "encoding": "u8" }
+        {
+          "name": "node_tag",
+          "encoding": "u8"
+        },
+        {
+          "name": "comparison_operator",
+          "encoding": "u8"
+        }
       ],
       "trailing_fields": []
     },
@@ -2345,8 +3216,14 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "node_tag", "encoding": "u8" },
-        { "name": "child_count", "encoding": "u8" }
+        {
+          "name": "node_tag",
+          "encoding": "u8"
+        },
+        {
+          "name": "child_count",
+          "encoding": "u8"
+        }
       ],
       "trailing_fields": []
     },
@@ -2355,7 +3232,10 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "byte_length", "encoding": "u8" }
+        {
+          "name": "byte_length",
+          "encoding": "u8"
+        }
       ],
       "trailing_fields": []
     },
@@ -2364,7 +3244,10 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "node_tag", "encoding": "u8" }
+        {
+          "name": "node_tag",
+          "encoding": "u8"
+        }
       ],
       "trailing_fields": []
     },
@@ -2373,7 +3256,10 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "node_tag", "encoding": "u8" }
+        {
+          "name": "node_tag",
+          "encoding": "u8"
+        }
       ],
       "trailing_fields": []
     },
@@ -2382,8 +3268,14 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "node_tag", "encoding": "u8" },
-        { "name": "boolean_value", "encoding": "u8" }
+        {
+          "name": "node_tag",
+          "encoding": "u8"
+        },
+        {
+          "name": "boolean_value",
+          "encoding": "u8"
+        }
       ],
       "trailing_fields": []
     },
@@ -2392,8 +3284,14 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "node_tag", "encoding": "u8" },
-        { "name": "assignment_count", "encoding": "u16be" }
+        {
+          "name": "node_tag",
+          "encoding": "u8"
+        },
+        {
+          "name": "assignment_count",
+          "encoding": "u16be"
+        }
       ],
       "trailing_fields": []
     },
@@ -2402,8 +3300,14 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "kind", "encoding": "u8" },
-        { "name": "parameter_index", "encoding": "u32be" }
+        {
+          "name": "kind",
+          "encoding": "u8"
+        },
+        {
+          "name": "parameter_index",
+          "encoding": "u32be"
+        }
       ],
       "trailing_fields": []
     },
@@ -2412,14 +3316,38 @@
       "generate_rust_codec": true,
       "generate_c_codec": true,
       "fields": [
-        { "name": "magic", "encoding": "bytes4" },
-        { "name": "major_version", "encoding": "u16le" },
-        { "name": "minor_version", "encoding": "u16le" },
-        { "name": "kind", "encoding": "u16le" },
-        { "name": "flags", "encoding": "u16le" },
-        { "name": "payload_length", "encoding": "u32le" },
-        { "name": "request_id", "encoding": "u64le" },
-        { "name": "response_sequence", "encoding": "u64le" }
+        {
+          "name": "magic",
+          "encoding": "bytes4"
+        },
+        {
+          "name": "major_version",
+          "encoding": "u16le"
+        },
+        {
+          "name": "minor_version",
+          "encoding": "u16le"
+        },
+        {
+          "name": "kind",
+          "encoding": "u16le"
+        },
+        {
+          "name": "flags",
+          "encoding": "u16le"
+        },
+        {
+          "name": "payload_length",
+          "encoding": "u32le"
+        },
+        {
+          "name": "request_id",
+          "encoding": "u64le"
+        },
+        {
+          "name": "response_sequence",
+          "encoding": "u64le"
+        }
       ],
       "trailing_fields": []
     }

@@ -73,7 +73,7 @@ Configure these environment variables in the shell command run by the unit:
 - `PRDB_TEST_SHARED_SQL_QUERY_ARTIFACT`: absolute path to `target/sdk-v1/sql-v3-shared-library.so`.
 - `PRDB_TEST_SHARED_SQL_LOAD_FAILURE_ARTIFACT`: absolute path to `target/sdk-v1/sql-v3-missing-dependency.so`.
 - `PRDB_TEST_EXTRA_ALLOWED_DEPENDENCY`: set to `libprdb_missing.so.1` for the missing-dependency fixture so manifest admission succeeds and the confined loader observes the missing runtime file.
-- `PRDB_TEST_SDK_RELEASE_DIR`: absolute path to the test release directory containing the hostile SDK constructor, normally `target/sdk-v1/hostile-sdk/releases/linux-x86_64/x86_64-v1/nixos-x86_64-glibc-2.42/sdk-1-abis1,2,3,4,5` for the pinned release profile.
+- `PRDB_TEST_SDK_RELEASE_DIR`: absolute path to the test release directory containing the hostile SDK constructor, normally `target/sdk-v1/hostile-sdk/releases/linux-x86_64/x86_64-v1/nixos-x86_64-glibc-2.42/sdk-1-abis1,2,3,4,5,6` for the pinned release profile.
 - `PRDB_TEST_INSTALLED_SDK_RELEASE_DIR`: absolute path to the normal SDK release in `target/release-profile`; process tests install these artifacts into a temporary instance repository.
 - `PRDB_TEST_WRITE_READ_QUERY_ARTIFACT`: absolute path to `target/sdk-v1/sql-v3-write-read.so`.
 - `PRDB_TEST_ORDERED_ANALYTICAL_ONLY`: optionally set to `1` to isolate the high-cardinality ordered SUM branch of the confined write/read acceptance.
@@ -98,8 +98,8 @@ systemd-run --user --wait --pipe --collect \
     export PRDB_TEST_SHARED_SQL_QUERY_ARTIFACT="$PWD/target/sdk-v1/sql-v3-shared-library.so"
     export PRDB_TEST_SHARED_SQL_LOAD_FAILURE_ARTIFACT="$PWD/target/sdk-v1/sql-v3-missing-dependency.so"
     export PRDB_TEST_EXTRA_ALLOWED_DEPENDENCY=libprdb_missing.so.1
-    export PRDB_TEST_SDK_RELEASE_DIR="$PWD/target/sdk-v1/hostile-sdk/releases/linux-x86_64/x86_64-v1/nixos-x86_64-glibc-2.42/sdk-1-abis1,2,3,4,5"
-    export PRDB_TEST_INSTALLED_SDK_RELEASE_DIR="$PWD/target/release-profile/sdk/releases/linux-x86_64/x86_64-v1/nixos-x86_64-glibc-2.42/sdk-1-abis1,2,3,4,5"
+    export PRDB_TEST_SDK_RELEASE_DIR="$PWD/target/sdk-v1/hostile-sdk/releases/linux-x86_64/x86_64-v1/nixos-x86_64-glibc-2.42/sdk-1-abis1,2,3,4,5,6"
+    export PRDB_TEST_INSTALLED_SDK_RELEASE_DIR="$PWD/target/release-profile/sdk/releases/linux-x86_64/x86_64-v1/nixos-x86_64-glibc-2.42/sdk-1-abis1,2,3,4,5,6"
     export PRDB_TEST_NETWORK_CONSTRUCTOR_ARTIFACT="$PWD/target/sdk-v1/sql-v3-network-constructor.so"
     export PRDB_TEST_FORGED_HANDLE_QUERY_ARTIFACT="$PWD/target/sdk-v1/sql-v3-forged-relation-handle.so"
     export PRDB_TEST_FORGED_ROW_HANDLE_QUERY_ARTIFACT="$PWD/target/sdk-v1/sql-v3-forged-row-handle.so"
@@ -120,6 +120,10 @@ cargo test -p prdb-engine --locked --test metadata_process disconnected_submissi
 ```
 
 Do not execute or load the artifact outside this executor path. The complete workspace command reports these tests as passed rather than ignored; the test must run on a host with the configured cgroup delegation and runtime profile.
+
+## SQL-9 secure spill acceptance
+
+The `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` test has focused ABI v6 spill modes selected by one environment variable: `PRDB_TEST_SPILL_QUOTA_ONLY`, `PRDB_TEST_SPILL_ONLY`, `PRDB_TEST_SPILL_DISABLED_ONLY`, `PRDB_TEST_SPILL_SORT_ONLY`, `PRDB_TEST_SPILL_DECIMAL_ONLY`, `PRDB_TEST_SPILL_REDACTED_ONLY`, `PRDB_TEST_SPILL_JOIN_ONLY`, `PRDB_TEST_SPILL_CRASH_ONLY`, or `PRDB_TEST_SPILL_PRESSURE_ONLY`. Set `PRDB_TEST_COUNT_BIGINT_ONLY=1` for the shared minimal database fixture and set `PRDB_TEST_SPILL_QUERY_ARTIFACT` to the built `target/sdk-v1/sql-v6-spill.so`. The enabled modes open a real `SpillBroker` under a private temporary scratch parent. Spill GROUP BY inserts two NULL keys and checks one `(NULL,2)` SQLR group; integer ORDER BY checks NULL-first descending output; Decimal ORDER BY checks NULL-first Decimal ordering and exact SQLR encodings; the REDACTED mode applies a restrictive cell policy to the Decimal sort key and requires a durable abort with no SQLR rows; JOIN checks that NULL keys do not match. The crash mode writes a private spill stream, emits provisional bytes, faults the confined worker, and requires a durable abort plus package cleanup. The pressure mode appends and seals 1 MiB, then sorts 136 authorized rows through three external runs while 64 operational point reads and 64 durable commits overlap; it verifies every ordered SQLR row. The broker's response cap is smaller than this append, confirming the response and request limits are independent. Each mode must run through the delegated cgroup wrapper with the SDK release and runtime variables above. The spill-disabled mode intentionally leaves the broker absent and checks the bounded fallback over the same rows.
 
 ## Indexed range equivalence
 

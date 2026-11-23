@@ -1,6 +1,8 @@
 #include "prdb_sdk_sql_exec_v2.h"
 #include "prdb_sdk_sql_exec_v3.h"
 #include "prdb_sdk_sql_dml_v3.h"
+#include "prdb_sdk_sql_order_v2.h"
+#include "prdb_sdk_sql_spill_sort_v1.h"
 #include "sql_parameter_internal.h"
 
 #include <string.h>
@@ -46,8 +48,162 @@ static int span_matches_name(const uint8_t *sql,
     return 1;
 }
 
+#define SQL_SPILL_SORT_ROW_BYTES UINT32_C(1024)
+
+typedef struct sql_spill_sort_context {
+    const prdb_host_api_v6 *host;
+    prdb_sdk_spill_stream_v1 input;
+    uint64_t source_offset;
+    uint64_t record_count;
+    uint32_t order_ordinal;
+    uint32_t order_type;
+    uint8_t decimal_scale;
+    uint8_t descending;
+    uint8_t has_limit;
+    uint64_t limit;
+    uint64_t emitted;
+    prdb_sdk_select_binding_v2 binding;
+    prdb_sdk_sql_result_row_v2_fn on_row;
+    void *result_context;
+} sql_spill_sort_context;
+
+static uint32_t spill_read_u32(const uint8_t *bytes) {
+    return ((uint32_t)bytes[0] << 24) | ((uint32_t)bytes[1] << 16) |
+           ((uint32_t)bytes[2] << 8) | bytes[3];
+}
+
+static void spill_write_u32(uint8_t *bytes, uint32_t value) {
+    bytes[0] = (uint8_t)(value >> 24);
+    bytes[1] = (uint8_t)(value >> 16);
+    bytes[2] = (uint8_t)(value >> 8);
+    bytes[3] = (uint8_t)value;
+}
+
+static int32_t parse_spilled_row(const uint8_t *record,
+                                 sql_spill_sort_context *context,
+                                 uint8_t wire[SQL_SPILL_SORT_ROW_BYTES + 5],
+                                 prdb_sdk_row_v1 *row_out,
+                                 prdb_sdk_value_v1 *key_out) {
+    prdb_sdk_batch_v1 batch = {0};
+    prdb_sdk_row_iterator_v1 rows = {0};
+    prdb_sdk_cell_iterator_v1 cells = {0};
+    uint32_t row_bytes = spill_read_u32(record);
+    if (row_bytes == 0 || row_bytes > SQL_SPILL_SORT_ROW_BYTES - 4)
+        return -1;
+    wire[0] = 0;
+    wire[1] = (uint8_t)PRDB_SDK_BATCH_WIRE_V1_VERSION;
+    wire[2] = 1;
+    wire[3] = 0;
+    wire[4] = 1;
+    memcpy(wire + 5, record + 4, row_bytes);
+    if (prdb_sdk_batch_open_v1(&batch, sizeof(batch), wire, row_bytes + 5) !=
+            PRDB_SDK_BATCH_OK ||
+        prdb_sdk_batch_rows_begin_v1(&batch, &rows, sizeof(rows)) !=
+            PRDB_SDK_BATCH_OK ||
+        prdb_sdk_batch_row_next_v1(&rows, row_out, sizeof(*row_out)) !=
+            PRDB_SDK_BATCH_OK ||
+        row_out->cell_count <= context->order_ordinal ||
+        prdb_sdk_row_cells_begin_v1(row_out, &cells, sizeof(cells)) !=
+            PRDB_SDK_BATCH_OK) {
+        return -1;
+    }
+    for (uint32_t ordinal = 0; ordinal <= context->order_ordinal; ++ordinal) {
+        if (prdb_sdk_cell_next_v1(&cells, key_out, sizeof(*key_out)) !=
+            PRDB_SDK_BATCH_OK)
+            return -1;
+    }
+    return 0;
+}
+
+static int32_t spill_sort_source(void *opaque, uint8_t *record,
+                                 uint32_t capacity, uint32_t *row_len,
+                                 uint8_t *has_row) {
+    sql_spill_sort_context *context = (sql_spill_sort_context *)opaque;
+    uint64_t read_bytes = 0;
+    if (capacity < SQL_SPILL_SORT_ROW_BYTES || row_len == NULL ||
+        has_row == NULL)
+        return -1;
+    *row_len = 0;
+    *has_row = 0;
+    if (context->source_offset == context->record_count *
+                                      SQL_SPILL_SORT_ROW_BYTES)
+        return 0;
+    if (context->source_offset > context->record_count *
+                                    SQL_SPILL_SORT_ROW_BYTES ||
+        prdb_sdk_spill_read_at_v1(
+            context->host, &context->input, context->source_offset, record,
+            SQL_SPILL_SORT_ROW_BYTES, &read_bytes) != 0 ||
+        read_bytes != SQL_SPILL_SORT_ROW_BYTES)
+        return -1;
+    context->source_offset += SQL_SPILL_SORT_ROW_BYTES;
+    *row_len = SQL_SPILL_SORT_ROW_BYTES;
+    *has_row = 1;
+    return 0;
+}
+
+static int32_t spill_sort_compare(void *opaque, const uint8_t *left_record,
+                                  const uint8_t *right_record,
+                                  int32_t *ordering) {
+    sql_spill_sort_context *context = (sql_spill_sort_context *)opaque;
+    uint8_t left_wire[SQL_SPILL_SORT_ROW_BYTES + 5] = {0};
+    uint8_t right_wire[SQL_SPILL_SORT_ROW_BYTES + 5] = {0};
+    prdb_sdk_row_v1 left_row = {0}, right_row = {0};
+    prdb_sdk_value_v1 left_key = {0}, right_key = {0};
+    uint32_t indices[2] = {0};
+    prdb_sdk_value_v1 values[2];
+    if (ordering == NULL ||
+        parse_spilled_row(left_record, context, left_wire, &left_row,
+                          &left_key) != 0 ||
+        parse_spilled_row(right_record, context, right_wire, &right_row,
+                          &right_key) != 0)
+        return -1;
+    values[0] = left_key;
+    values[1] = right_key;
+    int32_t status = prdb_sdk_sql_order_row_indices_v2(
+        values, 2, context->order_type, context->decimal_scale,
+        context->descending ? PRDB_SDK_SQL_ORDER_DESCENDING
+                            : PRDB_SDK_SQL_ORDER_ASCENDING,
+        PRDB_SDK_SQL_ORDER_NULLS_FIRST, indices, 2);
+    if (status != PRDB_SDK_SQL_EVAL_OK) return status;
+    if (values[0].state == PRDB_SDK_VALUE_STATE_NULL &&
+        values[1].state == PRDB_SDK_VALUE_STATE_NULL) {
+        *ordering = 0;
+        return 0;
+    }
+    if (values[0].state == PRDB_SDK_VALUE_STATE_NULL ||
+        values[1].state == PRDB_SDK_VALUE_STATE_NULL) {
+        *ordering = indices[0] == 0 ? -1 : 1;
+        return 0;
+    }
+    uint32_t equal = 0;
+    status = prdb_sdk_sql_compare_v1(
+        &values[0], &values[1], PRDB_SDK_SQL_COMPARE_EQUAL,
+        context->decimal_scale, context->decimal_scale, &equal);
+    if (status != PRDB_SDK_SQL_EVAL_OK) return status;
+    *ordering = equal == PRDB_SDK_SQL_TRUTH_TRUE
+                    ? 0
+                    : (indices[0] == 0 ? -1 : 1);
+    return 0;
+}
+
+static int32_t spill_sort_output(void *opaque, const uint8_t *record,
+                                 uint32_t row_len) {
+    sql_spill_sort_context *context = (sql_spill_sort_context *)opaque;
+    uint8_t wire[SQL_SPILL_SORT_ROW_BYTES + 5] = {0};
+    prdb_sdk_row_v1 row = {0};
+    prdb_sdk_value_v1 key = {0};
+    if (row_len != SQL_SPILL_SORT_ROW_BYTES ||
+        parse_spilled_row(record, context, wire, &row, &key) != 0)
+        return -1;
+    if (context->has_limit && context->emitted >= context->limit) return 0;
+    ++context->emitted;
+    return context->on_row(context->result_context, &row,
+                           &context->binding);
+}
+
 static int32_t execute_select_internal(
     const prdb_host_api_v3 *host_v3, const uint8_t *schema, uint32_t schema_len,
+    const prdb_host_api_v6 *spill_host,
     const uint8_t *sql, uint64_t sql_len,
     const prdb_sdk_value_v1 *parameters,
     const prdb_sdk_sql_parameter_metadata_v1 *parameter_metadata,
@@ -81,6 +237,9 @@ static int32_t execute_select_internal(
     uint32_t delivered = 0;
     uint32_t materialized_count = 0;
     uint32_t materialized_offset = 5;
+    prdb_sdk_spill_stream_v1 spill_input = {0};
+    sql_spill_sort_context spill_sort = {0};
+    uint64_t spill_record_count = 0;
     uint32_t order_indices[PRDB_SDK_SQL_ORDER_MAX_ROWS];
     prdb_sdk_row_v1 order_rows[PRDB_SDK_SQL_ORDER_MAX_ROWS];
     prdb_sdk_value_v1 order_keys[PRDB_SDK_SQL_ORDER_MAX_ROWS];
@@ -123,7 +282,7 @@ static int32_t execute_select_internal(
         if (status == PRDB_SDK_SQL_OK) {
             statement = statement_v3.base;
             has_order_by = statement_v3.has_order_by;
-            if (has_order_by != 0 &&
+            if (has_order_by != 0 && spill_host == NULL &&
                 (materialized_rows == NULL ||
                  materialized_rows_capacity < 5 ||
                  materialized_rows_capacity >
@@ -222,10 +381,17 @@ static int32_t execute_select_internal(
     }
     if (statement.has_limit && statement.limit == 0) return PRDB_SDK_SQL_EXEC_OK;
 
+    if (has_order_by != 0 && spill_host != NULL &&
+        prdb_sdk_spill_create_v1(spill_host, &spill_input) != 0) {
+        return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
+    }
+
     status = prdb_sdk_executor_open_full_scan_v1(
         host, resolved.executor_handle, executor_response,
         executor_response_capacity, &executor_response_len, cursor);
     if (status != PRDB_SDK_EXECUTOR_OK) {
+        if (spill_input.valid == 1)
+            (void)prdb_sdk_spill_destroy_v1(spill_host, &spill_input);
         return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
     }
     cursor_open = 1;
@@ -279,28 +445,48 @@ static int32_t execute_select_internal(
                 if (has_order_by != 0) {
                     uint32_t row_start;
                     uint32_t row_length;
-                    if (materialized_count >=
-                        PRDB_SDK_SQL_ORDER_MAX_ROWS) {
-                        final_status =
-                            PRDB_SDK_SQL_EXEC_MATERIALIZATION_LIMIT;
-                        break;
-                    }
                     if (row.cells_offset < 18 || rows.offset < row.cells_offset) {
                         final_status = PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR;
                         break;
                     }
                     row_start = row.cells_offset - 18;
                     row_length = rows.offset - row_start;
-                    if ((uint64_t)row_length >
-                        materialized_rows_capacity - materialized_offset) {
-                        final_status =
-                            PRDB_SDK_SQL_EXEC_MATERIALIZATION_LIMIT;
-                        break;
+                    if (spill_host != NULL) {
+                        uint8_t record[SQL_SPILL_SORT_ROW_BYTES] = {0};
+                        if (row_length > SQL_SPILL_SORT_ROW_BYTES - 4) {
+                            final_status =
+                                PRDB_SDK_SQL_EXEC_MATERIALIZATION_LIMIT;
+                            break;
+                        }
+                        spill_write_u32(record, row_length);
+                        memcpy(record + 4, batch_response + row_start,
+                               row_length);
+                        if (prdb_sdk_spill_append_v1(
+                                spill_host, &spill_input, record,
+                                sizeof(record)) != 0) {
+                            final_status =
+                                PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR;
+                            break;
+                        }
+                        ++spill_record_count;
+                    } else {
+                        if (materialized_count >=
+                            PRDB_SDK_SQL_ORDER_MAX_ROWS) {
+                            final_status =
+                                PRDB_SDK_SQL_EXEC_MATERIALIZATION_LIMIT;
+                            break;
+                        }
+                        if ((uint64_t)row_length >
+                            materialized_rows_capacity - materialized_offset) {
+                            final_status =
+                                PRDB_SDK_SQL_EXEC_MATERIALIZATION_LIMIT;
+                            break;
+                        }
+                        memcpy(materialized_rows + materialized_offset,
+                               batch_response + row_start, row_length);
+                        materialized_offset += row_length;
+                        ++materialized_count;
                     }
-                    memcpy(materialized_rows + materialized_offset,
-                           batch_response + row_start, row_length);
-                    materialized_offset += row_length;
-                    ++materialized_count;
                 } else {
                     if (on_row(result_context, &row, &binding) != 0) {
                         final_status = PRDB_SDK_SQL_EXEC_RESULT_ERROR;
@@ -337,7 +523,34 @@ static int32_t execute_select_internal(
             final_status = PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR;
         }
     }
-    if (final_status == PRDB_SDK_SQL_EXEC_OK && has_order_by != 0) {
+    if (final_status == PRDB_SDK_SQL_EXEC_OK && has_order_by != 0 &&
+        spill_host != NULL) {
+        int32_t spill_status = prdb_sdk_spill_seal_v1(spill_host, &spill_input);
+        if (spill_status != 0) {
+            final_status = PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR;
+        } else {
+            spill_sort.host = spill_host;
+            spill_sort.input = spill_input;
+            spill_sort.record_count = spill_record_count;
+            spill_sort.order_ordinal = binding_v3.order_by_column.ordinal;
+            spill_sort.order_type = binding_v3.order_by_column.type_code;
+            spill_sort.decimal_scale =
+                binding_v3.order_by_column.decimal_scale;
+            spill_sort.descending = statement_v3.order_descending;
+            spill_sort.has_limit = statement.has_limit;
+            spill_sort.limit = statement.limit;
+            spill_sort.binding = binding;
+            spill_sort.on_row = on_row;
+            spill_sort.result_context = result_context;
+            spill_status = prdb_sdk_sql_spill_sort_v1(
+                spill_host, &spill_sort, SQL_SPILL_SORT_ROW_BYTES,
+                UINT32_C(65536), spill_sort_source, spill_sort_compare,
+                spill_sort_output);
+            if (spill_status != 0) {
+                final_status = PRDB_SDK_SQL_EXEC_EVALUATION_ERROR;
+            }
+        }
+    } else if (final_status == PRDB_SDK_SQL_EXEC_OK && has_order_by != 0) {
         prdb_sdk_batch_v1 materialized_batch = {0};
         prdb_sdk_row_iterator_v1 materialized_iterator = {0};
         uint32_t emitted = 0;
@@ -414,6 +627,11 @@ static int32_t execute_select_internal(
             ++emitted;
         }
     }
+    if (spill_input.valid == 1 &&
+        prdb_sdk_spill_destroy_v1(spill_host, &spill_input) != 0 &&
+        final_status == PRDB_SDK_SQL_EXEC_OK) {
+        final_status = PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR;
+    }
     return fail_statement(host_v3, final_status);
 }
 
@@ -432,7 +650,7 @@ int32_t prdb_sdk_sql_execute_select_v2(
     prdb_sdk_value_v1 *cell_scratch, uint32_t cell_scratch_capacity,
     prdb_sdk_sql_result_row_v2_fn on_row, void *result_context) {
     return execute_select_internal(
-        host, schema, schema_len, sql, sql_len, parameters, NULL, parameter_count,
+        host, schema, schema_len, NULL, sql, sql_len, parameters, NULL, parameter_count,
         max_candidates, max_batch_bytes, planner_response,
         planner_response_capacity, executor_response,
         executor_response_capacity, batch_response, batch_response_capacity,
@@ -457,7 +675,7 @@ int32_t prdb_sdk_sql_execute_select_v3(
     uint8_t *materialized_rows, uint64_t materialized_rows_capacity,
     prdb_sdk_sql_result_row_v2_fn on_row, void *result_context) {
     return execute_select_internal(
-        host, schema, schema_len, sql, sql_len, parameters, NULL, parameter_count,
+        host, schema, schema_len, NULL, sql, sql_len, parameters, NULL, parameter_count,
         max_candidates, max_batch_bytes, planner_response,
         planner_response_capacity, executor_response,
         executor_response_capacity, batch_response, batch_response_capacity,
@@ -465,6 +683,36 @@ int32_t prdb_sdk_sql_execute_select_v3(
         executor_column_capacity, cell_scratch, cell_scratch_capacity,
         materialized_rows, materialized_rows_capacity,
         PRDB_SDK_SQL_ABI_V3_VERSION, on_row, result_context);
+}
+
+int32_t prdb_sdk_sql_execute_select_v4(
+    const prdb_host_api_v6 *host, const uint8_t *schema, uint32_t schema_len,
+    const uint8_t *sql, uint64_t sql_len,
+    const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
+    const prdb_sdk_sql_parameter_metadata_v1 *parameter_metadata,
+    uint16_t max_candidates, uint32_t max_batch_bytes,
+    uint8_t *planner_response, uint64_t planner_response_capacity,
+    uint8_t *executor_response, uint64_t executor_response_capacity,
+    uint8_t *batch_response, uint64_t batch_response_capacity,
+    prdb_sdk_sql_column_shape_v2 *planner_columns,
+    uint32_t planner_column_capacity,
+    prdb_sdk_sql_column_shape_v2 *executor_columns,
+    uint32_t executor_column_capacity,
+    prdb_sdk_value_v1 *cell_scratch, uint32_t cell_scratch_capacity,
+    prdb_sdk_sql_result_row_v2_fn on_row, void *result_context) {
+    if (host == NULL ||
+        host->v5.v4.v3.struct_size < sizeof(prdb_host_api_v3) ||
+        host->v5.v4.v3.abi_version != PRDB_QUERY_ABI_V3_VERSION ||
+        host->spill_request == NULL)
+        return PRDB_SDK_SQL_EXEC_INVALID_ARGUMENT;
+    return execute_select_internal(
+        &host->v5.v4.v3, schema, schema_len, host, sql, sql_len, parameters,
+        parameter_metadata, parameter_count, max_candidates, max_batch_bytes,
+        planner_response, planner_response_capacity, executor_response,
+        executor_response_capacity, batch_response, batch_response_capacity,
+        planner_columns, planner_column_capacity, executor_columns,
+        executor_column_capacity, cell_scratch, cell_scratch_capacity, NULL,
+        0, PRDB_SDK_SQL_ABI_V3_VERSION, on_row, result_context);
 }
 
 int32_t prdb_sdk_sql_execute_select_typed_v1(
@@ -492,7 +740,7 @@ int32_t prdb_sdk_sql_execute_select_typed_v1(
         return fail_statement(host, PRDB_SDK_SQL_EXEC_INVALID_ARGUMENT);
     }
     return execute_select_internal(
-        host, schema, schema_len, sql, sql_len, parameters, parameter_metadata,
+        host, schema, schema_len, NULL, sql, sql_len, parameters, parameter_metadata,
         parameter_count, max_candidates, max_batch_bytes, planner_response,
         planner_response_capacity, executor_response,
         executor_response_capacity, batch_response, batch_response_capacity,

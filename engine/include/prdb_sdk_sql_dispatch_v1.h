@@ -3,6 +3,7 @@
 
 #include "prdb_sdk_sql_exec_v2.h"
 #include "prdb_sdk_sql_result_v1.h"
+#include "prdb_query_abi_v6.h"
 
 #define PRDB_SDK_SQL_DISPATCH_ABI_V1_VERSION UINT32_C(1)
 #define PRDB_SDK_SQL_DISPATCH_MAX_PARAMETER_BYTES UINT64_C(1048576)
@@ -36,6 +37,14 @@ int32_t prdb_sdk_sql_run_v1(
  * delegated to the SELECT entry point. Errors latch statement failure. */
 int32_t prdb_sdk_sql_run_statement_v1(
     const prdb_host_api_v3 *host, const uint8_t *schema,
+    uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
+    const uint8_t *parameters, uint64_t parameters_len);
+
+/* ABI v6 statement dispatcher. When spill is configured, ordered row SELECTs,
+ * supported COUNT(*) GROUP BY shapes, and alias-aware JOINs use the trusted
+ * opaque spill callback. A null callback retains bounded in-memory execution. */
+int32_t prdb_sdk_sql_run_statement_v2(
+    const prdb_host_api_v6 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     const uint8_t *parameters, uint64_t parameters_len);
 

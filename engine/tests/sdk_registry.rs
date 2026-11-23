@@ -39,7 +39,7 @@ fn built_release(root: &Path) -> PathBuf {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    build_dir.join("releases/linux-x86_64/x86_64-v1/test-runtime/sdk-1-abis1,2,3,4,5")
+    build_dir.join("releases/linux-x86_64/x86_64-v1/test-runtime/sdk-1-abis1,2,3,4,5,6")
 }
 
 fn manifest(abi: u8, release: u32) -> ArtifactManifestV1 {
@@ -75,7 +75,7 @@ fn repository_install_is_durable_listable_and_pin_safe_for_removal() {
     .unwrap();
     let installed = repository.install(&metadata, &library, &allowed).unwrap();
     assert_eq!(installed.sdk_release, 1);
-    assert_eq!(installed.native_abis, vec![1, 2, 3, 4, 5]);
+    assert_eq!(installed.native_abis, vec![1, 2, 3, 4, 5, 6]);
     assert_eq!(repository.list().unwrap(), vec![installed]);
 
     let reopened_while_installed = SdkLibraryRepository::open(
@@ -97,6 +97,9 @@ fn repository_install_is_durable_listable_and_pin_safe_for_removal() {
     );
     let installed_path = pin.library_path().to_path_buf();
     drop(pin);
+    let abi_v6_pin = repository.resolve(&manifest(6, 1)).unwrap();
+    assert!(abi_v6_pin.library_path().is_file());
+    drop(abi_v6_pin);
     assert_eq!(repository.remove_release(1).unwrap(), library.len() as u64);
     assert!(!installed_path.exists());
     assert!(repository.list().unwrap().is_empty());

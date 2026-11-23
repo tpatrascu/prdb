@@ -940,6 +940,7 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
             scratch_parent: std::env::temp_dir(),
             runtime_read_execute: required_paths("PRDB_TEST_RUNTIME_READ_EXECUTE")?,
             runtime_read_only: required_paths("PRDB_TEST_RUNTIME_READ_ONLY")?,
+            spill_broker: None,
             cleanup_timeout: Duration::from_secs(2),
         },
     };

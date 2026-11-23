@@ -3,6 +3,7 @@
 
 #include "prdb_sdk_sql_exec_v19.h"
 #include "prdb_sdk_sql_v20.h"
+#include "prdb_query_abi_v6.h"
 
 typedef int32_t (*prdb_sdk_sql_join_result_row_v20_fn)(
     void *context, const prdb_sdk_value_v1 *projected_values,
@@ -48,6 +49,38 @@ int32_t prdb_sdk_sql_execute_inner_join_typed_v20(
     const uint8_t *sql, uint64_t sql_len,
     const prdb_sdk_value_v1 *parameters,
     const prdb_sdk_sql_parameter_metadata_v1 *metadata, uint32_t parameter_count,
+    uint16_t max_candidates, uint32_t max_batch_bytes,
+    uint8_t *left_planner_response, uint64_t left_planner_response_capacity,
+    uint8_t *right_planner_response, uint64_t right_planner_response_capacity,
+    uint8_t *left_executor_response, uint64_t left_executor_response_capacity,
+    uint8_t *right_executor_response, uint64_t right_executor_response_capacity,
+    uint8_t *batch_response, uint64_t batch_response_capacity,
+    prdb_sdk_sql_column_shape_v2 *left_planner_columns,
+    uint32_t left_planner_column_capacity,
+    prdb_sdk_sql_column_shape_v2 *right_planner_columns,
+    uint32_t right_planner_column_capacity,
+    prdb_sdk_sql_column_shape_v2 *left_executor_columns,
+    uint32_t left_executor_column_capacity,
+    prdb_sdk_sql_column_shape_v2 *right_executor_columns,
+    uint32_t right_executor_column_capacity,
+    prdb_sdk_value_v1 *cell_scratch, uint32_t cell_scratch_capacity,
+    prdb_sdk_sql_join_materialized_row_v16 *left_rows,
+    uint32_t left_row_capacity,
+    prdb_sdk_sql_join_materialized_row_v16 *right_rows,
+    uint32_t right_row_capacity,
+    uint8_t *materialized_bytes, uint64_t materialized_bytes_capacity,
+    prdb_sdk_sql_join_result_row_v20_fn on_row, void *result_context);
+
+/* ABI v6 counterpart. It retains the v20 parser/binder/filter contract and
+ * uses the opaque spill broker for bounded hash partitioning when scanning
+ * joined inputs. */
+int32_t prdb_sdk_sql_execute_inner_join_typed_spill_v21(
+    const prdb_host_api_v6 *host,
+    const uint8_t *schema, uint32_t schema_len,
+    const uint8_t *sql, uint64_t sql_len,
+    const prdb_sdk_value_v1 *parameters,
+    const prdb_sdk_sql_parameter_metadata_v1 *metadata,
+    uint32_t parameter_count,
     uint16_t max_candidates, uint32_t max_batch_bytes,
     uint8_t *left_planner_response, uint64_t left_planner_response_capacity,
     uint8_t *right_planner_response, uint64_t right_planner_response_capacity,

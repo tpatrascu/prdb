@@ -108,4 +108,23 @@ _Static_assert(offsetof(prdb_query_descriptor_v5_record, abi_version) == 4, "prd
 _Static_assert(offsetof(prdb_query_descriptor_v5_record, host_api_size) == 8, "prdb_query_descriptor_v5_record.host_api_size offset");
 _Static_assert(offsetof(prdb_query_descriptor_v5_record, invocation_size) == 12, "prdb_query_descriptor_v5_record.invocation_size offset");
 
+_Static_assert(sizeof(prdb_host_api_v6) == 72, "prdb_host_api_v6 size");
+_Static_assert(_Alignof(prdb_host_api_v6) == 8, "prdb_host_api_v6 alignment");
+_Static_assert(offsetof(prdb_host_api_v6, v5) == 0, "prdb_host_api_v6.v5 offset");
+_Static_assert(offsetof(prdb_host_api_v6, spill_request) == 64, "prdb_host_api_v6.spill_request offset");
+
+_Static_assert(sizeof(prdb_invocation_v6) == 24, "prdb_invocation_v6 size");
+_Static_assert(_Alignof(prdb_invocation_v6) == 8, "prdb_invocation_v6 alignment");
+_Static_assert(offsetof(prdb_invocation_v6, struct_size) == 0, "prdb_invocation_v6.struct_size offset");
+_Static_assert(offsetof(prdb_invocation_v6, abi_version) == 4, "prdb_invocation_v6.abi_version offset");
+_Static_assert(offsetof(prdb_invocation_v6, parameters) == 8, "prdb_invocation_v6.parameters offset");
+_Static_assert(offsetof(prdb_invocation_v6, parameters_len) == 16, "prdb_invocation_v6.parameters_len offset");
+
+_Static_assert(sizeof(prdb_query_descriptor_v6_record) == 16, "prdb_query_descriptor_v6_record size");
+_Static_assert(_Alignof(prdb_query_descriptor_v6_record) == 4, "prdb_query_descriptor_v6_record alignment");
+_Static_assert(offsetof(prdb_query_descriptor_v6_record, struct_size) == 0, "prdb_query_descriptor_v6_record.struct_size offset");
+_Static_assert(offsetof(prdb_query_descriptor_v6_record, abi_version) == 4, "prdb_query_descriptor_v6_record.abi_version offset");
+_Static_assert(offsetof(prdb_query_descriptor_v6_record, host_api_size) == 8, "prdb_query_descriptor_v6_record.host_api_size offset");
+_Static_assert(offsetof(prdb_query_descriptor_v6_record, invocation_size) == 12, "prdb_query_descriptor_v6_record.invocation_size offset");
+
 #endif /* PRDB_QUERY_ABI_LAYOUT_ASSERTIONS_H */

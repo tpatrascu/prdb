@@ -321,7 +321,7 @@ impl ClientConfig {
                 || sdk.target != "linux-x86_64"
                 || !valid_token(&sdk.cpu_baseline)
                 || !valid_token(&sdk.runtime_profile)
-                || !(1..=5).contains(&sdk.native_abi)
+                || !(1..=6).contains(&sdk.native_abi)
             {
                 return Err(invalid("invalid SDK selection"));
             }
@@ -603,6 +603,9 @@ mod tests {
         assert!(!debug.contains(&value.instances[0].credentials[0].token_secret));
         let encoded = serde_json::to_vec(&value).unwrap();
         ClientConfig::parse(&encoded).unwrap();
+        let mut spill_abi = config();
+        spill_abi.instances[0].sdk.native_abi = 6;
+        assert!(spill_abi.validate().is_ok());
         assert!(ClientConfig::parse(br#"{"format":"PRDB-CLIENT-CONFIG-1","format":"PRDB-CLIENT-CONFIG-1","instances":[]}"#).is_err());
         assert!(
             ClientConfig::parse(

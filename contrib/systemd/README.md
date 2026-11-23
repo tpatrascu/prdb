@@ -73,7 +73,7 @@ install -Dm755 target/release/prdb-maintain ~/.local/libexec/prdb/prdb-maintain
 install -Dm755 target/release/prdb-landlock-run ~/.local/libexec/prdb/prdb-landlock-run
 install -Dm755 engine/tools/with_delegated_cgroup.sh ~/.local/libexec/prdb/with_delegated_cgroup.sh
 install -d ~/.local/lib/prdb
-cp -R target/release-profile/sdk/releases/linux-x86_64/x86_64-v1/nixos-x86_64-glibc-2.42/sdk-1-abis1,2,3,4,5 ~/.local/lib/prdb/sql-sdk
+cp -R target/release-profile/sdk/releases/linux-x86_64/x86_64-v1/nixos-x86_64-glibc-2.42/sdk-1-abis1,2,3,4,5,6 ~/.local/lib/prdb/sql-sdk
 install -Dm644 contrib/systemd/user/prdb-supervisor.service ~/.config/systemd/user/prdb-supervisor.service
 install -Dm644 contrib/systemd/user/prdb-gateway.service ~/.config/systemd/user/prdb-gateway.service
 ```

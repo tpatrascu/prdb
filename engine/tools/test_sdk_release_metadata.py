@@ -46,7 +46,7 @@ class SdkReleaseMetadataTests(unittest.TestCase):
                 "--runtime-profile",
                 "nixos-x86_64-glibc-2.42",
                 "--native-abis",
-                "1,2,3,4,5",
+                "1,2,3,4,5,6",
                 *extra,
             ],
             check=False,
@@ -72,7 +72,7 @@ class SdkReleaseMetadataTests(unittest.TestCase):
             self.assertEqual(metadata["target"], "linux-x86_64")
             self.assertEqual(metadata["cpu_baseline"], "x86_64-v1")
             self.assertEqual(metadata["runtime_profile"], "nixos-x86_64-glibc-2.42")
-            self.assertEqual(metadata["native_abis"], [1, 2, 3, 4, 5])
+            self.assertEqual(metadata["native_abis"], [1, 2, 3, 4, 5, 6])
             self.assertEqual(metadata["needed"], sorted(metadata["needed"]))
             self.assertEqual(metadata_bytes, (json.dumps(
                 metadata, sort_keys=True, separators=(",", ":")
@@ -91,7 +91,7 @@ class SdkReleaseMetadataTests(unittest.TestCase):
             self.assertFalse((output / "release.sha256").exists())
 
     def test_unsupported_or_noncanonical_abi_list_is_rejected(self) -> None:
-        for abi_list in ("1,3,2", "1,1", "0,1", "1,6", ""):
+        for abi_list in ("1,3,2", "1,1", "0,1", "1,7", ""):
             with self.subTest(abi_list=abi_list), tempfile.TemporaryDirectory() as temporary:
                 result = self.run_generator(
                     Path(temporary), "--native-abis", abi_list

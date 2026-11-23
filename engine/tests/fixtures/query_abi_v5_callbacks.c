@@ -1,4 +1,5 @@
 #include "prdb_query_abi_v5.h"
+#include "prdb_query_abi_v6.h"
 #include "prdb_query_abi_layout_assertions.h"
 
 #include <assert.h>

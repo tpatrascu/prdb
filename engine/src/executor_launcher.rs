@@ -15,6 +15,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
 
 const COOPERATIVE_CANCELLATION_GRACE: Duration = Duration::from_millis(500);
@@ -29,6 +30,8 @@ pub struct ExecutorLaunchConfig {
     /// pinned libc and its loader cache.
     pub runtime_read_execute: Vec<PathBuf>,
     pub runtime_read_only: Vec<PathBuf>,
+    /// Shared trusted broker. Absence keeps spill disabled.
+    pub spill_broker: Option<crate::spill::SpillBroker>,
     pub cleanup_timeout: Duration,
 }
 
@@ -92,6 +95,8 @@ pub struct RunningExecutor {
     cgroup: Option<WorkerCgroup>,
     artifact_directory: Option<PrivateArtifactDirectory>,
     worker_channels: Option<(UnixStream, UnixStream, UnixStream)>,
+    spill_stream: Option<UnixStream>,
+    spill_session: Option<Arc<SpillSession>>,
     result_stream: Option<UnixStream>,
     cleanup_timeout: Duration,
 }
@@ -105,7 +110,29 @@ pub struct PreparedExecutor {
     cgroup: Option<WorkerCgroup>,
     artifact_directory: Option<PrivateArtifactDirectory>,
     worker_channels: Option<WorkerChannelPair>,
+    spill_session: Option<Arc<SpillSession>>,
     cleanup_timeout: Duration,
+}
+
+struct SpillSession {
+    broker: crate::spill::SpillBroker,
+    package: crate::spill::SpillPackage,
+    closed: std::sync::atomic::AtomicBool,
+}
+
+impl SpillSession {
+    fn close(&self) -> Result<(), crate::spill::SpillError> {
+        if self.closed.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            return Ok(());
+        }
+        self.broker.close_package(self.package)
+    }
+}
+
+impl Drop for SpillSession {
+    fn drop(&mut self) {
+        let _ = self.close();
+    }
 }
 
 struct WorkerChannelPair {
@@ -115,6 +142,8 @@ struct WorkerChannelPair {
     executor_supervisor: UnixStream,
     result_worker: UnixStream,
     result_supervisor: UnixStream,
+    spill_worker: UnixStream,
+    spill_supervisor: UnixStream,
     optimizer_submission_worker: UnixStream,
     optimizer_submission_optimizer: UnixStream,
     optimizer_planner_optimizer: UnixStream,
@@ -126,6 +155,7 @@ impl WorkerChannelPair {
         let (planner_worker, planner_supervisor) = UnixStream::pair()?;
         let (executor_worker, executor_supervisor) = UnixStream::pair()?;
         let (result_worker, result_supervisor) = UnixStream::pair()?;
+        let (spill_worker, spill_supervisor) = UnixStream::pair()?;
         let (optimizer_submission_worker, optimizer_submission_optimizer) = UnixStream::pair()?;
         let (optimizer_planner_optimizer, optimizer_planner_supervisor) = UnixStream::pair()?;
         Ok(Self {
@@ -135,6 +165,8 @@ impl WorkerChannelPair {
             executor_supervisor,
             result_worker,
             result_supervisor,
+            spill_worker,
+            spill_supervisor,
             optimizer_submission_worker,
             optimizer_submission_optimizer,
             optimizer_planner_optimizer,
@@ -142,12 +174,13 @@ impl WorkerChannelPair {
         })
     }
 
-    fn worker_fds(&self) -> [i32; 4] {
+    fn worker_fds(&self) -> [i32; 5] {
         [
             self.planner_worker.as_raw_fd(),
             self.executor_worker.as_raw_fd(),
             self.optimizer_submission_worker.as_raw_fd(),
             self.result_worker.as_raw_fd(),
+            self.spill_worker.as_raw_fd(),
         ]
     }
 
@@ -158,7 +191,9 @@ impl WorkerChannelPair {
         ]
     }
 
-    fn into_supervisor_streams(self) -> ((UnixStream, UnixStream, UnixStream), UnixStream) {
+    fn into_supervisor_streams(
+        self,
+    ) -> ((UnixStream, UnixStream, UnixStream), UnixStream, UnixStream) {
         (
             (
                 self.planner_supervisor,
@@ -166,6 +201,7 @@ impl WorkerChannelPair {
                 self.optimizer_planner_supervisor,
             ),
             self.result_supervisor,
+            self.spill_supervisor,
         )
     }
 }
@@ -225,12 +261,47 @@ impl RunningExecutor {
         O: Fn(u16, u64) + Send + Sync,
     {
         let result_stream = self.result_stream.take();
+        let spill_stream = self.spill_stream.take();
+        let spill_session = self.spill_session.take();
         let mut primary_error = None;
         if let Some(result_stream) = result_stream {
             let (result_tx, result_rx) = std::sync::mpsc::sync_channel(4);
             std::thread::scope(|scope| {
                 let result_thread =
                     scope.spawn(move || drain_result_stream(result_stream, result_tx));
+                let (spill_tx, spill_rx) = std::sync::mpsc::channel();
+                let spill_task = match (spill_stream, spill_session.as_ref()) {
+                    (Some(stream), Some(session)) => {
+                        let broker = session.broker.clone();
+                        let package = session.package;
+                        let session = Arc::clone(session);
+                        Some((
+                            scope.spawn(move || {
+                                let mut result =
+                                    broker.serve_channel(stream, package).map_err(|error| {
+                                        SupervisorInvocationError::WorkerChannelIo(
+                                            io::Error::other(format!(
+                                                "spill broker channel failed: {error:?}"
+                                            )),
+                                        )
+                                    });
+                                if let Err(error) = session.close() {
+                                    result = Err(SupervisorInvocationError::WorkerChannelIo(
+                                        io::Error::other(format!(
+                                            "spill package cleanup failed: {error:?}"
+                                        )),
+                                    ));
+                                }
+                                let _ = spill_tx.send(result);
+                            }),
+                            spill_rx,
+                        ))
+                    }
+                    (stream, _) => {
+                        drop(stream);
+                        None
+                    }
+                };
                 let storage_task =
                     self.worker_channels
                         .take()
@@ -252,16 +323,23 @@ impl RunningExecutor {
 
                 let mut result_done = false;
                 let mut storage_done = storage_task.is_none();
+                let mut spill_done = spill_task.is_none();
                 let mut cancellation_started_at = None;
-                while !result_done || !storage_done {
+                while !result_done || !storage_done || !spill_done {
                     if primary_error.is_none()
                         && let Err(error) = invocation.check_worker_deadline()
                     {
+                        if let Some(session) = spill_session.as_ref() {
+                            let _ = session.broker.cancel(session.package);
+                        }
                         primary_error = Some(error);
                     }
                     if primary_error.is_none() {
                         match invocation.cancellation_requested() {
                             Ok(true) => {
+                                if let Some(session) = spill_session.as_ref() {
+                                    let _ = session.broker.cancel(session.package);
+                                }
                                 let requested_at = cancellation_started_at
                                     .get_or_insert_with(std::time::Instant::now);
                                 if requested_at.elapsed() >= COOPERATIVE_CANCELLATION_GRACE {
@@ -311,13 +389,31 @@ impl RunningExecutor {
                         }
                     }
 
+                    if let Some((spill_thread, spill_rx)) = &spill_task
+                        && !spill_done
+                        && spill_thread.is_finished()
+                    {
+                        spill_done = true;
+                        match spill_rx.try_recv() {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => {
+                                primary_error.get_or_insert(error);
+                            }
+                            Err(_) => {
+                                primary_error.get_or_insert(
+                                    SupervisorInvocationError::WorkerHandlerPanicked,
+                                );
+                            }
+                        }
+                    }
+
                     if primary_error.is_some() {
                         if let Some(cgroup) = self.cgroup.as_ref() {
                             let _ = cgroup.kill_all();
                         }
                         let _ = self.child.kill();
                     }
-                    if result_done && !storage_done {
+                    if result_done && (!storage_done || !spill_done) {
                         std::thread::sleep(Duration::from_millis(10));
                     }
                 }
@@ -338,6 +434,11 @@ impl RunningExecutor {
                 {
                     primary_error.get_or_insert(SupervisorInvocationError::WorkerHandlerPanicked);
                 }
+                if let Some((spill_thread, _)) = spill_task
+                    && spill_thread.join().is_err()
+                {
+                    primary_error.get_or_insert(SupervisorInvocationError::WorkerHandlerPanicked);
+                }
             });
         } else if let Some((planner, executor, optimizer_planner)) = self.worker_channels.take()
             && let Err(error) = invocation.serve_worker_channels_with_optimizer_planner_observer(
@@ -349,6 +450,8 @@ impl RunningExecutor {
         {
             self.kill_reap_and_cleanup();
             return Err(error);
+        } else {
+            drop(spill_stream);
         }
         // The optimizer is a child in the same cgroup. Reap it before the
         // cgroup cleanup checks pids.current, otherwise its zombie can keep
@@ -563,7 +666,16 @@ pub fn start_and_launch_executor_selected<T, E>(
                     }));
                 }
             };
-            let prepared = prepare_executor(submission, cgroup, channels, config)
+            let spill_session = match create_spill_session(submission, config) {
+                Ok(session) => session,
+                Err(error) => {
+                    return Err(ExecutorStartError::Launch(ExecutorLaunchError {
+                        launch_error: error,
+                        cleanup_error: cgroup.cleanup(config.cleanup_timeout).err(),
+                    }));
+                }
+            };
+            let prepared = prepare_executor(submission, cgroup, channels, spill_session, config)
                 .map_err(ExecutorStartError::Launch)?;
             let admitted = match admit(submission) {
                 Ok(admitted) => admitted,
@@ -580,15 +692,51 @@ pub fn start_and_launch_executor_selected<T, E>(
     )
 }
 
+fn create_spill_session(
+    submission: &SealedSubmission,
+    config: &ExecutorLaunchConfig,
+) -> io::Result<Option<Arc<SpillSession>>> {
+    let Some(broker) = config.spill_broker.as_ref() else {
+        return Ok(None);
+    };
+    let metadata = submission.metadata();
+    if metadata.workload_class != crate::supervisor::WorkloadClass::Analytical {
+        return Ok(None);
+    }
+    let (invocation_id, package_id) = match submission.interactive_package() {
+        Some(binding) => (binding.transaction_id, binding.package_id),
+        None => (submission.invocation_id(), submission.invocation_id()),
+    };
+    let package = crate::spill::SpillPackage::new(invocation_id, package_id);
+    let deadline = std::time::Instant::now()
+        .checked_add(Duration::from_millis(metadata.deadline_ms))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "spill deadline overflow"))?;
+    broker
+        .open_package(package, metadata.workload_class, deadline)
+        .map_err(|error| io::Error::other(format!("spill package admission failed: {error:?}")))?;
+    Ok(Some(Arc::new(SpillSession {
+        broker: broker.clone(),
+        package,
+        closed: std::sync::atomic::AtomicBool::new(false),
+    })))
+}
+
 /// Materialize staged bytes privately and install the pre-exec restrictions.
 /// The returned host process is not started until `PreparedExecutor::spawn`.
 fn prepare_executor(
     submission: &SealedSubmission,
     cgroup: WorkerCgroup,
     channels: WorkerChannelPair,
+    spill_session: Option<Arc<SpillSession>>,
     config: &ExecutorLaunchConfig,
 ) -> Result<PreparedExecutor, ExecutorLaunchError> {
-    match build_command(submission, &cgroup, &channels, config) {
+    match build_command(
+        submission,
+        &cgroup,
+        &channels,
+        spill_session.is_some(),
+        config,
+    ) {
         Ok((command, optimizer_command, parameters, artifact_directory)) => Ok(PreparedExecutor {
             command,
             optimizer_command: Some(optimizer_command),
@@ -596,6 +744,7 @@ fn prepare_executor(
             cgroup: Some(cgroup),
             artifact_directory: Some(artifact_directory),
             worker_channels: Some(channels),
+            spill_session,
             cleanup_timeout: config.cleanup_timeout,
         }),
         Err(launch_error) => Err(ExecutorLaunchError {
@@ -640,13 +789,16 @@ impl PreparedExecutor {
                     .worker_channels
                     .take()
                     .expect("prepared worker channels");
-                let (supervisor_streams, result_stream) = channels.into_supervisor_streams();
+                let (supervisor_streams, result_stream, spill_stream) =
+                    channels.into_supervisor_streams();
                 Ok(RunningExecutor {
                     child,
                     optimizer_child: Some(optimizer_child),
                     cgroup: self.cgroup.take(),
                     artifact_directory: self.artifact_directory.take(),
                     worker_channels: Some(supervisor_streams),
+                    spill_stream: Some(spill_stream),
+                    spill_session: self.spill_session.take(),
                     result_stream: Some(result_stream),
                     cleanup_timeout: self.cleanup_timeout,
                 })
@@ -674,6 +826,7 @@ impl Drop for PreparedExecutor {
         self.artifact_directory.take();
         self.parameters.take();
         self.worker_channels.take();
+        self.spill_session.take();
     }
 }
 
@@ -681,6 +834,7 @@ fn build_command(
     submission: &SealedSubmission,
     cgroup: &WorkerCgroup,
     channels: &WorkerChannelPair,
+    spill_enabled: bool,
     config: &ExecutorLaunchConfig,
 ) -> io::Result<(Command, Command, File, PrivateArtifactDirectory)> {
     let executor_path = config.executor_path.canonicalize()?;
@@ -712,7 +866,7 @@ fn build_command(
     allow_runtime_paths(&mut policy, &config.runtime_read_only, false)?;
     let ruleset = LandlockRuleset::new(&policy)?;
 
-    let [planner_fd, executor_fd, optimizer_fd, result_fd] = channels.worker_fds();
+    let [planner_fd, executor_fd, optimizer_fd, result_fd, spill_fd] = channels.worker_fds();
     let mut command = Command::new(executor_path);
     command
         .arg("--library")
@@ -727,6 +881,12 @@ fn build_command(
         .arg(optimizer_fd.to_string())
         .arg("--result-fd")
         .arg(result_fd.to_string())
+        .arg("--spill-fd")
+        .arg(if spill_enabled {
+            spill_fd.to_string()
+        } else {
+            "-1".to_owned()
+        })
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -737,6 +897,9 @@ fn build_command(
         optimizer_fd,
         result_fd,
     ];
+    if spill_enabled {
+        inherited_fds.push(spill_fd);
+    }
     inherited_fds.sort_unstable();
     inherited_fds.dedup();
     configure_worker_command(&mut command, cgroup.path(), &ruleset, &inherited_fds)?;
@@ -969,15 +1132,17 @@ mod tests {
         use std::io::{Read, Write};
 
         let channels = WorkerChannelPair::new().unwrap();
-        let [planner_fd, executor_fd, optimizer_fd, result_fd] = channels.worker_fds();
+        let [planner_fd, executor_fd, optimizer_fd, result_fd, spill_fd] = channels.worker_fds();
         let [optimizer_submission_fd, optimizer_planner_fd] = channels.optimizer_fds();
         assert!(planner_fd >= 3);
         assert!(executor_fd >= 3);
         assert!(optimizer_fd >= 3);
         assert!(result_fd >= 3);
+        assert!(spill_fd >= 3);
         assert_ne!(planner_fd, executor_fd);
         assert_ne!(planner_fd, result_fd);
         assert_ne!(executor_fd, result_fd);
+        assert_ne!(spill_fd, result_fd);
         assert_ne!(optimizer_fd, planner_fd);
         assert_ne!(optimizer_fd, executor_fd);
         assert_ne!(optimizer_fd, result_fd);

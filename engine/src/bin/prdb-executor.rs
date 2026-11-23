@@ -10,19 +10,23 @@ mod worker {
         IpcFrame, Operation, ServiceRole, authorize_operation, read_frame, write_frame,
     };
     use prdb_engine::query_abi::{
-        BorrowedInvocationV1, HostApiV1, HostApiV2, HostApiV3, HostApiV4, HostApiV5, InvocationV2,
-        InvocationV3, InvocationV4, InvocationV5, MAX_IPC_REQUEST_BYTES, MAX_RESULT_CHUNK_BYTES,
+        BorrowedInvocationV1, HostApiV1, HostApiV2, HostApiV3, HostApiV4, HostApiV5, HostApiV6,
+        InvocationV2, InvocationV3, InvocationV4, InvocationV5, InvocationV6,
+        MAX_IPC_REQUEST_BYTES, MAX_IPC_RESPONSE_BYTES, MAX_RESULT_CHUNK_BYTES,
         MAX_TOTAL_RESULT_BYTES, QUERY_ABI_V2_VERSION, QUERY_ABI_V3_VERSION, QUERY_ABI_V4_VERSION,
-        QUERY_ABI_V5_VERSION, QUERY_ABI_VERSION, QUERY_DESCRIPTOR_SYMBOL,
+        QUERY_ABI_V5_VERSION, QUERY_ABI_V6_VERSION, QUERY_ABI_VERSION, QUERY_DESCRIPTOR_SYMBOL,
         QUERY_DESCRIPTOR_V2_SYMBOL, QUERY_DESCRIPTOR_V3_SYMBOL, QUERY_DESCRIPTOR_V4_SYMBOL,
-        QUERY_DESCRIPTOR_V5_SYMBOL, QUERY_ENTRY_SYMBOL, QUERY_ENTRY_V2_SYMBOL,
-        QUERY_ENTRY_V3_SYMBOL, QUERY_ENTRY_V4_SYMBOL, QUERY_ENTRY_V5_SYMBOL,
-        QUERY_STATEMENT_FAILURE_SQL, QueryDescriptorV1, QueryDescriptorV2, QueryDescriptorV3,
-        QueryDescriptorV4, QueryDescriptorV5, QueryIpcRequestV2, QueryMainV1, QueryMainV2,
-        QueryMainV3, QueryMainV4, QueryMainV5, QueryOptimizerRequestV4, QueryOptimizerRequestV5,
-        QueryStatementFailureV3, QueryWriteResultV2, validate_descriptor_v1,
+        QUERY_DESCRIPTOR_V5_SYMBOL, QUERY_DESCRIPTOR_V6_SYMBOL, QUERY_ENTRY_SYMBOL,
+        QUERY_ENTRY_V2_SYMBOL, QUERY_ENTRY_V3_SYMBOL, QUERY_ENTRY_V4_SYMBOL, QUERY_ENTRY_V5_SYMBOL,
+        QUERY_ENTRY_V6_SYMBOL, QUERY_STATEMENT_FAILURE_SQL, QueryDescriptorV1, QueryDescriptorV2,
+        QueryDescriptorV3, QueryDescriptorV4, QueryDescriptorV5, QueryDescriptorV6,
+        QueryIpcRequestV2, QueryMainV1, QueryMainV2, QueryMainV3, QueryMainV4, QueryMainV5,
+        QueryMainV6, QueryOptimizerRequestV4, QueryOptimizerRequestV5, QuerySpillRequestV1,
+        QueryStatementFailureV3, QueryWriteResultV2, SPILL_CHANNEL_HEADER_BYTES,
+        SPILL_CHANNEL_MAGIC, SPILL_CHANNEL_VERSION, SPILL_OP_APPEND, SPILL_OP_CREATE,
+        SPILL_OP_DESTROY, SPILL_OP_READ_AT, SPILL_OP_SEAL, SPILL_STATUS_OK, validate_descriptor_v1,
         validate_descriptor_v2, validate_descriptor_v3, validate_descriptor_v4,
-        validate_descriptor_v5,
+        validate_descriptor_v5, validate_descriptor_v6,
     };
     use std::ffi::{CStr, CString, OsStr, c_void};
     use std::io::{self, Read, Write};
@@ -57,6 +61,7 @@ mod worker {
         executor_fd: i32,
         optimizer_fd: i32,
         result_fd: i32,
+        spill_fd: i32,
     }
 
     pub fn main() {
@@ -90,15 +95,16 @@ mod worker {
     }
 
     fn parse_args(values: &[std::ffi::OsString]) -> Result<WorkerArgs, String> {
-        if values.len() != 12
+        if values.len() != 14
             || values[0] != "--library"
             || values[2] != "--parameters-fd"
             || values[4] != "--planner-fd"
             || values[6] != "--executor-fd"
             || values[8] != "--optimizer-fd"
             || values[10] != "--result-fd"
+            || values[12] != "--spill-fd"
         {
-            return Err("usage: prdb-executor --library ABSOLUTE_PATH --parameters-fd FD --planner-fd FD --executor-fd FD --optimizer-fd FD --result-fd FD (or --self-check)".to_owned());
+            return Err("usage: prdb-executor --library ABSOLUTE_PATH --parameters-fd FD --planner-fd FD --executor-fd FD --optimizer-fd FD --result-fd FD --spill-fd FD (or --self-check)".to_owned());
         }
         let library = PathBuf::from(&values[1]);
         if !library.is_absolute() {
@@ -129,21 +135,30 @@ mod worker {
             .ok_or_else(|| "result descriptor is not UTF-8".to_owned())?
             .parse::<i32>()
             .map_err(|_| "invalid result descriptor".to_owned())?;
+        let spill_fd = values[13]
+            .to_str()
+            .ok_or_else(|| "spill descriptor is not UTF-8".to_owned())?
+            .parse::<i32>()
+            .map_err(|_| "invalid spill descriptor".to_owned())?;
         if parameters_fd < 3
             || planner_fd < 3
             || executor_fd < 3
             || optimizer_fd < 3
             || result_fd < 3
+            || (spill_fd != -1 && spill_fd < 3)
         {
             return Err("worker descriptors must be greater than stderr".to_owned());
         }
-        let descriptors = [
+        let mut descriptors = vec![
             parameters_fd,
             planner_fd,
             executor_fd,
             optimizer_fd,
             result_fd,
         ];
+        if spill_fd >= 3 {
+            descriptors.push(spill_fd);
+        }
         if descriptors
             .iter()
             .enumerate()
@@ -158,6 +173,7 @@ mod worker {
             executor_fd,
             optimizer_fd,
             result_fd,
+            spill_fd,
         })
     }
 
@@ -234,8 +250,12 @@ mod worker {
             return Err(dynamic_loader_error("dlopen"));
         }
 
-        // Prefer v5, then v4, v3 and v2. An invalid descriptor is rejected rather than
+        // Prefer v6, then v5, v4, v3 and v2. An invalid descriptor is rejected rather than
         // falling back to a second ABI exported by the same library.
+        let v6_descriptor_symbol = CString::new(QUERY_DESCRIPTOR_V6_SYMBOL).expect("static symbol");
+        if let Some(descriptor_address) = lookup_optional_symbol(handle, &v6_descriptor_symbol)? {
+            return unsafe { execute_v6_library(handle, descriptor_address, args) };
+        }
         let v5_descriptor_symbol = CString::new(QUERY_DESCRIPTOR_V5_SYMBOL).expect("static symbol");
         if let Some(descriptor_address) = lookup_optional_symbol(handle, &v5_descriptor_symbol)? {
             return unsafe { execute_v5_library(handle, descriptor_address, args) };
@@ -305,6 +325,82 @@ mod worker {
         Ok(status)
     }
 
+    unsafe fn execute_v6_library(
+        handle: *mut libc::c_void,
+        descriptor_address: *mut libc::c_void,
+        args: WorkerArgs,
+    ) -> io::Result<i32> {
+        if !(descriptor_address as usize).is_multiple_of(std::mem::align_of::<QueryDescriptorV6>())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "query v6 descriptor has invalid alignment",
+            ));
+        }
+        let descriptor = unsafe { descriptor_address.cast::<QueryDescriptorV6>().read() };
+        validate_descriptor_v6(&descriptor).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("query ABI v6 descriptor rejected: {error:?}"),
+            )
+        })?;
+        let entry_symbol = CString::new(QUERY_ENTRY_V6_SYMBOL).expect("static symbol");
+        let entry_address = lookup_symbol(handle, &entry_symbol)?;
+        let entry: QueryMainV6 = unsafe { std::mem::transmute(entry_address) };
+        let parameters = read_parameters(args.parameters_fd)?;
+        let parameters_len = u64::try_from(parameters.len()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "parameters length overflow")
+        })?;
+        let parameters_ptr = if parameters.is_empty() {
+            std::ptr::null()
+        } else {
+            parameters.as_ptr()
+        };
+        let invocation = InvocationV6 {
+            struct_size: std::mem::size_of::<InvocationV6>() as u32,
+            abi_version: QUERY_ABI_V6_VERSION,
+            parameters: parameters_ptr,
+            parameters_len,
+        };
+        let context = unsafe {
+            CallbackContext::from_raw_fds(
+                args.planner_fd,
+                args.executor_fd,
+                args.optimizer_fd,
+                args.result_fd,
+                (args.spill_fd >= 3).then_some(args.spill_fd),
+            )
+        };
+        let context = Box::leak(Box::new(context));
+        let v3 = HostApiV3 {
+            struct_size: std::mem::size_of::<HostApiV3>() as u32,
+            abi_version: QUERY_ABI_V3_VERSION,
+            context: (context as *mut CallbackContext).cast(),
+            executor_request: Some(executor_request_v2 as QueryIpcRequestV2),
+            planner_request: Some(planner_request_v2 as QueryIpcRequestV2),
+            write_result: Some(write_result_v2 as QueryWriteResultV2),
+            statement_failure: Some(statement_failure_v3 as QueryStatementFailureV3),
+        };
+        let v5 = HostApiV5 {
+            v4: HostApiV4 {
+                v3,
+                optimizer_request: Some(optimizer_request_v4 as QueryOptimizerRequestV4),
+            },
+            optimizer_request: Some(optimizer_request_v5 as QueryOptimizerRequestV5),
+        };
+        let host = HostApiV6 {
+            v5,
+            spill_request: context
+                .spill
+                .as_ref()
+                .map(|_| spill_request_v1 as QuerySpillRequestV1),
+        };
+        let status = unsafe { entry(&host, &invocation) };
+        let failed = context.statement_failed.load(Ordering::SeqCst);
+        let _ = handle;
+        Ok(query_exit_status(status, failed))
+    }
+
     unsafe fn execute_v5_library(
         handle: *mut libc::c_void,
         descriptor_address: *mut libc::c_void,
@@ -351,6 +447,7 @@ mod worker {
                 args.executor_fd,
                 args.optimizer_fd,
                 args.result_fd,
+                (args.spill_fd >= 3).then_some(args.spill_fd),
             )
         };
         let context = Box::leak(Box::new(context));
@@ -426,6 +523,7 @@ mod worker {
                 args.executor_fd,
                 args.optimizer_fd,
                 args.result_fd,
+                (args.spill_fd >= 3).then_some(args.spill_fd),
             )
         };
         // Keep callback state alive until the worker's immediate `_exit`, even
@@ -499,6 +597,7 @@ mod worker {
                 args.executor_fd,
                 args.optimizer_fd,
                 args.result_fd,
+                (args.spill_fd >= 3).then_some(args.spill_fd),
             )
         };
         // Keep callback state alive until the worker's immediate `_exit`, even
@@ -573,6 +672,7 @@ mod worker {
                 args.executor_fd,
                 args.optimizer_fd,
                 args.result_fd,
+                (args.spill_fd >= 3).then_some(args.spill_fd),
             )
         };
         // Keep callback state alive until the worker's immediate `_exit`, even
@@ -672,6 +772,8 @@ mod worker {
         planner: IpcChannel,
         optimizer: IpcChannel,
         result: Mutex<UnixStream>,
+        spill: Option<Mutex<UnixStream>>,
+        next_spill_request_id: AtomicU64,
         total_result_bytes: AtomicU64,
         statement_failed: AtomicBool,
     }
@@ -682,9 +784,10 @@ mod worker {
             executor_fd: i32,
             optimizer_fd: i32,
             result_fd: i32,
+            spill_fd: Option<i32>,
         ) -> Self {
             // SAFETY: the trusted launcher passes distinct, open socket fds and
-            // transfers ownership to this invocation context.
+            // transfers ownership to this invocation context. Spill is optional.
             let planner = unsafe { IpcChannel::from_raw_fd(planner_fd, ServiceRole::Planner) };
             // SAFETY: same descriptor ownership contract as the planner fd.
             let executor = unsafe { IpcChannel::from_raw_fd(executor_fd, ServiceRole::Executor) };
@@ -693,11 +796,18 @@ mod worker {
                 unsafe { IpcChannel::from_raw_fd(optimizer_fd, ServiceRole::OptimizerSubmission) };
             // SAFETY: the result fd is a distinct connected Unix stream.
             let result = unsafe { UnixStream::from_raw_fd(result_fd) };
+            // SAFETY: the launcher transfers this dedicated worker channel.
+            let spill = spill_fd.map(|spill_fd| {
+                // SAFETY: the trusted launcher transfers this distinct channel fd.
+                Mutex::new(unsafe { UnixStream::from_raw_fd(spill_fd) })
+            });
             Self {
                 executor,
                 planner,
                 optimizer,
                 result: Mutex::new(result),
+                spill,
+                next_spill_request_id: AtomicU64::new(1),
                 total_result_bytes: AtomicU64::new(0),
                 statement_failed: AtomicBool::new(false),
             }
@@ -715,6 +825,128 @@ mod worker {
             CALLBACK_OK
         }))
         .unwrap_or(CALLBACK_INTERNAL_ERROR)
+    }
+
+    unsafe extern "C" fn spill_request_v1(
+        context: *mut c_void,
+        operation: u16,
+        request: *const u8,
+        request_len: u64,
+        response: *mut u8,
+        response_capacity: u64,
+        response_len: *mut u64,
+    ) -> i32 {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            if context.is_null() || response_len.is_null() {
+                return CALLBACK_INVALID_ARGUMENT;
+            }
+            let context = &*context.cast::<CallbackContext>();
+            *response_len = 0;
+            let request_len = match usize::try_from(request_len) {
+                Ok(value) if value <= MAX_IPC_REQUEST_BYTES as usize => value,
+                _ => return spill_callback_failure(context, CALLBACK_LIMIT_EXCEEDED),
+            };
+            let response_capacity = match usize::try_from(response_capacity) {
+                Ok(value) if value <= MAX_IPC_RESPONSE_BYTES as usize => value,
+                _ => return spill_callback_failure(context, CALLBACK_LIMIT_EXCEEDED),
+            };
+            if (request_len > 0 && request.is_null())
+                || (response_capacity > 0 && response.is_null())
+                || !matches!(
+                    operation,
+                    SPILL_OP_CREATE
+                        | SPILL_OP_APPEND
+                        | SPILL_OP_SEAL
+                        | SPILL_OP_READ_AT
+                        | SPILL_OP_DESTROY
+                )
+            {
+                return spill_callback_failure(context, CALLBACK_INVALID_ARGUMENT);
+            }
+            let request_bytes = if request_len == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(request, request_len)
+            };
+            let payload_len = match u32::try_from(request_len) {
+                Ok(value) => value,
+                Err(_) => return spill_callback_failure(context, CALLBACK_LIMIT_EXCEEDED),
+            };
+            let request_id = match context.next_spill_request_id.fetch_update(
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+                |id| id.checked_add(1),
+            ) {
+                Ok(id) => id,
+                Err(_) => return spill_callback_failure(context, CALLBACK_INTERNAL_ERROR),
+            };
+            let mut header = [0u8; SPILL_CHANNEL_HEADER_BYTES as usize];
+            header[..4].copy_from_slice(SPILL_CHANNEL_MAGIC.as_bytes());
+            header[4..6].copy_from_slice(&SPILL_CHANNEL_VERSION.to_be_bytes());
+            header[6..8].copy_from_slice(&operation.to_be_bytes());
+            header[8..16].copy_from_slice(&request_id.to_be_bytes());
+            header[16..20].copy_from_slice(&payload_len.to_be_bytes());
+
+            let Some(spill) = context.spill.as_ref() else {
+                return spill_callback_failure(context, CALLBACK_IO_ERROR);
+            };
+            let mut stream = match spill.lock() {
+                Ok(stream) => stream,
+                Err(_) => return spill_callback_failure(context, CALLBACK_INTERNAL_ERROR),
+            };
+            if stream
+                .write_all(&header)
+                .and_then(|()| stream.write_all(request_bytes))
+                .is_err()
+            {
+                return spill_callback_failure(context, CALLBACK_IO_ERROR);
+            }
+            let mut response_header = [0u8; SPILL_CHANNEL_HEADER_BYTES as usize];
+            if stream.read_exact(&mut response_header).is_err()
+                || response_header[..4] != SPILL_CHANNEL_MAGIC.as_bytes()[..]
+                || u16::from_be_bytes([response_header[4], response_header[5]])
+                    != SPILL_CHANNEL_VERSION
+                || u16::from_be_bytes([response_header[6], response_header[7]])
+                    != (operation | 0x8000)
+                || u64::from_be_bytes(response_header[8..16].try_into().unwrap()) != request_id
+            {
+                return spill_callback_failure(context, CALLBACK_PROTOCOL_ERROR);
+            }
+            let wire_len = u32::from_be_bytes(response_header[16..20].try_into().unwrap()) as usize;
+            if wire_len < 2 || wire_len > response_capacity.saturating_add(2) {
+                return spill_callback_failure(context, CALLBACK_RESPONSE_TOO_SMALL);
+            }
+            let mut wire_response = vec![0; wire_len];
+            if stream.read_exact(&mut wire_response).is_err() {
+                return spill_callback_failure(context, CALLBACK_IO_ERROR);
+            }
+            let status = u16::from_be_bytes([wire_response[0], wire_response[1]]);
+            if status != SPILL_STATUS_OK {
+                return spill_callback_failure(
+                    context,
+                    if status == 255 {
+                        CALLBACK_IO_ERROR
+                    } else {
+                        CALLBACK_LIMIT_EXCEEDED
+                    },
+                );
+            }
+            let body = &wire_response[2..];
+            if body.len() > response_capacity {
+                return spill_callback_failure(context, CALLBACK_RESPONSE_TOO_SMALL);
+            }
+            if !body.is_empty() {
+                std::ptr::copy_nonoverlapping(body.as_ptr(), response, body.len());
+            }
+            *response_len = body.len() as u64;
+            CALLBACK_OK
+        }))
+        .unwrap_or(CALLBACK_INTERNAL_ERROR)
+    }
+
+    fn spill_callback_failure(context: &CallbackContext, status: i32) -> i32 {
+        context.statement_failed.store(true, Ordering::SeqCst);
+        status
     }
 
     unsafe extern "C" fn executor_request_v2(
@@ -1018,6 +1250,69 @@ mod worker {
         use super::*;
         use std::os::fd::IntoRawFd;
 
+        #[test]
+        fn worker_requires_a_distinct_dedicated_spill_channel_fd() {
+            let arguments = [
+                "--library",
+                "/tmp/query.so",
+                "--parameters-fd",
+                "3",
+                "--planner-fd",
+                "4",
+                "--executor-fd",
+                "5",
+                "--optimizer-fd",
+                "6",
+                "--result-fd",
+                "7",
+                "--spill-fd",
+                "8",
+            ];
+            let values = arguments.map(std::ffi::OsString::from);
+            let parsed = parse_args(&values).unwrap();
+            assert_eq!(parsed.spill_fd, 8);
+
+            let mut disabled = arguments.map(std::ffi::OsString::from);
+            disabled[13] = std::ffi::OsString::from("-1");
+            assert_eq!(parse_args(&disabled).unwrap().spill_fd, -1);
+
+            let duplicate = [
+                "--library",
+                "/tmp/query.so",
+                "--parameters-fd",
+                "3",
+                "--planner-fd",
+                "4",
+                "--executor-fd",
+                "5",
+                "--optimizer-fd",
+                "6",
+                "--result-fd",
+                "7",
+                "--spill-fd",
+                "7",
+            ]
+            .map(std::ffi::OsString::from);
+            assert!(parse_args(&duplicate).is_err());
+
+            let legacy = [
+                "--library",
+                "/tmp/query.so",
+                "--parameters-fd",
+                "3",
+                "--planner-fd",
+                "4",
+                "--executor-fd",
+                "5",
+                "--optimizer-fd",
+                "6",
+                "--result-fd",
+                "7",
+            ]
+            .map(std::ffi::OsString::from);
+            assert!(parse_args(&legacy).is_err());
+        }
+
         fn callback_context(
             planner: UnixStream,
             executor: UnixStream,
@@ -1033,6 +1328,7 @@ mod worker {
             optimizer: UnixStream,
             result: UnixStream,
         ) -> CallbackContext {
+            let (spill, _spill_peer) = UnixStream::pair().unwrap();
             // SAFETY: each stream contributes one unique fd and ownership is
             // transferred into the callback context.
             unsafe {
@@ -1041,8 +1337,233 @@ mod worker {
                     executor.into_raw_fd(),
                     optimizer.into_raw_fd(),
                     result.into_raw_fd(),
+                    Some(spill.into_raw_fd()),
                 )
             }
+        }
+
+        fn spill_callback_context() -> (CallbackContext, UnixStream) {
+            let (planner, _planner_peer) = UnixStream::pair().unwrap();
+            let (executor, _executor_peer) = UnixStream::pair().unwrap();
+            let (optimizer, _optimizer_peer) = UnixStream::pair().unwrap();
+            let (result, _result_peer) = UnixStream::pair().unwrap();
+            let (spill, spill_peer) = UnixStream::pair().unwrap();
+            // SAFETY: each stream contributes a distinct owned endpoint.
+            let context = unsafe {
+                CallbackContext::from_raw_fds(
+                    planner.into_raw_fd(),
+                    executor.into_raw_fd(),
+                    optimizer.into_raw_fd(),
+                    result.into_raw_fd(),
+                    Some(spill.into_raw_fd()),
+                )
+            };
+            (context, spill_peer)
+        }
+
+        fn answer_spill_request(mut peer: UnixStream, status: u16, body: Vec<u8>) {
+            let mut request_header = [0u8; SPILL_CHANNEL_HEADER_BYTES as usize];
+            peer.read_exact(&mut request_header).unwrap();
+            let request_len =
+                u32::from_be_bytes(request_header[16..20].try_into().unwrap()) as usize;
+            let mut request = vec![0; request_len];
+            peer.read_exact(&mut request).unwrap();
+            let operation = u16::from_be_bytes([request_header[6], request_header[7]]);
+            let request_id = &request_header[8..16];
+            let mut response_header = [0u8; SPILL_CHANNEL_HEADER_BYTES as usize];
+            response_header[..4].copy_from_slice(SPILL_CHANNEL_MAGIC.as_bytes());
+            response_header[4..6].copy_from_slice(&SPILL_CHANNEL_VERSION.to_be_bytes());
+            response_header[6..8].copy_from_slice(&(operation | 0x8000).to_be_bytes());
+            response_header[8..16].copy_from_slice(request_id);
+            response_header[16..20].copy_from_slice(&((body.len() + 2) as u32).to_be_bytes());
+            peer.write_all(&response_header).unwrap();
+            peer.write_all(&status.to_be_bytes()).unwrap();
+            peer.write_all(&body).unwrap();
+        }
+
+        #[test]
+        fn spill_callback_relays_bounded_bytes_and_latches_broker_failures() {
+            let (context, peer) = spill_callback_context();
+            let responder = std::thread::spawn(move || {
+                answer_spill_request(peer, SPILL_STATUS_OK, vec![0x5a; 16]);
+            });
+            let mut response = [0u8; 16];
+            let mut response_len = 0u64;
+            // SAFETY: pointers and context remain valid for the callback.
+            let result = unsafe {
+                spill_request_v1(
+                    (&context as *const CallbackContext).cast_mut().cast(),
+                    SPILL_OP_CREATE,
+                    std::ptr::null(),
+                    0,
+                    response.as_mut_ptr(),
+                    response.len() as u64,
+                    &mut response_len,
+                )
+            };
+            responder.join().unwrap();
+            assert_eq!(result, CALLBACK_OK);
+            assert_eq!(response_len, 16);
+            assert_eq!(response, [0x5a; 16]);
+            assert!(!context.statement_failed.load(Ordering::SeqCst));
+
+            let (failed_context, peer) = spill_callback_context();
+            let responder = std::thread::spawn(move || answer_spill_request(peer, 6, Vec::new()));
+            // SAFETY: callback uses valid context and response-length storage.
+            let result = unsafe {
+                spill_request_v1(
+                    (&failed_context as *const CallbackContext)
+                        .cast_mut()
+                        .cast(),
+                    SPILL_OP_CREATE,
+                    std::ptr::null(),
+                    0,
+                    response.as_mut_ptr(),
+                    response.len() as u64,
+                    &mut response_len,
+                )
+            };
+            responder.join().unwrap();
+            assert_eq!(result, CALLBACK_LIMIT_EXCEEDED);
+            assert!(failed_context.statement_failed.load(Ordering::SeqCst));
+            assert_ne!(query_exit_status(0, true), 0);
+        }
+
+        #[test]
+        fn v6_spill_callback_roundtrips_through_the_trusted_broker() {
+            use prdb_engine::spill::{SpillBroker, SpillConfig, SpillPackage};
+            use prdb_engine::supervisor::WorkloadClass;
+            use std::os::unix::fs::PermissionsExt;
+            use std::time::{Duration, Instant};
+
+            let root = std::env::temp_dir().join(format!(
+                "prdb-executor-spill-{}-{:032x}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir(&root).unwrap();
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let broker = SpillBroker::open(SpillConfig {
+                parent: root.clone(),
+                max_bytes_per_invocation: 8192,
+                max_io_bytes_per_invocation: 32768,
+                max_streams_per_invocation: 4,
+                max_operations_per_invocation: 32,
+                max_response_bytes: 4096,
+                max_service_bytes: 16384,
+            })
+            .unwrap();
+            let package = SpillPackage::new([0x31; 16], [0x32; 16]);
+            broker
+                .open_package(
+                    package,
+                    WorkloadClass::Analytical,
+                    Instant::now() + Duration::from_secs(10),
+                )
+                .unwrap();
+            let (context, broker_stream) = spill_callback_context();
+            let serving_broker = broker.clone();
+            let server =
+                std::thread::spawn(move || serving_broker.serve_channel(broker_stream, package));
+            let context_ptr = (&context as *const CallbackContext).cast_mut().cast();
+            let mut handle = [0u8; 16];
+            let mut response_len = 0u64;
+            // SAFETY: every callback pointer refers to live bounded test storage.
+            assert_eq!(
+                unsafe {
+                    spill_request_v1(
+                        context_ptr,
+                        SPILL_OP_CREATE,
+                        std::ptr::null(),
+                        0,
+                        handle.as_mut_ptr(),
+                        handle.len() as u64,
+                        &mut response_len,
+                    )
+                },
+                CALLBACK_OK
+            );
+            assert_eq!(response_len, 16);
+
+            let payload = b"through-broker";
+            let mut append = handle.to_vec();
+            append.extend_from_slice(payload);
+            // SAFETY: request and response buffers are valid for the callback.
+            assert_eq!(
+                unsafe {
+                    spill_request_v1(
+                        context_ptr,
+                        SPILL_OP_APPEND,
+                        append.as_ptr(),
+                        append.len() as u64,
+                        std::ptr::null_mut(),
+                        0,
+                        &mut response_len,
+                    )
+                },
+                CALLBACK_OK
+            );
+
+            // SAFETY: handle is a live 16-byte request buffer.
+            assert_eq!(
+                unsafe {
+                    spill_request_v1(
+                        context_ptr,
+                        SPILL_OP_SEAL,
+                        handle.as_ptr(),
+                        handle.len() as u64,
+                        std::ptr::null_mut(),
+                        0,
+                        &mut response_len,
+                    )
+                },
+                CALLBACK_OK
+            );
+
+            let mut read_request = Vec::from(handle);
+            read_request.extend_from_slice(&0u64.to_be_bytes());
+            read_request.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+            let mut read_response = [0u8; 32];
+            // SAFETY: read request and response buffers are valid and bounded.
+            assert_eq!(
+                unsafe {
+                    spill_request_v1(
+                        context_ptr,
+                        SPILL_OP_READ_AT,
+                        read_request.as_ptr(),
+                        read_request.len() as u64,
+                        read_response.as_mut_ptr(),
+                        read_response.len() as u64,
+                        &mut response_len,
+                    )
+                },
+                CALLBACK_OK
+            );
+            assert_eq!(response_len, payload.len() as u64);
+            assert_eq!(&read_response[..payload.len()], payload);
+
+            // SAFETY: handle is a live 16-byte request buffer.
+            assert_eq!(
+                unsafe {
+                    spill_request_v1(
+                        context_ptr,
+                        SPILL_OP_DESTROY,
+                        handle.as_ptr(),
+                        handle.len() as u64,
+                        std::ptr::null_mut(),
+                        0,
+                        &mut response_len,
+                    )
+                },
+                CALLBACK_OK
+            );
+            drop(context);
+            assert_eq!(server.join().unwrap(), Ok(()));
+            broker.close_package(package).unwrap();
+            std::fs::remove_dir_all(root).unwrap();
         }
 
         #[test]

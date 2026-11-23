@@ -33,6 +33,8 @@ static const uint8_t descriptor_v4[] = "prdb_query_descriptor_v4";
 static const uint8_t entry_v4[] = "prdb_query_main_v4";
 static const uint8_t descriptor_v5[] = "prdb_query_descriptor_v5";
 static const uint8_t entry_v5[] = "prdb_query_main_v5";
+static const uint8_t descriptor_v6[] = "prdb_query_descriptor_v6";
+static const uint8_t entry_v6[] = "prdb_query_main_v6";
 
 static prdb_sdk_manifest_v1 make_manifest(void) {
     static prdb_sdk_manifest_dependency_v1 dependencies[2];
@@ -103,6 +105,12 @@ int main(void) {
     assert(output[6] == 5);
     assert(memcmp(&output[60], descriptor_v5, sizeof(descriptor_v5) - 1) == 0);
     assert(memcmp(&output[84], entry_v5, sizeof(entry_v5) - 1) == 0);
+    manifest.native_abi_version = 6;
+    assert(prdb_sdk_manifest_encode_v1(&manifest, output, sizeof(output),
+                                       &output_bytes) == PRDB_SDK_MANIFEST_OK);
+    assert(output[6] == 6);
+    assert(memcmp(&output[60], descriptor_v6, sizeof(descriptor_v6) - 1) == 0);
+    assert(memcmp(&output[84], entry_v6, sizeof(entry_v6) - 1) == 0);
     manifest.native_abi_version = 3;
 
     memset(small, 0xa5, sizeof(small));
@@ -134,8 +142,8 @@ int main(void) {
     manifest.native_abi_version = 6;
     assert(prdb_sdk_manifest_encode_v1(&manifest, output, sizeof(output),
                                        &output_bytes) ==
-           PRDB_SDK_MANIFEST_INVALID_VALUE);
-    assert(output_bytes == 0);
+           PRDB_SDK_MANIFEST_OK);
+    assert(output[6] == 6);
 
     manifest = make_manifest();
     manifest.sdk_release = 0;

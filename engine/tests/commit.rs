@@ -461,6 +461,7 @@ fn run_sandboxed_forged_handle_client(
             scratch_parent: std::env::temp_dir(),
             runtime_read_execute: required_paths("PRDB_TEST_RUNTIME_READ_EXECUTE")?,
             runtime_read_only: required_paths("PRDB_TEST_RUNTIME_READ_ONLY")?,
+            spill_broker: None,
             cleanup_timeout: Duration::from_secs(2),
         },
     };
@@ -17068,8 +17069,8 @@ fn storage_manager_runtime_and_metadata_reads_enforce_authorization()
         )
         .into());
     }
-    let sdk_release_dir =
-        sdk_build_dir.join("releases/linux-x86_64/x86_64-v1/nixos-glibc-2.42/sdk-1-abis1,2,3,4,5");
+    let sdk_release_dir = sdk_build_dir
+        .join("releases/linux-x86_64/x86_64-v1/nixos-glibc-2.42/sdk-1-abis1,2,3,4,5,6");
     let sdk_metadata = std::fs::read(sdk_release_dir.join("sdk-release.json"))?;
     let sdk_library = std::fs::read(sdk_release_dir.join("libprdb_sql.so.1"))?;
     let sdk_repository = std::sync::Arc::new(
@@ -20543,6 +20544,7 @@ fn admin_cancellation_sync_failure_quarantines_until_reopen()
                     scratch_parent: std::env::temp_dir(),
                     runtime_read_execute: Vec::new(),
                     runtime_read_only: Vec::new(),
+                    spill_broker: None,
                     cleanup_timeout: Duration::from_millis(100),
                 },
             },
@@ -32822,6 +32824,7 @@ fn gateway_service_listener_authenticates_control_admin_over_socket()
                             scratch_parent: std::env::temp_dir(),
                             runtime_read_execute: Vec::new(),
                             runtime_read_only: Vec::new(),
+                            spill_broker: None,
                             cleanup_timeout: Duration::from_millis(100),
                         },
                     },
@@ -39495,6 +39498,7 @@ fn run_sandboxed_v3_sql_error_fixture(
             scratch_parent: std::env::temp_dir(),
             runtime_read_execute: required_paths("PRDB_TEST_RUNTIME_READ_EXECUTE")?,
             runtime_read_only: required_paths("PRDB_TEST_RUNTIME_READ_ONLY")?,
+            spill_broker: None,
             cleanup_timeout: Duration::from_secs(2),
         },
     };
@@ -39979,6 +39983,7 @@ fn sandboxed_optimizer_metadata_submission_cancels_over_tcp()
             scratch_parent: std::env::temp_dir(),
             runtime_read_execute: required_paths("PRDB_TEST_RUNTIME_READ_EXECUTE")?,
             runtime_read_only: required_paths("PRDB_TEST_RUNTIME_READ_ONLY")?,
+            spill_broker: None,
             cleanup_timeout: Duration::from_secs(2),
         },
     };
@@ -40341,6 +40346,24 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let count_bigint_only = std::env::var_os("PRDB_TEST_COUNT_BIGINT_ONLY").is_some();
+    let spill_quota_only = std::env::var_os("PRDB_TEST_SPILL_QUOTA_ONLY").is_some();
+    let spill_only = std::env::var_os("PRDB_TEST_SPILL_ONLY").is_some();
+    let spill_disabled_only = std::env::var_os("PRDB_TEST_SPILL_DISABLED_ONLY").is_some();
+    let spill_sort_only = std::env::var_os("PRDB_TEST_SPILL_SORT_ONLY").is_some();
+    let spill_decimal_only = std::env::var_os("PRDB_TEST_SPILL_DECIMAL_ONLY").is_some();
+    let spill_redacted_only = std::env::var_os("PRDB_TEST_SPILL_REDACTED_ONLY").is_some();
+    let spill_join_only = std::env::var_os("PRDB_TEST_SPILL_JOIN_ONLY").is_some();
+    let spill_crash_only = std::env::var_os("PRDB_TEST_SPILL_CRASH_ONLY").is_some();
+    let spill_pressure_only = std::env::var_os("PRDB_TEST_SPILL_PRESSURE_ONLY").is_some();
+    let spill_enabled_only = spill_quota_only
+        || spill_only
+        || spill_sort_only
+        || spill_decimal_only
+        || spill_redacted_only
+        || spill_join_only
+        || spill_crash_only
+        || spill_pressure_only;
+    let spill_query_mode = spill_enabled_only || spill_disabled_only;
 
     struct AcceptFixture {
         requested_scope: Vec<u8>,
@@ -40419,9 +40442,15 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     let cgroup_parent = std::env::var_os("PRDB_TEST_CGROUP_PARENT")
         .map(PathBuf::from)
         .ok_or("PRDB_TEST_CGROUP_PARENT must name a delegated cgroup v2 parent")?;
-    let artifact_path = std::env::var_os("PRDB_TEST_WRITE_READ_QUERY_ARTIFACT")
-        .map(PathBuf::from)
-        .ok_or("PRDB_TEST_WRITE_READ_QUERY_ARTIFACT must name sql-v3-write-read.so")?;
+    let artifact_path = if spill_query_mode {
+        std::env::var_os("PRDB_TEST_SPILL_QUERY_ARTIFACT")
+            .map(PathBuf::from)
+            .ok_or("PRDB_TEST_SPILL_QUERY_ARTIFACT must name sql-v6-spill.so")?
+    } else {
+        std::env::var_os("PRDB_TEST_WRITE_READ_QUERY_ARTIFACT")
+            .map(PathBuf::from)
+            .ok_or("PRDB_TEST_WRITE_READ_QUERY_ARTIFACT must name sql-v3-write-read.so")?
+    };
     let restricted_artifact_path = std::env::var_os("PRDB_TEST_RESTRICTED_METADATA_QUERY_ARTIFACT")
         .map(PathBuf::from)
         .ok_or(
@@ -40461,11 +40490,19 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     let manifest = encode_manifest_v1(
         &manifest_v1_from_elf(
             &artifact,
-            4,
+            if spill_enabled_only || spill_disabled_only {
+                6
+            } else {
+                4
+            },
             1,
             "x86_64-v1".to_owned(),
             "nixos-x86_64-glibc-2.42".to_owned(),
-            "TinyCC DML integration fixture".to_owned(),
+            if spill_query_mode {
+                "TinyCC ABI v6 spill fixture".to_owned()
+            } else {
+                "TinyCC DML integration fixture".to_owned()
+            },
         )
         .map_err(|error| format!("derive DML manifest: {error:?}"))?,
     )
@@ -40679,7 +40716,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         TableColumnDefinition {
             name: "left_key".to_owned(),
             scalar_type: ScalarType::Integer,
-            nullable: false,
+            nullable: spill_query_mode,
             generated_uuid_identity: false,
             default: None,
         },
@@ -40791,7 +40828,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     let mut decimal_schema = vec![
         ColumnSchema {
             scalar_type: ScalarType::Integer,
-            nullable: false,
+            nullable: spill_query_mode,
         },
         ColumnSchema {
             scalar_type: ScalarType::Integer,
@@ -40838,6 +40875,40 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         })
     })
     .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+    let mut decimal_rows = decimal_rows;
+    if spill_query_mode {
+        for row_id in [0xf9, 0xfa] {
+            let mut values = vec![None, Some(ScalarValue::Integer(13)), None];
+            if count_bigint_only {
+                values.push(None);
+            }
+            decimal_rows.push(RowWrite {
+                key: table_row_key(decimal_table.table_id, id(row_id)),
+                expected_version: None,
+                payload: Some(encode_tuple(&decimal_schema, 1, &values)?),
+            });
+        }
+    }
+    if spill_pressure_only {
+        for index in 0..128u16 {
+            let left_key = i32::from(index % 3 + 1);
+            let mut values = vec![
+                Some(ScalarValue::Integer(left_key)),
+                Some(ScalarValue::Integer(17)),
+                None,
+            ];
+            if count_bigint_only {
+                values.push(None);
+            }
+            let mut row_id = [0; 16];
+            row_id[14..].copy_from_slice(&(index + 1).to_be_bytes());
+            decimal_rows.push(RowWrite {
+                key: table_row_key(decimal_table.table_id, row_id),
+                expected_version: None,
+                payload: Some(encode_tuple(&decimal_schema, 1, &values)?),
+            });
+        }
+    }
     commit_rows(
         &database,
         id(0xf2),
@@ -42121,6 +42192,31 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             &[policy_audit],
         )
         .map_err(|error| format!("metadata fixture policies failed: {error:?}"))?;
+    if spill_redacted_only {
+        let redacted_policy_invocation = id(0xac);
+        let mut redacted_policy_audit =
+            identity_audit_event(0xad, user_id, decimal_table.column_ids[2]);
+        redacted_policy_audit.correlation_id = redacted_policy_invocation;
+        storage
+            .create_policy(CreatePolicyRequest {
+                invocation_id: redacted_policy_invocation,
+                authenticated_actor_id: user_id,
+                table_id: decimal_table.table_id,
+                name: "sandbox_spill_redacted_sort_key_policy".to_owned(),
+                kind: PolicyKind::Cell,
+                operation: prdb_engine::authorization::Operation::Select,
+                effect: prdb_engine::authorization::Effect::Restrict,
+                recipients: vec![prdb_engine::authorization::Subject::Principal(user_id)],
+                target_column_ids: vec![decimal_table.column_ids[2]],
+                using_expression: Some(prdb_engine::authorization::Expr::Literal(Some(
+                    ScalarValue::Boolean(false),
+                ))),
+                with_check_expression: None,
+                retention_deadline_us: now + 3_600_000_000,
+                audit_event: redacted_policy_audit,
+            })
+            .map_err(|error| format!("create spill redaction policy: {error:?}"))?;
+    }
     let identity_policy_invocation = id(0xfa);
     let mut identity_policy_audit = identity_audit_event(0xfa, user_id, identity_table.table_id);
     identity_policy_audit.correlation_id = identity_policy_invocation;
@@ -42411,6 +42507,32 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
+    let spill_parent = if spill_enabled_only {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = fixture.0.join("spill-parent");
+        std::fs::create_dir(&path)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+        Some(path)
+    } else {
+        None
+    };
+    let spill_broker = if let Some(parent) = spill_parent.as_ref() {
+        Some(
+            prdb_engine::spill::SpillBroker::open(prdb_engine::spill::SpillConfig {
+                parent: parent.clone(),
+                max_bytes_per_invocation: if spill_quota_only { 1 } else { 8 * 1024 * 1024 },
+                max_io_bytes_per_invocation: 32 * 1024 * 1024,
+                max_streams_per_invocation: 16,
+                max_operations_per_invocation: 4096,
+                max_response_bytes: 64 * 1024,
+                max_service_bytes: 16 * 1024 * 1024,
+            })
+            .map_err(|error| format!("open spill test broker: {error:?}"))?,
+        )
+    } else {
+        None
+    };
     let runtime = GatewayExecutorConfig {
         cgroup_parent,
         resource_limits: prdb_engine::linux_sandbox::WorkerResourceLimits {
@@ -42426,6 +42548,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             scratch_parent: std::env::temp_dir(),
             runtime_read_execute: required_paths("PRDB_TEST_RUNTIME_READ_EXECUTE")?,
             runtime_read_only: required_paths("PRDB_TEST_RUNTIME_READ_ONLY")?,
+            spill_broker,
             cleanup_timeout: Duration::from_secs(2),
         },
     };
@@ -42435,12 +42558,35 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         || filtered_composite_only
         || count_column_only
         || count_bigint_only
+        || spill_quota_only
+        || spill_only
+        || spill_disabled_only
+        || spill_sort_only
+        || spill_decimal_only
+        || spill_redacted_only
+        || spill_join_only
+        || spill_crash_only
+        || spill_pressure_only
     {
         let mut ordered_client = ClientConnectionSession::default();
         ordered_client.accept_hello(ClientMode::Query, "sandbox-ordered-analytical-sum")?;
         ordered_client.authenticate(&storage, token_id, &secret)?;
         let ordered_owner = ordered_client.staging_owner()?;
-        let ordered_parameter = [if count_column_only {
+        let ordered_parameter = [if spill_only || spill_quota_only || spill_disabled_only {
+            b'S'
+        } else if spill_sort_only {
+            b'O'
+        } else if spill_decimal_only {
+            b'D'
+        } else if spill_redacted_only {
+            b'E'
+        } else if spill_join_only {
+            b'J'
+        } else if spill_crash_only {
+            b'X'
+        } else if spill_pressure_only {
+            b'P'
+        } else if count_column_only {
             b'V'
         } else if count_bigint_only {
             b'B'
@@ -42500,7 +42646,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 },
                 GatewayAdmissionConfig {
                     retention_period_us: 3_600_000_000,
-                    max_rows: 128,
+                    max_rows: if spill_pressure_only { 2048 } else { 128 },
                     max_bytes: 1_048_576,
                 },
                 &runtime,
@@ -42508,9 +42654,17 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         assert_eq!(ordered_accepted.payload, b"{\"state\":\"accepted\"}");
         let (mut ordered_service, mut ordered_gateway) = UnixStream::pair()?;
         ordered_gateway.set_read_timeout(Some(Duration::from_secs(10)))?;
+        let (pressure_trigger_tx, pressure_trigger_rx) = std::sync::mpsc::channel();
+        let mut pressure_trigger_tx = spill_pressure_only.then_some(pressure_trigger_tx);
         let ordered_reader = std::thread::spawn(move || {
             let mut frames = Vec::new();
             while let Some(frame) = prdb_engine::ipc::read_frame(&mut ordered_gateway)? {
+                if frame.operation == Operation::GatewayResultData as u16
+                    && frame.payload == b"spill-pressure-started"
+                    && let Some(trigger) = pressure_trigger_tx.take()
+                {
+                    let _ = trigger.send(());
+                }
                 let terminal = frame.operation == Operation::GatewayTerminal as u16;
                 frames.push(frame);
                 if terminal {
@@ -42519,31 +42673,311 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             }
             Ok::<_, prdb_engine::ipc::FrameError>(frames)
         });
-        let ordered_decision = observe_executor_relay_and_finalize_gateway(
-            &storage,
-            &mut ordered_invocation,
-            &mut ordered_executor,
-            &mut ordered_service,
-            ordered_accepted.request_id,
-        )?;
+        let ordered_decision = if spill_pressure_only {
+            let query_started_at = std::time::Instant::now();
+            let (
+                decision,
+                (operational_started_at, operational_finished_at, read_count, commit_count),
+                query_finished_at,
+            ) = std::thread::scope(|scope| {
+                let storage_ref = &storage;
+                let operational_table_id = composite_table.table_id;
+                let operational_worker = scope.spawn(move || -> Result<_, String> {
+                    pressure_trigger_rx
+                        .recv_timeout(Duration::from_secs(5))
+                        .map_err(|error| {
+                            format!("spill pressure marker was not relayed: {error}")
+                        })?;
+                    let started_at = std::time::Instant::now();
+                    let (reads, commits) = run_operational_read_commit_samples(
+                        storage_ref,
+                        operational_table_id,
+                        token_id,
+                        secret,
+                        now + 3_600_000_000,
+                        0x91,
+                    )
+                    .map_err(|error| format!("operational load during spill: {error}"))?;
+                    Ok((
+                        started_at,
+                        std::time::Instant::now(),
+                        reads.len(),
+                        commits.len(),
+                    ))
+                });
+                let decision = observe_executor_relay_and_finalize_gateway(
+                    &storage,
+                    &mut ordered_invocation,
+                    &mut ordered_executor,
+                    &mut ordered_service,
+                    ordered_accepted.request_id,
+                )?;
+                let query_finished_at = std::time::Instant::now();
+                let operational = operational_worker
+                    .join()
+                    .map_err(|_| std::io::Error::other("spill pressure worker panicked"))?
+                    .map_err(std::io::Error::other)?;
+                Ok::<_, Box<dyn std::error::Error>>((decision, operational, query_finished_at))
+            })?;
+            assert!(
+                operational_started_at < query_finished_at
+                    && operational_finished_at > query_started_at,
+                "operational reads/commits did not overlap the spill query"
+            );
+            assert_eq!(read_count, 64, "expected 64 operational point reads");
+            assert_eq!(commit_count, 64, "expected 64 operational commits");
+            eprintln!(
+                "broker-backed SQL sort overlapped {read_count} operational reads and {commit_count} commits for {} ms",
+                query_finished_at
+                    .duration_since(query_started_at)
+                    .as_millis(),
+            );
+            decision
+        } else {
+            observe_executor_relay_and_finalize_gateway(
+                &storage,
+                &mut ordered_invocation,
+                &mut ordered_executor,
+                &mut ordered_service,
+                ordered_accepted.request_id,
+            )?
+        };
         let ordered_frames = ordered_reader
             .join()
             .map_err(|_| "ordered analytical gateway reader panicked")??;
-        assert_eq!(
-            ordered_decision,
-            GatewayTerminalDecision::Commit,
-            "confined analytical fixture failed; frames: {:?}",
-            ordered_frames
-                .iter()
-                .map(|frame| (
-                    frame.operation,
-                    String::from_utf8_lossy(&frame.payload).into_owned()
-                ))
-                .collect::<Vec<_>>()
-        );
+        if spill_quota_only || spill_crash_only || spill_redacted_only {
+            assert!(
+                matches!(ordered_decision, GatewayTerminalDecision::Abort(_)),
+                "spill quota, redacted key, or worker crash must abort; frames: {:?}",
+                ordered_frames
+                    .iter()
+                    .map(|frame| (
+                        frame.operation,
+                        String::from_utf8_lossy(&frame.payload).into_owned()
+                    ))
+                    .collect::<Vec<_>>()
+            );
+            if spill_quota_only || spill_redacted_only {
+                assert!(
+                    ordered_frames
+                        .iter()
+                        .all(|frame| frame.operation != Operation::GatewayResultData as u16)
+                );
+            }
+        } else {
+            assert_eq!(
+                ordered_decision,
+                GatewayTerminalDecision::Commit,
+                "confined analytical fixture failed; frames: {:?}",
+                ordered_frames
+                    .iter()
+                    .map(|frame| (
+                        frame.operation,
+                        String::from_utf8_lossy(&frame.payload).into_owned()
+                    ))
+                    .collect::<Vec<_>>()
+            );
+        }
         staging.finish_started(ordered_owner, ordered_reservation.invocation_id)?;
         let mut ordered_frames = ordered_frames.into_iter();
-        if count_column_only || count_bigint_only {
+        if spill_only || spill_disabled_only {
+            fn expected_spilled_group_count(left_key: Option<i32>, count: i64) -> Vec<u8> {
+                let mut output = b"SQLR".to_vec();
+                output.extend_from_slice(&1u16.to_be_bytes());
+                output.extend_from_slice(&2u16.to_be_bytes());
+                output.extend_from_slice(&(b"left_key".len() as u16).to_be_bytes());
+                output.extend_from_slice(b"left_key");
+                output.extend_from_slice(&3u32.to_be_bytes());
+                if let Some(left_key) = left_key {
+                    output.extend_from_slice(&[0, 0, 0]);
+                    output.extend_from_slice(&4u32.to_be_bytes());
+                    output.extend_from_slice(&left_key.to_be_bytes());
+                } else {
+                    output.extend_from_slice(&[0, 0, 1]);
+                    output.extend_from_slice(&0u32.to_be_bytes());
+                }
+                output.extend_from_slice(&(b"count".len() as u16).to_be_bytes());
+                output.extend_from_slice(b"count");
+                output.extend_from_slice(&4u32.to_be_bytes());
+                output.extend_from_slice(&[0, 0, 0]);
+                output.extend_from_slice(&8u32.to_be_bytes());
+                output.extend_from_slice(&count.to_be_bytes());
+                output
+            }
+            let expected_groups = if spill_only {
+                [(None, 2), (Some(1), 2), (Some(2), 3), (Some(3), 1)]
+            } else {
+                [(Some(1), 2), (Some(2), 3), (Some(3), 1), (None, 2)]
+            };
+            for (left_key, count) in expected_groups {
+                let frame = ordered_frames
+                    .next()
+                    .ok_or("missing confined spilled GROUP BY row")?;
+                assert_eq!(frame.operation, Operation::GatewayResultData as u16);
+                assert_eq!(frame.request_id, ordered_accepted.request_id);
+                assert_eq!(frame.payload, expected_spilled_group_count(left_key, count));
+            }
+        } else if spill_sort_only {
+            fn expected_spilled_order_key(left_key: Option<i32>) -> Vec<u8> {
+                let mut output = b"SQLR".to_vec();
+                output.extend_from_slice(&1u16.to_be_bytes());
+                output.extend_from_slice(&1u16.to_be_bytes());
+                output.extend_from_slice(&(b"left_key".len() as u16).to_be_bytes());
+                output.extend_from_slice(b"left_key");
+                output.extend_from_slice(&3u32.to_be_bytes());
+                if let Some(left_key) = left_key {
+                    output.extend_from_slice(&[0, 0, 0]);
+                    output.extend_from_slice(&4u32.to_be_bytes());
+                    output.extend_from_slice(&left_key.to_be_bytes());
+                } else {
+                    output.extend_from_slice(&[0, 0, 1]);
+                    output.extend_from_slice(&0u32.to_be_bytes());
+                }
+                output
+            }
+            for left_key in [
+                None,
+                None,
+                Some(3),
+                Some(2),
+                Some(2),
+                Some(2),
+                Some(1),
+                Some(1),
+            ] {
+                let frame = ordered_frames
+                    .next()
+                    .ok_or("missing confined spilled ORDER BY row")?;
+                assert_eq!(frame.operation, Operation::GatewayResultData as u16);
+                assert_eq!(frame.request_id, ordered_accepted.request_id);
+                assert_eq!(frame.payload, expected_spilled_order_key(left_key));
+            }
+        } else if spill_decimal_only {
+            fn expected_spilled_decimal(value: Option<i128>) -> Vec<u8> {
+                let mut output = b"SQLR".to_vec();
+                output.extend_from_slice(&1u16.to_be_bytes());
+                output.extend_from_slice(&1u16.to_be_bytes());
+                output.extend_from_slice(&(b"decimal_value".len() as u16).to_be_bytes());
+                output.extend_from_slice(b"decimal_value");
+                output.extend_from_slice(&5u32.to_be_bytes());
+                output.extend_from_slice(&[4, 2]);
+                if let Some(value) = value {
+                    output.push(0);
+                    output.extend_from_slice(&16u32.to_be_bytes());
+                    output.extend_from_slice(&value.to_be_bytes());
+                } else {
+                    output.push(1);
+                    output.extend_from_slice(&0u32.to_be_bytes());
+                }
+                output
+            }
+            for value in [
+                None,
+                None,
+                None,
+                None,
+                Some(225),
+                Some(125),
+                Some(100),
+                Some(100),
+            ] {
+                let frame = ordered_frames
+                    .next()
+                    .ok_or("missing confined spilled Decimal ORDER BY row")?;
+                assert_eq!(frame.operation, Operation::GatewayResultData as u16);
+                assert_eq!(frame.request_id, ordered_accepted.request_id);
+                assert_eq!(frame.payload, expected_spilled_decimal(value));
+            }
+        } else if spill_pressure_only {
+            fn expected_pressure_order_key(left_key: Option<i32>) -> Vec<u8> {
+                let mut output = b"SQLR".to_vec();
+                output.extend_from_slice(&1u16.to_be_bytes());
+                output.extend_from_slice(&1u16.to_be_bytes());
+                output.extend_from_slice(&(b"left_key".len() as u16).to_be_bytes());
+                output.extend_from_slice(b"left_key");
+                output.extend_from_slice(&3u32.to_be_bytes());
+                if let Some(left_key) = left_key {
+                    output.extend_from_slice(&[0, 0, 0]);
+                    output.extend_from_slice(&4u32.to_be_bytes());
+                    output.extend_from_slice(&left_key.to_be_bytes());
+                } else {
+                    output.extend_from_slice(&[0, 0, 1]);
+                    output.extend_from_slice(&0u32.to_be_bytes());
+                }
+                output
+            }
+            let marker = ordered_frames
+                .next()
+                .ok_or("missing spill pressure start marker")?;
+            assert_eq!(marker.operation, Operation::GatewayResultData as u16);
+            assert_eq!(marker.payload, b"spill-pressure-started");
+            let mut expected_keys = vec![None, None];
+            expected_keys.extend(std::iter::repeat_n(Some(3), 43));
+            expected_keys.extend(std::iter::repeat_n(Some(2), 46));
+            expected_keys.extend(std::iter::repeat_n(Some(1), 45));
+            assert_eq!(expected_keys.len(), 136);
+            for left_key in expected_keys {
+                let frame = ordered_frames
+                    .next()
+                    .ok_or("missing concurrently spilled ORDER BY row")?;
+                assert_eq!(frame.operation, Operation::GatewayResultData as u16);
+                assert_eq!(frame.request_id, ordered_accepted.request_id);
+                assert_eq!(frame.payload, expected_pressure_order_key(left_key));
+            }
+        } else if spill_join_only {
+            fn decode_two_integer_sqlr_fields(
+                bytes: &[u8],
+            ) -> Result<(i32, i32), Box<dyn std::error::Error>> {
+                fn read_integer(
+                    bytes: &[u8],
+                    offset: &mut usize,
+                ) -> Result<i32, Box<dyn std::error::Error>> {
+                    let name_len = u16::from_be_bytes(bytes[*offset..*offset + 2].try_into()?);
+                    *offset += 2 + usize::from(name_len);
+                    assert_eq!(
+                        u32::from_be_bytes(bytes[*offset..*offset + 4].try_into()?),
+                        3
+                    );
+                    *offset += 4 + 3;
+                    let value_len = u32::from_be_bytes(bytes[*offset..*offset + 4].try_into()?);
+                    *offset += 4;
+                    assert_eq!(value_len, 4);
+                    let value = i32::from_be_bytes(bytes[*offset..*offset + 4].try_into()?);
+                    *offset += 4;
+                    Ok(value)
+                }
+                assert_eq!(&bytes[..4], b"SQLR");
+                assert_eq!(u16::from_be_bytes(bytes[4..6].try_into()?), 1);
+                assert_eq!(u16::from_be_bytes(bytes[6..8].try_into()?), 2);
+                let mut offset = 8;
+                let left = read_integer(bytes, &mut offset)?;
+                let right = read_integer(bytes, &mut offset)?;
+                assert_eq!(offset, bytes.len());
+                Ok((left, right))
+            }
+            let mut observed = std::collections::BTreeMap::new();
+            let row_count = ordered_frames
+                .as_slice()
+                .iter()
+                .take_while(|frame| frame.operation == Operation::GatewayResultData as u16)
+                .count();
+            for frame in ordered_frames.as_slice().iter().take(row_count) {
+                assert_eq!(frame.request_id, ordered_accepted.request_id);
+                let (left, right) = decode_two_integer_sqlr_fields(&frame.payload)?;
+                *observed.entry((left, right)).or_insert(0usize) += 1;
+            }
+            for _ in 0..row_count {
+                ordered_frames.next();
+            }
+            assert_eq!(
+                observed.into_iter().collect::<Vec<_>>(),
+                [((1, 7), 4), ((2, 9), 9), ((3, 11), 1)]
+            );
+        } else if !spill_quota_only
+            && !spill_crash_only
+            && !spill_redacted_only
+            && (count_column_only || count_bigint_only)
+        {
             fn expected_count_column_row(left_key: i32, right_key: i32, count: i64) -> Vec<u8> {
                 fn append_field(output: &mut Vec<u8>, name: &[u8], type_code: u32, value: &[u8]) {
                     output.extend_from_slice(&(name.len() as u16).to_be_bytes());
@@ -42572,6 +43006,25 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                     expected_count_column_row(left_key, right_key, count)
                 );
             }
+        } else if spill_quota_only || spill_redacted_only {
+            assert!(
+                ordered_frames
+                    .as_slice()
+                    .iter()
+                    .all(|frame| frame.operation != Operation::GatewayResultData as u16)
+            );
+        } else if spill_crash_only {
+            let provisional = ordered_frames
+                .next()
+                .ok_or("missing result emitted after spill write and before worker crash")?;
+            assert_eq!(provisional.operation, Operation::GatewayResultData as u16);
+            assert_eq!(provisional.payload, b"spill-crash-provisional");
+            assert!(
+                ordered_frames
+                    .as_slice()
+                    .iter()
+                    .all(|frame| frame.operation != Operation::GatewayResultData as u16)
+            );
         } else if filtered_composite_only {
             fn expected_filtered_sum_row(
                 left_key: i32,
@@ -42648,14 +43101,34 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             .ok_or("missing ordered SUM terminal")?;
         assert_eq!(terminal.operation, Operation::GatewayTerminal as u16);
         assert_eq!(terminal.request_id, ordered_accepted.request_id);
-        assert!(String::from_utf8(terminal.payload)?.contains("\"outcome\":\"committed\""));
+        assert!(String::from_utf8(terminal.payload)?.contains(
+            if spill_quota_only || spill_crash_only || spill_redacted_only {
+                "\"outcome\":\"aborted\""
+            } else {
+                "\"outcome\":\"committed\""
+            }
+        ));
         assert_eq!(
             storage
                 .lookup_invocation_outcome(ordered_reservation.invocation_id, user_id, now + 1)?
                 .ok_or("missing ordered SUM outcome")?
                 .status,
-            OutcomeStatus::Committed
+            if spill_quota_only || spill_crash_only || spill_redacted_only {
+                OutcomeStatus::Aborted
+            } else {
+                OutcomeStatus::Committed
+            }
         );
+        if let Some(parent) = spill_parent.as_ref() {
+            assert!(
+                std::fs::read_dir(parent)?.all(|entry| {
+                    entry
+                        .and_then(|entry| entry.file_type())
+                        .is_ok_and(|kind| !kind.is_dir())
+                }),
+                "spill invocation directory must be removed when the package ends"
+            );
+        }
         return Ok(());
     }
     let (accepted, mut invocation, mut executor) = client.handle_start_request_with_executor(
@@ -47478,6 +47951,7 @@ fn sealed_start_admits_only_current_credentials_and_enforces_request_deadline()
             scratch_parent: std::env::temp_dir(),
             runtime_read_execute: Vec::new(),
             runtime_read_only: Vec::new(),
+            spill_broker: None,
             cleanup_timeout: Duration::from_millis(100),
         },
     };

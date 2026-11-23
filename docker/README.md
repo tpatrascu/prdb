@@ -74,7 +74,7 @@ podman run --rm --network=host \
     --default-user admin \
     --sql-file /work/query.sql --schema public \
     --scope /work/scope.psc1 \
-    --sdk-library /opt/prdb/sdk/releases/linux-x86_64/x86_64-v1/debian-bookworm-glibc-2.36/sdk-1-abis1,2,3,4,5/libprdb_sql.so.1 \
+    --sdk-library /opt/prdb/sdk/releases/linux-x86_64/x86_64-v1/debian-bookworm-glibc-2.36/sdk-1-abis1,2,3,4,5,6/libprdb_sql.so.1 \
     --include-dir /opt/prdb/include \
     --sdk-release 1 --cpu-baseline x86_64-v1 \
     --runtime-profile debian-bookworm-glibc-2.36 \

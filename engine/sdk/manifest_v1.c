@@ -16,6 +16,8 @@ static const uint8_t descriptor_v4[] = "prdb_query_descriptor_v4";
 static const uint8_t entry_v4[] = "prdb_query_main_v4";
 static const uint8_t descriptor_v5[] = "prdb_query_descriptor_v5";
 static const uint8_t entry_v5[] = "prdb_query_main_v5";
+static const uint8_t descriptor_v6[] = "prdb_query_descriptor_v6";
+static const uint8_t entry_v6[] = "prdb_query_main_v6";
 
 static void write_u16_be(uint8_t *output, uint16_t value) {
     output[0] = (uint8_t)(value >> 8);
@@ -132,6 +134,11 @@ static int32_t validate_manifest(const prdb_sdk_manifest_v1 *manifest,
         *descriptor_len = (uint16_t)(sizeof(descriptor_v5) - 1);
         *entry = entry_v5;
         *entry_len = (uint16_t)(sizeof(entry_v5) - 1);
+    } else if (manifest->native_abi_version == 6) {
+        *descriptor = descriptor_v6;
+        *descriptor_len = (uint16_t)(sizeof(descriptor_v6) - 1);
+        *entry = entry_v6;
+        *entry_len = (uint16_t)(sizeof(entry_v6) - 1);
     } else {
         return PRDB_SDK_MANIFEST_INVALID_VALUE;
     }

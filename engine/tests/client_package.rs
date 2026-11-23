@@ -767,7 +767,7 @@ fn generated_query_artifact_is_independent_of_parameter_values() {
     fs::create_dir(&temp).unwrap();
     let sdk_build = temp.join("sdk");
     let sdk_release =
-        sdk_build.join("releases/linux-x86_64/x86_64-v1/test-runtime/sdk-1-abis1,2,3,4,5");
+        sdk_build.join("releases/linux-x86_64/x86_64-v1/test-runtime/sdk-1-abis1,2,3,4,5,6");
     let source_path = temp.join("query.c");
     let scope_path = temp.join("scope.psc1");
     let mut scope = b"PSC1\0\x01\x01\x01".to_vec();
@@ -904,7 +904,7 @@ fn packager_compiles_and_atomically_publishes_metadata_without_loading_query() {
     );
 
     let release_dir =
-        sdk_build.join("releases/linux-x86_64/x86_64-v1/test-runtime/sdk-1-abis1,2,3,4,5");
+        sdk_build.join("releases/linux-x86_64/x86_64-v1/test-runtime/sdk-1-abis1,2,3,4,5,6");
     let library = release_dir.join("libprdb_sql.so.1");
     let status = Command::new(env!("CARGO_BIN_EXE_prdb-packager"))
         .arg("--source")
@@ -1329,7 +1329,7 @@ fn packager_compiles_and_atomically_publishes_metadata_without_loading_query() {
         fs::copy(entry.path(), local_include.join(entry.file_name())).unwrap();
     }
     let local_release =
-        local_sdk_root.join("releases/linux-x86_64/x86_64-v1/test-runtime/sdk-1-abis1,2,3,4,5");
+        local_sdk_root.join("releases/linux-x86_64/x86_64-v1/test-runtime/sdk-1-abis1,2,3,4,5,6");
     fs::create_dir_all(&local_release).unwrap();
     for entry in fs::read_dir(&release_dir).unwrap() {
         let entry = entry.unwrap();
@@ -1721,7 +1721,7 @@ fn packager_validates_abi_v4_exports_on_the_maintained_optimizer_fixture() {
         .arg(root.join("engine/tests/fixtures/sql_v3_write_read.c"))
         .arg("--sdk-library")
         .arg(sdk_build.join(
-            "releases/linux-x86_64/x86_64-v1/test-runtime/sdk-1-abis1,2,3,4,5/libprdb_sql.so.1",
+            "releases/linux-x86_64/x86_64-v1/test-runtime/sdk-1-abis1,2,3,4,5,6/libprdb_sql.so.1",
         ))
         .arg("--shared-linker")
         .arg("cc")

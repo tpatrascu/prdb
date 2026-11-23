@@ -2,10 +2,14 @@
 #include "prdb_sdk_sql_exec_v16.h"
 #include "prdb_sdk_sql_exec_v19.h"
 #include "prdb_sdk_sql_exec_v20.h"
+#include "prdb_sdk_sql_v24.h"
+#include "prdb_sdk_sql_dispatch_v1.h"
+#include "prdb_sdk_spill_v1.h"
 #include "prdb_sdk_optimizer_v1.h"
 
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define JOIN_V16_STRESS_ROWS 47
@@ -23,6 +27,9 @@ typedef struct mock_state {
     uint32_t optimizer_calls;
     uint8_t batch[2][8192];
     uint32_t batch_len[2];
+    uint8_t paged_batch[2][2][8192];
+    uint32_t paged_batch_len[2][2];
+    uint32_t paged_batch_count[2];
     uint32_t planner_calls;
     uint32_t resolve_calls;
     uint32_t open_calls;
@@ -34,6 +41,17 @@ typedef struct mock_state {
     uint32_t next_calls[2];
     uint32_t scan_finished[2];
     uint32_t statement_failed;
+    struct spill_mock_stream {
+        uint8_t handle[16];
+        uint8_t *bytes;
+        uint64_t length;
+        uint8_t live;
+        uint8_t sealed;
+    } spill_streams[16];
+    uint64_t spill_stream_id;
+    uint32_t spill_append_calls;
+    uint32_t spill_fail_append_at;
+    uint32_t result_write_calls;
 } mock_state;
 
 typedef struct row_capture {
@@ -59,6 +77,87 @@ static void put_u32(uint8_t *bytes, uint32_t *offset, uint32_t value) {
 static void put_u64(uint8_t *bytes, uint32_t *offset, uint64_t value) {
     put_u32(bytes, offset, (uint32_t)(value >> 32));
     put_u32(bytes, offset, (uint32_t)value);
+}
+
+static uint64_t get_u64_be(const uint8_t *bytes) {
+    uint64_t value = 0;
+    for (uint32_t index = 0; index < 8; ++index)
+        value = (value << 8) | bytes[index];
+    return value;
+}
+
+static uint32_t get_u32_be(const uint8_t *bytes) {
+    return ((uint32_t)bytes[0] << 24) | ((uint32_t)bytes[1] << 16) |
+           ((uint32_t)bytes[2] << 8) | bytes[3];
+}
+
+static void put_u64_be(uint8_t *bytes, uint64_t value) {
+    for (uint32_t index = 0; index < 8; ++index)
+        bytes[index] = (uint8_t)(value >> (56 - index * 8));
+}
+
+static int32_t spill_request(void *context, uint16_t operation,
+                             const uint8_t *request, uint64_t request_len,
+                             uint8_t *response, uint64_t response_capacity,
+                             uint64_t *response_len) {
+    mock_state *mock = (mock_state *)context;
+    struct spill_mock_stream *stream = NULL;
+    *response_len = 0;
+    if (operation == PRDB_SPILL_OP_CREATE) {
+        assert(request_len == 0 && response_capacity == 16);
+        for (uint32_t index = 0; index < 16; ++index) {
+            if (mock->spill_streams[index].live) continue;
+            stream = &mock->spill_streams[index];
+            memset(stream, 0, sizeof(*stream));
+            stream->bytes = malloc(UINT64_C(1048576));
+            if (stream->bytes == NULL) return -1;
+            stream->live = 1;
+            put_u64_be(stream->handle, ++mock->spill_stream_id);
+            memcpy(response, stream->handle, 16);
+            *response_len = 16;
+            return 0;
+        }
+        return -1;
+    }
+    assert(request_len >= 16);
+    for (uint32_t index = 0; index < 16; ++index) {
+        if (mock->spill_streams[index].live &&
+            memcmp(mock->spill_streams[index].handle, request, 16) == 0) {
+            stream = &mock->spill_streams[index];
+            break;
+        }
+    }
+    if (stream == NULL) return -1;
+    if (operation == PRDB_SPILL_OP_APPEND) {
+        uint64_t count = request_len - 16;
+        if (++mock->spill_append_calls == mock->spill_fail_append_at ||
+            stream->sealed || count > UINT64_C(1048576) - stream->length)
+            return -1;
+        memcpy(stream->bytes + stream->length, request + 16, (size_t)count);
+        stream->length += count;
+    } else if (operation == PRDB_SPILL_OP_SEAL) {
+        assert(request_len == 16);
+        stream->sealed = 1;
+    } else if (operation == PRDB_SPILL_OP_READ_AT) {
+        uint64_t offset;
+        uint32_t capacity, count;
+        assert(request_len == 28 && stream->sealed);
+        offset = get_u64_be(request + 16);
+        capacity = get_u32_be(request + 24);
+        if (offset > stream->length || capacity > response_capacity)
+            return -1;
+        count = (uint32_t)(stream->length - offset);
+        if (count > capacity) count = capacity;
+        memcpy(response, stream->bytes + offset, count);
+        *response_len = count;
+    } else if (operation == PRDB_SPILL_OP_DESTROY) {
+        assert(request_len == 16);
+        free(stream->bytes);
+        memset(stream, 0, sizeof(*stream));
+    } else {
+        return -1;
+    }
+    return 0;
 }
 
 static void put_name(uint8_t *bytes, uint32_t *offset, const char *name) {
@@ -262,10 +361,27 @@ static uint32_t make_batch(uint8_t *bytes, const int32_t *keys,
         row_count);
 }
 
+static uint32_t make_continuation_batch(uint8_t *bytes, uint32_t length) {
+    assert(length >= 5 && bytes[2] == 1);
+    memmove(bytes + 19, bytes + 3, length - 3);
+    bytes[2] = 0;
+    bytes[3] = PRDB_SDK_BATCH_CURSOR_TOKEN_KIND;
+    memset(bytes + 4, 0x7a, 15);
+    return length + 16;
+}
+
 static int32_t statement_failure(void *context, uint32_t failure_code) {
     mock_state *mock = (mock_state *)context;
     assert(failure_code == PRDB_QUERY_STATEMENT_FAILURE_SQL);
     mock->statement_failed = 1;
+    return PRDB_QUERY_CALLBACK_OK;
+}
+
+static int32_t write_result(void *context, const uint8_t *bytes,
+                            uint64_t bytes_len) {
+    mock_state *mock = (mock_state *)context;
+    assert(bytes != NULL && bytes_len != 0);
+    ++mock->result_write_calls;
     return PRDB_QUERY_CALLBACK_OK;
 }
 
@@ -374,10 +490,21 @@ static int32_t executor_request(void *context, uint16_t operation,
             *response_len = offset;
             --mock->empty_pages[index];
         } else {
-            assert(mock->batch_len[index] <= capacity);
-            memcpy(response, mock->batch[index], mock->batch_len[index]);
-            *response_len = mock->batch_len[index];
-            mock->scan_finished[index] = 1;
+            if (mock->paged_batch_count[index] != 0) {
+                uint32_t page = mock->next_calls[index];
+                assert(page < mock->paged_batch_count[index]);
+                assert(mock->paged_batch_len[index][page] <= capacity);
+                memcpy(response, mock->paged_batch[index][page],
+                       mock->paged_batch_len[index][page]);
+                *response_len = mock->paged_batch_len[index][page];
+                mock->scan_finished[index] =
+                    page + 1 == mock->paged_batch_count[index];
+            } else {
+                assert(mock->batch_len[index] <= capacity);
+                memcpy(response, mock->batch[index], mock->batch_len[index]);
+                *response_len = mock->batch_len[index];
+                mock->scan_finished[index] = 1;
+            }
         }
         ++mock->next_calls[index];
     } else if (operation == PRDB_SDK_EXECUTOR_OP_CLOSE_CURSOR) {
@@ -558,7 +685,8 @@ static int32_t run_query_optimizer(mock_state *mock, row_capture *capture,
     prdb_sdk_sql_join_materialized_row_v16 right_rows[
         PRDB_SDK_SQL_EXEC_V8_MAX_ROWS] = {{{0}}};
     prdb_host_api_v3 host3 = {sizeof(host3), PRDB_QUERY_ABI_V3_VERSION,
-                              mock, executor_request, planner_request, NULL,
+                              mock, executor_request, planner_request,
+                              write_result,
                               statement_failure};
     prdb_host_api_v4 host4 = {host3, optimizer_request_v4};
     prdb_host_api_v5 host5 = {host4, optimizer_request_v5};
@@ -652,6 +780,85 @@ static int32_t run_query_v20(mock_state *mock, row_capture *capture,
         materialized_capacity, on_row_v20, capture);
 }
 
+static int32_t run_query_spill_v21(
+    mock_state *mock, row_capture *capture, const uint8_t *sql,
+    uint64_t sql_len, const prdb_sdk_value_v1 *parameters,
+    uint32_t parameter_count) {
+    static const uint8_t schema[] = "app";
+    uint8_t left_planner_response[256] = {0};
+    uint8_t right_planner_response[256] = {0};
+    uint8_t left_executor_response[256] = {0};
+    uint8_t right_executor_response[256] = {0};
+    uint8_t batch_response[8192] = {0};
+    uint8_t materialized_bytes[4096] = {0};
+    uint8_t integer_names[2][11] = {{0}};
+    prdb_sdk_sql_column_shape_v2 left_planner_columns[2] = {{0}};
+    prdb_sdk_sql_column_shape_v2 right_planner_columns[2] = {{0}};
+    prdb_sdk_sql_column_shape_v2 left_executor_columns[2] = {{0}};
+    prdb_sdk_sql_column_shape_v2 right_executor_columns[2] = {{0}};
+    prdb_sdk_value_v1 cell_scratch[2] = {{0}};
+    prdb_sdk_sql_join_materialized_row_v16 left_rows[
+        PRDB_SDK_SQL_EXEC_V8_MAX_ROWS] = {{{0}}};
+    prdb_sdk_sql_join_materialized_row_v16 right_rows[
+        PRDB_SDK_SQL_EXEC_V8_MAX_ROWS] = {{{0}}};
+    prdb_host_api_v3 host3 = {sizeof(host3), PRDB_QUERY_ABI_V3_VERSION,
+                              mock, executor_request, planner_request, NULL,
+                              statement_failure};
+    prdb_host_api_v6 host6 = {0};
+    host6.v5.v4.v3 = host3;
+    host6.spill_request = spill_request;
+    memcpy(integer_names[0], "account_id", sizeof("account_id") - 1);
+    memcpy(integer_names[1], "value", sizeof("value") - 1);
+    for (uint32_t index = 0; index < 2; ++index) {
+        const char *name = index == 0 ? "account_id" : "value";
+        uint32_t len = (uint32_t)strlen(name);
+        left_planner_columns[index] = (prdb_sdk_sql_column_shape_v2){
+            integer_names[index], len, index, PRDB_SDK_VALUE_TYPE_INTEGER,
+            0, 0};
+        right_planner_columns[index] = left_planner_columns[index];
+        left_executor_columns[index] = left_planner_columns[index];
+        right_executor_columns[index] = left_planner_columns[index];
+    }
+    return prdb_sdk_sql_execute_inner_join_typed_spill_v21(
+        &host6, schema, sizeof(schema) - 1, sql, sql_len, parameters, NULL,
+        parameter_count, JOIN_V16_ROW_LIMIT, 8192,
+        left_planner_response, sizeof(left_planner_response),
+        right_planner_response, sizeof(right_planner_response),
+        left_executor_response, sizeof(left_executor_response),
+        right_executor_response, sizeof(right_executor_response),
+        batch_response, sizeof(batch_response), left_planner_columns, 2,
+        right_planner_columns, 2, left_executor_columns, 2,
+        right_executor_columns, 2, cell_scratch, 2, left_rows,
+        PRDB_SDK_SQL_EXEC_V8_MAX_ROWS, right_rows,
+        PRDB_SDK_SQL_EXEC_V8_MAX_ROWS, materialized_bytes,
+        sizeof(materialized_bytes), on_row_v20, capture);
+}
+
+static int32_t run_statement_spill_v21(mock_state *mock, const uint8_t *sql,
+                                       uint64_t sql_len) {
+    static const uint8_t schema[] = "app";
+    prdb_host_api_v3 host3 = {sizeof(host3), PRDB_QUERY_ABI_V3_VERSION,
+                              mock, executor_request, planner_request,
+                              write_result, statement_failure};
+    prdb_host_api_v6 host6 = {0};
+    host6.v5.v4.v3 = host3;
+    host6.spill_request = spill_request;
+    return prdb_sdk_sql_run_statement_v2(
+        &host6, schema, sizeof(schema) - 1, sql, sql_len, NULL, 0);
+}
+
+static int32_t run_statement_no_spill_v6(mock_state *mock, const uint8_t *sql,
+                                         uint64_t sql_len) {
+    static const uint8_t schema[] = "app";
+    prdb_host_api_v3 host3 = {sizeof(host3), PRDB_QUERY_ABI_V3_VERSION,
+                              mock, executor_request, planner_request,
+                              write_result, statement_failure};
+    prdb_host_api_v6 host6 = {0};
+    host6.v5.v4.v3 = host3;
+    return prdb_sdk_sql_run_statement_v2(
+        &host6, schema, sizeof(schema) - 1, sql, sql_len, NULL, 0);
+}
+
 static int32_t run_query_optimizer_v20(
     mock_state *mock, row_capture *capture, const uint8_t *sql,
     uint64_t sql_len, const prdb_sdk_value_v1 *parameters,
@@ -719,14 +926,22 @@ static void reset(mock_state *mock, row_capture *capture) {
     mock->close_calls = 0;
     mock->executor_requests = 0;
     mock->empty_pages[0] = mock->empty_pages[1] = 0;
+    mock->paged_batch_count[0] = mock->paged_batch_count[1] = 0;
     mock->next_calls[0] = mock->next_calls[1] = 0;
     mock->scan_finished[0] = mock->scan_finished[1] = 0;
     mock->statement_failed = 0;
+    mock->spill_append_calls = 0;
+    mock->spill_fail_append_at = 0;
+    mock->result_write_calls = 0;
     capture->calls = 0;
     capture->callback_status = PRDB_QUERY_CALLBACK_OK;
 }
 
 int main(void) {
+    static const uint8_t grouped_spill_sql[] =
+        "SELECT account_id, COUNT(*) FROM accounts GROUP BY account_id";
+    static const uint8_t grouped_spill_limit_sql[] =
+        "SELECT account_id, COUNT(*) FROM accounts GROUP BY account_id LIMIT 2";
     static const uint8_t sql[] =
         "SELECT accounts.value, orders.value FROM accounts INNER JOIN "
         "orders ON accounts.account_id = orders.account_id";
@@ -822,6 +1037,117 @@ int main(void) {
     mock.batch_len[1] = make_batch(mock.batch[1], right_keys, right_states,
                                    right_values, 3);
     capture.mock = &mock;
+
+    {
+        reset(&mock, &capture);
+        assert(run_statement_no_spill_v6(
+                   &mock, grouped_spill_sql,
+                   sizeof(grouped_spill_sql) - 1) == PRDB_SDK_SQL_DISPATCH_OK);
+        assert(mock.result_write_calls == 3 && mock.statement_failed == 0 &&
+               mock.next_calls[0] == 1);
+        reset(&mock, &capture);
+
+        prdb_sdk_select_v24 grouped_statement = {0};
+        assert(prdb_sdk_sql_parse_select_v24(
+                   grouped_spill_sql, sizeof(grouped_spill_sql) - 1,
+                   &grouped_statement, sizeof(grouped_statement), NULL) ==
+               PRDB_SDK_SQL_OK);
+        int32_t keys[JOIN_V16_ROW_LIMIT];
+        int32_t values[JOIN_V16_ROW_LIMIT];
+        uint8_t states[JOIN_V16_ROW_LIMIT];
+        int32_t final_key = 129, final_value = 1;
+        uint8_t final_state = PRDB_SDK_VALUE_STATE_VALUE;
+        for (uint32_t index = 0; index < JOIN_V16_ROW_LIMIT; ++index) {
+            keys[index] = (int32_t)(JOIN_V16_ROW_LIMIT - index);
+            values[index] = 1;
+            states[index] = PRDB_SDK_VALUE_STATE_VALUE;
+        }
+        mock.paged_batch_len[0][0] = make_continuation_batch(
+            mock.paged_batch[0][0], make_batch(
+                mock.paged_batch[0][0], keys, states, values,
+                JOIN_V16_ROW_LIMIT));
+        mock.paged_batch_len[0][1] = make_batch(
+            mock.paged_batch[0][1], &final_key, &final_state, &final_value, 1);
+        reset(&mock, &capture);
+        mock.paged_batch_count[0] = 2;
+        assert(run_statement_spill_v21(
+                   &mock, grouped_spill_sql,
+                   sizeof(grouped_spill_sql) - 1) == PRDB_SDK_SQL_DISPATCH_OK);
+        assert(mock.result_write_calls == JOIN_V16_ROW_LIMIT + 1 &&
+               mock.next_calls[0] == 2 && mock.statement_failed == 0);
+        for (uint32_t stream = 0; stream < 16; ++stream)
+            assert(mock.spill_streams[stream].live == 0);
+
+        reset(&mock, &capture);
+        mock.paged_batch_count[0] = 2;
+        assert(run_statement_spill_v21(
+                   &mock, grouped_spill_limit_sql,
+                   sizeof(grouped_spill_limit_sql) - 1) ==
+               PRDB_SDK_SQL_DISPATCH_OK);
+        assert(mock.result_write_calls == 2 && mock.next_calls[0] == 2 &&
+               mock.statement_failed == 0);
+        for (uint32_t stream = 0; stream < 16; ++stream)
+            assert(mock.spill_streams[stream].live == 0);
+
+        {
+            const int32_t null_keys[] = {0, 0, 5};
+            const uint8_t null_states[] = {
+                PRDB_SDK_VALUE_STATE_NULL, PRDB_SDK_VALUE_STATE_NULL,
+                PRDB_SDK_VALUE_STATE_VALUE};
+            const int32_t null_values[] = {0, 0, 1};
+            mock.batch_len[0] = make_batch(
+                mock.batch[0], null_keys, null_states, null_values, 3);
+            reset(&mock, &capture);
+            assert(run_statement_spill_v21(
+                       &mock, grouped_spill_sql,
+                       sizeof(grouped_spill_sql) - 1) ==
+                   PRDB_SDK_SQL_DISPATCH_OK);
+            assert(mock.result_write_calls == 2 && mock.statement_failed == 0);
+            for (uint32_t stream = 0; stream < 16; ++stream)
+                assert(mock.spill_streams[stream].live == 0);
+
+            const uint8_t redacted_states[] = {
+                PRDB_SDK_VALUE_STATE_REDACTED,
+                PRDB_SDK_VALUE_STATE_VALUE,
+                PRDB_SDK_VALUE_STATE_VALUE};
+            mock.batch_len[0] = make_batch(
+                mock.batch[0], null_keys, redacted_states, null_values, 3);
+            reset(&mock, &capture);
+            assert(run_statement_spill_v21(
+                       &mock, grouped_spill_sql,
+                       sizeof(grouped_spill_sql) - 1) ==
+                   PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR);
+            assert(mock.result_write_calls == 0 && mock.statement_failed == 1);
+            for (uint32_t stream = 0; stream < 16; ++stream)
+                assert(mock.spill_streams[stream].live == 0);
+            mock.batch_len[0] = make_batch(
+                mock.batch[0], left_keys, left_states, left_values, 3);
+        }
+
+        reset(&mock, &capture);
+        mock.paged_batch_count[0] = 2;
+        mock.spill_fail_append_at = 1;
+        assert(run_statement_spill_v21(
+                   &mock, grouped_spill_sql,
+                   sizeof(grouped_spill_sql) - 1) ==
+               PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR);
+        assert(mock.result_write_calls == 0 && mock.statement_failed == 1);
+        for (uint32_t stream = 0; stream < 16; ++stream)
+            assert(mock.spill_streams[stream].live == 0);
+
+        reset(&mock, &capture);
+        mock.paged_batch_count[0] = 2;
+        mock.cancel_after_check = 1;
+        assert(run_statement_spill_v21(
+                   &mock, grouped_spill_sql,
+                   sizeof(grouped_spill_sql) - 1) ==
+               PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR);
+        assert(mock.result_write_calls == 0 && mock.statement_failed == 1);
+        for (uint32_t stream = 0; stream < 16; ++stream)
+            assert(mock.spill_streams[stream].live == 0);
+    }
+    mock.paged_batch_count[0] = 0;
+    reset(&mock, &capture);
 
     assert(run_query(&mock, &capture, sql, sizeof(sql) - 1, 1024) ==
            PRDB_SDK_SQL_EXEC_OK);
@@ -1142,6 +1468,109 @@ int main(void) {
                 assert(capture.calls == 0 && mock.open_calls == 1 &&
                        mock.next_calls[0] == 1 && mock.next_calls[1] == 0 &&
                        mock.statement_failed == 1);
+            }
+
+            {
+                int32_t first_keys[JOIN_V16_ROW_LIMIT];
+                int32_t first_values[JOIN_V16_ROW_LIMIT];
+                uint8_t first_states[JOIN_V16_ROW_LIMIT];
+                int32_t final_key = 99, final_value = 900;
+                uint8_t final_state = PRDB_SDK_VALUE_STATE_VALUE;
+                int32_t right_key = 99, right_value = 900;
+                uint8_t right_state = PRDB_SDK_VALUE_STATE_VALUE;
+                for (uint32_t row = 0; row < JOIN_V16_ROW_LIMIT; ++row) {
+                    first_keys[row] = 99;
+                    first_values[row] = 900;
+                    first_states[row] = PRDB_SDK_VALUE_STATE_VALUE;
+                }
+                mock.paged_batch_len[0][0] = make_continuation_batch(
+                    mock.paged_batch[0][0],
+                    make_batch(mock.paged_batch[0][0], first_keys,
+                               first_states, first_values,
+                               JOIN_V16_ROW_LIMIT));
+                mock.paged_batch_len[0][1] = make_batch(
+                    mock.paged_batch[0][1], &final_key, &final_state,
+                    &final_value, 1);
+                mock.paged_batch_count[0] = 2;
+                mock.batch_len[1] = make_batch(
+                    mock.batch[1], &right_key, &right_state, &right_value, 1);
+                reset(&mock, &capture);
+                mock.paged_batch_count[0] = 2;
+                int32_t spill_status = run_query_spill_v21(
+                    &mock, &capture, composite_sql,
+                    sizeof(composite_sql) - 1, NULL, 0);
+                assert(spill_status == PRDB_SDK_SQL_EXEC_OK);
+                assert(capture.calls == JOIN_V16_ROW_LIMIT + 1 &&
+                       mock.next_calls[0] == 2 && mock.next_calls[1] == 1 &&
+                       mock.statement_failed == 0);
+                for (uint32_t stream = 0; stream < 16; ++stream)
+                    assert(mock.spill_streams[stream].live == 0);
+
+                reset(&mock, &capture);
+                mock.paged_batch_count[0] = 2;
+                mock.spill_fail_append_at = 1;
+                assert(run_query_spill_v21(
+                           &mock, &capture, composite_sql,
+                           sizeof(composite_sql) - 1, NULL, 0) ==
+                       PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
+                assert(capture.calls == 0 && mock.statement_failed == 1);
+                for (uint32_t stream = 0; stream < 16; ++stream)
+                    assert(mock.spill_streams[stream].live == 0);
+
+                reset(&mock, &capture);
+                mock.paged_batch_count[0] = 2;
+                {
+                    int32_t right_keys[JOIN_V16_ROW_LIMIT];
+                    int32_t right_values[JOIN_V16_ROW_LIMIT];
+                    uint8_t right_states[JOIN_V16_ROW_LIMIT];
+                    for (uint32_t row = 0; row < JOIN_V16_ROW_LIMIT; ++row) {
+                        right_keys[row] = 99;
+                        right_values[row] = 900;
+                        right_states[row] = PRDB_SDK_VALUE_STATE_VALUE;
+                    }
+                    mock.batch_len[1] = make_batch(
+                        mock.batch[1], right_keys, right_states, right_values,
+                        JOIN_V16_ROW_LIMIT);
+                }
+                mock.cancel_after_check = 9;
+                int32_t cancel_status = run_query_spill_v21(
+                    &mock, &capture, composite_sql,
+                    sizeof(composite_sql) - 1, NULL, 0);
+                assert(cancel_status == PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
+                assert(capture.calls != 0 &&
+                       capture.calls < (JOIN_V16_ROW_LIMIT + 1) *
+                                           JOIN_V16_ROW_LIMIT &&
+                       mock.statement_failed == 1);
+                for (uint32_t stream = 0; stream < 16; ++stream)
+                    assert(mock.spill_streams[stream].live == 0);
+
+                {
+                    int32_t right_key = 99, right_value = 900;
+                    uint8_t right_state = PRDB_SDK_VALUE_STATE_VALUE;
+                    mock.batch_len[1] = make_batch(
+                        mock.batch[1], &right_key, &right_state, &right_value,
+                        1);
+                    reset(&mock, &capture);
+                    mock.paged_batch_count[0] = 2;
+                    assert(run_statement_spill_v21(
+                               &mock, composite_sql,
+                               sizeof(composite_sql) - 1) ==
+                           PRDB_SDK_SQL_DISPATCH_OK);
+                    assert(mock.result_write_calls == JOIN_V16_ROW_LIMIT + 1 &&
+                           mock.statement_failed == 0);
+                    for (uint32_t stream = 0; stream < 16; ++stream)
+                        assert(mock.spill_streams[stream].live == 0);
+
+                    reset(&mock, &capture);
+                    mock.paged_batch_count[0] = 2;
+                    assert(run_statement_spill_v21(
+                               &mock, sql, sizeof(sql) - 1) ==
+                           PRDB_SDK_SQL_DISPATCH_OK);
+                    assert(mock.result_write_calls == JOIN_V16_ROW_LIMIT + 1 &&
+                           mock.statement_failed == 0);
+                    for (uint32_t stream = 0; stream < 16; ++stream)
+                        assert(mock.spill_streams[stream].live == 0);
+                }
             }
         }
 

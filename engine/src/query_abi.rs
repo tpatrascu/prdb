@@ -53,12 +53,26 @@ pub type QueryOptimizerRequestV5 = unsafe extern "C" fn(
     response_len: *mut u64,
 ) -> i32;
 
+/// Bounded opaque spill-stream operation callback. Authority is bound to the
+/// dedicated supervisor-provisioned worker channel; requests carry no path or
+/// invocation, package, actor, or workload identity.
+pub type QuerySpillRequestV1 = unsafe extern "C" fn(
+    context: *mut std::ffi::c_void,
+    operation: u16,
+    request: *const u8,
+    request_len: u64,
+    response: *mut u8,
+    response_capacity: u64,
+    response_len: *mut u64,
+) -> i32;
+
 include!("query_abi_records.rs");
 
 pub type QueryMainV2 = unsafe extern "C" fn(*const HostApiV2, *const InvocationV2) -> c_int;
 pub type QueryMainV3 = unsafe extern "C" fn(*const HostApiV3, *const InvocationV3) -> c_int;
 pub type QueryMainV4 = unsafe extern "C" fn(*const HostApiV4, *const InvocationV4) -> c_int;
 pub type QueryMainV5 = unsafe extern "C" fn(*const HostApiV5, *const InvocationV5) -> c_int;
+pub type QueryMainV6 = unsafe extern "C" fn(*const HostApiV6, *const InvocationV6) -> c_int;
 
 pub type QueryMainV1 = unsafe extern "C" fn(*const HostApiV1, *const InvocationV1) -> c_int;
 
@@ -216,6 +230,23 @@ pub fn validate_descriptor_v5(descriptor: &QueryDescriptorV5) -> Result<(), Desc
     Ok(())
 }
 
+/// Check that a v6 library agrees with the spill-capable host table layout.
+pub fn validate_descriptor_v6(descriptor: &QueryDescriptorV6) -> Result<(), DescriptorV5Error> {
+    if descriptor.struct_size != std::mem::size_of::<QueryDescriptorV6>() as u32 {
+        return Err(DescriptorV2Error::StructSize);
+    }
+    if descriptor.abi_version != QUERY_ABI_V6_VERSION {
+        return Err(DescriptorV2Error::AbiVersion);
+    }
+    if descriptor.host_api_size != std::mem::size_of::<HostApiV6>() as u32 {
+        return Err(DescriptorV2Error::HostApiSize);
+    }
+    if descriptor.invocation_size != std::mem::size_of::<InvocationV6>() as u32 {
+        return Err(DescriptorV2Error::InvocationSize);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod generated_payload_tests {
     use super::{
@@ -363,6 +394,34 @@ mod generated_payload_tests {
         assert_eq!(
             decode_supervisor_status_terminal_response(&encoded),
             Some((4, -1, 7, -2))
+        );
+    }
+}
+
+#[cfg(test)]
+mod spill_abi_tests {
+    use super::*;
+
+    #[test]
+    fn spill_callback_requires_the_sized_v6_host_table() {
+        let mut descriptor = QueryDescriptorV6 {
+            struct_size: std::mem::size_of::<QueryDescriptorV6>() as u32,
+            abi_version: QUERY_ABI_V6_VERSION,
+            host_api_size: std::mem::size_of::<HostApiV6>() as u32,
+            invocation_size: std::mem::size_of::<InvocationV6>() as u32,
+        };
+        assert_eq!(validate_descriptor_v6(&descriptor), Ok(()));
+
+        descriptor.host_api_size -= 1;
+        assert_eq!(
+            validate_descriptor_v6(&descriptor),
+            Err(DescriptorV2Error::HostApiSize)
+        );
+        descriptor.host_api_size = std::mem::size_of::<HostApiV6>() as u32;
+        descriptor.abi_version = QUERY_ABI_V5_VERSION;
+        assert_eq!(
+            validate_descriptor_v6(&descriptor),
+            Err(DescriptorV2Error::AbiVersion)
         );
     }
 }

@@ -2266,6 +2266,7 @@ mod worker_result_event_tests {
                 scratch_parent: std::env::temp_dir(),
                 runtime_read_execute: Vec::new(),
                 runtime_read_only: Vec::new(),
+                spill_broker: None,
                 cleanup_timeout: Duration::from_millis(10),
             },
         };
@@ -2491,6 +2492,7 @@ mod worker_result_event_tests {
                     scratch_parent: std::env::temp_dir(),
                     runtime_read_execute: Vec::new(),
                     runtime_read_only: Vec::new(),
+                    spill_broker: None,
                     cleanup_timeout: Duration::from_millis(100),
                 },
             },
@@ -2621,6 +2623,7 @@ mod worker_result_event_tests {
                     scratch_parent: std::env::temp_dir(),
                     runtime_read_execute: Vec::new(),
                     runtime_read_only: Vec::new(),
+                    spill_broker: None,
                     cleanup_timeout: Duration::from_millis(100),
                 },
             },

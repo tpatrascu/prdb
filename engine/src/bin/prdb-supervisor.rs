@@ -9,6 +9,7 @@ mod service {
     use prdb_engine::bootstrap::StorageInstance;
     use prdb_engine::executor_launcher::ExecutorLaunchConfig;
     use prdb_engine::linux_sandbox::WorkerResourceLimits;
+    use prdb_engine::spill::{SpillBroker, SpillConfig};
     use prdb_engine::submission_manifest::{
         ArtifactCompatibilityProfile, VersionedSubmissionMetadataValidator,
     };
@@ -42,6 +43,13 @@ mod service {
         executor: Option<PathBuf>,
         optimizer: Option<PathBuf>,
         scratch_parent: Option<PathBuf>,
+        spill_parent: Option<PathBuf>,
+        spill_max_bytes: Option<u64>,
+        spill_max_io_bytes: Option<u64>,
+        spill_max_streams: Option<u64>,
+        spill_max_operations: Option<u64>,
+        spill_max_response_bytes: Option<u64>,
+        spill_max_service_bytes: Option<u64>,
         runtime_read_execute: Vec<PathBuf>,
         runtime_read_only: Vec<PathBuf>,
         profile_cpu: Option<String>,
@@ -88,6 +96,9 @@ mod service {
              Required: --instance-dir PATH --service-socket PATH --gateway-uid UID\n\
              [--service-socket-mode 0600|0660]\n\
              --cgroup-parent PATH --executor PATH --optimizer PATH --scratch-parent PATH\n\
+             [--spill-parent PATH --spill-max-bytes N --spill-max-io-bytes N\n\
+             --spill-max-streams N --spill-max-operations N\n\
+             --spill-max-response-bytes N --spill-max-service-bytes N]\n\
              --runtime-read-execute PATH (repeatable) --runtime-profile NAME\n\
              --cpu-baseline NAME --allowed-dependency NAME (repeatable)\n\
              [--sdk-repository-dir PATH --sdk-repository-max-bytes N]\n\
@@ -108,6 +119,13 @@ mod service {
 
     fn run() -> Result<(), Box<dyn std::error::Error>> {
         let options = parse_options()?;
+        let spill_config = spill_config(&options)?;
+        // Validate and retain the service broker independently from artifact
+        // staging. Worker-channel binding is added in the executor launch path.
+        let spill_broker = spill_config
+            .map(SpillBroker::open)
+            .transpose()
+            .map_err(|error| format!("secure spill configuration rejected: {error:?}"))?;
         let storage_config = storage_manager_config(&options)?;
         let instance_dir = required(options.instance_dir, "--instance-dir")?;
         let socket_path = required(options.service_socket, "--service-socket")?;
@@ -275,6 +293,7 @@ mod service {
                     scratch_parent,
                     runtime_read_execute: options.runtime_read_execute,
                     runtime_read_only: options.runtime_read_only,
+                    spill_broker: spill_broker.clone(),
                     cleanup_timeout: Duration::from_secs(2),
                 },
             },
@@ -442,6 +461,19 @@ mod service {
                 "--executor" => set!(executor, PathBuf::from(value)),
                 "--optimizer" => set!(optimizer, PathBuf::from(value)),
                 "--scratch-parent" => set!(scratch_parent, PathBuf::from(value)),
+                "--spill-parent" => set!(spill_parent, PathBuf::from(value)),
+                "--spill-max-bytes" => set!(spill_max_bytes, value.parse::<u64>()?),
+                "--spill-max-io-bytes" => set!(spill_max_io_bytes, value.parse::<u64>()?),
+                "--spill-max-streams" => set!(spill_max_streams, value.parse::<u64>()?),
+                "--spill-max-operations" => {
+                    set!(spill_max_operations, value.parse::<u64>()?)
+                }
+                "--spill-max-response-bytes" => {
+                    set!(spill_max_response_bytes, value.parse::<u64>()?)
+                }
+                "--spill-max-service-bytes" => {
+                    set!(spill_max_service_bytes, value.parse::<u64>()?)
+                }
                 "--runtime-read-execute" => options.runtime_read_execute.push(value.into()),
                 "--runtime-read-only" => options.runtime_read_only.push(value.into()),
                 "--cpu-baseline" => set!(profile_cpu, value),
@@ -528,6 +560,61 @@ mod service {
         }
     }
 
+    fn spill_config(options: &Options) -> Result<Option<SpillConfig>, String> {
+        let supplied = [
+            options.spill_parent.is_some(),
+            options.spill_max_bytes.is_some(),
+            options.spill_max_io_bytes.is_some(),
+            options.spill_max_streams.is_some(),
+            options.spill_max_operations.is_some(),
+            options.spill_max_response_bytes.is_some(),
+            options.spill_max_service_bytes.is_some(),
+        ]
+        .into_iter()
+        .filter(|present| *present)
+        .count();
+        if supplied == 0 {
+            return Ok(None);
+        }
+        if supplied != 7 {
+            return Err("all seven --spill-* options must be supplied together".to_owned());
+        }
+        let config = SpillConfig {
+            parent: required(options.spill_parent.clone(), "--spill-parent")?,
+            max_bytes_per_invocation: positive(
+                required(options.spill_max_bytes, "--spill-max-bytes")?,
+                "--spill-max-bytes",
+            )?,
+            max_io_bytes_per_invocation: positive(
+                required(options.spill_max_io_bytes, "--spill-max-io-bytes")?,
+                "--spill-max-io-bytes",
+            )?,
+            max_streams_per_invocation: positive(
+                required(options.spill_max_streams, "--spill-max-streams")?,
+                "--spill-max-streams",
+            )?,
+            max_operations_per_invocation: positive(
+                required(options.spill_max_operations, "--spill-max-operations")?,
+                "--spill-max-operations",
+            )?,
+            max_response_bytes: positive(
+                required(
+                    options.spill_max_response_bytes,
+                    "--spill-max-response-bytes",
+                )?,
+                "--spill-max-response-bytes",
+            )?,
+            max_service_bytes: positive(
+                required(options.spill_max_service_bytes, "--spill-max-service-bytes")?,
+                "--spill-max-service-bytes",
+            )?,
+        };
+        config
+            .validate()
+            .map_err(|error| format!("invalid spill limits: {error:?}"))?;
+        Ok(Some(config))
+    }
+
     fn storage_manager_config(
         options: &Options,
     ) -> Result<prdb_engine::storage_manager::StorageManagerConfig, String> {
@@ -588,11 +675,49 @@ mod service {
     #[cfg(test)]
     mod tests {
         use super::{
-            Options, resolve_cgroup_parent_with_delegated, storage_manager_config,
+            Options, resolve_cgroup_parent_with_delegated, spill_config, storage_manager_config,
             validate_storage_admission_capacity,
         };
         use prdb_engine::storage_manager::StorageManagerConfig;
         use prdb_engine::supervisor::StagingLimits;
+
+        #[test]
+        fn spill_configuration_is_disabled_or_complete_and_positive() {
+            assert!(spill_config(&Options::default()).unwrap().is_none());
+
+            let partial = Options {
+                spill_parent: Some("/var/lib/prdb/spill".into()),
+                spill_max_bytes: Some(4096),
+                ..Options::default()
+            };
+            assert!(spill_config(&partial).is_err());
+
+            let complete = Options {
+                spill_parent: Some("/var/lib/prdb/spill".into()),
+                spill_max_bytes: Some(4096),
+                spill_max_io_bytes: Some(8192),
+                spill_max_streams: Some(8),
+                spill_max_operations: Some(128),
+                spill_max_response_bytes: Some(1024),
+                spill_max_service_bytes: Some(32768),
+                ..Options::default()
+            };
+            let config = spill_config(&complete).unwrap().unwrap();
+            assert_eq!(config.max_bytes_per_invocation, 4096);
+            assert_eq!(config.max_service_bytes, 32768);
+
+            let zero = Options {
+                spill_parent: Some("/var/lib/prdb/spill".into()),
+                spill_max_bytes: Some(0),
+                spill_max_io_bytes: Some(8192),
+                spill_max_streams: Some(8),
+                spill_max_operations: Some(128),
+                spill_max_response_bytes: Some(1024),
+                spill_max_service_bytes: Some(32768),
+                ..Options::default()
+            };
+            assert!(spill_config(&zero).is_err());
+        }
 
         #[test]
         fn systemd_cgroup_parent_requires_an_absolute_exported_path() {

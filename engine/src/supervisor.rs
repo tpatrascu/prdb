@@ -1830,7 +1830,7 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         let release =
-            build_dir.join("releases/linux-x86_64/x86_64-v1/test-runtime/sdk-1-abis1,2,3,4,5");
+            build_dir.join("releases/linux-x86_64/x86_64-v1/test-runtime/sdk-1-abis1,2,3,4,5,6");
         let metadata = fs::read(release.join("sdk-release.json")).unwrap();
         let library = fs::read(release.join("libprdb_sql.so.1")).unwrap();
         let allowed = HashSet::from(["libc.so.6".to_owned()]);
@@ -2501,6 +2501,7 @@ mod tests {
             scratch_parent: std::env::temp_dir(),
             runtime_read_execute: Vec::new(),
             runtime_read_only: Vec::new(),
+            spill_broker: None,
             cleanup_timeout: std::time::Duration::from_millis(100),
         };
 
