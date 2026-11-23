@@ -26,7 +26,8 @@ int32_t prdb_query_main_v6(const prdb_host_api_v6 *host,
     static const uint8_t spill_join_rows_sql[] =
         "SELECT a.left_key, b.right_key FROM decimal_grouped_records AS a "
         "INNER JOIN decimal_grouped_records AS b ON "
-        "a.left_key = b.left_key AND a.right_key = b.right_key";
+        "a.left_key = b.left_key AND a.right_key = b.right_key "
+        "ORDER BY b.right_key DESC LIMIT 5";
     if (host == NULL || invocation == NULL ||
         host->v5.v4.v3.struct_size < sizeof(host->v5.v4.v3) ||
         host->v5.v4.v3.abi_version != PRDB_QUERY_ABI_V3_VERSION ||

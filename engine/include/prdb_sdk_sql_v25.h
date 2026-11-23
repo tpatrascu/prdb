@@ -11,6 +11,7 @@ typedef struct prdb_sdk_select_v25 {
     uint32_t struct_size;
     uint32_t abi_version;
     prdb_sdk_select_v20 base;
+    uint32_t order_keyword_offset;
     uint32_t has_order_by;
     prdb_sdk_sql_qualified_column_v8 order_by_column;
     uint32_t order_descending;

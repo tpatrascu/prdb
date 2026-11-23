@@ -6262,6 +6262,7 @@ int32_t prdb_sdk_sql_parse_select_v25(const uint8_t *sql, uint64_t sql_len,
                 goto failed_clause_v25;
             }
             result.base.base.base.base.sql_len = sql_len;
+            result.order_keyword_offset = order_offset;
             result.has_order_by = 1;
             result.struct_size = sizeof(result);
             result.abi_version = PRDB_SDK_SQL_ABI_V25_VERSION;

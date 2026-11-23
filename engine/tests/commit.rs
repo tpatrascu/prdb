@@ -42629,7 +42629,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 } else {
                     32 * 1024 * 1024
                 },
-                max_streams_per_invocation: 16,
+                max_streams_per_invocation: if spill_join_only { 17 } else { 16 },
                 max_operations_per_invocation: 4096,
                 max_response_bytes: 64 * 1024,
                 max_service_bytes: 16 * 1024 * 1024,
@@ -43172,17 +43172,20 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 .iter()
                 .take_while(|frame| frame.operation == Operation::GatewayResultData as u16)
                 .count();
+            let mut ordered = Vec::new();
             for frame in ordered_frames.as_slice().iter().take(row_count) {
                 assert_eq!(frame.request_id, ordered_accepted.request_id);
                 let (left, right) = decode_two_integer_sqlr_fields(&frame.payload)?;
                 *observed.entry((left, right)).or_insert(0usize) += 1;
+                ordered.push((left, right));
             }
             for _ in 0..row_count {
                 ordered_frames.next();
             }
+            assert_eq!(ordered, [(3, 11), (2, 9), (2, 9), (2, 9), (2, 9)]);
             assert_eq!(
                 observed.into_iter().collect::<Vec<_>>(),
-                [((1, 7), 4), ((2, 9), 9), ((3, 11), 1)]
+                [((2, 9), 4), ((3, 11), 1)]
             );
         } else if !spill_quota_only
             && !spill_crash_only
