@@ -550,6 +550,119 @@ impl ScanIndexRangeRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScanIndexPrefixRequest {
+    pub relation: ResolvedRelationHandle,
+    pub index_id: [u8; 16],
+    pub values: Vec<ScalarValue>,
+    pub column_ids: Vec<[u8; 16]>,
+}
+
+impl ScanIndexPrefixRequest {
+    const HEADER_BYTES: usize = 2 + 16 + 16 + 1;
+
+    pub fn encode(&self) -> Result<Vec<u8>, ExecutorRequestError> {
+        if self.index_id == [0; 16]
+            || !(2..=8).contains(&self.values.len())
+            || self.column_ids.len() > crate::tuple::MAX_COLUMNS
+            || self.column_ids.contains(&[0; 16])
+            || self
+                .column_ids
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != self.column_ids.len()
+        {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&1u16.to_be_bytes());
+        payload.extend_from_slice(&self.relation.to_bytes());
+        payload.extend_from_slice(&self.index_id);
+        payload.push(self.values.len() as u8);
+        for value in &self.values {
+            let (type_code, bytes) = encode_scalar_value(value)?;
+            append_scalar_value_record(&mut payload, type_code, &bytes)?;
+        }
+        let column_count = u16::try_from(self.column_ids.len())
+            .map_err(|_| ExecutorRequestError::InvalidPayload)?;
+        payload.extend_from_slice(&column_count.to_be_bytes());
+        for column_id in &self.column_ids {
+            payload.extend_from_slice(column_id);
+        }
+        ensure_response_size(&payload)?;
+        Ok(payload)
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
+        if payload.len() < Self::HEADER_BYTES + 2 || payload.len() > crate::ipc::MAX_PAYLOAD_BYTES {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        if payload.get(..2) != Some(&1u16.to_be_bytes()) {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        let relation = ResolvedRelationHandle::from_bytes(
+            payload
+                .get(2..18)
+                .ok_or(ExecutorRequestError::InvalidPayload)?,
+        )
+        .ok_or(ExecutorRequestError::InvalidPayload)?;
+        let index_id: [u8; 16] = payload[18..34]
+            .try_into()
+            .map_err(|_| ExecutorRequestError::InvalidPayload)?;
+        let count = usize::from(payload[34]);
+        if index_id == [0; 16] || !(2..=8).contains(&count) {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        let mut offset = Self::HEADER_BYTES;
+        let mut values = Vec::with_capacity(count);
+        for _ in 0..count {
+            values.push(decode_scalar_value_record(payload, &mut offset)?);
+        }
+        let count_end = offset
+            .checked_add(2)
+            .ok_or(ExecutorRequestError::InvalidPayload)?;
+        let column_count = usize::from(u16::from_be_bytes(
+            payload
+                .get(offset..count_end)
+                .ok_or(ExecutorRequestError::InvalidPayload)?
+                .try_into()
+                .map_err(|_| ExecutorRequestError::InvalidPayload)?,
+        ));
+        offset = count_end;
+        if column_count > crate::tuple::MAX_COLUMNS
+            || offset.checked_add(column_count * 16) != Some(payload.len())
+        {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        let column_ids = payload[offset..]
+            .chunks_exact(16)
+            .map(|chunk| {
+                chunk
+                    .try_into()
+                    .map_err(|_| ExecutorRequestError::InvalidPayload)
+            })
+            .collect::<Result<Vec<[u8; 16]>, _>>()?;
+        if column_ids.contains(&[0; 16])
+            || column_ids
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != column_ids.len()
+        {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        Ok(Self {
+            relation,
+            index_id,
+            values,
+            column_ids,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ScanIndexRangeResponse {
     Unavailable,
     Rows(Vec<Vec<SanitizedCell>>),
@@ -1625,6 +1738,19 @@ fn dispatch_executor_request_inner(
             };
             response.encode()?
         }
+        Operation::ScanIndexPrefix => {
+            let decoded = ScanIndexPrefixRequest::decode(&request.payload)?;
+            let response = match connection.scan_relation_index_prefix(
+                &decoded.relation,
+                decoded.index_id,
+                &decoded.values,
+                &decoded.column_ids,
+            )? {
+                ExecutorIndexRangeScan::Unavailable => ScanIndexRangeResponse::Unavailable,
+                ExecutorIndexRangeScan::Rows(rows) => ScanIndexRangeResponse::Rows(rows),
+            };
+            response.encode()?
+        }
         Operation::NextBatch => {
             let decoded = NextBatchRequest::decode(&request.payload)?;
             let page = connection.next_relation_scan_batch(
@@ -1847,8 +1973,9 @@ pub fn serve_executor_resolve_relation<S: Read + Write>(
 #[cfg(test)]
 mod cancellation_response_tests {
     use super::{
-        ExecutorBatchRow, ProbeUniqueIndexRequest, ProbeUniqueIndexResponse, ScanIndexRangeRequest,
-        ScanIndexRangeResponse, encode_cancellation_check_response,
+        ExecutorBatchRow, ProbeUniqueIndexRequest, ProbeUniqueIndexResponse,
+        ScanIndexPrefixRequest, ScanIndexRangeRequest, ScanIndexRangeResponse,
+        encode_cancellation_check_response,
     };
     use crate::authorization::SanitizedCell;
     use crate::metadata_discovery::{ExecutorRowHandle, ResolvedRelationHandle};
@@ -1963,6 +2090,25 @@ mod cancellation_response_tests {
             ScanIndexRangeResponse::decode(&oversized.encode().unwrap()).unwrap(),
             ScanIndexRangeResponse::Unavailable
         );
+    }
+
+    #[test]
+    fn composite_index_prefix_request_round_trips_typed_values_and_projection() {
+        let mut relation_bytes = [0u8; 16];
+        relation_bytes[0] = 6;
+        relation_bytes[1] = 1;
+        let request = ScanIndexPrefixRequest {
+            relation: ResolvedRelationHandle::from_bytes(&relation_bytes).unwrap(),
+            index_id: [9; 16],
+            values: vec![ScalarValue::Integer(-17), ScalarValue::Text("north".into())],
+            column_ids: vec![[7; 16], [8; 16]],
+        };
+        let encoded = request.encode().unwrap();
+        assert_eq!(ScanIndexPrefixRequest::decode(&encoded).unwrap(), request);
+        assert!(ScanIndexPrefixRequest::decode(&encoded[..encoded.len() - 1]).is_err());
+        let mut invalid = encoded;
+        invalid[34] = 1;
+        assert!(ScanIndexPrefixRequest::decode(&invalid).is_err());
     }
 
     #[test]

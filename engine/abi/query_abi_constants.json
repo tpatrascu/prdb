@@ -1044,6 +1044,13 @@
       "c_type": "UINT16_C"
     },
     {
+      "rust_name": "IPC_OP_SCAN_INDEX_PREFIX",
+      "rust_type": "u16",
+      "value": 4374,
+      "c_name": "PRDB_IPC_OP_SCAN_INDEX_PREFIX",
+      "c_type": "UINT16_C"
+    },
+    {
       "rust_name": "IPC_OP_DESCRIBE_RELATION",
       "rust_type": "u16",
       "value": 4609,

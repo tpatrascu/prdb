@@ -9111,8 +9111,11 @@ fn authorized_composite_integer_varchar_unique_probe_matches_reference()
     }
 
     let mut seed = InvocationTransaction::begin(&database, [0x32; 16], [9; 16], 9_999, 4, 4096)?;
-    let schema = seed.load_catalog_table_schema(table_id)?;
-    seed.load_catalog_indexes(&schema)?;
+    let schema = seed
+        .load_catalog_table_schema(table_id)
+        .map_err(|error| format!("load composite-prefix table schema: {error:?}"))?;
+    seed.load_catalog_indexes(&schema)
+        .map_err(|error| format!("load composite-prefix index: {error:?}"))?;
     let target_payload = encode_tuple(
         &schema.columns,
         schema.schema_version,
@@ -9149,7 +9152,8 @@ fn authorized_composite_integer_varchar_unique_probe_matches_reference()
         },
         &other_payload,
     )?;
-    seed.commit()?;
+    seed.commit()
+        .map_err(|error| format!("seed composite-prefix rows: {error:?}"))?;
 
     let mut invocation =
         InvocationTransaction::begin(&database, [0x35; 16], [9; 16], 9_999, 8, 4096)?;
@@ -11993,6 +11997,330 @@ fn catalog_insert_allocates_generated_identity_and_rejects_caller_override()
     );
     let read = database.begin_read()?;
     assert!(read.open_table(ROWS)?.get(&key(row_id)[..])?.is_none());
+    Ok(())
+}
+
+#[test]
+fn composite_index_prefix_scan_reconciles_snapshot_and_private_overlay()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let table_id = [0x20; 16];
+    let schema_id = [0x19; 16];
+    let first_column = [0x21; 16];
+    let second_column = [0x22; 16];
+    let index_id = [0x23; 16];
+    let row_id = |value| prdb_engine::overlay::RowId {
+        table: table_id,
+        row: [value; 16],
+    };
+    let table_key = catalog_id_key(5, table_id);
+    let table = catalog_record_payload(
+        5,
+        &table_key,
+        &[
+            CatalogField {
+                tag: 1,
+                wire_type: WireType::Id,
+                payload: schema_id.to_vec(),
+            },
+            CatalogField {
+                tag: 2,
+                wire_type: WireType::U64,
+                payload: 1u64.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 3,
+                wire_type: WireType::U64,
+                payload: 1u64.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 4,
+                wire_type: WireType::Id,
+                payload: [0x24; 16].to_vec(),
+            },
+            CatalogField {
+                tag: 5,
+                wire_type: WireType::U16,
+                payload: 1u16.to_le_bytes().to_vec(),
+            },
+        ],
+    )?;
+    let column_record = |column_id: [u8; 16], ordinal: u32, name: &[u8]| {
+        let key = catalog_id_key(6, column_id);
+        let payload = catalog_record_payload(
+            6,
+            &key,
+            &[
+                CatalogField {
+                    tag: 1,
+                    wire_type: WireType::Id,
+                    payload: table_id.to_vec(),
+                },
+                CatalogField {
+                    tag: 2,
+                    wire_type: WireType::U32,
+                    payload: ordinal.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 3,
+                    wire_type: WireType::Text,
+                    payload: name.to_vec(),
+                },
+                CatalogField {
+                    tag: 4,
+                    wire_type: WireType::Id,
+                    payload: [0x40; 16].to_vec(),
+                },
+                CatalogField {
+                    tag: 5,
+                    wire_type: WireType::Bytes,
+                    payload: vec![0; 8],
+                },
+                CatalogField {
+                    tag: 6,
+                    wire_type: WireType::Bool,
+                    payload: vec![1],
+                },
+                CatalogField {
+                    tag: 8,
+                    wire_type: WireType::U16,
+                    payload: 0u16.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 9,
+                    wire_type: WireType::U64,
+                    payload: 1u64.to_le_bytes().to_vec(),
+                },
+            ],
+        )?;
+        Ok::<_, Box<dyn std::error::Error>>((key, payload))
+    };
+    let mut index_columns = 2u32.to_le_bytes().to_vec();
+    index_columns.extend_from_slice(&first_column);
+    index_columns.extend_from_slice(&second_column);
+    let index_key = catalog_id_key(9, index_id);
+    let index = catalog_record_payload(
+        9,
+        &index_key,
+        &[
+            CatalogField {
+                tag: 1,
+                wire_type: WireType::Id,
+                payload: table_id.to_vec(),
+            },
+            CatalogField {
+                tag: 2,
+                wire_type: WireType::Ids,
+                payload: index_columns,
+            },
+            CatalogField {
+                tag: 3,
+                wire_type: WireType::U16,
+                payload: 1u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 4,
+                wire_type: WireType::Bool,
+                payload: vec![0],
+            },
+            CatalogField {
+                tag: 5,
+                wire_type: WireType::U16,
+                payload: 1u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 7,
+                wire_type: WireType::Id,
+                payload: index_id.to_vec(),
+            },
+            CatalogField {
+                tag: 8,
+                wire_type: WireType::U16,
+                payload: 1u16.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 9,
+                wire_type: WireType::U32,
+                payload: 1u32.to_le_bytes().to_vec(),
+            },
+            CatalogField {
+                tag: 10,
+                wire_type: WireType::U64,
+                payload: 1u64.to_le_bytes().to_vec(),
+            },
+        ],
+    )?;
+    let first = column_record(first_column, 0, b"region")?;
+    let second = column_record(second_column, 1, b"code")?;
+    let table_object = object_catalog_record_for(table_id, 3);
+    let schema_object = object_catalog_record_for(schema_id, 1);
+    let first_object = object_catalog_record_for(first_column, 4);
+    let second_object = object_catalog_record_for(second_column, 4);
+    let mut schema_tables = 1u32.to_le_bytes().to_vec();
+    schema_tables.extend_from_slice(&table_id);
+    let schema_key = catalog_id_key(3, schema_id);
+    let schema = catalog_record_payload(
+        3,
+        &schema_key,
+        &[CatalogField {
+            tag: 1,
+            wire_type: WireType::Ids,
+            payload: schema_tables,
+        }],
+    )?;
+    {
+        let write = database.begin_write()?;
+        let mut catalog = write.open_table(CATALOG)?;
+        for (key, value) in [
+            (table_key, table),
+            (schema_key, schema),
+            first,
+            second,
+            (index_key, index),
+            table_object,
+            schema_object,
+            first_object,
+            second_object,
+        ] {
+            catalog.insert(key.as_slice(), value.as_slice())?;
+        }
+        drop(catalog);
+        write.commit()?;
+    }
+
+    let mut seed = InvocationTransaction::begin(&database, [0x25; 16], [9; 16], 9_999, 8, 4_096)?;
+    let schema = seed
+        .load_catalog_table_schema(table_id)
+        .map_err(|error| format!("load seed schema: {error:?}"))?;
+    seed.load_catalog_indexes(&schema)
+        .map_err(|error| format!("load seed indexes: {error:?}"))?;
+    let encode = |region: Option<&[u8]>, code: Option<&[u8]>| {
+        encode_tuple(
+            &schema.columns,
+            schema.schema_version,
+            &[
+                region.map(|value| ScalarValue::Bytea(value.to_vec())),
+                code.map(|value| ScalarValue::Bytea(value.to_vec())),
+            ],
+        )
+    };
+    for (row, region, code) in [
+        (0x31, Some(b"north".as_slice()), Some(b"a".as_slice())),
+        (0x32, Some(b"north".as_slice()), Some(b"b".as_slice())),
+        (0x33, Some(b"south".as_slice()), Some(b"a".as_slice())),
+        (0x34, None, Some(b"a".as_slice())),
+    ] {
+        seed.stage_put(row_id(row), &encode(region, code)?)
+            .map_err(|error| format!("stage seed row {row:#x}: {error:?}"))?;
+    }
+    seed.commit()
+        .map_err(|error| format!("commit seed rows: {error:?}"))?;
+
+    let principal_id = [9; 16];
+    let table_target = AccessTarget::Table(table_id);
+    let first_target = AccessTarget::Column {
+        table_id,
+        column_id: first_column,
+    };
+    let second_target = AccessTarget::Column {
+        table_id,
+        column_id: second_column,
+    };
+    let context = AuthorizationContext {
+        principal_id,
+        role_ids: Default::default(),
+        scope: [
+            (Operation::Usage, AccessTarget::Schema(schema_id)),
+            (Operation::Select, table_target),
+            (Operation::Select, first_target),
+            (Operation::Select, second_target),
+        ]
+        .into(),
+    };
+    let grants = [
+        Grant {
+            subject: Subject::Principal(principal_id),
+            operation: Operation::Usage,
+            target: AccessTarget::Schema(schema_id),
+        },
+        Grant {
+            subject: Subject::Principal(principal_id),
+            operation: Operation::Select,
+            target: table_target,
+        },
+        Grant {
+            subject: Subject::Principal(principal_id),
+            operation: Operation::Select,
+            target: first_target,
+        },
+        Grant {
+            subject: Subject::Principal(principal_id),
+            operation: Operation::Select,
+            target: second_target,
+        },
+    ];
+    let policies = [table_target, first_target, second_target].map(|target| Policy {
+        subjects: vec![Subject::Principal(principal_id)],
+        operation: Operation::Select,
+        target,
+        effect: Effect::Allow,
+        using: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+        with_check: None,
+    });
+    let projection = AuthorizedProjection {
+        columns: &schema.columns,
+        column_ids: &schema.column_ids,
+        schema_version: schema.schema_version,
+        schema_id: schema.schema_id,
+        context: &context,
+        grants: &grants,
+        policies: &policies,
+        checks: &[],
+        policy_driving_columns: &[],
+        dependencies: &[],
+    };
+    let mut invocation =
+        InvocationTransaction::begin(&database, [0x26; 16], principal_id, 9_999, 8, 4_096)?;
+    let key_values = [
+        ScalarValue::Bytea(b"north".to_vec()),
+        ScalarValue::Bytea(b"a".to_vec()),
+    ];
+    assert_eq!(
+        invocation
+            .scan_catalog_index_prefix(table_id, index_id, &key_values, &projection)
+            .map_err(|error| format!("snapshot composite-prefix scan: {error:?}"))?,
+        prdb_engine::transaction::AuthorizedIndexRangeScan::Rows(vec![(
+            row_id(0x31),
+            vec![
+                SanitizedCell::Value(ScalarValue::Bytea(b"north".to_vec())),
+                SanitizedCell::Value(ScalarValue::Bytea(b"a".to_vec())),
+            ],
+        )]),
+    );
+    invocation
+        .stage_put(row_id(0x35), &encode(Some(b"north"), Some(b"a"))?)
+        .map_err(|error| format!("stage overlay insert: {error:?}"))?;
+    invocation
+        .stage_put(row_id(0x31), &encode(Some(b"north"), Some(b"z"))?)
+        .map_err(|error| format!("stage overlay update: {error:?}"))?;
+    assert!(matches!(
+        invocation
+            .scan_catalog_index_prefix(table_id, index_id, &key_values, &projection)
+            .map_err(|error| format!("overlay composite-prefix scan: {error:?}"))?,
+        prdb_engine::transaction::AuthorizedIndexRangeScan::Rows(rows)
+            if rows.len() == 1 && rows[0].0 == row_id(0x35)
+    ));
+    invocation
+        .stage_delete(row_id(0x35))
+        .map_err(|error| format!("stage overlay delete: {error:?}"))?;
+    assert_eq!(
+        invocation
+            .scan_catalog_index_prefix(table_id, index_id, &key_values, &projection)
+            .map_err(|error| format!("deleted composite-prefix scan: {error:?}"))?,
+        prdb_engine::transaction::AuthorizedIndexRangeScan::Rows(Vec::new()),
+    );
+    invocation.abort()?;
     Ok(())
 }
 

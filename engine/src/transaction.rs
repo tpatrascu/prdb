@@ -2033,6 +2033,250 @@ impl<'db> InvocationTransaction<'db> {
         }
     }
 
+    /// Scan the contiguous leading prefix of a composite index. Every value is
+    /// typed by the corresponding pinned index column; only authorized
+    /// sanitized rows are returned, and an oversized prefix result is never
+    /// returned partially.
+    pub fn scan_catalog_index_prefix(
+        &mut self,
+        table_id: [u8; 16],
+        index_id: [u8; 16],
+        values: &[ScalarValue],
+        projection: &AuthorizedProjection<'_>,
+    ) -> Result<AuthorizedIndexRangeScan, TransactionError> {
+        let result = (|| {
+            if table_id == [0; 16]
+                || index_id == [0; 16]
+                || !(2..=8).contains(&values.len())
+                || projection.columns.is_empty()
+                || projection.columns.len() != projection.column_ids.len()
+                || projection.columns.len() > crate::tuple::MAX_COLUMNS
+                || projection.schema_version == 0
+                || projection.schema_id == [0; 16]
+                || projection.column_ids.contains(&[0; 16])
+                || projection.grants.len() > crate::authorization::MAX_AUTHORIZATION_INPUTS
+                || projection.policies.len() > crate::authorization::MAX_AUTHORIZATION_INPUTS
+                || projection.checks.len() > crate::authorization::MAX_AUTHORIZATION_INPUTS
+                || projection.policy_driving_columns.len()
+                    > crate::authorization::MAX_AUTHORIZATION_INPUTS
+                || projection.dependencies.len() > crate::authorization::MAX_AUTHORIZATION_INPUTS
+            {
+                return Err(TransactionError::InvalidScanRequest);
+            }
+            if self.active_scan.is_some() {
+                return Err(TransactionError::ScanStillActive);
+            }
+            self.capture_authority_dependencies(projection.context, projection.dependencies)?;
+            let schema = self.load_catalog_table_schema(table_id)?;
+            if schema.schema_id != projection.schema_id
+                || schema.schema_version != projection.schema_version
+                || schema.column_ids != projection.column_ids
+                || schema.columns != projection.columns
+            {
+                return Err(TransactionError::InvalidContext);
+            }
+            let indexes = if let Some(indexes) = self.loaded_indexes.get(&table_id) {
+                indexes.clone()
+            } else {
+                self.load_catalog_indexes(&schema)?
+            };
+            let Some(index) = indexes
+                .into_iter()
+                .find(|index| index.index_id == index_id && index.table_id == table_id)
+            else {
+                return Ok(AuthorizedIndexRangeScan::Unavailable);
+            };
+            if index.column_ids.len() < values.len()
+                || index.column_ids.iter().any(|column_id| {
+                    let Some(ordinal) = schema
+                        .column_ids
+                        .iter()
+                        .position(|candidate| candidate == column_id)
+                    else {
+                        return true;
+                    };
+                    !index_component_unconditionally_readable(
+                        projection,
+                        table_id,
+                        schema.column_ids[ordinal],
+                    )
+                })
+            {
+                return Ok(AuthorizedIndexRangeScan::Unavailable);
+            }
+            let mut prefix_schemas = Vec::with_capacity(values.len());
+            for column_id in index.column_ids.iter().take(values.len()) {
+                let Some(ordinal) = schema
+                    .column_ids
+                    .iter()
+                    .position(|candidate| candidate == column_id)
+                else {
+                    return Err(TransactionError::CorruptCatalog);
+                };
+                // `encode_sql_tuple` below validates each value against the
+                // catalog column's scalar type.
+                prefix_schemas.push(schema.columns[ordinal].clone());
+            }
+            let values = values.iter().cloned().map(Some).collect::<Vec<_>>();
+            let tuple =
+                encode_sql_tuple(&prefix_schemas, &values).map_err(TransactionError::Tuple)?;
+            let mut key_prefix = Vec::with_capacity(16 + tuple.len());
+            key_prefix.extend_from_slice(&index_id);
+            key_prefix.extend_from_slice(&tuple);
+
+            let mut snapshot_candidates = Vec::new();
+            let mut snapshot_bytes = 0usize;
+            let mut after_key: Option<Vec<u8>> = None;
+            loop {
+                let page = self
+                    .pinned_snapshot()?
+                    .scan_index_prefix(
+                        &key_prefix,
+                        after_key.as_deref(),
+                        crate::snapshot::MAX_ROW_SCAN_PAGE,
+                    )
+                    .map_err(|error| TransactionError::Storage(error.to_string()))?;
+                snapshot_bytes = snapshot_bytes.saturating_add(
+                    page.candidates
+                        .iter()
+                        .map(|candidate| candidate.key.len())
+                        .sum::<usize>(),
+                );
+                if snapshot_candidates
+                    .len()
+                    .saturating_add(page.candidates.len())
+                    > MAX_AUTHORIZED_INDEX_RANGE_CANDIDATES
+                    || snapshot_bytes > MAX_AUTHORIZED_INDEX_RANGE_BYTES
+                {
+                    self.charge_scan_work(
+                        snapshot_candidates
+                            .len()
+                            .saturating_add(page.candidates.len()),
+                    )?;
+                    return Ok(AuthorizedIndexRangeScan::Unavailable);
+                }
+                snapshot_candidates.extend(page.candidates);
+                let Some(continuation) = page.continuation else {
+                    break;
+                };
+                after_key = Some(continuation);
+            }
+
+            let remaining_work = self.max_scan_work.saturating_sub(self.scanned_work);
+            let overlay_scan_work = self.overlay.staged_row_count()?;
+            let Some(overlay_row_ids) = self
+                .overlay
+                .bounded_row_ids_for_table(table_id, remaining_work)?
+            else {
+                return Err(TransactionError::ScanBudgetExceeded);
+            };
+            let candidate_work = overlay_scan_work
+                .checked_add(snapshot_candidates.len())
+                .ok_or(TransactionError::ScanBudgetExceeded)?;
+            self.charge_scan_work(candidate_work)?;
+
+            let mut candidate_ids = HashSet::new();
+            let mut candidate_row_bytes = 0usize;
+            for candidate in &snapshot_candidates {
+                let row_id = RowId {
+                    table: table_id,
+                    row: candidate.locator.row_id,
+                };
+                let stored = self
+                    .pinned_snapshot()?
+                    .get(&row_key(row_id))
+                    .map_err(|error| TransactionError::Storage(error.to_string()))?
+                    .ok_or(TransactionError::CorruptRowKey)?;
+                let record = RowRecord::decode(&stored).map_err(TransactionError::CorruptRow)?;
+                if record.row_version != candidate.locator.row_version {
+                    return Err(TransactionError::CorruptRowKey);
+                }
+                let derived = derive_index_key(
+                    index_id,
+                    row_id.row,
+                    schema.schema_version,
+                    &schema.column_ids,
+                    &schema.columns,
+                    &record.payload,
+                    &index.column_ids,
+                )
+                .map_err(|error| match error {
+                    DeriveIndexKeyError::InvalidDefinition => TransactionError::CorruptCatalog,
+                    DeriveIndexKeyError::Tuple(error) => TransactionError::Tuple(error),
+                })?;
+                if derived.key != candidate.key {
+                    return Err(TransactionError::CorruptRowKey);
+                }
+                if candidate.key.starts_with(&key_prefix) {
+                    candidate_row_bytes = candidate_row_bytes.saturating_add(record.payload.len());
+                    if candidate_row_bytes > MAX_AUTHORIZED_INDEX_RANGE_BYTES {
+                        return Ok(AuthorizedIndexRangeScan::Unavailable);
+                    }
+                    candidate_ids.insert(row_id);
+                }
+            }
+            for row_bytes in overlay_row_ids {
+                let row_id = RowId {
+                    table: table_id,
+                    row: row_bytes,
+                };
+                match self.overlay.get_for_actor(&row_id, self.principal_id)? {
+                    Some(StagedRow::Delete) => {
+                        candidate_ids.remove(&row_id);
+                    }
+                    Some(StagedRow::Value(payload)) => {
+                        let derived = derive_index_key(
+                            index_id,
+                            row_id.row,
+                            schema.schema_version,
+                            &schema.column_ids,
+                            &schema.columns,
+                            payload,
+                            &index.column_ids,
+                        )
+                        .map_err(|error| match error {
+                            DeriveIndexKeyError::InvalidDefinition => {
+                                TransactionError::CorruptCatalog
+                            }
+                            DeriveIndexKeyError::Tuple(error) => TransactionError::Tuple(error),
+                        })?;
+                        if derived.key.starts_with(&key_prefix) {
+                            candidate_row_bytes = candidate_row_bytes.saturating_add(payload.len());
+                            if candidate_row_bytes > MAX_AUTHORIZED_INDEX_RANGE_BYTES {
+                                return Ok(AuthorizedIndexRangeScan::Unavailable);
+                            }
+                            candidate_ids.insert(row_id);
+                        } else {
+                            candidate_ids.remove(&row_id);
+                        }
+                    }
+                    None => {}
+                }
+            }
+            if candidate_ids.len() > MAX_AUTHORIZED_INDEX_RANGE_CANDIDATES {
+                return Ok(AuthorizedIndexRangeScan::Unavailable);
+            }
+            let mut candidate_ids = candidate_ids.into_iter().collect::<Vec<_>>();
+            candidate_ids.sort_unstable_by_key(|id| id.row);
+            let mut rows = Vec::with_capacity(candidate_ids.len());
+            for candidate_id in candidate_ids {
+                if let Some(cells) = self.read_authorized(candidate_id, projection)? {
+                    rows.push((candidate_id, cells));
+                }
+            }
+            Ok(AuthorizedIndexRangeScan::Rows(rows))
+        })();
+        match result {
+            Ok(scan) => Ok(scan),
+            Err(error) => {
+                if !self.aborted {
+                    self.abort()?;
+                }
+                Err(error)
+            }
+        }
+    }
+
     /// Catalog-derived entry point for a unique equality probe. Schema,
     /// principal/role grants, and row/cell policies all come from this
     /// invocation's pinned catalog before the projection-based trusted helper
@@ -2075,6 +2319,33 @@ impl<'db> InvocationTransaction<'db> {
                 index_id,
                 lower,
                 upper,
+                &catalog_projection.as_projection(),
+            )
+        })();
+        match result {
+            Ok(scan) => Ok(scan),
+            Err(error) => {
+                if !self.aborted {
+                    self.abort()?;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    pub fn scan_catalog_index_prefix_for_principal(
+        &mut self,
+        table_id: [u8; 16],
+        index_id: [u8; 16],
+        values: &[ScalarValue],
+    ) -> Result<AuthorizedIndexRangeScan, TransactionError> {
+        let result = (|| {
+            let catalog_projection = self.load_catalog_estimate_projection(table_id)?;
+            self.load_catalog_indexes(&catalog_projection.schema)?;
+            self.scan_catalog_index_prefix(
+                table_id,
+                index_id,
+                values,
                 &catalog_projection.as_projection(),
             )
         })();
@@ -9896,6 +10167,72 @@ impl ExecutorMetadataConnection<'_, '_> {
             index_id,
             lower,
             upper,
+        )? {
+            AuthorizedIndexRangeScan::Unavailable => Ok(ExecutorIndexRangeScan::Unavailable),
+            AuthorizedIndexRangeScan::Rows(rows) => rows
+                .into_iter()
+                .map(|(_, cells)| {
+                    selected_ordinals
+                        .iter()
+                        .map(|ordinal| {
+                            cells
+                                .get(*ordinal)
+                                .cloned()
+                                .ok_or(TransactionError::InvalidMetadataRequest)
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(ExecutorIndexRangeScan::Rows),
+        }
+    }
+
+    pub fn scan_relation_index_prefix(
+        &mut self,
+        handle: &ResolvedRelationHandle,
+        index_id: [u8; 16],
+        values: &[ScalarValue],
+        requested_column_ids: &[[u8; 16]],
+    ) -> Result<ExecutorIndexRangeScan, TransactionError> {
+        let description = self.revalidate_relation_handle(handle)?;
+        if builtin_information_schema_relation_schema(description.relation_id).is_some() {
+            return Ok(ExecutorIndexRangeScan::Unavailable);
+        }
+        if index_id == [0; 16]
+            || !(2..=8).contains(&values.len())
+            || requested_column_ids.len() > crate::tuple::MAX_COLUMNS
+            || requested_column_ids.contains(&[0; 16])
+            || requested_column_ids
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>()
+                .len()
+                != requested_column_ids.len()
+        {
+            return Err(TransactionError::InvalidMetadataRequest);
+        }
+        let selected_ordinals = if requested_column_ids.is_empty() {
+            (0..description.columns.len()).collect::<Vec<_>>()
+        } else {
+            let selected = description
+                .columns
+                .iter()
+                .enumerate()
+                .filter_map(|(ordinal, column)| {
+                    requested_column_ids
+                        .contains(&column.column_id)
+                        .then_some(ordinal)
+                })
+                .collect::<Vec<_>>();
+            if selected.len() != requested_column_ids.len() {
+                return Err(TransactionError::InvalidMetadataRequest);
+            }
+            selected
+        };
+        match self.transaction.scan_catalog_index_prefix_for_principal(
+            description.relation_id,
+            index_id,
+            values,
         )? {
             AuthorizedIndexRangeScan::Unavailable => Ok(ExecutorIndexRangeScan::Unavailable),
             AuthorizedIndexRangeScan::Rows(rows) => rows

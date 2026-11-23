@@ -165,6 +165,8 @@ pub struct IndexNestedLoopJoinV1 {
     pub inner_side: JoinRelationSide,
     pub index_id: [u8; 16],
     pub key_column: BoundColumn,
+    /// Full contiguous index prefix for a kind-18 probe. Kind 17 leaves it empty.
+    pub prefix_columns: Vec<BoundColumn>,
 }
 
 /// Bounded single-key COUNT(*) grouping plan. The scan carries only the
@@ -267,6 +269,7 @@ const PLAN_KIND_UPDATE: u8 = 3;
 const PLAN_KIND_JOIN_SELECT: u8 = 4;
 const PLAN_KIND_FILTERED_JOIN_SELECT: u8 = 12;
 const PLAN_KIND_INDEX_NESTED_LOOP_JOIN: u8 = 17;
+const PLAN_KIND_INDEX_PREFIX_NESTED_LOOP_JOIN: u8 = 18;
 const DELETE_SINK_NODE: u8 = 5;
 const PLAN_KIND_GROUP_COUNT: u8 = 5;
 const PLAN_KIND_COMPOSITE_GROUP_COUNT: u8 = 6;
@@ -566,8 +569,12 @@ pub fn encode_join_select_plan_v1(plan: &JoinSelectPlanV1) -> Result<Vec<u8>, Pl
     let mut output = Vec::with_capacity(256);
     output.extend_from_slice(&crate::query_abi::encode_optimizer_plan_header_record(
         1,
-        if plan.index_nested_loop.is_some() {
-            PLAN_KIND_INDEX_NESTED_LOOP_JOIN
+        if let Some(index_join) = &plan.index_nested_loop {
+            if index_join.prefix_columns.len() > 1 {
+                PLAN_KIND_INDEX_PREFIX_NESTED_LOOP_JOIN
+            } else {
+                PLAN_KIND_INDEX_NESTED_LOOP_JOIN
+            }
         } else if plan.filter.is_some() {
             PLAN_KIND_FILTERED_JOIN_SELECT
         } else {
@@ -654,7 +661,14 @@ pub fn encode_join_select_plan_v1(plan: &JoinSelectPlanV1) -> Result<Vec<u8>, Pl
             JoinRelationSide::Right => 1,
         });
         output.extend_from_slice(&index_join.index_id);
-        put_column(&mut output, &index_join.key_column);
+        if index_join.prefix_columns.len() > 1 {
+            output.push(index_join.prefix_columns.len() as u8);
+            for column in &index_join.prefix_columns {
+                put_column(&mut output, column);
+            }
+        } else {
+            put_column(&mut output, &index_join.key_column);
+        }
     }
     if output.len() > MAX_PLAN_BYTES {
         return Err(PlanError::TooLarge);
@@ -674,7 +688,10 @@ pub fn decode_join_select_plan_v1(bytes: &[u8]) -> Result<JoinSelectPlanV1, Plan
     }
     if !matches!(
         kind,
-        PLAN_KIND_JOIN_SELECT | PLAN_KIND_FILTERED_JOIN_SELECT | PLAN_KIND_INDEX_NESTED_LOOP_JOIN
+        PLAN_KIND_JOIN_SELECT
+            | PLAN_KIND_FILTERED_JOIN_SELECT
+            | PLAN_KIND_INDEX_NESTED_LOOP_JOIN
+            | PLAN_KIND_INDEX_PREFIX_NESTED_LOOP_JOIN
     ) || reserved != 0
     {
         return Err(PlanError::InvalidEncoding);
@@ -760,7 +777,10 @@ pub fn decode_join_select_plan_v1(bytes: &[u8]) -> Result<JoinSelectPlanV1, Plan
         )),
         _ => return Err(PlanError::InvalidEncoding),
     };
-    let has_filter = if kind == PLAN_KIND_INDEX_NESTED_LOOP_JOIN {
+    let has_filter = if matches!(
+        kind,
+        PLAN_KIND_INDEX_NESTED_LOOP_JOIN | PLAN_KIND_INDEX_PREFIX_NESTED_LOOP_JOIN
+    ) {
         match reader.u8()? {
             0 => false,
             1 => true,
@@ -810,7 +830,10 @@ pub fn decode_join_select_plan_v1(bytes: &[u8]) -> Result<JoinSelectPlanV1, Plan
     } else {
         None
     };
-    let index_nested_loop = if kind == PLAN_KIND_INDEX_NESTED_LOOP_JOIN {
+    let index_nested_loop = if matches!(
+        kind,
+        PLAN_KIND_INDEX_NESTED_LOOP_JOIN | PLAN_KIND_INDEX_PREFIX_NESTED_LOOP_JOIN
+    ) {
         let outer_side = match reader.u8()? {
             0 => JoinRelationSide::Left,
             1 => JoinRelationSide::Right,
@@ -825,11 +848,30 @@ pub fn decode_join_select_plan_v1(bytes: &[u8]) -> Result<JoinSelectPlanV1, Plan
             .take(16)?
             .try_into()
             .map_err(|_| PlanError::Truncated)?;
+        let prefix_columns = if kind == PLAN_KIND_INDEX_PREFIX_NESTED_LOOP_JOIN {
+            let count = usize::from(reader.u8()?);
+            if !(2..=8).contains(&count) {
+                return Err(PlanError::InvalidColumnReference);
+            }
+            let mut columns = Vec::with_capacity(count);
+            for _ in 0..count {
+                columns.push(reader.column()?);
+            }
+            columns
+        } else {
+            Vec::new()
+        };
+        let key_column = if prefix_columns.is_empty() {
+            reader.column()?
+        } else {
+            prefix_columns[0].clone()
+        };
         Some(IndexNestedLoopJoinV1 {
             outer_side,
             inner_side,
             index_id,
-            key_column: reader.column()?,
+            key_column,
+            prefix_columns,
         })
     } else {
         None
@@ -966,6 +1008,34 @@ pub fn validate_join_select_plan_v1(plan: &JoinSelectPlanV1) -> Result<(), PlanE
         };
         if index_join.outer_side != expected_outer {
             return Err(PlanError::InvalidColumnReference);
+        }
+        if index_join.prefix_columns.len() > 8
+            || (!index_join.prefix_columns.is_empty()
+                && (index_join.prefix_columns.len() < 2
+                    || index_join.prefix_columns.first() != Some(&index_join.key_column)))
+        {
+            return Err(PlanError::InvalidColumnReference);
+        }
+        let prefix_columns = if index_join.prefix_columns.is_empty() {
+            std::slice::from_ref(&index_join.key_column)
+        } else {
+            &index_join.prefix_columns
+        };
+        let mut seen_prefix_columns = std::collections::HashSet::new();
+        for column in prefix_columns {
+            if !inner_scan.contains(column)
+                || !is_supported_index_join_key(column)
+                || !seen_prefix_columns.insert(column.column_id)
+            {
+                return Err(PlanError::InvalidColumnReference);
+            }
+            let paired_key = match index_join.inner_side {
+                JoinRelationSide::Left => plan.join_keys.iter().find(|(inner, _)| inner == column),
+                JoinRelationSide::Right => plan.join_keys.iter().find(|(_, inner)| inner == column),
+            };
+            if paired_key.is_none() {
+                return Err(PlanError::InvalidColumnReference);
+            }
         }
     }
     Ok(())
@@ -4426,30 +4496,47 @@ fn select_index_nested_loop_join(
         key_columns: &[BoundColumn],
         side: JoinRelationSide,
     ) -> Option<IndexNestedLoopJoinV1> {
-        let mut paths = paths
-            .filter(|(index_id, columns)| *index_id != [0; 16] && !columns.is_empty())
-            .collect::<Vec<_>>();
-        paths.sort_by_key(|(index_id, _)| *index_id);
+        let mut candidates = Vec::new();
         for (index_id, column_ids) in paths {
-            let Some(key_column) = key_columns
-                .iter()
-                .find(|column| column.column_id == column_ids[0])
-            else {
+            if index_id == [0; 16] || column_ids.is_empty() {
                 continue;
-            };
-            if is_supported_index_join_key(key_column) {
-                return Some(IndexNestedLoopJoinV1 {
-                    outer_side: match side {
-                        JoinRelationSide::Left => JoinRelationSide::Right,
-                        JoinRelationSide::Right => JoinRelationSide::Left,
-                    },
-                    inner_side: side,
-                    index_id,
-                    key_column: key_column.clone(),
-                });
+            }
+            let mut prefix = Vec::new();
+            for column_id in column_ids.iter().take(8) {
+                let Some(column) = key_columns
+                    .iter()
+                    .find(|column| column.column_id == *column_id)
+                else {
+                    break;
+                };
+                if !is_supported_index_join_key(column) {
+                    break;
+                }
+                prefix.push(column.clone());
+            }
+            if !prefix.is_empty() {
+                candidates.push((index_id, prefix));
             }
         }
-        None
+        candidates.sort_by(|(left_id, left_prefix), (right_id, right_prefix)| {
+            right_prefix
+                .len()
+                .cmp(&left_prefix.len())
+                .then_with(|| left_id.cmp(right_id))
+        });
+        candidates
+            .into_iter()
+            .next()
+            .map(|(index_id, prefix)| IndexNestedLoopJoinV1 {
+                outer_side: match side {
+                    JoinRelationSide::Left => JoinRelationSide::Right,
+                    JoinRelationSide::Right => JoinRelationSide::Left,
+                },
+                inner_side: side,
+                index_id,
+                key_column: prefix[0].clone(),
+                prefix_columns: if prefix.len() > 1 { prefix } else { Vec::new() },
+            })
     }
 
     let right = eligible(

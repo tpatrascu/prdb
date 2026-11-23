@@ -785,6 +785,56 @@ mod tests {
     }
 
     #[test]
+    fn composite_join_index_uses_the_longest_matching_prefix_plan() {
+        let mut request = vec![0, 1, crate::query_abi::OPTIMIZER_JOIN_SELECT_STATEMENT, 0];
+        for name in ["public", "lefts", "rights"] {
+            request.push(name.len() as u8);
+            request.extend_from_slice(name.as_bytes());
+        }
+        request.extend_from_slice(&1u16.to_be_bytes());
+        request.extend_from_slice(&[0, 2]);
+        request.extend_from_slice(b"id");
+        request.push(2);
+        for (left, right) in [("id", "id"), ("value", "value")] {
+            request.push(left.len() as u8);
+            request.extend_from_slice(left.as_bytes());
+            request.push(right.len() as u8);
+            request.extend_from_slice(right.as_bytes());
+        }
+        request.push(0);
+
+        let mut indexed_right = join_relation("rights", 0x41);
+        indexed_right.range_access_paths =
+            vec![crate::metadata_discovery::AuthorizedRangeAccessPath {
+                index_id: [0x71; 16],
+                column_ids: vec![[0x51; 16], [0x53; 16]],
+            }];
+        let encoded = optimize_join_select_v1_with_relations(
+            &request,
+            Some(join_relation("lefts", 0x31)),
+            Some(indexed_right),
+        )
+        .unwrap();
+        let (_, kind, _) = crate::query_abi::decode_optimizer_plan_header_record(&encoded)
+            .expect("optimizer must return a plan header");
+        assert_eq!(
+            kind, 18,
+            "two matching index keys should use prefix plan kind 18"
+        );
+        let plan = crate::optimizer_plan::decode_join_select_plan_v1(&encoded).unwrap();
+        let index_plan = plan.index_nested_loop.unwrap();
+        assert_eq!(index_plan.index_id, [0x71; 16]);
+        assert_eq!(
+            index_plan
+                .prefix_columns
+                .iter()
+                .map(|column| column.column_id)
+                .collect::<Vec<_>>(),
+            [[0x51; 16], [0x53; 16]]
+        );
+    }
+
+    #[test]
     fn every_ordered_index_scalar_can_drive_an_indexed_join() {
         let key_types = [
             ScalarType::Boolean,

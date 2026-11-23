@@ -17,6 +17,7 @@
 #define PRDB_SDK_EXECUTOR_OP_STAGE_DELETE PRDB_IPC_OP_STAGE_DELETE
 #define PRDB_SDK_EXECUTOR_OP_PROBE_UNIQUE_INDEX PRDB_IPC_OP_PROBE_UNIQUE_INDEX
 #define PRDB_SDK_EXECUTOR_OP_SCAN_INDEX_RANGE PRDB_IPC_OP_SCAN_INDEX_RANGE
+#define PRDB_SDK_EXECUTOR_OP_SCAN_INDEX_PREFIX PRDB_IPC_OP_SCAN_INDEX_PREFIX
 #define PRDB_SDK_EXECUTOR_OP_CHECK_CANCELLATION PRDB_IPC_OP_EXECUTOR_CHECK_CANCELLATION
 #define PRDB_SDK_EXECUTOR_MAX_COLUMN_IDS UINT16_C(256)
 
@@ -81,6 +82,15 @@ int32_t prdb_sdk_executor_scan_index_range_v1(
     uint8_t upper_inclusive, const uint8_t *column_ids,
     uint16_t column_count, uint8_t *request, uint64_t request_capacity,
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len,
+    prdb_sdk_index_range_v1 *range_out, uint32_t range_out_capacity);
+
+/* Probes a composite index using two to eight non-NULL leading key values. */
+int32_t prdb_sdk_executor_scan_index_prefix_v1(
+    const prdb_host_api_v2 *host, const uint8_t executor_handle[16],
+    const uint8_t index_id[16], const prdb_sdk_value_v1 *values,
+    uint8_t value_count, const uint8_t *column_ids, uint16_t column_count,
+    uint8_t *request, uint64_t request_capacity, uint8_t *response,
+    uint64_t response_capacity, uint64_t *response_len,
     prdb_sdk_index_range_v1 *range_out, uint32_t range_out_capacity);
 
 int32_t prdb_sdk_executor_next_batch_v1(

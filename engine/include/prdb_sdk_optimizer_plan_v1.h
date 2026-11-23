@@ -17,6 +17,7 @@
 #define PRDB_SDK_OPTIMIZER_PLAN_KIND_JOIN_SELECT UINT32_C(4)
 #define PRDB_SDK_OPTIMIZER_PLAN_KIND_FILTERED_JOIN_SELECT UINT32_C(12)
 #define PRDB_SDK_OPTIMIZER_PLAN_KIND_INDEX_NESTED_LOOP_JOIN UINT32_C(17)
+#define PRDB_SDK_OPTIMIZER_PLAN_KIND_INDEX_PREFIX_NESTED_LOOP_JOIN UINT32_C(18)
 #define PRDB_SDK_OPTIMIZER_PLAN_MAX_PARAMETER_INDEX UINT32_C(256)
 
 #define PRDB_SDK_OPTIMIZER_PLAN_OK INT32_C(0)
@@ -172,6 +173,20 @@ typedef struct prdb_sdk_optimizer_index_join_plan_v1 {
     uint8_t index_id[16];
     prdb_sdk_optimizer_plan_column_v1 key_column;
 } prdb_sdk_optimizer_index_join_plan_v1;
+
+/* Kind-18 plan for an indexed join using two to eight leading index keys. */
+typedef struct prdb_sdk_optimizer_index_prefix_join_plan_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    prdb_sdk_optimizer_join_plan_v1 join;
+    uint32_t has_filter;
+    prdb_sdk_optimizer_join_filter_v1 filter;
+    uint32_t outer_side;
+    uint32_t inner_side;
+    uint8_t index_id[16];
+    uint32_t prefix_column_count;
+    prdb_sdk_optimizer_plan_column_v1 prefix_columns[8];
+} prdb_sdk_optimizer_index_prefix_join_plan_v1;
 
 /* Kind-5 single-key COUNT(*) plan. Its scan shape contains exactly the
  * grouping key; relation and column names borrow the encoded payload. */
@@ -372,6 +387,11 @@ int32_t prdb_sdk_optimizer_decode_filtered_join_plan_v1(
 int32_t prdb_sdk_optimizer_decode_index_join_plan_v1(
     const uint8_t *payload, uint64_t payload_len,
     prdb_sdk_optimizer_index_join_plan_v1 *out, uint32_t out_capacity);
+
+int32_t prdb_sdk_optimizer_decode_index_prefix_join_plan_v1(
+    const uint8_t *payload, uint64_t payload_len,
+    prdb_sdk_optimizer_index_prefix_join_plan_v1 *out,
+    uint32_t out_capacity);
 
 /* Independently decode kind-5 single-key COUNT(*) plans, requiring an exact
  * one-column scan shape and canonical relation/limit records. */

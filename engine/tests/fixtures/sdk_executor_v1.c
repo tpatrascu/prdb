@@ -13,6 +13,7 @@ _Static_assert(PRDB_SDK_EXECUTOR_OP_STAGE_UPDATE == UINT16_C(0x1111), "update op
 _Static_assert(PRDB_SDK_EXECUTOR_OP_STAGE_DELETE == UINT16_C(0x1112), "delete operation tag");
 _Static_assert(PRDB_SDK_EXECUTOR_OP_CHECK_CANCELLATION == UINT16_C(0x1113), "cancellation operation tag");
 _Static_assert(PRDB_SDK_EXECUTOR_OP_SCAN_INDEX_RANGE == UINT16_C(0x1115), "index range operation tag");
+_Static_assert(PRDB_SDK_EXECUTOR_OP_SCAN_INDEX_PREFIX == UINT16_C(0x1116), "index prefix operation tag");
 #endif
 
 typedef struct mock_host {
@@ -456,6 +457,55 @@ int main(void) {
                    sizeof(response), &response_len, &range, sizeof(range)) ==
                PRDB_SDK_EXECUTOR_RESPONSE_TOO_SMALL);
         assert(mock.calls == 19);
+    }
+    {
+        const uint8_t first_value[] = {0, 0, 0, 4};
+        const uint8_t second_value[] = {0, 0, 0, 9};
+        uint8_t key_id[16], selected_columns[16], prefix_request[128];
+        uint8_t expected[71] = {0}, empty_reply[] = {1, 1, 0, 0};
+        uint32_t offset = 0;
+        prdb_sdk_value_v1 values[2] = {{0}};
+        prdb_sdk_index_range_v1 range = {0};
+        memset(key_id, 0x77, sizeof(key_id));
+        memset(selected_columns, 0x55, sizeof(selected_columns));
+        put_u16(expected, &offset, 1);
+        memcpy(expected + offset, resolved.executor_handle, 16); offset += 16;
+        memcpy(expected + offset, key_id, 16); offset += 16;
+        expected[offset++] = 2;
+        for (uint32_t i = 0; i < 2; ++i) {
+            expected[offset++] = PRDB_SDK_VALUE_TYPE_INTEGER;
+            put_u32(expected, &offset, 4);
+            memcpy(expected + offset, i == 0 ? first_value : second_value, 4);
+            offset += 4;
+            values[i].struct_size = sizeof(values[i]);
+            values[i].abi_version = PRDB_SDK_VALUE_ABI_V1_VERSION;
+            values[i].state = PRDB_SDK_VALUE_STATE_VALUE;
+            values[i].type_code = PRDB_SDK_VALUE_TYPE_INTEGER;
+            values[i].data = i == 0 ? first_value : second_value;
+            values[i].data_len = 4;
+        }
+        expected[offset++] = 0;
+        expected[offset++] = 1;
+        memcpy(expected + offset, selected_columns, 16); offset += 16;
+        assert(offset == sizeof(expected));
+        mock.expected_operation = PRDB_SDK_EXECUTOR_OP_SCAN_INDEX_PREFIX;
+        mock.expected_request = expected;
+        mock.expected_request_len = sizeof(expected);
+        mock.reply = empty_reply;
+        mock.reply_len = sizeof(empty_reply);
+        assert(prdb_sdk_executor_scan_index_prefix_v1(
+                   &host, resolved.executor_handle, key_id, values, 2,
+                   selected_columns, 1, prefix_request, sizeof(prefix_request),
+                   response, sizeof(response), &response_len, &range,
+                   sizeof(range)) == PRDB_SDK_EXECUTOR_OK);
+        assert(range.row_count == 0 && mock.calls == 20);
+        values[1].state = PRDB_SDK_VALUE_STATE_NULL;
+        assert(prdb_sdk_executor_scan_index_prefix_v1(
+                   &host, resolved.executor_handle, key_id, values, 2,
+                   selected_columns, 1, prefix_request, sizeof(prefix_request),
+                   response, sizeof(response), &response_len, &range,
+                   sizeof(range)) == PRDB_SDK_EXECUTOR_INVALID_ARGUMENT);
+        assert(mock.calls == 20);
     }
     return 0;
 }

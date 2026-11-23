@@ -3804,8 +3804,34 @@ static int32_t run_write_read_fixture(
             write_composite_joined_row_v19, &joined_results);
     }
     if (status != PRDB_SDK_SQL_EXEC_OK || joined_results.row_count != 2) {
-        static const uint8_t message[] = "fixture-error-composite-inner-join";
-        return report_failure(host, message, sizeof(message) - 1);
+        uint8_t message[64];
+        const int message_len = snprintf(
+            (char *)message, sizeof(message),
+            "composite-inner-join-status=%d rows=%u v5=%u plan=%u", status,
+            joined_results.row_count, optimizer_host_v5 != NULL,
+            composite_join_optimizer_response[2]);
+        if (message_len <= 0 || (size_t)message_len >= sizeof(message)) return 1;
+        return report_failure(host, message, (uint64_t)message_len);
+    }
+    if (optimizer_host_v5 != NULL) {
+        const uint32_t plan_len =
+            ((uint32_t)composite_join_optimizer_response[3] << 24) |
+            ((uint32_t)composite_join_optimizer_response[4] << 16) |
+            ((uint32_t)composite_join_optimizer_response[5] << 8) |
+            (uint32_t)composite_join_optimizer_response[6];
+        const uint64_t response_len =
+            (uint64_t)PRDB_OPTIMIZER_RESPONSE_SUCCESS_HEADER_BYTES + plan_len;
+        prdb_sdk_optimizer_response_v1 selected_plan = {0};
+        if (response_len > sizeof(composite_join_optimizer_response) ||
+            prdb_sdk_optimizer_decode_response_v1(
+                composite_join_optimizer_response, response_len, &selected_plan,
+                sizeof(selected_plan)) != PRDB_SDK_OPTIMIZER_RESULT_OK ||
+            selected_plan.status != PRDB_SDK_OPTIMIZER_STATUS_SUCCESS ||
+            selected_plan.plan == NULL || selected_plan.plan_len < 3 ||
+            selected_plan.plan[2] != PRDB_SDK_OPTIMIZER_PLAN_KIND_INDEX_PREFIX_NESTED_LOOP_JOIN) {
+            static const uint8_t message[] = "fixture-error-composite-prefix-plan";
+            return report_failure(host, message, sizeof(message) - 1);
+        }
     }
 
     joined_results.row_count = 0;

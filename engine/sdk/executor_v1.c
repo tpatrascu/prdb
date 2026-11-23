@@ -254,6 +254,87 @@ int32_t prdb_sdk_executor_scan_index_range_v1(
     return PRDB_SDK_EXECUTOR_OK;
 }
 
+int32_t prdb_sdk_executor_scan_index_prefix_v1(
+    const prdb_host_api_v2 *host, const uint8_t executor_handle[16],
+    const uint8_t index_id[16], const prdb_sdk_value_v1 *values,
+    uint8_t value_count, const uint8_t *column_ids, uint16_t column_count,
+    uint8_t *request, uint64_t request_capacity, uint8_t *response,
+    uint64_t response_capacity, uint64_t *response_len,
+    prdb_sdk_index_range_v1 *range_out, uint32_t range_out_capacity) {
+    uint64_t request_len = 37 + (uint64_t)column_count * 16;
+    uint64_t offset = 35;
+    int32_t status;
+    if (executor_handle == NULL || executor_handle[0] != 6 || index_id == NULL ||
+        values == NULL || value_count < 2 || value_count > 8 || request == NULL ||
+        response == NULL || response_len == NULL || range_out == NULL ||
+        range_out_capacity < sizeof(*range_out) ||
+        (column_count != 0 && column_ids == NULL) ||
+        column_count > PRDB_SDK_EXECUTOR_MAX_COLUMN_IDS) {
+        return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+    }
+    {
+        uint8_t nonzero = 0;
+        for (uint32_t i = 0; i < 16; ++i) nonzero |= index_id[i];
+        if (nonzero == 0) return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+    }
+    for (uint16_t i = 0; i < column_count; ++i) {
+        const uint8_t *column_id = column_ids + (uint64_t)i * 16;
+        uint8_t nonzero = 0;
+        for (uint32_t j = 0; j < 16; ++j) nonzero |= column_id[j];
+        if (nonzero == 0) return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+        for (uint16_t previous = 0; previous < i; ++previous) {
+            if (memcmp(column_id, column_ids + (uint64_t)previous * 16, 16) == 0)
+                return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+        }
+    }
+    for (uint8_t i = 0; i < value_count; ++i) {
+        if (!valid_range_bound(&values[i]) || values[i].data_len > UINT32_MAX ||
+            request_len > PRDB_QUERY_MAX_IPC_REQUEST_BYTES - 5 ||
+            values[i].data_len > PRDB_QUERY_MAX_IPC_REQUEST_BYTES - request_len - 5)
+            return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+        request_len += 5 + values[i].data_len;
+    }
+    if (request_len > PRDB_QUERY_MAX_IPC_REQUEST_BYTES)
+        return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+    if (request_capacity < request_len)
+        return PRDB_SDK_EXECUTOR_RESPONSE_TOO_SMALL;
+
+    request[0] = 0;
+    request[1] = 1;
+    memcpy(request + 2, executor_handle, 16);
+    memcpy(request + 18, index_id, 16);
+    request[34] = value_count;
+    for (uint8_t i = 0; i < value_count; ++i) {
+        uint8_t value_header[PRDB_SCALAR_VALUE_RECORD_HEADER_BYTES] = {0};
+        prdb_encode_scalar_value_record(value_header, values[i].type_code,
+                                        (uint32_t)values[i].data_len);
+        memcpy(request + offset, value_header, sizeof(value_header));
+        offset += sizeof(value_header);
+        if (values[i].data_len != 0) {
+            if (!prdb_encode_scalar_value_record_value_bytes(
+                    request + offset, (size_t)(request_capacity - offset),
+                    values[i].data, (size_t)values[i].data_len))
+                return PRDB_SDK_EXECUTOR_RESPONSE_TOO_SMALL;
+            offset += values[i].data_len;
+        }
+    }
+    request[offset++] = (uint8_t)(column_count >> 8);
+    request[offset++] = (uint8_t)column_count;
+    if (column_count != 0) {
+        memcpy(request + offset, column_ids, (size_t)column_count * 16);
+        offset += (uint64_t)column_count * 16;
+    }
+    if (offset != request_len) return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+    status = invoke(host, PRDB_SDK_EXECUTOR_OP_SCAN_INDEX_PREFIX, request,
+                    request_len, response, response_capacity, response_len);
+    if (status != PRDB_SDK_EXECUTOR_OK) return status;
+    status = prdb_sdk_index_range_open_v1(range_out, range_out_capacity,
+                                          response, *response_len);
+    if (status == PRDB_SDK_BATCH_UNAVAILABLE) return PRDB_SDK_EXECUTOR_UNAVAILABLE;
+    if (status != PRDB_SDK_BATCH_OK) return PRDB_SDK_EXECUTOR_INVALID_PAYLOAD;
+    return PRDB_SDK_EXECUTOR_OK;
+}
+
 int32_t prdb_sdk_executor_next_batch_v1(
     const prdb_host_api_v2 *host, const uint8_t cursor[16],
     uint16_t max_candidates, uint32_t max_bytes, uint8_t *response,

@@ -42722,6 +42722,20 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         retention_deadline_us: now + 3_600_000_000,
         audit_event: range_index_audit,
     })?;
+    let composite_join_index_invocation = id(0xb7);
+    let mut composite_join_index_audit =
+        identity_audit_event(0xb8, user_id, composite_table.table_id);
+    composite_join_index_audit.correlation_id = composite_join_index_invocation;
+    storage.create_index(prdb_engine::storage_manager::CreateIndexRequest {
+        invocation_id: composite_join_index_invocation,
+        authenticated_actor_id: user_id,
+        table_id: composite_table.table_id,
+        name: "grouped_left_right_composite".to_owned(),
+        column_ids: composite_table.column_ids[..2].to_vec(),
+        unique: false,
+        retention_deadline_us: now + 3_600_000_000,
+        audit_event: composite_join_index_audit,
+    })?;
     let range_benchmark_index_invocation = id(0xb5);
     let mut range_benchmark_index_audit =
         identity_audit_event(0xb6, user_id, range_benchmark_table.table_id);

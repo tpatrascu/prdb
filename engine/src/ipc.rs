@@ -39,6 +39,7 @@ pub enum Operation {
     ExecutorCheckCancellation = crate::query_abi::IPC_OP_EXECUTOR_CHECK_CANCELLATION,
     ProbeUniqueIndex = crate::query_abi::IPC_OP_PROBE_UNIQUE_INDEX,
     ScanIndexRange = crate::query_abi::IPC_OP_SCAN_INDEX_RANGE,
+    ScanIndexPrefix = crate::query_abi::IPC_OP_SCAN_INDEX_PREFIX,
     DescribeRelation = crate::query_abi::IPC_OP_DESCRIBE_RELATION,
     EstimateScan = crate::query_abi::IPC_OP_ESTIMATE_SCAN,
     OptimizeSelect = crate::query_abi::IPC_OP_OPTIMIZE_SELECT,
@@ -95,6 +96,7 @@ impl Operation {
             }
             crate::query_abi::IPC_OP_PROBE_UNIQUE_INDEX => Ok(Self::ProbeUniqueIndex),
             crate::query_abi::IPC_OP_SCAN_INDEX_RANGE => Ok(Self::ScanIndexRange),
+            crate::query_abi::IPC_OP_SCAN_INDEX_PREFIX => Ok(Self::ScanIndexPrefix),
             crate::query_abi::IPC_OP_DESCRIBE_RELATION => Ok(Self::DescribeRelation),
             crate::query_abi::IPC_OP_ESTIMATE_SCAN => Ok(Self::EstimateScan),
             crate::query_abi::IPC_OP_OPTIMIZE_SELECT => Ok(Self::OptimizeSelect),
@@ -178,6 +180,7 @@ pub fn authorize_operation(role: ServiceRole, operation: Operation) -> Result<()
                 | Operation::ExecutorCheckCancellation
                 | Operation::ProbeUniqueIndex
                 | Operation::ScanIndexRange
+                | Operation::ScanIndexPrefix
         ),
         ServiceRole::Planner => matches!(
             operation,
