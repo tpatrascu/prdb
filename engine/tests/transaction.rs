@@ -7381,6 +7381,31 @@ fn authorized_predicate_estimate_compares_readable_scalar_columns()
             "ordered estimate for {scalar_type:?}"
         );
     }
+    let incompatible_column_predicate = BoundPredicate::Compare {
+        operator: Comparison::Equal,
+        left: Box::new(BoundPredicate::Column(BoundColumn {
+            column_id: column_ids[2],
+            ordinal: 2,
+            scalar_type: ScalarType::SmallInt,
+            nullable: true,
+        })),
+        right: Box::new(BoundPredicate::Column(BoundColumn {
+            column_id: column_ids[4],
+            ordinal: 4,
+            scalar_type: ScalarType::Integer,
+            nullable: true,
+        })),
+    };
+    assert_eq!(
+        observer.estimate_authorized_predicate_at_most(
+            table_id,
+            &projection,
+            &incompatible_column_predicate,
+            3,
+        )?,
+        None,
+        "same-width estimate values must not permit cross-type comparisons"
+    );
     let bytea_case = cases
         .iter()
         .position(|(scalar_type, _, _, _)| *scalar_type == ScalarType::Bytea)
