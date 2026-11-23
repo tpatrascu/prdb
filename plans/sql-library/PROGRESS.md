@@ -1604,3 +1604,10 @@
 - Regression: the confined ABI v6 `V` mode runs `WHERE a.left_key >= $1 ORDER BY b.right_key DESC LIMIT 2` with a canonical little-endian INTEGER PSP1 value of 2 and expects `(3,11), (2,9)`.
 - Verification: the focused delegated-cgroup acceptance passed with those exact rows and a durable commit. The v25 TinyCC parser/binder fixture validates a parameterized WHERE combined with Decimal JOIN ordering and binding across both relation sides.
 - Remaining: broader ordered JOIN type and parameter combinations, filesystem deployment matrix, longer physical device saturation, and broader confined result comparisons across workload shapes.
+
+## SQL-9 follow-up: 64-bit sort key for spilled ordered JOIN — verified
+
+- Contract: the composed JOIN spool and external sorter must compare BIGINT values in signed numeric order and preserve the SQLR type and width.
+- Regression: the confined ABI v6 `M` mode joins the authorized rows, orders by `b.bigint_value DESC`, and applies LIMIT 5; it expects three NULL values first, then two 12s.
+- Verification: the focused delegated-cgroup acceptance checks the documented NULLS FIRST ordering, BIGINT SQLR width, and durable commit. (The first expected sequence omitted NULLS FIRST; the observed SQLR frame caught the incorrect expectation.)
+- Remaining: more scalar types and mixed null/range combinations, filesystem deployment matrix, longer physical device saturation, and broader confined result comparisons across workload shapes.
