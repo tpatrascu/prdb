@@ -1611,3 +1611,10 @@
 - Regression: the confined ABI v6 `M` mode joins the authorized rows, orders by `b.bigint_value DESC`, and applies LIMIT 5; it expects three NULL values first, then two 12s.
 - Verification: the focused delegated-cgroup acceptance checks the documented NULLS FIRST ordering, BIGINT SQLR width, and durable commit. (The first expected sequence omitted NULLS FIRST; the observed SQLR frame caught the incorrect expectation.)
 - Remaining: more scalar types and mixed null/range combinations, filesystem deployment matrix, longer physical device saturation, and broader confined result comparisons across workload shapes.
+
+## SQL-9 follow-up: repeat local filesystem allocation pressure probe — verified locally
+
+- Contract: configured scratch mounts must reserve and reclaim the shared physical allocation cap under concurrent package writes without leaking package files.
+- Verification: `optional_configured_filesystem_sustains_shared_allocation_pressure` passed on the current NFSv4.2 workspace mount (240 ms), `/var/tmp` ext4 (70 ms), and `/mnt/prdb-spill-test` ext4 loopback (103 ms). Each run completed four rounds, allocated and reclaimed 64 MiB across two packages, reached the configured shared cap without over-reservation, and verified package cleanup.
+- Boundary: these development-host probes confirm bounded allocation behavior on the three inspected mounts; they do not establish a production support matrix or sustained device saturation. XFS/Btrfs and target deployment filesystems remain unvalidated.
+- Remaining: production filesystem support decision and target-hardware validation, longer physical device saturation under operational load, and broader confined SQL workload comparisons.
