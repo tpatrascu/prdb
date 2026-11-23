@@ -6987,6 +6987,182 @@ fn authorized_scan_estimate_counts_sanitized_cells_and_private_writes()
 }
 
 #[test]
+fn authorized_predicate_estimate_compares_readable_decimal_columns()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::optimizer_binding::{BoundColumn, BoundPredicate};
+    use prdb_engine::optimizer_request::Comparison;
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let decimal_type = ScalarType::Decimal {
+        precision: 8,
+        scale: 2,
+    };
+    let columns = [
+        ColumnSchema {
+            scalar_type: decimal_type,
+            nullable: true,
+        },
+        ColumnSchema {
+            scalar_type: decimal_type,
+            nullable: true,
+        },
+    ];
+    let column_ids = [[0x52; 16], [0x53; 16]];
+    let table_id = id(0).table;
+    let encode_row = |left: Option<i128>, right: Option<i128>| {
+        encode_tuple(
+            &columns,
+            1,
+            &[
+                left.map(ScalarValue::Decimal),
+                right.map(ScalarValue::Decimal),
+            ],
+        )
+        .unwrap()
+    };
+    let mut seed = InvocationTransaction::begin(&database, [0x51; 16], [9; 16], 9_999, 8, 512)?;
+    seed.stage_put(id(1), &encode_row(Some(110), Some(110)))?;
+    seed.stage_put(id(2), &encode_row(Some(220), Some(330)))?;
+    seed.stage_put(id(3), &encode_row(None, None))?;
+    seed.commit()?;
+
+    let context = AuthorizationContext {
+        principal_id: [9; 16],
+        role_ids: std::collections::HashSet::new(),
+        scope: std::collections::HashSet::from([
+            (Operation::Usage, AccessTarget::Schema([0x54; 16])),
+            (Operation::Select, AccessTarget::Table(table_id)),
+            (
+                Operation::Select,
+                AccessTarget::Column {
+                    table_id,
+                    column_id: column_ids[0],
+                },
+            ),
+            (
+                Operation::Select,
+                AccessTarget::Column {
+                    table_id,
+                    column_id: column_ids[1],
+                },
+            ),
+        ]),
+    };
+    let grants = [
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Usage,
+            target: AccessTarget::Schema([0x54; 16]),
+        },
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Select,
+            target: AccessTarget::Column {
+                table_id,
+                column_id: column_ids[0],
+            },
+        },
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Select,
+            target: AccessTarget::Column {
+                table_id,
+                column_id: column_ids[1],
+            },
+        },
+    ];
+    let policies = [
+        Policy {
+            subjects: vec![Subject::Principal([9; 16])],
+            operation: Operation::Select,
+            target: AccessTarget::Table(table_id),
+            effect: Effect::Allow,
+            using: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+            with_check: None,
+        },
+        Policy {
+            subjects: vec![Subject::Principal([9; 16])],
+            operation: Operation::Select,
+            target: AccessTarget::Column {
+                table_id,
+                column_id: column_ids[0],
+            },
+            effect: Effect::Allow,
+            using: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+            with_check: None,
+        },
+        Policy {
+            subjects: vec![Subject::Principal([9; 16])],
+            operation: Operation::Select,
+            target: AccessTarget::Column {
+                table_id,
+                column_id: column_ids[1],
+            },
+            effect: Effect::Allow,
+            using: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+            with_check: None,
+        },
+    ];
+    let projection = AuthorizedProjection {
+        columns: &columns,
+        column_ids: &column_ids,
+        schema_version: 1,
+        schema_id: [0x54; 16],
+        context: &context,
+        grants: &grants,
+        policies: &policies,
+        checks: &[],
+        policy_driving_columns: &[],
+        dependencies: &[],
+    };
+    let predicate = |operator| BoundPredicate::Compare {
+        operator,
+        left: Box::new(BoundPredicate::Column(BoundColumn {
+            column_id: column_ids[0],
+            ordinal: 0,
+            scalar_type: decimal_type,
+            nullable: true,
+        })),
+        right: Box::new(BoundPredicate::Column(BoundColumn {
+            column_id: column_ids[1],
+            ordinal: 1,
+            scalar_type: decimal_type,
+            nullable: true,
+        })),
+    };
+    let mut observer = InvocationTransaction::begin(&database, [0x55; 16], [9; 16], 9_999, 8, 512)?;
+    assert_eq!(
+        observer.estimate_authorized_predicate_at_most(
+            table_id,
+            &projection,
+            &predicate(Comparison::Equal),
+            3,
+        )?,
+        Some((3, 1))
+    );
+    assert_eq!(
+        observer.estimate_authorized_predicate_at_most(
+            table_id,
+            &projection,
+            &predicate(Comparison::Less),
+            3,
+        )?,
+        Some((3, 1))
+    );
+    assert_eq!(
+        observer.estimate_authorized_predicate_at_most(
+            table_id,
+            &projection,
+            &predicate(Comparison::NotEqual),
+            3,
+        )?,
+        Some((3, 1))
+    );
+    Ok(())
+}
+
+#[test]
 fn authorized_join_estimate_counts_duplicate_matches_and_private_overlay()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();

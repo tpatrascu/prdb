@@ -1,5 +1,13 @@
 # Statistics Service Progress
 
+## ST-2 / OP-4 follow-up: exact DECIMAL column predicate estimates — implementation
+
+- Contract: a bounded predicate estimate may compare two authorized DECIMAL columns when binding has established identical precision and scale. The estimator compares their stored scaled-integer values; it still returns `Unknown` for DECIMAL literals and cross-type coercions, which the optimizer request format does not support.
+- Red/green: the real-redb transaction regression first returned `Unknown` for a three-row population with fully readable DECIMAL columns. It now verifies exact equality, less-than, and not-equal counts, including SQL NULL non-matches.
+- Implementation: predicate validation/evaluation now recognizes the DECIMAL scalar kind and compares the existing `i128` scaled values. It continues to inspect only authorized projected cells under the same candidate, row-byte, policy, cache, and allowance limits.
+- Verification: focused transaction regression passed. Format, lint, build, planner-channel, and full delegated-cgroup suite validation remain required for this slice.
+- Remaining: DECIMAL literals/coercion and predicate estimate comparisons for BYTEA, UUID, DATE, and TIMESTAMPTZ remain unsupported; broader candidate comparison and target-host workload evidence remain open.
+
 ## ST-2 / OP-4 / SQL-10 follow-up: composite index-prefix nested-loop joins — implemented
 
 - Contract: when a composite inner index has a contiguous leading prefix of two to eight columns and every prefix column participates in a join equality, the optimizer selects the longest matching prefix and emits plan kind 18. The SDK validates each key against the parsed join, skips probes containing NULL, sends all prefix values in index order through executor `ScanIndexPrefix`, and checks remaining equalities as residual predicates. Storage revalidates authorization and index shape, reconciles the snapshot with private writes, and returns bounded sanitized rows.
