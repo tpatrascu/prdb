@@ -40444,6 +40444,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     let spill_join_parameter_only =
         std::env::var_os("PRDB_TEST_SPILL_JOIN_PARAMETER_ONLY").is_some();
     let spill_join_bigint_only = std::env::var_os("PRDB_TEST_SPILL_JOIN_BIGINT_ONLY").is_some();
+    let spill_join_oversize_only = std::env::var_os("PRDB_TEST_SPILL_JOIN_OVERSIZE_ONLY").is_some();
     let spill_crash_only = std::env::var_os("PRDB_TEST_SPILL_CRASH_ONLY").is_some();
     let spill_pressure_only = std::env::var_os("PRDB_TEST_SPILL_PRESSURE_ONLY").is_some();
     let spill_pressure_cancel_only =
@@ -40460,6 +40461,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         || spill_join_filtered_only
         || spill_join_parameter_only
         || spill_join_bigint_only
+        || spill_join_oversize_only
         || spill_crash_only
         || spill_pressure_only
         || spill_pressure_cancel_only
@@ -40848,6 +40850,15 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             default: None,
         });
     }
+    if spill_join_oversize_only {
+        decimal_columns.push(TableColumnDefinition {
+            name: "large_payload".to_owned(),
+            scalar_type: ScalarType::Text,
+            nullable: true,
+            generated_uuid_identity: false,
+            default: None,
+        });
+    }
     let decimal_table = storage.create_table(CreateTableRequest {
         invocation_id: decimal_table_invocation,
         authenticated_actor_id: user_id,
@@ -40949,6 +40960,12 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             nullable: true,
         });
     }
+    if spill_join_oversize_only {
+        decimal_schema.push(ColumnSchema {
+            scalar_type: ScalarType::Text,
+            nullable: true,
+        });
+    }
     let decimal_rows = [
         (0xf3, 1, 7, Some(100), Some(2)),
         (0xf4, 1, 7, None, None),
@@ -40971,6 +40988,9 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 if count_bigint_only {
                     values.push(bigint_value.map(ScalarValue::BigInt));
                 }
+                if spill_join_oversize_only {
+                    values.push((row_id == 0xf8).then(|| ScalarValue::Text("x".repeat(1024))));
+                }
                 values
             })?),
         })
@@ -40981,6 +41001,9 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         for row_id in [0xf9, 0xfa] {
             let mut values = vec![None, Some(ScalarValue::Integer(13)), None];
             if count_bigint_only {
+                values.push(None);
+            }
+            if spill_join_oversize_only {
                 values.push(None);
             }
             decimal_rows.push(RowWrite {
@@ -41347,6 +41370,9 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     ];
     if count_bigint_only {
         authority_writes.push(dependency_write(user_id, decimal_table.column_ids[3], 5));
+    }
+    if spill_join_oversize_only {
+        authority_writes.push(dependency_write(user_id, decimal_table.column_ids[4], 5));
     }
     authority_writes.extend((2..=5).map(|privilege| {
         grant_write(
@@ -42643,6 +42669,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                     || spill_join_filtered_only
                     || spill_join_parameter_only
                     || spill_join_bigint_only
+                    || spill_join_oversize_only
                     || spill_redacted_only
                 {
                     17
@@ -42705,6 +42732,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         || spill_join_filtered_only
         || spill_join_parameter_only
         || spill_join_bigint_only
+        || spill_join_oversize_only
         || spill_crash_only
         || spill_pressure_only
         || spill_pressure_cancel_only
@@ -42734,6 +42762,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             b'V'
         } else if spill_join_bigint_only {
             b'M'
+        } else if spill_join_oversize_only {
+            b'Y'
         } else if spill_join_only {
             b'J'
         } else if spill_crash_only {
@@ -42969,12 +42999,13 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         if spill_quota_only
             || spill_crash_only
             || spill_redacted_only
+            || spill_join_oversize_only
             || spill_disk_full_only
             || spill_pressure_cancel_only
         {
             assert!(
                 matches!(ordered_decision, GatewayTerminalDecision::Abort(_)),
-                "spill quota, filesystem exhaustion, cancellation, redacted key, or worker crash must abort; frames: {:?}",
+                "spill quota, filesystem exhaustion, cancellation, redacted key, oversized joined projection, or worker crash must abort; frames: {:?}",
                 ordered_frames
                     .iter()
                     .map(|frame| (
@@ -42983,7 +43014,11 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                     ))
                     .collect::<Vec<_>>()
             );
-            if spill_quota_only || spill_redacted_only || spill_disk_full_only {
+            if spill_quota_only
+                || spill_redacted_only
+                || spill_join_oversize_only
+                || spill_disk_full_only
+            {
                 assert!(
                     ordered_frames
                         .iter()
@@ -43357,6 +43392,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         } else if !spill_quota_only
             && !spill_crash_only
             && !spill_redacted_only
+            && !spill_join_oversize_only
             && (count_column_only || count_bigint_only)
         {
             fn expected_count_column_row(left_key: i32, right_key: i32, count: i64) -> Vec<u8> {
@@ -43389,6 +43425,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             }
         } else if spill_quota_only
             || spill_redacted_only
+            || spill_join_oversize_only
             || spill_disk_full_only
             || spill_pressure_cancel_only
         {
@@ -43490,6 +43527,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             if spill_quota_only
                 || spill_crash_only
                 || spill_redacted_only
+                || spill_join_oversize_only
                 || spill_disk_full_only
                 || spill_pressure_cancel_only
             {
@@ -43506,6 +43544,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             if spill_quota_only
                 || spill_crash_only
                 || spill_redacted_only
+                || spill_join_oversize_only
                 || spill_disk_full_only
                 || spill_pressure_cancel_only
             {

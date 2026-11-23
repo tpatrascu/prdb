@@ -1618,3 +1618,10 @@
 - Verification: `optional_configured_filesystem_sustains_shared_allocation_pressure` passed on the current NFSv4.2 workspace mount (240 ms), `/var/tmp` ext4 (70 ms), and `/mnt/prdb-spill-test` ext4 loopback (103 ms). Each run completed four rounds, allocated and reclaimed 64 MiB across two packages, reached the configured shared cap without over-reservation, and verified package cleanup.
 - Boundary: these development-host probes confirm bounded allocation behavior on the three inspected mounts; they do not establish a production support matrix or sustained device saturation. XFS/Btrfs and target deployment filesystems remain unvalidated.
 - Remaining: production filesystem support decision and target-hardware validation, longer physical device saturation under operational load, and broader confined SQL workload comparisons.
+
+## SQL-9 follow-up: reject oversized ordered JOIN projection before SQLR — verified slice
+
+- Contract: the fixed 1024-byte joined-projection spool ceiling must fail an oversized row before ordered SQLR output, and the invocation must finish with a durable ABORTED outcome.
+- Regression: the confined ABI v6 `Y` mode projects a 1024-byte TEXT value together with an INTEGER key from the ordered self-JOIN. The encoded projection exceeds the fixed record ceiling; the harness requires an abort and no result-data frames.
+- Verification: the focused delegated-cgroup `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` acceptance passed with `PRDB_TEST_COUNT_BIGINT_ONLY=1` and `PRDB_TEST_SPILL_JOIN_OVERSIZE_ONLY=1`. Its initial run exposed a missing catalog dependency for the new fixture column; after adding the dependency, the query durably aborted without SQLR rows. The maintained spill artifact and focused Rust integration target compiled successfully.
+- Remaining: more joined projection types and multi-row workload coverage, production filesystem support decision and target-hardware validation, and longer physical device saturation under operational load.
