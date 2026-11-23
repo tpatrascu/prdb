@@ -52081,6 +52081,30 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
                             )
                             .expect("stage private predicate-match row");
                     }
+                    if operation == IpcOperation::EstimateScan as u16 && request_id == 10 {
+                        let mut invocation = observer_transaction
+                            .lock()
+                            .expect("shared planner invocation lock");
+                        invocation
+                            .as_mut()
+                            .expect("shared planner invocation remains active")
+                            .stage_put(
+                                prdb_engine::overlay::RowId {
+                                    table: table.table_id,
+                                    row: id(0x92),
+                                },
+                                &encode_tuple(
+                                    &[ColumnSchema {
+                                        scalar_type: ScalarType::Integer,
+                                        nullable: true,
+                                    }],
+                                    1,
+                                    &[Some(ScalarValue::Integer(12))],
+                                )
+                                .expect("encode second private population row"),
+                            )
+                            .expect("stage second private population row");
+                    }
                     Ok(())
                 },
             )
@@ -52293,12 +52317,13 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             )?;
             let response = prdb_engine::ipc::read_frame(&mut client)?
                 .ok_or("planner stream closed before allowance exhaustion")?;
+            let visible_rows = if request_id >= 10 { 7 } else { 6 };
             assert_eq!(
                 EstimateScanResponse::decode(&response.payload)?,
                 EstimateScanResponse::Exact(prdb_engine::statistics::AuthorizedScanSummary {
-                    visible_rows: 6,
+                    visible_rows,
                     columns: vec![prdb_engine::statistics::ColumnPopulation {
-                        readable_values: 6,
+                        readable_values: visible_rows,
                         nulls: 0,
                         redacted: 0,
                     }],

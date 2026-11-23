@@ -347,8 +347,8 @@ pub(crate) struct ExecutorMetadataSessionState {
 }
 
 /// Planner metadata session with opaque, connection-local table handles.
-/// Exact predicate and population estimates may be reused while the invocation
-/// and its private-write generation remain unchanged.
+/// Exact predicate, population, and column estimates may be reused while the
+/// invocation and its private-write generation remain unchanged.
 pub struct PlannerMetadataConnection<'connection, 'db> {
     transaction: &'connection mut InvocationTransaction<'db>,
     handles: HashMap<[u8; 16], PlannerTableHandleState>,
@@ -356,6 +356,8 @@ pub struct PlannerMetadataConnection<'connection, 'db> {
     estimate_requests: usize,
     predicate_estimates: HashMap<PredicateEstimateCacheKey, (u64, (u64, u64))>,
     population_estimates: HashMap<PopulationEstimateCacheKey, (u64, u64)>,
+    summary_estimates:
+        HashMap<SummaryEstimateCacheKey, (u64, crate::statistics::AuthorizedScanSummary)>,
 }
 
 #[derive(Default)]
@@ -365,6 +367,8 @@ pub(crate) struct PlannerMetadataSessionState {
     estimate_requests: usize,
     predicate_estimates: HashMap<PredicateEstimateCacheKey, (u64, (u64, u64))>,
     population_estimates: HashMap<PopulationEstimateCacheKey, (u64, u64)>,
+    summary_estimates:
+        HashMap<SummaryEstimateCacheKey, (u64, crate::statistics::AuthorizedScanSummary)>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -384,6 +388,14 @@ struct PopulationEstimateCacheKey {
     schema_id: [u8; 16],
     schema_version: u64,
     maximum_rows: u64,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct SummaryEstimateCacheKey {
+    relation_id: [u8; 16],
+    schema_id: [u8; 16],
+    schema_version: u64,
+    column_ids: Vec<[u8; 16]>,
 }
 
 #[derive(Clone)]
@@ -886,6 +898,7 @@ impl<'db> InvocationTransaction<'db> {
             estimate_requests: state.estimate_requests,
             predicate_estimates: state.predicate_estimates,
             population_estimates: state.population_estimates,
+            summary_estimates: state.summary_estimates,
         }
     }
 
@@ -10174,6 +10187,7 @@ impl PlannerMetadataConnection<'_, '_> {
             estimate_requests: self.estimate_requests,
             predicate_estimates: self.predicate_estimates,
             population_estimates: self.population_estimates,
+            summary_estimates: self.summary_estimates,
         }
     }
 
@@ -10379,6 +10393,19 @@ impl PlannerMetadataConnection<'_, '_> {
             .iter()
             .map(|ordinal| state.schema.column_ids[*ordinal])
             .collect::<Vec<_>>();
+        let cache_key = SummaryEstimateCacheKey {
+            relation_id: description.relation_id,
+            schema_id: state.schema.schema_id,
+            schema_version: state.schema.schema_version,
+            column_ids: selected_column_ids.clone(),
+        };
+        let write_generation = self.transaction.overlay.generation();
+        self.summary_estimates
+            .retain(|_, (generation, _)| *generation == write_generation);
+        if let Some((_, summary)) = self.summary_estimates.get(&cache_key) {
+            self.transaction.check_deadline()?;
+            return Ok(AuthorizedScanEstimate::Exact(summary.clone()));
+        }
         let projection = AuthorizedProjection {
             columns: &columns,
             column_ids: &selected_column_ids,
@@ -10391,8 +10418,27 @@ impl PlannerMetadataConnection<'_, '_> {
             policy_driving_columns: &state.policy_driving_columns,
             dependencies: &[],
         };
-        self.transaction
-            .estimate_authorized_scan(description.relation_id, &projection)
+        self.transaction.check_deadline()?;
+        let transaction = &mut *self.transaction;
+        let exact_summary = cached_exact_estimate(
+            &mut self.summary_estimates,
+            cache_key,
+            write_generation,
+            || {
+                Ok::<Option<crate::statistics::AuthorizedScanSummary>, TransactionError>(
+                    match transaction
+                        .estimate_authorized_scan(description.relation_id, &projection)?
+                    {
+                        AuthorizedScanEstimate::Exact(summary) => Some(summary),
+                        AuthorizedScanEstimate::Unknown => None,
+                    },
+                )
+            },
+        )?;
+        Ok(exact_summary.map_or(
+            AuthorizedScanEstimate::Unknown,
+            AuthorizedScanEstimate::Exact,
+        ))
     }
 
     /// Probe whether a table's authorized view is at most a small row bound.
@@ -10437,7 +10483,7 @@ impl PlannerMetadataConnection<'_, '_> {
         };
         self.transaction.check_deadline()?;
         let transaction = &mut *self.transaction;
-        cached_population_estimate(
+        cached_exact_estimate(
             &mut self.population_estimates,
             cache_key,
             write_generation,
@@ -10557,21 +10603,25 @@ fn consume_planner_estimate_budget(requests: &mut usize) -> bool {
     true
 }
 
-fn cached_population_estimate<E>(
-    cache: &mut HashMap<PopulationEstimateCacheKey, (u64, u64)>,
-    key: PopulationEstimateCacheKey,
+fn cached_exact_estimate<K, V, E>(
+    cache: &mut HashMap<K, (u64, V)>,
+    key: K,
     write_generation: u64,
-    estimate: impl FnOnce() -> Result<Option<u64>, E>,
-) -> Result<Option<u64>, E> {
+    estimate: impl FnOnce() -> Result<Option<V>, E>,
+) -> Result<Option<V>, E>
+where
+    K: Eq + std::hash::Hash,
+    V: Clone,
+{
     cache.retain(|_, (generation, _)| *generation == write_generation);
-    if let Some((_, exact_rows)) = cache.get(&key) {
-        return Ok(Some(*exact_rows));
+    if let Some((_, exact_value)) = cache.get(&key) {
+        return Ok(Some(exact_value.clone()));
     }
-    let exact_rows = estimate()?;
-    if let Some(exact_rows) = exact_rows {
-        cache.insert(key, (write_generation, exact_rows));
+    let exact_value = estimate()?;
+    if let Some(exact_value) = &exact_value {
+        cache.insert(key, (write_generation, exact_value.clone()));
     }
-    Ok(exact_rows)
+    Ok(exact_value)
 }
 
 fn index_component_unconditionally_readable(
@@ -11667,7 +11717,7 @@ mod planner_estimate_budget_tests {
 
 #[cfg(test)]
 mod planner_population_estimate_cache_tests {
-    use super::{PopulationEstimateCacheKey, cached_population_estimate};
+    use super::{PopulationEstimateCacheKey, SummaryEstimateCacheKey, cached_exact_estimate};
     use std::cell::Cell;
     use std::collections::HashMap;
 
@@ -11685,14 +11735,14 @@ mod planner_population_estimate_cache_tests {
         let mut cache = HashMap::new();
         let compute_calls = Cell::new(0);
         assert_eq!(
-            cached_population_estimate(&mut cache, key(128), 0, || {
+            cached_exact_estimate(&mut cache, key(128), 0, || {
                 compute_calls.set(compute_calls.get() + 1);
                 Ok::<_, ()>(Some(5))
             }),
             Ok(Some(5))
         );
         assert_eq!(
-            cached_population_estimate(&mut cache, key(128), 0, || {
+            cached_exact_estimate(&mut cache, key(128), 0, || {
                 compute_calls.set(compute_calls.get() + 1);
                 Ok::<_, ()>(Some(99))
             }),
@@ -11701,7 +11751,7 @@ mod planner_population_estimate_cache_tests {
         assert_eq!(compute_calls.get(), 1, "the exact result must be reused");
 
         assert_eq!(
-            cached_population_estimate(&mut cache, key(128), 1, || {
+            cached_exact_estimate(&mut cache, key(128), 1, || {
                 compute_calls.set(compute_calls.get() + 1);
                 Ok::<_, ()>(Some(6))
             }),
@@ -11713,11 +11763,11 @@ mod planner_population_estimate_cache_tests {
 
     #[test]
     fn unknown_population_estimates_are_not_cached() {
-        let mut cache = HashMap::new();
+        let mut cache = HashMap::<PopulationEstimateCacheKey, (u64, u64)>::new();
         let compute_calls = Cell::new(0);
         for _ in 0..2 {
             assert_eq!(
-                cached_population_estimate(&mut cache, key(128), 0, || {
+                cached_exact_estimate(&mut cache, key(128), 0, || {
                     compute_calls.set(compute_calls.get() + 1);
                     Ok::<_, ()>(None)
                 }),
@@ -11726,5 +11776,68 @@ mod planner_population_estimate_cache_tests {
         }
         assert_eq!(compute_calls.get(), 2);
         assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn exact_column_summary_cache_preserves_order_and_generation() {
+        let key = SummaryEstimateCacheKey {
+            relation_id: [1; 16],
+            schema_id: [2; 16],
+            schema_version: 3,
+            column_ids: vec![[4; 16], [5; 16]],
+        };
+        let reversed_key = SummaryEstimateCacheKey {
+            column_ids: vec![[5; 16], [4; 16]],
+            ..key.clone()
+        };
+        assert_ne!(
+            key, reversed_key,
+            "requested column order is part of the key"
+        );
+
+        let first = crate::statistics::AuthorizedScanSummary {
+            visible_rows: 5,
+            columns: vec![
+                crate::statistics::ColumnPopulation {
+                    readable_values: 5,
+                    nulls: 0,
+                    redacted: 0,
+                },
+                crate::statistics::ColumnPopulation {
+                    readable_values: 4,
+                    nulls: 1,
+                    redacted: 0,
+                },
+            ],
+        };
+        let updated = crate::statistics::AuthorizedScanSummary {
+            visible_rows: 6,
+            columns: first.columns.clone(),
+        };
+        let compute_calls = Cell::new(0);
+        let mut cache = HashMap::new();
+        assert_eq!(
+            cached_exact_estimate(&mut cache, key.clone(), 0, || {
+                compute_calls.set(compute_calls.get() + 1);
+                Ok::<_, ()>(Some(first.clone()))
+            }),
+            Ok(Some(first.clone()))
+        );
+        assert_eq!(
+            cached_exact_estimate(&mut cache, key.clone(), 0, || {
+                compute_calls.set(compute_calls.get() + 1);
+                Ok::<_, ()>(Some(updated.clone()))
+            }),
+            Ok(Some(first))
+        );
+        assert_eq!(compute_calls.get(), 1);
+        assert_eq!(
+            cached_exact_estimate(&mut cache, key, 1, || {
+                compute_calls.set(compute_calls.get() + 1);
+                Ok::<_, ()>(Some(updated.clone()))
+            }),
+            Ok(Some(updated))
+        );
+        assert_eq!(compute_calls.get(), 2);
     }
 }
