@@ -40445,6 +40445,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         std::env::var_os("PRDB_TEST_SPILL_JOIN_PARAMETER_ONLY").is_some();
     let spill_join_bigint_only = std::env::var_os("PRDB_TEST_SPILL_JOIN_BIGINT_ONLY").is_some();
     let spill_join_oversize_only = std::env::var_os("PRDB_TEST_SPILL_JOIN_OVERSIZE_ONLY").is_some();
+    let spill_join_text_only = std::env::var_os("PRDB_TEST_SPILL_JOIN_TEXT_ONLY").is_some();
     let spill_crash_only = std::env::var_os("PRDB_TEST_SPILL_CRASH_ONLY").is_some();
     let spill_pressure_only = std::env::var_os("PRDB_TEST_SPILL_PRESSURE_ONLY").is_some();
     let spill_pressure_cancel_only =
@@ -40462,6 +40463,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         || spill_join_parameter_only
         || spill_join_bigint_only
         || spill_join_oversize_only
+        || spill_join_text_only
         || spill_crash_only
         || spill_pressure_only
         || spill_pressure_cancel_only
@@ -40850,7 +40852,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             default: None,
         });
     }
-    if spill_join_oversize_only {
+    if spill_join_oversize_only || spill_join_text_only {
         decimal_columns.push(TableColumnDefinition {
             name: "large_payload".to_owned(),
             scalar_type: ScalarType::Text,
@@ -40960,7 +40962,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             nullable: true,
         });
     }
-    if spill_join_oversize_only {
+    if spill_join_oversize_only || spill_join_text_only {
         decimal_schema.push(ColumnSchema {
             scalar_type: ScalarType::Text,
             nullable: true,
@@ -40988,8 +40990,19 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 if count_bigint_only {
                     values.push(bigint_value.map(ScalarValue::BigInt));
                 }
-                if spill_join_oversize_only {
-                    values.push((row_id == 0xf8).then(|| ScalarValue::Text("x".repeat(1024))));
+                if spill_join_oversize_only || spill_join_text_only {
+                    let payload = if spill_join_oversize_only {
+                        (row_id == 0xf8).then(|| "x".repeat(1024))
+                    } else {
+                        match row_id {
+                            0xf3 => Some("alpha".to_owned()),
+                            0xf5 => Some("echo".to_owned()),
+                            0xf6 => Some("charlie".to_owned()),
+                            0xf7 => Some("delta".to_owned()),
+                            _ => None,
+                        }
+                    };
+                    values.push(payload.map(ScalarValue::Text));
                 }
                 values
             })?),
@@ -41003,7 +41016,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             if count_bigint_only {
                 values.push(None);
             }
-            if spill_join_oversize_only {
+            if spill_join_oversize_only || spill_join_text_only {
                 values.push(None);
             }
             decimal_rows.push(RowWrite {
@@ -41371,7 +41384,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     if count_bigint_only {
         authority_writes.push(dependency_write(user_id, decimal_table.column_ids[3], 5));
     }
-    if spill_join_oversize_only {
+    if spill_join_oversize_only || spill_join_text_only {
         authority_writes.push(dependency_write(user_id, decimal_table.column_ids[4], 5));
     }
     authority_writes.extend((2..=5).map(|privilege| {
@@ -42670,6 +42683,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                     || spill_join_parameter_only
                     || spill_join_bigint_only
                     || spill_join_oversize_only
+                    || spill_join_text_only
                     || spill_redacted_only
                 {
                     17
@@ -42733,6 +42747,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         || spill_join_parameter_only
         || spill_join_bigint_only
         || spill_join_oversize_only
+        || spill_join_text_only
         || spill_crash_only
         || spill_pressure_only
         || spill_pressure_cancel_only
@@ -42760,6 +42775,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             b'U'
         } else if spill_join_parameter_only {
             b'V'
+        } else if spill_join_text_only {
+            b'H'
         } else if spill_join_bigint_only {
             b'M'
         } else if spill_join_oversize_only {
@@ -43201,6 +43218,71 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 assert_eq!(frame.request_id, ordered_accepted.request_id);
                 assert_eq!(frame.payload, expected_pressure_order_key(left_key));
             }
+        } else if spill_join_text_only {
+            fn decode_text_join_sqlr_row(
+                bytes: &[u8],
+            ) -> Result<(i32, Option<String>), Box<dyn std::error::Error>> {
+                let mut offset = 8;
+                assert_eq!(&bytes[..4], b"SQLR");
+                assert_eq!(u16::from_be_bytes(bytes[4..6].try_into()?), 1);
+                assert_eq!(u16::from_be_bytes(bytes[6..8].try_into()?), 2);
+                let name_len = u16::from_be_bytes(bytes[offset..offset + 2].try_into()?) as usize;
+                offset += 2;
+                assert_eq!(&bytes[offset..offset + name_len], b"left_key");
+                offset += name_len;
+                assert_eq!(u32::from_be_bytes(bytes[offset..offset + 4].try_into()?), 3);
+                offset += 4;
+                assert_eq!(&bytes[offset..offset + 3], &[0, 0, 0]);
+                offset += 3;
+                assert_eq!(u32::from_be_bytes(bytes[offset..offset + 4].try_into()?), 4);
+                offset += 4;
+                let left = i32::from_be_bytes(bytes[offset..offset + 4].try_into()?);
+                offset += 4;
+                let name_len = u16::from_be_bytes(bytes[offset..offset + 2].try_into()?) as usize;
+                offset += 2;
+                assert_eq!(&bytes[offset..offset + name_len], b"large_payload");
+                offset += name_len;
+                assert_eq!(u32::from_be_bytes(bytes[offset..offset + 4].try_into()?), 6);
+                offset += 4;
+                assert_eq!(&bytes[offset..offset + 2], &[0, 0]);
+                let state = bytes[offset + 2];
+                offset += 3;
+                let length = u32::from_be_bytes(bytes[offset..offset + 4].try_into()?) as usize;
+                offset += 4;
+                let value = match (state, length) {
+                    (0, length) => {
+                        let value = String::from_utf8(bytes[offset..offset + length].to_vec())?;
+                        offset += length;
+                        Some(value)
+                    }
+                    (1, 0) => None,
+                    other => {
+                        return Err(format!("invalid TEXT SQLR state/length: {other:?}").into());
+                    }
+                };
+                assert_eq!(offset, bytes.len());
+                Ok((left, value))
+            }
+            let mut values = Vec::new();
+            for _ in 0..6 {
+                let frame = ordered_frames
+                    .next()
+                    .ok_or("missing ordered TEXT JOIN SQLR row")?;
+                assert_eq!(frame.operation, Operation::GatewayResultData as u16);
+                assert_eq!(frame.request_id, ordered_accepted.request_id);
+                values.push(decode_text_join_sqlr_row(&frame.payload)?);
+            }
+            assert_eq!(
+                values,
+                [
+                    (1, None),
+                    (1, None),
+                    (3, None),
+                    (2, Some("echo".to_owned())),
+                    (2, Some("echo".to_owned())),
+                    (2, Some("echo".to_owned())),
+                ]
+            );
         } else if spill_join_bigint_only {
             fn decode_bigint_join_sqlr_row(
                 bytes: &[u8],

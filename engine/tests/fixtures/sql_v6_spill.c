@@ -56,6 +56,11 @@ int32_t prdb_query_main_v6(const prdb_host_api_v6 *host,
         "decimal_grouped_records AS b ON a.left_key = b.left_key AND "
         "a.right_key = b.right_key WHERE b.large_payload IS NOT NULL "
         "ORDER BY b.large_payload DESC LIMIT 1";
+    static const uint8_t spill_text_join_sql[] =
+        "SELECT a.left_key, b.large_payload "
+        "FROM decimal_grouped_records AS a INNER JOIN "
+        "decimal_grouped_records AS b ON a.left_key = b.left_key AND "
+        "a.right_key = b.right_key ORDER BY b.large_payload DESC LIMIT 6";
     static const uint8_t integer_threshold_parameters[] = {
         'P', 'S', 'P', '1', 0, 1, 0, 0,
         0,   0,   0,   3,   /* INTEGER type */
@@ -144,6 +149,9 @@ int32_t prdb_query_main_v6(const prdb_host_api_v6 *host,
     } else if (invocation->parameters[0] == 'Y') {
         sql = spill_oversized_join_sql;
         sql_len = sizeof(spill_oversized_join_sql) - 1;
+    } else if (invocation->parameters[0] == 'H') {
+        sql = spill_text_join_sql;
+        sql_len = sizeof(spill_text_join_sql) - 1;
     } else if (invocation->parameters[0] == 'T' ||
                invocation->parameters[0] == 'E') {
         sql = spill_decimal_join_sql;
