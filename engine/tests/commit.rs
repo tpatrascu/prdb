@@ -40439,6 +40439,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     let spill_decimal_only = std::env::var_os("PRDB_TEST_SPILL_DECIMAL_ONLY").is_some();
     let spill_redacted_only = std::env::var_os("PRDB_TEST_SPILL_REDACTED_ONLY").is_some();
     let spill_join_only = std::env::var_os("PRDB_TEST_SPILL_JOIN_ONLY").is_some();
+    let spill_join_decimal_only = std::env::var_os("PRDB_TEST_SPILL_JOIN_DECIMAL_ONLY").is_some();
     let spill_crash_only = std::env::var_os("PRDB_TEST_SPILL_CRASH_ONLY").is_some();
     let spill_pressure_only = std::env::var_os("PRDB_TEST_SPILL_PRESSURE_ONLY").is_some();
     let spill_pressure_cancel_only =
@@ -40451,6 +40452,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         || spill_decimal_only
         || spill_redacted_only
         || spill_join_only
+        || spill_join_decimal_only
         || spill_crash_only
         || spill_pressure_only
         || spill_pressure_cancel_only
@@ -42629,7 +42631,14 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 } else {
                     32 * 1024 * 1024
                 },
-                max_streams_per_invocation: if spill_join_only { 17 } else { 16 },
+                max_streams_per_invocation: if spill_join_only
+                    || spill_join_decimal_only
+                    || spill_redacted_only
+                {
+                    17
+                } else {
+                    16
+                },
                 max_operations_per_invocation: 4096,
                 max_response_bytes: 64 * 1024,
                 max_service_bytes: 16 * 1024 * 1024,
@@ -42682,6 +42691,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         || spill_decimal_only
         || spill_redacted_only
         || spill_join_only
+        || spill_join_decimal_only
         || spill_crash_only
         || spill_pressure_only
         || spill_pressure_cancel_only
@@ -42703,6 +42713,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             b'D'
         } else if spill_redacted_only {
             b'E'
+        } else if spill_join_decimal_only {
+            b'T'
         } else if spill_join_only {
             b'J'
         } else if spill_crash_only {
@@ -43186,6 +43198,70 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             assert_eq!(
                 observed.into_iter().collect::<Vec<_>>(),
                 [((2, 9), 4), ((3, 11), 1)]
+            );
+        } else if spill_join_decimal_only {
+            fn decode_decimal_join_sqlr_row(
+                bytes: &[u8],
+            ) -> Result<(i32, Option<i128>), Box<dyn std::error::Error>> {
+                fn read_name(
+                    bytes: &[u8],
+                    offset: &mut usize,
+                ) -> Result<String, Box<dyn std::error::Error>> {
+                    let length =
+                        u16::from_be_bytes(bytes[*offset..*offset + 2].try_into()?) as usize;
+                    *offset += 2;
+                    let name = std::str::from_utf8(&bytes[*offset..*offset + length])?.to_owned();
+                    *offset += length;
+                    Ok(name)
+                }
+                assert_eq!(&bytes[..4], b"SQLR");
+                assert_eq!(u16::from_be_bytes(bytes[4..6].try_into()?), 1);
+                assert_eq!(u16::from_be_bytes(bytes[6..8].try_into()?), 2);
+                let mut offset = 8;
+                assert_eq!(read_name(bytes, &mut offset)?, "left_key");
+                assert_eq!(u32::from_be_bytes(bytes[offset..offset + 4].try_into()?), 3);
+                offset += 4;
+                assert_eq!(&bytes[offset..offset + 3], &[0, 0, 0]);
+                offset += 3;
+                assert_eq!(u32::from_be_bytes(bytes[offset..offset + 4].try_into()?), 4);
+                offset += 4;
+                let left = i32::from_be_bytes(bytes[offset..offset + 4].try_into()?);
+                offset += 4;
+                assert_eq!(read_name(bytes, &mut offset)?, "decimal_value");
+                assert_eq!(u32::from_be_bytes(bytes[offset..offset + 4].try_into()?), 5);
+                offset += 4;
+                assert_eq!(&bytes[offset..offset + 2], &[4, 2]);
+                let state = bytes[offset + 2];
+                offset += 2;
+                offset += 1;
+                let length = u32::from_be_bytes(bytes[offset..offset + 4].try_into()?) as usize;
+                offset += 4;
+                let value = match (state, length) {
+                    (0, 16) => {
+                        let value = i128::from_be_bytes(bytes[offset..offset + 16].try_into()?);
+                        offset += 16;
+                        Some(value)
+                    }
+                    (1, 0) => None,
+                    other => {
+                        return Err(format!("invalid Decimal SQLR state/length: {other:?}").into());
+                    }
+                };
+                assert_eq!(offset, bytes.len());
+                Ok((left, value))
+            }
+            let mut observed = Vec::new();
+            for _ in 0..6 {
+                let frame = ordered_frames
+                    .next()
+                    .ok_or("missing ordered Decimal JOIN SQLR row")?;
+                assert_eq!(frame.operation, Operation::GatewayResultData as u16);
+                assert_eq!(frame.request_id, ordered_accepted.request_id);
+                observed.push(decode_decimal_join_sqlr_row(&frame.payload)?);
+            }
+            assert_eq!(
+                observed.iter().map(|(_, value)| *value).collect::<Vec<_>>(),
+                [None, None, None, Some(225), Some(225), Some(225)]
             );
         } else if !spill_quota_only
             && !spill_crash_only

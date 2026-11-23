@@ -475,11 +475,15 @@ static int32_t decode_ordered_join_record(
             return -1;
         values[index] = (prdb_sdk_value_v1){
             sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
-            state, type_code, record + offset, data_len};
+            state, type_code,
+            state == PRDB_SDK_VALUE_STATE_VALUE ? record + offset : NULL,
+            data_len};
         offset += data_len;
     }
-    if (values[sort->order_projection_index].type_code !=
-        sort->binding->order_by_column.type_code)
+    if (values[sort->order_projection_index].state ==
+            PRDB_SDK_VALUE_STATE_VALUE &&
+        values[sort->order_projection_index].type_code !=
+            sort->binding->order_by_column.type_code)
         return -1;
     return 0;
 }
@@ -536,11 +540,14 @@ static int32_t ordered_join_extract_key(const ordered_join_sort *sort,
             (state != PRDB_SDK_VALUE_STATE_VALUE && data_len != 0))
             return -1;
         if (index == sort->order_projection_index) {
-            if (type_code != sort->binding->order_by_column.type_code)
+            if (state == PRDB_SDK_VALUE_STATE_VALUE &&
+                type_code != sort->binding->order_by_column.type_code)
                 return -1;
             *key = (prdb_sdk_value_v1){
                 sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
-                state, type_code, record + offset, data_len};
+                state, type_code,
+                state == PRDB_SDK_VALUE_STATE_VALUE ? record + offset : NULL,
+                data_len};
             return 0;
         }
         offset += data_len;
