@@ -39,10 +39,14 @@ use crate::outcome::{InvocationOutcome, lookup_outcome};
 use crate::row_record::RowRecord;
 use crate::schema::{
     AUDIT, CATALOG, ENGINE_META, INDEXES, INTERACTIVE_TXN_RECOVERY_MAGIC,
-    INTERACTIVE_TXN_RECOVERY_PREFIX, OUTCOMES, ROW_INDEXES, ROWS,
+    INTERACTIVE_TXN_RECOVERY_PREFIX, OUTCOMES, ROW_INDEXES, ROWS, STATS,
 };
 use crate::snapshot::{MAX_CATALOG_FAMILY_SCAN, RowSnapshot};
 use crate::startup::{StartupError, validate_persisted_records};
+use crate::statistics::{
+    COMMITTED_POPULATION_KEY_PREFIX, CommittedPopulationRecord, MAX_COMMITTED_POPULATION_ROWS,
+    StatisticsCollectionOutcome, StatisticsMaintenanceError, StatisticsRecordError,
+};
 use crate::transaction::{InvocationCoordination, InvocationTransaction, TransactionError};
 use crate::tuple::{ColumnSchema, ScalarType, encode_tuple};
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableHandle};
@@ -113,6 +117,310 @@ pub struct StorageManagerConfig {
     pub max_invocation_scan_work: usize,
     pub max_token_lifecycle_requests_per_minute: usize,
     pub max_admin_cancellation_requests_per_minute: usize,
+}
+
+#[cfg(test)]
+mod statistics_collection_tests {
+    use super::{StorageManager, StorageManagerConfig};
+    use crate::catalog::{CatalogField, WireType, encode_envelope, family_schema};
+    use crate::metadata::{EngineMetadata, Lifecycle};
+    use crate::schema::{CATALOG, ENGINE_META, ROWS, STATS, create_tables};
+    use crate::statistics::{
+        COMMITTED_POPULATION_KEY_PREFIX, CommittedPopulationRecord, StatisticsCollectionOutcome,
+    };
+    use redb::{Database, ReadableDatabase};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+
+    fn database_with_rows(
+        row_ids: &[u128],
+    ) -> Result<(std::path::PathBuf, Database), Box<dyn std::error::Error>> {
+        let path = std::env::temp_dir().join(format!(
+            "prdb-statistics-{}-{}.redb",
+            std::process::id(),
+            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let database = Database::create(&path)?;
+        let table_id = [0x44; 16];
+        let write = database.begin_write()?;
+        create_tables(&write)?;
+        {
+            let key = [5u16.to_be_bytes().as_slice(), &[1], &table_id].concat();
+            let fields = [
+                CatalogField {
+                    tag: 1,
+                    wire_type: WireType::Id,
+                    payload: table_id.to_vec(),
+                },
+                CatalogField {
+                    tag: 2,
+                    wire_type: WireType::U64,
+                    payload: 1u64.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 3,
+                    wire_type: WireType::U64,
+                    payload: 1u64.to_le_bytes().to_vec(),
+                },
+                CatalogField {
+                    tag: 4,
+                    wire_type: WireType::Id,
+                    payload: [0x55; 16].to_vec(),
+                },
+                CatalogField {
+                    tag: 5,
+                    wire_type: WireType::U16,
+                    payload: 1u16.to_le_bytes().to_vec(),
+                },
+            ];
+            let payload = encode_envelope(
+                &family_schema(5).ok_or("table family schema missing")?,
+                &key,
+                &fields,
+            )?;
+            write
+                .open_table(CATALOG)?
+                .insert(key.as_slice(), payload.as_slice())?;
+            let mut rows = write.open_table(ROWS)?;
+            for row_id in row_ids {
+                let mut key = Vec::with_capacity(32);
+                key.extend_from_slice(&table_id);
+                key.extend_from_slice(&row_id.to_be_bytes());
+                rows.insert(key.as_slice(), b"opaque row payload".as_slice())?;
+            }
+            let metadata = EngineMetadata {
+                database_id: [0x66; 16],
+                catalog_version: 2,
+                expression_version: 1,
+                builtin_semantics_version: 1,
+                commit_sequence: 1,
+                lifecycle: Lifecycle::Ready,
+            }
+            .encode()?;
+            write
+                .open_table(ENGINE_META)?
+                .insert(&b"format"[..], metadata.as_slice())?;
+        }
+        write.commit()?;
+        Ok((path, database))
+    }
+
+    #[test]
+    fn committed_population_collection_is_bounded_and_snapshot_tagged()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (path, database) = database_with_rows(&[1, 2])?;
+        let storage =
+            StorageManager::from_validated_database(&database, StorageManagerConfig::default())?;
+        storage
+            .admissions
+            .statistics_collection_limit
+            .store(3, Ordering::Release);
+        let table_id = [0x44; 16];
+        assert_eq!(
+            storage.collect_committed_table_population(table_id)?,
+            StatisticsCollectionOutcome::Exact
+        );
+        let mut stats_key = COMMITTED_POPULATION_KEY_PREFIX.to_vec();
+        stats_key.extend_from_slice(&table_id);
+        {
+            let read = database.begin_read()?;
+            let stats = read.open_table(STATS)?;
+            let value = stats
+                .get(stats_key.as_slice())?
+                .ok_or("statistics record missing")?;
+            assert_eq!(&value.value()[..4], b"CPR1");
+            assert_eq!(value.value()[12], 1);
+            assert_eq!(
+                CommittedPopulationRecord::decode_record(table_id, value.value())?,
+                CommittedPopulationRecord::Exact {
+                    table_id,
+                    snapshot_sequence: 1,
+                    rows: 2,
+                }
+            );
+        }
+
+        let write = database.begin_write()?;
+        {
+            let mut rows = write.open_table(ROWS)?;
+            for row_id in [3u128, 4] {
+                let mut key = Vec::with_capacity(32);
+                key.extend_from_slice(&table_id);
+                key.extend_from_slice(&row_id.to_be_bytes());
+                rows.insert(key.as_slice(), b"opaque row payload".as_slice())?;
+            }
+            let metadata = EngineMetadata {
+                database_id: [0x66; 16],
+                catalog_version: 2,
+                expression_version: 1,
+                builtin_semantics_version: 1,
+                commit_sequence: 2,
+                lifecycle: Lifecycle::Ready,
+            }
+            .encode()?;
+            write
+                .open_table(ENGINE_META)?
+                .insert(&b"format"[..], metadata.as_slice())?;
+        }
+        write.commit()?;
+        let prior_record = {
+            let read = database.begin_read()?;
+            let stats = read.open_table(STATS)?;
+            let value = stats
+                .get(stats_key.as_slice())?
+                .ok_or("prior statistics record missing")?;
+            CommittedPopulationRecord::decode_record(table_id, value.value())?
+        };
+        assert_eq!(prior_record.snapshot_sequence(), 1);
+        assert_eq!(
+            EngineMetadata::decode(
+                database
+                    .begin_read()?
+                    .open_table(ENGINE_META)?
+                    .get(&b"format"[..])?
+                    .ok_or("engine metadata missing")?
+                    .value()
+            )?
+            .commit_sequence,
+            2,
+            "the tagged record must now be stale"
+        );
+        assert_eq!(
+            storage.collect_committed_table_population(table_id)?,
+            StatisticsCollectionOutcome::Unknown
+        );
+        {
+            let read = database.begin_read()?;
+            let stats = read.open_table(STATS)?;
+            let value = stats
+                .get(stats_key.as_slice())?
+                .ok_or("unknown record missing")?;
+            assert_eq!(value.value()[12], 0, "partial counts must not be persisted");
+            assert_eq!(
+                CommittedPopulationRecord::decode_record(table_id, value.value())?,
+                CommittedPopulationRecord::Unknown {
+                    table_id,
+                    snapshot_sequence: 2,
+                }
+            );
+        }
+        drop(storage);
+        drop(database);
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn statistics_collection_admission_is_shared_across_manager_clones()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (path, database) = database_with_rows(&[])?;
+        let storage =
+            StorageManager::from_validated_database(&database, StorageManagerConfig::default())?;
+        let clone = storage.clone();
+        let active = storage
+            .admissions
+            .statistics_collection_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire);
+        assert!(active.is_ok());
+        assert!(matches!(
+            clone.collect_committed_table_population([0x44; 16]),
+            Err(crate::statistics::StatisticsMaintenanceError::Busy)
+        ));
+        storage
+            .admissions
+            .statistics_collection_active
+            .store(false, Ordering::Release);
+        assert!(matches!(
+            clone.collect_committed_table_population([0x44; 16])?,
+            StatisticsCollectionOutcome::Exact
+        ));
+        drop(clone);
+        drop(storage);
+        drop(database);
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn operational_row_commit_completes_while_population_collection_is_admitted()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::commit::{RowWrite, commit_rows};
+        use crate::row_record::RowRecord;
+        use std::time::{Duration, Instant};
+
+        let row_ids =
+            (1..=crate::statistics::MAX_COMMITTED_POPULATION_ROWS as u128).collect::<Vec<_>>();
+        let (path, database) = database_with_rows(&row_ids)?;
+        let storage =
+            StorageManager::from_validated_database(&database, StorageManagerConfig::default())?;
+        std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+            let collector = storage.clone();
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let collector_barrier = std::sync::Arc::clone(&barrier);
+            let collection = scope.spawn(move || {
+                collector_barrier.wait();
+                collector.collect_committed_table_population([0x44; 16])
+            });
+            barrier.wait();
+
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !storage
+                .admissions
+                .statistics_collection_active
+                .load(Ordering::Acquire)
+                && Instant::now() < deadline
+            {
+                std::thread::yield_now();
+            }
+            assert!(
+                storage
+                    .admissions
+                    .statistics_collection_active
+                    .load(Ordering::Acquire),
+                "maintenance did not acquire its independent admission slot"
+            );
+
+            let row_id = 20_000u128;
+            let mut row_key = [0; 32];
+            row_key[..16].copy_from_slice(&[0x44; 16]);
+            row_key[16..].copy_from_slice(&row_id.to_be_bytes());
+            let row_payload = RowRecord {
+                row_version: 1,
+                payload: Vec::new(),
+            }
+            .encode()?;
+            let commit_started = Instant::now();
+            commit_rows(
+                &database,
+                [0x71; 16],
+                [0x72; 16],
+                i64::MAX,
+                &[RowWrite {
+                    key: row_key,
+                    expected_version: None,
+                    payload: Some(row_payload),
+                }],
+            )?;
+            assert!(
+                commit_started.elapsed() < Duration::from_secs(2),
+                "the bounded collector held up an operational row commit"
+            );
+            let result = collection
+                .join()
+                .map_err(|_| "statistics collector panicked")??;
+            assert!(matches!(
+                result,
+                StatisticsCollectionOutcome::Exact | StatisticsCollectionOutcome::Unknown
+            ));
+            Ok(())
+        })?;
+
+        drop(storage);
+        drop(database);
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
 }
 
 impl Default for StorageManagerConfig {
@@ -2138,9 +2446,19 @@ struct InvocationAdmissionState {
     database_key: usize,
     limit: AtomicUsize,
     analytical_limit: AtomicUsize,
+    statistics_collection_limit: AtomicUsize,
+    statistics_collection_active: AtomicBool,
     database_uncertain: AtomicBool,
     live: Mutex<LiveInvocationRegistry>,
     changed: Condvar,
+}
+
+struct StatisticsMaintenancePermit<'a>(&'a AtomicBool);
+
+impl Drop for StatisticsMaintenancePermit<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 struct LiveInvocationRegistry {
@@ -2844,6 +3162,8 @@ fn invocation_registry(
         database_key,
         limit: AtomicUsize::new(configured_limit),
         analytical_limit: AtomicUsize::new(configured_analytical_limit),
+        statistics_collection_limit: AtomicUsize::new(MAX_COMMITTED_POPULATION_ROWS as usize),
+        statistics_collection_active: AtomicBool::new(false),
         database_uncertain: AtomicBool::new(false),
         live: Mutex::new(LiveInvocationRegistry {
             generation: 1,
@@ -3084,6 +3404,130 @@ impl<'db> StorageManager<'db> {
 
     pub(crate) fn database(&self) -> &'db Database {
         self.database
+    }
+
+    /// Collect a bounded committed row population from one redb snapshot.
+    /// Exact global counts are stored only in the protected stats table; this
+    /// public maintenance outcome omits the count. A trusted internal consumer
+    /// must validate the stored source commit sequence before reuse. The method
+    /// is not exposed over worker or planner IPC.
+    pub fn collect_committed_table_population(
+        &self,
+        table_id: [u8; 16],
+    ) -> Result<StatisticsCollectionOutcome, StatisticsMaintenanceError> {
+        if table_id == [0; 16] || self.admissions.database_uncertain.load(Ordering::Acquire) {
+            return Err(StatisticsMaintenanceError::InvalidRequest);
+        }
+        self.admissions
+            .statistics_collection_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| StatisticsMaintenanceError::Busy)?;
+        let _permit = StatisticsMaintenancePermit(&self.admissions.statistics_collection_active);
+
+        let maximum = self
+            .admissions
+            .statistics_collection_limit
+            .load(Ordering::Acquire)
+            .min(MAX_COMMITTED_POPULATION_ROWS as usize) as u64;
+        if maximum == 0 {
+            return Err(StatisticsMaintenanceError::InvalidRequest);
+        }
+
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|error| StatisticsMaintenanceError::Storage(error.to_string()))?;
+        let snapshot = RowSnapshot::new(read);
+        let metadata_bytes = snapshot
+            .get_engine_metadata_value()
+            .map_err(|error| StatisticsMaintenanceError::Storage(error.to_string()))?
+            .ok_or_else(|| StatisticsMaintenanceError::Storage("missing engine metadata".into()))?;
+        let metadata = EngineMetadata::decode(&metadata_bytes)
+            .map_err(|error| StatisticsMaintenanceError::Storage(error.to_string()))?;
+        if metadata.lifecycle != Lifecycle::Ready {
+            return Err(StatisticsMaintenanceError::InvalidRequest);
+        }
+        let mut catalog_key = Vec::with_capacity(19);
+        catalog_key.extend_from_slice(&5u16.to_be_bytes());
+        catalog_key.push(1);
+        catalog_key.extend_from_slice(&table_id);
+        if snapshot
+            .get_catalog_record(&catalog_key)
+            .map_err(|error| StatisticsMaintenanceError::Storage(error.to_string()))?
+            .is_none()
+        {
+            return Err(StatisticsMaintenanceError::InvalidRequest);
+        }
+
+        let mut row_count = 0u64;
+        let mut after_row_id = None;
+        let result = loop {
+            let remaining = maximum.saturating_add(1).saturating_sub(row_count);
+            if remaining == 0 {
+                break CommittedPopulationRecord::Unknown {
+                    table_id,
+                    snapshot_sequence: metadata.commit_sequence,
+                };
+            }
+            let page_limit = remaining.min(crate::snapshot::MAX_ROW_SCAN_PAGE as u64) as usize;
+            let (row_ids, complete) = snapshot
+                .scan_row_ids_after(table_id, after_row_id, page_limit)
+                .map_err(|error| StatisticsMaintenanceError::Storage(error.to_string()))?;
+            row_count = row_count.saturating_add(row_ids.len() as u64);
+            if row_count > maximum {
+                break CommittedPopulationRecord::Unknown {
+                    table_id,
+                    snapshot_sequence: metadata.commit_sequence,
+                };
+            }
+            if complete {
+                break CommittedPopulationRecord::Exact {
+                    table_id,
+                    snapshot_sequence: metadata.commit_sequence,
+                    rows: row_count,
+                };
+            }
+            after_row_id = row_ids.last().copied();
+        };
+        drop(snapshot);
+
+        let record = result.encode_record();
+        CommittedPopulationRecord::decode_record(result.table_id(), &record).map_err(|error| {
+            let reason = match error {
+                StatisticsRecordError::InvalidLength => "invalid record length",
+                StatisticsRecordError::InvalidMagic => "invalid record magic",
+                StatisticsRecordError::InvalidStatus => "invalid record status",
+                StatisticsRecordError::InvalidValue => "invalid record value",
+            };
+            StatisticsMaintenanceError::Storage(reason.to_owned())
+        })?;
+        let mut key = Vec::with_capacity(COMMITTED_POPULATION_KEY_PREFIX.len() + table_id.len());
+        key.extend_from_slice(COMMITTED_POPULATION_KEY_PREFIX);
+        key.extend_from_slice(&table_id);
+        let mut write = self
+            .database
+            .begin_write()
+            .map_err(|error| StatisticsMaintenanceError::Storage(error.to_string()))?;
+        write
+            .set_durability(redb::Durability::Immediate)
+            .map_err(|error| StatisticsMaintenanceError::Storage(error.to_string()))?;
+        write.set_two_phase_commit(true);
+        {
+            let mut stats = write
+                .open_table(STATS)
+                .map_err(|error| StatisticsMaintenanceError::Storage(error.to_string()))?;
+            stats
+                .insert(key.as_slice(), record.as_slice())
+                .map_err(|error| StatisticsMaintenanceError::Storage(error.to_string()))?;
+        }
+        if let Err(error) = write.commit() {
+            mark_database_uncertain(self.database);
+            return Err(StatisticsMaintenanceError::Storage(error.to_string()));
+        }
+        Ok(match result {
+            CommittedPopulationRecord::Exact { .. } => StatisticsCollectionOutcome::Exact,
+            CommittedPopulationRecord::Unknown { .. } => StatisticsCollectionOutcome::Unknown,
+        })
     }
 
     /// Prune one bounded batch of expired durable outcomes. Storage failures
@@ -16081,6 +16525,10 @@ mod commit_cancellation_boundary_tests {
             database_key: 0,
             limit: std::sync::atomic::AtomicUsize::new(3),
             analytical_limit: std::sync::atomic::AtomicUsize::new(1),
+            statistics_collection_limit: std::sync::atomic::AtomicUsize::new(
+                crate::statistics::MAX_COMMITTED_POPULATION_ROWS as usize,
+            ),
+            statistics_collection_active: std::sync::atomic::AtomicBool::new(false),
             database_uncertain: std::sync::atomic::AtomicBool::new(false),
             live: std::sync::Mutex::new(LiveInvocationRegistry {
                 generation: 1,
@@ -16138,6 +16586,10 @@ mod commit_cancellation_boundary_tests {
             database_key: 0,
             limit: std::sync::atomic::AtomicUsize::new(1),
             analytical_limit: std::sync::atomic::AtomicUsize::new(1),
+            statistics_collection_limit: std::sync::atomic::AtomicUsize::new(
+                crate::statistics::MAX_COMMITTED_POPULATION_ROWS as usize,
+            ),
+            statistics_collection_active: std::sync::atomic::AtomicBool::new(false),
             database_uncertain: std::sync::atomic::AtomicBool::new(false),
             live: std::sync::Mutex::new(LiveInvocationRegistry {
                 generation: 1,
