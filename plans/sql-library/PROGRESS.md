@@ -1552,9 +1552,17 @@
 - Verification: the probe passed on this host's NFSv4.2 workspace mount, allocating and reclaiming 64 MiB total in 251 ms, and on the host's `/var/tmp` ext4 filesystem in 74 ms. These are bounded local measurements and do not establish sustained device saturation or production filesystem support. Rust formatting, warning-denied engine all-target Clippy, and `git diff --check` passed.
 - Remaining: deployment filesystem matrix, sustained storage-device saturation with concurrent operational commit/cancellation load, and broader confined result comparisons across workload shapes.
 
-## SQL-9 follow-up: sustained confined broker writes during operational commits — implemented
+## SQL-9 follow-up: sustained confined broker writes during operational commits — verified
 
 - Contract: measure a longer broker-backed analytical write interval while operational point reads and durable commits remain active, and retain a separate cancellation-under-pressure acceptance.
 - Change: the non-cancelling `P` fixture now performs 512 append/seal/destroy cycles of the maximum legal append payload before its external sort. The confined harness permits the required cumulative I/O while retaining the existing operation and allocation limits; the `K` cancellation mode continues to use the same sustained loop.
 - Verification: the focused delegated-cgroup `PRDB_TEST_SPILL_PRESSURE_ONLY=1` acceptance passed with exact SQLR output; it overlapped the 512 MiB broker write sequence with 64 operational reads and 64 durable commits for 1,791 ms. The separate `PRDB_TEST_SPILL_PRESSURE_CANCEL_ONLY=1` acceptance also passed; cancellation was accepted during writes, all 64 reads/commits finished, and the spill invocation durably aborted after 131 ms of overlap. The four-round mounted-filesystem allocation/reclamation probe separately allocated and reclaimed 64 MiB.
-- Remaining: validate this sustained mode through the confined executor, filesystem deployment matrix, longer physical device saturation, and broader confined result comparisons across workload shapes.
+- Remaining: filesystem deployment matrix, longer physical device saturation, and broader confined result comparisons across workload shapes.
+
+## SQL-9 follow-up: reject memory-backed scratch before supervisor startup — verified
+
+- Contract clarification: an explicitly configured tmpfs/ramfs spill root is rejected when the supervisor opens its broker, before service sockets or query admissions are created. This is a startup configuration failure, so it cannot be exercised as a SQL statement failure. Actual ENOSPC after successful startup remains the confined SQL abort case.
+- Regression evidence: the new `supervisor_rejects_configured_memory_backed_spill_at_startup` process test passes the complete positive spill configuration with a private `/dev/shm` directory and requires process failure with `UnsupportedFilesystem`.
+- Verification: the focused `supervisor_binary` integration test passed; workspace formatting, warning-denied all-target Clippy, and `git diff --check` passed.
+- Plan reconciliation: this process-level gate supersedes earlier SQL-9 checklist wording that asked for unsupported-filesystem failure through SQL; the normative startup behavior is now explicit in the workload profile and acceptance plan.
+- Remaining: deployment filesystem matrix, longer physical device saturation, and broader confined result comparisons across workload shapes.

@@ -83,6 +83,50 @@ fn supervisor_refuses_to_start_without_explicit_instance_and_sandbox_profile() {
     assert!(error.contains("--instance-dir is required"));
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn supervisor_rejects_configured_memory_backed_spill_at_startup() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let spill_parent = std::path::PathBuf::from(format!(
+        "/dev/shm/prdb-supervisor-spill-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&spill_parent).expect("create tmpfs spill parent");
+    std::fs::set_permissions(&spill_parent, std::fs::Permissions::from_mode(0o700))
+        .expect("restrict tmpfs spill parent");
+    let output = Command::new(env!("CARGO_BIN_EXE_prdb-supervisor"))
+        .args([
+            "--spill-parent",
+            spill_parent.to_str().expect("UTF-8 tmpfs path"),
+            "--spill-max-bytes",
+            "4096",
+            "--spill-max-io-bytes",
+            "8192",
+            "--spill-max-streams",
+            "4",
+            "--spill-max-operations",
+            "32",
+            "--spill-max-response-bytes",
+            "1024",
+            "--spill-max-service-bytes",
+            "8192",
+        ])
+        .output()
+        .expect("run supervisor with memory-backed spill configuration");
+    let cleanup = std::fs::remove_dir(&spill_parent);
+    assert!(
+        cleanup.is_ok(),
+        "remove temporary tmpfs spill parent: {cleanup:?}"
+    );
+    assert!(!output.status.success());
+    let error = String::from_utf8(output.stderr).expect("UTF-8 supervisor error");
+    assert!(
+        error.contains("secure spill configuration rejected: UnsupportedFilesystem"),
+        "unexpected supervisor error: {error}"
+    );
+}
+
 #[cfg(unix)]
 struct ChildGuard(Option<std::process::Child>);
 

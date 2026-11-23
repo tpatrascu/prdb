@@ -147,6 +147,8 @@ PRDB_TEST_SPILL_FILESYSTEM_ROOT=/absolute/path/on/mount \
 
 The probe is opt-in and does not fill the filesystem. A passing result is only a smoke test for the selected mount; deployment acceptance still needs the supported filesystem matrix, including exhaustion and recovery behavior.
 
+The supervisor process test `supervisor_rejects_configured_memory_backed_spill_at_startup` passes a complete spill configuration rooted in a private `/dev/shm` directory and requires startup to fail with `UnsupportedFilesystem`. This boundary is checked before service admission, so the test does not launch a SQL worker or need delegated cgroups.
+
 For a concurrent allocation-pressure probe on a selected mounted filesystem, run:
 
 ```sh
