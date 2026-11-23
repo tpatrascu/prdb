@@ -53052,6 +53052,268 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
 }
 
 #[test]
+fn planner_stream_estimates_same_typed_decimal_column_predicate()
+-> Result<(), Box<dyn std::error::Error>> {
+    use prdb_engine::authorization::{Effect, Expr, Operation, Subject};
+    use prdb_engine::ipc::{IpcFrame, Operation as IpcOperation};
+    use prdb_engine::optimizer_binding::{BoundColumn, BoundPredicate};
+    use prdb_engine::optimizer_request::Comparison;
+    use prdb_engine::planner_ipc::{
+        EstimatePredicateRequest, EstimatePredicateResponse, serve_planner,
+    };
+    use prdb_engine::storage_manager::{
+        CreatePolicyRequest, CreateTableRequest, ObjectGrantPrivilege, ObjectGrantTarget,
+        PolicyKind, SetObjectGrantRequest, TableColumnDefinition,
+    };
+    use std::net::Shutdown;
+
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let actor = id(0xb0);
+    let admin_role = builtin_owner_id();
+    let mut setup_audit = identity_audit_event(0xb1, admin_role, actor);
+    setup_audit.action = AuditAction::AuthorityChange;
+    storage
+        .commit_catalog_and_audit(
+            id(0xb1),
+            admin_role,
+            9_999,
+            &[
+                principal_write_with_name(actor, 1, 1, "planner_decimal_owner"),
+                object_write_with_name(actor, 8, "planner_decimal_owner"),
+                membership_write(actor, admin_role),
+                dependency_write(actor, admin_role, 5),
+            ],
+            &[setup_audit],
+        )
+        .map_err(|error| format!("typed planner fixture identity setup: {error:?}"))?;
+
+    let mut schema_audit = identity_audit_event(0xb2, actor, actor);
+    schema_audit.correlation_id = id(0xb2);
+    let schema = storage
+        .create_schema(
+            id(0xb2),
+            actor,
+            "planner_decimal",
+            actor,
+            9_999,
+            schema_audit,
+        )
+        .map_err(|error| format!("typed planner fixture schema creation: {error:?}"))?;
+    let mut table_audit = identity_audit_event(0xb3, actor, schema.schema_id);
+    table_audit.correlation_id = id(0xb3);
+    let decimal_type = ScalarType::Decimal {
+        precision: 8,
+        scale: 2,
+    };
+    let table = storage
+        .create_table(CreateTableRequest {
+            invocation_id: id(0xb3),
+            authenticated_actor_id: actor,
+            schema_id: schema.schema_id,
+            name: "typed_observations".to_owned(),
+            columns: vec![
+                TableColumnDefinition {
+                    name: "left_value".to_owned(),
+                    scalar_type: decimal_type,
+                    nullable: true,
+                    generated_uuid_identity: false,
+                    default: None,
+                },
+                TableColumnDefinition {
+                    name: "right_value".to_owned(),
+                    scalar_type: decimal_type,
+                    nullable: true,
+                    generated_uuid_identity: false,
+                    default: None,
+                },
+            ],
+            retention_deadline_us: 9_999,
+            audit_event: table_audit,
+        })
+        .map_err(|error| format!("typed planner fixture table creation: {error:?}"))?;
+
+    for (audit_id, privilege, target) in [
+        (0xb4, ObjectGrantPrivilege::Usage, ObjectGrantTarget::Object),
+        (
+            0xb5,
+            ObjectGrantPrivilege::Select,
+            ObjectGrantTarget::Object,
+        ),
+        (
+            0xb6,
+            ObjectGrantPrivilege::Select,
+            ObjectGrantTarget::Column(table.column_ids[0]),
+        ),
+        (
+            0xb7,
+            ObjectGrantPrivilege::Select,
+            ObjectGrantTarget::Column(table.column_ids[1]),
+        ),
+    ] {
+        let object_id = if privilege == ObjectGrantPrivilege::Usage {
+            schema.schema_id
+        } else {
+            table.table_id
+        };
+        let invocation_id = id(audit_id);
+        let mut audit = identity_audit_event(audit_id, actor, object_id);
+        audit.correlation_id = invocation_id;
+        audit.action = AuditAction::AuthorityChange;
+        storage
+            .set_object_grant(SetObjectGrantRequest {
+                invocation_id,
+                authenticated_actor_id: actor,
+                grantee_id: actor,
+                object_id,
+                privilege,
+                target,
+                grant: true,
+                retention_deadline_us: 9_999,
+                audit_event: audit,
+            })
+            .map_err(|error| format!("typed planner fixture grant creation: {error:?}"))?;
+    }
+
+    let mut row_policy_audit = identity_audit_event(0xb8, actor, table.table_id);
+    row_policy_audit.correlation_id = id(0xb8);
+    storage
+        .create_policy(CreatePolicyRequest {
+            invocation_id: id(0xb8),
+            authenticated_actor_id: actor,
+            table_id: table.table_id,
+            name: "planner_decimal_select".to_owned(),
+            kind: PolicyKind::Row,
+            operation: Operation::Select,
+            effect: Effect::Allow,
+            recipients: vec![Subject::Principal(actor)],
+            target_column_ids: Vec::new(),
+            using_expression: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+            with_check_expression: None,
+            retention_deadline_us: 9_999,
+            audit_event: row_policy_audit,
+        })
+        .map_err(|error| format!("typed planner fixture row policy: {error:?}"))?;
+    for (audit_id, column_id) in [(0xb9, table.column_ids[0]), (0xba, table.column_ids[1])] {
+        let mut audit = identity_audit_event(audit_id, actor, table.table_id);
+        audit.correlation_id = id(audit_id);
+        storage
+            .create_policy(CreatePolicyRequest {
+                invocation_id: id(audit_id),
+                authenticated_actor_id: actor,
+                table_id: table.table_id,
+                name: format!("planner_decimal_read_{}", audit_id),
+                kind: PolicyKind::Cell,
+                operation: Operation::Select,
+                effect: Effect::Allow,
+                recipients: vec![Subject::Principal(actor)],
+                target_column_ids: vec![column_id],
+                using_expression: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+                with_check_expression: None,
+                retention_deadline_us: 9_999,
+                audit_event: audit,
+            })
+            .map_err(|error| format!("typed planner fixture cell policy: {error:?}"))?;
+    }
+
+    let mut writer = storage.begin_invocation(id(0xbb), actor, 9_999, 8, 4096)?;
+    let row_schema = [
+        ColumnSchema {
+            scalar_type: decimal_type,
+            nullable: true,
+        },
+        ColumnSchema {
+            scalar_type: decimal_type,
+            nullable: true,
+        },
+    ];
+    for (row_id, left, right) in [
+        (1, Some(110), Some(110)),
+        (2, Some(220), Some(330)),
+        (3, None, None),
+    ] {
+        writer.stage_put(
+            prdb_engine::overlay::RowId {
+                table: table.table_id,
+                row: id(row_id),
+            },
+            &encode_tuple(
+                &row_schema,
+                1,
+                &[
+                    left.map(ScalarValue::Decimal),
+                    right.map(ScalarValue::Decimal),
+                ],
+            )?,
+        )?;
+    }
+    writer.commit()?;
+
+    let invocation_id = id(0xbc);
+    let mut invocation = storage.begin_invocation(invocation_id, actor, 9_999, 8, 4096)?;
+    let predicate = BoundPredicate::Compare {
+        operator: Comparison::Equal,
+        left: Box::new(BoundPredicate::Column(BoundColumn {
+            column_id: table.column_ids[0],
+            ordinal: 0,
+            scalar_type: decimal_type,
+            nullable: true,
+        })),
+        right: Box::new(BoundPredicate::Column(BoundColumn {
+            column_id: table.column_ids[1],
+            ordinal: 1,
+            scalar_type: decimal_type,
+            nullable: true,
+        })),
+    };
+    let (mut client, mut server) = std::os::unix::net::UnixStream::pair()?;
+    client.set_read_timeout(Some(Duration::from_secs(5)))?;
+    std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+        let planner = scope.spawn(|| serve_planner(&mut server, &mut invocation));
+        prdb_engine::ipc::write_frame(
+            &mut client,
+            &IpcFrame {
+                operation: IpcOperation::EstimateScan as u16,
+                request_id: 1,
+                payload: EstimatePredicateRequest::from_bound_predicate(
+                    "planner_decimal".to_owned(),
+                    "typed_observations".to_owned(),
+                    &predicate,
+                )?
+                .encode()?,
+            },
+        )?;
+        let response = prdb_engine::ipc::read_frame(&mut client)?
+            .ok_or("typed planner stream closed before predicate estimate")?;
+        assert_eq!(response.request_id, 1);
+        assert_eq!(
+            EstimatePredicateResponse::decode(&response.payload)?,
+            EstimatePredicateResponse::Exact {
+                visible_rows: 3,
+                matching_rows: 1,
+            }
+        );
+        client.shutdown(Shutdown::Write)?;
+        drop(client);
+        planner
+            .join()
+            .expect("typed planner server thread panicked")
+            .map_err(|error| format!("typed planner server failed: {error:?}"))?;
+        Ok(())
+    })?;
+    invocation.abort()?;
+    assert_eq!(
+        storage
+            .lookup_invocation_outcome(invocation_id, actor, 9_998)?
+            .ok_or("typed planner invocation outcome missing")?
+            .status,
+        OutcomeStatus::Aborted
+    );
+    Ok(())
+}
+
+#[test]
 fn catalog_backed_executor_generates_uuid_identity_and_rejects_override_and_update()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::authorization::{Effect, Expr, Operation, Subject};
