@@ -43047,7 +43047,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         let ordered_owner = ordered_client.staging_owner()?;
         let ordered_parameter = [if indexed_join_fanout_benchmark_only {
             if indexed_join_fanout_sixteen_benchmark_only {
-                b'A'
+                b'X'
             } else if indexed_join_fanout == 4 {
                 b'4'
             } else if indexed_join_fanout == 5 {
@@ -52712,12 +52712,14 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
     );
 
     let mut large_join_estimate =
-        storage.begin_invocation(id(0xa3), actor, 9_999, 512, 1_048_576)?;
-    for row_number in 1..=130u8 {
+        storage.begin_invocation(id(0xa3), actor, 9_999, 2048, 8 * 1024 * 1024)?;
+    for row_number in 1..=1024u32 {
+        let mut row_id = [0; 16];
+        row_id[12..].copy_from_slice(&row_number.to_be_bytes());
         large_join_estimate.stage_put(
             prdb_engine::overlay::RowId {
                 table: table.table_id,
-                row: id(row_number),
+                row: row_id,
             },
             &encode_tuple(
                 &[ColumnSchema {
@@ -52745,18 +52747,18 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
                     right_relation_name: "observations".to_owned(),
                     left_key_column_ids: vec![table.column_ids[0]],
                     right_key_column_ids: vec![table.column_ids[0]],
-                    maximum_rows: 512,
+                    maximum_rows: 1024,
                 }
                 .encode()?,
             },
         )?;
         let response = prdb_engine::ipc::read_frame(&mut large_join_client)?
-            .ok_or("planner stream closed before the 512-row join estimate")?;
+            .ok_or("planner stream closed before the 1,024-row join estimate")?;
         assert_eq!(response.request_id, 1);
         assert_eq!(
             EstimateJoinResponse::decode(&response.payload)?,
             EstimateJoinResponse::Exact {
-                joined_rows: 130 * 130,
+                joined_rows: 1024 * 1024,
             }
         );
         large_join_client.shutdown(Shutdown::Write)?;

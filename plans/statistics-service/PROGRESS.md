@@ -4,7 +4,14 @@
 
 - Harness: added `PRDB_TEST_INDEXED_JOIN_FANOUT16_BENCHMARK_ONLY` to the maintained confined SQL acceptance. It seeds 16 outer rows and a 128-row indexed input with one match per outer row, checks 16 equivalent pairs and the indexed plan, and runs the same operational read/commit load as the 9-row fanout profiles.
 - Evidence: five fresh-database delegated-cgroup runs each completed 192 operational reads and 192 commits. Indexed median-of-run p50 was 243.5 ms (230.9–259.1 ms range); hash was 305.7 ms (289.4–313.7 ms range). This extends the local low-fanout observation to 16 outer rows; it does not establish deployment performance or a general cost model.
-- Verification: the five focused confined acceptance runs passed. The maintained TinyCC fixture was rebuilt with the SDK sandbox-query-fixture target; Rust formatting, workspace build, warning-denied Clippy, and `git diff --check` are recorded after this harness change below.
+- Verification: the five focused confined acceptance runs passed. The maintained TinyCC fixture was rebuilt with the SDK sandbox-query-fixture target; Rust formatting, workspace build, warning-denied Clippy, and `git diff --check` passed.
+
+## ST-2 / OP-4 follow-up: extend bounded join estimates to 1,024 rows — implemented
+
+- Contract: authorized join population probes and exact INNER JOIN pair estimates now accept a requested maximum of 1,024 rows per input. Candidate row reads remain bounded to 1,025 per population; pair estimation retains the 8 MiB combined decoded-row cap, 4 KiB per encoded key, value-independent visibility requirement, readable-key requirement, and shared estimate allowance. Results above the requested bound remain `Unknown` without partial counts.
+- Red/green: the real-redb transaction regression first returned `Unknown` for a 1,024×1,024 duplicated-key join. It now verifies 1,043,463 exact pairs at the boundary, `Unknown` for a requested 512-row bound, and `Unknown` when the actual input population exceeds 1,024. The planner-stream regression stages 1,024 rows and verifies an exact 1,048,576-pair estimate using the 1,024-row IPC request bound.
+- Scope: this raises the bounded estimator ceiling; it does not change optimizer strategy thresholds or claim that index nested-loop is cheaper outside the measured shapes. Populations above 1,024, broader cost comparison, global-statistics consumption, and target-host profiles remain open.
+- Verification: focused transaction and real planner-stream regressions passed. Rust formatting, locked workspace build, warning-denied Clippy, maintained TinyCC SDK tests, and the sandbox query fixture build passed. The writable delegated-cgroup preflight passed, and the full serial delegated-cgroup workspace suite passed: 389 library tests, 206 commit integration tests, 3 metadata-process tests, 83 transaction tests, and all other targets, with no ignored tests.
 
 ## ST-2 / OP-4 follow-up: exact same-typed scalar column estimates — implementation
 
