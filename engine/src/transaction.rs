@@ -2242,13 +2242,21 @@ impl<'db> InvocationTransaction<'db> {
         {
             return Ok(None);
         }
-        let Some(population) =
-            self.estimate_authorized_population_at_most(table_id, projection, maximum_rows)?
-        else {
-            return Ok(None);
-        };
-        if population == 0 {
-            return self.finish_predicate_estimate(Some((0, 0)));
+        if let Err(error) =
+            self.capture_authority_dependencies(projection.context, projection.dependencies)
+        {
+            return if estimate_error_is_terminal(&error) {
+                Err(error)
+            } else {
+                self.finish_predicate_estimate(None)
+            };
+        }
+        match estimate_population(table_id, projection) {
+            Some(EstimatePopulation::NoRows) => {
+                return self.finish_predicate_estimate(Some((0, 0)));
+            }
+            Some(EstimatePopulation::AllRows) => {}
+            None => return self.finish_predicate_estimate(None),
         }
         let Ok(candidate_limit) = usize::try_from(maximum_rows + 1) else {
             return self.finish_predicate_estimate(None);
@@ -2333,9 +2341,6 @@ impl<'db> InvocationTransaction<'db> {
             if matches == EstimateTruth::True {
                 matching_rows += 1;
             }
-        }
-        if visible_rows != population {
-            return self.finish_predicate_estimate(None);
         }
         self.finish_predicate_estimate(Some((visible_rows, matching_rows)))
     }
