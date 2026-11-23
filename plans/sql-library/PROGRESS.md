@@ -1589,4 +1589,11 @@
 - Change: the confined spill fixture adds a Decimal JOIN sort mode with `ORDER BY b.decimal_value DESC LIMIT 6`, plus a REDACTED variant using the existing restrictive cell policy. The TinyCC v25 parser/binder fixture now covers the same Decimal JOIN syntax and bound scale/precision.
 - Defect found: decoding a spooled NULL key gave it a non-NULL record pointer. The canonical SDK value validator requires NULL values to have type code zero and no payload pointer. The decoder now reconstructs NULL and REDACTED values with a NULL pointer, and type-checks the order key only when it contains a value.
 - Verification: the focused delegated-cgroup Decimal JOIN acceptance passed, checking three NULL SQLR values first and then the three `2.25` rows selected by LIMIT. The restrictive-policy mode passed with a durable abort and no result rows. The exact Decimal parser/binder fixture passed. The maintained TinyCC SDK suite, release-profile validation, formatting, warning-denied all-target Clippy, `git diff --check`, and the full serial delegated workspace suite all passed after this change.
-- Remaining: more ordered JOIN scalar types and filter combinations, filesystem deployment matrix, longer physical device saturation, and broader confined result comparisons across workload shapes.
+- Remaining: more ordered JOIN scalar types and parameterized filter combinations, filesystem deployment matrix, longer physical device saturation, and broader confined result comparisons across workload shapes.
+
+## SQL-9 follow-up: filter before spill-sort on ordered JOIN — verified
+
+- Contract: a qualified v20 filter on an ordered composite JOIN must run before external ordering and LIMIT while preserving the projected SQLR shape.
+- Regression: the confined ABI v6 `U` mode executes `WHERE b.decimal_value IS NULL ORDER BY b.right_key DESC LIMIT 2`; the authorized self-join has three qualifying rows and requires the sorted top two `(3,11), (1,7)`.
+- Verification: the focused delegated-cgroup acceptance passed with the exact two-row SQLR sequence and a durable commit. The maintained v25 parser/binder fixture also covers combining a Decimal JOIN filter with Decimal ORDER BY and verifies the bound side and projection index. Broader parameterized filter, scalar, and workload combinations remain open.
+- Remaining: parameterized ordered JOIN predicates, filesystem deployment matrix, longer physical device saturation, and broader confined result comparisons across workload shapes.

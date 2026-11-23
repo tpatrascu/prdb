@@ -33,6 +33,12 @@ int32_t prdb_query_main_v6(const prdb_host_api_v6 *host,
         "FROM decimal_grouped_records AS a INNER JOIN "
         "decimal_grouped_records AS b ON a.left_key = b.left_key AND "
         "a.right_key = b.right_key ORDER BY b.decimal_value DESC LIMIT 6";
+    static const uint8_t spill_filtered_join_sql[] =
+        "SELECT a.left_key, b.right_key "
+        "FROM decimal_grouped_records AS a INNER JOIN "
+        "decimal_grouped_records AS b ON a.left_key = b.left_key AND "
+        "a.right_key = b.right_key WHERE b.decimal_value IS NULL "
+        "ORDER BY b.right_key DESC LIMIT 2";
     if (host == NULL || invocation == NULL ||
         host->v5.v4.v3.struct_size < sizeof(host->v5.v4.v3) ||
         host->v5.v4.v3.abi_version != PRDB_QUERY_ABI_V3_VERSION ||
@@ -103,6 +109,9 @@ int32_t prdb_query_main_v6(const prdb_host_api_v6 *host,
                invocation->parameters[0] == 'K') {
         sql = spill_ordered_rows_sql;
         sql_len = sizeof(spill_ordered_rows_sql) - 1;
+    } else if (invocation->parameters[0] == 'U') {
+        sql = spill_filtered_join_sql;
+        sql_len = sizeof(spill_filtered_join_sql) - 1;
     } else if (invocation->parameters[0] == 'T' ||
                invocation->parameters[0] == 'E') {
         sql = spill_decimal_join_sql;

@@ -40440,6 +40440,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     let spill_redacted_only = std::env::var_os("PRDB_TEST_SPILL_REDACTED_ONLY").is_some();
     let spill_join_only = std::env::var_os("PRDB_TEST_SPILL_JOIN_ONLY").is_some();
     let spill_join_decimal_only = std::env::var_os("PRDB_TEST_SPILL_JOIN_DECIMAL_ONLY").is_some();
+    let spill_join_filtered_only = std::env::var_os("PRDB_TEST_SPILL_JOIN_FILTERED_ONLY").is_some();
     let spill_crash_only = std::env::var_os("PRDB_TEST_SPILL_CRASH_ONLY").is_some();
     let spill_pressure_only = std::env::var_os("PRDB_TEST_SPILL_PRESSURE_ONLY").is_some();
     let spill_pressure_cancel_only =
@@ -40453,6 +40454,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         || spill_redacted_only
         || spill_join_only
         || spill_join_decimal_only
+        || spill_join_filtered_only
         || spill_crash_only
         || spill_pressure_only
         || spill_pressure_cancel_only
@@ -42633,6 +42635,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 },
                 max_streams_per_invocation: if spill_join_only
                     || spill_join_decimal_only
+                    || spill_join_filtered_only
                     || spill_redacted_only
                 {
                     17
@@ -42692,6 +42695,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         || spill_redacted_only
         || spill_join_only
         || spill_join_decimal_only
+        || spill_join_filtered_only
         || spill_crash_only
         || spill_pressure_only
         || spill_pressure_cancel_only
@@ -42715,6 +42719,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             b'E'
         } else if spill_join_decimal_only {
             b'T'
+        } else if spill_join_filtered_only {
+            b'U'
         } else if spill_join_only {
             b'J'
         } else if spill_crash_only {
@@ -43147,7 +43153,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 assert_eq!(frame.request_id, ordered_accepted.request_id);
                 assert_eq!(frame.payload, expected_pressure_order_key(left_key));
             }
-        } else if spill_join_only {
+        } else if spill_join_only || spill_join_filtered_only {
             fn decode_two_integer_sqlr_fields(
                 bytes: &[u8],
             ) -> Result<(i32, i32), Box<dyn std::error::Error>> {
@@ -43194,11 +43200,19 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             for _ in 0..row_count {
                 ordered_frames.next();
             }
-            assert_eq!(ordered, [(3, 11), (2, 9), (2, 9), (2, 9), (2, 9)]);
-            assert_eq!(
-                observed.into_iter().collect::<Vec<_>>(),
-                [((2, 9), 4), ((3, 11), 1)]
-            );
+            if spill_join_filtered_only {
+                assert_eq!(ordered, [(3, 11), (1, 7)]);
+                assert_eq!(
+                    observed.into_iter().collect::<Vec<_>>(),
+                    [((1, 7), 1), ((3, 11), 1)]
+                );
+            } else {
+                assert_eq!(ordered, [(3, 11), (2, 9), (2, 9), (2, 9), (2, 9)]);
+                assert_eq!(
+                    observed.into_iter().collect::<Vec<_>>(),
+                    [((2, 9), 4), ((3, 11), 1)]
+                );
+            }
         } else if spill_join_decimal_only {
             fn decode_decimal_join_sqlr_row(
                 bytes: &[u8],
