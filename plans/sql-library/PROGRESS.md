@@ -1566,3 +1566,11 @@
 - Verification: the focused `supervisor_binary` integration test passed; workspace formatting, warning-denied all-target Clippy, and `git diff --check` passed.
 - Plan reconciliation: this process-level gate supersedes earlier SQL-9 checklist wording that asked for unsupported-filesystem failure through SQL; the normative startup behavior is now explicit in the workload profile and acceptance plan.
 - Remaining: deployment filesystem matrix, longer physical device saturation, and broader confined result comparisons across workload shapes.
+
+## SQL-9 follow-up: parse and bind ORDER BY on aliased composite JOIN — verified parser slice
+
+- Contract: add a versioned SQL shape for one qualified ordering column on the alias-aware composite JOIN, preserving direction and trailing LIMIT and binding the order key to an authorized projected output column.
+- Change: SDK parser/binder ABI v25 accepts `ORDER BY <alias>.<column> [ASC|DESC]` after the v20 JOIN predicate and optional filter, carries a trailing LIMIT in the embedded statement, resolves the key side/type, and records its projection index. Unprojected order keys are rejected. Existing v20 ABI behavior remains unchanged.
+- Verification: the maintained TinyCC SDK suite passes, including the v25 fixture and shared-library ABI fixture. The fixture checks alias spans, direction, LIMIT, right-side type/ordinal, legacy v20 rejection, missing ORDER BY, and rejection of a non-projected order key.
+- Boundary: SQL dispatch does not yet execute JOIN ORDER BY; v20 JOIN remains unordered. The following implementation slice must compose the spill join output with the stable external row sorter and cover it through the confined executor.
+- Remaining: dispatcher execution and confined acceptance for combined JOIN ORDER BY; filesystem deployment matrix, longer physical device saturation, and broader confined result comparisons across workload shapes.
