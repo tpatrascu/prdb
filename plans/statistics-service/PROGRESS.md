@@ -207,6 +207,13 @@
 - Verification: format check, locked workspace build, warning-denied Clippy, and the complete serial delegated-cgroup workspace suite pass. The suite includes 377 library tests, 205 commit integration tests, 3 metadata-process tests, 79 transaction tests, and all remaining workspace targets.
 - Remaining: no trusted consumer reads the global records yet; collection currently covers only row population. Richer physical statistics, consumer freshness validation, and mixed-load/target-host evidence remain open.
 
+## ST-6 follow-up: validate freshness before reuse — implementation
+
+- Added a trusted reader that loads the protected population record and engine commit sequence from one redb snapshot. It returns a record only when the source sequence matches that snapshot; missing/stale records trigger refresh, while malformed records fail closed.
+- The scheduled round-robin tick now skips redundant collection when a fresh exact or `Unknown` record exists. Counts remain in trusted storage and do not enter planner/executor IPC or public maintenance outcomes.
+- Regressions verify exact record reuse at sequence 1, staleness after the next committed sequence, fresh `Unknown` reuse without inventing a partial count, and that a scheduled second tick reports `FreshRecord` instead of collecting again.
+- Verification: the collection and scheduler-focused tests passed. Workspace build, format check, warning-denied Clippy, delegated-cgroup preflight, and the complete serial delegated-cgroup workspace suite passed (380 engine library tests, 205 commit integration tests, 3 metadata-process tests, 79 transaction tests, and all other workspace targets).
+
 ## ST-5 follow-up: reuse exact population probes within a planner session — verified slice
 
 - Population estimates are cached by relation ID, schema ID/version, and requested row bound inside `PlannerMetadataSessionState`. The cache remains bound to the planner's invocation snapshot and authorization context; every request, including a cache hit, consumes the 16-request allowance. A changed private-write generation invalidates cached population and predicate estimates. Unknown results are not cached.

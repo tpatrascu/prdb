@@ -214,7 +214,12 @@ mod statistics_collection_tests {
             StorageManager::from_validated_database(&database, StorageManagerConfig::default())?;
         let table_id = [0x44; 16];
         let mut cursor = None;
-        crate::supervisor_ipc::run_statistics_maintenance_tick(&storage, &mut cursor)?;
+        assert_eq!(
+            crate::supervisor_ipc::run_statistics_maintenance_tick(&storage, &mut cursor)?,
+            crate::supervisor_ipc::StatisticsMaintenanceTickOutcome::Collected(
+                StatisticsCollectionOutcome::Exact
+            )
+        );
         assert_eq!(cursor, Some(table_id));
         let mut stats_key = COMMITTED_POPULATION_KEY_PREFIX.to_vec();
         stats_key.extend_from_slice(&table_id);
@@ -234,6 +239,11 @@ mod statistics_collection_tests {
         drop(value);
         drop(stats);
         drop(read);
+        assert_eq!(
+            crate::supervisor_ipc::run_statistics_maintenance_tick(&storage, &mut cursor)?,
+            crate::supervisor_ipc::StatisticsMaintenanceTickOutcome::FreshRecord,
+            "a fresh persisted population avoids another full bounded collection"
+        );
         assert_eq!(
             storage.next_committed_population_table_id(cursor)?,
             Some(table_id),
@@ -259,6 +269,15 @@ mod statistics_collection_tests {
         assert_eq!(
             storage.collect_committed_table_population(table_id)?,
             StatisticsCollectionOutcome::Exact
+        );
+        assert_eq!(
+            storage.current_committed_population_record(table_id)?,
+            Some(CommittedPopulationRecord::Exact {
+                table_id,
+                snapshot_sequence: 1,
+                rows: 2,
+            }),
+            "a record is reusable only at its source commit sequence"
         );
         let mut stats_key = COMMITTED_POPULATION_KEY_PREFIX.to_vec();
         stats_key.extend_from_slice(&table_id);
@@ -303,6 +322,11 @@ mod statistics_collection_tests {
                 .insert(&b"format"[..], metadata.as_slice())?;
         }
         write.commit()?;
+        assert_eq!(
+            storage.current_committed_population_record(table_id)?,
+            None,
+            "a later committed snapshot makes the stored population stale"
+        );
         let prior_record = {
             let read = database.begin_read()?;
             let stats = read.open_table(STATS)?;
@@ -328,6 +352,14 @@ mod statistics_collection_tests {
         assert_eq!(
             storage.collect_committed_table_population(table_id)?,
             StatisticsCollectionOutcome::Unknown
+        );
+        assert_eq!(
+            storage.current_committed_population_record(table_id)?,
+            Some(CommittedPopulationRecord::Unknown {
+                table_id,
+                snapshot_sequence: 2,
+            }),
+            "a fresh over-limit record is reusable as Unknown, never as a partial count"
         );
         {
             let read = database.begin_read()?;
@@ -3503,6 +3535,49 @@ impl<'db> StorageManager<'db> {
             }
         }
         Ok(None)
+    }
+
+    /// Read a committed-population record only when it matches engine metadata
+    /// from the same fresh redb snapshot. The count stays within trusted
+    /// storage and is never included in the maintenance IPC result.
+    pub(crate) fn current_committed_population_record(
+        &self,
+        table_id: [u8; 16],
+    ) -> Result<Option<CommittedPopulationRecord>, StatisticsMaintenanceError> {
+        if table_id == [0; 16] || self.admissions.database_uncertain.load(Ordering::Acquire) {
+            return Err(StatisticsMaintenanceError::InvalidRequest);
+        }
+        let read = self
+            .database
+            .begin_read()
+            .map_err(|error| StatisticsMaintenanceError::Storage(error.to_string()))?;
+        let snapshot = RowSnapshot::new(read);
+        let metadata_bytes = snapshot
+            .get_engine_metadata_value()
+            .map_err(|error| StatisticsMaintenanceError::Storage(error.to_string()))?
+            .ok_or_else(|| StatisticsMaintenanceError::Storage("missing engine metadata".into()))?;
+        let metadata = EngineMetadata::decode(&metadata_bytes)
+            .map_err(|error| StatisticsMaintenanceError::Storage(error.to_string()))?;
+        if metadata.lifecycle != Lifecycle::Ready {
+            return Err(StatisticsMaintenanceError::InvalidRequest);
+        }
+
+        let mut key = Vec::with_capacity(COMMITTED_POPULATION_KEY_PREFIX.len() + table_id.len());
+        key.extend_from_slice(COMMITTED_POPULATION_KEY_PREFIX);
+        key.extend_from_slice(&table_id);
+        let stats = snapshot
+            .read_transaction()
+            .open_table(STATS)
+            .map_err(|error| StatisticsMaintenanceError::Storage(error.to_string()))?;
+        let Some(value) = stats
+            .get(key.as_slice())
+            .map_err(|error| StatisticsMaintenanceError::Storage(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let record = CommittedPopulationRecord::decode_record(table_id, value.value())
+            .map_err(|error| StatisticsMaintenanceError::Storage(error.to_string()))?;
+        Ok((record.snapshot_sequence() == metadata.commit_sequence).then_some(record))
     }
 
     /// Collect a bounded committed row population from one redb snapshot.

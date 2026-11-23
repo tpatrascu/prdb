@@ -43,18 +43,34 @@ pub fn gateway_result_bytes_relayed_total() -> u64 {
     GATEWAY_RESULT_BYTES_RELAYED_TOTAL.load(Ordering::Relaxed)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StatisticsMaintenanceTickOutcome {
+    NoTable,
+    FreshRecord,
+    Collected(crate::statistics::StatisticsCollectionOutcome),
+    Skipped,
+}
+
 pub(crate) fn run_statistics_maintenance_tick(
     manager: &StorageManager<'_>,
     after_table_id: &mut Option<[u8; 16]>,
-) -> Result<(), crate::statistics::StatisticsMaintenanceError> {
+) -> Result<StatisticsMaintenanceTickOutcome, crate::statistics::StatisticsMaintenanceError> {
     let Some(table_id) = manager.next_committed_population_table_id(*after_table_id)? else {
-        return Ok(());
+        return Ok(StatisticsMaintenanceTickOutcome::NoTable);
     };
     *after_table_id = Some(table_id);
+    if manager
+        .current_committed_population_record(table_id)?
+        .is_some()
+    {
+        return Ok(StatisticsMaintenanceTickOutcome::FreshRecord);
+    }
     match manager.collect_committed_table_population(table_id) {
-        Ok(_)
-        | Err(crate::statistics::StatisticsMaintenanceError::Busy)
-        | Err(crate::statistics::StatisticsMaintenanceError::InvalidRequest) => Ok(()),
+        Ok(outcome) => Ok(StatisticsMaintenanceTickOutcome::Collected(outcome)),
+        Err(crate::statistics::StatisticsMaintenanceError::Busy)
+        | Err(crate::statistics::StatisticsMaintenanceError::InvalidRequest) => {
+            Ok(StatisticsMaintenanceTickOutcome::Skipped)
+        }
         Err(error) => Err(error),
     }
 }
