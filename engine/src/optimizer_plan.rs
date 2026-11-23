@@ -49,6 +49,8 @@ pub struct SingleTablePlanV1 {
 /// authorized populations. The cutoff is conservative and based on a local
 /// storage API profile; it is not an end-to-end SQL cost estimate.
 pub const SMALL_POPULATION_SCAN_ROWS: u64 = 4;
+const SKEWED_JOIN_OUTER_MAX_ROWS: u64 = 8;
+const SKEWED_JOIN_INPUT_RATIO: u64 = 16;
 /// Maximum row count probed for optimizer join orientation.
 pub const JOIN_POPULATION_ESTIMATE_MAX_ROWS: u64 = 128;
 
@@ -4501,6 +4503,20 @@ fn select_index_nested_loop_join(
             return right;
         }
         (None, Some(right_rows)) if (1..=SMALL_POPULATION_SCAN_ROWS).contains(&right_rows) => {
+            return left;
+        }
+        (Some(left_rows), Some(right_rows))
+            if left_rows > SMALL_POPULATION_SCAN_ROWS
+                && left_rows <= SKEWED_JOIN_OUTER_MAX_ROWS
+                && right_rows >= left_rows * SKEWED_JOIN_INPUT_RATIO =>
+        {
+            return right;
+        }
+        (Some(left_rows), Some(right_rows))
+            if right_rows > SMALL_POPULATION_SCAN_ROWS
+                && right_rows <= SKEWED_JOIN_OUTER_MAX_ROWS
+                && left_rows >= right_rows * SKEWED_JOIN_INPUT_RATIO =>
+        {
             return left;
         }
         (Some(_), Some(_)) => return None,

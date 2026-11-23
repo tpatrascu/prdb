@@ -826,6 +826,88 @@ mod tests {
     }
 
     #[test]
+    fn eight_row_outer_with_much_larger_indexed_inner_selects_nested_loop() {
+        let mut indexed_right = join_relation("rights", 0x41);
+        indexed_right.range_access_paths =
+            vec![crate::metadata_discovery::AuthorizedRangeAccessPath {
+                index_id: [0x71; 16],
+                column_ids: vec![[0x51; 16]],
+            }];
+        let encoded = optimize_join_select_v1_with_relations_and_estimates(
+            &filtered_join_select_request(),
+            Some(join_relation("lefts", 0x31)),
+            Some(indexed_right),
+            Some(8),
+            Some(128),
+        )
+        .unwrap();
+        let plan = decode_join_select_plan_v1(&encoded).unwrap();
+        let index_join = plan
+            .index_nested_loop
+            .expect("measured smaller side should drive index probes");
+        assert_eq!(
+            index_join.outer_side,
+            crate::optimizer_request::JoinRelationSide::Left
+        );
+        assert_eq!(
+            index_join.inner_side,
+            crate::optimizer_request::JoinRelationSide::Right
+        );
+        assert_eq!(index_join.index_id, [0x71; 16]);
+    }
+
+    #[test]
+    fn skewed_join_can_orient_eight_row_right_input_to_left_index() {
+        let mut indexed_left = join_relation("lefts", 0x31);
+        indexed_left.range_access_paths =
+            vec![crate::metadata_discovery::AuthorizedRangeAccessPath {
+                index_id: [0x72; 16],
+                column_ids: vec![[0x41; 16]],
+            }];
+        let encoded = optimize_join_select_v1_with_relations_and_estimates(
+            &filtered_join_select_request(),
+            Some(indexed_left),
+            Some(join_relation("rights", 0x41)),
+            Some(128),
+            Some(8),
+        )
+        .unwrap();
+        let plan = decode_join_select_plan_v1(&encoded).unwrap();
+        let index_join = plan
+            .index_nested_loop
+            .expect("smaller right input should drive left index probes");
+        assert_eq!(
+            index_join.outer_side,
+            crate::optimizer_request::JoinRelationSide::Right
+        );
+        assert_eq!(
+            index_join.inner_side,
+            crate::optimizer_request::JoinRelationSide::Left
+        );
+        assert_eq!(index_join.index_id, [0x72; 16]);
+    }
+
+    #[test]
+    fn skewed_join_below_the_sixteen_to_one_ratio_keeps_hash_join() {
+        let mut indexed_right = join_relation("rights", 0x41);
+        indexed_right.range_access_paths =
+            vec![crate::metadata_discovery::AuthorizedRangeAccessPath {
+                index_id: [0x71; 16],
+                column_ids: vec![[0x51; 16]],
+            }];
+        let encoded = optimize_join_select_v1_with_relations_and_estimates(
+            &filtered_join_select_request(),
+            Some(join_relation("lefts", 0x31)),
+            Some(indexed_right),
+            Some(8),
+            Some(127),
+        )
+        .unwrap();
+        let plan = decode_join_select_plan_v1(&encoded).unwrap();
+        assert!(plan.index_nested_loop.is_none());
+    }
+
+    #[test]
     fn join_with_two_known_small_inputs_keeps_hash_join() {
         let mut indexed_left = join_relation("lefts", 0x31);
         indexed_left.range_access_paths =
