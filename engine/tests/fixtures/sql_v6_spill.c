@@ -14,6 +14,9 @@ int32_t prdb_query_main_v6(const prdb_host_api_v6 *host,
     static const uint8_t spill_group_count_sql[] =
         "SELECT left_key, COUNT(*) FROM decimal_grouped_records "
         "GROUP BY left_key";
+    static const uint8_t spill_group_limit_sql[] =
+        "SELECT left_key, COUNT(*) FROM decimal_grouped_records "
+        "GROUP BY left_key LIMIT 2";
     static const uint8_t spill_ordered_rows_sql[] =
         "SELECT left_key FROM decimal_grouped_records "
         "ORDER BY left_key DESC";
@@ -67,6 +70,9 @@ int32_t prdb_query_main_v6(const prdb_host_api_v6 *host,
     if (invocation->parameters[0] == 'S') {
         sql = spill_group_count_sql;
         sql_len = sizeof(spill_group_count_sql) - 1;
+    } else if (invocation->parameters[0] == 'L') {
+        sql = spill_group_limit_sql;
+        sql_len = sizeof(spill_group_limit_sql) - 1;
     } else if (invocation->parameters[0] == 'O' ||
                invocation->parameters[0] == 'P') {
         sql = spill_ordered_rows_sql;

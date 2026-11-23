@@ -1495,3 +1495,10 @@
 - Regression evidence: added `PRDB_TEST_SPILL_REDACTED_ONLY` to the existing confined ABI v6 acceptance. It installs a restrictive cell SELECT policy on the Decimal sort column, runs the Decimal ORDER BY fixture through the real broker, and asserts an empty result stream with terminal ABORTED. The focused acceptance passed inside a delegated `systemd --user` unit.
 - Implementation: the SDK sorter already reports `PRDB_SDK_SQL_EVAL_REDACTED_INPUT` while forming sort keys; this acceptance now exercises that failure through authorized scans, the spill callback, supervisor relay, and storage terminal decision.
 - Remaining: unsupported-filesystem and disk-full failure coverage through SQL; broader spill result comparison for stable ordering, skew, and LIMIT; fairness under concurrent sustained broker pressure; supported filesystem deployment validation; diagnosis of the full-suite `Invocation(Closed)` failure; and successful full serial workspace acceptance.
+
+## SQL-9 follow-up: confined spill GROUP BY LIMIT — verified slice
+
+- Contract: GROUP BY LIMIT is applied after external key sorting and aggregation, and only the selected groups are relayed.
+- Regression evidence: added `PRDB_TEST_SPILL_LIMIT_ONLY` to the confined ABI v6 acceptance. `GROUP BY left_key LIMIT 2` returned exactly the NULL-key group `(NULL,2)` and the next sorted group `(1,2)` as SQLR records; the durable invocation committed and the scratch package was reclaimed. The focused acceptance passed inside a delegated `systemd --user` unit.
+- Implementation: this exercises the existing group runner's post-fold LIMIT handling through the supervisor broker and executor result relay.
+- Remaining: unsupported-filesystem and disk-full failure coverage through SQL; broader spill result comparison for stable ordering, skew, and LIMIT on other operators; fairness under concurrent sustained broker pressure; supported filesystem deployment validation; diagnosis of the full-suite `Invocation(Closed)` failure; and successful full serial workspace acceptance.

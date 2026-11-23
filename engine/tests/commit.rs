@@ -40348,6 +40348,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     let count_bigint_only = std::env::var_os("PRDB_TEST_COUNT_BIGINT_ONLY").is_some();
     let spill_quota_only = std::env::var_os("PRDB_TEST_SPILL_QUOTA_ONLY").is_some();
     let spill_only = std::env::var_os("PRDB_TEST_SPILL_ONLY").is_some();
+    let spill_limit_only = std::env::var_os("PRDB_TEST_SPILL_LIMIT_ONLY").is_some();
     let spill_disabled_only = std::env::var_os("PRDB_TEST_SPILL_DISABLED_ONLY").is_some();
     let spill_sort_only = std::env::var_os("PRDB_TEST_SPILL_SORT_ONLY").is_some();
     let spill_decimal_only = std::env::var_os("PRDB_TEST_SPILL_DECIMAL_ONLY").is_some();
@@ -40357,6 +40358,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     let spill_pressure_only = std::env::var_os("PRDB_TEST_SPILL_PRESSURE_ONLY").is_some();
     let spill_enabled_only = spill_quota_only
         || spill_only
+        || spill_limit_only
         || spill_sort_only
         || spill_decimal_only
         || spill_redacted_only
@@ -42572,7 +42574,9 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         ordered_client.accept_hello(ClientMode::Query, "sandbox-ordered-analytical-sum")?;
         ordered_client.authenticate(&storage, token_id, &secret)?;
         let ordered_owner = ordered_client.staging_owner()?;
-        let ordered_parameter = [if spill_only || spill_quota_only || spill_disabled_only {
+        let ordered_parameter = [if spill_limit_only {
+            b'L'
+        } else if spill_only || spill_quota_only || spill_disabled_only {
             b'S'
         } else if spill_sort_only {
             b'O'
@@ -42780,7 +42784,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         }
         staging.finish_started(ordered_owner, ordered_reservation.invocation_id)?;
         let mut ordered_frames = ordered_frames.into_iter();
-        if spill_only || spill_disabled_only {
+        if spill_only || spill_disabled_only || spill_limit_only {
             fn expected_spilled_group_count(left_key: Option<i32>, count: i64) -> Vec<u8> {
                 let mut output = b"SQLR".to_vec();
                 output.extend_from_slice(&1u16.to_be_bytes());
@@ -42804,12 +42808,16 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 output.extend_from_slice(&count.to_be_bytes());
                 output
             }
-            let expected_groups = if spill_only {
+            let expected_groups = if spill_only || spill_limit_only {
                 [(None, 2), (Some(1), 2), (Some(2), 3), (Some(3), 1)]
             } else {
                 [(Some(1), 2), (Some(2), 3), (Some(3), 1), (None, 2)]
             };
-            for (left_key, count) in expected_groups {
+            for (left_key, count) in
+                expected_groups
+                    .into_iter()
+                    .take(if spill_limit_only { 2 } else { 4 })
+            {
                 let frame = ordered_frames
                     .next()
                     .ok_or("missing confined spilled GROUP BY row")?;
