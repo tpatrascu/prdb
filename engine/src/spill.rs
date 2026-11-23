@@ -1698,6 +1698,67 @@ mod tests {
     }
 
     #[test]
+    fn optional_configured_filesystem_sustains_shared_allocation_pressure() {
+        let Some(parent) = std::env::var_os("PRDB_TEST_SPILL_PRESSURE_FILESYSTEM_ROOT") else {
+            return;
+        };
+        let scratch = Scratch::new_in(Path::new(&parent));
+        let mut limits = config(&scratch.0);
+        limits.max_bytes_per_invocation = 8 * 1024 * 1024;
+        limits.max_io_bytes_per_invocation = 16 * 1024 * 1024;
+        limits.max_operations_per_invocation = 64;
+        limits.max_service_bytes = 16 * 1024 * 1024;
+        let broker = SpillBroker::open(limits).unwrap_or_else(|error| {
+            panic!("configured spill filesystem cannot sustain allocation pressure: {error:?}")
+        });
+        let chunk = Arc::new(vec![0x6B; MAX_IPC_REQUEST_BYTES as usize - HANDLE_BYTES]);
+        let owners = [package(41), package(42)];
+        let started = Instant::now();
+        for round in 0..4 {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            let handles = owners.map(|owner| {
+                broker
+                    .open_package(owner, WorkloadClass::Analytical, deadline)
+                    .unwrap();
+                broker.create(owner).unwrap()
+            });
+            let barrier = Arc::new(std::sync::Barrier::new(3));
+            let workers = owners
+                .into_iter()
+                .zip(handles)
+                .map(|(owner, handle)| {
+                    let broker = broker.clone();
+                    let barrier = Arc::clone(&barrier);
+                    let chunk = Arc::clone(&chunk);
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        for _ in 0..8 {
+                            broker.append(owner, handle, &chunk).unwrap();
+                        }
+                        broker.seal(owner, handle).unwrap();
+                    })
+                })
+                .collect::<Vec<_>>();
+            barrier.wait();
+            for worker in workers {
+                worker.join().unwrap();
+            }
+            let reserved = broker.0.state.lock().unwrap().service_reserved;
+            assert_eq!(reserved, 16 * 1024 * 1024);
+            for owner in owners {
+                broker.close_package(owner).unwrap();
+            }
+            assert_eq!(broker.0.state.lock().unwrap().service_reserved, 0);
+            eprintln!("spill filesystem pressure round {} complete", round + 1);
+        }
+        eprintln!(
+            "allocated and reclaimed 64 MiB across two concurrent packages in {} ms",
+            started.elapsed().as_millis()
+        );
+        drop(broker);
+    }
+
+    #[test]
     fn broker_restart_removes_orphaned_stream_files_and_package_directories() {
         let scratch = Scratch::new();
         let first = SpillBroker::open(config(&scratch.0)).unwrap();

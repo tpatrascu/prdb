@@ -1544,3 +1544,10 @@
 - Regression evidence: `concurrent_packages_cannot_overreserve_service_allocation` gives two packages one allocation unit of shared capacity, releases both appenders from a barrier, and requires exactly one append to succeed while the other receives `AllocationLimit`. It then closes the admitted package and verifies the waiting package can append.
 - Verification: the focused locked engine test passed in the pinned Nix development shell (`1 passed`); the command compiled the workspace test targets. Filesystem deployment validation and sustained saturation measurements remain open.
 - Remaining: SQL-9 deployment validation across supported filesystems, longer service-wide saturation under operational commit/cancellation load, and broader confined result comparisons across workload shapes.
+
+## SQL-9 follow-up: concurrent allocation pressure on configured filesystem — verified locally
+
+- Contract: simultaneous analytical packages can reserve and reclaim the full shared spill allocation on a configured mounted filesystem without exceeding the service cap or retaining package reservations after close.
+- Regression evidence: the opt-in `optional_configured_filesystem_sustains_shared_allocation_pressure` probe runs four rounds of two concurrent 8 MiB package allocations, asserts the broker reaches exactly its 16 MiB service cap, closes both packages, and checks service accounting returns to zero. Its first run caught an oversized fixture append; limiting chunks to the 1 MiB IPC request minus the 16-byte handle fixed the fixture.
+- Verification: the probe passed on this host's NFSv4.2 workspace mount, allocating and reclaiming 64 MiB total in 251 ms. This is one bounded local measurement and does not establish sustained device saturation or production filesystem support. Rust formatting, warning-denied engine all-target Clippy, and `git diff --check` passed.
+- Remaining: deployment filesystem matrix, sustained storage-device saturation with concurrent operational commit/cancellation load, and broader confined result comparisons across workload shapes.

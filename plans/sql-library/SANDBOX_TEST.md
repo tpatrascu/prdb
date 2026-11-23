@@ -146,3 +146,14 @@ PRDB_TEST_SPILL_FILESYSTEM_ROOT=/absolute/path/on/mount \
 ```
 
 The probe is opt-in and does not fill the filesystem. A passing result is only a smoke test for the selected mount; deployment acceptance still needs the supported filesystem matrix, including exhaustion and recovery behavior.
+
+For a concurrent allocation-pressure probe on a selected mounted filesystem, run:
+
+```sh
+PRDB_TEST_SPILL_PRESSURE_FILESYSTEM_ROOT=/absolute/path/on/mount \
+  nix develop --no-update-lock-file -c cargo test -p prdb-engine \
+  spill::tests::optional_configured_filesystem_sustains_shared_allocation_pressure \
+  --locked -- --exact --nocapture
+```
+
+The probe performs four rounds in which two package threads concurrently allocate the full 16 MiB broker service limit (8 MiB each), seal their streams, and close their packages before the next round. It reports elapsed time and verifies broker reservations return to zero. This measures bounded concurrent allocation and reclamation on the selected mount; it does not saturate the device or replace sustained deployment load and filesystem recovery testing.
