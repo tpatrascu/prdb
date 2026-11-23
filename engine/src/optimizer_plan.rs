@@ -51,6 +51,9 @@ pub struct SingleTablePlanV1 {
 pub const SMALL_POPULATION_SCAN_ROWS: u64 = 4;
 const SKEWED_JOIN_OUTER_MAX_ROWS: u64 = 8;
 const SKEWED_JOIN_INPUT_RATIO: u64 = 16;
+pub(crate) const FANOUT_AWARE_JOIN_OUTER_MAX_ROWS: u64 = 16;
+pub(crate) const FANOUT_AWARE_JOIN_INPUT_RATIO: u64 = 8;
+const FANOUT_AWARE_JOIN_MAX_PAIRS_PER_OUTER_ROW: u64 = 4;
 /// Maximum row count probed for optimizer join orientation.
 pub const JOIN_POPULATION_ESTIMATE_MAX_ROWS: u64 = 128;
 
@@ -4330,8 +4333,26 @@ pub fn plan_join_select_v1_with_estimates(
     left_visible_rows: Option<u64>,
     right_visible_rows: Option<u64>,
 ) -> Result<JoinSelectPlanV1, PlanError> {
-    let index_nested_loop =
-        select_index_nested_loop_join(&bound, left_visible_rows, right_visible_rows);
+    plan_join_select_v1_with_cardinality_estimate(
+        bound,
+        left_visible_rows,
+        right_visible_rows,
+        None,
+    )
+}
+
+pub fn plan_join_select_v1_with_cardinality_estimate(
+    bound: BoundJoinSelect,
+    left_visible_rows: Option<u64>,
+    right_visible_rows: Option<u64>,
+    joined_rows_estimate: Option<u64>,
+) -> Result<JoinSelectPlanV1, PlanError> {
+    let index_nested_loop = select_index_nested_loop_join(
+        &bound,
+        left_visible_rows,
+        right_visible_rows,
+        joined_rows_estimate,
+    );
     let relation = |relation: crate::optimizer_binding::BoundJoinRelation| RelationReference {
         schema_name: bound.schema_name.clone(),
         schema_id: bound.schema_id,
@@ -4398,6 +4419,7 @@ fn select_index_nested_loop_join(
     bound: &BoundJoinSelect,
     left_visible_rows: Option<u64>,
     right_visible_rows: Option<u64>,
+    joined_rows_estimate: Option<u64>,
 ) -> Option<IndexNestedLoopJoinV1> {
     fn eligible(
         paths: impl Iterator<Item = ([u8; 16], Vec<[u8; 16]>)>,
@@ -4510,6 +4532,26 @@ fn select_index_nested_loop_join(
             if right_rows > SMALL_POPULATION_SCAN_ROWS
                 && right_rows <= SKEWED_JOIN_OUTER_MAX_ROWS
                 && left_rows >= right_rows * SKEWED_JOIN_INPUT_RATIO =>
+        {
+            return left;
+        }
+        (Some(left_rows), Some(right_rows))
+            if left_rows > SMALL_POPULATION_SCAN_ROWS
+                && left_rows <= FANOUT_AWARE_JOIN_OUTER_MAX_ROWS
+                && right_rows >= left_rows * FANOUT_AWARE_JOIN_INPUT_RATIO
+                && joined_rows_estimate.is_some_and(|rows| {
+                    rows <= left_rows * FANOUT_AWARE_JOIN_MAX_PAIRS_PER_OUTER_ROW
+                }) =>
+        {
+            return right;
+        }
+        (Some(left_rows), Some(right_rows))
+            if right_rows > SMALL_POPULATION_SCAN_ROWS
+                && right_rows <= FANOUT_AWARE_JOIN_OUTER_MAX_ROWS
+                && left_rows >= right_rows * FANOUT_AWARE_JOIN_INPUT_RATIO
+                && joined_rows_estimate.is_some_and(|rows| {
+                    rows <= right_rows * FANOUT_AWARE_JOIN_MAX_PAIRS_PER_OUTER_ROW
+                }) =>
         {
             return left;
         }

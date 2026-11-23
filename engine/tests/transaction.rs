@@ -6987,6 +6987,216 @@ fn authorized_scan_estimate_counts_sanitized_cells_and_private_writes()
 }
 
 #[test]
+fn authorized_join_estimate_counts_duplicate_matches_and_private_overlay()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let schema_id = [0x72; 16];
+    let left_table = [0x73; 16];
+    let right_table = [0x74; 16];
+    let left_key = [0x75; 16];
+    let right_key = [0x76; 16];
+    let columns = [ColumnSchema {
+        scalar_type: ScalarType::Integer,
+        nullable: true,
+    }];
+    let column_ids = [[left_key], [right_key]];
+    let context = AuthorizationContext {
+        principal_id: [9; 16],
+        role_ids: std::collections::HashSet::new(),
+        scope: std::collections::HashSet::from([
+            (Operation::Usage, AccessTarget::Schema(schema_id)),
+            (Operation::Select, AccessTarget::Table(left_table)),
+            (Operation::Select, AccessTarget::Table(right_table)),
+            (
+                Operation::Select,
+                AccessTarget::Column {
+                    table_id: left_table,
+                    column_id: left_key,
+                },
+            ),
+            (
+                Operation::Select,
+                AccessTarget::Column {
+                    table_id: right_table,
+                    column_id: right_key,
+                },
+            ),
+        ]),
+    };
+    let grants = [
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Usage,
+            target: AccessTarget::Schema(schema_id),
+        },
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Select,
+            target: AccessTarget::Column {
+                table_id: left_table,
+                column_id: left_key,
+            },
+        },
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Select,
+            target: AccessTarget::Column {
+                table_id: right_table,
+                column_id: right_key,
+            },
+        },
+    ];
+    let table_policy = |table_id| Policy {
+        subjects: vec![Subject::Principal([9; 16])],
+        operation: Operation::Select,
+        target: AccessTarget::Table(table_id),
+        effect: Effect::Allow,
+        using: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+        with_check: None,
+    };
+    let left_policy = table_policy(left_table);
+    let right_policy = table_policy(right_table);
+    let policies = [
+        left_policy.clone(),
+        Policy {
+            target: AccessTarget::Column {
+                table_id: left_table,
+                column_id: left_key,
+            },
+            ..left_policy
+        },
+        right_policy.clone(),
+        Policy {
+            target: AccessTarget::Column {
+                table_id: right_table,
+                column_id: right_key,
+            },
+            ..right_policy
+        },
+    ];
+    let left_projection = AuthorizedProjection {
+        columns: &columns,
+        column_ids: &column_ids[0],
+        schema_version: 1,
+        schema_id,
+        context: &context,
+        grants: &grants,
+        policies: &policies,
+        checks: &[],
+        policy_driving_columns: &[],
+        dependencies: &[],
+    };
+    let right_projection = AuthorizedProjection {
+        columns: &columns,
+        column_ids: &column_ids[1],
+        schema_version: 1,
+        schema_id,
+        context: &context,
+        grants: &grants,
+        policies: &policies,
+        checks: &[],
+        policy_driving_columns: &[],
+        dependencies: &[],
+    };
+    let row =
+        |value: Option<i32>| encode_tuple(&columns, 1, &[value.map(ScalarValue::Integer)]).unwrap();
+    let mut seed = InvocationTransaction::begin(&database, [0x77; 16], [9; 16], 9_999, 32, 4096)?;
+    for (number, value) in [(1, Some(7)), (2, Some(7)), (3, Some(9)), (4, None)] {
+        seed.stage_put(numbered_row_id(left_table, number), &row(value))?;
+    }
+    for (number, value) in [
+        (1, Some(7)),
+        (2, Some(7)),
+        (3, Some(7)),
+        (4, Some(9)),
+        (5, Some(8)),
+        (6, None),
+    ] {
+        seed.stage_put(numbered_row_id(right_table, number), &row(value))?;
+    }
+    seed.commit()?;
+
+    let mut planner =
+        InvocationTransaction::begin(&database, [0x78; 16], [9; 16], 9_999, 32, 4096)?;
+    let left_ids = [left_key];
+    let right_ids = [right_key];
+    assert_eq!(
+        planner.estimate_authorized_join_cardinality_at_most(
+            left_table,
+            &left_projection,
+            &left_ids,
+            right_table,
+            &right_projection,
+            &right_ids,
+            8,
+        )?,
+        Some(7),
+        "duplicate keys contribute their full SQL join multiplicity and NULLs do not match"
+    );
+
+    let hidden_key_policies = [
+        policies[0].clone(),
+        policies[2].clone(),
+        policies[3].clone(),
+    ];
+    let hidden_left_projection = AuthorizedProjection {
+        columns: &columns,
+        column_ids: &column_ids[0],
+        schema_version: 1,
+        schema_id,
+        context: &context,
+        grants: &grants,
+        policies: &hidden_key_policies,
+        checks: &[],
+        policy_driving_columns: &[],
+        dependencies: &[],
+    };
+    assert_eq!(
+        planner.estimate_authorized_join_cardinality_at_most(
+            left_table,
+            &hidden_left_projection,
+            &left_ids,
+            right_table,
+            &right_projection,
+            &right_ids,
+            8,
+        )?,
+        None,
+        "the estimator must not inspect an unreadable join key"
+    );
+    assert_eq!(
+        planner.estimate_authorized_join_cardinality_at_most(
+            left_table,
+            &left_projection,
+            &left_ids,
+            right_table,
+            &right_projection,
+            &right_ids,
+            129,
+        )?,
+        None,
+        "join-cardinality work remains capped at 128 rows per side"
+    );
+
+    planner.stage_put(numbered_row_id(left_table, 5), &row(Some(7)))?;
+    assert_eq!(
+        planner.estimate_authorized_join_cardinality_at_most(
+            left_table,
+            &left_projection,
+            &left_ids,
+            right_table,
+            &right_projection,
+            &right_ids,
+            8,
+        )?,
+        Some(10),
+        "the estimate must reflect the invocation's private overlay"
+    );
+    Ok(())
+}
+
+#[test]
 fn authorized_scan_estimate_returns_unknown_at_candidate_budget()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::statistics::{

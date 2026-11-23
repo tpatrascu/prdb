@@ -112,6 +112,8 @@ const RANGE_ACCESS_PATHS_MARKER: [u8; 2] = [0x52, 0x01];
 const EMPTY_POPULATION_MARKER: [u8; 2] = [0x52, 0x02];
 const SCAN_ESTIMATE_REQUEST_MARKER: [u8; 2] = [0x52, 0x03];
 const POPULATION_ESTIMATE_LIMIT_MARKER: [u8; 2] = [0x52, 0x07];
+const JOIN_ESTIMATE_REQUEST_MARKER: [u8; 2] = [0x52, 0x08];
+const JOIN_ESTIMATE_RESPONSE_MARKER: [u8; 2] = [0x52, 0x09];
 const CARDINALITY_ESTIMATE_MARKER: [u8; 2] = [0x52, 0x04];
 const PREDICATE_ESTIMATE_REQUEST_MARKER: [u8; 2] = [0x52, 0x05];
 const PREDICATE_ESTIMATE_RESPONSE_MARKER: [u8; 2] = [0x52, 0x06];
@@ -732,6 +734,159 @@ pub struct EstimatePredicateRequest {
     pub predicate_bytes: Vec<u8>,
 }
 
+/// Exact join-cardinality estimate request. Relation names and key IDs are
+/// claims only; storage re-resolves both names in the invocation context.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EstimateJoinRequest {
+    pub schema_name: String,
+    pub left_relation_name: String,
+    pub right_relation_name: String,
+    pub left_key_column_ids: Vec<[u8; 16]>,
+    pub right_key_column_ids: Vec<[u8; 16]>,
+    pub maximum_rows: u64,
+}
+
+impl EstimateJoinRequest {
+    pub fn encode(&self) -> Result<Vec<u8>, PlannerRequestError> {
+        let key_count = self.left_key_column_ids.len();
+        if !(1..=8).contains(&key_count)
+            || key_count != self.right_key_column_ids.len()
+            || self.left_key_column_ids.contains(&[0; 16])
+            || self.right_key_column_ids.contains(&[0; 16])
+            || self.maximum_rows == 0
+            || self.maximum_rows > crate::statistics::MAX_JOIN_ESTIMATE_ROWS
+        {
+            return Err(PlannerRequestError::InvalidPayload);
+        }
+        let left = ResolveRelationRequest {
+            schema_name: self.schema_name.clone(),
+            relation_name: self.left_relation_name.clone(),
+        }
+        .encode()?;
+        let right = ResolveRelationRequest {
+            schema_name: self.schema_name.clone(),
+            relation_name: self.right_relation_name.clone(),
+        }
+        .encode()?;
+        let mut payload = Vec::with_capacity(13 + left.len() + right.len() + key_count * 32);
+        payload.extend_from_slice(&JOIN_ESTIMATE_REQUEST_MARKER);
+        payload.extend_from_slice(
+            &u16::try_from(self.maximum_rows)
+                .map_err(|_| PlannerRequestError::InvalidPayload)?
+                .to_be_bytes(),
+        );
+        payload.push(key_count as u8);
+        payload.extend_from_slice(
+            &u32::try_from(left.len())
+                .map_err(|_| PlannerRequestError::InvalidPayload)?
+                .to_be_bytes(),
+        );
+        payload.extend_from_slice(
+            &u32::try_from(right.len())
+                .map_err(|_| PlannerRequestError::InvalidPayload)?
+                .to_be_bytes(),
+        );
+        payload.extend_from_slice(&left);
+        payload.extend_from_slice(&right);
+        for (left_id, right_id) in self
+            .left_key_column_ids
+            .iter()
+            .zip(&self.right_key_column_ids)
+        {
+            payload.extend_from_slice(left_id);
+            payload.extend_from_slice(right_id);
+        }
+        ensure_response_size(&payload)?;
+        Ok(payload)
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Self, PlannerRequestError> {
+        if payload.len() < 13 || !payload.starts_with(&JOIN_ESTIMATE_REQUEST_MARKER) {
+            return Err(PlannerRequestError::InvalidPayload);
+        }
+        let maximum_rows = u64::from(u16::from_be_bytes(
+            payload[2..4]
+                .try_into()
+                .map_err(|_| PlannerRequestError::InvalidPayload)?,
+        ));
+        let key_count = usize::from(payload[4]);
+        if !(1..=8).contains(&key_count)
+            || maximum_rows == 0
+            || maximum_rows > crate::statistics::MAX_JOIN_ESTIMATE_ROWS
+        {
+            return Err(PlannerRequestError::InvalidPayload);
+        }
+        let left_len = usize::try_from(u32::from_be_bytes(
+            payload[5..9]
+                .try_into()
+                .map_err(|_| PlannerRequestError::InvalidPayload)?,
+        ))
+        .map_err(|_| PlannerRequestError::InvalidPayload)?;
+        let right_len = usize::try_from(u32::from_be_bytes(
+            payload[9..13]
+                .try_into()
+                .map_err(|_| PlannerRequestError::InvalidPayload)?,
+        ))
+        .map_err(|_| PlannerRequestError::InvalidPayload)?;
+        let left_end = 13usize
+            .checked_add(left_len)
+            .ok_or(PlannerRequestError::InvalidPayload)?;
+        let right_end = left_end
+            .checked_add(right_len)
+            .ok_or(PlannerRequestError::InvalidPayload)?;
+        let key_bytes = key_count
+            .checked_mul(32)
+            .ok_or(PlannerRequestError::InvalidPayload)?;
+        if right_end.checked_add(key_bytes) != Some(payload.len()) {
+            return Err(PlannerRequestError::InvalidPayload);
+        }
+        let left = ResolveRelationRequest::decode(&payload[13..left_end])?;
+        let right = ResolveRelationRequest::decode(&payload[left_end..right_end])?;
+        if left.schema_name != right.schema_name {
+            return Err(PlannerRequestError::InvalidPayload);
+        }
+        let mut left_key_column_ids = Vec::with_capacity(key_count);
+        let mut right_key_column_ids = Vec::with_capacity(key_count);
+        for pair in payload[right_end..].chunks_exact(32) {
+            left_key_column_ids.push(
+                pair[..16]
+                    .try_into()
+                    .map_err(|_| PlannerRequestError::InvalidPayload)?,
+            );
+            right_key_column_ids.push(
+                pair[16..]
+                    .try_into()
+                    .map_err(|_| PlannerRequestError::InvalidPayload)?,
+            );
+        }
+        if left_key_column_ids.contains(&[0; 16])
+            || right_key_column_ids.contains(&[0; 16])
+            || left_key_column_ids
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != key_count
+            || right_key_column_ids
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != key_count
+        {
+            return Err(PlannerRequestError::InvalidPayload);
+        }
+        Ok(Self {
+            schema_name: left.schema_name,
+            left_relation_name: left.relation_name,
+            right_relation_name: right.relation_name,
+            left_key_column_ids,
+            right_key_column_ids,
+            maximum_rows,
+        })
+    }
+}
+
 impl EstimatePredicateRequest {
     pub fn from_bound_predicate(
         schema_name: String,
@@ -803,6 +958,51 @@ pub enum EstimatePredicateResponse {
         matching_rows: u64,
     },
     Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EstimateJoinResponse {
+    Exact { joined_rows: u64 },
+    Unknown,
+}
+
+impl EstimateJoinResponse {
+    pub fn encode(self) -> Result<Vec<u8>, PlannerRequestError> {
+        match self {
+            Self::Exact { joined_rows } => {
+                let mut payload = Vec::with_capacity(10);
+                payload.extend_from_slice(&JOIN_ESTIMATE_RESPONSE_MARKER);
+                payload.extend_from_slice(&joined_rows.to_be_bytes());
+                ensure_response_size(&payload)?;
+                Ok(payload)
+            }
+            Self::Unknown => {
+                let payload =
+                    crate::query_abi::encode_planner_estimate_scan_unknown_response(1).to_vec();
+                ensure_response_size(&payload)?;
+                Ok(payload)
+            }
+        }
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Self, PlannerRequestError> {
+        if payload.starts_with(&JOIN_ESTIMATE_RESPONSE_MARKER) {
+            if payload.len() != 10 {
+                return Err(PlannerRequestError::InvalidPayload);
+            }
+            return Ok(Self::Exact {
+                joined_rows: u64::from_be_bytes(
+                    payload[2..10]
+                        .try_into()
+                        .map_err(|_| PlannerRequestError::InvalidPayload)?,
+                ),
+            });
+        }
+        match crate::query_abi::decode_planner_estimate_scan_unknown_response(payload) {
+            Some(1) => Ok(Self::Unknown),
+            _ => Err(PlannerRequestError::InvalidPayload),
+        }
+    }
 }
 
 impl EstimatePredicateResponse {
@@ -1035,6 +1235,21 @@ pub fn dispatch_planner_request(
                         matching_rows,
                     },
                     None => EstimatePredicateResponse::Unknown,
+                }
+                .encode()?
+            } else if request.payload.starts_with(&JOIN_ESTIMATE_REQUEST_MARKER) {
+                let decoded = EstimateJoinRequest::decode(&request.payload)?;
+                let estimate = connection.estimate_join_cardinality_for_plan(
+                    &decoded.schema_name,
+                    &decoded.left_relation_name,
+                    &decoded.right_relation_name,
+                    &decoded.left_key_column_ids,
+                    &decoded.right_key_column_ids,
+                    decoded.maximum_rows,
+                )?;
+                match estimate {
+                    Some(joined_rows) => EstimateJoinResponse::Exact { joined_rows },
+                    None => EstimateJoinResponse::Unknown,
                 }
                 .encode()?
             } else {
@@ -1369,5 +1584,48 @@ mod scan_estimate_request_tests {
         let mut malformed = encoded;
         *malformed.last_mut().unwrap() ^= 1;
         assert!(EstimatePredicateRequest::decode(&malformed).is_err());
+    }
+}
+
+#[cfg(test)]
+mod join_estimate_request_tests {
+    use super::{EstimateJoinRequest, EstimateJoinResponse};
+
+    #[test]
+    fn join_cardinality_estimate_codec_is_bounded_and_canonical() {
+        let request = EstimateJoinRequest {
+            schema_name: "sales".to_owned(),
+            left_relation_name: "orders".to_owned(),
+            right_relation_name: "items".to_owned(),
+            left_key_column_ids: vec![[0x11; 16], [0x12; 16]],
+            right_key_column_ids: vec![[0x21; 16], [0x22; 16]],
+            maximum_rows: 128,
+        };
+        let encoded = request.encode().unwrap();
+        assert_eq!(&encoded[..2], &[0x52, 0x08]);
+        assert_eq!(EstimateJoinRequest::decode(&encoded).unwrap(), request);
+
+        for response in [
+            EstimateJoinResponse::Exact { joined_rows: 0 },
+            EstimateJoinResponse::Exact {
+                joined_rows: 16_384,
+            },
+            EstimateJoinResponse::Unknown,
+        ] {
+            assert_eq!(
+                EstimateJoinResponse::decode(&response.encode().unwrap()).unwrap(),
+                response
+            );
+        }
+
+        let mut malformed = encoded.clone();
+        malformed[2..4].copy_from_slice(&129u16.to_be_bytes());
+        assert!(EstimateJoinRequest::decode(&malformed).is_err());
+        let mut mismatched_keys = request.clone();
+        mismatched_keys.right_key_column_ids.pop();
+        assert!(mismatched_keys.encode().is_err());
+        let mut zero_key = request;
+        zero_key.left_key_column_ids[0] = [0; 16];
+        assert!(zero_key.encode().is_err());
     }
 }

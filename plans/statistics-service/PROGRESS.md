@@ -1,5 +1,13 @@
 # Statistics Service Progress
 
+## ST-2 / OP-4 follow-up: bounded authorized join fanout estimate — implementation
+
+- Contract: for a join whose authorized populations are each at most 128, storage may return exact matching pair count for one-to-eight key columns only when row visibility is value-independent and key cells are unconditionally readable. NULL-containing keys do not match. Decoded rows are capped at 8 MiB and each encoded composite key at 4 KiB; unsupported, redacted, oversized, incomplete, or exhausted cases return `Unknown` without partial results.
+- Implementation: the planner-only `EstimateScan` protocol carries the qualified relation names, paired key-column IDs, and row bound. Storage re-resolves both relations against the pinned invocation context, includes staged private writes, and uses a planner-session cache invalidated by every private write. Each request consumes the shared estimate allowance. `Unknown` results are not cached.
+- Optimizer: when one side has 9–16 rows and the other is at least eight times larger, an exact fanout of at most four pairs per outer row permits an eligible indexed nested-loop plan; higher fanout keeps hash join. Existing small-input and measured eight-row/16:1 rules retain precedence. Tests cover storage duplicate fanout, NULL non-matches, overlay writes, unreadable keys, population cap, bounded IPC codec, planner process request/response, and optimizer decisions.
+- Validation so far: focused transaction, codec, optimizer-service, and planner-process tests pass. The threshold is not yet backed by confined strategy timings under mixed operational load. Workspace-wide checks and full suite are still pending.
+- Remaining: run the focused end-to-end indexed-versus-hash profile for moderate outer cardinalities and multiple fanout levels before treating the four-pair crossover as validated. Global-statistics consumption, populations above 128, composite index-prefix probing, target-host profiles, and general cost-based selection remain open.
+
 ## ST-2 contract synchronization across storage and planner IPC specs — verified
 
 - Correction: updated [storage manager](../../specs/storage-manager.md) and [IPC protocol](../../specs/ipc-protocol.md) to reflect that filtered ordinary unordered SELECT uses only exact zero-match predicate estimates for the no-scan hint, and that planner relation descriptions may carry both approved unique and non-unique range paths.

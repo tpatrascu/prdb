@@ -43,6 +43,7 @@ use crate::schema::{ENGINE_META, OUTCOMES, PRINCIPAL_NAMES};
 use crate::snapshot::{MAX_CATALOG_FAMILY_SCAN, MAX_ROW_SCAN_PAGE, RowSnapshot, SnapshotError};
 use crate::statistics::{
     AuthorizedScanEstimate, AuthorizedScanSummary, ColumnPopulation, MAX_ESTIMATE_CANDIDATES,
+    MAX_JOIN_ESTIMATE_BYTES, MAX_JOIN_ESTIMATE_KEY_BYTES, MAX_JOIN_ESTIMATE_ROWS,
     MAX_PREDICATE_ESTIMATE_ROWS,
 };
 use crate::storage_manager::{InvocationAdmissionMetrics, InvocationAdmissionPermit};
@@ -356,6 +357,7 @@ pub struct PlannerMetadataConnection<'connection, 'db> {
     estimate_requests: usize,
     predicate_estimates: HashMap<PredicateEstimateCacheKey, (u64, (u64, u64))>,
     population_estimates: HashMap<PopulationEstimateCacheKey, (u64, u64)>,
+    join_estimates: HashMap<JoinEstimateCacheKey, (u64, u64)>,
     summary_estimates:
         HashMap<SummaryEstimateCacheKey, (u64, crate::statistics::AuthorizedScanSummary)>,
 }
@@ -367,6 +369,7 @@ pub(crate) struct PlannerMetadataSessionState {
     estimate_requests: usize,
     predicate_estimates: HashMap<PredicateEstimateCacheKey, (u64, (u64, u64))>,
     population_estimates: HashMap<PopulationEstimateCacheKey, (u64, u64)>,
+    join_estimates: HashMap<JoinEstimateCacheKey, (u64, u64)>,
     summary_estimates:
         HashMap<SummaryEstimateCacheKey, (u64, crate::statistics::AuthorizedScanSummary)>,
 }
@@ -387,6 +390,17 @@ struct PopulationEstimateCacheKey {
     relation_id: [u8; 16],
     schema_id: [u8; 16],
     schema_version: u64,
+    maximum_rows: u64,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct JoinEstimateCacheKey {
+    left_relation_id: [u8; 16],
+    right_relation_id: [u8; 16],
+    schema_id: [u8; 16],
+    schema_version: u64,
+    left_key_column_ids: Vec<[u8; 16]>,
+    right_key_column_ids: Vec<[u8; 16]>,
     maximum_rows: u64,
 }
 
@@ -898,6 +912,7 @@ impl<'db> InvocationTransaction<'db> {
             estimate_requests: state.estimate_requests,
             predicate_estimates: state.predicate_estimates,
             population_estimates: state.population_estimates,
+            join_estimates: state.join_estimates,
             summary_estimates: state.summary_estimates,
         }
     }
@@ -2262,6 +2277,255 @@ impl<'db> InvocationTransaction<'db> {
             }
         }
         self.finish_population_probe(Some(visible_rows.len() as u64))
+    }
+
+    /// Estimate the exact INNER JOIN output count for bounded authorized
+    /// populations. Join-key values are read only when each key column is
+    /// unconditionally readable and both row populations are value-independent.
+    #[allow(clippy::too_many_arguments)] // Each relation supplies an ID, projection, and paired key IDs.
+    pub fn estimate_authorized_join_cardinality_at_most(
+        &mut self,
+        left_table_id: [u8; 16],
+        left_projection: &AuthorizedProjection<'_>,
+        left_key_column_ids: &[[u8; 16]],
+        right_table_id: [u8; 16],
+        right_projection: &AuthorizedProjection<'_>,
+        right_key_column_ids: &[[u8; 16]],
+        maximum_rows: u64,
+    ) -> Result<Option<u64>, TransactionError> {
+        self.check_deadline()?;
+        if maximum_rows > MAX_JOIN_ESTIMATE_ROWS
+            || left_key_column_ids.is_empty()
+            || left_key_column_ids.len() > 8
+            || left_key_column_ids.len() != right_key_column_ids.len()
+            || !valid_estimate_projection(left_table_id, left_projection)
+            || !valid_estimate_projection(right_table_id, right_projection)
+            || left_projection.schema_id != right_projection.schema_id
+            || left_projection.schema_version != right_projection.schema_version
+            || left_projection.context.principal_id != right_projection.context.principal_id
+            || left_projection.context.role_ids != right_projection.context.role_ids
+            || left_projection.context.scope != right_projection.context.scope
+        {
+            return Ok(None);
+        }
+        let left_ordinals = join_key_ordinals(left_table_id, left_projection, left_key_column_ids);
+        let right_ordinals =
+            join_key_ordinals(right_table_id, right_projection, right_key_column_ids);
+        let (Some(left_ordinals), Some(right_ordinals)) = (left_ordinals, right_ordinals) else {
+            return Ok(None);
+        };
+        if left_ordinals
+            .iter()
+            .zip(&right_ordinals)
+            .any(|(left, right)| {
+                !estimate_join_types_compatible(
+                    left_projection.columns[*left].scalar_type,
+                    right_projection.columns[*right].scalar_type,
+                )
+            })
+        {
+            return Ok(None);
+        }
+        if let Err(error) = self
+            .capture_authority_dependencies(left_projection.context, left_projection.dependencies)
+            .and_then(|()| {
+                self.capture_authority_dependencies(
+                    right_projection.context,
+                    right_projection.dependencies,
+                )
+            })
+        {
+            return if estimate_error_is_terminal(&error) {
+                Err(error)
+            } else {
+                Ok(None)
+            };
+        }
+        let left_population = estimate_population(left_table_id, left_projection);
+        let right_population = estimate_population(right_table_id, right_projection);
+        let (Some(left_population), Some(right_population)) = (left_population, right_population)
+        else {
+            return Ok(None);
+        };
+        if left_population == EstimatePopulation::NoRows
+            || right_population == EstimatePopulation::NoRows
+        {
+            self.check_deadline()?;
+            return Ok(Some(0));
+        }
+        if left_key_column_ids.iter().any(|column_id| {
+            !index_component_unconditionally_readable(left_projection, left_table_id, *column_id)
+        }) || right_key_column_ids.iter().any(|column_id| {
+            !index_component_unconditionally_readable(right_projection, right_table_id, *column_id)
+        }) {
+            return Ok(None);
+        }
+        let mut row_bytes = 0usize;
+        let Some(left_frequencies) = self.estimate_join_key_frequencies(
+            left_table_id,
+            left_projection,
+            &left_ordinals,
+            maximum_rows,
+            &mut row_bytes,
+        )?
+        else {
+            return Ok(None);
+        };
+        let Some(right_frequencies) = self.estimate_join_key_frequencies(
+            right_table_id,
+            right_projection,
+            &right_ordinals,
+            maximum_rows,
+            &mut row_bytes,
+        )?
+        else {
+            return Ok(None);
+        };
+        let mut joined_rows = 0u64;
+        for (key, left_count) in left_frequencies {
+            let Some(right_count) = right_frequencies.get(&key) else {
+                continue;
+            };
+            let Some(matches) = left_count.checked_mul(*right_count) else {
+                return Ok(None);
+            };
+            let Some(total) = joined_rows.checked_add(matches) else {
+                return Ok(None);
+            };
+            joined_rows = total;
+        }
+        self.check_deadline()?;
+        Ok(Some(joined_rows))
+    }
+
+    fn estimate_join_key_frequencies(
+        &mut self,
+        table_id: [u8; 16],
+        projection: &AuthorizedProjection<'_>,
+        key_ordinals: &[usize],
+        maximum_rows: u64,
+        bytes_read: &mut usize,
+    ) -> Result<Option<HashMap<Vec<u8>, u64>>, TransactionError> {
+        let Some(candidate_limit) = usize::try_from(maximum_rows)
+            .ok()
+            .and_then(|rows| rows.checked_add(1))
+        else {
+            return Ok(None);
+        };
+        let mut row_ids = Vec::with_capacity(candidate_limit.min(MAX_ROW_SCAN_PAGE));
+        let mut after_row_id = None;
+        loop {
+            let limit = candidate_limit
+                .saturating_sub(row_ids.len())
+                .min(MAX_ROW_SCAN_PAGE);
+            if limit == 0 {
+                return Ok(None);
+            }
+            let (page, complete) =
+                match self
+                    .pinned_snapshot()?
+                    .scan_row_ids_after(table_id, after_row_id, limit)
+                {
+                    Ok(page) => page,
+                    Err(_) => return Ok(None),
+                };
+            if page.is_empty() {
+                if complete {
+                    break;
+                }
+                return Ok(None);
+            }
+            if page.len() < limit && !complete {
+                return Ok(None);
+            }
+            after_row_id = page.last().copied();
+            row_ids.extend(page);
+            if complete {
+                break;
+            }
+        }
+        if row_ids.len() == candidate_limit {
+            return Ok(None);
+        }
+        let overlay_ids = match self
+            .overlay
+            .bounded_row_ids_for_table(table_id, maximum_rows as usize)
+        {
+            Ok(Some(ids)) => ids,
+            Ok(None) => return Ok(None),
+            Err(OverlayError::Aborted) => return Err(TransactionError::Aborted),
+            Err(_) => return Ok(None),
+        };
+        row_ids.extend(overlay_ids);
+        row_ids.sort_unstable();
+        row_ids.dedup();
+        if row_ids.len() as u64 > maximum_rows {
+            return Ok(None);
+        }
+        let key_columns = key_ordinals
+            .iter()
+            .map(|ordinal| projection.columns[*ordinal].clone())
+            .collect::<Vec<_>>();
+        let mut frequencies = HashMap::new();
+        for row_id in row_ids {
+            self.check_deadline()?;
+            let id = RowId {
+                table: table_id,
+                row: row_id,
+            };
+            match self.overlay.get_for_actor(&id, self.principal_id) {
+                Ok(Some(StagedRow::Delete)) => continue,
+                Ok(Some(StagedRow::Value(_))) | Ok(None) => {}
+                Err(OverlayError::Aborted) => return Err(TransactionError::Aborted),
+                Err(_) => return Ok(None),
+            }
+            let payload = match self.read_inner(id) {
+                Ok(Some(payload)) => payload,
+                Ok(None) => return Ok(None),
+                Err(error) if estimate_error_is_terminal(&error) => return Err(error),
+                Err(_) => return Ok(None),
+            };
+            *bytes_read = bytes_read.saturating_add(payload.len());
+            if *bytes_read > MAX_JOIN_ESTIMATE_BYTES {
+                return Ok(None);
+            }
+            let tuple = match decode_tuple(projection.columns, projection.schema_version, &payload)
+            {
+                Ok(tuple) => tuple,
+                Err(_) => return Ok(None),
+            };
+            let cells = match project_row(
+                projection.context,
+                projection.grants,
+                projection.policies,
+                projection.schema_id,
+                table_id,
+                projection.column_ids,
+                &tuple.values,
+            ) {
+                Ok(Some(cells)) => cells,
+                Ok(None) => return Ok(None),
+                Err(_) => return Ok(None),
+            };
+            let mut values = Vec::with_capacity(key_ordinals.len());
+            let mut contains_null = false;
+            for ordinal in key_ordinals {
+                match cells.get(*ordinal) {
+                    Some(SanitizedCell::Value(value)) => values.push(Some(value.clone())),
+                    Some(SanitizedCell::Null) => contains_null = true,
+                    Some(SanitizedCell::Redacted) | None => return Ok(None),
+                }
+            }
+            if contains_null {
+                continue;
+            }
+            let key = match encode_sql_tuple(&key_columns, &values) {
+                Ok(key) if key.len() <= MAX_JOIN_ESTIMATE_KEY_BYTES => key,
+                _ => return Ok(None),
+            };
+            *frequencies.entry(key).or_insert(0u64) += 1;
+        }
+        Ok(Some(frequencies))
     }
 
     /// Estimate exact matches for a bounded predicate over an authorized
@@ -10187,6 +10451,7 @@ impl PlannerMetadataConnection<'_, '_> {
             estimate_requests: self.estimate_requests,
             predicate_estimates: self.predicate_estimates,
             population_estimates: self.population_estimates,
+            join_estimates: self.join_estimates,
             summary_estimates: self.summary_estimates,
         }
     }
@@ -10491,6 +10756,127 @@ impl PlannerMetadataConnection<'_, '_> {
                 transaction.estimate_authorized_population_at_most(
                     description.relation_id,
                     &projection,
+                    maximum_rows,
+                )
+            },
+        )
+    }
+
+    /// Estimate the exact bounded INNER JOIN fanout after re-resolving both
+    /// named relations in this invocation's pinned authorization context.
+    pub fn estimate_join_cardinality_for_plan(
+        &mut self,
+        schema_name: &str,
+        left_relation_name: &str,
+        right_relation_name: &str,
+        left_key_column_ids: &[[u8; 16]],
+        right_key_column_ids: &[[u8; 16]],
+        maximum_rows: u64,
+    ) -> Result<Option<u64>, TransactionError> {
+        self.transaction.check_deadline()?;
+        if schema_name == "information_schema"
+            || maximum_rows > MAX_JOIN_ESTIMATE_ROWS
+            || left_key_column_ids.is_empty()
+            || left_key_column_ids.len() > 8
+            || left_key_column_ids.len() != right_key_column_ids.len()
+            || left_key_column_ids.contains(&[0; 16])
+            || right_key_column_ids.contains(&[0; 16])
+            || !consume_planner_estimate_budget(&mut self.estimate_requests)
+        {
+            return Ok(None);
+        }
+        let Some(left_relation) =
+            self.describe_relation_for_plan(schema_name, left_relation_name)?
+        else {
+            return Ok(None);
+        };
+        let Some(right_relation) =
+            self.describe_relation_for_plan(schema_name, right_relation_name)?
+        else {
+            return Ok(None);
+        };
+        if left_relation.schema_id != right_relation.schema_id
+            || left_relation.schema_version != right_relation.schema_version
+            || left_key_column_ids.iter().any(|column_id| {
+                !left_relation
+                    .relation
+                    .columns
+                    .iter()
+                    .any(|column| column.column_id == *column_id)
+            })
+            || right_key_column_ids.iter().any(|column_id| {
+                !right_relation
+                    .relation
+                    .columns
+                    .iter()
+                    .any(|column| column.column_id == *column_id)
+            })
+        {
+            return Ok(None);
+        }
+        let cache_key = JoinEstimateCacheKey {
+            left_relation_id: left_relation.relation.relation_id,
+            right_relation_id: right_relation.relation.relation_id,
+            schema_id: left_relation.schema_id,
+            schema_version: left_relation.schema_version,
+            left_key_column_ids: left_key_column_ids.to_vec(),
+            right_key_column_ids: right_key_column_ids.to_vec(),
+            maximum_rows,
+        };
+        let left_state = match self
+            .transaction
+            .load_catalog_estimate_projection(left_relation.relation.relation_id)
+        {
+            Ok(state) => state,
+            Err(error) if estimate_error_is_terminal(&error) => return Err(error),
+            Err(_) => return Ok(None),
+        };
+        let right_state = match self
+            .transaction
+            .load_catalog_estimate_projection(right_relation.relation.relation_id)
+        {
+            Ok(state) => state,
+            Err(error) if estimate_error_is_terminal(&error) => return Err(error),
+            Err(_) => return Ok(None),
+        };
+        let left_projection = AuthorizedProjection {
+            columns: &left_state.schema.columns,
+            column_ids: &left_state.schema.column_ids,
+            schema_version: left_state.schema.schema_version,
+            schema_id: left_state.schema.schema_id,
+            context: &left_state.context,
+            grants: &left_state.grants,
+            policies: &left_state.policies,
+            checks: &left_state.checks,
+            policy_driving_columns: &left_state.policy_driving_columns,
+            dependencies: &[],
+        };
+        let right_projection = AuthorizedProjection {
+            columns: &right_state.schema.columns,
+            column_ids: &right_state.schema.column_ids,
+            schema_version: right_state.schema.schema_version,
+            schema_id: right_state.schema.schema_id,
+            context: &right_state.context,
+            grants: &right_state.grants,
+            policies: &right_state.policies,
+            checks: &right_state.checks,
+            policy_driving_columns: &right_state.policy_driving_columns,
+            dependencies: &[],
+        };
+        let write_generation = self.transaction.overlay.generation();
+        let transaction = &mut *self.transaction;
+        cached_exact_estimate(
+            &mut self.join_estimates,
+            cache_key,
+            write_generation,
+            || {
+                transaction.estimate_authorized_join_cardinality_at_most(
+                    left_relation.relation.relation_id,
+                    &left_projection,
+                    left_key_column_ids,
+                    right_relation.relation.relation_id,
+                    &right_projection,
+                    right_key_column_ids,
                     maximum_rows,
                 )
             },
@@ -11027,6 +11413,35 @@ fn valid_estimate_projection(table_id: [u8; 16], projection: &AuthorizedProjecti
             .policies
             .iter()
             .all(|policy| policy.subjects.len() <= crate::authorization::MAX_POLICY_SUBJECTS)
+}
+
+fn join_key_ordinals(
+    table_id: [u8; 16],
+    projection: &AuthorizedProjection<'_>,
+    column_ids: &[[u8; 16]],
+) -> Option<Vec<usize>> {
+    if table_id == [0; 16]
+        || column_ids.is_empty()
+        || column_ids.len() > 8
+        || column_ids.contains(&[0; 16])
+        || column_ids.iter().copied().collect::<HashSet<_>>().len() != column_ids.len()
+    {
+        return None;
+    }
+    column_ids
+        .iter()
+        .map(|column_id| projection.column_ids.iter().position(|id| id == column_id))
+        .collect()
+}
+
+fn estimate_join_types_compatible(left: ScalarType, right: ScalarType) -> bool {
+    match (left, right) {
+        (ScalarType::Decimal { scale: left, .. }, ScalarType::Decimal { scale: right, .. }) => {
+            left == right
+        }
+        (ScalarType::Varchar { .. }, ScalarType::Varchar { .. }) => true,
+        (left, right) => left == right,
+    }
 }
 
 fn executor_batch_row_encoded_size(cells: &[SanitizedCell]) -> Result<usize, TransactionError> {

@@ -221,6 +221,72 @@ pub fn serve_optimizer_process<S: Read + Write, P: Read + Write>(
             visible_rows_estimates.push(described.visible_rows_estimate);
             relations.push(described.relation);
         }
+        let join_cardinality_estimate = if operation == Operation::OptimizeJoinSelect
+            && join_fanout_estimate_is_eligible(
+                visible_rows_estimates.first().copied().flatten(),
+                visible_rows_estimates.get(1).copied().flatten(),
+            ) {
+            let decoded = crate::optimizer_request::decode_join_select_request(&request.payload)
+                .map_err(|_| OptimizerProcessError::PlannerResponseMismatch)?;
+            match (
+                relations.first().and_then(Option::as_ref),
+                relations.get(1).and_then(Option::as_ref),
+            ) {
+                (Some(left_relation), Some(right_relation)) => {
+                    let left_key_ids = decoded
+                        .join_keys
+                        .iter()
+                        .map(|key| {
+                            left_relation
+                                .relation
+                                .columns
+                                .iter()
+                                .find(|column| {
+                                    column.name.eq_ignore_ascii_case(&key.left_column_name)
+                                })
+                                .map(|column| column.column_id)
+                        })
+                        .collect::<Option<Vec<_>>>();
+                    let right_key_ids = decoded
+                        .join_keys
+                        .iter()
+                        .map(|key| {
+                            right_relation
+                                .relation
+                                .columns
+                                .iter()
+                                .find(|column| {
+                                    column.name.eq_ignore_ascii_case(&key.right_column_name)
+                                })
+                                .map(|column| column.column_id)
+                        })
+                        .collect::<Option<Vec<_>>>();
+                    match (left_key_ids, right_key_ids) {
+                        (Some(left_key_ids), Some(right_key_ids)) => {
+                            if has_join_index_path(left_relation, &left_key_ids)
+                                || has_join_index_path(right_relation, &right_key_ids)
+                            {
+                                request_join_cardinality_estimate(
+                                    planner,
+                                    &mut next_planner_request_id,
+                                    decoded.schema_name,
+                                    decoded.left_relation_name,
+                                    decoded.right_relation_name,
+                                    left_key_ids,
+                                    right_key_ids,
+                                )?
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
         let optimized = match operation {
             Operation::OptimizeSelect => {
                 if request.payload.get(2)
@@ -250,12 +316,13 @@ pub fn serve_optimizer_process<S: Read + Write, P: Read + Write>(
                 )
             }
             Operation::OptimizeJoinSelect => {
-                crate::optimizer_service::optimize_join_select_v1_with_relations_and_estimates(
+                crate::optimizer_service::optimize_join_select_v1_with_relations_and_estimates_and_cardinality(
                     &request.payload,
                     relations.remove(0),
                     relations.remove(0),
                     visible_rows_estimates.first().copied().flatten(),
                     visible_rows_estimates.get(1).copied().flatten(),
+                    join_cardinality_estimate,
                 )
             }
             Operation::OptimizeGroupCount => {
@@ -443,6 +510,37 @@ pub fn serve_optimizer_process<S: Read + Write, P: Read + Write>(
     }
 }
 
+fn join_fanout_estimate_is_eligible(left_rows: Option<u64>, right_rows: Option<u64>) -> bool {
+    let (Some(left_rows), Some(right_rows)) = (left_rows, right_rows) else {
+        return false;
+    };
+    let outer_max = crate::optimizer_plan::FANOUT_AWARE_JOIN_OUTER_MAX_ROWS;
+    let ratio = crate::optimizer_plan::FANOUT_AWARE_JOIN_INPUT_RATIO;
+    (9..=outer_max).contains(&left_rows) && right_rows >= left_rows * ratio
+        || (9..=outer_max).contains(&right_rows) && left_rows >= right_rows * ratio
+}
+
+fn has_join_index_path(
+    relation: &crate::metadata_discovery::AuthorizedPlanRelation,
+    join_key_column_ids: &[[u8; 16]],
+) -> bool {
+    relation
+        .unique_access_paths
+        .iter()
+        .map(|path| path.column_ids.as_slice())
+        .chain(
+            relation
+                .range_access_paths
+                .iter()
+                .map(|path| path.column_ids.as_slice()),
+        )
+        .any(|column_ids| {
+            column_ids
+                .first()
+                .is_some_and(|column_id| join_key_column_ids.contains(column_id))
+        })
+}
+
 fn request_predicate_estimate<P: Read + Write>(
     planner: &mut P,
     next_request_id: &mut u64,
@@ -476,6 +574,50 @@ fn request_predicate_estimate<P: Read + Write>(
     }
     crate::planner_ipc::EstimatePredicateResponse::decode(&response.payload)
         .map_err(OptimizerProcessError::PlannerPayload)
+}
+
+fn request_join_cardinality_estimate<P: Read + Write>(
+    planner: &mut P,
+    next_request_id: &mut u64,
+    schema_name: String,
+    left_relation_name: String,
+    right_relation_name: String,
+    left_key_column_ids: Vec<[u8; 16]>,
+    right_key_column_ids: Vec<[u8; 16]>,
+) -> Result<Option<u64>, OptimizerProcessError> {
+    let request_id = *next_request_id;
+    *next_request_id = next_request_id
+        .checked_add(1)
+        .ok_or(OptimizerProcessError::RequestLimitExceeded)?;
+    let request = IpcFrame {
+        operation: Operation::EstimateScan as u16,
+        request_id,
+        payload: crate::planner_ipc::EstimateJoinRequest {
+            schema_name,
+            left_relation_name,
+            right_relation_name,
+            left_key_column_ids,
+            right_key_column_ids,
+            maximum_rows: crate::statistics::MAX_JOIN_ESTIMATE_ROWS,
+        }
+        .encode()
+        .map_err(OptimizerProcessError::PlannerPayload)?,
+    };
+    authorize_operation(ServiceRole::Planner, Operation::EstimateScan)
+        .map_err(OptimizerProcessError::Dispatch)?;
+    crate::ipc::write_frame(planner, &request).map_err(OptimizerProcessError::Frame)?;
+    let response = crate::ipc::read_frame(planner)
+        .map_err(OptimizerProcessError::Frame)?
+        .ok_or(OptimizerProcessError::PlannerClosed)?;
+    if response.operation != request.operation || response.request_id != request.request_id {
+        return Err(OptimizerProcessError::PlannerResponseMismatch);
+    }
+    match crate::planner_ipc::EstimateJoinResponse::decode(&response.payload)
+        .map_err(OptimizerProcessError::PlannerPayload)?
+    {
+        crate::planner_ipc::EstimateJoinResponse::Exact { joined_rows } => Ok(Some(joined_rows)),
+        crate::planner_ipc::EstimateJoinResponse::Unknown => Ok(None),
+    }
 }
 
 fn write_submission_response<S: Write>(
@@ -1631,8 +1773,8 @@ mod tests {
                 for (request_id, name, relation_id, base_column_id) in [
                     (257, "lefts", 0x31, 0x41),
                     (258, "rights", 0x32, 0x51),
-                    (259, "lefts", 0x31, 0x41),
-                    (260, "rights", 0x32, 0x51),
+                    (260, "lefts", 0x31, 0x41),
+                    (261, "rights", 0x32, 0x51),
                 ] {
                     let request = crate::ipc::read_frame(&mut planner_server)
                         .unwrap()
@@ -1697,13 +1839,47 @@ mod tests {
                             payload: DescribePlanRelationResponse {
                                 relation: Some(relation),
                                 proven_empty: false,
-                                visible_rows_estimate: Some(if name == "lefts" { 64 } else { 96 }),
+                                visible_rows_estimate: Some(if name == "lefts" { 9 } else { 128 }),
                             }
                             .encode()
                             .unwrap(),
                         },
                     )
                     .unwrap();
+                    if name == "rights" {
+                        let estimate = crate::ipc::read_frame(&mut planner_server)
+                            .unwrap()
+                            .expect("optimizer must request the bounded join fanout estimate");
+                        assert_eq!(estimate.operation, Operation::EstimateScan as u16);
+                        let estimate_request =
+                            crate::planner_ipc::EstimateJoinRequest::decode(&estimate.payload)
+                                .unwrap();
+                        assert_eq!(estimate_request.schema_name, "public");
+                        assert_eq!(estimate_request.left_relation_name, "lefts");
+                        assert_eq!(estimate_request.right_relation_name, "rights");
+                        assert_eq!(estimate_request.maximum_rows, 128);
+                        assert_eq!(
+                            estimate_request.left_key_column_ids,
+                            vec![[0x41; 16], [0x42; 16]]
+                        );
+                        assert_eq!(
+                            estimate_request.right_key_column_ids,
+                            vec![[0x51; 16], [0x52; 16]]
+                        );
+                        crate::ipc::write_frame(
+                            &mut planner_server,
+                            &IpcFrame {
+                                operation: estimate.operation,
+                                request_id: estimate.request_id,
+                                payload: crate::planner_ipc::EstimateJoinResponse::Exact {
+                                    joined_rows: 9,
+                                }
+                                .encode()
+                                .unwrap(),
+                            },
+                        )
+                        .unwrap();
+                    }
                 }
             });
             let optimizer_thread = scope
@@ -1736,8 +1912,8 @@ mod tests {
             assert_eq!(plan.join_keys.len(), 2);
             assert_eq!(plan.limit, Some(5));
             assert!(
-                plan.index_nested_loop.is_none(),
-                "known medium-sized inputs should retain hash join"
+                plan.index_nested_loop.is_some(),
+                "low fanout for a moderately larger input should select indexed nested loop"
             );
 
             crate::ipc::write_frame(
