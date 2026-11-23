@@ -51649,6 +51649,7 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
         DescribePlanRelationRequest, DescribePlanRelationResponse, DescribeRelationResponse,
         EstimatePredicateRequest, EstimatePredicateResponse, EstimateScanRequest,
         EstimateScanResponse, MAX_PLANNER_REQUESTS_PER_CONNECTION, serve_planner,
+        serve_planner_shared_with_observer,
     };
     use prdb_engine::storage_manager::{
         CreatePolicyRequest, CreateTableRequest, ObjectGrantPrivilege, ObjectGrantTarget,
@@ -52044,9 +52045,44 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             )?,
         )?;
     }
+    let shared_transaction = std::sync::Arc::new(std::sync::Mutex::new(Some(transaction)));
     let (mut client, mut server) = std::os::unix::net::UnixStream::pair()?;
     std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
-        let planner = scope.spawn(|| serve_planner(&mut server, &mut transaction));
+        let service_transaction = std::sync::Arc::clone(&shared_transaction);
+        let observer_transaction = std::sync::Arc::clone(&shared_transaction);
+        let planner = scope.spawn(move || {
+            serve_planner_shared_with_observer(
+                &mut server,
+                &service_transaction,
+                |operation, request_id| {
+                    if operation == IpcOperation::EstimateScan as u16 && request_id == 6 {
+                        let mut invocation = observer_transaction
+                            .lock()
+                            .expect("shared planner invocation lock");
+                        invocation
+                            .as_mut()
+                            .expect("shared planner invocation remains active")
+                            .stage_put(
+                                prdb_engine::overlay::RowId {
+                                    table: table.table_id,
+                                    row: id(0x91),
+                                },
+                                &encode_tuple(
+                                    &[ColumnSchema {
+                                        scalar_type: ScalarType::Integer,
+                                        nullable: true,
+                                    }],
+                                    1,
+                                    &[Some(ScalarValue::Integer(7))],
+                                )
+                                .expect("encode private predicate-match row"),
+                            )
+                            .expect("stage private predicate-match row");
+                    }
+                    Ok(())
+                },
+            )
+        });
         prdb_engine::ipc::write_frame(
             &mut client,
             &IpcFrame {
@@ -52146,7 +52182,55 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             }
         );
 
-        for request_id in 5..(2 + MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION as u64) {
+        prdb_engine::ipc::write_frame(
+            &mut client,
+            &IpcFrame {
+                operation: IpcOperation::EstimateScan as u16,
+                request_id: 5,
+                payload: EstimatePredicateRequest::from_bound_predicate(
+                    "planner_stats".to_owned(),
+                    "observations".to_owned(),
+                    &estimate_predicate,
+                )?
+                .encode()?,
+            },
+        )?;
+        let repeated_estimate = prdb_engine::ipc::read_frame(&mut client)?
+            .ok_or("planner stream closed before repeated predicate estimate")?;
+        assert_eq!(
+            EstimatePredicateResponse::decode(&repeated_estimate.payload)?,
+            EstimatePredicateResponse::Exact {
+                visible_rows: 5,
+                matching_rows: 1,
+            },
+            "an identical request in one unchanged session must preserve its exact result"
+        );
+
+        prdb_engine::ipc::write_frame(
+            &mut client,
+            &IpcFrame {
+                operation: IpcOperation::EstimateScan as u16,
+                request_id: 6,
+                payload: EstimatePredicateRequest::from_bound_predicate(
+                    "planner_stats".to_owned(),
+                    "observations".to_owned(),
+                    &estimate_predicate,
+                )?
+                .encode()?,
+            },
+        )?;
+        let post_write_estimate = prdb_engine::ipc::read_frame(&mut client)?
+            .ok_or("planner stream closed before post-write predicate estimate")?;
+        assert_eq!(
+            EstimatePredicateResponse::decode(&post_write_estimate.payload)?,
+            EstimatePredicateResponse::Exact {
+                visible_rows: 6,
+                matching_rows: 2,
+            },
+            "a private write between identical estimates must invalidate session reuse"
+        );
+
+        for request_id in 7..(2 + MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION as u64) {
             prdb_engine::ipc::write_frame(
                 &mut client,
                 &IpcFrame {
@@ -52164,9 +52248,9 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             assert_eq!(
                 EstimateScanResponse::decode(&response.payload)?,
                 EstimateScanResponse::Exact(prdb_engine::statistics::AuthorizedScanSummary {
-                    visible_rows: 5,
+                    visible_rows: 6,
                     columns: vec![prdb_engine::statistics::ColumnPopulation {
-                        readable_values: 5,
+                        readable_values: 6,
                         nulls: 0,
                         redacted: 0,
                     }],
@@ -52225,6 +52309,11 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             .map_err(|error| format!("planner server failed: {error:?}"))?;
         Ok(())
     })?;
+    let mut transaction = std::sync::Arc::try_unwrap(shared_transaction)
+        .unwrap_or_else(|_| panic!("planner service released its invocation handle"))
+        .into_inner()
+        .expect("planner invocation lock remains healthy")
+        .expect("planner invocation remains available after clean EOF");
     assert!(transaction.check_deadline().is_ok());
 
     let (mut executor_client, mut executor_storage) = std::os::unix::net::UnixStream::pair()?;

@@ -347,12 +347,14 @@ pub(crate) struct ExecutorMetadataSessionState {
 }
 
 /// Planner metadata session with opaque, connection-local table handles.
-/// Estimates are rebuilt from the invocation's pinned catalog on each request.
+/// Exact predicate estimates may be reused while the invocation and its
+/// private-write generation remain unchanged.
 pub struct PlannerMetadataConnection<'connection, 'db> {
     transaction: &'connection mut InvocationTransaction<'db>,
     handles: HashMap<[u8; 16], PlannerTableHandleState>,
     used_tokens: HashSet<[u8; 16]>,
     estimate_requests: usize,
+    predicate_estimates: HashMap<PredicateEstimateCacheKey, (u64, (u64, u64))>,
 }
 
 #[derive(Default)]
@@ -360,6 +362,18 @@ pub(crate) struct PlannerMetadataSessionState {
     handles: HashMap<[u8; 16], PlannerTableHandleState>,
     used_tokens: HashSet<[u8; 16]>,
     estimate_requests: usize,
+    predicate_estimates: HashMap<PredicateEstimateCacheKey, (u64, (u64, u64))>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct PredicateEstimateCacheKey {
+    relation_id: [u8; 16],
+    schema_id: [u8; 16],
+    schema_version: u64,
+    schema_name: String,
+    relation_name: String,
+    predicate_bytes: Vec<u8>,
+    maximum_rows: u64,
 }
 
 #[derive(Clone)]
@@ -860,6 +874,7 @@ impl<'db> InvocationTransaction<'db> {
             handles: state.handles,
             used_tokens: state.used_tokens,
             estimate_requests: state.estimate_requests,
+            predicate_estimates: state.predicate_estimates,
         }
     }
 
@@ -10146,6 +10161,7 @@ impl PlannerMetadataConnection<'_, '_> {
             handles: self.handles,
             used_tokens: self.used_tokens,
             estimate_requests: self.estimate_requests,
+            predicate_estimates: self.predicate_estimates,
         }
     }
 
@@ -10430,6 +10446,22 @@ impl PlannerMetadataConnection<'_, '_> {
         {
             return Ok(None);
         }
+        let cache_key = PredicateEstimateCacheKey {
+            relation_id: relation.relation.relation_id,
+            schema_id: relation.schema_id,
+            schema_version: relation.schema_version,
+            schema_name: schema_name.to_owned(),
+            relation_name: relation_name.to_owned(),
+            predicate_bytes: predicate_bytes.to_vec(),
+            maximum_rows: MAX_PREDICATE_ESTIMATE_ROWS,
+        };
+        let write_generation = self.transaction.overlay.generation();
+        self.predicate_estimates
+            .retain(|_, (generation, _)| *generation == write_generation);
+        if let Some((_, estimate)) = self.predicate_estimates.get(&cache_key) {
+            self.transaction.check_deadline()?;
+            return Ok(Some(*estimate));
+        }
         let state = match self
             .transaction
             .load_catalog_estimate_projection(relation.relation.relation_id)
@@ -10468,12 +10500,17 @@ impl PlannerMetadataConnection<'_, '_> {
             policy_driving_columns: &state.policy_driving_columns,
             dependencies: &[],
         };
-        self.transaction.estimate_authorized_predicate_at_most(
+        let estimate = self.transaction.estimate_authorized_predicate_at_most(
             relation.relation.relation_id,
             &projection,
             &predicate,
             MAX_PREDICATE_ESTIMATE_ROWS,
-        )
+        )?;
+        if let Some(estimate) = estimate {
+            self.predicate_estimates
+                .insert(cache_key, (write_generation, estimate));
+        }
+        Ok(estimate)
     }
 
     pub fn close_relation(&mut self, handle: &PlanningTableHandle) -> Result<(), TransactionError> {

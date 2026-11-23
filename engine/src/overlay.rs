@@ -32,6 +32,7 @@ pub struct Overlay {
     max_rows: usize,
     max_bytes: usize,
     bytes: usize,
+    generation: u64,
     aborted: bool,
 }
 impl Overlay {
@@ -41,6 +42,7 @@ impl Overlay {
             max_rows,
             max_bytes,
             bytes: 0,
+            generation: 0,
             aborted: false,
         }
     }
@@ -58,6 +60,7 @@ impl Overlay {
         actor_id: [u8; 16],
     ) -> Result<(), OverlayError> {
         let new_bytes = self.check_change(&id, value.len())?;
+        let generation = self.next_generation()?;
         self.rows.insert(
             id,
             StagedValue {
@@ -66,6 +69,7 @@ impl Overlay {
             },
         );
         self.bytes = new_bytes;
+        self.generation = generation;
         Ok(())
     }
 
@@ -77,6 +81,7 @@ impl Overlay {
     /// Stage a deletion attributed to the effective package actor.
     pub fn delete_as(&mut self, id: RowId, actor_id: [u8; 16]) -> Result<(), OverlayError> {
         let new_bytes = self.check_change(&id, 0)?;
+        let generation = self.next_generation()?;
         self.rows.insert(
             id,
             StagedValue {
@@ -85,6 +90,7 @@ impl Overlay {
             },
         );
         self.bytes = new_bytes;
+        self.generation = generation;
         Ok(())
     }
 
@@ -93,13 +99,28 @@ impl Overlay {
         if self.aborted {
             return Err(OverlayError::Aborted);
         }
+        if !self.rows.contains_key(id) {
+            return Ok(false);
+        }
+        let generation = self.next_generation()?;
         let Some(old) = self.rows.remove(id) else {
             return Ok(false);
         };
         if let Some(value) = old.value {
             self.bytes -= value.len();
         }
+        self.generation = generation;
         Ok(true)
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    fn next_generation(&self) -> Result<u64, OverlayError> {
+        self.generation
+            .checked_add(1)
+            .ok_or(OverlayError::LimitExceeded)
     }
 
     /// Consume the staged set for a terminal commit attempt.
@@ -335,5 +356,33 @@ mod tests {
 
         let entries = overlay.into_entries().unwrap();
         assert_eq!(entries, vec![(row(), Some(b"value".to_vec()))]);
+    }
+
+    #[test]
+    fn write_generation_advances_only_when_the_overlay_changes() {
+        let mut overlay = Overlay::new(1, 8);
+        assert_eq!(overlay.generation(), 0);
+        overlay.put_as(row(), b"one", [3; 16]).unwrap();
+        assert_eq!(overlay.generation(), 1);
+        overlay.put_as(row(), b"two", [3; 16]).unwrap();
+        assert_eq!(overlay.generation(), 2);
+        overlay.delete_as(row(), [3; 16]).unwrap();
+        assert_eq!(overlay.generation(), 3);
+        assert!(
+            !overlay
+                .remove(&RowId {
+                    table: [9; 16],
+                    row: [9; 16],
+                })
+                .unwrap()
+        );
+        assert_eq!(overlay.generation(), 3);
+        assert!(overlay.remove(&row()).unwrap());
+        assert_eq!(overlay.generation(), 4);
+        assert_eq!(
+            overlay.put_as(row(), b"123456789", [3; 16]),
+            Err(super::OverlayError::LimitExceeded)
+        );
+        assert_eq!(overlay.generation(), 4);
     }
 }
