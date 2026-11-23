@@ -2116,9 +2116,10 @@ impl<'db> InvocationTransaction<'db> {
         }
     }
 
-    /// Estimate whether the authorized population fits under a small fixed
-    /// bound. It reads at most `maximum_rows + 1` snapshot keys and does not
-    /// decode row values, so larger tables fall back without a table scan.
+    /// Estimate whether the authorized population fits under a fixed bound.
+    /// It reads at most `maximum_rows + 1` snapshot keys in bounded pages and
+    /// does not decode row values, so larger tables fall back without a full
+    /// table scan.
     pub fn estimate_authorized_population_at_most(
         &mut self,
         table_id: [u8; 16],
@@ -2126,7 +2127,9 @@ impl<'db> InvocationTransaction<'db> {
         maximum_rows: u64,
     ) -> Result<Option<u64>, TransactionError> {
         self.check_deadline()?;
-        if !valid_estimate_projection(table_id, projection) {
+        if maximum_rows > MAX_ESTIMATE_CANDIDATES as u64
+            || !valid_estimate_projection(table_id, projection)
+        {
             return Ok(None);
         }
         if let Err(error) =
@@ -2143,21 +2146,39 @@ impl<'db> InvocationTransaction<'db> {
             Some(EstimatePopulation::AllRows) => {}
             None => return self.finish_population_probe(None),
         }
-        let Some(limit) = usize::try_from(maximum_rows)
+        let Some(candidate_limit) = usize::try_from(maximum_rows)
             .ok()
             .and_then(|rows| rows.checked_add(1))
-            .filter(|limit| *limit <= MAX_ROW_SCAN_PAGE)
         else {
             return self.finish_population_probe(None);
         };
-        let (snapshot_ids, snapshot_complete) = match self
-            .pinned_snapshot()?
-            .scan_row_ids_after(table_id, None, limit)
-        {
-            Ok(page) => page,
-            Err(_) => return self.finish_population_probe(None),
-        };
-        if !snapshot_complete {
+        let mut snapshot_ids = Vec::with_capacity(candidate_limit.min(MAX_ROW_SCAN_PAGE));
+        let mut after_row_id = None;
+        loop {
+            let limit = candidate_limit
+                .saturating_sub(snapshot_ids.len())
+                .min(MAX_ROW_SCAN_PAGE);
+            if limit == 0 {
+                return self.finish_population_probe(None);
+            }
+            let (page, complete) =
+                match self
+                    .pinned_snapshot()?
+                    .scan_row_ids_after(table_id, after_row_id, limit)
+                {
+                    Ok(page) => page,
+                    Err(_) => return self.finish_population_probe(None),
+                };
+            if page.is_empty() {
+                break;
+            }
+            after_row_id = page.last().copied();
+            snapshot_ids.extend(page);
+            if complete {
+                break;
+            }
+        }
+        if snapshot_ids.len() == candidate_limit {
             return self.finish_population_probe(None);
         }
         let mut visible_rows = snapshot_ids.into_iter().collect::<HashSet<_>>();
@@ -2229,17 +2250,42 @@ impl<'db> InvocationTransaction<'db> {
         if population == 0 {
             return self.finish_predicate_estimate(Some((0, 0)));
         }
-        let Ok(row_limit) = usize::try_from(maximum_rows + 1) else {
+        let Ok(candidate_limit) = usize::try_from(maximum_rows + 1) else {
             return self.finish_predicate_estimate(None);
         };
-        let (mut row_ids, complete) = match self
-            .pinned_snapshot()?
-            .scan_row_ids_after(table_id, None, row_limit)
-        {
-            Ok(page) => page,
-            Err(_) => return self.finish_predicate_estimate(None),
-        };
-        if !complete {
+        let mut row_ids = Vec::with_capacity(candidate_limit.min(MAX_ROW_SCAN_PAGE));
+        let mut after_row_id = None;
+        loop {
+            let limit = candidate_limit
+                .saturating_sub(row_ids.len())
+                .min(MAX_ROW_SCAN_PAGE);
+            if limit == 0 {
+                return self.finish_predicate_estimate(None);
+            }
+            let (page, complete) =
+                match self
+                    .pinned_snapshot()?
+                    .scan_row_ids_after(table_id, after_row_id, limit)
+                {
+                    Ok(page) => page,
+                    Err(_) => return self.finish_predicate_estimate(None),
+                };
+            if page.is_empty() {
+                if complete {
+                    break;
+                }
+                return self.finish_predicate_estimate(None);
+            }
+            if page.len() < limit && !complete {
+                return self.finish_predicate_estimate(None);
+            }
+            after_row_id = page.last().copied();
+            row_ids.extend(page);
+            if complete {
+                break;
+            }
+        }
+        if row_ids.len() == candidate_limit {
             return self.finish_predicate_estimate(None);
         }
         let overlay_limit = usize::try_from(maximum_rows).unwrap_or(0);

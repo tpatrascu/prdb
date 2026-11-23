@@ -6557,7 +6557,7 @@ fn authorized_scan_estimate_counts_sanitized_cells_and_private_writes()
         None
     );
     let mut boundary_probe =
-        InvocationTransaction::begin(&database, [0x3a; 16], [9; 16], 9_999, 8, 512)?;
+        InvocationTransaction::begin(&database, [0x3a; 16], [9; 16], 9_999, 256, 32_768)?;
     boundary_probe.stage_put(id(3), &row(Some("third"), "secret-three"))?;
     boundary_probe.stage_put(id(4), &row(Some("fourth"), "secret-four"))?;
     assert_eq!(
@@ -6594,6 +6594,50 @@ fn authorized_scan_estimate_counts_sanitized_cells_and_private_writes()
             &projection,
             &predicate,
             129,
+        )?,
+        Some((5, 1)),
+        "predicate estimate limit must cover more than 128 rows when population is smaller"
+    );
+    for row_number in 6..=129 {
+        boundary_probe.stage_put(
+            id(row_number),
+            &row(Some("other"), &format!("secret-{row_number}")),
+        )?;
+    }
+    assert_eq!(
+        boundary_probe.estimate_authorized_population_at_most(
+            table_id,
+            &projection,
+            prdb_engine::statistics::MAX_ESTIMATE_CANDIDATES as u64,
+        )?,
+        Some(129)
+    );
+    assert_eq!(
+        boundary_probe.estimate_authorized_predicate_at_most(
+            table_id,
+            &projection,
+            &predicate,
+            128,
+        )?,
+        None,
+        "populations above the caller's bound must remain unknown"
+    );
+    assert_eq!(
+        boundary_probe.estimate_authorized_predicate_at_most(
+            table_id,
+            &projection,
+            &predicate,
+            prdb_engine::statistics::MAX_ESTIMATE_CANDIDATES as u64,
+        )?,
+        Some((129, 1)),
+        "bounded predicate estimates should cover exact authorized populations above 128 rows"
+    );
+    assert_eq!(
+        boundary_probe.estimate_authorized_predicate_at_most(
+            table_id,
+            &projection,
+            &predicate,
+            prdb_engine::statistics::MAX_ESTIMATE_CANDIDATES as u64 + 1,
         )?,
         None,
         "predicate estimate limit must remain explicitly bounded"

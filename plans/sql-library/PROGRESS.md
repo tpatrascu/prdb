@@ -1654,7 +1654,14 @@
 
 ## OP-4 follow-up: extend exact filtered estimates and use the visible scan population — implemented slice
 
-- Contract: filtered unordered SELECT estimates return exact visible and matching row counts only for fully readable, value-independent authorized populations up to 128 rows. Exact zero matches may emit the empty-view hint. Nonzero estimates use total `visible_rows` for the four-row sequential-scan crossover; a low match count alone does not justify scanning the full relation.
+- Contract: filtered unordered SELECT estimates return exact visible and matching row counts only for fully readable, value-independent authorized populations up to 16,384 rows, matching the estimator candidate cap. Exact zero matches may emit the empty-view hint. Nonzero estimates use total `visible_rows` for the four-row sequential-scan crossover; a low match count alone does not justify scanning the full relation.
 - Red/green: added a real-redb five-row estimate and a planner regression with eight visible rows but only two predicate matches. Both failed under the prior four-row cap / matching-count scan decision and pass after the change.
 - Profile: three sequential fresh-database release-harness runs (11 samples each) measured the 128-row predicate estimator at 0.131 ms median-of-run medians and 0.137 ms median-of-run p95s, excluding planner IPC and SQL execution.
 - Verification: focused transaction, planner-process, and real planner-stream tests passed. The release profile, `cargo fmt --all -- --check`, workspace build, warning-denied Clippy, and the complete serial delegated-cgroup workspace suite passed. The suite included sandboxed SQL, metadata-process, and transaction/storage tests. `git diff --check` passed.
+
+## OP-4 follow-up: page exact filtered estimates through 16,384 rows — verified slice
+
+- Contract: `EstimateScan` may return exact visible/matching counts for fully readable authorized populations through the 16,384-candidate bound, with row IDs read in storage-sized pages. Larger populations, incomplete reads, unsupported predicates, and redacted referenced cells return `Unknown` without partial counts.
+- Red/green: the real-redb regression failed at 129 rows under the previous 128-row cap; after widening the bound it verifies a 129-row private overlay result and the hard maximum. The release harness verifies an exact predicate count over 16,384 snapshot rows.
+- Profile: three fresh-database release runs measured median predicate-estimate latency of 17.235 ms and median p95 of 20.293 ms at the cap, excluding planner IPC and SQL execution.
+- Verification: workspace build, formatting, warning-denied Clippy, maintained TinyCC tests, fixture build, and full serial delegated-cgroup workspace acceptance passed. Larger populations and broader predicate types remain `Unknown`.

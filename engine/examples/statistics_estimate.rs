@@ -22,7 +22,7 @@ const DATASET_ROWS: [usize; 4] = [
     1_024,
     8_192,
     MAX_ESTIMATE_CANDIDATES - 1,
-    MAX_PREDICATE_ESTIMATE_ROWS as usize,
+    MAX_ESTIMATE_CANDIDATES,
 ];
 const ESTIMATE_RUNS: usize = 11;
 const SCHEMA_ID: [u8; 16] = [0x72; 16];
@@ -225,16 +225,26 @@ fn benchmark_dataset(
             64,
         )?;
         let started = Instant::now();
-        let estimate = invocation.estimate_authorized_scan(table, &projection)?;
+        let estimate_valid = if row_count == MAX_ESTIMATE_CANDIDATES {
+            invocation.estimate_authorized_population_at_most(
+                table,
+                &projection,
+                row_count as u64,
+            )? == Some(row_count as u64)
+        } else {
+            matches!(
+                invocation.estimate_authorized_scan(table, &projection)?,
+                AuthorizedScanEstimate::Exact(summary)
+                    if summary.visible_rows == row_count as u64
+                        && summary.columns.len() == 1
+                        && summary.columns[0].readable_values == row_count as u64
+                        && summary.columns[0].nulls == 0
+                        && summary.columns[0].redacted == 0
+            )
+        };
         elapsed.push(started.elapsed());
-        match estimate {
-            AuthorizedScanEstimate::Exact(summary)
-                if summary.visible_rows == row_count as u64
-                    && summary.columns.len() == 1
-                    && summary.columns[0].readable_values == row_count as u64
-                    && summary.columns[0].nulls == 0
-                    && summary.columns[0].redacted == 0 => {}
-            _ => return Err("estimate did not match the seeded authorized population".into()),
+        if !estimate_valid {
+            return Err("estimate did not match the seeded authorized population".into());
         }
     }
     elapsed.sort_unstable();
