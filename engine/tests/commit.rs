@@ -715,6 +715,7 @@ fn id(n: u8) -> [u8; 16] {
 fn run_operational_read_commit_samples(
     storage: &StorageManager<'_>,
     table_id: [u8; 16],
+    expected_scan_rows: usize,
     token_id: [u8; 16],
     secret: [u8; 32],
     retention_deadline_us: i64,
@@ -759,10 +760,10 @@ fn run_operational_read_commit_samples(
                         let page = transaction
                             .scan_catalog_authorized_rows(table_id, None, 128)
                             .map_err(|error| format!("operational authorized scan: {error:?}"))?;
-                        if page.rows.len() != 5 {
+                        if page.rows.len() != expected_scan_rows {
                             return Err(format!(
-                                "operational authorized scan returned {} rows, expected 5",
-                                page.rows.len()
+                                "operational authorized scan returned {} rows, expected {expected_scan_rows}",
+                                page.rows.len(),
                             ));
                         }
                         let commit_started = std::time::Instant::now();
@@ -40525,6 +40526,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let count_bigint_only = std::env::var_os("PRDB_TEST_COUNT_BIGINT_ONLY").is_some();
+    let indexed_join_benchmark_only =
+        std::env::var_os("PRDB_TEST_INDEXED_JOIN_BENCHMARK_ONLY").is_some();
     let spill_quota_only = std::env::var_os("PRDB_TEST_SPILL_QUOTA_ONLY").is_some();
     let spill_only = std::env::var_os("PRDB_TEST_SPILL_ONLY").is_some();
     let spill_limit_only = std::env::var_os("PRDB_TEST_SPILL_LIMIT_ONLY").is_some();
@@ -41003,29 +41006,43 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     ];
     // Keep the authorized-view population above the optimizer's small-scan
     // cutoff so the confined range acceptance exercises ScanIndexRange.
-    let composite_rows = [
-        (0xd3, 1, 7),
-        (0xd4, 1, 7),
-        (0xd5, 2, 9),
-        (0xd6, 2, 9),
-        (0xd7, 2, 9),
-    ]
-    .into_iter()
-    .map(|(row_id, left, right)| {
-        Ok(RowWrite {
-            key: table_row_key(composite_table.table_id, id(row_id)),
-            expected_version: None,
-            payload: Some(encode_tuple(
-                &composite_schema,
-                1,
-                &[
-                    Some(ScalarValue::Integer(left)),
-                    Some(ScalarValue::Integer(right)),
-                ],
-            )?),
+    let composite_seed_rows = if indexed_join_benchmark_only {
+        (0..64u16)
+            .map(|index| {
+                let row_id_byte = if index == 0 {
+                    0xd3
+                } else {
+                    u8::try_from(index).unwrap()
+                };
+                (row_id_byte, i32::from(index / 8), i32::from(index / 8))
+            })
+            .collect::<Vec<_>>()
+    } else {
+        vec![
+            (0xd3, 1, 7),
+            (0xd4, 1, 7),
+            (0xd5, 2, 9),
+            (0xd6, 2, 9),
+            (0xd7, 2, 9),
+        ]
+    };
+    let composite_rows = composite_seed_rows
+        .into_iter()
+        .map(|(row_id, left, right)| {
+            Ok(RowWrite {
+                key: table_row_key(composite_table.table_id, id(row_id)),
+                expected_version: None,
+                payload: Some(encode_tuple(
+                    &composite_schema,
+                    1,
+                    &[
+                        Some(ScalarValue::Integer(left)),
+                        Some(ScalarValue::Integer(right)),
+                    ],
+                )?),
+            })
         })
-    })
-    .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
     commit_rows(
         &database,
         id(0xd6),
@@ -41345,7 +41362,11 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         now + 3_600_000_000,
         &operational_pressure_rows,
     )?;
-    for row_id in [0xd3, 0xd4, 0xd5, 0xd6, 0xd7] {
+    for row_id in if indexed_join_benchmark_only {
+        vec![0xd3]
+    } else {
+        vec![0xd3, 0xd4, 0xd5, 0xd6, 0xd7]
+    } {
         assert!(
             row(
                 &database,
@@ -41364,7 +41385,20 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             nullable: true,
         },
     ];
-    let joined_rows = [(0xc5, 42, 7), (0xca, 1, 7)]
+    let joined_seed_rows = if indexed_join_benchmark_only {
+        (0..64u16)
+            .map(|index| {
+                (
+                    u8::try_from(index + 1).unwrap(),
+                    i32::from(index / 8),
+                    i32::from(index / 8),
+                )
+            })
+            .collect::<Vec<_>>()
+    } else {
+        vec![(0xc5, 42, 7), (0xca, 1, 7)]
+    };
+    let joined_rows = joined_seed_rows
         .into_iter()
         .map(|(row_id, id_value, match_key)| {
             Ok(RowWrite {
@@ -42741,6 +42775,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         run_operational_read_commit_samples(
             &storage,
             composite_table.table_id,
+            if indexed_join_benchmark_only { 64 } else { 5 },
             token_id,
             secret,
             now + 3_600_000_000,
@@ -42839,6 +42874,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     let filtered_composite_only = std::env::var_os("PRDB_TEST_FILTERED_COMPOSITE_ONLY").is_some();
     let count_column_only = std::env::var_os("PRDB_TEST_COUNT_COLUMN_ONLY").is_some();
     if std::env::var_os("PRDB_TEST_ORDERED_ANALYTICAL_ONLY").is_some()
+        || indexed_join_benchmark_only
         || filtered_composite_only
         || count_column_only
         || count_bigint_only
@@ -42864,7 +42900,9 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         ordered_client.accept_hello(ClientMode::Query, "sandbox-ordered-analytical-sum")?;
         ordered_client.authenticate(&storage, token_id, &secret)?;
         let ordered_owner = ordered_client.staging_owner()?;
-        let ordered_parameter = [if spill_limit_only {
+        let ordered_parameter = [if indexed_join_benchmark_only {
+            b'6'
+        } else if spill_limit_only {
             b'L'
         } else if spill_disk_full_only {
             b'F'
@@ -42970,14 +43008,31 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         ordered_gateway.set_read_timeout(Some(Duration::from_secs(10)))?;
         let (pressure_trigger_tx, pressure_trigger_rx) = std::sync::mpsc::channel();
         let (cancel_trigger_tx, cancel_trigger_rx) = std::sync::mpsc::channel();
+        let join_timing_observed_at = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let join_timing_observed_at_reader = Arc::clone(&join_timing_observed_at);
         let mut pressure_trigger_tx =
-            (spill_pressure_only || spill_pressure_cancel_only).then_some(pressure_trigger_tx);
+            (spill_pressure_only || spill_pressure_cancel_only || indexed_join_benchmark_only)
+                .then_some(pressure_trigger_tx);
         let mut cancel_trigger_tx = spill_pressure_cancel_only.then_some(cancel_trigger_tx);
         let ordered_reader = std::thread::spawn(move || {
             let mut frames = Vec::new();
             while let Some(frame) = prdb_engine::ipc::read_frame(&mut ordered_gateway)? {
                 if frame.operation == Operation::GatewayResultData as u16
-                    && frame.payload == b"spill-pressure-started"
+                    && frame.payload.len() == 16
+                    && &frame.payload[..7] == b"OP10J01"
+                {
+                    join_timing_observed_at_reader
+                        .lock()
+                        .map_err(|_| {
+                            prdb_engine::ipc::FrameError::Io(std::io::Error::other(
+                                "join timing observer lock poisoned",
+                            ))
+                        })?
+                        .push((frame.payload[7], std::time::Instant::now()));
+                }
+                if frame.operation == Operation::GatewayResultData as u16
+                    && (frame.payload == b"spill-pressure-started"
+                        || frame.payload == b"JOIN_BENCHMARK_STARTED")
                 {
                     if let Some(trigger) = pressure_trigger_tx.take() {
                         let _ = trigger.send(());
@@ -42994,7 +43049,11 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             }
             Ok::<_, prdb_engine::ipc::FrameError>(frames)
         });
-        let ordered_decision = if spill_pressure_only || spill_pressure_cancel_only {
+        let mut operational_load_interval = None;
+        let ordered_decision = if spill_pressure_only
+            || spill_pressure_cancel_only
+            || indexed_join_benchmark_only
+        {
             let query_started_at = std::time::Instant::now();
             let (
                 decision,
@@ -43011,15 +43070,49 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                             format!("spill pressure marker was not relayed: {error}")
                         })?;
                     let started_at = std::time::Instant::now();
-                    let (reads, commits) = run_operational_read_commit_samples(
+                    let (mut reads, mut commits) = run_operational_read_commit_samples(
                         storage_ref,
                         operational_table_id,
+                        if indexed_join_benchmark_only { 64 } else { 5 },
                         token_id,
                         secret,
                         now + 3_600_000_000,
                         0x91,
                     )
                     .map_err(|error| format!("operational load during spill: {error}"))?;
+                    if indexed_join_benchmark_only {
+                        let (additional_reads, additional_commits) =
+                            run_operational_read_commit_samples(
+                                storage_ref,
+                                operational_table_id,
+                                64,
+                                token_id,
+                                secret,
+                                now + 3_600_000_000,
+                                0x92,
+                            )
+                            .map_err(|error| {
+                                format!(
+                                    "additional operational load during join benchmark: {error}"
+                                )
+                            })?;
+                        reads.extend(additional_reads);
+                        commits.extend(additional_commits);
+                        let (final_reads, final_commits) = run_operational_read_commit_samples(
+                            storage_ref,
+                            operational_table_id,
+                            64,
+                            token_id,
+                            secret,
+                            now + 3_600_000_000,
+                            0x93,
+                        )
+                        .map_err(|error| {
+                            format!("final operational load during join benchmark: {error}")
+                        })?;
+                        reads.extend(final_reads);
+                        commits.extend(final_commits);
+                    }
                     Ok((
                         started_at,
                         std::time::Instant::now(),
@@ -43082,8 +43175,16 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                     && operational_finished_at > query_started_at,
                 "operational reads/commits did not overlap the spill query"
             );
-            assert_eq!(read_count, 64, "expected 64 operational point reads");
-            assert_eq!(commit_count, 64, "expected 64 operational commits");
+            let expected_operational_count = if indexed_join_benchmark_only { 192 } else { 64 };
+            assert_eq!(
+                read_count, expected_operational_count,
+                "unexpected operational point read count"
+            );
+            assert_eq!(
+                commit_count, expected_operational_count,
+                "unexpected operational commit count"
+            );
+            operational_load_interval = Some((operational_started_at, operational_finished_at));
             if spill_pressure_cancel_only {
                 let (cancel_started_at, cancel_finished_at, result) =
                     cancellation.ok_or("spill pressure cancellation was not observed")?;
@@ -43101,12 +43202,21 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 );
                 assert!(matches!(&decision, GatewayTerminalDecision::Abort(_)));
             }
-            eprintln!(
-                "broker-backed SQL sort overlapped {read_count} operational reads and {commit_count} commits for {} ms",
-                query_finished_at
-                    .duration_since(query_started_at)
-                    .as_millis(),
-            );
+            if indexed_join_benchmark_only {
+                eprintln!(
+                    "indexed/hash join benchmark invocation overlapped {read_count} operational reads and {commit_count} commits for {} ms",
+                    query_finished_at
+                        .duration_since(query_started_at)
+                        .as_millis(),
+                );
+            } else {
+                eprintln!(
+                    "broker-backed SQL sort overlapped {read_count} operational reads and {commit_count} commits for {} ms",
+                    query_finished_at
+                        .duration_since(query_started_at)
+                        .as_millis(),
+                );
+            }
             decision
         } else {
             observe_executor_relay_and_finalize_gateway(
@@ -43289,6 +43399,63 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                     .iter()
                     .all(|frame| frame.operation != Operation::GatewayResultData as u16)
             );
+        } else if indexed_join_benchmark_only {
+            let mut indexed_samples = Vec::new();
+            let mut hash_samples = Vec::new();
+            for frame in ordered_frames.as_slice() {
+                if frame.operation == Operation::GatewayResultData as u16
+                    && frame.payload.len() == 16
+                    && &frame.payload[..7] == b"OP10J01"
+                {
+                    let elapsed_ns = u64::from_be_bytes(frame.payload[8..16].try_into()?);
+                    assert!(elapsed_ns > 0);
+                    if frame.payload[7] == b'I' {
+                        indexed_samples.push(elapsed_ns);
+                    } else if frame.payload[7] == b'H' {
+                        hash_samples.push(elapsed_ns);
+                    } else {
+                        return Err("join benchmark reported an unknown strategy".into());
+                    }
+                }
+            }
+            assert_eq!(indexed_samples.len(), 2);
+            assert_eq!(hash_samples.len(), 2);
+            eprintln!(
+                "SQL-10 mixed-load join latency (ns), same invocation snapshot and 128-row join input, two samples per strategy: indexed={indexed_samples:?} hash={hash_samples:?}"
+            );
+            let (load_started, load_finished) = operational_load_interval
+                .ok_or("indexed/hash join benchmark did not overlap operational load")?;
+            let observed_samples = join_timing_observed_at
+                .lock()
+                .map_err(|_| std::io::Error::other("join timing observer lock poisoned"))?;
+            assert_eq!(observed_samples.len(), 4);
+            assert!(
+                observed_samples.iter().any(|(kind, observed_at)| {
+                    *kind == b'I' && load_started <= *observed_at && *observed_at <= load_finished
+                }),
+                "no indexed sample completed during operational load"
+            );
+            assert!(
+                observed_samples.iter().any(|(kind, observed_at)| {
+                    *kind == b'H' && load_started <= *observed_at && *observed_at <= load_finished
+                }),
+                "no hash sample completed during operational load"
+            );
+            assert!(ordered_frames.as_slice().iter().any(|frame| {
+                frame.operation == Operation::GatewayResultData as u16
+                    && frame.payload == b"JOIN_BENCHMARK_STARTED"
+            }));
+            assert!(ordered_frames.as_slice().iter().any(|frame| {
+                frame.operation == Operation::GatewayResultData as u16
+                    && frame.payload == b"JOIN_BENCHMARK_SAMPLES_FINISHED"
+            }));
+            while let Some(frame) = ordered_frames.as_slice().first() {
+                if frame.operation == Operation::GatewayTerminal as u16 {
+                    break;
+                }
+                assert_eq!(frame.operation, Operation::GatewayResultData as u16);
+                ordered_frames.next();
+            }
         } else if spill_pressure_only {
             fn expected_pressure_order_key(left_key: Option<i32>) -> Vec<u8> {
                 let mut output = b"SQLR".to_vec();
@@ -47007,6 +47174,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             run_operational_read_commit_samples(
                 &storage,
                 composite_table.table_id,
+                5,
                 token_id,
                 secret,
                 now + 3_600_000_000,

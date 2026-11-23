@@ -26,6 +26,7 @@
 #include "prdb_sdk_optimizer_v2.h"
 
 #include <errno.h>
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 
@@ -91,6 +92,21 @@ static int monotonic_time_ns(uint64_t *value_out) {
 static int32_t report_range_timing(const prdb_host_api_v3 *host, uint8_t kind,
                                    uint64_t elapsed_ns) {
     uint8_t payload[16] = {'O', 'P', '5', 'R', 'N', 'G', '1', kind};
+    if (host == NULL || host->write_result == NULL) {
+        return PRDB_QUERY_CALLBACK_INVALID_ARGUMENT;
+    }
+    for (uint32_t index = 0; index < 8; ++index) {
+        payload[8 + index] = (uint8_t)(elapsed_ns >> (56 - index * 8));
+    }
+    return host->write_result(host->context, payload, sizeof(payload)) == 0
+               ? PRDB_QUERY_CALLBACK_OK
+               : PRDB_QUERY_CALLBACK_IO_ERROR;
+}
+
+static int32_t report_indexed_join_timing(const prdb_host_api_v3 *host,
+                                          uint8_t kind,
+                                          uint64_t elapsed_ns) {
+    uint8_t payload[16] = {'O', 'P', '1', '0', 'J', '0', '1', kind};
     if (host == NULL || host->write_result == NULL) {
         return PRDB_QUERY_CALLBACK_INVALID_ARGUMENT;
     }
@@ -424,6 +440,11 @@ typedef struct joined_result_context {
     uint64_t output_len;
     uint32_t row_count;
 } joined_result_context;
+
+typedef struct indexed_join_benchmark_result_context {
+    uint32_t row_count;
+    int64_t value_checksum;
+} indexed_join_benchmark_result_context;
 
 typedef struct composite_grouped_result_context {
     const prdb_host_api_v3 *host;
@@ -1247,6 +1268,29 @@ static int32_t write_self_joined_row_v19(
     return 0;
 }
 
+static int32_t collect_indexed_join_benchmark_row(
+    void *opaque, const prdb_sdk_value_v1 *projected_values,
+    uint32_t projection_count,
+    const prdb_sdk_select_binding_v19 *binding) {
+    indexed_join_benchmark_result_context *context = opaque;
+    int32_t values[4] = {0};
+    if (context == NULL || projected_values == NULL || binding == NULL ||
+        projection_count != 4 || binding->base.join_key_count != 2) {
+        return 1;
+    }
+    for (uint32_t index = 0; index < 4; ++index) {
+        if (prdb_sdk_value_get_integer_v1(&projected_values[index], &values[index]) !=
+                PRDB_SDK_VALUE_ACCESS_OK ||
+            values[index] != values[0]) {
+            return 1;
+        }
+    }
+    if (context->row_count == UINT32_MAX) return 1;
+    ++context->row_count;
+    context->value_checksum += (int64_t)values[0] * 4;
+    return 0;
+}
+
 static int32_t write_filtered_joined_row_v20(
     void *opaque, const prdb_sdk_value_v1 *projected_values,
     uint32_t projection_count,
@@ -1890,6 +1934,127 @@ static int32_t run_write_read_fixture(
                 PRDB_QUERY_CALLBACK_OK) {
                 return 1;
             }
+        }
+        return 0;
+    }
+    if (invocation->parameters_len == 1 && invocation->parameters != NULL &&
+        invocation->parameters[0] == '6') {
+        static const uint8_t benchmark_sql[] =
+            "SELECT g.left_key, g.right_key, l.id, l.match_key "
+            "FROM grouped_records AS g INNER JOIN linked_records AS l ON "
+            "g.left_key = l.id AND g.right_key = l.match_key";
+        static const uint8_t started[] = "JOIN_BENCHMARK_STARTED";
+        static const uint8_t samples_finished[] =
+            "JOIN_BENCHMARK_SAMPLES_FINISHED";
+        const struct timespec load_settle_interval = {0, 100000000};
+        joined_results.left_columns = composite_join_left_executor_columns;
+        joined_results.right_columns = composite_join_right_executor_columns;
+        if (optimizer_host_v5 == NULL ||
+            host->write_result(host->context, started, sizeof(started) - 1) !=
+                PRDB_QUERY_CALLBACK_OK ||
+            sleep_without_signal_interruption(load_settle_interval) != 0) {
+            static const uint8_t message[] = "fixture-error-join-benchmark-start";
+            return report_failure(host, message, sizeof(message) - 1);
+        }
+        for (uint8_t sample = 0; sample < 2; ++sample) {
+            uint64_t started_ns = 0;
+            uint64_t finished_ns = 0;
+            indexed_join_benchmark_result_context indexed_results = {0};
+            if (!monotonic_time_ns(&started_ns)) {
+                static const uint8_t message[] = "fixture-error-join-benchmark-timer";
+                return report_failure(host, message, sizeof(message) - 1);
+            }
+            status = prdb_sdk_sql_execute_inner_join_optimizer_v1(
+                optimizer_host_v5, schema, sizeof(schema) - 1,
+                benchmark_sql, sizeof(benchmark_sql) - 1, 16,
+                sizeof(batch_response), composite_join_optimizer_request,
+                sizeof(composite_join_optimizer_request),
+                composite_join_optimizer_response,
+                sizeof(composite_join_optimizer_response),
+                composite_join_left_planner_response,
+                sizeof(composite_join_left_planner_response),
+                composite_join_right_planner_response,
+                sizeof(composite_join_right_planner_response),
+                composite_join_left_executor_response,
+                sizeof(composite_join_left_executor_response),
+                composite_join_right_executor_response,
+                sizeof(composite_join_right_executor_response), batch_response,
+                sizeof(batch_response), composite_join_left_planner_columns, 9,
+                composite_join_right_planner_columns, 9,
+                composite_join_left_executor_columns, 9,
+                composite_join_right_executor_columns, 9, cell_scratch, 9,
+                composite_join_left_rows, 128, composite_join_right_rows, 128,
+                composite_join_materialized_bytes,
+                sizeof(composite_join_materialized_bytes),
+                collect_indexed_join_benchmark_row, &indexed_results);
+            if (!monotonic_time_ns(&finished_ns)) {
+                static const uint8_t message[] = "fixture-error-indexed-join-timer";
+                return report_failure(host, message, sizeof(message) - 1);
+            }
+            if (status != PRDB_SDK_SQL_EXEC_OK) {
+                char message[64];
+                int message_len = snprintf(message, sizeof(message),
+                                            "indexed-join-exec-status=%d", status);
+                if (message_len <= 0 || (size_t)message_len >= sizeof(message)) {
+                    return 1;
+                }
+                return report_failure(host, (const uint8_t *)message,
+                                      (uint64_t)message_len);
+            }
+            if (indexed_results.row_count != 512) {
+                static const uint8_t message[] = "fixture-error-indexed-join-count";
+                return report_failure(host, message, sizeof(message) - 1);
+            }
+            if (indexed_results.value_checksum != 7168) {
+                static const uint8_t message[] = "fixture-error-indexed-join-checksum";
+                return report_failure(host, message, sizeof(message) - 1);
+            }
+            if (report_indexed_join_timing(host, 'I', finished_ns - started_ns) !=
+                PRDB_QUERY_CALLBACK_OK) {
+                static const uint8_t message[] = "fixture-error-indexed-join-timing";
+                return report_failure(host, message, sizeof(message) - 1);
+            }
+
+            indexed_join_benchmark_result_context hash_results = {0};
+            if (!monotonic_time_ns(&started_ns)) {
+                static const uint8_t message[] = "fixture-error-join-benchmark-timer";
+                return report_failure(host, message, sizeof(message) - 1);
+            }
+            status = prdb_sdk_sql_execute_inner_join_v19(
+                host, schema, sizeof(schema) - 1, benchmark_sql,
+                sizeof(benchmark_sql) - 1, 16,
+                sizeof(batch_response), composite_join_left_planner_response,
+                sizeof(composite_join_left_planner_response),
+                composite_join_right_planner_response,
+                sizeof(composite_join_right_planner_response),
+                composite_join_left_executor_response,
+                sizeof(composite_join_left_executor_response),
+                composite_join_right_executor_response,
+                sizeof(composite_join_right_executor_response), batch_response,
+                sizeof(batch_response), composite_join_left_planner_columns, 9,
+                composite_join_right_planner_columns, 9,
+                composite_join_left_executor_columns, 9,
+                composite_join_right_executor_columns, 9, cell_scratch, 9,
+                composite_join_left_rows, 128, composite_join_right_rows, 128,
+                composite_join_materialized_bytes,
+                sizeof(composite_join_materialized_bytes),
+                collect_indexed_join_benchmark_row, &hash_results);
+            if (!monotonic_time_ns(&finished_ns) ||
+                status != PRDB_SDK_SQL_EXEC_OK || hash_results.row_count != 512 ||
+                hash_results.value_checksum != 7168 ||
+                hash_results.row_count != indexed_results.row_count ||
+                hash_results.value_checksum != indexed_results.value_checksum ||
+                report_indexed_join_timing(host, 'H', finished_ns - started_ns) !=
+                    PRDB_QUERY_CALLBACK_OK) {
+                static const uint8_t message[] = "fixture-error-hash-join-benchmark";
+                return report_failure(host, message, sizeof(message) - 1);
+            }
+        }
+        if (host->write_result(host->context, samples_finished,
+                               sizeof(samples_finished) - 1) !=
+            PRDB_QUERY_CALLBACK_OK) {
+            static const uint8_t message[] = "fixture-error-join-benchmark-finish";
+            return report_failure(host, message, sizeof(message) - 1);
         }
         return 0;
     }
