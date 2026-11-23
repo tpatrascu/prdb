@@ -1597,3 +1597,10 @@
 - Regression: the confined ABI v6 `U` mode executes `WHERE b.decimal_value IS NULL ORDER BY b.right_key DESC LIMIT 2`; the authorized self-join has three qualifying rows and requires the sorted top two `(3,11), (1,7)`.
 - Verification: the focused delegated-cgroup acceptance passed with the exact two-row SQLR sequence and a durable commit. The maintained v25 parser/binder fixture also covers combining a Decimal JOIN filter with Decimal ORDER BY and verifies the bound side and projection index. Broader parameterized filter, scalar, and workload combinations remain open.
 - Remaining: parameterized ordered JOIN predicates, filesystem deployment matrix, longer physical device saturation, and broader confined result comparisons across workload shapes.
+
+## SQL-9 follow-up: PSP1 predicate before spill-sort on ordered JOIN — verified
+
+- Contract: the v25 dispatcher must preserve positional parameter binding while the internal filtered composite JOIN feeds the spill sort, and must apply the original order and LIMIT to only matching rows.
+- Regression: the confined ABI v6 `V` mode runs `WHERE a.left_key >= $1 ORDER BY b.right_key DESC LIMIT 2` with a canonical little-endian INTEGER PSP1 value of 2 and expects `(3,11), (2,9)`.
+- Verification: the focused delegated-cgroup acceptance passed with those exact rows and a durable commit. The v25 TinyCC parser/binder fixture validates a parameterized WHERE combined with Decimal JOIN ordering and binding across both relation sides.
+- Remaining: broader ordered JOIN type and parameter combinations, filesystem deployment matrix, longer physical device saturation, and broader confined result comparisons across workload shapes.

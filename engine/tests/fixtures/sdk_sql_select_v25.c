@@ -27,6 +27,10 @@ int main(void) {
         "SELECT a.id, b.amount FROM lefts AS a INNER JOIN rights AS b ON "
         "a.id = b.id AND a.region = b.region WHERE b.amount IS NULL "
         "ORDER BY b.amount DESC LIMIT 2";
+    static const uint8_t parameterized_decimal_join_order[] =
+        "SELECT a.id, b.amount FROM lefts AS a INNER JOIN rights AS b ON "
+        "a.id = b.id AND a.region = b.region WHERE a.id >= $1 "
+        "ORDER BY b.amount DESC LIMIT 2";
     static const uint8_t left_name[] = "lefts";
     static const uint8_t right_name[] = "rights";
     static const prdb_sdk_sql_column_shape_v2 left_columns[] = {
@@ -99,6 +103,20 @@ int main(void) {
            binding.order_by_column.type_code == PRDB_SDK_VALUE_TYPE_DECIMAL &&
            binding.order_by_projection_index == 1 &&
            binding.order_relation_side == PRDB_SDK_SQL_V8_RIGHT);
+    memset(&statement, 0, sizeof(statement));
+    memset(&binding, 0, sizeof(binding));
+    assert(prdb_sdk_sql_parse_select_v25(
+               parameterized_decimal_join_order,
+               sizeof(parameterized_decimal_join_order) - 1, &statement,
+               sizeof(statement), &error_offset) == PRDB_SDK_SQL_OK);
+    assert(statement.base.has_where == 1 && statement.base.parameter_index == 1);
+    assert(prdb_sdk_sql_bind_select_v25(
+               &statement, left_name, sizeof(left_name) - 1, left_columns, 3,
+               right_name, sizeof(right_name) - 1, decimal_right_columns, 3,
+               &binding, sizeof(binding)) == PRDB_SDK_SQL_BIND_OK);
+    assert(binding.base.where_relation_side == PRDB_SDK_SQL_V8_LEFT &&
+           binding.order_relation_side == PRDB_SDK_SQL_V8_RIGHT &&
+           binding.order_by_projection_index == 1);
 
     assert(prdb_sdk_sql_parse_select_v20(
                sql, sizeof(sql) - 1, &legacy, sizeof(legacy), NULL) ==

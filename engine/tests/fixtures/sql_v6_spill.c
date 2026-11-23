@@ -39,6 +39,18 @@ int32_t prdb_query_main_v6(const prdb_host_api_v6 *host,
         "decimal_grouped_records AS b ON a.left_key = b.left_key AND "
         "a.right_key = b.right_key WHERE b.decimal_value IS NULL "
         "ORDER BY b.right_key DESC LIMIT 2";
+    static const uint8_t spill_parameterized_join_sql[] =
+        "SELECT a.left_key, b.right_key "
+        "FROM decimal_grouped_records AS a INNER JOIN "
+        "decimal_grouped_records AS b ON a.left_key = b.left_key AND "
+        "a.right_key = b.right_key WHERE a.left_key >= $1 "
+        "ORDER BY b.right_key DESC LIMIT 2";
+    static const uint8_t integer_threshold_parameters[] = {
+        'P', 'S', 'P', '1', 0, 1, 0, 0,
+        0,   0,   0,   3,   /* INTEGER type */
+        0,   0,   0,   0,   /* precision, scale, state, reserved */
+        0,   0,   0,   4,   /* payload length */
+        2,   0,   0,   0};  /* little-endian INTEGER value */
     if (host == NULL || invocation == NULL ||
         host->v5.v4.v3.struct_size < sizeof(host->v5.v4.v3) ||
         host->v5.v4.v3.abi_version != PRDB_QUERY_ABI_V3_VERSION ||
@@ -112,6 +124,9 @@ int32_t prdb_query_main_v6(const prdb_host_api_v6 *host,
     } else if (invocation->parameters[0] == 'U') {
         sql = spill_filtered_join_sql;
         sql_len = sizeof(spill_filtered_join_sql) - 1;
+    } else if (invocation->parameters[0] == 'V') {
+        sql = spill_parameterized_join_sql;
+        sql_len = sizeof(spill_parameterized_join_sql) - 1;
     } else if (invocation->parameters[0] == 'T' ||
                invocation->parameters[0] == 'E') {
         sql = spill_decimal_join_sql;
@@ -126,7 +141,11 @@ int32_t prdb_query_main_v6(const prdb_host_api_v6 *host,
         return 1;
     }
     int32_t status = prdb_sdk_sql_run_statement_v2(
-        host, schema, sizeof(schema) - 1, sql, sql_len, NULL, 0);
+        host, schema, sizeof(schema) - 1, sql, sql_len,
+        invocation->parameters[0] == 'V' ? integer_threshold_parameters : NULL,
+        invocation->parameters[0] == 'V'
+            ? sizeof(integer_threshold_parameters)
+            : 0);
     if ((invocation->parameters[0] == 'P' || invocation->parameters[0] == 'K') &&
         prdb_sdk_spill_destroy_v1(host, &pressure_stream) != 0) {
         return 1;
