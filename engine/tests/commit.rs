@@ -40528,8 +40528,10 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let count_bigint_only = std::env::var_os("PRDB_TEST_COUNT_BIGINT_ONLY").is_some();
-    let indexed_join_benchmark_only =
-        std::env::var_os("PRDB_TEST_INDEXED_JOIN_BENCHMARK_ONLY").is_some();
+    let indexed_join_asymmetric_benchmark_only =
+        std::env::var_os("PRDB_TEST_INDEXED_JOIN_ASYMMETRIC_BENCHMARK_ONLY").is_some();
+    let indexed_join_benchmark_only = indexed_join_asymmetric_benchmark_only
+        || std::env::var_os("PRDB_TEST_INDEXED_JOIN_BENCHMARK_ONLY").is_some();
     let spill_quota_only = std::env::var_os("PRDB_TEST_SPILL_QUOTA_ONLY").is_some();
     let spill_only = std::env::var_os("PRDB_TEST_SPILL_ONLY").is_some();
     let spill_limit_only = std::env::var_os("PRDB_TEST_SPILL_LIMIT_ONLY").is_some();
@@ -41008,7 +41010,11 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     ];
     // Keep the authorized-view population above the optimizer's small-scan
     // cutoff so the confined range acceptance exercises ScanIndexRange.
-    let composite_seed_rows = if indexed_join_benchmark_only {
+    let composite_seed_rows = if indexed_join_asymmetric_benchmark_only {
+        (0..4u8)
+            .map(|index| (0xd3 + index, 0, 0))
+            .collect::<Vec<_>>()
+    } else if indexed_join_benchmark_only {
         (0..64u16)
             .map(|index| {
                 let row_id_byte = if index == 0 {
@@ -41387,7 +41393,11 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             nullable: true,
         },
     ];
-    let joined_seed_rows = if indexed_join_benchmark_only {
+    let joined_seed_rows = if indexed_join_asymmetric_benchmark_only {
+        (0..128u16)
+            .map(|index| (u8::try_from(index + 1).unwrap(), 0, 0))
+            .collect::<Vec<_>>()
+    } else if indexed_join_benchmark_only {
         (0..64u16)
             .map(|index| {
                 (
@@ -42686,6 +42696,21 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         retention_deadline_us: now + 3_600_000_000,
         audit_event: records_index_audit,
     })?;
+    if indexed_join_asymmetric_benchmark_only {
+        let join_inner_index_invocation = id(0xc8);
+        let mut join_inner_index_audit = identity_audit_event(0xc9, user_id, joined_table.table_id);
+        join_inner_index_audit.correlation_id = join_inner_index_invocation;
+        storage.create_index(prdb_engine::storage_manager::CreateIndexRequest {
+            invocation_id: join_inner_index_invocation,
+            authenticated_actor_id: user_id,
+            table_id: joined_table.table_id,
+            name: "linked_match_key_asymmetric_benchmark".to_owned(),
+            column_ids: vec![joined_table.column_ids[1]],
+            unique: false,
+            retention_deadline_us: now + 3_600_000_000,
+            audit_event: join_inner_index_audit,
+        })?;
+    }
     let mut requested_scope_records = Vec::<Vec<u8>>::new();
     for schema_id in [schema.schema_id, empty_schema.schema_id] {
         let mut record = vec![1, 1];
@@ -42777,7 +42802,13 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         run_operational_read_commit_samples(
             &storage,
             composite_table.table_id,
-            if indexed_join_benchmark_only { 64 } else { 5 },
+            if indexed_join_asymmetric_benchmark_only {
+                4
+            } else if indexed_join_benchmark_only {
+                64
+            } else {
+                5
+            },
             token_id,
             secret,
             now + 3_600_000_000,
@@ -42902,7 +42933,9 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         ordered_client.accept_hello(ClientMode::Query, "sandbox-ordered-analytical-sum")?;
         ordered_client.authenticate(&storage, token_id, &secret)?;
         let ordered_owner = ordered_client.staging_owner()?;
-        let ordered_parameter = [if indexed_join_benchmark_only {
+        let ordered_parameter = [if indexed_join_asymmetric_benchmark_only {
+            b'7'
+        } else if indexed_join_benchmark_only {
             b'6'
         } else if spill_limit_only {
             b'L'
@@ -43065,6 +43098,13 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             ) = std::thread::scope(|scope| {
                 let storage_ref = &storage;
                 let operational_table_id = composite_table.table_id;
+                let expected_operational_scan_rows = if indexed_join_asymmetric_benchmark_only {
+                    4
+                } else if indexed_join_benchmark_only {
+                    64
+                } else {
+                    5
+                };
                 let operational_worker = scope.spawn(move || -> Result<_, String> {
                     pressure_trigger_rx
                         .recv_timeout(Duration::from_secs(5))
@@ -43075,7 +43115,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                     let (mut reads, mut commits) = run_operational_read_commit_samples(
                         storage_ref,
                         operational_table_id,
-                        if indexed_join_benchmark_only { 64 } else { 5 },
+                        expected_operational_scan_rows,
                         token_id,
                         secret,
                         now + 3_600_000_000,
@@ -43087,7 +43127,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                             run_operational_read_commit_samples(
                                 storage_ref,
                                 operational_table_id,
-                                64,
+                                expected_operational_scan_rows,
                                 token_id,
                                 secret,
                                 now + 3_600_000_000,
@@ -43103,7 +43143,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                         let (final_reads, final_commits) = run_operational_read_commit_samples(
                             storage_ref,
                             operational_table_id,
-                            64,
+                            expected_operational_scan_rows,
                             token_id,
                             secret,
                             now + 3_600_000_000,
