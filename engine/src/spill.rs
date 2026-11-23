@@ -1350,6 +1350,76 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_packages_cannot_overreserve_service_allocation() {
+        let scratch = Scratch::new();
+        let mut limits = config(&scratch.0);
+        let allocation_unit = u64::try_from(unsafe {
+            let mut stat: libc::statfs = std::mem::zeroed();
+            let path = CString::new(scratch.0.as_os_str().as_bytes()).unwrap();
+            let fd = libc::open(
+                path.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            );
+            assert!(fd >= 0);
+            let result = libc::fstatfs(fd, &mut stat);
+            libc::close(fd);
+            assert_eq!(result, 0);
+            stat.f_bsize
+        })
+        .unwrap();
+        limits.max_bytes_per_invocation = allocation_unit;
+        limits.max_service_bytes = allocation_unit;
+        let broker = SpillBroker::open(limits).unwrap();
+        let owners = [package(31), package(32)];
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let handles = owners.map(|owner| {
+            broker
+                .open_package(owner, WorkloadClass::Analytical, deadline)
+                .unwrap();
+            broker.create(owner).unwrap()
+        });
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let results = owners
+            .into_iter()
+            .zip(handles)
+            .map(|(owner, handle)| {
+                let broker = broker.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    broker.append(owner, handle, b"x")
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let results = results
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            results.iter().filter(|result| result.is_ok()).count(),
+            1,
+            "one allocation unit of service capacity can admit only one package"
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| **result == Err(SpillError::AllocationLimit))
+                .count(),
+            1
+        );
+
+        let admitted = results.iter().position(Result::is_ok).unwrap();
+        let waiting = 1 - admitted;
+        broker.close_package(owners[admitted]).unwrap();
+        assert_eq!(
+            broker.append(owners[waiting], handles[waiting], b"x"),
+            Ok(())
+        );
+        broker.close_package(owners[waiting]).unwrap();
+    }
+
+    #[test]
     fn cancellation_invalidates_all_handles_for_the_package() {
         let scratch = Scratch::new();
         let broker = SpillBroker::open(config(&scratch.0)).unwrap();

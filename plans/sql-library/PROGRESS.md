@@ -1537,3 +1537,10 @@
 - Test: opt-in `PRDB_TEST_SPILL_FILESYSTEM_ROOT` points the broker unit fixture at an existing directory on the selected mount. It opens the broker, reserves physical spill allocation, round-trips an 8 KiB stream, closes the package, and checks that only the broker lock file remains.
 - Verification: the focused unit test passed on the host's NFSv4.2 workspace mount. Its first run exposed a test-fixture issue: the default 4 KiB response limit rejected the 8 KiB read; raising the probe's response cap to 16 KiB made the intended filesystem operation pass. This was test setup correction, not a product behavior regression.
 - Remaining: this single mount smoke test does not establish deployment support or cover exhaustion/recovery; the supported filesystem matrix and longer service-wide saturation measurements remain open.
+
+## SQL-9 follow-up: concurrent service allocation reservations — verified
+
+- Contract: simultaneous stream growth across analytical packages must reserve against one shared physical-allocation ceiling before filesystem writes begin; closing a package releases its reservation for later work.
+- Regression evidence: `concurrent_packages_cannot_overreserve_service_allocation` gives two packages one allocation unit of shared capacity, releases both appenders from a barrier, and requires exactly one append to succeed while the other receives `AllocationLimit`. It then closes the admitted package and verifies the waiting package can append.
+- Verification: the focused locked engine test passed in the pinned Nix development shell (`1 passed`); the command compiled the workspace test targets. Filesystem deployment validation and sustained saturation measurements remain open.
+- Remaining: SQL-9 deployment validation across supported filesystems, longer service-wide saturation under operational commit/cancellation load, and broader confined result comparisons across workload shapes.
