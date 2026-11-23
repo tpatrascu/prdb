@@ -925,7 +925,11 @@ fn initialize(path: &std::path::Path) -> Result<Database, Box<dyn std::error::Er
                 CatalogField {
                     tag: 1,
                     wire_type: WireType::U16,
-                    payload: 8u16.to_le_bytes().to_vec(),
+                    payload: if std::env::var_os("PRDB_BENCH_INDEX_TEXT").is_some() {
+                        6u16.to_le_bytes().to_vec()
+                    } else {
+                        8u16.to_le_bytes().to_vec()
+                    },
                 },
                 CatalogField {
                     tag: 2,
@@ -7297,6 +7301,22 @@ fn unique_constraint_uses_its_backing_index_for_invocation_writes()
                 .expect("PRDB_BENCH_INDEX_ROWS must be a u64")
         })
         .unwrap_or(4_096);
+    let index_profile_matches = std::env::var("PRDB_BENCH_INDEX_MATCHES")
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .expect("PRDB_BENCH_INDEX_MATCHES must be a u64")
+        })
+        .unwrap_or(1);
+    let index_profile_text = std::env::var_os("PRDB_BENCH_INDEX_TEXT").is_some();
+    assert!(index_profile_matches <= index_profile_rows);
+    let benchmark_value = |value: &str| {
+        if index_profile_text {
+            ScalarValue::Text(value.to_owned())
+        } else {
+            ScalarValue::Bytea(value.as_bytes().to_vec())
+        }
+    };
     let mut seed = InvocationTransaction::begin(
         &database,
         [241; 16],
@@ -7310,13 +7330,13 @@ fn unique_constraint_uses_its_backing_index_for_invocation_writes()
     let payload = encode_tuple(
         &seed_schema.columns,
         seed_schema.schema_version,
-        &[Some(ScalarValue::Bytea(b"duplicate".to_vec()))],
+        &[Some(benchmark_value("duplicate"))],
     )?;
     seed.stage_put(id(243), &payload)?;
     let alternate_payload = encode_tuple(
         &seed_schema.columns,
         seed_schema.schema_version,
-        &[Some(ScalarValue::Bytea(b"alternate duplicate".to_vec()))],
+        &[Some(benchmark_value("alternate duplicate"))],
     )?;
     seed.stage_put(id(245), &alternate_payload)?;
     for number in 0..index_profile_rows {
@@ -7324,7 +7344,7 @@ fn unique_constraint_uses_its_backing_index_for_invocation_writes()
         let payload = encode_tuple(
             &seed_schema.columns,
             seed_schema.schema_version,
-            &[Some(ScalarValue::Bytea(value.into_bytes()))],
+            &[Some(benchmark_value(&value))],
         )?;
         seed.stage_put(numbered_row_id(table_id, number + 1_000), &payload)?;
     }
@@ -7347,7 +7367,7 @@ fn unique_constraint_uses_its_backing_index_for_invocation_writes()
     let payload = encode_tuple(
         &schema.columns,
         schema.schema_version,
-        &[Some(ScalarValue::Bytea(b"duplicate".to_vec()))],
+        &[Some(benchmark_value("duplicate"))],
     )?;
     let principal_id = [9; 16];
     let context = AuthorizationContext {
@@ -7444,11 +7464,11 @@ fn unique_constraint_uses_its_backing_index_for_invocation_writes()
         expected_join_population
     );
     let range_bound = || prdb_engine::transaction::AuthorizedIndexRangeBound {
-        value: ScalarValue::Bytea(b"duplicate".to_vec()),
+        value: benchmark_value("duplicate"),
         inclusive: true,
     };
-    let target_cell = SanitizedCell::Value(ScalarValue::Bytea(b"duplicate".to_vec()));
-    let probe_values = [Some(ScalarValue::Bytea(b"duplicate".to_vec()))];
+    let target_cell = SanitizedCell::Value(benchmark_value("duplicate"));
+    let probe_values = [Some(benchmark_value("duplicate"))];
     let mut reference_matches = Vec::new();
     let mut reference_cursor = None;
     loop {
@@ -7465,7 +7485,7 @@ fn unique_constraint_uses_its_backing_index_for_invocation_writes()
     let unique_probe = invocation.probe_catalog_unique_index(
         table_id,
         index_id,
-        &[Some(ScalarValue::Bytea(b"duplicate".to_vec()))],
+        &[Some(benchmark_value("duplicate"))],
         &projection,
     )?;
     assert!(matches!(
@@ -7586,6 +7606,127 @@ fn unique_constraint_uses_its_backing_index_for_invocation_writes()
             reference_scan.0,
             reference_scan.1,
         );
+
+        if index_profile_matches > 0 {
+            let lower_value = format!("key-{:05}", 0);
+            let upper_value = format!("key-{:05}", index_profile_matches - 1);
+            let lower_key = lower_value.as_bytes().to_vec();
+            let upper_key = upper_value.as_bytes().to_vec();
+            let fanout_bound = |value: String| {
+                Some(prdb_engine::transaction::AuthorizedIndexRangeBound {
+                    value: benchmark_value(&value),
+                    inclusive: true,
+                })
+            };
+            let lower = fanout_bound(lower_value);
+            let upper = fanout_bound(upper_value);
+            let expected_rows = (0..index_profile_matches)
+                .map(|number| numbered_row_id(table_id, number + 1_000))
+                .collect::<Vec<_>>();
+            let key_column = prdb_engine::optimizer_binding::BoundColumn {
+                column_id,
+                ordinal: 0,
+                scalar_type: schema.columns[0].scalar_type,
+                nullable: schema.columns[0].nullable,
+            };
+            let range_predicate = prdb_engine::optimizer_binding::BoundPredicate::And(vec![
+                prdb_engine::optimizer_binding::BoundPredicate::Compare {
+                    operator: prdb_engine::optimizer_request::Comparison::GreaterOrEqual,
+                    left: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Column(
+                        key_column.clone(),
+                    )),
+                    right: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Text(
+                        lower_key.iter().copied().map(char::from).collect(),
+                    )),
+                },
+                prdb_engine::optimizer_binding::BoundPredicate::Compare {
+                    operator: prdb_engine::optimizer_request::Comparison::LessOrEqual,
+                    left: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Column(
+                        key_column,
+                    )),
+                    right: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Text(
+                        upper_key.iter().copied().map(char::from).collect(),
+                    )),
+                },
+            ]);
+            let mut predicate_estimate_times = Vec::with_capacity(RUNS);
+            let mut range_fanout_times = Vec::with_capacity(RUNS);
+            let mut scan_fanout_times = Vec::with_capacity(RUNS);
+            for _ in 0..RUNS {
+                let started = Instant::now();
+                let estimate = invocation.estimate_authorized_predicate_at_most(
+                    table_id,
+                    &projection,
+                    &range_predicate,
+                    prdb_engine::statistics::MAX_PREDICATE_ESTIMATE_ROWS,
+                )?;
+                predicate_estimate_times.push(started.elapsed());
+                assert_eq!(
+                    estimate,
+                    Some((index_profile_rows + 2, index_profile_matches))
+                );
+
+                let started = Instant::now();
+                let indexed = invocation.scan_catalog_index_range(
+                    table_id,
+                    range_index_id,
+                    lower.clone(),
+                    upper.clone(),
+                    &projection,
+                )?;
+                range_fanout_times.push(started.elapsed());
+                assert!(matches!(
+                    indexed,
+                    prdb_engine::transaction::AuthorizedIndexRangeScan::Rows(rows)
+                        if rows.iter().map(|(row_id, _)| *row_id).collect::<Vec<_>>() == expected_rows
+                ));
+
+                let started = Instant::now();
+                let mut cursor = None;
+                let mut scan_matches = Vec::new();
+                loop {
+                    let page =
+                        invocation.scan_authorized(table_id, cursor.as_ref(), 128, &projection)?;
+                    scan_matches.extend(page.rows.into_iter().filter_map(|(row_id, cells)| {
+                        let matches = match cells.first() {
+                            Some(SanitizedCell::Value(ScalarValue::Text(value))) => {
+                                value.as_bytes() >= lower_key.as_slice()
+                                    && value.as_bytes() <= upper_key.as_slice()
+                            }
+                            Some(SanitizedCell::Value(ScalarValue::Bytea(value))) => {
+                                value.as_slice() >= lower_key.as_slice()
+                                    && value.as_slice() <= upper_key.as_slice()
+                            }
+                            _ => false,
+                        };
+                        matches.then_some(row_id)
+                    }));
+                    let Some(next) = page.continuation else {
+                        break;
+                    };
+                    cursor = Some(next);
+                }
+                scan_fanout_times.push(started.elapsed());
+                assert_eq!(scan_matches, expected_rows);
+            }
+            let predicate_estimate = median_and_p95_ms(&mut predicate_estimate_times);
+            let range_fanout = median_and_p95_ms(&mut range_fanout_times);
+            let scan_fanout = median_and_p95_ms(&mut scan_fanout_times);
+            eprintln!(
+                "index selectivity benchmark: total_rows={}, matching_rows={}, predicate estimate median/p95={:.3}/{:.3} ms, range median/p95={:.3}/{:.3} ms, authorized scan+filter median/p95={:.3}/{:.3} ms",
+                index_profile_rows + 2,
+                index_profile_matches,
+                predicate_estimate.0,
+                predicate_estimate.1,
+                range_fanout.0,
+                range_fanout.1,
+                scan_fanout.0,
+                scan_fanout.1,
+            );
+        }
+    }
+    if index_profile_text {
+        return Ok(());
     }
     let hidden_context = AuthorizationContext {
         principal_id,

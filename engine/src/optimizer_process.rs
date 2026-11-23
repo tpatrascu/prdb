@@ -387,12 +387,31 @@ pub fn serve_optimizer_process<S: Read + Write, P: Read + Write>(
                     }) => Some(*visible_rows),
                     _ => None,
                 };
+                let predicate_matching_rows = match &predicate_estimate {
+                    Some(crate::planner_ipc::EstimatePredicateResponse::Exact {
+                        matching_rows,
+                        ..
+                    }) => Some(*matching_rows),
+                    _ => None,
+                };
                 if operation == Operation::OptimizeSelect
                     && request.payload.get(2) == Some(&crate::query_abi::OPTIMIZER_SELECT_STATEMENT)
                     && let Ok(mut decoded) = crate::optimizer_plan::decode_plan_v1(&plan)
                     && let Ok(true) = crate::optimizer_plan::apply_population_scan_heuristic(
                         &mut decoded,
                         predicate_visible_rows,
+                    )
+                    && let Ok(encoded) = crate::optimizer_plan::encode_plan_v1(&decoded)
+                {
+                    plan = encoded;
+                }
+                if operation == Operation::OptimizeSelect
+                    && request.payload.get(2) == Some(&crate::query_abi::OPTIMIZER_SELECT_STATEMENT)
+                    && let Ok(mut decoded) = crate::optimizer_plan::decode_plan_v1(&plan)
+                    && let Ok(true) = crate::optimizer_plan::apply_range_selectivity_scan_heuristic(
+                        &mut decoded,
+                        predicate_visible_rows,
+                        predicate_matching_rows,
                     )
                     && let Ok(encoded) = crate::optimizer_plan::encode_plan_v1(&decoded)
                 {
@@ -1108,6 +1127,31 @@ mod tests {
             },
         );
         assert!(!plan.empty_view_hint);
+        assert!(plan.range_scan.is_some());
+        assert!(matches!(plan.nodes.get(1), Some(PlanNode::Filter(_))));
+    }
+
+    #[test]
+    fn process_protocol_uses_scan_for_broad_range_matches() {
+        let plan = select_plan_with_predicate_estimate(
+            crate::planner_ipc::EstimatePredicateResponse::Exact {
+                visible_rows: 130,
+                matching_rows: 80,
+            },
+        );
+        assert!(!plan.empty_view_hint);
+        assert!(plan.range_scan.is_none());
+        assert!(matches!(plan.nodes.get(1), Some(PlanNode::Filter(_))));
+    }
+
+    #[test]
+    fn process_protocol_retains_range_just_below_half_selectivity() {
+        let plan = select_plan_with_predicate_estimate(
+            crate::planner_ipc::EstimatePredicateResponse::Exact {
+                visible_rows: 130,
+                matching_rows: 64,
+            },
+        );
         assert!(plan.range_scan.is_some());
         assert!(matches!(plan.nodes.get(1), Some(PlanNode::Filter(_))));
     }

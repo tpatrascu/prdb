@@ -1665,3 +1665,8 @@
 - Red/green: the real-redb regression failed at 129 rows under the previous 128-row cap; after widening the bound it verifies a 129-row private overlay result and the hard maximum. The release harness verifies an exact predicate count over 16,384 snapshot rows.
 - Profile: three fresh-database release runs measured median predicate-estimate latency of 17.235 ms and median p95 of 20.293 ms at the cap, excluding planner IPC and SQL execution.
 - Verification: workspace build, formatting, warning-denied Clippy, maintained TinyCC tests, fixture build, and full serial delegated-cgroup workspace acceptance passed. Larger populations and broader predicate types remain `Unknown`.
+## Optimizer follow-up: use predicate selectivity for broad range scans — implementation
+
+- The bounded planner estimate now influences optimizer-backed filtered SELECT: for exact estimates above the four-row population rule, a range hint is removed when matching rows are at least half of visible rows. The Filter stays in the plan; unique point probes stay unchanged. `Unknown` retains the existing path.
+- The threshold is informed by a five-run local TEXT comparison at 130 visible rows: range won at 43% matches, paths were near crossover at 49%, and scan-plus-filter won at 62%. Timings are direct transaction API measurements on one host, not confined SQL end-to-end or mixed operational load.
+- Process/plan threshold regressions and benchmark result-equivalence checks are in place. Workspace build, formatting, warning-denied Clippy, maintained TinyCC tests, sandbox fixture, cgroup preflight, and the complete serial delegated-cgroup workspace suite passed.

@@ -67,6 +67,33 @@ pub fn apply_population_scan_heuristic(
     Ok(false)
 }
 
+/// Prefer a sequential scan over a range index when the exact authorized
+/// predicate estimate says at least half the visible rows match. This
+/// conservative crossover is based on the local 130-row comparison; unique
+/// point probes are unaffected.
+pub fn apply_range_selectivity_scan_heuristic(
+    plan: &mut SingleTablePlanV1,
+    visible_rows: Option<u64>,
+    matching_rows: Option<u64>,
+) -> Result<bool, PlanError> {
+    let (Some(visible_rows), Some(matching_rows)) = (visible_rows, matching_rows) else {
+        return Ok(false);
+    };
+    if matching_rows > visible_rows {
+        return Err(PlanError::InvalidPredicate);
+    }
+    let minimum_sequential_scan_matches = visible_rows / 2 + visible_rows % 2;
+    if plan.range_scan.is_some()
+        && visible_rows > 0
+        && matching_rows >= minimum_sequential_scan_matches
+    {
+        plan.range_scan = None;
+        validate_plan_v1(plan)?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UniquePointProbeV1 {
     pub index_id: [u8; 16],
@@ -4948,6 +4975,12 @@ mod tests {
         let mut unknown_population = plan.clone();
         assert!(!apply_population_scan_heuristic(&mut unknown_population, None).unwrap());
         assert!(unknown_population.unique_probe.is_some());
+        let mut broad_match = plan.clone();
+        assert!(
+            !apply_range_selectivity_scan_heuristic(&mut broad_match, Some(130), Some(120),)
+                .unwrap()
+        );
+        assert!(broad_match.unique_probe.is_some());
         let encoded = encode_plan_v1(&plan).unwrap();
         assert_eq!(decode_plan_v1(&encoded).unwrap(), plan);
 
@@ -5026,6 +5059,20 @@ mod tests {
         let mut larger_population = plan.clone();
         assert!(!apply_population_scan_heuristic(&mut larger_population, Some(5)).unwrap());
         assert!(larger_population.range_scan.is_some());
+        assert!(
+            !apply_range_selectivity_scan_heuristic(&mut larger_population, Some(130), Some(64),)
+                .unwrap()
+        );
+        assert!(larger_population.range_scan.is_some());
+        assert!(
+            apply_range_selectivity_scan_heuristic(&mut larger_population, Some(130), Some(65),)
+                .unwrap()
+        );
+        assert!(larger_population.range_scan.is_none());
+        assert!(matches!(
+            apply_range_selectivity_scan_heuristic(&mut plan.clone(), Some(130), Some(131)),
+            Err(PlanError::InvalidPredicate)
+        ));
         let encoded = encode_plan_v1(&plan).unwrap();
         assert_eq!(decode_plan_v1(&encoded).unwrap(), plan);
 
