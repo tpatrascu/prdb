@@ -1947,7 +1947,8 @@ static int32_t run_write_read_fixture(
     }
     if (invocation->parameters_len == 1 && invocation->parameters != NULL &&
         (invocation->parameters[0] == '6' || invocation->parameters[0] == '7' ||
-         invocation->parameters[0] == '8')) {
+         invocation->parameters[0] == '8' || invocation->parameters[0] == '9' ||
+         invocation->parameters[0] == '4' || invocation->parameters[0] == '5')) {
         static const uint8_t benchmark_sql[] =
             "SELECT g.left_key, g.right_key, l.id, l.match_key "
             "FROM grouped_records AS g INNER JOIN linked_records AS l ON "
@@ -1956,10 +1957,16 @@ static int32_t run_write_read_fixture(
         static const uint8_t samples_finished[] =
             "JOIN_BENCHMARK_SAMPLES_FINISHED";
         const struct timespec load_settle_interval = {0, 100000000};
-        const uint32_t expected_join_rows =
-            invocation->parameters[0] == '8' ? 1024 : 512;
-        const int64_t expected_join_checksum =
-            invocation->parameters[0] != '6' ? 0 : 7168;
+        const uint32_t fanout = invocation->parameters[0] == '4' ? 4
+                                : invocation->parameters[0] == '5' ? 5
+                                : invocation->parameters[0] == '9' ? 1
+                                                                  : 0;
+        const uint32_t expected_join_rows = fanout != 0 ? 9 * fanout
+                                            : invocation->parameters[0] == '8' ? 1024
+                                                                              : 512;
+        const int64_t expected_join_checksum = fanout != 0 ? (int64_t)(144 * fanout)
+                                                : invocation->parameters[0] == '6' ? 7168
+                                                                                  : 0;
         joined_results.left_columns = composite_join_left_executor_columns;
         joined_results.right_columns = composite_join_right_executor_columns;
         if (optimizer_host_v5 == NULL ||
@@ -1973,7 +1980,8 @@ static int32_t run_write_read_fixture(
             uint64_t started_ns = 0;
             uint64_t finished_ns = 0;
             indexed_join_benchmark_result_context indexed_results = {
-                .asymmetric_values = invocation->parameters[0] != '6',
+                .asymmetric_values = invocation->parameters[0] == '7' ||
+                                     invocation->parameters[0] == '8',
             };
             if (!monotonic_time_ns(&started_ns)) {
                 static const uint8_t message[] = "fixture-error-join-benchmark-timer";
@@ -2031,11 +2039,14 @@ static int32_t run_write_read_fixture(
                           optimizer_response_len, &benchmark_plan,
                           sizeof(benchmark_plan))
                     : PRDB_SDK_OPTIMIZER_RESULT_INVALID_RESPONSE;
+            const uint8_t expected_plan_kind =
+                invocation->parameters[0] == '5'
+                    ? PRDB_SDK_OPTIMIZER_PLAN_KIND_JOIN_SELECT
+                    : PRDB_SDK_OPTIMIZER_PLAN_KIND_INDEX_NESTED_LOOP_JOIN;
             if (benchmark_plan_status != PRDB_SDK_OPTIMIZER_RESULT_OK ||
                 benchmark_plan.status != PRDB_SDK_OPTIMIZER_STATUS_SUCCESS ||
                 benchmark_plan.plan == NULL || benchmark_plan.plan_len < 3 ||
-                benchmark_plan.plan[2] !=
-                    PRDB_SDK_OPTIMIZER_PLAN_KIND_INDEX_NESTED_LOOP_JOIN) {
+                benchmark_plan.plan[2] != expected_plan_kind) {
                 char message[96];
                 int message_len = snprintf(
                     message, sizeof(message),
@@ -2059,14 +2070,21 @@ static int32_t run_write_read_fixture(
                 static const uint8_t message[] = "fixture-error-indexed-join-checksum";
                 return report_failure(host, message, sizeof(message) - 1);
             }
-            if (report_indexed_join_timing(host, 'I', finished_ns - started_ns) !=
+            const uint8_t selected_strategy =
+                benchmark_plan.plan[2] ==
+                        PRDB_SDK_OPTIMIZER_PLAN_KIND_INDEX_NESTED_LOOP_JOIN
+                    ? 'I'
+                    : 'H';
+            if (report_indexed_join_timing(host, selected_strategy,
+                                           finished_ns - started_ns) !=
                 PRDB_QUERY_CALLBACK_OK) {
                 static const uint8_t message[] = "fixture-error-indexed-join-timing";
                 return report_failure(host, message, sizeof(message) - 1);
             }
 
             indexed_join_benchmark_result_context hash_results = {
-                .asymmetric_values = invocation->parameters[0] != '6',
+                .asymmetric_values = invocation->parameters[0] == '7' ||
+                                     invocation->parameters[0] == '8',
             };
             if (!monotonic_time_ns(&started_ns)) {
                 static const uint8_t message[] = "fixture-error-join-benchmark-timer";

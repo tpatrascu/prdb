@@ -2304,7 +2304,6 @@ impl<'db> InvocationTransaction<'db> {
             || left_projection.schema_version != right_projection.schema_version
             || left_projection.context.principal_id != right_projection.context.principal_id
             || left_projection.context.role_ids != right_projection.context.role_ids
-            || left_projection.context.scope != right_projection.context.scope
         {
             return Ok(None);
         }

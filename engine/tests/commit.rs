@@ -40532,8 +40532,36 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         std::env::var_os("PRDB_TEST_INDEXED_JOIN_ASYMMETRIC_BENCHMARK_ONLY").is_some();
     let indexed_join_skew_benchmark_only =
         std::env::var_os("PRDB_TEST_INDEXED_JOIN_SKEW_BENCHMARK_ONLY").is_some();
+    let indexed_join_fanout_four_benchmark_only =
+        std::env::var_os("PRDB_TEST_INDEXED_JOIN_FANOUT4_BENCHMARK_ONLY").is_some();
+    let indexed_join_fanout_five_benchmark_only =
+        std::env::var_os("PRDB_TEST_INDEXED_JOIN_FANOUT5_BENCHMARK_ONLY").is_some();
+    let indexed_join_fanout_benchmark_only =
+        std::env::var_os("PRDB_TEST_INDEXED_JOIN_FANOUT_BENCHMARK_ONLY").is_some()
+            || indexed_join_fanout_four_benchmark_only
+            || indexed_join_fanout_five_benchmark_only;
+    let indexed_join_fanout: u16 = if indexed_join_fanout_four_benchmark_only {
+        4
+    } else if indexed_join_fanout_five_benchmark_only {
+        5
+    } else {
+        1
+    };
+    assert!(
+        [
+            std::env::var_os("PRDB_TEST_INDEXED_JOIN_FANOUT_BENCHMARK_ONLY").is_some(),
+            indexed_join_fanout_four_benchmark_only,
+            indexed_join_fanout_five_benchmark_only,
+        ]
+        .into_iter()
+        .filter(|enabled| *enabled)
+        .count()
+            <= 1,
+        "select exactly one indexed-join fanout benchmark mode"
+    );
     let indexed_join_benchmark_only = indexed_join_asymmetric_benchmark_only
         || indexed_join_skew_benchmark_only
+        || indexed_join_fanout_benchmark_only
         || std::env::var_os("PRDB_TEST_INDEXED_JOIN_BENCHMARK_ONLY").is_some();
     let spill_quota_only = std::env::var_os("PRDB_TEST_SPILL_QUOTA_ONLY").is_some();
     let spill_only = std::env::var_os("PRDB_TEST_SPILL_ONLY").is_some();
@@ -41013,35 +41041,41 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     ];
     // Keep the authorized-view population above the optimizer's small-scan
     // cutoff so the confined range acceptance exercises ScanIndexRange.
-    let composite_seed_rows =
-        if indexed_join_asymmetric_benchmark_only || indexed_join_skew_benchmark_only {
-            (0..if indexed_join_skew_benchmark_only {
-                8u8
-            } else {
-                4u8
+    let composite_seed_rows = if indexed_join_fanout_benchmark_only {
+        (0..9u8)
+            .map(|index| {
+                let key = i32::from(index);
+                (0xd3 + index, key, key)
             })
-                .map(|index| (0xd3 + index, 0, 0))
-                .collect::<Vec<_>>()
-        } else if indexed_join_benchmark_only {
-            (0..64u16)
-                .map(|index| {
-                    let row_id_byte = if index == 0 {
-                        0xd3
-                    } else {
-                        u8::try_from(index).unwrap()
-                    };
-                    (row_id_byte, i32::from(index / 8), i32::from(index / 8))
-                })
-                .collect::<Vec<_>>()
+            .collect::<Vec<_>>()
+    } else if indexed_join_asymmetric_benchmark_only || indexed_join_skew_benchmark_only {
+        (0..if indexed_join_skew_benchmark_only {
+            8u8
         } else {
-            vec![
-                (0xd3, 1, 7),
-                (0xd4, 1, 7),
-                (0xd5, 2, 9),
-                (0xd6, 2, 9),
-                (0xd7, 2, 9),
-            ]
-        };
+            4u8
+        })
+            .map(|index| (0xd3 + index, 0, 0))
+            .collect::<Vec<_>>()
+    } else if indexed_join_benchmark_only {
+        (0..64u16)
+            .map(|index| {
+                let row_id_byte = if index == 0 {
+                    0xd3
+                } else {
+                    u8::try_from(index).unwrap()
+                };
+                (row_id_byte, i32::from(index / 8), i32::from(index / 8))
+            })
+            .collect::<Vec<_>>()
+    } else {
+        vec![
+            (0xd3, 1, 7),
+            (0xd4, 1, 7),
+            (0xd5, 2, 9),
+            (0xd6, 2, 9),
+            (0xd7, 2, 9),
+        ]
+    };
     let composite_rows = composite_seed_rows
         .into_iter()
         .map(|(row_id, left, right)| {
@@ -41401,24 +41435,34 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             nullable: true,
         },
     ];
-    let joined_seed_rows =
-        if indexed_join_asymmetric_benchmark_only || indexed_join_skew_benchmark_only {
-            (0..128u16)
-                .map(|index| (u8::try_from(index + 1).unwrap(), 0, 0))
-                .collect::<Vec<_>>()
-        } else if indexed_join_benchmark_only {
-            (0..64u16)
-                .map(|index| {
-                    (
-                        u8::try_from(index + 1).unwrap(),
-                        i32::from(index / 8),
-                        i32::from(index / 8),
-                    )
-                })
-                .collect::<Vec<_>>()
-        } else {
-            vec![(0xc5, 42, 7), (0xca, 1, 7)]
-        };
+    let joined_seed_rows = if indexed_join_fanout_benchmark_only {
+        (0..128u16)
+            .map(|index| {
+                let key = if index < 9 * indexed_join_fanout {
+                    i32::from(index / indexed_join_fanout)
+                } else {
+                    1000 + i32::from(index)
+                };
+                (u8::try_from(index + 1).unwrap(), key, key)
+            })
+            .collect::<Vec<_>>()
+    } else if indexed_join_asymmetric_benchmark_only || indexed_join_skew_benchmark_only {
+        (0..128u16)
+            .map(|index| (u8::try_from(index + 1).unwrap(), 0, 0))
+            .collect::<Vec<_>>()
+    } else if indexed_join_benchmark_only {
+        (0..64u16)
+            .map(|index| {
+                (
+                    u8::try_from(index + 1).unwrap(),
+                    i32::from(index / 8),
+                    i32::from(index / 8),
+                )
+            })
+            .collect::<Vec<_>>()
+    } else {
+        vec![(0xc5, 42, 7), (0xca, 1, 7)]
+    };
     let joined_rows = joined_seed_rows
         .into_iter()
         .map(|(row_id, id_value, match_key)| {
@@ -42705,7 +42749,10 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         retention_deadline_us: now + 3_600_000_000,
         audit_event: records_index_audit,
     })?;
-    if indexed_join_asymmetric_benchmark_only || indexed_join_skew_benchmark_only {
+    if indexed_join_asymmetric_benchmark_only
+        || indexed_join_skew_benchmark_only
+        || indexed_join_fanout_benchmark_only
+    {
         let join_inner_index_invocation = id(0xc8);
         let mut join_inner_index_audit = identity_audit_event(0xc9, user_id, joined_table.table_id);
         join_inner_index_audit.correlation_id = join_inner_index_invocation;
@@ -42720,6 +42767,35 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             audit_event: join_inner_index_audit,
         })?;
     }
+    let (mut estimate_invocation, _) = storage.begin_token_authenticated_invocation(
+        id(0xca),
+        token_id,
+        &secret,
+        now + 3_600_000_000,
+        128,
+        1_048_576,
+    )?;
+    let joined_pairs = estimate_invocation
+        .open_planner_metadata_connection()
+        .estimate_join_cardinality_for_plan(
+            "sql_roundtrip",
+            "grouped_records",
+            "linked_records",
+            &composite_table.column_ids[..2],
+            &joined_table.column_ids[..2],
+            prdb_engine::statistics::MAX_JOIN_ESTIMATE_ROWS,
+        )?;
+    let expected_join_pairs = if indexed_join_fanout_benchmark_only {
+        u64::from(9 * indexed_join_fanout)
+    } else if indexed_join_skew_benchmark_only {
+        1024
+    } else if indexed_join_asymmetric_benchmark_only || indexed_join_benchmark_only {
+        512
+    } else {
+        2
+    };
+    assert_eq!(joined_pairs, Some(expected_join_pairs));
+    estimate_invocation.abort()?;
     let mut requested_scope_records = Vec::<Vec<u8>>::new();
     for schema_id in [schema.schema_id, empty_schema.schema_id] {
         let mut record = vec![1, 1];
@@ -42813,6 +42889,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             composite_table.table_id,
             if indexed_join_skew_benchmark_only {
                 8
+            } else if indexed_join_fanout_benchmark_only {
+                9
             } else if indexed_join_asymmetric_benchmark_only {
                 4
             } else if indexed_join_benchmark_only {
@@ -42944,7 +43022,15 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         ordered_client.accept_hello(ClientMode::Query, "sandbox-ordered-analytical-sum")?;
         ordered_client.authenticate(&storage, token_id, &secret)?;
         let ordered_owner = ordered_client.staging_owner()?;
-        let ordered_parameter = [if indexed_join_skew_benchmark_only {
+        let ordered_parameter = [if indexed_join_fanout_benchmark_only {
+            if indexed_join_fanout == 4 {
+                b'4'
+            } else if indexed_join_fanout == 5 {
+                b'5'
+            } else {
+                b'9'
+            }
+        } else if indexed_join_skew_benchmark_only {
             b'8'
         } else if indexed_join_asymmetric_benchmark_only {
             b'7'
@@ -43111,7 +43197,9 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             ) = std::thread::scope(|scope| {
                 let storage_ref = &storage;
                 let operational_table_id = composite_table.table_id;
-                let expected_operational_scan_rows = if indexed_join_skew_benchmark_only {
+                let expected_operational_scan_rows = if indexed_join_fanout_benchmark_only {
+                    9
+                } else if indexed_join_skew_benchmark_only {
                     8
                 } else if indexed_join_asymmetric_benchmark_only {
                     4
@@ -43475,23 +43563,38 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                     }
                 }
             }
-            assert_eq!(indexed_samples.len(), 2);
-            assert_eq!(hash_samples.len(), 2);
+            let expected_indexed_samples =
+                if indexed_join_fanout_benchmark_only && indexed_join_fanout == 5 {
+                    0
+                } else {
+                    2
+                };
+            let expected_hash_samples = if expected_indexed_samples == 0 { 4 } else { 2 };
+            assert_eq!(indexed_samples.len(), expected_indexed_samples);
+            assert_eq!(hash_samples.len(), expected_hash_samples);
             eprintln!(
-                "SQL-10 mixed-load join latency (ns), same invocation snapshot and 128-row join input, two samples per strategy: indexed={indexed_samples:?} hash={hash_samples:?}"
+                "SQL-10 mixed-load join latency (ns), same invocation snapshot and 128-row join input, indexed fanout {}: indexed={indexed_samples:?} hash={hash_samples:?}",
+                indexed_join_fanout
             );
             let (load_started, load_finished) = operational_load_interval
                 .ok_or("indexed/hash join benchmark did not overlap operational load")?;
             let observed_samples = join_timing_observed_at
                 .lock()
                 .map_err(|_| std::io::Error::other("join timing observer lock poisoned"))?;
-            assert_eq!(observed_samples.len(), 4);
-            assert!(
-                observed_samples.iter().any(|(kind, observed_at)| {
-                    *kind == b'I' && load_started <= *observed_at && *observed_at <= load_finished
-                }),
-                "no indexed sample completed during operational load"
+            assert_eq!(
+                observed_samples.len(),
+                expected_hash_samples + expected_indexed_samples
             );
+            if expected_indexed_samples > 0 {
+                assert!(
+                    observed_samples.iter().any(|(kind, observed_at)| {
+                        *kind == b'I'
+                            && load_started <= *observed_at
+                            && *observed_at <= load_finished
+                    }),
+                    "no indexed sample completed during operational load"
+                );
+            }
             assert!(
                 observed_samples.iter().any(|(kind, observed_at)| {
                     *kind == b'H' && load_started <= *observed_at && *observed_at <= load_finished
