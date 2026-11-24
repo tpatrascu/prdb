@@ -40756,14 +40756,16 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     let sql_in_fallback_only = std::env::var_os("PRDB_TEST_SQL_IN_FALLBACK_ONLY").is_some();
     let sql_in_null_left_only = std::env::var_os("PRDB_TEST_SQL_IN_NULL_LEFT_ONLY").is_some();
     let sql_in_cancel_only = std::env::var_os("PRDB_TEST_SQL_IN_CANCEL_ONLY").is_some();
+    let sql_in_denied_key_only = std::env::var_os("PRDB_TEST_SQL_IN_DENIED_KEY_ONLY").is_some();
     let sql_in_only = sql_in_indexed_only || sql_in_fallback_only || sql_in_null_left_only;
-    let sql_in_any_only = sql_in_only || sql_in_cancel_only;
+    let sql_in_any_only = sql_in_only || sql_in_cancel_only || sql_in_denied_key_only;
     assert!(
         [
             sql_in_indexed_only,
             sql_in_fallback_only,
             sql_in_null_left_only,
             sql_in_cancel_only,
+            sql_in_denied_key_only,
         ]
         .into_iter()
         .filter(|enabled| *enabled)
@@ -42807,6 +42809,31 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             })
             .map_err(|error| format!("create spill redaction policy: {error:?}"))?;
     }
+    if sql_in_denied_key_only {
+        let denied_key_policy_invocation = id(0xae);
+        let mut denied_key_policy_audit =
+            identity_audit_event(0xaf, user_id, composite_table.column_ids[0]);
+        denied_key_policy_audit.correlation_id = denied_key_policy_invocation;
+        storage
+            .create_policy(CreatePolicyRequest {
+                invocation_id: denied_key_policy_invocation,
+                authenticated_actor_id: user_id,
+                table_id: composite_table.table_id,
+                name: "sandbox_sql_in_denied_index_key_policy".to_owned(),
+                kind: PolicyKind::Cell,
+                operation: prdb_engine::authorization::Operation::Select,
+                effect: prdb_engine::authorization::Effect::Restrict,
+                recipients: vec![prdb_engine::authorization::Subject::Principal(user_id)],
+                target_column_ids: vec![composite_table.column_ids[0]],
+                using_expression: Some(prdb_engine::authorization::Expr::Literal(Some(
+                    ScalarValue::Boolean(false),
+                ))),
+                with_check_expression: None,
+                retention_deadline_us: now + 3_600_000_000,
+                audit_event: denied_key_policy_audit,
+            })
+            .map_err(|error| format!("create SQL IN denied-key policy: {error:?}"))?;
+    }
     let identity_policy_invocation = id(0xfa);
     let mut identity_policy_audit = identity_audit_event(0xfa, user_id, identity_table.table_id);
     identity_policy_audit.correlation_id = identity_policy_invocation;
@@ -43065,8 +43092,12 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     };
     assert_eq!(
         joined_pairs,
-        Some(expected_join_pairs),
-        "the authorized join estimate must return its exact pair count within the configured bound"
+        if sql_in_denied_key_only {
+            None
+        } else {
+            Some(expected_join_pairs)
+        },
+        "the authorized join estimate must return its exact pair count within the configured bound, or remain unknown when an indexed key is restricted"
     );
     estimate_invocation.abort()?;
     let mut requested_scope_records = Vec::<Vec<u8>>::new();
@@ -43394,6 +43425,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 b'L'
             } else if sql_in_cancel_only {
                 b'i'
+            } else if sql_in_denied_key_only {
+                b'd'
             } else {
                 b'N'
             }
@@ -43719,10 +43752,11 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             || spill_disk_full_only
             || spill_pressure_cancel_only
             || sql_in_cancel_only
+            || sql_in_denied_key_only
         {
             assert!(
                 matches!(ordered_decision, GatewayTerminalDecision::Abort(_)),
-                "spill quota, filesystem exhaustion, cancellation, redacted key, oversized joined projection, or worker crash must abort; frames: {:?}",
+                "spill quota, filesystem exhaustion, cancellation, denied SQL IN key, redacted key, oversized joined projection, or worker crash must abort; frames: {:?}",
                 ordered_frames
                     .iter()
                     .map(|frame| (
@@ -43736,6 +43770,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 || spill_join_oversize_only
                 || spill_disk_full_only
                 || sql_in_cancel_only
+                || sql_in_denied_key_only
             {
                 assert!(
                     ordered_frames
@@ -44279,13 +44314,13 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 observed.iter().map(|(_, value)| *value).collect::<Vec<_>>(),
                 [None, None, None, Some(225), Some(225), Some(225)]
             );
-        } else if sql_in_cancel_only {
+        } else if sql_in_cancel_only || sql_in_denied_key_only {
             assert!(
                 ordered_frames
                     .as_slice()
                     .iter()
                     .all(|frame| frame.operation != Operation::GatewayResultData as u16),
-                "cancelled SQL IN must not expose partial rows"
+                "cancelled or denied-key SQL IN must not expose partial rows"
             );
         } else if sql_in_only {
             fn decode_pair(bytes: &[u8]) -> Result<(i32, i32), Box<dyn std::error::Error>> {
@@ -44470,6 +44505,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 || spill_disk_full_only
                 || spill_pressure_cancel_only
                 || sql_in_cancel_only
+                || sql_in_denied_key_only
             {
                 "\"outcome\":\"aborted\""
             } else {
@@ -44488,6 +44524,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 || spill_disk_full_only
                 || spill_pressure_cancel_only
                 || sql_in_cancel_only
+                || sql_in_denied_key_only
             {
                 OutcomeStatus::Aborted
             } else {

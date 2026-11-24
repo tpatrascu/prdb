@@ -1966,7 +1966,8 @@ static int32_t run_write_read_fixture(
     }
     if (invocation->parameters_len == 1 && invocation->parameters != NULL &&
         (invocation->parameters[0] == 'N' || invocation->parameters[0] == 'F' ||
-         invocation->parameters[0] == 'L' || invocation->parameters[0] == 'i')) {
+         invocation->parameters[0] == 'L' || invocation->parameters[0] == 'i' ||
+         invocation->parameters[0] == 'd')) {
         static const uint8_t in_sql[] =
             "SELECT left_key, right_key FROM grouped_records "
             "WHERE left_key IN ($1, $2, $3, $4)";
@@ -2013,6 +2014,15 @@ static int32_t run_write_read_fixture(
                                              : in_parameters,
             sizeof(in_parameters));
         range_observer_original_host = NULL;
+        if (invocation->parameters[0] == 'd') {
+            if (status == PRDB_SDK_SQL_DISPATCH_OK ||
+                range_observer_scan_ranges_requests != 0 ||
+                range_observer_open_scan_requests == 0) {
+                static const uint8_t message[] = "fixture-error-in-denied-key-path";
+                return report_failure(host, message, sizeof(message) - 1);
+            }
+            return 0;
+        }
         if (invocation->parameters[0] == 'i') {
             if (status == PRDB_SDK_SQL_DISPATCH_OK ||
                 range_observer_cancellation_checks == 0 ||
