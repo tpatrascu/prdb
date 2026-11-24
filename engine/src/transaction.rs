@@ -13059,9 +13059,9 @@ mod predicate_estimate_scan_budget_tests {
         let encode_row = |value: Option<ScalarValue>| {
             crate::tuple::encode_tuple(&columns, 1, &[value]).expect("encode fixture row")
         };
-        let row_id = |value: u8| crate::overlay::RowId {
+        let row_id = |value: u64| crate::overlay::RowId {
             table: table_id,
-            row: [value; 16],
+            row: u128::from(value).to_be_bytes(),
         };
         let mut seed =
             InvocationTransaction::begin(database, [0x25; 16], principal_id, i64::MAX, 4, 512)
@@ -13203,8 +13203,8 @@ mod predicate_estimate_scan_budget_tests {
             [0x27; 16],
             principal_id,
             i64::MAX,
-            16,
-            2048,
+            16_384,
+            2 * 1024 * 1024,
         )
         .expect("begin few-hidden-row invocation");
         let mut many_hidden_coordination = InvocationCoordination::uncoordinated();
@@ -13215,11 +13215,17 @@ mod predicate_estimate_scan_budget_tests {
             [0x28; 16],
             principal_id,
             i64::MAX,
-            16,
-            2048,
+            16_384,
+            2 * 1024 * 1024,
         )
         .expect("begin many-hidden-row invocation");
-        for hidden_id in 3..=12 {
+        let hidden_candidate_count =
+            if std::env::var_os("PRDB_TEST_PROFILE_HIDDEN_ESTIMATE_CPU").is_some() {
+                8_192
+            } else {
+                10
+            };
+        for hidden_id in 3..=hidden_candidate_count + 2 {
             many_hidden
                 .stage_put(
                     row_id(hidden_id),
@@ -13258,6 +13264,59 @@ mod predicate_estimate_scan_budget_tests {
         assert_eq!(few_hidden_page.rows, many_hidden_page.rows);
         assert_eq!(few_hidden_page.rows.len(), 1);
         assert!(few_hidden_page.continuation.is_some());
+        if std::env::var_os("PRDB_TEST_PROFILE_HIDDEN_ESTIMATE_CPU").is_some() {
+            fn thread_cpu_time() -> std::time::Duration {
+                let mut value = libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                };
+                // SAFETY: `value` is a valid writable timespec for the duration of the call.
+                let status =
+                    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut value) };
+                assert_eq!(status, 0, "read current thread CPU clock");
+                std::time::Duration::new(
+                    u64::try_from(value.tv_sec).expect("thread CPU seconds are nonnegative"),
+                    u32::try_from(value.tv_nsec).expect("thread CPU nanoseconds fit u32"),
+                )
+            }
+            const PROFILE_SAMPLES: usize = 5;
+            const ESTIMATES_PER_SAMPLE: usize = 1_024;
+            let mut few_hidden_times = Vec::with_capacity(PROFILE_SAMPLES);
+            let mut many_hidden_times = Vec::with_capacity(PROFILE_SAMPLES);
+            let measure_estimates = |transaction: &mut InvocationTransaction<'_>| {
+                let started = thread_cpu_time();
+                for _ in 0..ESTIMATES_PER_SAMPLE {
+                    assert_eq!(
+                        transaction
+                            .estimate_authorized_predicate_at_most(
+                                table_id,
+                                &filtered_projection,
+                                &predicate,
+                                16_384,
+                            )
+                            .expect("repeat hidden-candidate estimate"),
+                        None
+                    );
+                }
+                thread_cpu_time().saturating_sub(started)
+            };
+            for sample in 0..PROFILE_SAMPLES {
+                if sample % 2 == 0 {
+                    few_hidden_times.push(measure_estimates(&mut few_hidden));
+                    many_hidden_times.push(measure_estimates(&mut many_hidden));
+                } else {
+                    many_hidden_times.push(measure_estimates(&mut many_hidden));
+                    few_hidden_times.push(measure_estimates(&mut few_hidden));
+                }
+            }
+            few_hidden_times.sort_unstable();
+            many_hidden_times.sort_unstable();
+            eprintln!(
+                "hidden-row estimate thread-CPU profile: hidden_overlay_rows={hidden_candidate_count}, estimates_per_sample={ESTIMATES_PER_SAMPLE}, samples={PROFILE_SAMPLES}, few-hidden p50={:.3} ms, many-hidden p50={:.3} ms",
+                few_hidden_times[few_hidden_times.len() / 2].as_secs_f64() * 1_000.0,
+                many_hidden_times[many_hidden_times.len() / 2].as_secs_f64() * 1_000.0,
+            );
+        }
         few_hidden.abort().expect("abort few-hidden invocation");
         many_hidden.abort().expect("abort many-hidden invocation");
 

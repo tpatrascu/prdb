@@ -1,5 +1,12 @@
 # Statistics Service Progress
 
+## ST-3 follow-up: measure thread CPU for hidden-candidate estimates — measured
+
+- Harness: the existing value-dependent-policy regression compares `Unknown` estimates with two committed candidates and with 8,194 total candidates (8,192 additional private overlay rows). An opt-in profile records current-thread CPU time for 1,024 repeated estimates per sample, across five samples and five fresh database fixtures; every estimate remains `Unknown`.
+- Evidence: the median of five run-level p50s was 2.506 ms for two candidates (2.149–2.562 ms range) and 2.523 ms for 8,194 candidates (2.203–2.531 ms range). The medians show no clear candidate-volume growth in this local profile.
+- Scope: this checks one value-dependent policy and one predicate on the local Linux host. It is not a timing noninterference proof, has no concurrent load, and does not cover committed hidden rows at scale or target-host behavior. Estimates still return `Unknown` without consuming query scan work.
+- Verification: five focused delegated-service profile runs and one initial focused run passed the exact-output and same-authorized-page assertions; the focused test uses `PRDB_TEST_PROFILE_HIDDEN_ESTIMATE_CPU=1` to enable timing.
+
 ## ST-2 / OP-1 follow-up: measure concurrent indexed estimates — measured
 
 - Harness: eight independent `prdb-optimizer` binaries each planned an indexed equality SELECT over a fresh 2,052-row fixture using its own invocation transaction and real planner IPC stream. A barrier synchronized requests; each plan was checked for relation identity and its filter. Five fresh-database runs each executed five batches of eight optimizer requests.
