@@ -64,6 +64,8 @@ Make the test pass without bypassing permissions, confinement, transaction bound
 
 Remove duplication and improve boundaries only where the new behavior warrants it. Run focused tests after edits, then targeted component/integration checks relevant to the iteration. Do not run the full workspace test suite after every iteration. Do not introduce unrelated abstractions or performance changes merely because the code is open.
 
+For every test run, capture and report its wall-clock elapsed duration in the handoff, including focused, targeted, and full-suite runs. For performance tests, also report the measured workload latency (at least the relevant p50/p95/p99) separately from test execution time; include setup or compilation time separately when it materially affects the reported duration. Never present test runtime as query latency or omit latency because a run was primarily a correctness check.
+
 ### 5. Reconcile specifications and evidence
 
 Update affected specs in the same increment: precise behavior, formats, limits, defaults, failures, compatibility, and remaining questions. Synchronize the index and neighboring contracts. Run focused regression checks for the increment and record actual results. Do not declare completion while a required behavior is represented only by a placeholder or skipped test.
