@@ -1,5 +1,12 @@
 # Statistics Service Progress
 
+## ST-2 / OP-7 follow-up: extend exact join estimates to 2,048 rows — implemented
+
+- Contract: authorized join population probes and exact pair estimates now accept up to 2,048 rows per input. Candidate row reads remain bounded to 2,049 per population; pair estimation retains the 8 MiB combined decoded-row cap, 4 KiB per encoded key, value-independent visibility requirement, statically readable-key requirement, and shared estimate allowance. Results above the requested bound remain `Unknown` without partial counts.
+- Red/green: the real-redb transaction regression first returned `Unknown` for a 2,048×2,048 join with NULL-only added keys. It now returns the same exact 1,043,463 pairs as the 1,024-row baseline; a smaller requested bound still returns `Unknown`. A planner-process regression verifies a 17×2,048 low-fanout join receives the expanded estimate request and chooses indexed nested-loop.
+- Scope: the estimate ceiling is higher; fanout rules and pair-per-outer threshold are unchanged. Populations above 2,048, broader fanout/distribution profiles, general cost comparison, global-statistics consumption, and target-host evidence remain open.
+- Validation: focused real-redb transaction and optimizer-process regressions passed. `cargo fmt --all -- --check`, locked workspace build, warning-denied all-target Clippy, and the full serial delegated-cgroup workspace suite passed. The suite reported 406 library tests, 206 commit integration tests, 3 metadata-process tests, 83 transaction tests, all other targets, and no ignored tests. The sandbox runtime allowlist included the pinned loader, libc, and `libgcc_s.so.1` required by the executor binary.
+
 ## ST-2 / OP-7 follow-up: validate the exact 17×119 skew boundary — measured
 
 - Contract: exercise the current 17-row outer / 7× indexed-side eligibility boundary through the full confined SQL path, including the authorized exact pair estimate, selected plan, indexed execution, hash reference result, durable outcome, and concurrent operational workload.

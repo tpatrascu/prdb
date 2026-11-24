@@ -52735,7 +52735,7 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
 
     let mut large_join_estimate =
         storage.begin_invocation(id(0xa3), actor, 9_999, 2048, 8 * 1024 * 1024)?;
-    for row_number in 1..=1024u32 {
+    for row_number in 1..=2048u32 {
         let mut row_id = [0; 16];
         row_id[12..].copy_from_slice(&row_number.to_be_bytes());
         large_join_estimate.stage_put(
@@ -52769,18 +52769,18 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
                     right_relation_name: "observations".to_owned(),
                     left_key_column_ids: vec![table.column_ids[0]],
                     right_key_column_ids: vec![table.column_ids[0]],
-                    maximum_rows: 1024,
+                    maximum_rows: 2048,
                 }
                 .encode()?,
             },
         )?;
         let response = prdb_engine::ipc::read_frame(&mut large_join_client)?
-            .ok_or("planner stream closed before the 1,024-row join estimate")?;
+            .ok_or("planner stream closed before the 2,048-row join estimate")?;
         assert_eq!(response.request_id, 1);
         assert_eq!(
             EstimateJoinResponse::decode(&response.payload)?,
             EstimateJoinResponse::Exact {
-                joined_rows: 1024 * 1024,
+                joined_rows: 2048 * 2048,
             }
         );
         large_join_client.shutdown(Shutdown::Write)?;

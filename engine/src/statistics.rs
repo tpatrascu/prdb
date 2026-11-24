@@ -3,7 +3,7 @@
 /// Maximum committed rows inspected by one maintenance collection pass.
 pub const MAX_COMMITTED_POPULATION_ROWS: u64 = 16_384;
 /// Maximum exact population per side considered by one join-cardinality estimate.
-pub const MAX_JOIN_ESTIMATE_ROWS: u64 = 1024;
+pub const MAX_JOIN_ESTIMATE_ROWS: u64 = 2048;
 /// Maximum encoded row bytes read across both sides of one join estimate.
 pub const MAX_JOIN_ESTIMATE_BYTES: usize = 8 * 1024 * 1024;
 /// Maximum encoded composite join key retained by the bounded estimator.

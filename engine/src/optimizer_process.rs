@@ -1848,7 +1848,11 @@ mod tests {
                             payload: DescribePlanRelationResponse {
                                 relation: Some(relation),
                                 proven_empty: false,
-                                visible_rows_estimate: Some(if name == "lefts" { 9 } else { 128 }),
+                                visible_rows_estimate: Some(if name == "lefts" {
+                                    17
+                                } else {
+                                    2048
+                                }),
                             }
                             .encode()
                             .unwrap(),
@@ -1884,7 +1888,7 @@ mod tests {
                                 operation: estimate.operation,
                                 request_id: estimate.request_id,
                                 payload: crate::planner_ipc::EstimateJoinResponse::Exact {
-                                    joined_rows: 9,
+                                    joined_rows: 17,
                                 }
                                 .encode()
                                 .unwrap(),
@@ -1925,7 +1929,7 @@ mod tests {
             assert_eq!(plan.limit, Some(5));
             assert!(
                 plan.index_nested_loop.is_some(),
-                "low fanout for a moderately larger input should select indexed nested loop"
+                "low fanout against an exact 2,048-row input should select indexed nested loop"
             );
 
             crate::ipc::write_frame(
