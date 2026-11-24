@@ -40752,7 +40752,13 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     let spill_pressure_cancel_only =
         std::env::var_os("PRDB_TEST_SPILL_PRESSURE_CANCEL_ONLY").is_some();
     let spill_disk_full_only = std::env::var_os("PRDB_TEST_SPILL_DISK_FULL_ONLY").is_some();
-    let sql_in_only = std::env::var_os("PRDB_TEST_SQL_IN_ONLY").is_some();
+    let sql_in_indexed_only = std::env::var_os("PRDB_TEST_SQL_IN_ONLY").is_some();
+    let sql_in_fallback_only = std::env::var_os("PRDB_TEST_SQL_IN_FALLBACK_ONLY").is_some();
+    let sql_in_only = sql_in_indexed_only || sql_in_fallback_only;
+    assert!(
+        !(sql_in_indexed_only && sql_in_fallback_only),
+        "select only one SQL IN acceptance mode"
+    );
     let spill_enabled_only = spill_quota_only
         || spill_only
         || spill_limit_only
@@ -43350,7 +43356,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         } else if count_bigint_only {
             b'I'
         } else if sql_in_only {
-            b'N'
+            if sql_in_fallback_only { b'F' } else { b'N' }
         } else if filtered_composite_only {
             b'Q'
         } else {

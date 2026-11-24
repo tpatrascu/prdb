@@ -1939,10 +1939,13 @@ static int32_t run_write_read_fixture(
         return 1;
     }
     if (invocation->parameters_len == 1 && invocation->parameters != NULL &&
-        invocation->parameters[0] == 'N') {
+        (invocation->parameters[0] == 'N' || invocation->parameters[0] == 'F')) {
         static const uint8_t in_sql[] =
             "SELECT left_key, right_key FROM grouped_records "
             "WHERE left_key IN ($1, $2, $3, $4)";
+        static const uint8_t in_fallback_sql[] =
+            "SELECT left_key, right_key FROM grouped_records "
+            "WHERE right_key IN ($1, $2, $3, $4)";
         static const uint8_t in_parameters[] = {
             'P', 'S', 'P', '1', 0, 4, 0, 0,
             0, 0, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0, 0, 0,
@@ -1951,6 +1954,16 @@ static int32_t run_write_read_fixture(
             0, 0, 0, 4, 2, 0, 0, 0,
             0, 0, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0, 0, 0,
             0, 0, 0, 4, 1, 0, 0, 0,
+            0, 0, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0, 1, 0,
+            0, 0, 0, 0};
+        static const uint8_t in_fallback_parameters[] = {
+            'P', 'S', 'P', '1', 0, 4, 0, 0,
+            0, 0, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0, 0, 0,
+            0, 0, 0, 4, 7, 0, 0, 0,
+            0, 0, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0, 0, 0,
+            0, 0, 0, 4, 9, 0, 0, 0,
+            0, 0, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0, 0, 0,
+            0, 0, 0, 4, 7, 0, 0, 0,
             0, 0, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0, 1, 0,
             0, 0, 0, 0};
         prdb_host_api_v4 observed_host;
@@ -1962,15 +1975,26 @@ static int32_t run_write_read_fixture(
         range_observer_open_scan_requests = 0;
         observed_host.v3.executor_request = observe_range_executor_request;
         status = prdb_sdk_sql_run_statement_optimizer_v1(
-            &observed_host, schema, sizeof(schema) - 1, in_sql,
-            sizeof(in_sql) - 1, in_parameters, sizeof(in_parameters));
+            &observed_host, schema, sizeof(schema) - 1,
+            invocation->parameters[0] == 'F' ? in_fallback_sql : in_sql,
+            invocation->parameters[0] == 'F' ? sizeof(in_fallback_sql) - 1
+                                             : sizeof(in_sql) - 1,
+            invocation->parameters[0] == 'F' ? in_fallback_parameters
+                                             : in_parameters,
+            sizeof(in_parameters));
         range_observer_original_host = NULL;
         if (status != PRDB_SDK_SQL_DISPATCH_OK) {
             static const uint8_t message[] = "fixture-error-batched-in-status";
             return report_failure(host, message, sizeof(message) - 1);
         }
-        if (range_observer_scan_ranges_requests != 1 ||
-            range_observer_open_scan_requests != 0) {
+        if (invocation->parameters[0] == 'F') {
+            if (range_observer_scan_ranges_requests != 0 ||
+                range_observer_open_scan_requests == 0) {
+                static const uint8_t message[] = "fixture-error-in-full-scan-fallback";
+                return report_failure(host, message, sizeof(message) - 1);
+            }
+        } else if (range_observer_scan_ranges_requests != 1 ||
+                   range_observer_open_scan_requests != 0) {
             static const uint8_t message[] = "fixture-error-batched-in-access-path";
             return report_failure(host, message, sizeof(message) - 1);
         }
