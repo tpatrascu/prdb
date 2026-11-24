@@ -7203,6 +7203,42 @@ fn constant_predicate_reuses_fresh_population_without_reading_rows()
             if rows.len() == 1 && rows[0].0 == id(1)
     ));
     bounded_scan_work.abort()?;
+
+    let changed_row = encode_tuple(
+        &columns,
+        1,
+        &[Some(ScalarValue::Bytea(b"changed".to_vec()))],
+    )?;
+    let mut overlay_update =
+        InvocationTransaction::begin(&database, [0x36; 16], [9; 16], 9_999, 4, 512)?;
+    overlay_update.stage_put(id(1), &changed_row)?;
+    assert_eq!(
+        overlay_update.estimate_authorized_predicate_at_most(
+            table_id,
+            &projection,
+            &indexed_match,
+            4,
+        )?,
+        Some((2, 0)),
+        "a private update must remove the committed indexed match"
+    );
+    overlay_update.abort()?;
+
+    let mut overlay_delete =
+        InvocationTransaction::begin(&database, [0x37; 16], [9; 16], 9_999, 4, 512)?;
+    overlay_delete.stage_delete(id(1))?;
+    assert_eq!(
+        overlay_delete.estimate_authorized_predicate_at_most(
+            table_id,
+            &projection,
+            &indexed_match,
+            4,
+        )?,
+        Some((1, 0)),
+        "a private delete must remove the committed indexed match and row"
+    );
+    overlay_delete.abort()?;
+
     assert_eq!(
         invocation.estimate_authorized_predicate_at_most(
             table_id,
@@ -7214,6 +7250,16 @@ fn constant_predicate_reuses_fresh_population_without_reading_rows()
         "an indexed exact estimate should not decode unrelated malformed rows"
     );
     invocation.stage_put(id(3), &row)?;
+    assert_eq!(
+        invocation.estimate_authorized_predicate_at_most(
+            table_id,
+            &projection,
+            &indexed_match,
+            4,
+        )?,
+        Some((3, 2)),
+        "a fresh committed index count should be adjusted by the bounded private insert"
+    );
     assert_eq!(
         invocation.estimate_authorized_predicate_at_most(
             table_id,

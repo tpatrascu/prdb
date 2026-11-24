@@ -193,6 +193,7 @@ pub enum ExecutorIndexRangeScan {
 
 const MAX_AUTHORIZED_INDEX_RANGE_CANDIDATES: usize = 1_024;
 const MAX_AUTHORIZED_INDEX_RANGE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_INDEXED_PREDICATE_OVERLAY_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutorAuthorizedRowScanPage {
@@ -2995,14 +2996,6 @@ impl<'db> InvocationTransaction<'db> {
         predicate: &crate::optimizer_binding::BoundPredicate,
         maximum_rows: u64,
     ) -> Result<Option<(u64, u64)>, TransactionError> {
-        let overlay_is_empty = match self.overlay.staged_row_count() {
-            Ok(rows) => rows == 0,
-            Err(OverlayError::Aborted) => return Err(TransactionError::Aborted),
-            Err(_) => return Ok(None),
-        };
-        if !overlay_is_empty {
-            return Ok(None);
-        }
         let Some(CommittedPopulationRecord::Exact {
             rows: visible_rows, ..
         }) = self
@@ -3016,6 +3009,18 @@ impl<'db> InvocationTransaction<'db> {
         if visible_rows > maximum_rows {
             return Ok(None);
         }
+        let Ok(overlay_limit) = usize::try_from(maximum_rows) else {
+            return Ok(None);
+        };
+        let overlay_row_ids = match self
+            .overlay
+            .bounded_row_ids_for_table(table_id, overlay_limit)
+        {
+            Ok(Some(row_ids)) => row_ids,
+            Ok(None) => return Ok(None),
+            Err(OverlayError::Aborted) => return Err(TransactionError::Aborted),
+            Err(_) => return Ok(None),
+        };
         let Some((key_column, lower, upper)) = crate::optimizer_plan::index_range_bounds(predicate)
         else {
             return Ok(None);
@@ -3106,7 +3111,98 @@ impl<'db> InvocationTransaction<'db> {
             };
             after_key = Some(continuation);
         }
+        let mut visible_rows = visible_rows;
+        let mut overlay_bytes = 0usize;
+        for row_id in overlay_row_ids {
+            self.check_deadline()?;
+            let id = RowId {
+                table: table_id,
+                row: row_id,
+            };
+            let new_payload = match self.overlay.get_for_actor(&id, self.principal_id) {
+                Ok(Some(StagedRow::Value(payload))) => Some(payload.to_vec()),
+                Ok(Some(StagedRow::Delete)) => None,
+                Ok(None) => continue,
+                Err(OverlayError::Aborted) => return Err(TransactionError::Aborted),
+                Err(_) => return Ok(None),
+            };
+            let old_payload = match self.pinned_snapshot()?.get(&row_key(id)) {
+                Ok(Some(bytes)) => match RowRecord::decode(&bytes) {
+                    Ok(record) => Some(record.payload),
+                    Err(_) => return Ok(None),
+                },
+                Ok(None) => None,
+                Err(_) => return Ok(None),
+            };
+            let Some(next_overlay_bytes) = overlay_bytes
+                .checked_add(old_payload.as_ref().map_or(0, Vec::len))
+                .and_then(|bytes| bytes.checked_add(new_payload.as_ref().map_or(0, Vec::len)))
+            else {
+                return Ok(None);
+            };
+            if next_overlay_bytes > MAX_INDEXED_PREDICATE_OVERLAY_BYTES {
+                return Ok(None);
+            }
+            overlay_bytes = next_overlay_bytes;
+            let old_matches = match old_payload.as_deref() {
+                Some(payload) => match self
+                    .estimate_payload_matches_predicate(id, payload, projection, predicate)
+                {
+                    Some(matches) => Some(matches),
+                    None => return Ok(None),
+                },
+                None => None,
+            };
+            let new_matches = match new_payload.as_deref() {
+                Some(payload) => match self
+                    .estimate_payload_matches_predicate(id, payload, projection, predicate)
+                {
+                    Some(matches) => Some(matches),
+                    None => return Ok(None),
+                },
+                None => None,
+            };
+            let Some(next_visible_rows) = visible_rows
+                .checked_sub(if old_payload.is_some() { 1 } else { 0 })
+                .and_then(|rows| rows.checked_add(if new_payload.is_some() { 1 } else { 0 }))
+            else {
+                return Ok(None);
+            };
+            let Some(next_matching_rows) = matching_rows
+                .checked_sub(if old_matches == Some(true) { 1 } else { 0 })
+                .and_then(|rows| rows.checked_add(if new_matches == Some(true) { 1 } else { 0 }))
+            else {
+                return Ok(None);
+            };
+            visible_rows = next_visible_rows;
+            matching_rows = next_matching_rows;
+        }
+        if visible_rows > maximum_rows || matching_rows > visible_rows {
+            return Ok(None);
+        }
         Ok(Some((visible_rows, matching_rows)))
+    }
+
+    fn estimate_payload_matches_predicate(
+        &self,
+        id: RowId,
+        payload: &[u8],
+        projection: &AuthorizedProjection<'_>,
+        predicate: &crate::optimizer_binding::BoundPredicate,
+    ) -> Option<bool> {
+        let tuple = decode_tuple(projection.columns, projection.schema_version, payload).ok()?;
+        let cells = project_row(
+            projection.context,
+            projection.grants,
+            projection.policies,
+            projection.schema_id,
+            id.table,
+            projection.column_ids,
+            &tuple.values,
+        )
+        .ok()??;
+        evaluate_estimate_predicate(predicate, &cells, projection, 0, 256)
+            .map(|truth| truth == EstimateTruth::True)
     }
 
     fn finish_predicate_estimate(

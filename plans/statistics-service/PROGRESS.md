@@ -1,5 +1,11 @@
 # Statistics Service Progress
 
+## ST-2 follow-up: adjust indexed predicate counts for private overlay writes — verified slice
+
+- Contract: a fresh committed population and an eligible readable leading index still provide the exact committed baseline. The estimator now adjusts that baseline only for bounded overlay entries authored by the current actor, using each affected row's pinned committed value and staged replacement/deletion. Other actors' writes remain outside the invocation view. Invalid or over-bound overlay values fall back to the bounded row estimator; cumulative old/staged payload bytes are capped at 16 MiB.
+- Red/green: the regression adds a private insert matching the indexed predicate while an unrelated committed row has malformed tuple bytes. The existing empty-overlay-only fast path returned `Unknown`; the new path returns `(3,2)` without reading the unrelated row. The same regression checks a private update that removes the match and a private delete that removes both the match and visible row.
+- Verification: the focused transaction regression passed, followed by all 85 transaction integration tests in an isolated locked Cargo target. The existing delegated full-suite process was still active, so no full-suite result is claimed for this slice.
+
 ## ST-2 / OP-4 follow-up: count exact indexed predicates without row decoding — implemented and profiled
 
 - Contract: a simple equality/range predicate may use a direct pinned-snapshot index-entry count only when a fresh exact committed population record proves the full authorized population, row visibility is independent of row values, the overlay is empty, the index begins with the predicate column, and every index component is unconditionally readable. The bounded path returns no row values and does not debit executor scan work; all other cases retain the bounded row estimator.
