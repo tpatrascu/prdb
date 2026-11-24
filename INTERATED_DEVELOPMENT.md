@@ -52,11 +52,11 @@ Make the test pass without bypassing permissions, confinement, transaction bound
 
 ### 4. Refactor with tests green
 
-Remove duplication and improve boundaries only where the new behavior warrants it. Run focused tests after edits, then the relevant component/integration checks. Do not introduce unrelated abstractions or performance changes merely because the code is open.
+Remove duplication and improve boundaries only where the new behavior warrants it. Run focused tests after edits, then targeted component/integration checks relevant to the iteration. Do not run the full workspace test suite after every iteration. Do not introduce unrelated abstractions or performance changes merely because the code is open.
 
 ### 5. Reconcile specifications and evidence
 
-Update affected specs in the same increment: precise behavior, formats, limits, defaults, failures, compatibility, and remaining questions. Synchronize the index and neighboring contracts. Then run the appropriate regression checks once and record actual results. Do not declare completion while a required behavior is represented only by a placeholder or skipped test.
+Update affected specs in the same increment: precise behavior, formats, limits, defaults, failures, compatibility, and remaining questions. Synchronize the index and neighboring contracts. Run focused regression checks for the increment and record actual results. Do not declare completion while a required behavior is represented only by a placeholder or skipped test.
 
 Repeat for the next small behavior. A regression fix starts with a reproducing test whenever feasible.
 
@@ -72,7 +72,7 @@ The final specs should describe the chosen behavior, with limitations clearly ma
 
 ## Implementation Sequence and Exit Evidence
 
-These milestones are dependency guides, not permission to defer correctness until the end. Use tiny cycles within each stage and add cross-component tests as soon as interfaces exist.
+These milestones are dependency guides, not permission to defer correctness until the end. Use tiny cycles within each stage and add cross-component tests as soon as interfaces exist. During a stage, run focused and targeted checks for each iteration. Run the full workspace test suite once the stage's deliverables are implemented, as part of its exit gate; do not run the full suite after every iteration. If that suite finds failures, fix them within the same stage and rerun the relevant checks and full suite before declaring the stage complete.
 
 | Stage | Deliverable | Required evidence before advancing |
 | --- | --- | --- |
@@ -106,7 +106,7 @@ Use property/model tests for version visibility, policy composition, decoding bo
 
 Use [AGENTS.md](AGENTS.md) for commands. During setup, replace its templates with actual repository paths/targets when those exist. Keep builds reproducible, commit the workspace lockfile, and make generated headers checkable against their source schema.
 
-Run focused tests during the red/green loop. Before completing a code increment, run applicable formatting, lint, Rust tests, C SDK tests, and cross-boundary integration checks. Include documentation tests and required target/profile coverage. Broaden testing when failures, changed dependencies, or new risks justify it; avoid rerunning unrelated expensive suites without cause.
+Run focused tests during the red/green loop and targeted component/integration checks for each iteration. Do not run the full workspace test suite after each increment. Run it at the end of each roadmap stage, after that stage's deliverables are implemented. If it finds failures, fix them within that stage and rerun the relevant checks and full suite before marking the stage complete. Include applicable formatting, lint, C SDK, documentation, and required target/profile checks at the stage gate. Broaden targeted testing when failures, changed dependencies, or new risks justify it; avoid rerunning unrelated expensive suites without cause.
 
 Report missing toolchains or unsupported kernel features explicitly. An integration test skipped because confinement is unavailable does not pass its security gate. Never weaken the sandbox to run a test. Performance measurements must separate SDK release build, query compile/link, loading, first result, and durable commit; optimize only after correctness evidence and a measured bottleneck.
 

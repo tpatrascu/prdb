@@ -35,6 +35,8 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 
 These build the engine and check formatting/lints. Run `cargo test --workspace --locked -- --test-threads=1` inside the delegated `systemd --user` service described below, with the fixture and runtime environment in [`plans/sql-library/SANDBOX_TEST.md`](plans/sql-library/SANDBOX_TEST.md); all sandbox integration tests are enabled. Use `cargo build --workspace --release --locked` for release validation. Add targeted feature/platform checks when introduced; do not assume all features are compatible. Document actual server startup commands when binaries exist.
 
+During development, run focused tests and targeted checks for each iteration. Run the full workspace test suite at the end of a roadmap stage, after that stage's deliverables are implemented; do not run it after every iteration. Fix any failures found at that gate within the same stage, then rerun the relevant checks and full suite before marking the stage complete.
+
 ## TinyCC Build and Tests
 
 Use the maintained build targets:
