@@ -832,3 +832,9 @@
 - Contract: each direct SDK SQL statement-dispatch call cumulatively accounts for requested bytes across dispatcher-owned `calloc` buffers and returns `RESOURCE_ERROR` before execution when the 12 MiB limit would be exceeded. The accounting covers SELECT, join/group, and DML dispatcher buffers; it does not include allocator metadata, SDK operator-internal allocations, or stack usage.
 - Regression: a malformed filtered-join PSP1 declaration that requests more than the heap budget fails before planner and result callbacks and latches statement failure. Existing join and grouped dispatch cases remain green.
 - Verification: `make -f engine/sdk/Makefile sdk-shared-tests` passed under the locked Nix development shell. Operator-internal allocation/copy accounting, stack bounds, end-to-end profiles, and target-hardware measurements remain open.
+
+## OP-7 follow-up: account for external sort and group heap — verified slice
+
+- Contract: the spill sort and spill group-count wrapper share a 256 KiB cap on simultaneous requested heap bytes. The live counter includes row/ordinal arrays, merge cursors and output buffer, merge-sort scratch, encoded spill records, and the group representative key. Allocation sizes are overflow-safe under the existing row, run, and input-memory bounds.
+- Regression: the SDK spill-sort fixture seeds the internal per-call budget at its ceiling and verifies the next workspace allocation fails before reading source rows or emitting results. Existing stable-sort, spill-group, and cleanup cases still pass.
+- Verification: `make -f engine/sdk/Makefile test` passed under the locked Nix development shell. Spill hash-join buffer tracking, allocator metadata, stack usage, cross-operator copy accounting, end-to-end profiles, and target-hardware memory measurements remain open.

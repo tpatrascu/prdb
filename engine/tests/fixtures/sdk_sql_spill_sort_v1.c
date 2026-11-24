@@ -1,5 +1,6 @@
 #include "prdb_sdk_sql_spill_sort_v1.h"
 #include "prdb_sdk_sql_spill_group_v1.h"
+#include "../../sdk/sql_spill_workspace_internal.h"
 
 #include <assert.h>
 #include <string.h>
@@ -158,8 +159,15 @@ static int32_t output_groups(void *context, const uint8_t *bytes,
 int main(void) {
     prdb_host_api_v6 host = {0};
     fixture state = {0};
+    prdb_sql_spill_heap_budget exhausted_budget = {
+        PRDB_SDK_SQL_SPILL_SORT_MAX_WORKSPACE_BYTES};
     host.v5.v4.v3.context = &state;
     host.spill_request = mock_spill;
+    assert(prdb_sdk_sql_spill_sort_with_budget_internal_v1(
+               &host, &state, sizeof(row), 8 * (sizeof(row) + 8),
+               source_rows, compare_rows, output_rows,
+               &exhausted_budget) != 0);
+    assert(state.next == 0 && state.outputs == 0);
     assert(prdb_sdk_sql_spill_sort_v1(
                &host, &state, sizeof(row), 8 * (sizeof(row) + 8),
                source_rows, compare_rows, output_rows) == 0);

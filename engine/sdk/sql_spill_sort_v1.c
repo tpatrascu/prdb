@@ -1,4 +1,5 @@
 #include "prdb_sdk_sql_spill_sort_v1.h"
+#include "sql_spill_workspace_internal.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -58,22 +59,28 @@ static int32_t load_cursor_record(const prdb_host_api_v6 *host,
 static int32_t merge_runs(
     const prdb_host_api_v6 *host, sort_run *runs, uint32_t run_count,
     uint32_t row_bytes, prdb_sdk_sql_spill_sort_compare_v1_fn compare,
-    void *context, sort_run *merged, prdb_sdk_sql_spill_sort_output_v1_fn output) {
+    void *context, sort_run *merged, prdb_sdk_sql_spill_sort_output_v1_fn output,
+    prdb_sql_spill_heap_budget *heap_budget) {
     const uint32_t record_bytes = row_bytes + 8;
     run_cursor cursors[PRDB_SDK_SQL_SPILL_SORT_MAX_RUNS];
     uint8_t *cursor_storage = NULL;
     uint8_t *output_buffer = NULL;
     uint32_t buffered_rows = 0;
     const uint32_t output_capacity = SORT_OUTPUT_BUFFER_BYTES / record_bytes;
+    size_t cursor_storage_bytes = (size_t)run_count * record_bytes;
+    size_t output_buffer_bytes = (size_t)output_capacity * record_bytes;
     int32_t status = 0;
     memset(cursors, 0, sizeof(cursors));
-    cursor_storage = (uint8_t *)malloc((size_t)run_count * record_bytes);
+    cursor_storage = (uint8_t *)prdb_sql_spill_heap_alloc(
+        heap_budget, cursor_storage_bytes);
     if (cursor_storage == NULL) return -1;
     output_buffer = output == NULL
-                        ? (uint8_t *)malloc((size_t)output_capacity * record_bytes)
+                        ? (uint8_t *)prdb_sql_spill_heap_alloc(
+                              heap_budget, output_buffer_bytes)
                         : NULL;
     if (output == NULL && output_buffer == NULL) {
-        free(cursor_storage);
+        prdb_sql_spill_heap_free(heap_budget, cursor_storage,
+                                 cursor_storage_bytes);
         return -1;
     }
     if (output == NULL) {
@@ -137,22 +144,29 @@ static int32_t merge_runs(
     }
 done:
     if (status != 0 && output == NULL) (void)destroy_run(host, merged);
-    free(output_buffer);
-    free(cursor_storage);
+    prdb_sql_spill_heap_free(heap_budget, output_buffer, output_buffer_bytes);
+    prdb_sql_spill_heap_free(heap_budget, cursor_storage,
+                             cursor_storage_bytes);
     return status;
 }
 
 static int32_t sort_run_records(
     uint8_t *records, uint64_t *ordinals, uint32_t count, uint32_t row_bytes,
-    prdb_sdk_sql_spill_sort_compare_v1_fn compare, void *context) {
-    uint8_t *scratch = (uint8_t *)malloc((size_t)count * row_bytes);
+    prdb_sdk_sql_spill_sort_compare_v1_fn compare, void *context,
+    prdb_sql_spill_heap_budget *heap_budget) {
+    size_t scratch_bytes = (size_t)count * row_bytes;
+    size_t scratch_ordinal_bytes = (size_t)count * sizeof(uint64_t);
+    uint8_t *scratch = (uint8_t *)prdb_sql_spill_heap_alloc(
+        heap_budget, scratch_bytes);
     uint64_t *scratch_ordinals =
-        (uint64_t *)malloc((size_t)count * sizeof(*scratch_ordinals));
+        (uint64_t *)prdb_sql_spill_heap_alloc(heap_budget,
+                                              scratch_ordinal_bytes);
     uint8_t *source_rows = records, *destination_rows = scratch;
     uint64_t *source_ordinals = ordinals, *destination_ordinals = scratch_ordinals;
     if (scratch == NULL || scratch_ordinals == NULL) {
-        free(scratch);
-        free(scratch_ordinals);
+        prdb_sql_spill_heap_free(heap_budget, scratch, scratch_bytes);
+        prdb_sql_spill_heap_free(heap_budget, scratch_ordinals,
+                                 scratch_ordinal_bytes);
         return -1;
     }
     for (uint32_t width = 1; width < count;) {
@@ -166,8 +180,10 @@ static int32_t sort_run_records(
                     context, source_rows + (size_t)left * row_bytes,
                     source_rows + (size_t)right * row_bytes, &ordering);
                 if (status != 0 || ordering < -1 || ordering > 1) {
-                    free(scratch);
-                    free(scratch_ordinals);
+                    prdb_sql_spill_heap_free(heap_budget, scratch,
+                                             scratch_bytes);
+                    prdb_sql_spill_heap_free(heap_budget, scratch_ordinals,
+                                             scratch_ordinal_bytes);
                     return status != 0 ? status : -1;
                 }
                 if (ordering < 0 ||
@@ -206,16 +222,20 @@ static int32_t sort_run_records(
         memcpy(records, source_rows, (size_t)count * row_bytes);
         memcpy(ordinals, source_ordinals, (size_t)count * sizeof(*ordinals));
     }
-    free(scratch);
-    free(scratch_ordinals);
+    prdb_sql_spill_heap_free(heap_budget, scratch, scratch_bytes);
+    prdb_sql_spill_heap_free(heap_budget, scratch_ordinals,
+                             scratch_ordinal_bytes);
     return 0;
 }
 
 static int32_t flush_run(const prdb_host_api_v6 *host, sort_run *run,
                          const uint8_t *rows, const uint64_t *ordinals,
-                         uint32_t count, uint32_t row_bytes) {
+                         uint32_t count, uint32_t row_bytes,
+                         prdb_sql_spill_heap_budget *heap_budget) {
     uint32_t record_bytes = row_bytes + 8;
-    uint8_t *encoded = (uint8_t *)malloc((size_t)count * record_bytes);
+    size_t encoded_bytes = (size_t)count * record_bytes;
+    uint8_t *encoded = (uint8_t *)prdb_sql_spill_heap_alloc(
+        heap_budget, encoded_bytes);
     if (encoded == NULL) return -1;
     int32_t status = prdb_sdk_spill_create_v1(host, &run->stream);
     if (status == 0) {
@@ -229,20 +249,22 @@ static int32_t flush_run(const prdb_host_api_v6 *host, sort_run *run,
         if (status == 0) status = prdb_sdk_spill_seal_v1(host, &run->stream);
     }
     if (status != 0) (void)destroy_run(host, run);
-    free(encoded);
+    prdb_sql_spill_heap_free(heap_budget, encoded, encoded_bytes);
     return status;
 }
 
-int32_t prdb_sdk_sql_spill_sort_v1(
+int32_t prdb_sdk_sql_spill_sort_with_budget_internal_v1(
     const prdb_host_api_v6 *host, void *context, uint32_t row_bytes,
     uint32_t memory_budget_bytes,
     prdb_sdk_sql_spill_sort_source_v1_fn source,
     prdb_sdk_sql_spill_sort_compare_v1_fn compare,
-    prdb_sdk_sql_spill_sort_output_v1_fn output) {
+    prdb_sdk_sql_spill_sort_output_v1_fn output,
+    prdb_sql_spill_heap_budget *heap_budget) {
     sort_run runs[PRDB_SDK_SQL_SPILL_SORT_MAX_RUNS];
     uint8_t *rows = NULL;
     uint64_t *ordinals = NULL;
     uint32_t run_count = 0, row_count = 0, row_capacity = 0;
+    size_t rows_bytes, ordinals_bytes;
     uint64_t next_ordinal = 0;
     int32_t status = 0;
     memset(runs, 0, sizeof(runs));
@@ -254,8 +276,11 @@ int32_t prdb_sdk_sql_spill_sort_v1(
         return -1;
     row_capacity = memory_budget_bytes / (row_bytes + 8);
     if (row_capacity == 0) return -1;
-    rows = (uint8_t *)malloc((size_t)row_capacity * row_bytes);
-    ordinals = (uint64_t *)malloc((size_t)row_capacity * sizeof(*ordinals));
+    rows_bytes = (size_t)row_capacity * row_bytes;
+    ordinals_bytes = (size_t)row_capacity * sizeof(*ordinals);
+    rows = (uint8_t *)prdb_sql_spill_heap_alloc(heap_budget, rows_bytes);
+    ordinals = (uint64_t *)prdb_sql_spill_heap_alloc(heap_budget,
+                                                     ordinals_bytes);
     if (rows == NULL || ordinals == NULL) { status = -1; goto cleanup; }
     for (;;) {
         uint32_t row_len = 0;
@@ -270,17 +295,17 @@ int32_t prdb_sdk_sql_spill_sort_v1(
         ordinals[row_count++] = next_ordinal++;
         if (row_count == row_capacity) {
             status = sort_run_records(rows, ordinals, row_count, row_bytes,
-                                      compare, context);
+                                      compare, context, heap_budget);
             if (status != 0) goto cleanup;
             status = flush_run(host, &runs[run_count], rows, ordinals,
-                               row_count, row_bytes);
+                               row_count, row_bytes, heap_budget);
             if (status != 0) goto cleanup;
             run_count++;
             row_count = 0;
             if (run_count == PRDB_SDK_SQL_SPILL_SORT_MAX_RUNS) {
                 sort_run merged = {0};
                 status = merge_runs(host, runs, run_count, row_bytes, compare,
-                                    context, &merged, NULL);
+                                    context, &merged, NULL, heap_budget);
                 if (status != 0) { (void)destroy_run(host, &merged); goto cleanup; }
                 for (uint32_t index = 0; index < run_count; ++index) {
                     status = destroy_run(host, &runs[index]);
@@ -294,17 +319,18 @@ int32_t prdb_sdk_sql_spill_sort_v1(
     }
     if (row_count != 0) {
         status = sort_run_records(rows, ordinals, row_count, row_bytes,
-                                  compare, context);
+                                  compare, context, heap_budget);
         if (status != 0) goto cleanup;
         status = flush_run(host, &runs[run_count], rows, ordinals,
-                           row_count, row_bytes);
+                           row_count, row_bytes, heap_budget);
         if (status != 0) goto cleanup;
         run_count++;
     }
     if (run_count == 1) {
         uint32_t record_bytes = row_bytes + 8;
         uint64_t offset = 0;
-        uint8_t *record = (uint8_t *)malloc(record_bytes);
+        uint8_t *record = (uint8_t *)prdb_sql_spill_heap_alloc(
+            heap_budget, record_bytes);
         if (record == NULL) { status = -1; goto cleanup; }
         for (;;) {
             uint64_t read_bytes = 0;
@@ -316,17 +342,29 @@ int32_t prdb_sdk_sql_spill_sort_v1(
             if (status != 0) break;
             offset += record_bytes;
         }
-        free(record);
+        prdb_sql_spill_heap_free(heap_budget, record, record_bytes);
     } else if (run_count > 1) {
         status = merge_runs(host, runs, run_count, row_bytes, compare,
-                            context, NULL, output);
+                            context, NULL, output, heap_budget);
     }
 cleanup:
     for (uint32_t index = 0; index < PRDB_SDK_SQL_SPILL_SORT_MAX_RUNS; ++index) {
         int32_t cleanup_status = destroy_run(host, &runs[index]);
         if (status == 0 && cleanup_status != 0) status = cleanup_status;
     }
-    free(ordinals);
-    free(rows);
+    prdb_sql_spill_heap_free(heap_budget, ordinals, ordinals_bytes);
+    prdb_sql_spill_heap_free(heap_budget, rows, rows_bytes);
     return status;
+}
+
+int32_t prdb_sdk_sql_spill_sort_v1(
+    const prdb_host_api_v6 *host, void *context, uint32_t row_bytes,
+    uint32_t memory_budget_bytes,
+    prdb_sdk_sql_spill_sort_source_v1_fn source,
+    prdb_sdk_sql_spill_sort_compare_v1_fn compare,
+    prdb_sdk_sql_spill_sort_output_v1_fn output) {
+    prdb_sql_spill_heap_budget heap_budget = {0};
+    return prdb_sdk_sql_spill_sort_with_budget_internal_v1(
+        host, context, row_bytes, memory_budget_bytes, source, compare,
+        output, &heap_budget);
 }
