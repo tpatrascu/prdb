@@ -62,6 +62,7 @@ mod service {
         max_bytes: Option<usize>,
         max_total_result_bytes: Option<u64>,
         max_sql_index_probe_candidates: Option<u32>,
+        analytical_max_sql_index_probe_candidates: Option<u32>,
         max_principal_reservations: Option<usize>,
         max_pending_operational: Option<usize>,
         max_pending_analytical: Option<usize>,
@@ -107,6 +108,7 @@ mod service {
              --retention-seconds N --max-rows N --max-bytes N\n\
              [--max-total-result-bytes N] (default 67108864)\n\
              [--max-sql-index-probe-candidates N] (default 128; maximum 16384)\n\
+             [--analytical-max-sql-index-probe-candidates N] (overrides the operational value)\n\
              --max-principal-reservations N\n\
              [--max-pending-operational N --max-pending-analytical N]\n\
              [--max-active-operational N --max-active-analytical N]\n\
@@ -169,6 +171,19 @@ mod service {
             )
             .into());
         }
+        let analytical_max_sql_index_probe_candidates = options
+            .analytical_max_sql_index_probe_candidates
+            .map(|value| {
+                if value == 0 || value > prdb_engine::query_abi::MAX_SQL_INDEX_PROBE_CANDIDATES {
+                    Err(format!(
+                        "--analytical-max-sql-index-probe-candidates must be in 1..={}",
+                        prdb_engine::query_abi::MAX_SQL_INDEX_PROBE_CANDIDATES
+                    ))
+                } else {
+                    Ok(value)
+                }
+            })
+            .transpose()?;
         let resource_limits = WorkerResourceLimits {
             cpu_quota_micros: positive(
                 required(options.cpu_quota_us, "--cpu-quota-us")?,
@@ -319,6 +334,7 @@ mod service {
                     spill_broker: spill_broker.clone(),
                     max_total_result_bytes,
                     max_sql_index_probe_candidates,
+                    analytical_max_sql_index_probe_candidates,
                     cleanup_timeout: Duration::from_secs(2),
                 },
             },
@@ -521,6 +537,12 @@ mod service {
                 }
                 "--max-sql-index-probe-candidates" => {
                     set!(max_sql_index_probe_candidates, value.parse::<u32>()?)
+                }
+                "--analytical-max-sql-index-probe-candidates" => {
+                    set!(
+                        analytical_max_sql_index_probe_candidates,
+                        value.parse::<u32>()?
+                    )
                 }
                 "--max-principal-reservations" => {
                     set!(max_principal_reservations, value.parse::<usize>()?)

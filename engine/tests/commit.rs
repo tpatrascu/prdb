@@ -550,6 +550,7 @@ fn run_sandboxed_forged_handle_client(
             max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
             max_sql_index_probe_candidates:
                 prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
+            analytical_max_sql_index_probe_candidates: None,
             cleanup_timeout: Duration::from_secs(2),
         },
     };
@@ -20680,6 +20681,7 @@ fn admin_cancellation_sync_failure_quarantines_until_reopen()
                     max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
                     max_sql_index_probe_candidates:
                         prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
+                    analytical_max_sql_index_probe_candidates: None,
                     cleanup_timeout: Duration::from_millis(100),
                 },
             },
@@ -33058,6 +33060,7 @@ fn gateway_service_listener_authenticates_control_admin_over_socket()
                             max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
                             max_sql_index_probe_candidates:
                                 prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
+                            analytical_max_sql_index_probe_candidates: None,
                             cleanup_timeout: Duration::from_millis(100),
                         },
                     },
@@ -39736,6 +39739,7 @@ fn run_sandboxed_v3_sql_error_fixture(
             max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
             max_sql_index_probe_candidates:
                 prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
+            analytical_max_sql_index_probe_candidates: None,
             cleanup_timeout: Duration::from_secs(2),
         },
     };
@@ -40224,6 +40228,7 @@ fn sandboxed_optimizer_metadata_submission_cancels_over_tcp()
             max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
             max_sql_index_probe_candidates:
                 prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
+            analytical_max_sql_index_probe_candidates: None,
             cleanup_timeout: Duration::from_secs(2),
         },
     };
@@ -43345,11 +43350,9 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             runtime_read_only: required_paths("PRDB_TEST_RUNTIME_READ_ONLY")?,
             spill_broker,
             max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
-            max_sql_index_probe_candidates: if sql_in_elevated_budget_only {
-                256
-            } else {
-                prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES
-            },
+            max_sql_index_probe_candidates:
+                prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
+            analytical_max_sql_index_probe_candidates: sql_in_elevated_budget_only.then_some(256),
             cleanup_timeout: Duration::from_secs(2),
         },
     };
@@ -49502,6 +49505,7 @@ fn sealed_start_admits_only_current_credentials_and_enforces_request_deadline()
             max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
             max_sql_index_probe_candidates:
                 prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
+            analytical_max_sql_index_probe_candidates: None,
             cleanup_timeout: Duration::from_millis(100),
         },
     };

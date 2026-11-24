@@ -38,7 +38,24 @@ pub struct ExecutorLaunchConfig {
     /// Trusted per-statement bound for candidate rows returned by one batched
     /// SQL index-probe operation. The SDK retains its fixed safety envelope.
     pub max_sql_index_probe_candidates: u32,
+    /// Optional analytical-class override. Omission inherits the operational
+    /// value so existing deployments keep one effective profile value.
+    pub analytical_max_sql_index_probe_candidates: Option<u32>,
     pub cleanup_timeout: Duration,
+}
+
+impl ExecutorLaunchConfig {
+    fn max_sql_index_probe_candidates_for(
+        &self,
+        workload_class: crate::supervisor::WorkloadClass,
+    ) -> u32 {
+        match workload_class {
+            crate::supervisor::WorkloadClass::Operational => self.max_sql_index_probe_candidates,
+            crate::supervisor::WorkloadClass::Analytical => self
+                .analytical_max_sql_index_probe_candidates
+                .unwrap_or(self.max_sql_index_probe_candidates),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -773,12 +790,15 @@ fn prepare_executor(
     spill_session: Option<Arc<SpillSession>>,
     config: &ExecutorLaunchConfig,
 ) -> Result<PreparedExecutor, ExecutorLaunchError> {
+    let mut effective_config = config.clone();
+    effective_config.max_sql_index_probe_candidates =
+        config.max_sql_index_probe_candidates_for(submission.metadata().workload_class);
     match build_command(
         submission,
         &cgroup,
         &channels,
         spill_session.is_some(),
-        config,
+        &effective_config,
     ) {
         Ok((command, optimizer_command, parameters, artifact_directory)) => Ok(PreparedExecutor {
             command,
@@ -1102,12 +1122,47 @@ fn create_sealed_parameters(parameters: &[u8]) -> io::Result<File> {
 #[cfg(test)]
 mod tests {
     use super::{
-        PrivateArtifactDirectory, WorkerChannelPair, create_sealed_parameters, drain_result_stream,
-        wait_for_optimizer_exit,
+        ExecutorLaunchConfig, PrivateArtifactDirectory, WorkerChannelPair,
+        create_sealed_parameters, drain_result_stream, wait_for_optimizer_exit,
     };
     use std::io::{self, Read, Seek, SeekFrom, Write};
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn analytical_probe_budget_override_is_optional_and_class_scoped() {
+        let config = ExecutorLaunchConfig {
+            executor_path: std::path::PathBuf::new(),
+            optimizer_path: std::path::PathBuf::new(),
+            scratch_parent: std::path::PathBuf::new(),
+            runtime_read_execute: Vec::new(),
+            runtime_read_only: Vec::new(),
+            spill_broker: None,
+            max_total_result_bytes: 1,
+            max_sql_index_probe_candidates: 128,
+            analytical_max_sql_index_probe_candidates: Some(512),
+            cleanup_timeout: std::time::Duration::ZERO,
+        };
+        assert_eq!(
+            config
+                .max_sql_index_probe_candidates_for(crate::supervisor::WorkloadClass::Operational),
+            128
+        );
+        assert_eq!(
+            config.max_sql_index_probe_candidates_for(crate::supervisor::WorkloadClass::Analytical),
+            512
+        );
+
+        let inherited = ExecutorLaunchConfig {
+            analytical_max_sql_index_probe_candidates: None,
+            ..config
+        };
+        assert_eq!(
+            inherited
+                .max_sql_index_probe_candidates_for(crate::supervisor::WorkloadClass::Analytical),
+            128
+        );
+    }
 
     #[test]
     fn optimizer_child_is_reaped_before_cgroup_cleanup() {
