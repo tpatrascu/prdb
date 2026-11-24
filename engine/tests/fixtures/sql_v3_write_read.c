@@ -24,6 +24,7 @@
 #include "prdb_sdk_optimizer_plan_v1.h"
 #include "prdb_sdk_optimizer_v1.h"
 #include "prdb_sdk_optimizer_v2.h"
+#include "prdb_query_abi_payload_codecs.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -49,6 +50,7 @@ static const prdb_host_api_v4 *range_observer_original_host;
 static uint32_t range_observer_scan_requests;
 static uint32_t range_observer_open_scan_requests;
 static uint32_t range_observer_scan_ranges_requests;
+static uint32_t range_observer_cancellation_checks;
 
 static int32_t observe_range_executor_request(
     void *context, uint16_t operation, const uint8_t *request,
@@ -69,6 +71,30 @@ static int32_t observe_range_executor_request(
     return range_observer_original_host->v3.executor_request(
         context, operation, request, request_len, response,
         response_capacity, response_len);
+}
+
+static int32_t cancel_range_observer_executor_request(
+    void *context, uint16_t operation, const uint8_t *request,
+    uint64_t request_len, uint8_t *response, uint64_t response_capacity,
+    uint64_t *response_len) {
+    if (range_observer_original_host == NULL ||
+        context != range_observer_original_host->v3.context ||
+        response == NULL || response_len == NULL) {
+        return PRDB_QUERY_CALLBACK_INVALID_ARGUMENT;
+    }
+    if (operation == PRDB_SDK_EXECUTOR_OP_CHECK_CANCELLATION) {
+        if (response_capacity <
+            PRDB_EXECUTOR_CANCELLATION_CHECK_RESPONSE_HEADER_BYTES) {
+            return PRDB_QUERY_CALLBACK_RESPONSE_TOO_SMALL;
+        }
+        ++range_observer_cancellation_checks;
+        prdb_encode_executor_cancellation_check_response(response, 1);
+        *response_len = PRDB_EXECUTOR_CANCELLATION_CHECK_RESPONSE_HEADER_BYTES;
+        return PRDB_QUERY_CALLBACK_OK;
+    }
+    return observe_range_executor_request(
+        context, operation, request, request_len, response, response_capacity,
+        response_len);
 }
 
 static int sleep_without_signal_interruption(struct timespec interval) {
@@ -1940,7 +1966,7 @@ static int32_t run_write_read_fixture(
     }
     if (invocation->parameters_len == 1 && invocation->parameters != NULL &&
         (invocation->parameters[0] == 'N' || invocation->parameters[0] == 'F' ||
-         invocation->parameters[0] == 'L')) {
+         invocation->parameters[0] == 'L' || invocation->parameters[0] == 'i')) {
         static const uint8_t in_sql[] =
             "SELECT left_key, right_key FROM grouped_records "
             "WHERE left_key IN ($1, $2, $3, $4)";
@@ -1974,7 +2000,10 @@ static int32_t run_write_read_fixture(
         range_observer_original_host = optimizer_host;
         range_observer_scan_ranges_requests = 0;
         range_observer_open_scan_requests = 0;
-        observed_host.v3.executor_request = observe_range_executor_request;
+        range_observer_cancellation_checks = 0;
+        observed_host.v3.executor_request = invocation->parameters[0] == 'i'
+            ? cancel_range_observer_executor_request
+            : observe_range_executor_request;
         status = prdb_sdk_sql_run_statement_optimizer_v1(
             &observed_host, schema, sizeof(schema) - 1,
             invocation->parameters[0] == 'F' ? in_fallback_sql : in_sql,
@@ -1984,6 +2013,16 @@ static int32_t run_write_read_fixture(
                                              : in_parameters,
             sizeof(in_parameters));
         range_observer_original_host = NULL;
+        if (invocation->parameters[0] == 'i') {
+            if (status == PRDB_SDK_SQL_DISPATCH_OK ||
+                range_observer_cancellation_checks == 0 ||
+                range_observer_scan_ranges_requests != 1 ||
+                range_observer_open_scan_requests != 0) {
+                static const uint8_t message[] = "fixture-error-in-cancellation-boundary";
+                return report_failure(host, message, sizeof(message) - 1);
+            }
+            return 0;
+        }
         if (status != PRDB_SDK_SQL_DISPATCH_OK) {
             static const uint8_t message[] = "fixture-error-batched-in-status";
             return report_failure(host, message, sizeof(message) - 1);

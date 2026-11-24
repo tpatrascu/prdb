@@ -40755,12 +40755,15 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     let sql_in_indexed_only = std::env::var_os("PRDB_TEST_SQL_IN_ONLY").is_some();
     let sql_in_fallback_only = std::env::var_os("PRDB_TEST_SQL_IN_FALLBACK_ONLY").is_some();
     let sql_in_null_left_only = std::env::var_os("PRDB_TEST_SQL_IN_NULL_LEFT_ONLY").is_some();
+    let sql_in_cancel_only = std::env::var_os("PRDB_TEST_SQL_IN_CANCEL_ONLY").is_some();
     let sql_in_only = sql_in_indexed_only || sql_in_fallback_only || sql_in_null_left_only;
+    let sql_in_any_only = sql_in_only || sql_in_cancel_only;
     assert!(
         [
             sql_in_indexed_only,
             sql_in_fallback_only,
-            sql_in_null_left_only
+            sql_in_null_left_only,
+            sql_in_cancel_only,
         ]
         .into_iter()
         .filter(|enabled| *enabled)
@@ -43290,7 +43293,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         || spill_pressure_only
         || spill_pressure_cancel_only
         || spill_disk_full_only
-        || sql_in_only
+        || sql_in_any_only
     {
         let mut ordered_client = ClientConnectionSession::default();
         ordered_client.accept_hello(ClientMode::Query, "sandbox-ordered-analytical-sum")?;
@@ -43384,11 +43387,13 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             b'V'
         } else if count_bigint_only {
             b'I'
-        } else if sql_in_only {
+        } else if sql_in_any_only {
             if sql_in_fallback_only {
                 b'F'
             } else if sql_in_null_left_only {
                 b'L'
+            } else if sql_in_cancel_only {
+                b'i'
             } else {
                 b'N'
             }
@@ -43713,6 +43718,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             || spill_join_oversize_only
             || spill_disk_full_only
             || spill_pressure_cancel_only
+            || sql_in_cancel_only
         {
             assert!(
                 matches!(ordered_decision, GatewayTerminalDecision::Abort(_)),
@@ -43729,11 +43735,20 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 || spill_redacted_only
                 || spill_join_oversize_only
                 || spill_disk_full_only
+                || sql_in_cancel_only
             {
                 assert!(
                     ordered_frames
                         .iter()
-                        .all(|frame| frame.operation != Operation::GatewayResultData as u16)
+                        .all(|frame| { frame.operation != Operation::GatewayResultData as u16 }),
+                    "expected no provisional data frames: {:?}",
+                    ordered_frames
+                        .iter()
+                        .map(|frame| (
+                            frame.operation,
+                            String::from_utf8_lossy(&frame.payload).into_owned()
+                        ))
+                        .collect::<Vec<_>>()
                 );
             }
         } else {
@@ -44264,6 +44279,14 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 observed.iter().map(|(_, value)| *value).collect::<Vec<_>>(),
                 [None, None, None, Some(225), Some(225), Some(225)]
             );
+        } else if sql_in_cancel_only {
+            assert!(
+                ordered_frames
+                    .as_slice()
+                    .iter()
+                    .all(|frame| frame.operation != Operation::GatewayResultData as u16),
+                "cancelled SQL IN must not expose partial rows"
+            );
         } else if sql_in_only {
             fn decode_pair(bytes: &[u8]) -> Result<(i32, i32), Box<dyn std::error::Error>> {
                 assert_eq!(&bytes[..4], b"SQLR");
@@ -44446,6 +44469,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 || spill_join_oversize_only
                 || spill_disk_full_only
                 || spill_pressure_cancel_only
+                || sql_in_cancel_only
             {
                 "\"outcome\":\"aborted\""
             } else {
@@ -44463,6 +44487,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 || spill_join_oversize_only
                 || spill_disk_full_only
                 || spill_pressure_cancel_only
+                || sql_in_cancel_only
             {
                 OutcomeStatus::Aborted
             } else {
