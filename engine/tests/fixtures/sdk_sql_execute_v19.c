@@ -1486,6 +1486,24 @@ int main(void) {
         reset(&mock, &capture);
         assert(run_query_optimizer_with_materialized_capacity(
                    &mock, &capture, composite_sql,
+                   sizeof(composite_sql) - 1, 24) == PRDB_SDK_SQL_EXEC_OK);
+        assert(mock.range_calls == 1 && capture.calls == 1 &&
+               capture.left_values[0] == 101 &&
+               capture.right_values[0] == 101 && mock.statement_failed == 0);
+
+        reset(&mock, &capture);
+        install_optimizer_index_join_plan(&mock);
+        assert(run_query_optimizer_with_materialized_capacity(
+                   &mock, &capture, composite_sql,
+                   sizeof(composite_sql) - 1, 23) ==
+               PRDB_SDK_SQL_EXEC_MATERIALIZATION_LIMIT);
+        assert(mock.range_calls == 1 && capture.calls == 0 &&
+               mock.statement_failed == 1);
+
+        reset(&mock, &capture);
+        install_optimizer_index_join_plan(&mock);
+        assert(run_query_optimizer_with_materialized_capacity(
+                   &mock, &capture, composite_sql,
                    sizeof(composite_sql) - 1, 12) ==
                PRDB_SDK_SQL_EXEC_MATERIALIZATION_LIMIT);
         assert(mock.range_calls == 1 && capture.calls == 0 &&
