@@ -13019,3 +13019,163 @@ mod planner_population_estimate_cache_tests {
         assert_eq!(compute_calls.get(), 2);
     }
 }
+
+#[cfg(test)]
+mod predicate_estimate_scan_budget_tests {
+    use super::{InvocationCoordination, InvocationTransaction};
+    use crate::authorization::{
+        AccessTarget, AuthorizationContext, Effect, Expr, Grant, Operation, Policy, Subject,
+    };
+    use crate::tuple::{ColumnSchema, ScalarType, ScalarValue};
+    use std::collections::HashSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn bounded_row_estimate_does_not_consume_query_scan_work() {
+        static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "prdb-estimate-scan-budget-{}-{}",
+            std::process::id(),
+            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut bootstrap = crate::bootstrap::initialize(&root, "estimate_admin", i64::MAX)
+            .expect("initialize estimate scan budget fixture");
+        bootstrap.take_secret().expect("take bootstrap secret");
+        let instance = bootstrap
+            .acknowledge()
+            .expect("publish estimate scan budget fixture");
+        let database = instance.database();
+        let table_id = [0x21; 16];
+        let schema_id = [0x22; 16];
+        let column_id = [0x23; 16];
+        let principal_id = [0x24; 16];
+        let schema_target = AccessTarget::Schema(schema_id);
+        let columns = [ColumnSchema {
+            scalar_type: ScalarType::Text,
+            nullable: true,
+        }];
+        let column_ids = [column_id];
+        let encode_row = |value: Option<ScalarValue>| {
+            crate::tuple::encode_tuple(&columns, 1, &[value]).expect("encode fixture row")
+        };
+        let row_id = |value: u8| crate::overlay::RowId {
+            table: table_id,
+            row: [value; 16],
+        };
+        let mut seed =
+            InvocationTransaction::begin(database, [0x25; 16], principal_id, i64::MAX, 4, 512)
+                .expect("begin estimate fixture seed");
+        seed.stage_put(
+            row_id(1),
+            &encode_row(Some(ScalarValue::Text("value".to_owned()))),
+        )
+        .expect("stage readable fixture row");
+        seed.stage_put(row_id(2), &encode_row(None))
+            .expect("stage NULL fixture row");
+        seed.commit().expect("commit estimate fixture rows");
+
+        let table_target = AccessTarget::Table(table_id);
+        let column_target = AccessTarget::Column {
+            table_id,
+            column_id,
+        };
+        let scope = HashSet::from([
+            (Operation::Usage, schema_target),
+            (Operation::Select, table_target),
+            (Operation::Select, column_target),
+        ]);
+        let context = AuthorizationContext {
+            principal_id,
+            role_ids: HashSet::new(),
+            scope,
+        };
+        let grants = [
+            Grant {
+                subject: Subject::Principal(principal_id),
+                operation: Operation::Usage,
+                target: schema_target,
+            },
+            Grant {
+                subject: Subject::Principal(principal_id),
+                operation: Operation::Select,
+                target: table_target,
+            },
+            Grant {
+                subject: Subject::Principal(principal_id),
+                operation: Operation::Select,
+                target: column_target,
+            },
+        ];
+        let policies = [
+            Policy {
+                subjects: vec![Subject::Principal(principal_id)],
+                operation: Operation::Select,
+                target: table_target,
+                effect: Effect::Allow,
+                using: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+                with_check: None,
+            },
+            Policy {
+                subjects: vec![Subject::Principal(principal_id)],
+                operation: Operation::Select,
+                target: column_target,
+                effect: Effect::Allow,
+                using: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+                with_check: None,
+            },
+        ];
+        let projection = super::AuthorizedProjection {
+            columns: &columns,
+            column_ids: &column_ids,
+            schema_version: 1,
+            schema_id,
+            context: &context,
+            grants: &grants,
+            policies: &policies,
+            checks: &[],
+            policy_driving_columns: &[],
+            dependencies: &[],
+        };
+        let predicate = crate::optimizer_binding::BoundPredicate::IsNull(Box::new(
+            crate::optimizer_binding::BoundPredicate::Column(
+                crate::optimizer_binding::BoundColumn {
+                    column_id,
+                    ordinal: 0,
+                    scalar_type: ScalarType::Text,
+                    nullable: true,
+                },
+            ),
+        ));
+        let mut coordination = InvocationCoordination::uncoordinated();
+        coordination.max_scan_work = 1;
+        let mut invocation = InvocationTransaction::begin_inner(
+            database,
+            coordination,
+            [0x26; 16],
+            principal_id,
+            i64::MAX,
+            4,
+            512,
+        )
+        .expect("begin one-unit scan-work invocation");
+
+        assert_eq!(
+            invocation
+                .estimate_authorized_predicate_at_most(table_id, &projection, &predicate, 4)
+                .expect("estimate predicate over bounded authorized rows"),
+            Some((2, 1))
+        );
+        let page = invocation
+            .scan_authorized(table_id, None, 1, &projection)
+            .expect("one query scan unit must remain after estimating two candidates");
+        assert_eq!(page.rows.len(), 1);
+        assert!(page.continuation.is_some());
+        invocation
+            .abort()
+            .expect("abort estimate fixture invocation");
+
+        drop(instance);
+        std::fs::remove_dir_all(root).expect("remove estimate scan budget fixture");
+    }
+}
