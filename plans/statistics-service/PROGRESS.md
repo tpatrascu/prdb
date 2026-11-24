@@ -2,11 +2,11 @@
 
 ## ST-2 / OP-7 follow-up: verify the inclusive 17-row fanout boundary — covered
 
-- Contract: for a 17-row outer input with an eligible indexed relation, the exact estimate may select indexed nested-loop at 68 pairs (four per outer row); 69 pairs must retain hash.
-- Regression: the optimizer-service unit test checks both sides of that exact decision edge. A new confined benchmark mode uses a 17×119 input, an exact seven-to-one population ratio, and 68 matching pairs; it validates the estimate, kind-17 plan, every output against hash, and concurrent operational work.
-- Evidence: five fresh-database delegated-cgroup runs each overlapped 192 operational reads and 192 commits. The median of per-run p50s was 250.3 ms for indexed nested-loop (248.5–266.2 ms range) and 292.3 ms for hash (281.3–341.7 ms range).
-- Scope: this adds a local measurement at the inclusive pair threshold and population-ratio boundary; it does not establish a general cost model or target-host performance.
-- Validation: all five confined runs passed; maintained TinyCC SDK tests and sandbox fixture build passed.
+- Contract: for a 17-row outer input with an eligible indexed relation, the exact estimate selects indexed nested-loop at 68 pairs (four per outer row) and hash at 69 pairs.
+- Regression: the optimizer-service unit test checks both sides of the exact decision edge. Confined benchmark modes use a 17×119 input and exact seven-to-one population ratio: one distributes 68 matches evenly, the other adds a 69th match to one key. Both validate the exact estimate, selected plan, every output against hash, and concurrent operational work.
+- Evidence: five fresh-database delegated-cgroup runs per case each overlapped 192 operational reads and 192 commits. At 68 pairs, the median of per-run p50s was 250.3 ms indexed (248.5–266.2 ms range) and 292.3 ms hash (281.3–341.7 ms range). At 69 pairs, all five plans selected kind-4 hash and returned 69 rows equal to the hash reference.
+- Scope: these local runs check both sides of the pair threshold at the population-ratio boundary; they do not establish a general cost model or target-host performance.
+- Validation: both five-run confined profiles passed; maintained TinyCC SDK tests and sandbox fixture build passed. Formatting, locked workspace build, warning-denied all-target Clippy, and the complete serial delegated-cgroup workspace suite also passed (408 library tests, 206 commit tests, 3 metadata-process tests, 84 transaction tests, all remaining targets, no ignored tests).
 
 ## ST-2 follow-up: verify join-estimate byte limits — covered
 
