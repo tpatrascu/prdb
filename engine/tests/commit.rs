@@ -40538,12 +40538,17 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         std::env::var_os("PRDB_TEST_INDEXED_JOIN_FANOUT5_BENCHMARK_ONLY").is_some();
     let indexed_join_fanout_sixteen_benchmark_only =
         std::env::var_os("PRDB_TEST_INDEXED_JOIN_FANOUT16_BENCHMARK_ONLY").is_some();
+    let indexed_join_fanout_seventeen_benchmark_only =
+        std::env::var_os("PRDB_TEST_INDEXED_JOIN_FANOUT17_BENCHMARK_ONLY").is_some();
     let indexed_join_fanout_benchmark_only =
         std::env::var_os("PRDB_TEST_INDEXED_JOIN_FANOUT_BENCHMARK_ONLY").is_some()
             || indexed_join_fanout_four_benchmark_only
             || indexed_join_fanout_five_benchmark_only
-            || indexed_join_fanout_sixteen_benchmark_only;
-    let indexed_join_fanout_outer_rows: u16 = if indexed_join_fanout_sixteen_benchmark_only {
+            || indexed_join_fanout_sixteen_benchmark_only
+            || indexed_join_fanout_seventeen_benchmark_only;
+    let indexed_join_fanout_outer_rows: u16 = if indexed_join_fanout_seventeen_benchmark_only {
+        17
+    } else if indexed_join_fanout_sixteen_benchmark_only {
         16
     } else {
         9
@@ -40561,6 +40566,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             indexed_join_fanout_four_benchmark_only,
             indexed_join_fanout_five_benchmark_only,
             indexed_join_fanout_sixteen_benchmark_only,
+            indexed_join_fanout_seventeen_benchmark_only,
         ]
         .into_iter()
         .filter(|enabled| *enabled)
@@ -43046,7 +43052,9 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         ordered_client.authenticate(&storage, token_id, &secret)?;
         let ordered_owner = ordered_client.staging_owner()?;
         let ordered_parameter = [if indexed_join_fanout_benchmark_only {
-            if indexed_join_fanout_sixteen_benchmark_only {
+            if indexed_join_fanout_seventeen_benchmark_only {
+                b'Y'
+            } else if indexed_join_fanout_sixteen_benchmark_only {
                 b'X'
             } else if indexed_join_fanout == 4 {
                 b'4'

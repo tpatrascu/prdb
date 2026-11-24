@@ -51,11 +51,22 @@ pub struct SingleTablePlanV1 {
 pub const SMALL_POPULATION_SCAN_ROWS: u64 = 4;
 const SKEWED_JOIN_OUTER_MAX_ROWS: u64 = 8;
 const SKEWED_JOIN_INPUT_RATIO: u64 = 16;
-pub(crate) const FANOUT_AWARE_JOIN_OUTER_MAX_ROWS: u64 = 16;
+pub(crate) const FANOUT_AWARE_JOIN_OUTER_MAX_ROWS: u64 = 17;
 pub(crate) const FANOUT_AWARE_JOIN_INPUT_RATIO: u64 = 8;
+const FANOUT_AWARE_JOIN_17_ROW_INPUT_RATIO: u64 = 7;
 const FANOUT_AWARE_JOIN_MAX_PAIRS_PER_OUTER_ROW: u64 = 4;
 /// Maximum row count probed for optimizer join orientation.
 pub const JOIN_POPULATION_ESTIMATE_MAX_ROWS: u64 = 1024;
+
+pub(crate) fn fanout_aware_join_inputs_are_eligible(outer_rows: u64, indexed_rows: u64) -> bool {
+    let minimum_ratio = if outer_rows == FANOUT_AWARE_JOIN_OUTER_MAX_ROWS {
+        FANOUT_AWARE_JOIN_17_ROW_INPUT_RATIO
+    } else {
+        FANOUT_AWARE_JOIN_INPUT_RATIO
+    };
+    (9..=FANOUT_AWARE_JOIN_OUTER_MAX_ROWS).contains(&outer_rows)
+        && indexed_rows >= outer_rows * minimum_ratio
+}
 
 pub fn apply_population_scan_heuristic(
     plan: &mut SingleTablePlanV1,
@@ -4689,9 +4700,7 @@ fn select_index_nested_loop_join(
             return left;
         }
         (Some(left_rows), Some(right_rows))
-            if left_rows > SMALL_POPULATION_SCAN_ROWS
-                && left_rows <= FANOUT_AWARE_JOIN_OUTER_MAX_ROWS
-                && right_rows >= left_rows * FANOUT_AWARE_JOIN_INPUT_RATIO
+            if fanout_aware_join_inputs_are_eligible(left_rows, right_rows)
                 && joined_rows_estimate.is_some_and(|rows| {
                     rows <= left_rows * FANOUT_AWARE_JOIN_MAX_PAIRS_PER_OUTER_ROW
                 }) =>
@@ -4699,9 +4708,7 @@ fn select_index_nested_loop_join(
             return right;
         }
         (Some(left_rows), Some(right_rows))
-            if right_rows > SMALL_POPULATION_SCAN_ROWS
-                && right_rows <= FANOUT_AWARE_JOIN_OUTER_MAX_ROWS
-                && left_rows >= right_rows * FANOUT_AWARE_JOIN_INPUT_RATIO
+            if fanout_aware_join_inputs_are_eligible(right_rows, left_rows)
                 && joined_rows_estimate.is_some_and(|rows| {
                     rows <= right_rows * FANOUT_AWARE_JOIN_MAX_PAIRS_PER_OUTER_ROW
                 }) =>

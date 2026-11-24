@@ -1,5 +1,13 @@
 # Statistics Service Progress
 
+## ST-2 / OP-7 follow-up: extend the low-fanout boundary to 17 outer rows — measured
+
+- Contract: exact authorized pair counts may orient indexed nested-loop when the smaller outer side has 9–16 rows and the indexed side is at least eight times larger, or it has 17 rows and the indexed side is at least seven times larger, and output is at most four pairs per outer row. Unknown estimates and higher fanout keep the existing fallback/hash choices.
+- Red/green: optimizer tests cover a 17-row outer at fanout one and five, and process eligibility tests cover the 17×119 ratio boundary, reversed orientation, the 18-row cap, and unknown populations.
+- Evidence: five fresh-database confined 17×128 runs each overlapped 192 operational reads and 192 commits. Indexed run-level p50s had median 257.3 ms (243.1–270.0 ms range); hash run-level p50s had median 298.9 ms (295.8–311.2 ms range). Both plans produced equivalent 17-pair results. This is host-local evidence for the measured shape only.
+- Validation: five repetitions of the confined acceptance passed in a delegated `cpu memory pids` cgroup; optimizer unit/process regressions and maintained TinyCC SDK tests passed. `cargo fmt --all -- --check`, locked workspace build, warning-denied all-target Clippy, maintained TinyCC tests, sandbox fixture, release-profile validation, and the full serial delegated-cgroup workspace suite passed. The suite reported 406 library tests, 206 commit tests, 3 metadata-process tests, and 83 transaction tests, with all other targets passing and no ignored tests.
+- Remaining: generalized cost comparison, broader fanout/distribution profiles, populations above 1,024, global-statistics consumption, and target-host evidence remain open.
+
 ## ST-2 / OP-4 follow-up: DECIMAL predicate literals — implemented slice
 
 - Contract: optimizer request and plan predicate tag `0x08` carries a signed big-endian i128 coefficient. The compared DECIMAL column supplies precision and scale; invalid precision overflow and non-DECIMAL comparisons are rejected. The trusted estimator compares authorized coefficients under that same schema context.

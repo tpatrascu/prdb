@@ -514,10 +514,8 @@ fn join_fanout_estimate_is_eligible(left_rows: Option<u64>, right_rows: Option<u
     let (Some(left_rows), Some(right_rows)) = (left_rows, right_rows) else {
         return false;
     };
-    let outer_max = crate::optimizer_plan::FANOUT_AWARE_JOIN_OUTER_MAX_ROWS;
-    let ratio = crate::optimizer_plan::FANOUT_AWARE_JOIN_INPUT_RATIO;
-    (9..=outer_max).contains(&left_rows) && right_rows >= left_rows * ratio
-        || (9..=outer_max).contains(&right_rows) && left_rows >= right_rows * ratio
+    crate::optimizer_plan::fanout_aware_join_inputs_are_eligible(left_rows, right_rows)
+        || crate::optimizer_plan::fanout_aware_join_inputs_are_eligible(right_rows, left_rows)
 }
 
 fn has_join_index_path(
@@ -647,6 +645,17 @@ mod tests {
     use std::net::Shutdown;
     use std::os::unix::net::UnixStream;
     use std::time::Duration;
+
+    #[test]
+    fn join_fanout_estimate_eligibility_covers_the_17_row_outer_limit() {
+        assert!(join_fanout_estimate_is_eligible(Some(16), Some(128)));
+        assert!(!join_fanout_estimate_is_eligible(Some(16), Some(127)));
+        assert!(join_fanout_estimate_is_eligible(Some(17), Some(119)));
+        assert!(join_fanout_estimate_is_eligible(Some(119), Some(17)));
+        assert!(!join_fanout_estimate_is_eligible(Some(18), Some(126)));
+        assert!(!join_fanout_estimate_is_eligible(Some(17), Some(118)));
+        assert!(!join_fanout_estimate_is_eligible(Some(17), None));
+    }
 
     fn select_request() -> Vec<u8> {
         let mut bytes = vec![0, 1, 1, 0];

@@ -1086,6 +1086,65 @@ mod tests {
     }
 
     #[test]
+    fn low_fanout_join_estimate_allows_a_17_row_outer_side() {
+        let mut indexed_right = join_relation("rights", 0x41);
+        indexed_right.range_access_paths =
+            vec![crate::metadata_discovery::AuthorizedRangeAccessPath {
+                index_id: [0x71; 16],
+                column_ids: vec![[0x51; 16]],
+            }];
+        let selective = optimize_join_select_v1_with_relations_and_estimates_and_cardinality(
+            &filtered_join_select_request(),
+            Some(join_relation("lefts", 0x31)),
+            Some(indexed_right.clone()),
+            Some(17),
+            Some(119),
+            Some(17),
+        )
+        .unwrap();
+        let selective = decode_join_select_plan_v1(&selective).unwrap();
+        assert_eq!(
+            selective
+                .index_nested_loop
+                .as_ref()
+                .map(|plan| plan.outer_side),
+            Some(crate::optimizer_request::JoinRelationSide::Left)
+        );
+
+        let high_fanout = optimize_join_select_v1_with_relations_and_estimates_and_cardinality(
+            &filtered_join_select_request(),
+            Some(join_relation("lefts", 0x31)),
+            Some(indexed_right),
+            Some(17),
+            Some(119),
+            Some(85),
+        )
+        .unwrap();
+        assert!(
+            decode_join_select_plan_v1(&high_fanout)
+                .unwrap()
+                .index_nested_loop
+                .is_none()
+        );
+
+        let below_ratio = optimize_join_select_v1_with_relations_and_estimates_and_cardinality(
+            &filtered_join_select_request(),
+            Some(join_relation("lefts", 0x31)),
+            Some(join_relation("rights", 0x41)),
+            Some(17),
+            Some(118),
+            Some(17),
+        )
+        .unwrap();
+        assert!(
+            decode_join_select_plan_v1(&below_ratio)
+                .unwrap()
+                .index_nested_loop
+                .is_none()
+        );
+    }
+
+    #[test]
     fn join_with_two_known_small_inputs_keeps_hash_join() {
         let mut indexed_left = join_relation("lefts", 0x31);
         indexed_left.range_access_paths =

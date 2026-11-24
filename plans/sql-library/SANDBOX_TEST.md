@@ -147,6 +147,8 @@ Set `PRDB_TEST_INDEXED_JOIN_FANOUT_BENCHMARK_ONLY=1` for nine outer rows with on
 
 Set `PRDB_TEST_INDEXED_JOIN_FANOUT16_BENCHMARK_ONLY=1` to profile 16 outer rows with one matching row each against the same 128-row indexed inner relation. Five fresh-database runs selected kind 17, returned the same 16 pairs for indexed and hash execution, and overlapped 192 operational reads and commits per run. Indexed median-of-run p50 was 243.5 ms (230.9–259.1 ms range), compared with 305.7 ms for hash (289.4–313.7 ms range). This extends the local low-fanout evidence to the upper end of the 9–16-row outer range; it is not a general cost model or target-host result.
 
+Set `PRDB_TEST_INDEXED_JOIN_FANOUT17_BENCHMARK_ONLY=1` to profile 17 outer rows with one matching row each against a 128-row indexed inner relation. Five fresh-database runs selected kind 17, returned identical results for indexed and hash execution, and overlapped 192 operational reads and commits per run. Indexed median-of-run p50 was 257.3 ms (243.1–270.0 ms range), compared with 298.9 ms for hash (295.8–311.2 ms range). The optimizer admits this case when the opposite side is at least seven times larger; the measurement does not validate other fanouts or workload shapes.
+
 The default acceptance continues to run its existing 30-second mixed-load workload. The benchmark-only mode has its own invocation scan budget and returns after validating the timing frames and durable commit.
 # Spill filesystem smoke probe
 
