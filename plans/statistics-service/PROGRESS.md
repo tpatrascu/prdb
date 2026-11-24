@@ -1,5 +1,12 @@
 # Statistics Service Progress
 
+## ST-2 / OP-7 follow-up: extend exact join estimates to 4,096 rows — implemented slice
+
+- Contract: authorized join population probes and pair estimates now accept up to 4,096 rows per input. The estimator reads at most 4,097 row IDs per side, retains the 8 MiB combined decoded-row cap, 4 KiB encoded-key cap, eight-key-component limit, value-independent visibility and readable-key rules, and the shared planner request allowance. Populations beyond the requested bound remain `Unknown` without partial counts.
+- Red/green: the real-redb duplicate-key regression first returned `Unknown` for the 4,096×4,096 bound. After increasing both planner and estimate limits, it returns the same exact 1,043,463 pairs as the 1,024-row baseline; a 2,048-row requested bound still returns `Unknown`. A planner IPC integration regression sends a 4,096-row exact join request and decodes the 16,777,216-pair response. The optimizer process protocol regression confirms it requests the expanded bound.
+- Remaining: broader join distributions and population shapes, cost-based path comparison, populations above 4,096, richer statistics, broader global-statistics consumption under an explicit disclosure policy, and target-host evidence remain open.
+- Validation: the real-redb transaction regression, 4,096-row planner IPC response, optimizer-process bound request, and both population/join request codec boundary regressions passed. `cargo fmt --all -- --check`, locked workspace build, and warning-denied all-target Clippy passed. The complete serial delegated-cgroup workspace suite passed with 407 library tests, 206 commit integration tests, 3 metadata-process tests, 83 transaction tests, all remaining targets, and no ignored tests.
+
 ## ST-6 follow-up: reuse a fresh committed population inside the authorized planner estimate — implemented slice
 
 - Contract: a committed count can answer the existing bounded population estimate only from the invocation's own pinned redb snapshot, when literal policy shape proves the full table is visible and the private row overlay is empty. The record must be exact and within the requested maximum. Missing, stale, malformed, over-bound, unknown, or overlay-bearing cases fall back to the bounded snapshot estimate or return `Unknown`; raw records never cross IPC.

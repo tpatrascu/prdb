@@ -7784,10 +7784,10 @@ fn authorized_join_estimate_counts_duplicate_matches_and_private_overlay()
             right_table,
             &right_projection,
             &right_ids,
-            2049,
+            4097,
         )?,
         None,
-        "join-cardinality work remains capped at 2,048 rows per side"
+        "join-cardinality work remains capped at 4,096 rows per side"
     );
 
     planner.stage_put(numbered_row_id(left_table, 5), &row(Some(7)))?;
@@ -7863,18 +7863,31 @@ fn authorized_join_estimate_counts_duplicate_matches_and_private_overlay()
     );
     exact_1024.abort()?;
 
-    let mut expand_to_2048 =
-        InvocationTransaction::begin(&database, [0x7c; 16], [9; 16], 9_999, 2048, 8 * 1024 * 1024)?;
-    for number in 3_000..4_024 {
-        expand_to_2048.stage_put(numbered_row_id(left_table, number), &row(None))?;
-        expand_to_2048.stage_put(numbered_row_id(right_table, number), &row(None))?;
+    let mut expand_to_4096 =
+        InvocationTransaction::begin(&database, [0x7c; 16], [9; 16], 9_999, 4096, 8 * 1024 * 1024)?;
+    for number in 5_000..7_048 {
+        expand_to_4096.stage_put(numbered_row_id(left_table, number), &row(None))?;
+        expand_to_4096.stage_put(numbered_row_id(right_table, number), &row(None))?;
     }
-    expand_to_2048.commit()?;
+    expand_to_4096.commit()?;
 
-    let mut exact_2048 =
+    let mut exact_4096 =
         InvocationTransaction::begin(&database, [0x7d; 16], [9; 16], 9_999, 32, 4096)?;
     assert_eq!(
-        exact_2048.estimate_authorized_join_cardinality_at_most(
+        exact_4096.estimate_authorized_join_cardinality_at_most(
+            left_table,
+            &left_projection,
+            &left_ids,
+            right_table,
+            &right_projection,
+            &right_ids,
+            4096,
+        )?,
+        Some(1_043_463),
+        "the estimator should cover 4,096-row inputs while NULL keys preserve the prior match count"
+    );
+    assert_eq!(
+        exact_4096.estimate_authorized_join_cardinality_at_most(
             left_table,
             &left_projection,
             &left_ids,
@@ -7883,23 +7896,10 @@ fn authorized_join_estimate_counts_duplicate_matches_and_private_overlay()
             &right_ids,
             2048,
         )?,
-        Some(1_043_463),
-        "the estimator should cover 2,048-row inputs while NULL keys preserve the prior match count"
-    );
-    assert_eq!(
-        exact_2048.estimate_authorized_join_cardinality_at_most(
-            left_table,
-            &left_projection,
-            &left_ids,
-            right_table,
-            &right_projection,
-            &right_ids,
-            1024,
-        )?,
         None,
         "the estimate must remain Unknown when the actual population exceeds the requested bound"
     );
-    exact_2048.abort()?;
+    exact_4096.abort()?;
 
     let mut oversized =
         InvocationTransaction::begin(&database, [0x79; 16], [9; 16], 9_999, 512, 1_048_576)?;
