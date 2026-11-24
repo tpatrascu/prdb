@@ -348,8 +348,9 @@ pub(crate) struct ExecutorMetadataSessionState {
 }
 
 /// Planner metadata session with opaque, connection-local table handles.
-/// Exact predicate, population, and column estimates may be reused while the
-/// invocation and its private-write generation remain unchanged.
+/// Exact predicate, population, join-cardinality, and column estimates may be
+/// reused while the invocation and its private-write generation remain
+/// unchanged.
 pub struct PlannerMetadataConnection<'connection, 'db> {
     transaction: &'connection mut InvocationTransaction<'db>,
     handles: HashMap<[u8; 16], PlannerTableHandleState>,
