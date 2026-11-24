@@ -52228,6 +52228,7 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
         const PROFILE_ROWS: usize = 2_052;
         const PROFILE_RUNS: usize = 11;
         const CONCURRENT_OPTIMIZERS: usize = 8;
+        const CONCURRENT_OPERATIONAL_TRANSACTIONS: usize = 64;
         const SATURATION_RUNS: usize = 5;
         let mut seed_invocation_id = [0xd1; 16];
         seed_invocation_id[15] = 1;
@@ -52322,6 +52323,8 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
         let mut saturated_optimizer_latencies = Vec::new();
         let mut saturated_optimizer_batch_times = Vec::new();
         let mut saturated_optimizer_total_times = Vec::new();
+        let mut saturated_operational_read_latencies = Vec::new();
+        let mut saturated_operational_commit_latencies = Vec::new();
         for run_number in 0..PROFILE_RUNS {
             let mut direct_invocation_id = [0xd1; 16];
             direct_invocation_id[14] = 2;
@@ -52519,14 +52522,21 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             }
             for run_number in 0..SATURATION_RUNS {
                 let all_started = std::time::Instant::now();
-                let barrier = Arc::new(Barrier::new(CONCURRENT_OPTIMIZERS + 1));
+                let barrier = Arc::new(Barrier::new(
+                    CONCURRENT_OPTIMIZERS + CONCURRENT_OPERATIONAL_TRANSACTIONS + 1,
+                ));
                 let storage_for_workers = storage.clone();
                 let table_id = table.table_id;
-                let (latencies, batch_time) = std::thread::scope(|scope| {
+                let operational_inflight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let (latencies, operational_latencies, batch_time) =
+                    std::thread::scope(|scope| {
                     let mut workers = Vec::with_capacity(CONCURRENT_OPTIMIZERS);
+                    let mut operational_workers =
+                        Vec::with_capacity(CONCURRENT_OPERATIONAL_TRANSACTIONS);
                     for worker_number in 0..CONCURRENT_OPTIMIZERS {
                         let worker_storage = storage_for_workers.clone();
                         let worker_barrier = Arc::clone(&barrier);
+                        let worker_operational_inflight = Arc::clone(&operational_inflight);
                         let request_payload = optimizer_request();
                         workers.push(scope.spawn(move || -> Result<Duration, String> {
                             let mut release_barrier = ReleaseBarrierOnDrop {
@@ -52617,6 +52627,15 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
                                     .ok_or_else(|| {
                                         "optimizer closed before saturation response".to_owned()
                                     })?;
+                                if worker_operational_inflight
+                                    .load(std::sync::atomic::Ordering::Acquire)
+                                    == 0
+                                {
+                                    return Err(
+                                        "operational reads and commits did not overlap optimizer planning"
+                                            .to_owned(),
+                                    );
+                                }
                                 let latency = started.elapsed();
                                 if response.operation != IpcOperation::OptimizeSelect as u16
                                     || response.request_id != 1
@@ -52682,6 +52701,55 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
                             Ok(latency)
                         }));
                     }
+                    for worker_number in 0..CONCURRENT_OPERATIONAL_TRANSACTIONS {
+                        let worker_storage = storage_for_workers.clone();
+                        let worker_barrier = Arc::clone(&barrier);
+                        let worker_operational_inflight = Arc::clone(&operational_inflight);
+                        operational_workers.push(scope.spawn(move || {
+                            let mut release_barrier = ReleaseBarrierOnDrop {
+                                barrier: Arc::clone(&worker_barrier),
+                                released: false,
+                            };
+                            let mut invocation_id = [0xe8; 16];
+                            invocation_id[14] = run_number as u8 + 1;
+                            invocation_id[15] = worker_number as u8 + 1;
+                            let mut transaction = worker_storage
+                                .begin_invocation(invocation_id, actor, 9_999, 1, 64)
+                                .map_err(|error| {
+                                    format!("begin concurrent operational invocation: {error:?}")
+                                })?;
+                            worker_operational_inflight
+                                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                            worker_barrier.wait();
+                            release_barrier.released = true;
+                            let read_started = std::time::Instant::now();
+                            let cells = transaction
+                                .read_catalog_authorized_row(
+                                    table_id,
+                                    ((worker_number + 1) as u128).to_be_bytes(),
+                                )
+                                .map_err(|error| {
+                                    format!("concurrent authorized operational read: {error:?}")
+                                })?
+                                .ok_or_else(|| {
+                                    "concurrent operational point read returned no row".to_owned()
+                                })?;
+                            if cells.len() != 1 {
+                                return Err(format!(
+                                    "concurrent operational point read returned {} cells, expected one",
+                                    cells.len()
+                                ));
+                            }
+                            let read_latency = read_started.elapsed();
+                            let commit_started = std::time::Instant::now();
+                            transaction.commit().map_err(|error| {
+                                format!("concurrent operational read-only commit: {error:?}")
+                            })?;
+                            worker_operational_inflight
+                                .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                            Ok::<_, String>((read_latency, commit_started.elapsed()))
+                        }));
+                    }
                     let batch_started = std::time::Instant::now();
                     barrier.wait();
                     let mut latencies = Vec::with_capacity(CONCURRENT_OPTIMIZERS);
@@ -52692,10 +52760,21 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
                                 .map_err(|_| "optimizer saturation worker panicked".to_owned())??,
                         );
                     }
-                    Ok::<_, String>((latencies, batch_started.elapsed()))
-                })
-                .map_err(|error| format!("optimizer saturation run failed: {error}"))?;
+                    let mut operational_latencies =
+                        Vec::with_capacity(CONCURRENT_OPERATIONAL_TRANSACTIONS);
+                    for worker in operational_workers {
+                        operational_latencies.push(worker.join().map_err(|_| {
+                            "concurrent operational worker panicked".to_owned()
+                        })??);
+                    }
+                    Ok::<_, String>((latencies, operational_latencies, batch_started.elapsed()))
+                    })
+                    .map_err(|error| format!("optimizer saturation run failed: {error}"))?;
                 saturated_optimizer_latencies.extend(latencies);
+                saturated_operational_read_latencies
+                    .extend(operational_latencies.iter().map(|(read, _)| *read));
+                saturated_operational_commit_latencies
+                    .extend(operational_latencies.iter().map(|(_, commit)| *commit));
                 saturated_optimizer_batch_times.push(batch_time);
                 saturated_optimizer_total_times.push(all_started.elapsed());
             }
@@ -52741,13 +52820,31 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             let total_p50 =
                 saturated_optimizer_total_times[saturated_optimizer_total_times.len() / 2];
             eprintln!(
-                "optimizer concurrency profile: processes={CONCURRENT_OPTIMIZERS}, runs={SATURATION_RUNS}, requests={}, request latency p50/p95={:.3}/{:.3} ms, request-batch p50={:.3} ms ({:.1} requests/s), setup-to-completion p50={:.3} ms",
+                "optimizer concurrency profile: processes={CONCURRENT_OPTIMIZERS}, operational transactions per batch={CONCURRENT_OPERATIONAL_TRANSACTIONS}, runs={SATURATION_RUNS}, requests={}, request latency p50/p95={:.3}/{:.3} ms, request-batch p50={:.3} ms ({:.1} requests/s), setup-to-completion p50={:.3} ms",
                 saturated_optimizer_latencies.len(),
                 latency_p50.as_secs_f64() * 1_000.0,
                 latency_p95.as_secs_f64() * 1_000.0,
                 batch_p50.as_secs_f64() * 1_000.0,
                 CONCURRENT_OPTIMIZERS as f64 / batch_p50.as_secs_f64(),
                 total_p50.as_secs_f64() * 1_000.0,
+            );
+            saturated_operational_read_latencies.sort_unstable();
+            saturated_operational_commit_latencies.sort_unstable();
+            let operational_read_p50 = saturated_operational_read_latencies
+                [saturated_operational_read_latencies.len() / 2];
+            let operational_read_p95 = saturated_operational_read_latencies
+                [((saturated_operational_read_latencies.len() - 1) * 95).div_ceil(100)];
+            let operational_commit_p50 = saturated_operational_commit_latencies
+                [saturated_operational_commit_latencies.len() / 2];
+            let operational_commit_p95 = saturated_operational_commit_latencies
+                [((saturated_operational_commit_latencies.len() - 1) * 95).div_ceil(100)];
+            eprintln!(
+                "operational transactions during optimizer saturation: transactions={}, authorized-read p50/p95={:.3}/{:.3} ms, read-only commit p50/p95={:.3}/{:.3} ms",
+                saturated_operational_read_latencies.len(),
+                operational_read_p50.as_secs_f64() * 1_000.0,
+                operational_read_p95.as_secs_f64() * 1_000.0,
+                operational_commit_p50.as_secs_f64() * 1_000.0,
+                operational_commit_p95.as_secs_f64() * 1_000.0,
             );
         }
         return Ok(());

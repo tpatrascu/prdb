@@ -117,6 +117,7 @@ Statistics never establish authorization or correctness. Missing or unsupported 
 - Attempt repeated predicate probes, cross-principal cache reuse, stale-policy reuse, and statistics access through worker channels.
 - Test planning work limits, cancellation, unsupported expressions, and heuristic fallback.
 - Measure planning overhead and plan quality under highly selective policies before adding richer statistics.
+- A five-run direct-storage profile released eight optimizer processes with 64 authorized operational reads and read-only commits. Median run-level optimizer request p50 was 228.501 ms (219.722–270.025 ms range), with median batch throughput 20.1 requests/s; operational read p50 median was 23.678 ms and read-only commit p50 median was 244.304 ms. This profile uses a shared test-service cgroup and bypasses supervisor START. The separate confined acceptance covers configured 64-operational/8-analytical admission and per-invocation cgroups, but synchronized estimate-request latency on that path and target-host behavior remain open.
 
 Open choices include collection algorithms, safe sampling, cache equivalence proofs, policy-aware cardinality estimation, and whether an explicitly privileged planning mode is ever desirable.
 

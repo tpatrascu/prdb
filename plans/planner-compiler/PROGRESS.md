@@ -1,5 +1,12 @@
 # Optimizer Progress
 
+## OP-1 / OP-4 / ST-2 follow-up: profile optimizer requests beside operational transactions — measured
+
+- Harness: the opt-in `PRDB_TEST_PROFILE_PLANNER_ESTIMATE_IPC=1 PRDB_TEST_PROFILE_OPTIMIZER_SATURATION=1` profile releases eight isolated optimizer processes and 64 authorized storage transactions through one barrier. Each of five batches has the optimizers plan the same indexed equality predicate while each operational transaction performs an authorized point read and read-only commit. Every plan is checked for its relation and exact filter; each optimizer response must arrive while at least one operational transaction remains in flight.
+- Evidence: five fresh-fixture delegated-service runs each completed 40 optimizer requests and 320 operational reads/commits. The median of run-level request p50s was 228.501 ms (219.722–270.025 ms range); median run-level p95 was 256.165 ms (232.899–424.790 ms range). Median eight-request batch p50 was 397.641 ms (20.1 requests/s). Operational read p50 medians were 23.678 ms (22.286–27.228 ms range), and read-only commit p50 medians were 244.304 ms (233.822–294.179 ms range).
+- Scope: this adds direct `StorageManager` mixed-load evidence on the 2,052-row fixture. These processes share the delegated test-service cgroup and bypass supervisor START admission and per-invocation cgroups; operational calls are read-only commits. The separate confined acceptance covers the configured 64 operational / 8 analytical admissions and per-invocation cgroups but does not time synchronized estimate requests. Full SQL/gateway latency and target-host evidence remain open.
+- Verification: all five focused profile runs passed, covering 200 optimizer requests and 1,600 authorized operational reads/commits; every batch released all eight optimizer workers with 64 operational transactions at the barrier.
+
 ## OP-1 / ST-2 follow-up: profile concurrent optimizer estimate requests — measured
 
 - Harness: an opt-in profile starts eight independent `prdb-optimizer` binaries, each with its own invocation transaction and real planner IPC stream, then releases one indexed equality `SELECT` per process through a barrier. Every returned plan is checked for the fixture relation and filter. Five fresh-database profile runs each contained five synchronized eight-process batches (40 optimizer requests per run).

@@ -1,5 +1,12 @@
 # Statistics Service Progress
 
+## ST-2 / OP-1 follow-up: profile estimates beside operational transactions — measured
+
+- Harness: the opt-in planner profile now releases eight isolated optimizer processes and 64 authorized storage transactions together. Each five-batch run checks the optimizer's indexed equality plan and exact filter while each operational transaction performs an authorized point read and read-only commit; each optimizer response must arrive while an operational transaction remains in flight.
+- Evidence: five fresh-fixture delegated-service runs completed 200 optimizer requests and 1,600 operational reads/commits. Median run-level optimizer request p50 was 228.501 ms (219.722–270.025 ms range), median p95 was 256.165 ms (232.899–424.790 ms range), and median eight-request batch throughput was 20.1 requests/s. Median operational read p50 was 23.678 ms (22.286–27.228 ms range); median read-only commit p50 was 244.304 ms (233.822–294.179 ms range).
+- Scope: this is direct `StorageManager` traffic on one local fixture, under a shared delegated-service cgroup. It bypasses supervisor START and per-invocation cgroups, and the operational commits carry no writes. The confined SQL acceptance separately covers eight optimizer-backed analytical workers, 64 admitted operational transactions and per-invocation resource limits. Estimate-request latency through that fully admitted path, other policies/predicates, and target-host behavior remain open.
+- Verification: all five focused profile invocations passed with 40 optimizer requests and 320 authorized operational reads/commits per invocation.
+
 ## ST-3 follow-up: profile committed hidden-row volume — measured
 
 - Harness: the hidden-row estimate regression pins one invocation before seeding and committing 8,192 rows that a value-dependent row policy hides, then pins a second invocation after that commit. Both estimates remain `Unknown`, both preserve the same authorized one-row scan page, and estimation leaves the one-unit query scan allowance available. An opt-in profile measures current-thread CPU for 1,024 repeated estimates per sample across five samples.
