@@ -451,3 +451,10 @@
 - Red/green evidence: the real-redb commit integration test first failed because the record remained after a successful table drop. It now checks the exact record exists before the drop, remains after an over-limit aborted drop, and is absent after the successful drop.
 - Implementation: the storage commit transaction detects deleted table catalog records and removes their statistics key before committing the same redb transaction.
 - Verification: the focused `storage_manager_drop_table_removes_owned_catalog_and_rows` regression passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied all-target Clippy, TinyCC `sandbox-query-fixture`, the cgroup preflight, and the full serial delegated-cgroup workspace suite passed; the suite ran 409 library tests, 206 commit tests, 3 metadata-process tests, 85 transaction tests, and all remaining targets with no ignored tests.
+
+## ST-2 / OP-4 follow-up: measure 18-row low-fanout outer boundary — verified slice
+
+- The exact pair-estimate rule now admits a smaller outer population through 18 rows when the indexed input is at least seven times larger; the four-pairs-per-outer cutoff is unchanged. The optimizer test first failed at 18×126 and passed after the bound expansion. Process eligibility tests reject 18×125 and 19×133.
+- Five confined 18×126 runs selected indexed nested-loop and verified hash-equivalent output while 192 operational reads and commits overlapped. Median run-level p50 was 273.9 ms indexed (246.6–281.1 ms range) versus 305.3 ms hash (279.6–336.5 ms range).
+- Scope: one additional uniform fanout-one shape on this host. This does not establish the crossover for higher fanout, larger outers, or deployment hardware.
+- Verification: optimizer-service and process boundary tests, five confined profile runs, maintained TinyCC SDK tests and fixture build, locked workspace build, format check, warning-denied all-target Clippy, and full serial delegated-cgroup workspace suite passed (409 library, 206 commit, 3 metadata-process, 85 transaction tests; all remaining targets passed with no ignored tests).

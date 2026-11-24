@@ -647,13 +647,16 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn join_fanout_estimate_eligibility_covers_the_17_row_outer_limit() {
+    fn join_fanout_estimate_eligibility_covers_the_18_row_outer_limit() {
         assert!(join_fanout_estimate_is_eligible(Some(16), Some(128)));
         assert!(!join_fanout_estimate_is_eligible(Some(16), Some(127)));
         assert!(join_fanout_estimate_is_eligible(Some(17), Some(119)));
         assert!(join_fanout_estimate_is_eligible(Some(119), Some(17)));
-        assert!(!join_fanout_estimate_is_eligible(Some(18), Some(126)));
+        assert!(join_fanout_estimate_is_eligible(Some(18), Some(126)));
+        assert!(join_fanout_estimate_is_eligible(Some(126), Some(18)));
         assert!(!join_fanout_estimate_is_eligible(Some(17), Some(118)));
+        assert!(!join_fanout_estimate_is_eligible(Some(18), Some(125)));
+        assert!(!join_fanout_estimate_is_eligible(Some(19), Some(133)));
         assert!(!join_fanout_estimate_is_eligible(Some(17), None));
     }
 

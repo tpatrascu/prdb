@@ -197,6 +197,13 @@
 - Scope: one host with uncontrolled cache and competing load; the 16,383-row p95 ranged from 15.835 to 27.299 ms. This measures the storage estimate call, excluding setup and planner IPC, and is not service-level or target-hardware evidence.
 - Verification: each of the three release harness executions completed successfully.
 
+## OP-4 / ST-2 follow-up: profile the 18×126 indexed-join boundary — measured
+
+- Harness: five fresh-database runs of `PRDB_TEST_INDEXED_JOIN_FANOUT18_RATIO7_BENCHMARK_ONLY=1` through the delegated-cgroup SQL acceptance. Each run selected kind-17 indexed nested-loop, checked the exact 18-pair estimate and all output values against the hash result, and overlapped 192 operational reads and 192 commits. Each strategy had two timed samples per run.
+- Run-level p50 samples: indexed 273.880, 246.599, 251.563, 274.404, and 281.080 ms; hash 305.277, 279.554, 297.743, 336.540, and 328.642 ms. The five-run median was 273.9 ms indexed (246.6–281.1 ms range) and 305.3 ms hash (279.6–336.5 ms range).
+- Scope: one uniform fanout-one shape at an 18-row outer and seven-to-one population ratio on this host. It supports extending the local measured optimizer bound by one row; higher fanout, other distributions, candidate comparison, and target-hardware results remain open.
+- Verification: five confined runs passed with operational load active; the maintained TinyCC fixture, SDK suite, locked workspace build, format check, warning-denied Clippy, and full serial delegated-cgroup workspace suite passed.
+
 ## WI-2 follow-up: token-authenticated principals receive different executor cell views — verified
 
 - Regression: `token_authenticated_catalog_scans_redact_cells_per_principal` creates two users through identity DDL, issues separate tokens, installs independent schema/table/column grants and row/cell policies through `StorageManager`, then compares executor IPC scans over the same variable-length Bytea row. The readable principal receives VALUE; the second principal sees the row and receives only REDACTED.

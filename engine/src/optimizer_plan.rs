@@ -51,16 +51,16 @@ pub struct SingleTablePlanV1 {
 pub const SMALL_POPULATION_SCAN_ROWS: u64 = 4;
 const SKEWED_JOIN_OUTER_MAX_ROWS: u64 = 8;
 const SKEWED_JOIN_INPUT_RATIO: u64 = 16;
-pub(crate) const FANOUT_AWARE_JOIN_OUTER_MAX_ROWS: u64 = 17;
+pub(crate) const FANOUT_AWARE_JOIN_OUTER_MAX_ROWS: u64 = 18;
 pub(crate) const FANOUT_AWARE_JOIN_INPUT_RATIO: u64 = 8;
-const FANOUT_AWARE_JOIN_17_ROW_INPUT_RATIO: u64 = 7;
+const FANOUT_AWARE_JOIN_LARGE_OUTER_INPUT_RATIO: u64 = 7;
 const FANOUT_AWARE_JOIN_MAX_PAIRS_PER_OUTER_ROW: u64 = 4;
 /// Maximum row count probed for optimizer join orientation.
 pub const JOIN_POPULATION_ESTIMATE_MAX_ROWS: u64 = 4096;
 
 pub(crate) fn fanout_aware_join_inputs_are_eligible(outer_rows: u64, indexed_rows: u64) -> bool {
-    let minimum_ratio = if outer_rows == FANOUT_AWARE_JOIN_OUTER_MAX_ROWS {
-        FANOUT_AWARE_JOIN_17_ROW_INPUT_RATIO
+    let minimum_ratio = if outer_rows >= 17 {
+        FANOUT_AWARE_JOIN_LARGE_OUTER_INPUT_RATIO
     } else {
         FANOUT_AWARE_JOIN_INPUT_RATIO
     };
