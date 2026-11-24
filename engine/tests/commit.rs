@@ -52293,10 +52293,30 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             "observations".to_owned(),
             &predicate,
         )?;
+        let optimizer_request = || {
+            let mut bytes = vec![0, 1, 1, 0];
+            for name in ["planner_stats", "observations"] {
+                bytes.push(name.len() as u8);
+                bytes.extend_from_slice(name.as_bytes());
+            }
+            bytes.extend_from_slice(&1u16.to_be_bytes());
+            bytes.push(5);
+            bytes.extend_from_slice(b"value");
+            let mut encoded_predicate = vec![0x20, 0, 0x10, 5];
+            encoded_predicate.extend_from_slice(b"value");
+            encoded_predicate.push(0x02);
+            encoded_predicate.extend_from_slice(&7i64.to_be_bytes());
+            bytes.extend_from_slice(&(encoded_predicate.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(&encoded_predicate);
+            bytes.push(1);
+            bytes.extend_from_slice(&3u32.to_be_bytes());
+            bytes
+        };
         let predicate_bytes = predicate_request.predicate_bytes.clone();
         let mut describe_roundtrips = Vec::with_capacity(PROFILE_RUNS);
         let mut direct_estimate_times = Vec::with_capacity(PROFILE_RUNS);
         let mut estimate_roundtrips = Vec::with_capacity(PROFILE_RUNS);
+        let mut optimizer_process_roundtrips = Vec::with_capacity(PROFILE_RUNS);
         for run_number in 0..PROFILE_RUNS {
             let mut direct_invocation_id = [0xd1; 16];
             direct_invocation_id[14] = 2;
@@ -52385,10 +52405,105 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
                 Ok(())
             })?;
             transaction.abort()?;
+
+            let mut process_invocation_id = [0xd1; 16];
+            process_invocation_id[13] = 1;
+            process_invocation_id[14] = 3;
+            process_invocation_id[15] = run_number as u8 + 1;
+            let mut process_transaction =
+                storage.begin_invocation(process_invocation_id, actor, 9_999, 1, 64)?;
+            let (optimizer_worker, mut optimizer_client) = std::os::unix::net::UnixStream::pair()?;
+            let (planner_worker, mut planner_storage) = std::os::unix::net::UnixStream::pair()?;
+            use std::os::fd::AsRawFd;
+            use std::os::unix::process::CommandExt;
+            use std::process::{Command, Stdio};
+            let submission_fd = optimizer_worker.as_raw_fd();
+            let planner_fd = planner_worker.as_raw_fd();
+            let mut optimizer = Command::new(env!("CARGO_BIN_EXE_prdb-optimizer"));
+            optimizer
+                .arg("--submission-fd")
+                .arg(submission_fd.to_string())
+                .arg("--planner-fd")
+                .arg(planner_fd.to_string())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            // SAFETY: the child callback touches only the two live Unix-stream
+            // descriptors captured above before exec, clearing their close-on-exec
+            // flag so the optimizer receives the intended channel endpoints.
+            unsafe {
+                optimizer.pre_exec(move || {
+                    for descriptor in [submission_fd, planner_fd] {
+                        // SAFETY: fcntl operates on inherited descriptors in the child.
+                        let flags = libc::fcntl(descriptor, libc::F_GETFD);
+                        if flags < 0
+                            || libc::fcntl(descriptor, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
+                        {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                    }
+                    Ok(())
+                });
+            }
+            let mut optimizer = optimizer.spawn()?;
+            drop(optimizer_worker);
+            drop(planner_worker);
+            optimizer_client.set_read_timeout(Some(Duration::from_secs(5)))?;
+            std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+                let planner =
+                    scope.spawn(|| serve_planner(&mut planner_storage, &mut process_transaction));
+                let started = std::time::Instant::now();
+                prdb_engine::ipc::write_frame(
+                    &mut optimizer_client,
+                    &IpcFrame {
+                        operation: IpcOperation::OptimizeSelect as u16,
+                        request_id: 1,
+                        payload: optimizer_request(),
+                    },
+                )?;
+                let response = prdb_engine::ipc::read_frame(&mut optimizer_client)?
+                    .ok_or("optimizer process closed before its filtered plan response")?;
+                optimizer_process_roundtrips.push(started.elapsed());
+                assert_eq!(response.operation, IpcOperation::OptimizeSelect as u16);
+                assert_eq!(response.request_id, 1);
+                let response = OptimizerResponse::decode(&response.payload)?;
+                assert_eq!(
+                    response.status,
+                    prdb_engine::optimizer_ipc::OptimizerStatus::Success,
+                    "isolated optimizer must return a filtered plan"
+                );
+                let plan = decode_plan_v1(
+                    response
+                        .plan
+                        .as_deref()
+                        .ok_or("successful optimizer response omitted its plan")?,
+                )?;
+                assert_eq!(
+                    plan.relation.relation_id, table.table_id,
+                    "isolated optimizer must bind the authorized relation"
+                );
+                assert!(
+                    plan.nodes
+                        .iter()
+                        .any(|node| matches!(node, PlanNode::Filter(found) if found == &predicate)),
+                    "isolated optimizer must preserve the exact equality predicate"
+                );
+                optimizer_client.shutdown(Shutdown::Write)?;
+                drop(optimizer_client);
+                let status = optimizer.wait()?;
+                assert!(status.success(), "optimizer child exited with {status}");
+                planner
+                    .join()
+                    .expect("optimizer profile planner thread panicked")
+                    .map_err(|error| format!("optimizer profile planner failed: {error:?}"))?;
+                Ok(())
+            })?;
+            process_transaction.abort()?;
         }
         describe_roundtrips.sort_unstable();
         direct_estimate_times.sort_unstable();
         estimate_roundtrips.sort_unstable();
+        optimizer_process_roundtrips.sort_unstable();
         let describe_median = describe_roundtrips[describe_roundtrips.len() / 2];
         let describe_p95 =
             describe_roundtrips[((describe_roundtrips.len() - 1) * 95).div_ceil(100)];
@@ -52398,14 +52513,20 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
         let estimate_median = estimate_roundtrips[estimate_roundtrips.len() / 2];
         let estimate_p95 =
             estimate_roundtrips[((estimate_roundtrips.len() - 1) * 95).div_ceil(100)];
+        let optimizer_process_median =
+            optimizer_process_roundtrips[optimizer_process_roundtrips.len() / 2];
+        let optimizer_process_p95 = optimizer_process_roundtrips
+            [((optimizer_process_roundtrips.len() - 1) * 95).div_ceil(100)];
         eprintln!(
-            "planner IPC profile: rows={PROFILE_ROWS}, runs={PROFILE_RUNS}, indexed exact equality, direct service median/p95={:.3}/{:.3} ms, DescribePlanRelation median/p95={:.3}/{:.3} ms, exact EstimateScan roundtrip median/p95={:.3}/{:.3} ms",
+            "planner estimate profile: rows={PROFILE_ROWS}, runs={PROFILE_RUNS}, indexed exact equality, direct service median/p95={:.3}/{:.3} ms, DescribePlanRelation median/p95={:.3}/{:.3} ms, exact EstimateScan roundtrip median/p95={:.3}/{:.3} ms, isolated optimizer plan request median/p95={:.3}/{:.3} ms",
             direct_median.as_secs_f64() * 1_000.0,
             direct_p95.as_secs_f64() * 1_000.0,
             describe_median.as_secs_f64() * 1_000.0,
             describe_p95.as_secs_f64() * 1_000.0,
             estimate_median.as_secs_f64() * 1_000.0,
             estimate_p95.as_secs_f64() * 1_000.0,
+            optimizer_process_median.as_secs_f64() * 1_000.0,
+            optimizer_process_p95.as_secs_f64() * 1_000.0,
         );
         return Ok(());
     }

@@ -1,5 +1,12 @@
 # Optimizer Progress
 
+## OP-4 / ST-2 follow-up: include the isolated optimizer request path in the estimate profile — measured
+
+- Harness: the real `prdb-optimizer` executable receives a filtered SELECT over the seeded 2,052-row INTEGER table. Each sample starts a fresh optimizer process and invocation, verifies the exact bound predicate and authorized relation in the returned plan, and times the request/response after the process has spawned.
+- Evidence: five fresh-database runs, with 11 requests per run, measured isolated optimizer request median-of-run p50 at 6.876 ms (6.686–7.069 ms) and median-of-run p95 at 7.636 ms. In the same profile, the exact `EstimateScan` IPC roundtrip measured 2.633 ms median-of-run p50 (2.512–2.714 ms), and direct planner service measured 2.677 ms (2.534–2.838 ms).
+- Scope: this includes isolated optimizer execution and planner IPC, but excludes process startup, executor startup, full SQL execution/result relay, mixed operational load, and target hardware. Other predicate and join shapes and broader candidate comparison remain open.
+- Verification: the exact authorized plan profile passed in five fresh-database runs. The complete serial delegated-cgroup workspace suite passed (409 library tests, 206 commit tests, and all other targets, no ignored tests); workspace build, format check, warning-denied Clippy, and local Markdown-link checks passed.
+
 ## OP-4 / ST-2 follow-up: measure predicate-estimate planner IPC — measured
 
 - Harness: the real `serve_planner` stream profile seeds a fresh authorized 2,052-row INTEGER table and a readable leading index. Across 11 fresh invocation sessions per run, it verifies one exact equality match and times direct `PlannerMetadataConnection` estimation, `DescribePlanRelation`, and `EstimateScan` request/response roundtrips.
