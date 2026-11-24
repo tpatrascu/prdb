@@ -40754,9 +40754,18 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     let spill_disk_full_only = std::env::var_os("PRDB_TEST_SPILL_DISK_FULL_ONLY").is_some();
     let sql_in_indexed_only = std::env::var_os("PRDB_TEST_SQL_IN_ONLY").is_some();
     let sql_in_fallback_only = std::env::var_os("PRDB_TEST_SQL_IN_FALLBACK_ONLY").is_some();
-    let sql_in_only = sql_in_indexed_only || sql_in_fallback_only;
+    let sql_in_null_left_only = std::env::var_os("PRDB_TEST_SQL_IN_NULL_LEFT_ONLY").is_some();
+    let sql_in_only = sql_in_indexed_only || sql_in_fallback_only || sql_in_null_left_only;
     assert!(
-        !(sql_in_indexed_only && sql_in_fallback_only),
+        [
+            sql_in_indexed_only,
+            sql_in_fallback_only,
+            sql_in_null_left_only
+        ]
+        .into_iter()
+        .filter(|enabled| *enabled)
+        .count()
+            <= 1,
         "select only one SQL IN acceptance mode"
     );
     let spill_enabled_only = spill_quota_only
@@ -41107,7 +41116,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             TableColumnDefinition {
                 name: "left_key".to_owned(),
                 scalar_type: ScalarType::Integer,
-                nullable: false,
+                nullable: sql_in_null_left_only,
                 generated_uuid_identity: false,
                 default: None,
             },
@@ -41208,7 +41217,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     let composite_schema = [
         ColumnSchema {
             scalar_type: ScalarType::Integer,
-            nullable: false,
+            nullable: sql_in_null_left_only,
         },
         ColumnSchema {
             scalar_type: ScalarType::Integer,
@@ -41277,6 +41286,24 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         now + 3_600_000_000,
         &composite_rows,
     )?;
+    if sql_in_null_left_only {
+        let null_left_row = RowWrite {
+            key: table_row_key(composite_table.table_id, id(0xd9)),
+            expected_version: None,
+            payload: Some(encode_tuple(
+                &composite_schema,
+                1,
+                &[None, Some(ScalarValue::Integer(13))],
+            )?),
+        };
+        commit_rows(
+            &database,
+            id(0xda),
+            builtin_owner_id(),
+            now + 3_600_000_000,
+            &[null_left_row],
+        )?;
+    }
     let mut decimal_schema = vec![
         ColumnSchema {
             scalar_type: ScalarType::Integer,
@@ -43138,6 +43165,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 4
             } else if indexed_join_benchmark_only {
                 64
+            } else if sql_in_null_left_only {
+                6
             } else {
                 5
             },
@@ -43356,7 +43385,13 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         } else if count_bigint_only {
             b'I'
         } else if sql_in_only {
-            if sql_in_fallback_only { b'F' } else { b'N' }
+            if sql_in_fallback_only {
+                b'F'
+            } else if sql_in_null_left_only {
+                b'L'
+            } else {
+                b'N'
+            }
         } else if filtered_composite_only {
             b'Q'
         } else {
@@ -44906,10 +44941,11 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                         let page = transaction
                             .scan_catalog_authorized_rows(operational_table_id, None, 128)
                             .map_err(|error| format!("operational authorized scan: {error:?}"))?;
-                        if page.rows.len() != 5 {
+                        let expected_scan_rows = if sql_in_null_left_only { 6 } else { 5 };
+                        if page.rows.len() != expected_scan_rows {
                             return Err(format!(
-                                "operational authorized scan returned {} rows, expected 5",
-                                page.rows.len()
+                                "operational authorized scan returned {} rows, expected {expected_scan_rows}",
+                                page.rows.len(),
                             ));
                         }
                         if worker_index >= 60 {

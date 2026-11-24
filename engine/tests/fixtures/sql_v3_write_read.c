@@ -1939,7 +1939,8 @@ static int32_t run_write_read_fixture(
         return 1;
     }
     if (invocation->parameters_len == 1 && invocation->parameters != NULL &&
-        (invocation->parameters[0] == 'N' || invocation->parameters[0] == 'F')) {
+        (invocation->parameters[0] == 'N' || invocation->parameters[0] == 'F' ||
+         invocation->parameters[0] == 'L')) {
         static const uint8_t in_sql[] =
             "SELECT left_key, right_key FROM grouped_records "
             "WHERE left_key IN ($1, $2, $3, $4)";
