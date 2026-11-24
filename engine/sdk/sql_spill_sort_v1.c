@@ -253,7 +253,7 @@ static int32_t flush_run(const prdb_host_api_v6 *host, sort_run *run,
     return status;
 }
 
-int32_t prdb_sdk_sql_spill_sort_with_budget_internal_v1(
+static int32_t spill_sort_with_budget(
     const prdb_host_api_v6 *host, void *context, uint32_t row_bytes,
     uint32_t memory_budget_bytes,
     prdb_sdk_sql_spill_sort_source_v1_fn source,
@@ -363,8 +363,8 @@ int32_t prdb_sdk_sql_spill_sort_v1(
     prdb_sdk_sql_spill_sort_source_v1_fn source,
     prdb_sdk_sql_spill_sort_compare_v1_fn compare,
     prdb_sdk_sql_spill_sort_output_v1_fn output) {
-    prdb_sql_spill_heap_budget heap_budget = {0};
-    return prdb_sdk_sql_spill_sort_with_budget_internal_v1(
-        host, context, row_bytes, memory_budget_bytes, source, compare,
-        output, &heap_budget);
+    prdb_sql_spill_heap_budget heap_budget = {
+        0, PRDB_SDK_SQL_SPILL_SORT_MAX_WORKSPACE_BYTES};
+    return spill_sort_with_budget(host, context, row_bytes, memory_budget_bytes,
+                                  source, compare, output, &heap_budget);
 }

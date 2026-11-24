@@ -1,4 +1,5 @@
 #include "prdb_sdk_sql_spill_join_v1.h"
+#include "../../sdk/sql_spill_workspace_internal.h"
 
 #include <assert.h>
 #include <string.h>
@@ -164,8 +165,17 @@ int main(void) {
     prdb_host_api_v6 host = {0};
     fixture state = {0};
     row_source left_source, right_source;
+    prdb_sql_spill_heap_budget exhausted_budget = {
+        PRDB_SDK_SQL_SPILL_JOIN_MAX_WORKSPACE_BYTES,
+        PRDB_SDK_SQL_SPILL_JOIN_MAX_WORKSPACE_BYTES};
     host.v5.v4.v3.context = &state;
     host.spill_request = mock_spill;
+
+    left_source = (row_source){state.left, 0, 0};
+    right_source = (row_source){state.right, 0, 0};
+    assert(prdb_sql_spill_heap_alloc(&exhausted_budget, 1) == NULL);
+    assert(exhausted_budget.requested_bytes ==
+           PRDB_SDK_SQL_SPILL_JOIN_MAX_WORKSPACE_BYTES);
 
     /* A single skewed partition crosses the 128-row block boundary and
      * produces the independently calculated 257 x 129 matches. */

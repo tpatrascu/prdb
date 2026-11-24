@@ -270,7 +270,7 @@ $(SDK_SQL_SPILL_SORT_OBJECT): $(SDK_SQL_SPILL_SORT_SOURCE) engine/sdk/sql_spill_
 $(SDK_SQL_SPILL_GROUP_OBJECT): $(SDK_SQL_SPILL_GROUP_SOURCE) engine/sdk/sql_spill_workspace_internal.h $(INCLUDE_DIR)/prdb_sdk_sql_spill_group_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_spill_sort_v1.h $(INCLUDE_DIR)/prdb_sdk_spill_v1.h $(QUERY_ABI_GENERATED_HEADERS) | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
-$(SDK_SQL_SPILL_JOIN_OBJECT): $(SDK_SQL_SPILL_JOIN_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_spill_join_v1.h $(INCLUDE_DIR)/prdb_sdk_spill_v1.h $(QUERY_ABI_GENERATED_HEADERS) | $(BUILD_DIR)
+$(SDK_SQL_SPILL_JOIN_OBJECT): $(SDK_SQL_SPILL_JOIN_SOURCE) engine/sdk/sql_spill_workspace_internal.h $(INCLUDE_DIR)/prdb_sdk_sql_spill_join_v1.h $(INCLUDE_DIR)/prdb_sdk_spill_v1.h $(QUERY_ABI_GENERATED_HEADERS) | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
 $(SDK_SCOPE_OBJECT): $(SDK_SCOPE_SOURCE) $(INCLUDE_DIR)/prdb_sdk_scope_v1.h | $(BUILD_DIR)
@@ -553,7 +553,7 @@ $(SDK_SPILL_TEST): engine/tests/fixtures/sdk_spill_v1.c $(SDK_ARCHIVE) $(INCLUDE
 $(SDK_SQL_SPILL_SORT_TEST): engine/tests/fixtures/sdk_sql_spill_sort_v1.c engine/sdk/sql_spill_workspace_internal.h $(SDK_ARCHIVE) $(INCLUDE_DIR)/prdb_sdk_sql_spill_sort_v1.h $(INCLUDE_DIR)/prdb_sdk_sql_spill_group_v1.h $(QUERY_ABI_GENERATED_HEADERS) | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" "$<" "$(SDK_ARCHIVE)" -o "$@"
 
-$(SDK_SQL_SPILL_JOIN_TEST): engine/tests/fixtures/sdk_sql_spill_join_v1.c $(SDK_ARCHIVE) $(INCLUDE_DIR)/prdb_sdk_sql_spill_join_v1.h $(QUERY_ABI_GENERATED_HEADERS) | $(BUILD_DIR)
+$(SDK_SQL_SPILL_JOIN_TEST): engine/tests/fixtures/sdk_sql_spill_join_v1.c engine/sdk/sql_spill_workspace_internal.h $(SDK_ARCHIVE) $(INCLUDE_DIR)/prdb_sdk_sql_spill_join_v1.h $(QUERY_ABI_GENERATED_HEADERS) | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" "$<" "$(SDK_ARCHIVE)" -o "$@"
 
 $(SDK_SCOPE_TEST): engine/tests/fixtures/sdk_scope_v1.c $(SDK_ARCHIVE) $(INCLUDE_DIR)/prdb_sdk_scope_v1.h | $(BUILD_DIR)

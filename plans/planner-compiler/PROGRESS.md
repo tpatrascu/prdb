@@ -835,6 +835,12 @@
 
 ## OP-7 follow-up: account for external sort and group heap — verified slice
 
-- Contract: the spill sort and spill group-count wrapper share a 256 KiB cap on simultaneous requested heap bytes. The live counter includes row/ordinal arrays, merge cursors and output buffer, merge-sort scratch, encoded spill records, and the group representative key. Allocation sizes are overflow-safe under the existing row, run, and input-memory bounds.
-- Regression: the SDK spill-sort fixture seeds the internal per-call budget at its ceiling and verifies the next workspace allocation fails before reading source rows or emitting results. Existing stable-sort, spill-group, and cleanup cases still pass.
-- Verification: `make -f engine/sdk/Makefile test` passed under the locked Nix development shell. Spill hash-join buffer tracking, allocator metadata, stack usage, cross-operator copy accounting, end-to-end profiles, and target-hardware memory measurements remain open.
+- Contract: the spill sorter tracks live requested bytes across row/ordinal arrays, merge cursors and output buffer, merge-sort scratch, and encoded spill records under a 256 KiB cap. The group-count wrapper separately caps its representative key at 1 KiB while the sorter runs, for a combined 263,168-byte ceiling. Allocation sizes are bounded by the existing row, run, and input-memory limits.
+- Regression: the SDK spill-sort fixture verifies that a request beyond a fully consumed workspace budget is rejected without changing the tracked high-water count. Existing stable-sort, spill-group, and cleanup cases still pass.
+- Verification: `make -f engine/sdk/Makefile test` passed under the locked Nix development shell. Allocator metadata, stack usage, cross-operator copy accounting, end-to-end profiles, and target-hardware memory measurements remain open.
+
+## OP-7 follow-up: account for spill hash-join buffers — verified slice
+
+- Contract: the spill hash join tracks its record buffer and both 128-row input blocks against a 1,052,672-byte per-call ceiling, calculated from the 4,096-byte maximum record size.
+- Regression: the SDK spill-join fixture verifies that the shared accounting helper rejects an additional request after the workspace ceiling is reached. Existing skewed-block, cancellation, and broker-cleanup cases still pass.
+- Verification: `make -f engine/sdk/Makefile test` passed under the locked Nix development shell, and the pinned release profile validated 10 engine binaries plus one query fixture against the rebuilt TinyCC SDK. End-to-end operator-copy accounting, stack bounds, full delegated-cgroup validation, and target-hardware performance/memory profiles remain open.

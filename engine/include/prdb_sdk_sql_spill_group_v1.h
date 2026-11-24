@@ -3,6 +3,10 @@
 
 #include "prdb_sdk_sql_spill_sort_v1.h"
 
+#define PRDB_SDK_SQL_SPILL_GROUP_MAX_WORKSPACE_BYTES \
+    (PRDB_SDK_SQL_SPILL_SORT_MAX_WORKSPACE_BYTES + \
+     PRDB_SDK_SQL_SPILL_SORT_MAX_ROW_BYTES)
+
 typedef int32_t (*prdb_sdk_sql_spill_group_output_v1_fn)(
     void *context, const uint8_t *representative, uint32_t row_bytes,
     uint64_t group_row_count);

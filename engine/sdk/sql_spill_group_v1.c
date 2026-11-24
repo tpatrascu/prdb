@@ -72,7 +72,8 @@ int32_t prdb_sdk_sql_spill_group_count_v1(
     prdb_sdk_sql_spill_sort_compare_v1_fn compare,
     prdb_sdk_sql_spill_group_output_v1_fn output) {
     group_state state = {0};
-    prdb_sql_spill_heap_budget heap_budget = {0};
+    prdb_sql_spill_heap_budget heap_budget = {
+        0, PRDB_SDK_SQL_SPILL_SORT_MAX_ROW_BYTES};
     int32_t status;
     if (host == NULL || source == NULL || compare == NULL || output == NULL ||
         key_bytes == 0 || key_bytes > PRDB_SDK_SQL_SPILL_SORT_MAX_ROW_BYTES)
@@ -85,9 +86,9 @@ int32_t prdb_sdk_sql_spill_group_count_v1(
     state.representative = (uint8_t *)prdb_sql_spill_heap_alloc(
         &heap_budget, key_bytes);
     if (state.representative == NULL) return -1;
-    status = prdb_sdk_sql_spill_sort_with_budget_internal_v1(
+    status = prdb_sdk_sql_spill_sort_v1(
         host, &state, key_bytes, memory_budget_bytes, source_group,
-        compare_group, consume_sorted, &heap_budget);
+        compare_group, consume_sorted);
     if (status == 0) status = emit_group(&state);
     prdb_sql_spill_heap_free(&heap_budget, state.representative, key_bytes);
     return status;

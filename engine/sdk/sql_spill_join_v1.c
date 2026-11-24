@@ -1,4 +1,5 @@
 #include "prdb_sdk_sql_spill_join_v1.h"
+#include "sql_spill_workspace_internal.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -50,6 +51,11 @@ int32_t prdb_sdk_sql_spill_hash_join_v1(
     uint8_t *record = NULL, *left_block = NULL, *right_block = NULL;
     int32_t result = PRDB_SDK_SQL_SPILL_JOIN_OK;
     uint32_t created = 0;
+    prdb_sql_spill_heap_budget heap_budget = {
+        0, PRDB_SDK_SQL_SPILL_JOIN_MAX_WORKSPACE_BYTES};
+    size_t record_buffer_bytes = record_bytes;
+    size_t block_buffer_bytes = (size_t)record_bytes *
+                                PRDB_SDK_SQL_SPILL_JOIN_BLOCK_ROWS;
     uint64_t comparisons_since_cancel = 0;
     uint64_t total_comparisons = 0, cancel_interval = 0;
 
@@ -59,11 +65,12 @@ int32_t prdb_sdk_sql_spill_hash_join_v1(
         records_equal == NULL || output == NULL || check_cancelled == NULL) {
         return PRDB_SDK_SQL_SPILL_JOIN_INVALID_ARGUMENT;
     }
-    record = (uint8_t *)malloc(record_bytes);
-    left_block = (uint8_t *)malloc((size_t)record_bytes *
-                                   PRDB_SDK_SQL_SPILL_JOIN_BLOCK_ROWS);
-    right_block = (uint8_t *)malloc((size_t)record_bytes *
-                                    PRDB_SDK_SQL_SPILL_JOIN_BLOCK_ROWS);
+    record = (uint8_t *)prdb_sql_spill_heap_alloc(&heap_budget,
+                                                  record_buffer_bytes);
+    left_block = (uint8_t *)prdb_sql_spill_heap_alloc(&heap_budget,
+                                                      block_buffer_bytes);
+    right_block = (uint8_t *)prdb_sql_spill_heap_alloc(&heap_budget,
+                                                       block_buffer_bytes);
     if (record == NULL || left_block == NULL || right_block == NULL) {
         result = PRDB_SDK_SQL_SPILL_JOIN_MEMORY_ERROR;
         goto cleanup;
@@ -210,8 +217,8 @@ cleanup:
             result = PRDB_SDK_SQL_SPILL_JOIN_BROKER_ERROR;
         }
     }
-    free(record);
-    free(left_block);
-    free(right_block);
+    prdb_sql_spill_heap_free(&heap_budget, record, record_buffer_bytes);
+    prdb_sql_spill_heap_free(&heap_budget, left_block, block_buffer_bytes);
+    prdb_sql_spill_heap_free(&heap_budget, right_block, block_buffer_bytes);
     return result;
 }

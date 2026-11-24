@@ -6,6 +6,10 @@
 #define PRDB_SDK_SQL_SPILL_JOIN_PARTITIONS UINT32_C(8)
 #define PRDB_SDK_SQL_SPILL_JOIN_BLOCK_ROWS UINT32_C(128)
 #define PRDB_SDK_SQL_SPILL_JOIN_MAX_RECORD_BYTES UINT32_C(4096)
+/* record buffer plus both maximum 128-row input blocks. */
+#define PRDB_SDK_SQL_SPILL_JOIN_MAX_WORKSPACE_BYTES \
+    (PRDB_SDK_SQL_SPILL_JOIN_MAX_RECORD_BYTES * \
+     (UINT32_C(1) + UINT32_C(2) * PRDB_SDK_SQL_SPILL_JOIN_BLOCK_ROWS))
 
 #define PRDB_SDK_SQL_SPILL_JOIN_OK INT32_C(0)
 #define PRDB_SDK_SQL_SPILL_JOIN_INVALID_ARGUMENT INT32_C(1)
@@ -31,7 +35,8 @@ typedef int32_t (*prdb_sdk_sql_spill_join_output_v1_fn)(
 
 /* Hash partitions both inputs into eight invocation-scoped opaque streams,
  * then compares bounded 128-row blocks within each partition. Input records
- * have one fixed, caller-defined size so reads use checked offsets. Rows with
+ * have one fixed, caller-defined size so reads use checked offsets. The live
+ * record and block heap buffers share the workspace ceiling above. Rows with
  * equal hashes are still checked by the equality callback. All streams are
  * destroyed on success and failure. Output order is partition order; callers
  * requiring SQL ORDER BY must apply the external sorter afterward. The
