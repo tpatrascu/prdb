@@ -64,6 +64,8 @@ mod service {
         analytical_max_total_result_bytes: Option<u64>,
         max_sql_index_probe_candidates: Option<u32>,
         analytical_max_sql_index_probe_candidates: Option<u32>,
+        max_sql_index_range_bytes: Option<usize>,
+        analytical_max_sql_index_range_bytes: Option<usize>,
         max_principal_reservations: Option<usize>,
         max_pending_operational: Option<usize>,
         max_pending_analytical: Option<usize>,
@@ -118,6 +120,8 @@ mod service {
              [--analytical-max-total-result-bytes N] (overrides the operational value)\n\
              [--max-sql-index-probe-candidates N] (default 128; maximum 16384)\n\
              [--analytical-max-sql-index-probe-candidates N] (overrides the operational value)\n\
+             [--max-sql-index-range-bytes N] (default 16777216)\n\
+             [--analytical-max-sql-index-range-bytes N] (overrides the operational value)\n\
              --max-principal-reservations N\n\
              [--max-pending-operational N --max-pending-analytical N]\n\
              [--max-active-operational N --max-active-analytical N]\n\
@@ -568,6 +572,15 @@ mod service {
                         value.parse::<u32>()?
                     )
                 }
+                "--max-sql-index-range-bytes" => {
+                    set!(max_sql_index_range_bytes, value.parse::<usize>()?)
+                }
+                "--analytical-max-sql-index-range-bytes" => {
+                    set!(
+                        analytical_max_sql_index_range_bytes,
+                        value.parse::<usize>()?
+                    )
+                }
                 "--max-principal-reservations" => {
                     set!(max_principal_reservations, value.parse::<usize>()?)
                 }
@@ -750,6 +763,16 @@ mod service {
                 )
             })
             .transpose()?;
+        let max_authorized_index_range_bytes = positive(
+            options
+                .max_sql_index_range_bytes
+                .unwrap_or(defaults.max_authorized_index_range_bytes),
+            "--max-sql-index-range-bytes",
+        )?;
+        let analytical_max_authorized_index_range_bytes = options
+            .analytical_max_sql_index_range_bytes
+            .map(|value| positive(value, "--analytical-max-sql-index-range-bytes"))
+            .transpose()?;
         if max_authorized_index_range_candidates
             > prdb_engine::query_abi::MAX_SQL_INDEX_PROBE_CANDIDATES as usize
             || analytical_max_authorized_index_range_candidates.is_some_and(|value| {
@@ -834,6 +857,9 @@ mod service {
             max_authorized_index_range_candidates,
             max_analytical_authorized_index_range_candidates:
                 analytical_max_authorized_index_range_candidates,
+            max_authorized_index_range_bytes,
+            max_analytical_authorized_index_range_bytes:
+                analytical_max_authorized_index_range_bytes,
             max_planner_estimate_requests,
             max_analytical_planner_estimate_requests: analytical_max_planner_estimate_requests,
             max_planner_estimate_candidates,
@@ -1000,6 +1026,8 @@ mod service {
                 defaults.max_analytical_authorized_index_range_candidates,
                 None
             );
+            assert_eq!(defaults.max_authorized_index_range_bytes, 16 * 1024 * 1024);
+            assert_eq!(defaults.max_analytical_authorized_index_range_bytes, None);
             assert_eq!(defaults.max_planner_estimate_candidates, 16_384);
             assert_eq!(defaults.max_analytical_planner_estimate_candidates, None);
             assert_eq!(defaults.max_statistics_collection_rows, 16_384);
@@ -1011,6 +1039,8 @@ mod service {
                 analytical_max_invocation_scan_work: Some(2_097_152),
                 max_sql_index_probe_candidates: Some(512),
                 analytical_max_sql_index_probe_candidates: Some(2048),
+                max_sql_index_range_bytes: Some(64 * 1024 * 1024),
+                analytical_max_sql_index_range_bytes: Some(512 * 1024 * 1024),
                 max_planner_estimate_requests: Some(64),
                 analytical_max_planner_estimate_requests: Some(1024),
                 max_planner_estimate_candidates: Some(32_768),
@@ -1030,6 +1060,14 @@ mod service {
             assert_eq!(
                 configured.max_analytical_authorized_index_range_candidates,
                 Some(2048)
+            );
+            assert_eq!(
+                configured.max_authorized_index_range_bytes,
+                64 * 1024 * 1024
+            );
+            assert_eq!(
+                configured.max_analytical_authorized_index_range_bytes,
+                Some(512 * 1024 * 1024)
             );
             assert_eq!(configured.max_planner_estimate_requests, 64);
             assert_eq!(
@@ -1085,6 +1123,16 @@ mod service {
             })
             .expect_err("zero candidate limit must fail");
             assert!(candidate_error.contains("--max-sql-index-probe-candidates must be positive"));
+
+            let range_bytes_error = storage_manager_config(&Options {
+                analytical_max_sql_index_range_bytes: Some(0),
+                ..Options::default()
+            })
+            .expect_err("zero analytical range-byte budget must fail");
+            assert!(
+                range_bytes_error
+                    .contains("--analytical-max-sql-index-range-bytes must be positive")
+            );
 
             let candidate_error = storage_manager_config(&Options {
                 analytical_max_planner_estimate_candidates: Some(0),

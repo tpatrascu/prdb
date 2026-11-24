@@ -199,8 +199,14 @@ pub enum ExecutorIndexRangeScan {
     Rows(Vec<Vec<SanitizedCell>>),
 }
 
-const MAX_AUTHORIZED_INDEX_RANGE_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_AUTHORIZED_INDEX_RANGE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_INDEXED_PREDICATE_OVERLAY_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+pub(crate) struct AuthorizedIndexRangeBudget {
+    pub candidates: usize,
+    pub bytes: usize,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutorAuthorizedRowScanPage {
@@ -323,6 +329,7 @@ pub struct InvocationTransaction<'db> {
     max_scan_work: usize,
     scanned_work: usize,
     max_authorized_index_range_candidates: usize,
+    max_authorized_index_range_bytes: usize,
     active_relation_scan: Option<ActiveRelationScan>,
     active_schema_scan: Option<ActiveSchemaScan>,
     active_column_scan: Option<ActiveColumnScan>,
@@ -618,7 +625,7 @@ pub(crate) struct InvocationCoordination {
     admission_metrics: Option<InvocationAdmissionMetrics>,
     max_age: Option<(Instant, Duration)>,
     max_scan_work: usize,
-    max_authorized_index_range_candidates: usize,
+    authorized_index_range_budget: AuthorizedIndexRangeBudget,
     max_planner_estimate_requests: usize,
     max_planner_estimate_candidates: usize,
 }
@@ -631,8 +638,10 @@ impl InvocationCoordination {
             admission_metrics: None,
             max_age: None,
             max_scan_work: MAX_INVOCATION_SCAN_WORK,
-            max_authorized_index_range_candidates:
-                crate::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES as usize,
+            authorized_index_range_budget: AuthorizedIndexRangeBudget {
+                candidates: crate::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES as usize,
+                bytes: MAX_AUTHORIZED_INDEX_RANGE_BYTES,
+            },
             max_planner_estimate_requests: DEFAULT_PLANNER_ESTIMATE_REQUESTS,
             max_planner_estimate_candidates: DEFAULT_ESTIMATE_CANDIDATES,
         }
@@ -645,8 +654,10 @@ impl InvocationCoordination {
             admission_metrics: None,
             max_age: None,
             max_scan_work: MAX_INVOCATION_SCAN_WORK,
-            max_authorized_index_range_candidates:
-                crate::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES as usize,
+            authorized_index_range_budget: AuthorizedIndexRangeBudget {
+                candidates: crate::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES as usize,
+                bytes: MAX_AUTHORIZED_INDEX_RANGE_BYTES,
+            },
             max_planner_estimate_requests: DEFAULT_PLANNER_ESTIMATE_REQUESTS,
             max_planner_estimate_candidates: DEFAULT_ESTIMATE_CANDIDATES,
         }
@@ -657,7 +668,7 @@ impl InvocationCoordination {
         admission_permit: InvocationAdmissionPermit,
         max_age: Duration,
         max_scan_work: usize,
-        max_authorized_index_range_candidates: usize,
+        authorized_index_range_budget: AuthorizedIndexRangeBudget,
         max_planner_estimate_requests: usize,
         max_planner_estimate_candidates: usize,
     ) -> Self {
@@ -668,7 +679,7 @@ impl InvocationCoordination {
             admission_metrics: Some(admission_metrics),
             max_age: Some((Instant::now(), max_age)),
             max_scan_work,
-            max_authorized_index_range_candidates,
+            authorized_index_range_budget,
             max_planner_estimate_requests,
             max_planner_estimate_candidates,
         }
@@ -886,7 +897,9 @@ impl<'db> InvocationTransaction<'db> {
             max_scan_work: coordination.max_scan_work,
             scanned_work: 0,
             max_authorized_index_range_candidates: coordination
-                .max_authorized_index_range_candidates,
+                .authorized_index_range_budget
+                .candidates,
+            max_authorized_index_range_bytes: coordination.authorized_index_range_budget.bytes,
             coordination,
             aborted: false,
             cancellation_triggered: false,
@@ -1921,7 +1934,7 @@ impl<'db> InvocationTransaction<'db> {
                     .len()
                     .saturating_add(page.candidates.len())
                     > self.max_authorized_index_range_candidates
-                    || snapshot_bytes > MAX_AUTHORIZED_INDEX_RANGE_BYTES
+                    || snapshot_bytes > self.max_authorized_index_range_bytes
                 {
                     self.charge_scan_work(
                         snapshot_candidates
@@ -1992,7 +2005,7 @@ impl<'db> InvocationTransaction<'db> {
                     .map_err(TransactionError::Tuple)?;
                 if tuple.values[key_ordinal].is_some() && in_range(&candidate.key) {
                     candidate_row_bytes = candidate_row_bytes.saturating_add(record.payload.len());
-                    if candidate_row_bytes > MAX_AUTHORIZED_INDEX_RANGE_BYTES {
+                    if candidate_row_bytes > self.max_authorized_index_range_bytes {
                         return Ok(AuthorizedIndexRangeScan::Unavailable);
                     }
                     candidate_ids.insert(row_id);
@@ -2027,7 +2040,7 @@ impl<'db> InvocationTransaction<'db> {
                             .map_err(TransactionError::Tuple)?;
                         if tuple.values[key_ordinal].is_some() && in_range(&derived.key) {
                             candidate_row_bytes = candidate_row_bytes.saturating_add(payload.len());
-                            if candidate_row_bytes > MAX_AUTHORIZED_INDEX_RANGE_BYTES {
+                            if candidate_row_bytes > self.max_authorized_index_range_bytes {
                                 return Ok(AuthorizedIndexRangeScan::Unavailable);
                             }
                             candidate_ids.insert(row_id);
@@ -2175,7 +2188,7 @@ impl<'db> InvocationTransaction<'db> {
                     .len()
                     .saturating_add(page.candidates.len())
                     > self.max_authorized_index_range_candidates
-                    || snapshot_bytes > MAX_AUTHORIZED_INDEX_RANGE_BYTES
+                    || snapshot_bytes > self.max_authorized_index_range_bytes
                 {
                     self.charge_scan_work(
                         snapshot_candidates
@@ -2238,7 +2251,7 @@ impl<'db> InvocationTransaction<'db> {
                 }
                 if candidate.key.starts_with(&key_prefix) {
                     candidate_row_bytes = candidate_row_bytes.saturating_add(record.payload.len());
-                    if candidate_row_bytes > MAX_AUTHORIZED_INDEX_RANGE_BYTES {
+                    if candidate_row_bytes > self.max_authorized_index_range_bytes {
                         return Ok(AuthorizedIndexRangeScan::Unavailable);
                     }
                     candidate_ids.insert(row_id);
@@ -2271,7 +2284,7 @@ impl<'db> InvocationTransaction<'db> {
                         })?;
                         if derived.key.starts_with(&key_prefix) {
                             candidate_row_bytes = candidate_row_bytes.saturating_add(payload.len());
-                            if candidate_row_bytes > MAX_AUTHORIZED_INDEX_RANGE_BYTES {
+                            if candidate_row_bytes > self.max_authorized_index_range_bytes {
                                 return Ok(AuthorizedIndexRangeScan::Unavailable);
                             }
                             candidate_ids.insert(row_id);
@@ -3195,7 +3208,7 @@ impl<'db> InvocationTransaction<'db> {
                     .sum::<usize>(),
             );
             if matching_rows > self.max_authorized_index_range_candidates as u64
-                || key_bytes > MAX_AUTHORIZED_INDEX_RANGE_BYTES
+                || key_bytes > self.max_authorized_index_range_bytes
                 || matching_rows > visible_rows
             {
                 return Ok(None);

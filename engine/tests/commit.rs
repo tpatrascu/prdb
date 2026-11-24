@@ -16314,6 +16314,8 @@ fn storage_manager_routes_invocations_and_catalog_commits_through_shared_fences(
             max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
             max_authorized_index_range_candidates: 128,
             max_analytical_authorized_index_range_candidates: None,
+            max_authorized_index_range_bytes: 16 * 1024 * 1024,
+            max_analytical_authorized_index_range_bytes: None,
             max_analytical_invocation_scan_work: None,
             max_planner_estimate_requests:
                 prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
@@ -16365,6 +16367,8 @@ fn storage_manager_admission_requires_a_login_enabled_catalog_user()
             max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
             max_authorized_index_range_candidates: 128,
             max_analytical_authorized_index_range_candidates: None,
+            max_authorized_index_range_bytes: 16 * 1024 * 1024,
+            max_analytical_authorized_index_range_bytes: None,
             max_analytical_invocation_scan_work: None,
             max_planner_estimate_requests:
                 prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
@@ -16445,6 +16449,8 @@ fn authenticated_role_closure_budget_ignores_unreachable_memberships()
             max_invocation_scan_work: 1,
             max_authorized_index_range_candidates: 128,
             max_analytical_authorized_index_range_candidates: None,
+            max_authorized_index_range_bytes: 16 * 1024 * 1024,
+            max_analytical_authorized_index_range_bytes: None,
             max_analytical_invocation_scan_work: None,
             max_planner_estimate_requests:
                 prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
@@ -16497,6 +16503,8 @@ fn catalog_grant_loading_budget_ignores_unrelated_grants() -> Result<(), Box<dyn
             max_invocation_scan_work: 1,
             max_authorized_index_range_candidates: 128,
             max_analytical_authorized_index_range_candidates: None,
+            max_authorized_index_range_bytes: 16 * 1024 * 1024,
+            max_analytical_authorized_index_range_bytes: None,
             max_analytical_invocation_scan_work: None,
             max_planner_estimate_requests:
                 prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
@@ -16533,6 +16541,19 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
         StorageManager::with_config(
             &database,
             StorageManagerConfig {
+                max_authorized_index_range_bytes: 0,
+                ..StorageManagerConfig::default()
+            },
+        )
+        .err(),
+        Some(StorageManagerInitError::Config(
+            prdb_engine::storage_manager::StorageManagerConfigError::ZeroAuthorizedIndexRangeByteLimit,
+        ))
+    );
+    assert_eq!(
+        StorageManager::with_config(
+            &database,
+            StorageManagerConfig {
                 ddl_fence_timeout: Duration::from_millis(100),
                 max_active_invocations: 0,
                 max_active_analytical_invocations: 1,
@@ -16540,6 +16561,8 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
                 max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
                 max_authorized_index_range_candidates: 128,
                 max_analytical_authorized_index_range_candidates: None,
+                max_authorized_index_range_bytes: 16 * 1024 * 1024,
+                max_analytical_authorized_index_range_bytes: None,
                 max_analytical_invocation_scan_work: None,
                 max_planner_estimate_requests:
                     prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
@@ -16569,6 +16592,8 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
                 max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
                 max_authorized_index_range_candidates: 128,
                 max_analytical_authorized_index_range_candidates: None,
+                max_authorized_index_range_bytes: 16 * 1024 * 1024,
+                max_analytical_authorized_index_range_bytes: None,
                 max_analytical_invocation_scan_work: None,
                 max_planner_estimate_requests:
                     prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
@@ -16598,6 +16623,8 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
                 max_invocation_scan_work: 0,
                 max_authorized_index_range_candidates: 128,
                 max_analytical_authorized_index_range_candidates: None,
+                max_authorized_index_range_bytes: 16 * 1024 * 1024,
+                max_analytical_authorized_index_range_bytes: None,
                 max_analytical_invocation_scan_work: None,
                 max_planner_estimate_requests:
                     prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
@@ -16634,6 +16661,8 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
             &database,
             StorageManagerConfig {
                 max_analytical_authorized_index_range_candidates: Some(0),
+                max_authorized_index_range_bytes: 16 * 1024 * 1024,
+                max_analytical_authorized_index_range_bytes: None,
                 ..StorageManagerConfig::default()
             },
         )
@@ -16667,6 +16696,8 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
                 max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
                 max_authorized_index_range_candidates: 128,
                 max_analytical_authorized_index_range_candidates: None,
+                max_authorized_index_range_bytes: 16 * 1024 * 1024,
+                max_analytical_authorized_index_range_bytes: None,
                 max_analytical_invocation_scan_work: Some(0),
                 max_planner_estimate_requests:
                     prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
@@ -16696,6 +16727,8 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
                 max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
                 max_authorized_index_range_candidates: 128,
                 max_analytical_authorized_index_range_candidates: None,
+                max_authorized_index_range_bytes: 16 * 1024 * 1024,
+                max_analytical_authorized_index_range_bytes: None,
                 max_analytical_invocation_scan_work: None,
                 max_planner_estimate_requests:
                     prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
@@ -16725,6 +16758,8 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
                 max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
                 max_authorized_index_range_candidates: 128,
                 max_analytical_authorized_index_range_candidates: None,
+                max_authorized_index_range_bytes: 16 * 1024 * 1024,
+                max_analytical_authorized_index_range_bytes: None,
                 max_analytical_invocation_scan_work: None,
                 max_planner_estimate_requests: prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
                 max_analytical_planner_estimate_requests: None,
@@ -16750,6 +16785,8 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
             max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
             max_authorized_index_range_candidates: 512,
             max_analytical_authorized_index_range_candidates: Some(2_048),
+            max_authorized_index_range_bytes: 16 * 1024 * 1024,
+            max_analytical_authorized_index_range_bytes: None,
             max_analytical_invocation_scan_work: None,
             max_planner_estimate_requests:
                 prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
@@ -16809,6 +16846,8 @@ fn storage_manager_expires_idle_invocations_and_releases_the_snapshot()
             max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
             max_authorized_index_range_candidates: 128,
             max_analytical_authorized_index_range_candidates: None,
+            max_authorized_index_range_bytes: 16 * 1024 * 1024,
+            max_analytical_authorized_index_range_bytes: None,
             max_analytical_invocation_scan_work: None,
             max_planner_estimate_requests:
                 prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
@@ -20570,6 +20609,8 @@ fn storage_manager_audits_cancellation_before_commit_and_preserves_terminal_outc
             max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
             max_authorized_index_range_candidates: 128,
             max_analytical_authorized_index_range_candidates: None,
+            max_authorized_index_range_bytes: 16 * 1024 * 1024,
+            max_analytical_authorized_index_range_bytes: None,
             max_analytical_invocation_scan_work: None,
             max_planner_estimate_requests:
                 prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
@@ -41257,6 +41298,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             } else {
                 None
             },
+            max_authorized_index_range_bytes: 16 * 1024 * 1024,
+            max_analytical_authorized_index_range_bytes: None,
             max_analytical_invocation_scan_work: indexed_join_benchmark_only.then_some(1_048_576),
             max_planner_estimate_requests: if sql_in_elevated_budget_only { 1 } else { 16 },
             max_analytical_planner_estimate_requests: sql_in_elevated_budget_only.then_some(64),
@@ -50028,6 +50071,8 @@ fn storage_manager_issues_and_revokes_tokens_for_manage_users()
         max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
         max_authorized_index_range_candidates: 128,
         max_analytical_authorized_index_range_candidates: None,
+        max_authorized_index_range_bytes: 16 * 1024 * 1024,
+        max_analytical_authorized_index_range_bytes: None,
         max_analytical_invocation_scan_work: None,
         max_planner_estimate_requests: prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
         max_analytical_planner_estimate_requests: None,
