@@ -1757,10 +1757,11 @@ mod join_estimate_request_tests {
             right_relation_name: "items".to_owned(),
             left_key_column_ids: vec![[0x11; 16], [0x12; 16]],
             right_key_column_ids: vec![[0x21; 16], [0x22; 16]],
-            maximum_rows: 4096,
+            maximum_rows: 16_384,
         };
         let encoded = request.encode().unwrap();
         assert_eq!(&encoded[..2], &[0x52, 0x08]);
+        assert_eq!(&encoded[2..4], &16_384u16.to_be_bytes());
         assert_eq!(EstimateJoinRequest::decode(&encoded).unwrap(), request);
 
         for response in [
@@ -1777,7 +1778,7 @@ mod join_estimate_request_tests {
         }
 
         let mut malformed = encoded.clone();
-        malformed[2..4].copy_from_slice(&4097u16.to_be_bytes());
+        malformed[2..4].copy_from_slice(&16_385u16.to_be_bytes());
         assert!(EstimateJoinRequest::decode(&malformed).is_err());
         let mut mismatched_keys = request.clone();
         mismatched_keys.right_key_column_ids.pop();

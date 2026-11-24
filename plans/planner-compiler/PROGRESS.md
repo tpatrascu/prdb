@@ -1,11 +1,18 @@
 # Optimizer Progress
 
+## OP-4 / ST-2 follow-up: extend exact authorized pair estimates to 16,384 rows — implemented
+
+- Contract: the optimizer and planner IPC can request exact joined-pair counts when each authorized population is at most 16,384 rows. Storage keeps the 8 MiB decoded-row ceiling, 4 KiB composite-key ceiling, value-independent visibility proof, readable join-key requirement, and shared 16-request estimate allowance.
+- Red/green: the transaction regression initially received `Unknown` for a valid request bound of 4,097. After increasing the bound, it proves exact duplicate-preserving pair counts at 4,097 and 16,384 rows per side; a smaller requested maximum still yields `Unknown` rather than partial counts. A process-level regression preserves the indexed fallback when the pair estimate is unknown for other bounded reasons.
+- Verification: the focused transaction test and process-protocol fallback test passed. The confined 17×4,097 acceptance used exact pair cardinality, selected kind 17, returned all 17 pairs, and overlapped 192 reads and 192 commits. Workspace build, format check, warning-denied Clippy, and the complete delegated serial workspace suite passed: 409 library tests, 206 commit tests, 3 metadata-process tests, 85 transaction tests, all other targets, and no ignored tests.
+- Remaining: the 8 MiB row-data limit still bounds usable input sizes; populations above 16,384, broader distributions, end-to-end estimate cost, generalized candidate comparison, and target-host evidence remain open.
+
 ## OP-4 / ST-2 follow-up: orient joins with authorized populations through 16,384 — implemented
 
-- Contract: the optimizer requests each join input's exact authorized population up to 16,384 rows. Exact join-pair estimates retain their separate 4,096-row-per-side cap. When a 9–18-row outer satisfies the measured ratio but the pair estimate is `Unknown`, the planner preserves its deterministic eligible-index fallback; an exact pair count above the four-per-outer cutoff still selects hash.
+- Contract: the optimizer requests each join input's exact authorized population up to 16,384 rows. Exact join-pair estimates use a separate 16,384-row-per-side cap and an 8 MiB decoded-row budget. When a 9–18-row outer satisfies the measured ratio but the pair estimate is `Unknown`, the planner preserves its deterministic eligible-index fallback; an exact pair count above the four-per-outer cutoff still selects hash.
 - Red/green: the planner IPC limit regression first failed at 4,097 rows. The optimizer process regression then failed for a known 17×4,097 population with an `Unknown` pair estimate, selecting hash. After widening the population limit and retaining the fallback for unknown pair cardinality, both regressions passed.
 - Verification: direct transaction population checks passed for 4,097, 16,384, and 16,385 rows (the last remains `Unknown`). The confined SQL 17×4,097 acceptance selected kind 17, returned all 17 pairs, and ran alongside 192 reads and 192 commits.
-- Remaining: the expanded population bound does not extend exact pair estimation above 4,096. Estimate/IPC overhead, broader population and fanout profiles, general cost comparison, and target-host evidence remain open.
+- Remaining: join estimates above 16,384, broader populations and fanout profiles, estimate overhead, general cost comparison, and target-host evidence remain open.
 
 ## OP-4 / ST-2 follow-up: use fresh indexed counts for predicate estimation — implemented and profiled
 

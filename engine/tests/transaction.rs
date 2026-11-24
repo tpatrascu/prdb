@@ -8123,8 +8123,8 @@ fn authorized_join_estimate_counts_duplicate_matches_and_private_overlay()
             &right_ids,
             4097,
         )?,
-        None,
-        "join-cardinality work remains capped at 4,096 rows per side"
+        Some(7),
+        "the estimate request may exceed the former 4,096-row cap when the actual populations are smaller"
     );
 
     planner.stage_put(numbered_row_id(left_table, 5), &row(Some(7)))?;
@@ -8237,6 +8237,88 @@ fn authorized_join_estimate_counts_duplicate_matches_and_private_overlay()
         "the estimate must remain Unknown when the actual population exceeds the requested bound"
     );
     exact_4096.abort()?;
+
+    let mut expand_to_4097 =
+        InvocationTransaction::begin(&database, [0x7e; 16], [9; 16], 9_999, 4096, 8 * 1024 * 1024)?;
+    for number in 8_000..9_025 {
+        expand_to_4097.stage_put(numbered_row_id(left_table, number), &row(None))?;
+        expand_to_4097.stage_put(numbered_row_id(right_table, number), &row(None))?;
+    }
+    expand_to_4097.commit()?;
+
+    let mut exact_4097 =
+        InvocationTransaction::begin(&database, [0x7f; 16], [9; 16], 9_999, 32, 4096)?;
+    assert_eq!(
+        exact_4097.estimate_authorized_join_cardinality_at_most(
+            left_table,
+            &left_projection,
+            &left_ids,
+            right_table,
+            &right_projection,
+            &right_ids,
+            4097,
+        )?,
+        Some(1_043_463),
+        "the exact pair estimator should continue across the former 4,096-row cap"
+    );
+    assert_eq!(
+        exact_4097.estimate_authorized_join_cardinality_at_most(
+            left_table,
+            &left_projection,
+            &left_ids,
+            right_table,
+            &right_projection,
+            &right_ids,
+            4096,
+        )?,
+        None,
+        "populations above the requested pair-estimate bound must remain Unknown"
+    );
+    exact_4097.abort()?;
+
+    let mut expand_to_16_384 = InvocationTransaction::begin(
+        &database,
+        [0x80; 16],
+        [9; 16],
+        9_999,
+        32_768,
+        8 * 1024 * 1024,
+    )?;
+    for number in 10_000..22_287 {
+        expand_to_16_384.stage_put(numbered_row_id(left_table, number), &row(None))?;
+        expand_to_16_384.stage_put(numbered_row_id(right_table, number), &row(None))?;
+    }
+    expand_to_16_384.commit()?;
+
+    let mut exact_16_384 =
+        InvocationTransaction::begin(&database, [0x81; 16], [9; 16], 9_999, 32, 4096)?;
+    assert_eq!(
+        exact_16_384.estimate_authorized_join_cardinality_at_most(
+            left_table,
+            &left_projection,
+            &left_ids,
+            right_table,
+            &right_projection,
+            &right_ids,
+            16_384,
+        )?,
+        Some(1_043_463),
+        "the exact pair estimator should use its complete 16,384-row budget"
+    );
+    assert_eq!(
+        exact_16_384.estimate_authorized_join_cardinality_at_most(
+            left_table,
+            &left_projection,
+            &left_ids,
+            right_table,
+            &right_projection,
+            &right_ids,
+            16_383,
+        )?,
+        None,
+        "a smaller requested bound must not return a partial pair count"
+    );
+    exact_16_384.abort()?;
 
     let mut oversized =
         InvocationTransaction::begin(&database, [0x79; 16], [9; 16], 9_999, 512, 1_048_576)?;
