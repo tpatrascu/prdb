@@ -7,6 +7,8 @@
 #include "prdb_sdk_sql_exec_v25.h"
 #include "prdb_sdk_sql_exec_v3.h"
 #include "prdb_sdk_sql_order_v2.h"
+#include "prdb_sdk_optimizer_plan_v1.h"
+#include "prdb_sdk_sql_v26.h"
 #include "prdb_sdk_sql_v25.h"
 #include "prdb_sdk_sql_spill_sort_v1.h"
 
@@ -1601,4 +1603,127 @@ int32_t prdb_sdk_sql_run_statement_v2(
     return prdb_sdk_sql_run_statement_v1(
         &host->v5.v4.v3, schema, schema_len, sql, sql_len, parameters,
         parameters_len);
+}
+
+int32_t prdb_sdk_sql_run_statement_optimizer_v1(
+    const prdb_host_api_v4 *host, const uint8_t *schema,
+    uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
+    const uint8_t *parameters, uint64_t parameters_len) {
+    prdb_sdk_select_v26 statement = {0};
+    prdb_sdk_executor_relation_v1 relation = {0};
+    prdb_sdk_sql_column_shape_v2 *columns = NULL;
+    prdb_sdk_value_v1 *source_cells = NULL;
+    prdb_sdk_value_v1 *projected_values = NULL;
+    prdb_sdk_value_v1 *values = NULL;
+    uint8_t (*parameter_payloads)[16] = NULL;
+    prdb_sdk_sql_parameter_metadata_v1 *metadata = NULL;
+    uint8_t *request = NULL;
+    uint8_t *optimizer_response = NULL;
+    uint8_t *relation_response = NULL;
+    uint8_t *scan_response = NULL;
+    uint8_t *batch_response = NULL;
+    uint8_t *result_buffer = NULL;
+    uint32_t parameter_count = 0;
+    uint32_t declared_count = 0;
+    uint32_t delivered_rows = 0;
+    uint64_t allocated_heap_bytes = 0;
+    int32_t status;
+
+    if (host == NULL || host->v3.struct_size < sizeof(host->v3) ||
+        host->v3.abi_version != PRDB_QUERY_ABI_V3_VERSION ||
+        host->optimizer_request == NULL || host->v3.statement_failure == NULL ||
+        schema == NULL || schema_len == 0 || schema_len > 128 || sql == NULL ||
+        sql_len == 0 || sql_len > PRDB_SDK_SQL_MAX_QUERY_BYTES ||
+        parameters_len > PRDB_SDK_SQL_DISPATCH_MAX_PARAMETER_BYTES ||
+        (parameters_len != 0 && parameters == NULL)) {
+        return latch_sql_failure(host == NULL ? NULL : &host->v3,
+                                 PRDB_SDK_SQL_DISPATCH_INVALID_ARGUMENT);
+    }
+    status = prdb_sdk_sql_parse_select_v26(
+        sql, sql_len, &statement, sizeof(statement), NULL);
+    if (status != PRDB_SDK_SQL_OK) {
+        return latch_sql_failure(&host->v3,
+                                 PRDB_SDK_SQL_DISPATCH_INVALID_ARGUMENT);
+    }
+    if (parameters_len >= 8 && memcmp(parameters, "PSP1", 4) == 0)
+        declared_count = read_u16_be(parameters + 4);
+    if (declared_count > PRDB_SDK_SQL_MAX_PARAMETER_INDEX)
+        return latch_sql_failure(&host->v3,
+                                 PRDB_SDK_SQL_DISPATCH_INVALID_PARAMETERS);
+    if (declared_count != 0) {
+        values = (prdb_sdk_value_v1 *)dispatch_calloc(
+            declared_count, sizeof(*values), &allocated_heap_bytes);
+        parameter_payloads = (uint8_t (*)[16])dispatch_calloc(
+            declared_count, sizeof(*parameter_payloads), &allocated_heap_bytes);
+        metadata = (prdb_sdk_sql_parameter_metadata_v1 *)dispatch_calloc(
+            declared_count, sizeof(*metadata), &allocated_heap_bytes);
+    }
+    request = (uint8_t *)dispatch_calloc(
+        1, PRDB_SDK_OPTIMIZER_MAX_REQUEST_BYTES, &allocated_heap_bytes);
+    optimizer_response = (uint8_t *)dispatch_calloc(
+        1, SQL_DISPATCH_RESPONSE_BYTES, &allocated_heap_bytes);
+    relation_response = (uint8_t *)dispatch_calloc(
+        1, SQL_DISPATCH_RESPONSE_BYTES, &allocated_heap_bytes);
+    scan_response = (uint8_t *)dispatch_calloc(
+        1, SQL_DISPATCH_RESPONSE_BYTES, &allocated_heap_bytes);
+    batch_response = (uint8_t *)dispatch_calloc(
+        1, SQL_DISPATCH_BATCH_BYTES, &allocated_heap_bytes);
+    result_buffer = (uint8_t *)dispatch_calloc(
+        1, PRDB_SDK_SQL_RESULT_MAX_BYTES, &allocated_heap_bytes);
+    columns = (prdb_sdk_sql_column_shape_v2 *)dispatch_calloc(
+        PRDB_SDK_SQL_MAX_RELATION_COLUMNS, sizeof(*columns),
+        &allocated_heap_bytes);
+    source_cells = (prdb_sdk_value_v1 *)dispatch_calloc(
+        PRDB_SDK_SQL_MAX_RELATION_COLUMNS, sizeof(*source_cells),
+        &allocated_heap_bytes);
+    projected_values = (prdb_sdk_value_v1 *)dispatch_calloc(
+        PRDB_SDK_SQL_MAX_PROJECTION_COLUMNS, sizeof(*projected_values),
+        &allocated_heap_bytes);
+    if (request == NULL || optimizer_response == NULL ||
+        relation_response == NULL || scan_response == NULL ||
+        batch_response == NULL || result_buffer == NULL || columns == NULL ||
+        source_cells == NULL || projected_values == NULL ||
+        (declared_count != 0 &&
+         (values == NULL || parameter_payloads == NULL || metadata == NULL))) {
+        status = latch_sql_failure(&host->v3,
+                                   PRDB_SDK_SQL_DISPATCH_RESOURCE_ERROR);
+        goto cleanup_optimizer;
+    }
+    status = prdb_sdk_sql_decode_parameters_v1(
+        parameters, parameters_len, values, declared_count, metadata,
+        declared_count, &parameter_count);
+    if (status != PRDB_SDK_SQL_DISPATCH_OK) {
+        status = latch_sql_failure(&host->v3, status);
+        goto cleanup_optimizer;
+    }
+    normalize_parameter_payloads(values, parameter_count, parameter_payloads);
+    status = prdb_sdk_optimizer_execute_select_ast_with_parameters_to_result_v1(
+        host, &statement.base, values, parameter_count, schema, schema_len,
+        SQL_DISPATCH_CANDIDATES, SQL_DISPATCH_BATCH_BYTES, request,
+        PRDB_SDK_OPTIMIZER_MAX_REQUEST_BYTES, optimizer_response,
+        SQL_DISPATCH_RESPONSE_BYTES, relation_response,
+        SQL_DISPATCH_RESPONSE_BYTES, scan_response, SQL_DISPATCH_RESPONSE_BYTES,
+        batch_response, SQL_DISPATCH_BATCH_BYTES, &relation, sizeof(relation),
+        columns, PRDB_SDK_SQL_MAX_RELATION_COLUMNS, source_cells,
+        PRDB_SDK_SQL_MAX_RELATION_COLUMNS, projected_values,
+        PRDB_SDK_SQL_MAX_PROJECTION_COLUMNS, result_buffer,
+        PRDB_SDK_SQL_RESULT_MAX_BYTES, &delivered_rows);
+    status = status == PRDB_SDK_OPTIMIZER_PLAN_OK
+                 ? PRDB_SDK_SQL_DISPATCH_OK
+                 : PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR;
+
+cleanup_optimizer:
+    free(values);
+    free(parameter_payloads);
+    free(metadata);
+    free(request);
+    free(optimizer_response);
+    free(relation_response);
+    free(scan_response);
+    free(batch_response);
+    free(result_buffer);
+    free(columns);
+    free(source_cells);
+    free(projected_values);
+    return status;
 }

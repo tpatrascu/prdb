@@ -52,4 +52,12 @@ int32_t prdb_sdk_sql_run_statement_v2(
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     const uint8_t *parameters, uint64_t parameters_len);
 
+/* Runs a parameterized SQL v26 SELECT through the trusted optimizer and its
+ * validated access path. This entry point requires the ABI v4 optimizer
+ * callback; the legacy v1/v2 dispatchers remain available unchanged. */
+int32_t prdb_sdk_sql_run_statement_optimizer_v1(
+    const prdb_host_api_v4 *host, const uint8_t *schema,
+    uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
+    const uint8_t *parameters, uint64_t parameters_len);
+
 #endif /* PRDB_SDK_SQL_DISPATCH_V1_H */

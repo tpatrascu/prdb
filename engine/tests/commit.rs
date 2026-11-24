@@ -40747,6 +40747,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     let spill_pressure_cancel_only =
         std::env::var_os("PRDB_TEST_SPILL_PRESSURE_CANCEL_ONLY").is_some();
     let spill_disk_full_only = std::env::var_os("PRDB_TEST_SPILL_DISK_FULL_ONLY").is_some();
+    let sql_in_only = std::env::var_os("PRDB_TEST_SQL_IN_ONLY").is_some();
     let spill_enabled_only = spill_quota_only
         || spill_only
         || spill_limit_only
@@ -43248,6 +43249,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         || spill_pressure_only
         || spill_pressure_cancel_only
         || spill_disk_full_only
+        || sql_in_only
     {
         let mut ordered_client = ClientConnectionSession::default();
         ordered_client.accept_hello(ClientMode::Query, "sandbox-ordered-analytical-sum")?;
@@ -43341,6 +43343,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             b'V'
         } else if count_bigint_only {
             b'I'
+        } else if sql_in_only {
+            b'N'
         } else if filtered_composite_only {
             b'Q'
         } else {
@@ -44212,6 +44216,47 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             assert_eq!(
                 observed.iter().map(|(_, value)| *value).collect::<Vec<_>>(),
                 [None, None, None, Some(225), Some(225), Some(225)]
+            );
+        } else if sql_in_only {
+            fn decode_pair(bytes: &[u8]) -> Result<(i32, i32), Box<dyn std::error::Error>> {
+                assert_eq!(&bytes[..4], b"SQLR");
+                assert_eq!(u16::from_be_bytes(bytes[4..6].try_into()?), 1);
+                assert_eq!(u16::from_be_bytes(bytes[6..8].try_into()?), 2);
+                let mut offset = 8;
+                let mut values = [0i32; 2];
+                for (index, expected_name) in
+                    [b"left_key".as_slice(), b"right_key"].iter().enumerate()
+                {
+                    let name_len =
+                        u16::from_be_bytes(bytes[offset..offset + 2].try_into()?) as usize;
+                    offset += 2;
+                    assert_eq!(&bytes[offset..offset + name_len], *expected_name);
+                    offset += name_len;
+                    assert_eq!(u32::from_be_bytes(bytes[offset..offset + 4].try_into()?), 3);
+                    offset += 4;
+                    assert_eq!(&bytes[offset..offset + 3], &[0, 0, 0]);
+                    offset += 3;
+                    assert_eq!(u32::from_be_bytes(bytes[offset..offset + 4].try_into()?), 4);
+                    offset += 4;
+                    values[index] = i32::from_be_bytes(bytes[offset..offset + 4].try_into()?);
+                    offset += 4;
+                }
+                assert_eq!(offset, bytes.len());
+                Ok((values[0], values[1]))
+            }
+            let mut observed = std::collections::BTreeMap::new();
+            for _ in 0..5 {
+                let frame = ordered_frames.next().ok_or("missing batched IN SQLR row")?;
+                assert_eq!(frame.operation, Operation::GatewayResultData as u16);
+                assert_eq!(frame.request_id, ordered_accepted.request_id);
+                *observed
+                    .entry(decode_pair(&frame.payload)?)
+                    .or_insert(0usize) += 1;
+            }
+            assert_eq!(
+                observed.into_iter().collect::<Vec<_>>(),
+                [((1, 7), 2), ((2, 9), 3)],
+                "IN must return the authorized reference rows with duplicate list values and a NULL member"
             );
         } else if !spill_quota_only
             && !spill_crash_only
