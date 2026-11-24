@@ -18,6 +18,26 @@
 #define SQL_DISPATCH_CANDIDATES UINT16_C(128)
 #define SQL_DISPATCH_JOIN_SORT_ROW_BYTES UINT32_C(1024)
 
+static void *dispatch_calloc(size_t count, size_t size,
+                             uint64_t *allocated_heap_bytes) {
+    size_t bytes;
+    void *allocation;
+
+    if (allocated_heap_bytes == NULL ||
+        (size != 0 && count > SIZE_MAX / size)) {
+        return NULL;
+    }
+    bytes = count * size;
+    if (*allocated_heap_bytes > PRDB_SDK_SQL_DISPATCH_MAX_HEAP_BYTES ||
+        (uint64_t)bytes > PRDB_SDK_SQL_DISPATCH_MAX_HEAP_BYTES -
+                              *allocated_heap_bytes) {
+        return NULL;
+    }
+    allocation = calloc(count, size);
+    if (allocation != NULL) *allocated_heap_bytes += (uint64_t)bytes;
+    return allocation;
+}
+
 typedef struct sql_result_context sql_result_context;
 
 typedef struct ordered_join_spool {
@@ -706,6 +726,7 @@ static int32_t sql_run_internal(
     int ordered_join_needs_latch = 0;
     uint32_t parameter_count = 0;
     uint32_t declared_count = 0;
+    uint64_t allocated_heap_bytes = 0;
     int32_t status;
 
     if (host == NULL || host->struct_size < sizeof(*host) ||
@@ -750,7 +771,8 @@ static int32_t sql_run_internal(
         }
     }
     if (is_grouped || is_join || is_single_key_join || is_single_grouped) {
-        materialized_bytes = (uint8_t *)calloc(1, SQL_DISPATCH_BATCH_BYTES);
+        materialized_bytes = (uint8_t *)dispatch_calloc(
+            1, SQL_DISPATCH_BATCH_BYTES, &allocated_heap_bytes);
         if (materialized_bytes == NULL) {
             return latch_sql_failure(host,
                                      PRDB_SDK_SQL_DISPATCH_RESOURCE_ERROR);
@@ -768,46 +790,65 @@ static int32_t sql_run_internal(
         declared_count = read_u16_be(parameters + 4);
     }
     if (declared_count != 0) {
-        values = (prdb_sdk_value_v1 *)calloc(declared_count, sizeof(*values));
-        parameter_payloads = calloc(declared_count, sizeof(*parameter_payloads));
-        metadata = (prdb_sdk_sql_parameter_metadata_v1 *)calloc(
-            declared_count, sizeof(*metadata));
+        values = (prdb_sdk_value_v1 *)dispatch_calloc(
+            declared_count, sizeof(*values), &allocated_heap_bytes);
+        parameter_payloads = (uint8_t (*)[16])dispatch_calloc(
+            declared_count, sizeof(*parameter_payloads), &allocated_heap_bytes);
+        metadata = (prdb_sdk_sql_parameter_metadata_v1 *)dispatch_calloc(
+            declared_count, sizeof(*metadata), &allocated_heap_bytes);
     }
-    planner_response = (uint8_t *)calloc(1, SQL_DISPATCH_RESPONSE_BYTES);
+    planner_response = (uint8_t *)dispatch_calloc(
+        1, SQL_DISPATCH_RESPONSE_BYTES, &allocated_heap_bytes);
     if (is_join || is_single_key_join) {
         right_planner_response =
-            (uint8_t *)calloc(1, SQL_DISPATCH_RESPONSE_BYTES);
+            (uint8_t *)dispatch_calloc(
+                1, SQL_DISPATCH_RESPONSE_BYTES, &allocated_heap_bytes);
         right_executor_response =
-            (uint8_t *)calloc(1, SQL_DISPATCH_RESPONSE_BYTES);
+            (uint8_t *)dispatch_calloc(
+                1, SQL_DISPATCH_RESPONSE_BYTES, &allocated_heap_bytes);
     }
-    executor_response = (uint8_t *)calloc(1, SQL_DISPATCH_RESPONSE_BYTES);
-    batch_response = (uint8_t *)calloc(1, SQL_DISPATCH_BATCH_BYTES);
-    output = (uint8_t *)calloc(1, PRDB_SDK_SQL_RESULT_MAX_BYTES);
-    planner_columns = (prdb_sdk_sql_column_shape_v2 *)calloc(
-        PRDB_SDK_SQL_MAX_RELATION_COLUMNS, sizeof(*planner_columns));
-    executor_columns = (prdb_sdk_sql_column_shape_v2 *)calloc(
-        PRDB_SDK_SQL_MAX_RELATION_COLUMNS, sizeof(*executor_columns));
+    executor_response = (uint8_t *)dispatch_calloc(
+        1, SQL_DISPATCH_RESPONSE_BYTES, &allocated_heap_bytes);
+    batch_response = (uint8_t *)dispatch_calloc(
+        1, SQL_DISPATCH_BATCH_BYTES, &allocated_heap_bytes);
+    output = (uint8_t *)dispatch_calloc(
+        1, PRDB_SDK_SQL_RESULT_MAX_BYTES, &allocated_heap_bytes);
+    planner_columns = (prdb_sdk_sql_column_shape_v2 *)dispatch_calloc(
+        PRDB_SDK_SQL_MAX_RELATION_COLUMNS, sizeof(*planner_columns),
+        &allocated_heap_bytes);
+    executor_columns = (prdb_sdk_sql_column_shape_v2 *)dispatch_calloc(
+        PRDB_SDK_SQL_MAX_RELATION_COLUMNS, sizeof(*executor_columns),
+        &allocated_heap_bytes);
     if (is_join) {
-        right_planner_columns = (prdb_sdk_sql_column_shape_v2 *)calloc(
-            PRDB_SDK_SQL_MAX_RELATION_COLUMNS, sizeof(*right_planner_columns));
-        right_executor_columns = (prdb_sdk_sql_column_shape_v2 *)calloc(
-            PRDB_SDK_SQL_MAX_RELATION_COLUMNS, sizeof(*right_executor_columns));
-        left_rows = (prdb_sdk_sql_join_materialized_row_v16 *)calloc(
-            PRDB_SDK_SQL_EXEC_V8_MAX_ROWS, sizeof(*left_rows));
-        right_rows = (prdb_sdk_sql_join_materialized_row_v16 *)calloc(
-            PRDB_SDK_SQL_EXEC_V8_MAX_ROWS, sizeof(*right_rows));
+        right_planner_columns = (prdb_sdk_sql_column_shape_v2 *)dispatch_calloc(
+            PRDB_SDK_SQL_MAX_RELATION_COLUMNS, sizeof(*right_planner_columns),
+            &allocated_heap_bytes);
+        right_executor_columns = (prdb_sdk_sql_column_shape_v2 *)dispatch_calloc(
+            PRDB_SDK_SQL_MAX_RELATION_COLUMNS, sizeof(*right_executor_columns),
+            &allocated_heap_bytes);
+        left_rows = (prdb_sdk_sql_join_materialized_row_v16 *)dispatch_calloc(
+            PRDB_SDK_SQL_EXEC_V8_MAX_ROWS, sizeof(*left_rows),
+            &allocated_heap_bytes);
+        right_rows = (prdb_sdk_sql_join_materialized_row_v16 *)dispatch_calloc(
+            PRDB_SDK_SQL_EXEC_V8_MAX_ROWS, sizeof(*right_rows),
+            &allocated_heap_bytes);
     } else if (is_single_key_join) {
-        right_planner_columns = (prdb_sdk_sql_column_shape_v2 *)calloc(
-            PRDB_SDK_SQL_MAX_RELATION_COLUMNS, sizeof(*right_planner_columns));
-        right_executor_columns = (prdb_sdk_sql_column_shape_v2 *)calloc(
-            PRDB_SDK_SQL_MAX_RELATION_COLUMNS, sizeof(*right_executor_columns));
-        left_rows_v8 = (prdb_sdk_sql_join_materialized_row_v8 *)calloc(
-            PRDB_SDK_SQL_EXEC_V8_MAX_ROWS, sizeof(*left_rows_v8));
-        right_rows_v8 = (prdb_sdk_sql_join_materialized_row_v8 *)calloc(
-            PRDB_SDK_SQL_EXEC_V8_MAX_ROWS, sizeof(*right_rows_v8));
+        right_planner_columns = (prdb_sdk_sql_column_shape_v2 *)dispatch_calloc(
+            PRDB_SDK_SQL_MAX_RELATION_COLUMNS, sizeof(*right_planner_columns),
+            &allocated_heap_bytes);
+        right_executor_columns = (prdb_sdk_sql_column_shape_v2 *)dispatch_calloc(
+            PRDB_SDK_SQL_MAX_RELATION_COLUMNS, sizeof(*right_executor_columns),
+            &allocated_heap_bytes);
+        left_rows_v8 = (prdb_sdk_sql_join_materialized_row_v8 *)dispatch_calloc(
+            PRDB_SDK_SQL_EXEC_V8_MAX_ROWS, sizeof(*left_rows_v8),
+            &allocated_heap_bytes);
+        right_rows_v8 = (prdb_sdk_sql_join_materialized_row_v8 *)dispatch_calloc(
+            PRDB_SDK_SQL_EXEC_V8_MAX_ROWS, sizeof(*right_rows_v8),
+            &allocated_heap_bytes);
     }
-    cell_scratch = (prdb_sdk_value_v1 *)calloc(
-        PRDB_SDK_SQL_MAX_RELATION_COLUMNS, sizeof(*cell_scratch));
+    cell_scratch = (prdb_sdk_value_v1 *)dispatch_calloc(
+        PRDB_SDK_SQL_MAX_RELATION_COLUMNS, sizeof(*cell_scratch),
+        &allocated_heap_bytes);
     if ((declared_count != 0 && (values == NULL || metadata == NULL ||
                                  parameter_payloads == NULL)) ||
         planner_response == NULL || executor_response == NULL ||
@@ -925,8 +966,9 @@ static int32_t sql_run_internal(
                 status = PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR;
                 goto cleanup;
             }
-            ordered_join_sql = (uint8_t *)calloc(
-                PRDB_SDK_SQL_MAX_QUERY_BYTES, sizeof(*ordered_join_sql));
+            ordered_join_sql = (uint8_t *)dispatch_calloc(
+                PRDB_SDK_SQL_MAX_QUERY_BYTES, sizeof(*ordered_join_sql),
+                &allocated_heap_bytes);
             if (ordered_join_sql == NULL) {
                 status = PRDB_SDK_SQL_DISPATCH_RESOURCE_ERROR;
                 goto cleanup;
@@ -1019,9 +1061,10 @@ static int32_t sql_run_internal(
                 ordered_join_sorter.order_projection_index =
                     ordered_join_binding.order_by_projection_index;
                 ordered_join_sorter.projected_values =
-                    (prdb_sdk_value_v1 *)calloc(
+                    (prdb_sdk_value_v1 *)dispatch_calloc(
                         ordered_join_sorter.projection_count,
-                        sizeof(*ordered_join_sorter.projected_values));
+                        sizeof(*ordered_join_sorter.projected_values),
+                        &allocated_heap_bytes);
                 ordered_join_sorter.result_context = &result;
                 if (ordered_join_sorter.projected_values == NULL ||
                     prepare_ordered_join_spool(
@@ -1295,6 +1338,7 @@ int32_t prdb_sdk_sql_run_statement_v1(
     prdb_sdk_executor_update_patch_v1 *patches = NULL;
     uint32_t parameter_count = 0;
     uint32_t declared_count = 0;
+    uint64_t allocated_heap_bytes = 0;
     int32_t parse_status;
     int32_t status;
 
@@ -1333,19 +1377,27 @@ int32_t prdb_sdk_sql_run_statement_v1(
                                  PRDB_SDK_SQL_DISPATCH_INVALID_PARAMETERS);
     }
     if (declared_count != 0) {
-        values = (prdb_sdk_value_v1 *)calloc(declared_count, sizeof(*values));
-        parameter_payloads = calloc(declared_count, sizeof(*parameter_payloads));
-        metadata = (prdb_sdk_sql_parameter_metadata_v1 *)calloc(
-            declared_count, sizeof(*metadata));
+        values = (prdb_sdk_value_v1 *)dispatch_calloc(
+            declared_count, sizeof(*values), &allocated_heap_bytes);
+        parameter_payloads = (uint8_t (*)[16])dispatch_calloc(
+            declared_count, sizeof(*parameter_payloads), &allocated_heap_bytes);
+        metadata = (prdb_sdk_sql_parameter_metadata_v1 *)dispatch_calloc(
+            declared_count, sizeof(*metadata), &allocated_heap_bytes);
     }
-    planner_response = (uint8_t *)calloc(1, SQL_DISPATCH_RESPONSE_BYTES);
-    executor_response = (uint8_t *)calloc(1, SQL_DISPATCH_RESPONSE_BYTES);
-    batch_response = (uint8_t *)calloc(1, SQL_DISPATCH_BATCH_BYTES);
-    mutation_request = (uint8_t *)calloc(1, PRDB_QUERY_MAX_IPC_REQUEST_BYTES);
-    planner_columns = (prdb_sdk_sql_column_shape_v2 *)calloc(
-        PRDB_SDK_SQL_MAX_RELATION_COLUMNS, sizeof(*planner_columns));
-    executor_columns = (prdb_sdk_sql_column_shape_v2 *)calloc(
-        PRDB_SDK_SQL_MAX_RELATION_COLUMNS, sizeof(*executor_columns));
+    planner_response = (uint8_t *)dispatch_calloc(
+        1, SQL_DISPATCH_RESPONSE_BYTES, &allocated_heap_bytes);
+    executor_response = (uint8_t *)dispatch_calloc(
+        1, SQL_DISPATCH_RESPONSE_BYTES, &allocated_heap_bytes);
+    batch_response = (uint8_t *)dispatch_calloc(
+        1, SQL_DISPATCH_BATCH_BYTES, &allocated_heap_bytes);
+    mutation_request = (uint8_t *)dispatch_calloc(
+        1, PRDB_QUERY_MAX_IPC_REQUEST_BYTES, &allocated_heap_bytes);
+    planner_columns = (prdb_sdk_sql_column_shape_v2 *)dispatch_calloc(
+        PRDB_SDK_SQL_MAX_RELATION_COLUMNS, sizeof(*planner_columns),
+        &allocated_heap_bytes);
+    executor_columns = (prdb_sdk_sql_column_shape_v2 *)dispatch_calloc(
+        PRDB_SDK_SQL_MAX_RELATION_COLUMNS, sizeof(*executor_columns),
+        &allocated_heap_bytes);
     if (parse_status == PRDB_SDK_SQL_OK &&
         (declared_count != 0 && (values == NULL || metadata == NULL ||
          parameter_payloads == NULL))) {
@@ -1370,8 +1422,9 @@ int32_t prdb_sdk_sql_run_statement_v1(
     if (prdb_sdk_sql_parse_insert_v3(
             sql, sql_len, &insert_statement, sizeof(insert_statement), NULL) ==
         PRDB_SDK_SQL_OK) {
-        insert_values = (prdb_sdk_executor_insert_value_v1 *)calloc(
-            PRDB_SDK_SQL_MAX_RELATION_COLUMNS, sizeof(*insert_values));
+        insert_values = (prdb_sdk_executor_insert_value_v1 *)dispatch_calloc(
+            PRDB_SDK_SQL_MAX_RELATION_COLUMNS, sizeof(*insert_values),
+            &allocated_heap_bytes);
         if (insert_values == NULL) {
             status = PRDB_SDK_SQL_DISPATCH_RESOURCE_ERROR;
             goto resource_error;
@@ -1388,13 +1441,17 @@ int32_t prdb_sdk_sql_run_statement_v1(
     } else if (prdb_sdk_sql_parse_update_v1(
                    sql, sql_len, &update_statement, sizeof(update_statement),
                    NULL) == PRDB_SDK_SQL_OK) {
-        binding = (prdb_sdk_select_binding_v2 *)calloc(1, sizeof(*binding));
-        cell_scratch = (prdb_sdk_value_v1 *)calloc(
-            PRDB_SDK_SQL_MAX_RELATION_COLUMNS, sizeof(*cell_scratch));
-        target_handles = (uint8_t *)calloc(
-            PRDB_SDK_SQL_EXEC_MAX_MUTATION_TARGETS, 16);
-        patches = (prdb_sdk_executor_update_patch_v1 *)calloc(
-            PRDB_SDK_SQL_MAX_UPDATE_ASSIGNMENTS, sizeof(*patches));
+        binding = (prdb_sdk_select_binding_v2 *)dispatch_calloc(
+            1, sizeof(*binding), &allocated_heap_bytes);
+        cell_scratch = (prdb_sdk_value_v1 *)dispatch_calloc(
+            PRDB_SDK_SQL_MAX_RELATION_COLUMNS, sizeof(*cell_scratch),
+            &allocated_heap_bytes);
+        target_handles = (uint8_t *)dispatch_calloc(
+            PRDB_SDK_SQL_EXEC_MAX_MUTATION_TARGETS, 16,
+            &allocated_heap_bytes);
+        patches = (prdb_sdk_executor_update_patch_v1 *)dispatch_calloc(
+            PRDB_SDK_SQL_MAX_UPDATE_ASSIGNMENTS, sizeof(*patches),
+            &allocated_heap_bytes);
         if (binding == NULL || cell_scratch == NULL || target_handles == NULL ||
             patches == NULL) {
             status = PRDB_SDK_SQL_DISPATCH_RESOURCE_ERROR;
@@ -1415,11 +1472,14 @@ int32_t prdb_sdk_sql_run_statement_v1(
             PRDB_SDK_SQL_EXEC_MAX_MUTATION_TARGETS, patches,
             PRDB_SDK_SQL_MAX_UPDATE_ASSIGNMENTS, &updated_count);
     } else {
-        binding = (prdb_sdk_select_binding_v2 *)calloc(1, sizeof(*binding));
-        cell_scratch = (prdb_sdk_value_v1 *)calloc(
-            PRDB_SDK_SQL_MAX_RELATION_COLUMNS, sizeof(*cell_scratch));
-        target_handles = (uint8_t *)calloc(
-            PRDB_SDK_SQL_EXEC_MAX_MUTATION_TARGETS, 16);
+        binding = (prdb_sdk_select_binding_v2 *)dispatch_calloc(
+            1, sizeof(*binding), &allocated_heap_bytes);
+        cell_scratch = (prdb_sdk_value_v1 *)dispatch_calloc(
+            PRDB_SDK_SQL_MAX_RELATION_COLUMNS, sizeof(*cell_scratch),
+            &allocated_heap_bytes);
+        target_handles = (uint8_t *)dispatch_calloc(
+            PRDB_SDK_SQL_EXEC_MAX_MUTATION_TARGETS, 16,
+            &allocated_heap_bytes);
         if (binding == NULL || cell_scratch == NULL || target_handles == NULL) {
             status = PRDB_SDK_SQL_DISPATCH_RESOURCE_ERROR;
             goto resource_error;

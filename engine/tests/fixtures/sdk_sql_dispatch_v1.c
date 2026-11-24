@@ -878,6 +878,25 @@ static int test_rejects_malformed_blocks(void) {
     return 0;
 }
 
+static int test_dispatch_bounds_query_heap(void) {
+    static const uint8_t sql[] =
+        "SELECT l.id, r.score FROM widgets AS l INNER JOIN widgets AS r "
+        "ON l.id = r.id AND l.score = r.score WHERE l.score >= $1";
+    static const uint8_t oversized_parameters[] = {
+        'P', 'S', 'P', '1', 0xff, 0xff, 0, 0};
+    dispatch_test_context context = {0};
+    prdb_host_api_v3 host = {
+        sizeof(host), PRDB_QUERY_ABI_V3_VERSION, &context,
+        unused_executor_request, fail_planner_request, discard_result,
+        count_statement_failure};
+    int32_t status = prdb_sdk_sql_run_v1(
+        &host, (const uint8_t *)"app", 3, sql, sizeof(sql) - 1,
+        oversized_parameters, sizeof(oversized_parameters));
+    return status != PRDB_SDK_SQL_DISPATCH_RESOURCE_ERROR ||
+           context.failure_calls != 1 || context.planner_calls != 0 ||
+           context.result_calls != 0;
+}
+
 int main(void) {
     if (prdb_sdk_sql_run_statement_v1(NULL, NULL, 0, NULL, 0, NULL, 0) !=
         PRDB_SDK_SQL_DISPATCH_INVALID_ARGUMENT) {
@@ -925,6 +944,10 @@ int main(void) {
     }
     if (test_rejects_malformed_blocks() != 0) {
         fputs("malformed PSP1 block was accepted\n", stderr);
+        return 1;
+    }
+    if (test_dispatch_bounds_query_heap() != 0) {
+        fputs("SQL dispatcher exceeded its bounded heap budget\n", stderr);
         return 1;
     }
     return 0;

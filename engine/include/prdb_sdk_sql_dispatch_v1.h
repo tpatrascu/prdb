@@ -7,6 +7,10 @@
 
 #define PRDB_SDK_SQL_DISPATCH_ABI_V1_VERSION UINT32_C(1)
 #define PRDB_SDK_SQL_DISPATCH_MAX_PARAMETER_BYTES UINT64_C(1048576)
+/* Maximum cumulative bytes requested by the statement dispatcher per call.
+ * This covers dispatcher-owned calloc buffers, not allocations inside SDK
+ * operators or stack usage. */
+#define PRDB_SDK_SQL_DISPATCH_MAX_HEAP_BYTES UINT64_C(12582912)
 
 #define PRDB_SDK_SQL_DISPATCH_OK INT32_C(0)
 #define PRDB_SDK_SQL_DISPATCH_INVALID_ARGUMENT INT32_C(1)
