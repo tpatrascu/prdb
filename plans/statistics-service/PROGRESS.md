@@ -3,9 +3,9 @@
 ## ST-2 / ST-3 follow-up: preserve query scan work during bounded predicate estimation — verified
 
 - Contract: a two-candidate row-evaluator estimate must leave a one-unit execution scan-work budget available to the query.
-- Regression: the internal transaction test sets invocation scan work to one, estimates `IS NULL` over two authorized rows through the bounded row-evaluator path, then successfully scans one row with that same invocation. The first test draft used overlay limits instead of scan work; it was discarded and replaced with this check against the actual invocation coordination budget.
-- Evidence: `transaction::predicate_estimate_scan_budget_tests::bounded_row_estimate_does_not_consume_query_scan_work` passes with exact `(2 visible, 1 matching)` counts and a subsequent one-row scan.
-- Scope: this covers execution scan-work accounting for the bounded row-estimator path. CPU timing/resource noninterference and target-host behavior remain open.
+- Regression: the internal transaction test sets invocation scan work to one, estimates `IS NULL` over two authorized rows through the bounded row-evaluator path, then successfully scans one row with that same invocation. It also compares a value-dependent row policy with no extra private candidates against one with ten added hidden candidates: both predicate estimates are `Unknown`, and both retain the same one-row authorized scan page under the one-unit budget. The first test draft used overlay limits instead of scan work; it was discarded and replaced with this check against the actual invocation coordination budget.
+- Evidence: `transaction::predicate_estimate_scan_budget_tests::bounded_row_estimate_does_not_consume_query_scan_work` passes with exact `(2 visible, 1 matching)` counts for the readable case, identical `Unknown` results for the hidden-candidate cases, and identical authorized scan output.
+- Scope: this covers result-content and query scan-work behavior for the bounded row-estimator path across hidden candidate volume. It does not establish CPU timing/resource noninterference or target-host behavior.
 - Verification: locked workspace build, format check, warning-denied all-target Clippy, and the complete serial delegated-cgroup workspace suite passed (410 library tests, 206 commit tests, 85 transaction tests, all other targets, no ignored tests); `git diff --check` and local Markdown links passed.
 
 ## ST-2 / OP-4 follow-up: include the isolated optimizer request path in the estimate profile — measured

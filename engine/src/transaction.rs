@@ -13175,6 +13175,92 @@ mod predicate_estimate_scan_budget_tests {
             .abort()
             .expect("abort estimate fixture invocation");
 
+        let value_dependent_policy = Policy {
+            using: Some(Expr::Equal(
+                Box::new(Expr::Field(0)),
+                Box::new(Expr::Literal(Some(ScalarValue::Text("value".to_owned())))),
+            )),
+            ..policies[0].clone()
+        };
+        let filtered_policies = [value_dependent_policy, policies[1].clone()];
+        let filtered_projection = super::AuthorizedProjection {
+            columns: &columns,
+            column_ids: &column_ids,
+            schema_version: 1,
+            schema_id,
+            context: &context,
+            grants: &grants,
+            policies: &filtered_policies,
+            checks: &[],
+            policy_driving_columns: &[],
+            dependencies: &[],
+        };
+        let mut few_hidden_coordination = InvocationCoordination::uncoordinated();
+        few_hidden_coordination.max_scan_work = 1;
+        let mut few_hidden = InvocationTransaction::begin_inner(
+            database,
+            few_hidden_coordination,
+            [0x27; 16],
+            principal_id,
+            i64::MAX,
+            16,
+            2048,
+        )
+        .expect("begin few-hidden-row invocation");
+        let mut many_hidden_coordination = InvocationCoordination::uncoordinated();
+        many_hidden_coordination.max_scan_work = 1;
+        let mut many_hidden = InvocationTransaction::begin_inner(
+            database,
+            many_hidden_coordination,
+            [0x28; 16],
+            principal_id,
+            i64::MAX,
+            16,
+            2048,
+        )
+        .expect("begin many-hidden-row invocation");
+        for hidden_id in 3..=12 {
+            many_hidden
+                .stage_put(
+                    row_id(hidden_id),
+                    &encode_row(Some(ScalarValue::Text(format!("hidden-{hidden_id}")))),
+                )
+                .expect("stage additional hidden candidate");
+        }
+        assert_eq!(
+            few_hidden
+                .estimate_authorized_predicate_at_most(
+                    table_id,
+                    &filtered_projection,
+                    &predicate,
+                    16,
+                )
+                .expect("unknown estimate for value-dependent policy"),
+            None
+        );
+        assert_eq!(
+            many_hidden
+                .estimate_authorized_predicate_at_most(
+                    table_id,
+                    &filtered_projection,
+                    &predicate,
+                    16,
+                )
+                .expect("unknown estimate with additional hidden candidates"),
+            None
+        );
+        let few_hidden_page = few_hidden
+            .scan_authorized(table_id, None, 1, &filtered_projection)
+            .expect("one-unit query scan after unknown estimate");
+        let many_hidden_page = many_hidden
+            .scan_authorized(table_id, None, 1, &filtered_projection)
+            .expect("same one-unit query scan after hidden candidates increase");
+        assert_eq!(few_hidden_page.rows, many_hidden_page.rows);
+        assert_eq!(few_hidden_page.rows.len(), 1);
+        assert!(few_hidden_page.continuation.is_some());
+        few_hidden.abort().expect("abort few-hidden invocation");
+        many_hidden.abort().expect("abort many-hidden invocation");
+
         drop(instance);
         std::fs::remove_dir_all(root).expect("remove estimate scan budget fixture");
     }
