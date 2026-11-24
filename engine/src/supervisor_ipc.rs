@@ -2318,6 +2318,7 @@ mod worker_result_event_tests {
                 runtime_read_execute: Vec::new(),
                 runtime_read_only: Vec::new(),
                 spill_broker: None,
+                max_total_result_bytes: crate::query_abi::MAX_TOTAL_RESULT_BYTES,
                 cleanup_timeout: Duration::from_millis(10),
             },
         };
@@ -2544,6 +2545,7 @@ mod worker_result_event_tests {
                     runtime_read_execute: Vec::new(),
                     runtime_read_only: Vec::new(),
                     spill_broker: None,
+                    max_total_result_bytes: crate::query_abi::MAX_TOTAL_RESULT_BYTES,
                     cleanup_timeout: Duration::from_millis(100),
                 },
             },
@@ -2676,6 +2678,7 @@ mod worker_result_event_tests {
                     runtime_read_execute: Vec::new(),
                     runtime_read_only: Vec::new(),
                     spill_broker: None,
+                    max_total_result_bytes: crate::query_abi::MAX_TOTAL_RESULT_BYTES,
                     cleanup_timeout: Duration::from_millis(100),
                 },
             },

@@ -13,8 +13,8 @@ mod worker {
         BorrowedInvocationV1, HostApiV1, HostApiV2, HostApiV3, HostApiV4, HostApiV5, HostApiV6,
         InvocationV2, InvocationV3, InvocationV4, InvocationV5, InvocationV6,
         MAX_IPC_REQUEST_BYTES, MAX_IPC_RESPONSE_BYTES, MAX_RESULT_CHUNK_BYTES,
-        MAX_TOTAL_RESULT_BYTES, QUERY_ABI_V2_VERSION, QUERY_ABI_V3_VERSION, QUERY_ABI_V4_VERSION,
-        QUERY_ABI_V5_VERSION, QUERY_ABI_V6_VERSION, QUERY_ABI_VERSION, QUERY_DESCRIPTOR_SYMBOL,
+        QUERY_ABI_V2_VERSION, QUERY_ABI_V3_VERSION, QUERY_ABI_V4_VERSION, QUERY_ABI_V5_VERSION,
+        QUERY_ABI_V6_VERSION, QUERY_ABI_VERSION, QUERY_DESCRIPTOR_SYMBOL,
         QUERY_DESCRIPTOR_V2_SYMBOL, QUERY_DESCRIPTOR_V3_SYMBOL, QUERY_DESCRIPTOR_V4_SYMBOL,
         QUERY_DESCRIPTOR_V5_SYMBOL, QUERY_DESCRIPTOR_V6_SYMBOL, QUERY_ENTRY_SYMBOL,
         QUERY_ENTRY_V2_SYMBOL, QUERY_ENTRY_V3_SYMBOL, QUERY_ENTRY_V4_SYMBOL, QUERY_ENTRY_V5_SYMBOL,
@@ -62,6 +62,7 @@ mod worker {
         optimizer_fd: i32,
         result_fd: i32,
         spill_fd: i32,
+        max_total_result_bytes: u64,
     }
 
     pub fn main() {
@@ -95,7 +96,7 @@ mod worker {
     }
 
     fn parse_args(values: &[std::ffi::OsString]) -> Result<WorkerArgs, String> {
-        if values.len() != 14
+        if values.len() != 16
             || values[0] != "--library"
             || values[2] != "--parameters-fd"
             || values[4] != "--planner-fd"
@@ -103,8 +104,9 @@ mod worker {
             || values[8] != "--optimizer-fd"
             || values[10] != "--result-fd"
             || values[12] != "--spill-fd"
+            || values[14] != "--max-total-result-bytes"
         {
-            return Err("usage: prdb-executor --library ABSOLUTE_PATH --parameters-fd FD --planner-fd FD --executor-fd FD --optimizer-fd FD --result-fd FD --spill-fd FD (or --self-check)".to_owned());
+            return Err("usage: prdb-executor --library ABSOLUTE_PATH --parameters-fd FD --planner-fd FD --executor-fd FD --optimizer-fd FD --result-fd FD --spill-fd FD --max-total-result-bytes N (or --self-check)".to_owned());
         }
         let library = PathBuf::from(&values[1]);
         if !library.is_absolute() {
@@ -140,6 +142,14 @@ mod worker {
             .ok_or_else(|| "spill descriptor is not UTF-8".to_owned())?
             .parse::<i32>()
             .map_err(|_| "invalid spill descriptor".to_owned())?;
+        let max_total_result_bytes = values[15]
+            .to_str()
+            .ok_or_else(|| "result budget is not UTF-8".to_owned())?
+            .parse::<u64>()
+            .map_err(|_| "invalid result budget".to_owned())?;
+        if max_total_result_bytes == 0 {
+            return Err("result budget must be positive".to_owned());
+        }
         if parameters_fd < 3
             || planner_fd < 3
             || executor_fd < 3
@@ -174,6 +184,7 @@ mod worker {
             optimizer_fd,
             result_fd,
             spill_fd,
+            max_total_result_bytes,
         })
     }
 
@@ -369,6 +380,7 @@ mod worker {
                 args.optimizer_fd,
                 args.result_fd,
                 (args.spill_fd >= 3).then_some(args.spill_fd),
+                args.max_total_result_bytes,
             )
         };
         let context = Box::leak(Box::new(context));
@@ -448,6 +460,7 @@ mod worker {
                 args.optimizer_fd,
                 args.result_fd,
                 (args.spill_fd >= 3).then_some(args.spill_fd),
+                args.max_total_result_bytes,
             )
         };
         let context = Box::leak(Box::new(context));
@@ -524,6 +537,7 @@ mod worker {
                 args.optimizer_fd,
                 args.result_fd,
                 (args.spill_fd >= 3).then_some(args.spill_fd),
+                args.max_total_result_bytes,
             )
         };
         // Keep callback state alive until the worker's immediate `_exit`, even
@@ -598,6 +612,7 @@ mod worker {
                 args.optimizer_fd,
                 args.result_fd,
                 (args.spill_fd >= 3).then_some(args.spill_fd),
+                args.max_total_result_bytes,
             )
         };
         // Keep callback state alive until the worker's immediate `_exit`, even
@@ -673,6 +688,7 @@ mod worker {
                 args.optimizer_fd,
                 args.result_fd,
                 (args.spill_fd >= 3).then_some(args.spill_fd),
+                args.max_total_result_bytes,
             )
         };
         // Keep callback state alive until the worker's immediate `_exit`, even
@@ -775,6 +791,7 @@ mod worker {
         spill: Option<Mutex<UnixStream>>,
         next_spill_request_id: AtomicU64,
         total_result_bytes: AtomicU64,
+        max_total_result_bytes: u64,
         statement_failed: AtomicBool,
     }
 
@@ -785,6 +802,7 @@ mod worker {
             optimizer_fd: i32,
             result_fd: i32,
             spill_fd: Option<i32>,
+            max_total_result_bytes: u64,
         ) -> Self {
             // SAFETY: the trusted launcher passes distinct, open socket fds and
             // transfers ownership to this invocation context. Spill is optional.
@@ -809,6 +827,7 @@ mod worker {
                 spill,
                 next_spill_request_id: AtomicU64::new(1),
                 total_result_bytes: AtomicU64::new(0),
+                max_total_result_bytes,
                 statement_failed: AtomicBool::new(false),
             }
         }
@@ -1144,7 +1163,7 @@ mod worker {
                 |total| {
                     total
                         .checked_add(bytes_len)
-                        .filter(|total| *total <= MAX_TOTAL_RESULT_BYTES)
+                        .filter(|total| *total <= context.max_total_result_bytes)
                 },
             );
             if next_total.is_err() {
@@ -1338,6 +1357,7 @@ mod worker {
                     optimizer.into_raw_fd(),
                     result.into_raw_fd(),
                     Some(spill.into_raw_fd()),
+                    prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
                 )
             }
         }
@@ -1356,6 +1376,7 @@ mod worker {
                     optimizer.into_raw_fd(),
                     result.into_raw_fd(),
                     Some(spill.into_raw_fd()),
+                    prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
                 )
             };
             (context, spill_peer)
@@ -1788,9 +1809,10 @@ mod worker {
             result_peer.read_exact(&mut received).unwrap();
             assert_eq!(received, bytes);
 
-            context
-                .total_result_bytes
-                .store(MAX_TOTAL_RESULT_BYTES, Ordering::Relaxed);
+            context.total_result_bytes.store(
+                prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
+                Ordering::Relaxed,
+            );
             // SAFETY: context and output slice remain valid; quota rejection
             // occurs before the result stream is touched.
             let status =

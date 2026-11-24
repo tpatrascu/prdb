@@ -941,6 +941,7 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
             runtime_read_execute: required_paths("PRDB_TEST_RUNTIME_READ_EXECUTE")?,
             runtime_read_only: required_paths("PRDB_TEST_RUNTIME_READ_ONLY")?,
             spill_broker: None,
+            max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
             cleanup_timeout: Duration::from_secs(2),
         },
     };

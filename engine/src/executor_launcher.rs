@@ -32,6 +32,9 @@ pub struct ExecutorLaunchConfig {
     pub runtime_read_only: Vec<PathBuf>,
     /// Shared trusted broker. Absence keeps spill disabled.
     pub spill_broker: Option<crate::spill::SpillBroker>,
+    /// Trusted per-invocation output budget. The fixed chunk size remains an
+    /// ABI safety limit; this cumulative budget is deployment-configurable.
+    pub max_total_result_bytes: u64,
     pub cleanup_timeout: Duration,
 }
 
@@ -99,6 +102,7 @@ pub struct RunningExecutor {
     spill_session: Option<Arc<SpillSession>>,
     result_stream: Option<UnixStream>,
     cleanup_timeout: Duration,
+    max_total_result_bytes: u64,
 }
 
 /// Fully prepared command and staged inputs, ready to spawn after the storage
@@ -112,6 +116,7 @@ pub struct PreparedExecutor {
     worker_channels: Option<WorkerChannelPair>,
     spill_session: Option<Arc<SpillSession>>,
     cleanup_timeout: Duration,
+    max_total_result_bytes: u64,
 }
 
 struct SpillSession {
@@ -292,8 +297,10 @@ impl RunningExecutor {
         if let Some(result_stream) = result_stream {
             let (result_tx, result_rx) = std::sync::mpsc::sync_channel(4);
             std::thread::scope(|scope| {
-                let result_thread =
-                    scope.spawn(move || drain_result_stream(result_stream, result_tx));
+                let max_total_result_bytes = self.max_total_result_bytes;
+                let result_thread = scope.spawn(move || {
+                    drain_result_stream(result_stream, result_tx, max_total_result_bytes)
+                });
                 let (spill_tx, spill_rx) = std::sync::mpsc::channel();
                 let spill_task = match (spill_stream, spill_session.as_ref()) {
                     (Some(stream), Some(session)) => {
@@ -577,6 +584,7 @@ impl Drop for RunningExecutor {
 fn drain_result_stream(
     mut stream: UnixStream,
     sender: std::sync::mpsc::SyncSender<Result<Vec<u8>, io::Error>>,
+    max_total_result_bytes: u64,
 ) -> io::Result<()> {
     let mut total_bytes = 0u64;
     loop {
@@ -608,7 +616,7 @@ fn drain_result_stream(
                 io::Error::new(io::ErrorKind::InvalidData, "worker result size overflow"),
             );
         };
-        if next_total > crate::query_abi::MAX_TOTAL_RESULT_BYTES {
+        if next_total > max_total_result_bytes {
             return send_result_error(
                 &sender,
                 io::Error::new(io::ErrorKind::InvalidData, "worker result quota exceeded"),
@@ -778,6 +786,7 @@ fn prepare_executor(
             worker_channels: Some(channels),
             spill_session,
             cleanup_timeout: config.cleanup_timeout,
+            max_total_result_bytes: config.max_total_result_bytes,
         }),
         Err(launch_error) => Err(ExecutorLaunchError {
             launch_error,
@@ -833,6 +842,7 @@ impl PreparedExecutor {
                     spill_session: self.spill_session.take(),
                     result_stream: Some(result_stream),
                     cleanup_timeout: self.cleanup_timeout,
+                    max_total_result_bytes: self.max_total_result_bytes,
                 })
             }
             Err(launch_error) => Err(ExecutorLaunchError {
@@ -919,6 +929,8 @@ fn build_command(
         } else {
             "-1".to_owned()
         })
+        .arg("--max-total-result-bytes")
+        .arg(config.max_total_result_bytes.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -1215,9 +1227,20 @@ mod tests {
         worker.write_all(&3u32.to_be_bytes()).unwrap();
         worker.write_all(b"abc").unwrap();
         drop(worker);
-        drain_result_stream(supervisor, sender).unwrap();
+        drain_result_stream(supervisor, sender, crate::query_abi::MAX_TOTAL_RESULT_BYTES).unwrap();
         assert_eq!(receiver.recv().unwrap().unwrap(), b"abc");
         assert!(receiver.recv().is_err());
+
+        let (mut worker, supervisor) = UnixStream::pair().unwrap();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        worker.write_all(&3u32.to_be_bytes()).unwrap();
+        worker.write_all(b"abc").unwrap();
+        drop(worker);
+        drain_result_stream(supervisor, sender, 2).unwrap();
+        assert_eq!(
+            receiver.recv().unwrap().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
 
         let (mut worker, supervisor) = UnixStream::pair().unwrap();
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
@@ -1225,7 +1248,7 @@ mod tests {
             .write_all(&((crate::query_abi::MAX_RESULT_CHUNK_BYTES as u32) + 1).to_be_bytes())
             .unwrap();
         drop(worker);
-        drain_result_stream(supervisor, sender).unwrap();
+        drain_result_stream(supervisor, sender, crate::query_abi::MAX_TOTAL_RESULT_BYTES).unwrap();
         assert_eq!(
             receiver.recv().unwrap().unwrap_err().kind(),
             io::ErrorKind::InvalidData

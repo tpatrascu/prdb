@@ -318,6 +318,7 @@ fn gateway_worker_pool_opens_one_service_stream_per_client() {
             idle_timeout: std::time::Duration::from_secs(5),
             pre_auth_timeout: std::time::Duration::from_secs(2),
             accept_poll_interval: std::time::Duration::from_millis(5),
+            max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
         };
         run_gateway(
             listener,
@@ -424,6 +425,7 @@ fn stalled_partial_frame_does_not_block_another_gateway_connection() {
             idle_timeout: std::time::Duration::from_secs(5),
             pre_auth_timeout: std::time::Duration::from_secs(2),
             accept_poll_interval: std::time::Duration::from_millis(5),
+            max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
         };
         run_gateway(
             listener,
@@ -833,6 +835,7 @@ fn gateway_stops_forwarding_auth_after_failed_attempt_budget() {
                 idle_timeout: Duration::from_secs(3),
                 pre_auth_timeout: Duration::from_secs(3),
                 accept_poll_interval: Duration::from_millis(5),
+                max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
             },
             move || {
                 let (gateway_service, supervisor_service) = std::os::unix::net::UnixStream::pair()?;
@@ -1194,6 +1197,7 @@ fn status_on_another_gateway_connection_progresses_while_result_worker_is_blocke
                 idle_timeout: std::time::Duration::from_secs(2),
                 pre_auth_timeout: std::time::Duration::from_secs(1),
                 accept_poll_interval: std::time::Duration::from_millis(1),
+                max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
             },
             connector,
             gateway_shutdown,

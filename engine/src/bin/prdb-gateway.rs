@@ -30,6 +30,7 @@ fn main() {
              --auth-failures-per-ip COUNT         default 10 per minute\n\
              --idle-timeout-ms DURATION          default 30000\n\
              --pre-auth-timeout-ms DURATION      default 10000\n\
+             --max-total-result-bytes N          default 67108864\n\
              --allow-plaintext-non-loopback      explicit plaintext bind opt-in"
         );
         return;
@@ -53,6 +54,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut auth_failures_per_ip_per_minute = 10usize;
     let mut idle_timeout = Duration::from_secs(30);
     let mut pre_auth_timeout = Duration::from_secs(10);
+    let mut max_total_result_bytes = prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES;
     let mut allow_non_loopback_plaintext = false;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
@@ -99,6 +101,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 pre_auth_timeout =
                     Duration::from_millis(value(&mut arguments, "--pre-auth-timeout-ms")?.parse()?);
             }
+            "--max-total-result-bytes" => {
+                max_total_result_bytes =
+                    value(&mut arguments, "--max-total-result-bytes")?.parse()?;
+                if max_total_result_bytes == 0 {
+                    return Err("--max-total-result-bytes must be positive".into());
+                }
+            }
             "--allow-plaintext-non-loopback" => allow_non_loopback_plaintext = true,
             unknown => return Err(format!("unknown option {unknown}").into()),
         }
@@ -143,6 +152,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             auth_failures_per_ip_per_minute,
             idle_timeout,
             pre_auth_timeout,
+            max_total_result_bytes,
             ..GatewayRuntimeConfig::default()
         },
         move || connector.connect(),

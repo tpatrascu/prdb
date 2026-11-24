@@ -151,6 +151,9 @@ pub struct GatewayRuntimeConfig {
     pub idle_timeout: Duration,
     pub pre_auth_timeout: Duration,
     pub accept_poll_interval: Duration,
+    /// Cumulative result bytes accepted per request. Individual protocol
+    /// frame limits remain fixed independently.
+    pub max_total_result_bytes: u64,
 }
 
 impl Default for GatewayRuntimeConfig {
@@ -165,6 +168,7 @@ impl Default for GatewayRuntimeConfig {
             idle_timeout: Duration::from_secs(30),
             pre_auth_timeout: Duration::from_secs(10),
             accept_poll_interval: Duration::from_millis(10),
+            max_total_result_bytes: crate::query_abi::MAX_TOTAL_RESULT_BYTES,
         }
     }
 }
@@ -561,18 +565,43 @@ pub fn serve_tcp_client_connection<C: GatewayClientStream, S: Read + Write>(
     client: &mut C,
     service: &mut S,
 ) -> Result<(), GatewayConnectionError> {
-    serve_tcp_client_connection_inner(client, service, None, None, None, None, false)
+    serve_tcp_client_connection_inner(
+        client,
+        service,
+        GatewayConnectionSettings {
+            frame_timeout: None,
+            pre_auth_timeout: None,
+            auth_failure_limiter: None,
+            source_ip: None,
+            control_only: false,
+            max_total_result_bytes: crate::query_abi::MAX_TOTAL_RESULT_BYTES,
+        },
+    )
+}
+
+#[derive(Clone, Copy)]
+struct GatewayConnectionSettings<'a> {
+    frame_timeout: Option<Duration>,
+    pre_auth_timeout: Option<Duration>,
+    auth_failure_limiter: Option<&'a GatewayAuthFailureLimiter>,
+    source_ip: Option<IpAddr>,
+    control_only: bool,
+    max_total_result_bytes: u64,
 }
 
 fn serve_tcp_client_connection_inner<C: GatewayClientStream, S: Read + Write>(
     client: &mut C,
     service: &mut S,
-    frame_timeout: Option<Duration>,
-    pre_auth_timeout: Option<Duration>,
-    auth_failure_limiter: Option<&GatewayAuthFailureLimiter>,
-    source_ip: Option<IpAddr>,
-    control_only: bool,
+    settings: GatewayConnectionSettings<'_>,
 ) -> Result<(), GatewayConnectionError> {
+    let GatewayConnectionSettings {
+        frame_timeout,
+        pre_auth_timeout,
+        auth_failure_limiter,
+        source_ip,
+        control_only,
+        max_total_result_bytes,
+    } = settings;
     let mut decoder = crate::client_protocol::ClientFrameDecoder::negotiating();
     let mut input = [0u8; 8192];
     let pre_auth_deadline =
@@ -730,7 +759,13 @@ fn serve_tcp_client_connection_inner<C: GatewayClientStream, S: Read + Write>(
         response.zeroize();
         write_result?;
         if operation == crate::ipc::Operation::StartSubmission {
-            relay_gateway_result_events(client, service, request.request_id, protocol_major)?;
+            relay_gateway_result_events_with_limit(
+                client,
+                service,
+                request.request_id,
+                max_total_result_bytes,
+                protocol_major,
+            )?;
         }
     }
 }
@@ -763,21 +798,6 @@ fn write_client_error_version<C: GatewayClientStream>(
     }
     .map_err(GatewayConnectionError::ClientFrame)?;
     client.write_all(&bytes).map_err(GatewayConnectionError::Io)
-}
-
-fn relay_gateway_result_events<C: GatewayClientStream, S: Read + Write>(
-    client: &mut C,
-    service: &mut S,
-    start_request_id: u64,
-    protocol_major: u16,
-) -> Result<(), GatewayConnectionError> {
-    relay_gateway_result_events_with_limit(
-        client,
-        service,
-        start_request_id,
-        crate::query_abi::MAX_TOTAL_RESULT_BYTES,
-        protocol_major,
-    )
 }
 
 fn relay_gateway_result_events_with_limit<C: GatewayClientStream, S: Read + Write>(
@@ -872,23 +892,41 @@ pub fn serve_tcp_client_connection_with_timeouts(
     serve_tcp_client_connection_inner(
         client,
         service,
-        Some(idle_timeout),
-        Some(pre_auth_timeout),
-        None,
-        None,
-        false,
+        GatewayConnectionSettings {
+            frame_timeout: Some(idle_timeout),
+            pre_auth_timeout: Some(pre_auth_timeout),
+            auth_failure_limiter: None,
+            source_ip: None,
+            control_only: false,
+            max_total_result_bytes: crate::query_abi::MAX_TOTAL_RESULT_BYTES,
+        },
     )
 }
 
 fn serve_tcp_client_connection_with_limits(
     client: &mut TcpStream,
     service: &mut std::os::unix::net::UnixStream,
-    idle_timeout: Duration,
-    pre_auth_timeout: Duration,
-    auth_failure_limiter: &GatewayAuthFailureLimiter,
-    source_ip: IpAddr,
-    control_only: bool,
+    settings: GatewayConnectionSettings<'_>,
 ) -> Result<(), GatewayConnectionError> {
+    let GatewayConnectionSettings {
+        frame_timeout: idle_timeout,
+        pre_auth_timeout,
+        auth_failure_limiter,
+        source_ip,
+        control_only,
+        max_total_result_bytes,
+    } = settings;
+    let (Some(idle_timeout), Some(pre_auth_timeout), Some(auth_failure_limiter), Some(source_ip)) = (
+        idle_timeout,
+        pre_auth_timeout,
+        auth_failure_limiter,
+        source_ip,
+    ) else {
+        return Err(GatewayConnectionError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "gateway worker connection settings are incomplete",
+        )));
+    };
     if idle_timeout.is_zero() || pre_auth_timeout.is_zero() {
         return Err(GatewayConnectionError::Io(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -910,11 +948,14 @@ fn serve_tcp_client_connection_with_limits(
     serve_tcp_client_connection_inner(
         client,
         service,
-        Some(idle_timeout),
-        Some(pre_auth_timeout),
-        Some(auth_failure_limiter),
-        Some(source_ip),
-        control_only,
+        GatewayConnectionSettings {
+            frame_timeout: Some(idle_timeout),
+            pre_auth_timeout: Some(pre_auth_timeout),
+            auth_failure_limiter: Some(auth_failure_limiter),
+            source_ip: Some(source_ip),
+            control_only,
+            max_total_result_bytes,
+        },
     )
 }
 
@@ -1030,6 +1071,7 @@ fn validate_gateway_runtime_config(
         || config.idle_timeout.is_zero()
         || config.pre_auth_timeout.is_zero()
         || config.accept_poll_interval.is_zero()
+        || config.max_total_result_bytes == 0
     {
         return Err(GatewayRuntimeError::InvalidConfig);
     }
@@ -1088,6 +1130,7 @@ where
         let auth_failure_limiter = auth_failure_limiter.clone();
         let idle_timeout = config.idle_timeout;
         let pre_auth_timeout = config.pre_auth_timeout;
+        let max_total_result_bytes = config.max_total_result_bytes;
         workers.push(
             std::thread::Builder::new()
                 .name(if control_only {
@@ -1110,11 +1153,14 @@ where
                         let _ = serve_tcp_client_connection_with_limits(
                             &mut client,
                             &mut service,
-                            idle_timeout,
-                            pre_auth_timeout,
-                            &auth_failure_limiter,
-                            source_ip,
-                            control_only,
+                            GatewayConnectionSettings {
+                                frame_timeout: Some(idle_timeout),
+                                pre_auth_timeout: Some(pre_auth_timeout),
+                                auth_failure_limiter: Some(&auth_failure_limiter),
+                                source_ip: Some(source_ip),
+                                control_only,
+                                max_total_result_bytes,
+                            },
                         );
                     }
                 })

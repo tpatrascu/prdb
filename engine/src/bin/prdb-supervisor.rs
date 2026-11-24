@@ -60,6 +60,7 @@ mod service {
         retention_seconds: Option<u64>,
         max_rows: Option<usize>,
         max_bytes: Option<usize>,
+        max_total_result_bytes: Option<u64>,
         max_principal_reservations: Option<usize>,
         max_pending_operational: Option<usize>,
         max_pending_analytical: Option<usize>,
@@ -103,6 +104,7 @@ mod service {
              --cpu-baseline NAME --allowed-dependency NAME (repeatable)\n\
              [--sdk-repository-dir PATH --sdk-repository-max-bytes N]\n\
              --retention-seconds N --max-rows N --max-bytes N\n\
+             [--max-total-result-bytes N] (default 67108864)\n\
              --max-principal-reservations N\n\
              [--max-pending-operational N --max-pending-analytical N]\n\
              [--max-active-operational N --max-active-analytical N]\n\
@@ -146,6 +148,12 @@ mod service {
             .ok_or("--retention-seconds must be positive and fit in signed microseconds")?;
         let max_rows = positive(required(options.max_rows, "--max-rows")?, "--max-rows")?;
         let max_bytes = positive(required(options.max_bytes, "--max-bytes")?, "--max-bytes")?;
+        let max_total_result_bytes = positive(
+            options
+                .max_total_result_bytes
+                .unwrap_or(prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES),
+            "--max-total-result-bytes",
+        )?;
         let resource_limits = WorkerResourceLimits {
             cpu_quota_micros: positive(
                 required(options.cpu_quota_us, "--cpu-quota-us")?,
@@ -294,6 +302,7 @@ mod service {
                     runtime_read_execute: options.runtime_read_execute,
                     runtime_read_only: options.runtime_read_only,
                     spill_broker: spill_broker.clone(),
+                    max_total_result_bytes,
                     cleanup_timeout: Duration::from_secs(2),
                 },
             },
@@ -491,6 +500,9 @@ mod service {
                 "--retention-seconds" => set!(retention_seconds, value.parse::<u64>()?),
                 "--max-rows" => set!(max_rows, value.parse::<usize>()?),
                 "--max-bytes" => set!(max_bytes, value.parse::<usize>()?),
+                "--max-total-result-bytes" => {
+                    set!(max_total_result_bytes, value.parse::<u64>()?)
+                }
                 "--max-principal-reservations" => {
                     set!(max_principal_reservations, value.parse::<usize>()?)
                 }

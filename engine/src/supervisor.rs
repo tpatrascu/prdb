@@ -2502,6 +2502,7 @@ mod tests {
             runtime_read_execute: Vec::new(),
             runtime_read_only: Vec::new(),
             spill_broker: None,
+            max_total_result_bytes: crate::query_abi::MAX_TOTAL_RESULT_BYTES,
             cleanup_timeout: std::time::Duration::from_millis(100),
         };
 
