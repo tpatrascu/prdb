@@ -1,5 +1,12 @@
 # Optimizer Progress
 
+## OP-4 / ST-2 follow-up: measure predicate-estimate planner IPC — measured
+
+- Harness: the real `serve_planner` stream profile seeds a fresh authorized 2,052-row INTEGER table and a readable leading index. Across 11 fresh invocation sessions per run, it verifies one exact equality match and times direct `PlannerMetadataConnection` estimation, `DescribePlanRelation`, and `EstimateScan` request/response roundtrips.
+- Evidence: five fresh-database runs produced median-of-run p50s of 2.579 ms for direct planner service (2.500–2.609 ms), 1.786 ms for relation description (1.767–1.845 ms), and 2.584 ms for the `EstimateScan` IPC roundtrip (2.500–2.603 ms). Median-of-run p95s were 2.865, 2.077, and 2.982 ms respectively. The `EstimateScan` IPC cost was within measurement variation of the direct service call; a filtered plan makes a separate relation-description request.
+- Scope: this measures an indexed single-column equality through the real storage planner stream. It excludes the isolated optimizer process, other predicate shapes, full SQL planning/execution, operational mixed load, and target hardware; those remain open.
+- Verification: the focused real-redb planner stream test passed in all five profile runs, preserving the exact `(2,052 visible, 1 matching)` response. `cargo fmt --all -- --check` passed.
+
 ## OP-4 / ST-2 follow-up: extend exact authorized pair estimates to 16,384 rows — implemented
 
 - Contract: the optimizer and planner IPC can request exact joined-pair counts when each authorized population is at most 16,384 rows. Storage keeps the 8 MiB decoded-row ceiling, 4 KiB composite-key ceiling, value-independent visibility proof, readable join-key requirement, and shared 16-request estimate allowance.

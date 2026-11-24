@@ -52224,6 +52224,192 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
         })
         .map_err(|error| format!("planner fixture column policy creation: {error:?}"))?;
 
+    if std::env::var_os("PRDB_TEST_PROFILE_PLANNER_ESTIMATE_IPC").is_some() {
+        const PROFILE_ROWS: usize = 2_052;
+        const PROFILE_RUNS: usize = 11;
+        let mut seed_invocation_id = [0xd1; 16];
+        seed_invocation_id[15] = 1;
+        let mut seed = storage.begin_invocation(
+            seed_invocation_id,
+            actor,
+            9_999,
+            PROFILE_ROWS + 1,
+            PROFILE_ROWS * 64,
+        )?;
+        for value in 0..PROFILE_ROWS {
+            seed.stage_put(
+                prdb_engine::overlay::RowId {
+                    table: table.table_id,
+                    row: ((value + 1) as u128).to_be_bytes(),
+                },
+                &encode_tuple(
+                    &[ColumnSchema {
+                        scalar_type: ScalarType::Integer,
+                        nullable: true,
+                    }],
+                    1,
+                    &[Some(ScalarValue::Integer(value as i32))],
+                )?,
+            )?;
+        }
+        seed.commit()
+            .map_err(|error| format!("planner IPC profile seed commit: {error:?}"))?;
+        let mut index_invocation_id = [0xd1; 16];
+        index_invocation_id[15] = 2;
+        let mut index_audit = identity_audit_event(0xd2, actor, table.table_id);
+        index_audit.correlation_id = index_invocation_id;
+        storage
+            .create_index(prdb_engine::storage_manager::CreateIndexRequest {
+                invocation_id: index_invocation_id,
+                authenticated_actor_id: actor,
+                table_id: table.table_id,
+                name: "planner_estimate_profile_idx".to_owned(),
+                column_ids: vec![table.column_ids[0]],
+                unique: false,
+                retention_deadline_us: 9_999,
+                audit_event: index_audit,
+            })
+            .map_err(|error| format!("planner IPC profile index creation: {error:?}"))?;
+        assert_eq!(
+            storage.collect_committed_table_population(table.table_id)?,
+            prdb_engine::statistics::StatisticsCollectionOutcome::Exact,
+            "the IPC profile needs an exact committed population record"
+        );
+
+        let predicate = prdb_engine::optimizer_binding::BoundPredicate::Compare {
+            operator: prdb_engine::optimizer_request::Comparison::Equal,
+            left: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Column(
+                BoundColumn {
+                    column_id: table.column_ids[0],
+                    ordinal: 0,
+                    scalar_type: ScalarType::Integer,
+                    nullable: true,
+                },
+            )),
+            right: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Integer(7)),
+        };
+        let predicate_request = EstimatePredicateRequest::from_bound_predicate(
+            "planner_stats".to_owned(),
+            "observations".to_owned(),
+            &predicate,
+        )?;
+        let predicate_bytes = predicate_request.predicate_bytes.clone();
+        let mut describe_roundtrips = Vec::with_capacity(PROFILE_RUNS);
+        let mut direct_estimate_times = Vec::with_capacity(PROFILE_RUNS);
+        let mut estimate_roundtrips = Vec::with_capacity(PROFILE_RUNS);
+        for run_number in 0..PROFILE_RUNS {
+            let mut direct_invocation_id = [0xd1; 16];
+            direct_invocation_id[14] = 2;
+            direct_invocation_id[15] = run_number as u8 + 1;
+            let mut direct_transaction =
+                storage.begin_invocation(direct_invocation_id, actor, 9_999, 1, 64)?;
+            let mut connection = direct_transaction.open_planner_metadata_connection();
+            let started = std::time::Instant::now();
+            let direct_estimate = connection.estimate_predicate_for_plan(
+                "planner_stats",
+                "observations",
+                &predicate_bytes,
+            )?;
+            direct_estimate_times.push(started.elapsed());
+            assert_eq!(
+                direct_estimate,
+                Some((PROFILE_ROWS as u64, 1)),
+                "direct planner service must preserve the exact authorized estimate"
+            );
+            drop(connection);
+            direct_transaction.abort()?;
+
+            let mut estimate_invocation_id = [0xd1; 16];
+            estimate_invocation_id[14] = 1;
+            estimate_invocation_id[15] = run_number as u8 + 1;
+            let mut transaction =
+                storage.begin_invocation(estimate_invocation_id, actor, 9_999, 1, 64)?;
+            let (mut client, mut server) = std::os::unix::net::UnixStream::pair()?;
+            client.set_read_timeout(Some(Duration::from_secs(5)))?;
+            std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+                let planner = scope.spawn(|| serve_planner(&mut server, &mut transaction));
+                let describe = IpcFrame {
+                    operation: IpcOperation::DescribePlanRelation as u16,
+                    request_id: 1,
+                    payload: DescribePlanRelationRequest {
+                        schema_name: "planner_stats".to_owned(),
+                        relation_name: "observations".to_owned(),
+                        include_scan_estimate: false,
+                        population_estimate_max_rows: None,
+                    }
+                    .encode()?,
+                };
+                let started = std::time::Instant::now();
+                prdb_engine::ipc::write_frame(&mut client, &describe)?;
+                let described = prdb_engine::ipc::read_frame(&mut client)?
+                    .ok_or("planner IPC stream closed before relation response")?;
+                describe_roundtrips.push(started.elapsed());
+                assert_eq!(
+                    described.operation,
+                    IpcOperation::DescribePlanRelation as u16
+                );
+                assert_eq!(described.request_id, 1);
+                assert_eq!(
+                    DescribePlanRelationResponse::decode(&described.payload)?
+                        .relation
+                        .ok_or("planner IPC did not resolve the benchmark relation")?
+                        .relation
+                        .relation_id,
+                    table.table_id
+                );
+                let request = IpcFrame {
+                    operation: IpcOperation::EstimateScan as u16,
+                    request_id: 2,
+                    payload: predicate_request.encode()?,
+                };
+                let started = std::time::Instant::now();
+                prdb_engine::ipc::write_frame(&mut client, &request)?;
+                let response = prdb_engine::ipc::read_frame(&mut client)?
+                    .ok_or("planner IPC stream closed before estimate response")?;
+                estimate_roundtrips.push(started.elapsed());
+                assert_eq!(response.operation, IpcOperation::EstimateScan as u16);
+                assert_eq!(response.request_id, 2);
+                assert_eq!(
+                    EstimatePredicateResponse::decode(&response.payload)?,
+                    EstimatePredicateResponse::Exact {
+                        visible_rows: PROFILE_ROWS as u64,
+                        matching_rows: 1,
+                    },
+                    "planner IPC must preserve the exact authorized estimate"
+                );
+                client.shutdown(Shutdown::Write)?;
+                planner
+                    .join()
+                    .expect("planner IPC profile server panicked")
+                    .map_err(|error| format!("planner IPC profile failed: {error:?}"))?;
+                Ok(())
+            })?;
+            transaction.abort()?;
+        }
+        describe_roundtrips.sort_unstable();
+        direct_estimate_times.sort_unstable();
+        estimate_roundtrips.sort_unstable();
+        let describe_median = describe_roundtrips[describe_roundtrips.len() / 2];
+        let describe_p95 =
+            describe_roundtrips[((describe_roundtrips.len() - 1) * 95).div_ceil(100)];
+        let direct_median = direct_estimate_times[direct_estimate_times.len() / 2];
+        let direct_p95 =
+            direct_estimate_times[((direct_estimate_times.len() - 1) * 95).div_ceil(100)];
+        let estimate_median = estimate_roundtrips[estimate_roundtrips.len() / 2];
+        let estimate_p95 =
+            estimate_roundtrips[((estimate_roundtrips.len() - 1) * 95).div_ceil(100)];
+        eprintln!(
+            "planner IPC profile: rows={PROFILE_ROWS}, runs={PROFILE_RUNS}, indexed exact equality, direct service median/p95={:.3}/{:.3} ms, DescribePlanRelation median/p95={:.3}/{:.3} ms, exact EstimateScan roundtrip median/p95={:.3}/{:.3} ms",
+            direct_median.as_secs_f64() * 1_000.0,
+            direct_p95.as_secs_f64() * 1_000.0,
+            describe_median.as_secs_f64() * 1_000.0,
+            describe_p95.as_secs_f64() * 1_000.0,
+            estimate_median.as_secs_f64() * 1_000.0,
+            estimate_p95.as_secs_f64() * 1_000.0,
+        );
+        return Ok(());
+    }
+
     assert_eq!(
         storage.collect_committed_table_population(table.table_id)?,
         prdb_engine::statistics::StatisticsCollectionOutcome::Exact,
