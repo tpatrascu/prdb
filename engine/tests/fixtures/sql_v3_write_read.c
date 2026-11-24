@@ -2064,6 +2064,32 @@ static int32_t run_write_read_fixture(
         return 0;
     }
     if (invocation->parameters_len == 1 && invocation->parameters != NULL &&
+        invocation->parameters[0] == 'R') {
+        static const uint8_t large_result_sql[] =
+            "SELECT large_payload, large_payload, large_payload, "
+            "large_payload, large_payload, large_payload, large_payload, "
+            "large_payload, large_payload, large_payload, large_payload "
+            "FROM decimal_grouped_records WHERE left_key = $1 LIMIT 800";
+        static const uint8_t large_result_parameters[] = {
+            'P', 'S', 'P', '1', 0, 1, 0, 0,
+            0, 0, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0, 0, 0,
+            0, 0, 0, 4, 99, 0, 0, 0};
+        status = prdb_sdk_sql_run_statement_optimizer_v1(
+            optimizer_host, schema, sizeof(schema) - 1, large_result_sql,
+            sizeof(large_result_sql) - 1, large_result_parameters,
+            sizeof(large_result_parameters));
+        if (status != PRDB_SDK_SQL_DISPATCH_OK) {
+            char message[64];
+            int length = snprintf(message, sizeof(message),
+                                  "fixture-error-large-sql-result-%d", status);
+            return length > 0 && (size_t)length < sizeof(message)
+                       ? report_failure(host, (const uint8_t *)message,
+                                        (uint64_t)length)
+                       : 1;
+        }
+        return 0;
+    }
+    if (invocation->parameters_len == 1 && invocation->parameters != NULL &&
         invocation->parameters[0] == 'O') {
         uint8_t output_chunk[PRDB_QUERY_MAX_RESULT_CHUNK_BYTES];
         memset(output_chunk, 0xa5, sizeof(output_chunk));

@@ -40881,6 +40881,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         std::env::var_os("PRDB_TEST_SQL_IN_OVER_BUDGET_FALLBACK_ONLY").is_some();
     let sql_in_elevated_budget_only =
         std::env::var_os("PRDB_TEST_SQL_IN_ELEVATED_BUDGET_ONLY").is_some();
+    let elevated_result_only = std::env::var_os("PRDB_TEST_ELEVATED_RESULT_ONLY").is_some();
     let sql_in_only = sql_in_indexed_only
         || sql_in_fallback_only
         || sql_in_null_left_only
@@ -40896,12 +40897,13 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             sql_in_denied_key_only,
             sql_in_over_budget_only,
             sql_in_elevated_budget_only,
+            elevated_result_only,
         ]
         .into_iter()
         .filter(|enabled| *enabled)
         .count()
             <= 1,
-        "select only one SQL IN acceptance mode"
+        "select only one SQL IN or elevated-result acceptance mode"
     );
     let spill_enabled_only = spill_quota_only
         || spill_only
@@ -41312,7 +41314,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             default: None,
         });
     }
-    if spill_join_oversize_only || spill_join_text_only {
+    if spill_join_oversize_only || spill_join_text_only || elevated_result_only {
         decimal_columns.push(TableColumnDefinition {
             name: "large_payload".to_owned(),
             scalar_type: ScalarType::Text,
@@ -41483,7 +41485,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             nullable: true,
         });
     }
-    if spill_join_oversize_only || spill_join_text_only {
+    if spill_join_oversize_only || spill_join_text_only || elevated_result_only {
         decimal_schema.push(ColumnSchema {
             scalar_type: ScalarType::Text,
             nullable: true,
@@ -41511,8 +41513,10 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 if count_bigint_only {
                     values.push(bigint_value.map(ScalarValue::BigInt));
                 }
-                if spill_join_oversize_only || spill_join_text_only {
-                    let payload = if spill_join_oversize_only {
+                if spill_join_oversize_only || spill_join_text_only || elevated_result_only {
+                    let payload = if elevated_result_only {
+                        None
+                    } else if spill_join_oversize_only {
                         (row_id == 0xf8).then(|| "x".repeat(1024))
                     } else {
                         match row_id {
@@ -41537,7 +41541,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             if count_bigint_only {
                 values.push(None);
             }
-            if spill_join_oversize_only || spill_join_text_only {
+            if spill_join_oversize_only || spill_join_text_only || elevated_result_only {
                 values.push(None);
             }
             decimal_rows.push(RowWrite {
@@ -41574,6 +41578,43 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         now + 3_600_000_000,
         &decimal_rows,
     )?;
+    if elevated_result_only {
+        const ROWS: u16 = 8192;
+        const ROWS_PER_COMMIT: u16 = 64;
+        let payload = "x".repeat(16_350);
+        for batch in 0..ROWS / ROWS_PER_COMMIT {
+            let first = batch * ROWS_PER_COMMIT;
+            let rows = (first..first + ROWS_PER_COMMIT)
+                .map(|row_number| {
+                    let mut row_id = [0; 16];
+                    row_id[14..].copy_from_slice(&(row_number + 1).to_be_bytes());
+                    Ok(RowWrite {
+                        key: table_row_key(decimal_table.table_id, row_id),
+                        expected_version: None,
+                        payload: Some(encode_tuple(
+                            &decimal_schema,
+                            1,
+                            &[
+                                Some(ScalarValue::Integer(99)),
+                                Some(ScalarValue::Integer(1)),
+                                None,
+                                Some(ScalarValue::Text(payload.clone())),
+                            ],
+                        )?),
+                    })
+                })
+                .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+            let mut invocation_id = id(0xc6);
+            invocation_id[14..].copy_from_slice(&(batch + 1).to_be_bytes());
+            commit_rows(
+                &database,
+                invocation_id,
+                builtin_owner_id(),
+                now + 3_600_000_000,
+                &rows,
+            )?;
+        }
+    }
     let pressure_schema = [
         ColumnSchema {
             scalar_type: ScalarType::Text,
@@ -41974,7 +42015,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     if count_bigint_only {
         authority_writes.push(dependency_write(user_id, decimal_table.column_ids[3], 5));
     }
-    if spill_join_oversize_only || spill_join_text_only {
+    if spill_join_oversize_only || spill_join_text_only || elevated_result_only {
         let payload_column_index = if count_bigint_only { 4 } else { 3 };
         authority_writes.push(dependency_write(
             user_id,
@@ -42810,7 +42851,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             "sandbox_decimal_group_bigint_cell_policy",
         ));
     }
-    if spill_join_oversize_only || spill_join_text_only {
+    if spill_join_oversize_only || spill_join_text_only || elevated_result_only {
         let payload_column_index = if count_bigint_only { 4 } else { 3 };
         decimal_cell_policies.push((
             decimal_table.column_ids[payload_column_index],
@@ -43453,8 +43494,12 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             } else {
                 prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES
             },
-            analytical_max_total_result_bytes: sql_in_elevated_budget_only
-                .then_some(prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES),
+            analytical_max_total_result_bytes: if elevated_result_only {
+                Some(192 * 1024 * 1024)
+            } else {
+                sql_in_elevated_budget_only
+                    .then_some(prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES)
+            },
             max_sql_index_probe_candidates:
                 prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
             analytical_max_sql_index_probe_candidates: sql_in_elevated_budget_only.then_some(256),
@@ -43489,6 +43534,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         || spill_pressure_cancel_only
         || spill_disk_full_only
         || sql_in_any_only
+        || elevated_result_only
     {
         let mut ordered_client = ClientConnectionSession::default();
         ordered_client.accept_hello(ClientMode::Query, "sandbox-ordered-analytical-sum")?;
@@ -43598,6 +43644,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             } else {
                 b'N'
             }
+        } else if elevated_result_only {
+            b'R'
         } else if filtered_composite_only {
             b'Q'
         } else {
@@ -43670,12 +43718,35 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         let (cancel_trigger_tx, cancel_trigger_rx) = std::sync::mpsc::channel();
         let join_timing_observed_at = Arc::new(std::sync::Mutex::new(Vec::new()));
         let join_timing_observed_at_reader = Arc::clone(&join_timing_observed_at);
+        let elevated_result_reader = elevated_result_only;
+        let expected_large_result_row = if elevated_result_only {
+            let mut row = b"SQLR".to_vec();
+            row.extend_from_slice(&1u16.to_be_bytes());
+            row.extend_from_slice(&11u16.to_be_bytes());
+            for _ in 0..11 {
+                row.extend_from_slice(&13u16.to_be_bytes());
+                row.extend_from_slice(b"large_payload");
+                row.extend_from_slice(&6u32.to_be_bytes());
+                row.extend_from_slice(&[0, 0, 0]);
+                row.extend_from_slice(&16_350u32.to_be_bytes());
+                row.extend(std::iter::repeat_n(b'x', 16_350));
+            }
+            Some(row)
+        } else {
+            None
+        };
         let mut pressure_trigger_tx =
             (spill_pressure_only || spill_pressure_cancel_only || indexed_join_benchmark_only)
                 .then_some(pressure_trigger_tx);
         let mut cancel_trigger_tx = spill_pressure_cancel_only.then_some(cancel_trigger_tx);
         let ordered_reader = std::thread::spawn(move || {
             let mut frames = Vec::new();
+            let mut discarded_result_bytes = 0u64;
+            let mut discarded_result_frames = 0usize;
+            let mut discarded_result_rows = 0usize;
+            let mut expected_row_offset = 0usize;
+            let mut first_discarded_result_prefix = Vec::new();
+            let expected_large_result_row = expected_large_result_row;
             while let Some(frame) = prdb_engine::ipc::read_frame(&mut ordered_gateway)? {
                 if frame.operation == Operation::GatewayResultData as u16
                     && frame.payload.len() == 16
@@ -43701,14 +43772,65 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                         let _ = trigger.send(());
                     }
                 }
+                if elevated_result_reader && frame.operation == Operation::GatewayResultData as u16
+                {
+                    if first_discarded_result_prefix.is_empty() {
+                        first_discarded_result_prefix
+                            .extend_from_slice(&frame.payload[..frame.payload.len().min(64)]);
+                    }
+                    let expected_row = expected_large_result_row.as_ref().ok_or_else(|| {
+                        prdb_engine::ipc::FrameError::Io(std::io::Error::other(
+                            "large SQL result verifier is unavailable",
+                        ))
+                    })?;
+                    let mut frame_offset = 0;
+                    while frame_offset < frame.payload.len() {
+                        let compared = (expected_row.len() - expected_row_offset)
+                            .min(frame.payload.len() - frame_offset);
+                        if frame.payload[frame_offset..frame_offset + compared]
+                            != expected_row[expected_row_offset..expected_row_offset + compared]
+                        {
+                            return Err(prdb_engine::ipc::FrameError::Io(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "large SQL result row differs from expected SQLR bytes",
+                            )));
+                        }
+                        frame_offset += compared;
+                        expected_row_offset += compared;
+                        if expected_row_offset == expected_row.len() {
+                            expected_row_offset = 0;
+                            discarded_result_rows += 1;
+                        }
+                    }
+                    discarded_result_bytes = discarded_result_bytes
+                        .checked_add(u64::try_from(frame.payload.len()).map_err(|_| {
+                            prdb_engine::ipc::FrameError::Io(std::io::Error::other(
+                                "result frame length exceeds u64",
+                            ))
+                        })?)
+                        .ok_or_else(|| {
+                            prdb_engine::ipc::FrameError::Io(std::io::Error::other(
+                                "result byte counter overflow",
+                            ))
+                        })?;
+                    discarded_result_frames += 1;
+                    continue;
+                }
                 let terminal = frame.operation == Operation::GatewayTerminal as u16;
                 frames.push(frame);
                 if terminal {
                     break;
                 }
             }
-            Ok::<_, prdb_engine::ipc::FrameError>(frames)
+            Ok::<_, prdb_engine::ipc::FrameError>((
+                frames,
+                discarded_result_bytes,
+                discarded_result_frames,
+                discarded_result_rows,
+                first_discarded_result_prefix,
+            ))
         });
+        let elevated_result_started_at = elevated_result_only.then(std::time::Instant::now);
         let mut operational_load_interval = None;
         let ordered_decision = if spill_pressure_only
             || spill_pressure_cancel_only
@@ -43912,9 +44034,31 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 ordered_accepted.request_id,
             )?
         };
-        let ordered_frames = ordered_reader
+        let (
+            ordered_frames,
+            discarded_result_bytes,
+            discarded_result_frames,
+            discarded_result_rows,
+            first_discarded_result_prefix,
+        ) = ordered_reader
             .join()
             .map_err(|_| "ordered analytical gateway reader panicked")??;
+        if let Some(started_at) = elevated_result_started_at {
+            assert_eq!(
+                discarded_result_bytes,
+                800 * (8 + 11 * (26 + 16_350)),
+                "unexpected first streamed SQL result payload: {:?}",
+                String::from_utf8_lossy(&first_discarded_result_prefix)
+            );
+            assert_eq!(discarded_result_frames, 800 * 11);
+            assert_eq!(discarded_result_rows, 800);
+            eprintln!(
+                "confined 137 MiB SQL result relay latency: {:.3} ms ({} bytes, {} bounded frames)",
+                started_at.elapsed().as_secs_f64() * 1000.0,
+                discarded_result_bytes,
+                discarded_result_frames,
+            );
+        }
         if spill_quota_only
             || spill_crash_only
             || spill_redacted_only
@@ -43972,7 +44116,13 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         }
         staging.finish_started(ordered_owner, ordered_reservation.invocation_id)?;
         let mut ordered_frames = ordered_frames.into_iter();
-        if spill_only || spill_disabled_only || spill_limit_only {
+        if elevated_result_only {
+            assert_eq!(
+                ordered_frames.len(),
+                1,
+                "result relay retained payload frames"
+            );
+        } else if spill_only || spill_disabled_only || spill_limit_only {
             fn expected_spilled_group_count(left_key: Option<i32>, count: i64) -> Vec<u8> {
                 let mut output = b"SQLR".to_vec();
                 output.extend_from_slice(&1u16.to_be_bytes());
