@@ -52690,7 +52690,35 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             "a private write must invalidate the cached population estimate"
         );
 
-        for request_id in 9..(2 + MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION as u64) {
+        for (request_id, expected_joined_rows) in [(9, 8), (10, 9), (11, 9)] {
+            prdb_engine::ipc::write_frame(
+                &mut client,
+                &IpcFrame {
+                    operation: IpcOperation::EstimateScan as u16,
+                    request_id,
+                    payload: EstimateJoinRequest {
+                        schema_name: "planner_stats".to_owned(),
+                        left_relation_name: "observations".to_owned(),
+                        right_relation_name: "observations".to_owned(),
+                        left_key_column_ids: vec![table.column_ids[0]],
+                        right_key_column_ids: vec![table.column_ids[0]],
+                        maximum_rows: 128,
+                    }
+                    .encode()?,
+                },
+            )?;
+            let response = prdb_engine::ipc::read_frame(&mut client)?
+                .ok_or("planner stream closed before join estimate cache check")?;
+            assert_eq!(
+                EstimateJoinResponse::decode(&response.payload)?,
+                EstimateJoinResponse::Exact {
+                    joined_rows: expected_joined_rows,
+                },
+                "join estimate cache must reflect the write generation and reuse only within it"
+            );
+        }
+
+        for request_id in 12..(2 + MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION as u64) {
             prdb_engine::ipc::write_frame(
                 &mut client,
                 &IpcFrame {
