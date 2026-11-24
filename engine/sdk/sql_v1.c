@@ -23,6 +23,7 @@
 #include "prdb_sdk_sql_v23.h"
 #include "prdb_sdk_sql_v24.h"
 #include "prdb_sdk_sql_v25.h"
+#include "prdb_sdk_sql_v26.h"
 #include "prdb_sdk_sql_dml_v1.h"
 #include "prdb_sdk_sql_dml_v2.h"
 #include "prdb_sdk_sql_dml_v3.h"
@@ -70,6 +71,7 @@ typedef struct parser {
 #define HAVING_HIDDEN_COUNT 1
 #define HAVING_NULL_TESTS 2
 #define GROUP_SINGLE_KEY 4
+#define PARSER_ALLOW_IN 8
 
 static int is_space(uint8_t byte) {
     return byte == ' ' || byte == '\t' || byte == '\r' || byte == '\n';
@@ -972,6 +974,58 @@ static int32_t parse_predicate_primary_v2(parser *state,
     if (status != PRDB_SDK_SQL_OK) {
         return status;
     }
+    if ((state->having_features & PARSER_ALLOW_IN) != 0 &&
+        token_is_keyword(state, "IN")) {
+        uint32_t root = 0;
+        uint32_t value_count = 0;
+        if (advance(state) != PRDB_SDK_SQL_OK) return state->error;
+        if (state->current.kind != TOKEN_LEFT_PAREN) {
+            state->error_offset = state->current.offset;
+            return PRDB_SDK_SQL_SYNTAX_ERROR;
+        }
+        if (advance(state) != PRDB_SDK_SQL_OK) return state->error;
+        for (;;) {
+            prdb_sdk_predicate_node_v2 equality = {0};
+            uint32_t leaf;
+            if (state->current.kind != TOKEN_PARAMETER) {
+                state->error_offset = state->current.offset;
+                return PRDB_SDK_SQL_SYNTAX_ERROR;
+            }
+            if (++value_count > PRDB_SDK_SQL_V26_MAX_IN_VALUES) {
+                state->error_offset = state->current.offset;
+                return PRDB_SDK_SQL_LIMIT_EXCEEDED;
+            }
+            equality.node_kind = PRDB_SDK_SQL_PREDICATE_COMPARE;
+            equality.comparison = PRDB_SDK_SQL_COMPARE_EQUAL;
+            equality.column = node.column;
+            status = parse_unsigned(state, state->current,
+                                    PRDB_SDK_SQL_MAX_PARAMETER_INDEX, 0,
+                                    &equality.parameter_index);
+            if (status != PRDB_SDK_SQL_OK) return status;
+            status = add_predicate_node(state, statement, equality, &leaf);
+            if (status != PRDB_SDK_SQL_OK) return status;
+            if (value_count == 1) {
+                root = leaf;
+            } else {
+                prdb_sdk_predicate_node_v2 disjunction = {0};
+                disjunction.node_kind = PRDB_SDK_SQL_PREDICATE_OR;
+                disjunction.left_child = root;
+                disjunction.right_child = leaf;
+                status = add_predicate_node(state, statement, disjunction, &root);
+                if (status != PRDB_SDK_SQL_OK) return status;
+            }
+            if (advance(state) != PRDB_SDK_SQL_OK) return state->error;
+            if (state->current.kind != TOKEN_COMMA) break;
+            if (advance(state) != PRDB_SDK_SQL_OK) return state->error;
+        }
+        if (state->current.kind != TOKEN_RIGHT_PAREN) {
+            state->error_offset = state->current.offset;
+            return PRDB_SDK_SQL_SYNTAX_ERROR;
+        }
+        if (advance(state) != PRDB_SDK_SQL_OK) return state->error;
+        *index_out = root;
+        return PRDB_SDK_SQL_OK;
+    }
     if (token_is_keyword(state, "IS")) {
         if (advance(state) != PRDB_SDK_SQL_OK) {
             return state->error;
@@ -1294,10 +1348,11 @@ failed:
     return fail_at(&state, status);
 }
 
-int32_t prdb_sdk_sql_parse_select_v2(const uint8_t *sql, uint64_t sql_len,
-                                     prdb_sdk_select_v2 *out,
-                                     uint32_t out_capacity,
-                                     uint32_t *error_offset_out) {
+static int32_t parse_select_v2_internal(const uint8_t *sql, uint64_t sql_len,
+                                        prdb_sdk_select_v2 *out,
+                                        uint32_t out_capacity,
+                                        uint32_t *error_offset_out,
+                                        int allow_in) {
     parser state;
     prdb_sdk_select_v2 result;
     int32_t status;
@@ -1318,7 +1373,7 @@ int32_t prdb_sdk_sql_parse_select_v2(const uint8_t *sql, uint64_t sql_len,
         return PRDB_SDK_SQL_LIMIT_EXCEEDED;
     }
     state = (parser){sql, (uint32_t)sql_len, 0, {TOKEN_END, 0, 0}, 0,
-                     PRDB_SDK_SQL_OK, 0};
+                     PRDB_SDK_SQL_OK, allow_in ? PARSER_ALLOW_IN : 0};
     result = (prdb_sdk_select_v2){0};
     result.struct_size = sizeof(result);
     result.abi_version = PRDB_SDK_SQL_ABI_V2_VERSION;
@@ -1429,6 +1484,31 @@ failed_v2:
         *error_offset_out = state.error_offset;
     }
     return fail_at(&state, status);
+}
+
+int32_t prdb_sdk_sql_parse_select_v2(const uint8_t *sql, uint64_t sql_len,
+                                     prdb_sdk_select_v2 *out,
+                                     uint32_t out_capacity,
+                                     uint32_t *error_offset_out) {
+    return parse_select_v2_internal(sql, sql_len, out, out_capacity,
+                                    error_offset_out, 0);
+}
+
+int32_t prdb_sdk_sql_parse_select_v26(const uint8_t *sql, uint64_t sql_len,
+                                      prdb_sdk_select_v26 *out,
+                                      uint32_t out_capacity,
+                                      uint32_t *error_offset_out) {
+    prdb_sdk_select_v26 result = {0};
+    int32_t status;
+    if (out == NULL || out_capacity < sizeof(*out))
+        return PRDB_SDK_SQL_INVALID_ARGUMENT;
+    status = parse_select_v2_internal(sql, sql_len, &result.base,
+                                      sizeof(result.base), error_offset_out, 1);
+    if (status != PRDB_SDK_SQL_OK) return status;
+    result.struct_size = sizeof(result);
+    result.abi_version = PRDB_SDK_SQL_ABI_V26_VERSION;
+    *out = result;
+    return PRDB_SDK_SQL_OK;
 }
 
 static int decimal_fits_precision(const uint8_t *coefficient,

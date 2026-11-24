@@ -606,6 +606,16 @@ static void put_integer_literal_column_comparison(uint8_t *bytes,
     *offset += 15;
 }
 
+static void put_integer_null_comparison(uint8_t *bytes, uint32_t *offset) {
+    bytes[(*offset)++] = 0x20;
+    bytes[(*offset)++] = 0;
+    bytes[(*offset)++] = 0x10;
+    bytes[(*offset)++] = 10;
+    memset(bytes + *offset, 0, 15);
+    *offset += 15;
+    bytes[(*offset)++] = 0x00;
+}
+
 static uint32_t build_filter_plan(uint8_t *bytes,
                                   uint32_t *predicate_offset) {
     uint32_t offset = 0;
@@ -991,15 +1001,17 @@ static uint32_t build_multi_point_probe_plan(uint8_t *bytes) {
     uint32_t predicate_offset;
     uint32_t offset = build_filter_plan(bytes, &predicate_offset);
     const uint32_t old_predicate_len = 28;
-    memmove(bytes + predicate_offset + 2 + 2 * old_predicate_len,
+    const uint32_t new_predicate_len = 2 + 2 * old_predicate_len + 20;
+    memmove(bytes + predicate_offset + new_predicate_len,
             bytes + predicate_offset + old_predicate_len,
             offset - predicate_offset - old_predicate_len);
     uint32_t predicate_end = predicate_offset;
     bytes[predicate_end++] = 0x31;
-    bytes[predicate_end++] = 2;
+    bytes[predicate_end++] = 3;
     put_integer_comparison(bytes, &predicate_end, 1);
     put_integer_comparison(bytes, &predicate_end, 2);
-    offset += 2 + old_predicate_len;
+    put_integer_null_comparison(bytes, &predicate_end);
+    offset += new_predicate_len - old_predicate_len;
     bytes[offset++] = 0xa4;
     memset(bytes + offset, 0x72, 16);
     offset += 16;

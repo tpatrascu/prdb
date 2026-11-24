@@ -1,5 +1,6 @@
 #include "prdb_sdk_sql_exec_v2.h"
 #include "prdb_sdk_sql_exec_v3.h"
+#include "prdb_sdk_sql_v26.h"
 #include "prdb_sdk_sql_dml_v3.h"
 #include "prdb_sdk_sql_order_v2.h"
 #include "prdb_sdk_sql_spill_sort_v1.h"
@@ -221,6 +222,7 @@ static int32_t execute_select_internal(
     uint32_t parser_version, prdb_sdk_sql_result_row_v2_fn on_row,
     void *result_context) {
     prdb_sdk_select_v2 statement = {0};
+    prdb_sdk_select_v26 statement_v26 = {0};
     prdb_sdk_select_v3 statement_v3 = {0};
     prdb_sdk_planner_relation_v1 planned = {0};
     prdb_sdk_executor_relation_v1 resolved = {0};
@@ -274,8 +276,14 @@ static int32_t execute_select_internal(
         return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_INVALID_ARGUMENT);
     }
     if (parser_version == PRDB_SDK_SQL_ABI_V2_VERSION) {
-        status = prdb_sdk_sql_parse_select_v2(sql, sql_len, &statement,
-                                              sizeof(statement), NULL);
+        status = prdb_sdk_sql_parse_select_v26(
+            sql, sql_len, &statement_v26, sizeof(statement_v26), NULL);
+        if (status == PRDB_SDK_SQL_OK) {
+            statement = statement_v26.base;
+        } else {
+            status = prdb_sdk_sql_parse_select_v2(sql, sql_len, &statement,
+                                                  sizeof(statement), NULL);
+        }
     } else if (parser_version == PRDB_SDK_SQL_ABI_V3_VERSION) {
         status = prdb_sdk_sql_parse_select_v3(
             sql, sql_len, &statement_v3, sizeof(statement_v3), NULL);

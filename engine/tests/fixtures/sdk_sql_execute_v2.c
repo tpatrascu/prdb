@@ -811,6 +811,8 @@ int main(void) {
     static const uint8_t zero_limit_sql[] = "SELECT id FROM widgets LIMIT 0";
     static const uint8_t no_match_sql[] =
         "SELECT id FROM widgets WHERE id < $1";
+    static const uint8_t in_sql[] =
+        "SELECT id FROM widgets WHERE id IN ($1, $2) LIMIT 1";
     static const uint8_t sort_limit_sql[] =
         "SELECT id FROM widgets ORDER BY id DESC LIMIT 1";
     static const uint8_t sort_all_sql[] =
@@ -879,7 +881,10 @@ int main(void) {
          insert_parameter_bytes, sizeof(insert_parameter_bytes)}};
     static const uint8_t multi_parameter_bytes[2][4] = {
         {0, 0, 0, 42}, {0, 0, 0, 43}};
+    static const uint8_t in_parameter_bytes[2][4] = {
+        {0, 0, 0, 4}, {0, 0, 0, 5}};
     prdb_sdk_value_v1 multi_parameters[2] = {{0}};
+    prdb_sdk_value_v1 in_parameters[2] = {{0}};
     uint8_t planner_response[256] = {0};
     uint8_t executor_response[256] = {0};
     uint8_t batch_response[4096] = {0};
@@ -894,6 +899,10 @@ int main(void) {
             sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
             PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_INTEGER,
             multi_parameter_bytes[index], sizeof(multi_parameter_bytes[index])};
+        in_parameters[index] = (prdb_sdk_value_v1){
+            sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
+            PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_INTEGER,
+            in_parameter_bytes[index], sizeof(in_parameter_bytes[index])};
     }
     assert(sizeof(prdb_host_api_v3) == 48);
     assert(sizeof(prdb_query_descriptor_v3_record) == 16);
@@ -923,6 +932,43 @@ int main(void) {
                       sizeof(expected_result)) == 0);
     }
     assert(mock.statement_failed == 0);
+
+    mock.stream_pages = 0;
+    mock.stream_next_calls = 0;
+    mock.executor_calls = 0;
+    mock.executor_requests = 0;
+    mock.cancellation_checks = 0;
+    mock.scan_finished = 0;
+    mock.statement_failed = 0;
+    result.calls = 0;
+    result.encoded_len = 0;
+    assert(prdb_sdk_sql_execute_select_v2(
+               &host, schema, sizeof(schema) - 1, in_sql, sizeof(in_sql) - 1,
+               in_parameters, 2, 1, 1024, planner_response,
+               sizeof(planner_response), executor_response,
+               sizeof(executor_response), batch_response,
+               sizeof(batch_response), planner_columns, 1, executor_columns,
+               1, cell_scratch, 1, on_row, &result) == PRDB_SDK_SQL_EXEC_OK);
+    assert(result.calls == 1 && mock.statement_failed == 0);
+
+    in_parameters[1] = (prdb_sdk_value_v1){
+        sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
+        PRDB_SDK_VALUE_STATE_NULL, 0,
+        NULL, 0};
+    mock.executor_calls = 0;
+    mock.executor_requests = 0;
+    mock.cancellation_checks = 0;
+    mock.scan_finished = 0;
+    result.calls = 0;
+    result.encoded_len = 0;
+    assert(prdb_sdk_sql_execute_select_v2(
+               &host, schema, sizeof(schema) - 1, in_sql, sizeof(in_sql) - 1,
+               in_parameters, 2, 1, 1024, planner_response,
+               sizeof(planner_response), executor_response,
+               sizeof(executor_response), batch_response,
+               sizeof(batch_response), planner_columns, 1, executor_columns,
+               1, cell_scratch, 1, on_row, &result) == PRDB_SDK_SQL_EXEC_OK);
+    assert(result.calls == 0 && mock.statement_failed == 0);
 
     mock.stream_pages = 1;
     mock.stream_next_calls = 0;

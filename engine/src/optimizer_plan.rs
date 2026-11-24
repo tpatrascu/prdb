@@ -589,7 +589,7 @@ pub fn decode_plan_v1(bytes: &[u8]) -> Result<SingleTablePlanV1, PlanError> {
                 }
                 0xa4 => {
                     let count = usize::from(reader.u16()?);
-                    if !(2..=64).contains(&count) {
+                    if !(1..=64).contains(&count) {
                         return Err(PlanError::InvalidPredicate);
                     }
                     let mut values = Vec::with_capacity(count);
@@ -4538,6 +4538,11 @@ fn select_multi_point_probe(
                 right,
             } => {
                 let (column, value) = match (left.as_ref(), right.as_ref()) {
+                    (BoundPredicate::Column(column), BoundPredicate::Null)
+                    | (BoundPredicate::Null, BoundPredicate::Column(column)) => {
+                        leaves.push((column.clone(), BoundPredicate::Null));
+                        return (leaves.len() <= 64).then_some(());
+                    }
                     (BoundPredicate::Column(column), value)
                         if is_point_probe_literal(column, value) =>
                     {
@@ -4581,11 +4586,14 @@ fn select_multi_point_probe(
         .map(|(index_id, _)| *index_id)?;
     let mut values = Vec::new();
     for (_, value) in leaves {
+        if matches!(value, BoundPredicate::Null) {
+            continue;
+        }
         if !values.contains(&value) {
             values.push(value);
         }
     }
-    if values.len() < 2 {
+    if values.is_empty() {
         return None;
     }
     Some(MultiPointProbeV1 {
@@ -5008,7 +5016,7 @@ pub fn validate_plan_v1(plan: &SingleTablePlanV1) -> Result<(), PlanError> {
     if let Some(probe) = &plan.multi_point_probe {
         if probe.index_id == [0; 16]
             || !columns.iter().any(|column| column == &probe.key_column)
-            || !(2..=64).contains(&probe.values.len())
+            || !(1..=64).contains(&probe.values.len())
             || probe.values.iter().enumerate().any(|(index, value)| {
                 !is_point_probe_literal(&probe.key_column, value)
                     || probe.values[..index].contains(value)
@@ -5356,7 +5364,15 @@ mod tests {
             right: Box::new(BoundPredicate::Integer(value)),
         };
         let mut bound = bound_select();
-        bound.predicate = Some(BoundPredicate::Or(vec![equality(11), equality(22)]));
+        bound.predicate = Some(BoundPredicate::Or(vec![
+            equality(11),
+            equality(22),
+            BoundPredicate::Compare {
+                operator: Comparison::Equal,
+                left: Box::new(BoundPredicate::Column(key.clone())),
+                right: Box::new(BoundPredicate::Null),
+            },
+        ]));
         bound.range_access_paths = vec![crate::metadata_discovery::AuthorizedRangeAccessPath {
             index_id: [0x71; 16],
             column_ids: vec![key.column_id],
@@ -5380,7 +5396,37 @@ mod tests {
     }
 
     #[test]
-    fn repeated_or_equalities_fall_back_without_a_multi_point_hint() {
+    fn same_key_or_with_one_non_null_value_keeps_a_single_probe_hint() {
+        let key = column(7, 1, ScalarType::Integer);
+        let mut bound = bound_select();
+        bound.predicate = Some(BoundPredicate::Or(vec![
+            BoundPredicate::Compare {
+                operator: Comparison::Equal,
+                left: Box::new(BoundPredicate::Column(key.clone())),
+                right: Box::new(BoundPredicate::Integer(11)),
+            },
+            BoundPredicate::Compare {
+                operator: Comparison::Equal,
+                left: Box::new(BoundPredicate::Column(key.clone())),
+                right: Box::new(BoundPredicate::Null),
+            },
+        ]));
+        bound.range_access_paths = vec![crate::metadata_discovery::AuthorizedRangeAccessPath {
+            index_id: [0x71; 16],
+            column_ids: vec![key.column_id],
+        }];
+
+        let plan = plan_select_v1(bound).unwrap();
+        let probe = plan.multi_point_probe.as_ref().unwrap();
+        assert_eq!(probe.values, vec![BoundPredicate::Integer(11)]);
+        assert_eq!(
+            decode_plan_v1(&encode_plan_v1(&plan).unwrap()).unwrap(),
+            plan
+        );
+    }
+
+    #[test]
+    fn repeated_or_equalities_use_one_distinct_multi_point_probe() {
         let key = column(7, 1, ScalarType::Integer);
         let equality = || BoundPredicate::Compare {
             operator: Comparison::Equal,
@@ -5395,7 +5441,10 @@ mod tests {
         }];
 
         let plan = plan_select_v1(bound).unwrap();
-        assert!(plan.multi_point_probe.is_none());
+        assert_eq!(
+            plan.multi_point_probe.unwrap().values,
+            vec![BoundPredicate::Integer(11)]
+        );
     }
 
     #[test]

@@ -716,6 +716,11 @@ static int read_point_probe_leaf(plan_reader *reader, uint8_t column_id[16],
     } else if (tag == 0x08) {
         const uint8_t *coefficient;
         if (!read_decimal_predicate_record(reader, start, &coefficient)) return 0;
+    } else if (tag == 0x00) {
+        if (!read_null_predicate_tag(reader, start)) return 0;
+        *literal = reader->bytes + start;
+        *literal_len = 0;
+        return 1;
     } else {
         return 0;
     }
@@ -796,6 +801,7 @@ static int multi_point_filter_collect(
         right_is_column = right_literal == NULL;
         if (left_is_column && !right_is_column &&
             memcmp(left_column, key_column->column_id, 16) == 0) {
+            if (right_len == 0) return 1;
             for (uint16_t i = 0; i < hint->count; ++i)
                 if (hint->literal_lengths[i] == right_len &&
                     memcmp(hint->literals[i], right_literal, right_len) == 0) {
@@ -804,6 +810,7 @@ static int multi_point_filter_collect(
                 }
         } else if (right_is_column && !left_is_column &&
                    memcmp(right_column, key_column->column_id, 16) == 0) {
+            if (left_len == 0) return 1;
             for (uint16_t i = 0; i < hint->count; ++i)
                 if (hint->literal_lengths[i] == left_len &&
                     memcmp(hint->literals[i], left_literal, left_len) == 0) {
@@ -4845,7 +4852,7 @@ static int32_t decode_plan_internal(
                 if (!take(&reader, 2, &count_bytes))
                     return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
                 value_count = (uint16_t)(((uint16_t)count_bytes[0] << 8) | count_bytes[1]);
-                if (value_count < 2 || value_count > 64)
+                if (value_count < 1 || value_count > 64)
                     return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
                 decoded_multi_point_probe.present = 1;
                 decoded_multi_point_probe.count = value_count;
