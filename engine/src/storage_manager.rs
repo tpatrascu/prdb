@@ -675,30 +675,72 @@ mod statistics_collection_tests {
                 "maintenance did not acquire its independent admission slot"
             );
 
-            let row_id = 70_000u128;
-            let mut row_key = [0; 32];
-            row_key[..16].copy_from_slice(&[0x44; 16]);
-            row_key[16..].copy_from_slice(&row_id.to_be_bytes());
-            let row_payload = RowRecord {
-                row_version: 1,
-                payload: Vec::new(),
-            }
-            .encode()?;
-            let commit_started = Instant::now();
-            commit_rows(
-                &database,
-                [0x71; 16],
-                [0x72; 16],
-                i64::MAX,
-                &[RowWrite {
-                    key: row_key,
-                    expected_version: None,
-                    payload: Some(row_payload),
-                }],
-            )?;
+            let completed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let completed_during_collection =
+                std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            std::thread::scope(
+                |writers| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+                    let start_writers = std::sync::Arc::new(std::sync::Barrier::new(9));
+                    let mut handles = Vec::new();
+                    for worker in 0..8u64 {
+                        let start_writers = std::sync::Arc::clone(&start_writers);
+                        let completed = std::sync::Arc::clone(&completed);
+                        let completed_during_collection =
+                            std::sync::Arc::clone(&completed_during_collection);
+                        let storage = &storage;
+                        let database = &database;
+                        handles.push(writers.spawn(
+                            move || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+                                start_writers.wait();
+                                for offset in 0..24u64 {
+                                    let sequence = worker * 24 + offset;
+                                    let row_id = 70_000u128 + sequence as u128;
+                                    let mut row_key = [0; 32];
+                                    row_key[..16].copy_from_slice(&[0x44; 16]);
+                                    row_key[16..].copy_from_slice(&row_id.to_be_bytes());
+                                    let row_payload = RowRecord {
+                                        row_version: 1,
+                                        payload: Vec::new(),
+                                    }
+                                    .encode()?;
+                                    let mut invocation_id = [0x71; 16];
+                                    invocation_id[..8].copy_from_slice(&sequence.to_be_bytes());
+                                    commit_rows(
+                                        database,
+                                        invocation_id,
+                                        [0x72; 16],
+                                        i64::MAX,
+                                        &[RowWrite {
+                                            key: row_key,
+                                            expected_version: None,
+                                            payload: Some(row_payload),
+                                        }],
+                                    )?;
+                                    completed.fetch_add(1, Ordering::Relaxed);
+                                    if storage
+                                        .admissions
+                                        .statistics_collection_active
+                                        .load(Ordering::Acquire)
+                                    {
+                                        completed_during_collection.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                                Ok(())
+                            },
+                        ));
+                    }
+                    start_writers.wait();
+                    for handle in handles {
+                        handle.join().map_err(|_| "operational writer panicked")??;
+                    }
+                    Ok(())
+                },
+            )
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+            assert_eq!(completed.load(Ordering::Relaxed), 192);
             assert!(
-                commit_started.elapsed() < Duration::from_secs(2),
-                "the bounded collector held up an operational row commit"
+                completed_during_collection.load(Ordering::Relaxed) > 0,
+                "no operational commit completed while elevated maintenance was admitted"
             );
             let result = collection
                 .join()
