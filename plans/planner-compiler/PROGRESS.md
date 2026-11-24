@@ -892,3 +892,8 @@
 - Implementation: the v8 runner projects and emits each visited pair directly, removing its 16,384-entry (128 KiB) local pair array. Its fixed key/projection arrays have a compile-time 20 KiB ceiling; this does not bound every stack frame or the whole executor.
 - Regression: the SDK fixture checks ordering, callback failure, no callback for redacted input, and all 16,384 pairs at the maximum input shape without an output pair array. Existing v8 execution fixture remains covered.
 - Verification: maintained TinyCC SDK tests and `sandbox-query-fixture` passed. Broader operator copy/stack accounting, end-to-end profiles, and target-hardware measurements remain open.
+## OP-1 / OP-7 follow-up: fuzz all optimizer codecs — verified slice
+
+- Coverage: the maintained `catalog_ddl_codecs` target now invokes every public optimizer request and plan decoder, including composite, filtered composite, and ordered composite aggregate codecs that were previously omitted.
+- Verification: the fuzz target compiled with the refreshed dedicated lockfile, then ran under its pinned `nightly-2026-11-01` ASan/libFuzzer toolchain against 1,308 existing corpus files for 1,309 executions with no crash. `cargo fmt --manifest-path fuzz/Cargo.toml --all -- --check` and `git diff --check` passed.
+- Remaining: this bounded corpus run is not sustained fuzzing or proof of parser correctness; malformed process-level IPC and full confined load/performance evidence remain tracked separately.

@@ -7,11 +7,12 @@ use prdb_engine::catalog::{
 use prdb_engine::expression::{decode_catalog_expression, decode_expression};
 use prdb_engine::optimizer_plan::{decode_delete_plan_v1, decode_plan_v1, decode_update_plan_v1};
 use prdb_engine::optimizer_request::{
-    decode_composite_group_count_request, decode_delete_request, decode_group_aggregate_request,
-    decode_group_count_request, decode_join_select_request,
-    decode_ordered_composite_group_count_request, decode_ordered_group_aggregate_request,
-    decode_ordered_group_count_request, decode_ordered_select_request, decode_select_request,
-    decode_update_request,
+    decode_composite_group_aggregate_request, decode_composite_group_count_request,
+    decode_delete_request, decode_filtered_composite_group_aggregate_request,
+    decode_group_aggregate_request, decode_group_count_request, decode_join_select_request,
+    decode_ordered_composite_group_aggregate_request, decode_ordered_composite_group_count_request,
+    decode_ordered_group_aggregate_request, decode_ordered_group_count_request,
+    decode_ordered_select_request, decode_select_request, decode_update_request,
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -44,6 +45,21 @@ fuzz_target!(|data: &[u8]| {
     let _ = decode_update_request(data);
 
     let _ = decode_plan_v1(data);
+    let _ = prdb_engine::optimizer_plan::decode_join_select_plan_v1(data);
+    let _ = prdb_engine::optimizer_plan::decode_group_count_plan_v1(data);
+    let _ = prdb_engine::optimizer_plan::decode_group_aggregate_plan_v1(data);
+    let _ = prdb_engine::optimizer_plan::decode_ordered_group_aggregate_plan_v1(data);
+    let _ = prdb_engine::optimizer_plan::decode_ordered_group_count_plan_v1(data);
+    let _ = prdb_engine::optimizer_plan::decode_ordered_composite_group_count_plan_v1(data);
+    let _ = prdb_engine::optimizer_plan::decode_composite_group_count_plan_v1(data);
+    let _ = prdb_engine::optimizer_plan::decode_composite_group_aggregate_plan_v1(data);
+    let _ = prdb_engine::optimizer_plan::decode_filtered_composite_group_aggregate_plan_v1(data);
+    let _ = prdb_engine::optimizer_plan::decode_ordered_composite_group_aggregate_plan_v1(data);
+    let _ = prdb_engine::optimizer_plan::decode_ordered_select_plan_v1(data);
     let _ = decode_delete_plan_v1(data);
     let _ = decode_update_plan_v1(data);
+
+    let _ = decode_composite_group_aggregate_request(data);
+    let _ = decode_filtered_composite_group_aggregate_request(data);
+    let _ = decode_ordered_composite_group_aggregate_request(data);
 });
