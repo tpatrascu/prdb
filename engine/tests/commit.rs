@@ -40583,6 +40583,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         std::env::var_os("PRDB_TEST_INDEXED_JOIN_FANOUT18_OVER_THRESHOLD_BENCHMARK_ONLY").is_some();
     let indexed_join_fanout_nineteen_ratio7_benchmark_only =
         std::env::var_os("PRDB_TEST_INDEXED_JOIN_FANOUT19_RATIO7_BENCHMARK_ONLY").is_some();
+    let indexed_join_fanout_nineteen_over_cutoff_benchmark_only =
+        std::env::var_os("PRDB_TEST_INDEXED_JOIN_FANOUT19_OVER_CUTOFF_BENCHMARK_ONLY").is_some();
     let indexed_join_fanout_seventeen_ratio7_benchmark_only =
         std::env::var_os("PRDB_TEST_INDEXED_JOIN_FANOUT17_RATIO7_BENCHMARK_ONLY").is_some();
     let indexed_join_fanout_seventeen_threshold_benchmark_only =
@@ -40612,6 +40614,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             || indexed_join_fanout_eighteen_threshold_benchmark_only
             || indexed_join_fanout_eighteen_over_threshold_benchmark_only
             || indexed_join_fanout_nineteen_ratio7_benchmark_only
+            || indexed_join_fanout_nineteen_over_cutoff_benchmark_only
             || indexed_join_fanout_seventeen_ratio7_benchmark_only
             || indexed_join_fanout_seventeen_threshold_benchmark_only
             || indexed_join_fanout_seventeen_over_threshold_benchmark_only
@@ -40621,6 +40624,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             || indexed_join_skewed_fanout_benchmark_only
             || indexed_join_skewed_high_fanout_benchmark_only;
     let indexed_join_fanout_outer_rows: u16 = if indexed_join_fanout_nineteen_ratio7_benchmark_only
+        || indexed_join_fanout_nineteen_over_cutoff_benchmark_only
     {
         19
     } else if indexed_join_fanout_eighteen_ratio7_benchmark_only
@@ -40657,7 +40661,9 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         3
     } else if indexed_join_fanout_four_benchmark_only {
         4
-    } else if indexed_join_fanout_five_benchmark_only {
+    } else if indexed_join_fanout_five_benchmark_only
+        || indexed_join_fanout_nineteen_over_cutoff_benchmark_only
+    {
         5
     } else {
         1
@@ -40676,6 +40682,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             indexed_join_fanout_eighteen_threshold_benchmark_only,
             indexed_join_fanout_eighteen_over_threshold_benchmark_only,
             indexed_join_fanout_nineteen_ratio7_benchmark_only,
+            indexed_join_fanout_nineteen_over_cutoff_benchmark_only,
             indexed_join_fanout_seventeen_ratio7_benchmark_only,
             indexed_join_fanout_seventeen_threshold_benchmark_only,
             indexed_join_fanout_seventeen_over_threshold_benchmark_only,
@@ -40692,6 +40699,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         "select exactly one indexed-join fanout benchmark mode"
     );
     let indexed_join_fanout_inner_rows: u16 = if indexed_join_fanout_nineteen_ratio7_benchmark_only
+        || indexed_join_fanout_nineteen_over_cutoff_benchmark_only
     {
         133
     } else if indexed_join_fanout_nine_ratio8_benchmark_only {
@@ -43262,6 +43270,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 b'n'
             } else if indexed_join_fanout_nineteen_ratio7_benchmark_only {
                 b'p'
+            } else if indexed_join_fanout_nineteen_over_cutoff_benchmark_only {
+                b'r'
             } else if indexed_join_fanout_eighteen_threshold_benchmark_only {
                 b'j'
             } else if indexed_join_fanout_eighteen_over_threshold_benchmark_only {
@@ -43612,6 +43622,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 let benchmark_label = if indexed_join_fanout_seventeen_large_inner_benchmark_only
                     || indexed_join_fanout_seventeen_cap_inner_benchmark_only
                     || indexed_join_fanout_seventeen_4097_benchmark_only
+                    || indexed_join_fanout_nineteen_ratio7_benchmark_only
+                    || indexed_join_fanout_nineteen_over_cutoff_benchmark_only
                 {
                     "indexed join"
                 } else {
@@ -43835,7 +43847,9 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             let expected_indexed_samples = if indexed_join_skewed_high_fanout_benchmark_only
                 || indexed_join_fanout_seventeen_over_threshold_benchmark_only
                 || indexed_join_fanout_eighteen_over_threshold_benchmark_only
-                || (indexed_join_fanout_benchmark_only && indexed_join_fanout == 5)
+                || (indexed_join_fanout_benchmark_only
+                    && indexed_join_fanout == 5
+                    && !indexed_join_fanout_nineteen_over_cutoff_benchmark_only)
             {
                 0
             } else {
@@ -43845,6 +43859,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 || indexed_join_fanout_seventeen_cap_inner_benchmark_only
                 || indexed_join_fanout_seventeen_4097_benchmark_only
                 || indexed_join_fanout_nineteen_ratio7_benchmark_only
+                || indexed_join_fanout_nineteen_over_cutoff_benchmark_only
             {
                 0
             } else if expected_indexed_samples == 0 {

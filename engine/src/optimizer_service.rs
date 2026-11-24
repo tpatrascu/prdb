@@ -1240,6 +1240,50 @@ mod tests {
     }
 
     #[test]
+    fn exact_bounded_join_uses_index_when_hash_input_exceeds_its_row_limit() {
+        let mut indexed_right = join_relation("rights", 0x41);
+        indexed_right.range_access_paths =
+            vec![crate::metadata_discovery::AuthorizedRangeAccessPath {
+                index_id: [0x71; 16],
+                column_ids: vec![[0x51; 16]],
+            }];
+
+        let encoded = optimize_join_select_v1_with_relations_and_estimates_and_cardinality(
+            &filtered_join_select_request(),
+            Some(join_relation("lefts", 0x31)),
+            Some(indexed_right.clone()),
+            Some(19),
+            Some(133),
+            Some(95),
+        )
+        .unwrap();
+        let plan = decode_join_select_plan_v1(&encoded).unwrap();
+        assert_eq!(
+            plan.index_nested_loop.as_ref().map(|plan| plan.outer_side),
+            Some(crate::optimizer_request::JoinRelationSide::Left),
+            "an exact 95-pair estimate fits the indexed runner even though hash cannot materialize 133 rows"
+        );
+
+        let over_pair_budget =
+            optimize_join_select_v1_with_relations_and_estimates_and_cardinality(
+                &filtered_join_select_request(),
+                Some(join_relation("lefts", 0x31)),
+                Some(indexed_right),
+                Some(128),
+                Some(16_384),
+                Some(16_385),
+            )
+            .unwrap();
+        assert!(
+            decode_join_select_plan_v1(&over_pair_budget)
+                .unwrap()
+                .index_nested_loop
+                .is_none(),
+            "an exact output estimate above the indexed runner pair budget must not select it"
+        );
+    }
+
+    #[test]
     fn join_with_two_known_small_inputs_keeps_hash_join() {
         let mut indexed_left = join_relation("lefts", 0x31);
         indexed_left.range_access_paths =

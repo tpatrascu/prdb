@@ -51,6 +51,11 @@ pub struct SingleTablePlanV1 {
 pub const SMALL_POPULATION_SCAN_ROWS: u64 = 4;
 const SKEWED_JOIN_OUTER_MAX_ROWS: u64 = 8;
 const SKEWED_JOIN_INPUT_RATIO: u64 = 16;
+// The bounded SQL hash path materializes at most 128 rows from either input.
+const BOUNDED_HASH_JOIN_MAX_ROWS_PER_INPUT: u64 = 128;
+// These limits match the indexed SDK runner's outer and pair capacities.
+const INDEXED_JOIN_MAX_OUTER_ROWS: u64 = 128;
+const INDEXED_JOIN_MAX_OUTPUT_PAIRS: u64 = 16_384;
 pub(crate) const FANOUT_AWARE_JOIN_OUTER_MAX_ROWS: u64 = 19;
 pub(crate) const FANOUT_AWARE_JOIN_INPUT_RATIO: u64 = 8;
 const FANOUT_AWARE_JOIN_LARGE_OUTER_INPUT_RATIO: u64 = 7;
@@ -4660,6 +4665,24 @@ fn select_index_nested_loop_join(
 
     if left_visible_rows == Some(0) || right_visible_rows == Some(0) {
         return None;
+    }
+    if let (Some(left_rows), Some(right_rows)) = (left_visible_rows, right_visible_rows)
+        && joined_rows_estimate.is_some_and(|rows| rows <= INDEXED_JOIN_MAX_OUTPUT_PAIRS)
+    {
+        // Above the hash input bound, prefer an executable indexed plan when
+        // the exact pair count and the indexed runner's row capacities fit.
+        if left_rows <= INDEXED_JOIN_MAX_OUTER_ROWS
+            && right_rows > BOUNDED_HASH_JOIN_MAX_ROWS_PER_INPUT
+            && right_rows <= JOIN_POPULATION_ESTIMATE_MAX_ROWS
+        {
+            return right.as_ref().cloned();
+        }
+        if right_rows <= INDEXED_JOIN_MAX_OUTER_ROWS
+            && left_rows > BOUNDED_HASH_JOIN_MAX_ROWS_PER_INPUT
+            && left_rows <= JOIN_POPULATION_ESTIMATE_MAX_ROWS
+        {
+            return left.as_ref().cloned();
+        }
     }
     match (left_visible_rows, right_visible_rows) {
         (Some(left_rows), Some(right_rows))

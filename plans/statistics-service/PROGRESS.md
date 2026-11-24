@@ -565,3 +565,10 @@
 - Evidence: five confined 19×133 profiles selected kind 17, returned 19 expected rows, and overlapped 192 operational reads and commits. Median run-level p50 was 287.2 ms (264.8–298.2 ms range). Hash comparison is unavailable because the SDK hash join is limited to 128 rows per input.
 - Scope: one uniform fanout-one local shape; no general cost claim or target-host evidence.
 - Verification: five runs passed through optimizer, planner/storage estimates, confined SDK execution, and gateway relay with query copies and database/temp data in external run directories.
+
+## ST-2 / OP-4 follow-up: preserve bounded index execution above the hash input cap — implemented slice
+
+- Exact authorized populations and pair estimates now allow an eligible indexed nested-loop plan when a hash input exceeds 128 rows, as long as the chosen outer side fits 128 rows and exact indexed candidates/output fit 16,384. This uses existing authorization, request, response, copied-byte, and per-range bounds.
+- The optimizer regression was red for 19×133 with 95 exact pairs because it selected hash; it is green with kind 17 and rejects a 16,385-pair estimate.
+- Five fresh-database confined profiles returned all 95 expected pairs and overlapped 192 operational reads and commits. Median run-level p50 was 339.6 ms (280.1–404.1 ms range); no hash comparison is possible above the hash input limit. This is bounded feasibility evidence, not a general cost claim.
+- Query/data files were under `$HOME/tmp/prdb-tests`; compiler outputs remained under existing `target/` paths. Broader cardinality distributions, candidate comparison, and target-host profiling remain open.

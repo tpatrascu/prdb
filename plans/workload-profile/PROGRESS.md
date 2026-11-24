@@ -226,3 +226,9 @@
 - Run-level indexed p50 samples: 280.095, 264.809, 287.235, 293.085, and 298.201 ms. The five-run median was 287.2 ms (264.8–298.2 ms range). There is no hash comparison because the SDK hash join caps each input at 128 rows.
 - Scope: one uniform fanout-one shape at the exact seven-to-one ratio on this host. This validates correctness and records indexed latency above the hash materialization limit; it is not a comparative cost result or target-hardware evidence.
 - Verification: optimizer boundary tests passed; the confined acceptance passed five times with writable delegated `cpu memory pids` controllers. Compiler outputs remained in the repository's existing `target/` paths.
+
+## OP-4 / ST-2 follow-up: profile indexed join above the hash input cap — measured
+
+- Five fresh-database runs of `PRDB_TEST_INDEXED_JOIN_FANOUT19_OVER_CUTOFF_BENCHMARK_ONLY=1` exercised 19×133 inputs with five matches per outer row. Every run selected kind 17, checked the exact 95-pair result and checksum, and overlapped 192 operational reads and commits.
+- Run-level indexed p50 samples were 280.1, 404.1, 339.6, 345.6, and 337.5 ms; median was 339.6 ms (280.1–404.1 ms range). Hash comparison is unavailable because the SDK hash join caps each input at 128 rows.
+- Query inputs and database/runtime test data were under `$HOME/tmp/prdb-tests`; compiled fixtures stayed in the repository's existing `target/sdk-v1/`. This measures bounded execution feasibility, not general high-fanout cost or target-hardware performance.

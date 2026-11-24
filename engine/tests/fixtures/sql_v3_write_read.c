@@ -1958,6 +1958,7 @@ static int32_t run_write_read_fixture(
          invocation->parameters[0] == 'b' ||
          invocation->parameters[0] == 'n' ||
          invocation->parameters[0] == 'p' ||
+         invocation->parameters[0] == 'r' ||
          invocation->parameters[0] == 'j' || invocation->parameters[0] == 'k' ||
          invocation->parameters[0] == 'X' || invocation->parameters[0] == 'Y' ||
          invocation->parameters[0] == 'z')) {
@@ -1972,7 +1973,8 @@ static int32_t run_write_read_fixture(
         const uint32_t outer_rows = invocation->parameters[0] == 'n' ||
                                             invocation->parameters[0] == 'j' ||
                                             invocation->parameters[0] == 'k' ? 18
-                                    : invocation->parameters[0] == 'p' ? 19
+                                    : invocation->parameters[0] == 'p' ||
+                                            invocation->parameters[0] == 'r' ? 19
                                     : invocation->parameters[0] == 'Y' ||
                                             invocation->parameters[0] == 'z' ||
                                             invocation->parameters[0] == 'W' ||
@@ -2002,6 +2004,7 @@ static int32_t run_write_read_fixture(
                                           invocation->parameters[0] == 'E' ||
                                           invocation->parameters[0] == 'q' ? 1
                                 : invocation->parameters[0] == 'p' ? 1
+                                : invocation->parameters[0] == 'r' ? 5
                                 : invocation->parameters[0] == 'X' ? 1
                                 : invocation->parameters[0] == '9' ? 1
                                                                   : 0;
@@ -2017,6 +2020,7 @@ static int32_t run_write_read_fixture(
                                                : invocation->parameters[0] == 'j' ||
                                                          invocation->parameters[0] == 'k' ? 2448
                                                : invocation->parameters[0] == 'p' ? 684
+                                               : invocation->parameters[0] == 'r' ? 3420
                                                : fanout != 0
                                                    ? (int64_t)((invocation->parameters[0] == 'Y' ||
                                                                         invocation->parameters[0] == 'z' ||
@@ -2157,7 +2161,8 @@ static int32_t run_write_read_fixture(
             if (invocation->parameters[0] == 'W' ||
                 invocation->parameters[0] == 'E' ||
                 invocation->parameters[0] == 'q' ||
-                invocation->parameters[0] == 'p') continue;
+                invocation->parameters[0] == 'p' ||
+                invocation->parameters[0] == 'r') continue;
             indexed_join_benchmark_result_context hash_results = {
                 .asymmetric_values = invocation->parameters[0] == '7' ||
                                      invocation->parameters[0] == '8',
