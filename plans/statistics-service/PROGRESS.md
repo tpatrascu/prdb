@@ -1,5 +1,12 @@
 # Statistics Service Progress
 
+## ST-2 / OP-7 follow-up: profile minimum 9-row join ratio at the fanout cutoff — measured
+
+- Contract: complement the measured 9×128 distribution with the minimum eligible indexed-side population for a nine-row outer: 9×72 (eight-to-one), producing exactly four pairs per outer row.
+- Evidence: five fresh-database delegated-cgroup runs selected indexed nested-loop, returned all 36 rows equal to the hash reference, and overlapped 192 operational reads and 192 commits each. Median of per-run p50s was 174.5 ms indexed (168.0–185.6 ms range) and 186.8 ms hash (172.7–200.8 ms range).
+- Scope: this adds evidence at the minimum population ratio and inclusive pair threshold for the smallest eligible outer. It is a local fixture, not a general cost model or target-host performance claim.
+- Validation: all five confined profiles passed; maintained TinyCC SDK tests and sandbox query fixture build passed. `cargo fmt --all -- --check`, locked workspace build, warning-denied all-target Clippy, and the full serial delegated-cgroup workspace suite passed (409 library tests, 206 commit tests, 3 metadata-process tests, 84 transaction tests, all remaining targets, no ignored tests).
+
 ## ST-2 / OP-7 follow-up: verify the inclusive 17-row fanout boundary — covered
 
 - Contract: for a 17-row outer input with an eligible indexed relation, the exact estimate selects indexed nested-loop at 68 pairs (four per outer row) and hash at 69 pairs.

@@ -1950,6 +1950,7 @@ static int32_t run_write_read_fixture(
          invocation->parameters[0] == '8' || invocation->parameters[0] == '9' ||
          invocation->parameters[0] == '2' || invocation->parameters[0] == '3' ||
          invocation->parameters[0] == '4' || invocation->parameters[0] == '5' ||
+         invocation->parameters[0] == 'c' ||
          invocation->parameters[0] == 'W' || invocation->parameters[0] == 'E' ||
          invocation->parameters[0] == 'q' ||
          invocation->parameters[0] == 's' ||
@@ -1980,6 +1981,7 @@ static int32_t run_write_read_fixture(
         const uint32_t fanout = invocation->parameters[0] == 'a' ||
                                         invocation->parameters[0] == 'b'
                                     ? 4
+                                : invocation->parameters[0] == 'c' ? 4
                                 : invocation->parameters[0] == '2' ? 2
                                 : invocation->parameters[0] == '3' ? 3
                                 : invocation->parameters[0] == '4' ? 4
