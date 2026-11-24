@@ -6,14 +6,14 @@ Implement [schema/type/table/index/constraint administration](../../specs/ddl-sc
 
 ## Decisions Before Implementation
 
-Fix bounded DDL text/structured schemas, normalized identifier limits, scalar wire/storage ranges, exact decimal casts, UTC date/timestamp ranges and trusted default/CHECK IR. Preserve the declared initial scalar set, constraints and supported ALTER forms. Define deterministic fence acquisition, affected-table schema/write epochs and private-build publication/cleanup without custom physical trees.
+Fix bounded DDL text/structured schemas, normalized identifier limits, scalar wire/storage ranges, exact decimal casts, UTC date/timestamp ranges and trusted default/CHECK IR. Preserve the declared initial scalar set, constraints and supported ALTER forms. Classify schema width, rewrite rows/bytes, and request sizes as configurable maintenance/schema workload budgets unless a catalog or ABI field is the actual constraint; the present 4096-column value is an implementation envelope, not a production target. Validate wide relations with the 80–250-column ERP/CRM sizing model, and plan a compatible catalog/metadata extension if the existing envelope is insufficient. Define deterministic fence acquisition, affected-table schema/write epochs and private-build publication/cleanup without custom physical trees.
 
 ## Increments
 
 | ID | Observable test first | Minimum implementation and evidence |
 | --- | --- | --- |
 | DS-1 | Qualified/unquoted/quoted names bind predictably; unsupported definitions and unauthorized actors fail | Independent trusted validation, admitted default schema for client names, reserved namespaces and current actor checks |
-| DS-2 | All declared scalar/default fixtures round-trip exactly; invalid Unicode/count/precision/overflow rejects atomically | BOOLEAN, signed integers, DECIMAL up to precision 38, TEXT/VARCHAR/BYTEA/UUID/DATE/TIMESTAMPTZ codecs and checked conversions; trusted generated identity/current-principal defaults |
+| DS-2 | All declared scalar/default fixtures round-trip exactly; invalid Unicode/count/precision/overflow rejects atomically, while a raised trusted schema profile admits a wide relation | BOOLEAN, signed integers, DECIMAL up to precision 38, TEXT/VARCHAR/BYTEA/UUID/DATE/TIMESTAMPTZ codecs and checked conversions; trusted generated identity/current-principal defaults; make the per-relation column budget configurable below the validated format envelope and test the default plus an elevated profile |
 | DS-3 | Create table publishes catalog/storage/constraints atomically with audit/outcome and denies implicit data access | Minimal schema/table creation with atomic table-level PRIMARY KEY and UNIQUE, then NOT NULL/CHECK/non-cascading FK definitions, stable IDs and typed dependency records |
 | DS-4 | Simultaneous duplicate keys or parent/child races leave constraints valid and loser fully aborted | Final uniqueness and both FK directions over latest state plus final overlay; MATCH SIMPLE, NULLS DISTINCT and CHECK-unknown semantics; REFERENCES authority required |
 | DS-5 | Rename/add/default/NOT NULL/constraint/ownership/drop operations preserve stable references and old-row meaning | Implement every supported ALTER incrementally; immutable add-column defaults, restricted drops and no new-column grants; reject type rewrite/cascades and deferred features |
