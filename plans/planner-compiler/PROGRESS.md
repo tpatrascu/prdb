@@ -1,10 +1,16 @@
 # Optimizer Progress
 
+## OP-4 / ST-2 follow-up: typed UUID predicate literal — implemented slice
+
+- Request and plan tag `0x05` carries 16 canonical UUID bytes. Rust binding and both plan validators require UUID compatibility. The trusted estimator and TinyCC evaluator compare UUID values; unique point and leading-key range hints support UUID literals.
+- Evidence: Rust request, binding, plan, planner-IPC, index-eligibility, and real-redb estimate regressions pass. TinyCC request encoding and DATE/UUID plan decoding fixtures pass. The maintained SDK suite and full serial delegated-cgroup workspace suite passed.
+- Remaining: DECIMAL, BYTEA, and TIMESTAMPTZ literals, cross-type coercions, broader candidate comparison, and target-host workload evidence remain open.
+
 ## OP-4 / ST-2 follow-up: typed DATE predicate literal — implemented slice
 
 - Request and plan tag `0x04` carries a signed big-endian i32 DATE count since 1970-01-01, restricted to the supported DATE range. Rust binding checks DATE compatibility; exact authorized predicate estimates and TinyCC filter evaluation use the established DATE comparison semantics. DATE literals can use unique point and leading-key range hints.
 - Evidence: Rust request decode/invalid-range and plan round-trip tests, real-redb exact DATE estimate regression, and TinyCC parameter request encoding and DATE plan decoding fixtures passed. The full delegated-cgroup serial workspace suite passed.
-- Remaining: DECIMAL, BYTEA, UUID, and TIMESTAMPTZ literals, cross-type coercions, broader candidate comparison, and target-host workload evidence remain open.
+- Remaining: DECIMAL, BYTEA, and TIMESTAMPTZ literals, cross-type coercions, broader candidate comparison, and target-host workload evidence remain open.
 
 ## Filtered composite aggregate planning — verified
 

@@ -114,6 +114,9 @@ static int encode_optimizer_parameter(
     case PRDB_SDK_VALUE_TYPE_DATE:
         return predicate_append_u8(output, capacity, offset, 0x04) &&
                predicate_append(output, capacity, offset, value->data, 4);
+    case PRDB_SDK_VALUE_TYPE_UUID:
+        return predicate_append_u8(output, capacity, offset, 0x05) &&
+               predicate_append(output, capacity, offset, value->data, 16);
     default:
         return 2;
     }

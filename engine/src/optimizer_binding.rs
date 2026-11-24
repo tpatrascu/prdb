@@ -265,6 +265,7 @@ pub enum BoundPredicate {
     Integer(i64),
     Text(String),
     Date(i32),
+    Uuid([u8; 16]),
     Column(BoundColumn),
     Compare {
         operator: Comparison,
@@ -1246,6 +1247,7 @@ fn bind_predicate(
         }
         Predicate::Text(value) => Ok((BoundPredicate::Text(value.clone()), Some(ScalarType::Text))),
         Predicate::Date(value) => Ok((BoundPredicate::Date(*value), Some(ScalarType::Date))),
+        Predicate::Uuid(value) => Ok((BoundPredicate::Uuid(*value), Some(ScalarType::Uuid))),
         Predicate::Column(name) => {
             let column = resolve_column(columns, name)?;
             Ok((
@@ -2176,6 +2178,28 @@ mod tests {
                     nullable: false,
                 })),
                 right: Box::new(BoundPredicate::Date(7)),
+            }))
+        );
+        let mut uuid_predicate = vec![0x20, 0, 0x10, 2, b'i', b'd', 0x05];
+        uuid_predicate.extend_from_slice(&[0x44; 16]);
+        assert_eq!(
+            bind_select_request(&request(&uuid_predicate, "id"), Some(relation())),
+            Err(BindError::InvalidQuery)
+        );
+        let mut uuid_relation = relation();
+        uuid_relation.relation.columns[0].scalar_type = ScalarType::Uuid;
+        assert_eq!(
+            bind_select_request(&request(&uuid_predicate, "id"), Some(uuid_relation))
+                .map(|plan| plan.predicate),
+            Ok(Some(BoundPredicate::Compare {
+                operator: Comparison::Equal,
+                left: Box::new(BoundPredicate::Column(BoundColumn {
+                    column_id: [0x21; 16],
+                    ordinal: 0,
+                    scalar_type: ScalarType::Uuid,
+                    nullable: false,
+                })),
+                right: Box::new(BoundPredicate::Uuid([0x44; 16])),
             }))
         );
     }

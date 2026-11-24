@@ -7406,6 +7406,31 @@ fn authorized_predicate_estimate_compares_readable_scalar_columns()
         Some((3, 1)),
         "DATE literals should compare against authorized DATE cells"
     );
+    let uuid_case = cases
+        .iter()
+        .position(|(scalar_type, _, _, _)| *scalar_type == ScalarType::Uuid)
+        .expect("fixture has a UUID comparison pair");
+    let uuid_ordinal = uuid_case * 2 + 1;
+    let uuid_literal_predicate = BoundPredicate::Compare {
+        operator: Comparison::Equal,
+        left: Box::new(BoundPredicate::Column(BoundColumn {
+            column_id: column_ids[uuid_ordinal],
+            ordinal: uuid_ordinal as u32,
+            scalar_type: ScalarType::Uuid,
+            nullable: true,
+        })),
+        right: Box::new(BoundPredicate::Uuid([2; 16])),
+    };
+    assert_eq!(
+        observer.estimate_authorized_predicate_at_most(
+            table_id,
+            &projection,
+            &uuid_literal_predicate,
+            3,
+        )?,
+        Some((3, 1)),
+        "UUID literals should compare against authorized UUID cells"
+    );
     let invalid_date_literal = BoundPredicate::Compare {
         operator: Comparison::Equal,
         left: Box::new(BoundPredicate::Column(BoundColumn {

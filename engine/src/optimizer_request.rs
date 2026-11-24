@@ -247,6 +247,7 @@ pub enum Predicate {
     Integer(i64),
     Text(String),
     Date(i32),
+    Uuid([u8; 16]),
     Column(String),
     Compare {
         operator: Comparison,
@@ -1514,6 +1515,7 @@ impl<'a> PredicateParser<'a> {
                 }
                 Ok(Predicate::Date(days))
             }
+            0x05 => Ok(Predicate::Uuid(self.cursor.take(16)?.try_into().unwrap())),
             0x10 => Ok(Predicate::Column(self.cursor.identifier()?)),
             0x20 => {
                 let operator = match self.cursor.u8()? {
@@ -2495,6 +2497,30 @@ mod tests {
         assert_eq!(
             decode_select_request(&select_request(&expression)),
             Err(RequestError::InvalidValue)
+        );
+    }
+
+    #[test]
+    fn decodes_uuid_predicate_literal_as_sixteen_canonical_bytes() {
+        let uuid = [0x12; 16];
+        let mut expression = vec![0x20, 0, 0x10];
+        name("object_id", &mut expression);
+        expression.push(0x05);
+        expression.extend_from_slice(&uuid);
+
+        let decoded = decode_select_request(&select_request(&expression));
+        assert_eq!(
+            decoded.map(|request| request.predicate),
+            Ok(Some(Predicate::Compare {
+                operator: Comparison::Equal,
+                left: Box::new(Predicate::Column("object_id".to_owned())),
+                right: Box::new(Predicate::Uuid(uuid)),
+            }))
+        );
+        expression.pop();
+        assert_eq!(
+            decode_select_request(&select_request(&expression)),
+            Err(RequestError::Truncated)
         );
     }
 

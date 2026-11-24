@@ -3643,6 +3643,10 @@ fn put_predicate(output: &mut Vec<u8>, predicate: &BoundPredicate) -> Result<(),
             output.push(0x04);
             output.extend_from_slice(&value.to_be_bytes());
         }
+        BoundPredicate::Uuid(value) => {
+            output.push(0x05);
+            output.extend_from_slice(value);
+        }
         BoundPredicate::Column(column) => {
             output.extend_from_slice(
                 &crate::query_abi::encode_optimizer_plan_column_predicate_record(
@@ -4088,6 +4092,11 @@ impl PlanReader<'_> {
                 }
                 Ok(BoundPredicate::Date(days))
             }
+            0x05 => Ok(BoundPredicate::Uuid(
+                self.take(16)?
+                    .try_into()
+                    .map_err(|_| PlanError::Truncated)?,
+            )),
             0x10 => {
                 let column_id = self.column_predicate_id(tag_offset)?;
                 let column = scan_columns
@@ -4394,6 +4403,7 @@ fn is_point_probe_literal(column: &BoundColumn, value: &BoundPredicate) -> bool 
         (ScalarType::Boolean, BoundPredicate::Boolean(_))
             | (ScalarType::Text, BoundPredicate::Text(_))
             | (ScalarType::Date, BoundPredicate::Date(_))
+            | (ScalarType::Uuid, BoundPredicate::Uuid(_))
     ) || matches!(
         (column.scalar_type, value),
         (ScalarType::Integer, BoundPredicate::Integer(value))
@@ -4902,7 +4912,8 @@ fn collect_predicate_columns_at_depth(
         | BoundPredicate::Boolean(_)
         | BoundPredicate::Integer(_)
         | BoundPredicate::Text(_)
-        | BoundPredicate::Date(_) => Ok(()),
+        | BoundPredicate::Date(_)
+        | BoundPredicate::Uuid(_) => Ok(()),
     }
 }
 
@@ -4941,6 +4952,7 @@ fn predicate_type_at_depth(
             Ok(Some(ScalarType::Date))
         }
         BoundPredicate::Date(_) => Err(PlanError::InvalidPredicate),
+        BoundPredicate::Uuid(_) => Ok(Some(ScalarType::Uuid)),
         BoundPredicate::Column(column) => {
             if scan_columns.iter().any(|scanned| scanned == column) {
                 Ok(Some(column.scalar_type))
@@ -5730,6 +5742,30 @@ mod tests {
             offset: 0,
         };
         assert_eq!(reader.predicate(&[]), Err(PlanError::InvalidPredicate));
+    }
+
+    #[test]
+    fn uuid_predicate_record_roundtrips_canonical_bytes() {
+        let predicate = BoundPredicate::Uuid([0x12; 16]);
+        let mut encoded = Vec::new();
+        put_predicate(&mut encoded, &predicate).unwrap();
+        assert_eq!(encoded, [&[0x05][..], &[0x12; 16][..]].concat());
+
+        let mut reader = PlanReader {
+            bytes: &encoded,
+            offset: 0,
+        };
+        assert_eq!(reader.predicate(&[]).unwrap(), predicate);
+        assert_eq!(reader.offset, encoded.len());
+    }
+
+    #[test]
+    fn uuid_literals_are_eligible_for_exact_index_access() {
+        let key = column(0x45, 0, ScalarType::Uuid);
+        assert!(is_point_probe_literal(
+            &key,
+            &BoundPredicate::Uuid([0x12; 16])
+        ));
     }
 
     #[test]
