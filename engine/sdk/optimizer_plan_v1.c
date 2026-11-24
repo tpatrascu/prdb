@@ -146,6 +146,27 @@ static int read_uuid_predicate_record(plan_reader *reader,
     return 1;
 }
 
+static int read_timestamptz_predicate_record(plan_reader *reader,
+                                             uint64_t header_offset,
+                                             const uint8_t **timestamp_bytes) {
+    static const uint8_t minimum[8] = {0xff, 0x23, 0x40, 0x01,
+                                       0x00, 0xd4, 0x40, 0x00};
+    static const uint8_t maximum[8] = {0x03, 0x84, 0x44, 0x0c,
+                                       0xcc, 0x73, 0x5f, 0xff};
+    const uint8_t *bytes;
+    if (header_offset >= reader->length ||
+        reader->bytes[header_offset] != 0x06 ||
+        reader->offset != header_offset + 1 || !take(reader, 8, &bytes))
+        return 0;
+    if ((bytes[0] & 0x80) != 0) {
+        if (memcmp(bytes, minimum, 8) < 0) return 0;
+    } else if (memcmp(bytes, maximum, 8) > 0) {
+        return 0;
+    }
+    *timestamp_bytes = bytes;
+    return 1;
+}
+
 static int read_column_predicate_record(plan_reader *reader,
                                         uint64_t header_offset,
                                         uint8_t column_id[16]) {
@@ -481,6 +502,10 @@ static int decode_predicate(plan_reader *reader,
             if (!read_uuid_predicate_record(reader, tag_offset, &bytes)) return 0;
             type.type_code = PRDB_SDK_VALUE_TYPE_UUID;
             break;
+        case 0x06:
+            if (!read_timestamptz_predicate_record(reader, tag_offset, &bytes)) return 0;
+            type.type_code = PRDB_SDK_VALUE_TYPE_TIMESTAMPTZ;
+            break;
         case 0x10: {
             uint32_t index;
             int found = 0;
@@ -596,6 +621,9 @@ static int read_point_probe_leaf(plan_reader *reader, uint8_t column_id[16],
     } else if (tag == 0x05) {
         const uint8_t *uuid_bytes;
         if (!read_uuid_predicate_record(reader, start, &uuid_bytes)) return 0;
+    } else if (tag == 0x06) {
+        const uint8_t *timestamp_bytes;
+        if (!read_timestamptz_predicate_record(reader, start, &timestamp_bytes)) return 0;
     } else {
         return 0;
     }
@@ -864,6 +892,22 @@ static int encode_point_probe_request(
             value_len = 16;
             break;
         }
+        case 0x06: {
+            const uint8_t *timestamp_bytes;
+            plan_reader literal_reader = {hint->literal,
+                                          hint->literal_len, 0};
+            uint8_t tag;
+            if (!read_u8(&literal_reader, &tag) || tag != 0x06 ||
+                !read_timestamptz_predicate_record(&literal_reader, 0,
+                                                   &timestamp_bytes) ||
+                literal_reader.offset != literal_reader.length ||
+                hint->key_column.type_code != PRDB_SDK_VALUE_TYPE_TIMESTAMPTZ)
+                return 0;
+            type_code = PRDB_SDK_VALUE_TYPE_TIMESTAMPTZ;
+            value_bytes = timestamp_bytes;
+            value_len = 8;
+            break;
+        }
         default:
             return 0;
     }
@@ -981,6 +1025,18 @@ static int range_literal_to_value(const uint8_t *literal,
         value->type_code = PRDB_SDK_VALUE_TYPE_UUID;
         value->data = uuid_bytes;
         value->data_len = 16;
+    } else if (tag == 0x06) {
+        const uint8_t *timestamp_bytes;
+        if (expected_type != PRDB_SDK_VALUE_TYPE_TIMESTAMPTZ ||
+            !read_timestamptz_predicate_record(&reader, 0, &timestamp_bytes) ||
+            reader.offset != reader.length) return 0;
+        memset(value, 0, sizeof(*value));
+        value->struct_size = sizeof(*value);
+        value->abi_version = PRDB_SDK_VALUE_ABI_V1_VERSION;
+        value->state = PRDB_SDK_VALUE_STATE_VALUE;
+        value->type_code = PRDB_SDK_VALUE_TYPE_TIMESTAMPTZ;
+        value->data = timestamp_bytes;
+        value->data_len = 8;
     } else {
         return 0;
     }
@@ -1198,6 +1254,15 @@ static int32_t evaluate_predicate_node(
         if (!read_uuid_predicate_record(reader, tag_offset, &uuid_bytes))
             return PRDB_SDK_SQL_EVAL_INVALID_VALUE;
         predicate_value_init(out, PRDB_SDK_VALUE_TYPE_UUID, uuid_bytes, 16);
+        return PRDB_SDK_SQL_EVAL_OK;
+    }
+    case 0x06: {
+        const uint8_t *timestamp_bytes;
+        if (!read_timestamptz_predicate_record(reader, tag_offset,
+                                               &timestamp_bytes))
+            return PRDB_SDK_SQL_EVAL_INVALID_VALUE;
+        predicate_value_init(out, PRDB_SDK_VALUE_TYPE_TIMESTAMPTZ,
+                             timestamp_bytes, 8);
         return PRDB_SDK_SQL_EVAL_OK;
     }
     case 0x03: {
@@ -4427,7 +4492,7 @@ static int32_t decode_plan_internal(
                 if (!read_u8(&reader, &literal_tag) ||
                     (literal_tag != 0x01 && literal_tag != 0x02 &&
                      literal_tag != 0x03 && literal_tag != 0x04 &&
-                     literal_tag != 0x05)) {
+                     literal_tag != 0x05 && literal_tag != 0x06)) {
                     return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
                 }
                 --reader.offset;
@@ -6161,6 +6226,13 @@ static int match_optimizer_parameter(plan_reader *reader,
             !read_uuid_predicate_record(reader, tag_offset, &uuid_bytes))
             return 0;
         return memcmp(uuid_bytes, value->data, 16) == 0;
+    }
+    case PRDB_SDK_VALUE_TYPE_TIMESTAMPTZ: {
+        const uint8_t *timestamp_bytes;
+        if (tag != 0x06 || !read_timestamptz_predicate_record(
+                                reader, tag_offset, &timestamp_bytes))
+            return 0;
+        return memcmp(timestamp_bytes, value->data, 8) == 0;
     }
     default:
         return 0;

@@ -16,6 +16,10 @@ pub(crate) fn date_day_count_is_valid(days: i32) -> bool {
     (MIN_DATE_DAYS..=MAX_DATE_DAYS).contains(&days)
 }
 
+pub(crate) fn timestamp_micros_is_valid(micros: i64) -> bool {
+    (MIN_TIMESTAMP_MICROS..=MAX_TIMESTAMP_MICROS).contains(&micros)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScalarType {
     Boolean,
@@ -345,7 +349,7 @@ fn decode_scalar(kind: ScalarType, bytes: &[u8]) -> Result<ScalarValue, TupleErr
         }
         ScalarType::TimestampTz => {
             let value = i64::from_le_bytes(fixed(bytes)?);
-            if !(MIN_TIMESTAMP_MICROS..=MAX_TIMESTAMP_MICROS).contains(&value) {
+            if !timestamp_micros_is_valid(value) {
                 return Err(TupleError::InvalidScalarRange);
             }
             ScalarValue::TimestampTz(value)

@@ -11442,6 +11442,7 @@ fn valid_estimate_predicate(
             BoundPredicate::Null | BoundPredicate::Boolean(_) | BoundPredicate::Integer(_) => true,
             BoundPredicate::Date(value) => crate::tuple::date_day_count_is_valid(*value),
             BoundPredicate::Uuid(_) => true,
+            BoundPredicate::TimestampTz(value) => crate::tuple::timestamp_micros_is_valid(*value),
             BoundPredicate::Text(value) => value.len() <= 4096,
             BoundPredicate::Column(column) => usize::try_from(column.ordinal)
                 .ok()
@@ -11498,6 +11499,7 @@ fn estimate_predicate_kind(
         BoundPredicate::Text(_) => Some(EstimateValueKind::Text),
         BoundPredicate::Date(_) => Some(EstimateValueKind::Date),
         BoundPredicate::Uuid(_) => Some(EstimateValueKind::Uuid),
+        BoundPredicate::TimestampTz(_) => Some(EstimateValueKind::TimestampTz),
         BoundPredicate::Column(column) => {
             let ordinal = usize::try_from(column.ordinal).ok()?;
             let column = &projection.columns[ordinal];
@@ -11575,6 +11577,7 @@ fn evaluate_estimate_predicate(
             BoundPredicate::Integer(value) => Some(EstimateValue::Integer(*value)),
             BoundPredicate::Date(value) => Some(EstimateValue::Date(*value)),
             BoundPredicate::Uuid(value) => Some(EstimateValue::Uuid(*value)),
+            BoundPredicate::TimestampTz(value) => Some(EstimateValue::TimestampTz(*value)),
             BoundPredicate::Text(value) if value.len() <= 4096 => {
                 Some(EstimateValue::Text(value.clone()))
             }

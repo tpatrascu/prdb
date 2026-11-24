@@ -266,6 +266,7 @@ pub enum BoundPredicate {
     Text(String),
     Date(i32),
     Uuid([u8; 16]),
+    TimestampTz(i64),
     Column(BoundColumn),
     Compare {
         operator: Comparison,
@@ -1248,6 +1249,10 @@ fn bind_predicate(
         Predicate::Text(value) => Ok((BoundPredicate::Text(value.clone()), Some(ScalarType::Text))),
         Predicate::Date(value) => Ok((BoundPredicate::Date(*value), Some(ScalarType::Date))),
         Predicate::Uuid(value) => Ok((BoundPredicate::Uuid(*value), Some(ScalarType::Uuid))),
+        Predicate::TimestampTz(value) => Ok((
+            BoundPredicate::TimestampTz(*value),
+            Some(ScalarType::TimestampTz),
+        )),
         Predicate::Column(name) => {
             let column = resolve_column(columns, name)?;
             Ok((
@@ -2200,6 +2205,27 @@ mod tests {
                     nullable: false,
                 })),
                 right: Box::new(BoundPredicate::Uuid([0x44; 16])),
+            }))
+        );
+        let mut timestamp_relation = relation();
+        timestamp_relation.relation.columns[0].scalar_type = ScalarType::TimestampTz;
+        let mut timestamp_predicate = vec![0x20, 0, 0x10, 2, b'i', b'd', 0x06];
+        timestamp_predicate.extend_from_slice(&(-42i64).to_be_bytes());
+        assert_eq!(
+            bind_select_request(
+                &request(&timestamp_predicate, "id"),
+                Some(timestamp_relation)
+            )
+            .map(|plan| plan.predicate),
+            Ok(Some(BoundPredicate::Compare {
+                operator: Comparison::Equal,
+                left: Box::new(BoundPredicate::Column(BoundColumn {
+                    column_id: [0x21; 16],
+                    ordinal: 0,
+                    scalar_type: ScalarType::TimestampTz,
+                    nullable: false,
+                })),
+                right: Box::new(BoundPredicate::TimestampTz(-42)),
             }))
         );
     }

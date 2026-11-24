@@ -248,6 +248,7 @@ pub enum Predicate {
     Text(String),
     Date(i32),
     Uuid([u8; 16]),
+    TimestampTz(i64),
     Column(String),
     Compare {
         operator: Comparison,
@@ -1516,6 +1517,18 @@ impl<'a> PredicateParser<'a> {
                 Ok(Predicate::Date(days))
             }
             0x05 => Ok(Predicate::Uuid(self.cursor.take(16)?.try_into().unwrap())),
+            0x06 => {
+                let micros = i64::from_be_bytes(
+                    self.cursor
+                        .take(8)?
+                        .try_into()
+                        .map_err(|_| RequestError::Truncated)?,
+                );
+                if !crate::tuple::timestamp_micros_is_valid(micros) {
+                    return Err(RequestError::InvalidValue);
+                }
+                Ok(Predicate::TimestampTz(micros))
+            }
             0x10 => Ok(Predicate::Column(self.cursor.identifier()?)),
             0x20 => {
                 let operator = match self.cursor.u8()? {
@@ -2521,6 +2534,30 @@ mod tests {
         assert_eq!(
             decode_select_request(&select_request(&expression)),
             Err(RequestError::Truncated)
+        );
+    }
+
+    #[test]
+    fn decodes_timestamptz_predicate_literal_as_big_endian_microseconds() {
+        let micros = -42i64;
+        let mut expression = vec![0x20, 0, 0x10];
+        name("created_at", &mut expression);
+        expression.push(0x06);
+        expression.extend_from_slice(&micros.to_be_bytes());
+        let decoded = decode_select_request(&select_request(&expression));
+        assert_eq!(
+            decoded.map(|request| request.predicate),
+            Ok(Some(Predicate::Compare {
+                operator: Comparison::Equal,
+                left: Box::new(Predicate::Column("created_at".to_owned())),
+                right: Box::new(Predicate::TimestampTz(micros)),
+            }))
+        );
+        expression.truncate(expression.len() - 8);
+        expression.extend_from_slice(&i64::MAX.to_be_bytes());
+        assert_eq!(
+            decode_select_request(&select_request(&expression)),
+            Err(RequestError::InvalidValue)
         );
     }
 

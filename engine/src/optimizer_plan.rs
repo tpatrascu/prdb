@@ -3647,6 +3647,10 @@ fn put_predicate(output: &mut Vec<u8>, predicate: &BoundPredicate) -> Result<(),
             output.push(0x05);
             output.extend_from_slice(value);
         }
+        BoundPredicate::TimestampTz(value) => {
+            output.push(0x06);
+            output.extend_from_slice(&value.to_be_bytes());
+        }
         BoundPredicate::Column(column) => {
             output.extend_from_slice(
                 &crate::query_abi::encode_optimizer_plan_column_predicate_record(
@@ -4097,6 +4101,14 @@ impl PlanReader<'_> {
                     .try_into()
                     .map_err(|_| PlanError::Truncated)?,
             )),
+            0x06 => {
+                let micros =
+                    i64::from_be_bytes(self.take(8)?.try_into().map_err(|_| PlanError::Truncated)?);
+                if !crate::tuple::timestamp_micros_is_valid(micros) {
+                    return Err(PlanError::InvalidPredicate);
+                }
+                Ok(BoundPredicate::TimestampTz(micros))
+            }
             0x10 => {
                 let column_id = self.column_predicate_id(tag_offset)?;
                 let column = scan_columns
@@ -4404,6 +4416,7 @@ fn is_point_probe_literal(column: &BoundColumn, value: &BoundPredicate) -> bool 
             | (ScalarType::Text, BoundPredicate::Text(_))
             | (ScalarType::Date, BoundPredicate::Date(_))
             | (ScalarType::Uuid, BoundPredicate::Uuid(_))
+            | (ScalarType::TimestampTz, BoundPredicate::TimestampTz(_))
     ) || matches!(
         (column.scalar_type, value),
         (ScalarType::Integer, BoundPredicate::Integer(value))
@@ -4913,7 +4926,8 @@ fn collect_predicate_columns_at_depth(
         | BoundPredicate::Integer(_)
         | BoundPredicate::Text(_)
         | BoundPredicate::Date(_)
-        | BoundPredicate::Uuid(_) => Ok(()),
+        | BoundPredicate::Uuid(_)
+        | BoundPredicate::TimestampTz(_) => Ok(()),
     }
 }
 
@@ -4953,6 +4967,10 @@ fn predicate_type_at_depth(
         }
         BoundPredicate::Date(_) => Err(PlanError::InvalidPredicate),
         BoundPredicate::Uuid(_) => Ok(Some(ScalarType::Uuid)),
+        BoundPredicate::TimestampTz(value) if crate::tuple::timestamp_micros_is_valid(*value) => {
+            Ok(Some(ScalarType::TimestampTz))
+        }
+        BoundPredicate::TimestampTz(_) => Err(PlanError::InvalidPredicate),
         BoundPredicate::Column(column) => {
             if scan_columns.iter().any(|scanned| scanned == column) {
                 Ok(Some(column.scalar_type))
@@ -5760,11 +5778,40 @@ mod tests {
     }
 
     #[test]
+    fn timestamptz_predicate_record_roundtrips_signed_microseconds() {
+        let predicate = BoundPredicate::TimestampTz(-42);
+        let mut encoded = Vec::new();
+        put_predicate(&mut encoded, &predicate).unwrap();
+        assert_eq!(encoded, [&[0x06][..], &(-42i64).to_be_bytes()[..]].concat());
+        let mut reader = PlanReader {
+            bytes: &encoded,
+            offset: 0,
+        };
+        assert_eq!(reader.predicate(&[]).unwrap(), predicate);
+        let mut invalid = encoded;
+        invalid[1..].copy_from_slice(&i64::MAX.to_be_bytes());
+        let mut reader = PlanReader {
+            bytes: &invalid,
+            offset: 0,
+        };
+        assert_eq!(reader.predicate(&[]), Err(PlanError::InvalidPredicate));
+    }
+
+    #[test]
     fn uuid_literals_are_eligible_for_exact_index_access() {
         let key = column(0x45, 0, ScalarType::Uuid);
         assert!(is_point_probe_literal(
             &key,
             &BoundPredicate::Uuid([0x12; 16])
+        ));
+    }
+
+    #[test]
+    fn timestamptz_literals_are_eligible_for_exact_index_access() {
+        let key = column(0x45, 0, ScalarType::TimestampTz);
+        assert!(is_point_probe_literal(
+            &key,
+            &BoundPredicate::TimestampTz(-42)
         ));
     }
 

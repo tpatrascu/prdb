@@ -1,11 +1,18 @@
 # Statistics Service Progress
 
+## ST-2 / OP-4 follow-up: TIMESTAMPTZ predicate literals — implemented slice
+
+- Contract: optimizer request and plan predicate tag `0x06` carries signed big-endian i64 microseconds since epoch, restricted to the supported timestamp range. Binding requires a TIMESTAMPTZ operand; authorized estimation compares the literal with readable timestamp cells.
+- Coverage: request validation, binding, Rust plan codec and point-index eligibility, planner IPC round-trip, real-redb exact estimate, and TinyCC request encoding/plan decoding cover this type.
+- Verification: focused Rust regressions, formatting, locked workspace build, warning-denied all-target Clippy, maintained TinyCC SDK tests, sandbox query fixture build, and the full delegated-cgroup suite passed. The suite reported 397 library tests, 206 commit tests, 3 metadata-process tests, and 83 transaction tests, with all other targets passing and no ignored tests.
+- Remaining: DECIMAL and BYTEA literals, cross-type coercions, broader candidate comparison, populations above 1,024, global-statistics consumption, and target-host workload evidence remain open.
+
 ## ST-2 / OP-4 follow-up: UUID predicate literals — implemented slice
 
 - Contract: optimizer request and plan predicate tag `0x05` carries the 16 canonical UUID bytes. Binding requires a UUID operand; authorized estimation compares UUID literals with readable UUID cells. Eligible single-column UUID equality and range predicates may use the existing authorized index paths.
 - Red/green: the request decoder regression first rejected tag `0x05` with `InvalidPredicate`; it now checks all 16 bytes. A real-redb predicate estimate returns the exact `(3 visible, 1 matching)` count for a UUID literal. Rust planner-IPC codec coverage and TinyCC request/plan fixtures cover the cross-language wire shapes.
 - Verification: focused Rust regressions, formatting, locked workspace build, warning-denied all-target Clippy, maintained TinyCC SDK tests, sandbox query fixture build, and the full serial delegated-cgroup workspace suite passed.
-- Remaining: DECIMAL, BYTEA, TIMESTAMPTZ literals, cross-type coercions, broader candidate comparison, populations above 1,024, global-statistics consumption, and target-host workload evidence remain open.
+- Remaining: DECIMAL and BYTEA literals, cross-type coercions, broader candidate comparison, populations above 1,024, global-statistics consumption, and target-host workload evidence remain open.
 
 ## ST-2 / OP-4 follow-up: DATE predicate literals — implemented slice
 
@@ -30,7 +37,7 @@
 
 ## ST-2 / OP-4 follow-up: exact same-typed scalar column estimates — implementation
 
-- Contract: the bounded estimator compares authorized columns when both operands have the identical scalar type: BOOLEAN, SMALLINT, INTEGER, BIGINT, DECIMAL, TEXT, VARCHAR, BYTEA, UUID, DATE, or TIMESTAMPTZ. DECIMAL precision/scale must match; TEXT, VARCHAR, and BYTEA values are capped at 4 KiB each. Boolean, integer, DATE, UUID, and text literals are supported; DECIMAL, BYTEA, and TIMESTAMPTZ literals and cross-type coercions remain unsupported.
+- Contract: the bounded estimator compares authorized columns when both operands have the identical scalar type: BOOLEAN, SMALLINT, INTEGER, BIGINT, DECIMAL, TEXT, VARCHAR, BYTEA, UUID, DATE, or TIMESTAMPTZ. DECIMAL precision/scale must match; TEXT, VARCHAR, and BYTEA values are capped at 4 KiB each. Boolean, integer, DATE, UUID, TIMESTAMPTZ, and text literals are supported; DECIMAL and BYTEA literals and cross-type coercions remain unsupported.
 - Red/green: the real-redb regression first failed with `Unknown` on the BYTEA pair. It now checks exact equality and inequality counts for all eleven scalar types, with duplicate and SQL NULL cases, and verifies the 4 KiB variable-value fallback.
 - Implementation: the trusted evaluator now mirrors same-type column binding and existing scalar comparison order for these types while retaining authorized projections, candidate/row-byte bounds, policy restrictions, cache invalidation, and the shared estimate allowance.
 - Verification: the all-type transaction regression covers equality, inequality, and ordering; a real `serve_planner` stream regression confirms a DECIMAL column predicate returns exact counts over planner IPC. Both focused tests passed. Format, warning-denied workspace Clippy, locked build, and the complete delegated-cgroup suite passed for the evaluator change; the suite ran before the additional planner-stream regression was added.
