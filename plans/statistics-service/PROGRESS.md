@@ -42,6 +42,13 @@
 - Scope: this validates the existing 4,096-row estimate cap end to end; it does not raise the cap or establish performance beyond it. Broader cost comparisons and target-host repeats remain open.
 - Verification: TinyCC sandbox fixture build, all five focused confined runs, `cargo fmt --all -- --check`, locked workspace build, warning-denied Clippy, TinyCC SDK tests, and the complete serial delegated-cgroup workspace suite passed (407 library tests, 206 commit tests, 3 metadata-process tests, 83 transaction tests, all other targets, no ignored tests). The full suite initially caught the marker collision; the rerun passed after using the unique marker.
 
+## ST-2 / OP-7 follow-up: preserve indexed fallback above the estimate cap — measured
+
+- Harness: added `PRDB_TEST_INDEXED_JOIN_FANOUT17_4097_UNKNOWN_BENCHMARK_ONLY`. A real planner transaction verifies the 4,097-row join estimate is `Unknown` with no partial count. The confined query still selects kind 17 through the deterministic index fallback and returns all 17 expected pairs from a 4,097-row indexed input.
+- Red/green: the first focused run failed because the fixture incorrectly expected an exact count. After asserting `None` at 4,097, the confined query passed. Five fresh-database delegated-cgroup runs each overlapped 192 operational reads and commits; the median of per-run p50 indexed latency was 256.5 ms (223.1–270.9 ms range).
+- Scope: this verifies only the first over-cap population and the existing fallback. The hash join comparison remains unavailable for inputs above 128 materialized rows; populations substantially above the cap and broader workload comparisons remain open.
+- Verification: TinyCC sandbox fixture build, all five focused confined runs, `cargo fmt --all -- --check`, locked workspace build, warning-denied Clippy, TinyCC SDK tests, and the complete serial delegated-cgroup workspace suite passed (407 library tests, 206 commit tests, 3 metadata-process tests, 83 transaction tests, all other targets, no ignored tests).
+
 ## ST-2 / OP-7 follow-up: validate the exact 17×119 skew boundary — measured
 
 - Contract: exercise the current 17-row outer / 7× indexed-side eligibility boundary through the full confined SQL path, including the authorized exact pair estimate, selected plan, indexed execution, hash reference result, durable outcome, and concurrent operational workload.
