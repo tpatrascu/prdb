@@ -113,7 +113,7 @@ Statistics never establish authorization or correctness. Missing or unsupported 
 ## Validation and Research Questions
 
 - Compare scoped summaries with a reference authorized scan, including nulls and redactions.
-- Change only hidden values or add invisible rows: normalized estimate content must remain unchanged when the authorized view and public inputs are unchanged. A five-run local thread-CPU profile of one value-dependent policy measured median-of-run p50 at 2.506 ms with two candidates (2.149–2.562 ms range) and 2.523 ms with 8,194 candidates (2.203–2.531 ms range). Treat this as one host-local measurement, not proof of timing/resource noninterference; timing behavior remains a known limitation.
+- Change only hidden values or add invisible rows: normalized estimate content must remain unchanged when the authorized view and public inputs are unchanged. Five-run local thread-CPU profiles of one value-dependent policy measured median-of-run p50 at 2.506 ms with two private-overlay candidates (2.149–2.562 ms range) and 2.523 ms with 8,194 candidates (2.203–2.531 ms range); a separate committed-row profile measured 2.384 ms with two candidates (2.257–2.455 ms range) and 2.411 ms with 8,194 candidates (2.221–2.453 ms range). Treat these as host-local measurements, not proof of timing/resource noninterference; timing behavior remains a known limitation.
 - Attempt repeated predicate probes, cross-principal cache reuse, stale-policy reuse, and statistics access through worker channels.
 - Test planning work limits, cancellation, unsupported expressions, and heuristic fallback.
 - Measure planning overhead and plan quality under highly selective policies before adding richer statistics.

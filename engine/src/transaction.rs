@@ -13207,32 +13207,47 @@ mod predicate_estimate_scan_budget_tests {
             2 * 1024 * 1024,
         )
         .expect("begin few-hidden-row invocation");
-        let mut many_hidden_coordination = InvocationCoordination::uncoordinated();
-        many_hidden_coordination.max_scan_work = 1;
-        let mut many_hidden = InvocationTransaction::begin_inner(
-            database,
-            many_hidden_coordination,
-            [0x28; 16],
-            principal_id,
-            i64::MAX,
-            16_384,
-            2 * 1024 * 1024,
-        )
-        .expect("begin many-hidden-row invocation");
+        // Keep this transaction's snapshot before publishing the hidden rows so the
+        // paired estimate compares committed candidate populations under one policy.
         let hidden_candidate_count =
             if std::env::var_os("PRDB_TEST_PROFILE_HIDDEN_ESTIMATE_CPU").is_some() {
                 8_192
             } else {
                 10
             };
+        let mut hidden_seed = InvocationTransaction::begin_inner(
+            database,
+            InvocationCoordination::uncoordinated(),
+            [0x28; 16],
+            principal_id,
+            i64::MAX,
+            hidden_candidate_count + 2,
+            2 * 1024 * 1024,
+        )
+        .expect("begin hidden-row seed invocation");
         for hidden_id in 3..=hidden_candidate_count + 2 {
-            many_hidden
+            hidden_seed
                 .stage_put(
-                    row_id(hidden_id),
+                    row_id(u64::try_from(hidden_id).expect("hidden row ID fits u64")),
                     &encode_row(Some(ScalarValue::Text(format!("hidden-{hidden_id}")))),
                 )
-                .expect("stage additional hidden candidate");
+                .expect("stage hidden committed candidate");
         }
+        hidden_seed
+            .commit()
+            .expect("commit rows hidden by the value-dependent policy");
+        let mut many_hidden_coordination = InvocationCoordination::uncoordinated();
+        many_hidden_coordination.max_scan_work = 1;
+        let mut many_hidden = InvocationTransaction::begin_inner(
+            database,
+            many_hidden_coordination,
+            [0x29; 16],
+            principal_id,
+            i64::MAX,
+            16_384,
+            2 * 1024 * 1024,
+        )
+        .expect("begin many-hidden-row invocation");
         assert_eq!(
             few_hidden
                 .estimate_authorized_predicate_at_most(
@@ -13312,7 +13327,7 @@ mod predicate_estimate_scan_budget_tests {
             few_hidden_times.sort_unstable();
             many_hidden_times.sort_unstable();
             eprintln!(
-                "hidden-row estimate thread-CPU profile: hidden_overlay_rows={hidden_candidate_count}, estimates_per_sample={ESTIMATES_PER_SAMPLE}, samples={PROFILE_SAMPLES}, few-hidden p50={:.3} ms, many-hidden p50={:.3} ms",
+                "hidden-row estimate thread-CPU profile: hidden_committed_rows={hidden_candidate_count}, estimates_per_sample={ESTIMATES_PER_SAMPLE}, samples={PROFILE_SAMPLES}, few-hidden p50={:.3} ms, many-hidden p50={:.3} ms",
                 few_hidden_times[few_hidden_times.len() / 2].as_secs_f64() * 1_000.0,
                 many_hidden_times[many_hidden_times.len() / 2].as_secs_f64() * 1_000.0,
             );

@@ -1,5 +1,12 @@
 # Statistics Service Progress
 
+## ST-3 follow-up: profile committed hidden-row volume — measured
+
+- Harness: the hidden-row estimate regression pins one invocation before seeding and committing 8,192 rows that a value-dependent row policy hides, then pins a second invocation after that commit. Both estimates remain `Unknown`, both preserve the same authorized one-row scan page, and estimation leaves the one-unit query scan allowance available. An opt-in profile measures current-thread CPU for 1,024 repeated estimates per sample across five samples.
+- Evidence: five fresh-fixture delegated-service runs measured a median of run-level p50s of 2.384 ms with two committed candidates (2.257–2.455 ms range) and 2.411 ms with 8,194 committed candidates (2.221–2.453 ms range).
+- Scope: this is one local policy/predicate on one Linux host, with no concurrent workload. Similar medians are not proof of timing or resource noninterference; broader policy shapes, concurrent-resource behavior, and target-host evidence remain open.
+- Verification: all five focused profile runs passed the exact estimate, authorized-page, and scan-work assertions.
+
 ## ST-3 follow-up: measure thread CPU for hidden-candidate estimates — measured
 
 - Harness: the existing value-dependent-policy regression compares `Unknown` estimates with two committed candidates and with 8,194 total candidates (8,192 additional private overlay rows). An opt-in profile records current-thread CPU time for 1,024 repeated estimates per sample, across five samples and five fresh database fixtures; every estimate remains `Unknown`.
