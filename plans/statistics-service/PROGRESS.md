@@ -3,9 +3,10 @@
 ## ST-2 / OP-7 follow-up: verify the inclusive 17-row fanout boundary — covered
 
 - Contract: for a 17-row outer input with an eligible indexed relation, the exact estimate may select indexed nested-loop at 68 pairs (four per outer row); 69 pairs must retain hash.
-- Regression: an optimizer-service test checks both sides of that exact decision edge with the 17×119 population ratio that admits the fanout rule. The existing real-redb and confined profiles separately establish estimate and execution behavior.
-- Scope: this pins the inclusive threshold in the planner decision; it adds no cost measurement or broader cost-model claim.
-- Validation: the focused optimizer-service test, workspace formatting check, and warning-denied engine Clippy check passed.
+- Regression: the optimizer-service unit test checks both sides of that exact decision edge. A new confined benchmark mode uses a 17×119 input, an exact seven-to-one population ratio, and 68 matching pairs; it validates the estimate, kind-17 plan, every output against hash, and concurrent operational work.
+- Evidence: five fresh-database delegated-cgroup runs each overlapped 192 operational reads and 192 commits. The median of per-run p50s was 250.3 ms for indexed nested-loop (248.5–266.2 ms range) and 292.3 ms for hash (281.3–341.7 ms range).
+- Scope: this adds a local measurement at the inclusive pair threshold and population-ratio boundary; it does not establish a general cost model or target-host performance.
+- Validation: all five confined runs passed; maintained TinyCC SDK tests and sandbox fixture build passed.
 
 ## ST-2 follow-up: verify join-estimate byte limits — covered
 

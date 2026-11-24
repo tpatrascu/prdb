@@ -1953,7 +1953,7 @@ static int32_t run_write_read_fixture(
          invocation->parameters[0] == 'W' || invocation->parameters[0] == 'E' ||
          invocation->parameters[0] == 'q' ||
          invocation->parameters[0] == 's' ||
-         invocation->parameters[0] == 'h' ||
+         invocation->parameters[0] == 'h' || invocation->parameters[0] == 'a' ||
          invocation->parameters[0] == 'X' || invocation->parameters[0] == 'Y' ||
          invocation->parameters[0] == 'z')) {
         static const uint8_t benchmark_sql[] =
@@ -1970,11 +1970,13 @@ static int32_t run_write_read_fixture(
                                             invocation->parameters[0] == 'E' ||
                                             invocation->parameters[0] == 'q' ||
                                             invocation->parameters[0] == 's' ||
-                                            invocation->parameters[0] == 'h'
+                                            invocation->parameters[0] == 'h' ||
+                                            invocation->parameters[0] == 'a'
                                         ? 17
                                     : invocation->parameters[0] == 'X' ? 16
                                                                        : 9;
-        const uint32_t fanout = invocation->parameters[0] == '2' ? 2
+        const uint32_t fanout = invocation->parameters[0] == 'a' ? 4
+                                : invocation->parameters[0] == '2' ? 2
                                 : invocation->parameters[0] == '3' ? 3
                                 : invocation->parameters[0] == '4' ? 4
                                 : invocation->parameters[0] == '5' ? 5
@@ -1997,7 +1999,8 @@ static int32_t run_write_read_fixture(
                                                                         invocation->parameters[0] == 'z' ||
                                                                         invocation->parameters[0] == 'W' ||
                                                                         invocation->parameters[0] == 'E' ||
-                                                                        invocation->parameters[0] == 'q'
+                                                                        invocation->parameters[0] == 'q' ||
+                                                                        invocation->parameters[0] == 'a'
                                                                     ? 544
                                                                 : invocation->parameters[0] == 'X'
                                                                     ? 480
