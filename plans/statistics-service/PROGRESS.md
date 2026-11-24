@@ -1,5 +1,11 @@
 # Statistics Service Progress
 
+## ST-2 follow-up: use adjusted populations for constant predicates — verified slice
+
+- Contract: `TRUE`, `FALSE`, and other supported row-independent constants derive exact matches from the same bounded authorized population estimate as planner scan choices. A fresh committed population record with current-actor insert/delete deltas can supply the count; stale/missing statistics fall back to the row-key probe. No row payloads are decoded for constant evaluation.
+- Red/green: the constant-predicate regression first expected a private insert to yield `(3, 0)` for `FALSE` but received `Unknown`. After routing the constant path through the bounded population estimator, the private-overlay case passed. The follow-up committed a row after the stats record became stale and verified the row-key fallback returned the new count `(3, 0)` rather than the stale baseline.
+- Verification: the focused regression passed, followed by all 85 transaction integration tests. The isolated locked workspace build, format check, and all-target Clippy passed. The existing delegated full workspace suite is still active in the commit integration binary, so no full-suite result is claimed.
+
 ## ST-2 follow-up: adjust fresh population estimates for private writes — verified slice
 
 - Contract: when a fresh exact committed population record and a literal full-visible policy proof establish the baseline, adjust only for the invocation's own bounded overlay rows using pinned row-key existence. Staged inserts add one visible row; updates retain the count; deletes subtract one. Other actors' writes remain invisible. The estimator examines at most 16,384 overlay row IDs and falls back to the bounded probe on limit or storage uncertainty.

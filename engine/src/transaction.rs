@@ -2914,31 +2914,16 @@ impl<'db> InvocationTransaction<'db> {
                     evaluate_estimate_predicate(predicate, &[], projection, 0, 256)
                         .map(|truth| truth == EstimateTruth::True);
                 if let Some(matches_all) = constant_matches_all {
-                    let overlay_is_empty = match self.overlay.staged_row_count() {
-                        Ok(rows) => rows == 0,
-                        Err(OverlayError::Aborted) => return Err(TransactionError::Aborted),
-                        Err(_) => false,
-                    };
-                    if overlay_is_empty {
-                        let record = self
-                            .pinned_snapshot()?
-                            .committed_population_record(table_id)
-                            .ok()
-                            .flatten();
-                        match record {
-                            Some(CommittedPopulationRecord::Exact { rows, .. })
-                                if rows <= maximum_rows =>
-                            {
-                                let matches = if matches_all { rows } else { 0 };
-                                return self.finish_predicate_estimate(Some((rows, matches)));
-                            }
-                            Some(CommittedPopulationRecord::Exact { .. })
-                            | Some(CommittedPopulationRecord::Unknown { .. }) => {
-                                return self.finish_predicate_estimate(None);
-                            }
-                            None => {}
-                        }
+                    let visible_rows = self.estimate_authorized_population_at_most(
+                        table_id,
+                        projection,
+                        maximum_rows,
+                    )?;
+                    if let Some(visible_rows) = visible_rows {
+                        let matching_rows = if matches_all { visible_rows } else { 0 };
+                        return self.finish_predicate_estimate(Some((visible_rows, matching_rows)));
                     }
+                    return self.finish_predicate_estimate(None);
                 }
             }
             None => return self.finish_predicate_estimate(None),

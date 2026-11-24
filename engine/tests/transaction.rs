@@ -7291,8 +7291,8 @@ fn constant_predicate_reuses_fresh_population_without_reading_rows()
             &prdb_engine::optimizer_binding::BoundPredicate::Boolean(false),
             4,
         )?,
-        None,
-        "a private write must prevent reuse of the committed population record"
+        Some((3, 0)),
+        "a row-independent constant predicate should use the adjusted private population"
     );
     invocation.abort()?;
 
@@ -7316,8 +7316,8 @@ fn constant_predicate_reuses_fresh_population_without_reading_rows()
             &prdb_engine::optimizer_binding::BoundPredicate::Boolean(false),
             4,
         )?,
-        None,
-        "a later committed sequence must invalidate population-stat reuse and scan fallback"
+        Some((3, 0)),
+        "a stale population record must fall back to a fresh bounded population probe"
     );
     stale_statistics_invocation.abort()?;
     Ok(())
