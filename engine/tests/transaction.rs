@@ -7199,7 +7199,7 @@ fn constant_predicate_reuses_fresh_population_without_reading_rows()
         )),
     };
     let mut bounded_scan_work =
-        InvocationTransaction::begin(&database, [0x35; 16], [9; 16], 9_999, 4, 1)?;
+        InvocationTransaction::begin(&database, [0x35; 16], [9; 16], 9_999, 1, 1)?;
     assert_eq!(
         bounded_scan_work.estimate_authorized_predicate_at_most(
             table_id,
