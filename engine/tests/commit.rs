@@ -758,13 +758,27 @@ fn run_operational_read_commit_samples(
                             );
                         }
                         point_read_samples.push(point_read_started.elapsed());
-                        let page = transaction
-                            .scan_catalog_authorized_rows(table_id, None, 128)
-                            .map_err(|error| format!("operational authorized scan: {error:?}"))?;
-                        if page.rows.len() != expected_scan_rows {
+                        let mut continuation = None;
+                        let mut scanned_rows = 0usize;
+                        loop {
+                            let page = transaction
+                                .scan_catalog_authorized_rows(
+                                    table_id,
+                                    continuation.as_ref(),
+                                    128,
+                                )
+                                .map_err(|error| {
+                                    format!("operational authorized scan: {error:?}")
+                                })?;
+                            scanned_rows += page.rows.len();
+                            continuation = page.continuation;
+                            if continuation.is_none() {
+                                break;
+                            }
+                        }
+                        if scanned_rows != expected_scan_rows {
                             return Err(format!(
-                                "operational authorized scan returned {} rows, expected {expected_scan_rows}",
-                                page.rows.len(),
+                                "operational authorized scan returned {scanned_rows} rows, expected {expected_scan_rows}"
                             ));
                         }
                         let commit_started = std::time::Instant::now();
@@ -40757,7 +40771,12 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     let sql_in_null_left_only = std::env::var_os("PRDB_TEST_SQL_IN_NULL_LEFT_ONLY").is_some();
     let sql_in_cancel_only = std::env::var_os("PRDB_TEST_SQL_IN_CANCEL_ONLY").is_some();
     let sql_in_denied_key_only = std::env::var_os("PRDB_TEST_SQL_IN_DENIED_KEY_ONLY").is_some();
-    let sql_in_only = sql_in_indexed_only || sql_in_fallback_only || sql_in_null_left_only;
+    let sql_in_over_budget_only =
+        std::env::var_os("PRDB_TEST_SQL_IN_OVER_BUDGET_FALLBACK_ONLY").is_some();
+    let sql_in_only = sql_in_indexed_only
+        || sql_in_fallback_only
+        || sql_in_null_left_only
+        || sql_in_over_budget_only;
     let sql_in_any_only = sql_in_only || sql_in_cancel_only || sql_in_denied_key_only;
     assert!(
         [
@@ -40766,6 +40785,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             sql_in_null_left_only,
             sql_in_cancel_only,
             sql_in_denied_key_only,
+            sql_in_over_budget_only,
         ]
         .into_iter()
         .filter(|enabled| *enabled)
@@ -41267,7 +41287,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 (0xd7, 2, 9),
             ]
         };
-    let composite_rows = composite_seed_rows
+    let mut composite_rows = composite_seed_rows
         .into_iter()
         .map(|(row_id, left, right)| {
             Ok(RowWrite {
@@ -41284,6 +41304,19 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             })
         })
         .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+    if sql_in_over_budget_only {
+        for row_id in 1..=124u8 {
+            composite_rows.push(RowWrite {
+                key: table_row_key(composite_table.table_id, id(row_id)),
+                expected_version: None,
+                payload: Some(encode_tuple(
+                    &composite_schema,
+                    1,
+                    &[Some(ScalarValue::Integer(1)), Some(ScalarValue::Integer(7))],
+                )?),
+            });
+        }
+    }
     commit_rows(
         &database,
         id(0xd6),
@@ -43094,6 +43127,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         joined_pairs,
         if sql_in_denied_key_only {
             None
+        } else if sql_in_over_budget_only {
+            Some(126)
         } else {
             Some(expected_join_pairs)
         },
@@ -43199,6 +43234,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 4
             } else if indexed_join_benchmark_only {
                 64
+            } else if sql_in_over_budget_only {
+                129
             } else if sql_in_null_left_only {
                 6
             } else {
@@ -43427,6 +43464,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 b'i'
             } else if sql_in_denied_key_only {
                 b'd'
+            } else if sql_in_over_budget_only {
+                b'o'
             } else {
                 b'N'
             }
@@ -43565,6 +43604,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                     4
                 } else if indexed_join_benchmark_only {
                     64
+                } else if sql_in_over_budget_only {
+                    129
                 } else {
                     5
                 };
@@ -44350,7 +44391,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 Ok((values[0], values[1]))
             }
             let mut observed = std::collections::BTreeMap::new();
-            for _ in 0..5 {
+            let expected_rows = if sql_in_over_budget_only { 129 } else { 5 };
+            for _ in 0..expected_rows {
                 let frame = ordered_frames.next().ok_or("missing batched IN SQLR row")?;
                 assert_eq!(frame.operation, Operation::GatewayResultData as u16);
                 assert_eq!(frame.request_id, ordered_accepted.request_id);
@@ -44360,7 +44402,11 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             }
             assert_eq!(
                 observed.into_iter().collect::<Vec<_>>(),
-                [((1, 7), 2), ((2, 9), 3)],
+                if sql_in_over_budget_only {
+                    vec![((1, 7), 126), ((2, 9), 3)]
+                } else {
+                    vec![((1, 7), 2), ((2, 9), 3)]
+                },
                 "IN must return the authorized reference rows with duplicate list values and a NULL member"
             );
         } else if !spill_quota_only
@@ -45000,14 +45046,34 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                             );
                         }
                         let point_read_latency = point_read_started.elapsed();
-                        let page = transaction
-                            .scan_catalog_authorized_rows(operational_table_id, None, 128)
-                            .map_err(|error| format!("operational authorized scan: {error:?}"))?;
-                        let expected_scan_rows = if sql_in_null_left_only { 6 } else { 5 };
-                        if page.rows.len() != expected_scan_rows {
+                        let expected_scan_rows = if sql_in_over_budget_only {
+                            129
+                        } else if sql_in_null_left_only {
+                            6
+                        } else {
+                            5
+                        };
+                        let mut continuation = None;
+                        let mut scanned_rows = 0usize;
+                        loop {
+                            let page = transaction
+                                .scan_catalog_authorized_rows(
+                                    operational_table_id,
+                                    continuation.as_ref(),
+                                    128,
+                                )
+                                .map_err(|error| {
+                                    format!("operational authorized scan: {error:?}")
+                                })?;
+                            scanned_rows += page.rows.len();
+                            continuation = page.continuation;
+                            if continuation.is_none() {
+                                break;
+                            }
+                        }
+                        if scanned_rows != expected_scan_rows {
                             return Err(format!(
-                                "operational authorized scan returned {} rows, expected {expected_scan_rows}",
-                                page.rows.len(),
+                                "operational authorized scan returned {scanned_rows} rows, expected {expected_scan_rows}"
                             ));
                         }
                         if worker_index >= 60 {
