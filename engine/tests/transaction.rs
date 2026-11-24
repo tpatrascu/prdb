@@ -7939,6 +7939,228 @@ fn authorized_join_estimate_counts_duplicate_matches_and_private_overlay()
 }
 
 #[test]
+fn authorized_join_estimate_returns_unknown_at_row_and_key_byte_limits()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let schema_id = [0x81; 16];
+    let left_table = [0x82; 16];
+    let right_table = [0x83; 16];
+    let left_integer_key = [0x84; 16];
+    let left_text_key = [0x85; 16];
+    let right_integer_key = [0x86; 16];
+    let right_text_key = [0x87; 16];
+    let columns = [
+        ColumnSchema {
+            scalar_type: ScalarType::Integer,
+            nullable: false,
+        },
+        ColumnSchema {
+            scalar_type: ScalarType::Text,
+            nullable: false,
+        },
+    ];
+    let left_column_ids = [left_integer_key, left_text_key];
+    let right_column_ids = [right_integer_key, right_text_key];
+    let context = AuthorizationContext {
+        principal_id: [9; 16],
+        role_ids: std::collections::HashSet::new(),
+        scope: std::collections::HashSet::from([
+            (Operation::Usage, AccessTarget::Schema(schema_id)),
+            (Operation::Select, AccessTarget::Table(left_table)),
+            (Operation::Select, AccessTarget::Table(right_table)),
+            (
+                Operation::Select,
+                AccessTarget::Column {
+                    table_id: left_table,
+                    column_id: left_integer_key,
+                },
+            ),
+            (
+                Operation::Select,
+                AccessTarget::Column {
+                    table_id: left_table,
+                    column_id: left_text_key,
+                },
+            ),
+            (
+                Operation::Select,
+                AccessTarget::Column {
+                    table_id: right_table,
+                    column_id: right_integer_key,
+                },
+            ),
+            (
+                Operation::Select,
+                AccessTarget::Column {
+                    table_id: right_table,
+                    column_id: right_text_key,
+                },
+            ),
+        ]),
+    };
+    let grants = [
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Usage,
+            target: AccessTarget::Schema(schema_id),
+        },
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Select,
+            target: AccessTarget::Column {
+                table_id: left_table,
+                column_id: left_integer_key,
+            },
+        },
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Select,
+            target: AccessTarget::Column {
+                table_id: left_table,
+                column_id: left_text_key,
+            },
+        },
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Select,
+            target: AccessTarget::Column {
+                table_id: right_table,
+                column_id: right_integer_key,
+            },
+        },
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Select,
+            target: AccessTarget::Column {
+                table_id: right_table,
+                column_id: right_text_key,
+            },
+        },
+    ];
+    let table_policy = |table_id| Policy {
+        subjects: vec![Subject::Principal([9; 16])],
+        operation: Operation::Select,
+        target: AccessTarget::Table(table_id),
+        effect: Effect::Allow,
+        using: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+        with_check: None,
+    };
+    let left_policy = table_policy(left_table);
+    let right_policy = table_policy(right_table);
+    let policies = [
+        left_policy.clone(),
+        Policy {
+            target: AccessTarget::Column {
+                table_id: left_table,
+                column_id: left_integer_key,
+            },
+            ..left_policy.clone()
+        },
+        Policy {
+            target: AccessTarget::Column {
+                table_id: left_table,
+                column_id: left_text_key,
+            },
+            ..left_policy
+        },
+        right_policy.clone(),
+        Policy {
+            target: AccessTarget::Column {
+                table_id: right_table,
+                column_id: right_integer_key,
+            },
+            ..right_policy.clone()
+        },
+        Policy {
+            target: AccessTarget::Column {
+                table_id: right_table,
+                column_id: right_text_key,
+            },
+            ..right_policy
+        },
+    ];
+    let left_projection = AuthorizedProjection {
+        columns: &columns,
+        column_ids: &left_column_ids,
+        schema_version: 1,
+        schema_id,
+        context: &context,
+        grants: &grants,
+        policies: &policies,
+        checks: &[],
+        policy_driving_columns: &[],
+        dependencies: &[],
+    };
+    let right_projection = AuthorizedProjection {
+        columns: &columns,
+        column_ids: &right_column_ids,
+        schema_version: 1,
+        schema_id,
+        context: &context,
+        grants: &grants,
+        policies: &policies,
+        checks: &[],
+        policy_driving_columns: &[],
+        dependencies: &[],
+    };
+    let large_value = ScalarValue::Text("x".repeat(940_000));
+    let encode_row = |text_value: ScalarValue| {
+        encode_tuple(
+            &columns,
+            1,
+            &[Some(ScalarValue::Integer(0)), Some(text_value)],
+        )
+        .unwrap()
+    };
+    let mut seed =
+        InvocationTransaction::begin(&database, [0x88; 16], [9; 16], 9_999, 16, 12 * 1024 * 1024)?;
+    for number in 0..5 {
+        seed.stage_put(
+            numbered_row_id(left_table, number),
+            &encode_row(large_value.clone()),
+        )?;
+    }
+    for number in 0..4 {
+        seed.stage_put(
+            numbered_row_id(right_table, number),
+            &encode_row(large_value.clone()),
+        )?;
+    }
+    seed.commit()?;
+
+    let mut planner =
+        InvocationTransaction::begin(&database, [0x89; 16], [9; 16], 9_999, 16, 4096)?;
+    assert_eq!(
+        planner.estimate_authorized_join_cardinality_at_most(
+            left_table,
+            &left_projection,
+            &[left_integer_key],
+            right_table,
+            &right_projection,
+            &[right_integer_key],
+            8,
+        )?,
+        None,
+        "combined decoded row payload above 8 MiB must not produce a partial join estimate"
+    );
+    assert_eq!(
+        planner.estimate_authorized_join_cardinality_at_most(
+            left_table,
+            &left_projection,
+            &[left_text_key],
+            right_table,
+            &right_projection,
+            &[right_text_key],
+            8,
+        )?,
+        None,
+        "an encoded join key above 4 KiB must return Unknown"
+    );
+    Ok(())
+}
+
+#[test]
 fn authorized_scan_estimate_returns_unknown_at_candidate_budget()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::statistics::{

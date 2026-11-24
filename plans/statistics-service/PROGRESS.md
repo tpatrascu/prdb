@@ -1,5 +1,11 @@
 # Statistics Service Progress
 
+## ST-2 follow-up: verify join-estimate byte limits — covered
+
+- Contract: an authorized exact join estimate remains `Unknown` without partial counts when combined decoded row payload exceeds 8 MiB or an encoded join key exceeds 4 KiB.
+- Regression: added a real-redb transaction test with nine wide rows crossing the combined row-byte bound and a second estimate using their oversized text keys. Both return `Unknown`.
+- Validation: the focused transaction regression passed; `cargo fmt --all -- --check`, workspace build, workspace Clippy with warnings denied, SDK tests, and the serial full workspace suite in the delegated cgroup service all passed after this addition.
+
 ## ST-2 / OP-7 follow-up: verify hash fallback for hot-key fanout above threshold — measured
 
 - Contract: complement the 16-match hot-key case with a 17×128 join where one outer key matches all 128 indexed rows and the other 16 are unmatched. The exact 128-pair estimate exceeds four pairs per outer row; the optimizer must retain kind-4 hash and preserve the full result.
