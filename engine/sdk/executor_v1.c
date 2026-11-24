@@ -802,6 +802,9 @@ int32_t prdb_sdk_executor_stage_inserts_v1(
         const uint8_t *handle = response + 4 + (uint64_t)row * 16;
         if (handle[0] != PRDB_SDK_BATCH_ROW_TOKEN_KIND)
             return PRDB_SDK_EXECUTOR_INVALID_PAYLOAD;
+    }
+    for (uint16_t row = 0; row < row_count; ++row) {
+        const uint8_t *handle = response + 4 + (uint64_t)row * 16;
         memcpy(row_handles_out + (uint64_t)row * 16, handle, 16);
     }
     return PRDB_SDK_EXECUTOR_OK;
