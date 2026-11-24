@@ -12,6 +12,10 @@ const MAX_DATE_DAYS: i32 = 2_932_896;
 const MIN_TIMESTAMP_MICROS: i64 = -62_135_596_800_000_000;
 const MAX_TIMESTAMP_MICROS: i64 = 253_402_300_799_999_999;
 
+pub(crate) fn date_day_count_is_valid(days: i32) -> bool {
+    (MIN_DATE_DAYS..=MAX_DATE_DAYS).contains(&days)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScalarType {
     Boolean,
@@ -288,7 +292,7 @@ fn encode_scalar<'a>(
         (ScalarType::Bytea, ScalarValue::Bytea(value)) => Cow::Borrowed(value.as_slice()),
         (ScalarType::Uuid, ScalarValue::Uuid(value)) => Cow::Borrowed(value),
         (ScalarType::Date, ScalarValue::Date(value)) => {
-            if !(MIN_DATE_DAYS..=MAX_DATE_DAYS).contains(value) {
+            if !date_day_count_is_valid(*value) {
                 return Err(TupleError::InvalidScalarRange);
             }
             Cow::Owned(value.to_le_bytes().to_vec())
@@ -334,7 +338,7 @@ fn decode_scalar(kind: ScalarType, bytes: &[u8]) -> Result<ScalarValue, TupleErr
         ScalarType::Uuid => ScalarValue::Uuid(fixed(bytes)?),
         ScalarType::Date => {
             let value = i32::from_le_bytes(fixed(bytes)?);
-            if !(MIN_DATE_DAYS..=MAX_DATE_DAYS).contains(&value) {
+            if !date_day_count_is_valid(value) {
                 return Err(TupleError::InvalidScalarRange);
             }
             ScalarValue::Date(value)

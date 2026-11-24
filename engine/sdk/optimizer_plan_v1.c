@@ -115,6 +115,27 @@ static int read_integer_predicate_record(plan_reader *reader,
     return node_tag == 0x02;
 }
 
+static int read_date_predicate_record(plan_reader *reader,
+                                      uint64_t header_offset,
+                                      const uint8_t **date_bytes) {
+    const uint8_t *ignored;
+    uint32_t raw_days;
+    int64_t days;
+    if (header_offset >= reader->length ||
+        reader->bytes[header_offset] != 0x04 ||
+        reader->offset != header_offset + 1 ||
+        !take(reader, 4, &ignored)) return 0;
+    raw_days = ((uint32_t)ignored[0] << 24) |
+               ((uint32_t)ignored[1] << 16) |
+               ((uint32_t)ignored[2] << 8) | ignored[3];
+    days = raw_days <= INT32_MAX
+               ? (int64_t)raw_days
+               : (int64_t)raw_days - INT64_C(4294967296);
+    if (days < -719162 || days > 2932896) return 0;
+    *date_bytes = ignored;
+    return 1;
+}
+
 static int read_column_predicate_record(plan_reader *reader,
                                         uint64_t header_offset,
                                         uint8_t column_id[16]) {
@@ -442,6 +463,10 @@ static int decode_predicate(plan_reader *reader,
             type.type_code = 6;
             break;
         }
+        case 0x04:
+            if (!read_date_predicate_record(reader, tag_offset, &bytes)) return 0;
+            type.type_code = PRDB_SDK_VALUE_TYPE_DATE;
+            break;
         case 0x10: {
             uint32_t index;
             int found = 0;
@@ -551,6 +576,9 @@ static int read_point_probe_leaf(plan_reader *reader, uint8_t column_id[16],
         if (!read_text_predicate_header(reader, start, &length) ||
             length > 4096 || !take(reader, length, &bytes) ||
             !valid_utf8(bytes, length)) return 0;
+    } else if (tag == 0x04) {
+        const uint8_t *date_bytes;
+        if (!read_date_predicate_record(reader, start, &date_bytes)) return 0;
     } else {
         return 0;
     }
@@ -789,6 +817,21 @@ static int encode_point_probe_request(
             value_len = text_len;
             break;
         }
+        case 0x04: {
+            const uint8_t *date_bytes;
+            plan_reader literal_reader = {hint->literal,
+                                          hint->literal_len, 0};
+            uint8_t tag;
+            if (!read_u8(&literal_reader, &tag) || tag != 0x04 ||
+                !read_date_predicate_record(&literal_reader, 0, &date_bytes) ||
+                literal_reader.offset != literal_reader.length ||
+                hint->key_column.type_code != PRDB_SDK_VALUE_TYPE_DATE)
+                return 0;
+            type_code = PRDB_SDK_VALUE_TYPE_DATE;
+            value_bytes = date_bytes;
+            value_len = 4;
+            break;
+        }
         default:
             return 0;
     }
@@ -882,6 +925,18 @@ static int range_literal_to_value(const uint8_t *literal,
         value->type_code = PRDB_SDK_VALUE_TYPE_TEXT;
         value->data = text;
         value->data_len = text_len;
+    } else if (tag == 0x04) {
+        const uint8_t *date_bytes;
+        if (expected_type != PRDB_SDK_VALUE_TYPE_DATE ||
+            !read_date_predicate_record(&reader, 0, &date_bytes) ||
+            reader.offset != reader.length) return 0;
+        memset(value, 0, sizeof(*value));
+        value->struct_size = sizeof(*value);
+        value->abi_version = PRDB_SDK_VALUE_ABI_V1_VERSION;
+        value->state = PRDB_SDK_VALUE_STATE_VALUE;
+        value->type_code = PRDB_SDK_VALUE_TYPE_DATE;
+        value->data = date_bytes;
+        value->data_len = 4;
     } else {
         return 0;
     }
@@ -1007,6 +1062,10 @@ static int skip_predicate_node(plan_reader *reader, uint32_t depth) {
                length <= 4096 &&
                take(reader, length, &bytes);
     }
+    case 0x04: {
+        const uint8_t *date_bytes;
+        return read_date_predicate_record(reader, tag_offset, &date_bytes);
+    }
     case 0x10:
         {
             uint8_t column_id[16];
@@ -1097,6 +1156,13 @@ static int32_t evaluate_predicate_node(
             !take(reader, length, &bytes))
             return PRDB_SDK_SQL_EVAL_INVALID_VALUE;
         predicate_value_init(out, PRDB_SDK_VALUE_TYPE_TEXT, bytes, length);
+        return PRDB_SDK_SQL_EVAL_OK;
+    }
+    case 0x04: {
+        const uint8_t *date_bytes;
+        if (!read_date_predicate_record(reader, tag_offset, &date_bytes))
+            return PRDB_SDK_SQL_EVAL_INVALID_VALUE;
+        predicate_value_init(out, PRDB_SDK_VALUE_TYPE_DATE, date_bytes, 4);
         return PRDB_SDK_SQL_EVAL_OK;
     }
     case 0x10: {
@@ -4308,7 +4374,8 @@ static int32_t decode_plan_internal(
                 uint64_t literal_offset;
                 uint8_t literal_tag;
                 if (!read_u8(&reader, &literal_tag) ||
-                    (literal_tag != 0x01 && literal_tag != 0x02 && literal_tag != 0x03)) {
+                    (literal_tag != 0x01 && literal_tag != 0x02 &&
+                     literal_tag != 0x03 && literal_tag != 0x04)) {
                     return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
                 }
                 --reader.offset;
@@ -6028,6 +6095,13 @@ static int match_optimizer_parameter(plan_reader *reader,
             length != value->data_len || length > 4096 ||
             !take(reader, length, &bytes)) return 0;
         return length == 0 || memcmp(bytes, value->data, length) == 0;
+    }
+    case PRDB_SDK_VALUE_TYPE_DATE: {
+        const uint8_t *date_bytes;
+        if (tag != 0x04 ||
+            !read_date_predicate_record(reader, tag_offset, &date_bytes))
+            return 0;
+        return memcmp(date_bytes, value->data, 4) == 0;
     }
     default:
         return 0;

@@ -264,6 +264,7 @@ pub enum BoundPredicate {
     Boolean(bool),
     Integer(i64),
     Text(String),
+    Date(i32),
     Column(BoundColumn),
     Compare {
         operator: Comparison,
@@ -1244,6 +1245,7 @@ fn bind_predicate(
             Ok((BoundPredicate::Integer(*value), Some(ScalarType::Integer)))
         }
         Predicate::Text(value) => Ok((BoundPredicate::Text(value.clone()), Some(ScalarType::Text))),
+        Predicate::Date(value) => Ok((BoundPredicate::Date(*value), Some(ScalarType::Date))),
         Predicate::Column(name) => {
             let column = resolve_column(columns, name)?;
             Ok((
@@ -2154,6 +2156,27 @@ mod tests {
         assert_eq!(
             bind_select_request(&request(&non_boolean_root, "id"), Some(relation())),
             Err(BindError::InvalidQuery)
+        );
+        let date_predicate = [0x20, 0, 0x10, 2, b'i', b'd', 0x04, 0, 0, 0, 7];
+        assert_eq!(
+            bind_select_request(&request(&date_predicate, "id"), Some(relation())),
+            Err(BindError::InvalidQuery)
+        );
+        let mut date_relation = relation();
+        date_relation.relation.columns[0].scalar_type = ScalarType::Date;
+        assert_eq!(
+            bind_select_request(&request(&date_predicate, "id"), Some(date_relation))
+                .map(|plan| plan.predicate),
+            Ok(Some(BoundPredicate::Compare {
+                operator: Comparison::Equal,
+                left: Box::new(BoundPredicate::Column(BoundColumn {
+                    column_id: [0x21; 16],
+                    ordinal: 0,
+                    scalar_type: ScalarType::Date,
+                    nullable: false,
+                })),
+                right: Box::new(BoundPredicate::Date(7)),
+            }))
         );
     }
 }

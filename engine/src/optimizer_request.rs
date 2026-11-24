@@ -246,6 +246,7 @@ pub enum Predicate {
     Boolean(bool),
     Integer(i64),
     Text(String),
+    Date(i32),
     Column(String),
     Compare {
         operator: Comparison,
@@ -1501,6 +1502,18 @@ impl<'a> PredicateParser<'a> {
                     .to_owned();
                 Ok(Predicate::Text(text))
             }
+            0x04 => {
+                let days = i32::from_be_bytes(
+                    self.cursor
+                        .take(4)?
+                        .try_into()
+                        .map_err(|_| RequestError::Truncated)?,
+                );
+                if !crate::tuple::date_day_count_is_valid(days) {
+                    return Err(RequestError::InvalidValue);
+                }
+                Ok(Predicate::Date(days))
+            }
             0x10 => Ok(Predicate::Column(self.cursor.identifier()?)),
             0x20 => {
                 let operator = match self.cursor.u8()? {
@@ -2458,6 +2471,30 @@ mod tests {
                     right: Box::new(Predicate::Text("new".to_owned())),
                 },
             ]))
+        );
+    }
+
+    #[test]
+    fn decodes_date_predicate_literal_as_signed_day_count() {
+        let mut expression = vec![0x20, 0, 0x10];
+        name("created_on", &mut expression);
+        expression.push(0x04);
+        expression.extend_from_slice(&(-42i32).to_be_bytes());
+
+        let decoded = decode_select_request(&select_request(&expression));
+        assert_eq!(
+            decoded.map(|request| format!("{:?}", request.predicate)),
+            Ok(
+                "Some(Compare { operator: Equal, left: Column(\"created_on\"), right: Date(-42) })"
+                    .to_owned()
+            )
+        );
+
+        expression.truncate(expression.len() - 4);
+        expression.extend_from_slice(&i32::MAX.to_be_bytes());
+        assert_eq!(
+            decode_select_request(&select_request(&expression)),
+            Err(RequestError::InvalidValue)
         );
     }
 

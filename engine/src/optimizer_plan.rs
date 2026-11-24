@@ -3639,6 +3639,10 @@ fn put_predicate(output: &mut Vec<u8>, predicate: &BoundPredicate) -> Result<(),
             );
             output.extend_from_slice(value.as_bytes());
         }
+        BoundPredicate::Date(value) => {
+            output.push(0x04);
+            output.extend_from_slice(&value.to_be_bytes());
+        }
         BoundPredicate::Column(column) => {
             output.extend_from_slice(
                 &crate::query_abi::encode_optimizer_plan_column_predicate_record(
@@ -4076,6 +4080,14 @@ impl PlanReader<'_> {
                     .to_owned();
                 Ok(BoundPredicate::Text(text))
             }
+            0x04 => {
+                let days =
+                    i32::from_be_bytes(self.take(4)?.try_into().map_err(|_| PlanError::Truncated)?);
+                if !crate::tuple::date_day_count_is_valid(days) {
+                    return Err(PlanError::InvalidPredicate);
+                }
+                Ok(BoundPredicate::Date(days))
+            }
             0x10 => {
                 let column_id = self.column_predicate_id(tag_offset)?;
                 let column = scan_columns
@@ -4381,6 +4393,7 @@ fn is_point_probe_literal(column: &BoundColumn, value: &BoundPredicate) -> bool 
         (column.scalar_type, value),
         (ScalarType::Boolean, BoundPredicate::Boolean(_))
             | (ScalarType::Text, BoundPredicate::Text(_))
+            | (ScalarType::Date, BoundPredicate::Date(_))
     ) || matches!(
         (column.scalar_type, value),
         (ScalarType::Integer, BoundPredicate::Integer(value))
@@ -4888,7 +4901,8 @@ fn collect_predicate_columns_at_depth(
         BoundPredicate::Null
         | BoundPredicate::Boolean(_)
         | BoundPredicate::Integer(_)
-        | BoundPredicate::Text(_) => Ok(()),
+        | BoundPredicate::Text(_)
+        | BoundPredicate::Date(_) => Ok(()),
     }
 }
 
@@ -4923,6 +4937,10 @@ fn predicate_type_at_depth(
             Ok(Some(ScalarType::Text))
         }
         BoundPredicate::Text(_) => Err(PlanError::InvalidPredicate),
+        BoundPredicate::Date(value) if crate::tuple::date_day_count_is_valid(*value) => {
+            Ok(Some(ScalarType::Date))
+        }
+        BoundPredicate::Date(_) => Err(PlanError::InvalidPredicate),
         BoundPredicate::Column(column) => {
             if scan_columns.iter().any(|scanned| scanned == column) {
                 Ok(Some(column.scalar_type))
@@ -5689,6 +5707,29 @@ mod tests {
         };
         assert_eq!(reader.predicate(&[]).unwrap(), predicate);
         assert_eq!(reader.offset, encoded.len());
+    }
+
+    #[test]
+    fn date_predicate_record_roundtrips_signed_big_endian_day_count() {
+        let predicate = BoundPredicate::Date(-42);
+        let mut encoded = Vec::new();
+        put_predicate(&mut encoded, &predicate).unwrap();
+        assert_eq!(encoded, [0x04, 0xff, 0xff, 0xff, 0xd6]);
+
+        let mut reader = PlanReader {
+            bytes: &encoded,
+            offset: 0,
+        };
+        assert_eq!(reader.predicate(&[]).unwrap(), predicate);
+        assert_eq!(reader.offset, encoded.len());
+
+        let mut invalid_date = encoded;
+        invalid_date[1..].copy_from_slice(&i32::MAX.to_be_bytes());
+        let mut reader = PlanReader {
+            bytes: &invalid_date,
+            offset: 0,
+        };
+        assert_eq!(reader.predicate(&[]), Err(PlanError::InvalidPredicate));
     }
 
     #[test]

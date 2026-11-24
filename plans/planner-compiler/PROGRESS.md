@@ -1,5 +1,11 @@
 # Optimizer Progress
 
+## OP-4 / ST-2 follow-up: typed DATE predicate literal — implemented slice
+
+- Request and plan tag `0x04` carries a signed big-endian i32 DATE count since 1970-01-01, restricted to the supported DATE range. Rust binding checks DATE compatibility; exact authorized predicate estimates and TinyCC filter evaluation use the established DATE comparison semantics. DATE literals can use unique point and leading-key range hints.
+- Evidence: Rust request decode/invalid-range and plan round-trip tests, real-redb exact DATE estimate regression, and TinyCC parameter request encoding and DATE plan decoding fixtures passed. The full delegated-cgroup serial workspace suite passed.
+- Remaining: DECIMAL, BYTEA, UUID, and TIMESTAMPTZ literals, cross-type coercions, broader candidate comparison, and target-host workload evidence remain open.
+
 ## Filtered composite aggregate planning — verified
 
 - Contract: statement 15 and plan kind 15 preserve statement 13's wire format while adding a required bounded Boolean filter before composite grouping. Authorized binding includes filter columns; the plan scan is the sorted union of filter columns, grouping keys, and aggregate input.

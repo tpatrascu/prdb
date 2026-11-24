@@ -7381,6 +7381,51 @@ fn authorized_predicate_estimate_compares_readable_scalar_columns()
             "ordered estimate for {scalar_type:?}"
         );
     }
+    let date_case = cases
+        .iter()
+        .position(|(scalar_type, _, _, _)| *scalar_type == ScalarType::Date)
+        .expect("fixture has a DATE comparison pair");
+    let date_ordinal = date_case * 2 + 1;
+    let date_literal_predicate = BoundPredicate::Compare {
+        operator: Comparison::Equal,
+        left: Box::new(BoundPredicate::Column(BoundColumn {
+            column_id: column_ids[date_ordinal],
+            ordinal: date_ordinal as u32,
+            scalar_type: ScalarType::Date,
+            nullable: true,
+        })),
+        right: Box::new(BoundPredicate::Date(11)),
+    };
+    assert_eq!(
+        observer.estimate_authorized_predicate_at_most(
+            table_id,
+            &projection,
+            &date_literal_predicate,
+            3,
+        )?,
+        Some((3, 1)),
+        "DATE literals should compare against authorized DATE cells"
+    );
+    let invalid_date_literal = BoundPredicate::Compare {
+        operator: Comparison::Equal,
+        left: Box::new(BoundPredicate::Column(BoundColumn {
+            column_id: column_ids[date_ordinal],
+            ordinal: date_ordinal as u32,
+            scalar_type: ScalarType::Date,
+            nullable: true,
+        })),
+        right: Box::new(BoundPredicate::Date(i32::MAX)),
+    };
+    assert_eq!(
+        observer.estimate_authorized_predicate_at_most(
+            table_id,
+            &projection,
+            &invalid_date_literal,
+            3,
+        )?,
+        None,
+        "DATE estimates must reject values outside the scalar range"
+    );
     let incompatible_column_predicate = BoundPredicate::Compare {
         operator: Comparison::Equal,
         left: Box::new(BoundPredicate::Column(BoundColumn {

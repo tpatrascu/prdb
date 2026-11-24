@@ -1558,6 +1558,36 @@ mod scan_estimate_request_tests {
                 .unwrap(),
             predicate
         );
+        let date_column = crate::optimizer_binding::BoundColumn {
+            column_id: [8; 16],
+            ordinal: 1,
+            scalar_type: crate::tuple::ScalarType::Date,
+            nullable: false,
+        };
+        let date_predicate = crate::optimizer_binding::BoundPredicate::Compare {
+            operator: crate::optimizer_request::Comparison::GreaterOrEqual,
+            left: Box::new(crate::optimizer_binding::BoundPredicate::Column(
+                date_column.clone(),
+            )),
+            right: Box::new(crate::optimizer_binding::BoundPredicate::Date(-42)),
+        };
+        let date_request = EstimatePredicateRequest::from_bound_predicate(
+            "public".to_owned(),
+            "items".to_owned(),
+            &date_predicate,
+        )
+        .unwrap();
+        let date_decoded =
+            EstimatePredicateRequest::decode(&date_request.encode().unwrap()).unwrap();
+        assert_eq!(date_decoded, date_request);
+        assert_eq!(
+            crate::optimizer_plan::decode_bound_predicate_v1(
+                &date_decoded.predicate_bytes,
+                &[date_column],
+            )
+            .unwrap(),
+            date_predicate
+        );
         for response in [
             EstimatePredicateResponse::Exact {
                 visible_rows: 4,

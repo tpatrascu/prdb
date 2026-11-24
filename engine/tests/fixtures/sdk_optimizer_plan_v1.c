@@ -635,6 +635,38 @@ static uint32_t build_filter_plan(uint8_t *bytes,
     return offset;
 }
 
+static uint32_t build_date_filter_plan(uint8_t *bytes) {
+    uint32_t offset = 0;
+    (void)put_header(bytes, &offset, 4);
+    bytes[offset++] = 1;
+    put_u16(bytes, &offset, 1);
+    uint32_t column_id_offset = put_column(
+        bytes, &offset, PRDB_SDK_VALUE_TYPE_DATE, 0);
+    bytes[column_id_offset] = 10;
+    set_column_ordinal(bytes, column_id_offset, 0);
+    bytes[offset++] = 2;
+    bytes[offset++] = 0x20;
+    bytes[offset++] = 0;
+    bytes[offset++] = 0x10;
+    bytes[offset++] = 10;
+    memset(bytes + offset, 0, 15);
+    offset += 15;
+    bytes[offset++] = 0x04;
+    bytes[offset++] = 0xff;
+    bytes[offset++] = 0xff;
+    bytes[offset++] = 0xff;
+    bytes[offset++] = 0xd6;
+    bytes[offset++] = 3;
+    put_u16(bytes, &offset, 1);
+    column_id_offset = put_column(
+        bytes, &offset, PRDB_SDK_VALUE_TYPE_DATE, 0);
+    bytes[column_id_offset] = 10;
+    set_column_ordinal(bytes, column_id_offset, 0);
+    bytes[offset++] = 4;
+    put_u32(bytes, &offset, 1);
+    return offset;
+}
+
 static uint32_t build_null_filter_plan(uint8_t *bytes,
                                        uint8_t predicate_tag,
                                        uint32_t *predicate_offset) {
@@ -1725,11 +1757,23 @@ int main(void) {
                PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD);
     }
     uint8_t filtered_plan[512];
+    uint8_t date_filter_plan[512];
     uint8_t probed_plan[512];
     uint8_t ranged_plan[512];
     uint8_t equality_ranged_plan[512];
     uint32_t filtered_plan_len = build_filter_plan(filtered_plan,
                                                    &predicate_offset);
+    uint32_t date_filter_plan_len = build_date_filter_plan(date_filter_plan);
+    prdb_sdk_optimizer_plan_v1 decoded_date_plan = {0};
+    prdb_sdk_optimizer_filter_v1 decoded_date_filter = {0};
+    assert(prdb_sdk_optimizer_decode_plan_with_filter_v1(
+               date_filter_plan, date_filter_plan_len, &decoded_date_plan,
+               sizeof(decoded_date_plan), &decoded_date_filter,
+               sizeof(decoded_date_filter)) == PRDB_SDK_OPTIMIZER_PLAN_OK);
+    assert(decoded_date_filter.present == 1 &&
+           decoded_date_filter.prefix_len == 24 &&
+           decoded_date_filter.prefix[0] == 0x20 &&
+           decoded_date_filter.prefix[19] == 0x04);
     uint8_t sql_filtered[] = "SELECT c0 FROM items WHERE c0 = $1 LIMIT 1";
     uint8_t filter_parameter_bytes[4] = {0, 0, 0, 1};
     prdb_sdk_value_v1 filter_parameters[1] = {{

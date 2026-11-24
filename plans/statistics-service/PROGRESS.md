@@ -1,5 +1,13 @@
 # Statistics Service Progress
 
+## ST-2 / OP-4 follow-up: DATE predicate literals — implemented slice
+
+- Contract: optimizer request and plan predicate tag `0x04` carries a signed big-endian i32 DATE day count, restricted to the DATE range supported by the tuple type. The binder requires a DATE operand; typed estimation compares it with authorized DATE values.
+- Implementation: added request decoding, binding, canonical plan encode/decode and validation, trusted estimate evaluation, TinyCC request encoding, DATE-aware SDK predicate decoding/evaluation, and DATE unique/range hint conversion.
+- Red/green: the new request decoder regression first rejected tag `0x04` with `InvalidPredicate`; it now accepts a valid signed day count and rejects out-of-range values. Real-redb estimate coverage verifies an exact `(3 visible, 1 matching)` result for a DATE literal. Rust plan-wire tests and TinyCC request/plan fixture checks cover the encoding.
+- Verification: focused request/plan/transaction regressions passed; the maintained TinyCC SDK suite passed; formatting, locked workspace build, warning-denied all-target Clippy, and sandbox query fixture passed. The full delegated-cgroup serial workspace suite passed with 391 library tests, 206 commit tests, 3 metadata-process tests, 83 transaction tests, all other targets, and zero ignored tests.
+- Remaining: other literal types and cross-type coercions, broader candidate comparison, populations above 1,024, global-statistics consumption, and target-host workload evidence remain open.
+
 ## ST-2 / OP-7 follow-up: profile the 16-row low-fanout boundary — measured
 
 - Harness: added `PRDB_TEST_INDEXED_JOIN_FANOUT16_BENCHMARK_ONLY` to the maintained confined SQL acceptance. It seeds 16 outer rows and a 128-row indexed input with one match per outer row, checks 16 equivalent pairs and the indexed plan, and runs the same operational read/commit load as the 9-row fanout profiles.
