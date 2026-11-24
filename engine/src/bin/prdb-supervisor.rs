@@ -61,6 +61,7 @@ mod service {
         max_rows: Option<usize>,
         max_bytes: Option<usize>,
         max_total_result_bytes: Option<u64>,
+        analytical_max_total_result_bytes: Option<u64>,
         max_sql_index_probe_candidates: Option<u32>,
         analytical_max_sql_index_probe_candidates: Option<u32>,
         max_principal_reservations: Option<usize>,
@@ -107,6 +108,7 @@ mod service {
              [--sdk-repository-dir PATH --sdk-repository-max-bytes N]\n\
              --retention-seconds N --max-rows N --max-bytes N\n\
              [--max-total-result-bytes N] (default 67108864)\n\
+             [--analytical-max-total-result-bytes N] (overrides the operational value)\n\
              [--max-sql-index-probe-candidates N] (default 128; maximum 16384)\n\
              [--analytical-max-sql-index-probe-candidates N] (overrides the operational value)\n\
              --max-principal-reservations N\n\
@@ -158,6 +160,10 @@ mod service {
                 .unwrap_or(prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES),
             "--max-total-result-bytes",
         )?;
+        let analytical_max_total_result_bytes = options
+            .analytical_max_total_result_bytes
+            .map(|value| positive(value, "--analytical-max-total-result-bytes"))
+            .transpose()?;
         let max_sql_index_probe_candidates = options
             .max_sql_index_probe_candidates
             .unwrap_or(prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES);
@@ -333,6 +339,7 @@ mod service {
                     runtime_read_only: options.runtime_read_only,
                     spill_broker: spill_broker.clone(),
                     max_total_result_bytes,
+                    analytical_max_total_result_bytes,
                     max_sql_index_probe_candidates,
                     analytical_max_sql_index_probe_candidates,
                     cleanup_timeout: Duration::from_secs(2),
@@ -534,6 +541,9 @@ mod service {
                 "--max-bytes" => set!(max_bytes, value.parse::<usize>()?),
                 "--max-total-result-bytes" => {
                     set!(max_total_result_bytes, value.parse::<u64>()?)
+                }
+                "--analytical-max-total-result-bytes" => {
+                    set!(analytical_max_total_result_bytes, value.parse::<u64>()?)
                 }
                 "--max-sql-index-probe-candidates" => {
                     set!(max_sql_index_probe_candidates, value.parse::<u32>()?)

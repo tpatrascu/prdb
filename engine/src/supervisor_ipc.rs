@@ -2319,6 +2319,7 @@ mod worker_result_event_tests {
                 runtime_read_only: Vec::new(),
                 spill_broker: None,
                 max_total_result_bytes: crate::query_abi::MAX_TOTAL_RESULT_BYTES,
+                analytical_max_total_result_bytes: None,
                 max_sql_index_probe_candidates:
                     crate::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
                 analytical_max_sql_index_probe_candidates: None,
@@ -2549,6 +2550,7 @@ mod worker_result_event_tests {
                     runtime_read_only: Vec::new(),
                     spill_broker: None,
                     max_total_result_bytes: crate::query_abi::MAX_TOTAL_RESULT_BYTES,
+                    analytical_max_total_result_bytes: None,
                     max_sql_index_probe_candidates:
                         crate::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
                     analytical_max_sql_index_probe_candidates: None,
@@ -2685,6 +2687,7 @@ mod worker_result_event_tests {
                     runtime_read_only: Vec::new(),
                     spill_broker: None,
                     max_total_result_bytes: crate::query_abi::MAX_TOTAL_RESULT_BYTES,
+                    analytical_max_total_result_bytes: None,
                     max_sql_index_probe_candidates:
                         crate::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
                     analytical_max_sql_index_probe_candidates: None,

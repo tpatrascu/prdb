@@ -548,6 +548,7 @@ fn run_sandboxed_forged_handle_client(
             runtime_read_only: required_paths("PRDB_TEST_RUNTIME_READ_ONLY")?,
             spill_broker: None,
             max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
+            analytical_max_total_result_bytes: None,
             max_sql_index_probe_candidates:
                 prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
             analytical_max_sql_index_probe_candidates: None,
@@ -20679,6 +20680,7 @@ fn admin_cancellation_sync_failure_quarantines_until_reopen()
                     runtime_read_only: Vec::new(),
                     spill_broker: None,
                     max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
+                    analytical_max_total_result_bytes: None,
                     max_sql_index_probe_candidates:
                         prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
                     analytical_max_sql_index_probe_candidates: None,
@@ -33058,6 +33060,7 @@ fn gateway_service_listener_authenticates_control_admin_over_socket()
                             runtime_read_only: Vec::new(),
                             spill_broker: None,
                             max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
+                            analytical_max_total_result_bytes: None,
                             max_sql_index_probe_candidates:
                                 prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
                             analytical_max_sql_index_probe_candidates: None,
@@ -39737,6 +39740,7 @@ fn run_sandboxed_v3_sql_error_fixture(
             runtime_read_only: required_paths("PRDB_TEST_RUNTIME_READ_ONLY")?,
             spill_broker: None,
             max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
+            analytical_max_total_result_bytes: None,
             max_sql_index_probe_candidates:
                 prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
             analytical_max_sql_index_probe_candidates: None,
@@ -40226,6 +40230,7 @@ fn sandboxed_optimizer_metadata_submission_cancels_over_tcp()
             runtime_read_only: required_paths("PRDB_TEST_RUNTIME_READ_ONLY")?,
             spill_broker: None,
             max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
+            analytical_max_total_result_bytes: None,
             max_sql_index_probe_candidates:
                 prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
             analytical_max_sql_index_probe_candidates: None,
@@ -43349,7 +43354,13 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             runtime_read_execute: required_paths("PRDB_TEST_RUNTIME_READ_EXECUTE")?,
             runtime_read_only: required_paths("PRDB_TEST_RUNTIME_READ_ONLY")?,
             spill_broker,
-            max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
+            max_total_result_bytes: if sql_in_elevated_budget_only {
+                1
+            } else {
+                prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES
+            },
+            analytical_max_total_result_bytes: sql_in_elevated_budget_only
+                .then_some(prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES),
             max_sql_index_probe_candidates:
                 prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
             analytical_max_sql_index_probe_candidates: sql_in_elevated_budget_only.then_some(256),
@@ -49503,6 +49514,7 @@ fn sealed_start_admits_only_current_credentials_and_enforces_request_deadline()
             runtime_read_only: Vec::new(),
             spill_broker: None,
             max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
+            analytical_max_total_result_bytes: None,
             max_sql_index_probe_candidates:
                 prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
             analytical_max_sql_index_probe_candidates: None,

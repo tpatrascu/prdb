@@ -35,6 +35,9 @@ pub struct ExecutorLaunchConfig {
     /// Trusted per-invocation output budget. The fixed chunk size remains an
     /// ABI safety limit; this cumulative budget is deployment-configurable.
     pub max_total_result_bytes: u64,
+    /// Optional analytical-class result-byte ceiling. Omission inherits the
+    /// operational value so the gateway profile remains a separate upper cap.
+    pub analytical_max_total_result_bytes: Option<u64>,
     /// Trusted per-statement bound for candidate rows returned by one batched
     /// SQL index-probe operation. The SDK retains its fixed safety envelope.
     pub max_sql_index_probe_candidates: u32,
@@ -45,6 +48,15 @@ pub struct ExecutorLaunchConfig {
 }
 
 impl ExecutorLaunchConfig {
+    fn max_total_result_bytes_for(&self, workload_class: crate::supervisor::WorkloadClass) -> u64 {
+        match workload_class {
+            crate::supervisor::WorkloadClass::Operational => self.max_total_result_bytes,
+            crate::supervisor::WorkloadClass::Analytical => self
+                .analytical_max_total_result_bytes
+                .unwrap_or(self.max_total_result_bytes),
+        }
+    }
+
     fn max_sql_index_probe_candidates_for(
         &self,
         workload_class: crate::supervisor::WorkloadClass,
@@ -791,6 +803,8 @@ fn prepare_executor(
     config: &ExecutorLaunchConfig,
 ) -> Result<PreparedExecutor, ExecutorLaunchError> {
     let mut effective_config = config.clone();
+    effective_config.max_total_result_bytes =
+        config.max_total_result_bytes_for(submission.metadata().workload_class);
     effective_config.max_sql_index_probe_candidates =
         config.max_sql_index_probe_candidates_for(submission.metadata().workload_class);
     match build_command(
@@ -809,7 +823,7 @@ fn prepare_executor(
             worker_channels: Some(channels),
             spill_session,
             cleanup_timeout: config.cleanup_timeout,
-            max_total_result_bytes: config.max_total_result_bytes,
+            max_total_result_bytes: effective_config.max_total_result_bytes,
         }),
         Err(launch_error) => Err(ExecutorLaunchError {
             launch_error,
@@ -1139,6 +1153,7 @@ mod tests {
             runtime_read_only: Vec::new(),
             spill_broker: None,
             max_total_result_bytes: 1,
+            analytical_max_total_result_bytes: Some(2),
             max_sql_index_probe_candidates: 128,
             analytical_max_sql_index_probe_candidates: Some(512),
             cleanup_timeout: std::time::Duration::ZERO,
@@ -1152,8 +1167,17 @@ mod tests {
             config.max_sql_index_probe_candidates_for(crate::supervisor::WorkloadClass::Analytical),
             512
         );
+        assert_eq!(
+            config.max_total_result_bytes_for(crate::supervisor::WorkloadClass::Operational),
+            1
+        );
+        assert_eq!(
+            config.max_total_result_bytes_for(crate::supervisor::WorkloadClass::Analytical),
+            2
+        );
 
         let inherited = ExecutorLaunchConfig {
+            analytical_max_total_result_bytes: None,
             analytical_max_sql_index_probe_candidates: None,
             ..config
         };
@@ -1161,6 +1185,10 @@ mod tests {
             inherited
                 .max_sql_index_probe_candidates_for(crate::supervisor::WorkloadClass::Analytical),
             128
+        );
+        assert_eq!(
+            inherited.max_total_result_bytes_for(crate::supervisor::WorkloadClass::Analytical),
+            1
         );
     }
 
