@@ -45,7 +45,8 @@
 - Implementation: Rust decodes, binds, plans, encodes, and dispatches statement 15 through `OptimizeGroupCount`. The C SDK encodes parameterized WHERE trees, decodes and validates kind 15, matches the filter predicate to the parsed AST and parameters, re-resolves executor identity, and invokes the v13 grouping runner with the same parameters.
 - Regression: Rust tests cover request decoding, authorized binding, filter-only scan columns, plan round trips, and optimizer process dispatch. TinyCC fixtures check canonical request bytes, malformed plan rejection, predicate mismatch rejection, and filtered SUM execution with the expected single group.
 - Verification: ABI generation check, full TinyCC SDK suite plus `sandbox-query-fixture`, formatting check, locked workspace build, warning-denied all-target Clippy, and the full serial workspace suite passed in the delegated user cgroup.
-- Remaining: filtered composite aggregates still need confined SQL artifact acceptance and broader analytic workload, secure spill, target-hardware, and mixed-workload evidence.
+- Confined acceptance: `PRDB_TEST_FILTERED_COMPOSITE_ONLY=1` runs the maintained SQL artifact through the confined optimizer/executor lifecycle and verifies the filtered composite Decimal SUM SQLR row and durable commit. The focused delegated-cgroup acceptance passed (`1 passed, 0 ignored`); the ordinary full workspace suite also passed with this fixture enabled.
+- Remaining: broader analytic workload, secure spill, target-hardware, and mixed-workload evidence.
 
 ## OP-5 follow-up: expose the authorized unique point probe over executor IPC — implemented
 
