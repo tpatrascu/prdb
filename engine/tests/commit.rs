@@ -43630,22 +43630,22 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             b'I'
         } else if sql_in_any_only {
             if sql_in_fallback_only {
-                b'F'
+                b'$'
             } else if sql_in_null_left_only {
-                b'L'
+                b'&'
             } else if sql_in_cancel_only {
-                b'i'
+                b'^'
             } else if sql_in_denied_key_only {
-                b'd'
+                b'?'
             } else if sql_in_over_budget_only {
-                b'o'
+                b'@'
             } else if sql_in_elevated_budget_only {
-                b'e'
+                b'~'
             } else {
-                b'N'
+                b'#'
             }
         } else if elevated_result_only {
-            b'R'
+            b'!'
         } else if filtered_composite_only {
             b'Q'
         } else {
@@ -48885,8 +48885,12 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             "stage-failure readiness",
         ),
         (
+            b"UPDATE_STAGE_BATCH_ACCEPTED".as_slice(),
+            "first accepted UPDATE batch",
+        ),
+        (
             b"UPDATE_STAGE_FAILURE_INJECTED".as_slice(),
-            "injected StageUpdate failure",
+            "injected later StageUpdates failure",
         ),
     ] {
         let event = read_frame(&mut stage_failure_gateway)?

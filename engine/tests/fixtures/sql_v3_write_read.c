@@ -161,6 +161,19 @@ static int32_t cancel_update_executor_request(
     if ((operation == PRDB_IPC_OP_STAGE_UPDATE ||
          operation == PRDB_IPC_OP_STAGE_UPDATES) &&
         fail_next_stage_update != 0) {
+        if (fail_next_stage_update > 1) {
+            static const uint8_t accepted[] = "UPDATE_STAGE_BATCH_ACCEPTED";
+            --fail_next_stage_update;
+            int32_t status = cancel_update_original_host->v4.v3.executor_request(
+                context, operation, request, request_len, response,
+                response_capacity, response_len);
+            if (status != PRDB_QUERY_CALLBACK_OK ||
+                cancel_update_original_host->v4.v3.write_result(
+                    context, accepted, sizeof(accepted) - 1) != 0) {
+                return PRDB_QUERY_CALLBACK_IO_ERROR;
+            }
+            return status;
+        }
         static const uint8_t injected[] = "UPDATE_STAGE_FAILURE_INJECTED";
         fail_next_stage_update = 0;
         (void)cancel_update_original_host->v4.v3.write_result(
@@ -1965,10 +1978,10 @@ static int32_t run_write_read_fixture(
         return 1;
     }
     if (invocation->parameters_len == 1 && invocation->parameters != NULL &&
-        (invocation->parameters[0] == 'N' || invocation->parameters[0] == 'F' ||
-         invocation->parameters[0] == 'L' || invocation->parameters[0] == 'i' ||
-         invocation->parameters[0] == 'd' || invocation->parameters[0] == 'o' ||
-         invocation->parameters[0] == 'e')) {
+        (invocation->parameters[0] == '#' || invocation->parameters[0] == '$' ||
+         invocation->parameters[0] == '&' || invocation->parameters[0] == '^' ||
+         invocation->parameters[0] == '?' || invocation->parameters[0] == '@' ||
+         invocation->parameters[0] == '~')) {
         static const uint8_t in_sql[] =
             "SELECT left_key, right_key FROM grouped_records "
             "WHERE left_key IN ($1, $2, $3, $4)";
@@ -2003,19 +2016,19 @@ static int32_t run_write_read_fixture(
         range_observer_scan_ranges_requests = 0;
         range_observer_open_scan_requests = 0;
         range_observer_cancellation_checks = 0;
-        observed_host.v3.executor_request = invocation->parameters[0] == 'i'
+        observed_host.v3.executor_request = invocation->parameters[0] == '^'
             ? cancel_range_observer_executor_request
             : observe_range_executor_request;
         status = prdb_sdk_sql_run_statement_optimizer_v1(
             &observed_host, schema, sizeof(schema) - 1,
-            invocation->parameters[0] == 'F' ? in_fallback_sql : in_sql,
-            invocation->parameters[0] == 'F' ? sizeof(in_fallback_sql) - 1
+            invocation->parameters[0] == '$' ? in_fallback_sql : in_sql,
+            invocation->parameters[0] == '$' ? sizeof(in_fallback_sql) - 1
                                              : sizeof(in_sql) - 1,
-            invocation->parameters[0] == 'F' ? in_fallback_parameters
+            invocation->parameters[0] == '$' ? in_fallback_parameters
                                              : in_parameters,
             sizeof(in_parameters));
         range_observer_original_host = NULL;
-        if (invocation->parameters[0] == 'd') {
+        if (invocation->parameters[0] == '?') {
             if (status == PRDB_SDK_SQL_DISPATCH_OK ||
                 range_observer_scan_ranges_requests != 0 ||
                 range_observer_open_scan_requests == 0) {
@@ -2024,7 +2037,7 @@ static int32_t run_write_read_fixture(
             }
             return 0;
         }
-        if (invocation->parameters[0] == 'i') {
+        if (invocation->parameters[0] == '^') {
             if (status == PRDB_SDK_SQL_DISPATCH_OK ||
                 range_observer_cancellation_checks == 0 ||
                 range_observer_scan_ranges_requests != 1 ||
@@ -2038,19 +2051,19 @@ static int32_t run_write_read_fixture(
             static const uint8_t message[] = "fixture-error-batched-in-status";
             return report_failure(host, message, sizeof(message) - 1);
         }
-        if (invocation->parameters[0] == 'F') {
+        if (invocation->parameters[0] == '$') {
             if (range_observer_scan_ranges_requests != 0 ||
                 range_observer_open_scan_requests == 0) {
                 static const uint8_t message[] = "fixture-error-in-full-scan-fallback";
                 return report_failure(host, message, sizeof(message) - 1);
             }
-        } else if (invocation->parameters[0] == 'o') {
+        } else if (invocation->parameters[0] == '@') {
             if (range_observer_scan_ranges_requests != 1 ||
                 range_observer_open_scan_requests == 0) {
                 static const uint8_t message[] = "fixture-error-in-over-budget-fallback";
                 return report_failure(host, message, sizeof(message) - 1);
             }
-        } else if (invocation->parameters[0] == 'e') {
+        } else if (invocation->parameters[0] == '~') {
             if (range_observer_scan_ranges_requests != 1 ||
                 range_observer_open_scan_requests != 0) {
                 static const uint8_t message[] = "fixture-error-elevated-index-budget";
@@ -2064,7 +2077,7 @@ static int32_t run_write_read_fixture(
         return 0;
     }
     if (invocation->parameters_len == 1 && invocation->parameters != NULL &&
-        invocation->parameters[0] == 'R') {
+        invocation->parameters[0] == '!') {
         static const uint8_t large_result_sql[] =
             "SELECT large_payload, large_payload, large_payload, "
             "large_payload, large_payload, large_payload, large_payload, "
@@ -2463,11 +2476,13 @@ static int32_t run_write_read_fixture(
         failure_host = *optimizer_host_v5;
         cancel_update_original_host = optimizer_host_v5;
         cancel_update_ready_sent = 1;
-        fail_next_stage_update = 1;
+        /* Keep each encoded UPDATE batch to one row so the second staging
+         * request can fail after the first one has been accepted. */
+        fail_next_stage_update = 2;
         failure_host.v4.v3.executor_request = cancel_update_executor_request;
         update_status = prdb_sdk_optimizer_execute_update_ast_v1(
             &failure_host, &update, parameters, 2, schema, sizeof(schema) - 1,
-            16, sizeof(batch_response), request, sizeof(request), response,
+            16, 64, request, sizeof(request), response,
             sizeof(response), relation_response, sizeof(relation_response),
             scan_response, sizeof(scan_response), batch_response,
             sizeof(batch_response), &relation, sizeof(relation), columns, 2,
