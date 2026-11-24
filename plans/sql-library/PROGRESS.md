@@ -7,7 +7,7 @@
 - Implementation: the Rust executor dispatcher handles `ScanIndexRanges` (`0x1117`), while the C runner groups up to 128 point/prefix probes per frame. Existing scalar operations remain available.
 - Verification: `nix develop --no-update-lock-file -c make -f engine/sdk/Makefile BUILD_DIR=target/sdk-v1-batch test`, `cargo fmt --all -- --check`, and `cargo test -p prdb-engine --test executor_ipc --test ipc --locked --offline` passed.
 - Confined verification: the serial delegated-cgroup `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` acceptance passed with `PRDB_TEST_INDEXED_JOIN_FANOUT17_BENCHMARK_ONLY=1`. It loaded the rebuilt `sql-v3-write-read.so` through the confined executor and checked the exact 17-pair indexed and hash results while 192 operational reads and commits overlapped. The run reported indexed p50 samples of 271.1/280.0 ms and hash samples of 388.0/323.6 ms; these remain local measurements, not service targets.
-- Remaining: broaden confined batched probe coverage to duplicate/NULL keys, staged overlays, denied columns and composite prefixes; OR/IN lookup, planner batching, and configurable profile support remain unimplemented.
+- Remaining: broaden confined join-probe coverage to duplicate/NULL keys, staged overlays, denied columns and composite prefixes. Multi-relation planner metadata/estimate batching is implemented in the IPC-8 slice; same-key OR lookup and SQL v26 `IN` syntax now have SDK/plan implementation slices below, but still need storage-backed result-equivalence, fallback, cancellation and mixed-load acceptance. Trusted profile propagation remains planned under SQL-13/WI-10/WI-11.
 
 ## SQL-4 / IPC-7 follow-up: mutation batch transport — codec slice
 
