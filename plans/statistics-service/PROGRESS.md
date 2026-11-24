@@ -35,6 +35,13 @@
 - Contract: the expanded profile exercises the already specified 4,096-row population-estimate cap and 17-row low-fanout rule; it adds evidence without changing optimizer selection. It is host-local evidence and does not establish deployment performance or a general cost model.
 - Verification: the maintained TinyCC sandbox fixture build and five-run confined mixed-load profile passed. The preserved 17×119 indexed/hash profile passed. `cargo fmt --all -- --check`, locked workspace build, warning-denied Clippy, TinyCC SDK tests, and the full serial delegated-cgroup workspace suite passed (407 library tests, 206 commit tests, 3 metadata-process tests, 83 transaction tests, remaining targets, no ignored tests).
 
+## ST-2 / OP-7 follow-up: exercise the 4,096-row join-estimate cap end to end — measured
+
+- Harness: added `PRDB_TEST_INDEXED_JOIN_FANOUT17_4096_BENCHMARK_ONLY`. A 17-row outer probes a 4,096-row indexed relation with one matching row per outer key. The confined test verifies the exact authorized pair estimate, kind-17 plan, all 17 joined outputs and checksum while 192 operational reads and commits overlap. Marker `E` is unique among the existing fixture modes; an initial full-suite run caught a collision with the UPDATE stage-failure mode before the marker was changed.
+- Evidence: five fresh-database delegated-cgroup runs passed. Two indexed samples per run produced a median of per-run p50 latencies of 308.1 ms (297.1–342.0 ms range). This cap-boundary profile records only index nested-loop because the SDK hash join supports at most 128 materialized rows.
+- Scope: this validates the existing 4,096-row estimate cap end to end; it does not raise the cap or establish performance beyond it. Broader cost comparisons and target-host repeats remain open.
+- Verification: TinyCC sandbox fixture build, all five focused confined runs, `cargo fmt --all -- --check`, locked workspace build, warning-denied Clippy, TinyCC SDK tests, and the complete serial delegated-cgroup workspace suite passed (407 library tests, 206 commit tests, 3 metadata-process tests, 83 transaction tests, all other targets, no ignored tests). The full suite initially caught the marker collision; the rerun passed after using the unique marker.
+
 ## ST-2 / OP-7 follow-up: validate the exact 17×119 skew boundary — measured
 
 - Contract: exercise the current 17-row outer / 7× indexed-side eligibility boundary through the full confined SQL path, including the authorized exact pair estimate, selected plan, indexed execution, hash reference result, durable outcome, and concurrent operational workload.
