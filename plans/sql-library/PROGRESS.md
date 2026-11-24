@@ -1,5 +1,14 @@
 # SQL Library Progress
 
+## SQL-10 follow-up: batch indexed nested-loop probes — SDK implementation slice
+
+- Contract: grouped executor responses must retain input probe order, preserve duplicate outer-row multiplicity, and become unavailable as a whole when the response/candidate budget is exceeded.
+- Red/green evidence: the maintained SDK fixture now feeds eight distinct outer rows through one batched probe frame and checks all eight mapped join results. A 17-probe response above the aggregate candidate cap produces no callbacks and latches statement failure; a cancellation during probe preparation sends no request and publishes no rows.
+- Implementation: the Rust executor dispatcher handles `ScanIndexRanges` (`0x1117`), while the C runner groups up to 128 point/prefix probes per frame. Existing scalar operations remain available.
+- Verification: `nix develop --no-update-lock-file -c make -f engine/sdk/Makefile BUILD_DIR=target/sdk-v1-batch test`, `cargo fmt --all -- --check`, and `cargo test -p prdb-engine --test executor_ipc --test ipc --locked --offline` passed.
+- Confined verification: the serial delegated-cgroup `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` acceptance passed with `PRDB_TEST_INDEXED_JOIN_FANOUT17_BENCHMARK_ONLY=1`. It loaded the rebuilt `sql-v3-write-read.so` through the confined executor and checked the exact 17-pair indexed and hash results while 192 operational reads and commits overlapped. The run reported indexed p50 samples of 271.1/280.0 ms and hash samples of 388.0/323.6 ms; these remain local measurements, not service targets.
+- Remaining: broaden confined batched probe coverage to duplicate/NULL keys, staged overlays, denied columns and composite prefixes; mutation staging, OR/IN lookup, planner batching, and configurable profile support remain unimplemented.
+
 ## SQL-7 follow-up: BIGINT optimizer predicate parameters — SDK support added
 
 - Contract: filtered optimizer predicates encode a BIGINT value with the existing signed 64-bit tag `0x02` and its eight-byte big-endian representation; INTEGER remains sign-extended to the same wire form.

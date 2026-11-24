@@ -328,6 +328,135 @@ int32_t prdb_sdk_index_range_open_v1(
     return PRDB_SDK_BATCH_OK;
 }
 
+int32_t prdb_sdk_index_ranges_open_v1(
+    prdb_sdk_index_ranges_v1 *out, uint32_t out_capacity,
+    const uint8_t *payload, uint64_t payload_len) {
+    uint32_t offset = 4;
+    uint32_t candidate_count = 0;
+    uint16_t group_count;
+
+    if (out == NULL || out_capacity < sizeof(*out))
+        return PRDB_SDK_BATCH_INVALID_ARGUMENT;
+    if (payload == NULL || payload_len < 2 ||
+        payload_len > PRDB_SDK_BATCH_MAX_BYTES)
+        return PRDB_SDK_BATCH_INVALID_PAYLOAD;
+    if (payload[0] != 1) return PRDB_SDK_BATCH_UNSUPPORTED_VERSION;
+    if (payload[1] == 0)
+        return payload_len == 2 ? PRDB_SDK_BATCH_UNAVAILABLE
+                                : PRDB_SDK_BATCH_INVALID_PAYLOAD;
+    if (payload[1] != 1 || payload_len < 4)
+        return PRDB_SDK_BATCH_INVALID_PAYLOAD;
+    group_count = read_u16(payload, 2);
+    if (group_count == 0 || group_count > PRDB_SDK_BATCH_MAX_ROWS)
+        return PRDB_SDK_BATCH_INVALID_PAYLOAD;
+
+    for (uint16_t group_index = 0; group_index < group_count; ++group_index) {
+        const uint8_t *row_count_bytes;
+        uint16_t row_count;
+        if (!take(payload, payload_len, &offset, 2, &row_count_bytes))
+            return PRDB_SDK_BATCH_INVALID_PAYLOAD;
+        row_count = read_u16(row_count_bytes, 0);
+        if (row_count > PRDB_SDK_INDEX_RANGE_MAX_ROWS)
+            return PRDB_SDK_BATCH_INVALID_PAYLOAD;
+        candidate_count += row_count;
+        if (candidate_count > UINT32_C(16384))
+            return PRDB_SDK_BATCH_INVALID_PAYLOAD;
+        for (uint16_t row_index = 0; row_index < row_count; ++row_index) {
+            const uint8_t *cell_count_bytes;
+            uint16_t cell_count;
+            if (!take(payload, payload_len, &offset,
+                      PRDB_INDEX_RANGE_RESPONSE_ROW_RECORD_HEADER_BYTES,
+                      &cell_count_bytes) ||
+                !prdb_decode_index_range_response_row_record(
+                    cell_count_bytes,
+                    PRDB_INDEX_RANGE_RESPONSE_ROW_RECORD_HEADER_BYTES,
+                    &cell_count) ||
+                cell_count > PRDB_SDK_BATCH_MAX_CELLS_PER_ROW)
+                return PRDB_SDK_BATCH_INVALID_PAYLOAD;
+            for (uint16_t cell_index = 0; cell_index < cell_count; ++cell_index) {
+                if (skip_cell(payload, payload_len, &offset) != PRDB_SDK_BATCH_OK)
+                    return PRDB_SDK_BATCH_INVALID_PAYLOAD;
+            }
+        }
+    }
+    if ((uint64_t)offset != payload_len)
+        return PRDB_SDK_BATCH_INVALID_PAYLOAD;
+    out->struct_size = sizeof(*out);
+    out->abi_version = PRDB_SDK_BATCH_ABI_V1_VERSION;
+    out->payload = payload;
+    out->payload_len = payload_len;
+    out->next_group_offset = 4;
+    out->group_count = group_count;
+    out->groups_remaining = group_count;
+    return PRDB_SDK_BATCH_OK;
+}
+
+int32_t prdb_sdk_index_ranges_groups_begin_v1(
+    const prdb_sdk_index_ranges_v1 *ranges,
+    prdb_sdk_index_ranges_group_iterator_v1 *out, uint32_t out_capacity) {
+    if (ranges == NULL || out == NULL || out_capacity < sizeof(*out) ||
+        ranges->struct_size < sizeof(*ranges) ||
+        ranges->abi_version != PRDB_SDK_BATCH_ABI_V1_VERSION)
+        return PRDB_SDK_BATCH_INVALID_ARGUMENT;
+    out->struct_size = sizeof(*out);
+    out->abi_version = PRDB_SDK_BATCH_ABI_V1_VERSION;
+    out->ranges = ranges;
+    out->offset = ranges->next_group_offset;
+    out->groups_remaining = ranges->groups_remaining;
+    return PRDB_SDK_BATCH_OK;
+}
+
+int32_t prdb_sdk_index_ranges_group_next_v1(
+    prdb_sdk_index_ranges_group_iterator_v1 *iterator,
+    prdb_sdk_index_range_v1 *out, uint32_t out_capacity) {
+    const prdb_sdk_index_ranges_v1 *ranges;
+    const uint8_t *row_count_bytes;
+    uint16_t row_count;
+    uint32_t rows_offset;
+    uint32_t offset;
+    if (iterator == NULL || out == NULL || out_capacity < sizeof(*out) ||
+        iterator->struct_size < sizeof(*iterator) ||
+        iterator->abi_version != PRDB_SDK_BATCH_ABI_V1_VERSION ||
+        iterator->ranges == NULL)
+        return PRDB_SDK_BATCH_INVALID_ARGUMENT;
+    if (iterator->groups_remaining == 0) return PRDB_SDK_BATCH_END;
+    ranges = iterator->ranges;
+    if (ranges->struct_size < sizeof(*ranges) ||
+        ranges->abi_version != PRDB_SDK_BATCH_ABI_V1_VERSION ||
+        !take(ranges->payload, ranges->payload_len, &iterator->offset, 2,
+              &row_count_bytes))
+        return PRDB_SDK_BATCH_INVALID_PAYLOAD;
+    row_count = read_u16(row_count_bytes, 0);
+    rows_offset = iterator->offset;
+    offset = rows_offset;
+    for (uint16_t row_index = 0; row_index < row_count; ++row_index) {
+        const uint8_t *cell_count_bytes;
+        uint16_t cell_count;
+        if (!take(ranges->payload, ranges->payload_len, &offset,
+                  PRDB_INDEX_RANGE_RESPONSE_ROW_RECORD_HEADER_BYTES,
+                  &cell_count_bytes) ||
+            !prdb_decode_index_range_response_row_record(
+                cell_count_bytes,
+                PRDB_INDEX_RANGE_RESPONSE_ROW_RECORD_HEADER_BYTES,
+                &cell_count))
+            return PRDB_SDK_BATCH_INVALID_PAYLOAD;
+        for (uint16_t cell_index = 0; cell_index < cell_count; ++cell_index) {
+            if (skip_cell(ranges->payload, ranges->payload_len, &offset) !=
+                PRDB_SDK_BATCH_OK)
+                return PRDB_SDK_BATCH_INVALID_PAYLOAD;
+        }
+    }
+    out->struct_size = sizeof(*out);
+    out->abi_version = PRDB_SDK_BATCH_ABI_V1_VERSION;
+    out->payload = ranges->payload;
+    out->payload_len = ranges->payload_len;
+    out->rows_offset = rows_offset;
+    out->row_count = row_count;
+    iterator->offset = offset;
+    --iterator->groups_remaining;
+    return PRDB_SDK_BATCH_OK;
+}
+
 int32_t prdb_sdk_index_range_rows_begin_v1(
     const prdb_sdk_index_range_v1 *range,
     prdb_sdk_index_range_row_iterator_v1 *out, uint32_t out_capacity) {

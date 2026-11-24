@@ -40,6 +40,10 @@ pub enum Operation {
     ProbeUniqueIndex = crate::query_abi::IPC_OP_PROBE_UNIQUE_INDEX,
     ScanIndexRange = crate::query_abi::IPC_OP_SCAN_INDEX_RANGE,
     ScanIndexPrefix = crate::query_abi::IPC_OP_SCAN_INDEX_PREFIX,
+    ScanIndexRanges = crate::query_abi::IPC_OP_SCAN_INDEX_RANGES,
+    StageInserts = crate::query_abi::IPC_OP_STAGE_INSERTS,
+    StageUpdates = crate::query_abi::IPC_OP_STAGE_UPDATES,
+    StageDeletes = crate::query_abi::IPC_OP_STAGE_DELETES,
     DescribeRelation = crate::query_abi::IPC_OP_DESCRIBE_RELATION,
     EstimateScan = crate::query_abi::IPC_OP_ESTIMATE_SCAN,
     OptimizeSelect = crate::query_abi::IPC_OP_OPTIMIZE_SELECT,
@@ -97,6 +101,10 @@ impl Operation {
             crate::query_abi::IPC_OP_PROBE_UNIQUE_INDEX => Ok(Self::ProbeUniqueIndex),
             crate::query_abi::IPC_OP_SCAN_INDEX_RANGE => Ok(Self::ScanIndexRange),
             crate::query_abi::IPC_OP_SCAN_INDEX_PREFIX => Ok(Self::ScanIndexPrefix),
+            crate::query_abi::IPC_OP_SCAN_INDEX_RANGES => Ok(Self::ScanIndexRanges),
+            crate::query_abi::IPC_OP_STAGE_INSERTS => Ok(Self::StageInserts),
+            crate::query_abi::IPC_OP_STAGE_UPDATES => Ok(Self::StageUpdates),
+            crate::query_abi::IPC_OP_STAGE_DELETES => Ok(Self::StageDeletes),
             crate::query_abi::IPC_OP_DESCRIBE_RELATION => Ok(Self::DescribeRelation),
             crate::query_abi::IPC_OP_ESTIMATE_SCAN => Ok(Self::EstimateScan),
             crate::query_abi::IPC_OP_OPTIMIZE_SELECT => Ok(Self::OptimizeSelect),
@@ -181,6 +189,10 @@ pub fn authorize_operation(role: ServiceRole, operation: Operation) -> Result<()
                 | Operation::ProbeUniqueIndex
                 | Operation::ScanIndexRange
                 | Operation::ScanIndexPrefix
+                | Operation::ScanIndexRanges
+                | Operation::StageInserts
+                | Operation::StageUpdates
+                | Operation::StageDeletes
         ),
         ServiceRole::Planner => matches!(
             operation,

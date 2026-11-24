@@ -10577,6 +10577,51 @@ impl ExecutorMetadataConnection<'_, '_> {
         }
     }
 
+    /// Execute an ordered set of authorized point or leading-prefix probes.
+    /// The caller publishes the result only after every entry is available.
+    pub fn scan_relation_index_ranges(
+        &mut self,
+        handle: &ResolvedRelationHandle,
+        index_id: [u8; 16],
+        probes: &[Vec<ScalarValue>],
+        requested_column_ids: &[[u8; 16]],
+    ) -> Result<Option<Vec<Vec<Vec<SanitizedCell>>>>, TransactionError> {
+        if probes.is_empty() || probes.len() > 128 {
+            return Err(TransactionError::InvalidMetadataRequest);
+        }
+        let mut groups = Vec::with_capacity(probes.len());
+        let mut candidates = 0usize;
+        for values in probes {
+            if !(1..=8).contains(&values.len()) {
+                return Err(TransactionError::InvalidMetadataRequest);
+            }
+            let scan = if values.len() == 1 {
+                let bound = AuthorizedIndexRangeBound {
+                    value: values[0].clone(),
+                    inclusive: true,
+                };
+                self.scan_relation_index_range(
+                    handle,
+                    index_id,
+                    Some(bound.clone()),
+                    Some(bound),
+                    requested_column_ids,
+                )?
+            } else {
+                self.scan_relation_index_prefix(handle, index_id, values, requested_column_ids)?
+            };
+            let ExecutorIndexRangeScan::Rows(rows) = scan else {
+                return Ok(None);
+            };
+            candidates = candidates.saturating_add(rows.len());
+            if rows.len() > 1_024 || candidates > 16_384 {
+                return Ok(None);
+            }
+            groups.push(rows);
+        }
+        Ok(Some(groups))
+    }
+
     fn next_information_schema_page(
         &mut self,
         scan: ActiveExecutorScan,

@@ -1,5 +1,12 @@
 # Internal IPC Progress
 
+## IPC-7 / SQL-10 follow-up: batched index probe frame — implemented slice
+
+- Contract: `0x1117` carries 1–128 typed leading-key or two-to-eight-column prefix probes and returns ordered result groups, or one unavailable status without partial groups. The fixed frame ceiling and aggregate 16,384-candidate/1 MiB response limits are enforced.
+- Implementation: added generated operation code and executor role dispatch, Rust request/response codecs and connection handler, TinyCC request encoder and grouped-response iterator, and changed the SQL-10 nested-loop runner to issue one request per group of up to 128 outer rows. Cancellation is checked before and after the batch; group ordinals preserve duplicate outer-row association.
+- Verification: generated ABI consistency tests, 8 executor IPC tests, 8 IPC tests, `cargo fmt --all -- --check`, maintained TinyCC SDK tests, and release-profile validation passed in the pinned Nix shell. The SQL v19 fixture verifies eight ordered result groups in one probe frame and no partial output when aggregate candidate limits are exceeded. Confined SQL acceptance passed with exact indexed/hash results under 192 concurrent operational reads and commits; the range-probe batch ran through the actual executor/storage path.
+- Remaining: broader duplicate/NULL, overlay, denied-column and composite-prefix batch cases; batch mutation operations `0x1118`–`0x111a`; planner metadata batches `0x1209`/`0x120a`; and configurable profile propagation remain open.
+
 ## IPC-2 follow-up: TinyCC unique-index probe uses the shared scalar-value codec — implemented
 
 - Contract: the `0x1114` key scalar uses the common record `{type_code:u8, value_length:u32be, value_bytes[value_length]}`.

@@ -18,6 +18,7 @@
 #define PRDB_SDK_EXECUTOR_OP_PROBE_UNIQUE_INDEX PRDB_IPC_OP_PROBE_UNIQUE_INDEX
 #define PRDB_SDK_EXECUTOR_OP_SCAN_INDEX_RANGE PRDB_IPC_OP_SCAN_INDEX_RANGE
 #define PRDB_SDK_EXECUTOR_OP_SCAN_INDEX_PREFIX PRDB_IPC_OP_SCAN_INDEX_PREFIX
+#define PRDB_SDK_EXECUTOR_OP_SCAN_INDEX_RANGES PRDB_IPC_OP_SCAN_INDEX_RANGES
 #define PRDB_SDK_EXECUTOR_OP_CHECK_CANCELLATION PRDB_IPC_OP_EXECUTOR_CHECK_CANCELLATION
 #define PRDB_SDK_EXECUTOR_MAX_COLUMN_IDS UINT16_C(256)
 
@@ -57,6 +58,13 @@ typedef struct prdb_sdk_executor_update_patch_v1 {
     prdb_sdk_value_v1 value;
 } prdb_sdk_executor_update_patch_v1;
 
+typedef struct prdb_sdk_executor_index_probe_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    const prdb_sdk_value_v1 *values;
+    uint8_t value_count;
+} prdb_sdk_executor_index_probe_v1;
+
 /* Resolve requires an explicit schema because InvocationV2 has no default
  * schema field. Request and response buffers are caller-owned and bounded. */
 int32_t prdb_sdk_executor_resolve_relation_v1(
@@ -92,6 +100,17 @@ int32_t prdb_sdk_executor_scan_index_prefix_v1(
     uint8_t *request, uint64_t request_capacity, uint8_t *response,
     uint64_t response_capacity, uint64_t *response_len,
     prdb_sdk_index_range_v1 *range_out, uint32_t range_out_capacity);
+
+/* Runs 1..128 independent non-NULL point or leading-prefix probes in one
+ * frame. Result groups remain in probe order and borrow the response bytes. */
+int32_t prdb_sdk_executor_scan_index_ranges_v1(
+    const prdb_host_api_v2 *host, const uint8_t executor_handle[16],
+    const uint8_t index_id[16],
+    const prdb_sdk_executor_index_probe_v1 *probes, uint16_t probe_count,
+    const uint8_t *column_ids, uint16_t column_count,
+    uint8_t *request, uint64_t request_capacity, uint8_t *response,
+    uint64_t response_capacity, uint64_t *response_len,
+    prdb_sdk_index_ranges_v1 *ranges_out, uint32_t ranges_out_capacity);
 
 int32_t prdb_sdk_executor_next_batch_v1(
     const prdb_host_api_v2 *host, const uint8_t cursor[16],

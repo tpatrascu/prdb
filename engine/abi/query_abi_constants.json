@@ -1051,6 +1051,34 @@
       "c_type": "UINT16_C"
     },
     {
+      "rust_name": "IPC_OP_SCAN_INDEX_RANGES",
+      "rust_type": "u16",
+      "value": 4375,
+      "c_name": "PRDB_IPC_OP_SCAN_INDEX_RANGES",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_STAGE_INSERTS",
+      "rust_type": "u16",
+      "value": 4376,
+      "c_name": "PRDB_IPC_OP_STAGE_INSERTS",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_STAGE_UPDATES",
+      "rust_type": "u16",
+      "value": 4377,
+      "c_name": "PRDB_IPC_OP_STAGE_UPDATES",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_STAGE_DELETES",
+      "rust_type": "u16",
+      "value": 4378,
+      "c_name": "PRDB_IPC_OP_STAGE_DELETES",
+      "c_type": "UINT16_C"
+    },
+    {
       "rust_name": "IPC_OP_DESCRIBE_RELATION",
       "rust_type": "u16",
       "value": 4609,

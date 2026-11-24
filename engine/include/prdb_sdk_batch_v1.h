@@ -70,6 +70,24 @@ typedef struct prdb_sdk_index_range_v1 {
     uint16_t row_count;
 } prdb_sdk_index_range_v1;
 
+typedef struct prdb_sdk_index_ranges_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    const uint8_t *payload;
+    uint64_t payload_len;
+    uint32_t next_group_offset;
+    uint16_t group_count;
+    uint16_t groups_remaining;
+} prdb_sdk_index_ranges_v1;
+
+typedef struct prdb_sdk_index_ranges_group_iterator_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    const prdb_sdk_index_ranges_v1 *ranges;
+    uint32_t offset;
+    uint16_t groups_remaining;
+} prdb_sdk_index_ranges_group_iterator_v1;
+
 typedef struct prdb_sdk_index_range_row_iterator_v1 {
     uint32_t struct_size;
     uint32_t abi_version;
@@ -106,6 +124,15 @@ int32_t prdb_sdk_cell_next_v1(prdb_sdk_cell_iterator_v1 *iterator,
 int32_t prdb_sdk_index_range_open_v1(
     prdb_sdk_index_range_v1 *out, uint32_t out_capacity,
     const uint8_t *payload, uint64_t payload_len);
+int32_t prdb_sdk_index_ranges_open_v1(
+    prdb_sdk_index_ranges_v1 *out, uint32_t out_capacity,
+    const uint8_t *payload, uint64_t payload_len);
+int32_t prdb_sdk_index_ranges_groups_begin_v1(
+    const prdb_sdk_index_ranges_v1 *ranges,
+    prdb_sdk_index_ranges_group_iterator_v1 *out, uint32_t out_capacity);
+int32_t prdb_sdk_index_ranges_group_next_v1(
+    prdb_sdk_index_ranges_group_iterator_v1 *iterator,
+    prdb_sdk_index_range_v1 *out, uint32_t out_capacity);
 int32_t prdb_sdk_index_range_rows_begin_v1(
     const prdb_sdk_index_range_v1 *range,
     prdb_sdk_index_range_row_iterator_v1 *out, uint32_t out_capacity);

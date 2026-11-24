@@ -183,6 +183,11 @@ fn ipc_operation_codes_are_fixed_and_unknown_codes_fail_closed() {
     assert_eq!(Operation::from_code(0x1115), Ok(Operation::ScanIndexRange));
     assert_eq!(Operation::ScanIndexPrefix as u16, 0x1116);
     assert_eq!(Operation::from_code(0x1116), Ok(Operation::ScanIndexPrefix));
+    assert_eq!(Operation::ScanIndexRanges as u16, 0x1117);
+    assert_eq!(Operation::StageInserts as u16, 0x1118);
+    assert_eq!(Operation::StageUpdates as u16, 0x1119);
+    assert_eq!(Operation::StageDeletes as u16, 0x111a);
+    assert_eq!(Operation::from_code(0x1117), Ok(Operation::ScanIndexRanges));
     assert_eq!(Operation::EstimateScan as u16, 0x1202);
     assert_eq!(Operation::OptimizeDelete as u16, 0x1205);
     assert_eq!(Operation::OptimizeUpdate as u16, 0x1206);
@@ -242,6 +247,21 @@ fn ipc_operation_allowlists_separate_executor_planner_and_control_roles() {
     assert_eq!(
         authorize_operation(ServiceRole::Executor, Operation::ScanIndexPrefix),
         Ok(())
+    );
+    assert_eq!(
+        authorize_operation(ServiceRole::Executor, Operation::ScanIndexRanges),
+        Ok(())
+    );
+    assert_eq!(
+        authorize_operation(ServiceRole::Executor, Operation::StageInserts),
+        Ok(())
+    );
+    assert_eq!(
+        authorize_operation(ServiceRole::Planner, Operation::ScanIndexRanges),
+        Err(DispatchError::OperationNotAllowed {
+            role: ServiceRole::Planner,
+            operation: Operation::ScanIndexRanges,
+        })
     );
     assert_eq!(
         authorize_operation(ServiceRole::Planner, Operation::EstimateScan),

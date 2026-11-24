@@ -662,6 +662,293 @@ impl ScanIndexPrefixRequest {
     }
 }
 
+/// One leading-key or leading-prefix lookup in a batched index request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScanIndexProbe {
+    pub values: Vec<ScalarValue>,
+}
+
+/// Bounded batch of independent leading-key or leading-prefix index probes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScanIndexRangesRequest {
+    pub relation: ResolvedRelationHandle,
+    pub index_id: [u8; 16],
+    pub probes: Vec<ScanIndexProbe>,
+    pub column_ids: Vec<[u8; 16]>,
+}
+
+impl ScanIndexRangesRequest {
+    const HEADER_BYTES: usize = 2 + 16 + 16 + 2;
+    pub const MAX_PROBES: usize = 128;
+
+    pub fn encode(&self) -> Result<Vec<u8>, ExecutorRequestError> {
+        validate_index_ranges_shape(self.index_id, &self.probes, &self.column_ids)?;
+        let mut payload = Vec::with_capacity(Self::HEADER_BYTES);
+        payload.extend_from_slice(&1u16.to_be_bytes());
+        payload.extend_from_slice(&self.relation.to_bytes());
+        payload.extend_from_slice(&self.index_id);
+        payload.extend_from_slice(&(self.probes.len() as u16).to_be_bytes());
+        for probe in &self.probes {
+            payload.push(probe.values.len() as u8);
+            for value in &probe.values {
+                let (type_code, bytes) = encode_scalar_value(value)?;
+                append_scalar_value_record(&mut payload, type_code, &bytes)?;
+            }
+        }
+        payload.extend_from_slice(&(self.column_ids.len() as u16).to_be_bytes());
+        for column_id in &self.column_ids {
+            payload.extend_from_slice(column_id);
+        }
+        ensure_response_size(&payload)?;
+        Ok(payload)
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
+        if payload.len() < Self::HEADER_BYTES + 2
+            || payload.len() > crate::ipc::MAX_PAYLOAD_BYTES
+            || payload.get(..2) != Some(&1u16.to_be_bytes())
+        {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        let relation = ResolvedRelationHandle::from_bytes(
+            payload
+                .get(2..18)
+                .ok_or(ExecutorRequestError::InvalidPayload)?,
+        )
+        .ok_or(ExecutorRequestError::InvalidPayload)?;
+        let index_id = payload
+            .get(18..34)
+            .ok_or(ExecutorRequestError::InvalidPayload)?
+            .try_into()
+            .map_err(|_| ExecutorRequestError::InvalidPayload)?;
+        let probe_count = usize::from(u16::from_be_bytes(
+            payload
+                .get(34..36)
+                .ok_or(ExecutorRequestError::InvalidPayload)?
+                .try_into()
+                .map_err(|_| ExecutorRequestError::InvalidPayload)?,
+        ));
+        if !(1..=Self::MAX_PROBES).contains(&probe_count) {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        let mut offset = Self::HEADER_BYTES;
+        let mut probes = Vec::with_capacity(probe_count);
+        for _ in 0..probe_count {
+            let key_count = usize::from(
+                *payload
+                    .get(offset)
+                    .ok_or(ExecutorRequestError::InvalidPayload)?,
+            );
+            offset = offset
+                .checked_add(1)
+                .ok_or(ExecutorRequestError::InvalidPayload)?;
+            if !(1..=8).contains(&key_count) {
+                return Err(ExecutorRequestError::InvalidPayload);
+            }
+            let mut values = Vec::with_capacity(key_count);
+            for _ in 0..key_count {
+                values.push(decode_scalar_value_record(payload, &mut offset)?);
+            }
+            probes.push(ScanIndexProbe { values });
+        }
+        let count_end = offset
+            .checked_add(2)
+            .ok_or(ExecutorRequestError::InvalidPayload)?;
+        let column_count = usize::from(u16::from_be_bytes(
+            payload
+                .get(offset..count_end)
+                .ok_or(ExecutorRequestError::InvalidPayload)?
+                .try_into()
+                .map_err(|_| ExecutorRequestError::InvalidPayload)?,
+        ));
+        offset = count_end;
+        if column_count > crate::tuple::MAX_COLUMNS
+            || offset.checked_add(column_count * 16) != Some(payload.len())
+        {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        let column_ids = payload[offset..]
+            .chunks_exact(16)
+            .map(|chunk| {
+                chunk
+                    .try_into()
+                    .map_err(|_| ExecutorRequestError::InvalidPayload)
+            })
+            .collect::<Result<Vec<[u8; 16]>, _>>()?;
+        validate_index_ranges_shape(index_id, &probes, &column_ids)?;
+        Ok(Self {
+            relation,
+            index_id,
+            probes,
+            column_ids,
+        })
+    }
+}
+
+fn validate_index_ranges_shape(
+    index_id: [u8; 16],
+    probes: &[ScanIndexProbe],
+    column_ids: &[[u8; 16]],
+) -> Result<(), ExecutorRequestError> {
+    if index_id == [0; 16]
+        || !(1..=ScanIndexRangesRequest::MAX_PROBES).contains(&probes.len())
+        || probes
+            .iter()
+            .any(|probe| !(1..=8).contains(&probe.values.len()))
+        || column_ids.len() > crate::tuple::MAX_COLUMNS
+        || column_ids.contains(&[0; 16])
+        || column_ids
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != column_ids.len()
+    {
+        return Err(ExecutorRequestError::InvalidPayload);
+    }
+    Ok(())
+}
+
+/// Results are kept in input-probe order. An unavailable result has no groups.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ScanIndexRangesResponse {
+    Unavailable,
+    Groups(Vec<Vec<Vec<SanitizedCell>>>),
+}
+
+impl ScanIndexRangesResponse {
+    const VERSION: u8 = 1;
+    const MAX_GROUP_ROWS: usize = 1_024;
+    const MAX_CANDIDATES: usize = 16_384;
+
+    fn unavailable_payload() -> Vec<u8> {
+        vec![Self::VERSION, 0]
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, ExecutorRequestError> {
+        let Self::Groups(groups) = self else {
+            return Ok(Self::unavailable_payload());
+        };
+        if !(1..=ScanIndexRangesRequest::MAX_PROBES).contains(&groups.len()) {
+            return Ok(Self::unavailable_payload());
+        }
+        let mut candidate_count = 0usize;
+        let mut payload = vec![Self::VERSION, 1];
+        payload.extend_from_slice(&(groups.len() as u16).to_be_bytes());
+        for rows in groups {
+            if rows.len() > Self::MAX_GROUP_ROWS {
+                return Ok(Self::unavailable_payload());
+            }
+            candidate_count = candidate_count.saturating_add(rows.len());
+            if candidate_count > Self::MAX_CANDIDATES {
+                return Ok(Self::unavailable_payload());
+            }
+            payload.extend_from_slice(&(rows.len() as u16).to_be_bytes());
+            for row in rows {
+                if row.len() > crate::tuple::MAX_COLUMNS {
+                    return Err(ExecutorRequestError::InvalidPayload);
+                }
+                payload.extend_from_slice(&(row.len() as u16).to_be_bytes());
+                for cell in row {
+                    if encode_sanitized_cell(&mut payload, cell, crate::ipc::MAX_PAYLOAD_BYTES)
+                        .is_err()
+                    {
+                        return Ok(Self::unavailable_payload());
+                    }
+                }
+            }
+        }
+        if payload.len() > crate::ipc::MAX_PAYLOAD_BYTES {
+            Ok(Self::unavailable_payload())
+        } else {
+            Ok(payload)
+        }
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
+        if payload.len() < 2
+            || payload.len() > crate::ipc::MAX_PAYLOAD_BYTES
+            || payload[0] != Self::VERSION
+        {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        if payload[1] == 0 && payload.len() == 2 {
+            return Ok(Self::Unavailable);
+        }
+        if payload[1] != 1 || payload.len() < 4 {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        let group_count = usize::from(u16::from_be_bytes([payload[2], payload[3]]));
+        if !(1..=ScanIndexRangesRequest::MAX_PROBES).contains(&group_count) {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        let mut offset = 4usize;
+        let mut candidate_count = 0usize;
+        let mut groups = Vec::with_capacity(group_count);
+        for _ in 0..group_count {
+            let count_end = offset
+                .checked_add(2)
+                .ok_or(ExecutorRequestError::InvalidPayload)?;
+            let row_count = usize::from(u16::from_be_bytes(
+                payload
+                    .get(offset..count_end)
+                    .ok_or(ExecutorRequestError::InvalidPayload)?
+                    .try_into()
+                    .map_err(|_| ExecutorRequestError::InvalidPayload)?,
+            ));
+            offset = count_end;
+            candidate_count = candidate_count.saturating_add(row_count);
+            if row_count > Self::MAX_GROUP_ROWS || candidate_count > Self::MAX_CANDIDATES {
+                return Err(ExecutorRequestError::InvalidPayload);
+            }
+            let mut rows = Vec::with_capacity(row_count);
+            for _ in 0..row_count {
+                let count_end = offset
+                    .checked_add(2)
+                    .ok_or(ExecutorRequestError::InvalidPayload)?;
+                let cell_count = usize::from(u16::from_be_bytes(
+                    payload
+                        .get(offset..count_end)
+                        .ok_or(ExecutorRequestError::InvalidPayload)?
+                        .try_into()
+                        .map_err(|_| ExecutorRequestError::InvalidPayload)?,
+                ));
+                offset = count_end;
+                if cell_count > crate::tuple::MAX_COLUMNS {
+                    return Err(ExecutorRequestError::InvalidPayload);
+                }
+                let mut cells = Vec::with_capacity(cell_count);
+                for _ in 0..cell_count {
+                    let tag_end = offset
+                        .checked_add(generated::SANITIZED_CELL_TAG_RECORD_HEADER_BYTES as usize)
+                        .ok_or(ExecutorRequestError::InvalidPayload)?;
+                    let tag = generated::decode_sanitized_cell_tag_record(
+                        payload
+                            .get(offset..tag_end)
+                            .ok_or(ExecutorRequestError::InvalidPayload)?,
+                    )
+                    .ok_or(ExecutorRequestError::InvalidPayload)?;
+                    offset = tag_end;
+                    cells.push(match tag {
+                        0 => {
+                            SanitizedCell::Value(decode_scalar_value_record(payload, &mut offset)?)
+                        }
+                        1 => SanitizedCell::Null,
+                        2 => SanitizedCell::Redacted,
+                        _ => return Err(ExecutorRequestError::InvalidPayload),
+                    });
+                }
+                rows.push(cells);
+            }
+            groups.push(rows);
+        }
+        if offset != payload.len() {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        Ok(Self::Groups(groups))
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ScanIndexRangeResponse {
     Unavailable,
@@ -1748,6 +2035,24 @@ fn dispatch_executor_request_inner(
             )? {
                 ExecutorIndexRangeScan::Unavailable => ScanIndexRangeResponse::Unavailable,
                 ExecutorIndexRangeScan::Rows(rows) => ScanIndexRangeResponse::Rows(rows),
+            };
+            response.encode()?
+        }
+        Operation::ScanIndexRanges => {
+            let decoded = ScanIndexRangesRequest::decode(&request.payload)?;
+            let probes = decoded
+                .probes
+                .iter()
+                .map(|probe| probe.values.clone())
+                .collect::<Vec<_>>();
+            let response = match connection.scan_relation_index_ranges(
+                &decoded.relation,
+                decoded.index_id,
+                &probes,
+                &decoded.column_ids,
+            )? {
+                Some(groups) => ScanIndexRangesResponse::Groups(groups),
+                None => ScanIndexRangesResponse::Unavailable,
             };
             response.encode()?
         }

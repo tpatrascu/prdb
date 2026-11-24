@@ -335,6 +335,104 @@ int32_t prdb_sdk_executor_scan_index_prefix_v1(
     return PRDB_SDK_EXECUTOR_OK;
 }
 
+int32_t prdb_sdk_executor_scan_index_ranges_v1(
+    const prdb_host_api_v2 *host, const uint8_t executor_handle[16],
+    const uint8_t index_id[16],
+    const prdb_sdk_executor_index_probe_v1 *probes, uint16_t probe_count,
+    const uint8_t *column_ids, uint16_t column_count,
+    uint8_t *request, uint64_t request_capacity, uint8_t *response,
+    uint64_t response_capacity, uint64_t *response_len,
+    prdb_sdk_index_ranges_v1 *ranges_out, uint32_t ranges_out_capacity) {
+    uint64_t request_len = 38 + (uint64_t)column_count * 16;
+    uint64_t offset = 36;
+    int32_t status;
+    if (executor_handle == NULL || executor_handle[0] != 6 || index_id == NULL ||
+        probes == NULL || probe_count == 0 || probe_count > PRDB_SDK_BATCH_MAX_ROWS ||
+        request == NULL || response == NULL || response_len == NULL ||
+        ranges_out == NULL || ranges_out_capacity < sizeof(*ranges_out) ||
+        (column_count != 0 && column_ids == NULL) ||
+        column_count > PRDB_SDK_EXECUTOR_MAX_COLUMN_IDS)
+        return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+    {
+        uint8_t nonzero = 0;
+        for (uint32_t i = 0; i < 16; ++i) nonzero |= index_id[i];
+        if (nonzero == 0) return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+    }
+    for (uint16_t i = 0; i < column_count; ++i) {
+        const uint8_t *column_id = column_ids + (uint64_t)i * 16;
+        uint8_t nonzero = 0;
+        for (uint32_t j = 0; j < 16; ++j) nonzero |= column_id[j];
+        if (nonzero == 0) return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+        for (uint16_t previous = 0; previous < i; ++previous) {
+            if (memcmp(column_id, column_ids + (uint64_t)previous * 16, 16) == 0)
+                return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+        }
+    }
+    for (uint16_t probe_index = 0; probe_index < probe_count; ++probe_index) {
+        const prdb_sdk_executor_index_probe_v1 *probe = &probes[probe_index];
+        if (probe->struct_size < sizeof(*probe) ||
+            probe->abi_version != PRDB_SDK_EXECUTOR_ABI_V1_VERSION ||
+            probe->values == NULL || probe->value_count == 0 ||
+            probe->value_count > 8 || request_len >= PRDB_QUERY_MAX_IPC_REQUEST_BYTES)
+            return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+        ++request_len;
+        for (uint8_t value_index = 0; value_index < probe->value_count; ++value_index) {
+            const prdb_sdk_value_v1 *value = &probe->values[value_index];
+            if (!valid_range_bound(value) || value->data_len > UINT32_MAX ||
+                request_len > PRDB_QUERY_MAX_IPC_REQUEST_BYTES - 5 ||
+                value->data_len > PRDB_QUERY_MAX_IPC_REQUEST_BYTES - request_len - 5)
+                return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+            request_len += 5 + value->data_len;
+        }
+    }
+    if (request_len > PRDB_QUERY_MAX_IPC_REQUEST_BYTES)
+        return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+    if (request_capacity < request_len)
+        return PRDB_SDK_EXECUTOR_RESPONSE_TOO_SMALL;
+    request[0] = 0;
+    request[1] = 1;
+    memcpy(request + 2, executor_handle, 16);
+    memcpy(request + 18, index_id, 16);
+    request[34] = (uint8_t)(probe_count >> 8);
+    request[35] = (uint8_t)probe_count;
+    for (uint16_t probe_index = 0; probe_index < probe_count; ++probe_index) {
+        const prdb_sdk_executor_index_probe_v1 *probe = &probes[probe_index];
+        request[offset++] = probe->value_count;
+        for (uint8_t value_index = 0; value_index < probe->value_count; ++value_index) {
+            const prdb_sdk_value_v1 *value = &probe->values[value_index];
+            uint8_t value_header[PRDB_SCALAR_VALUE_RECORD_HEADER_BYTES] = {0};
+            prdb_encode_scalar_value_record(value_header, value->type_code,
+                                            (uint32_t)value->data_len);
+            memcpy(request + offset, value_header, sizeof(value_header));
+            offset += sizeof(value_header);
+            if (value->data_len != 0) {
+                if (!prdb_encode_scalar_value_record_value_bytes(
+                        request + offset, (size_t)(request_capacity - offset),
+                        value->data, (size_t)value->data_len))
+                    return PRDB_SDK_EXECUTOR_RESPONSE_TOO_SMALL;
+                offset += value->data_len;
+            }
+        }
+    }
+    request[offset++] = (uint8_t)(column_count >> 8);
+    request[offset++] = (uint8_t)column_count;
+    if (column_count != 0) {
+        memcpy(request + offset, column_ids, (size_t)column_count * 16);
+        offset += (uint64_t)column_count * 16;
+    }
+    if (offset != request_len) return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+    status = invoke(host, PRDB_SDK_EXECUTOR_OP_SCAN_INDEX_RANGES, request,
+                    request_len, response, response_capacity, response_len);
+    if (status != PRDB_SDK_EXECUTOR_OK) return status;
+    status = prdb_sdk_index_ranges_open_v1(ranges_out, ranges_out_capacity,
+                                           response, *response_len);
+    if (status == PRDB_SDK_BATCH_UNAVAILABLE) return PRDB_SDK_EXECUTOR_UNAVAILABLE;
+    if (status != PRDB_SDK_BATCH_OK) return PRDB_SDK_EXECUTOR_INVALID_PAYLOAD;
+    if (ranges_out->group_count != probe_count)
+        return PRDB_SDK_EXECUTOR_INVALID_PAYLOAD;
+    return PRDB_SDK_EXECUTOR_OK;
+}
+
 int32_t prdb_sdk_executor_next_batch_v1(
     const prdb_host_api_v2 *host, const uint8_t cursor[16],
     uint16_t max_candidates, uint32_t max_bytes, uint8_t *response,

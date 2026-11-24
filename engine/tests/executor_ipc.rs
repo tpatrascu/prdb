@@ -1,7 +1,8 @@
+use prdb_engine::authorization::SanitizedCell;
 use prdb_engine::executor_ipc::{
     MutationAcknowledgement, OpenScanRequest, OpenScanResponse, ResolveRelationRequest,
-    ResolveRelationResponse, StageDeleteRequest, StageInsertRequest, StageInsertResponse,
-    StageUpdateRequest,
+    ResolveRelationResponse, ScanIndexProbe, ScanIndexRangesRequest, ScanIndexRangesResponse,
+    StageDeleteRequest, StageInsertRequest, StageInsertResponse, StageUpdateRequest,
 };
 use prdb_engine::metadata_discovery::{
     AuthorizedRelationDescription, EXECUTOR_SCAN_CURSOR_TOKEN_KIND, ExecutorRowHandle,
@@ -75,6 +76,75 @@ fn executor_mutation_payloads_round_trip_canonical_values_and_handles() {
         MutationAcknowledgement::decode(&MutationAcknowledgement.encode()).unwrap(),
         MutationAcknowledgement
     );
+}
+
+#[test]
+fn batched_index_probe_payloads_preserve_probe_and_result_group_order() {
+    let request = ScanIndexRangesRequest {
+        relation: ResolvedRelationHandle::from_bytes(&handle(6)).unwrap(),
+        index_id: handle(7),
+        probes: vec![
+            ScanIndexProbe {
+                values: vec![ScalarValue::Integer(11)],
+            },
+            ScanIndexProbe {
+                values: vec![ScalarValue::Text("region".into()), ScalarValue::BigInt(9)],
+            },
+        ],
+        column_ids: vec![handle(9), handle(10)],
+    };
+    assert_eq!(
+        ScanIndexRangesRequest::decode(&request.encode().unwrap()).unwrap(),
+        request
+    );
+
+    let response = ScanIndexRangesResponse::Groups(vec![
+        vec![vec![SanitizedCell::Value(ScalarValue::Integer(11))]],
+        vec![
+            vec![SanitizedCell::Null],
+            vec![
+                SanitizedCell::Redacted,
+                SanitizedCell::Value(ScalarValue::BigInt(9)),
+            ],
+        ],
+    ]);
+    let encoded = response.encode().unwrap();
+    assert_eq!(ScanIndexRangesResponse::decode(&encoded).unwrap(), response);
+    assert_eq!(
+        ScanIndexRangesResponse::decode(&ScanIndexRangesResponse::Unavailable.encode().unwrap())
+            .unwrap(),
+        ScanIndexRangesResponse::Unavailable
+    );
+}
+
+#[test]
+fn batched_index_probe_payloads_reject_bad_counts_trailing_data_and_partial_groups() {
+    let request = ScanIndexRangesRequest {
+        relation: ResolvedRelationHandle::from_bytes(&handle(6)).unwrap(),
+        index_id: handle(7),
+        probes: vec![ScanIndexProbe {
+            values: vec![ScalarValue::Integer(11)],
+        }],
+        column_ids: vec![handle(9)],
+    };
+    let mut malformed = request.encode().unwrap();
+    malformed[34..36].copy_from_slice(&129u16.to_be_bytes());
+    assert!(ScanIndexRangesRequest::decode(&malformed).is_err());
+
+    let mut trailing = request.encode().unwrap();
+    trailing.push(0);
+    assert!(ScanIndexRangesRequest::decode(&trailing).is_err());
+
+    let mut malformed_response = ScanIndexRangesResponse::Groups(vec![vec![]])
+        .encode()
+        .unwrap();
+    malformed_response[2..4].copy_from_slice(&2u16.to_be_bytes());
+    assert!(ScanIndexRangesResponse::decode(&malformed_response).is_err());
+
+    let over_limit = ScanIndexRangesResponse::Groups(vec![vec![vec![]; 1_025]])
+        .encode()
+        .unwrap();
+    assert_eq!(over_limit, vec![1, 0]);
 }
 
 #[test]

@@ -46,6 +46,7 @@ typedef struct mock_state {
     uint16_t range_row_count;
     int32_t range_value_base;
     uint8_t repeat_range_values;
+    uint8_t vary_range_by_probe;
     uint32_t statement_failed;
     struct spill_mock_stream {
         uint8_t handle[16];
@@ -617,6 +618,64 @@ static int32_t executor_request(void *context, uint16_t operation,
         *response_len = offset;
         mock->scan_finished[1] = 1;
         ++mock->prefix_calls;
+    } else if (operation == PRDB_SDK_EXECUTOR_OP_SCAN_INDEX_RANGES) {
+        uint32_t offset = 0;
+        uint32_t request_offset = 36;
+        uint16_t probe_count;
+        uint32_t row_count = mock->range_row_count == 0 ? 1 : mock->range_row_count;
+        int32_t value_base = mock->range_value_base == 0 ? 101 : mock->range_value_base;
+        assert(request_len >= 38 && request[0] == 0 && request[1] == 1 &&
+               request[2] == 6 && request[3] == 0x22);
+        assert(memcmp(request + 18, (uint8_t[16]){
+                   0x71,0x71,0x71,0x71,0x71,0x71,0x71,0x71,
+                   0x71,0x71,0x71,0x71,0x71,0x71,0x71,0x71}, 16) == 0);
+        probe_count = (uint16_t)(((uint16_t)request[34] << 8) | request[35]);
+        assert(probe_count > 0 && probe_count <= PRDB_SDK_BATCH_MAX_ROWS &&
+               mock->open_calls == 1);
+        for (uint16_t probe = 0; probe < probe_count; ++probe) {
+            assert(request_offset < request_len);
+            uint8_t key_count = request[request_offset++];
+            assert(key_count == 1 || key_count == 2);
+            for (uint8_t key = 0; key < key_count; ++key) {
+                assert(request_offset + 5 <= request_len);
+                uint32_t value_len = ((uint32_t)request[request_offset + 1] << 24) |
+                    ((uint32_t)request[request_offset + 2] << 16) |
+                    ((uint32_t)request[request_offset + 3] << 8) |
+                    request[request_offset + 4];
+                request_offset += 5 + value_len;
+                assert(request_offset <= request_len);
+            }
+        }
+        assert(request_offset + 2 <= request_len);
+        uint16_t column_count = (uint16_t)(((uint16_t)request[request_offset] << 8) |
+                                           request[request_offset + 1]);
+        request_offset += 2 + (uint32_t)column_count * 16;
+        assert(request_offset == request_len);
+        if ((uint64_t)probe_count * row_count > UINT32_C(16384)) {
+            assert(capacity >= 2);
+            response[0] = 1;
+            response[1] = 0;
+            *response_len = 2;
+            ++mock->range_calls;
+            return PRDB_QUERY_CALLBACK_OK;
+        }
+        response[offset++] = 1;
+        response[offset++] = 1;
+        put_u16(response, &offset, probe_count);
+        for (uint16_t probe = 0; probe < probe_count; ++probe) {
+            put_u16(response, &offset, (uint16_t)row_count);
+            for (uint32_t row = 0; row < row_count; ++row) {
+                put_u16(response, &offset, 2);
+                append_integer_cell(response, &offset, 1);
+                append_integer_cell(response, &offset,
+                    value_base + (mock->vary_range_by_probe ? (int32_t)probe :
+                        (mock->repeat_range_values ? 0 : (int32_t)row)));
+            }
+        }
+        assert(offset <= capacity);
+        *response_len = offset;
+        mock->scan_finished[1] = 1;
+        ++mock->range_calls;
     } else if (operation == PRDB_SDK_EXECUTOR_OP_CLOSE_CURSOR) {
         static const uint8_t reply[] = {0, 1, 0};
         assert(request_len == 18 && request[0] == 0 && request[1] == 1 &&
@@ -781,8 +840,8 @@ static int32_t run_query_optimizer_with_materialized_capacity(
     uint8_t optimizer_response[2048] = {0};
     uint8_t left_planner_response[256] = {0};
     uint8_t right_planner_response[256] = {0};
-    uint8_t left_executor_response[65536] = {0};
-    uint8_t right_executor_response[65536] = {0};
+    uint8_t left_executor_response[PRDB_SDK_BATCH_MAX_BYTES] = {0};
+    uint8_t right_executor_response[PRDB_SDK_BATCH_MAX_BYTES] = {0};
     uint8_t batch_response[8192] = {0};
     uint8_t materialized_bytes[262144] = {0};
     uint8_t integer_names[2][11] = {{0}};
@@ -1051,6 +1110,7 @@ static void reset(mock_state *mock, row_capture *capture) {
     mock->range_row_count = 0;
     mock->range_value_base = 0;
     mock->repeat_range_values = 0;
+    mock->vary_range_by_probe = 0;
     mock->statement_failed = 0;
     mock->spill_append_calls = 0;
     mock->spill_fail_append_at = 0;
@@ -1378,6 +1438,31 @@ int main(void) {
     }
 
     {
+        int32_t outer_keys[8];
+        int32_t outer_values[8];
+        uint8_t outer_states[8];
+        for (uint32_t index = 0; index < 8; ++index) {
+            outer_keys[index] = 1;
+            outer_values[index] = 101 + (int32_t)index;
+            outer_states[index] = PRDB_SDK_VALUE_STATE_VALUE;
+        }
+        mock.batch_len[0] = make_batch(mock.batch[0], outer_keys,
+                                       outer_states, outer_values, 8);
+        install_optimizer_index_join_plan(&mock);
+        reset(&mock, &capture);
+        mock.vary_range_by_probe = 1;
+        assert(run_query_optimizer(&mock, &capture, composite_sql,
+                                  sizeof(composite_sql) - 1) ==
+               PRDB_SDK_SQL_EXEC_OK);
+        assert(mock.range_calls == 1 && capture.calls == 8 &&
+               mock.statement_failed == 0);
+        for (uint32_t index = 0; index < 8; ++index) {
+            assert(capture.left_values[index] == 101 + (int32_t)index);
+            assert(capture.right_values[index] == 101 + (int32_t)index);
+        }
+    }
+
+    {
         const int32_t outer_key[] = {1};
         const uint8_t outer_state[] = {PRDB_SDK_VALUE_STATE_VALUE};
         const int32_t outer_value[] = {101};
@@ -1395,7 +1480,7 @@ int main(void) {
         assert(run_query_optimizer(&mock, &capture, composite_sql,
                                   sizeof(composite_sql) - 1) ==
                PRDB_SDK_SQL_EXEC_OK);
-        assert(mock.prefix_calls == 1 && mock.range_calls == 0 &&
+        assert(mock.prefix_calls == 0 && mock.range_calls == 1 &&
                mock.open_calls == 1 && capture.calls == 1 &&
                capture.left_values[0] == 101 && capture.right_values[0] == 101 &&
                mock.statement_failed == 0);
@@ -1472,7 +1557,7 @@ int main(void) {
         assert(run_query_optimizer(&mock, &capture, composite_sql,
                                   sizeof(composite_sql) - 1) ==
                PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
-        assert(mock.range_calls == 16 && capture.calls == 16 &&
+        assert(mock.range_calls == 0 && capture.calls == 0 &&
                mock.statement_failed == 1);
     }
 
@@ -1528,7 +1613,7 @@ int main(void) {
         assert(run_query_optimizer(&mock, &capture, composite_sql,
                                   sizeof(composite_sql) - 1) ==
                PRDB_SDK_SQL_EXEC_MATERIALIZATION_LIMIT);
-        assert(mock.range_calls == 17 && capture.calls == 16384 &&
+        assert(mock.range_calls == 1 && capture.calls == 0 &&
                mock.statement_failed == 1);
         install_optimizer_join_plan(&mock);
     }
