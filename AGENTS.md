@@ -29,12 +29,14 @@ This repository checkout is on NFS. Run performance tests and other intensive te
 
 ```sh
 export PRDB_TEST_ROOT="$HOME/tmp/prdb-tests"
-export PRDB_TEST_RUN_DIR="$PRDB_TEST_ROOT/runs/unique-run-name"
-export TMPDIR="$PRDB_TEST_RUN_DIR/tmp"
-mkdir -p "$TMPDIR" "$PRDB_TEST_RUN_DIR/data"
+export PRDB_TEST_RUN_DIR="$PRDB_TEST_ROOT/runs/r$(date +%s)"
+mkdir -p "$PRDB_TEST_ROOT/t" "$PRDB_TEST_RUN_DIR/data"
+if [ ! -e "$HOME/t" ] && [ ! -L "$HOME/t" ]; then ln -s "$PRDB_TEST_ROOT/t" "$HOME/t"; fi
+test "$(readlink -f "$HOME/t")" = "$(readlink -f "$PRDB_TEST_ROOT/t")"
+export TMPDIR="$HOME/t"
 ```
 
-Use the run-specific directory for database instance files, query input/data files, spill files, logs, and other runtime data; remove it after collecting results. Copy compiled query libraries there when the harness consumes them as test inputs, while leaving their compiler outputs in the existing build directories. Cargo, TinyCC, and release-profile compiler output stays in its normal repository location. Do not set `CARGO_TARGET_DIR`, `BUILD_DIR`, or `RELEASE_PROFILE_DIR` to move compilation output for this policy. If an intensive test writes runtime data relative to its working directory or into the source/build tree instead of `TMPDIR` or a configured data root, update its harness to accept an external data root. Keep the source checkout as the code input; its NFS location must not be used for generated test data. See [`plans/sql-library/SANDBOX_TEST.md`](plans/sql-library/SANDBOX_TEST.md) for the sandbox procedure.
+Point the short `$HOME/t` alias at `$PRDB_TEST_ROOT/t` and use it for `TMPDIR` so temporary Unix socket paths stay below the platform limit; use the unique run directory for other per-run files. Use the run-specific directory for configured database instance files, query input/data files, spill files, logs, and other runtime data; remove it after collecting results. Tempfile-backed data uses the short external alias and is automatically unique per test. Copy compiled query libraries there when the harness consumes them as test inputs, while leaving their compiler outputs in the existing build directories. Cargo, TinyCC, and release-profile compiler output stays in its normal repository location. Do not set `CARGO_TARGET_DIR`, `BUILD_DIR`, or `RELEASE_PROFILE_DIR` to move compilation output for this policy. If an intensive test writes runtime data relative to its working directory or into the source/build tree instead of `TMPDIR` or a configured data root, update its harness to accept an external data root. Keep the source checkout as the code input; its NFS location must not be used for generated test data. See [`plans/sql-library/SANDBOX_TEST.md`](plans/sql-library/SANDBOX_TEST.md) for the sandbox procedure.
 
 ## Rust Build and Checks
 
@@ -90,9 +92,11 @@ systemd-run --user --wait --pipe --collect \
   --property='Delegate=cpu memory pids' --property="WorkingDirectory=$PWD" \
   "$PWD/engine/tools/with_delegated_cgroup.sh" \
   sh -c 'export PRDB_TEST_ROOT="$HOME/tmp/prdb-tests"; \
-    export PRDB_TEST_RUN_DIR="$PRDB_TEST_ROOT/runs/cgroup-probe-$(date +%s)"; \
-    export TMPDIR="$PRDB_TEST_RUN_DIR/tmp"; \
-    mkdir -p "$TMPDIR" "$PRDB_TEST_RUN_DIR/data"; \
+    export PRDB_TEST_RUN_DIR="$PRDB_TEST_ROOT/runs/r$(date +%s)"; \
+    mkdir -p "$PRDB_TEST_ROOT/t" "$PRDB_TEST_RUN_DIR/data"; \
+    if [ ! -e "$HOME/t" ] && [ ! -L "$HOME/t" ]; then ln -s "$PRDB_TEST_ROOT/t" "$HOME/t"; fi; \
+    test "$(readlink -f "$HOME/t")" = "$(readlink -f "$PRDB_TEST_ROOT/t")"; \
+    export TMPDIR="$HOME/t"; \
     exec nix develop --no-update-lock-file -c cargo run --locked \
       --bin prdb-sandbox-probe -- "$PRDB_TEST_CGROUP_PARENT"'
 ```

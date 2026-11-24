@@ -904,3 +904,10 @@
 - Coverage: the maintained `catalog_ddl_codecs` target now invokes every public optimizer request and plan decoder, including composite, filtered composite, and ordered composite aggregate codecs that were previously omitted.
 - Verification: the fuzz target compiled with the refreshed dedicated lockfile, then ran under its pinned `nightly-2026-11-01` ASan/libFuzzer toolchain against 1,308 existing corpus files for 1,309 executions with no crash. `cargo fmt --manifest-path fuzz/Cargo.toml --all -- --check` and `git diff --check` passed.
 - Remaining: this bounded corpus run is not sustained fuzzing or proof of parser correctness; malformed process-level IPC and full confined load/performance evidence remain tracked separately.
+
+## OP-4 / ST-2 follow-up: extend low-fanout outer eligibility through 19 rows — measured slice
+
+- Red/green: the inclusive pair-cutoff regression first failed at 19 outer rows; after widening the fanout-aware bound from 18 to 19 it passes at exactly four pairs per outer and rejects one pair above. The optimizer-process estimate eligibility test covers both orientations at 19×133 and rejects 19×132 and 20×140.
+- Acceptance: five confined 19×133 runs selected kind 17, verified all 19 joined rows and checksum, and overlapped 192 operational reads and commits. Indexed median run-level p50 was 287.2 ms (264.8–298.2 ms range). No hash comparison is possible because the SDK hash join caps each input at 128 rows.
+- Scope: one uniform fanout-one exact-ratio case. This extends the bounded exact-estimate rule without claiming a general cost model; higher fanout, broader distributions, candidate comparison above the hash cap, and target-host profiles remain open.
+- Verification: focused optimizer tests and five confined acceptance runs passed. TinyCC rebuilt the fixture under `target/sdk-v1/`; query test copies, database files, and temporary data were under `$HOME/tmp/prdb-tests`. `cargo test --workspace --locked -- --test-threads=1` passed inside the delegated cgroup service with runtime paths from the pinned Nix shell; Cargo and TinyCC compiler outputs stayed under `target/`.

@@ -66,9 +66,11 @@ Create an external runtime-data directory for each test run; leave compiler outp
 
 ```sh
 export PRDB_TEST_ROOT="$HOME/tmp/prdb-tests"
-export PRDB_TEST_RUN_DIR="$PRDB_TEST_ROOT/runs/fixture-build-$(date +%s)"
-export TMPDIR="$PRDB_TEST_RUN_DIR/tmp"
-mkdir -p "$TMPDIR" "$PRDB_TEST_RUN_DIR/data"
+export PRDB_TEST_RUN_DIR="$PRDB_TEST_ROOT/runs/r$(date +%s)"
+mkdir -p "$PRDB_TEST_ROOT/t" "$PRDB_TEST_RUN_DIR/data"
+if [ ! -e "$HOME/t" ] && [ ! -L "$HOME/t" ]; then ln -s "$PRDB_TEST_ROOT/t" "$HOME/t"; fi
+test "$(readlink -f "$HOME/t")" = "$(readlink -f "$PRDB_TEST_ROOT/t")"
+export TMPDIR="$HOME/t"
 ```
 
 Run `release-profile` after changing the SDK or query fixtures. The process tests use `PRDB_TEST_INSTALLED_SDK_RELEASE_DIR`, which points into `target/release-profile/`; rebuilding only the SDK release leaves that test input stale. Query binaries and SDK libraries are compiler outputs and stay under the established repository `target/` paths. Use `$PRDB_TEST_RUN_DIR` for runtime query/data files, databases, spill files, logs, and temporary directories.
@@ -109,9 +111,11 @@ systemd-run --user --wait --pipe --collect \
   --property='Delegate=cpu memory pids' --property="WorkingDirectory=$PWD" \
   "$PWD/engine/tools/with_delegated_cgroup.sh" sh -c '
     export PRDB_TEST_ROOT="$HOME/tmp/prdb-tests"
-    export PRDB_TEST_RUN_DIR="$PRDB_TEST_ROOT/runs/full-suite-$(date +%s)"
-    export TMPDIR="$PRDB_TEST_RUN_DIR/tmp"
-    mkdir -p "$TMPDIR" "$PRDB_TEST_RUN_DIR/data" "$PRDB_TEST_RUN_DIR/queries"
+    export PRDB_TEST_RUN_DIR="$PRDB_TEST_ROOT/runs/r$(date +%s)"
+    mkdir -p "$PRDB_TEST_ROOT/t" "$PRDB_TEST_RUN_DIR/data" "$PRDB_TEST_RUN_DIR/queries"
+    if [ ! -e "$HOME/t" ] && [ ! -L "$HOME/t" ]; then ln -s "$PRDB_TEST_ROOT/t" "$HOME/t"; fi
+    test "$(readlink -f "$HOME/t")" = "$(readlink -f "$PRDB_TEST_ROOT/t")"
+    export TMPDIR="$HOME/t"
     cp "$PWD"/target/sdk-v1/*.so "$PRDB_TEST_RUN_DIR/queries/"
     export PRDB_TEST_QUERY_ARTIFACT="$PRDB_TEST_RUN_DIR/queries/sql-v3-caught-error.so"
     export PRDB_TEST_SHARED_SQL_QUERY_ARTIFACT="$PRDB_TEST_RUN_DIR/queries/sql-v3-shared-library.so"
@@ -124,13 +128,16 @@ systemd-run --user --wait --pipe --collect \
     export PRDB_TEST_FORGED_ROW_HANDLE_QUERY_ARTIFACT="$PRDB_TEST_RUN_DIR/queries/sql-v3-forged-row-handle.so"
     export PRDB_TEST_WRITE_READ_QUERY_ARTIFACT="$PRDB_TEST_RUN_DIR/queries/sql-v3-write-read.so"
     export PRDB_TEST_RESTRICTED_METADATA_QUERY_ARTIFACT="$PRDB_TEST_RUN_DIR/queries/sql-v3-restricted-metadata.so"
-    export PRDB_TEST_RUNTIME_READ_EXECUTE="/absolute/path/ld-linux-x86-64.so.2:/absolute/path/libc.so.6:/absolute/path/libgcc_s.so.1"
+    glibc="$(nix develop --no-update-lock-file -c cc -print-file-name=libc.so.6)"
+    loader="$(nix develop --no-update-lock-file -c cc -print-file-name=ld-linux-x86-64.so.2)"
+    libgcc="$(nix develop --no-update-lock-file -c cc -print-file-name=libgcc_s.so.1)"
+    export PRDB_TEST_RUNTIME_READ_EXECUTE="$loader:$glibc:$libgcc"
     export PRDB_TEST_RUNTIME_READ_ONLY=
     exec nix develop --no-update-lock-file -c cargo test --workspace --locked -- --test-threads=1
   '
 ```
 
-The launcher supplies `PRDB_TEST_CGROUP_PARENT` and `PRDB_SYSTEMD_CGROUP_PARENT`; the command runs all tests serially so each cgroup-dependent test can provision its child beneath that parent. The exported `TMPDIR` keeps tempfile-backed databases and spill areas in the per-run directory. The command copies the compiled query libraries there as test inputs; the originals and all Cargo/TinyCC compiler output remain in the repository's established build directories. Do not run query fixtures with `tcc -run`, from a trusted-process loader, or directly outside the confined executor.
+The launcher supplies `PRDB_TEST_CGROUP_PARENT` and `PRDB_SYSTEMD_CGROUP_PARENT`; the command runs all tests serially so each cgroup-dependent test can provision its child beneath that parent. Point the short `$HOME/t` alias at `$PRDB_TEST_ROOT/t` for `TMPDIR`; long temporary paths can push Unix socket names past the platform limit. Keep other per-run data in the unique run directory. The alias keeps tempfile-backed databases and spill areas physically under the external scratch root; configured runtime files use the per-run directory. The command copies the compiled query libraries there as test inputs; the originals and all Cargo/TinyCC compiler output remain in the repository's established build directories. Do not run query fixtures with `tcc -run`, from a trusted-process loader, or directly outside the confined executor.
 
 For a focused run, create a unique `PRDB_TEST_RUN_DIR`, set `TMPDIR`, copy the required compiled query library from `target/sdk-v1/` into `$PRDB_TEST_RUN_DIR/queries/`, and point the artifact variable at that copy. This keeps the runtime query input outside NFS while leaving its compiler output in place. Run focused process-test debugging inside the same delegated service with its artifact/runtime environment:
 
@@ -177,6 +184,8 @@ Set `PRDB_TEST_INDEXED_JOIN_FANOUT17_4097_BENCHMARK_ONLY=1` to exercise exact pa
 Set `PRDB_TEST_INDEXED_JOIN_FANOUT17_RATIO7_BENCHMARK_ONLY=1` to test the exact 17×119 boundary. Five fresh-database runs selected kind 17, verified 17 identical joined rows for indexed and hash execution, and overlapped 192 operational reads and commits each. Indexed median-of-run p50 was 259.6 ms (242.7–270.9 ms range); hash was 313.8 ms (296.1–334.0 ms range). This supports the ratio boundary for this fixture only.
 
 Set `PRDB_TEST_INDEXED_JOIN_FANOUT18_RATIO7_BENCHMARK_ONLY=1` to profile 18 outer rows against a 126-row indexed relation at the seven-to-one population ratio, with one matching row per outer key. The confined acceptance checks the exact pair estimate, kind-17 plan, 18 output pairs, equality with hash results, and 192 operational reads and commits per fresh-database run. Five runs measured median run-level p50 of 273.9 ms indexed (246.6–281.1 ms range) versus 305.3 ms hash (279.6–336.5 ms range). This is local evidence for extending the low-fanout outer bound to 18 rows, not a general cost model or target-host result.
+
+Set `PRDB_TEST_INDEXED_JOIN_FANOUT19_RATIO7_BENCHMARK_ONLY=1` for a 19×133 one-match-per-outer profile. This mode checks the exact pair estimate, kind-17 plan, all 19 result pairs and checksum, and overlaps 192 operational reads and commits. It records indexed execution only because the SDK hash join caps each input at 128 rows; five fresh-database runs measured median run-level p50 at 287.2 ms (264.8–298.2 ms range). For each run, copy the compiled query fixtures from `target/sdk-v1/` into `$PRDB_TEST_RUN_DIR/queries/`, point the artifact variables at those copies, and leave compiler outputs under `target/`.
 
 Set `PRDB_TEST_INDEXED_JOIN_FANOUT18_THRESHOLD_BENCHMARK_ONLY=1` for 18 outer rows, 126 indexed rows, and exactly 72 pairs (four per outer row), or `PRDB_TEST_INDEXED_JOIN_FANOUT18_OVER_THRESHOLD_BENCHMARK_ONLY=1` for 73 pairs. Five confined runs at 72 pairs selected kind 17, matched the hash reference, and overlapped 192 operational reads and commits; median run-level p50 was 259.8 ms indexed (247.1–309.9 ms range) versus 307.9 ms hash (299.0–338.0 ms range). Five runs at 73 pairs selected kind 4 and validated all results; median run-level p50 was 348.5 ms (327.1–361.7 ms range). These profiles verify both sides of this host-local cutoff, not general cost-based selection or target-host performance.
 

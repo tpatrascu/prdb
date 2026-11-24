@@ -1190,7 +1190,7 @@ mod tests {
 
     #[test]
     fn moderate_join_fanout_limit_is_inclusive_for_every_outer_size() {
-        for outer_rows in 9..=18 {
+        for outer_rows in 9..=19 {
             let indexed_rows = if outer_rows >= 17 {
                 outer_rows * 7
             } else {
