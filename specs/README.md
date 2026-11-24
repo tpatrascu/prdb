@@ -59,6 +59,8 @@ Start with the architecture and authorization documents. Component specification
 
 Record decisions consistently across affected documents. Keep unresolved security assumptions explicit.
 
+Treat numeric execution, query, estimate, and maintenance ceilings as prototype defaults unless the relevant spec identifies a format/ABI invariant. The configurable profile model and illustrative production-scale ERP/CRM scenario are defined in [Workload profile](workload-profile.md#configurable-bounds-and-production-sizing); do not infer production readiness from the current default values.
+
 Follow the [iterated development guide](../INTERATED_DEVELOPMENT.md) to implement these contracts through small TDD cycles while refining the specs.
 
 The [implementation plan index](../plans/README.md) maps every component and specification to dependency-ordered tasks, prerequisite decisions, and acceptance gates. It includes the [storage-manager plan](../plans/storage-manager/README.md), shared integration milestones, and per-increment evidence requirements for future implementation work.

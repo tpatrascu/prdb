@@ -6,6 +6,8 @@ The optimizer needs cardinality, selectivity, value-width, distinct-count, corre
 
 Introduce a logical statistics service inside the storage manager for the baseline. It owns collection, a protected catalog, scoped estimation, and refresh scheduling. Moving collection into a separate trusted process is a future option, not a prerequisite. Such a collector would hold sensitive data and remain part of the confidentiality boundary.
 
+The estimate-count allowance, candidate rows, decoded bytes, key bytes, and maintenance frequency documented here are prototype defaults, not the final supported database scale. Load them from the trusted planner/maintenance budget profile in [workload profile](workload-profile.md#configurable-bounds-and-production-sizing). Keep the current per-item UNKNOWN behavior, authorization checks, snapshot validity, and no-partial-estimate rule at every configured value. The estimate count allowance remains cumulative per planner session but is configurable for service deployments; an estimate batch consumes one allowance unit per item, regardless of frame count.
+
 ## Two Statistics Domains
 
 | Domain | Contents and use | Planner access |

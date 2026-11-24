@@ -18,6 +18,7 @@ Freeze sized/versioned entry-point and host tables, explicit statuses, parameter
 | EX-4 | Worker output spelling COMMITTED remains provisional application bytes | Emit only on bounded local output; supervisor receives an independent completion/error signal, never a worker terminal envelope |
 | EX-5 | Caught statement error followed by successful return cannot commit prior writes | Notify trusted transaction state of failures, stop requests on finalization, and leave commit authority with supervisor/storage |
 | EX-6 | Constructor/entry crashes, malformed pointers, loops and forced termination leave other invocations safe | Sandbox integration, process exit rather than unsafe unloading, disconnect cleanup and draining storage-owned pins |
+| EX-7 | A worker handles a larger trusted query profile without whole-result allocation or crossing its IPC/ABI envelope | Read effective per-invocation limits from trusted host context; stream results and page executor batches under cumulative work/output budgets. Exercise wider schemas and large streamed outputs above current defaults, plus clean rejection at fixed frame/ABI limits |
 
 ## Acceptance and Handoff
 

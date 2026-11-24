@@ -6,6 +6,10 @@ A disposable sandboxed Rust executor process (also called the query worker) load
 
 The prototype targets programs built for the database protocol/SDK, not unrestricted compatibility with existing Linux applications. Workers receive only scoped IPC, bounded output, approved runtime/artifact resources, and any explicitly permitted scratch space.
 
+The 1 MiB v1 IPC frame and sized ABI field widths are compatibility envelopes. Per-invocation result bytes, query work, page counts, row/candidate defaults, callback counts, and deadlines are workload-profile budgets and must not be treated as final capacities. The supervisor passes effective values to the worker; the executor must stream results and honor larger validated profiles without allocating the entire result at once. Raising a bound beyond the ABI/frame envelope requires a versioned/chunked interface.
+
+The current 16 KiB result-write chunk and 64 MiB cumulative result limit are reference defaults, not fixed ABI maxima. The host may configure larger cumulative output subject to service/principal quotas and relay backpressure; one result frame remains within its encoded-length and transport envelope.
+
 ## Data Contract
 
 Access database values only through the storage-manager protocol. Received batches represent visible rows and individually authorized cells. A worker has no database files, raw storage mappings, policy secrets, or channels belonging to other contexts.

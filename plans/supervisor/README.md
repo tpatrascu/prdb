@@ -19,6 +19,7 @@ Specify gateway-service version and sessions scoped by gateway generation/connec
 | SU-5 | Successful return commits only after work drains; caught errors/crashes before commit abort all writes | Stop new requests, finalize via supervisor-only channel and enforce synchronized cancellation/deadline/commit races |
 | SU-6 | Gateway/supervisor loss around commit leaves an authenticated reconcilable outcome without replay | Resolve storage outcomes despite absent clients, invalidate sessions, cancel pre-barrier work and reap workers/descendants |
 | SU-7 | Analytical load, planner failure and retention pressure preserve bounded operational progress | Global/per-principal queues, separate planning/estimation budgets, pinned-history limits and live registry integration |
+| SU-8 | Each worker receives one validated profile whose cumulative budgets match host cgroup, output relay, storage, planner and spill capacity | Add trusted operational/analytical/planner/maintenance profile loading, startup validation, version pinning, and propagation to worker/storage/broker. Keep current documented limits as defaults, not fixed production capacity. Test an elevated profile, invalid cross-budget combinations, atomic reload/start behavior, above-limit cancellation, and ERP/CRM-scale query output under operational load |
 
 ## Acceptance and Handoff
 

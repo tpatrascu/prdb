@@ -23,10 +23,16 @@ Build an operational database first, with analytical queries as an explicit supp
 
 Simple internal implementations are welcome: reference scans, interpreted plans, conservative dependency epochs, and a serialized commit-validation gate are already compatible with the design. They do not justify weakening externally observable guarantees.
 
+## Bounds and Production Workloads
+
+Do not assume a numeric query, operator, estimate, request, result, schema-rewrite, queue, or admission bound in a prototype spec is part of the final implementation. Unless it is explicitly a wire/storage-format invariant, treat it as a provisional default that must be configurable by a trusted, validated workload profile. For every bound, record its class (format invariant, implementation safety ceiling, or workload budget), scope, default, source/configuration owner, and what happens at exhaustion. Keep per-request bounds separate from cumulative statement/invocation/service budgets. Raising a workload budget must preserve authorization, cancellation, backpressure, and no-partial-result/commit behavior. If a required value exceeds a fixed field, frame, or data structure, design a compatible format/implementation extension instead of declaring the current limit the product target.
+
+Always check capacity against real production requirements while keeping correctness tests small. Benchmarks at or below a prototype ceiling establish neither production readiness nor a reason to make that ceiling permanent. Include tests using a larger trusted profile and representative data distributions, row widths, result sizes, skew, and concurrent operational work. The [workload profile](specs/workload-profile.md#configurable-bounds-and-production-sizing) defines an illustrative mid-sized ERP/CRM scale scenario to use for reference; its table counts are sizing inputs, not universal market claims. Record the configured values, hardware/runtime profile, p50/p95/p99 latency, rows and bytes processed/returned, peak memory, spill and disk use, throughput, and progress of competing work. Evaluate boundary and above-bound behavior, not just successful runs below the defaults.
+
 ## Start Each Work Session
 
 1. Inspect the current tree, applicable instructions, build configuration, and existing changes. Preserve unrelated work. Do not assume the repository still matches an earlier chat.
-2. Read the specs and tests for the affected behavior. Check adjacent contracts: changing a handle may affect IPC, the SDK ABI, cursor lifetime, and authorization.
+2. Read the specs and tests for the affected behavior. Check adjacent contracts: changing a handle may affect IPC, the SDK ABI, cursor lifetime, and authorization. Classify every affected numeric limit and identify whether it is configurable or format-bound before implementing it.
 3. Identify the smallest useful behavior to implement and the evidence needed to establish it. Prefer an observable vertical slice over a broad collection of stubs.
 4. State the scope briefly and proceed. Resolve routine implementation choices independently. Ask about material ambiguity in user intent or incompatible requirements while continuing work that does not depend on the answer.
 
@@ -46,6 +52,8 @@ Create the smallest meaningful test that fails for the intended missing behavior
 
 Test results and externally observable effects, not private function names, exact internal call sequences, or a duplicate implementation. Use hand-checked examples or an independently structured reference model. Include a denial/failure case when it is part of the contract.
 
+For resource-bound work, test both the configured default and at least one elevated trusted profile. Verify that raising a workload budget increases supported capacity without changing SQL results, permission behavior, statement atomicity, or cancellation; verify that fixed wire/ABI limits still reject cleanly. Add scale fixtures that exceed the old default and avoid allocating the whole result when the operator is meant to stream or spill.
+
 ### 3. Implement the minimum coherent change
 
 Make the test pass without bypassing permissions, confinement, transaction boundaries, or real protocol validation. A test-only storage fixture is acceptable for a unit test; it is not evidence that cross-process execution works. Keep unsafe Rust small and document its invariants. Keep C allocation ownership and error propagation explicit.
@@ -62,7 +70,7 @@ Repeat for the next small behavior. A regression fix starts with a reproducing t
 
 ## Refining the Specs Without Weakening Them
 
-Use implementation evidence to replace open choices with concrete decisions: tested TinyCC flags, protocol encodings, supported targets, error codes, lock ordering, or bounded resource defaults. Document the reason and affected contracts near the decision. Keep normative behavior in `specs/`, rather than scattering competing rules in source comments and progress notes.
+Use implementation evidence to resolve open choices: tested TinyCC flags, protocol encodings, supported targets, error codes, lock ordering, and safe default workload budgets. Document the reason, configurability, supported profile range, and affected contracts near the decision. A measured local default does not make a workload ceiling immutable. Keep normative behavior in `specs/`, rather than scattering competing rules in source comments and progress notes.
 
 When a test exposes a mismatch, determine whether the code is wrong, the test is wrong, or the spec is genuinely incomplete. Never redefine success merely to preserve passing code. Do not remove concurrent writes, cell permissions, durable acknowledgement, or sandbox requirements to get a milestone green.
 

@@ -111,6 +111,8 @@ Use rustfmt conventions for Rust and consistent C naming through the public head
 
 Test ABI layout/ownership, malformed inputs, cell permissions, sandbox confinement, concurrent MVCC writes, conflicts, rollback, recovery, and reclamation. Benchmark compilation separately from execution. No coverage threshold exists. Documentation-only changes require link and consistency checks, not unavailable builds.
 
+Treat numeric query/operator/estimate, request, result, queue, admission, and maintenance bounds in the specs as provisional configurable defaults unless they are explicitly fixed by a wire/storage format or published ABI. Do not encode these defaults as final product capacity. Classify each bound, load workload budgets from trusted validated profiles, and retain independent cumulative/service ceilings. Before calling a bound production-ready, test an elevated profile and representative ERP/CRM scale, row widths, result sizes, skew, and concurrent operational load as described in [`specs/workload-profile.md`](specs/workload-profile.md#configurable-bounds-and-production-sizing). If a desired setting exceeds a format or implementation ceiling, version or redesign that interface and document the migration.
+
 ## Commits and Pull Requests
 
 After completing each feature implementation, create a git commit for that feature.

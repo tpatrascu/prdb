@@ -6,6 +6,8 @@ This document defines proposed SQL-like schema DDL, not an implemented parser or
 
 DDL runs through a separately authenticated administrative SDK/control channel. The client may parse text, but storage independently parses or validates a bounded structured definition and checks administrative privileges. Query executors cannot call this channel or execute DDL inside their invocation transaction. Definitions in the SDK confer no authority.
 
+Administrative row/index rewrite ceilings and request/work budgets in this specification are trusted maintenance-profile defaults, not immutable product limits. Validate and configure them separately from query profiles; a schema operation that exceeds its active budget must fail atomically without partial publication. Identifier, scalar-width, and catalog/ABI field constraints remain fixed-format limits unless a versioned format change explicitly extends them.
+
 Each administrative submission contains one statement or an explicit atomic batch of DDL statements; it cannot mix user native execution or DML. Catalog changes, identity changes, and permissions share storage's durable commit ordering. Administrative requests have IDs, budgets, cancellation, and outcome lookup, just like transaction finalization.
 
 ## Names, Schemas, and Types

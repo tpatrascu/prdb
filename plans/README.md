@@ -2,6 +2,8 @@
 
 These plans cover every component and supporting contract in the [specification index](../specs/README.md). They describe future work, not implemented features or passing checks. Normative behavior stays in `specs/`; resolve ambiguities there before making tests depend on them. Read [AGENTS.md](../AGENTS.md) and [INTERATED_DEVELOPMENT.md](../INTERATED_DEVELOPMENT.md) before implementation.
 
+Numeric query and resource ceilings in these plans are provisional defaults unless they are fixed by an explicit wire/storage-format constraint. Implementations must read configurable trusted profiles and include above-default scale evidence before treating an operating limit as production-ready; use the sizing model in [workload profile](../specs/workload-profile.md#configurable-bounds-and-production-sizing).
+
 ## Component Plans
 
 | Plan | Responsibility |
@@ -43,8 +45,8 @@ Use these stages as integration gates, with small red–green–refactor–speci
 | 4 | redb snapshots and overlays; transactions; row conflicts; durable commit/outcome publication | Concurrent staging and reads, own writes, all-or-nothing commit, stale-policy rejection, restart/status and retained-reader safety. Stages 3–4 jointly form the first usable data slice |
 | 5 | Client framing/helper and gateway; supervisor relay; SDK SQL/parser; baseline optimizer and bounded estimates | Real TCP upload/seal/START of a TinyCC library, sequential reads/writes, durable commit and lost-reply reconciliation without replay |
 | 6 | Complete schema, identity and permission DDL; logical indexes/constraints; metadata/admin/audit | Control-path coverage, unique/FK races, old readers versus DDL, stale writers and crash-safe index publication |
-| 7 | Complete initial SQL/types, statistics fallback, scheduling and hardening | Feature-to-spec evidence, fuzz/model suites, bounded cancellation/pressure and repeatable operational measurements |
-| 8 | Analytical operators and optimizer support; mixed workloads | Equijoins, grouping/aggregates, sorting/HAVING, redaction/null semantics, memory bounds and operational tail latency during analytics |
+| 7 | Complete initial SQL/types, statistics fallback, scheduling and hardening; configurable workload-budget profiles | Feature-to-spec evidence, fuzz/model suites, bounded cancellation/pressure, repeatable operational measurements, and an elevated trusted profile validated above prototype defaults at representative ERP/CRM scale |
+| 8 | Analytical operators and optimizer support; mixed workloads | Equijoins, grouping/aggregates, sorting/HAVING, redaction/null semantics, configurable memory/work/output budgets, and operational tail latency during analytics at production-representative row counts and result sizes |
 
 Stage 6 is required to complete the initial scope. Stage 8 is required to complete analytical support. Initial SQL alone completes neither. Minimal catalog/control functions land early; full DDL expands them later. Durability starts with the first writes. A serialized final commit gate permits concurrent invocation reads and staged writes; it does not permit holding a redb writer across native execution.
 
