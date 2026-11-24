@@ -5,7 +5,14 @@
 - Contract: `0x1117` carries 1–128 typed leading-key or two-to-eight-column prefix probes and returns ordered result groups, or one unavailable status without partial groups. The fixed frame ceiling and aggregate 16,384-candidate/1 MiB response limits are enforced.
 - Implementation: added generated operation code and executor role dispatch, Rust request/response codecs and connection handler, TinyCC request encoder and grouped-response iterator, and changed the SQL-10 nested-loop runner to issue one request per group of up to 128 outer rows. Cancellation is checked before and after the batch; group ordinals preserve duplicate outer-row association.
 - Verification: generated ABI consistency tests, 8 executor IPC tests, 8 IPC tests, `cargo fmt --all -- --check`, maintained TinyCC SDK tests, and release-profile validation passed in the pinned Nix shell. The SQL v19 fixture verifies eight ordered result groups in one probe frame and no partial output when aggregate candidate limits are exceeded. Confined SQL acceptance passed with exact indexed/hash results under 192 concurrent operational reads and commits; the range-probe batch ran through the actual executor/storage path.
-- Remaining: broader duplicate/NULL, overlay, denied-column and composite-prefix probe cases; planner metadata batches `0x1209`/`0x120a`; and configurable profile propagation remain open.
+- Remaining: broader duplicate/NULL, overlay, denied-column and composite-prefix probe cases; configurable profile propagation remains open.
+
+## IPC-8 / OP-8: batched planner metadata and estimates — implemented slice
+
+- Contract: `0x1209` returns relation descriptions and connection-scoped handles in input order, with per-entry unavailable results. `0x120a` returns exact/UNKNOWN scan estimates in input order and closes each submitted handle after use. Prototype batch defaults are 64 descriptions and 16 estimates; trusted planner profiles may raise them only within validated frame, handle, candidate, and response envelopes.
+- Implementation: generated operation codes and planner-role allowlisting now dispatch both batch operations. Rust codecs reject invalid counts, duplicate handles/columns, malformed lengths, invalid token kinds, trailing bytes, and payload overflow. The isolated optimizer uses one description request and one estimate request for both inputs to join planning; it retains existing single-relation paths for other operators.
+- Verification: the batch codec test covers available and unavailable relations, exact and UNKNOWN estimates, input order, and malformed/trailing data. IPC operation and role tests pass. All 24 optimizer-process unit tests pass, including join planning checks that the metadata exchange uses two batch frames and preserves exact/unknown population results.
+- Remaining: real-storage mixed hidden/absent relation batches, concurrent snapshot-mutation coverage, broader fuzz/property coverage, effective trusted-profile propagation, and production-scale optimizer workload evidence remain open.
 
 ## IPC-7 follow-up: mutation batch codec and dispatcher — implemented slice
 

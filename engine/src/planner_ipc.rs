@@ -36,7 +36,9 @@ pub use crate::query_abi::{
     PLANNER_ESTIMATE_SCAN_RESPONSE_VISIBLE_ROWS_OFFSET,
 };
 use crate::statistics::{AuthorizedScanEstimate, AuthorizedScanSummary, ColumnPopulation};
-use crate::transaction::{PlannerMetadataConnection, TransactionError};
+use crate::transaction::{
+    MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION, PlannerMetadataConnection, TransactionError,
+};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
@@ -1202,6 +1204,372 @@ impl EstimateScanResponse {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DescribePlanRelationsRequest {
+    pub relations: Vec<(String, String)>,
+}
+
+impl DescribePlanRelationsRequest {
+    pub fn encode(&self) -> Result<Vec<u8>, PlannerRequestError> {
+        if self.relations.is_empty() || self.relations.len() > 64 {
+            return Err(PlannerRequestError::InvalidPayload);
+        }
+        let mut payload = Vec::with_capacity(4);
+        payload.extend_from_slice(&1u16.to_be_bytes());
+        payload.extend_from_slice(&(self.relations.len() as u16).to_be_bytes());
+        for (schema, relation) in &self.relations {
+            if schema.is_empty()
+                || relation.is_empty()
+                || schema.len() > u16::MAX as usize
+                || relation.len() > u16::MAX as usize
+            {
+                return Err(PlannerRequestError::InvalidPayload);
+            }
+            payload.extend_from_slice(&(schema.len() as u16).to_be_bytes());
+            payload.extend_from_slice(&(relation.len() as u16).to_be_bytes());
+            payload.extend_from_slice(schema.as_bytes());
+            payload.extend_from_slice(relation.as_bytes());
+            ensure_response_size(&payload)?;
+        }
+        Ok(payload)
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Self, PlannerRequestError> {
+        if payload.len() < 4
+            || payload.len() > crate::ipc::MAX_PAYLOAD_BYTES
+            || payload[..2] != 1u16.to_be_bytes()
+        {
+            return Err(PlannerRequestError::InvalidPayload);
+        }
+        let count = usize::from(u16::from_be_bytes([payload[2], payload[3]]));
+        if count == 0 || count > 64 {
+            return Err(PlannerRequestError::InvalidPayload);
+        }
+        let mut offset = 4usize;
+        let mut relations = Vec::with_capacity(count);
+        for _ in 0..count {
+            let lengths = payload
+                .get(offset..offset + 4)
+                .ok_or(PlannerRequestError::InvalidPayload)?;
+            let schema_len = usize::from(u16::from_be_bytes([lengths[0], lengths[1]]));
+            let relation_len = usize::from(u16::from_be_bytes([lengths[2], lengths[3]]));
+            if schema_len == 0 || relation_len == 0 {
+                return Err(PlannerRequestError::InvalidPayload);
+            }
+            offset = offset
+                .checked_add(4)
+                .ok_or(PlannerRequestError::InvalidPayload)?;
+            let schema_end = offset
+                .checked_add(schema_len)
+                .ok_or(PlannerRequestError::InvalidPayload)?;
+            let relation_end = schema_end
+                .checked_add(relation_len)
+                .ok_or(PlannerRequestError::InvalidPayload)?;
+            let schema = std::str::from_utf8(
+                payload
+                    .get(offset..schema_end)
+                    .ok_or(PlannerRequestError::InvalidPayload)?,
+            )
+            .map_err(|_| PlannerRequestError::InvalidPayload)?
+            .to_owned();
+            let relation = std::str::from_utf8(
+                payload
+                    .get(schema_end..relation_end)
+                    .ok_or(PlannerRequestError::InvalidPayload)?,
+            )
+            .map_err(|_| PlannerRequestError::InvalidPayload)?
+            .to_owned();
+            relations.push((schema, relation));
+            offset = relation_end;
+        }
+        if offset != payload.len() {
+            return Err(PlannerRequestError::InvalidPayload);
+        }
+        Ok(Self { relations })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DescribePlanRelationBatchEntry {
+    pub handle: Option<PlanningTableHandle>,
+    pub response: DescribePlanRelationResponse,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DescribePlanRelationsResponse {
+    pub entries: Vec<DescribePlanRelationBatchEntry>,
+}
+
+impl DescribePlanRelationsResponse {
+    pub fn encode(&self) -> Result<Vec<u8>, PlannerRequestError> {
+        if self.entries.is_empty() || self.entries.len() > 64 {
+            return Err(PlannerRequestError::InvalidPayload);
+        }
+        let mut payload = Vec::with_capacity(4);
+        payload.extend_from_slice(&1u16.to_be_bytes());
+        payload.extend_from_slice(&(self.entries.len() as u16).to_be_bytes());
+        for entry in &self.entries {
+            let body = match (&entry.handle, &entry.response.relation) {
+                (Some(handle), Some(_))
+                    if handle.to_bytes()[0]
+                        == crate::metadata_discovery::PLANNING_TABLE_HANDLE_TOKEN_KIND =>
+                {
+                    let complete = entry.response.encode()?;
+                    if complete.len() < 3 || complete[2] != 0 {
+                        return Err(PlannerRequestError::InvalidPayload);
+                    }
+                    let mut body = Vec::with_capacity(16 + complete.len() - 3);
+                    body.extend_from_slice(&handle.to_bytes());
+                    body.extend_from_slice(&complete[3..]);
+                    body
+                }
+                (None, None)
+                    if !entry.response.proven_empty
+                        && entry.response.visible_rows_estimate.is_none() =>
+                {
+                    vec![1]
+                }
+                _ => return Err(PlannerRequestError::InvalidPayload),
+            };
+            let len =
+                u32::try_from(body.len()).map_err(|_| PlannerRequestError::ResponseTooLarge)?;
+            payload.extend_from_slice(&len.to_be_bytes());
+            payload.extend_from_slice(&body);
+            ensure_response_size(&payload)?;
+        }
+        Ok(payload)
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Self, PlannerRequestError> {
+        if payload.len() < 4
+            || payload.len() > crate::ipc::MAX_PAYLOAD_BYTES
+            || payload[..2] != 1u16.to_be_bytes()
+        {
+            return Err(PlannerRequestError::InvalidPayload);
+        }
+        let count = usize::from(u16::from_be_bytes([payload[2], payload[3]]));
+        if count == 0 || count > 64 {
+            return Err(PlannerRequestError::InvalidPayload);
+        }
+        let mut offset = 4usize;
+        let mut entries = Vec::with_capacity(count);
+        let mut handles = std::collections::HashSet::new();
+        for _ in 0..count {
+            let len_bytes = payload
+                .get(offset..offset + 4)
+                .ok_or(PlannerRequestError::InvalidPayload)?;
+            let len = usize::try_from(u32::from_be_bytes(len_bytes.try_into().unwrap()))
+                .map_err(|_| PlannerRequestError::InvalidPayload)?;
+            offset = offset
+                .checked_add(4)
+                .ok_or(PlannerRequestError::InvalidPayload)?;
+            let end = offset
+                .checked_add(len)
+                .ok_or(PlannerRequestError::InvalidPayload)?;
+            let body = payload
+                .get(offset..end)
+                .ok_or(PlannerRequestError::InvalidPayload)?;
+            offset = end;
+            if body == [1] {
+                entries.push(DescribePlanRelationBatchEntry {
+                    handle: None,
+                    response: DescribePlanRelationResponse {
+                        relation: None,
+                        proven_empty: false,
+                        visible_rows_estimate: None,
+                    },
+                });
+            } else {
+                if body.len() < 19 {
+                    return Err(PlannerRequestError::InvalidPayload);
+                }
+                let handle = PlanningTableHandle::from_bytes(&body[..16])
+                    .ok_or(PlannerRequestError::InvalidPayload)?;
+                if !handles.insert(handle.to_bytes()) {
+                    return Err(PlannerRequestError::InvalidPayload);
+                }
+                let mut complete = vec![0, 1, 0];
+                complete.extend_from_slice(&body[16..]);
+                entries.push(DescribePlanRelationBatchEntry {
+                    handle: Some(handle),
+                    response: DescribePlanRelationResponse::decode(&complete)?,
+                });
+            }
+        }
+        if offset != payload.len() {
+            return Err(PlannerRequestError::InvalidPayload);
+        }
+        Ok(Self { entries })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EstimateScansRequest {
+    pub entries: Vec<EstimateScanRequest>,
+}
+
+impl EstimateScansRequest {
+    pub fn encode(&self) -> Result<Vec<u8>, PlannerRequestError> {
+        if self.entries.is_empty()
+            || self.entries.len() > MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION
+        {
+            return Err(PlannerRequestError::InvalidPayload);
+        }
+        let mut payload = Vec::with_capacity(4);
+        payload.extend_from_slice(&1u16.to_be_bytes());
+        payload.extend_from_slice(&(self.entries.len() as u16).to_be_bytes());
+        let mut handles = std::collections::HashSet::new();
+        for entry in &self.entries {
+            if entry.column_ids.len() > crate::tuple::MAX_COLUMNS {
+                return Err(PlannerRequestError::InvalidPayload);
+            }
+            if !handles.insert(entry.handle.to_bytes())
+                || entry.column_ids.contains(&[0; 16])
+                || entry
+                    .column_ids
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::HashSet<_>>()
+                    .len()
+                    != entry.column_ids.len()
+            {
+                return Err(PlannerRequestError::InvalidPayload);
+            }
+            payload.extend_from_slice(&entry.handle.to_bytes());
+            payload.extend_from_slice(&(entry.column_ids.len() as u16).to_be_bytes());
+            for id in &entry.column_ids {
+                payload.extend_from_slice(id);
+            }
+            ensure_response_size(&payload)?;
+        }
+        Ok(payload)
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Self, PlannerRequestError> {
+        if payload.len() < 4
+            || payload.len() > crate::ipc::MAX_PAYLOAD_BYTES
+            || payload[..2] != 1u16.to_be_bytes()
+        {
+            return Err(PlannerRequestError::InvalidPayload);
+        }
+        let count = usize::from(u16::from_be_bytes([payload[2], payload[3]]));
+        if count == 0 || count > MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION {
+            return Err(PlannerRequestError::InvalidPayload);
+        }
+        let mut offset = 4usize;
+        let mut entries = Vec::with_capacity(count);
+        let mut handles = std::collections::HashSet::new();
+        for _ in 0..count {
+            let handle_bytes = payload
+                .get(offset..offset + 16)
+                .ok_or(PlannerRequestError::InvalidPayload)?;
+            let handle = PlanningTableHandle::from_bytes(handle_bytes)
+                .ok_or(PlannerRequestError::InvalidPayload)?;
+            if !handles.insert(handle.to_bytes()) {
+                return Err(PlannerRequestError::InvalidPayload);
+            }
+            offset += 16;
+            let count_bytes = payload
+                .get(offset..offset + 2)
+                .ok_or(PlannerRequestError::InvalidPayload)?;
+            let column_count = usize::from(u16::from_be_bytes([count_bytes[0], count_bytes[1]]));
+            if column_count > crate::tuple::MAX_COLUMNS {
+                return Err(PlannerRequestError::InvalidPayload);
+            }
+            offset += 2;
+            let byte_count = column_count
+                .checked_mul(16)
+                .ok_or(PlannerRequestError::InvalidPayload)?;
+            let ids = payload
+                .get(offset..offset + byte_count)
+                .ok_or(PlannerRequestError::InvalidPayload)?;
+            let column_ids: Vec<[u8; 16]> = ids
+                .chunks_exact(16)
+                .map(|bytes| bytes.try_into().expect("fixed chunk"))
+                .collect();
+            if column_ids.contains(&[0; 16])
+                || column_ids
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::HashSet<_>>()
+                    .len()
+                    != column_ids.len()
+            {
+                return Err(PlannerRequestError::InvalidPayload);
+            }
+            offset += byte_count;
+            entries.push(EstimateScanRequest { handle, column_ids });
+        }
+        if offset != payload.len() {
+            return Err(PlannerRequestError::InvalidPayload);
+        }
+        Ok(Self { entries })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EstimateScansResponse {
+    pub entries: Vec<EstimateScanResponse>,
+}
+
+impl EstimateScansResponse {
+    pub fn encode(&self) -> Result<Vec<u8>, PlannerRequestError> {
+        if self.entries.is_empty()
+            || self.entries.len() > MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION
+        {
+            return Err(PlannerRequestError::InvalidPayload);
+        }
+        let mut payload = Vec::with_capacity(4);
+        payload.extend_from_slice(&1u16.to_be_bytes());
+        payload.extend_from_slice(&(self.entries.len() as u16).to_be_bytes());
+        for entry in &self.entries {
+            let bytes = entry.encode()?;
+            let len =
+                u32::try_from(bytes.len()).map_err(|_| PlannerRequestError::ResponseTooLarge)?;
+            payload.extend_from_slice(&len.to_be_bytes());
+            payload.extend_from_slice(&bytes);
+            ensure_response_size(&payload)?;
+        }
+        Ok(payload)
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Self, PlannerRequestError> {
+        if payload.len() < 4
+            || payload.len() > crate::ipc::MAX_PAYLOAD_BYTES
+            || payload[..2] != 1u16.to_be_bytes()
+        {
+            return Err(PlannerRequestError::InvalidPayload);
+        }
+        let count = usize::from(u16::from_be_bytes([payload[2], payload[3]]));
+        if count == 0 || count > MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION {
+            return Err(PlannerRequestError::InvalidPayload);
+        }
+        let mut offset = 4usize;
+        let mut entries = Vec::with_capacity(count);
+        for _ in 0..count {
+            let len_bytes = payload
+                .get(offset..offset + 4)
+                .ok_or(PlannerRequestError::InvalidPayload)?;
+            let len = usize::try_from(u32::from_be_bytes(len_bytes.try_into().unwrap()))
+                .map_err(|_| PlannerRequestError::InvalidPayload)?;
+            offset += 4;
+            let end = offset
+                .checked_add(len)
+                .ok_or(PlannerRequestError::InvalidPayload)?;
+            entries.push(EstimateScanResponse::decode(
+                payload
+                    .get(offset..end)
+                    .ok_or(PlannerRequestError::InvalidPayload)?,
+            )?);
+            offset = end;
+        }
+        if offset != payload.len() {
+            return Err(PlannerRequestError::InvalidPayload);
+        }
+        Ok(Self { entries })
+    }
+}
+
 pub fn dispatch_planner_request(
     role: ServiceRole,
     connection: &mut PlannerMetadataConnection<'_, '_>,
@@ -1294,6 +1662,41 @@ pub fn dispatch_planner_request(
                 visible_rows_estimate,
             }
             .encode()?
+        }
+        Operation::DescribePlanRelations => {
+            let decoded = DescribePlanRelationsRequest::decode(&request.payload)?;
+            let mut entries = Vec::with_capacity(decoded.relations.len());
+            for (schema, relation_name) in decoded.relations {
+                match connection.resolve_relation_for_plan(&schema, &relation_name)? {
+                    Some((handle, relation)) => entries.push(DescribePlanRelationBatchEntry {
+                        handle: Some(handle),
+                        response: DescribePlanRelationResponse {
+                            relation: Some(relation),
+                            proven_empty: false,
+                            visible_rows_estimate: None,
+                        },
+                    }),
+                    None => entries.push(DescribePlanRelationBatchEntry {
+                        handle: None,
+                        response: DescribePlanRelationResponse {
+                            relation: None,
+                            proven_empty: false,
+                            visible_rows_estimate: None,
+                        },
+                    }),
+                }
+            }
+            DescribePlanRelationsResponse { entries }.encode()?
+        }
+        Operation::EstimateScans => {
+            let decoded = EstimateScansRequest::decode(&request.payload)?;
+            let mut entries = Vec::with_capacity(decoded.entries.len());
+            for entry in decoded.entries {
+                let estimate = connection.estimate_scan(&entry.handle, &entry.column_ids)?;
+                connection.close_relation(&entry.handle)?;
+                entries.push(EstimateScanResponse::from_estimate(estimate));
+            }
+            EstimateScansResponse { entries }.encode()?
         }
         _ => {
             return Err(PlannerRequestError::Dispatch(
@@ -1495,7 +1898,120 @@ fn abort_shared_planner_invocation(
 
 #[cfg(test)]
 mod scan_estimate_request_tests {
-    use super::{DescribePlanRelationRequest, EstimatePredicateRequest, EstimatePredicateResponse};
+    use super::{
+        DescribePlanRelationBatchEntry, DescribePlanRelationRequest, DescribePlanRelationsRequest,
+        DescribePlanRelationsResponse, EstimatePredicateRequest, EstimatePredicateResponse,
+        EstimateScanRequest, EstimateScanResponse, EstimateScansRequest, EstimateScansResponse,
+    };
+
+    #[test]
+    fn planner_relation_and_scan_batches_round_trip_in_input_order() {
+        let relations = DescribePlanRelationsRequest {
+            relations: vec![
+                ("public".to_owned(), "customers".to_owned()),
+                ("sales".to_owned(), "orders".to_owned()),
+            ],
+        };
+        let encoded = relations.encode().unwrap();
+        assert_eq!(
+            DescribePlanRelationsRequest::decode(&encoded).unwrap(),
+            relations
+        );
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert!(DescribePlanRelationsRequest::decode(&trailing).is_err());
+        assert!(
+            DescribePlanRelationsRequest { relations: vec![] }
+                .encode()
+                .is_err()
+        );
+
+        let handle = crate::metadata_discovery::PlanningTableHandle::from_bytes(&[9; 16]).unwrap();
+        let mut second_handle_bytes = [9; 16];
+        second_handle_bytes[15] = 2;
+        let second_handle =
+            crate::metadata_discovery::PlanningTableHandle::from_bytes(&second_handle_bytes)
+                .unwrap();
+        let plan_relation = crate::metadata_discovery::AuthorizedPlanRelation {
+            schema_id: [1; 16],
+            schema_version: 2,
+            table_epoch: 3,
+            relation: crate::metadata_discovery::AuthorizedRelationDescription {
+                relation_id: [2; 16],
+                name: "customers".to_owned(),
+                columns: vec![crate::metadata_discovery::VisibleColumn {
+                    column_id: [3; 16],
+                    name: "id".to_owned(),
+                    ordinal: 0,
+                    scalar_type: crate::tuple::ScalarType::Integer,
+                    nullable: false,
+                }],
+            },
+            unique_access_paths: vec![],
+            range_access_paths: vec![],
+        };
+        let described = DescribePlanRelationsResponse {
+            entries: vec![
+                DescribePlanRelationBatchEntry {
+                    handle: Some(handle.clone()),
+                    response: super::DescribePlanRelationResponse {
+                        relation: Some(plan_relation),
+                        proven_empty: false,
+                        visible_rows_estimate: None,
+                    },
+                },
+                DescribePlanRelationBatchEntry {
+                    handle: None,
+                    response: super::DescribePlanRelationResponse {
+                        relation: None,
+                        proven_empty: false,
+                        visible_rows_estimate: None,
+                    },
+                },
+            ],
+        };
+        let encoded = described.encode().unwrap();
+        assert_eq!(
+            DescribePlanRelationsResponse::decode(&encoded).unwrap(),
+            described
+        );
+        let mut malformed = encoded;
+        malformed[4..8].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(DescribePlanRelationsResponse::decode(&malformed).is_err());
+
+        let estimates = EstimateScansRequest {
+            entries: vec![
+                EstimateScanRequest {
+                    handle: handle.clone(),
+                    column_ids: vec![],
+                },
+                EstimateScanRequest {
+                    handle: second_handle,
+                    column_ids: vec![[7; 16]],
+                },
+            ],
+        };
+        let encoded = estimates.encode().unwrap();
+        assert_eq!(EstimateScansRequest::decode(&encoded).unwrap(), estimates);
+        let responses = EstimateScansResponse {
+            entries: vec![
+                EstimateScanResponse::Unknown,
+                EstimateScanResponse::Exact(crate::statistics::AuthorizedScanSummary {
+                    visible_rows: 12,
+                    columns: vec![crate::statistics::ColumnPopulation {
+                        readable_values: 10,
+                        nulls: 2,
+                        redacted: 0,
+                    }],
+                }),
+            ],
+        };
+        let encoded = responses.encode().unwrap();
+        assert_eq!(EstimateScansResponse::decode(&encoded).unwrap(), responses);
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert!(EstimateScansResponse::decode(&trailing).is_err());
+    }
 
     #[test]
     fn scan_estimate_request_is_opt_in_and_canonical() {

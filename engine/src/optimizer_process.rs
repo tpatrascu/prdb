@@ -7,8 +7,9 @@ use crate::optimizer_ipc::{
 };
 use crate::optimizer_plan::MAX_PLAN_BYTES;
 use crate::planner_ipc::{
-    DescribePlanRelationRequest, DescribePlanRelationResponse, MAX_PLANNER_REQUESTS_PER_CONNECTION,
-    PlannerRequestError,
+    DescribePlanRelationRequest, DescribePlanRelationResponse, DescribePlanRelationsRequest,
+    DescribePlanRelationsResponse, EstimateScanRequest, EstimateScanResponse, EstimateScansRequest,
+    EstimateScansResponse, MAX_PLANNER_REQUESTS_PER_CONNECTION, PlannerRequestError,
 };
 use std::collections::HashSet;
 use std::io::{Read, Write};
@@ -183,43 +184,127 @@ pub fn serve_optimizer_process<S: Read + Write, P: Read + Write>(
         let mut relations = Vec::with_capacity(relation_names.len());
         let mut proven_empty = Vec::with_capacity(relation_names.len());
         let mut visible_rows_estimates = Vec::with_capacity(relation_names.len());
-        for (schema_name, relation_name) in relation_names {
-            let planner_request_id = next_planner_request_id;
-            next_planner_request_id = next_planner_request_id
-                .checked_add(1)
-                .ok_or(OptimizerProcessError::RequestLimitExceeded)?;
-            let include_scan_estimate = operation == Operation::OptimizeSelect
-                && request.payload.get(2) == Some(&crate::query_abi::OPTIMIZER_SELECT_STATEMENT);
+        if operation == Operation::OptimizeJoinSelect {
+            let join_request =
+                crate::optimizer_request::decode_join_select_request(&request.payload)
+                    .map_err(|_| OptimizerProcessError::PlannerResponseMismatch)?;
+            let planner_request_id = take_planner_request_id(&mut next_planner_request_id)?;
             let planner_request = IpcFrame {
-                operation: Operation::DescribePlanRelation as u16,
+                operation: Operation::DescribePlanRelations as u16,
                 request_id: planner_request_id,
-                payload: DescribePlanRelationRequest {
-                    schema_name,
-                    relation_name,
-                    include_scan_estimate,
-                    population_estimate_max_rows: (operation == Operation::OptimizeJoinSelect)
-                        .then_some(crate::optimizer_plan::JOIN_POPULATION_ESTIMATE_MAX_ROWS),
+                payload: DescribePlanRelationsRequest {
+                    relations: relation_names,
                 }
                 .encode()
                 .map_err(OptimizerProcessError::PlannerPayload)?,
             };
-            authorize_operation(ServiceRole::Planner, Operation::DescribePlanRelation)
-                .map_err(OptimizerProcessError::Dispatch)?;
-            crate::ipc::write_frame(planner, &planner_request)
-                .map_err(OptimizerProcessError::Frame)?;
-            let planner_response = crate::ipc::read_frame(planner)
-                .map_err(OptimizerProcessError::Frame)?
-                .ok_or(OptimizerProcessError::PlannerClosed)?;
-            if planner_response.operation != planner_request.operation
-                || planner_response.request_id != planner_request.request_id
-            {
+            let planner_response = planner_roundtrip(planner, planner_request)?;
+            let described = DescribePlanRelationsResponse::decode(&planner_response.payload)
+                .map_err(OptimizerProcessError::PlannerPayload)?;
+            if described.entries.len() != 2 {
                 return Err(OptimizerProcessError::PlannerResponseMismatch);
             }
-            let described = DescribePlanRelationResponse::decode(&planner_response.payload)
-                .map_err(OptimizerProcessError::PlannerPayload)?;
-            proven_empty.push(described.proven_empty);
-            visible_rows_estimates.push(described.visible_rows_estimate);
-            relations.push(described.relation);
+            let mut estimate_positions = Vec::new();
+            let mut estimate_entries = Vec::new();
+            for (index, entry) in described.entries.into_iter().enumerate() {
+                let relation = entry.response.relation;
+                if relation.is_some() != entry.handle.is_some() {
+                    return Err(OptimizerProcessError::PlannerResponseMismatch);
+                }
+                if let Some(handle) = entry.handle {
+                    let key_name = join_request.join_keys.first().map(|key| {
+                        if index == 0 {
+                            key.left_column_name.as_str()
+                        } else {
+                            key.right_column_name.as_str()
+                        }
+                    });
+                    let column_ids = relation
+                        .as_ref()
+                        .and_then(|relation| {
+                            key_name
+                                .and_then(|name| {
+                                    relation
+                                        .relation
+                                        .columns
+                                        .iter()
+                                        .find(|column| column.name.eq_ignore_ascii_case(name))
+                                })
+                                .or_else(|| relation.relation.columns.first())
+                                .map(|column| vec![column.column_id])
+                        })
+                        .unwrap_or_default();
+                    estimate_positions.push(index);
+                    estimate_entries.push(EstimateScanRequest { handle, column_ids });
+                }
+                relations.push(relation);
+                proven_empty.push(false);
+                visible_rows_estimates.push(None);
+            }
+            if !estimate_entries.is_empty() {
+                let planner_request_id = take_planner_request_id(&mut next_planner_request_id)?;
+                let planner_request = IpcFrame {
+                    operation: Operation::EstimateScans as u16,
+                    request_id: planner_request_id,
+                    payload: EstimateScansRequest {
+                        entries: estimate_entries,
+                    }
+                    .encode()
+                    .map_err(OptimizerProcessError::PlannerPayload)?,
+                };
+                let planner_response = planner_roundtrip(planner, planner_request)?;
+                let estimates = EstimateScansResponse::decode(&planner_response.payload)
+                    .map_err(OptimizerProcessError::PlannerPayload)?;
+                if estimates.entries.len() != estimate_positions.len() {
+                    return Err(OptimizerProcessError::PlannerResponseMismatch);
+                }
+                for (index, estimate) in estimate_positions.into_iter().zip(estimates.entries) {
+                    visible_rows_estimates[index] = match estimate {
+                        EstimateScanResponse::Exact(summary) => Some(summary.visible_rows),
+                        EstimateScanResponse::Unknown => None,
+                    };
+                }
+            }
+        } else {
+            for (schema_name, relation_name) in relation_names {
+                let planner_request_id = next_planner_request_id;
+                next_planner_request_id = next_planner_request_id
+                    .checked_add(1)
+                    .ok_or(OptimizerProcessError::RequestLimitExceeded)?;
+                let include_scan_estimate = operation == Operation::OptimizeSelect
+                    && request.payload.get(2)
+                        == Some(&crate::query_abi::OPTIMIZER_SELECT_STATEMENT);
+                let planner_request = IpcFrame {
+                    operation: Operation::DescribePlanRelation as u16,
+                    request_id: planner_request_id,
+                    payload: DescribePlanRelationRequest {
+                        schema_name,
+                        relation_name,
+                        include_scan_estimate,
+                        population_estimate_max_rows: (operation == Operation::OptimizeJoinSelect)
+                            .then_some(crate::optimizer_plan::JOIN_POPULATION_ESTIMATE_MAX_ROWS),
+                    }
+                    .encode()
+                    .map_err(OptimizerProcessError::PlannerPayload)?,
+                };
+                authorize_operation(ServiceRole::Planner, Operation::DescribePlanRelation)
+                    .map_err(OptimizerProcessError::Dispatch)?;
+                crate::ipc::write_frame(planner, &planner_request)
+                    .map_err(OptimizerProcessError::Frame)?;
+                let planner_response = crate::ipc::read_frame(planner)
+                    .map_err(OptimizerProcessError::Frame)?
+                    .ok_or(OptimizerProcessError::PlannerClosed)?;
+                if planner_response.operation != planner_request.operation
+                    || planner_response.request_id != planner_request.request_id
+                {
+                    return Err(OptimizerProcessError::PlannerResponseMismatch);
+                }
+                let described = DescribePlanRelationResponse::decode(&planner_response.payload)
+                    .map_err(OptimizerProcessError::PlannerPayload)?;
+                proven_empty.push(described.proven_empty);
+                visible_rows_estimates.push(described.visible_rows_estimate);
+                relations.push(described.relation);
+            }
         }
         let join_cardinality_estimate = if operation == Operation::OptimizeJoinSelect
             && join_fanout_estimate_is_eligible(
@@ -508,6 +593,32 @@ pub fn serve_optimizer_process<S: Read + Write, P: Read + Write>(
         .map_err(OptimizerProcessError::Response)?;
         write_submission_response(submission, request.operation, request.request_id, response)?;
     }
+}
+
+fn take_planner_request_id(next_request_id: &mut u64) -> Result<u64, OptimizerProcessError> {
+    let request_id = *next_request_id;
+    *next_request_id = next_request_id
+        .checked_add(1)
+        .ok_or(OptimizerProcessError::RequestLimitExceeded)?;
+    Ok(request_id)
+}
+
+fn planner_roundtrip<P: Read + Write>(
+    planner: &mut P,
+    request: IpcFrame,
+) -> Result<IpcFrame, OptimizerProcessError> {
+    let operation =
+        Operation::from_code(request.operation).map_err(OptimizerProcessError::Dispatch)?;
+    authorize_operation(ServiceRole::Planner, operation)
+        .map_err(OptimizerProcessError::Dispatch)?;
+    crate::ipc::write_frame(planner, &request).map_err(OptimizerProcessError::Frame)?;
+    let response = crate::ipc::read_frame(planner)
+        .map_err(OptimizerProcessError::Frame)?
+        .ok_or(OptimizerProcessError::PlannerClosed)?;
+    if response.operation != request.operation || response.request_id != request.request_id {
+        return Err(OptimizerProcessError::PlannerResponseMismatch);
+    }
+    Ok(response)
 }
 
 fn join_fanout_estimate_is_eligible(left_rows: Option<u64>, right_rows: Option<u64>) -> bool {
@@ -1785,126 +1896,192 @@ mod tests {
             .unwrap();
         std::thread::scope(|scope| {
             let planner_thread = scope.spawn(|| {
-                for (request_id, name, relation_id, base_column_id) in [
-                    (257, "lefts", 0x31, 0x41),
-                    (258, "rights", 0x32, 0x51),
-                    (260, "lefts", 0x31, 0x41),
-                    (261, "rights", 0x32, 0x51),
+                for (describe_id, estimate_id, relation_rows, pair_estimate) in [
+                    (257, 258, [17, 2048], Some(17)),
+                    (260, 261, [17, 4097], None),
                 ] {
                     let request = crate::ipc::read_frame(&mut planner_server)
                         .unwrap()
-                        .expect("optimizer must resolve each join relation");
-                    let decoded = DescribePlanRelationRequest::decode(&request.payload).unwrap();
-                    assert_eq!(request.request_id, request_id);
-                    assert_eq!(decoded.schema_name, "public");
-                    assert_eq!(decoded.relation_name, name);
-                    assert!(!decoded.include_scan_estimate);
+                        .expect("optimizer must batch both join relation descriptions");
+                    assert_eq!(request.operation, Operation::DescribePlanRelations as u16);
+                    assert_eq!(request.request_id, describe_id);
+                    let names = DescribePlanRelationsRequest::decode(&request.payload).unwrap();
                     assert_eq!(
-                        decoded.population_estimate_max_rows,
-                        Some(crate::optimizer_plan::JOIN_POPULATION_ESTIMATE_MAX_ROWS)
+                        names.relations,
+                        vec![
+                            ("public".to_owned(), "lefts".to_owned()),
+                            ("public".to_owned(), "rights".to_owned()),
+                        ]
                     );
-                    let mut range_access_paths = Vec::new();
-                    if name == "rights" {
-                        range_access_paths.push(
-                            crate::metadata_discovery::AuthorizedRangeAccessPath {
-                                index_id: [0x71; 16],
-                                column_ids: vec![[base_column_id; 16]],
-                            },
-                        );
-                    }
-                    let relation = AuthorizedPlanRelation {
-                        schema_id: [1; 16],
-                        schema_version: 3,
-                        table_epoch: u64::from(relation_id),
-                        relation: AuthorizedRelationDescription {
-                            relation_id: [relation_id; 16],
-                            name: name.to_owned(),
-                            columns: vec![
-                                VisibleColumn {
-                                    column_id: [base_column_id; 16],
-                                    name: "id".to_owned(),
-                                    ordinal: 0,
-                                    scalar_type: ScalarType::Integer,
-                                    nullable: false,
+                    let relations = [("lefts", 0x31, 0x41), ("rights", 0x32, 0x51)]
+                        .into_iter()
+                        .map(|(name, relation_id, base_column_id)| {
+                            let range_access_paths = if name == "rights" {
+                                vec![crate::metadata_discovery::AuthorizedRangeAccessPath {
+                                    index_id: [0x71; 16],
+                                    column_ids: vec![[base_column_id; 16]],
+                                }]
+                            } else {
+                                Vec::new()
+                            };
+                            AuthorizedPlanRelation {
+                                schema_id: [1; 16],
+                                schema_version: 3,
+                                table_epoch: u64::from(relation_id),
+                                relation: AuthorizedRelationDescription {
+                                    relation_id: [relation_id; 16],
+                                    name: name.to_owned(),
+                                    columns: vec![
+                                        VisibleColumn {
+                                            column_id: [base_column_id; 16],
+                                            name: "id".to_owned(),
+                                            ordinal: 0,
+                                            scalar_type: ScalarType::Integer,
+                                            nullable: false,
+                                        },
+                                        VisibleColumn {
+                                            column_id: [base_column_id + 1; 16],
+                                            name: "active".to_owned(),
+                                            ordinal: 1,
+                                            scalar_type: ScalarType::Boolean,
+                                            nullable: false,
+                                        },
+                                        VisibleColumn {
+                                            column_id: [base_column_id + 2; 16],
+                                            name: "value".to_owned(),
+                                            ordinal: 2,
+                                            scalar_type: ScalarType::Text,
+                                            nullable: true,
+                                        },
+                                    ],
                                 },
-                                VisibleColumn {
-                                    column_id: [base_column_id + 1; 16],
-                                    name: "active".to_owned(),
-                                    ordinal: 1,
-                                    scalar_type: ScalarType::Boolean,
-                                    nullable: false,
-                                },
-                                VisibleColumn {
-                                    column_id: [base_column_id + 2; 16],
-                                    name: "value".to_owned(),
-                                    ordinal: 2,
-                                    scalar_type: ScalarType::Text,
-                                    nullable: true,
-                                },
-                            ],
-                        },
-                        unique_access_paths: Vec::new(),
-                        range_access_paths,
-                    };
+                                unique_access_paths: Vec::new(),
+                                range_access_paths,
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    let handles = [[9; 16], [9; 16]]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, mut token)| {
+                            token[15] = u8::try_from(index + 1).unwrap();
+                            crate::metadata_discovery::PlanningTableHandle::from_bytes(&token)
+                                .unwrap()
+                        })
+                        .collect::<Vec<_>>();
                     crate::ipc::write_frame(
                         &mut planner_server,
                         &IpcFrame {
                             operation: request.operation,
                             request_id: request.request_id,
-                            payload: DescribePlanRelationResponse {
-                                relation: Some(relation),
-                                proven_empty: false,
-                                visible_rows_estimate: Some(if name == "lefts" {
-                                    17
-                                } else if request_id >= 260 {
-                                    4097
-                                } else {
-                                    2048
-                                }),
+                            payload: DescribePlanRelationsResponse {
+                                entries: relations
+                                    .into_iter()
+                                    .zip(handles.iter().cloned())
+                                    .map(|(relation, handle)| {
+                                        crate::planner_ipc::DescribePlanRelationBatchEntry {
+                                            handle: Some(handle),
+                                            response: DescribePlanRelationResponse {
+                                                relation: Some(relation),
+                                                proven_empty: false,
+                                                visible_rows_estimate: None,
+                                            },
+                                        }
+                                    })
+                                    .collect(),
                             }
                             .encode()
                             .unwrap(),
                         },
                     )
                     .unwrap();
-                    if name == "rights" {
-                        let estimate = crate::ipc::read_frame(&mut planner_server)
-                            .unwrap()
-                            .expect("optimizer must request the bounded join fanout estimate");
-                        assert_eq!(estimate.operation, Operation::EstimateScan as u16);
-                        let estimate_request =
-                            crate::planner_ipc::EstimateJoinRequest::decode(&estimate.payload)
-                                .unwrap();
-                        assert_eq!(estimate_request.schema_name, "public");
-                        assert_eq!(estimate_request.left_relation_name, "lefts");
-                        assert_eq!(estimate_request.right_relation_name, "rights");
-                        assert_eq!(
-                            estimate_request.maximum_rows,
-                            crate::statistics::MAX_JOIN_ESTIMATE_ROWS
-                        );
-                        assert_eq!(
-                            estimate_request.left_key_column_ids,
-                            vec![[0x41; 16], [0x42; 16]]
-                        );
-                        assert_eq!(
-                            estimate_request.right_key_column_ids,
-                            vec![[0x51; 16], [0x52; 16]]
-                        );
-                        let estimate_response = if request_id >= 260 {
-                            crate::planner_ipc::EstimateJoinResponse::Unknown
-                        } else {
-                            crate::planner_ipc::EstimateJoinResponse::Exact { joined_rows: 17 }
-                        };
-                        crate::ipc::write_frame(
-                            &mut planner_server,
-                            &IpcFrame {
-                                operation: estimate.operation,
-                                request_id: estimate.request_id,
-                                payload: estimate_response.encode().unwrap(),
-                            },
-                        )
-                        .unwrap();
-                    }
+                    let estimate = crate::ipc::read_frame(&mut planner_server)
+                        .unwrap()
+                        .expect("optimizer must batch both population estimates");
+                    assert_eq!(estimate.operation, Operation::EstimateScans as u16);
+                    assert_eq!(estimate.request_id, estimate_id);
+                    let estimate_request = EstimateScansRequest::decode(&estimate.payload).unwrap();
+                    assert_eq!(estimate_request.entries.len(), 2);
+                    assert_eq!(
+                        estimate_request
+                            .entries
+                            .iter()
+                            .map(|entry| entry.column_ids.clone())
+                            .collect::<Vec<_>>(),
+                        vec![vec![[0x41; 16]], vec![[0x51; 16]]]
+                    );
+                    assert_eq!(
+                        estimate_request
+                            .entries
+                            .iter()
+                            .map(|entry| entry.handle.to_bytes())
+                            .collect::<Vec<_>>(),
+                        handles
+                            .iter()
+                            .map(|handle| handle.to_bytes())
+                            .collect::<Vec<_>>()
+                    );
+                    crate::ipc::write_frame(
+                        &mut planner_server,
+                        &IpcFrame {
+                            operation: estimate.operation,
+                            request_id: estimate.request_id,
+                            payload: EstimateScansResponse {
+                                entries: relation_rows
+                                    .into_iter()
+                                    .map(|visible_rows| {
+                                        EstimateScanResponse::Exact(
+                                            crate::statistics::AuthorizedScanSummary {
+                                                visible_rows,
+                                                columns: vec![
+                                                    crate::statistics::ColumnPopulation::default(),
+                                                ],
+                                            },
+                                        )
+                                    })
+                                    .collect(),
+                            }
+                            .encode()
+                            .unwrap(),
+                        },
+                    )
+                    .unwrap();
+                    let estimate = crate::ipc::read_frame(&mut planner_server)
+                        .unwrap()
+                        .expect("optimizer must request the bounded join fanout estimate");
+                    assert_eq!(estimate.operation, Operation::EstimateScan as u16);
+                    let estimate_request =
+                        crate::planner_ipc::EstimateJoinRequest::decode(&estimate.payload).unwrap();
+                    assert_eq!(estimate_request.schema_name, "public");
+                    assert_eq!(estimate_request.left_relation_name, "lefts");
+                    assert_eq!(estimate_request.right_relation_name, "rights");
+                    assert_eq!(
+                        estimate_request.maximum_rows,
+                        crate::statistics::MAX_JOIN_ESTIMATE_ROWS
+                    );
+                    assert_eq!(
+                        estimate_request.left_key_column_ids,
+                        vec![[0x41; 16], [0x42; 16]]
+                    );
+                    assert_eq!(
+                        estimate_request.right_key_column_ids,
+                        vec![[0x51; 16], [0x52; 16]]
+                    );
+                    let estimate_response = pair_estimate.map_or(
+                        crate::planner_ipc::EstimateJoinResponse::Unknown,
+                        |joined_rows| crate::planner_ipc::EstimateJoinResponse::Exact {
+                            joined_rows,
+                        },
+                    );
+                    crate::ipc::write_frame(
+                        &mut planner_server,
+                        &IpcFrame {
+                            operation: estimate.operation,
+                            request_id: estimate.request_id,
+                            payload: estimate_response.encode().unwrap(),
+                        },
+                    )
+                    .unwrap();
                 }
             });
             let optimizer_thread = scope

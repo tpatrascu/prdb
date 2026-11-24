@@ -48,6 +48,8 @@ pub enum Operation {
     EstimateScan = crate::query_abi::IPC_OP_ESTIMATE_SCAN,
     OptimizeSelect = crate::query_abi::IPC_OP_OPTIMIZE_SELECT,
     DescribePlanRelation = crate::query_abi::IPC_OP_DESCRIBE_PLAN_RELATION,
+    DescribePlanRelations = crate::query_abi::IPC_OP_DESCRIBE_PLAN_RELATIONS,
+    EstimateScans = crate::query_abi::IPC_OP_ESTIMATE_SCANS,
     OptimizeDelete = crate::query_abi::IPC_OP_OPTIMIZE_DELETE,
     OptimizeUpdate = crate::query_abi::IPC_OP_OPTIMIZE_UPDATE,
     OptimizeJoinSelect = crate::query_abi::IPC_OP_OPTIMIZE_JOIN_SELECT,
@@ -109,6 +111,8 @@ impl Operation {
             crate::query_abi::IPC_OP_ESTIMATE_SCAN => Ok(Self::EstimateScan),
             crate::query_abi::IPC_OP_OPTIMIZE_SELECT => Ok(Self::OptimizeSelect),
             crate::query_abi::IPC_OP_DESCRIBE_PLAN_RELATION => Ok(Self::DescribePlanRelation),
+            crate::query_abi::IPC_OP_DESCRIBE_PLAN_RELATIONS => Ok(Self::DescribePlanRelations),
+            crate::query_abi::IPC_OP_ESTIMATE_SCANS => Ok(Self::EstimateScans),
             crate::query_abi::IPC_OP_OPTIMIZE_DELETE => Ok(Self::OptimizeDelete),
             crate::query_abi::IPC_OP_OPTIMIZE_UPDATE => Ok(Self::OptimizeUpdate),
             crate::query_abi::IPC_OP_OPTIMIZE_JOIN_SELECT => Ok(Self::OptimizeJoinSelect),
@@ -196,7 +200,11 @@ pub fn authorize_operation(role: ServiceRole, operation: Operation) -> Result<()
         ),
         ServiceRole::Planner => matches!(
             operation,
-            Operation::DescribeRelation | Operation::EstimateScan | Operation::DescribePlanRelation
+            Operation::DescribeRelation
+                | Operation::EstimateScan
+                | Operation::DescribePlanRelation
+                | Operation::DescribePlanRelations
+                | Operation::EstimateScans
         ),
         ServiceRole::OptimizerSubmission => matches!(
             operation,

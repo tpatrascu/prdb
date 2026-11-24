@@ -1107,6 +1107,20 @@
       "c_type": "UINT16_C"
     },
     {
+      "rust_name": "IPC_OP_DESCRIBE_PLAN_RELATIONS",
+      "rust_type": "u16",
+      "value": 4617,
+      "c_name": "PRDB_IPC_OP_DESCRIBE_PLAN_RELATIONS",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "IPC_OP_ESTIMATE_SCANS",
+      "rust_type": "u16",
+      "value": 4618,
+      "c_name": "PRDB_IPC_OP_ESTIMATE_SCANS",
+      "c_type": "UINT16_C"
+    },
+    {
       "rust_name": "IPC_OP_OPTIMIZE_DELETE",
       "rust_type": "u16",
       "value": 4613,

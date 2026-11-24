@@ -54131,7 +54131,9 @@ fn planner_stream_estimates_same_typed_decimal_column_predicate()
     use prdb_engine::optimizer_binding::{BoundColumn, BoundPredicate};
     use prdb_engine::optimizer_request::Comparison;
     use prdb_engine::planner_ipc::{
-        EstimatePredicateRequest, EstimatePredicateResponse, serve_planner,
+        DescribePlanRelationsRequest, DescribePlanRelationsResponse, EstimatePredicateRequest,
+        EstimatePredicateResponse, EstimateScanRequest, EstimateScanResponse, EstimateScansRequest,
+        EstimateScansResponse, serve_planner,
     };
     use prdb_engine::storage_manager::{
         CreatePolicyRequest, CreateTableRequest, ObjectGrantPrivilege, ObjectGrantTarget,
@@ -54366,6 +54368,57 @@ fn planner_stream_estimates_same_typed_decimal_column_predicate()
                 matching_rows: 1,
             }
         );
+        prdb_engine::ipc::write_frame(
+            &mut client,
+            &IpcFrame {
+                operation: IpcOperation::DescribePlanRelations as u16,
+                request_id: 2,
+                payload: DescribePlanRelationsRequest {
+                    relations: vec![
+                        (
+                            "planner_decimal".to_owned(),
+                            "typed_observations".to_owned(),
+                        ),
+                        ("planner_decimal".to_owned(), "missing_table".to_owned()),
+                    ],
+                }
+                .encode()?,
+            },
+        )?;
+        let response = prdb_engine::ipc::read_frame(&mut client)?
+            .ok_or("planner stream closed before relation batch")?;
+        let described = DescribePlanRelationsResponse::decode(&response.payload)?;
+        assert_eq!(described.entries.len(), 2);
+        assert_eq!(
+            described.entries[0]
+                .response
+                .relation
+                .as_ref()
+                .map(|relation| relation.relation.name.as_str()),
+            Some("typed_observations")
+        );
+        assert!(described.entries[0].handle.is_some());
+        assert!(described.entries[1].handle.is_none());
+        assert!(described.entries[1].response.relation.is_none());
+        prdb_engine::ipc::write_frame(
+            &mut client,
+            &IpcFrame {
+                operation: IpcOperation::EstimateScans as u16,
+                request_id: 3,
+                payload: EstimateScansRequest {
+                    entries: vec![EstimateScanRequest {
+                        handle: described.entries[0].handle.clone().unwrap(),
+                        column_ids: vec![table.column_ids[0]],
+                    }],
+                }
+                .encode()?,
+            },
+        )?;
+        let response = prdb_engine::ipc::read_frame(&mut client)?
+            .ok_or("planner stream closed before estimate batch")?;
+        let estimates = EstimateScansResponse::decode(&response.payload)?;
+        assert_eq!(estimates.entries.len(), 1);
+        assert_eq!(estimates.entries[0], EstimateScanResponse::Unknown);
         client.shutdown(Shutdown::Write)?;
         drop(client);
         planner
