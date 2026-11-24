@@ -2,7 +2,11 @@
 use crate::catalog::{CatalogRecord, InvalidCatalogRecord, decode_registered_envelope};
 use crate::expression::decode_catalog_expression_record;
 use crate::index_locator::{IndexLocator, LocatorError};
-use crate::schema::{CATALOG, ENGINE_META, INDEXES, POLICIES, RELATION_NAMES, ROWS, SCHEMA_NAMES};
+use crate::metadata::{EngineMetadata, Lifecycle};
+use crate::schema::{
+    CATALOG, ENGINE_META, INDEXES, POLICIES, RELATION_NAMES, ROWS, SCHEMA_NAMES, STATS,
+};
+use crate::statistics::{COMMITTED_POPULATION_KEY_PREFIX, CommittedPopulationRecord};
 use redb::ReadTransaction;
 
 pub const MAX_CATALOG_FAMILY_SCAN: usize = 65_536;
@@ -76,6 +80,44 @@ impl RowSnapshot {
         Ok(table
             .get(&b"format"[..])?
             .map(|value| value.value().to_vec()))
+    }
+
+    /// Read a protected committed-population record only when it is fresh for
+    /// this exact pinned snapshot. Callers must still prove that the estimate
+    /// matches the invocation's authorized view and contains no private writes.
+    pub(crate) fn committed_population_record(
+        &self,
+        table_id: [u8; 16],
+    ) -> Result<Option<CommittedPopulationRecord>, SnapshotError> {
+        if table_id == [0; 16] {
+            return Ok(None);
+        }
+        let metadata_bytes = self
+            .get_engine_metadata_value()
+            .map_err(|error| SnapshotError::Storage(error.to_string()))?
+            .ok_or_else(|| SnapshotError::Storage("missing engine metadata".into()))?;
+        let metadata = EngineMetadata::decode(&metadata_bytes)
+            .map_err(|error| SnapshotError::Storage(error.to_string()))?;
+        if metadata.lifecycle != Lifecycle::Ready {
+            return Ok(None);
+        }
+
+        let mut key = Vec::with_capacity(COMMITTED_POPULATION_KEY_PREFIX.len() + table_id.len());
+        key.extend_from_slice(COMMITTED_POPULATION_KEY_PREFIX);
+        key.extend_from_slice(&table_id);
+        let stats = self
+            .transaction
+            .open_table(STATS)
+            .map_err(|error| SnapshotError::Storage(error.to_string()))?;
+        let Some(value) = stats
+            .get(key.as_slice())
+            .map_err(|error| SnapshotError::Storage(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let record = CommittedPopulationRecord::decode_record(table_id, value.value())
+            .map_err(|error| SnapshotError::Storage(error.to_string()))?;
+        Ok((record.snapshot_sequence() == metadata.commit_sequence).then_some(record))
     }
 
     /// Copy one row value out of its redb guard. No guard or database borrow escapes.

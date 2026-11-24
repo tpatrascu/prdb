@@ -125,6 +125,7 @@ mod statistics_collection_tests {
     use crate::catalog::{CatalogField, WireType, encode_envelope, family_schema};
     use crate::metadata::{EngineMetadata, Lifecycle};
     use crate::schema::{CATALOG, ENGINE_META, ROWS, STATS, create_tables};
+    use crate::snapshot::RowSnapshot;
     use crate::statistics::{
         COMMITTED_POPULATION_KEY_PREFIX, CommittedPopulationRecord, StatisticsCollectionOutcome,
     };
@@ -249,6 +250,66 @@ mod statistics_collection_tests {
             Some(table_id),
             "the cursor wraps after the last table"
         );
+        drop(storage);
+        drop(database);
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn pinned_snapshot_accepts_only_its_fresh_committed_population_record()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let table_id = [0x44; 16];
+        let (path, database) = database_with_rows(&[1, 2, 3])?;
+        let storage =
+            StorageManager::from_validated_database(&database, StorageManagerConfig::default())?;
+        assert_eq!(
+            storage.collect_committed_table_population(table_id)?,
+            StatisticsCollectionOutcome::Exact
+        );
+
+        let pinned = RowSnapshot::new(database.begin_read()?);
+        assert_eq!(
+            pinned.committed_population_record(table_id)?,
+            Some(CommittedPopulationRecord::Exact {
+                table_id,
+                snapshot_sequence: 1,
+                rows: 3,
+            })
+        );
+
+        let write = database.begin_write()?;
+        let metadata = EngineMetadata {
+            database_id: [0x66; 16],
+            catalog_version: 2,
+            expression_version: 1,
+            builtin_semantics_version: 1,
+            commit_sequence: 2,
+            lifecycle: Lifecycle::Ready,
+        }
+        .encode()?;
+        write
+            .open_table(ENGINE_META)?
+            .insert(&b"format"[..], metadata.as_slice())?;
+        write.commit()?;
+
+        assert_eq!(
+            pinned.committed_population_record(table_id)?,
+            Some(CommittedPopulationRecord::Exact {
+                table_id,
+                snapshot_sequence: 1,
+                rows: 3,
+            }),
+            "a retained invocation snapshot keeps its own fresh record"
+        );
+        let current = RowSnapshot::new(database.begin_read()?);
+        assert_eq!(
+            current.committed_population_record(table_id)?,
+            None,
+            "a later engine commit makes the old global record unavailable"
+        );
+        drop(current);
+        drop(pinned);
         drop(storage);
         drop(database);
         std::fs::remove_file(path)?;

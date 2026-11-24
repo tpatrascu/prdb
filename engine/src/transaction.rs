@@ -42,9 +42,9 @@ use crate::row_record::{RowRecord, RowRecordError};
 use crate::schema::{ENGINE_META, OUTCOMES, PRINCIPAL_NAMES};
 use crate::snapshot::{MAX_CATALOG_FAMILY_SCAN, MAX_ROW_SCAN_PAGE, RowSnapshot, SnapshotError};
 use crate::statistics::{
-    AuthorizedScanEstimate, AuthorizedScanSummary, ColumnPopulation, MAX_ESTIMATE_CANDIDATES,
-    MAX_JOIN_ESTIMATE_BYTES, MAX_JOIN_ESTIMATE_KEY_BYTES, MAX_JOIN_ESTIMATE_ROWS,
-    MAX_PREDICATE_ESTIMATE_ROWS,
+    AuthorizedScanEstimate, AuthorizedScanSummary, ColumnPopulation, CommittedPopulationRecord,
+    MAX_ESTIMATE_CANDIDATES, MAX_JOIN_ESTIMATE_BYTES, MAX_JOIN_ESTIMATE_KEY_BYTES,
+    MAX_JOIN_ESTIMATE_ROWS, MAX_PREDICATE_ESTIMATE_ROWS,
 };
 use crate::storage_manager::{InvocationAdmissionMetrics, InvocationAdmissionPermit};
 use crate::tuple::{
@@ -2442,9 +2442,11 @@ impl<'db> InvocationTransaction<'db> {
     }
 
     /// Estimate whether the authorized population fits under a fixed bound.
-    /// It reads at most `maximum_rows + 1` snapshot keys in bounded pages and
-    /// does not decode row values, so larger tables fall back without a full
-    /// table scan.
+    /// It reuses a fresh protected committed count only when the pinned
+    /// snapshot, literal row policies, and empty private overlay prove the
+    /// global population equals this invocation's authorized population.
+    /// Otherwise it reads at most `maximum_rows + 1` snapshot keys in bounded
+    /// pages and does not decode row values.
     pub fn estimate_authorized_population_at_most(
         &mut self,
         table_id: [u8; 16],
@@ -2468,7 +2470,32 @@ impl<'db> InvocationTransaction<'db> {
         }
         match estimate_population(table_id, projection) {
             Some(EstimatePopulation::NoRows) => return self.finish_population_probe(Some(0)),
-            Some(EstimatePopulation::AllRows) => {}
+            Some(EstimatePopulation::AllRows) => {
+                let overlay_is_empty = match self.overlay.staged_row_count() {
+                    Ok(rows) => rows == 0,
+                    Err(OverlayError::Aborted) => return Err(TransactionError::Aborted),
+                    Err(_) => false,
+                };
+                if overlay_is_empty {
+                    let record = self
+                        .pinned_snapshot()?
+                        .committed_population_record(table_id)
+                        .ok()
+                        .flatten();
+                    match record {
+                        Some(CommittedPopulationRecord::Exact { rows, .. })
+                            if rows <= maximum_rows =>
+                        {
+                            return self.finish_population_probe(Some(rows));
+                        }
+                        Some(CommittedPopulationRecord::Exact { .. })
+                        | Some(CommittedPopulationRecord::Unknown { .. }) => {
+                            return self.finish_population_probe(None);
+                        }
+                        None => {}
+                    }
+                }
+            }
             None => return self.finish_population_probe(None),
         }
         let Some(candidate_limit) = usize::try_from(maximum_rows)

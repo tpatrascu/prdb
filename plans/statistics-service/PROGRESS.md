@@ -1,5 +1,12 @@
 # Statistics Service Progress
 
+## ST-6 follow-up: reuse a fresh committed population inside the authorized planner estimate — implemented slice
+
+- Contract: a committed count can answer the existing bounded population estimate only from the invocation's own pinned redb snapshot, when literal policy shape proves the full table is visible and the private row overlay is empty. The record must be exact and within the requested maximum. Missing, stale, malformed, over-bound, unknown, or overlay-bearing cases fall back to the bounded snapshot estimate or return `Unknown`; raw records never cross IPC.
+- Red/green: the pinned-snapshot freshness regression initially failed because the snapshot had no trusted committed-population reader. It now verifies that a retained old snapshot continues to match its exact record after a later engine commit, while a new snapshot rejects that stale record. The planner-stream allowance regression collects a fresh exact record, uses it through the authorized estimate API, and then verifies that private staged rows produce the updated count.
+- Validation: the pinned-snapshot record regression and real planner-stream estimate regression passed. `cargo fmt --all -- --check`, locked workspace build, and warning-denied all-target Clippy passed. The complete serial delegated-cgroup workspace suite passed with 407 library tests, 206 commit integration tests, 3 metadata-process tests, 83 transaction tests, all remaining targets, and no ignored tests.
+- Remaining: broader join distributions and population shapes, cost-based path comparison, populations above 2,048, richer statistics, broader global-statistics consumption under an explicit disclosure policy, and target-host evidence remain open.
+
 ## ST-2 / OP-7 follow-up: profile intermediate join fanouts two and three — measured
 
 - Contract: the maintained confined benchmark accepts 9×128 joins with two or three matches per outer row, asserts the exact pair estimate and kind-17 indexed plan, and compares against equivalent hash results under operational load.

@@ -52007,6 +52007,12 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
         })
         .map_err(|error| format!("planner fixture column policy creation: {error:?}"))?;
 
+    assert_eq!(
+        storage.collect_committed_table_population(table.table_id)?,
+        prdb_engine::statistics::StatisticsCollectionOutcome::Exact,
+        "the planner fixture starts with a fresh committed population record"
+    );
+
     let encode_select = |schema_name: &str, relation_name: &str, column_name: &str| {
         let mut bytes = vec![0, 1, 1, 0];
         for name in [schema_name, relation_name] {
@@ -52042,6 +52048,14 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
     let mut binding_transaction = storage.begin_invocation(id(0x8a), actor, 9_999, 8, 512)?;
     {
         let mut planner_connection = binding_transaction.open_planner_metadata_connection();
+        let (population_handle, _) = planner_connection
+            .resolve_relation("planner_stats", "observations")?
+            .ok_or("authorized population relation was not described")?;
+        assert_eq!(
+            planner_connection.estimate_population_at_most(&population_handle, 128)?,
+            Some(0),
+            "a fresh committed count is usable when the whole table is authorized"
+        );
         let bound = bind_select_request_via_metadata(
             &encode_select("planner_stats", "observations", "value"),
             &mut planner_connection,
