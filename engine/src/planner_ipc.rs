@@ -1497,22 +1497,24 @@ mod scan_estimate_request_tests {
 
         let join_estimate = DescribePlanRelationRequest {
             include_scan_estimate: false,
-            population_estimate_max_rows: Some(4096),
+            population_estimate_max_rows: Some(
+                crate::optimizer_plan::JOIN_POPULATION_ESTIMATE_MAX_ROWS,
+            ),
             ..opted_in
         };
         let encoded = join_estimate.encode().unwrap();
-        assert_eq!(&encoded[encoded.len() - 4..], &[0x52, 0x07, 16, 0]);
+        assert_eq!(&encoded[encoded.len() - 4..], &[0x52, 0x07, 64, 0]);
         assert_eq!(
             DescribePlanRelationRequest::decode(&encoded).unwrap(),
             join_estimate
         );
         let mut over_budget = encoded;
         let budget_offset = over_budget.len() - 2;
-        over_budget[budget_offset..].copy_from_slice(&4097u16.to_be_bytes());
+        over_budget[budget_offset..].copy_from_slice(&16385u16.to_be_bytes());
         assert!(DescribePlanRelationRequest::decode(&over_budget).is_err());
         assert!(
             DescribePlanRelationRequest {
-                population_estimate_max_rows: Some(4097),
+                population_estimate_max_rows: Some(16385),
                 ..join_estimate.clone()
             }
             .encode()

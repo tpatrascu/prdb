@@ -1,5 +1,12 @@
 # Statistics Service Progress
 
+## ST-2 / OP-4 follow-up: extend authorized join-population estimates to 16,384 — implemented
+
+- Contract: join planning may request exact authorized population counts through 16,384 rows, with the row-key fallback stopping after 16,385 candidates. Fresh committed population records remain eligible only under the full-visible policy proof and pinned snapshot; current-actor overlay deltas remain bounded to 16,384 row IDs. Exact join-pair estimation remains separately capped at 4,096 rows per side.
+- Red/green: planner IPC initially rejected the newly requested 16,384-row population limit. After widening the request bound, the optimizer-process regression exposed a second issue: a known 17×4,097 population with unavailable pair cardinality selected hash instead of retaining the measured indexed fallback. Planning now retains that deterministic index preference only when pair cardinality is `Unknown`; known high fanout still selects hash.
+- Verification: direct transaction profiles returned exact counts for 4,097 and 16,384 visible rows and `Unknown` for 16,385. The planner IPC boundary and process-protocol regressions passed. A delegated confined SQL acceptance selected kind 17 for the 17×4,097 case, returned all 17 pairs, and overlapped 192 operational reads and 192 commits. Workspace build, format check, warning-denied Clippy, and the complete delegated serial workspace suite passed: 409 library tests, 206 commit tests, 3 metadata-process tests, 85 transaction tests, all other targets, and no ignored tests.
+- Remaining: this expands bounded population orientation, not exact pair estimates or general cost comparison. Populations above 16,384, broader join distributions, estimate overhead, and target-host workload evidence remain open.
+
 ## Fresh delegated workspace verification — passed
 
 - The earlier delegated `cargo test --workspace` unit remained blocked in the commit integration binary for over three hours. A fresh delegated run of the complete commit integration target passed all 206 tests in 153 seconds, including sandboxed SQL and optimizer cancellation.

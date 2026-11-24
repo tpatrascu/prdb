@@ -1853,6 +1853,8 @@ mod tests {
                                 proven_empty: false,
                                 visible_rows_estimate: Some(if name == "lefts" {
                                     17
+                                } else if request_id >= 260 {
+                                    4097
                                 } else {
                                     2048
                                 }),
@@ -1885,16 +1887,17 @@ mod tests {
                             estimate_request.right_key_column_ids,
                             vec![[0x51; 16], [0x52; 16]]
                         );
+                        let estimate_response = if request_id >= 260 {
+                            crate::planner_ipc::EstimateJoinResponse::Unknown
+                        } else {
+                            crate::planner_ipc::EstimateJoinResponse::Exact { joined_rows: 17 }
+                        };
                         crate::ipc::write_frame(
                             &mut planner_server,
                             &IpcFrame {
                                 operation: estimate.operation,
                                 request_id: estimate.request_id,
-                                payload: crate::planner_ipc::EstimateJoinResponse::Exact {
-                                    joined_rows: 17,
-                                }
-                                .encode()
-                                .unwrap(),
+                                payload: estimate_response.encode().unwrap(),
                             },
                         )
                         .unwrap();
@@ -1956,6 +1959,10 @@ mod tests {
             )
             .unwrap();
             assert_eq!(plan.right_scan_columns.len(), 3);
+            assert!(
+                plan.index_nested_loop.is_some(),
+                "a 17-row outer and 4,097-row indexed input should retain the measured indexed fallback when exact fanout is unavailable"
+            );
             let filter = plan.filter.unwrap();
             assert_eq!(
                 filter.relation_side,

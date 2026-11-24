@@ -55,8 +55,9 @@ pub(crate) const FANOUT_AWARE_JOIN_OUTER_MAX_ROWS: u64 = 18;
 pub(crate) const FANOUT_AWARE_JOIN_INPUT_RATIO: u64 = 8;
 const FANOUT_AWARE_JOIN_LARGE_OUTER_INPUT_RATIO: u64 = 7;
 const FANOUT_AWARE_JOIN_MAX_PAIRS_PER_OUTER_ROW: u64 = 4;
-/// Maximum row count probed for optimizer join orientation.
-pub const JOIN_POPULATION_ESTIMATE_MAX_ROWS: u64 = 4096;
+/// Maximum row count probed for optimizer join orientation. This matches the
+/// bounded candidate budget available to a planner population estimate.
+pub const JOIN_POPULATION_ESTIMATE_MAX_ROWS: u64 = 16_384;
 
 pub(crate) fn fanout_aware_join_inputs_are_eligible(outer_rows: u64, indexed_rows: u64) -> bool {
     let minimum_ratio = if outer_rows >= 17 {
@@ -4712,6 +4713,18 @@ fn select_index_nested_loop_join(
                 && joined_rows_estimate.is_some_and(|rows| {
                     rows <= right_rows * FANOUT_AWARE_JOIN_MAX_PAIRS_PER_OUTER_ROW
                 }) =>
+        {
+            return left;
+        }
+        (Some(left_rows), Some(right_rows))
+            if joined_rows_estimate.is_none()
+                && fanout_aware_join_inputs_are_eligible(left_rows, right_rows) =>
+        {
+            return right;
+        }
+        (Some(left_rows), Some(right_rows))
+            if joined_rows_estimate.is_none()
+                && fanout_aware_join_inputs_are_eligible(right_rows, left_rows) =>
         {
             return left;
         }

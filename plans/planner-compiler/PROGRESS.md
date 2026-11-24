@@ -1,5 +1,12 @@
 # Optimizer Progress
 
+## OP-4 / ST-2 follow-up: orient joins with authorized populations through 16,384 — implemented
+
+- Contract: the optimizer requests each join input's exact authorized population up to 16,384 rows. Exact join-pair estimates retain their separate 4,096-row-per-side cap. When a 9–18-row outer satisfies the measured ratio but the pair estimate is `Unknown`, the planner preserves its deterministic eligible-index fallback; an exact pair count above the four-per-outer cutoff still selects hash.
+- Red/green: the planner IPC limit regression first failed at 4,097 rows. The optimizer process regression then failed for a known 17×4,097 population with an `Unknown` pair estimate, selecting hash. After widening the population limit and retaining the fallback for unknown pair cardinality, both regressions passed.
+- Verification: direct transaction population checks passed for 4,097, 16,384, and 16,385 rows (the last remains `Unknown`). The confined SQL 17×4,097 acceptance selected kind 17, returned all 17 pairs, and ran alongside 192 reads and 192 commits.
+- Remaining: the expanded population bound does not extend exact pair estimation above 4,096. Estimate/IPC overhead, broader population and fanout profiles, general cost comparison, and target-host evidence remain open.
+
 ## OP-4 / ST-2 follow-up: use fresh indexed counts for predicate estimation — implemented and profiled
 
 - Contract: exact simple single-key equality/range predicates can count locator entries only when the same pinned snapshot has a fresh exact committed population count, policies prove all rows visible, the overlay is empty, and an eligible index starts with an unconditionally readable predicate key. The path is bounded to 1,024 locators and 16 MiB of encoded index keys; it returns no row values and does not consume executor scan-work allowance. Ineligible or over-bound requests retain the bounded row estimator.
