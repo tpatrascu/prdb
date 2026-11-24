@@ -865,6 +865,47 @@ int32_t prdb_sdk_sql_execute_insert_v1(
     return PRDB_SDK_SQL_EXEC_OK;
 }
 
+static uint64_t insert_batch_row_record_bytes(
+    const prdb_sdk_executor_insert_value_v1 *values, uint32_t value_count) {
+    uint64_t bytes = PRDB_EXECUTOR_STAGE_INSERT_REQUEST_HEADER_BYTES;
+    for (uint32_t i = 0; i < value_count; ++i) {
+        uint64_t cell_bytes = PRDB_MUTATION_CELL_TAG_RECORD_HEADER_BYTES;
+        if (values[i].state == PRDB_SDK_EXECUTOR_INSERT_VALUE) {
+            if (values[i].value.data_len > UINT64_MAX - cell_bytes -
+                    PRDB_SCALAR_VALUE_RECORD_HEADER_BYTES) return UINT64_MAX;
+            cell_bytes += PRDB_SCALAR_VALUE_RECORD_HEADER_BYTES +
+                          values[i].value.data_len;
+        }
+        if (bytes > UINT64_MAX - cell_bytes) return UINT64_MAX;
+        bytes += cell_bytes;
+    }
+    return bytes;
+}
+
+static uint32_t insert_batch_count(
+    const prdb_sdk_executor_insert_value_v1 *values, uint32_t row_count,
+    uint32_t value_count, uint64_t frame_capacity) {
+    if (frame_capacity < 8) return 0;
+    uint32_t batches = 0;
+    uint32_t first = 0;
+    while (first < row_count) {
+        uint64_t bytes = 4;
+        uint32_t count = 0;
+        while (first + count < row_count && count < 128) {
+            uint64_t record_bytes = insert_batch_row_record_bytes(
+                values + (uint64_t)(first + count) * value_count, value_count);
+            if (record_bytes == UINT64_MAX || record_bytes > UINT32_MAX ||
+                record_bytes > frame_capacity - bytes - 4) break;
+            bytes += 4 + record_bytes;
+            ++count;
+        }
+        if (count == 0) return 0;
+        first += count;
+        ++batches;
+    }
+    return batches;
+}
+
 int32_t prdb_sdk_sql_execute_insert_v2(
     const prdb_host_api_v3 *host_v3, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
@@ -883,7 +924,6 @@ int32_t prdb_sdk_sql_execute_insert_v2(
     prdb_sdk_executor_relation_v1 resolved = {0};
     uint64_t planner_response_len = 0;
     uint64_t executor_response_len = 0;
-    uint32_t inserted_count = 0;
     int32_t status;
     prdb_host_api_v2 base_host;
     const prdb_host_api_v2 *host;
@@ -939,6 +979,8 @@ int32_t prdb_sdk_sql_execute_insert_v2(
                              executor_columns)) {
         return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_SHAPE_MISMATCH);
     }
+    uint64_t required_insert_cells = (uint64_t)statement->row_count *
+                                     resolved.column_count;
     if (statement->row_count == 0 || statement->values_per_row == 0 ||
         (statement_v3.column_count == 0 &&
          statement->values_per_row != resolved.column_count) ||
@@ -946,7 +988,7 @@ int32_t prdb_sdk_sql_execute_insert_v2(
          statement_v3.column_count != statement->values_per_row) ||
         statement_v3.column_count > resolved.column_count ||
         resolved.column_count > PRDB_SDK_SQL_MAX_INSERT_VALUES ||
-        resolved.column_count > insert_value_capacity) {
+        required_insert_cells > insert_value_capacity) {
         return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_BIND_ERROR);
     }
 
@@ -977,24 +1019,20 @@ int32_t prdb_sdk_sql_execute_insert_v2(
     }
 
     for (uint32_t row = 0; row < statement->row_count; ++row) {
-        uint8_t row_handle[16];
-        int32_t cancelled = 0;
         uint32_t first_cell = row * statement->values_per_row;
-        status = prdb_sdk_executor_check_cancelled_v1(host, &cancelled);
-        if (status != PRDB_SDK_EXECUTOR_OK || cancelled) {
-            return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
-        }
+        prdb_sdk_executor_insert_value_v1 *row_values =
+            insert_values + (uint64_t)row * resolved.column_count;
         for (uint32_t ordinal = 0; ordinal < resolved.column_count; ++ordinal) {
-            insert_values[ordinal].struct_size = sizeof(insert_values[ordinal]);
-            insert_values[ordinal].abi_version = PRDB_SDK_EXECUTOR_ABI_V1_VERSION;
-            insert_values[ordinal].state = PRDB_SDK_EXECUTOR_INSERT_DEFAULT;
-            insert_values[ordinal].value = (prdb_sdk_value_v1){0};
+            row_values[ordinal].struct_size = sizeof(row_values[ordinal]);
+            row_values[ordinal].abi_version = PRDB_SDK_EXECUTOR_ABI_V1_VERSION;
+            row_values[ordinal].state = PRDB_SDK_EXECUTOR_INSERT_DEFAULT;
+            row_values[ordinal].value = (prdb_sdk_value_v1){0};
         }
         for (uint32_t column = 0; column < statement->values_per_row; ++column) {
             const prdb_sdk_sql_insert_cell_v1 *cell =
                 &statement->base.values[first_cell + column];
             uint32_t target = target_ordinals[column];
-            prdb_sdk_executor_insert_value_v1 *input = &insert_values[target];
+            prdb_sdk_executor_insert_value_v1 *input = &row_values[target];
             input->struct_size = sizeof(*input);
             input->abi_version = PRDB_SDK_EXECUTOR_ABI_V1_VERSION;
             input->state = cell->kind;
@@ -1024,17 +1062,47 @@ int32_t prdb_sdk_sql_execute_insert_v2(
                                       PRDB_SDK_SQL_EXEC_BIND_ERROR);
             }
         }
-        status = prdb_sdk_executor_stage_insert_v1(
-            host, resolved.executor_handle, insert_values,
-            (uint16_t)resolved.column_count, insert_request,
+    }
+    uint64_t frame_capacity = insert_request_capacity <
+            PRDB_QUERY_MAX_IPC_REQUEST_BYTES
+        ? insert_request_capacity : PRDB_QUERY_MAX_IPC_REQUEST_BYTES;
+    uint32_t batches = insert_batch_count(insert_values, statement->row_count,
+                                           resolved.column_count, frame_capacity);
+    if (batches == 0 || 2U + batches * 2U > 256U) {
+        return fail_statement(host_v3, batches == 0
+            ? PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR : PRDB_SDK_SQL_EXEC_REQUEST_LIMIT);
+    }
+    uint8_t row_handles[128 * 16];
+    for (uint32_t first = 0; first < statement->row_count;) {
+        uint64_t bytes = 4;
+        uint32_t count = 0;
+        while (first + count < statement->row_count && count < 128) {
+            uint64_t record_bytes = insert_batch_row_record_bytes(
+                insert_values + (uint64_t)(first + count) * resolved.column_count,
+                resolved.column_count);
+            if (record_bytes == UINT64_MAX || record_bytes > UINT32_MAX ||
+                record_bytes > frame_capacity - bytes - 4) break;
+            bytes += 4 + record_bytes;
+            ++count;
+        }
+        int32_t cancelled = 0;
+        status = prdb_sdk_executor_check_cancelled_v1(host, &cancelled);
+        if (status != PRDB_SDK_EXECUTOR_OK || cancelled) {
+            return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
+        }
+        status = prdb_sdk_executor_stage_inserts_v1(
+            host, resolved.executor_handle,
+            insert_values + (uint64_t)first * resolved.column_count,
+            (uint16_t)count, (uint16_t)resolved.column_count, insert_request,
             insert_request_capacity, executor_response,
-            executor_response_capacity, &executor_response_len, row_handle);
+            executor_response_capacity, &executor_response_len, row_handles,
+            sizeof(row_handles));
         if (status != PRDB_SDK_EXECUTOR_OK) {
             return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
         }
-        ++inserted_count;
+        first += count;
     }
-    *inserted_count_out = inserted_count;
+    *inserted_count_out = statement->row_count;
     return PRDB_SDK_SQL_EXEC_OK;
 }
 
@@ -1270,19 +1338,64 @@ int32_t prdb_sdk_sql_execute_update_v1(
     if (final_status != PRDB_SDK_SQL_EXEC_OK) {
         return fail_statement(host_v3, final_status);
     }
-    if (2U + page_count + close_count + target_count > 256U) {
+    uint64_t update_record_bytes = PRDB_EXECUTOR_STAGE_UPDATE_REQUEST_HEADER_BYTES;
+    for (uint32_t patch_index = 0; patch_index < statement.assignment_count;
+         ++patch_index) {
+        const prdb_sdk_executor_update_patch_v1 *patch = &patches[patch_index];
+        uint64_t cell_bytes = PRDB_PATCH_ORDINAL_RECORD_HEADER_BYTES +
+                              PRDB_MUTATION_CELL_TAG_RECORD_HEADER_BYTES;
+        if (patch->value.state == PRDB_SDK_VALUE_STATE_VALUE) {
+            if (patch->value.data_len > UINT64_MAX - cell_bytes -
+                    PRDB_SCALAR_VALUE_RECORD_HEADER_BYTES) {
+                return fail_statement(host_v3,
+                                      PRDB_SDK_SQL_EXEC_REQUEST_LIMIT);
+            }
+            cell_bytes += PRDB_SCALAR_VALUE_RECORD_HEADER_BYTES +
+                          patch->value.data_len;
+        }
+        if (update_record_bytes > UINT64_MAX - cell_bytes) {
+            return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_REQUEST_LIMIT);
+        }
+        update_record_bytes += cell_bytes;
+    }
+    uint64_t update_frame_capacity = update_request_capacity <
+            PRDB_QUERY_MAX_IPC_REQUEST_BYTES
+        ? update_request_capacity : PRDB_QUERY_MAX_IPC_REQUEST_BYTES;
+    if (update_record_bytes > UINT32_MAX || update_frame_capacity <= 4 ||
+        update_record_bytes + 4 > update_frame_capacity) {
+        return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
+    }
+    uint32_t rows_per_update_batch = (uint32_t)((update_frame_capacity - 4) /
+        (update_record_bytes + 4));
+    if (rows_per_update_batch == 0) {
+        return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
+    }
+    uint32_t update_batch_count = target_count == 0 ? 0 :
+        (target_count + rows_per_update_batch - 1) / rows_per_update_batch;
+    if (2U + page_count + close_count + update_batch_count +
+            (update_batch_count != 0) > 256U) {
         return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_REQUEST_LIMIT);
     }
-    for (uint32_t index = 0; index < target_count; ++index) {
-        status = prdb_sdk_executor_stage_update_v1(
-            host, target_handles + (uint64_t)index * 16, patches,
-            (uint16_t)statement.assignment_count, update_request,
+    if (update_batch_count != 0) {
+        int32_t cancelled = 0;
+        status = prdb_sdk_executor_check_cancelled_v1(host, &cancelled);
+        if (status != PRDB_SDK_EXECUTOR_OK || cancelled) {
+            return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
+        }
+    }
+    for (uint32_t first = 0; first < target_count;) {
+        uint32_t count = target_count - first;
+        if (count > rows_per_update_batch) count = rows_per_update_batch;
+        status = prdb_sdk_executor_stage_updates_v1(
+            host, target_handles + (uint64_t)first * 16, (uint16_t)count,
+            patches, (uint16_t)statement.assignment_count, update_request,
             update_request_capacity, executor_response,
             executor_response_capacity, &executor_response_len);
         if (status != PRDB_SDK_EXECUTOR_OK) {
             return fail_statement(host_v3,
                                   PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
         }
+        first += count;
     }
     *updated_count_out = target_count;
     return PRDB_SDK_SQL_EXEC_OK;
@@ -1481,17 +1594,38 @@ int32_t prdb_sdk_sql_execute_delete_v1(
     if (final_status != PRDB_SDK_SQL_EXEC_OK) {
         return fail_statement(host_v3, final_status);
     }
-    if (2U + page_count + close_count + target_count > 256U) {
+    uint64_t delete_frame_capacity = batch_response_capacity <
+            PRDB_QUERY_MAX_IPC_REQUEST_BYTES
+        ? batch_response_capacity : PRDB_QUERY_MAX_IPC_REQUEST_BYTES;
+    if (delete_frame_capacity < 26) {
+        return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
+    }
+    uint32_t rows_per_delete_batch = (uint32_t)((delete_frame_capacity - 4) / 22);
+    uint32_t delete_batch_count = target_count == 0 ? 0 :
+        (target_count + rows_per_delete_batch - 1) / rows_per_delete_batch;
+    if (2U + page_count + close_count + delete_batch_count +
+            (delete_batch_count != 0) > 256U) {
         return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_REQUEST_LIMIT);
     }
-    for (uint32_t index = 0; index < target_count; ++index) {
-        status = prdb_sdk_executor_stage_delete_v1(
-            host, target_handles + (uint64_t)index * 16, executor_response,
+    if (delete_batch_count != 0) {
+        int32_t cancelled = 0;
+        status = prdb_sdk_executor_check_cancelled_v1(host, &cancelled);
+        if (status != PRDB_SDK_EXECUTOR_OK || cancelled) {
+            return fail_statement(host_v3, PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
+        }
+    }
+    for (uint32_t first = 0; first < target_count;) {
+        uint32_t count = target_count - first;
+        if (count > rows_per_delete_batch) count = rows_per_delete_batch;
+        status = prdb_sdk_executor_stage_deletes_v1(
+            host, target_handles + (uint64_t)first * 16, (uint16_t)count,
+            batch_response, batch_response_capacity, executor_response,
             executor_response_capacity, &executor_response_len);
         if (status != PRDB_SDK_EXECUTOR_OK) {
             return fail_statement(host_v3,
                                   PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
         }
+        first += count;
     }
     *deleted_count_out = target_count;
     return PRDB_SDK_SQL_EXEC_OK;

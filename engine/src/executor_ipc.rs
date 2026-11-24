@@ -1453,7 +1453,7 @@ impl StageInsertsRequest {
     pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
         let rows = decode_mutation_batch(payload)?
             .into_iter()
-            .map(|bytes| StageInsertRequest::decode(bytes))
+            .map(StageInsertRequest::decode)
             .collect::<Result<Vec<_>, _>>()?;
         if rows.is_empty()
             || rows.iter().any(|row| {
@@ -1480,7 +1480,7 @@ impl StageUpdatesRequest {
     pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
         let rows = decode_mutation_batch(payload)?
             .into_iter()
-            .map(|bytes| StageUpdateRequest::decode(bytes))
+            .map(StageUpdateRequest::decode)
             .collect::<Result<Vec<_>, _>>()?;
         validate_unique_batch_handles(rows.iter().map(|row| row.handle.to_bytes()))?;
         Ok(Self { rows })
@@ -1509,7 +1509,7 @@ impl StageDeletesRequest {
     }
 }
 
-fn encode_mutation_batch<'a>(
+fn encode_mutation_batch(
     records: impl Iterator<Item = Result<Vec<u8>, ExecutorRequestError>>,
 ) -> Result<Vec<u8>, ExecutorRequestError> {
     const MAX_ROWS: usize = 4096;

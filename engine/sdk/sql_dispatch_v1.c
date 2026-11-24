@@ -1422,8 +1422,15 @@ int32_t prdb_sdk_sql_run_statement_v1(
     if (prdb_sdk_sql_parse_insert_v3(
             sql, sql_len, &insert_statement, sizeof(insert_statement), NULL) ==
         PRDB_SDK_SQL_OK) {
+        uint64_t insert_cell_capacity =
+            (uint64_t)insert_statement.base.row_count *
+            PRDB_SDK_SQL_MAX_RELATION_COLUMNS;
+        if (insert_cell_capacity > UINT32_MAX) {
+            status = PRDB_SDK_SQL_DISPATCH_RESOURCE_ERROR;
+            goto resource_error;
+        }
         insert_values = (prdb_sdk_executor_insert_value_v1 *)dispatch_calloc(
-            PRDB_SDK_SQL_MAX_RELATION_COLUMNS, sizeof(*insert_values),
+            (uint32_t)insert_cell_capacity, sizeof(*insert_values),
             &allocated_heap_bytes);
         if (insert_values == NULL) {
             status = PRDB_SDK_SQL_DISPATCH_RESOURCE_ERROR;
@@ -1437,7 +1444,7 @@ int32_t prdb_sdk_sql_run_statement_v1(
             PRDB_QUERY_MAX_IPC_REQUEST_BYTES, planner_columns,
             PRDB_SDK_SQL_MAX_RELATION_COLUMNS, executor_columns,
             PRDB_SDK_SQL_MAX_RELATION_COLUMNS, insert_values,
-            PRDB_SDK_SQL_MAX_RELATION_COLUMNS, &inserted_count);
+            (uint32_t)insert_cell_capacity, &inserted_count);
     } else if (prdb_sdk_sql_parse_update_v1(
                    sql, sql_len, &update_statement, sizeof(update_statement),
                    NULL) == PRDB_SDK_SQL_OK) {

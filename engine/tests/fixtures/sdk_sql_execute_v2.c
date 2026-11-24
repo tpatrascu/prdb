@@ -328,6 +328,31 @@ static int32_t executor_request(void *context, uint16_t operation,
         assert(sizeof(reply) <= capacity);
         memcpy(response, reply, sizeof(reply));
         *response_len = sizeof(reply);
+    } else if (operation == PRDB_SDK_EXECUTOR_OP_STAGE_UPDATES) {
+        uint8_t expected_row[] = {
+            0, 1, 8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+            0, 1, 0, 0, 0, 0, 0, PRDB_SDK_VALUE_TYPE_INTEGER,
+            0, 0, 0, 4, 0, 0, 0, 4};
+        static const uint8_t reply[] = {0, 1, 0};
+        assert(request_len >= 4 && request[0] == 0 && request[1] == 1);
+        uint32_t count = ((uint32_t)request[2] << 8) | request[3];
+        uint32_t offset = 4;
+        assert(count > 0);
+        for (uint32_t row = 0; row < count; ++row) {
+            uint32_t length = ((uint32_t)request[offset] << 24) |
+                ((uint32_t)request[offset + 1] << 16) |
+                ((uint32_t)request[offset + 2] << 8) | request[offset + 3];
+            offset += 4;
+            assert(length == sizeof(expected_row));
+            if (mock->stage_handles_repeated)
+                memset(expected_row + 3, (int)(mock->stage_update_calls + 1), 15);
+            assert(memcmp(request + offset, expected_row, length) == 0);
+            ++mock->stage_update_calls;
+            offset += length;
+        }
+        assert(offset == request_len && sizeof(reply) <= capacity);
+        memcpy(response, reply, sizeof(reply));
+        *response_len = sizeof(reply);
     } else if (operation == PRDB_SDK_EXECUTOR_OP_STAGE_UPDATE) {
         uint8_t expected[] = {
             0, 1, 8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
@@ -344,6 +369,29 @@ static int32_t executor_request(void *context, uint16_t operation,
         memcpy(response, reply, sizeof(reply));
         *response_len = sizeof(reply);
         ++mock->stage_update_calls;
+    } else if (operation == PRDB_SDK_EXECUTOR_OP_STAGE_DELETES) {
+        uint8_t expected_row[] = {0, 1, 8, 1, 2, 3, 4, 5, 6,
+                                  7, 8, 9, 10, 11, 12, 13, 14, 15};
+        static const uint8_t reply[] = {0, 1, 0};
+        assert(request_len >= 4 && request[0] == 0 && request[1] == 1);
+        uint32_t count = ((uint32_t)request[2] << 8) | request[3];
+        uint32_t offset = 4;
+        assert(count > 0);
+        for (uint32_t row = 0; row < count; ++row) {
+            uint32_t length = ((uint32_t)request[offset] << 24) |
+                ((uint32_t)request[offset + 1] << 16) |
+                ((uint32_t)request[offset + 2] << 8) | request[offset + 3];
+            offset += 4;
+            assert(length == sizeof(expected_row));
+            if (mock->stage_handles_repeated)
+                memset(expected_row + 3, (int)(mock->stage_delete_calls + 1), 15);
+            assert(memcmp(request + offset, expected_row, length) == 0);
+            ++mock->stage_delete_calls;
+            offset += length;
+        }
+        assert(offset == request_len && sizeof(reply) <= capacity);
+        memcpy(response, reply, sizeof(reply));
+        *response_len = sizeof(reply);
     } else if (operation == PRDB_SDK_EXECUTOR_OP_STAGE_DELETE) {
         uint8_t expected[] = {0, 1, 8, 1, 2, 3, 4, 5, 6,
                               7, 8, 9, 10, 11, 12, 13, 14, 15};
@@ -358,6 +406,69 @@ static int32_t executor_request(void *context, uint16_t operation,
         memcpy(response, reply, sizeof(reply));
         *response_len = sizeof(reply);
         ++mock->stage_delete_calls;
+    } else if (operation == PRDB_SDK_EXECUTOR_OP_STAGE_INSERTS) {
+        assert(request_len >= 4 && request[0] == 0 && request[1] == 1);
+        uint32_t count = ((uint32_t)request[2] << 8) | request[3];
+        uint32_t offset = 4;
+        assert(count > 0 && count <= 128);
+        if (mock->check_column_list_insert) {
+            static const uint8_t expected_handle[18] = {
+                0, 1, 6, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
+                0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22};
+            assert(count == 1);
+            uint32_t length = ((uint32_t)request[offset] << 24) |
+                ((uint32_t)request[offset + 1] << 16) |
+                ((uint32_t)request[offset + 2] << 8) | request[offset + 3];
+            offset += 4;
+            assert(length == 39 && request_len == 47);
+            assert(memcmp(request + offset, expected_handle, sizeof(expected_handle)) == 0);
+            assert(request[offset + 18] == 0 && request[offset + 19] == 3);
+            assert(request[offset + 20] == PRDB_SDK_EXECUTOR_INSERT_VALUE &&
+                   request[offset + 21] == PRDB_SDK_VALUE_TYPE_INTEGER &&
+                   request[offset + 25] == 4 && request[offset + 29] == 42);
+            assert(request[offset + 30] == PRDB_SDK_EXECUTOR_INSERT_DEFAULT);
+            assert(request[offset + 31] == PRDB_SDK_EXECUTOR_INSERT_VALUE &&
+                   request[offset + 32] == PRDB_SDK_VALUE_TYPE_BYTEA &&
+                   request[offset + 36] == 2 && request[offset + 37] == 0xaa &&
+                   request[offset + 38] == 0xbb);
+            assert(offset + length == request_len && 20 <= capacity);
+            response[0] = 0; response[1] = 1; response[3] = 1;
+            response[4] = 8; memset(response + 5, 0x66, 15);
+            *response_len = 20;
+            ++mock->column_list_insert_calls;
+            goto stage_inserts_done;
+        }
+        for (uint32_t row = 0; row < count; ++row) {
+            uint32_t length = ((uint32_t)request[offset] << 24) |
+                ((uint32_t)request[offset + 1] << 16) |
+                ((uint32_t)request[offset + 2] << 8) | request[offset + 3];
+            offset += 4;
+            assert(length == 30);
+            assert(request[offset] == 0 && request[offset + 1] == 1 &&
+                   request[offset + 2] == 6);
+            assert(request[offset + 18] == 0 && request[offset + 19] == 1);
+            uint8_t expected_value = (uint8_t)(42 + mock->multi_insert_calls);
+            assert(request[offset + 20] == PRDB_SDK_EXECUTOR_INSERT_VALUE &&
+                   request[offset + 21] == PRDB_SDK_VALUE_TYPE_INTEGER &&
+                   request[offset + 25] == 4 && request[offset + 29] == expected_value);
+            ++mock->multi_insert_calls;
+            offset += length;
+        }
+        assert(offset == request_len);
+        if (mock->fail_multi_insert_at != 0 &&
+            mock->multi_insert_calls >= mock->fail_multi_insert_at) {
+            *response_len = 0;
+        } else {
+            assert(4 + count * 16 <= capacity);
+            response[0] = 0; response[1] = 1;
+            response[2] = request[2]; response[3] = request[3];
+            for (uint32_t row = 0; row < count; ++row) {
+                response[4 + row * 16] = 8;
+                memset(response + 5 + row * 16, 0x66, 15);
+            }
+            *response_len = 4 + count * 16;
+        }
+stage_inserts_done: ;
     } else if (operation == PRDB_SDK_EXECUTOR_OP_STAGE_INSERT) {
         if (mock->check_column_list_insert) {
             static const uint8_t expected_handle[18] = {
@@ -1060,9 +1171,9 @@ int main(void) {
     mock.planner_len = make_relation_three(
         planner_payload, PRDB_SDK_PLANNER_TABLE_HANDLE_KIND, 0x99);
     mock.executor_len = make_relation_three(executor_payload, 6, 0x22);
-    uint8_t insert_request[64] = {0};
+    uint8_t insert_request[256] = {0};
     uint8_t inserted_row_handle[16] = {0};
-    prdb_sdk_executor_insert_value_v1 insert_values[3] = {{0}};
+    prdb_sdk_executor_insert_value_v1 insert_values[6] = {{0}};
     assert(prdb_sdk_sql_execute_insert_v1(
                &host, schema, sizeof(schema) - 1, insert_sql,
                sizeof(insert_sql) - 1, &insert_parameter, 1,
@@ -1092,10 +1203,11 @@ int main(void) {
                planner_response, sizeof(planner_response), executor_response,
                sizeof(executor_response), insert_request,
                sizeof(insert_request), planner_columns, 3, executor_columns,
-               3, insert_values, 3, &inserted_count);
+               3, insert_values, 6, &inserted_count);
     assert(multi_status == PRDB_SDK_SQL_EXEC_OK);
     assert(inserted_count == 2 && mock.multi_insert_calls == 2);
-    assert(mock.cancellation_checks == 2 && mock.executor_calls == 3);
+    assert(mock.cancellation_checks == 1);
+    assert(mock.executor_calls == 2);
     assert(mock.planner_calls == 1 && mock.statement_failed == 0);
 
     mock.planner_calls = 0;
@@ -1110,8 +1222,8 @@ int main(void) {
                sizeof(multi_insert_sql) - 1, multi_parameters, 2,
                planner_response, sizeof(planner_response), executor_response,
                sizeof(executor_response), insert_request,
-               sizeof(insert_request), planner_columns, 3, executor_columns,
-               3, insert_values, 3, &inserted_count) ==
+               64, planner_columns, 3, executor_columns,
+               3, insert_values, 6, &inserted_count) ==
            PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
     assert(inserted_count == UINT32_C(0xbeef));
     assert(mock.multi_insert_calls == 2 && mock.statement_failed == 1);
@@ -1121,7 +1233,7 @@ int main(void) {
     mock.multi_insert_calls = 0;
     mock.cancellation_checks = 0;
     mock.fail_multi_insert_at = 0;
-    mock.cancel_after_checks = 2;
+    mock.cancel_after_checks = 1;
     mock.statement_failed = 0;
     inserted_count = UINT32_C(0xcafe);
     assert(prdb_sdk_sql_execute_insert_v2(
@@ -1130,10 +1242,10 @@ int main(void) {
                planner_response, sizeof(planner_response), executor_response,
                sizeof(executor_response), insert_request,
                sizeof(insert_request), planner_columns, 3, executor_columns,
-               3, insert_values, 3, &inserted_count) ==
+               3, insert_values, 6, &inserted_count) ==
            PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
     assert(inserted_count == UINT32_C(0xcafe));
-    assert(mock.multi_insert_calls == 1 && mock.statement_failed == 1);
+    assert(mock.multi_insert_calls == 0 && mock.statement_failed == 1);
     mock.accept_multi_insert = 0;
     mock.cancel_after_checks = 0;
     mock.planner_len = make_relation_three(
@@ -1152,7 +1264,7 @@ int main(void) {
                planner_response, sizeof(planner_response), executor_response,
                sizeof(executor_response), insert_request,
                sizeof(insert_request), planner_columns, 3, executor_columns,
-               3, insert_values, 3, &inserted_count) == PRDB_SDK_SQL_EXEC_OK);
+               3, insert_values, 6, &inserted_count) == PRDB_SDK_SQL_EXEC_OK);
     assert(inserted_count == 1 && mock.column_list_insert_calls == 1);
     assert(mock.planner_calls == 1 && mock.executor_calls == 2);
     assert(mock.statement_failed == 0);
@@ -1341,7 +1453,7 @@ int main(void) {
                1, &update_binding, sizeof(update_binding), update_cell_scratch,
                1, update_targets, 2, &deleted_count) == PRDB_SDK_SQL_EXEC_OK);
     assert(deleted_count == 2 && mock.stage_delete_calls == 2 &&
-           mock.planner_calls == 1 && mock.executor_calls == 6 &&
+           mock.planner_calls == 1 && mock.executor_calls == 5 &&
            mock.statement_failed == 0);
     mock.stage_handles_repeated = 0;
     mock.require_finished_scan_before_stage = 0;
@@ -1366,7 +1478,7 @@ int main(void) {
                1, &update_binding, sizeof(update_binding), update_cell_scratch,
                1, update_targets, 3, &deleted_count) == PRDB_SDK_SQL_EXEC_OK);
     assert(deleted_count == 3 && mock.stage_delete_calls == 3 &&
-           mock.planner_calls == 1 && mock.executor_calls == 7 &&
+           mock.planner_calls == 1 && mock.executor_calls == 5 &&
            mock.statement_failed == 0 && mock.scan_finished);
 
     mock.batch = max_rows_batch;
@@ -1390,7 +1502,7 @@ int main(void) {
                &deleted_count) == PRDB_SDK_SQL_EXEC_OK);
     assert(deleted_count == PRDB_SDK_SQL_EXEC_MAX_MUTATION_TARGETS &&
            mock.stage_delete_calls == PRDB_SDK_SQL_EXEC_MAX_MUTATION_TARGETS &&
-           mock.planner_calls == 1 && mock.executor_calls == 132 &&
+           mock.planner_calls == 1 && mock.executor_calls == 5 &&
            mock.statement_failed == 0 && mock.scan_finished);
     mock.stage_handles_repeated = 0;
     mock.require_finished_scan_before_stage = 0;

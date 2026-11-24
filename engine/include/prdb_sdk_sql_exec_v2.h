@@ -92,9 +92,10 @@ int32_t prdb_sdk_sql_execute_insert_v1(
     uint32_t insert_value_capacity,
     uint8_t row_handle_out[16]);
 
-/* Stages each row of a bounded multi-row INSERT within the same invocation
- * transaction. If a later row fails, statement_failure aborts all earlier
- * staged rows. inserted_count_out is written only after every row succeeds. */
+/* Binds all rows into caller scratch, then stages payload-bounded batches in
+ * one invocation transaction. insert_value_capacity is measured in cells and
+ * must hold row_count * the resolved relation column count. If a later batch
+ * fails, statement_failure aborts earlier staged rows too. */
 int32_t prdb_sdk_sql_execute_insert_v2(
     const prdb_host_api_v3 *host,
     const uint8_t *schema, uint32_t schema_len,

@@ -269,18 +269,22 @@ static int32_t unused_executor_request(
             return PRDB_QUERY_CALLBACK_RESPONSE_TOO_SMALL;
         memcpy(response, context->executor_reply, context->executor_reply_len);
         *response_len = context->executor_reply_len;
-    } else if (operation == PRDB_SDK_EXECUTOR_OP_STAGE_INSERT) {
+    } else if (operation == PRDB_SDK_EXECUTOR_OP_STAGE_INSERTS) {
         static const uint8_t insert_cells[] = {
             0, 2,
             PRDB_SDK_EXECUTOR_INSERT_VALUE, PRDB_SDK_VALUE_TYPE_INTEGER,
             0, 0, 0, 4, 0xff, 0xff, 0xff, 0xd6,
             PRDB_SDK_EXECUTOR_INSERT_NULL};
-        uint8_t reply[18] = {0, 1, 8};
-        if (request_len != 18 + sizeof(insert_cells) ||
-            memcmp(request + 18, insert_cells, sizeof(insert_cells)) != 0 ||
+        uint8_t reply[20] = {0, 1, 0, 1, 8};
+        if (request_len != 8 + 18 + sizeof(insert_cells) ||
+            request[0] != 0 || request[1] != 1 || request[2] != 0 ||
+            request[3] != 1 ||
+            (((uint32_t)request[4] << 24) | ((uint32_t)request[5] << 16) |
+             ((uint32_t)request[6] << 8) | request[7]) != 18 + sizeof(insert_cells) ||
+            memcmp(request + 8 + 18, insert_cells, sizeof(insert_cells)) != 0 ||
             sizeof(reply) > response_capacity)
             return PRDB_QUERY_CALLBACK_INVALID_ARGUMENT;
-        memset(reply + 3, 0x44, 15);
+        memset(reply + 5, 0x44, 15);
         memcpy(response, reply, sizeof(reply));
         *response_len = sizeof(reply);
         ++context->insert_calls;

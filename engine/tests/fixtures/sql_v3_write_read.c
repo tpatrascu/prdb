@@ -129,7 +129,8 @@ static int32_t cancel_update_executor_request(
         response == NULL || response_len == NULL) {
         return PRDB_QUERY_CALLBACK_INVALID_ARGUMENT;
     }
-    if (operation == PRDB_IPC_OP_STAGE_UPDATE &&
+    if ((operation == PRDB_IPC_OP_STAGE_UPDATE ||
+         operation == PRDB_IPC_OP_STAGE_UPDATES) &&
         fail_next_stage_update != 0) {
         static const uint8_t injected[] = "UPDATE_STAGE_FAILURE_INJECTED";
         fail_next_stage_update = 0;
@@ -137,7 +138,8 @@ static int32_t cancel_update_executor_request(
             context, injected, sizeof(injected) - 1);
         return PRDB_QUERY_CALLBACK_IO_ERROR;
     }
-    if (operation == PRDB_IPC_OP_STAGE_UPDATE &&
+    if ((operation == PRDB_IPC_OP_STAGE_UPDATE ||
+         operation == PRDB_IPC_OP_STAGE_UPDATES) &&
         observe_next_stage_update != 0) {
         static const uint8_t reached[] = "UPDATE_STAGE_REACHED";
         observe_next_stage_update = 0;
@@ -150,7 +152,8 @@ static int32_t cancel_update_executor_request(
         int32_t status = cancel_update_original_host->v4.v3.executor_request(
             context, operation, request, request_len, response,
             response_capacity, response_len);
-        if (operation == PRDB_IPC_OP_STAGE_UPDATE) {
+        if (operation == PRDB_IPC_OP_STAGE_UPDATE ||
+            operation == PRDB_IPC_OP_STAGE_UPDATES) {
             static const uint8_t returned[] = "UPDATE_STAGE_RETURNED";
             if (cancel_update_original_host->v4.v3.write_result(
                     context, returned, sizeof(returned) - 1) != 0) {
