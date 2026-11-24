@@ -44,6 +44,7 @@ typedef struct mock_state {
     uint32_t range_calls;
     uint32_t prefix_calls;
     uint16_t range_row_count;
+    uint32_t max_index_probe_candidates;
     int32_t range_value_base;
     uint8_t repeat_range_values;
     uint8_t vary_range_by_probe;
@@ -507,7 +508,22 @@ static int32_t executor_request(void *context, uint16_t operation,
     mock_state *mock = (mock_state *)context;
     ++mock->executor_requests;
     assert(mock->executor_requests <= 256);
-    if (operation == PRDB_SDK_EXECUTOR_OP_CHECK_CANCELLATION) {
+    if (operation == PRDB_SDK_EXECUTOR_OP_GET_WORKLOAD_BUDGETS) {
+        assert(request_len == 0 && capacity >= 12);
+        memcpy(response, "PQB1", 4);
+        response[4] = 0;
+        response[5] = PRDB_QUERY_WORKLOAD_BUDGETS_VERSION;
+        response[6] = 0;
+        response[7] = 12;
+        uint32_t candidates = mock->max_index_probe_candidates == 0
+            ? PRDB_MAX_SQL_INDEX_PROBE_CANDIDATES
+            : mock->max_index_probe_candidates;
+        response[8] = (uint8_t)(candidates >> 24);
+        response[9] = (uint8_t)(candidates >> 16);
+        response[10] = (uint8_t)(candidates >> 8);
+        response[11] = (uint8_t)candidates;
+        *response_len = 12;
+    } else if (operation == PRDB_SDK_EXECUTOR_OP_CHECK_CANCELLATION) {
         uint8_t reply[] = {0, 1, 0};
         assert(request_len == 0 && sizeof(reply) <= capacity);
         ++mock->check_cancel_calls;
@@ -1426,6 +1442,16 @@ int main(void) {
                mock.executor_requests < 256 &&
                capture.calls == 1 && capture.left_values[0] == 101 &&
                capture.right_values[0] == 101 && mock.statement_failed == 0);
+        mock.max_index_probe_candidates = 1;
+        reset(&mock, &capture);
+        mock.range_row_count = 2;
+        assert(run_query_optimizer(&mock, &capture, composite_sql,
+                                  sizeof(composite_sql) - 1) ==
+               PRDB_SDK_SQL_EXEC_MATERIALIZATION_LIMIT);
+        assert(mock.range_calls == 1 && capture.calls == 1 &&
+               mock.statement_failed == 1);
+        mock.max_index_probe_candidates = 0;
+        mock.range_row_count = 0;
         uint32_t restored_len = build_optimizer_join_plan(
             mock.optimizer_response + 7);
         response_offset = 0;

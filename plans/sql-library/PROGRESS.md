@@ -2,6 +2,8 @@
 
 ## SQL-10 follow-up: batch indexed nested-loop probes — SDK implementation slice
 
+- Trusted limit follow-up: SQL v19 now reads the invocation-pinned `max-sql-index-probe-candidates` value through executor host operation `0x7ffe` and enforces it cumulatively across outer pages. The maintained TinyCC fixture sets the limit to one and verifies that a two-candidate response stops after one result and latches the materialization-limit failure. `time nix develop --no-update-lock-file -c make -f engine/sdk/Makefile test` passed in 2.006 s wall time.
+
 - Contract: grouped executor responses must retain input probe order, preserve duplicate outer-row multiplicity, and become unavailable as a whole when the response/candidate budget is exceeded.
 - Red/green evidence: the maintained SDK fixture now feeds eight distinct outer rows through one batched probe frame and checks all eight mapped join results. A 17-probe response above the aggregate candidate cap produces no callbacks and latches statement failure; a cancellation during probe preparation sends no request and publishes no rows.
 - Implementation: the Rust executor dispatcher handles `ScanIndexRanges` (`0x1117`), while the C runner groups up to 128 point/prefix probes per frame. Existing scalar operations remain available.
