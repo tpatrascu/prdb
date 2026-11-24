@@ -1,5 +1,12 @@
 # Optimizer Progress
 
+## OP-10: class-profiled cumulative estimate allowance — implemented slice
+
+- Contract: [planner](../../specs/planner-compiler.md), [IPC](../../specs/ipc-protocol.md), and [workload profile](../../specs/workload-profile.md). The cumulative allowance is an invocation workload budget; the 16-entry estimate batch and 256-frame planner connection remain separate envelopes.
+- Implementation: supervisor options `--max-planner-estimate-requests` (default 16) and `--analytical-max-planner-estimate-requests` select 1–4,096 cumulative estimate entries. Storage pins the class-selected value when it admits the invocation; subsequent planner sessions restore their used count and consult the same pinned allowance. Exhaustion retains the existing per-entry UNKNOWN/fixed-heuristic behavior.
+- Verification: storage and transaction unit tests cover class selection, inheritance, the default boundary, and accounting through the 4,096 implementation envelope. Supervisor tests cover defaults, CLI values, zero rejection, and over-envelope rejection. Confined SQL acceptance sets the operational allowance to 1 and the Analytical override to 64; the same indexed IN query must still obtain its plan and return the exact rows.
+- Scope: this validates cumulative estimate allowance configuration and class pinning. Planner connection frames, per-frame batch entries, per-estimate row/key/byte ceilings, profile compatibility with overall planning requests, and ERP/CRM plan quality remain separate work.
+
 ## OP-1 follow-up: measure confined optimizer planner dispatch — verified slice
 
 - Implementation: added opt-in timing at the shared optimizer-planner IPC service. It measures from after a complete request frame arrives through invocation-lock wait, trusted metadata/estimate handling, and response encoding. Normal worker-channel paths do not call the clock or timing observer.

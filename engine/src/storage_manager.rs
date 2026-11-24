@@ -47,7 +47,10 @@ use crate::statistics::{
     COMMITTED_POPULATION_KEY_PREFIX, CommittedPopulationRecord, MAX_COMMITTED_POPULATION_ROWS,
     StatisticsCollectionOutcome, StatisticsMaintenanceError, StatisticsRecordError,
 };
-use crate::transaction::{InvocationCoordination, InvocationTransaction, TransactionError};
+use crate::transaction::{
+    DEFAULT_PLANNER_ESTIMATE_REQUESTS, InvocationCoordination, InvocationTransaction,
+    MAX_PLANNER_ESTIMATE_REQUESTS, TransactionError,
+};
 use crate::tuple::{ColumnSchema, ScalarType, encode_tuple};
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableHandle};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -115,13 +118,32 @@ pub struct StorageManagerConfig {
     pub max_invocation_age: Duration,
     /// Maximum catalog records and row candidates scanned in one invocation.
     pub max_invocation_scan_work: usize,
+    /// Cumulative storage-estimate allowance for Operational planner sessions.
+    pub max_planner_estimate_requests: usize,
+    /// Optional Analytical planner-estimate allowance; omission inherits the
+    /// Operational value.
+    pub max_analytical_planner_estimate_requests: Option<usize>,
     pub max_token_lifecycle_requests_per_minute: usize,
     pub max_admin_cancellation_requests_per_minute: usize,
 }
 
+impl StorageManagerConfig {
+    pub fn max_planner_estimate_requests_for(
+        &self,
+        workload_class: crate::supervisor::WorkloadClass,
+    ) -> usize {
+        match workload_class {
+            crate::supervisor::WorkloadClass::Operational => self.max_planner_estimate_requests,
+            crate::supervisor::WorkloadClass::Analytical => self
+                .max_analytical_planner_estimate_requests
+                .unwrap_or(self.max_planner_estimate_requests),
+        }
+    }
+}
+
 #[cfg(test)]
 mod statistics_collection_tests {
-    use super::{StorageManager, StorageManagerConfig};
+    use super::{DEFAULT_PLANNER_ESTIMATE_REQUESTS, StorageManager, StorageManagerConfig};
     use crate::catalog::{CatalogField, WireType, encode_envelope, family_schema};
     use crate::metadata::{EngineMetadata, Lifecycle};
     use crate::schema::{CATALOG, ENGINE_META, ROWS, STATS, create_tables};
@@ -131,6 +153,36 @@ mod statistics_collection_tests {
     };
     use redb::{Database, ReadableDatabase};
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn planner_estimate_budget_is_class_scoped_and_inherits_by_default() {
+        let defaults = StorageManagerConfig::default();
+        assert_eq!(
+            defaults
+                .max_planner_estimate_requests_for(crate::supervisor::WorkloadClass::Operational),
+            DEFAULT_PLANNER_ESTIMATE_REQUESTS
+        );
+        assert_eq!(
+            defaults
+                .max_planner_estimate_requests_for(crate::supervisor::WorkloadClass::Analytical),
+            DEFAULT_PLANNER_ESTIMATE_REQUESTS
+        );
+        let elevated = StorageManagerConfig {
+            max_planner_estimate_requests: 32,
+            max_analytical_planner_estimate_requests: Some(1024),
+            ..defaults
+        };
+        assert_eq!(
+            elevated
+                .max_planner_estimate_requests_for(crate::supervisor::WorkloadClass::Operational),
+            32
+        );
+        assert_eq!(
+            elevated
+                .max_planner_estimate_requests_for(crate::supervisor::WorkloadClass::Analytical),
+            1024
+        );
+    }
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
@@ -563,6 +615,8 @@ impl Default for StorageManagerConfig {
             max_active_analytical_invocations: 8,
             max_invocation_age: Duration::from_secs(15 * 60),
             max_invocation_scan_work: crate::transaction::MAX_INVOCATION_SCAN_WORK,
+            max_planner_estimate_requests: DEFAULT_PLANNER_ESTIMATE_REQUESTS,
+            max_analytical_planner_estimate_requests: None,
             max_token_lifecycle_requests_per_minute: 30,
             max_admin_cancellation_requests_per_minute: 30,
         }
@@ -575,6 +629,8 @@ pub enum StorageManagerConfigError {
     ZeroAnalyticalInvocationLimit,
     ZeroInvocationAge,
     ZeroInvocationScanWorkLimit,
+    ZeroPlannerEstimateRequestLimit,
+    PlannerEstimateRequestLimitTooLarge,
     ZeroTokenLifecycleRequestLimit,
     ZeroAdminCancellationRequestLimit,
 }
@@ -1665,6 +1721,8 @@ pub struct StorageManager<'db> {
     authentication_failure_audits: Arc<TokenRequestLimiter>,
     max_invocation_age: Duration,
     max_invocation_scan_work: usize,
+    max_planner_estimate_requests: usize,
+    max_analytical_planner_estimate_requests: Option<usize>,
     interactive_transactions: InteractiveTransactionMap<'db>,
     interactive_begin_requests: InteractiveBeginRequestMap,
 }
@@ -3874,6 +3932,22 @@ impl<'db> StorageManager<'db> {
                 StorageManagerConfigError::ZeroInvocationScanWorkLimit,
             ));
         }
+        if config.max_planner_estimate_requests == 0
+            || config.max_analytical_planner_estimate_requests == Some(0)
+        {
+            return Err(StorageManagerInitError::Config(
+                StorageManagerConfigError::ZeroPlannerEstimateRequestLimit,
+            ));
+        }
+        if config.max_planner_estimate_requests > MAX_PLANNER_ESTIMATE_REQUESTS
+            || config
+                .max_analytical_planner_estimate_requests
+                .is_some_and(|value| value > MAX_PLANNER_ESTIMATE_REQUESTS)
+        {
+            return Err(StorageManagerInitError::Config(
+                StorageManagerConfigError::PlannerEstimateRequestLimitTooLarge,
+            ));
+        }
         if config.max_token_lifecycle_requests_per_minute == 0 {
             return Err(StorageManagerInitError::Config(
                 StorageManagerConfigError::ZeroTokenLifecycleRequestLimit,
@@ -3915,6 +3989,9 @@ impl<'db> StorageManager<'db> {
             authentication_failure_audits,
             max_invocation_age: config.max_invocation_age,
             max_invocation_scan_work: config.max_invocation_scan_work,
+            max_planner_estimate_requests: config.max_planner_estimate_requests,
+            max_analytical_planner_estimate_requests: config
+                .max_analytical_planner_estimate_requests,
             interactive_transactions: Arc::new(Mutex::new(HashMap::new())),
             interactive_begin_requests: Arc::new(Mutex::new(HashMap::new())),
         })
@@ -3938,6 +4015,18 @@ impl<'db> StorageManager<'db> {
 
     pub fn max_invocation_scan_work(&self) -> usize {
         self.max_invocation_scan_work
+    }
+
+    pub fn max_planner_estimate_requests_for(
+        &self,
+        workload_class: crate::supervisor::WorkloadClass,
+    ) -> usize {
+        match workload_class {
+            crate::supervisor::WorkloadClass::Operational => self.max_planner_estimate_requests,
+            crate::supervisor::WorkloadClass::Analytical => self
+                .max_analytical_planner_estimate_requests
+                .unwrap_or(self.max_planner_estimate_requests),
+        }
     }
 
     /// Whether a managed invocation hit an ambiguous redb commit error and
@@ -4003,6 +4092,7 @@ impl<'db> StorageManager<'db> {
                 admission_permit,
                 self.max_invocation_age,
                 self.max_invocation_scan_work,
+                self.max_planner_estimate_requests_for(workload_class),
             ),
             invocation_id,
             principal_id,

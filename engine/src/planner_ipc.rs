@@ -37,7 +37,7 @@ pub use crate::query_abi::{
 };
 use crate::statistics::{AuthorizedScanEstimate, AuthorizedScanSummary, ColumnPopulation};
 use crate::transaction::{
-    MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION, PlannerMetadataConnection, TransactionError,
+    MAX_PLANNER_ESTIMATE_BATCH_ENTRIES, PlannerMetadataConnection, TransactionError,
 };
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
@@ -1410,9 +1410,7 @@ pub struct EstimateScansRequest {
 
 impl EstimateScansRequest {
     pub fn encode(&self) -> Result<Vec<u8>, PlannerRequestError> {
-        if self.entries.is_empty()
-            || self.entries.len() > MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION
-        {
+        if self.entries.is_empty() || self.entries.len() > MAX_PLANNER_ESTIMATE_BATCH_ENTRIES {
             return Err(PlannerRequestError::InvalidPayload);
         }
         let mut payload = Vec::with_capacity(4);
@@ -1453,7 +1451,7 @@ impl EstimateScansRequest {
             return Err(PlannerRequestError::InvalidPayload);
         }
         let count = usize::from(u16::from_be_bytes([payload[2], payload[3]]));
-        if count == 0 || count > MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION {
+        if count == 0 || count > MAX_PLANNER_ESTIMATE_BATCH_ENTRIES {
             return Err(PlannerRequestError::InvalidPayload);
         }
         let mut offset = 4usize;
@@ -1514,9 +1512,7 @@ pub struct EstimateScansResponse {
 
 impl EstimateScansResponse {
     pub fn encode(&self) -> Result<Vec<u8>, PlannerRequestError> {
-        if self.entries.is_empty()
-            || self.entries.len() > MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION
-        {
+        if self.entries.is_empty() || self.entries.len() > MAX_PLANNER_ESTIMATE_BATCH_ENTRIES {
             return Err(PlannerRequestError::InvalidPayload);
         }
         let mut payload = Vec::with_capacity(4);
@@ -1541,7 +1537,7 @@ impl EstimateScansResponse {
             return Err(PlannerRequestError::InvalidPayload);
         }
         let count = usize::from(u16::from_be_bytes([payload[2], payload[3]]));
-        if count == 0 || count > MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION {
+        if count == 0 || count > MAX_PLANNER_ESTIMATE_BATCH_ENTRIES {
             return Err(PlannerRequestError::InvalidPayload);
         }
         let mut offset = 4usize;

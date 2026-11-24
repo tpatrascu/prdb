@@ -71,6 +71,8 @@ mod service {
         max_active_analytical: Option<usize>,
         max_storage_active_snapshots: Option<usize>,
         max_storage_active_analytical_snapshots: Option<usize>,
+        max_planner_estimate_requests: Option<usize>,
+        analytical_max_planner_estimate_requests: Option<usize>,
         max_active_operational_per_principal: Option<usize>,
         max_active_analytical_per_principal: Option<usize>,
         cpu_quota_us: Option<u64>,
@@ -118,6 +120,8 @@ mod service {
              --max-active-analytical-per-principal N]\n\
              [--max-storage-active-snapshots N\n\
              --max-storage-active-analytical-snapshots N]\n\
+             [--max-planner-estimate-requests N] (default 16; maximum 4096)\n\
+             [--analytical-max-planner-estimate-requests N] (overrides the operational value)\n\
              --cpu-quota-us N --cpu-period-us N --memory-max-bytes N --max-processes N\n\
              [--analytical-cpu-quota-us N --analytical-cpu-period-us N\n\
              --analytical-memory-max-bytes N --analytical-max-processes N]\n\
@@ -578,6 +582,15 @@ mod service {
                         value.parse::<usize>()?
                     )
                 }
+                "--max-planner-estimate-requests" => {
+                    set!(max_planner_estimate_requests, value.parse::<usize>()?)
+                }
+                "--analytical-max-planner-estimate-requests" => {
+                    set!(
+                        analytical_max_planner_estimate_requests,
+                        value.parse::<usize>()?
+                    )
+                }
                 "--max-active-operational-per-principal" => {
                     set!(
                         max_active_operational_per_principal,
@@ -683,6 +696,26 @@ mod service {
         options: &Options,
     ) -> Result<prdb_engine::storage_manager::StorageManagerConfig, String> {
         let defaults = prdb_engine::storage_manager::StorageManagerConfig::default();
+        let max_planner_estimate_requests = positive(
+            options
+                .max_planner_estimate_requests
+                .unwrap_or(defaults.max_planner_estimate_requests),
+            "--max-planner-estimate-requests",
+        )?;
+        let analytical_max_planner_estimate_requests = options
+            .analytical_max_planner_estimate_requests
+            .map(|value| positive(value, "--analytical-max-planner-estimate-requests"))
+            .transpose()?;
+        if max_planner_estimate_requests > prdb_engine::transaction::MAX_PLANNER_ESTIMATE_REQUESTS
+            || analytical_max_planner_estimate_requests.is_some_and(|value| {
+                value > prdb_engine::transaction::MAX_PLANNER_ESTIMATE_REQUESTS
+            })
+        {
+            return Err(format!(
+                "planner estimate requests must not exceed {}",
+                prdb_engine::transaction::MAX_PLANNER_ESTIMATE_REQUESTS
+            ));
+        }
         Ok(prdb_engine::storage_manager::StorageManagerConfig {
             max_active_invocations: positive(
                 options
@@ -696,6 +729,8 @@ mod service {
                     .unwrap_or(defaults.max_active_analytical_invocations),
                 "--max-storage-active-analytical-snapshots",
             )?,
+            max_planner_estimate_requests,
+            max_analytical_planner_estimate_requests: analytical_max_planner_estimate_requests,
             ..defaults
         })
     }
@@ -845,15 +880,24 @@ mod service {
             let defaults = storage_manager_config(&Options::default()).expect("default config");
             assert_eq!(defaults.max_active_invocations, 128);
             assert_eq!(defaults.max_active_analytical_invocations, 8);
+            assert_eq!(defaults.max_planner_estimate_requests, 16);
+            assert_eq!(defaults.max_analytical_planner_estimate_requests, None);
 
             let configured = storage_manager_config(&Options {
                 max_storage_active_snapshots: Some(48),
                 max_storage_active_analytical_snapshots: Some(6),
+                max_planner_estimate_requests: Some(64),
+                analytical_max_planner_estimate_requests: Some(1024),
                 ..Options::default()
             })
             .expect("configured limits");
             assert_eq!(configured.max_active_invocations, 48);
             assert_eq!(configured.max_active_analytical_invocations, 6);
+            assert_eq!(configured.max_planner_estimate_requests, 64);
+            assert_eq!(
+                configured.max_analytical_planner_estimate_requests,
+                Some(1024)
+            );
         }
 
         #[test]
@@ -871,6 +915,25 @@ mod service {
             })
             .expect_err("zero analytical storage limit must fail");
             assert!(error.contains("--max-storage-active-analytical-snapshots must be positive"));
+
+            let estimate_error = storage_manager_config(&Options {
+                analytical_max_planner_estimate_requests: Some(0),
+                ..Options::default()
+            })
+            .expect_err("zero analytical estimate allowance must fail");
+            assert!(
+                estimate_error
+                    .contains("--analytical-max-planner-estimate-requests must be positive")
+            );
+
+            let too_large = storage_manager_config(&Options {
+                max_planner_estimate_requests: Some(
+                    prdb_engine::transaction::MAX_PLANNER_ESTIMATE_REQUESTS + 1,
+                ),
+                ..Options::default()
+            })
+            .expect_err("estimate allowance above the implementation envelope must fail");
+            assert!(too_large.contains("must not exceed"));
         }
     }
 }

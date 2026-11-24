@@ -245,3 +245,9 @@
 - Added [`BOUND_INVENTORY.csv`](BOUND_INVENTORY.csv) as the machine-readable starting point for SQL syntax/materialization, IPC, planner estimates, result relay, staging/admission, cgroups, storage snapshots, and spill/maintenance bounds. The initial source reconciliation now contains 61 entries.
 - Each row records classification, component, scope, current value/default, trusted owner, envelope, accounting lifetime, exhaustion behavior, implementation status, and source specification. Unknown or pending profile ownership is stated explicitly instead of treating an implementation constant as a supported production setting.
 - Source reconciliation added the distinct 256 per-operator SQL request budget, 512-frame executor and 256-frame planner connection caps, 4,096 executor row-handle table, 128 scan-page candidates, 4,096 mutation batch record envelope, and batched planner metadata/estimate limits. This is still an initial inventory, not a completeness claim. Queue/output accounting, index/storage work limits, profile vector validation, and measured ERP/CRM capacity evidence remain open under WI-10/WI-11.
+
+## WI-10 follow-up: planner estimate allowance — implemented slice
+
+- The cumulative planner estimate allowance is now an Operational workload setting (default 16) with an optional Analytical override, validated through 4,096. Storage selects it from sealed workload metadata and pins it for the invocation; 16-entry estimate batches and the 256-frame planner connection cap remain independent.
+- Unit coverage checks class inheritance and allowance exhaustion at the configured boundary. The confined SQL IN acceptance runs with an Operational allowance of 1 and Analytical allowance of 64 to exercise class selection on the optimizer-backed path.
+- Remaining WI-10 work includes the other SQL/operator and storage bounds, full profile-vector validation, and production-scale mixed ERP/CRM capacity evidence.

@@ -57,9 +57,16 @@ use std::time::{Duration, Instant};
 
 const MAX_INDEX_CHANGES_PER_ROW: usize = 256;
 pub const MAX_INVOCATION_SCAN_WORK: usize = 65_536;
-/// Authorized estimate requests admitted on one planner connection before the
-/// session switches to fixed optimizer heuristics.
-pub const MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION: usize = 16;
+/// Maximum number of estimate entries encoded in one planner IPC request.
+pub const MAX_PLANNER_ESTIMATE_BATCH_ENTRIES: usize = 16;
+/// Keep the original name as an alias for callers that use the per-request
+/// envelope; this is distinct from the cumulative invocation allowance.
+pub const MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION: usize = MAX_PLANNER_ESTIMATE_BATCH_ENTRIES;
+/// Default cumulative estimate allowance for one invocation.
+pub const DEFAULT_PLANNER_ESTIMATE_REQUESTS: usize = 16;
+/// Maximum configurable cumulative estimate allowance. The planner IPC stream
+/// and per-request batch envelopes remain independently enforced.
+pub const MAX_PLANNER_ESTIMATE_REQUESTS: usize = 4096;
 const INFORMATION_SCHEMA_ID: [u8; 16] = crate::metadata_discovery::INFORMATION_SCHEMA_SCHEMA_ID;
 const INFORMATION_SCHEMA_COLUMN_EXTRA_BYTES: usize =
     "TIMESTAMP WITH TIME ZONE".len() + "YES".len() + 4 + 3 * 5 + 16;
@@ -610,6 +617,7 @@ pub(crate) struct InvocationCoordination {
     admission_metrics: Option<InvocationAdmissionMetrics>,
     max_age: Option<(Instant, Duration)>,
     max_scan_work: usize,
+    max_planner_estimate_requests: usize,
 }
 
 impl InvocationCoordination {
@@ -620,6 +628,7 @@ impl InvocationCoordination {
             admission_metrics: None,
             max_age: None,
             max_scan_work: MAX_INVOCATION_SCAN_WORK,
+            max_planner_estimate_requests: DEFAULT_PLANNER_ESTIMATE_REQUESTS,
         }
     }
 
@@ -630,6 +639,7 @@ impl InvocationCoordination {
             admission_metrics: None,
             max_age: None,
             max_scan_work: MAX_INVOCATION_SCAN_WORK,
+            max_planner_estimate_requests: DEFAULT_PLANNER_ESTIMATE_REQUESTS,
         }
     }
 
@@ -638,6 +648,7 @@ impl InvocationCoordination {
         admission_permit: InvocationAdmissionPermit,
         max_age: Duration,
         max_scan_work: usize,
+        max_planner_estimate_requests: usize,
     ) -> Self {
         let admission_metrics = admission_permit.metrics();
         Self {
@@ -646,6 +657,7 @@ impl InvocationCoordination {
             admission_metrics: Some(admission_metrics),
             max_age: Some((Instant::now(), max_age)),
             max_scan_work,
+            max_planner_estimate_requests,
         }
     }
 
@@ -11248,7 +11260,10 @@ impl PlannerMetadataConnection<'_, '_> {
         {
             return Ok(false);
         }
-        if !consume_planner_estimate_budget(&mut self.estimate_requests) {
+        if !consume_planner_estimate_budget(
+            &mut self.estimate_requests,
+            self.transaction.coordination.max_planner_estimate_requests,
+        ) {
             return Ok(false);
         }
         let state = match self.transaction.load_catalog_estimate_projection(table_id) {
@@ -11333,7 +11348,10 @@ impl PlannerMetadataConnection<'_, '_> {
         {
             return Ok(AuthorizedScanEstimate::Unknown);
         }
-        if !consume_planner_estimate_budget(&mut self.estimate_requests) {
+        if !consume_planner_estimate_budget(
+            &mut self.estimate_requests,
+            self.transaction.coordination.max_planner_estimate_requests,
+        ) {
             return Ok(AuthorizedScanEstimate::Unknown);
         }
         let state = self
@@ -11431,7 +11449,10 @@ impl PlannerMetadataConnection<'_, '_> {
         {
             return Ok(None);
         }
-        if !consume_planner_estimate_budget(&mut self.estimate_requests) {
+        if !consume_planner_estimate_budget(
+            &mut self.estimate_requests,
+            self.transaction.coordination.max_planner_estimate_requests,
+        ) {
             return Ok(None);
         }
         let state = self
@@ -11491,7 +11512,10 @@ impl PlannerMetadataConnection<'_, '_> {
             || left_key_column_ids.len() != right_key_column_ids.len()
             || left_key_column_ids.contains(&[0; 16])
             || right_key_column_ids.contains(&[0; 16])
-            || !consume_planner_estimate_budget(&mut self.estimate_requests)
+            || !consume_planner_estimate_budget(
+                &mut self.estimate_requests,
+                self.transaction.coordination.max_planner_estimate_requests,
+            )
         {
             return Ok(None);
         }
@@ -11612,7 +11636,10 @@ impl PlannerMetadataConnection<'_, '_> {
             return Ok(None);
         };
         if schema_name == "information_schema"
-            || !consume_planner_estimate_budget(&mut self.estimate_requests)
+            || !consume_planner_estimate_budget(
+                &mut self.estimate_requests,
+                self.transaction.coordination.max_planner_estimate_requests,
+            )
         {
             return Ok(None);
         }
@@ -11691,8 +11718,8 @@ impl PlannerMetadataConnection<'_, '_> {
     }
 }
 
-fn consume_planner_estimate_budget(requests: &mut usize) -> bool {
-    if *requests >= MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION {
+fn consume_planner_estimate_budget(requests: &mut usize, maximum: usize) -> bool {
+    if *requests >= maximum {
         return false;
     }
     *requests += 1;
@@ -12929,17 +12956,38 @@ mod requested_scope_tests {
 
 #[cfg(test)]
 mod planner_estimate_budget_tests {
-    use super::{MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION, consume_planner_estimate_budget};
+    use super::{
+        DEFAULT_PLANNER_ESTIMATE_REQUESTS, MAX_PLANNER_ESTIMATE_REQUESTS,
+        consume_planner_estimate_budget,
+    };
 
     #[test]
     fn estimate_budget_exhaustion_falls_back_without_ending_the_planner_session() {
         let mut requests = 0;
-        for _ in 0..MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION {
-            assert!(consume_planner_estimate_budget(&mut requests));
+        for _ in 0..DEFAULT_PLANNER_ESTIMATE_REQUESTS {
+            assert!(consume_planner_estimate_budget(
+                &mut requests,
+                DEFAULT_PLANNER_ESTIMATE_REQUESTS
+            ));
         }
-        assert_eq!(requests, MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION);
-        assert!(!consume_planner_estimate_budget(&mut requests));
-        assert_eq!(requests, MAX_PLANNER_ESTIMATE_REQUESTS_PER_CONNECTION);
+        assert_eq!(requests, DEFAULT_PLANNER_ESTIMATE_REQUESTS);
+        assert!(!consume_planner_estimate_budget(
+            &mut requests,
+            DEFAULT_PLANNER_ESTIMATE_REQUESTS
+        ));
+        assert_eq!(requests, DEFAULT_PLANNER_ESTIMATE_REQUESTS);
+
+        for _ in 0..MAX_PLANNER_ESTIMATE_REQUESTS - DEFAULT_PLANNER_ESTIMATE_REQUESTS {
+            assert!(consume_planner_estimate_budget(
+                &mut requests,
+                MAX_PLANNER_ESTIMATE_REQUESTS
+            ));
+        }
+        assert_eq!(requests, MAX_PLANNER_ESTIMATE_REQUESTS);
+        assert!(!consume_planner_estimate_budget(
+            &mut requests,
+            MAX_PLANNER_ESTIMATE_REQUESTS
+        ));
     }
 }
 

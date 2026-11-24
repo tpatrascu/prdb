@@ -16312,6 +16312,9 @@ fn storage_manager_routes_invocations_and_catalog_commits_through_shared_fences(
             max_active_analytical_invocations: 8,
             max_invocation_age: Duration::from_secs(15 * 60),
             max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
+            max_planner_estimate_requests:
+                prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
+            max_analytical_planner_estimate_requests: None,
             max_token_lifecycle_requests_per_minute: 30,
             max_admin_cancellation_requests_per_minute: 30,
         },
@@ -16353,6 +16356,9 @@ fn storage_manager_admission_requires_a_login_enabled_catalog_user()
             max_active_analytical_invocations: 1,
             max_invocation_age: Duration::from_secs(30),
             max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
+            max_planner_estimate_requests:
+                prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
+            max_analytical_planner_estimate_requests: None,
             max_token_lifecycle_requests_per_minute: 30,
             max_admin_cancellation_requests_per_minute: 30,
         },
@@ -16423,6 +16429,9 @@ fn authenticated_role_closure_budget_ignores_unreachable_memberships()
         &database,
         StorageManagerConfig {
             max_invocation_scan_work: 1,
+            max_planner_estimate_requests:
+                prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
+            max_analytical_planner_estimate_requests: None,
             ..StorageManagerConfig::default()
         },
     )?;
@@ -16465,6 +16474,9 @@ fn catalog_grant_loading_budget_ignores_unrelated_grants() -> Result<(), Box<dyn
         &database,
         StorageManagerConfig {
             max_invocation_scan_work: 1,
+            max_planner_estimate_requests:
+                prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
+            max_analytical_planner_estimate_requests: None,
             ..StorageManagerConfig::default()
         },
     )?;
@@ -16498,6 +16510,9 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
                 max_active_analytical_invocations: 1,
                 max_invocation_age: Duration::from_secs(30),
                 max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
+                max_planner_estimate_requests:
+                    prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
+                max_analytical_planner_estimate_requests: None,
                 max_token_lifecycle_requests_per_minute: 30,
                 max_admin_cancellation_requests_per_minute: 30,
             },
@@ -16516,6 +16531,9 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
                 max_active_analytical_invocations: 1,
                 max_invocation_age: Duration::ZERO,
                 max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
+                max_planner_estimate_requests:
+                    prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
+                max_analytical_planner_estimate_requests: None,
                 max_token_lifecycle_requests_per_minute: 30,
                 max_admin_cancellation_requests_per_minute: 30,
             },
@@ -16534,6 +16552,9 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
                 max_active_analytical_invocations: 1,
                 max_invocation_age: Duration::from_secs(30),
                 max_invocation_scan_work: 0,
+                max_planner_estimate_requests:
+                    prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
+                max_analytical_planner_estimate_requests: None,
                 max_token_lifecycle_requests_per_minute: 30,
                 max_admin_cancellation_requests_per_minute: 30,
             },
@@ -16552,6 +16573,9 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
                 max_active_analytical_invocations: 1,
                 max_invocation_age: Duration::from_secs(30),
                 max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
+                max_planner_estimate_requests:
+                    prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
+                max_analytical_planner_estimate_requests: None,
                 max_token_lifecycle_requests_per_minute: 0,
                 max_admin_cancellation_requests_per_minute: 30,
             },
@@ -16570,6 +16594,8 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
             max_active_analytical_invocations: 1,
                 max_invocation_age: Duration::from_secs(30),
                 max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
+                max_planner_estimate_requests: prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
+                max_analytical_planner_estimate_requests: None,
                 max_token_lifecycle_requests_per_minute: 30,
                 max_admin_cancellation_requests_per_minute: 0,
             },
@@ -16587,6 +16613,9 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
             max_active_analytical_invocations: 1,
             max_invocation_age: Duration::from_secs(30),
             max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
+            max_planner_estimate_requests:
+                prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
+            max_analytical_planner_estimate_requests: None,
             max_token_lifecycle_requests_per_minute: 30,
             max_admin_cancellation_requests_per_minute: 30,
         },
@@ -16624,6 +16653,9 @@ fn storage_manager_expires_idle_invocations_and_releases_the_snapshot()
             max_active_analytical_invocations: 1,
             max_invocation_age: Duration::from_millis(1),
             max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
+            max_planner_estimate_requests:
+                prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
+            max_analytical_planner_estimate_requests: None,
             max_token_lifecycle_requests_per_minute: 30,
             max_admin_cancellation_requests_per_minute: 30,
         },
@@ -20375,6 +20407,9 @@ fn storage_manager_audits_cancellation_before_commit_and_preserves_terminal_outc
             max_active_analytical_invocations: 1,
             max_invocation_age: Duration::from_secs(15 * 60),
             max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
+            max_planner_estimate_requests:
+                prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
+            max_analytical_planner_estimate_requests: None,
             max_token_lifecycle_requests_per_minute: 30,
             max_admin_cancellation_requests_per_minute: 4,
         },
@@ -41043,6 +41078,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         &database,
         StorageManagerConfig {
             max_active_analytical_invocations: 8,
+            max_planner_estimate_requests: if sql_in_elevated_budget_only { 1 } else { 16 },
+            max_analytical_planner_estimate_requests: sql_in_elevated_budget_only.then_some(64),
             ..StorageManagerConfig::default()
         },
     )?;
@@ -49625,6 +49662,8 @@ fn storage_manager_issues_and_revokes_tokens_for_manage_users()
         max_active_analytical_invocations: 8,
         max_invocation_age: Duration::from_secs(15 * 60),
         max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
+        max_planner_estimate_requests: prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
+        max_analytical_planner_estimate_requests: None,
         max_token_lifecycle_requests_per_minute: 5,
         max_admin_cancellation_requests_per_minute: 30,
     };
