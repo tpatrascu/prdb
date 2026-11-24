@@ -1189,6 +1189,57 @@ mod tests {
     }
 
     #[test]
+    fn moderate_join_fanout_limit_is_inclusive_for_every_outer_size() {
+        for outer_rows in 9..=17 {
+            let indexed_rows = if outer_rows == 17 {
+                119
+            } else {
+                outer_rows * 8
+            };
+            let mut indexed_right = join_relation("rights", 0x41);
+            indexed_right.range_access_paths =
+                vec![crate::metadata_discovery::AuthorizedRangeAccessPath {
+                    index_id: [0x71; 16],
+                    column_ids: vec![[0x51; 16]],
+                }];
+
+            let at_limit = optimize_join_select_v1_with_relations_and_estimates_and_cardinality(
+                &filtered_join_select_request(),
+                Some(join_relation("lefts", 0x31)),
+                Some(indexed_right.clone()),
+                Some(outer_rows),
+                Some(indexed_rows),
+                Some(outer_rows * 4),
+            )
+            .unwrap();
+            assert!(
+                decode_join_select_plan_v1(&at_limit)
+                    .unwrap()
+                    .index_nested_loop
+                    .is_some(),
+                "outer_rows={outer_rows} must allow exactly four pairs per outer row"
+            );
+
+            let above_limit = optimize_join_select_v1_with_relations_and_estimates_and_cardinality(
+                &filtered_join_select_request(),
+                Some(join_relation("lefts", 0x31)),
+                Some(indexed_right),
+                Some(outer_rows),
+                Some(indexed_rows),
+                Some(outer_rows * 4 + 1),
+            )
+            .unwrap();
+            assert!(
+                decode_join_select_plan_v1(&above_limit)
+                    .unwrap()
+                    .index_nested_loop
+                    .is_none(),
+                "outer_rows={outer_rows} must keep hash one pair above the fanout limit"
+            );
+        }
+    }
+
+    #[test]
     fn join_with_two_known_small_inputs_keeps_hash_join() {
         let mut indexed_left = join_relation("lefts", 0x31);
         indexed_left.range_access_paths =
