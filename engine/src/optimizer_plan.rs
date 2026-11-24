@@ -3639,6 +3639,15 @@ fn put_predicate(output: &mut Vec<u8>, predicate: &BoundPredicate) -> Result<(),
             );
             output.extend_from_slice(value.as_bytes());
         }
+        BoundPredicate::Bytea(value) => {
+            if value.len() > crate::optimizer_request::MAX_TEXT_LITERAL_BYTES {
+                return Err(PlanError::InvalidPredicate);
+            }
+            let length = u16::try_from(value.len()).map_err(|_| PlanError::TooLarge)?;
+            output.push(0x07);
+            output.extend_from_slice(&length.to_be_bytes());
+            output.extend_from_slice(value);
+        }
         BoundPredicate::Date(value) => {
             output.push(0x04);
             output.extend_from_slice(&value.to_be_bytes());
@@ -4109,6 +4118,13 @@ impl PlanReader<'_> {
                 }
                 Ok(BoundPredicate::TimestampTz(micros))
             }
+            0x07 => {
+                let length = usize::from(self.u16()?);
+                if length > crate::optimizer_request::MAX_TEXT_LITERAL_BYTES {
+                    return Err(PlanError::TooLarge);
+                }
+                Ok(BoundPredicate::Bytea(self.take(length)?.to_vec()))
+            }
             0x10 => {
                 let column_id = self.column_predicate_id(tag_offset)?;
                 let column = scan_columns
@@ -4417,6 +4433,7 @@ fn is_point_probe_literal(column: &BoundColumn, value: &BoundPredicate) -> bool 
             | (ScalarType::Date, BoundPredicate::Date(_))
             | (ScalarType::Uuid, BoundPredicate::Uuid(_))
             | (ScalarType::TimestampTz, BoundPredicate::TimestampTz(_))
+            | (ScalarType::Bytea, BoundPredicate::Bytea(_))
     ) || matches!(
         (column.scalar_type, value),
         (ScalarType::Integer, BoundPredicate::Integer(value))
@@ -4925,6 +4942,7 @@ fn collect_predicate_columns_at_depth(
         | BoundPredicate::Boolean(_)
         | BoundPredicate::Integer(_)
         | BoundPredicate::Text(_)
+        | BoundPredicate::Bytea(_)
         | BoundPredicate::Date(_)
         | BoundPredicate::Uuid(_)
         | BoundPredicate::TimestampTz(_) => Ok(()),
@@ -4967,6 +4985,12 @@ fn predicate_type_at_depth(
         }
         BoundPredicate::Date(_) => Err(PlanError::InvalidPredicate),
         BoundPredicate::Uuid(_) => Ok(Some(ScalarType::Uuid)),
+        BoundPredicate::Bytea(value)
+            if value.len() <= crate::optimizer_request::MAX_TEXT_LITERAL_BYTES =>
+        {
+            Ok(Some(ScalarType::Bytea))
+        }
+        BoundPredicate::Bytea(_) => Err(PlanError::InvalidPredicate),
         BoundPredicate::TimestampTz(value) if crate::tuple::timestamp_micros_is_valid(*value) => {
             Ok(Some(ScalarType::TimestampTz))
         }
@@ -5798,6 +5822,30 @@ mod tests {
     }
 
     #[test]
+    fn bytea_predicate_record_roundtrips_bounded_raw_bytes() {
+        let predicate = BoundPredicate::Bytea(vec![0, 0x80, 0xff]);
+        let mut encoded = Vec::new();
+        put_predicate(&mut encoded, &predicate).unwrap();
+        assert_eq!(encoded, [0x07, 0, 3, 0, 0x80, 0xff]);
+        let mut reader = PlanReader {
+            bytes: &encoded,
+            offset: 0,
+        };
+        assert_eq!(reader.predicate(&[]).unwrap(), predicate);
+        let mut output = Vec::new();
+        assert_eq!(
+            put_predicate(
+                &mut output,
+                &BoundPredicate::Bytea(vec![
+                    0;
+                    crate::optimizer_request::MAX_TEXT_LITERAL_BYTES + 1
+                ]),
+            ),
+            Err(PlanError::InvalidPredicate)
+        );
+    }
+
+    #[test]
     fn uuid_literals_are_eligible_for_exact_index_access() {
         let key = column(0x45, 0, ScalarType::Uuid);
         assert!(is_point_probe_literal(
@@ -5812,6 +5860,15 @@ mod tests {
         assert!(is_point_probe_literal(
             &key,
             &BoundPredicate::TimestampTz(-42)
+        ));
+    }
+
+    #[test]
+    fn bytea_literals_are_eligible_for_exact_index_access() {
+        let key = column(0x45, 0, ScalarType::Bytea);
+        assert!(is_point_probe_literal(
+            &key,
+            &BoundPredicate::Bytea(vec![0, 0x80, 0xff])
         ));
     }
 

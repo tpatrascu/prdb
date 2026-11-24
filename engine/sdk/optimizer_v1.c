@@ -120,6 +120,13 @@ static int encode_optimizer_parameter(
     case PRDB_SDK_VALUE_TYPE_TIMESTAMPTZ:
         return predicate_append_u8(output, capacity, offset, 0x06) &&
                predicate_append(output, capacity, offset, value->data, 8);
+    case PRDB_SDK_VALUE_TYPE_BYTEA:
+        return value->data_len <= 4096 && value->data_len <= UINT16_MAX &&
+               predicate_append_u8(output, capacity, offset, 0x07) &&
+               predicate_append_u16(output, capacity, offset,
+                                    (uint16_t)value->data_len) &&
+               predicate_append(output, capacity, offset, value->data,
+                                value->data_len);
     default:
         return 2;
     }

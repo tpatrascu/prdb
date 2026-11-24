@@ -7456,6 +7456,31 @@ fn authorized_predicate_estimate_compares_readable_scalar_columns()
         Some((3, 1)),
         "TIMESTAMPTZ literals should compare against authorized cells"
     );
+    let bytea_case = cases
+        .iter()
+        .position(|(scalar_type, _, _, _)| *scalar_type == ScalarType::Bytea)
+        .expect("fixture has a BYTEA comparison pair");
+    let bytea_ordinal = bytea_case * 2 + 1;
+    let bytea_literal_predicate = BoundPredicate::Compare {
+        operator: Comparison::Equal,
+        left: Box::new(BoundPredicate::Column(BoundColumn {
+            column_id: column_ids[bytea_ordinal],
+            ordinal: bytea_ordinal as u32,
+            scalar_type: ScalarType::Bytea,
+            nullable: true,
+        })),
+        right: Box::new(BoundPredicate::Bytea(vec![1, 2])),
+    };
+    assert_eq!(
+        observer.estimate_authorized_predicate_at_most(
+            table_id,
+            &projection,
+            &bytea_literal_predicate,
+            3,
+        )?,
+        Some((3, 1)),
+        "BYTEA literals should compare against authorized cells"
+    );
     let invalid_date_literal = BoundPredicate::Compare {
         operator: Comparison::Equal,
         left: Box::new(BoundPredicate::Column(BoundColumn {

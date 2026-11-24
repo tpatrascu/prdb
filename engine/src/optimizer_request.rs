@@ -246,6 +246,7 @@ pub enum Predicate {
     Boolean(bool),
     Integer(i64),
     Text(String),
+    Bytea(Vec<u8>),
     Date(i32),
     Uuid([u8; 16]),
     TimestampTz(i64),
@@ -1529,6 +1530,13 @@ impl<'a> PredicateParser<'a> {
                 }
                 Ok(Predicate::TimestampTz(micros))
             }
+            0x07 => {
+                let length = usize::from(self.cursor.u16()?);
+                if length > MAX_TEXT_LITERAL_BYTES {
+                    return Err(RequestError::InvalidValue);
+                }
+                Ok(Predicate::Bytea(self.cursor.take(length)?.to_vec()))
+            }
             0x10 => Ok(Predicate::Column(self.cursor.identifier()?)),
             0x20 => {
                 let operator = match self.cursor.u8()? {
@@ -2535,6 +2543,14 @@ mod tests {
             decode_select_request(&select_request(&expression)),
             Err(RequestError::Truncated)
         );
+        let mut oversized = vec![0x20, 0, 0x10];
+        name("payload", &mut oversized);
+        oversized.extend_from_slice(&[0x07, 0x10, 0x01]);
+        oversized.resize(oversized.len() + 4097, 0xaa);
+        assert_eq!(
+            decode_select_request(&select_request(&oversized)),
+            Err(RequestError::InvalidValue)
+        );
     }
 
     #[test]
@@ -2558,6 +2574,29 @@ mod tests {
         assert_eq!(
             decode_select_request(&select_request(&expression)),
             Err(RequestError::InvalidValue)
+        );
+    }
+
+    #[test]
+    fn decodes_bounded_bytea_predicate_literal_as_raw_bytes() {
+        let mut expression = vec![0x20, 0, 0x10];
+        name("payload", &mut expression);
+        expression.extend_from_slice(&[0x07, 0, 3, 0, 0x80, 0xff]);
+        assert_eq!(
+            decode_select_request(&select_request(&expression))
+                .unwrap()
+                .predicate,
+            Some(Predicate::Compare {
+                operator: Comparison::Equal,
+                left: Box::new(Predicate::Column("payload".to_owned())),
+                right: Box::new(Predicate::Bytea(vec![0, 0x80, 0xff])),
+            })
+        );
+        *expression.last_mut().unwrap() = 0;
+        expression.pop();
+        assert_eq!(
+            decode_select_request(&select_request(&expression)),
+            Err(RequestError::Truncated)
         );
     }
 

@@ -98,6 +98,18 @@ static int read_text_predicate_header(plan_reader *reader,
     return node_tag == 0x03;
 }
 
+static int read_bytea_predicate_header(plan_reader *reader,
+                                       uint64_t header_offset,
+                                       uint16_t *bytea_length) {
+    const uint8_t *ignored;
+    if (header_offset >= reader->length ||
+        reader->bytes[header_offset] != 0x07 ||
+        reader->offset != header_offset + 1 || !take(reader, 2, &ignored))
+        return 0;
+    *bytea_length = ((uint16_t)ignored[0] << 8) | ignored[1];
+    return 1;
+}
+
 static int read_integer_predicate_record(plan_reader *reader,
                                          uint64_t header_offset,
                                          int64_t *integer_value) {
@@ -506,6 +518,13 @@ static int decode_predicate(plan_reader *reader,
             if (!read_timestamptz_predicate_record(reader, tag_offset, &bytes)) return 0;
             type.type_code = PRDB_SDK_VALUE_TYPE_TIMESTAMPTZ;
             break;
+        case 0x07: {
+            uint16_t length;
+            if (!read_bytea_predicate_header(reader, tag_offset, &length) ||
+                length > 4096 || !take(reader, length, &bytes)) return 0;
+            type.type_code = PRDB_SDK_VALUE_TYPE_BYTEA;
+            break;
+        }
         case 0x10: {
             uint32_t index;
             int found = 0;
@@ -624,6 +643,11 @@ static int read_point_probe_leaf(plan_reader *reader, uint8_t column_id[16],
     } else if (tag == 0x06) {
         const uint8_t *timestamp_bytes;
         if (!read_timestamptz_predicate_record(reader, start, &timestamp_bytes)) return 0;
+    } else if (tag == 0x07) {
+        uint16_t length;
+        const uint8_t *bytea_bytes;
+        if (!read_bytea_predicate_header(reader, start, &length) ||
+            length > 4096 || !take(reader, length, &bytea_bytes)) return 0;
     } else {
         return 0;
     }
@@ -908,6 +932,23 @@ static int encode_point_probe_request(
             value_len = 8;
             break;
         }
+        case 0x07: {
+            uint16_t bytea_length;
+            const uint8_t *bytea_bytes;
+            plan_reader literal_reader = {hint->literal, hint->literal_len, 0};
+            uint8_t tag;
+            if (!read_u8(&literal_reader, &tag) || tag != 0x07 ||
+                !read_bytea_predicate_header(&literal_reader, 0, &bytea_length) ||
+                bytea_length > 4096 ||
+                !take(&literal_reader, bytea_length, &bytea_bytes) ||
+                literal_reader.offset != literal_reader.length ||
+                hint->key_column.type_code != PRDB_SDK_VALUE_TYPE_BYTEA)
+                return 0;
+            type_code = PRDB_SDK_VALUE_TYPE_BYTEA;
+            value_bytes = bytea_bytes;
+            value_len = bytea_length;
+            break;
+        }
         default:
             return 0;
     }
@@ -1037,6 +1078,20 @@ static int range_literal_to_value(const uint8_t *literal,
         value->type_code = PRDB_SDK_VALUE_TYPE_TIMESTAMPTZ;
         value->data = timestamp_bytes;
         value->data_len = 8;
+    } else if (tag == 0x07) {
+        uint16_t bytea_length;
+        const uint8_t *bytea_bytes;
+        if (expected_type != PRDB_SDK_VALUE_TYPE_BYTEA ||
+            !read_bytea_predicate_header(&reader, 0, &bytea_length) ||
+            bytea_length > 4096 || !take(&reader, bytea_length, &bytea_bytes) ||
+            reader.offset != reader.length) return 0;
+        memset(value, 0, sizeof(*value));
+        value->struct_size = sizeof(*value);
+        value->abi_version = PRDB_SDK_VALUE_ABI_V1_VERSION;
+        value->state = PRDB_SDK_VALUE_STATE_VALUE;
+        value->type_code = PRDB_SDK_VALUE_TYPE_BYTEA;
+        value->data = bytea_bytes;
+        value->data_len = bytea_length;
     } else {
         return 0;
     }
@@ -1162,6 +1217,11 @@ static int skip_predicate_node(plan_reader *reader, uint32_t depth) {
                length <= 4096 &&
                take(reader, length, &bytes);
     }
+    case 0x07: {
+        uint16_t length;
+        return read_bytea_predicate_header(reader, tag_offset, &length) &&
+               length <= 4096 && take(reader, length, &bytes);
+    }
     case 0x04: {
         const uint8_t *date_bytes;
         return read_date_predicate_record(reader, tag_offset, &date_bytes);
@@ -1263,6 +1323,16 @@ static int32_t evaluate_predicate_node(
             return PRDB_SDK_SQL_EVAL_INVALID_VALUE;
         predicate_value_init(out, PRDB_SDK_VALUE_TYPE_TIMESTAMPTZ,
                              timestamp_bytes, 8);
+        return PRDB_SDK_SQL_EVAL_OK;
+    }
+    case 0x07: {
+        uint16_t length;
+        const uint8_t *bytea_bytes;
+        if (!read_bytea_predicate_header(reader, tag_offset, &length) ||
+            length > 4096 || !take(reader, length, &bytea_bytes))
+            return PRDB_SDK_SQL_EVAL_INVALID_VALUE;
+        predicate_value_init(out, PRDB_SDK_VALUE_TYPE_BYTEA,
+                             bytea_bytes, length);
         return PRDB_SDK_SQL_EVAL_OK;
     }
     case 0x03: {
@@ -4492,7 +4562,8 @@ static int32_t decode_plan_internal(
                 if (!read_u8(&reader, &literal_tag) ||
                     (literal_tag != 0x01 && literal_tag != 0x02 &&
                      literal_tag != 0x03 && literal_tag != 0x04 &&
-                     literal_tag != 0x05 && literal_tag != 0x06)) {
+                     literal_tag != 0x05 && literal_tag != 0x06 &&
+                     literal_tag != 0x07)) {
                     return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
                 }
                 --reader.offset;
@@ -6233,6 +6304,15 @@ static int match_optimizer_parameter(plan_reader *reader,
                                 reader, tag_offset, &timestamp_bytes))
             return 0;
         return memcmp(timestamp_bytes, value->data, 8) == 0;
+    }
+    case PRDB_SDK_VALUE_TYPE_BYTEA: {
+        uint16_t length;
+        const uint8_t *bytea_bytes;
+        if (tag != 0x07 ||
+            !read_bytea_predicate_header(reader, tag_offset, &length) ||
+            length > 4096 || length != value->data_len ||
+            !take(reader, length, &bytea_bytes)) return 0;
+        return length == 0 || memcmp(bytea_bytes, value->data, length) == 0;
     }
     default:
         return 0;

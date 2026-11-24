@@ -264,6 +264,7 @@ pub enum BoundPredicate {
     Boolean(bool),
     Integer(i64),
     Text(String),
+    Bytea(Vec<u8>),
     Date(i32),
     Uuid([u8; 16]),
     TimestampTz(i64),
@@ -1247,6 +1248,10 @@ fn bind_predicate(
             Ok((BoundPredicate::Integer(*value), Some(ScalarType::Integer)))
         }
         Predicate::Text(value) => Ok((BoundPredicate::Text(value.clone()), Some(ScalarType::Text))),
+        Predicate::Bytea(value) => Ok((
+            BoundPredicate::Bytea(value.clone()),
+            Some(ScalarType::Bytea),
+        )),
         Predicate::Date(value) => Ok((BoundPredicate::Date(*value), Some(ScalarType::Date))),
         Predicate::Uuid(value) => Ok((BoundPredicate::Uuid(*value), Some(ScalarType::Uuid))),
         Predicate::TimestampTz(value) => Ok((
@@ -2226,6 +2231,23 @@ mod tests {
                     nullable: false,
                 })),
                 right: Box::new(BoundPredicate::TimestampTz(-42)),
+            }))
+        );
+        let mut bytea_relation = relation();
+        bytea_relation.relation.columns[0].scalar_type = ScalarType::Bytea;
+        let bytea_predicate = vec![0x20, 0, 0x10, 2, b'i', b'd', 0x07, 0, 2, 0x80, 0xff];
+        assert_eq!(
+            bind_select_request(&request(&bytea_predicate, "id"), Some(bytea_relation))
+                .map(|plan| plan.predicate),
+            Ok(Some(BoundPredicate::Compare {
+                operator: Comparison::Equal,
+                left: Box::new(BoundPredicate::Column(BoundColumn {
+                    column_id: [0x21; 16],
+                    ordinal: 0,
+                    scalar_type: ScalarType::Bytea,
+                    nullable: false,
+                })),
+                right: Box::new(BoundPredicate::Bytea(vec![0x80, 0xff])),
             }))
         );
     }

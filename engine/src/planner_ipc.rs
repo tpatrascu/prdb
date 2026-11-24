@@ -1648,6 +1648,38 @@ mod scan_estimate_request_tests {
             .unwrap(),
             timestamp_predicate
         );
+        let bytea_column = crate::optimizer_binding::BoundColumn {
+            column_id: [11; 16],
+            ordinal: 4,
+            scalar_type: crate::tuple::ScalarType::Bytea,
+            nullable: false,
+        };
+        let bytea_predicate = crate::optimizer_binding::BoundPredicate::Compare {
+            operator: crate::optimizer_request::Comparison::Equal,
+            left: Box::new(crate::optimizer_binding::BoundPredicate::Column(
+                bytea_column.clone(),
+            )),
+            right: Box::new(crate::optimizer_binding::BoundPredicate::Bytea(vec![
+                0, 0x80, 0xff,
+            ])),
+        };
+        let bytea_request = EstimatePredicateRequest::from_bound_predicate(
+            "public".to_owned(),
+            "items".to_owned(),
+            &bytea_predicate,
+        )
+        .unwrap();
+        let bytea_decoded =
+            EstimatePredicateRequest::decode(&bytea_request.encode().unwrap()).unwrap();
+        assert_eq!(bytea_decoded, bytea_request);
+        assert_eq!(
+            crate::optimizer_plan::decode_bound_predicate_v1(
+                &bytea_decoded.predicate_bytes,
+                &[bytea_column],
+            )
+            .unwrap(),
+            bytea_predicate
+        );
         for response in [
             EstimatePredicateResponse::Exact {
                 visible_rows: 4,
