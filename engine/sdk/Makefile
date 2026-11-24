@@ -657,7 +657,7 @@ $(SQL_V3_FORGED_ROW_HANDLE_QUERY): $(SQL_V3_FORGED_ROW_HANDLE_OBJECT) | $(BUILD_
 sandbox-query-fixture: $(SQL_V3_CAUGHT_ERROR_QUERY) $(SQL_V3_SHARED_LIBRARY_QUERY) $(SQL_V3_MISSING_DEPENDENCY_QUERY) $(SQL_V3_NETWORK_CONSTRUCTOR_QUERY) $(SQL_V3_WRITE_READ_QUERY) $(SQL_V6_SPILL_QUERY) $(SQL_V3_RESTRICTED_METADATA_QUERY) $(SQL_V3_FORGED_HANDLE_QUERY) $(SQL_V3_FORGED_ROW_HANDLE_QUERY) sdk-hostile-constructor-release
 
 .PHONY: release-profile
-release-profile: sandbox-query-fixture
+release-profile: sandbox-query-fixture sdk-shared-release
 	test "$$(getconf GNU_LIBC_VERSION)" = "glibc 2.42"
 	test -n "$(TCC_STORE_PATH)" -a -e "$(TCC_STORE_PATH)"
 	NIX_DONT_SET_RPATH=1 cargo build --workspace --release --locked

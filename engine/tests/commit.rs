@@ -41131,6 +41131,11 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         &database,
         StorageManagerConfig {
             max_active_analytical_invocations: 8,
+            max_invocation_scan_work: if indexed_join_benchmark_only {
+                1_048_576
+            } else {
+                prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK
+            },
             max_planner_estimate_requests: if sql_in_elevated_budget_only { 1 } else { 16 },
             max_analytical_planner_estimate_requests: sql_in_elevated_budget_only.then_some(64),
             max_planner_estimate_candidates: if sql_in_elevated_budget_only {
@@ -43502,7 +43507,15 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             },
             max_sql_index_probe_candidates:
                 prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
-            analytical_max_sql_index_probe_candidates: sql_in_elevated_budget_only.then_some(256),
+            analytical_max_sql_index_probe_candidates: if sql_in_elevated_budget_only {
+                Some(256)
+            } else if indexed_join_asymmetric_benchmark_only
+                || std::env::var_os("PRDB_TEST_INDEXED_JOIN_BENCHMARK_ONLY").is_some()
+            {
+                Some(512)
+            } else {
+                None
+            },
             cleanup_timeout: Duration::from_secs(2),
         },
     };
@@ -43878,37 +43891,26 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                     )
                     .map_err(|error| format!("operational load during spill: {error}"))?;
                     if indexed_join_benchmark_only {
-                        let (additional_reads, additional_commits) =
-                            run_operational_read_commit_samples(
-                                storage_ref,
-                                operational_table_id,
-                                expected_operational_scan_rows,
-                                token_id,
-                                secret,
-                                now + 3_600_000_000,
-                                0x92,
-                            )
-                            .map_err(|error| {
-                                format!(
-                                    "additional operational load during join benchmark: {error}"
+                        for sample in 0..7u8 {
+                            let namespace = 0x92 + sample;
+                            let (additional_reads, additional_commits) =
+                                run_operational_read_commit_samples(
+                                    storage_ref,
+                                    operational_table_id,
+                                    expected_operational_scan_rows,
+                                    token_id,
+                                    secret,
+                                    now + 3_600_000_000,
+                                    namespace,
                                 )
-                            })?;
-                        reads.extend(additional_reads);
-                        commits.extend(additional_commits);
-                        let (final_reads, final_commits) = run_operational_read_commit_samples(
-                            storage_ref,
-                            operational_table_id,
-                            expected_operational_scan_rows,
-                            token_id,
-                            secret,
-                            now + 3_600_000_000,
-                            0x93,
-                        )
-                        .map_err(|error| {
-                            format!("final operational load during join benchmark: {error}")
-                        })?;
-                        reads.extend(final_reads);
-                        commits.extend(final_commits);
+                                .map_err(|error| {
+                                    format!(
+                                        "additional operational load during join benchmark: {error}"
+                                    )
+                                })?;
+                            reads.extend(additional_reads);
+                            commits.extend(additional_commits);
+                        }
                     }
                     Ok((
                         started_at,
@@ -43972,7 +43974,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                     && operational_finished_at > query_started_at,
                 "operational reads/commits did not overlap the spill query"
             );
-            let expected_operational_count = if indexed_join_benchmark_only { 192 } else { 64 };
+            let expected_operational_count = if indexed_join_benchmark_only { 512 } else { 64 };
             assert_eq!(
                 read_count, expected_operational_count,
                 "unexpected operational point read count"
@@ -44317,7 +44319,16 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                             && load_started <= *observed_at
                             && *observed_at <= load_finished
                     }),
-                    "no indexed sample completed during operational load"
+                    "no indexed sample completed during operational load; load_duration={:?}, samples relative_to_load_start={:?}",
+                    load_finished.duration_since(load_started),
+                    observed_samples
+                        .iter()
+                        .map(|(kind, observed_at)| (
+                            *kind as char,
+                            observed_at.checked_duration_since(load_started),
+                            load_finished.checked_duration_since(*observed_at),
+                        ))
+                        .collect::<Vec<_>>()
                 );
             }
             if expected_hash_samples > 0 {

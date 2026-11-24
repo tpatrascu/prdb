@@ -2139,6 +2139,35 @@ static int32_t run_write_read_fixture(
         static const uint8_t started[] = "JOIN_BENCHMARK_STARTED";
         static const uint8_t samples_finished[] =
             "JOIN_BENCHMARK_SAMPLES_FINISHED";
+        if (invocation->parameters[0] == '6') {
+            uint8_t workload_response[12] = {0};
+            uint8_t empty_request = 0;
+            uint64_t workload_response_len = 0;
+            int32_t workload_status = host->executor_request(
+                host->context, PRDB_QUERY_HOST_OP_GET_WORKLOAD_BUDGETS,
+                &empty_request, 0, workload_response,
+                sizeof(workload_response), &workload_response_len);
+            uint32_t candidate_budget = workload_response_len == 12
+                ? ((uint32_t)workload_response[8] << 24) |
+                  ((uint32_t)workload_response[9] << 16) |
+                  ((uint32_t)workload_response[10] << 8) |
+                  (uint32_t)workload_response[11]
+                : 0;
+            if (workload_status != PRDB_QUERY_CALLBACK_OK ||
+                workload_response_len != 12 ||
+                memcmp(workload_response, "PQB1\0\1\0\14", 8) != 0 ||
+                candidate_budget != 512) {
+                char message[72];
+                int message_len = snprintf(
+                    message, sizeof(message),
+                    "join-candidate-budget-status=%d value=%u",
+                    workload_status, candidate_budget);
+                return message_len > 0 && (size_t)message_len < sizeof(message)
+                    ? report_failure(host, (const uint8_t *)message,
+                                     (uint64_t)message_len)
+                    : 1;
+            }
+        }
         const struct timespec load_settle_interval = {0, 100000000};
         const uint32_t outer_rows = invocation->parameters[0] == 'n' ||
                                             invocation->parameters[0] == 'j' ||
@@ -2255,7 +2284,7 @@ static int32_t run_write_read_fixture(
             if (status != PRDB_SDK_SQL_EXEC_OK) {
                 char message[64];
                 int message_len = snprintf(message, sizeof(message),
-                                            "indexed-join-exec-status=%d", status);
+                                           "indexed-join-exec-status=%d", status);
                 if (message_len <= 0 || (size_t)message_len >= sizeof(message)) {
                     return 1;
                 }
@@ -2281,6 +2310,8 @@ static int32_t run_write_read_fixture(
                 invocation->parameters[0] == '5' || invocation->parameters[0] == 'h' ||
                         invocation->parameters[0] == 'b' || invocation->parameters[0] == 'k'
                     ? PRDB_SDK_OPTIMIZER_PLAN_KIND_JOIN_SELECT
+                : invocation->parameters[0] == '6'
+                    ? PRDB_SDK_OPTIMIZER_PLAN_KIND_INDEX_PREFIX_NESTED_LOOP_JOIN
                     : PRDB_SDK_OPTIMIZER_PLAN_KIND_INDEX_NESTED_LOOP_JOIN;
             if (benchmark_plan_status != PRDB_SDK_OPTIMIZER_RESULT_OK ||
                 benchmark_plan.status != PRDB_SDK_OPTIMIZER_STATUS_SUCCESS ||
@@ -2319,6 +2350,8 @@ static int32_t run_write_read_fixture(
             const uint8_t selected_strategy =
                 benchmark_plan.plan[2] ==
                         PRDB_SDK_OPTIMIZER_PLAN_KIND_INDEX_NESTED_LOOP_JOIN
+                    || benchmark_plan.plan[2] ==
+                           PRDB_SDK_OPTIMIZER_PLAN_KIND_INDEX_PREFIX_NESTED_LOOP_JOIN
                     ? 'I'
                     : 'H';
             if (report_indexed_join_timing(host, selected_strategy,

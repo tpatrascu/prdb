@@ -44,6 +44,7 @@ typedef struct mock_state {
     uint32_t range_calls;
     uint32_t prefix_calls;
     uint16_t range_row_count;
+    uint16_t max_range_probes_per_response;
     uint32_t max_index_probe_candidates;
     int32_t range_value_base;
     uint8_t repeat_range_values;
@@ -667,6 +668,11 @@ static int32_t executor_request(void *context, uint16_t operation,
                                            request[request_offset + 1]);
         request_offset += 2 + (uint32_t)column_count * 16;
         assert(request_offset == request_len);
+        if (mock->max_range_probes_per_response != 0 &&
+            probe_count > mock->max_range_probes_per_response) {
+            ++mock->range_calls;
+            return PRDB_QUERY_CALLBACK_RESPONSE_TOO_SMALL;
+        }
         if ((uint64_t)probe_count * row_count > UINT32_C(16384)) {
             assert(capacity >= 2);
             response[0] = 1;
@@ -1452,6 +1458,30 @@ int main(void) {
                mock.statement_failed == 1);
         mock.max_index_probe_candidates = 0;
         mock.range_row_count = 0;
+        {
+            int32_t duplicate_outer_keys[8] = {
+                1, 1, 1, 1, 1, 1, 1, 1};
+            int32_t duplicate_outer_values[8] = {
+                101, 101, 101, 101, 101, 101, 101, 101};
+            uint8_t duplicate_outer_states[8] = {
+                PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_STATE_VALUE,
+                PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_STATE_VALUE,
+                PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_STATE_VALUE,
+                PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_STATE_VALUE};
+            mock.batch_len[0] = make_batch(
+                mock.batch[0], duplicate_outer_keys, duplicate_outer_states,
+                duplicate_outer_values, 8);
+            reset(&mock, &capture);
+            mock.max_range_probes_per_response = 4;
+            assert(run_query_optimizer(&mock, &capture, composite_sql,
+                                      sizeof(composite_sql) - 1) ==
+                   PRDB_SDK_SQL_EXEC_OK);
+            assert(mock.range_calls == 3 && capture.calls == 8 &&
+                   mock.statement_failed == 0);
+            mock.max_range_probes_per_response = 0;
+            mock.batch_len[0] = make_batch(
+                mock.batch[0], outer_key, outer_state, outer_value, 1);
+        }
         uint32_t restored_len = build_optimizer_join_plan(
             mock.optimizer_response + 7);
         response_offset = 0;
