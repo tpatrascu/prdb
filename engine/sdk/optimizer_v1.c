@@ -127,6 +127,9 @@ static int encode_optimizer_parameter(
                                     (uint16_t)value->data_len) &&
                predicate_append(output, capacity, offset, value->data,
                                 value->data_len);
+    case PRDB_SDK_VALUE_TYPE_DECIMAL:
+        return predicate_append_u8(output, capacity, offset, 0x08) &&
+               predicate_append(output, capacity, offset, value->data, 16);
     default:
         return 2;
     }

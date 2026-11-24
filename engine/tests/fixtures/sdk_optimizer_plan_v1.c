@@ -761,6 +761,43 @@ static uint32_t build_bytea_filter_plan(uint8_t *bytes) {
     return offset;
 }
 
+static uint32_t build_decimal_filter_plan(uint8_t *bytes) {
+    uint32_t offset = 0;
+    (void)put_header(bytes, &offset, 4);
+    bytes[offset++] = 1;
+    put_u16(bytes, &offset, 1);
+    uint32_t column_id_offset = put_column(
+        bytes, &offset, PRDB_SDK_VALUE_TYPE_DECIMAL, 0);
+    bytes[column_id_offset] = 10;
+    bytes[column_id_offset + 21] = 8;
+    bytes[column_id_offset + 22] = 2;
+    set_column_ordinal(bytes, column_id_offset, 0);
+    bytes[offset++] = 2;
+    bytes[offset++] = 0x20;
+    bytes[offset++] = 0;
+    bytes[offset++] = 0x10;
+    bytes[offset++] = 10;
+    memset(bytes + offset, 0, 15);
+    offset += 15;
+    bytes[offset++] = 0x08;
+    memset(bytes + offset, 0, 13);
+    offset += 13;
+    bytes[offset++] = 1;
+    bytes[offset++] = 0xe2;
+    bytes[offset++] = 0x40;
+    bytes[offset++] = 3;
+    put_u16(bytes, &offset, 1);
+    column_id_offset = put_column(
+        bytes, &offset, PRDB_SDK_VALUE_TYPE_DECIMAL, 0);
+    bytes[column_id_offset] = 10;
+    bytes[column_id_offset + 21] = 8;
+    bytes[column_id_offset + 22] = 2;
+    set_column_ordinal(bytes, column_id_offset, 0);
+    bytes[offset++] = 4;
+    put_u32(bytes, &offset, 1);
+    return offset;
+}
+
 static uint32_t build_null_filter_plan(uint8_t *bytes,
                                        uint8_t predicate_tag,
                                        uint32_t *predicate_offset) {
@@ -1855,6 +1892,7 @@ int main(void) {
     uint8_t uuid_filter_plan[512];
     uint8_t timestamptz_filter_plan[512];
     uint8_t bytea_filter_plan[512];
+    uint8_t decimal_filter_plan[512];
     uint8_t probed_plan[512];
     uint8_t ranged_plan[512];
     uint8_t equality_ranged_plan[512];
@@ -1904,6 +1942,17 @@ int main(void) {
            decoded_bytea_filter.prefix_len == 25 &&
            decoded_bytea_filter.prefix[0] == 0x20 &&
            decoded_bytea_filter.prefix[19] == 0x07);
+    uint32_t decimal_filter_plan_len =
+        build_decimal_filter_plan(decimal_filter_plan);
+    prdb_sdk_optimizer_filter_v1 decoded_decimal_filter = {0};
+    assert(prdb_sdk_optimizer_decode_plan_with_filter_v1(
+               decimal_filter_plan, decimal_filter_plan_len, &decoded_date_plan,
+               sizeof(decoded_date_plan), &decoded_decimal_filter,
+               sizeof(decoded_decimal_filter)) == PRDB_SDK_OPTIMIZER_PLAN_OK);
+    assert(decoded_decimal_filter.present == 1 &&
+           decoded_decimal_filter.prefix_len == 36 &&
+           decoded_decimal_filter.prefix[0] == 0x20 &&
+           decoded_decimal_filter.prefix[19] == 0x08);
     uint8_t sql_filtered[] = "SELECT c0 FROM items WHERE c0 = $1 LIMIT 1";
     uint8_t filter_parameter_bytes[4] = {0, 0, 0, 1};
     prdb_sdk_value_v1 filter_parameters[1] = {{

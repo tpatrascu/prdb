@@ -368,9 +368,12 @@ fn validate_decimal(value: i128, precision: u8, scale: u8) -> Result<(), TupleEr
     if precision == 0 || precision > 38 || scale > precision {
         return Err(TupleError::InvalidDecimalParameters);
     }
-    let digits = value.unsigned_abs().to_string().len();
-    if digits > precision as usize {
+    if !decimal_coefficient_is_valid(value, precision) {
         return Err(TupleError::DecimalPrecisionExceeded);
     }
     Ok(())
+}
+
+pub(crate) fn decimal_coefficient_is_valid(value: i128, precision: u8) -> bool {
+    (1..=38).contains(&precision) && value.unsigned_abs().to_string().len() <= precision as usize
 }

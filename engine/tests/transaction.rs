@@ -7481,6 +7481,34 @@ fn authorized_predicate_estimate_compares_readable_scalar_columns()
         Some((3, 1)),
         "BYTEA literals should compare against authorized cells"
     );
+    let decimal_case = cases
+        .iter()
+        .position(|(scalar_type, _, _, _)| matches!(scalar_type, ScalarType::Decimal { .. }))
+        .expect("fixture has a DECIMAL comparison pair");
+    let decimal_ordinal = decimal_case * 2 + 1;
+    let decimal_literal_predicate = BoundPredicate::Compare {
+        operator: Comparison::Equal,
+        left: Box::new(BoundPredicate::Column(BoundColumn {
+            column_id: column_ids[decimal_ordinal],
+            ordinal: decimal_ordinal as u32,
+            scalar_type: ScalarType::Decimal {
+                precision: 8,
+                scale: 2,
+            },
+            nullable: true,
+        })),
+        right: Box::new(BoundPredicate::Decimal(1_200)),
+    };
+    assert_eq!(
+        observer.estimate_authorized_predicate_at_most(
+            table_id,
+            &projection,
+            &decimal_literal_predicate,
+            3,
+        )?,
+        Some((3, 1)),
+        "DECIMAL literals should compare at the bound column scale"
+    );
     let invalid_date_literal = BoundPredicate::Compare {
         operator: Comparison::Equal,
         left: Box::new(BoundPredicate::Column(BoundColumn {

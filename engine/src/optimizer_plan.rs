@@ -3660,6 +3660,10 @@ fn put_predicate(output: &mut Vec<u8>, predicate: &BoundPredicate) -> Result<(),
             output.push(0x06);
             output.extend_from_slice(&value.to_be_bytes());
         }
+        BoundPredicate::Decimal(value) => {
+            output.push(0x08);
+            output.extend_from_slice(&value.to_be_bytes());
+        }
         BoundPredicate::Column(column) => {
             output.extend_from_slice(
                 &crate::query_abi::encode_optimizer_plan_column_predicate_record(
@@ -4125,6 +4129,11 @@ impl PlanReader<'_> {
                 }
                 Ok(BoundPredicate::Bytea(self.take(length)?.to_vec()))
             }
+            0x08 => Ok(BoundPredicate::Decimal(i128::from_be_bytes(
+                self.take(16)?
+                    .try_into()
+                    .map_err(|_| PlanError::Truncated)?,
+            ))),
             0x10 => {
                 let column_id = self.column_predicate_id(tag_offset)?;
                 let column = scan_columns
@@ -4438,6 +4447,10 @@ fn is_point_probe_literal(column: &BoundColumn, value: &BoundPredicate) -> bool 
         (column.scalar_type, value),
         (ScalarType::Integer, BoundPredicate::Integer(value))
             if i32::try_from(*value).is_ok()
+    ) || matches!(
+        (column.scalar_type, value),
+        (ScalarType::Decimal { precision, .. }, BoundPredicate::Decimal(value))
+            if crate::tuple::decimal_coefficient_is_valid(*value, precision)
     )
 }
 
@@ -4945,7 +4958,8 @@ fn collect_predicate_columns_at_depth(
         | BoundPredicate::Bytea(_)
         | BoundPredicate::Date(_)
         | BoundPredicate::Uuid(_)
-        | BoundPredicate::TimestampTz(_) => Ok(()),
+        | BoundPredicate::TimestampTz(_)
+        | BoundPredicate::Decimal(_) => Ok(()),
     }
 }
 
@@ -4974,6 +4988,7 @@ fn predicate_type_at_depth(
         BoundPredicate::Null => Ok(None),
         BoundPredicate::Boolean(_) => Ok(Some(ScalarType::Boolean)),
         BoundPredicate::Integer(_) => Ok(Some(ScalarType::Integer)),
+        BoundPredicate::Decimal(_) => Ok(None),
         BoundPredicate::Text(value)
             if value.len() <= crate::optimizer_request::MAX_TEXT_LITERAL_BYTES =>
         {
@@ -5003,6 +5018,20 @@ fn predicate_type_at_depth(
             }
         }
         BoundPredicate::Compare { left, right, .. } => {
+            let decimal_context_valid = match (left.as_ref(), right.as_ref()) {
+                (BoundPredicate::Decimal(value), BoundPredicate::Column(column))
+                | (BoundPredicate::Column(column), BoundPredicate::Decimal(value)) => {
+                    matches!(column.scalar_type, ScalarType::Decimal { precision, .. }
+                        if crate::tuple::decimal_coefficient_is_valid(*value, precision))
+                }
+                (BoundPredicate::Decimal(_), BoundPredicate::Null)
+                | (BoundPredicate::Null, BoundPredicate::Decimal(_)) => true,
+                (BoundPredicate::Decimal(_), _) | (_, BoundPredicate::Decimal(_)) => false,
+                _ => true,
+            };
+            if !decimal_context_valid {
+                return Err(PlanError::InvalidPredicate);
+            }
             let left = predicate_type_at_depth(left, scan_columns, depth + 1, nodes)?;
             let right = predicate_type_at_depth(right, scan_columns, depth + 1, nodes)?;
             if matches!((left, right), (Some(left), Some(right)) if left != right) {
@@ -5846,6 +5875,66 @@ mod tests {
     }
 
     #[test]
+    fn decimal_predicate_record_roundtrips_signed_big_endian_coefficient() {
+        let predicate = BoundPredicate::Decimal(-123_456);
+        let mut encoded = Vec::new();
+        put_predicate(&mut encoded, &predicate).unwrap();
+        assert_eq!(
+            encoded,
+            [&[0x08][..], &(-123_456i128).to_be_bytes()[..]].concat()
+        );
+        let mut reader = PlanReader {
+            bytes: &encoded,
+            offset: 0,
+        };
+        assert_eq!(reader.predicate(&[]).unwrap(), predicate);
+    }
+
+    #[test]
+    fn decimal_predicate_requires_a_decimal_column_and_fits_its_precision() {
+        let decimal_column = column(
+            0x46,
+            0,
+            ScalarType::Decimal {
+                precision: 8,
+                scale: 2,
+            },
+        );
+        let predicate = BoundPredicate::Compare {
+            operator: crate::optimizer_request::Comparison::Equal,
+            left: Box::new(BoundPredicate::Column(decimal_column.clone())),
+            right: Box::new(BoundPredicate::Decimal(12_345_678)),
+        };
+        let mut encoded = Vec::new();
+        put_predicate(&mut encoded, &predicate).unwrap();
+        assert_eq!(
+            decode_bound_predicate_v1(&encoded, std::slice::from_ref(&decimal_column)),
+            Ok(predicate)
+        );
+
+        let out_of_precision = BoundPredicate::Compare {
+            operator: crate::optimizer_request::Comparison::Equal,
+            left: Box::new(BoundPredicate::Column(decimal_column)),
+            right: Box::new(BoundPredicate::Decimal(123_456_789)),
+        };
+        let mut encoded = Vec::new();
+        put_predicate(&mut encoded, &out_of_precision).unwrap();
+        let columns = [column(
+            0x46,
+            0,
+            ScalarType::Decimal {
+                precision: 8,
+                scale: 2,
+            },
+        )];
+        let decoded = decode_bound_predicate_v1(&encoded, &columns).unwrap();
+        assert_eq!(
+            predicate_type(&decoded, &columns),
+            Err(PlanError::InvalidPredicate)
+        );
+    }
+
+    #[test]
     fn uuid_literals_are_eligible_for_exact_index_access() {
         let key = column(0x45, 0, ScalarType::Uuid);
         assert!(is_point_probe_literal(
@@ -5869,6 +5958,26 @@ mod tests {
         assert!(is_point_probe_literal(
             &key,
             &BoundPredicate::Bytea(vec![0, 0x80, 0xff])
+        ));
+    }
+
+    #[test]
+    fn decimal_literals_are_eligible_for_exact_index_access() {
+        let key = column(
+            0x45,
+            0,
+            ScalarType::Decimal {
+                precision: 8,
+                scale: 2,
+            },
+        );
+        assert!(is_point_probe_literal(
+            &key,
+            &BoundPredicate::Decimal(123_456)
+        ));
+        assert!(!is_point_probe_literal(
+            &key,
+            &BoundPredicate::Decimal(123_456_789)
         ));
     }
 

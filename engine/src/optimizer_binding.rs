@@ -268,6 +268,7 @@ pub enum BoundPredicate {
     Date(i32),
     Uuid([u8; 16]),
     TimestampTz(i64),
+    Decimal(i128),
     Column(BoundColumn),
     Compare {
         operator: Comparison,
@@ -1258,6 +1259,7 @@ fn bind_predicate(
             BoundPredicate::TimestampTz(*value),
             Some(ScalarType::TimestampTz),
         )),
+        Predicate::Decimal(value) => Ok((BoundPredicate::Decimal(*value), None)),
         Predicate::Column(name) => {
             let column = resolve_column(columns, name)?;
             Ok((
@@ -1272,6 +1274,20 @@ fn bind_predicate(
         } => {
             let (left, left_type) = bind_predicate(left, columns)?;
             let (right, right_type) = bind_predicate(right, columns)?;
+            let decimal_context_valid = match (&left, &right) {
+                (BoundPredicate::Decimal(value), BoundPredicate::Column(column))
+                | (BoundPredicate::Column(column), BoundPredicate::Decimal(value)) => {
+                    matches!(column.scalar_type, ScalarType::Decimal { precision, .. }
+                        if crate::tuple::decimal_coefficient_is_valid(*value, precision))
+                }
+                (BoundPredicate::Decimal(_), BoundPredicate::Null)
+                | (BoundPredicate::Null, BoundPredicate::Decimal(_)) => true,
+                (BoundPredicate::Decimal(_), _) | (_, BoundPredicate::Decimal(_)) => false,
+                _ => true,
+            };
+            if !decimal_context_valid {
+                return Err(BindError::InvalidQuery);
+            }
             if matches!((left_type, right_type), (Some(left), Some(right)) if left != right) {
                 return Err(BindError::InvalidQuery);
             }
@@ -2248,6 +2264,30 @@ mod tests {
                     nullable: false,
                 })),
                 right: Box::new(BoundPredicate::Bytea(vec![0x80, 0xff])),
+            }))
+        );
+        let mut decimal_relation = relation();
+        decimal_relation.relation.columns[0].scalar_type = ScalarType::Decimal {
+            precision: 8,
+            scale: 2,
+        };
+        let mut decimal_predicate = vec![0x20, 0, 0x10, 2, b'i', b'd', 0x08];
+        decimal_predicate.extend_from_slice(&123_456i128.to_be_bytes());
+        assert_eq!(
+            bind_select_request(&request(&decimal_predicate, "id"), Some(decimal_relation))
+                .map(|plan| plan.predicate),
+            Ok(Some(BoundPredicate::Compare {
+                operator: Comparison::Equal,
+                left: Box::new(BoundPredicate::Column(BoundColumn {
+                    column_id: [0x21; 16],
+                    ordinal: 0,
+                    scalar_type: ScalarType::Decimal {
+                        precision: 8,
+                        scale: 2
+                    },
+                    nullable: false,
+                })),
+                right: Box::new(BoundPredicate::Decimal(123_456)),
             }))
         );
     }

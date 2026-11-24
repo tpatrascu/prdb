@@ -11444,6 +11444,7 @@ fn valid_estimate_predicate(
             BoundPredicate::Uuid(_) => true,
             BoundPredicate::Bytea(value) => value.len() <= 4096,
             BoundPredicate::TimestampTz(value) => crate::tuple::timestamp_micros_is_valid(*value),
+            BoundPredicate::Decimal(_) => true,
             BoundPredicate::Text(value) => value.len() <= 4096,
             BoundPredicate::Column(column) => usize::try_from(column.ordinal)
                 .ok()
@@ -11456,8 +11457,25 @@ fn valid_estimate_predicate(
                 })
                 .unwrap_or(false),
             BoundPredicate::Compare { left, right, .. } => {
+                let decimal_context_valid = match (left.as_ref(), right.as_ref()) {
+                    (BoundPredicate::Decimal(value), BoundPredicate::Column(column))
+                    | (BoundPredicate::Column(column), BoundPredicate::Decimal(value)) => {
+                        let ordinal = match usize::try_from(column.ordinal) {
+                            Ok(ordinal) => ordinal,
+                            Err(_) => return false,
+                        };
+                        matches!(projection.columns.get(ordinal).map(|column| column.scalar_type),
+                            Some(crate::tuple::ScalarType::Decimal { precision, .. })
+                                if crate::tuple::decimal_coefficient_is_valid(*value, precision))
+                    }
+                    (BoundPredicate::Decimal(_), BoundPredicate::Null)
+                    | (BoundPredicate::Null, BoundPredicate::Decimal(_)) => true,
+                    (BoundPredicate::Decimal(_), _) | (_, BoundPredicate::Decimal(_)) => false,
+                    _ => true,
+                };
                 visit(left, projection, depth + 1, remaining_nodes, maximum_depth)
                     && visit(right, projection, depth + 1, remaining_nodes, maximum_depth)
+                    && decimal_context_valid
             }
             BoundPredicate::And(children) | BoundPredicate::Or(children) => {
                 !children.is_empty()
@@ -11503,6 +11521,7 @@ fn estimate_predicate_kind(
         BoundPredicate::Bytea(value) if value.len() <= 4096 => Some(EstimateValueKind::Bytea),
         BoundPredicate::Bytea(_) => None,
         BoundPredicate::TimestampTz(_) => Some(EstimateValueKind::TimestampTz),
+        BoundPredicate::Decimal(_) => Some(EstimateValueKind::Decimal),
         BoundPredicate::Column(column) => {
             let ordinal = usize::try_from(column.ordinal).ok()?;
             let column = &projection.columns[ordinal];
@@ -11585,6 +11604,7 @@ fn evaluate_estimate_predicate(
             }
             BoundPredicate::Bytea(_) => None,
             BoundPredicate::TimestampTz(value) => Some(EstimateValue::TimestampTz(*value)),
+            BoundPredicate::Decimal(value) => Some(EstimateValue::Decimal(*value)),
             BoundPredicate::Text(value) if value.len() <= 4096 => {
                 Some(EstimateValue::Text(value.clone()))
             }

@@ -179,6 +179,43 @@ static int read_timestamptz_predicate_record(plan_reader *reader,
     return 1;
 }
 
+static int read_decimal_predicate_record(plan_reader *reader,
+                                         uint64_t header_offset,
+                                         const uint8_t **coefficient) {
+    if (header_offset >= reader->length ||
+        reader->bytes[header_offset] != 0x08 ||
+        reader->offset != header_offset + 1 || !take(reader, 16, coefficient))
+        return 0;
+    return 1;
+}
+
+static int decimal_coefficient_fits_precision(const uint8_t coefficient[16],
+                                               uint8_t precision) {
+    uint8_t magnitude[16];
+    uint8_t maximum[16] = {0};
+    uint16_t carry;
+    if (precision == 0 || precision > 38) return 0;
+    memcpy(magnitude, coefficient, sizeof(magnitude));
+    if ((magnitude[0] & 0x80) != 0) {
+        carry = 1;
+        for (int index = 15; index >= 0; --index) {
+            uint16_t value = (uint16_t)(uint8_t)~magnitude[index] + carry;
+            magnitude[index] = (uint8_t)value;
+            carry = (uint16_t)(value >> 8);
+        }
+    }
+    for (uint8_t digit = 0; digit < precision; ++digit) {
+        carry = 9;
+        for (int index = 15; index >= 0; --index) {
+            uint16_t value = (uint16_t)maximum[index] * 10 + carry;
+            maximum[index] = (uint8_t)value;
+            carry = (uint16_t)(value >> 8);
+        }
+        if (carry != 0) return 0;
+    }
+    return memcmp(magnitude, maximum, sizeof(magnitude)) <= 0;
+}
+
 static int read_column_predicate_record(plan_reader *reader,
                                         uint64_t header_offset,
                                         uint8_t column_id[16]) {
@@ -414,8 +451,10 @@ static int read_column(plan_reader *reader,
 
 typedef struct predicate_type {
     uint8_t is_null;
+    uint8_t decimal_literal;
     uint8_t type_code;
     uint8_t parameters[4];
+    uint8_t decimal_coefficient[16];
 } predicate_type;
 
 static int valid_utf8(const uint8_t *bytes, uint32_t length) {
@@ -457,9 +496,17 @@ static int valid_utf8(const uint8_t *bytes, uint32_t length) {
 }
 
 static int same_type(const predicate_type *left, const predicate_type *right) {
-    return left->is_null || right->is_null ||
-           (left->type_code == right->type_code &&
-            memcmp(left->parameters, right->parameters, 4) == 0);
+    if (left->is_null || right->is_null) return 1;
+    if (left->decimal_literal || right->decimal_literal) {
+        const predicate_type *literal = left->decimal_literal ? left : right;
+        const predicate_type *column = left->decimal_literal ? right : left;
+        return left->decimal_literal != right->decimal_literal &&
+               column->type_code == PRDB_SDK_VALUE_TYPE_DECIMAL &&
+               decimal_coefficient_fits_precision(
+                   literal->decimal_coefficient, column->parameters[0]);
+    }
+    return left->type_code == right->type_code &&
+           memcmp(left->parameters, right->parameters, 4) == 0;
 }
 
 static int predicate_boolean(const predicate_type *type) {
@@ -523,6 +570,15 @@ static int decode_predicate(plan_reader *reader,
             if (!read_bytea_predicate_header(reader, tag_offset, &length) ||
                 length > 4096 || !take(reader, length, &bytes)) return 0;
             type.type_code = PRDB_SDK_VALUE_TYPE_BYTEA;
+            break;
+        }
+        case 0x08: {
+            const uint8_t *coefficient;
+            if (!read_decimal_predicate_record(reader, tag_offset, &coefficient))
+                return 0;
+            type.type_code = PRDB_SDK_VALUE_TYPE_DECIMAL;
+            type.decimal_literal = 1;
+            memcpy(type.decimal_coefficient, coefficient, 16);
             break;
         }
         case 0x10: {
@@ -648,6 +704,9 @@ static int read_point_probe_leaf(plan_reader *reader, uint8_t column_id[16],
         const uint8_t *bytea_bytes;
         if (!read_bytea_predicate_header(reader, start, &length) ||
             length > 4096 || !take(reader, length, &bytea_bytes)) return 0;
+    } else if (tag == 0x08) {
+        const uint8_t *coefficient;
+        if (!read_decimal_predicate_record(reader, start, &coefficient)) return 0;
     } else {
         return 0;
     }
@@ -949,6 +1008,22 @@ static int encode_point_probe_request(
             value_len = bytea_length;
             break;
         }
+        case 0x08: {
+            const uint8_t *coefficient;
+            plan_reader literal_reader = {hint->literal, hint->literal_len, 0};
+            uint8_t tag;
+            if (!read_u8(&literal_reader, &tag) || tag != 0x08 ||
+                !read_decimal_predicate_record(&literal_reader, 0, &coefficient) ||
+                literal_reader.offset != literal_reader.length ||
+                hint->key_column.type_code != PRDB_SDK_VALUE_TYPE_DECIMAL ||
+                !decimal_coefficient_fits_precision(
+                    coefficient, hint->key_column.type_parameters[0]))
+                return 0;
+            type_code = PRDB_SDK_VALUE_TYPE_DECIMAL;
+            value_bytes = coefficient;
+            value_len = 16;
+            break;
+        }
         default:
             return 0;
     }
@@ -993,6 +1068,7 @@ static int encode_point_probe_request(
 static int range_literal_to_value(const uint8_t *literal,
                                   uint32_t literal_len,
                                   uint8_t expected_type,
+                                  uint8_t decimal_precision,
                                   uint8_t integer_bytes[4],
                                   prdb_sdk_value_v1 *value) {
     plan_reader reader;
@@ -1092,6 +1168,20 @@ static int range_literal_to_value(const uint8_t *literal,
         value->type_code = PRDB_SDK_VALUE_TYPE_BYTEA;
         value->data = bytea_bytes;
         value->data_len = bytea_length;
+    } else if (tag == 0x08) {
+        const uint8_t *coefficient;
+        if (expected_type != PRDB_SDK_VALUE_TYPE_DECIMAL ||
+            !read_decimal_predicate_record(&reader, 0, &coefficient) ||
+            reader.offset != reader.length ||
+            !decimal_coefficient_fits_precision(coefficient, decimal_precision))
+            return 0;
+        memset(value, 0, sizeof(*value));
+        value->struct_size = sizeof(*value);
+        value->abi_version = PRDB_SDK_VALUE_ABI_V1_VERSION;
+        value->state = PRDB_SDK_VALUE_STATE_VALUE;
+        value->type_code = PRDB_SDK_VALUE_TYPE_DECIMAL;
+        value->data = coefficient;
+        value->data_len = 16;
     } else {
         return 0;
     }
@@ -1222,6 +1312,10 @@ static int skip_predicate_node(plan_reader *reader, uint32_t depth) {
         return read_bytea_predicate_header(reader, tag_offset, &length) &&
                length <= 4096 && take(reader, length, &bytes);
     }
+    case 0x08: {
+        const uint8_t *coefficient;
+        return read_decimal_predicate_record(reader, tag_offset, &coefficient);
+    }
     case 0x04: {
         const uint8_t *date_bytes;
         return read_date_predicate_record(reader, tag_offset, &date_bytes);
@@ -1335,6 +1429,15 @@ static int32_t evaluate_predicate_node(
                              bytea_bytes, length);
         return PRDB_SDK_SQL_EVAL_OK;
     }
+    case 0x08: {
+        const uint8_t *coefficient;
+        if (!read_decimal_predicate_record(reader, tag_offset, &coefficient))
+            return PRDB_SDK_SQL_EVAL_INVALID_VALUE;
+        predicate_value_init(out, PRDB_SDK_VALUE_TYPE_DECIMAL,
+                             coefficient, 16);
+        out->decimal_scale = UINT8_MAX;
+        return PRDB_SDK_SQL_EVAL_OK;
+    }
     case 0x03: {
         uint16_t length;
         if (!read_text_predicate_header(reader, tag_offset, &length) ||
@@ -1380,6 +1483,12 @@ static int32_t evaluate_predicate_node(
         status = evaluate_predicate_node(reader, plan, source_cells, &right,
                                          depth + 1, nodes);
         if (status != PRDB_SDK_SQL_EVAL_OK) return status;
+        if (left.decimal_scale == UINT8_MAX &&
+            right.value.type_code == PRDB_SDK_VALUE_TYPE_DECIMAL)
+            left.decimal_scale = right.decimal_scale;
+        if (right.decimal_scale == UINT8_MAX &&
+            left.value.type_code == PRDB_SDK_VALUE_TYPE_DECIMAL)
+            right.decimal_scale = left.decimal_scale;
         status = prdb_sdk_sql_compare_v1(
             &left.value, &right.value, (uint32_t)comparison + 1,
             left.decimal_scale,
@@ -4563,7 +4672,7 @@ static int32_t decode_plan_internal(
                     (literal_tag != 0x01 && literal_tag != 0x02 &&
                      literal_tag != 0x03 && literal_tag != 0x04 &&
                      literal_tag != 0x05 && literal_tag != 0x06 &&
-                     literal_tag != 0x07)) {
+                     literal_tag != 0x07 && literal_tag != 0x08)) {
                     return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
                 }
                 --reader.offset;
@@ -5951,7 +6060,9 @@ int32_t prdb_sdk_optimizer_execute_unfiltered_plan_v1(
         if (range_probe.lower_literal != NULL) {
             if (!range_literal_to_value(
                     range_probe.lower_literal, range_probe.lower_literal_len,
-                    range_probe.key_column.type_code, lower_integer_bytes,
+                    range_probe.key_column.type_code,
+                    range_probe.key_column.type_parameters[0],
+                    lower_integer_bytes,
                     &lower_value)) {
                 return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
             }
@@ -5960,7 +6071,9 @@ int32_t prdb_sdk_optimizer_execute_unfiltered_plan_v1(
         if (range_probe.upper_literal != NULL) {
             if (!range_literal_to_value(
                     range_probe.upper_literal, range_probe.upper_literal_len,
-                    range_probe.key_column.type_code, upper_integer_bytes,
+                    range_probe.key_column.type_code,
+                    range_probe.key_column.type_parameters[0],
+                    upper_integer_bytes,
                     &upper_value)) {
                 return PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD;
             }
@@ -6313,6 +6426,13 @@ static int match_optimizer_parameter(plan_reader *reader,
             length > 4096 || length != value->data_len ||
             !take(reader, length, &bytea_bytes)) return 0;
         return length == 0 || memcmp(bytea_bytes, value->data, length) == 0;
+    }
+    case PRDB_SDK_VALUE_TYPE_DECIMAL: {
+        const uint8_t *coefficient;
+        if (tag != 0x08 ||
+            !read_decimal_predicate_record(reader, tag_offset, &coefficient))
+            return 0;
+        return memcmp(coefficient, value->data, 16) == 0;
     }
     default:
         return 0;

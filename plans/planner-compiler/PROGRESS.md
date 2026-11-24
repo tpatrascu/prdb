@@ -1,30 +1,37 @@
 # Optimizer Progress
 
+## OP-4 / ST-2 follow-up: typed DECIMAL predicate literal — implemented slice
+
+- Request and plan tag `0x08` carries a signed big-endian i128 coefficient. The compared DECIMAL column supplies the scale; the coefficient must fit that column's precision. Rust binding and validation, exact authorized estimates, TinyCC evaluation, and unique/range index hints apply this context.
+- Evidence: request/plan codec, precision and type checks, planner IPC round-trip, real-redb estimate, and TinyCC request/plan fixtures cover the encoding.
+- Verification: focused DECIMAL Rust tests, formatting, locked workspace build, warning-denied all-target Clippy, maintained TinyCC SDK tests, sandbox query fixture build, and the full serial delegated-cgroup workspace suite passed. The suite reported 404 library tests, 206 commit tests, 3 metadata-process tests, and 83 transaction tests, with all other targets passing and no ignored tests.
+- Remaining: cross-type coercions, broader candidate comparison, and target-host workload evidence remain open.
+
 ## OP-4 / ST-2 follow-up: typed BYTEA predicate literal — implemented slice
 
 - Request and plan tag `0x07` carries a big-endian u16 length and up to 4,096 raw bytes. Rust binding, authorized estimates, TinyCC predicate evaluation, unique point probes, and leading-key range hints support BYTEA values within that bound.
 - Evidence: request/plan round-trip, type binding, planner IPC codec, real-redb exact estimates, and TinyCC request/plan fixtures cover the wire path.
 - Verification: focused Rust regressions, formatting, locked workspace build, warning-denied all-target Clippy, maintained TinyCC SDK tests, sandbox query fixture build, and the full delegated-cgroup suite passed. The suite reported 400 library tests, 206 commit tests, 3 metadata-process tests, and 83 transaction tests, with all other targets passing and no ignored tests.
-- Remaining: DECIMAL literals, cross-type coercions, broader candidate comparison, and target-host workload evidence remain open.
+- Remaining: cross-type coercions, broader candidate comparison, and target-host workload evidence remain open.
 
 ## OP-4 / ST-2 follow-up: typed TIMESTAMPTZ predicate literal — implemented slice
 
 - Request and plan tag `0x06` carries signed big-endian i64 microseconds since the Unix epoch, validated against the supported TIMESTAMPTZ range. Rust binding, planner estimates, TinyCC predicate evaluation, unique point probes, and leading-key range hints support matching TIMESTAMPTZ columns.
 - Evidence: request range/truncation and plan round-trip coverage, binder compatibility, planner IPC codec, exact real-redb estimates, and TinyCC request/plan fixtures cover the wire path.
 - Verification: focused Rust regressions, formatting, locked workspace build, warning-denied all-target Clippy, maintained TinyCC SDK tests, sandbox query fixture build, and the full delegated-cgroup suite passed. The suite reported 397 library tests, 206 commit tests, 3 metadata-process tests, and 83 transaction tests, with all other targets passing and no ignored tests.
-- Remaining: DECIMAL literals, cross-type coercions, broader candidate comparison, and target-host workload evidence remain open.
+- Remaining: cross-type coercions, broader candidate comparison, and target-host workload evidence remain open.
 
 ## OP-4 / ST-2 follow-up: typed UUID predicate literal — implemented slice
 
 - Request and plan tag `0x05` carries 16 canonical UUID bytes. Rust binding and both plan validators require UUID compatibility. The trusted estimator and TinyCC evaluator compare UUID values; unique point and leading-key range hints support UUID literals.
 - Evidence: Rust request, binding, plan, planner-IPC, index-eligibility, and real-redb estimate regressions pass. TinyCC request encoding and DATE/UUID plan decoding fixtures pass. The maintained SDK suite and full serial delegated-cgroup workspace suite passed.
-- Remaining: DECIMAL literals, cross-type coercions, broader candidate comparison, and target-host workload evidence remain open.
+- Remaining: cross-type coercions, broader candidate comparison, and target-host workload evidence remain open.
 
 ## OP-4 / ST-2 follow-up: typed DATE predicate literal — implemented slice
 
 - Request and plan tag `0x04` carries a signed big-endian i32 DATE count since 1970-01-01, restricted to the supported DATE range. Rust binding checks DATE compatibility; exact authorized predicate estimates and TinyCC filter evaluation use the established DATE comparison semantics. DATE literals can use unique point and leading-key range hints.
 - Evidence: Rust request decode/invalid-range and plan round-trip tests, real-redb exact DATE estimate regression, and TinyCC parameter request encoding and DATE plan decoding fixtures passed. The full delegated-cgroup serial workspace suite passed.
-- Remaining: DECIMAL literals, cross-type coercions, broader candidate comparison, and target-host workload evidence remain open.
+- Remaining: cross-type coercions, broader candidate comparison, and target-host workload evidence remain open.
 
 ## Filtered composite aggregate planning — verified
 

@@ -250,6 +250,7 @@ pub enum Predicate {
     Date(i32),
     Uuid([u8; 16]),
     TimestampTz(i64),
+    Decimal(i128),
     Column(String),
     Compare {
         operator: Comparison,
@@ -1537,6 +1538,12 @@ impl<'a> PredicateParser<'a> {
                 }
                 Ok(Predicate::Bytea(self.cursor.take(length)?.to_vec()))
             }
+            0x08 => Ok(Predicate::Decimal(i128::from_be_bytes(
+                self.cursor
+                    .take(16)?
+                    .try_into()
+                    .map_err(|_| RequestError::Truncated)?,
+            ))),
             0x10 => Ok(Predicate::Column(self.cursor.identifier()?)),
             0x20 => {
                 let operator = match self.cursor.u8()? {
@@ -2594,6 +2601,30 @@ mod tests {
         );
         *expression.last_mut().unwrap() = 0;
         expression.pop();
+        assert_eq!(
+            decode_select_request(&select_request(&expression)),
+            Err(RequestError::Truncated)
+        );
+    }
+
+    #[test]
+    fn decodes_decimal_predicate_literal_as_signed_big_endian_coefficient() {
+        let coefficient = -123_456i128;
+        let mut expression = vec![0x20, 0, 0x10];
+        name("amount", &mut expression);
+        expression.push(0x08);
+        expression.extend_from_slice(&coefficient.to_be_bytes());
+        assert_eq!(
+            decode_select_request(&select_request(&expression))
+                .unwrap()
+                .predicate,
+            Some(Predicate::Compare {
+                operator: Comparison::Equal,
+                left: Box::new(Predicate::Column("amount".to_owned())),
+                right: Box::new(Predicate::Decimal(coefficient)),
+            })
+        );
+        expression.truncate(expression.len() - 16);
         assert_eq!(
             decode_select_request(&select_request(&expression)),
             Err(RequestError::Truncated)

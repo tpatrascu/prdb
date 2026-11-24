@@ -1680,6 +1680,39 @@ mod scan_estimate_request_tests {
             .unwrap(),
             bytea_predicate
         );
+        let decimal_column = crate::optimizer_binding::BoundColumn {
+            column_id: [12; 16],
+            ordinal: 5,
+            scalar_type: crate::tuple::ScalarType::Decimal {
+                precision: 8,
+                scale: 2,
+            },
+            nullable: false,
+        };
+        let decimal_predicate = crate::optimizer_binding::BoundPredicate::Compare {
+            operator: crate::optimizer_request::Comparison::Greater,
+            left: Box::new(crate::optimizer_binding::BoundPredicate::Column(
+                decimal_column.clone(),
+            )),
+            right: Box::new(crate::optimizer_binding::BoundPredicate::Decimal(12_345)),
+        };
+        let decimal_request = EstimatePredicateRequest::from_bound_predicate(
+            "public".to_owned(),
+            "items".to_owned(),
+            &decimal_predicate,
+        )
+        .unwrap();
+        let decimal_decoded =
+            EstimatePredicateRequest::decode(&decimal_request.encode().unwrap()).unwrap();
+        assert_eq!(decimal_decoded, decimal_request);
+        assert_eq!(
+            crate::optimizer_plan::decode_bound_predicate_v1(
+                &decimal_decoded.predicate_bytes,
+                &[decimal_column],
+            )
+            .unwrap(),
+            decimal_predicate
+        );
         for response in [
             EstimatePredicateResponse::Exact {
                 visible_rows: 4,

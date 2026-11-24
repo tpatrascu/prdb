@@ -683,6 +683,33 @@ int main(void) {
         assert(memcmp(encoded, expected_bytea_predicate,
                       sizeof(expected_bytea_predicate)) == 0);
     }
+    {
+        static const uint8_t decimal_predicate_sql[] =
+            "SELECT name FROM items WHERE amount = $1;";
+        static const uint8_t expected_decimal_predicate[] = {
+            0, 1, 1, 0, 6, 'p', 'u', 'b', 'l', 'i', 'c', 5, 'i', 't', 'e',
+            'm', 's', 0, 1, 4, 'n', 'a', 'm', 'e', 0, 0, 0, 27, 0x20, 0,
+            0x10, 6, 'a', 'm', 'o', 'u', 'n', 't', 0x08,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0xe2, 0x40, 0};
+        prdb_sdk_select_v2 decimal_statement = {0};
+        uint8_t decimal_bytes[16] = {
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0xe2, 0x40};
+        prdb_sdk_value_v1 decimal_parameters[1] = {{
+            sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
+            PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_DECIMAL,
+            decimal_bytes, sizeof(decimal_bytes)}};
+        assert(prdb_sdk_sql_parse_select_v2(
+                   decimal_predicate_sql, sizeof(decimal_predicate_sql) - 1,
+                   &decimal_statement, sizeof(decimal_statement),
+                   &error_offset) == PRDB_SDK_SQL_OK);
+        assert(prdb_sdk_optimizer_encode_select_with_parameters_v1(
+                   &decimal_statement, decimal_parameters, 1, schema,
+                   sizeof(schema) - 1, encoded, sizeof(encoded),
+                   &encoded_len) == PRDB_SDK_OPTIMIZER_ENCODE_OK);
+        assert(encoded_len == sizeof(expected_decimal_predicate));
+        assert(memcmp(encoded, expected_decimal_predicate,
+                      sizeof(expected_decimal_predicate)) == 0);
+    }
 
     assert(prdb_sdk_optimizer_submit_select_v1(
                &host, request, sizeof(request), response, sizeof(response),
