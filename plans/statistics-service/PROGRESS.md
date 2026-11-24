@@ -18,7 +18,7 @@
 
 - Harness: eight independent `prdb-optimizer` binaries each planned an indexed equality SELECT over a fresh 2,052-row fixture using its own invocation transaction and real planner IPC stream. A barrier synchronized requests; each plan was checked for relation identity and its filter. Five fresh-database runs each executed five batches of eight optimizer requests.
 - Evidence: median-of-run request p50/p95 were 24.689/28.098 ms; the median eight-request batch was 44.414 ms (180.1 requests/s). Setup-to-completion p50 was 44.580 ms. Five profile runs passed all 200 optimizer requests, and a final focused delegated-service run passed another 40 requests after adding failure-safe barrier release.
-- Scope: this measures concurrent estimate and optimizer traffic under the delegated test service. It bypasses supervisor admission, gives processes a shared test cgroup, and has no concurrent operational workload. Full configured START saturation, per-invocation resource limits, CPU timing noninterference across hidden data, and target-host behavior remain open.
+- Scope: this profile measures concurrent estimate and optimizer traffic under the delegated test service. It bypasses supervisor admission and gives processes a shared test cgroup. The separate confined SQL acceptance covers all eight configured optimizer-backed analytical workers, 64 admitted operational transactions, ninth-start rejection, and per-invocation cgroup sampling; see [workload progress](../workload-profile/PROGRESS.md). Synchronized estimate-request latency on that admitted path, CPU timing noninterference across hidden data, and target-host behavior remain open.
 
 ## ST-2 / ST-3 follow-up: preserve query scan work during bounded predicate estimation — verified
 

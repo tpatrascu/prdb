@@ -1,6 +1,6 @@
 # Statistics Service Implementation Plan
 
-Concurrent estimate profile: five delegated-service runs each released eight real optimizer processes through a barrier for indexed equality estimates over 2,052 rows. Median-of-run request p50/p95 were 24.689/28.098 ms; the eight-request batch median was 44.414 ms (180.1 requests/s). This bypassed supervisor START admission and used a shared test-service cgroup; full configured admission, operational mixed load, per-invocation cgroups, and target-host evidence remain open. See [progress](PROGRESS.md) for the harness and verification details.
+Concurrent estimate profile: five delegated-service runs each released eight real optimizer processes through a barrier for indexed equality estimates over 2,052 rows. Median-of-run request p50/p95 were 24.689/28.098 ms; the eight-request batch median was 44.414 ms (180.1 requests/s). This profile bypassed supervisor START admission and used a shared test-service cgroup. Separately, the confined SQL acceptance fills all eight configured analytical START slots with optimizer-backed workers alongside 64 admitted operational transactions, verifies ninth-start rejection, samples per-invocation cgroups, and checks operational progress; see [workload progress](../workload-profile/PROGRESS.md). Synchronized estimate-request latency on that full admitted path and target-host evidence remain open. See [progress](PROGRESS.md) for the harness and verification details.
 
 ## Contract and Dependencies
 
