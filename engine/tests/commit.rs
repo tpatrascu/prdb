@@ -54892,6 +54892,25 @@ fn planner_stream_estimates_same_typed_decimal_column_predicate()
             audit_event: table_audit,
         })
         .map_err(|error| format!("typed planner fixture table creation: {error:?}"))?;
+    let mut hidden_table_audit = identity_audit_event(0xbd, actor, schema.schema_id);
+    hidden_table_audit.correlation_id = id(0xbd);
+    storage
+        .create_table(CreateTableRequest {
+            invocation_id: id(0xbd),
+            authenticated_actor_id: actor,
+            schema_id: schema.schema_id,
+            name: "hidden_observations".to_owned(),
+            columns: vec![TableColumnDefinition {
+                name: "secret_value".to_owned(),
+                scalar_type: ScalarType::Integer,
+                nullable: false,
+                generated_uuid_identity: false,
+                default: None,
+            }],
+            retention_deadline_us: 9_999,
+            audit_event: hidden_table_audit,
+        })
+        .map_err(|error| format!("typed planner hidden table creation: {error:?}"))?;
 
     for (audit_id, privilege, target) in [
         (0xb4, ObjectGrantPrivilege::Usage, ObjectGrantTarget::Object),
@@ -55065,6 +55084,10 @@ fn planner_stream_estimates_same_typed_decimal_column_predicate()
                             "typed_observations".to_owned(),
                         ),
                         ("planner_decimal".to_owned(), "missing_table".to_owned()),
+                        (
+                            "planner_decimal".to_owned(),
+                            "hidden_observations".to_owned(),
+                        ),
                     ],
                 }
                 .encode()?,
@@ -55073,7 +55096,7 @@ fn planner_stream_estimates_same_typed_decimal_column_predicate()
         let response = prdb_engine::ipc::read_frame(&mut client)?
             .ok_or("planner stream closed before relation batch")?;
         let described = DescribePlanRelationsResponse::decode(&response.payload)?;
-        assert_eq!(described.entries.len(), 2);
+        assert_eq!(described.entries.len(), 3);
         assert_eq!(
             described.entries[0]
                 .response
@@ -55085,6 +55108,9 @@ fn planner_stream_estimates_same_typed_decimal_column_predicate()
         assert!(described.entries[0].handle.is_some());
         assert!(described.entries[1].handle.is_none());
         assert!(described.entries[1].response.relation.is_none());
+        assert!(described.entries[2].handle.is_none());
+        assert!(described.entries[2].response.relation.is_none());
+        assert_eq!(described.entries[1], described.entries[2]);
         prdb_engine::ipc::write_frame(
             &mut client,
             &IpcFrame {
