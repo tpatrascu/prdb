@@ -23,6 +23,19 @@ The flake pins Nixpkgs revision `718f670e845328e9c2cecdd832835712b2cbd065`. Its 
 
 If the toolkit is missing, broken, or inaccessible, actively diagnose and restore a working, version-matched environment before implementation checks: inspect PATH and Nix, enter or provision the locked development shell, and resolve missing linkers or dependencies. Use authorized sandbox escalation when Nix daemon access is blocked. `nix-shell -p` may be used as a host-specific recovery tool if the locked shell cannot be built, but verify every version and document the deviation. Do not silently substitute GCC/Clang for TinyCC. If an external restriction still blocks repair, report the attempted repair and the exact blocker; never represent unrun checks as passing. Cargo may use `--offline` with `--locked` when all locked dependencies are cached; otherwise obtain the dependencies through the permitted network. Run Cargo operations that write the same target directory sequentially.
 
+## Test Data Outside the NFS Checkout
+
+This repository checkout is on NFS. Run performance tests and other intensive tests with runtime test data outside the checkout, under `$HOME/tmp/prdb-tests`. Before starting one, create and export a run-specific scratch directory and direct temporary files there:
+
+```sh
+export PRDB_TEST_ROOT="$HOME/tmp/prdb-tests"
+export PRDB_TEST_RUN_DIR="$PRDB_TEST_ROOT/runs/unique-run-name"
+export TMPDIR="$PRDB_TEST_RUN_DIR/tmp"
+mkdir -p "$TMPDIR" "$PRDB_TEST_RUN_DIR/data"
+```
+
+Use the run-specific directory for database instance files, query input/data files, spill files, logs, and other runtime data; remove it after collecting results. Copy compiled query libraries there when the harness consumes them as test inputs, while leaving their compiler outputs in the existing build directories. Cargo, TinyCC, and release-profile compiler output stays in its normal repository location. Do not set `CARGO_TARGET_DIR`, `BUILD_DIR`, or `RELEASE_PROFILE_DIR` to move compilation output for this policy. If an intensive test writes runtime data relative to its working directory or into the source/build tree instead of `TMPDIR` or a configured data root, update its harness to accept an external data root. Keep the source checkout as the code input; its NFS location must not be used for generated test data. See [`plans/sql-library/SANDBOX_TEST.md`](plans/sql-library/SANDBOX_TEST.md) for the sandbox procedure.
+
 ## Rust Build and Checks
 
 Once `Cargo.toml` and `Cargo.lock` exist, run from the repository root:
@@ -76,8 +89,12 @@ systemd-run --user --wait --pipe --collect \
   --unit="prdb-cgroup-probe-$$.service" --slice=prdb-tests.slice \
   --property='Delegate=cpu memory pids' --property="WorkingDirectory=$PWD" \
   "$PWD/engine/tools/with_delegated_cgroup.sh" \
-  sh -c 'exec nix develop --no-update-lock-file -c cargo run --locked \
-    --bin prdb-sandbox-probe -- "$PRDB_TEST_CGROUP_PARENT"'
+  sh -c 'export PRDB_TEST_ROOT="$HOME/tmp/prdb-tests"; \
+    export PRDB_TEST_RUN_DIR="$PRDB_TEST_ROOT/runs/cgroup-probe-$(date +%s)"; \
+    export TMPDIR="$PRDB_TEST_RUN_DIR/tmp"; \
+    mkdir -p "$TMPDIR" "$PRDB_TEST_RUN_DIR/data"; \
+    exec nix develop --no-update-lock-file -c cargo run --locked \
+      --bin prdb-sandbox-probe -- "$PRDB_TEST_CGROUP_PARENT"'
 ```
 
 The probe must report a writable cgroup v2 parent and `cpu memory pids` in both the available controllers and enabled child controllers. Probe success is a preflight, not end-to-end acceptance; run `cargo test --workspace --locked -- --test-threads=1` inside the same `systemd --user` wrapper with its documented fixture/runtime environment variables. The commit and metadata process integration tests run as part of this suite. Do not run them outside delegated cgroup setup or use a fake cgroup directory as confinement evidence.

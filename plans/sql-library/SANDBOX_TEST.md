@@ -62,7 +62,16 @@ Build the artifacts, SDK release, and installable release profile:
 nix develop --no-update-lock-file -c make -f engine/sdk/Makefile release-profile
 ```
 
-Run this target after changing the SDK or query fixtures before using the acceptance environment below. It rebuilds the SDK release under `target/sdk-v1/` and copies that release into `target/release-profile/sdk/releases/`. The process tests use `PRDB_TEST_INSTALLED_SDK_RELEASE_DIR`, which points into `target/release-profile/`; rebuilding only the SDK release leaves that test input stale. If the SDK release was rebuilt separately, rerun `release-profile` before acceptance. Check that `PRDB_TEST_INSTALLED_SDK_RELEASE_DIR` names the release directory in the profile produced by this command, rather than a different or older profile.
+Create an external runtime-data directory for each test run; leave compiler output in the existing repository `target/` directories:
+
+```sh
+export PRDB_TEST_ROOT="$HOME/tmp/prdb-tests"
+export PRDB_TEST_RUN_DIR="$PRDB_TEST_ROOT/runs/fixture-build-$(date +%s)"
+export TMPDIR="$PRDB_TEST_RUN_DIR/tmp"
+mkdir -p "$TMPDIR" "$PRDB_TEST_RUN_DIR/data"
+```
+
+Run `release-profile` after changing the SDK or query fixtures. The process tests use `PRDB_TEST_INSTALLED_SDK_RELEASE_DIR`, which points into `target/release-profile/`; rebuilding only the SDK release leaves that test input stale. Query binaries and SDK libraries are compiler outputs and stay under the established repository `target/` paths. Use `$PRDB_TEST_RUN_DIR` for runtime query/data files, databases, spill files, logs, and temporary directories.
 
 This builds `sql-v3-caught-error.so`, `sql-v3-shared-library.so`, `sql-v3-missing-dependency.so`, `sql-v3-network-constructor.so`, `sql-v3-write-read.so`, and `sql-v3-restricted-metadata.so`, plus the regular and hostile-constructor `libprdb_sql.so.1` releases and their metadata. These are untrusted native libraries and query artifacts and must only be loaded through the sandboxed executor tests.
 
@@ -70,22 +79,25 @@ Run the full workspace test suite inside a delegated `systemd --user` unit. A di
 
 Configure these environment variables in the shell command run by the unit:
 
+- `PRDB_TEST_ROOT`: scratch root, normally `$HOME/tmp/prdb-tests`; create it before running the service.
+- `PRDB_TEST_RUN_DIR`: unique run directory below `$PRDB_TEST_ROOT/runs/` for scratch data and logs.
+- `TMPDIR`: set to `$PRDB_TEST_RUN_DIR/tmp` so Rust temporary directories and test databases stay outside the checkout.
 - `PRDB_TEST_CGROUP_PARENT`: an existing cgroup v2 parent delegated with enabled `cpu`, `memory`, and `pids` controllers.
-- `PRDB_TEST_QUERY_ARTIFACT`: absolute path to `target/sdk-v1/sql-v3-caught-error.so`.
-- `PRDB_TEST_SHARED_SQL_QUERY_ARTIFACT`: absolute path to `target/sdk-v1/sql-v3-shared-library.so`.
-- `PRDB_TEST_SHARED_SQL_LOAD_FAILURE_ARTIFACT`: absolute path to `target/sdk-v1/sql-v3-missing-dependency.so`.
+- `PRDB_TEST_QUERY_ARTIFACT`: absolute path to `$PRDB_TEST_RUN_DIR/queries/sql-v3-caught-error.so`.
+- `PRDB_TEST_SHARED_SQL_QUERY_ARTIFACT`: absolute path to `$PRDB_TEST_RUN_DIR/queries/sql-v3-shared-library.so`.
+- `PRDB_TEST_SHARED_SQL_LOAD_FAILURE_ARTIFACT`: absolute path to `$PRDB_TEST_RUN_DIR/queries/sql-v3-missing-dependency.so`.
 - `PRDB_TEST_EXTRA_ALLOWED_DEPENDENCY`: set to `libprdb_missing.so.1` for the missing-dependency fixture so manifest admission succeeds and the confined loader observes the missing runtime file.
-- `PRDB_TEST_SDK_RELEASE_DIR`: absolute path to the test release directory containing the hostile SDK constructor, normally `target/sdk-v1/hostile-sdk/releases/linux-x86_64/x86_64-v1/nixos-x86_64-glibc-2.42/sdk-1-abis1,2,3,4,5,6` for the pinned release profile.
-- `PRDB_TEST_INSTALLED_SDK_RELEASE_DIR`: absolute path to the normal SDK release in `target/release-profile`; process tests install these artifacts into a temporary instance repository.
-- `PRDB_TEST_WRITE_READ_QUERY_ARTIFACT`: absolute path to `target/sdk-v1/sql-v3-write-read.so`.
+- `PRDB_TEST_SDK_RELEASE_DIR`: absolute path to the test release directory containing the hostile SDK constructor, normally `$PWD/target/sdk-v1/hostile-sdk/releases/linux-x86_64/x86_64-v1/nixos-x86_64-glibc-2.42/sdk-1-abis1,2,3,4,5,6` for the pinned release profile.
+- `PRDB_TEST_INSTALLED_SDK_RELEASE_DIR`: absolute path to the normal SDK release in `$PWD/target/release-profile`; process tests install these artifacts into a temporary instance repository.
+- `PRDB_TEST_WRITE_READ_QUERY_ARTIFACT`: absolute path to `$PRDB_TEST_RUN_DIR/queries/sql-v3-write-read.so`.
 - `PRDB_TEST_ORDERED_ANALYTICAL_ONLY`: optionally set to `1` to isolate the high-cardinality ordered SUM branch of the confined write/read acceptance.
 - `PRDB_TEST_FILTERED_COMPOSITE_ONLY`: optionally set to `1` to isolate the filtered ordered composite aggregate branch. It submits `SUM(decimal_value)` grouped by two keys with `WHERE left_key = $1 AND (decimal_value IS NULL OR decimal_value IS NOT NULL)`, compound `HAVING SUM(decimal_value) IS NOT NULL AND COUNT(*) >= 1`, and three `ORDER BY` items. It binds `$1` to `1`, verifies the null-test branches retain the two rows in `(1,7)`, checks sort metadata, and relays the exact DECIMAL(38,2) sum `1.00` through the gateway before commit. This exercises optimizer statement 16 / plan kind 16.
 - `PRDB_TEST_COUNT_COLUMN_ONLY`: optionally set to `1` to isolate the confined v24 `COUNT(column)` SQLR relay case. It checks non-NULL counting and zero for an all-NULL group through the dispatcher and gateway.
 - `PRDB_TEST_COUNT_BIGINT_ONLY`: optionally set to `1` to isolate optimizer-backed `COUNT(bigint_value)` over a nullable BIGINT input through the confined executor, gateway SQLR relay, and durable commit.
-- `PRDB_TEST_RESTRICTED_METADATA_QUERY_ARTIFACT`: absolute path to `target/sdk-v1/sql-v3-restricted-metadata.so`, used by the restricted-principal metadata acceptance.
-- `PRDB_TEST_NETWORK_CONSTRUCTOR_ARTIFACT`: absolute path to `target/sdk-v1/sql-v3-network-constructor.so`.
-- `PRDB_TEST_FORGED_HANDLE_QUERY_ARTIFACT`: absolute path to `target/sdk-v1/sql-v3-forged-relation-handle.so`.
-- `PRDB_TEST_FORGED_ROW_HANDLE_QUERY_ARTIFACT`: absolute path to `target/sdk-v1/sql-v3-forged-row-handle.so`.
+- `PRDB_TEST_RESTRICTED_METADATA_QUERY_ARTIFACT`: absolute path to `$PRDB_TEST_RUN_DIR/queries/sql-v3-restricted-metadata.so`, used by the restricted-principal metadata acceptance.
+- `PRDB_TEST_NETWORK_CONSTRUCTOR_ARTIFACT`: absolute path to `$PRDB_TEST_RUN_DIR/queries/sql-v3-network-constructor.so`.
+- `PRDB_TEST_FORGED_HANDLE_QUERY_ARTIFACT`: absolute path to `$PRDB_TEST_RUN_DIR/queries/sql-v3-forged-relation-handle.so`.
+- `PRDB_TEST_FORGED_ROW_HANDLE_QUERY_ARTIFACT`: absolute path to `$PRDB_TEST_RUN_DIR/queries/sql-v3-forged-row-handle.so`.
 - `PRDB_TEST_RUNTIME_READ_EXECUTE`: platform-separated absolute paths for the pinned dynamic loader, libc, and other executor runtime dependencies.
 - `PRDB_TEST_RUNTIME_READ_ONLY`: platform-separated absolute paths for runtime configuration files the dynamic loader needs, such as its loader cache when applicable. Set it to an empty string when the selected runtime has no read-only files; do not use absent paths as placeholders.
 
@@ -96,26 +108,31 @@ systemd-run --user --wait --pipe --collect \
   --unit="prdb-sandbox-test-$$.service" --slice=prdb-tests.slice \
   --property='Delegate=cpu memory pids' --property="WorkingDirectory=$PWD" \
   "$PWD/engine/tools/with_delegated_cgroup.sh" sh -c '
-    export PRDB_TEST_QUERY_ARTIFACT="$PWD/target/sdk-v1/sql-v3-caught-error.so"
-    export PRDB_TEST_SHARED_SQL_QUERY_ARTIFACT="$PWD/target/sdk-v1/sql-v3-shared-library.so"
-    export PRDB_TEST_SHARED_SQL_LOAD_FAILURE_ARTIFACT="$PWD/target/sdk-v1/sql-v3-missing-dependency.so"
+    export PRDB_TEST_ROOT="$HOME/tmp/prdb-tests"
+    export PRDB_TEST_RUN_DIR="$PRDB_TEST_ROOT/runs/full-suite-$(date +%s)"
+    export TMPDIR="$PRDB_TEST_RUN_DIR/tmp"
+    mkdir -p "$TMPDIR" "$PRDB_TEST_RUN_DIR/data" "$PRDB_TEST_RUN_DIR/queries"
+    cp "$PWD"/target/sdk-v1/*.so "$PRDB_TEST_RUN_DIR/queries/"
+    export PRDB_TEST_QUERY_ARTIFACT="$PRDB_TEST_RUN_DIR/queries/sql-v3-caught-error.so"
+    export PRDB_TEST_SHARED_SQL_QUERY_ARTIFACT="$PRDB_TEST_RUN_DIR/queries/sql-v3-shared-library.so"
+    export PRDB_TEST_SHARED_SQL_LOAD_FAILURE_ARTIFACT="$PRDB_TEST_RUN_DIR/queries/sql-v3-missing-dependency.so"
     export PRDB_TEST_EXTRA_ALLOWED_DEPENDENCY=libprdb_missing.so.1
     export PRDB_TEST_SDK_RELEASE_DIR="$PWD/target/sdk-v1/hostile-sdk/releases/linux-x86_64/x86_64-v1/nixos-x86_64-glibc-2.42/sdk-1-abis1,2,3,4,5,6"
     export PRDB_TEST_INSTALLED_SDK_RELEASE_DIR="$PWD/target/release-profile/sdk/releases/linux-x86_64/x86_64-v1/nixos-x86_64-glibc-2.42/sdk-1-abis1,2,3,4,5,6"
-    export PRDB_TEST_NETWORK_CONSTRUCTOR_ARTIFACT="$PWD/target/sdk-v1/sql-v3-network-constructor.so"
-    export PRDB_TEST_FORGED_HANDLE_QUERY_ARTIFACT="$PWD/target/sdk-v1/sql-v3-forged-relation-handle.so"
-    export PRDB_TEST_FORGED_ROW_HANDLE_QUERY_ARTIFACT="$PWD/target/sdk-v1/sql-v3-forged-row-handle.so"
-    export PRDB_TEST_WRITE_READ_QUERY_ARTIFACT="$PWD/target/sdk-v1/sql-v3-write-read.so"
-    export PRDB_TEST_RESTRICTED_METADATA_QUERY_ARTIFACT="$PWD/target/sdk-v1/sql-v3-restricted-metadata.so"
+    export PRDB_TEST_NETWORK_CONSTRUCTOR_ARTIFACT="$PRDB_TEST_RUN_DIR/queries/sql-v3-network-constructor.so"
+    export PRDB_TEST_FORGED_HANDLE_QUERY_ARTIFACT="$PRDB_TEST_RUN_DIR/queries/sql-v3-forged-relation-handle.so"
+    export PRDB_TEST_FORGED_ROW_HANDLE_QUERY_ARTIFACT="$PRDB_TEST_RUN_DIR/queries/sql-v3-forged-row-handle.so"
+    export PRDB_TEST_WRITE_READ_QUERY_ARTIFACT="$PRDB_TEST_RUN_DIR/queries/sql-v3-write-read.so"
+    export PRDB_TEST_RESTRICTED_METADATA_QUERY_ARTIFACT="$PRDB_TEST_RUN_DIR/queries/sql-v3-restricted-metadata.so"
     export PRDB_TEST_RUNTIME_READ_EXECUTE="/absolute/path/ld-linux-x86-64.so.2:/absolute/path/libc.so.6:/absolute/path/libgcc_s.so.1"
     export PRDB_TEST_RUNTIME_READ_ONLY=
     exec nix develop --no-update-lock-file -c cargo test --workspace --locked -- --test-threads=1
   '
 ```
 
-The launcher supplies `PRDB_TEST_CGROUP_PARENT` and `PRDB_SYSTEMD_CGROUP_PARENT`; the command runs all tests serially so each cgroup-dependent test can provision its child beneath that parent. Do not run query fixtures with `tcc -run`, from a trusted-process loader, or directly outside the confined executor.
+The launcher supplies `PRDB_TEST_CGROUP_PARENT` and `PRDB_SYSTEMD_CGROUP_PARENT`; the command runs all tests serially so each cgroup-dependent test can provision its child beneath that parent. The exported `TMPDIR` keeps tempfile-backed databases and spill areas in the per-run directory. The command copies the compiled query libraries there as test inputs; the originals and all Cargo/TinyCC compiler output remain in the repository's established build directories. Do not run query fixtures with `tcc -run`, from a trusted-process loader, or directly outside the confined executor.
 
-For focused process-test debugging, run the test directly inside the same delegated service with its artifact/runtime environment:
+For a focused run, create a unique `PRDB_TEST_RUN_DIR`, set `TMPDIR`, copy the required compiled query library from `target/sdk-v1/` into `$PRDB_TEST_RUN_DIR/queries/`, and point the artifact variable at that copy. This keeps the runtime query input outside NFS while leaving its compiler output in place. Run focused process-test debugging inside the same delegated service with its artifact/runtime environment:
 
 ```sh
 cargo test -p prdb-engine --locked --test metadata_process disconnected_submission_is_reconciled_after_gateway_restart -- --exact --nocapture
@@ -125,11 +142,11 @@ Do not execute or load the artifact outside this executor path. The complete wor
 
 ## SQL-9 secure spill acceptance
 
-The `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` test has focused ABI v6 spill modes selected by one environment variable: `PRDB_TEST_SPILL_QUOTA_ONLY`, `PRDB_TEST_SPILL_ONLY`, `PRDB_TEST_SPILL_LIMIT_ONLY`, `PRDB_TEST_SPILL_DISABLED_ONLY`, `PRDB_TEST_SPILL_SORT_ONLY`, `PRDB_TEST_SPILL_DECIMAL_ONLY`, `PRDB_TEST_SPILL_REDACTED_ONLY`, `PRDB_TEST_SPILL_JOIN_ONLY`, `PRDB_TEST_SPILL_JOIN_DECIMAL_ONLY`, `PRDB_TEST_SPILL_JOIN_FILTERED_ONLY`, `PRDB_TEST_SPILL_JOIN_PARAMETER_ONLY`, `PRDB_TEST_SPILL_JOIN_BIGINT_ONLY`, `PRDB_TEST_SPILL_JOIN_OVERSIZE_ONLY`, `PRDB_TEST_SPILL_JOIN_TEXT_ONLY`, `PRDB_TEST_SPILL_CRASH_ONLY`, or `PRDB_TEST_SPILL_PRESSURE_ONLY`. Set `PRDB_TEST_COUNT_BIGINT_ONLY=1` when a mode needs the shared nullable BIGINT fixture column and set `PRDB_TEST_SPILL_QUERY_ARTIFACT` to the built `target/sdk-v1/sql-v6-spill.so`. The enabled modes open a real `SpillBroker` under a private temporary scratch parent. Spill GROUP BY inserts two NULL keys and checks one `(NULL,2)` SQLR group; the LIMIT mode checks the first two sorted groups after aggregation; integer ORDER BY checks NULL-first descending output; Decimal ORDER BY checks NULL-first Decimal ordering and exact SQLR encodings; the REDACTED mode applies a restrictive cell policy to the Decimal JOIN sort key and requires a durable abort with no SQLR rows. JOIN checks that NULL keys do not match; the ordered integer JOIN requires the exact top-five SQLR rows for `ORDER BY b.right_key DESC LIMIT 5`, proving sorting precedes LIMIT. `PRDB_TEST_SPILL_JOIN_DECIMAL_ONLY` orders the joined rows by a nullable Decimal value and checks NULLS FIRST plus the exact post-sort LIMIT. `PRDB_TEST_SPILL_JOIN_FILTERED_ONLY` applies `b.decimal_value IS NULL` before sorting and checks that the descending integer JOIN order returns `(3,11)` and `(1,7)` under LIMIT 2. `PRDB_TEST_SPILL_JOIN_PARAMETER_ONLY` applies `a.left_key >= $1` with an INTEGER PSP1 parameter and checks the two ordered rows at or above the threshold. `PRDB_TEST_SPILL_JOIN_BIGINT_ONLY` orders by nullable BIGINT descending and checks NULLS FIRST before the two highest 64-bit values. `PRDB_TEST_SPILL_JOIN_OVERSIZE_ONLY` projects a 1024-byte TEXT value into a joined record larger than the fixed spool ceiling and requires durable abort with no SQLR rows. `PRDB_TEST_SPILL_JOIN_TEXT_ONLY` sorts joined rows by nullable TEXT descending, checks NULLS FIRST, duplicate stable ordering, the exact six-row SQLR result, and durable commit. The REDACTED mode exercises the Decimal JOIN key under a restrictive cell policy. The combined path uses 17 simultaneous spill streams at peak. The crash mode writes a private spill stream, emits provisional bytes, faults the confined worker, and requires a durable abort plus package cleanup. The non-cancelling pressure mode runs 512 1 MiB append/seal/destroy cycles (512 MiB cumulative spill I/O), then sorts 136 authorized rows through three external runs while 64 operational point reads and 64 durable commits overlap; it verifies every ordered SQLR row. The cancellation pressure mode issues owner cancellation during the same append/seal/destroy loop and checks concurrent operational progress. The broker's response cap is smaller than the append payload, confirming response and request limits are independent. Each mode must run through the delegated cgroup wrapper with the SDK release and runtime variables above. The spill-disabled mode intentionally leaves the broker absent and checks the bounded fallback over the same rows.
+The `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` test has focused ABI v6 spill modes selected by one environment variable: `PRDB_TEST_SPILL_QUOTA_ONLY`, `PRDB_TEST_SPILL_ONLY`, `PRDB_TEST_SPILL_LIMIT_ONLY`, `PRDB_TEST_SPILL_DISABLED_ONLY`, `PRDB_TEST_SPILL_SORT_ONLY`, `PRDB_TEST_SPILL_DECIMAL_ONLY`, `PRDB_TEST_SPILL_REDACTED_ONLY`, `PRDB_TEST_SPILL_JOIN_ONLY`, `PRDB_TEST_SPILL_JOIN_DECIMAL_ONLY`, `PRDB_TEST_SPILL_JOIN_FILTERED_ONLY`, `PRDB_TEST_SPILL_JOIN_PARAMETER_ONLY`, `PRDB_TEST_SPILL_JOIN_BIGINT_ONLY`, `PRDB_TEST_SPILL_JOIN_OVERSIZE_ONLY`, `PRDB_TEST_SPILL_JOIN_TEXT_ONLY`, `PRDB_TEST_SPILL_CRASH_ONLY`, or `PRDB_TEST_SPILL_PRESSURE_ONLY`. Set `PRDB_TEST_COUNT_BIGINT_ONLY=1` when a mode needs the shared nullable BIGINT fixture column and set `PRDB_TEST_SPILL_QUERY_ARTIFACT` to `$PRDB_TEST_RUN_DIR/queries/sql-v6-spill.so`. The enabled modes open a real `SpillBroker` under a private temporary scratch parent. Spill GROUP BY inserts two NULL keys and checks one `(NULL,2)` SQLR group; the LIMIT mode checks the first two sorted groups after aggregation; integer ORDER BY checks NULL-first descending output; Decimal ORDER BY checks NULL-first Decimal ordering and exact SQLR encodings; the REDACTED mode applies a restrictive cell policy to the Decimal JOIN sort key and requires a durable abort with no SQLR rows. JOIN checks that NULL keys do not match; the ordered integer JOIN requires the exact top-five SQLR rows for `ORDER BY b.right_key DESC LIMIT 5`, proving sorting precedes LIMIT. `PRDB_TEST_SPILL_JOIN_DECIMAL_ONLY` orders the joined rows by a nullable Decimal value and checks NULLS FIRST plus the exact post-sort LIMIT. `PRDB_TEST_SPILL_JOIN_FILTERED_ONLY` applies `b.decimal_value IS NULL` before sorting and checks that the descending integer JOIN order returns `(3,11)` and `(1,7)` under LIMIT 2. `PRDB_TEST_SPILL_JOIN_PARAMETER_ONLY` applies `a.left_key >= $1` with an INTEGER PSP1 parameter and checks the two ordered rows at or above the threshold. `PRDB_TEST_SPILL_JOIN_BIGINT_ONLY` orders by nullable BIGINT descending and checks NULLS FIRST before the two highest 64-bit values. `PRDB_TEST_SPILL_JOIN_OVERSIZE_ONLY` projects a 1024-byte TEXT value into a joined record larger than the fixed spool ceiling and requires durable abort with no SQLR rows. `PRDB_TEST_SPILL_JOIN_TEXT_ONLY` sorts joined rows by nullable TEXT descending, checks NULLS FIRST, duplicate stable ordering, the exact six-row SQLR result, and durable commit. The REDACTED mode exercises the Decimal JOIN key under a restrictive cell policy. The combined path uses 17 simultaneous spill streams at peak. The crash mode writes a private spill stream, emits provisional bytes, faults the confined worker, and requires a durable abort plus package cleanup. The non-cancelling pressure mode runs 512 1 MiB append/seal/destroy cycles (512 MiB cumulative spill I/O), then sorts 136 authorized rows through three external runs while 64 operational point reads and 64 durable commits overlap; it verifies every ordered SQLR row. The cancellation pressure mode issues owner cancellation during the same append/seal/destroy loop and checks concurrent operational progress. The broker's response cap is smaller than the append payload, confirming response and request limits are independent. Each mode must run through the delegated cgroup wrapper with the SDK release and runtime variables above. The spill-disabled mode intentionally leaves the broker absent and checks the bounded fallback over the same rows.
 
 ## Indexed range equivalence
 
-For physical disk-full coverage, set `PRDB_TEST_SPILL_DISK_FULL_ONLY=1`, `PRDB_TEST_SPILL_QUERY_ARTIFACT` to `target/sdk-v1/sql-v6-spill.so`, and `PRDB_TEST_SPILL_TEST_ROOT` to a dedicated writable ext4 filesystem directory. The filesystem must have more than the configured 16 MiB service headroom when the broker opens. The test then allocates a filler file until fewer than 8 KiB remain and executes SQL `ORDER BY left_key` through the confined spill sorter; it requires zero result-data frames and a durable ABORTED outcome. Use a disposable loopback filesystem separate from the database and shared host filesystems. The filler file is removed when the test exits, including panic unwinding. Unmount and remove the loopback image after the run.
+For physical disk-full coverage, set `PRDB_TEST_SPILL_DISK_FULL_ONLY=1`, `PRDB_TEST_SPILL_QUERY_ARTIFACT` to `$PRDB_TEST_RUN_DIR/queries/sql-v6-spill.so`, and `PRDB_TEST_SPILL_TEST_ROOT` to a dedicated writable ext4 filesystem directory located beneath `$PRDB_TEST_RUN_DIR` or mounted from an image stored there. Do not use the NFS checkout for the image, mount point, filler file, or test data. The filesystem must have more than the configured 16 MiB service headroom when the broker opens. The test then allocates a filler file until fewer than 8 KiB remain and executes SQL `ORDER BY left_key` through the confined spill sorter; it requires zero result-data frames and a durable ABORTED outcome. Use a disposable loopback filesystem separate from the database and shared host filesystems. The filler file is removed when the test exits, including panic unwinding. Unmount and remove the loopback image after the run.
 
 The existing `PRDB_TEST_SPILL_QUOTA_ONLY=1` mode remains the broker allocation-quota rejection check. The physical disk-full mode drives the underlying filesystem allocator to ENOSPC after broker startup, exercising the SQL failure latch and terminal abort path under a real allocation error.
 
