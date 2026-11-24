@@ -55027,6 +55027,11 @@ fn planner_stream_estimates_same_typed_decimal_column_predicate()
         )?;
     }
     writer.commit()?;
+    assert_eq!(
+        storage.collect_committed_table_population(table.table_id)?,
+        prdb_engine::statistics::StatisticsCollectionOutcome::Exact,
+        "the snapshot estimate test needs exact committed population metadata"
+    );
 
     let invocation_id = id(0xbc);
     let mut invocation = storage.begin_invocation(invocation_id, actor, 9_999, 8, 4096)?;
@@ -55111,6 +55116,31 @@ fn planner_stream_estimates_same_typed_decimal_column_predicate()
         assert!(described.entries[2].handle.is_none());
         assert!(described.entries[2].response.relation.is_none());
         assert_eq!(described.entries[1], described.entries[2]);
+        let mut concurrent_writer = storage.begin_invocation(id(0xbe), actor, 9_999, 1, 128)?;
+        concurrent_writer.stage_put(
+            prdb_engine::overlay::RowId {
+                table: table.table_id,
+                row: id(4),
+            },
+            &encode_tuple(
+                &[
+                    ColumnSchema {
+                        scalar_type: decimal_type,
+                        nullable: true,
+                    },
+                    ColumnSchema {
+                        scalar_type: decimal_type,
+                        nullable: true,
+                    },
+                ],
+                1,
+                &[
+                    Some(ScalarValue::Decimal(440)),
+                    Some(ScalarValue::Decimal(440)),
+                ],
+            )?,
+        )?;
+        concurrent_writer.commit()?;
         prdb_engine::ipc::write_frame(
             &mut client,
             &IpcFrame {
@@ -55129,7 +55159,44 @@ fn planner_stream_estimates_same_typed_decimal_column_predicate()
             .ok_or("planner stream closed before estimate batch")?;
         let estimates = EstimateScansResponse::decode(&response.payload)?;
         assert_eq!(estimates.entries.len(), 1);
-        assert_eq!(estimates.entries[0], EstimateScanResponse::Unknown);
+        assert_eq!(
+            estimates.entries[0],
+            EstimateScanResponse::Unknown,
+            "batched summary may conservatively become UNKNOWN after concurrent mutation"
+        );
+        let post_mutation_predicate = BoundPredicate::Compare {
+            operator: Comparison::Equal,
+            left: Box::new(BoundPredicate::Column(BoundColumn {
+                column_id: table.column_ids[0],
+                ordinal: 0,
+                scalar_type: decimal_type,
+                nullable: true,
+            })),
+            right: Box::new(BoundPredicate::Decimal(440)),
+        };
+        prdb_engine::ipc::write_frame(
+            &mut client,
+            &IpcFrame {
+                operation: IpcOperation::EstimateScan as u16,
+                request_id: 4,
+                payload: EstimatePredicateRequest::from_bound_predicate(
+                    "planner_decimal".to_owned(),
+                    "typed_observations".to_owned(),
+                    &post_mutation_predicate,
+                )?
+                .encode()?,
+            },
+        )?;
+        let response = prdb_engine::ipc::read_frame(&mut client)?
+            .ok_or("planner stream closed before post-mutation predicate estimate")?;
+        assert_eq!(
+            EstimatePredicateResponse::decode(&response.payload)?,
+            EstimatePredicateResponse::Exact {
+                visible_rows: 3,
+                matching_rows: 0,
+            },
+            "planner predicate estimate must use the invocation snapshot, not the new committed row"
+        );
         client.shutdown(Shutdown::Write)?;
         drop(client);
         planner
