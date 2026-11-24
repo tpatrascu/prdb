@@ -1,5 +1,11 @@
 # Statistics Service Progress
 
+## ST-2 / ST-6 follow-up: exercise constant estimates through planner IPC — verified slice
+
+- The real planner-stream integration regression now sends a constant integer comparison through `EstimateScan` after committing a row and collecting a fresh protected population record. It verifies the IPC response contains the exact one-row visible population and zero matches, covering the service dispatch path for constant-predicate reuse.
+- The existing transaction regression continues to cover literal `TRUE`, `FALSE`, `NULL`, `1 = 2`, `NULL IS NULL`, malformed stored row bytes, and private-write invalidation; this planner-stream addition checks IPC encoding, relation resolution, and response wiring on a nonempty committed table.
+- Verification: the focused `planner_stream_estimate_allowance_falls_back_without_aborting_invocation` integration test passed. `cargo fmt --all -- --check`, locked workspace build, warning-denied all-target Clippy, and the full serial delegated-cgroup workspace suite passed. The full run included 409 library tests, 206 commit integration tests, 3 metadata-process tests, 85 transaction integration tests, all remaining targets, and zero ignored tests.
+
 ## ST-2 follow-up: reuse fresh populations for constant predicates — implemented slice
 
 - The bounded predicate estimator now derives exact results for row-independent constant expressions, including literal `TRUE`, `FALSE`, `NULL`, `1 = 2`, and `NULL IS NULL`, from a fresh protected committed population count when the pinned authorization proves all rows visible, the population fits the request bound, and the invocation has no private writes. It avoids reading or decoding row values in this case; stale, unknown, over-bound, unsupported-policy, and overlay-bearing cases keep the bounded scan/fallback behavior.

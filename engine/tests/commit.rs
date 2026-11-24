@@ -53294,6 +53294,81 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
         Ok(())
     })?;
     optimizer_metadata_transaction.abort()?;
+
+    // Exercise the constant-predicate fast path through the real planner IPC
+    // server, using a nonempty committed population and its fresh stats record.
+    let committed_row_id = id(0xe1);
+    let mut committed_key = [0; 32];
+    committed_key[..16].copy_from_slice(&table.table_id);
+    committed_key[16..].copy_from_slice(&committed_row_id);
+    let committed_tuple = encode_tuple(
+        &[ColumnSchema {
+            scalar_type: ScalarType::Integer,
+            nullable: true,
+        }],
+        1,
+        &[Some(ScalarValue::Integer(7))],
+    )?;
+    commit_rows(
+        &database,
+        id(0xe2),
+        actor,
+        9_999,
+        &[RowWrite {
+            key: committed_key,
+            expected_version: None,
+            payload: Some(committed_tuple),
+        }],
+    )?;
+    assert_eq!(
+        storage.collect_committed_table_population(table.table_id)?,
+        prdb_engine::statistics::StatisticsCollectionOutcome::Exact
+    );
+
+    let constant_invocation_id = id(0xe3);
+    let mut constant_invocation =
+        storage.begin_invocation(constant_invocation_id, actor, 9_999, 8, 512)?;
+    let constant_predicate = prdb_engine::optimizer_binding::BoundPredicate::Compare {
+        operator: prdb_engine::optimizer_request::Comparison::Equal,
+        left: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Integer(1)),
+        right: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Integer(2)),
+    };
+    let (mut constant_client, mut constant_server) = std::os::unix::net::UnixStream::pair()?;
+    constant_client.set_read_timeout(Some(Duration::from_secs(5)))?;
+    std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+        let planner = scope.spawn(|| serve_planner(&mut constant_server, &mut constant_invocation));
+        prdb_engine::ipc::write_frame(
+            &mut constant_client,
+            &IpcFrame {
+                operation: IpcOperation::EstimateScan as u16,
+                request_id: 1,
+                payload: EstimatePredicateRequest::from_bound_predicate(
+                    "planner_stats".to_owned(),
+                    "observations".to_owned(),
+                    &constant_predicate,
+                )?
+                .encode()?,
+            },
+        )?;
+        let response = prdb_engine::ipc::read_frame(&mut constant_client)?
+            .ok_or("planner stream closed before constant predicate estimate")?;
+        assert_eq!(response.request_id, 1);
+        assert_eq!(
+            EstimatePredicateResponse::decode(&response.payload)?,
+            EstimatePredicateResponse::Exact {
+                visible_rows: 1,
+                matching_rows: 0,
+            }
+        );
+        constant_client.shutdown(Shutdown::Write)?;
+        drop(constant_client);
+        planner
+            .join()
+            .expect("constant predicate planner server thread panicked")
+            .map_err(|error| format!("constant predicate planner stream failed: {error:?}"))?;
+        Ok(())
+    })?;
+    constant_invocation.abort()?;
     Ok(())
 }
 
