@@ -1,5 +1,11 @@
 # Statistics Service Progress
 
+## ST-2 follow-up: reuse fresh populations for constant predicates — implemented slice
+
+- The bounded predicate estimator now derives exact results for literal `TRUE`, `FALSE`, and `NULL` from a fresh protected committed population count when the pinned authorization proves all rows visible, the population fits the request bound, and the invocation has no private writes. It avoids reading or decoding row values in this case; stale, unknown, over-bound, unsupported-policy, and overlay-bearing cases keep the bounded scan/fallback behavior.
+- Red/green: `constant_false_predicate_reuses_fresh_population_without_reading_rows` first returned `Unknown` when the existing estimator tried to decode a deliberately malformed row tuple. It now returns `(1, 0)` from the fresh population record. The same regression checks `TRUE` and SQL `NULL`, then stages a private row and verifies that committed-stat reuse is suppressed.
+- Validation: focused constant-predicate and authorized predicate-estimate transaction regressions passed; `cargo fmt --all -- --check`, locked workspace build, warning-denied all-target Clippy, and the full serial delegated-cgroup workspace suite passed. The suite included 409 library tests, 206 commit tests, 3 metadata-process tests, 85 transaction tests, every remaining target, and zero ignored tests.
+
 ## ST-2 / OP-7 follow-up: profile minimum 9-row join ratio at the fanout cutoff — measured
 
 - Contract: complement the measured 9×128 distribution with the minimum eligible indexed-side population for a nine-row outer: 9×72 (eight-to-one), producing exactly four pairs per outer row.

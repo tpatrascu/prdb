@@ -66,6 +66,8 @@ The optimizer uses this count only for the moderate skew region: if the exact jo
 
 The confined acceptance measures two nonuniform 17×128 fanout distributions. When one outer key matches 16 indexed rows and the remaining 16 outer keys are unmatched, the exact 16-pair estimate falls below the four-pairs-per-outer threshold; kind 17 returns all 16 rows and matches hash. Five fresh-database runs overlapped 192 operational reads and commits each; median-of-run p50 was 257.8 ms indexed and 299.1 ms hash. When that one key matches all 128 indexed rows, the exact estimate exceeds the threshold and all five optimizer plans retain kind-4 hash; all 128 result rows are validated, with median-of-run p50 hash latency of 341.9 ms. Each run again overlapped 192 reads and commits. These host-local cases check two hot-key distributions and do not establish general cost-based planning.
 
+For literal `TRUE`, `FALSE`, and `NULL` predicates, the trusted estimator may derive exact matching counts from a fresh protected committed population record only when the pinned snapshot and literal row policies prove that the complete population is visible, the record is exact and within the requested bound, and the private overlay is empty. `TRUE` matches every visible row; `FALSE` and `NULL` match none. Missing, stale, unknown, over-bound, or overlay-incompatible records do not authorize reuse.
+
 ## Cell-Specific Semantics
 
 For a department manager, visible employee count may cover the department, but salary distributions may use only readable salaries of direct reports. State both populations explicitly. A readable-salary distribution must never stand in for the full department's salary distribution.

@@ -2856,7 +2856,40 @@ impl<'db> InvocationTransaction<'db> {
             Some(EstimatePopulation::NoRows) => {
                 return self.finish_predicate_estimate(Some((0, 0)));
             }
-            Some(EstimatePopulation::AllRows) => {}
+            Some(EstimatePopulation::AllRows) => {
+                let constant_matches_all = match predicate {
+                    crate::optimizer_binding::BoundPredicate::Boolean(value) => Some(*value),
+                    crate::optimizer_binding::BoundPredicate::Null => Some(false),
+                    _ => None,
+                };
+                if let Some(matches_all) = constant_matches_all {
+                    let overlay_is_empty = match self.overlay.staged_row_count() {
+                        Ok(rows) => rows == 0,
+                        Err(OverlayError::Aborted) => return Err(TransactionError::Aborted),
+                        Err(_) => false,
+                    };
+                    if overlay_is_empty {
+                        let record = self
+                            .pinned_snapshot()?
+                            .committed_population_record(table_id)
+                            .ok()
+                            .flatten();
+                        match record {
+                            Some(CommittedPopulationRecord::Exact { rows, .. })
+                                if rows <= maximum_rows =>
+                            {
+                                let matches = if matches_all { rows } else { 0 };
+                                return self.finish_predicate_estimate(Some((rows, matches)));
+                            }
+                            Some(CommittedPopulationRecord::Exact { .. })
+                            | Some(CommittedPopulationRecord::Unknown { .. }) => {
+                                return self.finish_predicate_estimate(None);
+                            }
+                            None => {}
+                        }
+                    }
+                }
+            }
             None => return self.finish_predicate_estimate(None),
         }
         let Ok(candidate_limit) = usize::try_from(maximum_rows + 1) else {

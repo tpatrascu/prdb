@@ -6987,6 +6987,157 @@ fn authorized_scan_estimate_counts_sanitized_cells_and_private_writes()
 }
 
 #[test]
+fn constant_false_predicate_reuses_fresh_population_without_reading_rows()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new();
+    let database = initialize(&fixture.path())?;
+    let table_id = [0x10; 16];
+    let schema_id = [0x23; 16];
+    let column_id = [0x66; 16];
+    let columns = [ColumnSchema {
+        scalar_type: ScalarType::Text,
+        nullable: false,
+    }];
+    let column_ids = [column_id];
+    let row = encode_tuple(&columns, 1, &[Some(ScalarValue::Text("seed".to_owned()))])?;
+    let mut seed = InvocationTransaction::begin(&database, [0x31; 16], [9; 16], 9_999, 4, 512)?;
+    seed.stage_put(id(1), &row)?;
+    seed.commit()?;
+
+    let commit_sequence = {
+        let read = database.begin_read()?;
+        let metadata = read
+            .open_table(ENGINE_META)?
+            .get(&b"format"[..])?
+            .ok_or("engine metadata is missing")?;
+        EngineMetadata::decode(metadata.value())?.commit_sequence
+    };
+    let mut population_key = b"statistics:committed-population:v1:".to_vec();
+    population_key.extend_from_slice(&table_id);
+    let mut population_record = [0; 21];
+    population_record[..4].copy_from_slice(b"CPR1");
+    population_record[4..12].copy_from_slice(&commit_sequence.to_le_bytes());
+    population_record[12] = 1;
+    population_record[13..21].copy_from_slice(&1u64.to_le_bytes());
+    {
+        let write = database.begin_write()?;
+        write
+            .open_table(ROWS)?
+            .insert(key(id(1)).as_slice(), &b"malformed tuple"[..])?;
+        write
+            .open_table(schema::STATS)?
+            .insert(population_key.as_slice(), population_record.as_slice())?;
+        write.commit()?;
+    }
+
+    let context = AuthorizationContext {
+        principal_id: [9; 16],
+        role_ids: std::collections::HashSet::new(),
+        scope: std::collections::HashSet::from([
+            (Operation::Usage, AccessTarget::Schema(schema_id)),
+            (Operation::Select, AccessTarget::Table(table_id)),
+            (
+                Operation::Select,
+                AccessTarget::Column {
+                    table_id,
+                    column_id,
+                },
+            ),
+        ]),
+    };
+    let grants = [
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Usage,
+            target: AccessTarget::Schema(schema_id),
+        },
+        Grant {
+            subject: Subject::Principal([9; 16]),
+            operation: Operation::Select,
+            target: AccessTarget::Column {
+                table_id,
+                column_id,
+            },
+        },
+    ];
+    let table_allow = Policy {
+        subjects: vec![Subject::Principal([9; 16])],
+        operation: Operation::Select,
+        target: AccessTarget::Table(table_id),
+        effect: Effect::Allow,
+        using: Some(Expr::Literal(Some(ScalarValue::Boolean(true)))),
+        with_check: None,
+    };
+    let policies = [
+        table_allow.clone(),
+        Policy {
+            target: AccessTarget::Column {
+                table_id,
+                column_id,
+            },
+            ..table_allow
+        },
+    ];
+    let projection = AuthorizedProjection {
+        columns: &columns,
+        column_ids: &column_ids,
+        schema_version: 1,
+        schema_id,
+        context: &context,
+        grants: &grants,
+        policies: &policies,
+        checks: &[],
+        policy_driving_columns: &[],
+        dependencies: &[],
+    };
+    let mut invocation =
+        InvocationTransaction::begin(&database, [0x32; 16], [9; 16], 9_999, 4, 512)?;
+    let estimate = invocation.estimate_authorized_predicate_at_most(
+        table_id,
+        &projection,
+        &prdb_engine::optimizer_binding::BoundPredicate::Boolean(false),
+        4,
+    )?;
+    assert_eq!(
+        estimate,
+        Some((1, 0)),
+        "constant FALSE needs only the fresh full-view population, not tuple decoding"
+    );
+    assert_eq!(
+        invocation.estimate_authorized_predicate_at_most(
+            table_id,
+            &projection,
+            &prdb_engine::optimizer_binding::BoundPredicate::Boolean(true),
+            4,
+        )?,
+        Some((1, 1))
+    );
+    assert_eq!(
+        invocation.estimate_authorized_predicate_at_most(
+            table_id,
+            &projection,
+            &prdb_engine::optimizer_binding::BoundPredicate::Null,
+            4,
+        )?,
+        Some((1, 0)),
+        "SQL NULL is not a matching WHERE predicate"
+    );
+    invocation.stage_put(id(2), &row)?;
+    assert_eq!(
+        invocation.estimate_authorized_predicate_at_most(
+            table_id,
+            &projection,
+            &prdb_engine::optimizer_binding::BoundPredicate::Boolean(false),
+            4,
+        )?,
+        None,
+        "a private write must prevent reuse of the committed population record"
+    );
+    invocation.abort()?;
+    Ok(())
+}
+
+#[test]
 fn authorized_predicate_estimate_compares_readable_decimal_columns()
 -> Result<(), Box<dyn std::error::Error>> {
     use prdb_engine::optimizer_binding::{BoundColumn, BoundPredicate};
