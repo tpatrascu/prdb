@@ -1342,4 +1342,35 @@ mod tests {
             io::ErrorKind::InvalidData
         );
     }
+
+    #[test]
+    fn result_stream_accepts_elevated_cumulative_budget_with_bounded_memory() {
+        use std::io::Write;
+
+        let elevated_limit = 128 * 1024 * 1024u64;
+        let chunk_len = crate::query_abi::MAX_RESULT_CHUNK_BYTES as u32;
+        let frame_count = elevated_limit / u64::from(chunk_len);
+        assert_eq!(elevated_limit % u64::from(chunk_len), 0);
+
+        let (mut worker, supervisor) = UnixStream::pair().unwrap();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(2);
+        let payload = vec![0x5a; chunk_len as usize];
+        let writer = std::thread::spawn(move || -> io::Result<()> {
+            for _ in 0..frame_count {
+                worker.write_all(&chunk_len.to_be_bytes())?;
+                worker.write_all(&payload)?;
+            }
+            worker.shutdown(std::net::Shutdown::Write)
+        });
+        let relay =
+            std::thread::spawn(move || drain_result_stream(supervisor, sender, elevated_limit));
+
+        let mut received = 0u64;
+        while let Ok(chunk) = receiver.recv() {
+            received = received.saturating_add(chunk.unwrap().len() as u64);
+        }
+        writer.join().unwrap().unwrap();
+        relay.join().unwrap().unwrap();
+        assert_eq!(received, elevated_limit);
+    }
 }

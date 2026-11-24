@@ -1468,6 +1468,32 @@ mod result_relay_tests {
         }
     }
 
+    #[derive(Default)]
+    struct CountingClient(u64);
+
+    impl Read for CountingClient {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            Ok(0)
+        }
+    }
+
+    impl Write for CountingClient {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len() as u64);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl GatewayClientStream for CountingClient {
+        fn set_gateway_read_timeout(&mut self, _timeout: Option<Duration>) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn v2_gateway_rejection_uses_the_negotiated_frame_version() {
         let mut client = CapturedClient::default();
@@ -1520,6 +1546,48 @@ mod result_relay_tests {
         assert_eq!(frames[0].kind, 102);
         assert!(super::gateway_result_bytes_sent_to_clients_total() >= before.saturating_add(3));
         assert_eq!(frames[0].payload, b"abc");
+    }
+
+    #[test]
+    fn result_relay_accepts_elevated_cumulative_budget_with_bounded_memory() {
+        let elevated_limit = 128 * 1024 * 1024u64;
+        let result_chunk = vec![0x5a; 16 * 1024];
+        let frame_count = elevated_limit / result_chunk.len() as u64;
+        let (mut relay_service, mut supervisor_service) = UnixStream::pair().unwrap();
+        let writer = std::thread::spawn(move || {
+            for _ in 0..frame_count {
+                write_frame(
+                    &mut supervisor_service,
+                    &IpcFrame {
+                        operation: Operation::GatewayResultData as u16,
+                        request_id: 7,
+                        payload: result_chunk.clone(),
+                    },
+                )
+                .unwrap();
+            }
+            write_frame(
+                &mut supervisor_service,
+                &IpcFrame {
+                    operation: Operation::GatewayTerminal as u16,
+                    request_id: 7,
+                    payload: Vec::new(),
+                },
+            )
+            .unwrap();
+        });
+
+        let mut client = CountingClient::default();
+        relay_gateway_result_events_with_limit(
+            &mut client,
+            &mut relay_service,
+            7,
+            elevated_limit,
+            1,
+        )
+        .unwrap();
+        writer.join().unwrap();
+        assert!(client.0 > elevated_limit);
     }
 
     #[test]

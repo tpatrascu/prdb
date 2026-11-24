@@ -1925,6 +1925,48 @@ mod worker {
         }
 
         #[test]
+        fn result_callback_streams_above_default_budget_when_trusted_limit_is_raised() {
+            let elevated_limit = 128 * 1024 * 1024u64;
+            let chunk = vec![0x5a; MAX_RESULT_CHUNK_BYTES as usize];
+            let chunk_len = chunk.len() as u64;
+            let frame_count = elevated_limit / chunk_len;
+            assert_eq!(elevated_limit % chunk_len, 0);
+
+            let (planner, _planner_peer) = UnixStream::pair().unwrap();
+            let (executor, _executor_peer) = UnixStream::pair().unwrap();
+            let (result, mut result_peer) = UnixStream::pair().unwrap();
+            let mut context = callback_context(planner, executor, result);
+            context.max_total_result_bytes = elevated_limit;
+            let context_ptr = (&context as *const CallbackContext).cast_mut().cast();
+            let reader = std::thread::spawn(move || {
+                let mut received = 0u64;
+                let mut payload = vec![0; MAX_RESULT_CHUNK_BYTES as usize];
+                for _ in 0..frame_count {
+                    let mut header = [0u8; 4];
+                    result_peer.read_exact(&mut header).unwrap();
+                    assert_eq!(u32::from_be_bytes(header), chunk_len as u32);
+                    result_peer.read_exact(&mut payload).unwrap();
+                    assert!(payload.iter().all(|byte| *byte == 0x5a));
+                    received += payload.len() as u64;
+                }
+                received
+            });
+
+            for _ in 0..frame_count {
+                // SAFETY: callback context and chunk bytes remain live for each call.
+                assert_eq!(
+                    unsafe { write_result_v2(context_ptr, chunk.as_ptr(), chunk_len) },
+                    CALLBACK_OK
+                );
+            }
+            assert_eq!(reader.join().unwrap(), elevated_limit);
+            assert_eq!(
+                context.total_result_bytes.load(Ordering::Relaxed),
+                elevated_limit
+            );
+        }
+
+        #[test]
         fn caught_statement_failure_forces_worker_failure() {
             let (planner, _planner_peer) = UnixStream::pair().unwrap();
             let (executor, _executor_peer) = UnixStream::pair().unwrap();
