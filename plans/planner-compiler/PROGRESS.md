@@ -1,5 +1,12 @@
 # Optimizer Progress
 
+## OP-4 / ST-2 follow-up: use fresh indexed counts for predicate estimation — implemented and profiled
+
+- Contract: exact simple single-key equality/range predicates can count locator entries only when the same pinned snapshot has a fresh exact committed population count, policies prove all rows visible, the overlay is empty, and an eligible index starts with an unconditionally readable predicate key. The path is bounded to 1,024 locators and 16 MiB of encoded index keys; it returns no row values and does not consume executor scan-work allowance. Ineligible or over-bound requests retain the bounded row estimator.
+- Red/green: the fresh-population transaction regression adds an unrelated malformed row outside a one-row indexed equality. The original full-row estimator returns `Unknown`; the indexed counter returns exact `(2, 1)`. It also proves a one-unit query scan-work budget remains available for the subsequent indexed query.
+- Evidence: five fresh-database 2,052-row TEXT runs at 882 matches measured estimate p50 medians of 1.537 ms (1.494–1.599 ms range), versus the previous full-row estimate at 26.103 ms. Access-path profiles remain host-local and do not include planner IPC or SQL execution; end-to-end cost accounting is still open.
+- Validation: focused regression, all 85 transaction tests, and five benchmark invocations passed; maintained TinyCC SDK tests and sandbox fixture build passed; workspace build, format check, warning-denied all-target Clippy, and the full serial delegated-cgroup workspace suite passed. The full run had 409 library tests, 206 commit tests, 3 metadata-process tests, and all other targets passing with zero ignored tests.
+
 ## OP-4 / ST-2 follow-up: record range-selectivity estimate cost — measured
 
 - Evidence: five-run direct-storage TEXT profiles at 514 rows measured median-of-run p50s of 4.966 ms range versus 5.746 ms scan at 43% matches, 5.769 versus 5.565 ms at 49%, and 7.626 versus 6.037 ms at 62%. At 2,050 rows and 43% matches, the medians were 21.579 ms range and 25.323 ms scan; exact predicate estimation measured 26.103 ms.

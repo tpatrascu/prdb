@@ -6992,16 +6992,28 @@ fn constant_predicate_reuses_fresh_population_without_reading_rows()
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
     let table_id = [0x10; 16];
-    let schema_id = [0x23; 16];
+    let schema_id = [0x10; 16];
     let column_id = [0x66; 16];
     let columns = [ColumnSchema {
-        scalar_type: ScalarType::Text,
-        nullable: false,
+        scalar_type: ScalarType::Bytea,
+        nullable: true,
     }];
     let column_ids = [column_id];
-    let row = encode_tuple(&columns, 1, &[Some(ScalarValue::Text("seed".to_owned()))])?;
+    let (index_key, index_value) = index_catalog_record([0x57; 16], table_id, column_id, 1)?;
+    {
+        let write = database.begin_write()?;
+        write
+            .open_table(CATALOG)?
+            .insert(index_key.as_slice(), index_value.as_slice())?;
+        write.commit()?;
+    }
+    let row = encode_tuple(&columns, 1, &[Some(ScalarValue::Bytea(b"seed".to_vec()))])?;
     let mut seed = InvocationTransaction::begin(&database, [0x31; 16], [9; 16], 9_999, 4, 512)?;
+    let seed_schema = seed.load_catalog_table_schema(table_id)?;
+    seed.load_catalog_indexes(&seed_schema)?;
     seed.stage_put(id(1), &row)?;
+    let other_row = encode_tuple(&columns, 1, &[Some(ScalarValue::Bytea(b"other".to_vec()))])?;
+    seed.stage_put(id(2), &other_row)?;
     seed.commit()?;
 
     let commit_sequence = {
@@ -7018,12 +7030,12 @@ fn constant_predicate_reuses_fresh_population_without_reading_rows()
     population_record[..4].copy_from_slice(b"CPR1");
     population_record[4..12].copy_from_slice(&commit_sequence.to_le_bytes());
     population_record[12] = 1;
-    population_record[13..21].copy_from_slice(&1u64.to_le_bytes());
+    population_record[13..21].copy_from_slice(&2u64.to_le_bytes());
     {
         let write = database.begin_write()?;
         write
             .open_table(ROWS)?
-            .insert(key(id(1)).as_slice(), &b"malformed tuple"[..])?;
+            .insert(key(id(2)).as_slice(), &b"malformed tuple"[..])?;
         write
             .open_table(schema::STATS)?
             .insert(population_key.as_slice(), population_record.as_slice())?;
@@ -7100,7 +7112,7 @@ fn constant_predicate_reuses_fresh_population_without_reading_rows()
     )?;
     assert_eq!(
         estimate,
-        Some((1, 0)),
+        Some((2, 0)),
         "constant FALSE needs only the fresh full-view population, not tuple decoding"
     );
     assert_eq!(
@@ -7110,7 +7122,7 @@ fn constant_predicate_reuses_fresh_population_without_reading_rows()
             &prdb_engine::optimizer_binding::BoundPredicate::Boolean(true),
             4,
         )?,
-        Some((1, 1))
+        Some((2, 2))
     );
     assert_eq!(
         invocation.estimate_authorized_predicate_at_most(
@@ -7119,7 +7131,7 @@ fn constant_predicate_reuses_fresh_population_without_reading_rows()
             &prdb_engine::optimizer_binding::BoundPredicate::Null,
             4,
         )?,
-        Some((1, 0)),
+        Some((2, 0)),
         "SQL NULL is not a matching WHERE predicate"
     );
     let constant_false_comparison = prdb_engine::optimizer_binding::BoundPredicate::Compare {
@@ -7134,7 +7146,7 @@ fn constant_predicate_reuses_fresh_population_without_reading_rows()
             &constant_false_comparison,
             4,
         )?,
-        Some((1, 0))
+        Some((2, 0))
     );
     let null_is_null = prdb_engine::optimizer_binding::BoundPredicate::IsNull(Box::new(
         prdb_engine::optimizer_binding::BoundPredicate::Null,
@@ -7146,9 +7158,62 @@ fn constant_predicate_reuses_fresh_population_without_reading_rows()
             &null_is_null,
             4,
         )?,
-        Some((1, 1))
+        Some((2, 2))
     );
-    invocation.stage_put(id(2), &row)?;
+    let indexed_match = prdb_engine::optimizer_binding::BoundPredicate::Compare {
+        operator: prdb_engine::optimizer_request::Comparison::Equal,
+        left: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Column(
+            prdb_engine::optimizer_binding::BoundColumn {
+                column_id,
+                ordinal: 0,
+                scalar_type: ScalarType::Bytea,
+                nullable: true,
+            },
+        )),
+        right: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Bytea(
+            b"seed".to_vec(),
+        )),
+    };
+    let mut bounded_scan_work =
+        InvocationTransaction::begin(&database, [0x35; 16], [9; 16], 9_999, 4, 1)?;
+    assert_eq!(
+        bounded_scan_work.estimate_authorized_predicate_at_most(
+            table_id,
+            &projection,
+            &indexed_match,
+            4,
+        )?,
+        Some((2, 1))
+    );
+    assert!(matches!(
+        bounded_scan_work.scan_catalog_index_range(
+            table_id,
+            [1; 16],
+            Some(prdb_engine::transaction::AuthorizedIndexRangeBound {
+                value: ScalarValue::Bytea(b"seed".to_vec()),
+                inclusive: true,
+            }),
+            Some(prdb_engine::transaction::AuthorizedIndexRangeBound {
+                value: ScalarValue::Bytea(b"seed".to_vec()),
+                inclusive: true,
+            }),
+            &projection,
+        )?,
+        prdb_engine::transaction::AuthorizedIndexRangeScan::Rows(rows)
+            if rows.len() == 1 && rows[0].0 == id(1)
+    ));
+    bounded_scan_work.abort()?;
+    assert_eq!(
+        invocation.estimate_authorized_predicate_at_most(
+            table_id,
+            &projection,
+            &indexed_match,
+            4,
+        )?,
+        Some((2, 1)),
+        "an indexed exact estimate should not decode unrelated malformed rows"
+    );
+    invocation.stage_put(id(3), &row)?;
     assert_eq!(
         invocation.estimate_authorized_predicate_at_most(
             table_id,
@@ -8725,6 +8790,29 @@ fn unique_constraint_uses_its_backing_index_for_invocation_writes()
         seed.stage_put(numbered_row_id(table_id, number + 1_000), &payload)?;
     }
     assert_eq!(seed.commit()?, 1);
+
+    let commit_sequence = {
+        let read = database.begin_read()?;
+        let metadata = read
+            .open_table(ENGINE_META)?
+            .get(&b"format"[..])?
+            .ok_or("engine metadata is missing")?;
+        EngineMetadata::decode(metadata.value())?.commit_sequence
+    };
+    let mut population_key = b"statistics:committed-population:v1:".to_vec();
+    population_key.extend_from_slice(&table_id);
+    let mut population_record = [0; 21];
+    population_record[..4].copy_from_slice(b"CPR1");
+    population_record[4..12].copy_from_slice(&commit_sequence.to_le_bytes());
+    population_record[12] = 1;
+    population_record[13..21].copy_from_slice(&(index_profile_rows + 2).to_le_bytes());
+    {
+        let write = database.begin_write()?;
+        write
+            .open_table(schema::STATS)?
+            .insert(population_key.as_slice(), population_record.as_slice())?;
+        write.commit()?;
+    }
 
     let mut invocation =
         InvocationTransaction::begin(&database, [242; 16], [9; 16], 9_999, 8, 512)?;

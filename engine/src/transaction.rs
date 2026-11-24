@@ -2890,6 +2890,17 @@ impl<'db> InvocationTransaction<'db> {
             }
             None => return self.finish_predicate_estimate(None),
         }
+        if matches!(
+            estimate_population(table_id, projection),
+            Some(EstimatePopulation::AllRows)
+        ) && let Some(estimate) = self.estimate_indexed_predicate_from_fresh_population(
+            table_id,
+            projection,
+            predicate,
+            maximum_rows,
+        )? {
+            return self.finish_predicate_estimate(Some(estimate));
+        }
         let Ok(candidate_limit) = usize::try_from(maximum_rows + 1) else {
             return self.finish_predicate_estimate(None);
         };
@@ -2975,6 +2986,127 @@ impl<'db> InvocationTransaction<'db> {
             }
         }
         self.finish_predicate_estimate(Some((visible_rows, matching_rows)))
+    }
+
+    fn estimate_indexed_predicate_from_fresh_population(
+        &mut self,
+        table_id: [u8; 16],
+        projection: &AuthorizedProjection<'_>,
+        predicate: &crate::optimizer_binding::BoundPredicate,
+        maximum_rows: u64,
+    ) -> Result<Option<(u64, u64)>, TransactionError> {
+        let overlay_is_empty = match self.overlay.staged_row_count() {
+            Ok(rows) => rows == 0,
+            Err(OverlayError::Aborted) => return Err(TransactionError::Aborted),
+            Err(_) => return Ok(None),
+        };
+        if !overlay_is_empty {
+            return Ok(None);
+        }
+        let Some(CommittedPopulationRecord::Exact {
+            rows: visible_rows, ..
+        }) = self
+            .pinned_snapshot()?
+            .committed_population_record(table_id)
+            .ok()
+            .flatten()
+        else {
+            return Ok(None);
+        };
+        if visible_rows > maximum_rows {
+            return Ok(None);
+        }
+        let Some((key_column, lower, upper)) = crate::optimizer_plan::index_range_bounds(predicate)
+        else {
+            return Ok(None);
+        };
+        let schema = self.load_catalog_table_schema(table_id)?;
+        if schema.schema_id != projection.schema_id
+            || schema.schema_version != projection.schema_version
+            || schema.column_ids != projection.column_ids
+            || schema.columns != projection.columns
+        {
+            return Ok(None);
+        }
+        let indexes = self.load_catalog_indexes(&schema)?;
+        let Some(index) = indexes.into_iter().find(|index| {
+            index.column_ids.first() == Some(&key_column.column_id)
+                && index.column_ids.iter().all(|column_id| {
+                    index_component_unconditionally_readable(projection, table_id, *column_id)
+                })
+        }) else {
+            return Ok(None);
+        };
+        let Some(key_ordinal) = schema
+            .column_ids
+            .iter()
+            .position(|column_id| *column_id == key_column.column_id)
+        else {
+            return Ok(None);
+        };
+        if schema.columns[key_ordinal].scalar_type != key_column.scalar_type {
+            return Ok(None);
+        }
+        let encode_bound = |bound: crate::optimizer_plan::IndexRangeBoundV1| {
+            let value = bound_predicate_scalar(&key_column, &bound.value)?;
+            let tuple = encode_sql_tuple(
+                std::slice::from_ref(&schema.columns[key_ordinal]),
+                &[Some(value)],
+            )
+            .ok()?;
+            Some(crate::snapshot::IndexRangeBound {
+                tuple,
+                inclusive: bound.inclusive,
+            })
+        };
+        let lower = match lower {
+            Some(bound) => match encode_bound(bound) {
+                Some(bound) => Some(bound),
+                None => return Ok(None),
+            },
+            None => None,
+        };
+        let upper = match upper {
+            Some(bound) => match encode_bound(bound) {
+                Some(bound) => Some(bound),
+                None => return Ok(None),
+            },
+            None => None,
+        };
+        let mut after_key = None;
+        let mut matching_rows = 0u64;
+        let mut key_bytes = 0usize;
+        loop {
+            self.check_deadline()?;
+            let page = match self.pinned_snapshot()?.scan_index_range(
+                &index.index_id,
+                lower.clone(),
+                upper.clone(),
+                after_key.as_deref(),
+                crate::snapshot::MAX_ROW_SCAN_PAGE,
+            ) {
+                Ok(page) => page,
+                Err(_) => return Ok(None),
+            };
+            matching_rows = matching_rows.saturating_add(page.candidates.len() as u64);
+            key_bytes = key_bytes.saturating_add(
+                page.candidates
+                    .iter()
+                    .map(|candidate| candidate.key.len())
+                    .sum::<usize>(),
+            );
+            if matching_rows > MAX_AUTHORIZED_INDEX_RANGE_CANDIDATES as u64
+                || key_bytes > MAX_AUTHORIZED_INDEX_RANGE_BYTES
+                || matching_rows > visible_rows
+            {
+                return Ok(None);
+            }
+            let Some(continuation) = page.continuation else {
+                break;
+            };
+            after_key = Some(continuation);
+        }
+        Ok(Some((visible_rows, matching_rows)))
     }
 
     fn finish_predicate_estimate(
@@ -11403,6 +11535,42 @@ where
         cache.insert(key, (write_generation, exact_value.clone()));
     }
     Ok(exact_value)
+}
+
+fn bound_predicate_scalar(
+    column: &crate::optimizer_binding::BoundColumn,
+    value: &crate::optimizer_binding::BoundPredicate,
+) -> Option<ScalarValue> {
+    use crate::optimizer_binding::BoundPredicate;
+
+    match (column.scalar_type, value) {
+        (ScalarType::Boolean, BoundPredicate::Boolean(value)) => Some(ScalarValue::Boolean(*value)),
+        (ScalarType::SmallInt, BoundPredicate::Integer(value)) => {
+            i16::try_from(*value).ok().map(ScalarValue::SmallInt)
+        }
+        (ScalarType::Integer, BoundPredicate::Integer(value)) => {
+            i32::try_from(*value).ok().map(ScalarValue::Integer)
+        }
+        (ScalarType::BigInt, BoundPredicate::Integer(value)) => Some(ScalarValue::BigInt(*value)),
+        (ScalarType::Decimal { precision, .. }, BoundPredicate::Decimal(value))
+            if crate::tuple::decimal_coefficient_is_valid(*value, precision) =>
+        {
+            Some(ScalarValue::Decimal(*value))
+        }
+        (ScalarType::Text, BoundPredicate::Text(value)) => Some(ScalarValue::Text(value.clone())),
+        (ScalarType::Varchar { .. }, BoundPredicate::Text(value)) => {
+            Some(ScalarValue::Varchar(value.clone()))
+        }
+        (ScalarType::Bytea, BoundPredicate::Bytea(value)) => {
+            Some(ScalarValue::Bytea(value.clone()))
+        }
+        (ScalarType::Uuid, BoundPredicate::Uuid(value)) => Some(ScalarValue::Uuid(*value)),
+        (ScalarType::Date, BoundPredicate::Date(value)) => Some(ScalarValue::Date(*value)),
+        (ScalarType::TimestampTz, BoundPredicate::TimestampTz(value)) => {
+            Some(ScalarValue::TimestampTz(*value))
+        }
+        _ => None,
+    }
 }
 
 fn index_component_unconditionally_readable(

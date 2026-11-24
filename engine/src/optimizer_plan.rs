@@ -4327,7 +4327,7 @@ fn select_index_range_scan(
     })
 }
 
-fn index_range_bounds(
+pub(crate) fn index_range_bounds(
     predicate: &BoundPredicate,
 ) -> Option<(
     BoundColumn,

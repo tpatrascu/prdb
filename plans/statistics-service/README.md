@@ -10,6 +10,8 @@ The internal `InvocationTransaction::estimate_authorized_scan` API returns exact
 
 Row-independent constant predicate estimates may reuse a fresh exact committed population count under the same pinned-snapshot, full-visible-policy, request-bound, and empty-overlay conditions. The estimator does not decode row values for those expressions when reuse applies.
 
+For exact single-column equality/range predicates, the predicate estimator also counts index locators directly when a fresh committed population record, an empty overlay, an all-rows-visible policy proof, and an unconditionally readable leading index key establish that the range count is the full match count. It returns `(visible_rows, matching_rows)` without decoding matching rows, caps the path at 1,024 locators and 16 MiB of encoded keys, and leaves executor scan-work accounting untouched. If any precondition or bound fails, it uses the existing bounded row estimator. Five local 2,052-row TEXT profiles at 882 matches measured 1.537 ms median run-level estimate p50 (1.494–1.599 ms), versus 26.103 ms for the earlier full-row pass; planner IPC and end-to-end query latency remain unmeasured.
+
 ## Decisions Before Further Implementation
 
 At the smallest moderate-skew boundary, five delegated-cgroup runs of the 9×72 shape (eight-to-one population ratio, 36 pairs, four per outer row) selected indexed nested-loop and matched hash output. Median of run-level p50s was 174.5 ms indexed (168.0–185.6 ms range) and 186.8 ms hash (172.7–200.8 ms range), with 192 operational reads and commits overlapping each run. This extends local evidence to the minimum ratio and inclusive fanout cutoff; it does not establish a general cost model or target-host performance.

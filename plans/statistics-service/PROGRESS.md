@@ -1,5 +1,12 @@
 # Statistics Service Progress
 
+## ST-2 / OP-4 follow-up: count exact indexed predicates without row decoding — implemented and profiled
+
+- Contract: a simple equality/range predicate may use a direct pinned-snapshot index-entry count only when a fresh exact committed population record proves the full authorized population, row visibility is independent of row values, the overlay is empty, the index begins with the predicate column, and every index component is unconditionally readable. The bounded path returns no row values and does not debit executor scan work; all other cases retain the bounded row estimator.
+- Red/green: extended the fresh-population regression with one valid matching indexed row and one malformed row outside the range. The old full-row estimator returned `Unknown`; the index-count path returns exact `(2, 1)`. A one-unit executor scan-work budget still permits the subsequent real index range query, proving estimate work is separate. Candidate/encoded-key bounds remain 1,024 and 16 MiB; unsupported and oversized cases fall back.
+- Evidence: five fresh-database 2,052-row TEXT profiles at 882 matches measured indexed estimator medians of 1.537 ms (1.494–1.599 ms range), versus the earlier full-row estimator at 26.103 ms. This is direct transaction-layer evidence; planner IPC, SQL execution, end-to-end latency, and target-host profiling remain open.
+- Validation: five benchmark invocations passed; all 85 transaction integration tests passed; maintained TinyCC SDK tests and sandbox fixture build passed; workspace build, format check, and warning-denied all-target Clippy passed; the full serial delegated-cgroup workspace suite passed with 409 library tests, 206 commit tests, 3 metadata-process tests, and all remaining targets passing with zero ignored tests.
+
 ## ST-2 / ST-6 follow-up: reject stale population reuse for constant predicates — verified
 
 - The constant-predicate transaction regression now commits another row after writing the protected population record, advancing the engine sequence. On the new snapshot, the stale count is rejected and the estimate falls back to row evaluation; the deliberately malformed existing tuple makes that fallback return `Unknown` rather than reuse the old exact count.
