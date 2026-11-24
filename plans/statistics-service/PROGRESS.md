@@ -1,22 +1,27 @@
 # Statistics Service Progress
 
+## Fresh delegated workspace verification — passed
+
+- The earlier delegated `cargo test --workspace` unit remained blocked in the commit integration binary for over three hours. A fresh delegated run of the complete commit integration target passed all 206 tests in 153 seconds, including sandboxed SQL and optimizer cancellation.
+- Stopped the stale unit and ran the full workspace suite in a new delegated `systemd --user` unit with the documented TinyCC artifacts/runtime and an isolated Cargo target. `cargo test --workspace --locked -- --test-threads=1` completed successfully in 4m43s. All Rust unit, integration, sandbox, and process tests ran; no test was skipped.
+
 ## ST-2 follow-up: use adjusted populations for constant predicates — verified slice
 
 - Contract: `TRUE`, `FALSE`, and other supported row-independent constants derive exact matches from the same bounded authorized population estimate as planner scan choices. A fresh committed population record with current-actor insert/delete deltas can supply the count; stale/missing statistics fall back to the row-key probe. No row payloads are decoded for constant evaluation.
 - Red/green: the constant-predicate regression first expected a private insert to yield `(3, 0)` for `FALSE` but received `Unknown`. After routing the constant path through the bounded population estimator, the private-overlay case passed. The follow-up committed a row after the stats record became stale and verified the row-key fallback returned the new count `(3, 0)` rather than the stale baseline.
-- Verification: the focused regression passed, followed by all 85 transaction integration tests. The isolated locked workspace build, format check, and all-target Clippy passed. The existing delegated full workspace suite is still active in the commit integration binary, so no full-suite result is claimed.
+- Verification: the focused regression passed, followed by all 85 transaction integration tests. The isolated locked workspace build, format check, and all-target Clippy passed. A later fresh delegated full workspace run passed; see the full verification entry above.
 
 ## ST-2 follow-up: adjust fresh population estimates for private writes — verified slice
 
 - Contract: when a fresh exact committed population record and a literal full-visible policy proof establish the baseline, adjust only for the invocation's own bounded overlay rows using pinned row-key existence. Staged inserts add one visible row; updates retain the count; deletes subtract one. Other actors' writes remain invisible. The estimator examines at most 16,384 overlay row IDs and falls back to the bounded probe on limit or storage uncertainty.
 - Red/green: the authorized population regression stores a fresh two-row population record, stages deletion of one row, and asks for the exact result at bound one. The previous empty-overlay-only reuse returned `Unknown`; bounded delta adjustment returns one. The existing insert, update, multi-row bound, and private-overlay estimate cases remain covered.
-- Verification: the new red assertion first failed with `Unknown` at bound one, then the focused test and all 85 transaction integration tests passed. The isolated locked workspace build, format check, and all-target Clippy passed. The existing delegated full workspace suite remains active in the commit integration binary; no full-suite result is claimed.
+- Verification: the new red assertion first failed with `Unknown` at bound one, then the focused test and all 85 transaction integration tests passed. The isolated locked workspace build, format check, and all-target Clippy passed. A later fresh delegated full workspace run passed; see the full verification entry above.
 
 ## ST-2 follow-up: adjust indexed predicate counts for private overlay writes — verified slice
 
 - Contract: a fresh committed population and an eligible readable leading index still provide the exact committed baseline. The estimator now adjusts that baseline only for bounded overlay entries authored by the current actor, using each affected row's pinned committed value and staged replacement/deletion. Other actors' writes remain outside the invocation view. Invalid or over-bound overlay values fall back to the bounded row estimator; cumulative old/staged payload bytes are capped at 16 MiB.
 - Red/green: the regression adds a private insert matching the indexed predicate while an unrelated committed row has malformed tuple bytes. The existing empty-overlay-only fast path returned `Unknown`; the new path returns `(3,2)` without reading the unrelated row. The same regression checks a private update that removes the match and a private delete that removes both the match and visible row.
-- Verification: the focused transaction regression passed, followed by all 85 transaction integration tests in an isolated locked Cargo target. The existing delegated full-suite process was still active, so no full-suite result is claimed for this slice.
+- Verification: the focused transaction regression passed, followed by all 85 transaction integration tests in an isolated locked Cargo target. A later fresh delegated full workspace run passed; see the full verification entry above.
 
 ## ST-2 / OP-4 follow-up: count exact indexed predicates without row decoding — implemented and profiled
 
