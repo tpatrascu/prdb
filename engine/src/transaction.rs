@@ -2445,10 +2445,10 @@ impl<'db> InvocationTransaction<'db> {
 
     /// Estimate whether the authorized population fits under a fixed bound.
     /// It reuses a fresh protected committed count only when the pinned
-    /// snapshot, literal row policies, and empty private overlay prove the
-    /// global population equals this invocation's authorized population.
-    /// Otherwise it reads at most `maximum_rows + 1` snapshot keys in bounded
-    /// pages and does not decode row values.
+    /// snapshot and literal row policies prove the full committed population
+    /// is visible. It then adjusts for bounded current-actor overlay inserts
+    /// and deletes using row-key existence, without decoding values. Otherwise
+    /// it reads at most `maximum_rows + 1` snapshot keys in bounded pages.
     pub fn estimate_authorized_population_at_most(
         &mut self,
         table_id: [u8; 16],
@@ -2476,26 +2476,78 @@ impl<'db> InvocationTransaction<'db> {
                 let overlay_is_empty = match self.overlay.staged_row_count() {
                     Ok(rows) => rows == 0,
                     Err(OverlayError::Aborted) => return Err(TransactionError::Aborted),
-                    Err(_) => false,
+                    Err(_) => return self.finish_population_probe(None),
                 };
-                if overlay_is_empty {
-                    let record = self
-                        .pinned_snapshot()?
-                        .committed_population_record(table_id)
-                        .ok()
-                        .flatten();
-                    match record {
-                        Some(CommittedPopulationRecord::Exact { rows, .. })
-                            if rows <= maximum_rows =>
-                        {
-                            return self.finish_population_probe(Some(rows));
-                        }
-                        Some(CommittedPopulationRecord::Exact { .. })
-                        | Some(CommittedPopulationRecord::Unknown { .. }) => {
-                            return self.finish_population_probe(None);
-                        }
-                        None => {}
+                let record = self
+                    .pinned_snapshot()?
+                    .committed_population_record(table_id)
+                    .ok()
+                    .flatten();
+                match record {
+                    Some(CommittedPopulationRecord::Exact { rows, .. }) if overlay_is_empty => {
+                        return self
+                            .finish_population_probe((rows <= maximum_rows).then_some(rows));
                     }
+                    Some(CommittedPopulationRecord::Exact { rows, .. }) => {
+                        let mut overlay_complete = true;
+                        let overlay_row_ids = match self
+                            .overlay
+                            .bounded_row_ids_for_table(table_id, MAX_ESTIMATE_CANDIDATES)
+                        {
+                            Ok(Some(row_ids)) => row_ids,
+                            Ok(None) => {
+                                overlay_complete = false;
+                                Vec::new()
+                            }
+                            Err(OverlayError::Aborted) => return Err(TransactionError::Aborted),
+                            Err(_) => return self.finish_population_probe(None),
+                        };
+                        let mut adjusted_rows = rows;
+                        for row_id in overlay_row_ids {
+                            self.check_deadline()?;
+                            let id = RowId {
+                                table: table_id,
+                                row: row_id,
+                            };
+                            let new_exists =
+                                match self.overlay.get_for_actor(&id, self.principal_id) {
+                                    Ok(Some(StagedRow::Value(_))) => true,
+                                    Ok(Some(StagedRow::Delete)) => false,
+                                    Ok(None) => continue,
+                                    Err(OverlayError::Aborted) => {
+                                        return Err(TransactionError::Aborted);
+                                    }
+                                    Err(_) => {
+                                        overlay_complete = false;
+                                        break;
+                                    }
+                                };
+                            let old_exists = match self.pinned_snapshot()?.get(&row_key(id)) {
+                                Ok(row) => row.is_some(),
+                                Err(_) => {
+                                    overlay_complete = false;
+                                    break;
+                                }
+                            };
+                            let Some(next_rows) = adjusted_rows
+                                .checked_sub(u64::from(old_exists))
+                                .and_then(|count| count.checked_add(u64::from(new_exists)))
+                            else {
+                                overlay_complete = false;
+                                break;
+                            };
+                            adjusted_rows = next_rows;
+                        }
+                        if overlay_complete {
+                            return self.finish_population_probe(
+                                (adjusted_rows <= maximum_rows).then_some(adjusted_rows),
+                            );
+                        }
+                    }
+                    Some(CommittedPopulationRecord::Unknown { .. }) if overlay_is_empty => {
+                        return self.finish_population_probe(None);
+                    }
+                    None | Some(CommittedPopulationRecord::Unknown { .. }) => {}
                 }
             }
             None => return self.finish_population_probe(None),

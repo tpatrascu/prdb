@@ -1,5 +1,11 @@
 # Statistics Service Progress
 
+## ST-2 follow-up: adjust fresh population estimates for private writes — verified slice
+
+- Contract: when a fresh exact committed population record and a literal full-visible policy proof establish the baseline, adjust only for the invocation's own bounded overlay rows using pinned row-key existence. Staged inserts add one visible row; updates retain the count; deletes subtract one. Other actors' writes remain invisible. The estimator examines at most 16,384 overlay row IDs and falls back to the bounded probe on limit or storage uncertainty.
+- Red/green: the authorized population regression stores a fresh two-row population record, stages deletion of one row, and asks for the exact result at bound one. The previous empty-overlay-only reuse returned `Unknown`; bounded delta adjustment returns one. The existing insert, update, multi-row bound, and private-overlay estimate cases remain covered.
+- Verification: the new red assertion first failed with `Unknown` at bound one, then the focused test and all 85 transaction integration tests passed. The isolated locked workspace build, format check, and all-target Clippy passed. The existing delegated full workspace suite remains active in the commit integration binary; no full-suite result is claimed.
+
 ## ST-2 follow-up: adjust indexed predicate counts for private overlay writes — verified slice
 
 - Contract: a fresh committed population and an eligible readable leading index still provide the exact committed baseline. The estimator now adjusts that baseline only for bounded overlay entries authored by the current actor, using each affected row's pinned committed value and staged replacement/deletion. Other actors' writes remain outside the invocation view. Invalid or over-bound overlay values fall back to the bounded row estimator; cumulative old/staged payload bytes are capped at 16 MiB.

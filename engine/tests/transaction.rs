@@ -6453,6 +6453,21 @@ fn authorized_scan_estimate_counts_sanitized_cells_and_private_writes()
     seed.stage_put(id(2), &row(None, "secret-two"))?;
     seed.commit()?;
 
+    let mut population_key = b"statistics:committed-population:v1:".to_vec();
+    population_key.extend_from_slice(&table_id);
+    let mut population_record = [0; 21];
+    population_record[..4].copy_from_slice(b"CPR1");
+    population_record[4..12].copy_from_slice(&commit_sequence(&database)?.to_le_bytes());
+    population_record[12] = 1;
+    population_record[13..21].copy_from_slice(&2u64.to_le_bytes());
+    {
+        let write = database.begin_write()?;
+        write
+            .open_table(schema::STATS)?
+            .insert(population_key.as_slice(), population_record.as_slice())?;
+        write.commit()?;
+    }
+
     let context = AuthorizationContext {
         principal_id: [9; 16],
         role_ids: std::collections::HashSet::new(),
@@ -6533,6 +6548,15 @@ fn authorized_scan_estimate_counts_sanitized_cells_and_private_writes()
         observer.estimate_authorized_population_at_most(table_id, &projection, 4)?,
         Some(2)
     );
+    let mut deleting_probe =
+        InvocationTransaction::begin(&database, [0x38; 16], [9; 16], 9_999, 8, 512)?;
+    deleting_probe.stage_delete(id(2))?;
+    assert_eq!(
+        deleting_probe.estimate_authorized_population_at_most(table_id, &projection, 1)?,
+        Some(1),
+        "a fresh committed count should be adjusted for a private delete at the estimate bound"
+    );
+    deleting_probe.abort()?;
     assert_eq!(
         observer.estimate_authorized_predicate_at_most(table_id, &projection, &predicate, 4,)?,
         Some((2, 1))
