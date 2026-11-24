@@ -242,6 +242,6 @@
 
 ## WI-11: initial cross-component bound inventory — in progress
 
-- Added [`BOUND_INVENTORY.csv`](BOUND_INVENTORY.csv) as the machine-readable starting point for SQL syntax/materialization, IPC, planner estimates, result relay, staging/admission, cgroups, storage snapshots, and spill/maintenance bounds.
+- Added [`BOUND_INVENTORY.csv`](BOUND_INVENTORY.csv) as the machine-readable starting point for SQL syntax/materialization, IPC, planner estimates, result relay, staging/admission, cgroups, storage snapshots, and spill/maintenance bounds. The initial source reconciliation now contains 61 entries.
 - Each row records classification, component, scope, current value/default, trusted owner, envelope, accounting lifetime, exhaustion behavior, implementation status, and source specification. Unknown or pending profile ownership is stated explicitly instead of treating an implementation constant as a supported production setting.
-- This is an initial inventory, not a completeness claim. Code-path reconciliation, queue/output accounting, index/storage work limits, profile vector validation, and measured ERP/CRM capacity evidence remain open under WI-10/WI-11.
+- Source reconciliation added the distinct 256 per-operator SQL request budget, 512-frame executor and 256-frame planner connection caps, 4,096 executor row-handle table, 128 scan-page candidates, 4,096 mutation batch record envelope, and batched planner metadata/estimate limits. This is still an initial inventory, not a completeness claim. Queue/output accounting, index/storage work limits, profile vector validation, and measured ERP/CRM capacity evidence remain open under WI-10/WI-11.
