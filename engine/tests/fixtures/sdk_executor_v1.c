@@ -507,5 +507,23 @@ int main(void) {
                    sizeof(range)) == PRDB_SDK_EXECUTOR_INVALID_ARGUMENT);
         assert(mock.calls == 20);
     }
+    {
+        const uint8_t empty_request[] = {0};
+        const uint8_t budget_reply[12] = {
+            'P', 'Q', 'B', '1', 0, PRDB_QUERY_WORKLOAD_BUDGETS_VERSION,
+            0, 12, 0, 0, 1, 0};
+        prdb_sdk_workload_budgets_v1 budgets = {0};
+        mock.expected_operation = PRDB_SDK_EXECUTOR_OP_GET_WORKLOAD_BUDGETS;
+        mock.expected_request = empty_request;
+        mock.expected_request_len = 0;
+        mock.reply = budget_reply;
+        mock.reply_len = sizeof(budget_reply);
+        assert(prdb_sdk_executor_get_workload_budgets_v1(
+                   &host, response, sizeof(response), &response_len, &budgets,
+                   sizeof(budgets)) == PRDB_SDK_EXECUTOR_OK);
+        assert(budgets.abi_version == PRDB_QUERY_WORKLOAD_BUDGETS_VERSION);
+        assert(budgets.max_index_probe_candidates == 256);
+        assert(mock.calls == 21);
+    }
     return 0;
 }

@@ -63,6 +63,7 @@ mod worker {
         result_fd: i32,
         spill_fd: i32,
         max_total_result_bytes: u64,
+        max_sql_index_probe_candidates: u32,
     }
 
     pub fn main() {
@@ -96,7 +97,7 @@ mod worker {
     }
 
     fn parse_args(values: &[std::ffi::OsString]) -> Result<WorkerArgs, String> {
-        if values.len() != 16
+        if values.len() != 18
             || values[0] != "--library"
             || values[2] != "--parameters-fd"
             || values[4] != "--planner-fd"
@@ -105,8 +106,9 @@ mod worker {
             || values[10] != "--result-fd"
             || values[12] != "--spill-fd"
             || values[14] != "--max-total-result-bytes"
+            || values[16] != "--max-sql-index-probe-candidates"
         {
-            return Err("usage: prdb-executor --library ABSOLUTE_PATH --parameters-fd FD --planner-fd FD --executor-fd FD --optimizer-fd FD --result-fd FD --spill-fd FD --max-total-result-bytes N (or --self-check)".to_owned());
+            return Err("usage: prdb-executor --library ABSOLUTE_PATH --parameters-fd FD --planner-fd FD --executor-fd FD --optimizer-fd FD --result-fd FD --spill-fd FD --max-total-result-bytes N --max-sql-index-probe-candidates N (or --self-check)".to_owned());
         }
         let library = PathBuf::from(&values[1]);
         if !library.is_absolute() {
@@ -150,6 +152,17 @@ mod worker {
         if max_total_result_bytes == 0 {
             return Err("result budget must be positive".to_owned());
         }
+        let max_sql_index_probe_candidates = values[17]
+            .to_str()
+            .ok_or_else(|| "index candidate budget is not UTF-8".to_owned())?
+            .parse::<u32>()
+            .map_err(|_| "invalid index candidate budget".to_owned())?;
+        if max_sql_index_probe_candidates == 0
+            || max_sql_index_probe_candidates
+                > prdb_engine::query_abi::MAX_SQL_INDEX_PROBE_CANDIDATES
+        {
+            return Err("index candidate budget is outside the supported envelope".to_owned());
+        }
         if parameters_fd < 3
             || planner_fd < 3
             || executor_fd < 3
@@ -185,6 +198,7 @@ mod worker {
             result_fd,
             spill_fd,
             max_total_result_bytes,
+            max_sql_index_probe_candidates,
         })
     }
 
@@ -381,6 +395,7 @@ mod worker {
                 args.result_fd,
                 (args.spill_fd >= 3).then_some(args.spill_fd),
                 args.max_total_result_bytes,
+                args.max_sql_index_probe_candidates,
             )
         };
         let context = Box::leak(Box::new(context));
@@ -461,6 +476,7 @@ mod worker {
                 args.result_fd,
                 (args.spill_fd >= 3).then_some(args.spill_fd),
                 args.max_total_result_bytes,
+                args.max_sql_index_probe_candidates,
             )
         };
         let context = Box::leak(Box::new(context));
@@ -538,6 +554,7 @@ mod worker {
                 args.result_fd,
                 (args.spill_fd >= 3).then_some(args.spill_fd),
                 args.max_total_result_bytes,
+                args.max_sql_index_probe_candidates,
             )
         };
         // Keep callback state alive until the worker's immediate `_exit`, even
@@ -613,6 +630,7 @@ mod worker {
                 args.result_fd,
                 (args.spill_fd >= 3).then_some(args.spill_fd),
                 args.max_total_result_bytes,
+                args.max_sql_index_probe_candidates,
             )
         };
         // Keep callback state alive until the worker's immediate `_exit`, even
@@ -689,6 +707,7 @@ mod worker {
                 args.result_fd,
                 (args.spill_fd >= 3).then_some(args.spill_fd),
                 args.max_total_result_bytes,
+                args.max_sql_index_probe_candidates,
             )
         };
         // Keep callback state alive until the worker's immediate `_exit`, even
@@ -792,6 +811,7 @@ mod worker {
         next_spill_request_id: AtomicU64,
         total_result_bytes: AtomicU64,
         max_total_result_bytes: u64,
+        max_sql_index_probe_candidates: u32,
         statement_failed: AtomicBool,
     }
 
@@ -803,6 +823,7 @@ mod worker {
             result_fd: i32,
             spill_fd: Option<i32>,
             max_total_result_bytes: u64,
+            max_sql_index_probe_candidates: u32,
         ) -> Self {
             // SAFETY: the trusted launcher passes distinct, open socket fds and
             // transfers ownership to this invocation context. Spill is optional.
@@ -828,6 +849,7 @@ mod worker {
                 next_spill_request_id: AtomicU64::new(1),
                 total_result_bytes: AtomicU64::new(0),
                 max_total_result_bytes,
+                max_sql_index_probe_candidates,
                 statement_failed: AtomicBool::new(false),
             }
         }
@@ -977,6 +999,30 @@ mod worker {
         response_capacity: u64,
         response_len: *mut u64,
     ) -> i32 {
+        if operation == prdb_engine::query_abi::QUERY_HOST_OP_GET_WORKLOAD_BUDGETS {
+            return std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+                if context.is_null() || response_len.is_null() || request_len != 0 {
+                    return CALLBACK_INVALID_ARGUMENT;
+                }
+                let context = &*context.cast::<CallbackContext>();
+                *response_len = 0;
+                if response_capacity < 12 || response.is_null() {
+                    return CALLBACK_RESPONSE_TOO_SMALL;
+                }
+                let body = std::slice::from_raw_parts_mut(response, 12);
+                body[..4].copy_from_slice(
+                    prdb_engine::query_abi::QUERY_WORKLOAD_BUDGETS_MAGIC.as_bytes(),
+                );
+                body[4..6].copy_from_slice(
+                    &prdb_engine::query_abi::QUERY_WORKLOAD_BUDGETS_VERSION.to_be_bytes(),
+                );
+                body[6..8].copy_from_slice(&12u16.to_be_bytes());
+                body[8..12].copy_from_slice(&context.max_sql_index_probe_candidates.to_be_bytes());
+                *response_len = 12;
+                CALLBACK_OK
+            }))
+            .unwrap_or(CALLBACK_INTERNAL_ERROR);
+        }
         callback_ipc_v2(
             context,
             ServiceRole::Executor,
@@ -1286,6 +1332,10 @@ mod worker {
                 "7",
                 "--spill-fd",
                 "8",
+                "--max-total-result-bytes",
+                "67108864",
+                "--max-sql-index-probe-candidates",
+                "128",
             ];
             let values = arguments.map(std::ffi::OsString::from);
             let parsed = parse_args(&values).unwrap();
@@ -1310,6 +1360,10 @@ mod worker {
                 "7",
                 "--spill-fd",
                 "7",
+                "--max-total-result-bytes",
+                "67108864",
+                "--max-sql-index-probe-candidates",
+                "128",
             ]
             .map(std::ffi::OsString::from);
             assert!(parse_args(&duplicate).is_err());
@@ -1358,6 +1412,7 @@ mod worker {
                     result.into_raw_fd(),
                     Some(spill.into_raw_fd()),
                     prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
+                    prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
                 )
             }
         }
@@ -1377,6 +1432,7 @@ mod worker {
                     result.into_raw_fd(),
                     Some(spill.into_raw_fd()),
                     prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
+                    prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
                 )
             };
             (context, spill_peer)
@@ -1788,6 +1844,54 @@ mod worker {
                 )
             };
             assert_eq!(status, CALLBACK_INVALID_ARGUMENT);
+        }
+
+        #[test]
+        fn executor_callback_serves_trusted_workload_budget_locally() {
+            let (planner, _planner_peer) = UnixStream::pair().unwrap();
+            let (executor, mut executor_peer) = UnixStream::pair().unwrap();
+            let (optimizer, _optimizer_peer) = UnixStream::pair().unwrap();
+            let (result, _result_peer) = UnixStream::pair().unwrap();
+            let (spill, _spill_peer) = UnixStream::pair().unwrap();
+            // SAFETY: each stream contributes one distinct owned endpoint.
+            let context = unsafe {
+                CallbackContext::from_raw_fds(
+                    planner.into_raw_fd(),
+                    executor.into_raw_fd(),
+                    optimizer.into_raw_fd(),
+                    result.into_raw_fd(),
+                    Some(spill.into_raw_fd()),
+                    prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
+                    512,
+                )
+            };
+            let context_ptr = (&context as *const CallbackContext).cast_mut().cast();
+            let mut response = [0u8; 12];
+            let mut response_len = 0;
+            // SAFETY: the trusted context and response buffer remain live.
+            let status = unsafe {
+                executor_request_v2(
+                    context_ptr,
+                    prdb_engine::query_abi::QUERY_HOST_OP_GET_WORKLOAD_BUDGETS,
+                    std::ptr::null(),
+                    0,
+                    response.as_mut_ptr(),
+                    response.len() as u64,
+                    &mut response_len,
+                )
+            };
+            assert_eq!(status, CALLBACK_OK);
+            assert_eq!(response_len, 12);
+            assert_eq!(&response[..8], b"PQB1\0\x01\0\x0c");
+            assert_eq!(u32::from_be_bytes(response[8..12].try_into().unwrap()), 512);
+            executor_peer
+                .set_nonblocking(true)
+                .expect("configure unused IPC peer");
+            let mut unexpected = [0u8; 1];
+            assert!(matches!(
+                executor_peer.read(&mut unexpected),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock
+            ));
         }
 
         #[test]

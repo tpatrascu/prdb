@@ -23,7 +23,22 @@
 #define PRDB_SDK_EXECUTOR_OP_SCAN_INDEX_PREFIX PRDB_IPC_OP_SCAN_INDEX_PREFIX
 #define PRDB_SDK_EXECUTOR_OP_SCAN_INDEX_RANGES PRDB_IPC_OP_SCAN_INDEX_RANGES
 #define PRDB_SDK_EXECUTOR_OP_CHECK_CANCELLATION PRDB_IPC_OP_EXECUTOR_CHECK_CANCELLATION
+#define PRDB_SDK_EXECUTOR_OP_GET_WORKLOAD_BUDGETS PRDB_QUERY_HOST_OP_GET_WORKLOAD_BUDGETS
 #define PRDB_SDK_EXECUTOR_MAX_COLUMN_IDS UINT16_C(256)
+
+typedef struct prdb_sdk_workload_budgets_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint32_t max_index_probe_candidates;
+} prdb_sdk_workload_budgets_v1;
+
+/* Reads a trusted, invocation-pinned workload budget from the executor host.
+ * The operation is answered locally by the trusted executor and is not sent
+ * to storage IPC. */
+int32_t prdb_sdk_executor_get_workload_budgets_v1(
+    const prdb_host_api_v2 *host, uint8_t *response,
+    uint64_t response_capacity, uint64_t *response_len,
+    prdb_sdk_workload_budgets_v1 *out, uint32_t out_capacity);
 
 #define PRDB_SDK_EXECUTOR_OK INT32_C(0)
 #define PRDB_SDK_EXECUTOR_UNAVAILABLE INT32_C(1)

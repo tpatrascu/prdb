@@ -548,6 +548,8 @@ fn run_sandboxed_forged_handle_client(
             runtime_read_only: required_paths("PRDB_TEST_RUNTIME_READ_ONLY")?,
             spill_broker: None,
             max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
+            max_sql_index_probe_candidates:
+                prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
             cleanup_timeout: Duration::from_secs(2),
         },
     };
@@ -20676,6 +20678,8 @@ fn admin_cancellation_sync_failure_quarantines_until_reopen()
                     runtime_read_only: Vec::new(),
                     spill_broker: None,
                     max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
+                    max_sql_index_probe_candidates:
+                        prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
                     cleanup_timeout: Duration::from_millis(100),
                 },
             },
@@ -33052,6 +33056,8 @@ fn gateway_service_listener_authenticates_control_admin_over_socket()
                             runtime_read_only: Vec::new(),
                             spill_broker: None,
                             max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
+                            max_sql_index_probe_candidates:
+                                prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
                             cleanup_timeout: Duration::from_millis(100),
                         },
                     },
@@ -39728,6 +39734,8 @@ fn run_sandboxed_v3_sql_error_fixture(
             runtime_read_only: required_paths("PRDB_TEST_RUNTIME_READ_ONLY")?,
             spill_broker: None,
             max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
+            max_sql_index_probe_candidates:
+                prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
             cleanup_timeout: Duration::from_secs(2),
         },
     };
@@ -40214,6 +40222,8 @@ fn sandboxed_optimizer_metadata_submission_cancels_over_tcp()
             runtime_read_only: required_paths("PRDB_TEST_RUNTIME_READ_ONLY")?,
             spill_broker: None,
             max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
+            max_sql_index_probe_candidates:
+                prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
             cleanup_timeout: Duration::from_secs(2),
         },
     };
@@ -40773,10 +40783,13 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     let sql_in_denied_key_only = std::env::var_os("PRDB_TEST_SQL_IN_DENIED_KEY_ONLY").is_some();
     let sql_in_over_budget_only =
         std::env::var_os("PRDB_TEST_SQL_IN_OVER_BUDGET_FALLBACK_ONLY").is_some();
+    let sql_in_elevated_budget_only =
+        std::env::var_os("PRDB_TEST_SQL_IN_ELEVATED_BUDGET_ONLY").is_some();
     let sql_in_only = sql_in_indexed_only
         || sql_in_fallback_only
         || sql_in_null_left_only
-        || sql_in_over_budget_only;
+        || sql_in_over_budget_only
+        || sql_in_elevated_budget_only;
     let sql_in_any_only = sql_in_only || sql_in_cancel_only || sql_in_denied_key_only;
     assert!(
         [
@@ -40786,6 +40799,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             sql_in_cancel_only,
             sql_in_denied_key_only,
             sql_in_over_budget_only,
+            sql_in_elevated_budget_only,
         ]
         .into_iter()
         .filter(|enabled| *enabled)
@@ -41304,7 +41318,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             })
         })
         .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
-    if sql_in_over_budget_only {
+    if sql_in_over_budget_only || sql_in_elevated_budget_only {
         for row_id in 1..=124u8 {
             composite_rows.push(RowWrite {
                 key: table_row_key(composite_table.table_id, id(row_id)),
@@ -43127,7 +43141,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         joined_pairs,
         if sql_in_denied_key_only {
             None
-        } else if sql_in_over_budget_only {
+        } else if sql_in_over_budget_only || sql_in_elevated_budget_only {
             Some(126)
         } else {
             Some(expected_join_pairs)
@@ -43234,7 +43248,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 4
             } else if indexed_join_benchmark_only {
                 64
-            } else if sql_in_over_budget_only {
+            } else if sql_in_over_budget_only || sql_in_elevated_budget_only {
                 129
             } else if sql_in_null_left_only {
                 6
@@ -43331,6 +43345,11 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             runtime_read_only: required_paths("PRDB_TEST_RUNTIME_READ_ONLY")?,
             spill_broker,
             max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
+            max_sql_index_probe_candidates: if sql_in_elevated_budget_only {
+                256
+            } else {
+                prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES
+            },
             cleanup_timeout: Duration::from_secs(2),
         },
     };
@@ -43466,6 +43485,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 b'd'
             } else if sql_in_over_budget_only {
                 b'o'
+            } else if sql_in_elevated_budget_only {
+                b'e'
             } else {
                 b'N'
             }
@@ -43604,7 +43625,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                     4
                 } else if indexed_join_benchmark_only {
                     64
-                } else if sql_in_over_budget_only {
+                } else if sql_in_over_budget_only || sql_in_elevated_budget_only {
                     129
                 } else {
                     5
@@ -44391,7 +44412,11 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 Ok((values[0], values[1]))
             }
             let mut observed = std::collections::BTreeMap::new();
-            let expected_rows = if sql_in_over_budget_only { 129 } else { 5 };
+            let expected_rows = if sql_in_over_budget_only || sql_in_elevated_budget_only {
+                129
+            } else {
+                5
+            };
             for _ in 0..expected_rows {
                 let frame = ordered_frames.next().ok_or("missing batched IN SQLR row")?;
                 assert_eq!(frame.operation, Operation::GatewayResultData as u16);
@@ -44402,7 +44427,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             }
             assert_eq!(
                 observed.into_iter().collect::<Vec<_>>(),
-                if sql_in_over_budget_only {
+                if sql_in_over_budget_only || sql_in_elevated_budget_only {
                     vec![((1, 7), 126), ((2, 9), 3)]
                 } else {
                     vec![((1, 7), 2), ((2, 9), 3)]
@@ -45046,7 +45071,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                             );
                         }
                         let point_read_latency = point_read_started.elapsed();
-                        let expected_scan_rows = if sql_in_over_budget_only {
+                        let expected_scan_rows = if sql_in_over_budget_only || sql_in_elevated_budget_only {
                             129
                         } else if sql_in_null_left_only {
                             6
@@ -49475,6 +49500,8 @@ fn sealed_start_admits_only_current_credentials_and_enforces_request_deadline()
             runtime_read_only: Vec::new(),
             spill_broker: None,
             max_total_result_bytes: prdb_engine::query_abi::MAX_TOTAL_RESULT_BYTES,
+            max_sql_index_probe_candidates:
+                prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES,
             cleanup_timeout: Duration::from_millis(100),
         },
     };

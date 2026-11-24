@@ -1967,7 +1967,8 @@ static int32_t run_write_read_fixture(
     if (invocation->parameters_len == 1 && invocation->parameters != NULL &&
         (invocation->parameters[0] == 'N' || invocation->parameters[0] == 'F' ||
          invocation->parameters[0] == 'L' || invocation->parameters[0] == 'i' ||
-         invocation->parameters[0] == 'd' || invocation->parameters[0] == 'o')) {
+         invocation->parameters[0] == 'd' || invocation->parameters[0] == 'o' ||
+         invocation->parameters[0] == 'e')) {
         static const uint8_t in_sql[] =
             "SELECT left_key, right_key FROM grouped_records "
             "WHERE left_key IN ($1, $2, $3, $4)";
@@ -2047,6 +2048,12 @@ static int32_t run_write_read_fixture(
             if (range_observer_scan_ranges_requests != 1 ||
                 range_observer_open_scan_requests == 0) {
                 static const uint8_t message[] = "fixture-error-in-over-budget-fallback";
+                return report_failure(host, message, sizeof(message) - 1);
+            }
+        } else if (invocation->parameters[0] == 'e') {
+            if (range_observer_scan_ranges_requests != 1 ||
+                range_observer_open_scan_requests != 0) {
+                static const uint8_t message[] = "fixture-error-elevated-index-budget";
                 return report_failure(host, message, sizeof(message) - 1);
             }
         } else if (range_observer_scan_ranges_requests != 1 ||

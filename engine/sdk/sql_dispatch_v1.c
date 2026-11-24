@@ -1617,6 +1617,10 @@ int32_t prdb_sdk_sql_run_statement_optimizer_v1(
     prdb_sdk_value_v1 *values = NULL;
     uint8_t (*parameter_payloads)[16] = NULL;
     prdb_sdk_sql_parameter_metadata_v1 *metadata = NULL;
+    prdb_sdk_workload_budgets_v1 workload_budgets = {0};
+    prdb_host_api_v2 executor_host = {0};
+    uint8_t workload_response[12] = {0};
+    uint64_t workload_response_len = 0;
     uint8_t *request = NULL;
     uint8_t *optimizer_response = NULL;
     uint8_t *relation_response = NULL;
@@ -1697,9 +1701,23 @@ int32_t prdb_sdk_sql_run_statement_optimizer_v1(
         goto cleanup_optimizer;
     }
     normalize_parameter_payloads(values, parameter_count, parameter_payloads);
-    status = prdb_sdk_optimizer_execute_select_ast_with_parameters_to_result_v1(
+    executor_host.struct_size = sizeof(executor_host);
+    executor_host.abi_version = PRDB_QUERY_ABI_V2_VERSION;
+    executor_host.context = host->v3.context;
+    executor_host.executor_request = host->v3.executor_request;
+    status = prdb_sdk_executor_get_workload_budgets_v1(
+        &executor_host, workload_response, sizeof(workload_response),
+        &workload_response_len, &workload_budgets, sizeof(workload_budgets));
+    if (status != PRDB_SDK_EXECUTOR_OK) {
+        status = latch_sql_failure(&host->v3,
+                                   PRDB_SDK_SQL_DISPATCH_EXECUTION_ERROR);
+        goto cleanup_optimizer;
+    }
+    status = prdb_sdk_optimizer_execute_select_ast_with_parameters_to_result_v2(
         host, &statement.base, values, parameter_count, schema, schema_len,
-        SQL_DISPATCH_CANDIDATES, SQL_DISPATCH_BATCH_BYTES, request,
+        SQL_DISPATCH_CANDIDATES,
+        (uint16_t)workload_budgets.max_index_probe_candidates,
+        SQL_DISPATCH_BATCH_BYTES, request,
         PRDB_SDK_OPTIMIZER_MAX_REQUEST_BYTES, optimizer_response,
         SQL_DISPATCH_RESPONSE_BYTES, relation_response,
         SQL_DISPATCH_RESPONSE_BYTES, scan_response, SQL_DISPATCH_RESPONSE_BYTES,

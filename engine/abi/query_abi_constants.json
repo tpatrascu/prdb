@@ -1737,6 +1737,41 @@
       "c_type": "UINT32_C"
     },
     {
+      "rust_name": "QUERY_HOST_OP_GET_WORKLOAD_BUDGETS",
+      "rust_type": "u16",
+      "value": 32766,
+      "c_name": "PRDB_QUERY_HOST_OP_GET_WORKLOAD_BUDGETS",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "QUERY_WORKLOAD_BUDGETS_VERSION",
+      "rust_type": "u16",
+      "value": 1,
+      "c_name": "PRDB_QUERY_WORKLOAD_BUDGETS_VERSION",
+      "c_type": "UINT16_C"
+    },
+    {
+      "rust_name": "QUERY_WORKLOAD_BUDGETS_MAGIC",
+      "rust_type": "&str",
+      "value": "PQB1",
+      "c_name": "PRDB_QUERY_WORKLOAD_BUDGETS_MAGIC",
+      "c_type": "string"
+    },
+    {
+      "rust_name": "MAX_SQL_INDEX_PROBE_CANDIDATES",
+      "rust_type": "u32",
+      "value": 16384,
+      "c_name": "PRDB_MAX_SQL_INDEX_PROBE_CANDIDATES",
+      "c_type": "UINT32_C"
+    },
+    {
+      "rust_name": "DEFAULT_SQL_INDEX_PROBE_CANDIDATES",
+      "rust_type": "u32",
+      "value": 128,
+      "c_name": "PRDB_DEFAULT_SQL_INDEX_PROBE_CANDIDATES",
+      "c_type": "UINT32_C"
+    },
+    {
       "rust_name": "QUERY_DESCRIPTOR_V6_SYMBOL",
       "rust_type": "&str",
       "value": "prdb_query_descriptor_v6",

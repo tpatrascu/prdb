@@ -35,6 +35,9 @@ pub struct ExecutorLaunchConfig {
     /// Trusted per-invocation output budget. The fixed chunk size remains an
     /// ABI safety limit; this cumulative budget is deployment-configurable.
     pub max_total_result_bytes: u64,
+    /// Trusted per-statement bound for candidate rows returned by one batched
+    /// SQL index-probe operation. The SDK retains its fixed safety envelope.
+    pub max_sql_index_probe_candidates: u32,
     pub cleanup_timeout: Duration,
 }
 
@@ -931,6 +934,8 @@ fn build_command(
         })
         .arg("--max-total-result-bytes")
         .arg(config.max_total_result_bytes.to_string())
+        .arg("--max-sql-index-probe-candidates")
+        .arg(config.max_sql_index_probe_candidates.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());

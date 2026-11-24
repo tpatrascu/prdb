@@ -46,6 +46,36 @@ static int32_t invoke(const prdb_host_api_v2 *host, uint16_t operation,
     return PRDB_SDK_EXECUTOR_OK;
 }
 
+int32_t prdb_sdk_executor_get_workload_budgets_v1(
+    const prdb_host_api_v2 *host, uint8_t *response,
+    uint64_t response_capacity, uint64_t *response_len,
+    prdb_sdk_workload_budgets_v1 *out, uint32_t out_capacity) {
+    const uint8_t empty_request = 0;
+    uint32_t candidates;
+    int32_t status;
+    if (out == NULL || out_capacity < sizeof(*out) || response == NULL ||
+        response_capacity < 12 || response_len == NULL)
+        return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+    status = invoke(host, PRDB_SDK_EXECUTOR_OP_GET_WORKLOAD_BUDGETS,
+                    &empty_request, 0, response, response_capacity,
+                    response_len);
+    if (status != PRDB_SDK_EXECUTOR_OK) return status;
+    if (*response_len != 12 ||
+        memcmp(response, PRDB_QUERY_WORKLOAD_BUDGETS_MAGIC, 4) != 0 ||
+        response[4] != 0 ||
+        response[5] != PRDB_QUERY_WORKLOAD_BUDGETS_VERSION ||
+        response[6] != 0 || response[7] != 12)
+        return PRDB_SDK_EXECUTOR_INVALID_PAYLOAD;
+    candidates = ((uint32_t)response[8] << 24) |
+                 ((uint32_t)response[9] << 16) |
+                 ((uint32_t)response[10] << 8) | response[11];
+    if (candidates == 0 || candidates > PRDB_MAX_SQL_INDEX_PROBE_CANDIDATES)
+        return PRDB_SDK_EXECUTOR_INVALID_PAYLOAD;
+    *out = (prdb_sdk_workload_budgets_v1){
+        sizeof(*out), PRDB_QUERY_WORKLOAD_BUDGETS_VERSION, candidates};
+    return PRDB_SDK_EXECUTOR_OK;
+}
+
 int32_t prdb_sdk_executor_resolve_relation_v1(
     const prdb_host_api_v2 *host, const uint8_t *schema, uint32_t schema_len,
     const uint8_t *relation, uint32_t relation_len, uint8_t *response,
