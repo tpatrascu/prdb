@@ -40546,6 +40546,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         std::env::var_os("PRDB_TEST_INDEXED_JOIN_FANOUT17_BENCHMARK_ONLY").is_some();
     let indexed_join_fanout_seventeen_ratio7_benchmark_only =
         std::env::var_os("PRDB_TEST_INDEXED_JOIN_FANOUT17_RATIO7_BENCHMARK_ONLY").is_some();
+    let indexed_join_fanout_seventeen_large_inner_benchmark_only =
+        std::env::var_os("PRDB_TEST_INDEXED_JOIN_FANOUT17_2048_BENCHMARK_ONLY").is_some();
     let indexed_join_fanout_benchmark_only =
         std::env::var_os("PRDB_TEST_INDEXED_JOIN_FANOUT_BENCHMARK_ONLY").is_some()
             || indexed_join_fanout_four_benchmark_only
@@ -40554,9 +40556,11 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             || indexed_join_fanout_three_benchmark_only
             || indexed_join_fanout_sixteen_benchmark_only
             || indexed_join_fanout_seventeen_benchmark_only
-            || indexed_join_fanout_seventeen_ratio7_benchmark_only;
+            || indexed_join_fanout_seventeen_ratio7_benchmark_only
+            || indexed_join_fanout_seventeen_large_inner_benchmark_only;
     let indexed_join_fanout_outer_rows: u16 = if indexed_join_fanout_seventeen_benchmark_only
         || indexed_join_fanout_seventeen_ratio7_benchmark_only
+        || indexed_join_fanout_seventeen_large_inner_benchmark_only
     {
         17
     } else if indexed_join_fanout_sixteen_benchmark_only {
@@ -40585,6 +40589,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             indexed_join_fanout_sixteen_benchmark_only,
             indexed_join_fanout_seventeen_benchmark_only,
             indexed_join_fanout_seventeen_ratio7_benchmark_only,
+            indexed_join_fanout_seventeen_large_inner_benchmark_only,
         ]
         .into_iter()
         .filter(|enabled| *enabled)
@@ -40592,12 +40597,14 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             <= 1,
         "select exactly one indexed-join fanout benchmark mode"
     );
-    let indexed_join_fanout_inner_rows: u16 = if indexed_join_fanout_seventeen_ratio7_benchmark_only
-    {
-        119
-    } else {
-        128
-    };
+    let indexed_join_fanout_inner_rows: u16 =
+        if indexed_join_fanout_seventeen_large_inner_benchmark_only {
+            2048
+        } else if indexed_join_fanout_seventeen_ratio7_benchmark_only {
+            119
+        } else {
+            128
+        };
     let indexed_join_benchmark_only = indexed_join_asymmetric_benchmark_only
         || indexed_join_skew_benchmark_only
         || indexed_join_fanout_benchmark_only
@@ -41482,31 +41489,35 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 } else {
                     1000 + i32::from(index)
                 };
-                (u8::try_from(index + 1).unwrap(), key, key)
+                let mut row_id = [0; 16];
+                row_id[14..].copy_from_slice(&(index + 1).to_be_bytes());
+                (row_id, key, key)
             })
             .collect::<Vec<_>>()
     } else if indexed_join_asymmetric_benchmark_only || indexed_join_skew_benchmark_only {
         (0..128u16)
-            .map(|index| (u8::try_from(index + 1).unwrap(), 0, 0))
+            .map(|index| {
+                let mut row_id = [0; 16];
+                row_id[14..].copy_from_slice(&(index + 1).to_be_bytes());
+                (row_id, 0, 0)
+            })
             .collect::<Vec<_>>()
     } else if indexed_join_benchmark_only {
         (0..64u16)
             .map(|index| {
-                (
-                    u8::try_from(index + 1).unwrap(),
-                    i32::from(index / 8),
-                    i32::from(index / 8),
-                )
+                let mut row_id = [0; 16];
+                row_id[14..].copy_from_slice(&(index + 1).to_be_bytes());
+                (row_id, i32::from(index / 8), i32::from(index / 8))
             })
             .collect::<Vec<_>>()
     } else {
-        vec![(0xc5, 42, 7), (0xca, 1, 7)]
+        vec![(id(0xc5), 42, 7), (id(0xca), 1, 7)]
     };
     let joined_rows = joined_seed_rows
         .into_iter()
         .map(|(row_id, id_value, match_key)| {
             Ok(RowWrite {
-                key: table_row_key(joined_table.table_id, id(row_id)),
+                key: table_row_key(joined_table.table_id, row_id),
                 expected_version: None,
                 payload: Some(encode_tuple(
                     &joined_schema,
@@ -43080,6 +43091,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 b'z'
             } else if indexed_join_fanout_seventeen_benchmark_only {
                 b'Y'
+            } else if indexed_join_fanout_seventeen_large_inner_benchmark_only {
+                b'W'
             } else if indexed_join_fanout_sixteen_benchmark_only {
                 b'X'
             } else if indexed_join_fanout == 2 {
@@ -43411,8 +43424,13 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 assert!(matches!(&decision, GatewayTerminalDecision::Abort(_)));
             }
             if indexed_join_benchmark_only {
+                let benchmark_label = if indexed_join_fanout_seventeen_large_inner_benchmark_only {
+                    "indexed join"
+                } else {
+                    "indexed/hash join"
+                };
                 eprintln!(
-                    "indexed/hash join benchmark invocation overlapped {read_count} operational reads and {commit_count} commits for {} ms",
+                    "{benchmark_label} benchmark invocation overlapped {read_count} operational reads and {commit_count} commits for {} ms",
                     query_finished_at
                         .duration_since(query_started_at)
                         .as_millis(),
@@ -43632,7 +43650,14 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 } else {
                     2
                 };
-            let expected_hash_samples = if expected_indexed_samples == 0 { 4 } else { 2 };
+            let expected_hash_samples = if indexed_join_fanout_seventeen_large_inner_benchmark_only
+            {
+                0
+            } else if expected_indexed_samples == 0 {
+                4
+            } else {
+                2
+            };
             assert_eq!(indexed_samples.len(), expected_indexed_samples);
             assert_eq!(hash_samples.len(), expected_hash_samples);
             eprintln!(
@@ -43658,12 +43683,16 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                     "no indexed sample completed during operational load"
                 );
             }
-            assert!(
-                observed_samples.iter().any(|(kind, observed_at)| {
-                    *kind == b'H' && load_started <= *observed_at && *observed_at <= load_finished
-                }),
-                "no hash sample completed during operational load"
-            );
+            if expected_hash_samples > 0 {
+                assert!(
+                    observed_samples.iter().any(|(kind, observed_at)| {
+                        *kind == b'H'
+                            && load_started <= *observed_at
+                            && *observed_at <= load_finished
+                    }),
+                    "no hash sample completed during operational load"
+                );
+            }
             assert!(ordered_frames.as_slice().iter().any(|frame| {
                 frame.operation == Operation::GatewayResultData as u16
                     && frame.payload == b"JOIN_BENCHMARK_STARTED"

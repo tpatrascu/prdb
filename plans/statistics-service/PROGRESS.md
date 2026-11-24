@@ -28,6 +28,13 @@
 - Scope: the estimate ceiling is higher; fanout rules and pair-per-outer threshold are unchanged. Populations above 2,048, broader fanout/distribution profiles, general cost comparison, global-statistics consumption, and target-host evidence remain open.
 - Validation: focused real-redb transaction and optimizer-process regressions passed. `cargo fmt --all -- --check`, locked workspace build, warning-denied all-target Clippy, and the full serial delegated-cgroup workspace suite passed. The suite reported 406 library tests, 206 commit integration tests, 3 metadata-process tests, 83 transaction tests, all other targets, and no ignored tests. The sandbox runtime allowlist included the pinned loader, libc, and `libgcc_s.so.1` required by the executor binary.
 
+# ST-2 / OP-7 follow-up: profile 17×2,048 indexed nested-loop input — measured
+
+- Harness: added `PRDB_TEST_INDEXED_JOIN_FANOUT17_2048_BENCHMARK_ONLY` to the confined SQL acceptance. A 17-row outer probes a 2,048-row indexed relation with one match per outer key. It verifies the authorized exact pair count, selected kind-17 plan, 17 output pairs and checksum, while 192 operational reads and 192 commits overlap the query.
+- Evidence: five fresh-database delegated-cgroup runs passed. The two indexed samples per run produced a median of per-run p50 latencies of 280.3 ms (273.1–310.6 ms range). The case records indexed execution only because the SDK hash join is bounded to 128 materialized rows; existing 17×128 and other supported profiles continue to compare equivalent hash and indexed outputs.
+- Contract: the expanded profile exercises the already specified 4,096-row population-estimate cap and 17-row low-fanout rule; it adds evidence without changing optimizer selection. It is host-local evidence and does not establish deployment performance or a general cost model.
+- Verification: the maintained TinyCC sandbox fixture build and five-run confined mixed-load profile passed. The preserved 17×119 indexed/hash profile passed. `cargo fmt --all -- --check`, locked workspace build, warning-denied Clippy, TinyCC SDK tests, and the full serial delegated-cgroup workspace suite passed (407 library tests, 206 commit tests, 3 metadata-process tests, 83 transaction tests, remaining targets, no ignored tests).
+
 ## ST-2 / OP-7 follow-up: validate the exact 17×119 skew boundary — measured
 
 - Contract: exercise the current 17-row outer / 7× indexed-side eligibility boundary through the full confined SQL path, including the authorized exact pair estimate, selected plan, indexed execution, hash reference result, durable outcome, and concurrent operational workload.

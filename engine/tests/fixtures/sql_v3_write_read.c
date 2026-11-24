@@ -1874,7 +1874,7 @@ static int32_t run_write_read_fixture(
     prdb_sdk_sql_column_shape_v2 composite_join_left_executor_columns[9] = {{0}};
     prdb_sdk_sql_column_shape_v2 composite_join_right_executor_columns[9] = {{0}};
     static prdb_sdk_sql_join_materialized_row_v16 composite_join_left_rows[128];
-    static prdb_sdk_sql_join_materialized_row_v16 composite_join_right_rows[128];
+    static prdb_sdk_sql_join_materialized_row_v16 composite_join_right_rows[4096];
     static uint8_t composite_join_materialized_bytes[
         PRDB_SDK_SQL_EXEC_V8_MAX_MATERIALIZED_BYTES];
     static uint8_t analytical_pressure_batch_response[PRDB_SDK_BATCH_MAX_BYTES];
@@ -1950,6 +1950,7 @@ static int32_t run_write_read_fixture(
          invocation->parameters[0] == '8' || invocation->parameters[0] == '9' ||
          invocation->parameters[0] == '2' || invocation->parameters[0] == '3' ||
          invocation->parameters[0] == '4' || invocation->parameters[0] == '5' ||
+         invocation->parameters[0] == 'W' ||
          invocation->parameters[0] == 'X' || invocation->parameters[0] == 'Y' ||
          invocation->parameters[0] == 'z')) {
         static const uint8_t benchmark_sql[] =
@@ -1961,7 +1962,8 @@ static int32_t run_write_read_fixture(
             "JOIN_BENCHMARK_SAMPLES_FINISHED";
         const struct timespec load_settle_interval = {0, 100000000};
         const uint32_t outer_rows = invocation->parameters[0] == 'Y' ||
-                                            invocation->parameters[0] == 'z'
+                                            invocation->parameters[0] == 'z' ||
+                                            invocation->parameters[0] == 'W'
                                         ? 17
                                     : invocation->parameters[0] == 'X' ? 16
                                                                        : 9;
@@ -1970,7 +1972,8 @@ static int32_t run_write_read_fixture(
                                 : invocation->parameters[0] == '4' ? 4
                                 : invocation->parameters[0] == '5' ? 5
                                 : invocation->parameters[0] == 'Y' ||
-                                          invocation->parameters[0] == 'z' ? 1
+                                          invocation->parameters[0] == 'z' ||
+                                          invocation->parameters[0] == 'W' ? 1
                                 : invocation->parameters[0] == 'X' ? 1
                                 : invocation->parameters[0] == '9' ? 1
                                                                   : 0;
@@ -1979,7 +1982,8 @@ static int32_t run_write_read_fixture(
                                                                               : 512;
         const int64_t expected_join_checksum = fanout != 0
                                                    ? (int64_t)((invocation->parameters[0] == 'Y' ||
-                                                                        invocation->parameters[0] == 'z'
+                                                                        invocation->parameters[0] == 'z' ||
+                                                                        invocation->parameters[0] == 'W'
                                                                     ? 544
                                                                 : invocation->parameters[0] == 'X'
                                                                     ? 480
@@ -2108,6 +2112,7 @@ static int32_t run_write_read_fixture(
                 return report_failure(host, message, sizeof(message) - 1);
             }
 
+            if (invocation->parameters[0] == 'W') continue;
             indexed_join_benchmark_result_context hash_results = {
                 .asymmetric_values = invocation->parameters[0] == '7' ||
                                      invocation->parameters[0] == '8',
