@@ -242,7 +242,7 @@
 
 ## WI-11: initial cross-component bound inventory — in progress
 
-- Added [`BOUND_INVENTORY.csv`](BOUND_INVENTORY.csv) as the machine-readable starting point for SQL syntax/materialization, IPC, planner estimates, result relay, staging/admission, cgroups, storage snapshots, and spill/maintenance bounds. The initial source reconciliation now contains 61 entries.
+- Added [`BOUND_INVENTORY.csv`](BOUND_INVENTORY.csv) as the machine-readable starting point for SQL syntax/materialization, IPC, planner estimates, result relay, staging/admission, cgroups, storage snapshots, and spill/maintenance bounds. The initial source reconciliation now contains 62 entries.
 - Each row records classification, component, scope, current value/default, trusted owner, envelope, accounting lifetime, exhaustion behavior, implementation status, and source specification. Unknown or pending profile ownership is stated explicitly instead of treating an implementation constant as a supported production setting.
 - Source reconciliation added the distinct 256 per-operator SQL request budget, 512-frame executor and 256-frame planner connection caps, 4,096 executor row-handle table, 128 scan-page candidates, 4,096 mutation batch record envelope, and batched planner metadata/estimate limits. This is still an initial inventory, not a completeness claim. Queue/output accounting, index/storage work limits, profile vector validation, and measured ERP/CRM capacity evidence remain open under WI-10/WI-11.
 
@@ -251,3 +251,9 @@
 - The cumulative planner estimate allowance is now an Operational workload setting (default 16) with an optional Analytical override, validated through 4,096. Storage selects it from sealed workload metadata and pins it for the invocation; 16-entry estimate batches and the 256-frame planner connection cap remain independent.
 - Unit coverage checks class inheritance and allowance exhaustion at the configured boundary. The confined SQL IN acceptance runs with an Operational allowance of 1 and Analytical allowance of 64 to exercise class selection on the optimizer-backed path.
 - Remaining WI-10 work includes the other SQL/operator and storage bounds, full profile-vector validation, and production-scale mixed ERP/CRM capacity evidence.
+
+## WI-10 follow-up: per-estimate candidate allowance — implemented slice
+
+- Planner row candidates now have a separate trusted Operational setting (default 16,384) and optional Analytical override, with a current implementation envelope of 1,048,576. The supervisor validates and passes the value through storage admission, which pins it on the invocation. Estimate-request count, join-specific row/key/byte limits, and IPC batch/frame bounds remain independent.
+- Focused storage and supervisor tests cover class selection/inheritance and CLI boundaries. Confined SQL IN acceptance sets the Operational candidate limit to 1 and the Analytical override to 256; the Analytical invocation returns the exact 129-row multiset.
+- An external-TMPDIR real-redb planner IPC regression seeds 16,385 rows and confirms that default 16,384 returns UNKNOWN while a trusted 32,768 candidate profile returns exact summary and predicate counts. The protected committed-population collection still caps at 16,384 rows and is recorded separately in the inventory. Elevated mixed-load evidence and profile-vector validation remain open.

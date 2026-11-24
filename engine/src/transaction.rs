@@ -43,8 +43,9 @@ use crate::schema::{ENGINE_META, OUTCOMES, PRINCIPAL_NAMES};
 use crate::snapshot::{MAX_CATALOG_FAMILY_SCAN, MAX_ROW_SCAN_PAGE, RowSnapshot, SnapshotError};
 use crate::statistics::{
     AuthorizedScanEstimate, AuthorizedScanSummary, ColumnPopulation, CommittedPopulationRecord,
-    MAX_ESTIMATE_CANDIDATES, MAX_JOIN_ESTIMATE_BYTES, MAX_JOIN_ESTIMATE_KEY_BYTES,
-    MAX_JOIN_ESTIMATE_ROWS, MAX_PREDICATE_ESTIMATE_ROWS,
+    DEFAULT_ESTIMATE_CANDIDATES, MAX_CONFIGURABLE_ESTIMATE_CANDIDATES, MAX_ESTIMATE_CANDIDATES,
+    MAX_JOIN_ESTIMATE_BYTES, MAX_JOIN_ESTIMATE_KEY_BYTES, MAX_JOIN_ESTIMATE_ROWS,
+    MAX_PREDICATE_ESTIMATE_ROWS,
 };
 use crate::storage_manager::{InvocationAdmissionMetrics, InvocationAdmissionPermit};
 use crate::tuple::{
@@ -618,6 +619,7 @@ pub(crate) struct InvocationCoordination {
     max_age: Option<(Instant, Duration)>,
     max_scan_work: usize,
     max_planner_estimate_requests: usize,
+    max_planner_estimate_candidates: usize,
 }
 
 impl InvocationCoordination {
@@ -629,6 +631,7 @@ impl InvocationCoordination {
             max_age: None,
             max_scan_work: MAX_INVOCATION_SCAN_WORK,
             max_planner_estimate_requests: DEFAULT_PLANNER_ESTIMATE_REQUESTS,
+            max_planner_estimate_candidates: DEFAULT_ESTIMATE_CANDIDATES,
         }
     }
 
@@ -640,6 +643,7 @@ impl InvocationCoordination {
             max_age: None,
             max_scan_work: MAX_INVOCATION_SCAN_WORK,
             max_planner_estimate_requests: DEFAULT_PLANNER_ESTIMATE_REQUESTS,
+            max_planner_estimate_candidates: DEFAULT_ESTIMATE_CANDIDATES,
         }
     }
 
@@ -649,6 +653,7 @@ impl InvocationCoordination {
         max_age: Duration,
         max_scan_work: usize,
         max_planner_estimate_requests: usize,
+        max_planner_estimate_candidates: usize,
     ) -> Self {
         let admission_metrics = admission_permit.metrics();
         Self {
@@ -658,6 +663,7 @@ impl InvocationCoordination {
             max_age: Some((Instant::now(), max_age)),
             max_scan_work,
             max_planner_estimate_requests,
+            max_planner_estimate_candidates,
         }
     }
 
@@ -2502,9 +2508,11 @@ impl<'db> InvocationTransaction<'db> {
                     }
                     Some(CommittedPopulationRecord::Exact { rows, .. }) => {
                         let mut overlay_complete = true;
+                        let overlay_candidate_limit =
+                            usize::try_from(maximum_rows).unwrap_or(MAX_ESTIMATE_CANDIDATES);
                         let overlay_row_ids = match self
                             .overlay
-                            .bounded_row_ids_for_table(table_id, MAX_ESTIMATE_CANDIDATES)
+                            .bounded_row_ids_for_table(table_id, overlay_candidate_limit)
                         {
                             Ok(Some(row_ids)) => row_ids,
                             Ok(None) => {
@@ -2901,8 +2909,31 @@ impl<'db> InvocationTransaction<'db> {
         predicate: &crate::optimizer_binding::BoundPredicate,
         maximum_rows: u64,
     ) -> Result<Option<(u64, u64)>, TransactionError> {
+        if maximum_rows > DEFAULT_ESTIMATE_CANDIDATES as u64 {
+            return Ok(None);
+        }
+        self.estimate_authorized_predicate_at_most_with_limit(
+            table_id,
+            projection,
+            predicate,
+            maximum_rows,
+            DEFAULT_ESTIMATE_CANDIDATES,
+        )
+    }
+
+    fn estimate_authorized_predicate_at_most_with_limit(
+        &mut self,
+        table_id: [u8; 16],
+        projection: &AuthorizedProjection<'_>,
+        predicate: &crate::optimizer_binding::BoundPredicate,
+        maximum_rows: u64,
+        candidate_limit: usize,
+    ) -> Result<Option<(u64, u64)>, TransactionError> {
         self.check_deadline()?;
-        if maximum_rows > MAX_PREDICATE_ESTIMATE_ROWS
+        let maximum_rows = maximum_rows.min(candidate_limit as u64);
+        if candidate_limit == 0
+            || candidate_limit > MAX_CONFIGURABLE_ESTIMATE_CANDIDATES
+            || maximum_rows > MAX_PREDICATE_ESTIMATE_ROWS
             || !valid_estimate_projection(table_id, projection)
             || !valid_estimate_predicate(predicate, projection, 32, 256)
         {
@@ -2948,6 +2979,7 @@ impl<'db> InvocationTransaction<'db> {
             projection,
             predicate,
             maximum_rows,
+            candidate_limit,
         )? {
             return self.finish_predicate_estimate(Some(estimate));
         }
@@ -2989,7 +3021,9 @@ impl<'db> InvocationTransaction<'db> {
         if row_ids.len() == candidate_limit {
             return self.finish_predicate_estimate(None);
         }
-        let overlay_limit = usize::try_from(maximum_rows).unwrap_or(0);
+        let overlay_limit = usize::try_from(maximum_rows)
+            .unwrap_or(0)
+            .min(candidate_limit);
         let overlay_ids = match self
             .overlay
             .bounded_row_ids_for_table(table_id, overlay_limit)
@@ -3044,6 +3078,7 @@ impl<'db> InvocationTransaction<'db> {
         projection: &AuthorizedProjection<'_>,
         predicate: &crate::optimizer_binding::BoundPredicate,
         maximum_rows: u64,
+        candidate_limit: usize,
     ) -> Result<Option<(u64, u64)>, TransactionError> {
         let Some(CommittedPopulationRecord::Exact {
             rows: visible_rows, ..
@@ -3061,6 +3096,7 @@ impl<'db> InvocationTransaction<'db> {
         let Ok(overlay_limit) = usize::try_from(maximum_rows) else {
             return Ok(None);
         };
+        let overlay_limit = overlay_limit.min(candidate_limit);
         let overlay_row_ids = match self
             .overlay
             .bounded_row_ids_for_table(table_id, overlay_limit)
@@ -3277,8 +3313,20 @@ impl<'db> InvocationTransaction<'db> {
         table_id: [u8; 16],
         projection: &AuthorizedProjection<'_>,
     ) -> Result<AuthorizedScanEstimate, TransactionError> {
+        self.estimate_authorized_scan_with_limit(table_id, projection, DEFAULT_ESTIMATE_CANDIDATES)
+    }
+
+    fn estimate_authorized_scan_with_limit(
+        &mut self,
+        table_id: [u8; 16],
+        projection: &AuthorizedProjection<'_>,
+        candidate_limit: usize,
+    ) -> Result<AuthorizedScanEstimate, TransactionError> {
         self.check_deadline()?;
-        if !valid_estimate_projection(table_id, projection) {
+        if candidate_limit == 0
+            || candidate_limit > MAX_CONFIGURABLE_ESTIMATE_CANDIDATES
+            || !valid_estimate_projection(table_id, projection)
+        {
             return self.finish_estimate(AuthorizedScanEstimate::Unknown);
         }
         if let Err(error) =
@@ -3304,7 +3352,7 @@ impl<'db> InvocationTransaction<'db> {
         }
         let overlay_row_ids = match self
             .overlay
-            .bounded_row_ids_for_table(table_id, MAX_ESTIMATE_CANDIDATES)
+            .bounded_row_ids_for_table(table_id, candidate_limit)
         {
             Ok(Some(row_ids)) => row_ids,
             Ok(None) => return self.finish_estimate(AuthorizedScanEstimate::Unknown),
@@ -3317,7 +3365,7 @@ impl<'db> InvocationTransaction<'db> {
         let mut scanned = 0usize;
         let mut after_row_id = None;
         loop {
-            let remaining = MAX_ESTIMATE_CANDIDATES.saturating_sub(scanned);
+            let remaining = candidate_limit.saturating_sub(scanned);
             if remaining == 0 {
                 return self.finish_estimate(AuthorizedScanEstimate::Unknown);
             }
@@ -3385,7 +3433,7 @@ impl<'db> InvocationTransaction<'db> {
                     },
                 ));
             }
-            if scanned >= MAX_ESTIMATE_CANDIDATES {
+            if scanned >= candidate_limit {
                 return self.finish_estimate(AuthorizedScanEstimate::Unknown);
             }
             after_row_id = Some(next_after_row_id);
@@ -11412,6 +11460,10 @@ impl PlannerMetadataConnection<'_, '_> {
             dependencies: &[],
         };
         self.transaction.check_deadline()?;
+        let candidate_limit = self
+            .transaction
+            .coordination
+            .max_planner_estimate_candidates;
         let transaction = &mut *self.transaction;
         let exact_summary = cached_exact_estimate(
             &mut self.summary_estimates,
@@ -11419,9 +11471,11 @@ impl PlannerMetadataConnection<'_, '_> {
             write_generation,
             || {
                 Ok::<Option<crate::statistics::AuthorizedScanSummary>, TransactionError>(
-                    match transaction
-                        .estimate_authorized_scan(description.relation_id, &projection)?
-                    {
+                    match transaction.estimate_authorized_scan_with_limit(
+                        description.relation_id,
+                        &projection,
+                        candidate_limit,
+                    )? {
                         AuthorizedScanEstimate::Exact(summary) => Some(summary),
                         AuthorizedScanEstimate::Unknown => None,
                     },
@@ -11441,6 +11495,11 @@ impl PlannerMetadataConnection<'_, '_> {
         handle: &PlanningTableHandle,
         maximum_rows: u64,
     ) -> Result<Option<u64>, TransactionError> {
+        let maximum_rows = maximum_rows.min(
+            self.transaction
+                .coordination
+                .max_planner_estimate_candidates as u64,
+        );
         let description = self.describe_relation(handle)?;
         if self
             .handles
@@ -11650,7 +11709,11 @@ impl PlannerMetadataConnection<'_, '_> {
             schema_name: schema_name.to_owned(),
             relation_name: relation_name.to_owned(),
             predicate_bytes: predicate_bytes.to_vec(),
-            maximum_rows: MAX_PREDICATE_ESTIMATE_ROWS,
+            maximum_rows: self
+                .transaction
+                .coordination
+                .max_planner_estimate_candidates
+                .min(MAX_CONFIGURABLE_ESTIMATE_CANDIDATES) as u64,
         };
         let write_generation = self.transaction.overlay.generation();
         self.predicate_estimates
@@ -11697,12 +11760,19 @@ impl PlannerMetadataConnection<'_, '_> {
             policy_driving_columns: &state.policy_driving_columns,
             dependencies: &[],
         };
-        let estimate = self.transaction.estimate_authorized_predicate_at_most(
-            relation.relation.relation_id,
-            &projection,
-            &predicate,
-            MAX_PREDICATE_ESTIMATE_ROWS,
-        )?;
+        let candidate_limit = self
+            .transaction
+            .coordination
+            .max_planner_estimate_candidates;
+        let estimate = self
+            .transaction
+            .estimate_authorized_predicate_at_most_with_limit(
+                relation.relation.relation_id,
+                &projection,
+                &predicate,
+                candidate_limit as u64,
+                candidate_limit,
+            )?;
         if let Some(estimate) = estimate {
             self.predicate_estimates
                 .insert(cache_key, (write_generation, estimate));

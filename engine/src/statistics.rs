@@ -127,11 +127,16 @@ impl CommittedPopulationRecord {
     }
 }
 
-/// Maximum row candidates inspected by one on-demand estimate.
-pub const MAX_ESTIMATE_CANDIDATES: usize = 16_384;
+/// Operational default row candidates inspected by one on-demand estimate.
+pub const DEFAULT_ESTIMATE_CANDIDATES: usize = 16_384;
+/// Compatibility name for the default estimate candidate limit.
+pub const MAX_ESTIMATE_CANDIDATES: usize = DEFAULT_ESTIMATE_CANDIDATES;
+/// Maximum configurable row candidates inspected by one on-demand estimate.
+/// This is an implementation envelope, not a production workload target.
+pub const MAX_CONFIGURABLE_ESTIMATE_CANDIDATES: usize = 1_048_576;
 /// Maximum visible population for exact planner predicate estimates. This
-/// matches the existing per-estimate candidate budget.
-pub const MAX_PREDICATE_ESTIMATE_ROWS: u64 = MAX_ESTIMATE_CANDIDATES as u64;
+/// matches the implementation envelope for the per-estimate candidate budget.
+pub const MAX_PREDICATE_ESTIMATE_ROWS: u64 = MAX_CONFIGURABLE_ESTIMATE_CANDIDATES as u64;
 
 /// Result of a bounded authorized scan summary. Unknown estimates contain no
 /// partial counts, so callers can use fixed heuristics without learning how

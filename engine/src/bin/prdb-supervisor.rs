@@ -73,6 +73,8 @@ mod service {
         max_storage_active_analytical_snapshots: Option<usize>,
         max_planner_estimate_requests: Option<usize>,
         analytical_max_planner_estimate_requests: Option<usize>,
+        max_planner_estimate_candidates: Option<usize>,
+        analytical_max_planner_estimate_candidates: Option<usize>,
         max_active_operational_per_principal: Option<usize>,
         max_active_analytical_per_principal: Option<usize>,
         cpu_quota_us: Option<u64>,
@@ -122,6 +124,8 @@ mod service {
              --max-storage-active-analytical-snapshots N]\n\
              [--max-planner-estimate-requests N] (default 16; maximum 4096)\n\
              [--analytical-max-planner-estimate-requests N] (overrides the operational value)\n\
+             [--max-planner-estimate-candidates N] (default 16384; maximum 1048576)\n\
+             [--analytical-max-planner-estimate-candidates N] (overrides the operational value)\n\
              --cpu-quota-us N --cpu-period-us N --memory-max-bytes N --max-processes N\n\
              [--analytical-cpu-quota-us N --analytical-cpu-period-us N\n\
              --analytical-memory-max-bytes N --analytical-max-processes N]\n\
@@ -591,6 +595,15 @@ mod service {
                         value.parse::<usize>()?
                     )
                 }
+                "--max-planner-estimate-candidates" => {
+                    set!(max_planner_estimate_candidates, value.parse::<usize>()?)
+                }
+                "--analytical-max-planner-estimate-candidates" => {
+                    set!(
+                        analytical_max_planner_estimate_candidates,
+                        value.parse::<usize>()?
+                    )
+                }
                 "--max-active-operational-per-principal" => {
                     set!(
                         max_active_operational_per_principal,
@@ -706,6 +719,16 @@ mod service {
             .analytical_max_planner_estimate_requests
             .map(|value| positive(value, "--analytical-max-planner-estimate-requests"))
             .transpose()?;
+        let max_planner_estimate_candidates = positive(
+            options
+                .max_planner_estimate_candidates
+                .unwrap_or(prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES),
+            "--max-planner-estimate-candidates",
+        )?;
+        let analytical_max_planner_estimate_candidates = options
+            .analytical_max_planner_estimate_candidates
+            .map(|value| positive(value, "--analytical-max-planner-estimate-candidates"))
+            .transpose()?;
         if max_planner_estimate_requests > prdb_engine::transaction::MAX_PLANNER_ESTIMATE_REQUESTS
             || analytical_max_planner_estimate_requests.is_some_and(|value| {
                 value > prdb_engine::transaction::MAX_PLANNER_ESTIMATE_REQUESTS
@@ -714,6 +737,17 @@ mod service {
             return Err(format!(
                 "planner estimate requests must not exceed {}",
                 prdb_engine::transaction::MAX_PLANNER_ESTIMATE_REQUESTS
+            ));
+        }
+        if max_planner_estimate_candidates
+            > prdb_engine::statistics::MAX_CONFIGURABLE_ESTIMATE_CANDIDATES
+            || analytical_max_planner_estimate_candidates.is_some_and(|value| {
+                value > prdb_engine::statistics::MAX_CONFIGURABLE_ESTIMATE_CANDIDATES
+            })
+        {
+            return Err(format!(
+                "planner estimate candidates must not exceed {}",
+                prdb_engine::statistics::MAX_CONFIGURABLE_ESTIMATE_CANDIDATES
             ));
         }
         Ok(prdb_engine::storage_manager::StorageManagerConfig {
@@ -731,6 +765,8 @@ mod service {
             )?,
             max_planner_estimate_requests,
             max_analytical_planner_estimate_requests: analytical_max_planner_estimate_requests,
+            max_planner_estimate_candidates,
+            max_analytical_planner_estimate_candidates: analytical_max_planner_estimate_candidates,
             ..defaults
         })
     }
@@ -882,12 +918,16 @@ mod service {
             assert_eq!(defaults.max_active_analytical_invocations, 8);
             assert_eq!(defaults.max_planner_estimate_requests, 16);
             assert_eq!(defaults.max_analytical_planner_estimate_requests, None);
+            assert_eq!(defaults.max_planner_estimate_candidates, 16_384);
+            assert_eq!(defaults.max_analytical_planner_estimate_candidates, None);
 
             let configured = storage_manager_config(&Options {
                 max_storage_active_snapshots: Some(48),
                 max_storage_active_analytical_snapshots: Some(6),
                 max_planner_estimate_requests: Some(64),
                 analytical_max_planner_estimate_requests: Some(1024),
+                max_planner_estimate_candidates: Some(32_768),
+                analytical_max_planner_estimate_candidates: Some(131_072),
                 ..Options::default()
             })
             .expect("configured limits");
@@ -897,6 +937,11 @@ mod service {
             assert_eq!(
                 configured.max_analytical_planner_estimate_requests,
                 Some(1024)
+            );
+            assert_eq!(configured.max_planner_estimate_candidates, 32_768);
+            assert_eq!(
+                configured.max_analytical_planner_estimate_candidates,
+                Some(131_072)
             );
         }
 
@@ -926,6 +971,16 @@ mod service {
                     .contains("--analytical-max-planner-estimate-requests must be positive")
             );
 
+            let candidate_error = storage_manager_config(&Options {
+                analytical_max_planner_estimate_candidates: Some(0),
+                ..Options::default()
+            })
+            .expect_err("zero analytical estimate candidate limit must fail");
+            assert!(
+                candidate_error
+                    .contains("--analytical-max-planner-estimate-candidates must be positive")
+            );
+
             let too_large = storage_manager_config(&Options {
                 max_planner_estimate_requests: Some(
                     prdb_engine::transaction::MAX_PLANNER_ESTIMATE_REQUESTS + 1,
@@ -934,6 +989,15 @@ mod service {
             })
             .expect_err("estimate allowance above the implementation envelope must fail");
             assert!(too_large.contains("must not exceed"));
+
+            let too_many_candidates = storage_manager_config(&Options {
+                max_planner_estimate_candidates: Some(
+                    prdb_engine::statistics::MAX_CONFIGURABLE_ESTIMATE_CANDIDATES + 1,
+                ),
+                ..Options::default()
+            })
+            .expect_err("candidate limit above the implementation envelope must fail");
+            assert!(too_many_candidates.contains("must not exceed"));
         }
     }
 }

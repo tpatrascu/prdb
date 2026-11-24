@@ -16315,6 +16315,8 @@ fn storage_manager_routes_invocations_and_catalog_commits_through_shared_fences(
             max_planner_estimate_requests:
                 prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
             max_analytical_planner_estimate_requests: None,
+            max_planner_estimate_candidates: prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
+            max_analytical_planner_estimate_candidates: None,
             max_token_lifecycle_requests_per_minute: 30,
             max_admin_cancellation_requests_per_minute: 30,
         },
@@ -16359,6 +16361,8 @@ fn storage_manager_admission_requires_a_login_enabled_catalog_user()
             max_planner_estimate_requests:
                 prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
             max_analytical_planner_estimate_requests: None,
+            max_planner_estimate_candidates: prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
+            max_analytical_planner_estimate_candidates: None,
             max_token_lifecycle_requests_per_minute: 30,
             max_admin_cancellation_requests_per_minute: 30,
         },
@@ -16432,6 +16436,8 @@ fn authenticated_role_closure_budget_ignores_unreachable_memberships()
             max_planner_estimate_requests:
                 prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
             max_analytical_planner_estimate_requests: None,
+            max_planner_estimate_candidates: prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
+            max_analytical_planner_estimate_candidates: None,
             ..StorageManagerConfig::default()
         },
     )?;
@@ -16477,6 +16483,8 @@ fn catalog_grant_loading_budget_ignores_unrelated_grants() -> Result<(), Box<dyn
             max_planner_estimate_requests:
                 prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
             max_analytical_planner_estimate_requests: None,
+            max_planner_estimate_candidates: prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
+            max_analytical_planner_estimate_candidates: None,
             ..StorageManagerConfig::default()
         },
     )?;
@@ -16513,6 +16521,9 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
                 max_planner_estimate_requests:
                     prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
                 max_analytical_planner_estimate_requests: None,
+                max_planner_estimate_candidates:
+                    prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
+                max_analytical_planner_estimate_candidates: None,
                 max_token_lifecycle_requests_per_minute: 30,
                 max_admin_cancellation_requests_per_minute: 30,
             },
@@ -16534,6 +16545,9 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
                 max_planner_estimate_requests:
                     prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
                 max_analytical_planner_estimate_requests: None,
+                max_planner_estimate_candidates:
+                    prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
+                max_analytical_planner_estimate_candidates: None,
                 max_token_lifecycle_requests_per_minute: 30,
                 max_admin_cancellation_requests_per_minute: 30,
             },
@@ -16555,6 +16569,9 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
                 max_planner_estimate_requests:
                     prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
                 max_analytical_planner_estimate_requests: None,
+                max_planner_estimate_candidates:
+                    prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
+                max_analytical_planner_estimate_candidates: None,
                 max_token_lifecycle_requests_per_minute: 30,
                 max_admin_cancellation_requests_per_minute: 30,
             },
@@ -16576,6 +16593,9 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
                 max_planner_estimate_requests:
                     prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
                 max_analytical_planner_estimate_requests: None,
+                max_planner_estimate_candidates:
+                    prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
+                max_analytical_planner_estimate_candidates: None,
                 max_token_lifecycle_requests_per_minute: 0,
                 max_admin_cancellation_requests_per_minute: 30,
             },
@@ -16596,6 +16616,8 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
                 max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
                 max_planner_estimate_requests: prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
                 max_analytical_planner_estimate_requests: None,
+            max_planner_estimate_candidates: prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
+            max_analytical_planner_estimate_candidates: None,
                 max_token_lifecycle_requests_per_minute: 30,
                 max_admin_cancellation_requests_per_minute: 0,
             },
@@ -16616,6 +16638,8 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
             max_planner_estimate_requests:
                 prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
             max_analytical_planner_estimate_requests: None,
+            max_planner_estimate_candidates: prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
+            max_analytical_planner_estimate_candidates: None,
             max_token_lifecycle_requests_per_minute: 30,
             max_admin_cancellation_requests_per_minute: 30,
         },
@@ -16656,6 +16680,8 @@ fn storage_manager_expires_idle_invocations_and_releases_the_snapshot()
             max_planner_estimate_requests:
                 prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
             max_analytical_planner_estimate_requests: None,
+            max_planner_estimate_candidates: prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
+            max_analytical_planner_estimate_candidates: None,
             max_token_lifecycle_requests_per_minute: 30,
             max_admin_cancellation_requests_per_minute: 30,
         },
@@ -20410,6 +20436,8 @@ fn storage_manager_audits_cancellation_before_commit_and_preserves_terminal_outc
             max_planner_estimate_requests:
                 prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
             max_analytical_planner_estimate_requests: None,
+            max_planner_estimate_candidates: prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
+            max_analytical_planner_estimate_candidates: None,
             max_token_lifecycle_requests_per_minute: 30,
             max_admin_cancellation_requests_per_minute: 4,
         },
@@ -41080,6 +41108,12 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             max_active_analytical_invocations: 8,
             max_planner_estimate_requests: if sql_in_elevated_budget_only { 1 } else { 16 },
             max_analytical_planner_estimate_requests: sql_in_elevated_budget_only.then_some(64),
+            max_planner_estimate_candidates: if sql_in_elevated_budget_only {
+                1
+            } else {
+                prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES
+            },
+            max_analytical_planner_estimate_candidates: sql_in_elevated_budget_only.then_some(256),
             ..StorageManagerConfig::default()
         },
     )?;
@@ -49664,6 +49698,8 @@ fn storage_manager_issues_and_revokes_tokens_for_manage_users()
         max_invocation_scan_work: prdb_engine::transaction::MAX_INVOCATION_SCAN_WORK,
         max_planner_estimate_requests: prdb_engine::transaction::DEFAULT_PLANNER_ESTIMATE_REQUESTS,
         max_analytical_planner_estimate_requests: None,
+        max_planner_estimate_candidates: prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
+        max_analytical_planner_estimate_candidates: None,
         max_token_lifecycle_requests_per_minute: 5,
         max_admin_cancellation_requests_per_minute: 30,
     };
@@ -52465,7 +52501,19 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
 
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
-    let storage = StorageManager::new(&database, Duration::from_millis(100))?;
+    let candidate_override_profile =
+        std::env::var_os("PRDB_TEST_PROFILE_PLANNER_ESTIMATE_CANDIDATES").is_some();
+    let storage = StorageManager::with_config(
+        &database,
+        StorageManagerConfig {
+            max_planner_estimate_candidates: if candidate_override_profile {
+                32_768
+            } else {
+                prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES
+            },
+            ..StorageManagerConfig::default()
+        },
+    )?;
     let actor = id(0x81);
     let admin_role = builtin_owner_id();
     let mut setup_audit = identity_audit_event(0x82, admin_role, actor);
@@ -52588,6 +52636,160 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             audit_event: column_policy_audit,
         })
         .map_err(|error| format!("planner fixture column policy creation: {error:?}"))?;
+
+    if candidate_override_profile {
+        const PROFILE_ROWS: usize = prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES + 1;
+        let mut seed =
+            storage.begin_invocation(id(0xc1), actor, 9_999, PROFILE_ROWS, PROFILE_ROWS * 64)?;
+        for value in 0..PROFILE_ROWS {
+            seed.stage_put(
+                prdb_engine::overlay::RowId {
+                    table: table.table_id,
+                    row: u128::try_from(value + 1)?.to_be_bytes(),
+                },
+                &encode_tuple(
+                    &[ColumnSchema {
+                        scalar_type: ScalarType::Integer,
+                        nullable: true,
+                    }],
+                    1,
+                    &[Some(ScalarValue::Integer(i32::try_from(value)?))],
+                )?,
+            )?;
+        }
+        seed.commit()?;
+        assert_eq!(
+            storage.collect_committed_table_population(table.table_id)?,
+            prdb_engine::statistics::StatisticsCollectionOutcome::Unknown,
+            "the independent committed-population maintenance cap remains in force"
+        );
+
+        let mut transaction = storage.begin_invocation(id(0xc2), actor, 9_999, 1, 64)?;
+        let (mut client, mut server) = std::os::unix::net::UnixStream::pair()?;
+        client.set_read_timeout(Some(Duration::from_secs(5)))?;
+        let predicate = prdb_engine::optimizer_binding::BoundPredicate::Compare {
+            operator: prdb_engine::optimizer_request::Comparison::Equal,
+            left: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Column(
+                BoundColumn {
+                    column_id: table.column_ids[0],
+                    ordinal: 0,
+                    scalar_type: ScalarType::Integer,
+                    nullable: true,
+                },
+            )),
+            right: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Integer(7)),
+        };
+        let request = EstimatePredicateRequest::from_bound_predicate(
+            "planner_stats".to_owned(),
+            "observations".to_owned(),
+            &predicate,
+        )?;
+        std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+            let planner = scope.spawn(|| serve_planner(&mut server, &mut transaction));
+            prdb_engine::ipc::write_frame(
+                &mut client,
+                &IpcFrame {
+                    operation: IpcOperation::DescribeRelation as u16,
+                    request_id: 1,
+                    payload: prdb_engine::executor_ipc::ResolveRelationRequest {
+                        schema_name: "planner_stats".to_owned(),
+                        relation_name: "observations".to_owned(),
+                    }
+                    .encode()?,
+                },
+            )?;
+            let described = prdb_engine::ipc::read_frame(&mut client)?
+                .ok_or("planner stream closed before elevated candidate handle")?;
+            let (handle, _) = DescribeRelationResponse::decode(&described.payload)?
+                .table
+                .ok_or("planner did not return the candidate-profile handle")?;
+            prdb_engine::ipc::write_frame(
+                &mut client,
+                &IpcFrame {
+                    operation: IpcOperation::EstimateScan as u16,
+                    request_id: 2,
+                    payload: EstimateScanRequest {
+                        handle: handle.clone(),
+                        column_ids: Vec::new(),
+                    }
+                    .encode()?,
+                },
+            )?;
+            let summary = prdb_engine::ipc::read_frame(&mut client)?
+                .ok_or("planner stream closed before elevated candidate summary")?;
+            assert_eq!(
+                EstimateScanResponse::decode(&summary.payload)?,
+                EstimateScanResponse::Exact(prdb_engine::statistics::AuthorizedScanSummary {
+                    visible_rows: PROFILE_ROWS as u64,
+                    columns: vec![prdb_engine::statistics::ColumnPopulation {
+                        readable_values: PROFILE_ROWS as u64,
+                        nulls: 0,
+                        redacted: 0,
+                    }],
+                }),
+                "the elevated profile must return a complete summary beyond the old default"
+            );
+            prdb_engine::ipc::write_frame(
+                &mut client,
+                &IpcFrame {
+                    operation: IpcOperation::EstimateScan as u16,
+                    request_id: 3,
+                    payload: request.encode()?,
+                },
+            )?;
+            let response = prdb_engine::ipc::read_frame(&mut client)?
+                .ok_or("planner stream closed before elevated candidate estimate")?;
+            assert_eq!(
+                EstimatePredicateResponse::decode(&response.payload)?,
+                EstimatePredicateResponse::Exact {
+                    visible_rows: PROFILE_ROWS as u64,
+                    matching_rows: 1,
+                },
+                "the elevated trusted candidate profile must estimate beyond the old default"
+            );
+            client.shutdown(Shutdown::Write)?;
+            planner
+                .join()
+                .expect("elevated candidate planner panicked")
+                .map_err(|error| format!("elevated candidate planner failed: {error:?}"))?;
+            Ok(())
+        })?;
+        transaction.abort()?;
+
+        let default_storage =
+            StorageManager::with_config(&database, StorageManagerConfig::default())?;
+        let mut default_transaction =
+            default_storage.begin_invocation(id(0xc3), actor, 9_999, 1, 64)?;
+        let (mut default_client, mut default_server) = std::os::unix::net::UnixStream::pair()?;
+        default_client.set_read_timeout(Some(Duration::from_secs(5)))?;
+        std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+            let planner =
+                scope.spawn(|| serve_planner(&mut default_server, &mut default_transaction));
+            prdb_engine::ipc::write_frame(
+                &mut default_client,
+                &IpcFrame {
+                    operation: IpcOperation::EstimateScan as u16,
+                    request_id: 1,
+                    payload: request.encode()?,
+                },
+            )?;
+            let response = prdb_engine::ipc::read_frame(&mut default_client)?
+                .ok_or("default planner closed before estimate fallback")?;
+            assert_eq!(
+                EstimatePredicateResponse::decode(&response.payload)?,
+                EstimatePredicateResponse::Unknown,
+                "the default candidate ceiling must return UNKNOWN above 16,384 rows"
+            );
+            default_client.shutdown(Shutdown::Write)?;
+            planner
+                .join()
+                .expect("default candidate planner panicked")
+                .map_err(|error| format!("default candidate planner failed: {error:?}"))?;
+            Ok(())
+        })?;
+        default_transaction.abort()?;
+        return Ok(());
+    }
 
     if std::env::var_os("PRDB_TEST_PROFILE_PLANNER_ESTIMATE_IPC").is_some() {
         const PROFILE_ROWS: usize = 2_052;
