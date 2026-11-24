@@ -1,5 +1,10 @@
 # Statistics Service Progress
 
+## ST-2 / ST-6 follow-up: reject stale population reuse for constant predicates — verified
+
+- The constant-predicate transaction regression now commits another row after writing the protected population record, advancing the engine sequence. On the new snapshot, the stale count is rejected and the estimate falls back to row evaluation; the deliberately malformed existing tuple makes that fallback return `Unknown` rather than reuse the old exact count.
+- Verification: the focused `constant_predicate_reuses_fresh_population_without_reading_rows` transaction regression passed. `cargo fmt --all -- --check`, locked workspace build, warning-denied all-target Clippy, and the full serial delegated-cgroup workspace suite passed. The suite included 409 library tests, 206 commit integration tests, 3 metadata-process tests, 85 transaction integration tests, all remaining targets, and zero ignored tests.
+
 ## ST-2 / ST-6 follow-up: exercise constant estimates through planner IPC — verified slice
 
 - The real planner-stream integration regression now sends a constant integer comparison through `EstimateScan` after committing a row and collecting a fresh protected population record. It verifies the IPC response contains the exact one-row visible population and zero matches, covering the service dispatch path for constant-predicate reuse.

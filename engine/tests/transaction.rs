@@ -7160,6 +7160,31 @@ fn constant_predicate_reuses_fresh_population_without_reading_rows()
         "a private write must prevent reuse of the committed population record"
     );
     invocation.abort()?;
+
+    commit_rows(
+        &database,
+        [0x33; 16],
+        [9; 16],
+        9_999,
+        &[RowWrite {
+            key: key(id(3)),
+            expected_version: None,
+            payload: Some(row),
+        }],
+    )?;
+    let mut stale_statistics_invocation =
+        InvocationTransaction::begin(&database, [0x34; 16], [9; 16], 9_999, 4, 512)?;
+    assert_eq!(
+        stale_statistics_invocation.estimate_authorized_predicate_at_most(
+            table_id,
+            &projection,
+            &prdb_engine::optimizer_binding::BoundPredicate::Boolean(false),
+            4,
+        )?,
+        None,
+        "a later committed sequence must invalidate population-stat reuse and scan fallback"
+    );
+    stale_statistics_invocation.abort()?;
     Ok(())
 }
 
