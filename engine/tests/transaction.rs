@@ -6987,7 +6987,7 @@ fn authorized_scan_estimate_counts_sanitized_cells_and_private_writes()
 }
 
 #[test]
-fn constant_false_predicate_reuses_fresh_population_without_reading_rows()
+fn constant_predicate_reuses_fresh_population_without_reading_rows()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new();
     let database = initialize(&fixture.path())?;
@@ -7121,6 +7121,32 @@ fn constant_false_predicate_reuses_fresh_population_without_reading_rows()
         )?,
         Some((1, 0)),
         "SQL NULL is not a matching WHERE predicate"
+    );
+    let constant_false_comparison = prdb_engine::optimizer_binding::BoundPredicate::Compare {
+        operator: prdb_engine::optimizer_request::Comparison::Equal,
+        left: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Integer(1)),
+        right: Box::new(prdb_engine::optimizer_binding::BoundPredicate::Integer(2)),
+    };
+    assert_eq!(
+        invocation.estimate_authorized_predicate_at_most(
+            table_id,
+            &projection,
+            &constant_false_comparison,
+            4,
+        )?,
+        Some((1, 0))
+    );
+    let null_is_null = prdb_engine::optimizer_binding::BoundPredicate::IsNull(Box::new(
+        prdb_engine::optimizer_binding::BoundPredicate::Null,
+    ));
+    assert_eq!(
+        invocation.estimate_authorized_predicate_at_most(
+            table_id,
+            &projection,
+            &null_is_null,
+            4,
+        )?,
+        Some((1, 1))
     );
     invocation.stage_put(id(2), &row)?;
     assert_eq!(

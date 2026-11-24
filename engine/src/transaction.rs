@@ -2857,11 +2857,9 @@ impl<'db> InvocationTransaction<'db> {
                 return self.finish_predicate_estimate(Some((0, 0)));
             }
             Some(EstimatePopulation::AllRows) => {
-                let constant_matches_all = match predicate {
-                    crate::optimizer_binding::BoundPredicate::Boolean(value) => Some(*value),
-                    crate::optimizer_binding::BoundPredicate::Null => Some(false),
-                    _ => None,
-                };
+                let constant_matches_all =
+                    evaluate_estimate_predicate(predicate, &[], projection, 0, 256)
+                        .map(|truth| truth == EstimateTruth::True);
                 if let Some(matches_all) = constant_matches_all {
                     let overlay_is_empty = match self.overlay.staged_row_count() {
                         Ok(rows) => rows == 0,
@@ -11549,8 +11547,7 @@ fn valid_estimate_predicate(
                 visit(child, projection, depth + 1, remaining_nodes, maximum_depth)
             }
             BoundPredicate::IsNull(child) | BoundPredicate::IsNotNull(child) => {
-                matches!(child.as_ref(), BoundPredicate::Column(_))
-                    && visit(child, projection, depth + 1, remaining_nodes, maximum_depth)
+                visit(child, projection, depth + 1, remaining_nodes, maximum_depth)
             }
         }
     }
@@ -11628,7 +11625,8 @@ fn estimate_predicate_kind(
             })
             .then_some(EstimateValueKind::Boolean),
         BoundPredicate::IsNull(child) | BoundPredicate::IsNotNull(child) => {
-            matches!(child.as_ref(), BoundPredicate::Column(_))
+            estimate_predicate_kind(child, projection)
+                .is_some()
                 .then_some(EstimateValueKind::Boolean)
         }
     }
@@ -11749,27 +11747,15 @@ fn evaluate_estimate_predicate(
                 }
             }
             BoundPredicate::IsNull(child) | BoundPredicate::IsNotNull(child) => {
-                let BoundPredicate::Column(column) = child.as_ref() else {
-                    return None;
-                };
-                let ordinal = usize::try_from(column.ordinal).ok()?;
-                if projection.column_ids.get(ordinal) != Some(&column.column_id)
-                    || projection.columns.get(ordinal)?.scalar_type != column.scalar_type
-                    || projection.columns.get(ordinal)?.nullable != column.nullable
-                {
-                    return None;
-                }
-                match cells.get(ordinal)? {
-                    SanitizedCell::Value(_) => Some(EstimateValue::Boolean(matches!(
-                        predicate,
-                        BoundPredicate::IsNotNull(_)
-                    ))),
-                    SanitizedCell::Null => Some(EstimateValue::Boolean(matches!(
-                        predicate,
-                        BoundPredicate::IsNull(_)
-                    ))),
-                    SanitizedCell::Redacted => None,
-                }
+                let child = value(child, cells, projection, depth + 1, next_budget)?;
+                let is_null = matches!(child, EstimateValue::Null);
+                Some(EstimateValue::Boolean(
+                    if matches!(predicate, BoundPredicate::IsNull(_)) {
+                        is_null
+                    } else {
+                        !is_null
+                    },
+                ))
             }
         }
     }
