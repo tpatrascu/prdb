@@ -987,6 +987,35 @@ static uint32_t build_unique_probe_plan(uint8_t *bytes,
     return offset;
 }
 
+static uint32_t build_multi_point_probe_plan(uint8_t *bytes) {
+    uint32_t predicate_offset;
+    uint32_t offset = build_filter_plan(bytes, &predicate_offset);
+    const uint32_t old_predicate_len = 28;
+    memmove(bytes + predicate_offset + 2 + 2 * old_predicate_len,
+            bytes + predicate_offset + old_predicate_len,
+            offset - predicate_offset - old_predicate_len);
+    uint32_t predicate_end = predicate_offset;
+    bytes[predicate_end++] = 0x31;
+    bytes[predicate_end++] = 2;
+    put_integer_comparison(bytes, &predicate_end, 1);
+    put_integer_comparison(bytes, &predicate_end, 2);
+    offset += 2 + old_predicate_len;
+    bytes[offset++] = 0xa4;
+    memset(bytes + offset, 0x72, 16);
+    offset += 16;
+    uint32_t column_offset = put_column(bytes, &offset, 3, 0);
+    bytes[column_offset] = 10;
+    set_column_ordinal(bytes, column_offset, 0);
+    put_u16(bytes, &offset, 2);
+    for (uint8_t value = 1; value <= 2; ++value) {
+        bytes[offset++] = 0x02;
+        memset(bytes + offset, 0, 7);
+        offset += 7;
+        bytes[offset++] = value;
+    }
+    return offset;
+}
+
 static uint32_t build_boolean_filter_plan(uint8_t *bytes,
                                           uint32_t *predicate_offset) {
     uint32_t offset = 0;
@@ -3527,6 +3556,15 @@ int main(void) {
                sizeof(filter)) == PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD);
     probe_plan[probe_plan_len - 9] = 0x02;
     memset(probe_plan + probe_plan_len - 9 - 26 - 16, 0, 16);
+    assert(prdb_sdk_optimizer_decode_plan_with_filter_v1(
+               probe_plan, probe_plan_len, &decoded, sizeof(decoded), &filter,
+               sizeof(filter)) == PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD);
+
+    probe_plan_len = build_multi_point_probe_plan(probe_plan);
+    assert(prdb_sdk_optimizer_decode_plan_with_filter_v1(
+               probe_plan, probe_plan_len, &decoded, sizeof(decoded), &filter,
+               sizeof(filter)) == PRDB_SDK_OPTIMIZER_PLAN_OK);
+    probe_plan[probe_plan_len - 1] = 3;
     assert(prdb_sdk_optimizer_decode_plan_with_filter_v1(
                probe_plan, probe_plan_len, &decoded, sizeof(decoded), &filter,
                sizeof(filter)) == PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD);

@@ -41,6 +41,9 @@ pub struct SingleTablePlanV1 {
     /// Optional bounded leading-key range hint. Storage revalidates the index
     /// and authorization, and the executor retains the full predicate filter.
     pub range_scan: Option<IndexRangeScanV1>,
+    /// Optional bounded leading-key batch point-probe hint for a complete OR
+    /// of equalities. The original predicate remains in the Filter node.
+    pub multi_point_probe: Option<MultiPointProbeV1>,
     /// Storage-proven empty authorized view, revalidated by the executor.
     pub empty_view_hint: bool,
 }
@@ -79,10 +82,13 @@ pub fn apply_population_scan_heuristic(
     visible_rows: Option<u64>,
 ) -> Result<bool, PlanError> {
     if visible_rows.is_some_and(|rows| rows > 0 && rows <= SMALL_POPULATION_SCAN_ROWS)
-        && (plan.unique_probe.is_some() || plan.range_scan.is_some())
+        && (plan.unique_probe.is_some()
+            || plan.range_scan.is_some()
+            || plan.multi_point_probe.is_some())
     {
         plan.unique_probe = None;
         plan.range_scan = None;
+        plan.multi_point_probe = None;
         validate_plan_v1(plan)?;
         return Ok(true);
     }
@@ -135,6 +141,13 @@ pub struct IndexRangeScanV1 {
 pub struct IndexRangeBoundV1 {
     pub value: BoundPredicate,
     pub inclusive: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MultiPointProbeV1 {
+    pub index_id: [u8; 16],
+    pub key_column: BoundColumn,
+    pub values: Vec<BoundPredicate>,
 }
 
 /// Bounded DELETE plan carrying only the authorized logical relation, the
@@ -390,7 +403,10 @@ pub fn encode_plan_v1(plan: &SingleTablePlanV1) -> Result<Vec<u8>, PlanError> {
             return Err(PlanError::TooLarge);
         }
     }
-    if plan.unique_probe.is_some() && plan.range_scan.is_some() {
+    let hint_count = usize::from(plan.unique_probe.is_some())
+        + usize::from(plan.range_scan.is_some())
+        + usize::from(plan.multi_point_probe.is_some());
+    if hint_count > 1 {
         return Err(PlanError::InvalidPredicate);
     }
     if let Some(probe) = &plan.unique_probe {
@@ -411,9 +427,24 @@ pub fn encode_plan_v1(plan: &SingleTablePlanV1) -> Result<Vec<u8>, PlanError> {
                 }
             }
         }
+    } else if let Some(probe) = &plan.multi_point_probe {
+        output.push(0xa4);
+        output.extend_from_slice(&probe.index_id);
+        put_column(&mut output, &probe.key_column);
+        output.extend_from_slice(
+            &u16::try_from(probe.values.len())
+                .map_err(|_| PlanError::InvalidPredicate)?
+                .to_be_bytes(),
+        );
+        for value in &probe.values {
+            put_predicate(&mut output, value)?;
+        }
     }
     if plan.empty_view_hint {
-        if plan.unique_probe.is_some() || plan.range_scan.is_some() {
+        if plan.unique_probe.is_some()
+            || plan.range_scan.is_some()
+            || plan.multi_point_probe.is_some()
+        {
             return Err(PlanError::InvalidPredicate);
         }
         output.push(0xa3);
@@ -505,12 +536,12 @@ pub fn decode_plan_v1(bytes: &[u8]) -> Result<SingleTablePlanV1, PlanError> {
         nodes.push(node);
     }
     let mut empty_view_hint = false;
-    let (unique_probe, range_scan) =
+    let (unique_probe, range_scan, multi_point_probe) =
         if reader.is_empty() || reader.bytes.get(reader.offset) == Some(&0xa3) {
-            (None, None)
+            (None, None, None)
         } else {
             let hint_tag = reader.u8()?;
-            if hint_tag != 0xa1 && hint_tag != 0xa2 {
+            if !matches!(hint_tag, 0xa1 | 0xa2 | 0xa4) {
                 return Err(PlanError::TrailingBytes);
             }
             let index_id: [u8; 16] = reader
@@ -527,6 +558,7 @@ pub fn decode_plan_v1(bytes: &[u8]) -> Result<SingleTablePlanV1, PlanError> {
                             key_column,
                             value,
                         }),
+                        None,
                         None,
                     )
                 }
@@ -552,13 +584,33 @@ pub fn decode_plan_v1(bytes: &[u8]) -> Result<SingleTablePlanV1, PlanError> {
                             lower: decode_bound()?,
                             upper: decode_bound()?,
                         }),
+                        None,
+                    )
+                }
+                0xa4 => {
+                    let count = usize::from(reader.u16()?);
+                    if !(2..=64).contains(&count) {
+                        return Err(PlanError::InvalidPredicate);
+                    }
+                    let mut values = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        values.push(reader.predicate(&scan_columns)?);
+                    }
+                    (
+                        None,
+                        None,
+                        Some(MultiPointProbeV1 {
+                            index_id,
+                            key_column,
+                            values,
+                        }),
                     )
                 }
                 _ => return Err(PlanError::TrailingBytes),
             }
         };
     if !reader.is_empty() && reader.bytes.get(reader.offset) == Some(&0xa3) {
-        if unique_probe.is_some() || range_scan.is_some() {
+        if unique_probe.is_some() || range_scan.is_some() || multi_point_probe.is_some() {
             return Err(PlanError::InvalidEncoding);
         }
         reader.offset += 1;
@@ -572,6 +624,7 @@ pub fn decode_plan_v1(bytes: &[u8]) -> Result<SingleTablePlanV1, PlanError> {
         nodes,
         unique_probe,
         range_scan,
+        multi_point_probe,
         empty_view_hint,
     };
     validate_plan_v1(&plan)?;
@@ -4275,6 +4328,17 @@ pub fn plan_select_v1(bound: BoundSelect) -> Result<SingleTablePlanV1, PlanError
     } else {
         None
     };
+    let multi_point_probe = if unique_probe.is_none() && range_scan.is_none() {
+        bound.predicate.as_ref().and_then(|predicate| {
+            select_multi_point_probe(
+                predicate,
+                &bound.unique_access_paths,
+                &bound.range_access_paths,
+            )
+        })
+    } else {
+        None
+    };
 
     let mut scan_columns = Vec::with_capacity(bound.projections.len());
     for column in &bound.projections {
@@ -4301,6 +4365,7 @@ pub fn plan_select_v1(bound: BoundSelect) -> Result<SingleTablePlanV1, PlanError
         nodes,
         unique_probe,
         range_scan,
+        multi_point_probe,
         empty_view_hint: false,
     };
     validate_plan_v1(&plan)?;
@@ -4448,6 +4513,85 @@ fn select_unique_point_probe(
         index_id: path.index_id,
         key_column: column.clone(),
         value: value.clone(),
+    })
+}
+
+fn select_multi_point_probe(
+    predicate: &BoundPredicate,
+    unique_paths: &[crate::metadata_discovery::AuthorizedUniqueAccessPath],
+    range_paths: &[crate::metadata_discovery::AuthorizedRangeAccessPath],
+) -> Option<MultiPointProbeV1> {
+    fn collect(
+        predicate: &BoundPredicate,
+        leaves: &mut Vec<(BoundColumn, BoundPredicate)>,
+    ) -> Option<()> {
+        match predicate {
+            BoundPredicate::Or(children) if !children.is_empty() => {
+                for child in children {
+                    collect(child, leaves)?;
+                }
+                Some(())
+            }
+            BoundPredicate::Compare {
+                operator: crate::optimizer_request::Comparison::Equal,
+                left,
+                right,
+            } => {
+                let (column, value) = match (left.as_ref(), right.as_ref()) {
+                    (BoundPredicate::Column(column), value)
+                        if is_point_probe_literal(column, value) =>
+                    {
+                        (column, value)
+                    }
+                    (value, BoundPredicate::Column(column))
+                        if is_point_probe_literal(column, value) =>
+                    {
+                        (column, value)
+                    }
+                    _ => return None,
+                };
+                leaves.push((column.clone(), value.clone()));
+                (leaves.len() <= 64).then_some(())
+            }
+            _ => None,
+        }
+    }
+
+    if !matches!(predicate, BoundPredicate::Or(_)) {
+        return None;
+    }
+    let mut leaves = Vec::new();
+    collect(predicate, &mut leaves)?;
+    let (first_key_column, _) = leaves.first()?;
+    let key_column = first_key_column.clone();
+    if leaves.len() < 2 || leaves.iter().any(|(column, _)| column != &key_column) {
+        return None;
+    }
+    let index_id = unique_paths
+        .iter()
+        .map(|path| (&path.index_id, &path.column_ids))
+        .chain(
+            range_paths
+                .iter()
+                .map(|path| (&path.index_id, &path.column_ids)),
+        )
+        .find(|(index_id, column_ids)| {
+            **index_id != [0; 16] && column_ids.first() == Some(&key_column.column_id)
+        })
+        .map(|(index_id, _)| *index_id)?;
+    let mut values = Vec::new();
+    for (_, value) in leaves {
+        if !values.contains(&value) {
+            values.push(value);
+        }
+    }
+    if values.len() < 2 {
+        return None;
+    }
+    Some(MultiPointProbeV1 {
+        index_id,
+        key_column,
+        values,
     })
 }
 
@@ -4762,6 +4906,12 @@ fn select_index_nested_loop_join(
 /// before interpreting a decoded plan.
 pub fn validate_plan_v1(plan: &SingleTablePlanV1) -> Result<(), PlanError> {
     validate_relation(&plan.relation)?;
+    let hint_count = usize::from(plan.unique_probe.is_some())
+        + usize::from(plan.range_scan.is_some())
+        + usize::from(plan.multi_point_probe.is_some());
+    if hint_count > 1 || (plan.empty_view_hint && hint_count != 0) {
+        return Err(PlanError::InvalidPredicate);
+    }
     if !(2..=4).contains(&plan.nodes.len()) {
         return Err(PlanError::InvalidPipeline);
     }
@@ -4852,6 +5002,32 @@ pub fn validate_plan_v1(plan: &SingleTablePlanV1) -> Result<(), PlanError> {
                 range.upper.clone(),
             ))
         {
+            return Err(PlanError::InvalidPredicate);
+        }
+    }
+    if let Some(probe) = &plan.multi_point_probe {
+        if probe.index_id == [0; 16]
+            || !columns.iter().any(|column| column == &probe.key_column)
+            || !(2..=64).contains(&probe.values.len())
+            || probe.values.iter().enumerate().any(|(index, value)| {
+                !is_point_probe_literal(&probe.key_column, value)
+                    || probe.values[..index].contains(value)
+            })
+        {
+            return Err(PlanError::InvalidPredicate);
+        }
+        let expected = match plan.nodes.get(1) {
+            Some(PlanNode::Filter(predicate)) => select_multi_point_probe(
+                predicate,
+                &[crate::metadata_discovery::AuthorizedUniqueAccessPath {
+                    index_id: probe.index_id,
+                    column_ids: vec![probe.key_column.column_id],
+                }],
+                &[],
+            ),
+            _ => None,
+        };
+        if expected.as_ref() != Some(probe) {
             return Err(PlanError::InvalidPredicate);
         }
     }
@@ -5169,6 +5345,57 @@ mod tests {
             range_access_paths: Vec::new(),
             limit: Some(5),
         }
+    }
+
+    #[test]
+    fn same_key_or_equality_plan_uses_a_batched_probe_hint() {
+        let key = column(7, 1, ScalarType::Integer);
+        let equality = |value| BoundPredicate::Compare {
+            operator: Comparison::Equal,
+            left: Box::new(BoundPredicate::Column(key.clone())),
+            right: Box::new(BoundPredicate::Integer(value)),
+        };
+        let mut bound = bound_select();
+        bound.predicate = Some(BoundPredicate::Or(vec![equality(11), equality(22)]));
+        bound.range_access_paths = vec![crate::metadata_discovery::AuthorizedRangeAccessPath {
+            index_id: [0x71; 16],
+            column_ids: vec![key.column_id],
+        }];
+
+        let plan = plan_select_v1(bound).unwrap();
+        let probe = plan.multi_point_probe.as_ref().unwrap();
+        assert_eq!(probe.index_id, [0x71; 16]);
+        assert_eq!(probe.key_column, key);
+        assert_eq!(
+            probe.values,
+            vec![BoundPredicate::Integer(11), BoundPredicate::Integer(22)]
+        );
+        assert_eq!(
+            decode_plan_v1(&encode_plan_v1(&plan).unwrap()).unwrap(),
+            plan
+        );
+        let mut malformed = encode_plan_v1(&plan).unwrap();
+        *malformed.last_mut().unwrap() ^= 1;
+        assert_eq!(decode_plan_v1(&malformed), Err(PlanError::InvalidPredicate));
+    }
+
+    #[test]
+    fn repeated_or_equalities_fall_back_without_a_multi_point_hint() {
+        let key = column(7, 1, ScalarType::Integer);
+        let equality = || BoundPredicate::Compare {
+            operator: Comparison::Equal,
+            left: Box::new(BoundPredicate::Column(key.clone())),
+            right: Box::new(BoundPredicate::Integer(11)),
+        };
+        let mut bound = bound_select();
+        bound.predicate = Some(BoundPredicate::Or(vec![equality(), equality()]));
+        bound.range_access_paths = vec![crate::metadata_discovery::AuthorizedRangeAccessPath {
+            index_id: [0x71; 16],
+            column_ids: vec![key.column_id],
+        }];
+
+        let plan = plan_select_v1(bound).unwrap();
+        assert!(plan.multi_point_probe.is_none());
     }
 
     #[test]
