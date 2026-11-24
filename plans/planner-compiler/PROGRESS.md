@@ -1,5 +1,11 @@
 # Optimizer Progress
 
+## OP-4 / ST-2 follow-up: record range-selectivity estimate cost — measured
+
+- Evidence: five-run direct-storage TEXT profiles at 514 rows measured median-of-run p50s of 4.966 ms range versus 5.746 ms scan at 43% matches, 5.769 versus 5.565 ms at 49%, and 7.626 versus 6.037 ms at 62%. At 2,050 rows and 43% matches, the medians were 21.579 ms range and 25.323 ms scan; exact predicate estimation measured 26.103 ms.
+- Limitation: path timings exclude estimate acquisition from execution cost, and all measurements are host-local. The estimate cost exceeds the measured access-path gap at 2,050 rows; end-to-end planner/executor cost accounting remains open.
+- Verification: five repeated direct-storage runs for the 2,050-row, 880-match profile passed with exact count and result equivalence. Full serial delegated-cgroup workspace tests, formatting, locked workspace build, and warning-denied Clippy passed for the adjacent statistics-service implementation.
+
 ## OP-4 / ST-2 follow-up: typed DECIMAL predicate literal — implemented slice
 
 - Request and plan tag `0x08` carries a signed big-endian i128 coefficient. The compared DECIMAL column supplies the scale; the coefficient must fit that column's precision. Rust binding and validation, exact authorized estimates, TinyCC evaluation, and unique/range index hints apply this context.
