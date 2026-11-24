@@ -638,11 +638,16 @@ mod statistics_collection_tests {
         use crate::row_record::RowRecord;
         use std::time::{Duration, Instant};
 
-        let row_ids =
-            (1..=crate::statistics::MAX_COMMITTED_POPULATION_ROWS as u128).collect::<Vec<_>>();
+        let elevated_maintenance_limit = 65_536;
+        let row_ids = (1..=elevated_maintenance_limit as u128).collect::<Vec<_>>();
         let (path, database) = database_with_rows(&row_ids)?;
-        let storage =
-            StorageManager::from_validated_database(&database, StorageManagerConfig::default())?;
+        let storage = StorageManager::from_validated_database(
+            &database,
+            StorageManagerConfig {
+                max_statistics_collection_rows: elevated_maintenance_limit,
+                ..StorageManagerConfig::default()
+            },
+        )?;
         std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
             let collector = storage.clone();
             let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
@@ -670,7 +675,7 @@ mod statistics_collection_tests {
                 "maintenance did not acquire its independent admission slot"
             );
 
-            let row_id = 20_000u128;
+            let row_id = 70_000u128;
             let mut row_key = [0; 32];
             row_key[..16].copy_from_slice(&[0x44; 16]);
             row_key[16..].copy_from_slice(&row_id.to_be_bytes());
