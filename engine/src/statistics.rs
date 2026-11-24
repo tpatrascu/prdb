@@ -1,7 +1,10 @@
 //! Authorization-scoped optimizer estimates and protected trusted statistics.
 
-/// Maximum committed rows inspected by one maintenance collection pass.
+/// Default committed rows inspected by one maintenance collection pass.
 pub const MAX_COMMITTED_POPULATION_ROWS: u64 = 16_384;
+/// Maximum committed rows allowed in an exact protected population record.
+/// This is an implementation envelope, not a production maintenance target.
+pub const MAX_CONFIGURABLE_COMMITTED_POPULATION_ROWS: u64 = 1_048_576;
 /// Maximum exact population per side considered by one join-cardinality estimate.
 pub const MAX_JOIN_ESTIMATE_ROWS: u64 = 16_384;
 /// Maximum encoded row bytes read across both sides of one join estimate.
@@ -116,7 +119,7 @@ impl CommittedPopulationRecord {
                 table_id,
                 snapshot_sequence,
             }),
-            1 if rows <= MAX_COMMITTED_POPULATION_ROWS => Ok(Self::Exact {
+            1 if rows <= MAX_CONFIGURABLE_COMMITTED_POPULATION_ROWS => Ok(Self::Exact {
                 table_id,
                 snapshot_sequence,
                 rows,
@@ -165,7 +168,10 @@ pub struct ColumnPopulation {
 
 #[cfg(test)]
 mod committed_population_record_tests {
-    use super::{CommittedPopulationRecord, MAX_COMMITTED_POPULATION_ROWS, StatisticsRecordError};
+    use super::{
+        CommittedPopulationRecord, MAX_CONFIGURABLE_COMMITTED_POPULATION_ROWS,
+        StatisticsRecordError,
+    };
 
     #[test]
     fn committed_population_record_round_trips_exact_and_unknown() {
@@ -194,7 +200,7 @@ mod committed_population_record_tests {
         let exact = CommittedPopulationRecord::Exact {
             table_id: [7; 16],
             snapshot_sequence: 19,
-            rows: MAX_COMMITTED_POPULATION_ROWS + 1,
+            rows: MAX_CONFIGURABLE_COMMITTED_POPULATION_ROWS + 1,
         };
         let mut bytes = exact.encode_record();
         assert_eq!(

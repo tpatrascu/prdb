@@ -45,8 +45,9 @@ use crate::snapshot::{MAX_CATALOG_FAMILY_SCAN, RowSnapshot};
 use crate::startup::{StartupError, validate_persisted_records};
 use crate::statistics::{
     COMMITTED_POPULATION_KEY_PREFIX, CommittedPopulationRecord, DEFAULT_ESTIMATE_CANDIDATES,
-    MAX_COMMITTED_POPULATION_ROWS, MAX_CONFIGURABLE_ESTIMATE_CANDIDATES,
-    StatisticsCollectionOutcome, StatisticsMaintenanceError, StatisticsRecordError,
+    MAX_COMMITTED_POPULATION_ROWS, MAX_CONFIGURABLE_COMMITTED_POPULATION_ROWS,
+    MAX_CONFIGURABLE_ESTIMATE_CANDIDATES, StatisticsCollectionOutcome, StatisticsMaintenanceError,
+    StatisticsRecordError,
 };
 use crate::transaction::{
     DEFAULT_PLANNER_ESTIMATE_REQUESTS, InvocationCoordination, InvocationTransaction,
@@ -128,6 +129,8 @@ pub struct StorageManagerConfig {
     pub max_planner_estimate_candidates: usize,
     /// Optional Analytical per-estimate candidate limit.
     pub max_analytical_planner_estimate_candidates: Option<usize>,
+    /// Maximum committed row keys inspected by one statistics maintenance pass.
+    pub max_statistics_collection_rows: usize,
     pub max_token_lifecycle_requests_per_minute: usize,
     pub max_admin_cancellation_requests_per_minute: usize,
 }
@@ -202,6 +205,7 @@ mod statistics_collection_tests {
             max_analytical_planner_estimate_requests: Some(1024),
             max_planner_estimate_candidates: 1024,
             max_analytical_planner_estimate_candidates: Some(65_536),
+            max_statistics_collection_rows: 65_536,
             ..defaults
         };
         assert_eq!(
@@ -224,6 +228,7 @@ mod statistics_collection_tests {
                 .max_planner_estimate_candidates_for(crate::supervisor::WorkloadClass::Analytical),
             65_536
         );
+        assert_eq!(elevated.max_statistics_collection_rows, 65_536);
     }
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
@@ -538,6 +543,64 @@ mod statistics_collection_tests {
     }
 
     #[test]
+    fn committed_population_collection_uses_its_configured_limit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let rows = (1u64..=16_385).map(u128::from).collect::<Vec<_>>();
+        let (path, database) = database_with_rows(&rows)?;
+        let storage = StorageManager::from_validated_database(
+            &database,
+            StorageManagerConfig {
+                max_statistics_collection_rows: 32_768,
+                ..StorageManagerConfig::default()
+            },
+        )?;
+        let table_id = [0x44; 16];
+
+        assert_eq!(
+            storage.collect_committed_table_population(table_id)?,
+            StatisticsCollectionOutcome::Exact
+        );
+        assert_eq!(
+            storage.current_committed_population_record(table_id)?,
+            Some(CommittedPopulationRecord::Exact {
+                table_id,
+                snapshot_sequence: 1,
+                rows: 16_385,
+            })
+        );
+
+        drop(storage);
+        drop(database);
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn committed_population_collection_limit_rejects_invalid_configuration()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (path, database) = database_with_rows(&[])?;
+        for limit in [
+            0,
+            crate::statistics::MAX_CONFIGURABLE_COMMITTED_POPULATION_ROWS as usize + 1,
+        ] {
+            let result = StorageManager::from_validated_database(
+                &database,
+                StorageManagerConfig {
+                    max_statistics_collection_rows: limit,
+                    ..StorageManagerConfig::default()
+                },
+            );
+            assert!(matches!(
+                result,
+                Err(super::StorageManagerInitError::Config(_))
+            ));
+        }
+        drop(database);
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
     fn statistics_collection_admission_is_shared_across_manager_clones()
     -> Result<(), Box<dyn std::error::Error>> {
         let (path, database) = database_with_rows(&[])?;
@@ -661,6 +724,7 @@ impl Default for StorageManagerConfig {
             max_analytical_planner_estimate_requests: None,
             max_planner_estimate_candidates: DEFAULT_ESTIMATE_CANDIDATES,
             max_analytical_planner_estimate_candidates: None,
+            max_statistics_collection_rows: MAX_COMMITTED_POPULATION_ROWS as usize,
             max_token_lifecycle_requests_per_minute: 30,
             max_admin_cancellation_requests_per_minute: 30,
         }
@@ -677,6 +741,8 @@ pub enum StorageManagerConfigError {
     PlannerEstimateRequestLimitTooLarge,
     ZeroPlannerEstimateCandidateLimit,
     PlannerEstimateCandidateLimitTooLarge,
+    ZeroStatisticsCollectionRowLimit,
+    StatisticsCollectionRowLimitTooLarge,
     ZeroTokenLifecycleRequestLimit,
     ZeroAdminCancellationRequestLimit,
 }
@@ -3404,6 +3470,7 @@ fn invocation_registry(
     database: &Database,
     configured_limit: usize,
     configured_analytical_limit: usize,
+    configured_statistics_collection_limit: usize,
 ) -> Arc<InvocationAdmissionState> {
     let database_key = database as *const Database as usize;
     let uncertain = UNCERTAIN_INVOCATION_REGISTRIES.get_or_init(|| Mutex::new(HashMap::new()));
@@ -3419,6 +3486,9 @@ fn invocation_registry(
         invocations
             .analytical_limit
             .fetch_min(configured_analytical_limit, Ordering::Relaxed);
+        invocations
+            .statistics_collection_limit
+            .fetch_min(configured_statistics_collection_limit, Ordering::Relaxed);
         return invocations;
     }
     let registry = INVOCATION_REGISTRIES.get_or_init(|| Mutex::new(HashMap::new()));
@@ -3433,13 +3503,16 @@ fn invocation_registry(
         invocations
             .analytical_limit
             .fetch_min(configured_analytical_limit, Ordering::Relaxed);
+        invocations
+            .statistics_collection_limit
+            .fetch_min(configured_statistics_collection_limit, Ordering::Relaxed);
         return invocations;
     }
     let invocations = Arc::new(InvocationAdmissionState {
         database_key,
         limit: AtomicUsize::new(configured_limit),
         analytical_limit: AtomicUsize::new(configured_analytical_limit),
-        statistics_collection_limit: AtomicUsize::new(MAX_COMMITTED_POPULATION_ROWS as usize),
+        statistics_collection_limit: AtomicUsize::new(configured_statistics_collection_limit),
         statistics_collection_active: AtomicBool::new(false),
         database_uncertain: AtomicBool::new(false),
         live: Mutex::new(LiveInvocationRegistry {
@@ -3467,8 +3540,14 @@ fn shared_invocation_registry(
     database: &Database,
     configured_limit: usize,
     configured_analytical_limit: usize,
+    configured_statistics_collection_limit: usize,
 ) -> Arc<InvocationAdmissionState> {
-    invocation_registry(database, configured_limit, configured_analytical_limit)
+    invocation_registry(
+        database,
+        configured_limit,
+        configured_analytical_limit,
+        configured_statistics_collection_limit,
+    )
 }
 
 fn retain_uncertain_registry(database_key: usize, state: Arc<InvocationAdmissionState>) {
@@ -3636,6 +3715,7 @@ pub(crate) fn mark_database_uncertain(database: &Database) {
         database,
         StorageManagerConfig::default().max_active_invocations,
         StorageManagerConfig::default().max_active_analytical_invocations,
+        StorageManagerConfig::default().max_statistics_collection_rows,
     );
     let first_uncertain = !invocations.database_uncertain.swap(true, Ordering::AcqRel);
     if first_uncertain {
@@ -3808,7 +3888,7 @@ impl<'db> StorageManager<'db> {
             .admissions
             .statistics_collection_limit
             .load(Ordering::Acquire)
-            .min(MAX_COMMITTED_POPULATION_ROWS as usize) as u64;
+            .min(MAX_CONFIGURABLE_COMMITTED_POPULATION_ROWS as usize) as u64;
         if maximum == 0 {
             return Err(StatisticsMaintenanceError::InvalidRequest);
         }
@@ -4012,6 +4092,17 @@ impl<'db> StorageManager<'db> {
                 StorageManagerConfigError::PlannerEstimateCandidateLimitTooLarge,
             ));
         }
+        if config.max_statistics_collection_rows == 0 {
+            return Err(StorageManagerInitError::Config(
+                StorageManagerConfigError::ZeroStatisticsCollectionRowLimit,
+            ));
+        }
+        if config.max_statistics_collection_rows as u64 > MAX_CONFIGURABLE_COMMITTED_POPULATION_ROWS
+        {
+            return Err(StorageManagerInitError::Config(
+                StorageManagerConfigError::StatisticsCollectionRowLimitTooLarge,
+            ));
+        }
         if config.max_token_lifecycle_requests_per_minute == 0 {
             return Err(StorageManagerInitError::Config(
                 StorageManagerConfigError::ZeroTokenLifecycleRequestLimit,
@@ -4041,6 +4132,7 @@ impl<'db> StorageManager<'db> {
             database,
             config.max_active_invocations,
             config.max_active_analytical_invocations,
+            config.max_statistics_collection_rows,
         );
         Ok(Self {
             database,

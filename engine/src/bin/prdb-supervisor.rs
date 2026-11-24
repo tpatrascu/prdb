@@ -75,6 +75,7 @@ mod service {
         analytical_max_planner_estimate_requests: Option<usize>,
         max_planner_estimate_candidates: Option<usize>,
         analytical_max_planner_estimate_candidates: Option<usize>,
+        max_statistics_collection_rows: Option<usize>,
         max_active_operational_per_principal: Option<usize>,
         max_active_analytical_per_principal: Option<usize>,
         cpu_quota_us: Option<u64>,
@@ -126,6 +127,7 @@ mod service {
              [--analytical-max-planner-estimate-requests N] (overrides the operational value)\n\
              [--max-planner-estimate-candidates N] (default 16384; maximum 1048576)\n\
              [--analytical-max-planner-estimate-candidates N] (overrides the operational value)\n\
+             [--max-statistics-collection-rows N] (default 16384; maximum 1048576)\n\
              --cpu-quota-us N --cpu-period-us N --memory-max-bytes N --max-processes N\n\
              [--analytical-cpu-quota-us N --analytical-cpu-period-us N\n\
              --analytical-memory-max-bytes N --analytical-max-processes N]\n\
@@ -604,6 +606,9 @@ mod service {
                         value.parse::<usize>()?
                     )
                 }
+                "--max-statistics-collection-rows" => {
+                    set!(max_statistics_collection_rows, value.parse::<usize>()?)
+                }
                 "--max-active-operational-per-principal" => {
                     set!(
                         max_active_operational_per_principal,
@@ -729,6 +734,12 @@ mod service {
             .analytical_max_planner_estimate_candidates
             .map(|value| positive(value, "--analytical-max-planner-estimate-candidates"))
             .transpose()?;
+        let max_statistics_collection_rows = positive(
+            options
+                .max_statistics_collection_rows
+                .unwrap_or(defaults.max_statistics_collection_rows),
+            "--max-statistics-collection-rows",
+        )?;
         if max_planner_estimate_requests > prdb_engine::transaction::MAX_PLANNER_ESTIMATE_REQUESTS
             || analytical_max_planner_estimate_requests.is_some_and(|value| {
                 value > prdb_engine::transaction::MAX_PLANNER_ESTIMATE_REQUESTS
@@ -750,6 +761,14 @@ mod service {
                 prdb_engine::statistics::MAX_CONFIGURABLE_ESTIMATE_CANDIDATES
             ));
         }
+        if max_statistics_collection_rows as u64
+            > prdb_engine::statistics::MAX_CONFIGURABLE_COMMITTED_POPULATION_ROWS
+        {
+            return Err(format!(
+                "statistics collection rows must not exceed {}",
+                prdb_engine::statistics::MAX_CONFIGURABLE_COMMITTED_POPULATION_ROWS
+            ));
+        }
         Ok(prdb_engine::storage_manager::StorageManagerConfig {
             max_active_invocations: positive(
                 options
@@ -767,6 +786,7 @@ mod service {
             max_analytical_planner_estimate_requests: analytical_max_planner_estimate_requests,
             max_planner_estimate_candidates,
             max_analytical_planner_estimate_candidates: analytical_max_planner_estimate_candidates,
+            max_statistics_collection_rows,
             ..defaults
         })
     }
@@ -920,6 +940,7 @@ mod service {
             assert_eq!(defaults.max_analytical_planner_estimate_requests, None);
             assert_eq!(defaults.max_planner_estimate_candidates, 16_384);
             assert_eq!(defaults.max_analytical_planner_estimate_candidates, None);
+            assert_eq!(defaults.max_statistics_collection_rows, 16_384);
 
             let configured = storage_manager_config(&Options {
                 max_storage_active_snapshots: Some(48),
@@ -928,6 +949,7 @@ mod service {
                 analytical_max_planner_estimate_requests: Some(1024),
                 max_planner_estimate_candidates: Some(32_768),
                 analytical_max_planner_estimate_candidates: Some(131_072),
+                max_statistics_collection_rows: Some(65_536),
                 ..Options::default()
             })
             .expect("configured limits");
@@ -943,6 +965,7 @@ mod service {
                 configured.max_analytical_planner_estimate_candidates,
                 Some(131_072)
             );
+            assert_eq!(configured.max_statistics_collection_rows, 65_536);
         }
 
         #[test]
@@ -981,6 +1004,15 @@ mod service {
                     .contains("--analytical-max-planner-estimate-candidates must be positive")
             );
 
+            let maintenance_error = storage_manager_config(&Options {
+                max_statistics_collection_rows: Some(0),
+                ..Options::default()
+            })
+            .expect_err("zero statistics maintenance limit must fail");
+            assert!(
+                maintenance_error.contains("--max-statistics-collection-rows must be positive")
+            );
+
             let too_large = storage_manager_config(&Options {
                 max_planner_estimate_requests: Some(
                     prdb_engine::transaction::MAX_PLANNER_ESTIMATE_REQUESTS + 1,
@@ -998,6 +1030,16 @@ mod service {
             })
             .expect_err("candidate limit above the implementation envelope must fail");
             assert!(too_many_candidates.contains("must not exceed"));
+
+            let too_many_statistics_rows = storage_manager_config(&Options {
+                max_statistics_collection_rows: Some(
+                    prdb_engine::statistics::MAX_CONFIGURABLE_COMMITTED_POPULATION_ROWS as usize
+                        + 1,
+                ),
+                ..Options::default()
+            })
+            .expect_err("maintenance limit above implementation envelope must fail");
+            assert!(too_many_statistics_rows.contains("must not exceed"));
         }
     }
 }

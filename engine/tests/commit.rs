@@ -16317,6 +16317,8 @@ fn storage_manager_routes_invocations_and_catalog_commits_through_shared_fences(
             max_analytical_planner_estimate_requests: None,
             max_planner_estimate_candidates: prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
             max_analytical_planner_estimate_candidates: None,
+            max_statistics_collection_rows: prdb_engine::statistics::MAX_COMMITTED_POPULATION_ROWS
+                as usize,
             max_token_lifecycle_requests_per_minute: 30,
             max_admin_cancellation_requests_per_minute: 30,
         },
@@ -16363,6 +16365,8 @@ fn storage_manager_admission_requires_a_login_enabled_catalog_user()
             max_analytical_planner_estimate_requests: None,
             max_planner_estimate_candidates: prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
             max_analytical_planner_estimate_candidates: None,
+            max_statistics_collection_rows: prdb_engine::statistics::MAX_COMMITTED_POPULATION_ROWS
+                as usize,
             max_token_lifecycle_requests_per_minute: 30,
             max_admin_cancellation_requests_per_minute: 30,
         },
@@ -16438,6 +16442,8 @@ fn authenticated_role_closure_budget_ignores_unreachable_memberships()
             max_analytical_planner_estimate_requests: None,
             max_planner_estimate_candidates: prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
             max_analytical_planner_estimate_candidates: None,
+            max_statistics_collection_rows: prdb_engine::statistics::MAX_COMMITTED_POPULATION_ROWS
+                as usize,
             ..StorageManagerConfig::default()
         },
     )?;
@@ -16485,6 +16491,8 @@ fn catalog_grant_loading_budget_ignores_unrelated_grants() -> Result<(), Box<dyn
             max_analytical_planner_estimate_requests: None,
             max_planner_estimate_candidates: prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
             max_analytical_planner_estimate_candidates: None,
+            max_statistics_collection_rows: prdb_engine::statistics::MAX_COMMITTED_POPULATION_ROWS
+                as usize,
             ..StorageManagerConfig::default()
         },
     )?;
@@ -16524,6 +16532,8 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
                 max_planner_estimate_candidates:
                     prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
                 max_analytical_planner_estimate_candidates: None,
+                max_statistics_collection_rows:
+                    prdb_engine::statistics::MAX_COMMITTED_POPULATION_ROWS as usize,
                 max_token_lifecycle_requests_per_minute: 30,
                 max_admin_cancellation_requests_per_minute: 30,
             },
@@ -16548,6 +16558,8 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
                 max_planner_estimate_candidates:
                     prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
                 max_analytical_planner_estimate_candidates: None,
+                max_statistics_collection_rows:
+                    prdb_engine::statistics::MAX_COMMITTED_POPULATION_ROWS as usize,
                 max_token_lifecycle_requests_per_minute: 30,
                 max_admin_cancellation_requests_per_minute: 30,
             },
@@ -16572,6 +16584,8 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
                 max_planner_estimate_candidates:
                     prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
                 max_analytical_planner_estimate_candidates: None,
+                max_statistics_collection_rows:
+                    prdb_engine::statistics::MAX_COMMITTED_POPULATION_ROWS as usize,
                 max_token_lifecycle_requests_per_minute: 30,
                 max_admin_cancellation_requests_per_minute: 30,
             },
@@ -16596,6 +16610,8 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
                 max_planner_estimate_candidates:
                     prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
                 max_analytical_planner_estimate_candidates: None,
+                max_statistics_collection_rows:
+                    prdb_engine::statistics::MAX_COMMITTED_POPULATION_ROWS as usize,
                 max_token_lifecycle_requests_per_minute: 0,
                 max_admin_cancellation_requests_per_minute: 30,
             },
@@ -16618,6 +16634,7 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
                 max_analytical_planner_estimate_requests: None,
             max_planner_estimate_candidates: prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
             max_analytical_planner_estimate_candidates: None,
+            max_statistics_collection_rows: prdb_engine::statistics::MAX_COMMITTED_POPULATION_ROWS as usize,
                 max_token_lifecycle_requests_per_minute: 30,
                 max_admin_cancellation_requests_per_minute: 0,
             },
@@ -16640,6 +16657,8 @@ fn storage_manager_bounds_active_invocation_snapshots_across_clones()
             max_analytical_planner_estimate_requests: None,
             max_planner_estimate_candidates: prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
             max_analytical_planner_estimate_candidates: None,
+            max_statistics_collection_rows: prdb_engine::statistics::MAX_COMMITTED_POPULATION_ROWS
+                as usize,
             max_token_lifecycle_requests_per_minute: 30,
             max_admin_cancellation_requests_per_minute: 30,
         },
@@ -16682,6 +16701,8 @@ fn storage_manager_expires_idle_invocations_and_releases_the_snapshot()
             max_analytical_planner_estimate_requests: None,
             max_planner_estimate_candidates: prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
             max_analytical_planner_estimate_candidates: None,
+            max_statistics_collection_rows: prdb_engine::statistics::MAX_COMMITTED_POPULATION_ROWS
+                as usize,
             max_token_lifecycle_requests_per_minute: 30,
             max_admin_cancellation_requests_per_minute: 30,
         },
@@ -20438,6 +20459,8 @@ fn storage_manager_audits_cancellation_before_commit_and_preserves_terminal_outc
             max_analytical_planner_estimate_requests: None,
             max_planner_estimate_candidates: prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
             max_analytical_planner_estimate_candidates: None,
+            max_statistics_collection_rows: prdb_engine::statistics::MAX_COMMITTED_POPULATION_ROWS
+                as usize,
             max_token_lifecycle_requests_per_minute: 30,
             max_admin_cancellation_requests_per_minute: 4,
         },
@@ -49700,6 +49723,8 @@ fn storage_manager_issues_and_revokes_tokens_for_manage_users()
         max_analytical_planner_estimate_requests: None,
         max_planner_estimate_candidates: prdb_engine::statistics::DEFAULT_ESTIMATE_CANDIDATES,
         max_analytical_planner_estimate_candidates: None,
+        max_statistics_collection_rows: prdb_engine::statistics::MAX_COMMITTED_POPULATION_ROWS
+            as usize,
         max_token_lifecycle_requests_per_minute: 5,
         max_admin_cancellation_requests_per_minute: 30,
     };

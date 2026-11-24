@@ -572,3 +572,11 @@
 - The optimizer regression was red for 19×133 with 95 exact pairs because it selected hash; it is green with kind 17 and rejects a 16,385-pair estimate.
 - Five fresh-database confined profiles returned all 95 expected pairs and overlapped 192 operational reads and commits. Median run-level p50 was 339.6 ms (280.1–404.1 ms range); no hash comparison is possible above the hash input limit. This is bounded feasibility evidence, not a general cost claim.
 - Query/data files were under `$HOME/tmp/prdb-tests`; compiler outputs remained under existing `target/` paths. Broader cardinality distributions, candidate comparison, and target-host profiling remain open.
+
+
+## ST-6 / WI-10 follow-up: configurable committed-population collection rows — implemented slice
+
+- Contract: the trusted service-level maintenance profile sets the maximum row keys examined for one committed table population; a pass reads at most the selected limit plus one sentinel and stores UNKNOWN instead of a partial count when over limit. The bound is independent of per-invocation planner estimates and refresh cadence.
+- Implementation: `--max-statistics-collection-rows` defaults to 16,384 and accepts up to 1,048,576. Storage validates and shares the strictest configured limit for handles of the same database. The CPR1 count remains `u64`, with exact decode accepted through the tested implementation envelope.
+- Red/green: an external-TMPDIR real-redb fixture with 16,385 rows observed UNKNOWN under the old cap, then persisted an exact count with trusted limit 32,768. CLI boundaries and CPR1 over-envelope rejection are covered.
+- Remaining: mixed operational load, service maintenance fairness at larger row counts, multi-million/tens-of-millions scale evidence, and production profile-vector validation remain open.
