@@ -734,6 +734,33 @@ mod service {
             .analytical_max_invocation_scan_work
             .map(|value| positive(value, "--analytical-max-invocation-scan-work"))
             .transpose()?;
+        let max_authorized_index_range_candidates = positive(
+            options
+                .max_sql_index_probe_candidates
+                .map(|value| value as usize)
+                .unwrap_or(defaults.max_authorized_index_range_candidates),
+            "--max-sql-index-probe-candidates",
+        )?;
+        let analytical_max_authorized_index_range_candidates = options
+            .analytical_max_sql_index_probe_candidates
+            .map(|value| {
+                positive(
+                    value as usize,
+                    "--analytical-max-sql-index-probe-candidates",
+                )
+            })
+            .transpose()?;
+        if max_authorized_index_range_candidates
+            > prdb_engine::query_abi::MAX_SQL_INDEX_PROBE_CANDIDATES as usize
+            || analytical_max_authorized_index_range_candidates.is_some_and(|value| {
+                value > prdb_engine::query_abi::MAX_SQL_INDEX_PROBE_CANDIDATES as usize
+            })
+        {
+            return Err(format!(
+                "SQL index probe candidates must not exceed {}",
+                prdb_engine::query_abi::MAX_SQL_INDEX_PROBE_CANDIDATES
+            ));
+        }
         let max_planner_estimate_requests = positive(
             options
                 .max_planner_estimate_requests
@@ -804,6 +831,9 @@ mod service {
             )?,
             max_invocation_scan_work,
             max_analytical_invocation_scan_work: analytical_max_invocation_scan_work,
+            max_authorized_index_range_candidates,
+            max_analytical_authorized_index_range_candidates:
+                analytical_max_authorized_index_range_candidates,
             max_planner_estimate_requests,
             max_analytical_planner_estimate_requests: analytical_max_planner_estimate_requests,
             max_planner_estimate_candidates,
@@ -962,6 +992,14 @@ mod service {
             assert_eq!(defaults.max_analytical_planner_estimate_requests, None);
             assert_eq!(defaults.max_invocation_scan_work, 65_536);
             assert_eq!(defaults.max_analytical_invocation_scan_work, None);
+            assert_eq!(
+                defaults.max_authorized_index_range_candidates,
+                prdb_engine::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES as usize
+            );
+            assert_eq!(
+                defaults.max_analytical_authorized_index_range_candidates,
+                None
+            );
             assert_eq!(defaults.max_planner_estimate_candidates, 16_384);
             assert_eq!(defaults.max_analytical_planner_estimate_candidates, None);
             assert_eq!(defaults.max_statistics_collection_rows, 16_384);
@@ -971,6 +1009,8 @@ mod service {
                 max_storage_active_analytical_snapshots: Some(6),
                 max_invocation_scan_work: Some(131_072),
                 analytical_max_invocation_scan_work: Some(2_097_152),
+                max_sql_index_probe_candidates: Some(512),
+                analytical_max_sql_index_probe_candidates: Some(2048),
                 max_planner_estimate_requests: Some(64),
                 analytical_max_planner_estimate_requests: Some(1024),
                 max_planner_estimate_candidates: Some(32_768),
@@ -985,6 +1025,11 @@ mod service {
             assert_eq!(
                 configured.max_analytical_invocation_scan_work,
                 Some(2_097_152)
+            );
+            assert_eq!(configured.max_authorized_index_range_candidates, 512);
+            assert_eq!(
+                configured.max_analytical_authorized_index_range_candidates,
+                Some(2048)
             );
             assert_eq!(configured.max_planner_estimate_requests, 64);
             assert_eq!(
@@ -1033,6 +1078,13 @@ mod service {
             assert!(
                 scan_work_error.contains("--analytical-max-invocation-scan-work must be positive")
             );
+
+            let candidate_error = storage_manager_config(&Options {
+                max_sql_index_probe_candidates: Some(0),
+                ..Options::default()
+            })
+            .expect_err("zero candidate limit must fail");
+            assert!(candidate_error.contains("--max-sql-index-probe-candidates must be positive"));
 
             let candidate_error = storage_manager_config(&Options {
                 analytical_max_planner_estimate_candidates: Some(0),

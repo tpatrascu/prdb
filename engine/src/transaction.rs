@@ -199,7 +199,6 @@ pub enum ExecutorIndexRangeScan {
     Rows(Vec<Vec<SanitizedCell>>),
 }
 
-const MAX_AUTHORIZED_INDEX_RANGE_CANDIDATES: usize = 1_024;
 const MAX_AUTHORIZED_INDEX_RANGE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_INDEXED_PREDICATE_OVERLAY_BYTES: usize = 16 * 1024 * 1024;
 
@@ -323,6 +322,7 @@ pub struct InvocationTransaction<'db> {
     active_scan: Option<ActiveRowScan>,
     max_scan_work: usize,
     scanned_work: usize,
+    max_authorized_index_range_candidates: usize,
     active_relation_scan: Option<ActiveRelationScan>,
     active_schema_scan: Option<ActiveSchemaScan>,
     active_column_scan: Option<ActiveColumnScan>,
@@ -618,6 +618,7 @@ pub(crate) struct InvocationCoordination {
     admission_metrics: Option<InvocationAdmissionMetrics>,
     max_age: Option<(Instant, Duration)>,
     max_scan_work: usize,
+    max_authorized_index_range_candidates: usize,
     max_planner_estimate_requests: usize,
     max_planner_estimate_candidates: usize,
 }
@@ -630,6 +631,8 @@ impl InvocationCoordination {
             admission_metrics: None,
             max_age: None,
             max_scan_work: MAX_INVOCATION_SCAN_WORK,
+            max_authorized_index_range_candidates:
+                crate::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES as usize,
             max_planner_estimate_requests: DEFAULT_PLANNER_ESTIMATE_REQUESTS,
             max_planner_estimate_candidates: DEFAULT_ESTIMATE_CANDIDATES,
         }
@@ -642,6 +645,8 @@ impl InvocationCoordination {
             admission_metrics: None,
             max_age: None,
             max_scan_work: MAX_INVOCATION_SCAN_WORK,
+            max_authorized_index_range_candidates:
+                crate::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES as usize,
             max_planner_estimate_requests: DEFAULT_PLANNER_ESTIMATE_REQUESTS,
             max_planner_estimate_candidates: DEFAULT_ESTIMATE_CANDIDATES,
         }
@@ -652,6 +657,7 @@ impl InvocationCoordination {
         admission_permit: InvocationAdmissionPermit,
         max_age: Duration,
         max_scan_work: usize,
+        max_authorized_index_range_candidates: usize,
         max_planner_estimate_requests: usize,
         max_planner_estimate_candidates: usize,
     ) -> Self {
@@ -662,6 +668,7 @@ impl InvocationCoordination {
             admission_metrics: Some(admission_metrics),
             max_age: Some((Instant::now(), max_age)),
             max_scan_work,
+            max_authorized_index_range_candidates,
             max_planner_estimate_requests,
             max_planner_estimate_candidates,
         }
@@ -878,6 +885,8 @@ impl<'db> InvocationTransaction<'db> {
             retention_deadline_us,
             max_scan_work: coordination.max_scan_work,
             scanned_work: 0,
+            max_authorized_index_range_candidates: coordination
+                .max_authorized_index_range_candidates,
             coordination,
             aborted: false,
             cancellation_triggered: false,
@@ -1911,7 +1920,7 @@ impl<'db> InvocationTransaction<'db> {
                 if snapshot_candidates
                     .len()
                     .saturating_add(page.candidates.len())
-                    > MAX_AUTHORIZED_INDEX_RANGE_CANDIDATES
+                    > self.max_authorized_index_range_candidates
                     || snapshot_bytes > MAX_AUTHORIZED_INDEX_RANGE_BYTES
                 {
                     self.charge_scan_work(
@@ -2029,7 +2038,7 @@ impl<'db> InvocationTransaction<'db> {
                     None => {}
                 }
             }
-            if candidate_ids.len() > MAX_AUTHORIZED_INDEX_RANGE_CANDIDATES {
+            if candidate_ids.len() > self.max_authorized_index_range_candidates {
                 return Ok(AuthorizedIndexRangeScan::Unavailable);
             }
             let mut candidate_ids = candidate_ids.into_iter().collect::<Vec<_>>();
@@ -2165,7 +2174,7 @@ impl<'db> InvocationTransaction<'db> {
                 if snapshot_candidates
                     .len()
                     .saturating_add(page.candidates.len())
-                    > MAX_AUTHORIZED_INDEX_RANGE_CANDIDATES
+                    > self.max_authorized_index_range_candidates
                     || snapshot_bytes > MAX_AUTHORIZED_INDEX_RANGE_BYTES
                 {
                     self.charge_scan_work(
@@ -2273,7 +2282,7 @@ impl<'db> InvocationTransaction<'db> {
                     None => {}
                 }
             }
-            if candidate_ids.len() > MAX_AUTHORIZED_INDEX_RANGE_CANDIDATES {
+            if candidate_ids.len() > self.max_authorized_index_range_candidates {
                 return Ok(AuthorizedIndexRangeScan::Unavailable);
             }
             let mut candidate_ids = candidate_ids.into_iter().collect::<Vec<_>>();
@@ -3185,7 +3194,7 @@ impl<'db> InvocationTransaction<'db> {
                     .map(|candidate| candidate.key.len())
                     .sum::<usize>(),
             );
-            if matching_rows > MAX_AUTHORIZED_INDEX_RANGE_CANDIDATES as u64
+            if matching_rows > self.max_authorized_index_range_candidates as u64
                 || key_bytes > MAX_AUTHORIZED_INDEX_RANGE_BYTES
                 || matching_rows > visible_rows
             {
@@ -10679,7 +10688,7 @@ impl ExecutorMetadataConnection<'_, '_> {
                 return Ok(None);
             };
             candidates = candidates.saturating_add(rows.len());
-            if rows.len() > 1_024 || candidates > 16_384 {
+            if candidates > 16_384 {
                 return Ok(None);
             }
             groups.push(rows);

@@ -525,5 +525,20 @@ int main(void) {
         assert(budgets.max_index_probe_candidates == 256);
         assert(mock.calls == 21);
     }
+    {
+        enum { ROW_COUNT = 1025 };
+        uint8_t range_payload[4 + ROW_COUNT * 2] = {1, 1, 0, 0};
+        prdb_sdk_index_range_v1 range = {0};
+        range_payload[2] = (uint8_t)(ROW_COUNT >> 8);
+        range_payload[3] = (uint8_t)ROW_COUNT;
+        for (uint32_t row = 0; row < ROW_COUNT; ++row) {
+            range_payload[4 + row * 2] = 0;
+            range_payload[5 + row * 2] = 0;
+        }
+        assert(prdb_sdk_index_range_open_v1(
+                   &range, sizeof(range), range_payload,
+                   sizeof(range_payload)) == PRDB_SDK_BATCH_OK);
+        assert(range.row_count == ROW_COUNT);
+    }
     return 0;
 }

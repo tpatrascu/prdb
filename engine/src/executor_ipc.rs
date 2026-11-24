@@ -818,7 +818,7 @@ pub enum ScanIndexRangesResponse {
 
 impl ScanIndexRangesResponse {
     const VERSION: u8 = 1;
-    const MAX_GROUP_ROWS: usize = 1_024;
+    const MAX_GROUP_ROWS: usize = 16_384;
     const MAX_CANDIDATES: usize = 16_384;
 
     fn unavailable_payload() -> Vec<u8> {
@@ -956,7 +956,7 @@ pub enum ScanIndexRangeResponse {
 }
 
 impl ScanIndexRangeResponse {
-    const MAX_ROWS: usize = 1_024;
+    const MAX_ROWS: usize = 16_384;
 
     fn unavailable_payload() -> Vec<u8> {
         generated::encode_index_range_response_unavailable_record(
@@ -2618,6 +2618,18 @@ mod cancellation_response_tests {
         )]]);
         assert_eq!(
             ScanIndexRangeResponse::decode(&oversized.encode().unwrap()).unwrap(),
+            ScanIndexRangeResponse::Unavailable
+        );
+        let above_legacy_cap = ScanIndexRangeResponse::Rows(vec![Vec::new(); 1_025]);
+        let encoded = above_legacy_cap.encode().unwrap();
+        assert_eq!(
+            ScanIndexRangeResponse::decode(&encoded).unwrap(),
+            above_legacy_cap
+        );
+        let above_implementation_envelope = ScanIndexRangeResponse::Rows(vec![Vec::new(); 16_385]);
+        assert_eq!(
+            ScanIndexRangeResponse::decode(&above_implementation_envelope.encode().unwrap())
+                .unwrap(),
             ScanIndexRangeResponse::Unavailable
         );
     }

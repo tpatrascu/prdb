@@ -123,6 +123,12 @@ pub struct StorageManagerConfig {
     /// Optional Analytical invocation scan-work allowance; omission inherits
     /// the Operational value.
     pub max_analytical_invocation_scan_work: Option<usize>,
+    /// Maximum authorized candidates returned by one Operational index-range
+    /// scan. The supervisor sets this from the same trusted SQL candidate
+    /// profile passed to the executor.
+    pub max_authorized_index_range_candidates: usize,
+    /// Optional Analytical per-range candidate limit.
+    pub max_analytical_authorized_index_range_candidates: Option<usize>,
     /// Cumulative storage-estimate allowance for Operational planner sessions.
     pub max_planner_estimate_requests: usize,
     /// Optional Analytical planner-estimate allowance; omission inherits the
@@ -139,6 +145,20 @@ pub struct StorageManagerConfig {
 }
 
 impl StorageManagerConfig {
+    pub fn max_authorized_index_range_candidates_for(
+        &self,
+        workload_class: crate::supervisor::WorkloadClass,
+    ) -> usize {
+        match workload_class {
+            crate::supervisor::WorkloadClass::Operational => {
+                self.max_authorized_index_range_candidates
+            }
+            crate::supervisor::WorkloadClass::Analytical => self
+                .max_analytical_authorized_index_range_candidates
+                .unwrap_or(self.max_authorized_index_range_candidates),
+        }
+    }
+
     pub fn max_invocation_scan_work_for(
         &self,
         workload_class: crate::supervisor::WorkloadClass,
@@ -223,6 +243,18 @@ mod statistics_collection_tests {
             defaults.max_invocation_scan_work_for(crate::supervisor::WorkloadClass::Analytical),
             crate::transaction::MAX_INVOCATION_SCAN_WORK
         );
+        assert_eq!(
+            defaults.max_authorized_index_range_candidates_for(
+                crate::supervisor::WorkloadClass::Operational
+            ),
+            crate::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES as usize
+        );
+        assert_eq!(
+            defaults.max_authorized_index_range_candidates_for(
+                crate::supervisor::WorkloadClass::Analytical
+            ),
+            crate::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES as usize
+        );
         let elevated = StorageManagerConfig {
             max_planner_estimate_requests: 32,
             max_analytical_planner_estimate_requests: Some(1024),
@@ -230,6 +262,8 @@ mod statistics_collection_tests {
             max_analytical_planner_estimate_candidates: Some(65_536),
             max_invocation_scan_work: 65_536,
             max_analytical_invocation_scan_work: Some(1_048_576),
+            max_authorized_index_range_candidates: 512,
+            max_analytical_authorized_index_range_candidates: Some(2_048),
             max_statistics_collection_rows: 65_536,
             ..defaults
         };
@@ -260,6 +294,18 @@ mod statistics_collection_tests {
         assert_eq!(
             elevated.max_invocation_scan_work_for(crate::supervisor::WorkloadClass::Analytical),
             1_048_576
+        );
+        assert_eq!(
+            elevated.max_authorized_index_range_candidates_for(
+                crate::supervisor::WorkloadClass::Operational
+            ),
+            512
+        );
+        assert_eq!(
+            elevated.max_authorized_index_range_candidates_for(
+                crate::supervisor::WorkloadClass::Analytical
+            ),
+            2_048
         );
         assert_eq!(elevated.max_statistics_collection_rows, 65_536);
     }
@@ -801,6 +847,9 @@ impl Default for StorageManagerConfig {
             max_invocation_age: Duration::from_secs(15 * 60),
             max_invocation_scan_work: crate::transaction::MAX_INVOCATION_SCAN_WORK,
             max_analytical_invocation_scan_work: None,
+            max_authorized_index_range_candidates:
+                crate::query_abi::DEFAULT_SQL_INDEX_PROBE_CANDIDATES as usize,
+            max_analytical_authorized_index_range_candidates: None,
             max_planner_estimate_requests: DEFAULT_PLANNER_ESTIMATE_REQUESTS,
             max_analytical_planner_estimate_requests: None,
             max_planner_estimate_candidates: DEFAULT_ESTIMATE_CANDIDATES,
@@ -818,6 +867,8 @@ pub enum StorageManagerConfigError {
     ZeroAnalyticalInvocationLimit,
     ZeroInvocationAge,
     ZeroInvocationScanWorkLimit,
+    ZeroAuthorizedIndexRangeCandidateLimit,
+    AuthorizedIndexRangeCandidateLimitTooLarge,
     ZeroPlannerEstimateRequestLimit,
     PlannerEstimateRequestLimitTooLarge,
     ZeroPlannerEstimateCandidateLimit,
@@ -1915,6 +1966,8 @@ pub struct StorageManager<'db> {
     max_invocation_age: Duration,
     max_invocation_scan_work: usize,
     max_analytical_invocation_scan_work: Option<usize>,
+    max_authorized_index_range_candidates: usize,
+    max_analytical_authorized_index_range_candidates: Option<usize>,
     max_planner_estimate_requests: usize,
     max_analytical_planner_estimate_requests: Option<usize>,
     max_planner_estimate_candidates: usize,
@@ -4147,6 +4200,25 @@ impl<'db> StorageManager<'db> {
                 StorageManagerConfigError::ZeroInvocationScanWorkLimit,
             ));
         }
+        if config.max_authorized_index_range_candidates == 0
+            || config.max_analytical_authorized_index_range_candidates == Some(0)
+        {
+            return Err(StorageManagerInitError::Config(
+                StorageManagerConfigError::ZeroAuthorizedIndexRangeCandidateLimit,
+            ));
+        }
+        if config.max_authorized_index_range_candidates
+            > crate::query_abi::MAX_SQL_INDEX_PROBE_CANDIDATES as usize
+            || config
+                .max_analytical_authorized_index_range_candidates
+                .is_some_and(|value| {
+                    value > crate::query_abi::MAX_SQL_INDEX_PROBE_CANDIDATES as usize
+                })
+        {
+            return Err(StorageManagerInitError::Config(
+                StorageManagerConfigError::AuthorizedIndexRangeCandidateLimitTooLarge,
+            ));
+        }
         if config.max_planner_estimate_requests == 0
             || config.max_analytical_planner_estimate_requests == Some(0)
         {
@@ -4233,6 +4305,9 @@ impl<'db> StorageManager<'db> {
             max_invocation_age: config.max_invocation_age,
             max_invocation_scan_work: config.max_invocation_scan_work,
             max_analytical_invocation_scan_work: config.max_analytical_invocation_scan_work,
+            max_authorized_index_range_candidates: config.max_authorized_index_range_candidates,
+            max_analytical_authorized_index_range_candidates: config
+                .max_analytical_authorized_index_range_candidates,
             max_planner_estimate_requests: config.max_planner_estimate_requests,
             max_analytical_planner_estimate_requests: config
                 .max_analytical_planner_estimate_requests,
@@ -4273,6 +4348,20 @@ impl<'db> StorageManager<'db> {
             crate::supervisor::WorkloadClass::Analytical => self
                 .max_analytical_invocation_scan_work
                 .unwrap_or(self.max_invocation_scan_work),
+        }
+    }
+
+    pub fn max_authorized_index_range_candidates_for(
+        &self,
+        workload_class: crate::supervisor::WorkloadClass,
+    ) -> usize {
+        match workload_class {
+            crate::supervisor::WorkloadClass::Operational => {
+                self.max_authorized_index_range_candidates
+            }
+            crate::supervisor::WorkloadClass::Analytical => self
+                .max_analytical_authorized_index_range_candidates
+                .unwrap_or(self.max_authorized_index_range_candidates),
         }
     }
 
@@ -4363,6 +4452,7 @@ impl<'db> StorageManager<'db> {
                 admission_permit,
                 self.max_invocation_age,
                 self.max_invocation_scan_work_for(workload_class),
+                self.max_authorized_index_range_candidates_for(workload_class),
                 self.max_planner_estimate_requests_for(workload_class),
                 self.max_planner_estimate_candidates_for(workload_class),
             ),
