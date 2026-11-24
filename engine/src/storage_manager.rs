@@ -2202,13 +2202,39 @@ impl SupervisorInvocation<'_> {
     #[doc(hidden)]
     pub fn serve_worker_channels_with_optimizer_planner_observer<F>(
         &self,
-        mut planner_stream: std::os::unix::net::UnixStream,
-        mut executor_stream: std::os::unix::net::UnixStream,
-        mut optimizer_planner_stream: std::os::unix::net::UnixStream,
+        planner_stream: std::os::unix::net::UnixStream,
+        executor_stream: std::os::unix::net::UnixStream,
+        optimizer_planner_stream: std::os::unix::net::UnixStream,
         observer: F,
     ) -> Result<(), SupervisorInvocationError>
     where
         F: Fn(u16, u64) + Send + Sync,
+    {
+        self.serve_worker_channels_with_optimizer_planner_timing_observer(
+            planner_stream,
+            executor_stream,
+            optimizer_planner_stream,
+            observer,
+            |_, _, _| {},
+            false,
+        )
+    }
+
+    /// Variant that also reports the duration of each optimizer planner
+    /// request's trusted storage dispatch for confined workload profiling.
+    #[doc(hidden)]
+    pub fn serve_worker_channels_with_optimizer_planner_timing_observer<F, T>(
+        &self,
+        mut planner_stream: std::os::unix::net::UnixStream,
+        mut executor_stream: std::os::unix::net::UnixStream,
+        mut optimizer_planner_stream: std::os::unix::net::UnixStream,
+        observer: F,
+        timing_observer: T,
+        measure_dispatch: bool,
+    ) -> Result<(), SupervisorInvocationError>
+    where
+        F: Fn(u16, u64) + Send + Sync,
+        T: Fn(u16, u64, Duration) + Send + Sync,
     {
         use std::net::Shutdown;
         let stop_streams = || -> std::io::Result<(
@@ -2294,11 +2320,24 @@ impl SupervisorInvocation<'_> {
                             _ => crate::planner_ipc::PlannerConnectionError::SharedInvocationUnavailable,
                         })
                     };
-                    crate::planner_ipc::serve_planner_shared_with_observer(
-                        &mut optimizer_planner_stream,
-                        &self.transaction,
-                        &mut observe_and_check,
-                    )
+                    let mut observe_dispatch = |operation, request_id, duration| {
+                        timing_observer(operation, request_id, duration);
+                    };
+                    if measure_dispatch {
+                        crate::planner_ipc::serve_planner_shared_with_timing_observer(
+                            &mut optimizer_planner_stream,
+                            &self.transaction,
+                            &mut observe_and_check,
+                            &mut observe_dispatch,
+                            true,
+                        )
+                    } else {
+                        crate::planner_ipc::serve_planner_shared_with_observer(
+                            &mut optimizer_planner_stream,
+                            &self.transaction,
+                            &mut observe_and_check,
+                        )
+                    }
                     .map_err(SupervisorInvocationError::Planner)
                 }))
                 .unwrap_or(Err(SupervisorInvocationError::WorkerHandlerPanicked));

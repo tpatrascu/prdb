@@ -44718,6 +44718,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         analytics_memory_peak_bytes,
         analytical_cap_rejected,
         optimizer_range_latency_samples,
+        optimizer_planner_dispatch_samples,
     ) = std::thread::scope(|scope| {
         let observer_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let analytics_result_relayed = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -44727,6 +44728,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         let active_cancellation_workers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let additional_worker_memory_samples =
             Arc::new(std::sync::Mutex::new(Vec::<(u64, u64)>::with_capacity(7)));
+        let optimizer_planner_dispatch_samples = Arc::new(std::sync::Mutex::new(Vec::new()));
         let start = Arc::new(std::sync::Barrier::new(72));
         let first_operational_batch = Arc::new(std::sync::Barrier::new(64));
         let (saturation_started_tx, saturation_started_rx) = std::sync::mpsc::channel();
@@ -45447,8 +45449,10 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         let mut analytical_group_resumed_at = None;
         let mut optimizer_range_latency_samples = Vec::with_capacity(2);
         let optimizer_relation_descriptions = std::sync::atomic::AtomicUsize::new(0);
+        let optimizer_planner_dispatch_samples_for_worker =
+            Arc::clone(&optimizer_planner_dispatch_samples);
         let worker_status_result = executor
-            .observe_exit_with_results_and_optimizer_planner_observer(
+            .observe_exit_with_results_and_optimizer_planner_timing_observer(
                 &invocation,
                 |payload| {
                     if payload.len() == 16 && &payload[..7] == b"OP5RNG1" {
@@ -45502,6 +45506,13 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                 },
+                move |operation, request_id, elapsed| {
+                    optimizer_planner_dispatch_samples_for_worker
+                        .lock()
+                        .expect("optimizer planner timing samples")
+                        .push((operation, request_id, elapsed));
+                },
+                true,
             );
         let (index_build_started_at, index_build_finished_at, index_build_id) = index_build_worker
             .join()
@@ -45603,6 +45614,10 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             analytics_memory_peak_bytes,
             analytical_cap_rejected,
             optimizer_range_latency_samples,
+            optimizer_planner_dispatch_samples
+                .lock()
+                .expect("optimizer planner timing samples")
+                .clone(),
         ))
     })?;
     assert!(analytical_cap_rejected);
@@ -45674,6 +45689,24 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     eprintln!(
         "OP-5 confined SQL range latency (ns): 1,024-row duplicate range optimizer={} reference={}",
         optimizer_range_latency_samples[0].1, optimizer_range_latency_samples[1].1,
+    );
+    assert!(
+        !optimizer_planner_dispatch_samples.is_empty(),
+        "confined SQL worker must report optimizer planner dispatch samples"
+    );
+    let mut optimizer_planner_dispatch_samples = optimizer_planner_dispatch_samples;
+    optimizer_planner_dispatch_samples.sort_by_key(|(_, _, elapsed)| *elapsed);
+    let dispatch_p50 = optimizer_planner_dispatch_samples
+        [(optimizer_planner_dispatch_samples.len() - 1) * 50 / 100]
+        .2;
+    let dispatch_p95 = optimizer_planner_dispatch_samples
+        [(optimizer_planner_dispatch_samples.len() - 1) * 95 / 100]
+        .2;
+    eprintln!(
+        "confined optimizer planner storage dispatch (requests={} p50={:.3} ms p95={:.3} ms); excludes optimizer scheduling and socket delivery",
+        optimizer_planner_dispatch_samples.len(),
+        dispatch_p50.as_secs_f64() * 1_000.0,
+        dispatch_p95.as_secs_f64() * 1_000.0,
     );
     staging.finish_started(owner, reservation.invocation_id)?;
     let analytical_group_started =

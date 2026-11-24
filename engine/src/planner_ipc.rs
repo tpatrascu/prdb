@@ -1383,11 +1383,31 @@ pub fn serve_planner_shared<S: Read + Write>(
 pub fn serve_planner_shared_with_observer<S, F>(
     stream: &mut S,
     invocation: &Arc<Mutex<Option<crate::transaction::InvocationTransaction<'_>>>>,
-    mut on_request: F,
+    on_request: F,
 ) -> Result<(), PlannerConnectionError>
 where
     S: Read + Write,
     F: FnMut(u16, u64) -> Result<(), PlannerConnectionError>,
+{
+    serve_planner_shared_with_timing_observer(stream, invocation, on_request, |_, _, _| {}, false)
+}
+
+/// Variant that reports storage dispatch duration after each optimizer
+/// planner request has been handled and before its response is written. The
+/// duration covers invocation-lock wait, trusted estimate/metadata work, and
+/// response encoding; it excludes optimizer process scheduling and socket
+/// delivery. The callback runs without the invocation mutex held.
+pub fn serve_planner_shared_with_timing_observer<S, F, T>(
+    stream: &mut S,
+    invocation: &Arc<Mutex<Option<crate::transaction::InvocationTransaction<'_>>>>,
+    mut on_request: F,
+    mut on_dispatch: T,
+    measure_dispatch: bool,
+) -> Result<(), PlannerConnectionError>
+where
+    S: Read + Write,
+    F: FnMut(u16, u64) -> Result<(), PlannerConnectionError>,
+    T: FnMut(u16, u64, std::time::Duration),
 {
     let mut state = crate::transaction::PlannerMetadataSessionState::default();
     let mut request_ids = std::collections::HashSet::new();
@@ -1412,6 +1432,7 @@ where
             abort_shared_planner_invocation(invocation)?;
             return Err(error);
         }
+        let dispatch_started = measure_dispatch.then(std::time::Instant::now);
         let response = {
             let mut invocation = match invocation.lock() {
                 Ok(invocation) => invocation,
@@ -1432,6 +1453,13 @@ where
             state = connection.detach();
             result
         };
+        if let Some(dispatch_started) = dispatch_started {
+            on_dispatch(
+                request.operation,
+                request.request_id,
+                dispatch_started.elapsed(),
+            );
+        }
         let response = match response {
             Ok(response) => response,
             Err(error) => {

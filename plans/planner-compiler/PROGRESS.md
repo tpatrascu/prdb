@@ -1,5 +1,12 @@
 # Optimizer Progress
 
+## OP-1 follow-up: measure confined optimizer planner dispatch — verified slice
+
+- Implementation: added opt-in timing at the shared optimizer-planner IPC service. It measures from after a complete request frame arrives through invocation-lock wait, trusted metadata/estimate handling, and response encoding. Normal worker-channel paths do not call the clock or timing observer.
+- Evidence: two focused runs of `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` passed inside the delegated user service. Each acceptance measured 21 dispatches; p50 was 15.761 ms and 16.957 ms, and p95 was 36.428 ms and 38.356 ms. The acceptance also sustained eight analytical workers and 64 concurrent operational transactions for 30 seconds (2,411 and 2,342 operational commits in the two runs).
+- Scope: the timing callback observes the primary confined SQL worker's storage-side dispatches across the acceptance, not exclusively the 30-second saturation interval. It excludes optimizer scheduling and socket delivery and is only two fixture runs. Repeated end-to-end optimizer request latency, broader predicates, and target-host behavior remain open.
+- Verification: focused commit-test binary compiled; the confined SQL acceptance passed twice with zero ignored tests; warning-denied all-target Clippy and formatting checks passed.
+
 ## OP-1 / OP-4 / ST-2 follow-up: profile optimizer requests beside operational transactions — measured
 
 - Harness: the opt-in `PRDB_TEST_PROFILE_PLANNER_ESTIMATE_IPC=1 PRDB_TEST_PROFILE_OPTIMIZER_SATURATION=1` profile releases eight isolated optimizer processes and 64 authorized storage transactions through one barrier. Each of five batches has the optimizers plan the same indexed equality predicate while each operational transaction performs an authorized point read and read-only commit. Every plan is checked for its relation and exact filter; each optimizer response must arrive while at least one operational transaction remains in flight.

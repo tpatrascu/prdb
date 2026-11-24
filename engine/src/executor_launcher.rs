@@ -253,12 +253,37 @@ impl RunningExecutor {
     pub fn observe_exit_with_results_and_optimizer_planner_observer<F, O>(
         &mut self,
         invocation: &SupervisorInvocation<'_>,
-        mut on_result: F,
+        on_result: F,
         optimizer_planner_observer: O,
     ) -> Result<ExitStatus, SupervisorInvocationError>
     where
         F: FnMut(&[u8]) -> io::Result<()>,
         O: Fn(u16, u64) + Send + Sync,
+    {
+        self.observe_exit_with_results_and_optimizer_planner_timing_observer(
+            invocation,
+            on_result,
+            optimizer_planner_observer,
+            |_, _, _| {},
+            false,
+        )
+    }
+
+    /// Variant that also reports optimizer-planner storage dispatch durations
+    /// for confined workload profiling.
+    #[doc(hidden)]
+    pub fn observe_exit_with_results_and_optimizer_planner_timing_observer<F, O, T>(
+        &mut self,
+        invocation: &SupervisorInvocation<'_>,
+        mut on_result: F,
+        optimizer_planner_observer: O,
+        optimizer_planner_timing_observer: T,
+        measure_planner_dispatch: bool,
+    ) -> Result<ExitStatus, SupervisorInvocationError>
+    where
+        F: FnMut(&[u8]) -> io::Result<()>,
+        O: Fn(u16, u64) + Send + Sync,
+        T: Fn(u16, u64, Duration) + Send + Sync,
     {
         let result_stream = self.result_stream.take();
         let spill_stream = self.spill_stream.take();
@@ -308,13 +333,17 @@ impl RunningExecutor {
                         .map(|(planner, executor, optimizer_planner)| {
                             let (storage_tx, storage_rx) = std::sync::mpsc::channel();
                             let optimizer_planner_observer = &optimizer_planner_observer;
+                            let optimizer_planner_timing_observer =
+                                &optimizer_planner_timing_observer;
                             let storage_thread = scope.spawn(move || {
                                 let result = invocation
-                                    .serve_worker_channels_with_optimizer_planner_observer(
+                                    .serve_worker_channels_with_optimizer_planner_timing_observer(
                                         planner,
                                         executor,
                                         optimizer_planner,
                                         optimizer_planner_observer,
+                                        optimizer_planner_timing_observer,
+                                        measure_planner_dispatch,
                                     );
                                 let _ = storage_tx.send(result);
                             });
@@ -441,12 +470,15 @@ impl RunningExecutor {
                 }
             });
         } else if let Some((planner, executor, optimizer_planner)) = self.worker_channels.take()
-            && let Err(error) = invocation.serve_worker_channels_with_optimizer_planner_observer(
-                planner,
-                executor,
-                optimizer_planner,
-                optimizer_planner_observer,
-            )
+            && let Err(error) = invocation
+                .serve_worker_channels_with_optimizer_planner_timing_observer(
+                    planner,
+                    executor,
+                    optimizer_planner,
+                    optimizer_planner_observer,
+                    optimizer_planner_timing_observer,
+                    measure_planner_dispatch,
+                )
         {
             self.kill_reap_and_cleanup();
             return Err(error);
