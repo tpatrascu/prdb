@@ -120,6 +120,9 @@ pub struct StorageManagerConfig {
     pub max_invocation_age: Duration,
     /// Maximum catalog records and row candidates scanned in one invocation.
     pub max_invocation_scan_work: usize,
+    /// Optional Analytical invocation scan-work allowance; omission inherits
+    /// the Operational value.
+    pub max_analytical_invocation_scan_work: Option<usize>,
     /// Cumulative storage-estimate allowance for Operational planner sessions.
     pub max_planner_estimate_requests: usize,
     /// Optional Analytical planner-estimate allowance; omission inherits the
@@ -136,6 +139,18 @@ pub struct StorageManagerConfig {
 }
 
 impl StorageManagerConfig {
+    pub fn max_invocation_scan_work_for(
+        &self,
+        workload_class: crate::supervisor::WorkloadClass,
+    ) -> usize {
+        match workload_class {
+            crate::supervisor::WorkloadClass::Operational => self.max_invocation_scan_work,
+            crate::supervisor::WorkloadClass::Analytical => self
+                .max_analytical_invocation_scan_work
+                .unwrap_or(self.max_invocation_scan_work),
+        }
+    }
+
     pub fn max_planner_estimate_requests_for(
         &self,
         workload_class: crate::supervisor::WorkloadClass,
@@ -178,7 +193,7 @@ mod statistics_collection_tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
-    fn planner_estimate_budget_is_class_scoped_and_inherits_by_default() {
+    fn invocation_work_budgets_are_class_scoped_and_inherit_by_default() {
         let defaults = StorageManagerConfig::default();
         assert_eq!(
             defaults
@@ -200,11 +215,21 @@ mod statistics_collection_tests {
                 .max_planner_estimate_candidates_for(crate::supervisor::WorkloadClass::Analytical),
             DEFAULT_ESTIMATE_CANDIDATES
         );
+        assert_eq!(
+            defaults.max_invocation_scan_work_for(crate::supervisor::WorkloadClass::Operational),
+            crate::transaction::MAX_INVOCATION_SCAN_WORK
+        );
+        assert_eq!(
+            defaults.max_invocation_scan_work_for(crate::supervisor::WorkloadClass::Analytical),
+            crate::transaction::MAX_INVOCATION_SCAN_WORK
+        );
         let elevated = StorageManagerConfig {
             max_planner_estimate_requests: 32,
             max_analytical_planner_estimate_requests: Some(1024),
             max_planner_estimate_candidates: 1024,
             max_analytical_planner_estimate_candidates: Some(65_536),
+            max_invocation_scan_work: 65_536,
+            max_analytical_invocation_scan_work: Some(1_048_576),
             max_statistics_collection_rows: 65_536,
             ..defaults
         };
@@ -227,6 +252,14 @@ mod statistics_collection_tests {
             elevated
                 .max_planner_estimate_candidates_for(crate::supervisor::WorkloadClass::Analytical),
             65_536
+        );
+        assert_eq!(
+            elevated.max_invocation_scan_work_for(crate::supervisor::WorkloadClass::Operational),
+            65_536
+        );
+        assert_eq!(
+            elevated.max_invocation_scan_work_for(crate::supervisor::WorkloadClass::Analytical),
+            1_048_576
         );
         assert_eq!(elevated.max_statistics_collection_rows, 65_536);
     }
@@ -767,6 +800,7 @@ impl Default for StorageManagerConfig {
             max_active_analytical_invocations: 8,
             max_invocation_age: Duration::from_secs(15 * 60),
             max_invocation_scan_work: crate::transaction::MAX_INVOCATION_SCAN_WORK,
+            max_analytical_invocation_scan_work: None,
             max_planner_estimate_requests: DEFAULT_PLANNER_ESTIMATE_REQUESTS,
             max_analytical_planner_estimate_requests: None,
             max_planner_estimate_candidates: DEFAULT_ESTIMATE_CANDIDATES,
@@ -1880,6 +1914,7 @@ pub struct StorageManager<'db> {
     authentication_failure_audits: Arc<TokenRequestLimiter>,
     max_invocation_age: Duration,
     max_invocation_scan_work: usize,
+    max_analytical_invocation_scan_work: Option<usize>,
     max_planner_estimate_requests: usize,
     max_analytical_planner_estimate_requests: Option<usize>,
     max_planner_estimate_candidates: usize,
@@ -4107,6 +4142,11 @@ impl<'db> StorageManager<'db> {
                 StorageManagerConfigError::ZeroInvocationScanWorkLimit,
             ));
         }
+        if config.max_analytical_invocation_scan_work == Some(0) {
+            return Err(StorageManagerInitError::Config(
+                StorageManagerConfigError::ZeroInvocationScanWorkLimit,
+            ));
+        }
         if config.max_planner_estimate_requests == 0
             || config.max_analytical_planner_estimate_requests == Some(0)
         {
@@ -4192,6 +4232,7 @@ impl<'db> StorageManager<'db> {
             authentication_failure_audits,
             max_invocation_age: config.max_invocation_age,
             max_invocation_scan_work: config.max_invocation_scan_work,
+            max_analytical_invocation_scan_work: config.max_analytical_invocation_scan_work,
             max_planner_estimate_requests: config.max_planner_estimate_requests,
             max_analytical_planner_estimate_requests: config
                 .max_analytical_planner_estimate_requests,
@@ -4221,6 +4262,18 @@ impl<'db> StorageManager<'db> {
 
     pub fn max_invocation_scan_work(&self) -> usize {
         self.max_invocation_scan_work
+    }
+
+    pub fn max_invocation_scan_work_for(
+        &self,
+        workload_class: crate::supervisor::WorkloadClass,
+    ) -> usize {
+        match workload_class {
+            crate::supervisor::WorkloadClass::Operational => self.max_invocation_scan_work,
+            crate::supervisor::WorkloadClass::Analytical => self
+                .max_analytical_invocation_scan_work
+                .unwrap_or(self.max_invocation_scan_work),
+        }
     }
 
     pub fn max_planner_estimate_requests_for(
@@ -4309,7 +4362,7 @@ impl<'db> StorageManager<'db> {
                 self.ddl_fences.clone(),
                 admission_permit,
                 self.max_invocation_age,
-                self.max_invocation_scan_work,
+                self.max_invocation_scan_work_for(workload_class),
                 self.max_planner_estimate_requests_for(workload_class),
                 self.max_planner_estimate_candidates_for(workload_class),
             ),

@@ -71,6 +71,8 @@ mod service {
         max_active_analytical: Option<usize>,
         max_storage_active_snapshots: Option<usize>,
         max_storage_active_analytical_snapshots: Option<usize>,
+        max_invocation_scan_work: Option<usize>,
+        analytical_max_invocation_scan_work: Option<usize>,
         max_planner_estimate_requests: Option<usize>,
         analytical_max_planner_estimate_requests: Option<usize>,
         max_planner_estimate_candidates: Option<usize>,
@@ -123,6 +125,8 @@ mod service {
              --max-active-analytical-per-principal N]\n\
              [--max-storage-active-snapshots N\n\
              --max-storage-active-analytical-snapshots N]\n\
+             [--max-invocation-scan-work N] (default 65536)\n\
+             [--analytical-max-invocation-scan-work N] (overrides the operational value)\n\
              [--max-planner-estimate-requests N] (default 16; maximum 4096)\n\
              [--analytical-max-planner-estimate-requests N] (overrides the operational value)\n\
              [--max-planner-estimate-candidates N] (default 16384; maximum 1048576)\n\
@@ -588,6 +592,12 @@ mod service {
                         value.parse::<usize>()?
                     )
                 }
+                "--max-invocation-scan-work" => {
+                    set!(max_invocation_scan_work, value.parse::<usize>()?)
+                }
+                "--analytical-max-invocation-scan-work" => {
+                    set!(analytical_max_invocation_scan_work, value.parse::<usize>()?)
+                }
                 "--max-planner-estimate-requests" => {
                     set!(max_planner_estimate_requests, value.parse::<usize>()?)
                 }
@@ -714,6 +724,16 @@ mod service {
         options: &Options,
     ) -> Result<prdb_engine::storage_manager::StorageManagerConfig, String> {
         let defaults = prdb_engine::storage_manager::StorageManagerConfig::default();
+        let max_invocation_scan_work = positive(
+            options
+                .max_invocation_scan_work
+                .unwrap_or(defaults.max_invocation_scan_work),
+            "--max-invocation-scan-work",
+        )?;
+        let analytical_max_invocation_scan_work = options
+            .analytical_max_invocation_scan_work
+            .map(|value| positive(value, "--analytical-max-invocation-scan-work"))
+            .transpose()?;
         let max_planner_estimate_requests = positive(
             options
                 .max_planner_estimate_requests
@@ -782,6 +802,8 @@ mod service {
                     .unwrap_or(defaults.max_active_analytical_invocations),
                 "--max-storage-active-analytical-snapshots",
             )?,
+            max_invocation_scan_work,
+            max_analytical_invocation_scan_work: analytical_max_invocation_scan_work,
             max_planner_estimate_requests,
             max_analytical_planner_estimate_requests: analytical_max_planner_estimate_requests,
             max_planner_estimate_candidates,
@@ -938,6 +960,8 @@ mod service {
             assert_eq!(defaults.max_active_analytical_invocations, 8);
             assert_eq!(defaults.max_planner_estimate_requests, 16);
             assert_eq!(defaults.max_analytical_planner_estimate_requests, None);
+            assert_eq!(defaults.max_invocation_scan_work, 65_536);
+            assert_eq!(defaults.max_analytical_invocation_scan_work, None);
             assert_eq!(defaults.max_planner_estimate_candidates, 16_384);
             assert_eq!(defaults.max_analytical_planner_estimate_candidates, None);
             assert_eq!(defaults.max_statistics_collection_rows, 16_384);
@@ -945,6 +969,8 @@ mod service {
             let configured = storage_manager_config(&Options {
                 max_storage_active_snapshots: Some(48),
                 max_storage_active_analytical_snapshots: Some(6),
+                max_invocation_scan_work: Some(131_072),
+                analytical_max_invocation_scan_work: Some(2_097_152),
                 max_planner_estimate_requests: Some(64),
                 analytical_max_planner_estimate_requests: Some(1024),
                 max_planner_estimate_candidates: Some(32_768),
@@ -955,6 +981,11 @@ mod service {
             .expect("configured limits");
             assert_eq!(configured.max_active_invocations, 48);
             assert_eq!(configured.max_active_analytical_invocations, 6);
+            assert_eq!(configured.max_invocation_scan_work, 131_072);
+            assert_eq!(
+                configured.max_analytical_invocation_scan_work,
+                Some(2_097_152)
+            );
             assert_eq!(configured.max_planner_estimate_requests, 64);
             assert_eq!(
                 configured.max_analytical_planner_estimate_requests,
@@ -992,6 +1023,15 @@ mod service {
             assert!(
                 estimate_error
                     .contains("--analytical-max-planner-estimate-requests must be positive")
+            );
+
+            let scan_work_error = storage_manager_config(&Options {
+                analytical_max_invocation_scan_work: Some(0),
+                ..Options::default()
+            })
+            .expect_err("zero analytical scan-work allowance must fail");
+            assert!(
+                scan_work_error.contains("--analytical-max-invocation-scan-work must be positive")
             );
 
             let candidate_error = storage_manager_config(&Options {
