@@ -1,13 +1,5 @@
 # Statistics Service Progress
 
-## ST-2 / ST-3 follow-up: keep predicate estimates outside query scan-work accounting — verified
-
-- Contract: an exact estimate over the two-row visible population must not charge the invocation's one-unit query scan-work budget; a subsequent one-row indexed lookup must still succeed.
-- Regression: `authorized_scan_estimate_counts_sanitized_cells_and_private_writes` now uses a one-unit scan-work limit for the exact two-row predicate estimate before reading the indexed match. The previous limit of four could not detect an accidental estimate charge.
-- Evidence: the focused real-redb transaction regression passes with exact `(2 visible, 1 matching)` counts and returns the authorized index row under the one-unit limit.
-- Scope: this proves scan-work accounting separation for the direct trusted estimator. It does not establish CPU timing/resource noninterference or target-host behavior.
-- Verification: all 85 transaction integration tests passed serially; format check, warning-denied workspace Clippy, `git diff --check`, and local links in the affected plans/specs passed.
-
 ## ST-2 / OP-4 follow-up: include the isolated optimizer request path in the estimate profile — measured
 
 - Harness: the real `prdb-optimizer` executable receives a filtered SELECT over the seeded 2,052-row INTEGER table. Each sample starts a fresh optimizer process and invocation, verifies the exact bound predicate and authorized relation in the returned plan, and times the request/response after the process has spawned.
