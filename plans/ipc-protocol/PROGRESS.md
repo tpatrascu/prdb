@@ -7,6 +7,13 @@
 - Verification: generated ABI consistency tests, 8 executor IPC tests, 8 IPC tests, `cargo fmt --all -- --check`, maintained TinyCC SDK tests, and release-profile validation passed in the pinned Nix shell. The SQL v19 fixture verifies eight ordered result groups in one probe frame and no partial output when aggregate candidate limits are exceeded. Confined SQL acceptance passed with exact indexed/hash results under 192 concurrent operational reads and commits; the range-probe batch ran through the actual executor/storage path.
 - Remaining: broader duplicate/NULL, overlay, denied-column and composite-prefix batch cases; batch mutation operations `0x1118`–`0x111a`; planner metadata batches `0x1209`/`0x120a`; and configurable profile propagation remain open.
 
+## IPC-7 follow-up: mutation batch codec and dispatcher — implemented slice
+
+- Contract: mutation batch payloads carry a version/count header and length-delimited scalar mutation records. The complete batch is decoded before staging, and a member failure aborts the invocation so no prefix can commit.
+- Implementation: Rust codecs and executor dispatch now support `stage_inserts` (`0x1118`), `stage_updates` (`0x1119`), and `stage_deletes` (`0x111a`); the TinyCC SDK exposes bounded frame encoders for all three. Insert responses preserve per-row handle order. Existing scalar operations remain compatible.
+- Verification: focused executor IPC tests pass (10 tests), covering round-trips, trailing/truncated records, duplicate handles, and ordered insert handles. The maintained TinyCC SDK suite and ABI generator checks pass. SQL INSERT/UPDATE/DELETE runners have not yet been switched to these batch helpers; no mutation-batch storage or confined acceptance is claimed.
+- Remaining: migrate SQL multi-row INSERT and collected UPDATE/DELETE targets to payload-bounded batch calls; verify no-prefix abort and later-chunk rollback through storage, then add confined acceptance. Planner batching and configurable bounds remain open.
+
 ## IPC-2 follow-up: TinyCC unique-index probe uses the shared scalar-value codec — implemented
 
 - Contract: the `0x1114` key scalar uses the common record `{type_code:u8, value_length:u32be, value_bytes[value_length]}`.

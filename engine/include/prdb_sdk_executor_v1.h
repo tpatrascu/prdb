@@ -13,6 +13,9 @@
 #define PRDB_SDK_EXECUTOR_OP_NEXT_BATCH PRDB_IPC_OP_NEXT_BATCH
 #define PRDB_SDK_EXECUTOR_OP_CLOSE_CURSOR PRDB_IPC_OP_CLOSE_CURSOR
 #define PRDB_SDK_EXECUTOR_OP_STAGE_INSERT PRDB_IPC_OP_STAGE_INSERT
+#define PRDB_SDK_EXECUTOR_OP_STAGE_INSERTS PRDB_IPC_OP_STAGE_INSERTS
+#define PRDB_SDK_EXECUTOR_OP_STAGE_UPDATES PRDB_IPC_OP_STAGE_UPDATES
+#define PRDB_SDK_EXECUTOR_OP_STAGE_DELETES PRDB_IPC_OP_STAGE_DELETES
 #define PRDB_SDK_EXECUTOR_OP_STAGE_UPDATE PRDB_IPC_OP_STAGE_UPDATE
 #define PRDB_SDK_EXECUTOR_OP_STAGE_DELETE PRDB_IPC_OP_STAGE_DELETE
 #define PRDB_SDK_EXECUTOR_OP_PROBE_UNIQUE_INDEX PRDB_IPC_OP_PROBE_UNIQUE_INDEX
@@ -143,6 +146,26 @@ int32_t prdb_sdk_executor_stage_update_v1(
  * invocation, snapshot, grant, policy and row-version authority. */
 int32_t prdb_sdk_executor_stage_delete_v1(
     const prdb_host_api_v2 *host, const uint8_t row_handle[16],
+    uint8_t *response, uint64_t response_capacity, uint64_t *response_len);
+
+/* Batch mutations use a version/count header followed by length-delimited
+ * scalar mutation records. The caller chooses bounded chunks that fit the
+ * 1 MiB IPC frame; the storage handler aborts the invocation on any member
+ * failure. Insert values are row-major; update patches apply to each handle. */
+int32_t prdb_sdk_executor_stage_inserts_v1(
+    const prdb_host_api_v2 *host, const uint8_t relation_handle[16],
+    const prdb_sdk_executor_insert_value_v1 *values, uint16_t row_count,
+    uint16_t value_count, uint8_t *request, uint64_t request_capacity,
+    uint8_t *response, uint64_t response_capacity, uint64_t *response_len,
+    uint8_t *row_handles_out, uint64_t row_handles_capacity);
+int32_t prdb_sdk_executor_stage_updates_v1(
+    const prdb_host_api_v2 *host, const uint8_t *row_handles,
+    uint16_t row_count, const prdb_sdk_executor_update_patch_v1 *patches,
+    uint16_t patch_count, uint8_t *request, uint64_t request_capacity,
+    uint8_t *response, uint64_t response_capacity, uint64_t *response_len);
+int32_t prdb_sdk_executor_stage_deletes_v1(
+    const prdb_host_api_v2 *host, const uint8_t *row_handles,
+    uint16_t row_count, uint8_t *request, uint64_t request_capacity,
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len);
 
 /* Returns the invocation's current cancellation or deadline state in

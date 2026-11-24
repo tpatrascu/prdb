@@ -9,6 +9,12 @@
 - Confined verification: the serial delegated-cgroup `sandboxed_v3_sql_dml_sequence_is_visible_and_commits` acceptance passed with `PRDB_TEST_INDEXED_JOIN_FANOUT17_BENCHMARK_ONLY=1`. It loaded the rebuilt `sql-v3-write-read.so` through the confined executor and checked the exact 17-pair indexed and hash results while 192 operational reads and commits overlapped. The run reported indexed p50 samples of 271.1/280.0 ms and hash samples of 388.0/323.6 ms; these remain local measurements, not service targets.
 - Remaining: broaden confined batched probe coverage to duplicate/NULL keys, staged overlays, denied columns and composite prefixes; mutation staging, OR/IN lookup, planner batching, and configurable profile support remain unimplemented.
 
+## SQL-4 / IPC-7 follow-up: mutation batch transport — codec slice
+
+- Rust storage IPC now decodes and dispatches `stage_inserts`, `stage_updates`, and `stage_deletes` (`0x1118`–`0x111a`); the TinyCC SDK has bounded batch request encoders. Batches are fully decoded before execution, and any staging error aborts the invocation.
+- Verification: 10 focused executor IPC tests and the maintained TinyCC SDK suite passed. These tests verify codecs and compilation only; SQL DML still calls scalar staging operations, so reduced call counts, storage rollback, and confined behavior are not yet verified.
+- Remaining: connect multi-row INSERT and collected UPDATE/DELETE targets to payload-bounded batches and verify cross-chunk failure rollback in the confined executor/storage path.
+
 ## SQL-7 follow-up: BIGINT optimizer predicate parameters — SDK support added
 
 - Contract: filtered optimizer predicates encode a BIGINT value with the existing signed 64-bit tag `0x02` and its eight-byte big-endian representation; INTEGER remains sign-extended to the same wire form.

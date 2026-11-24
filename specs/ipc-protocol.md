@@ -111,6 +111,8 @@ stage_deletes(row_handles[1..4096]) -> acknowledgement
 scan_index_ranges(relation, index, probes[1..128], columns) -> grouped_authorized_rows[probes]
 ```
 
+The v1 mutation batch payloads use a common `version:u16be=1`, `count:u16be` header (count 1–4096), followed by `count` records encoded as `record_length:u32be` and one complete scalar mutation request body without an outer frame. `stage_inserts` records each carry the relation handle and full-shape values; all records must name the same relation. Its response is version, count, then one opaque row handle per input ordinal. `stage_updates` records carry one row handle and its unique ordinal/value patches; `stage_deletes` records carry one row handle. The latter two return the existing mutation acknowledgement. The entire request is decoded and validated before staging begins. Any member failure aborts the invocation, including already accepted chunks of the same statement, so no prefix can commit. SDKs split work into payload-bounded chunks; each chunk consumes one request-budget unit, while the transaction remains all-or-error across chunks.
+
 Requested limits are capped by the server. Predicates use a bounded, validated expression language; native callbacks are forbidden. Exact expression support and wire encoding remain undecided.
 
 ## Mutation Ordering and Transaction Control

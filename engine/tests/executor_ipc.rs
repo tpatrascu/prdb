@@ -2,7 +2,8 @@ use prdb_engine::authorization::SanitizedCell;
 use prdb_engine::executor_ipc::{
     MutationAcknowledgement, OpenScanRequest, OpenScanResponse, ResolveRelationRequest,
     ResolveRelationResponse, ScanIndexProbe, ScanIndexRangesRequest, ScanIndexRangesResponse,
-    StageDeleteRequest, StageInsertRequest, StageInsertResponse, StageUpdateRequest,
+    StageDeleteRequest, StageDeletesRequest, StageInsertRequest, StageInsertResponse,
+    StageInsertsRequest, StageInsertsResponse, StageUpdateRequest, StageUpdatesRequest,
 };
 use prdb_engine::metadata_discovery::{
     AuthorizedRelationDescription, EXECUTOR_SCAN_CURSOR_TOKEN_KIND, ExecutorRowHandle,
@@ -76,6 +77,85 @@ fn executor_mutation_payloads_round_trip_canonical_values_and_handles() {
         MutationAcknowledgement::decode(&MutationAcknowledgement.encode()).unwrap(),
         MutationAcknowledgement
     );
+}
+
+#[test]
+fn executor_mutation_batches_round_trip_and_reject_partial_or_duplicate_records() {
+    let relation = ResolvedRelationHandle::from_bytes(&handle(6)).unwrap();
+    let rows = StageInsertsRequest {
+        rows: vec![
+            StageInsertRequest {
+                relation: relation.clone(),
+                values: vec![InsertInput::Value(Some(ScalarValue::Integer(3)))],
+            },
+            StageInsertRequest {
+                relation,
+                values: vec![InsertInput::Value(Some(ScalarValue::Integer(4)))],
+            },
+        ],
+    };
+    let wire = rows.encode().unwrap();
+    assert_eq!(StageInsertsRequest::decode(&wire).unwrap(), rows);
+    let mut truncated = wire.clone();
+    truncated.pop();
+    assert!(StageInsertsRequest::decode(&truncated).is_err());
+
+    let first = ExecutorRowHandle::from_bytes(&handle(8)).unwrap();
+    let mut second_bytes = handle(8);
+    second_bytes[15] = 0x5b;
+    let second = ExecutorRowHandle::from_bytes(&second_bytes).unwrap();
+    let updates = StageUpdatesRequest {
+        rows: vec![
+            StageUpdateRequest {
+                handle: first.clone(),
+                patches: vec![FieldPatch {
+                    ordinal: 1,
+                    value: Some(ScalarValue::Integer(8)),
+                }],
+            },
+            StageUpdateRequest {
+                handle: second.clone(),
+                patches: vec![FieldPatch {
+                    ordinal: 1,
+                    value: None,
+                }],
+            },
+        ],
+    };
+    assert_eq!(
+        StageUpdatesRequest::decode(&updates.encode().unwrap()).unwrap(),
+        updates
+    );
+    let deletes = StageDeletesRequest {
+        handles: vec![first.clone(), second],
+    };
+    assert_eq!(
+        StageDeletesRequest::decode(&deletes.encode().unwrap()).unwrap(),
+        deletes
+    );
+
+    let duplicated = StageDeletesRequest {
+        handles: vec![first.clone(), first],
+    };
+    assert!(StageDeletesRequest::decode(&duplicated.encode().unwrap()).is_err());
+    assert!(StageDeletesRequest::decode(&[1, 0, 0, 1, 0, 0, 0]).is_err());
+}
+
+#[test]
+fn executor_insert_batch_response_preserves_handle_order() {
+    let handles = vec![ExecutorRowHandle::from_bytes(&handle(8)).unwrap(), {
+        let mut bytes = handle(8);
+        bytes[15] = 0x5b;
+        ExecutorRowHandle::from_bytes(&bytes).unwrap()
+    }];
+    let response = StageInsertsResponse { handles };
+    assert_eq!(
+        StageInsertsResponse::decode(&response.encode().unwrap()).unwrap(),
+        response
+    );
+    let mut trailing = response.encode().unwrap();
+    trailing.push(0);
+    assert!(StageInsertsResponse::decode(&trailing).is_err());
 }
 
 #[test]

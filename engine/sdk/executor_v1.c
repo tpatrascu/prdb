@@ -656,6 +656,211 @@ int32_t prdb_sdk_executor_stage_delete_v1(
     return PRDB_SDK_EXECUTOR_OK;
 }
 
+static int32_t encode_batch_insert_record(
+    const uint8_t relation_handle[16],
+    const prdb_sdk_executor_insert_value_v1 *values, uint16_t value_count,
+    uint8_t *out, uint64_t capacity, uint64_t *length_out) {
+    uint64_t offset = PRDB_EXECUTOR_STAGE_INSERT_REQUEST_HEADER_BYTES;
+    prdb_encode_executor_stage_insert_request(out, relation_handle, value_count);
+    for (uint16_t i = 0; i < value_count; ++i) {
+        const prdb_sdk_executor_insert_value_v1 *input = &values[i];
+        if (input->struct_size < sizeof(*input) ||
+            input->abi_version != PRDB_SDK_EXECUTOR_ABI_V1_VERSION) {
+            return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+        }
+        if (input->state == PRDB_SDK_EXECUTOR_INSERT_DEFAULT ||
+            input->state == PRDB_SDK_EXECUTOR_INSERT_NULL) {
+            if (offset + 1 > capacity) return PRDB_SDK_EXECUTOR_RESPONSE_TOO_SMALL;
+            prdb_encode_mutation_cell_tag_record(out + offset,
+                input->state == PRDB_SDK_EXECUTOR_INSERT_DEFAULT ? 2 : 1);
+            ++offset;
+        } else if (input->state == PRDB_SDK_EXECUTOR_INSERT_VALUE) {
+            if (prdb_sdk_value_validate_v1(&input->value) != PRDB_SDK_VALUE_VALID ||
+                input->value.state != PRDB_SDK_VALUE_STATE_VALUE) {
+                return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+            }
+            uint64_t value_len = input->value.data_len;
+            uint64_t end = offset + 1 + 5 + value_len;
+            if (value_len > UINT32_MAX || end < offset || end > capacity)
+                return PRDB_SDK_EXECUTOR_RESPONSE_TOO_SMALL;
+            prdb_encode_mutation_cell_tag_record(out + offset, 0);
+            ++offset;
+            uint8_t value_header[PRDB_SCALAR_VALUE_RECORD_HEADER_BYTES] = {0};
+            prdb_encode_scalar_value_record(value_header,
+                (uint8_t)input->value.type_code, (uint32_t)value_len);
+            memcpy(out + offset, value_header, sizeof(value_header));
+            offset += sizeof(value_header);
+            if (!prdb_encode_scalar_value_record_value_bytes(
+                    out + offset, (size_t)(capacity - offset), input->value.data,
+                    (size_t)value_len)) return PRDB_SDK_EXECUTOR_RESPONSE_TOO_SMALL;
+            offset += value_len;
+        } else return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+    }
+    *length_out = offset;
+    return PRDB_SDK_EXECUTOR_OK;
+}
+
+static int32_t encode_batch_update_record(
+    const uint8_t handle[16], const prdb_sdk_executor_update_patch_v1 *patches,
+    uint16_t patch_count, uint8_t *out, uint64_t capacity, uint64_t *length_out) {
+    uint8_t seen[PRDB_SDK_BATCH_MAX_CELLS_PER_ROW / 8] = {0};
+    uint64_t offset = PRDB_EXECUTOR_STAGE_UPDATE_REQUEST_HEADER_BYTES;
+    if (handle == NULL || handle[0] != PRDB_SDK_BATCH_ROW_TOKEN_KIND || patches == NULL)
+        return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+    prdb_encode_executor_stage_update_request(out, handle, patch_count);
+    for (uint16_t i = 0; i < patch_count; ++i) {
+        const prdb_sdk_executor_update_patch_v1 *patch = &patches[i];
+        if (patch->struct_size < sizeof(*patch) ||
+            patch->abi_version != PRDB_SDK_EXECUTOR_ABI_V1_VERSION ||
+            patch->ordinal >= PRDB_SDK_BATCH_MAX_CELLS_PER_ROW ||
+            prdb_sdk_value_validate_v1(&patch->value) != PRDB_SDK_VALUE_VALID ||
+            (patch->value.state != PRDB_SDK_VALUE_STATE_NULL &&
+             patch->value.state != PRDB_SDK_VALUE_STATE_VALUE))
+            return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+        uint32_t byte_index = patch->ordinal / 8;
+        uint8_t mask = (uint8_t)(1U << (patch->ordinal % 8));
+        if ((seen[byte_index] & mask) != 0) return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+        seen[byte_index] |= mask;
+        uint64_t value_len = patch->value.state == PRDB_SDK_VALUE_STATE_VALUE
+                                 ? patch->value.data_len : 0;
+        uint64_t end = offset + 5 + value_len + (value_len != 0 ||
+            patch->value.state == PRDB_SDK_VALUE_STATE_VALUE ? 5 : 0);
+        if (value_len > UINT32_MAX || end < offset || end > capacity)
+            return PRDB_SDK_EXECUTOR_RESPONSE_TOO_SMALL;
+        prdb_encode_patch_ordinal_record(out + offset, patch->ordinal);
+        offset += PRDB_PATCH_ORDINAL_RECORD_HEADER_BYTES;
+        if (patch->value.state == PRDB_SDK_VALUE_STATE_NULL) {
+            prdb_encode_mutation_cell_tag_record(out + offset, 1);
+            ++offset;
+        } else {
+            prdb_encode_mutation_cell_tag_record(out + offset, 0);
+            ++offset;
+            uint8_t value_header[PRDB_SCALAR_VALUE_RECORD_HEADER_BYTES] = {0};
+            prdb_encode_scalar_value_record(value_header,
+                (uint8_t)patch->value.type_code, (uint32_t)value_len);
+            memcpy(out + offset, value_header, sizeof(value_header));
+            offset += sizeof(value_header);
+            if (!prdb_encode_scalar_value_record_value_bytes(
+                    out + offset, (size_t)(capacity - offset), patch->value.data,
+                    (size_t)value_len)) return PRDB_SDK_EXECUTOR_RESPONSE_TOO_SMALL;
+            offset += value_len;
+        }
+    }
+    *length_out = offset;
+    return PRDB_SDK_EXECUTOR_OK;
+}
+
+static int32_t mutation_batch_invoke(
+    const prdb_host_api_v2 *host, uint32_t operation, const uint8_t *request,
+    uint64_t request_len, uint8_t *response, uint64_t response_capacity,
+    uint64_t *response_len) {
+    int32_t status = invoke(host, operation, request, request_len, response,
+                            response_capacity, response_len);
+    if (status != PRDB_SDK_EXECUTOR_OK) return status;
+    if (!valid_mutation_acknowledgement(response, *response_len))
+        return PRDB_SDK_EXECUTOR_INVALID_PAYLOAD;
+    return PRDB_SDK_EXECUTOR_OK;
+}
+
+int32_t prdb_sdk_executor_stage_inserts_v1(
+    const prdb_host_api_v2 *host, const uint8_t relation_handle[16],
+    const prdb_sdk_executor_insert_value_v1 *values, uint16_t row_count,
+    uint16_t value_count, uint8_t *request, uint64_t request_capacity,
+    uint8_t *response, uint64_t response_capacity, uint64_t *response_len,
+    uint8_t *row_handles_out, uint64_t row_handles_capacity) {
+    uint64_t offset = 4;
+    if (relation_handle == NULL || relation_handle[0] != 6 || values == NULL ||
+        row_count == 0 || row_count > 4096 || value_count == 0 ||
+        request == NULL || request_capacity > PRDB_QUERY_MAX_IPC_REQUEST_BYTES ||
+        response == NULL || response_len == NULL || row_handles_out == NULL ||
+        row_handles_capacity < (uint64_t)row_count * 16 || request_capacity < 4)
+        return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+    request[0] = 0; request[1] = 1;
+    request[2] = (uint8_t)(row_count >> 8); request[3] = (uint8_t)row_count;
+    for (uint16_t row = 0; row < row_count; ++row) {
+        if (offset + 4 > request_capacity) return PRDB_SDK_EXECUTOR_RESPONSE_TOO_SMALL;
+        uint64_t body_len = 0;
+        int32_t status = encode_batch_insert_record(
+            relation_handle, values + (uint64_t)row * value_count, value_count, request + offset + 4,
+            request_capacity - offset - 4, &body_len);
+        if (status != PRDB_SDK_EXECUTOR_OK) return status;
+        if (body_len > UINT32_MAX || offset + 4 + body_len > PRDB_QUERY_MAX_IPC_REQUEST_BYTES)
+            return PRDB_SDK_EXECUTOR_RESPONSE_TOO_SMALL;
+        request[offset] = (uint8_t)(body_len >> 24);
+        request[offset + 1] = (uint8_t)(body_len >> 16);
+        request[offset + 2] = (uint8_t)(body_len >> 8);
+        request[offset + 3] = (uint8_t)body_len;
+        offset += 4 + body_len;
+    }
+    int32_t status = invoke(host, PRDB_SDK_EXECUTOR_OP_STAGE_INSERTS, request, offset,
+        response, response_capacity, response_len);
+    if (status != PRDB_SDK_EXECUTOR_OK) return status;
+    if (*response_len != 4 + (uint64_t)row_count * 16 || response[0] != 0 ||
+        response[1] != 1 || response[2] != request[2] || response[3] != request[3])
+        return PRDB_SDK_EXECUTOR_INVALID_PAYLOAD;
+    for (uint16_t row = 0; row < row_count; ++row) {
+        const uint8_t *handle = response + 4 + (uint64_t)row * 16;
+        if (handle[0] != PRDB_SDK_BATCH_ROW_TOKEN_KIND)
+            return PRDB_SDK_EXECUTOR_INVALID_PAYLOAD;
+        memcpy(row_handles_out + (uint64_t)row * 16, handle, 16);
+    }
+    return PRDB_SDK_EXECUTOR_OK;
+}
+
+int32_t prdb_sdk_executor_stage_updates_v1(
+    const prdb_host_api_v2 *host, const uint8_t *row_handles,
+    uint16_t row_count, const prdb_sdk_executor_update_patch_v1 *patches,
+    uint16_t patch_count, uint8_t *request, uint64_t request_capacity,
+    uint8_t *response, uint64_t response_capacity, uint64_t *response_len) {
+    uint64_t offset = 4;
+    if (row_handles == NULL || row_count == 0 || row_count > 4096 ||
+        patches == NULL || patch_count == 0 || request == NULL ||
+        request_capacity > PRDB_QUERY_MAX_IPC_REQUEST_BYTES || request_capacity < 4)
+        return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+    request[0] = 0; request[1] = 1;
+    request[2] = (uint8_t)(row_count >> 8); request[3] = (uint8_t)row_count;
+    for (uint16_t row = 0; row < row_count; ++row) {
+        if (offset + 4 > request_capacity) return PRDB_SDK_EXECUTOR_RESPONSE_TOO_SMALL;
+        uint64_t body_len = 0;
+        int32_t status = encode_batch_update_record(row_handles + (uint64_t)row * 16,
+            patches, patch_count, request + offset + 4, request_capacity - offset - 4,
+            &body_len);
+        if (status != PRDB_SDK_EXECUTOR_OK) return status;
+        if (body_len > UINT32_MAX || offset + 4 + body_len > PRDB_QUERY_MAX_IPC_REQUEST_BYTES)
+            return PRDB_SDK_EXECUTOR_RESPONSE_TOO_SMALL;
+        request[offset] = (uint8_t)(body_len >> 24);
+        request[offset + 1] = (uint8_t)(body_len >> 16);
+        request[offset + 2] = (uint8_t)(body_len >> 8);
+        request[offset + 3] = (uint8_t)body_len;
+        offset += 4 + body_len;
+    }
+    return mutation_batch_invoke(host, PRDB_SDK_EXECUTOR_OP_STAGE_UPDATES,
+        request, offset, response, response_capacity, response_len);
+}
+
+int32_t prdb_sdk_executor_stage_deletes_v1(
+    const prdb_host_api_v2 *host, const uint8_t *row_handles,
+    uint16_t row_count, uint8_t *request, uint64_t request_capacity,
+    uint8_t *response, uint64_t response_capacity, uint64_t *response_len) {
+    uint64_t offset = 4;
+    if (row_handles == NULL || row_count == 0 || row_count > 4096 || request == NULL ||
+        request_capacity > PRDB_QUERY_MAX_IPC_REQUEST_BYTES || request_capacity < 4)
+        return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+    request[0] = 0; request[1] = 1;
+    request[2] = (uint8_t)(row_count >> 8); request[3] = (uint8_t)row_count;
+    for (uint16_t row = 0; row < row_count; ++row) {
+        const uint8_t *handle = row_handles + (uint64_t)row * 16;
+        if (handle[0] != PRDB_SDK_BATCH_ROW_TOKEN_KIND || offset + 22 > request_capacity)
+            return PRDB_SDK_EXECUTOR_INVALID_ARGUMENT;
+        request[offset] = 0; request[offset + 1] = 0; request[offset + 2] = 0; request[offset + 3] = 18;
+        request[offset + 4] = 0; request[offset + 5] = 1;
+        memcpy(request + offset + 6, handle, 16);
+        offset += 22;
+    }
+    return mutation_batch_invoke(host, PRDB_SDK_EXECUTOR_OP_STAGE_DELETES,
+        request, offset, response, response_capacity, response_len);
+}
+
 int32_t prdb_sdk_executor_check_cancelled_v1(
     const prdb_host_api_v2 *host, int32_t *cancelled_out) {
     const uint8_t empty_request = 0;

@@ -10099,6 +10099,11 @@ fn attach_plan_identity(
 }
 
 impl ExecutorMetadataConnection<'_, '_> {
+    /// Abort the complete invocation after an all-or-error executor batch fails.
+    pub fn abort_invocation(&mut self) -> Result<(), TransactionError> {
+        self.transaction.abort()
+    }
+
     pub(crate) fn record_policy_denial(&mut self) {
         self.transaction.coordination.record_policy_denial();
     }

@@ -3,8 +3,8 @@
 use crate::authorization::SanitizedCell;
 use crate::ipc::{DispatchError, IpcFrame, Operation, ServiceRole, authorize_operation};
 use crate::metadata_discovery::{
-    AuthorizedRelationDescription, ExecutorRowHandle, ExecutorScanCursor, ResolvedRelationHandle,
-    VisibleColumn,
+    AuthorizedRelationDescription, EXECUTOR_ROW_HANDLE_TOKEN_KIND, ExecutorRowHandle,
+    ExecutorScanCursor, ResolvedRelationHandle, VisibleColumn,
 };
 use crate::query_abi as generated;
 pub use crate::query_abi::{
@@ -1437,6 +1437,197 @@ impl StageDeleteRequest {
     }
 }
 
+/// A length-delimited set of inserts. The complete payload is decoded before
+/// any transaction state is changed; execution aborts the invocation if any
+/// member fails so no staged prefix can be committed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StageInsertsRequest {
+    pub rows: Vec<StageInsertRequest>,
+}
+
+impl StageInsertsRequest {
+    pub fn encode(&self) -> Result<Vec<u8>, ExecutorRequestError> {
+        encode_mutation_batch(self.rows.iter().map(StageInsertRequest::encode))
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
+        let rows = decode_mutation_batch(payload)?
+            .into_iter()
+            .map(|bytes| StageInsertRequest::decode(bytes))
+            .collect::<Result<Vec<_>, _>>()?;
+        if rows.is_empty()
+            || rows.iter().any(|row| {
+                rows.first()
+                    .is_some_and(|first| first.relation != row.relation)
+            })
+        {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        Ok(Self { rows })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StageUpdatesRequest {
+    pub rows: Vec<StageUpdateRequest>,
+}
+
+impl StageUpdatesRequest {
+    pub fn encode(&self) -> Result<Vec<u8>, ExecutorRequestError> {
+        encode_mutation_batch(self.rows.iter().map(StageUpdateRequest::encode))
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
+        let rows = decode_mutation_batch(payload)?
+            .into_iter()
+            .map(|bytes| StageUpdateRequest::decode(bytes))
+            .collect::<Result<Vec<_>, _>>()?;
+        validate_unique_batch_handles(rows.iter().map(|row| row.handle.to_bytes()))?;
+        Ok(Self { rows })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StageDeletesRequest {
+    pub handles: Vec<ExecutorRowHandle>,
+}
+
+impl StageDeletesRequest {
+    pub fn encode(&self) -> Result<Vec<u8>, ExecutorRequestError> {
+        encode_mutation_batch(self.handles.iter().map(|handle| {
+            Ok(generated::encode_executor_stage_delete_request(handle.to_bytes()).to_vec())
+        }))
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
+        let handles = decode_mutation_batch(payload)?
+            .into_iter()
+            .map(|bytes| StageDeleteRequest::decode(bytes).map(|row| row.handle))
+            .collect::<Result<Vec<_>, _>>()?;
+        validate_unique_batch_handles(handles.iter().map(ExecutorRowHandle::to_bytes))?;
+        Ok(Self { handles })
+    }
+}
+
+fn encode_mutation_batch<'a>(
+    records: impl Iterator<Item = Result<Vec<u8>, ExecutorRequestError>>,
+) -> Result<Vec<u8>, ExecutorRequestError> {
+    const MAX_ROWS: usize = 4096;
+    let records = records.collect::<Result<Vec<_>, _>>()?;
+    if records.is_empty() || records.len() > MAX_ROWS {
+        return Err(ExecutorRequestError::InvalidPayload);
+    }
+    let count = u16::try_from(records.len()).map_err(|_| ExecutorRequestError::InvalidPayload)?;
+    let mut payload = Vec::with_capacity(4);
+    payload.extend_from_slice(&1u16.to_be_bytes());
+    payload.extend_from_slice(&count.to_be_bytes());
+    for record in records {
+        let length =
+            u32::try_from(record.len()).map_err(|_| ExecutorRequestError::InvalidPayload)?;
+        payload.extend_from_slice(&length.to_be_bytes());
+        payload.extend_from_slice(&record);
+        ensure_response_size(&payload)?;
+    }
+    Ok(payload)
+}
+
+fn decode_mutation_batch(payload: &[u8]) -> Result<Vec<&[u8]>, ExecutorRequestError> {
+    const MAX_ROWS: usize = 4096;
+    if payload.len() < 4
+        || payload.len() > crate::ipc::MAX_PAYLOAD_BYTES
+        || payload[..2] != 1u16.to_be_bytes()
+    {
+        return Err(ExecutorRequestError::InvalidPayload);
+    }
+    let count = usize::from(u16::from_be_bytes([payload[2], payload[3]]));
+    if count == 0 || count > MAX_ROWS {
+        return Err(ExecutorRequestError::InvalidPayload);
+    }
+    let mut offset = 4usize;
+    let mut records = Vec::with_capacity(count);
+    for _ in 0..count {
+        let length_bytes = payload
+            .get(offset..offset + 4)
+            .ok_or(ExecutorRequestError::InvalidPayload)?;
+        let length = usize::try_from(u32::from_be_bytes(length_bytes.try_into().unwrap()))
+            .map_err(|_| ExecutorRequestError::InvalidPayload)?;
+        offset = offset
+            .checked_add(4)
+            .ok_or(ExecutorRequestError::InvalidPayload)?;
+        let end = offset
+            .checked_add(length)
+            .ok_or(ExecutorRequestError::InvalidPayload)?;
+        records.push(
+            payload
+                .get(offset..end)
+                .ok_or(ExecutorRequestError::InvalidPayload)?,
+        );
+        offset = end;
+    }
+    if offset != payload.len() {
+        return Err(ExecutorRequestError::InvalidPayload);
+    }
+    Ok(records)
+}
+
+fn validate_unique_batch_handles(
+    handles: impl Iterator<Item = [u8; 16]>,
+) -> Result<(), ExecutorRequestError> {
+    let handles = handles.collect::<Vec<_>>();
+    let unique = handles
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    if handles.is_empty() || handles.len() > 4096 || unique.len() != handles.len() {
+        return Err(ExecutorRequestError::InvalidPayload);
+    }
+    // The decoder also verifies each handle's token kind.
+    Ok(())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StageInsertsResponse {
+    pub handles: Vec<ExecutorRowHandle>,
+}
+
+impl StageInsertsResponse {
+    pub fn encode(&self) -> Result<Vec<u8>, ExecutorRequestError> {
+        if self.handles.is_empty() || self.handles.len() > 4096 {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        let mut payload = Vec::with_capacity(4 + self.handles.len() * 16);
+        payload.extend_from_slice(&1u16.to_be_bytes());
+        payload.extend_from_slice(&(self.handles.len() as u16).to_be_bytes());
+        for handle in &self.handles {
+            if handle.to_bytes()[0] != EXECUTOR_ROW_HANDLE_TOKEN_KIND {
+                return Err(ExecutorRequestError::InvalidPayload);
+            }
+            payload.extend_from_slice(&handle.to_bytes());
+        }
+        ensure_response_size(&payload)?;
+        Ok(payload)
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Self, ExecutorRequestError> {
+        if payload.len() < 4 || payload[..2] != 1u16.to_be_bytes() {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        let count = usize::from(u16::from_be_bytes([payload[2], payload[3]]));
+        if count == 0 || count > 4096 || payload.len() != 4 + count * 16 {
+            return Err(ExecutorRequestError::InvalidPayload);
+        }
+        let handles = payload[4..]
+            .chunks_exact(16)
+            .map(|bytes| {
+                let bytes: [u8; 16] = bytes.try_into().expect("chunk length is fixed");
+                ExecutorRowHandle::from_bytes(&bytes).ok_or(ExecutorRequestError::InvalidPayload)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        validate_unique_batch_handles(handles.iter().map(ExecutorRowHandle::to_bytes))?;
+        Ok(Self { handles })
+    }
+}
+
 fn encode_mutation_value(
     payload: &mut Vec<u8>,
     value: Option<&ScalarValue>,
@@ -2094,6 +2285,40 @@ fn dispatch_executor_request_inner(
         Operation::StageDelete => {
             let decoded = StageDeleteRequest::decode(&request.payload)?;
             connection.stage_delete(&decoded.handle)?;
+            MutationAcknowledgement.encode()
+        }
+        Operation::StageInserts => {
+            let decoded = StageInsertsRequest::decode(&request.payload)?;
+            let mut handles = Vec::with_capacity(decoded.rows.len());
+            for row in decoded.rows {
+                match connection.stage_insert(&row.relation, &row.values) {
+                    Ok(handle) => handles.push(handle),
+                    Err(error) => {
+                        let _ = connection.abort_invocation();
+                        return Err(error.into());
+                    }
+                }
+            }
+            StageInsertsResponse { handles }.encode()?
+        }
+        Operation::StageUpdates => {
+            let decoded = StageUpdatesRequest::decode(&request.payload)?;
+            for row in decoded.rows {
+                if let Err(error) = connection.stage_update(&row.handle, &row.patches) {
+                    let _ = connection.abort_invocation();
+                    return Err(error.into());
+                }
+            }
+            MutationAcknowledgement.encode()
+        }
+        Operation::StageDeletes => {
+            let decoded = StageDeletesRequest::decode(&request.payload)?;
+            for handle in decoded.handles {
+                if let Err(error) = connection.stage_delete(&handle) {
+                    let _ = connection.abort_invocation();
+                    return Err(error.into());
+                }
+            }
             MutationAcknowledgement.encode()
         }
         Operation::ExecutorCheckCancellation => {
