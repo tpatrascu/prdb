@@ -2593,6 +2593,19 @@ fn storage_manager_drop_table_removes_owned_catalog_and_rows()
         retention_deadline_us: 9_999,
         audit_event: create_audit,
     })?;
+    assert_eq!(
+        storage.collect_committed_table_population(created.table_id)?,
+        prdb_engine::statistics::StatisticsCollectionOutcome::Exact
+    );
+    let mut committed_population_key = b"statistics:committed-population:v1:".to_vec();
+    committed_population_key.extend_from_slice(&created.table_id);
+    assert!(
+        database
+            .begin_read()?
+            .open_table(schema::STATS)?
+            .get(committed_population_key.as_slice())?
+            .is_some()
+    );
     let table_grant = grant_write(grantee, created.table_id, 2, 1, created.table_id, actor);
     let grant_edge = dependency_write(grantee, created.table_id, 5);
     let mut advanced_grantee = principal_write_with_name(grantee, 1, 2, "table_drop_grantee");
@@ -2945,6 +2958,14 @@ fn storage_manager_drop_table_removes_owned_catalog_and_rows()
             .status,
         OutcomeStatus::Aborted
     );
+    assert!(
+        database
+            .begin_read()?
+            .open_table(schema::STATS)?
+            .get(committed_population_key.as_slice())?
+            .is_some(),
+        "an aborted DROP TABLE must preserve its population record"
+    );
     let last_row_key = row_writes[65_536].key;
     assert_eq!(
         commit_rows(
@@ -2995,6 +3016,14 @@ fn storage_manager_drop_table_removes_owned_catalog_and_rows()
         .drop_table(drop_invocation, actor, created.table_id, 9_999, drop_audit)
         .map_err(|error| format!("table drop failed: {error:?}"))?;
     assert_eq!(dropped.table_id, created.table_id);
+    assert!(
+        database
+            .begin_read()?
+            .open_table(schema::STATS)?
+            .get(committed_population_key.as_slice())?
+            .is_none(),
+        "DROP TABLE must remove its protected population record"
+    );
     assert!(matches!(
         stale_writer.commit(),
         Err(prdb_engine::transaction::TransactionError::Commit(

@@ -18,7 +18,7 @@ use crate::index_locator::IndexLocator;
 use crate::metadata::{EngineMetadata, Lifecycle};
 use crate::outcome::{InvocationOutcome, OutcomeStatus};
 use crate::row_record::RowRecord;
-use crate::schema::{AUDIT, CATALOG, ENGINE_META, INDEXES, OUTCOMES, ROW_INDEXES, ROWS};
+use crate::schema::{AUDIT, CATALOG, ENGINE_META, INDEXES, OUTCOMES, ROW_INDEXES, ROWS, STATS};
 use crate::tuple::{ColumnSchema, ScalarType, ScalarValue, decode_tuple, encode_tuple};
 use redb::{
     Database, ReadOnlyTable, ReadableDatabase, ReadableTable, ReadableTableMetadata,
@@ -5647,6 +5647,20 @@ fn commit_storage_changes_inner_unchecked(
             decode_catalog_record(&write.key, bytes)?;
         }
     }
+    let dropped_table_ids = catalog_writes
+        .iter()
+        .filter(|write| {
+            write.payload.is_none()
+                && write.key.len() == 19
+                && write.key[..2] == 5u16.to_be_bytes()
+                && write.key[2] == 1
+        })
+        .map(|write| {
+            write.key[3..19]
+                .try_into()
+                .map_err(|_| CommitError::InvalidCatalog)
+        })
+        .collect::<Result<Vec<[u8; 16]>, _>>()?;
     let mut unique_guards = HashSet::with_capacity(catalog_guards.len());
     for guard in catalog_guards {
         if !unique_guards.insert(guard.key.as_slice()) {
@@ -6855,6 +6869,17 @@ fn commit_storage_changes_inner_unchecked(
             table
                 .insert(&event_id[..], &payload[..])
                 .map_err(storage_error)?;
+        }
+    }
+    if !dropped_table_ids.is_empty() {
+        let mut table = transaction.open_table(STATS).map_err(storage_error)?;
+        for table_id in &dropped_table_ids {
+            let mut key = Vec::with_capacity(
+                crate::statistics::COMMITTED_POPULATION_KEY_PREFIX.len() + table_id.len(),
+            );
+            key.extend_from_slice(crate::statistics::COMMITTED_POPULATION_KEY_PREFIX);
+            key.extend_from_slice(table_id);
+            table.remove(key.as_slice()).map_err(storage_error)?;
         }
     }
 

@@ -444,3 +444,10 @@
 - Evidence: five confined 8×128 runs with 1,024 equivalent result rows measured median run-level p50 of 194.4 ms indexed and 287.6 ms hash while each run completed 192 operational reads and durable commits. The 4×128 high-fanout profile also favors indexed nested-loop. These are local measurements, not general cost proof.
 - Verification: optimizer-service tests and five focused delegated-cgroup timing runs passed. Locked workspace build, formatting, warning-denied Clippy, TinyCC SDK tests, sandbox fixture build, and the full serial delegated-cgroup workspace suite passed (383 library tests, 205 commit tests, 3 metadata-process tests, 79 transaction tests, all other targets; no ignored tests).
 - Limitation: this uses input population skew, not distinct-key, fanout, or output-cardinality statistics. It does not consume the protected committed population table and does not expand the 128-row estimate cap.
+
+## ST-6 follow-up: remove population records when dropping tables — verified
+
+- Contract: a committed `DROP TABLE` removes the table's protected committed-population record atomically with its catalog deletion; failed or aborted drops preserve the record.
+- Red/green evidence: the real-redb commit integration test first failed because the record remained after a successful table drop. It now checks the exact record exists before the drop, remains after an over-limit aborted drop, and is absent after the successful drop.
+- Implementation: the storage commit transaction detects deleted table catalog records and removes their statistics key before committing the same redb transaction.
+- Verification: the focused `storage_manager_drop_table_removes_owned_catalog_and_rows` regression passed. `cargo build --workspace --locked`, `cargo fmt --all -- --check`, warning-denied all-target Clippy, TinyCC `sandbox-query-fixture`, the cgroup preflight, and the full serial delegated-cgroup workspace suite passed; the suite ran 409 library tests, 206 commit tests, 3 metadata-process tests, 85 transaction tests, and all remaining targets with no ignored tests.
