@@ -1957,6 +1957,7 @@ static int32_t run_write_read_fixture(
          invocation->parameters[0] == 'h' || invocation->parameters[0] == 'a' ||
          invocation->parameters[0] == 'b' ||
          invocation->parameters[0] == 'n' ||
+         invocation->parameters[0] == 'j' || invocation->parameters[0] == 'k' ||
          invocation->parameters[0] == 'X' || invocation->parameters[0] == 'Y' ||
          invocation->parameters[0] == 'z')) {
         static const uint8_t benchmark_sql[] =
@@ -1967,7 +1968,9 @@ static int32_t run_write_read_fixture(
         static const uint8_t samples_finished[] =
             "JOIN_BENCHMARK_SAMPLES_FINISHED";
         const struct timespec load_settle_interval = {0, 100000000};
-        const uint32_t outer_rows = invocation->parameters[0] == 'n' ? 18
+        const uint32_t outer_rows = invocation->parameters[0] == 'n' ||
+                                            invocation->parameters[0] == 'j' ||
+                                            invocation->parameters[0] == 'k' ? 18
                                     : invocation->parameters[0] == 'Y' ||
                                             invocation->parameters[0] == 'z' ||
                                             invocation->parameters[0] == 'W' ||
@@ -1983,6 +1986,8 @@ static int32_t run_write_read_fixture(
         const uint32_t fanout = invocation->parameters[0] == 'a' ||
                                         invocation->parameters[0] == 'b'
                                     ? 4
+                                : invocation->parameters[0] == 'j' ||
+                                          invocation->parameters[0] == 'k' ? 4
                                 : invocation->parameters[0] == 'c' ? 4
                                 : invocation->parameters[0] == '2' ? 2
                                 : invocation->parameters[0] == '3' ? 3
@@ -2000,11 +2005,14 @@ static int32_t run_write_read_fixture(
         const uint32_t expected_join_rows = invocation->parameters[0] == 'h' ? 128
                                             : invocation->parameters[0] == 's' ? 16
                                             : invocation->parameters[0] == 'b' ? 69
+                                            : invocation->parameters[0] == 'k' ? 73
                                             : fanout != 0 ? outer_rows * fanout
                                             : invocation->parameters[0] == '8' ? 1024
                                                                               : 512;
         const int64_t expected_join_checksum = invocation->parameters[0] == 's' ? 0
                                                : invocation->parameters[0] == 'n' ? 612
+                                               : invocation->parameters[0] == 'j' ||
+                                                         invocation->parameters[0] == 'k' ? 2448
                                                : fanout != 0
                                                    ? (int64_t)((invocation->parameters[0] == 'Y' ||
                                                                         invocation->parameters[0] == 'z' ||
@@ -2093,7 +2101,7 @@ static int32_t run_write_read_fixture(
                     : PRDB_SDK_OPTIMIZER_RESULT_INVALID_RESPONSE;
             const uint8_t expected_plan_kind =
                 invocation->parameters[0] == '5' || invocation->parameters[0] == 'h' ||
-                        invocation->parameters[0] == 'b'
+                        invocation->parameters[0] == 'b' || invocation->parameters[0] == 'k'
                     ? PRDB_SDK_OPTIMIZER_PLAN_KIND_JOIN_SELECT
                     : PRDB_SDK_OPTIMIZER_PLAN_KIND_INDEX_NESTED_LOOP_JOIN;
             if (benchmark_plan_status != PRDB_SDK_OPTIMIZER_RESULT_OK ||

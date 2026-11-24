@@ -458,3 +458,9 @@
 - Five confined 18×126 runs selected indexed nested-loop and verified hash-equivalent output while 192 operational reads and commits overlapped. Median run-level p50 was 273.9 ms indexed (246.6–281.1 ms range) versus 305.3 ms hash (279.6–336.5 ms range).
 - Scope: one additional uniform fanout-one shape on this host. This does not establish the crossover for higher fanout, larger outers, or deployment hardware.
 - Verification: optimizer-service and process boundary tests, five confined profile runs, maintained TinyCC SDK tests and fixture build, locked workspace build, format check, warning-denied all-target Clippy, and full serial delegated-cgroup workspace suite passed (409 library, 206 commit, 3 metadata-process, 85 transaction tests; all remaining targets passed with no ignored tests).
+
+## ST-2 / OP-4 follow-up: verify the 18-row exact-cardinality cutoff — measured
+
+- Five fresh-database confined 18×126 runs at the inclusive 72-pair limit selected indexed nested-loop and matched hash output; median run-level p50 was 259.8 ms indexed (247.1–309.9 ms range) versus 307.9 ms hash (299.0–338.0 ms range).
+- Five runs at 73 pairs selected hash, returned all 73 pairs, and had a median run-level p50 of 348.5 ms (327.1–361.7 ms range). Both profiles overlapped 192 operational reads and commits in every run.
+- The exact boundary ran through optimizer, planner/storage estimates, confined SDK execution, and the gateway relay. Maintained TinyCC tests, fixture rebuild, locked workspace build, format check, warning-denied Clippy, and the full serial delegated-cgroup suite passed (409 library tests, 206 commit tests, 3 metadata-process tests, 85 transaction tests, and all remaining targets; no ignored tests). These measurements are host-local and do not establish general cost-based selection or target-host performance.
