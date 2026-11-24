@@ -157,6 +157,8 @@ Set `PRDB_TEST_INDEXED_JOIN_FANOUT17_4097_UNKNOWN_BENCHMARK_ONLY=1` to exercise 
 
 Set `PRDB_TEST_INDEXED_JOIN_FANOUT17_RATIO7_BENCHMARK_ONLY=1` to test the exact 17×119 boundary. Five fresh-database runs selected kind 17, verified 17 identical joined rows for indexed and hash execution, and overlapped 192 operational reads and commits each. Indexed median-of-run p50 was 259.6 ms (242.7–270.9 ms range); hash was 313.8 ms (296.1–334.0 ms range). This supports the ratio boundary for this fixture only.
 
+Set `PRDB_TEST_INDEXED_JOIN_SKEWED_FANOUT_BENCHMARK_ONLY=1` to profile a nonuniform 17×128 join: one outer key matches 16 indexed rows and the other 16 outer keys have no matches. The exact estimate is 16 pairs (under the four-pairs-per-outer threshold), so the optimizer selects kind 17; the confined executor checks all 16 rows and compares them with hash execution. Five fresh-database runs passed while each overlapped 192 operational reads and commits. The median of per-run p50 latencies was 257.8 ms indexed (247.8–334.4 ms range) and 299.1 ms hash (288.6–361.7 ms range). This broadens evidence to one hot-key distribution; it does not validate other skew shapes or establish a general cost model.
+
 The default acceptance continues to run its existing 30-second mixed-load workload. The benchmark-only mode has its own invocation scan budget and returns after validating the timing frames and durable commit.
 # Spill filesystem smoke probe
 

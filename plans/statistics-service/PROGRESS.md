@@ -1,5 +1,12 @@
 # Statistics Service Progress
 
+## ST-2 / OP-7 follow-up: profile skewed join fanout — measured
+
+- Contract: add a confined 17×128 join profile with one hot outer key matching 16 indexed rows and 16 unmatched outer keys. The real authorized pair estimate is 16, below the four-pairs-per-outer gate; kind 17 must preserve all result rows and equal the hash reference.
+- Evidence: five fresh-database delegated-cgroup runs passed. Every run selected kind 17, verified 16 identical rows against hash, and overlapped 192 operational reads and 192 commits. The median of per-run p50 latencies was 257.8 ms indexed (247.8–334.4 ms range) and 299.1 ms hash (288.6–361.7 ms range).
+- Scope: this checks one highly skewed key distribution and does not establish general cost-based selection or other hot-key/population shapes.
+- Verification: the focused confined run and four-run repeat passed. `cargo fmt --all -- --check`, locked workspace build, warning-denied all-target Clippy, maintained TinyCC SDK tests, sandbox fixture rebuild, and the complete serial delegated-cgroup workspace suite passed (407 library tests, 206 commit tests, 3 metadata-process tests, 83 transaction tests, all remaining targets, no ignored tests).
+
 ## ST-2 / OP-7 follow-up: extend exact join estimates to 4,096 rows — implemented slice
 
 - Contract: authorized join population probes and pair estimates now accept up to 4,096 rows per input. The estimator reads at most 4,097 row IDs per side, retains the 8 MiB combined decoded-row cap, 4 KiB encoded-key cap, eight-key-component limit, value-independent visibility and readable-key rules, and the shared planner request allowance. Populations beyond the requested bound remain `Unknown` without partial counts.

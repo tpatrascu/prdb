@@ -1952,6 +1952,7 @@ static int32_t run_write_read_fixture(
          invocation->parameters[0] == '4' || invocation->parameters[0] == '5' ||
          invocation->parameters[0] == 'W' || invocation->parameters[0] == 'E' ||
          invocation->parameters[0] == 'q' ||
+         invocation->parameters[0] == 's' ||
          invocation->parameters[0] == 'X' || invocation->parameters[0] == 'Y' ||
          invocation->parameters[0] == 'z')) {
         static const uint8_t benchmark_sql[] =
@@ -1966,7 +1967,8 @@ static int32_t run_write_read_fixture(
                                             invocation->parameters[0] == 'z' ||
                                             invocation->parameters[0] == 'W' ||
                                             invocation->parameters[0] == 'E' ||
-                                            invocation->parameters[0] == 'q'
+                                            invocation->parameters[0] == 'q' ||
+                                            invocation->parameters[0] == 's'
                                         ? 17
                                     : invocation->parameters[0] == 'X' ? 16
                                                                        : 9;
@@ -1982,10 +1984,12 @@ static int32_t run_write_read_fixture(
                                 : invocation->parameters[0] == 'X' ? 1
                                 : invocation->parameters[0] == '9' ? 1
                                                                   : 0;
-        const uint32_t expected_join_rows = fanout != 0 ? outer_rows * fanout
+        const uint32_t expected_join_rows = invocation->parameters[0] == 's' ? 16
+                                            : fanout != 0 ? outer_rows * fanout
                                             : invocation->parameters[0] == '8' ? 1024
                                                                               : 512;
-        const int64_t expected_join_checksum = fanout != 0
+        const int64_t expected_join_checksum = invocation->parameters[0] == 's' ? 0
+                                               : fanout != 0
                                                    ? (int64_t)((invocation->parameters[0] == 'Y' ||
                                                                         invocation->parameters[0] == 'z' ||
                                                                         invocation->parameters[0] == 'W' ||
