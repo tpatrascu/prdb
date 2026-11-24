@@ -1949,7 +1949,8 @@ static int32_t run_write_read_fixture(
         (invocation->parameters[0] == '6' || invocation->parameters[0] == '7' ||
          invocation->parameters[0] == '8' || invocation->parameters[0] == '9' ||
          invocation->parameters[0] == '4' || invocation->parameters[0] == '5' ||
-         invocation->parameters[0] == 'X' || invocation->parameters[0] == 'Y')) {
+         invocation->parameters[0] == 'X' || invocation->parameters[0] == 'Y' ||
+         invocation->parameters[0] == 'z')) {
         static const uint8_t benchmark_sql[] =
             "SELECT g.left_key, g.right_key, l.id, l.match_key "
             "FROM grouped_records AS g INNER JOIN linked_records AS l ON "
@@ -1958,12 +1959,15 @@ static int32_t run_write_read_fixture(
         static const uint8_t samples_finished[] =
             "JOIN_BENCHMARK_SAMPLES_FINISHED";
         const struct timespec load_settle_interval = {0, 100000000};
-        const uint32_t outer_rows = invocation->parameters[0] == 'Y' ? 17
+        const uint32_t outer_rows = invocation->parameters[0] == 'Y' ||
+                                            invocation->parameters[0] == 'z'
+                                        ? 17
                                     : invocation->parameters[0] == 'X' ? 16
                                                                        : 9;
         const uint32_t fanout = invocation->parameters[0] == '4' ? 4
                                 : invocation->parameters[0] == '5' ? 5
-                                : invocation->parameters[0] == 'Y' ? 1
+                                : invocation->parameters[0] == 'Y' ||
+                                          invocation->parameters[0] == 'z' ? 1
                                 : invocation->parameters[0] == 'X' ? 1
                                 : invocation->parameters[0] == '9' ? 1
                                                                   : 0;
@@ -1971,7 +1975,8 @@ static int32_t run_write_read_fixture(
                                             : invocation->parameters[0] == '8' ? 1024
                                                                               : 512;
         const int64_t expected_join_checksum = fanout != 0
-                                                   ? (int64_t)((invocation->parameters[0] == 'Y'
+                                                   ? (int64_t)((invocation->parameters[0] == 'Y' ||
+                                                                        invocation->parameters[0] == 'z'
                                                                     ? 544
                                                                 : invocation->parameters[0] == 'X'
                                                                     ? 480

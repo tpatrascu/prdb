@@ -149,6 +149,8 @@ Set `PRDB_TEST_INDEXED_JOIN_FANOUT16_BENCHMARK_ONLY=1` to profile 16 outer rows 
 
 Set `PRDB_TEST_INDEXED_JOIN_FANOUT17_BENCHMARK_ONLY=1` to profile 17 outer rows with one matching row each against a 128-row indexed inner relation. Five fresh-database runs selected kind 17, returned identical results for indexed and hash execution, and overlapped 192 operational reads and commits per run. Indexed median-of-run p50 was 257.3 ms (243.1–270.0 ms range), compared with 298.9 ms for hash (295.8–311.2 ms range). The optimizer admits this case when the opposite side is at least seven times larger; the measurement does not validate other fanouts or workload shapes.
 
+Set `PRDB_TEST_INDEXED_JOIN_FANOUT17_RATIO7_BENCHMARK_ONLY=1` to test the exact 17×119 boundary. Five fresh-database runs selected kind 17, verified 17 identical joined rows for indexed and hash execution, and overlapped 192 operational reads and commits each. Indexed median-of-run p50 was 259.6 ms (242.7–270.9 ms range); hash was 313.8 ms (296.1–334.0 ms range). This supports the ratio boundary for this fixture only.
+
 The default acceptance continues to run its existing 30-second mixed-load workload. The benchmark-only mode has its own invocation scan budget and returns after validating the timing frames and durable commit.
 # Spill filesystem smoke probe
 

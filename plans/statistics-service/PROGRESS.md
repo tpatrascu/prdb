@@ -1,5 +1,13 @@
 # Statistics Service Progress
 
+## ST-2 / OP-7 follow-up: validate the exact 17×119 skew boundary — measured
+
+- Contract: exercise the current 17-row outer / 7× indexed-side eligibility boundary through the full confined SQL path, including the authorized exact pair estimate, selected plan, indexed execution, hash reference result, durable outcome, and concurrent operational workload.
+- Acceptance: a new maintained benchmark mode seeds 17 outer rows and exactly 119 indexed rows with one match per outer row; it verifies 17 equivalent output rows from kind-17 indexed nested-loop and hash execution.
+- Evidence: five fresh-database delegated-cgroup runs each overlapped 192 operational reads and commits. Indexed run-level p50 median was 259.6 ms (242.7–270.9 ms range); hash median was 313.8 ms (296.1–334.0 ms range). This is local evidence for the exact boundary shape, not a deployment performance claim.
+- Validation: five exact-boundary confined runs passed, as did the default 42-second confined acceptance. The full serial delegated-cgroup workspace suite passed with 406 library tests, 206 commit tests, 3 metadata-process tests, 83 transaction tests, all other targets, and no ignored tests. Workspace build, format check, warning-denied all-target Clippy, TinyCC SDK tests, sandbox fixture, and release-profile verification passed. A first full-suite attempt caught a fixture parameter collision with the existing redacted-count branch; the benchmark now uses a distinct lowercase `z` marker, and both that default acceptance and the final full suite pass.
+- Remaining: generalized cost comparison, broader fanout/distribution profiles, populations above 1,024, global-statistics consumption, and target-host evidence remain open.
+
 ## ST-2 / OP-7 follow-up: extend the low-fanout boundary to 17 outer rows — measured
 
 - Contract: exact authorized pair counts may orient indexed nested-loop when the smaller outer side has 9–16 rows and the indexed side is at least eight times larger, or it has 17 rows and the indexed side is at least seven times larger, and output is at most four pairs per outer row. Unknown estimates and higher fanout keep the existing fallback/hash choices.
