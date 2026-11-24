@@ -1948,6 +1948,7 @@ static int32_t run_write_read_fixture(
     if (invocation->parameters_len == 1 && invocation->parameters != NULL &&
         (invocation->parameters[0] == '6' || invocation->parameters[0] == '7' ||
          invocation->parameters[0] == '8' || invocation->parameters[0] == '9' ||
+         invocation->parameters[0] == '2' || invocation->parameters[0] == '3' ||
          invocation->parameters[0] == '4' || invocation->parameters[0] == '5' ||
          invocation->parameters[0] == 'X' || invocation->parameters[0] == 'Y' ||
          invocation->parameters[0] == 'z')) {
@@ -1964,7 +1965,9 @@ static int32_t run_write_read_fixture(
                                         ? 17
                                     : invocation->parameters[0] == 'X' ? 16
                                                                        : 9;
-        const uint32_t fanout = invocation->parameters[0] == '4' ? 4
+        const uint32_t fanout = invocation->parameters[0] == '2' ? 2
+                                : invocation->parameters[0] == '3' ? 3
+                                : invocation->parameters[0] == '4' ? 4
                                 : invocation->parameters[0] == '5' ? 5
                                 : invocation->parameters[0] == 'Y' ||
                                           invocation->parameters[0] == 'z' ? 1

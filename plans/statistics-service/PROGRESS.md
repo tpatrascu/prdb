@@ -1,5 +1,12 @@
 # Statistics Service Progress
 
+## ST-2 / OP-7 follow-up: profile intermediate join fanouts two and three — measured
+
+- Contract: the maintained confined benchmark accepts 9×128 joins with two or three matches per outer row, asserts the exact pair estimate and kind-17 indexed plan, and compares against equivalent hash results under operational load.
+- Evidence: five fresh-database delegated-cgroup runs per fanout each overlapped 192 operational reads and commits. At fanout two, indexed median-of-run p50 was 182.7 ms (169.6–193.7 ms range), compared with 309.4 ms for hash (278.4–321.7 ms range). At fanout three, indexed was 181.5 ms (173.7–194.0 ms range), compared with 301.9 ms for hash (288.9–312.5 ms range). Together with prior fanout-one, four, and five evidence, all five tested integer fanouts now cover the current cutoff and its adjacent hash case.
+- Validation: ten confined runs passed, including plan-kind, result-equivalence, and operational-load assertions; the TinyCC sandbox query fixture rebuilt with its constrained `$ORIGIN` runpath.
+- Remaining: broader key distributions, outer/indexed population shapes, general cost comparison, populations above 2,048, global-statistics consumption, and target-host evidence remain open.
+
 ## ST-2 / OP-7 follow-up: extend exact join estimates to 2,048 rows — implemented
 
 - Contract: authorized join population probes and exact pair estimates now accept up to 2,048 rows per input. Candidate row reads remain bounded to 2,049 per population; pair estimation retains the 8 MiB combined decoded-row cap, 4 KiB per encoded key, value-independent visibility requirement, statically readable-key requirement, and shared estimate allowance. Results above the requested bound remain `Unknown` without partial counts.

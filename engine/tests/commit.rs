@@ -40536,6 +40536,10 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         std::env::var_os("PRDB_TEST_INDEXED_JOIN_FANOUT4_BENCHMARK_ONLY").is_some();
     let indexed_join_fanout_five_benchmark_only =
         std::env::var_os("PRDB_TEST_INDEXED_JOIN_FANOUT5_BENCHMARK_ONLY").is_some();
+    let indexed_join_fanout_two_benchmark_only =
+        std::env::var_os("PRDB_TEST_INDEXED_JOIN_FANOUT2_BENCHMARK_ONLY").is_some();
+    let indexed_join_fanout_three_benchmark_only =
+        std::env::var_os("PRDB_TEST_INDEXED_JOIN_FANOUT3_BENCHMARK_ONLY").is_some();
     let indexed_join_fanout_sixteen_benchmark_only =
         std::env::var_os("PRDB_TEST_INDEXED_JOIN_FANOUT16_BENCHMARK_ONLY").is_some();
     let indexed_join_fanout_seventeen_benchmark_only =
@@ -40546,6 +40550,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         std::env::var_os("PRDB_TEST_INDEXED_JOIN_FANOUT_BENCHMARK_ONLY").is_some()
             || indexed_join_fanout_four_benchmark_only
             || indexed_join_fanout_five_benchmark_only
+            || indexed_join_fanout_two_benchmark_only
+            || indexed_join_fanout_three_benchmark_only
             || indexed_join_fanout_sixteen_benchmark_only
             || indexed_join_fanout_seventeen_benchmark_only
             || indexed_join_fanout_seventeen_ratio7_benchmark_only;
@@ -40558,7 +40564,11 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
     } else {
         9
     };
-    let indexed_join_fanout: u16 = if indexed_join_fanout_four_benchmark_only {
+    let indexed_join_fanout: u16 = if indexed_join_fanout_two_benchmark_only {
+        2
+    } else if indexed_join_fanout_three_benchmark_only {
+        3
+    } else if indexed_join_fanout_four_benchmark_only {
         4
     } else if indexed_join_fanout_five_benchmark_only {
         5
@@ -40570,6 +40580,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             std::env::var_os("PRDB_TEST_INDEXED_JOIN_FANOUT_BENCHMARK_ONLY").is_some(),
             indexed_join_fanout_four_benchmark_only,
             indexed_join_fanout_five_benchmark_only,
+            indexed_join_fanout_two_benchmark_only,
+            indexed_join_fanout_three_benchmark_only,
             indexed_join_fanout_sixteen_benchmark_only,
             indexed_join_fanout_seventeen_benchmark_only,
             indexed_join_fanout_seventeen_ratio7_benchmark_only,
@@ -43070,6 +43082,10 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                 b'Y'
             } else if indexed_join_fanout_sixteen_benchmark_only {
                 b'X'
+            } else if indexed_join_fanout == 2 {
+                b'2'
+            } else if indexed_join_fanout == 3 {
+                b'3'
             } else if indexed_join_fanout == 4 {
                 b'4'
             } else if indexed_join_fanout == 5 {
