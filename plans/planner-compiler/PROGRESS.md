@@ -1,5 +1,12 @@
 # Optimizer Progress
 
+## OP-1 / ST-2 follow-up: profile concurrent optimizer estimate requests — measured
+
+- Harness: an opt-in profile starts eight independent `prdb-optimizer` binaries, each with its own invocation transaction and real planner IPC stream, then releases one indexed equality `SELECT` per process through a barrier. Every returned plan is checked for the fixture relation and filter. Five fresh-database profile runs each contained five synchronized eight-process batches (40 optimizer requests per run).
+- Evidence: across the five run-level samples, median-of-run request p50 was 24.689 ms and p95 was 28.098 ms. Median eight-request batch time was 44.414 ms, or 180.1 requests/s. Setup-to-completion p50 was 44.580 ms. The profile used a 2,052-row indexed INTEGER relation and ran inside a delegated user service.
+- Scope: concurrent optimizer and storage planner traffic is now measured. Processes share the test service cgroup and bypass supervisor START admission, so this does not cover the 64 operational plus 8 analytical admission limits, per-invocation cgroups, concurrent operational traffic, or target hardware. The profile excludes fixture setup from request latencies; setup-to-completion includes optimizer process launch and worker setup.
+- Verification: five profile invocations passed, each with 40 successful optimizer requests and exact plan checks; a final focused delegated-service run also passed after adding the failure-safe barrier release. The opt-in env switches are `PRDB_TEST_PROFILE_PLANNER_ESTIMATE_IPC=1` and `PRDB_TEST_PROFILE_OPTIMIZER_SATURATION=1`.
+
 ## OP-4 / ST-2 follow-up: include the isolated optimizer request path in the estimate profile — measured
 
 - Harness: the real `prdb-optimizer` executable receives a filtered SELECT over the seeded 2,052-row INTEGER table. Each sample starts a fresh optimizer process and invocation, verifies the exact bound predicate and authorized relation in the returned plan, and times the request/response after the process has spawned.

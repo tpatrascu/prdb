@@ -52227,6 +52227,8 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
     if std::env::var_os("PRDB_TEST_PROFILE_PLANNER_ESTIMATE_IPC").is_some() {
         const PROFILE_ROWS: usize = 2_052;
         const PROFILE_RUNS: usize = 11;
+        const CONCURRENT_OPTIMIZERS: usize = 8;
+        const SATURATION_RUNS: usize = 5;
         let mut seed_invocation_id = [0xd1; 16];
         seed_invocation_id[15] = 1;
         let mut seed = storage.begin_invocation(
@@ -52317,6 +52319,9 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
         let mut direct_estimate_times = Vec::with_capacity(PROFILE_RUNS);
         let mut estimate_roundtrips = Vec::with_capacity(PROFILE_RUNS);
         let mut optimizer_process_roundtrips = Vec::with_capacity(PROFILE_RUNS);
+        let mut saturated_optimizer_latencies = Vec::new();
+        let mut saturated_optimizer_batch_times = Vec::new();
+        let mut saturated_optimizer_total_times = Vec::new();
         for run_number in 0..PROFILE_RUNS {
             let mut direct_invocation_id = [0xd1; 16];
             direct_invocation_id[14] = 2;
@@ -52500,6 +52505,201 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             })?;
             process_transaction.abort()?;
         }
+        if std::env::var_os("PRDB_TEST_PROFILE_OPTIMIZER_SATURATION").is_some() {
+            struct ReleaseBarrierOnDrop {
+                barrier: Arc<Barrier>,
+                released: bool,
+            }
+            impl Drop for ReleaseBarrierOnDrop {
+                fn drop(&mut self) {
+                    if !self.released {
+                        self.barrier.wait();
+                    }
+                }
+            }
+            for run_number in 0..SATURATION_RUNS {
+                let all_started = std::time::Instant::now();
+                let barrier = Arc::new(Barrier::new(CONCURRENT_OPTIMIZERS + 1));
+                let storage_for_workers = storage.clone();
+                let table_id = table.table_id;
+                let (latencies, batch_time) = std::thread::scope(|scope| {
+                    let mut workers = Vec::with_capacity(CONCURRENT_OPTIMIZERS);
+                    for worker_number in 0..CONCURRENT_OPTIMIZERS {
+                        let worker_storage = storage_for_workers.clone();
+                        let worker_barrier = Arc::clone(&barrier);
+                        let request_payload = optimizer_request();
+                        workers.push(scope.spawn(move || -> Result<Duration, String> {
+                            let mut release_barrier = ReleaseBarrierOnDrop {
+                                barrier: Arc::clone(&worker_barrier),
+                                released: false,
+                            };
+                            let mut invocation_id = [0xe7; 16];
+                            invocation_id[14] = run_number as u8 + 1;
+                            invocation_id[15] = worker_number as u8 + 1;
+                            let mut transaction = worker_storage
+                                .begin_invocation(invocation_id, actor, 9_999, 1, 64)
+                                .map_err(|error| {
+                                    format!("begin saturation invocation: {error:?}")
+                                })?;
+                            let (optimizer_worker, mut optimizer_client) =
+                                std::os::unix::net::UnixStream::pair().map_err(|error| {
+                                    format!("optimizer saturation socket: {error}")
+                                })?;
+                            let (planner_worker, mut planner_storage) =
+                                std::os::unix::net::UnixStream::pair().map_err(|error| {
+                                    format!("planner saturation socket: {error}")
+                                })?;
+                            use std::os::fd::AsRawFd;
+                            use std::os::unix::process::CommandExt;
+                            use std::process::{Command, Stdio};
+                            let submission_fd = optimizer_worker.as_raw_fd();
+                            let planner_fd = planner_worker.as_raw_fd();
+                            let mut command = Command::new(env!("CARGO_BIN_EXE_prdb-optimizer"));
+                            command
+                                .arg("--submission-fd")
+                                .arg(submission_fd.to_string())
+                                .arg("--planner-fd")
+                                .arg(planner_fd.to_string())
+                                .stdin(Stdio::null())
+                                .stdout(Stdio::null())
+                                .stderr(Stdio::null());
+                            // SAFETY: the child callback touches only the two live Unix-stream
+                            // descriptors captured above before exec, clearing their close-on-exec
+                            // flag so this optimizer receives the intended channel endpoints.
+                            unsafe {
+                                command.pre_exec(move || {
+                                    for descriptor in [submission_fd, planner_fd] {
+                                        // SAFETY: fcntl operates on inherited descriptors in the child.
+                                        let flags = libc::fcntl(descriptor, libc::F_GETFD);
+                                        if flags < 0
+                                            || libc::fcntl(
+                                                descriptor,
+                                                libc::F_SETFD,
+                                                flags & !libc::FD_CLOEXEC,
+                                            ) < 0
+                                        {
+                                            return Err(std::io::Error::last_os_error());
+                                        }
+                                    }
+                                    Ok(())
+                                });
+                            }
+                            let mut optimizer = command
+                                .spawn()
+                                .map_err(|error| format!("spawn optimizer: {error}"))?;
+                            drop(optimizer_worker);
+                            drop(planner_worker);
+                            optimizer_client
+                                .set_read_timeout(Some(Duration::from_secs(10)))
+                                .map_err(|error| format!("set optimizer timeout: {error}"))?;
+                            let latency = std::thread::scope(|planner_scope| {
+                                let planner = planner_scope.spawn(|| {
+                                    serve_planner(&mut planner_storage, &mut transaction)
+                                });
+                                worker_barrier.wait();
+                                release_barrier.released = true;
+                                let started = std::time::Instant::now();
+                                prdb_engine::ipc::write_frame(
+                                    &mut optimizer_client,
+                                    &IpcFrame {
+                                        operation: IpcOperation::OptimizeSelect as u16,
+                                        request_id: 1,
+                                        payload: request_payload,
+                                    },
+                                )
+                                .map_err(|error| {
+                                    format!("write optimizer saturation request: {error}")
+                                })?;
+                                let response = prdb_engine::ipc::read_frame(&mut optimizer_client)
+                                    .map_err(|error| {
+                                        format!("read optimizer saturation response: {error}")
+                                    })?
+                                    .ok_or_else(|| {
+                                        "optimizer closed before saturation response".to_owned()
+                                    })?;
+                                let latency = started.elapsed();
+                                if response.operation != IpcOperation::OptimizeSelect as u16
+                                    || response.request_id != 1
+                                {
+                                    return Err(
+                                        "optimizer saturation response mismatched the request"
+                                            .to_owned(),
+                                    );
+                                }
+                                let response = OptimizerResponse::decode(&response.payload)
+                                    .map_err(|error| {
+                                        format!("decode optimizer saturation response: {error:?}")
+                                    })?;
+                                if response.status
+                                    != prdb_engine::optimizer_ipc::OptimizerStatus::Success
+                                {
+                                    return Err(format!(
+                                        "optimizer saturation failed: {:?}",
+                                        response.status
+                                    ));
+                                }
+                                let plan =
+                                    decode_plan_v1(response.plan.as_deref().ok_or_else(|| {
+                                        "optimizer omitted saturation plan".to_owned()
+                                    })?)
+                                    .map_err(|error| {
+                                        format!("decode saturation plan: {error:?}")
+                                    })?;
+                                if plan.relation.relation_id != table_id
+                                    || !plan
+                                        .nodes
+                                        .iter()
+                                        .any(|node| matches!(node, PlanNode::Filter(_)))
+                                {
+                                    return Err("optimizer saturation returned an unexpected plan"
+                                        .to_owned());
+                                }
+                                optimizer_client
+                                    .shutdown(Shutdown::Write)
+                                    .map_err(|error| {
+                                        format!("close optimizer saturation request: {error}")
+                                    })?;
+                                drop(optimizer_client);
+                                let status = optimizer
+                                    .wait()
+                                    .map_err(|error| format!("wait for optimizer: {error}"))?;
+                                if !status.success() {
+                                    return Err(format!(
+                                        "optimizer exited unsuccessfully: {status}"
+                                    ));
+                                }
+                                planner
+                                    .join()
+                                    .map_err(|_| "planner saturation thread panicked".to_owned())?
+                                    .map_err(|error| {
+                                        format!("planner saturation failed: {error:?}")
+                                    })?;
+                                Ok::<_, String>(latency)
+                            })?;
+                            transaction.abort().map_err(|error| {
+                                format!("abort saturation invocation: {error:?}")
+                            })?;
+                            Ok(latency)
+                        }));
+                    }
+                    let batch_started = std::time::Instant::now();
+                    barrier.wait();
+                    let mut latencies = Vec::with_capacity(CONCURRENT_OPTIMIZERS);
+                    for worker in workers {
+                        latencies.push(
+                            worker
+                                .join()
+                                .map_err(|_| "optimizer saturation worker panicked".to_owned())??,
+                        );
+                    }
+                    Ok::<_, String>((latencies, batch_started.elapsed()))
+                })
+                .map_err(|error| format!("optimizer saturation run failed: {error}"))?;
+                saturated_optimizer_latencies.extend(latencies);
+                saturated_optimizer_batch_times.push(batch_time);
+                saturated_optimizer_total_times.push(all_started.elapsed());
+            }
+        }
         describe_roundtrips.sort_unstable();
         direct_estimate_times.sort_unstable();
         estimate_roundtrips.sort_unstable();
@@ -52528,6 +52728,28 @@ fn planner_stream_estimate_allowance_falls_back_without_aborting_invocation()
             optimizer_process_median.as_secs_f64() * 1_000.0,
             optimizer_process_p95.as_secs_f64() * 1_000.0,
         );
+        if !saturated_optimizer_latencies.is_empty() {
+            saturated_optimizer_latencies.sort_unstable();
+            saturated_optimizer_batch_times.sort_unstable();
+            saturated_optimizer_total_times.sort_unstable();
+            let latency_p50 =
+                saturated_optimizer_latencies[saturated_optimizer_latencies.len() / 2];
+            let latency_p95 = saturated_optimizer_latencies
+                [((saturated_optimizer_latencies.len() - 1) * 95).div_ceil(100)];
+            let batch_p50 =
+                saturated_optimizer_batch_times[saturated_optimizer_batch_times.len() / 2];
+            let total_p50 =
+                saturated_optimizer_total_times[saturated_optimizer_total_times.len() / 2];
+            eprintln!(
+                "optimizer concurrency profile: processes={CONCURRENT_OPTIMIZERS}, runs={SATURATION_RUNS}, requests={}, request latency p50/p95={:.3}/{:.3} ms, request-batch p50={:.3} ms ({:.1} requests/s), setup-to-completion p50={:.3} ms",
+                saturated_optimizer_latencies.len(),
+                latency_p50.as_secs_f64() * 1_000.0,
+                latency_p95.as_secs_f64() * 1_000.0,
+                batch_p50.as_secs_f64() * 1_000.0,
+                CONCURRENT_OPTIMIZERS as f64 / batch_p50.as_secs_f64(),
+                total_p50.as_secs_f64() * 1_000.0,
+            );
+        }
         return Ok(());
     }
 

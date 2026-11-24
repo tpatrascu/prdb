@@ -1,5 +1,7 @@
 # Statistics Service Implementation Plan
 
+Concurrent estimate profile: five delegated-service runs each released eight real optimizer processes through a barrier for indexed equality estimates over 2,052 rows. Median-of-run request p50/p95 were 24.689/28.098 ms; the eight-request batch median was 44.414 ms (180.1 requests/s). This bypassed supervisor START admission and used a shared test-service cgroup; full configured admission, operational mixed load, per-invocation cgroups, and target-host evidence remain open. See [progress](PROGRESS.md) for the harness and verification details.
+
 ## Contract and Dependencies
 
 Implement [statistics](../../specs/statistics-service.md) as a trusted module within [storage](../storage-manager/README.md). Depend on [authorization](../authorization/README.md), [snapshots/overlays](../concurrency-mvcc/README.md), [dictionary validity](../data-dictionary/README.md) and planner-role [IPC](../ipc-protocol/README.md). A separate collector process and global statistics are not initial prerequisites.
