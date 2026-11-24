@@ -1,5 +1,12 @@
 # Statistics Service Progress
 
+## ST-2 / OP-7 follow-up: verify the inclusive 17-row fanout boundary — covered
+
+- Contract: for a 17-row outer input with an eligible indexed relation, the exact estimate may select indexed nested-loop at 68 pairs (four per outer row); 69 pairs must retain hash.
+- Regression: an optimizer-service test checks both sides of that exact decision edge with the 17×119 population ratio that admits the fanout rule. The existing real-redb and confined profiles separately establish estimate and execution behavior.
+- Scope: this pins the inclusive threshold in the planner decision; it adds no cost measurement or broader cost-model claim.
+- Validation: the focused optimizer-service test, workspace formatting check, and warning-denied engine Clippy check passed.
+
 ## ST-2 follow-up: verify join-estimate byte limits — covered
 
 - Contract: an authorized exact join estimate remains `Unknown` without partial counts when combined decoded row payload exceeds 8 MiB or an encoded join key exceeds 4 KiB.

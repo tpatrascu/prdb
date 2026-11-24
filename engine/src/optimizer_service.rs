@@ -1145,6 +1145,50 @@ mod tests {
     }
 
     #[test]
+    fn seventeen_row_join_fanout_limit_is_inclusive() {
+        let mut indexed_right = join_relation("rights", 0x41);
+        indexed_right.range_access_paths =
+            vec![crate::metadata_discovery::AuthorizedRangeAccessPath {
+                index_id: [0x71; 16],
+                column_ids: vec![[0x51; 16]],
+            }];
+
+        let at_limit = optimize_join_select_v1_with_relations_and_estimates_and_cardinality(
+            &filtered_join_select_request(),
+            Some(join_relation("lefts", 0x31)),
+            Some(indexed_right.clone()),
+            Some(17),
+            Some(119),
+            Some(68),
+        )
+        .unwrap();
+        assert!(
+            decode_join_select_plan_v1(&at_limit)
+                .unwrap()
+                .index_nested_loop
+                .is_some(),
+            "the inclusive four-pairs-per-outer limit must retain indexed nested-loop"
+        );
+
+        let above_limit = optimize_join_select_v1_with_relations_and_estimates_and_cardinality(
+            &filtered_join_select_request(),
+            Some(join_relation("lefts", 0x31)),
+            Some(indexed_right),
+            Some(17),
+            Some(119),
+            Some(69),
+        )
+        .unwrap();
+        assert!(
+            decode_join_select_plan_v1(&above_limit)
+                .unwrap()
+                .index_nested_loop
+                .is_none(),
+            "one pair above the inclusive fanout limit must retain hash join"
+        );
+    }
+
+    #[test]
     fn join_with_two_known_small_inputs_keeps_hash_join() {
         let mut indexed_left = join_relation("lefts", 0x31);
         indexed_left.range_access_paths =
