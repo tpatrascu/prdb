@@ -4,6 +4,26 @@
 
 #define SQL_EXEC_V8_MAX_SCAN_PAGES UINT32_C(121)
 #define SQL_EXEC_V8_JOIN_POLL_INTERVAL UINT32_C(2048)
+#define SQL_EXEC_V8_JOIN_KEY_STACK_BYTES                                      \
+    (2u * PRDB_SDK_SQL_JOIN_MAX_ROWS * sizeof(prdb_sdk_value_v1) +            \
+     PRDB_SDK_SQL_MAX_PROJECTION_COLUMNS * sizeof(prdb_sdk_value_v1))
+
+_Static_assert(SQL_EXEC_V8_JOIN_KEY_STACK_BYTES <= 20u * 1024u,
+               "v8 join key/projection arrays exceed their stack budget");
+
+typedef struct sql_exec_v8_pair_output {
+    const prdb_sdk_sql_join_materialized_row_v8 *left_rows;
+    const prdb_sdk_sql_join_materialized_row_v8 *right_rows;
+    const prdb_sdk_select_binding_v8 *binding;
+    const prdb_host_api_v2 *host;
+    prdb_sdk_sql_join_result_row_v8_fn on_row;
+    void *result_context;
+    prdb_sdk_value_v1 *projected_values;
+    uint32_t emitted_rows;
+    uint32_t limit;
+    int has_limit;
+    int32_t failure_status;
+} sql_exec_v8_pair_output;
 
 static int32_t fail_statement_v8(const prdb_host_api_v3 *host,
                                  int32_t status) {
@@ -12,6 +32,40 @@ static int32_t fail_statement_v8(const prdb_host_api_v3 *host,
                                       PRDB_QUERY_STATEMENT_FAILURE_SQL);
     }
     return status;
+}
+
+static int32_t emit_pair_v8(void *opaque,
+                            const prdb_sdk_sql_join_pair_v1 *pair) {
+    sql_exec_v8_pair_output *output = (sql_exec_v8_pair_output *)opaque;
+    if (output == NULL || pair == NULL) return 1;
+    if (output->has_limit && output->emitted_rows >= output->limit) return 0;
+    if (output->emitted_rows != 0 &&
+        output->emitted_rows % SQL_EXEC_V8_JOIN_POLL_INTERVAL == 0) {
+        int32_t cancelled = 0;
+        int32_t status = prdb_sdk_executor_check_cancelled_v1(
+            output->host, &cancelled);
+        if (status != PRDB_SDK_EXECUTOR_OK || cancelled) {
+            output->failure_status = PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR;
+            return 1;
+        }
+    }
+    for (uint32_t projection = 0;
+         projection < output->binding->projection_count; ++projection) {
+        const prdb_sdk_sql_join_projection_binding_v8 *projection_binding =
+            &output->binding->projections[projection];
+        output->projected_values[projection] =
+            projection_binding->relation_side == PRDB_SDK_SQL_V8_LEFT
+                ? output->left_rows[pair->left_row].projections[projection]
+                : output->right_rows[pair->right_row].projections[projection];
+    }
+    if (output->on_row(output->result_context, output->projected_values,
+                       output->binding->projection_count,
+                       output->binding) != PRDB_QUERY_CALLBACK_OK) {
+        output->failure_status = PRDB_SDK_SQL_EXEC_RESULT_ERROR;
+        return 1;
+    }
+    ++output->emitted_rows;
+    return 0;
 }
 
 static int same_relation_shape_v8(
@@ -240,7 +294,6 @@ int32_t prdb_sdk_sql_execute_inner_join_v8(
     prdb_sdk_executor_relation_v1 resolved_left = {0}, resolved_right = {0};
     prdb_sdk_value_v1 left_keys[PRDB_SDK_SQL_JOIN_MAX_ROWS] = {{0}};
     prdb_sdk_value_v1 right_keys[PRDB_SDK_SQL_JOIN_MAX_ROWS] = {{0}};
-    prdb_sdk_sql_join_pair_v1 pairs[PRDB_SDK_SQL_JOIN_MAX_PAIRS];
     prdb_sdk_value_v1 projected_values[PRDB_SDK_SQL_MAX_PROJECTION_COLUMNS];
     uint32_t left_row_count = 0, right_row_count = 0, pair_count = 0;
     uint32_t total_pages = 0;
@@ -389,16 +442,6 @@ int32_t prdb_sdk_sql_execute_inner_join_v8(
     for (uint32_t index = 0; index < right_row_count; ++index) {
         right_keys[index] = right_rows[index].join_key;
     }
-    status = prdb_sdk_sql_inner_join_pairs_v1(
-        left_keys, left_row_count,
-        binding.left_join_key.column.decimal_scale, right_keys,
-        right_row_count, binding.right_join_key.column.decimal_scale,
-        binding.left_join_key.column.type_code, pairs,
-        PRDB_SDK_SQL_JOIN_MAX_PAIRS, &pair_count);
-    if (status != PRDB_SDK_SQL_JOIN_OK) {
-        return fail_statement_v8(host_v3,
-                                 PRDB_SDK_SQL_EXEC_EVALUATION_ERROR);
-    }
     {
         int32_t cancelled = 0;
         status = prdb_sdk_executor_check_cancelled_v1(host, &cancelled);
@@ -407,34 +450,32 @@ int32_t prdb_sdk_sql_execute_inner_join_v8(
                                      PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
         }
     }
-    for (uint32_t pair_index = 0; pair_index < pair_count; ++pair_index) {
-        if (pair_index != 0 &&
-            pair_index % SQL_EXEC_V8_JOIN_POLL_INTERVAL == 0) {
-            int32_t cancelled = 0;
-            status = prdb_sdk_executor_check_cancelled_v1(host, &cancelled);
-            if (status != PRDB_SDK_EXECUTOR_OK || cancelled) {
-                return fail_statement_v8(host_v3,
-                                         PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
-            }
-        }
-        const prdb_sdk_sql_join_pair_v1 *pair = &pairs[pair_index];
-        for (uint32_t projection = 0;
-             projection < binding.projection_count; ++projection) {
-            const prdb_sdk_sql_join_projection_binding_v8 *projection_binding =
-                &binding.projections[projection];
-            projected_values[projection] =
-                projection_binding->relation_side == PRDB_SDK_SQL_V8_LEFT
-                    ? left_rows[pair->left_row].projections[projection]
-                    : right_rows[pair->right_row].projections[projection];
-        }
-        if (on_row(result_context, projected_values, binding.projection_count,
-                   &binding) != PRDB_QUERY_CALLBACK_OK) {
-            return fail_statement_v8(host_v3,
-                                     PRDB_SDK_SQL_EXEC_RESULT_ERROR);
-        }
-        if (statement.has_limit != 0 && pair_index + 1 >= statement.limit) {
-            break;
-        }
+    sql_exec_v8_pair_output pair_output = {
+        left_rows,
+        right_rows,
+        &binding,
+        host,
+        on_row,
+        result_context,
+        projected_values,
+        0,
+        statement.limit,
+        statement.has_limit != 0,
+        PRDB_SDK_SQL_EXEC_OK,
+    };
+    status = prdb_sdk_sql_inner_join_visit_v1(
+        left_keys, left_row_count,
+        binding.left_join_key.column.decimal_scale, right_keys,
+        right_row_count, binding.right_join_key.column.decimal_scale,
+        binding.left_join_key.column.type_code, emit_pair_v8, &pair_output,
+        &pair_count);
+    if (status == PRDB_SDK_SQL_JOIN_CALLBACK_ERROR &&
+        pair_output.failure_status != PRDB_SDK_SQL_EXEC_OK) {
+        return fail_statement_v8(host_v3, pair_output.failure_status);
+    }
+    if (status != PRDB_SDK_SQL_JOIN_OK) {
+        return fail_statement_v8(host_v3,
+                                 PRDB_SDK_SQL_EXEC_EVALUATION_ERROR);
     }
     return PRDB_SDK_SQL_EXEC_OK;
 }

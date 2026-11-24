@@ -886,3 +886,9 @@
 - Contract: the spill hash join tracks its record buffer and both 128-row input blocks against a 1,052,672-byte per-call ceiling, calculated from the 4,096-byte maximum record size.
 - Regression: the SDK spill-join fixture verifies that the shared accounting helper rejects an additional request after the workspace ceiling is reached. Existing skewed-block, cancellation, and broker-cleanup cases still pass.
 - Verification: `make -f engine/sdk/Makefile test` passed under the locked Nix development shell, and the pinned release profile validated 10 engine binaries plus one query fixture against the rebuilt TinyCC SDK. End-to-end operator-copy accounting, stack bounds, full delegated-cgroup validation, and target-hardware performance/memory profiles remain open.
+## OP-7 follow-up: stream v8 hash-join pairs — implemented slice
+
+- Contract: the additive SDK visitor preserves the pair primitive's stable left-major order and preflights all key validation and candidate comparisons before the first callback. Callback failure leaves the output pair count unchanged.
+- Implementation: the v8 runner projects and emits each visited pair directly, removing its 16,384-entry (128 KiB) local pair array. Its fixed key/projection arrays have a compile-time 20 KiB ceiling; this does not bound every stack frame or the whole executor.
+- Regression: the SDK fixture checks ordering, callback failure, no callback for redacted input, and all 16,384 pairs at the maximum input shape without an output pair array. Existing v8 execution fixture remains covered.
+- Verification: maintained TinyCC SDK tests and `sandbox-query-fixture` passed. Broader operator copy/stack accounting, end-to-end profiles, and target-hardware measurements remain open.

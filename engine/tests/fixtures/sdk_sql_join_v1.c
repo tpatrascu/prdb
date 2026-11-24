@@ -22,6 +22,46 @@ static prdb_sdk_value_v1 null_value(void) {
                                PRDB_SDK_VALUE_STATE_NULL, 0, NULL, 0};
 }
 
+typedef struct visit_expectation {
+    const prdb_sdk_sql_join_pair_v1 *expected;
+    uint32_t expected_count;
+    uint32_t visited;
+    uint32_t stop_after;
+    int valid;
+} visit_expectation;
+
+static int32_t check_pair_visit(void *opaque,
+                                const prdb_sdk_sql_join_pair_v1 *pair) {
+    visit_expectation *expectation = (visit_expectation *)opaque;
+    if (expectation == NULL || pair == NULL ||
+        expectation->visited >= expectation->expected_count ||
+        pair->left_row != expectation->expected[expectation->visited].left_row ||
+        pair->right_row != expectation->expected[expectation->visited].right_row) {
+        if (expectation != NULL) expectation->valid = 0;
+        return 1;
+    }
+    ++expectation->visited;
+    return expectation->stop_after != 0 &&
+                   expectation->visited == expectation->stop_after
+               ? 1
+               : 0;
+}
+
+static int32_t check_maximum_pair_visit(
+    void *opaque, const prdb_sdk_sql_join_pair_v1 *pair) {
+    visit_expectation *expectation = (visit_expectation *)opaque;
+    if (expectation == NULL || pair == NULL) return 1;
+    uint32_t expected_left = expectation->visited / PRDB_SDK_SQL_JOIN_MAX_ROWS;
+    uint32_t expected_right = expectation->visited % PRDB_SDK_SQL_JOIN_MAX_ROWS;
+    if (expectation->visited >= PRDB_SDK_SQL_JOIN_MAX_PAIRS ||
+        pair->left_row != expected_left || pair->right_row != expected_right) {
+        if (expectation != NULL) expectation->valid = 0;
+        return 1;
+    }
+    ++expectation->visited;
+    return 0;
+}
+
 int main(void) {
     uint8_t left_bytes[4][4];
     uint8_t right_bytes[4][4];
@@ -43,6 +83,25 @@ int main(void) {
     assert(pairs[2].left_row == 1 && pairs[2].right_row == 3);
     assert(pairs[3].left_row == 3 && pairs[3].right_row == 0);
     assert(pairs[4].left_row == 3 && pairs[4].right_row == 3);
+
+    {
+        uint32_t pair_count = 777;
+        visit_expectation expectation = {pairs, 5, 0, 0, 1};
+        assert(prdb_sdk_sql_inner_join_visit_v1(
+                   left, 4, 0, right, 4, 0, PRDB_SDK_VALUE_TYPE_INTEGER,
+                   check_pair_visit, &expectation, &pair_count) ==
+               PRDB_SDK_SQL_JOIN_OK);
+        assert(expectation.valid && expectation.visited == 5 && pair_count == 5);
+
+        expectation.visited = 0;
+        expectation.stop_after = 2;
+        pair_count = 777;
+        assert(prdb_sdk_sql_inner_join_visit_v1(
+                   left, 4, 0, right, 4, 0, PRDB_SDK_VALUE_TYPE_INTEGER,
+                   check_pair_visit, &expectation, &pair_count) ==
+               PRDB_SDK_SQL_JOIN_CALLBACK_ERROR);
+        assert(expectation.valid && expectation.visited == 2 && pair_count == 777);
+    }
 
     {
         prdb_sdk_sql_join_pair_v1 unchanged[4] = {
@@ -84,6 +143,21 @@ int main(void) {
                PRDB_SDK_SQL_JOIN_OUTPUT_LIMIT_EXCEEDED);
         assert(unchanged_count == 49 && unchanged[0].left_row == 41 &&
                unchanged[3].right_row == 48);
+
+        {
+            visit_expectation no_callback = {pairs, 5, 0, 0, 1};
+            invalid_right[3] = (prdb_sdk_value_v1){
+                sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
+                PRDB_SDK_VALUE_STATE_REDACTED, 0, NULL, 0};
+            unchanged_count = 51;
+            assert(prdb_sdk_sql_inner_join_visit_v1(
+                       left, 4, 0, invalid_right, 4, 0,
+                       PRDB_SDK_VALUE_TYPE_INTEGER, check_pair_visit,
+                       &no_callback, &unchanged_count) ==
+                   PRDB_SDK_SQL_EVAL_REDACTED_INPUT);
+            assert(no_callback.valid && no_callback.visited == 0 &&
+                   unchanged_count == 51);
+        }
     }
 
     {
@@ -104,22 +178,20 @@ int main(void) {
         prdb_sdk_value_v1 repeated = integer_value(repeated_bytes, 7);
         prdb_sdk_value_v1 left_max[PRDB_SDK_SQL_JOIN_MAX_ROWS];
         prdb_sdk_value_v1 right_max[PRDB_SDK_SQL_JOIN_MAX_ROWS];
-        prdb_sdk_sql_join_pair_v1 all_pairs[PRDB_SDK_SQL_JOIN_MAX_PAIRS];
         uint32_t all_pair_count = 0;
+        visit_expectation expectation = {NULL, 0, 0, 0, 1};
         for (uint32_t index = 0; index < PRDB_SDK_SQL_JOIN_MAX_ROWS; ++index) {
             left_max[index] = repeated;
             right_max[index] = repeated;
         }
-        assert(prdb_sdk_sql_inner_join_pairs_v1(
+        assert(prdb_sdk_sql_inner_join_visit_v1(
                    left_max, PRDB_SDK_SQL_JOIN_MAX_ROWS, 0, right_max,
                    PRDB_SDK_SQL_JOIN_MAX_ROWS, 0,
-                   PRDB_SDK_VALUE_TYPE_INTEGER, all_pairs,
-                   PRDB_SDK_SQL_JOIN_MAX_PAIRS,
-                   &all_pair_count) == PRDB_SDK_SQL_JOIN_OK);
+                   PRDB_SDK_VALUE_TYPE_INTEGER, check_maximum_pair_visit,
+                   &expectation, &all_pair_count) == PRDB_SDK_SQL_JOIN_OK);
+        assert(expectation.valid &&
+               expectation.visited == PRDB_SDK_SQL_JOIN_MAX_PAIRS);
         assert(all_pair_count == PRDB_SDK_SQL_JOIN_MAX_PAIRS);
-        assert(all_pairs[0].left_row == 0 && all_pairs[0].right_row == 0);
-        assert(all_pairs[PRDB_SDK_SQL_JOIN_MAX_PAIRS - 1].left_row == 127 &&
-               all_pairs[PRDB_SDK_SQL_JOIN_MAX_PAIRS - 1].right_row == 127);
     }
 
     {
