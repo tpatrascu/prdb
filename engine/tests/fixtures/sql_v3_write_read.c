@@ -1953,6 +1953,7 @@ static int32_t run_write_read_fixture(
          invocation->parameters[0] == 'W' || invocation->parameters[0] == 'E' ||
          invocation->parameters[0] == 'q' ||
          invocation->parameters[0] == 's' ||
+         invocation->parameters[0] == 'h' ||
          invocation->parameters[0] == 'X' || invocation->parameters[0] == 'Y' ||
          invocation->parameters[0] == 'z')) {
         static const uint8_t benchmark_sql[] =
@@ -1968,7 +1969,8 @@ static int32_t run_write_read_fixture(
                                             invocation->parameters[0] == 'W' ||
                                             invocation->parameters[0] == 'E' ||
                                             invocation->parameters[0] == 'q' ||
-                                            invocation->parameters[0] == 's'
+                                            invocation->parameters[0] == 's' ||
+                                            invocation->parameters[0] == 'h'
                                         ? 17
                                     : invocation->parameters[0] == 'X' ? 16
                                                                        : 9;
@@ -1984,7 +1986,8 @@ static int32_t run_write_read_fixture(
                                 : invocation->parameters[0] == 'X' ? 1
                                 : invocation->parameters[0] == '9' ? 1
                                                                   : 0;
-        const uint32_t expected_join_rows = invocation->parameters[0] == 's' ? 16
+        const uint32_t expected_join_rows = invocation->parameters[0] == 'h' ? 128
+                                            : invocation->parameters[0] == 's' ? 16
                                             : fanout != 0 ? outer_rows * fanout
                                             : invocation->parameters[0] == '8' ? 1024
                                                                               : 512;
@@ -2074,7 +2077,7 @@ static int32_t run_write_read_fixture(
                           sizeof(benchmark_plan))
                     : PRDB_SDK_OPTIMIZER_RESULT_INVALID_RESPONSE;
             const uint8_t expected_plan_kind =
-                invocation->parameters[0] == '5'
+                invocation->parameters[0] == '5' || invocation->parameters[0] == 'h'
                     ? PRDB_SDK_OPTIMIZER_PLAN_KIND_JOIN_SELECT
                     : PRDB_SDK_OPTIMIZER_PLAN_KIND_INDEX_NESTED_LOOP_JOIN;
             if (benchmark_plan_status != PRDB_SDK_OPTIMIZER_RESULT_OK ||

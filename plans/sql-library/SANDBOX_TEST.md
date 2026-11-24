@@ -159,6 +159,8 @@ Set `PRDB_TEST_INDEXED_JOIN_FANOUT17_RATIO7_BENCHMARK_ONLY=1` to test the exact 
 
 Set `PRDB_TEST_INDEXED_JOIN_SKEWED_FANOUT_BENCHMARK_ONLY=1` to profile a nonuniform 17×128 join: one outer key matches 16 indexed rows and the other 16 outer keys have no matches. The exact estimate is 16 pairs (under the four-pairs-per-outer threshold), so the optimizer selects kind 17; the confined executor checks all 16 rows and compares them with hash execution. Five fresh-database runs passed while each overlapped 192 operational reads and commits. The median of per-run p50 latencies was 257.8 ms indexed (247.8–334.4 ms range) and 299.1 ms hash (288.6–361.7 ms range). This broadens evidence to one hot-key distribution; it does not validate other skew shapes or establish a general cost model.
 
+Set `PRDB_TEST_INDEXED_JOIN_SKEWED_HIGH_FANOUT_BENCHMARK_ONLY=1` for the complementary nonuniform 17×128 case: one outer key matches all 128 indexed rows and the other 16 outer keys have no matches. Its exact 128-pair estimate exceeds four pairs per outer row, so all five fresh-database runs selected kind-4 hash; each run verified all 128 result rows and overlapped 192 operational reads and commits. The median of per-run p50 hash latencies was 341.9 ms (340.7–363.2 ms range). This checks the high side of the cutoff for one hot-key distribution, not other skew shapes or a general cost model.
+
 The default acceptance continues to run its existing 30-second mixed-load workload. The benchmark-only mode has its own invocation scan budget and returns after validating the timing frames and durable commit.
 # Spill filesystem smoke probe
 

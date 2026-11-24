@@ -40554,6 +40554,8 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         std::env::var_os("PRDB_TEST_INDEXED_JOIN_FANOUT17_4097_UNKNOWN_BENCHMARK_ONLY").is_some();
     let indexed_join_skewed_fanout_benchmark_only =
         std::env::var_os("PRDB_TEST_INDEXED_JOIN_SKEWED_FANOUT_BENCHMARK_ONLY").is_some();
+    let indexed_join_skewed_high_fanout_benchmark_only =
+        std::env::var_os("PRDB_TEST_INDEXED_JOIN_SKEWED_HIGH_FANOUT_BENCHMARK_ONLY").is_some();
     let indexed_join_fanout_benchmark_only =
         std::env::var_os("PRDB_TEST_INDEXED_JOIN_FANOUT_BENCHMARK_ONLY").is_some()
             || indexed_join_fanout_four_benchmark_only
@@ -40566,13 +40568,15 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             || indexed_join_fanout_seventeen_large_inner_benchmark_only
             || indexed_join_fanout_seventeen_cap_inner_benchmark_only
             || indexed_join_fanout_seventeen_over_cap_benchmark_only
-            || indexed_join_skewed_fanout_benchmark_only;
+            || indexed_join_skewed_fanout_benchmark_only
+            || indexed_join_skewed_high_fanout_benchmark_only;
     let indexed_join_fanout_outer_rows: u16 = if indexed_join_fanout_seventeen_benchmark_only
         || indexed_join_fanout_seventeen_ratio7_benchmark_only
         || indexed_join_fanout_seventeen_large_inner_benchmark_only
         || indexed_join_fanout_seventeen_cap_inner_benchmark_only
         || indexed_join_fanout_seventeen_over_cap_benchmark_only
         || indexed_join_skewed_fanout_benchmark_only
+        || indexed_join_skewed_high_fanout_benchmark_only
     {
         17
     } else if indexed_join_fanout_sixteen_benchmark_only {
@@ -40605,6 +40609,7 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             indexed_join_fanout_seventeen_cap_inner_benchmark_only,
             indexed_join_fanout_seventeen_over_cap_benchmark_only,
             indexed_join_skewed_fanout_benchmark_only,
+            indexed_join_skewed_high_fanout_benchmark_only,
         ]
         .into_iter()
         .filter(|enabled| *enabled)
@@ -41501,7 +41506,15 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             nullable: true,
         },
     ];
-    let joined_seed_rows = if indexed_join_skewed_fanout_benchmark_only {
+    let joined_seed_rows = if indexed_join_skewed_high_fanout_benchmark_only {
+        (0..128u16)
+            .map(|index| {
+                let mut row_id = [0; 16];
+                row_id[14..].copy_from_slice(&(index + 1).to_be_bytes());
+                (row_id, 0, 0)
+            })
+            .collect::<Vec<_>>()
+    } else if indexed_join_skewed_fanout_benchmark_only {
         (0..128u16)
             .map(|index| {
                 let key = if index < 16 {
@@ -42883,7 +42896,9 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             &joined_table.column_ids[..2],
             prdb_engine::statistics::MAX_JOIN_ESTIMATE_ROWS,
         )?;
-    let expected_join_pairs = if indexed_join_skewed_fanout_benchmark_only {
+    let expected_join_pairs = if indexed_join_skewed_high_fanout_benchmark_only {
+        128
+    } else if indexed_join_skewed_fanout_benchmark_only {
         16
     } else if indexed_join_fanout_benchmark_only {
         u64::from(indexed_join_fanout_outer_rows * indexed_join_fanout)
@@ -43130,7 +43145,9 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
         ordered_client.authenticate(&storage, token_id, &secret)?;
         let ordered_owner = ordered_client.staging_owner()?;
         let ordered_parameter = [if indexed_join_fanout_benchmark_only {
-            if indexed_join_skewed_fanout_benchmark_only {
+            if indexed_join_skewed_high_fanout_benchmark_only {
+                b'h'
+            } else if indexed_join_skewed_fanout_benchmark_only {
                 b's'
             } else if indexed_join_fanout_seventeen_ratio7_benchmark_only {
                 b'z'
@@ -43700,12 +43717,13 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
                     }
                 }
             }
-            let expected_indexed_samples =
-                if indexed_join_fanout_benchmark_only && indexed_join_fanout == 5 {
-                    0
-                } else {
-                    2
-                };
+            let expected_indexed_samples = if indexed_join_skewed_high_fanout_benchmark_only
+                || (indexed_join_fanout_benchmark_only && indexed_join_fanout == 5)
+            {
+                0
+            } else {
+                2
+            };
             let expected_hash_samples = if indexed_join_fanout_seventeen_large_inner_benchmark_only
                 || indexed_join_fanout_seventeen_cap_inner_benchmark_only
                 || indexed_join_fanout_seventeen_over_cap_benchmark_only
@@ -43718,8 +43736,10 @@ fn sandboxed_v3_sql_dml_sequence_is_visible_and_commits() -> Result<(), Box<dyn 
             };
             assert_eq!(indexed_samples.len(), expected_indexed_samples);
             assert_eq!(hash_samples.len(), expected_hash_samples);
-            let profile = if indexed_join_skewed_fanout_benchmark_only {
-                "skewed fanout"
+            let profile = if indexed_join_skewed_high_fanout_benchmark_only {
+                "high skewed fanout"
+            } else if indexed_join_skewed_fanout_benchmark_only {
+                "low skewed fanout"
             } else {
                 "uniform fanout"
             };

@@ -1,5 +1,12 @@
 # Statistics Service Progress
 
+## ST-2 / OP-7 follow-up: verify hash fallback for hot-key fanout above threshold — measured
+
+- Contract: complement the 16-match hot-key case with a 17×128 join where one outer key matches all 128 indexed rows and the other 16 are unmatched. The exact 128-pair estimate exceeds four pairs per outer row; the optimizer must retain kind-4 hash and preserve the full result.
+- Evidence: five fresh-database delegated-cgroup runs selected hash, verified the 128 matching rows, and overlapped 192 operational reads and 192 commits per run. Median of per-run p50 hash latency was 341.9 ms (340.7–363.2 ms range).
+- Scope: the pair estimate is skewed to one hot key; this verifies the bounded threshold's high side for one input shape only.
+- Verification: the focused confined run and four-run repeat passed. `cargo fmt --all -- --check`, locked workspace build, warning-denied all-target Clippy, maintained TinyCC SDK tests, sandbox fixture rebuild, and the complete serial delegated-cgroup workspace suite passed (407 library tests, 206 commit tests, 3 metadata-process tests, 83 transaction tests, all remaining targets, no ignored tests).
+
 ## ST-2 / OP-7 follow-up: profile skewed join fanout — measured
 
 - Contract: add a confined 17×128 join profile with one hot outer key matching 16 indexed rows and 16 unmatched outer keys. The real authorized pair estimate is 16, below the four-pairs-per-outer gate; kind 17 must preserve all result rows and equal the hash reference.
