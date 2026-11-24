@@ -52,7 +52,7 @@ pub const SMALL_POPULATION_SCAN_ROWS: u64 = 4;
 const SKEWED_JOIN_OUTER_MAX_ROWS: u64 = 8;
 const SKEWED_JOIN_INPUT_RATIO: u64 = 16;
 // The bounded SQL hash path materializes at most 128 rows from either input.
-const BOUNDED_HASH_JOIN_MAX_ROWS_PER_INPUT: u64 = 128;
+pub(crate) const BOUNDED_HASH_JOIN_MAX_ROWS_PER_INPUT: u64 = 128;
 // These limits match the indexed SDK runner's outer and pair capacities.
 const INDEXED_JOIN_MAX_OUTER_ROWS: u64 = 128;
 const INDEXED_JOIN_MAX_OUTPUT_PAIRS: u64 = 16_384;

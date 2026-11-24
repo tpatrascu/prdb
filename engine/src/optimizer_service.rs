@@ -1229,13 +1229,18 @@ mod tests {
                 Some(outer_rows * 4 + 1),
             )
             .unwrap();
-            assert!(
-                decode_join_select_plan_v1(&above_limit)
-                    .unwrap()
-                    .index_nested_loop
-                    .is_none(),
-                "outer_rows={outer_rows} must keep hash one pair above the fanout limit"
-            );
+            let above_limit_plan = decode_join_select_plan_v1(&above_limit).unwrap();
+            if indexed_rows > crate::optimizer_plan::BOUNDED_HASH_JOIN_MAX_ROWS_PER_INPUT {
+                assert!(
+                    above_limit_plan.index_nested_loop.is_some(),
+                    "outer_rows={outer_rows} must keep an executable indexed path when hash exceeds its input bound"
+                );
+            } else {
+                assert!(
+                    above_limit_plan.index_nested_loop.is_none(),
+                    "outer_rows={outer_rows} must keep hash one pair above the fanout limit when hash is executable"
+                );
+            }
         }
     }
 
