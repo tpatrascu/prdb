@@ -67,7 +67,30 @@ SDK_SQL_SPILL_JOIN_OBJECT := $(BUILD_DIR)/sql_spill_join_v1.o
 SDK_SCOPE_OBJECT := $(BUILD_DIR)/scope_v1.o
 SDK_OPTIMIZER_OBJECT := $(BUILD_DIR)/optimizer_v1.o
 SDK_OPTIMIZER_PLAN_OBJECT := $(BUILD_DIR)/optimizer_plan_v1.o
-SDK_OBJECTS := $(SDK_VALUE_OBJECT) $(SDK_BATCH_OBJECT) $(SDK_OWNED_BATCH_OBJECT) $(SDK_SQL_OBJECT) $(SDK_SQL_ORDER_OBJECT) $(SDK_SQL_GROUP_OBJECT) $(SDK_SQL_JOIN_OBJECT) $(SDK_SQL_JOIN_V2_OBJECT) $(SDK_PLANNER_OBJECT) $(SDK_EXECUTOR_OBJECT) $(SDK_SQL_EXEC_OBJECT) $(SDK_SQL_DISPATCH_OBJECT) $(SDK_SQL_BATCH_OBJECT) $(SDK_SQL_EXEC_V4_OBJECT) $(SDK_SQL_EXEC_V5_OBJECT) $(SDK_SQL_EXEC_V6_OBJECT) $(SDK_SQL_EXEC_V7_OBJECT) $(SDK_SQL_EXEC_V8_OBJECT) $(SDK_SQL_EXEC_V16_OBJECT) $(SDK_SQL_EXEC_V19_OBJECT) $(SDK_SQL_EXEC_V25_OBJECT) $(SDK_SQL_RESULT_OBJECT) $(SDK_MANIFEST_OBJECT) $(SDK_SPILL_OBJECT) $(SDK_SQL_SPILL_SORT_OBJECT) $(SDK_SQL_SPILL_GROUP_OBJECT) $(SDK_SQL_SPILL_JOIN_OBJECT) $(SDK_SCOPE_OBJECT) $(SDK_OPTIMIZER_OBJECT) $(SDK_OPTIMIZER_PLAN_OBJECT)
+SDK_SQL_DML_SOURCE := engine/sdk/sql_dml_v1.c
+SDK_SQL_EVAL_SOURCE := engine/sdk/sql_eval_v1.c
+SDK_SQL_SELECT_GROUP_SOURCE := engine/sdk/sql_select_group_v1.c
+SDK_SQL_SELECT_COMPOSITE_SOURCE := engine/sdk/sql_select_composite_v1.c
+SDK_SQL_SELECT_JOIN_SOURCE := engine/sdk/sql_select_join_v1.c
+SDK_SQL_SELECT_HAVING_SOURCE := engine/sdk/sql_select_having_v1.c
+SDK_OPTIMIZER_PLAN_CODEC_SOURCE := engine/sdk/optimizer_plan_codec_v1.c
+SDK_OPTIMIZER_PLAN_DECODE_SOURCE := engine/sdk/optimizer_plan_decode_v1.c
+SDK_OPTIMIZER_PLAN_MATCH_SOURCE := engine/sdk/optimizer_plan_match_v1.c
+SDK_OPTIMIZER_PLAN_SCAN_SOURCE := engine/sdk/optimizer_plan_scan_v1.c
+SDK_OPTIMIZER_PLAN_EXEC_SOURCE := engine/sdk/optimizer_plan_exec_v1.c
+SDK_SQL_SOURCES := $(SDK_SQL_SOURCE) $(SDK_SQL_DML_SOURCE) $(SDK_SQL_EVAL_SOURCE) $(SDK_SQL_SELECT_GROUP_SOURCE) $(SDK_SQL_SELECT_COMPOSITE_SOURCE) $(SDK_SQL_SELECT_JOIN_SOURCE) $(SDK_SQL_SELECT_HAVING_SOURCE)
+SDK_SQL_DML_OBJECT := $(BUILD_DIR)/sql_dml_v1.o
+SDK_SQL_EVAL_OBJECT := $(BUILD_DIR)/sql_eval_v1.o
+SDK_SQL_SELECT_GROUP_OBJECT := $(BUILD_DIR)/sql_select_group_v1.o
+SDK_SQL_SELECT_COMPOSITE_OBJECT := $(BUILD_DIR)/sql_select_composite_v1.o
+SDK_SQL_SELECT_JOIN_OBJECT := $(BUILD_DIR)/sql_select_join_v1.o
+SDK_SQL_SELECT_HAVING_OBJECT := $(BUILD_DIR)/sql_select_having_v1.o
+SDK_OPTIMIZER_PLAN_CODEC_OBJECT := $(BUILD_DIR)/optimizer_plan_codec_v1.o
+SDK_OPTIMIZER_PLAN_DECODE_OBJECT := $(BUILD_DIR)/optimizer_plan_decode_v1.o
+SDK_OPTIMIZER_PLAN_MATCH_OBJECT := $(BUILD_DIR)/optimizer_plan_match_v1.o
+SDK_OPTIMIZER_PLAN_SCAN_OBJECT := $(BUILD_DIR)/optimizer_plan_scan_v1.o
+SDK_OPTIMIZER_PLAN_EXEC_OBJECT := $(BUILD_DIR)/optimizer_plan_exec_v1.o
+SDK_OBJECTS := $(SDK_VALUE_OBJECT) $(SDK_BATCH_OBJECT) $(SDK_OWNED_BATCH_OBJECT) $(SDK_SQL_OBJECT) $(SDK_SQL_ORDER_OBJECT) $(SDK_SQL_GROUP_OBJECT) $(SDK_SQL_JOIN_OBJECT) $(SDK_SQL_JOIN_V2_OBJECT) $(SDK_PLANNER_OBJECT) $(SDK_EXECUTOR_OBJECT) $(SDK_SQL_EXEC_OBJECT) $(SDK_SQL_DISPATCH_OBJECT) $(SDK_SQL_BATCH_OBJECT) $(SDK_SQL_EXEC_V4_OBJECT) $(SDK_SQL_EXEC_V5_OBJECT) $(SDK_SQL_EXEC_V6_OBJECT) $(SDK_SQL_EXEC_V7_OBJECT) $(SDK_SQL_EXEC_V8_OBJECT) $(SDK_SQL_EXEC_V16_OBJECT) $(SDK_SQL_EXEC_V19_OBJECT) $(SDK_SQL_EXEC_V25_OBJECT) $(SDK_SQL_RESULT_OBJECT) $(SDK_MANIFEST_OBJECT) $(SDK_SPILL_OBJECT) $(SDK_SQL_SPILL_SORT_OBJECT) $(SDK_SQL_SPILL_GROUP_OBJECT) $(SDK_SQL_SPILL_JOIN_OBJECT) $(SDK_SCOPE_OBJECT) $(SDK_OPTIMIZER_OBJECT) $(SDK_OPTIMIZER_PLAN_OBJECT) $(SDK_OPTIMIZER_PLAN_CODEC_OBJECT) $(SDK_OPTIMIZER_PLAN_DECODE_OBJECT) $(SDK_OPTIMIZER_PLAN_MATCH_OBJECT) $(SDK_OPTIMIZER_PLAN_SCAN_OBJECT) $(SDK_OPTIMIZER_PLAN_EXEC_OBJECT) $(SDK_SQL_DML_OBJECT) $(SDK_SQL_EVAL_OBJECT) $(SDK_SQL_SELECT_GROUP_OBJECT) $(SDK_SQL_SELECT_COMPOSITE_OBJECT) $(SDK_SQL_SELECT_JOIN_OBJECT) $(SDK_SQL_SELECT_HAVING_OBJECT)
 SDK_ARCHIVE := $(BUILD_DIR)/libprdb_sdk.a
 SDK_RELEASE ?= 1
 SDK_TARGET ?= linux-x86_64
@@ -283,6 +306,42 @@ $(SDK_OPTIMIZER_OBJECT): $(SDK_OPTIMIZER_SOURCE) $(INCLUDE_DIR)/prdb_sdk_optimiz
 $(SDK_OPTIMIZER_PLAN_OBJECT): $(SDK_OPTIMIZER_PLAN_SOURCE) $(INCLUDE_DIR)/prdb_sdk_optimizer_plan_v1.h $(INCLUDE_DIR)/prdb_sdk_optimizer_v1.h $(INCLUDE_DIR)/prdb_sdk_optimizer_v2.h $(INCLUDE_DIR)/prdb_sdk_sql_v12.h $(INCLUDE_DIR)/prdb_sdk_sql_v13.h $(INCLUDE_DIR)/prdb_sdk_sql_v19.h $(INCLUDE_DIR)/prdb_sdk_sql_v20.h $(INCLUDE_DIR)/prdb_sdk_sql_dml_v1.h $(INCLUDE_DIR)/prdb_query_abi_v5.h $(INCLUDE_DIR)/prdb_query_abi_payload_codecs.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
 
+$(SDK_SQL_DML_OBJECT): $(SDK_SQL_DML_SOURCE) engine/sdk/sql_internal.h | $(BUILD_DIR)
+	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
+
+$(SDK_SQL_EVAL_OBJECT): $(SDK_SQL_EVAL_SOURCE) engine/sdk/sql_internal.h | $(BUILD_DIR)
+	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
+
+$(SDK_SQL_SELECT_GROUP_OBJECT): $(SDK_SQL_SELECT_GROUP_SOURCE) engine/sdk/sql_internal.h | $(BUILD_DIR)
+	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
+
+$(SDK_SQL_SELECT_COMPOSITE_OBJECT): $(SDK_SQL_SELECT_COMPOSITE_SOURCE) engine/sdk/sql_internal.h | $(BUILD_DIR)
+	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
+
+$(SDK_SQL_SELECT_JOIN_OBJECT): $(SDK_SQL_SELECT_JOIN_SOURCE) engine/sdk/sql_internal.h | $(BUILD_DIR)
+	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
+
+$(SDK_SQL_SELECT_HAVING_OBJECT): $(SDK_SQL_SELECT_HAVING_SOURCE) engine/sdk/sql_internal.h | $(BUILD_DIR)
+	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
+
+$(SDK_OPTIMIZER_PLAN_CODEC_OBJECT): $(SDK_OPTIMIZER_PLAN_CODEC_SOURCE) engine/sdk/optimizer_plan_codec_internal.h | $(BUILD_DIR)
+	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
+
+$(SDK_OPTIMIZER_PLAN_DECODE_OBJECT): $(SDK_OPTIMIZER_PLAN_DECODE_SOURCE) engine/sdk/optimizer_plan_codec_internal.h | $(BUILD_DIR)
+	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
+
+$(SDK_OPTIMIZER_PLAN_MATCH_OBJECT): $(SDK_OPTIMIZER_PLAN_MATCH_SOURCE) engine/sdk/optimizer_plan_codec_internal.h | $(BUILD_DIR)
+	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
+
+$(SDK_OPTIMIZER_PLAN_SCAN_OBJECT): $(SDK_OPTIMIZER_PLAN_SCAN_SOURCE) engine/sdk/optimizer_plan_codec_internal.h | $(BUILD_DIR)
+	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
+
+$(SDK_OPTIMIZER_PLAN_EXEC_OBJECT): $(SDK_OPTIMIZER_PLAN_EXEC_SOURCE) engine/sdk/optimizer_plan_codec_internal.h | $(BUILD_DIR)
+	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" -c "$<" -o "$@"
+
+$(SDK_PIC_OBJECT_DIR)/sql_v1.o $(SDK_PIC_OBJECT_DIR)/sql_dml_v1.o $(SDK_PIC_OBJECT_DIR)/sql_eval_v1.o $(SDK_PIC_OBJECT_DIR)/sql_select_group_v1.o $(SDK_PIC_OBJECT_DIR)/sql_select_composite_v1.o $(SDK_PIC_OBJECT_DIR)/sql_select_join_v1.o $(SDK_PIC_OBJECT_DIR)/sql_select_having_v1.o: engine/sdk/sql_internal.h
+$(SDK_PIC_OBJECT_DIR)/optimizer_plan_v1.o $(SDK_PIC_OBJECT_DIR)/optimizer_plan_codec_v1.o $(SDK_PIC_OBJECT_DIR)/optimizer_plan_decode_v1.o $(SDK_PIC_OBJECT_DIR)/optimizer_plan_match_v1.o $(SDK_PIC_OBJECT_DIR)/optimizer_plan_scan_v1.o $(SDK_PIC_OBJECT_DIR)/optimizer_plan_exec_v1.o: engine/sdk/optimizer_plan_codec_internal.h
+
 $(SDK_ARCHIVE): $(SDK_OBJECTS)
 	$(TCC_AR) rcs "$@" $(SDK_OBJECTS)
 
@@ -425,26 +484,26 @@ $(SDK_SQL_V22_TEST): engine/tests/fixtures/sdk_sql_select_v22.c $(SDK_ARCHIVE) $
 $(SDK_SQL_EXEC_V19_TEST): engine/tests/fixtures/sdk_sql_execute_v19.c $(SDK_ARCHIVE) $(INCLUDE_DIR)/prdb_sdk_sql_exec_v19.h $(INCLUDE_DIR)/prdb_sdk_sql_exec_v20.h $(INCLUDE_DIR)/prdb_sdk_sql_v19.h $(INCLUDE_DIR)/prdb_sdk_sql_v20.h $(INCLUDE_DIR)/prdb_sdk_optimizer_v1.h $(INCLUDE_DIR)/prdb_sdk_optimizer_plan_v1.h $(INCLUDE_DIR)/prdb_query_abi_v5.h | $(BUILD_DIR)
 	$(TCC) -Wall -Wextra -Werror -I"$(INCLUDE_DIR)" "$<" "$(SDK_ARCHIVE)" -o "$@"
 
-$(SDK_SQL_V18_FUZZER): engine/tests/fuzz/sql_v18_fuzz.c $(SDK_SQL_SOURCE) $(SDK_VALUE_SOURCE) $(SDK_BATCH_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_v18.h | $(BUILD_DIR)
-	$(FUZZ_CC) -Wall -Wextra -Werror -Wno-unused-variable -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer -I"$(INCLUDE_DIR)" engine/tests/fuzz/sql_v18_fuzz.c $(SDK_SQL_SOURCE) $(SDK_VALUE_SOURCE) $(SDK_BATCH_SOURCE) -o "$@"
+$(SDK_SQL_V18_FUZZER): engine/tests/fuzz/sql_v18_fuzz.c $(SDK_SQL_SOURCES) $(SDK_VALUE_SOURCE) $(SDK_BATCH_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_v18.h | $(BUILD_DIR)
+	$(FUZZ_CC) -Wall -Wextra -Werror -Wno-unused-variable -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer -I"$(INCLUDE_DIR)" engine/tests/fuzz/sql_v18_fuzz.c $(SDK_SQL_SOURCES) $(SDK_VALUE_SOURCE) $(SDK_BATCH_SOURCE) -o "$@"
 
-$(SDK_SQL_V19_FUZZER): engine/tests/fuzz/sql_v19_fuzz.c $(SDK_SQL_SOURCE) $(SDK_VALUE_SOURCE) $(SDK_BATCH_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_v19.h | $(BUILD_DIR)
-	$(FUZZ_CC) -Wall -Wextra -Werror -Wno-unused-variable -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer -I"$(INCLUDE_DIR)" engine/tests/fuzz/sql_v19_fuzz.c $(SDK_SQL_SOURCE) $(SDK_VALUE_SOURCE) $(SDK_BATCH_SOURCE) -o "$@"
+$(SDK_SQL_V19_FUZZER): engine/tests/fuzz/sql_v19_fuzz.c $(SDK_SQL_SOURCES) $(SDK_VALUE_SOURCE) $(SDK_BATCH_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_v19.h | $(BUILD_DIR)
+	$(FUZZ_CC) -Wall -Wextra -Werror -Wno-unused-variable -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer -I"$(INCLUDE_DIR)" engine/tests/fuzz/sql_v19_fuzz.c $(SDK_SQL_SOURCES) $(SDK_VALUE_SOURCE) $(SDK_BATCH_SOURCE) -o "$@"
 
-$(SDK_SQL_V20_FUZZER): engine/tests/fuzz/sql_v20_fuzz.c $(SDK_SQL_SOURCE) $(SDK_VALUE_SOURCE) $(SDK_BATCH_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_v20.h | $(BUILD_DIR)
-	$(FUZZ_CC) -Wall -Wextra -Werror -Wno-unused-variable -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer -I"$(INCLUDE_DIR)" engine/tests/fuzz/sql_v20_fuzz.c $(SDK_SQL_SOURCE) $(SDK_VALUE_SOURCE) $(SDK_BATCH_SOURCE) -o "$@"
+$(SDK_SQL_V20_FUZZER): engine/tests/fuzz/sql_v20_fuzz.c $(SDK_SQL_SOURCES) $(SDK_VALUE_SOURCE) $(SDK_BATCH_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_v20.h | $(BUILD_DIR)
+	$(FUZZ_CC) -Wall -Wextra -Werror -Wno-unused-variable -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer -I"$(INCLUDE_DIR)" engine/tests/fuzz/sql_v20_fuzz.c $(SDK_SQL_SOURCES) $(SDK_VALUE_SOURCE) $(SDK_BATCH_SOURCE) -o "$@"
 
-$(SDK_SQL_V21_FUZZER): engine/tests/fuzz/sql_v21_fuzz.c $(SDK_SQL_SOURCE) $(SDK_VALUE_SOURCE) $(SDK_BATCH_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_v21.h | $(BUILD_DIR)
-	$(FUZZ_CC) -Wall -Wextra -Werror -Wno-unused-variable -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer -I"$(INCLUDE_DIR)" engine/tests/fuzz/sql_v21_fuzz.c $(SDK_SQL_SOURCE) $(SDK_VALUE_SOURCE) $(SDK_BATCH_SOURCE) -o "$@"
+$(SDK_SQL_V21_FUZZER): engine/tests/fuzz/sql_v21_fuzz.c $(SDK_SQL_SOURCES) $(SDK_VALUE_SOURCE) $(SDK_BATCH_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_v21.h | $(BUILD_DIR)
+	$(FUZZ_CC) -Wall -Wextra -Werror -Wno-unused-variable -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer -I"$(INCLUDE_DIR)" engine/tests/fuzz/sql_v21_fuzz.c $(SDK_SQL_SOURCES) $(SDK_VALUE_SOURCE) $(SDK_BATCH_SOURCE) -o "$@"
 
-$(SDK_SQL_V22_FUZZER): engine/tests/fuzz/sql_v22_fuzz.c $(SDK_SQL_SOURCE) $(SDK_VALUE_SOURCE) $(SDK_BATCH_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_v22.h | $(BUILD_DIR)
-	$(FUZZ_CC) -Wall -Wextra -Werror -Wno-unused-variable -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer -I"$(INCLUDE_DIR)" engine/tests/fuzz/sql_v22_fuzz.c $(SDK_SQL_SOURCE) $(SDK_VALUE_SOURCE) $(SDK_BATCH_SOURCE) -o "$@"
+$(SDK_SQL_V22_FUZZER): engine/tests/fuzz/sql_v22_fuzz.c $(SDK_SQL_SOURCES) $(SDK_VALUE_SOURCE) $(SDK_BATCH_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_v22.h | $(BUILD_DIR)
+	$(FUZZ_CC) -Wall -Wextra -Werror -Wno-unused-variable -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer -I"$(INCLUDE_DIR)" engine/tests/fuzz/sql_v22_fuzz.c $(SDK_SQL_SOURCES) $(SDK_VALUE_SOURCE) $(SDK_BATCH_SOURCE) -o "$@"
 
-$(SDK_SQL_V23_FUZZER): engine/tests/fuzz/sql_v23_fuzz.c $(SDK_SQL_SOURCE) $(SDK_VALUE_SOURCE) $(SDK_BATCH_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_v23.h | $(BUILD_DIR)
-	$(FUZZ_CC) -Wall -Wextra -Werror -Wno-unused-variable -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer -I"$(INCLUDE_DIR)" engine/tests/fuzz/sql_v23_fuzz.c $(SDK_SQL_SOURCE) $(SDK_VALUE_SOURCE) $(SDK_BATCH_SOURCE) -o "$@"
+$(SDK_SQL_V23_FUZZER): engine/tests/fuzz/sql_v23_fuzz.c $(SDK_SQL_SOURCES) $(SDK_VALUE_SOURCE) $(SDK_BATCH_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_v23.h | $(BUILD_DIR)
+	$(FUZZ_CC) -Wall -Wextra -Werror -Wno-unused-variable -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer -I"$(INCLUDE_DIR)" engine/tests/fuzz/sql_v23_fuzz.c $(SDK_SQL_SOURCES) $(SDK_VALUE_SOURCE) $(SDK_BATCH_SOURCE) -o "$@"
 
-$(SDK_SQL_V24_FUZZER): engine/tests/fuzz/sql_v24_fuzz.c $(SDK_SQL_SOURCE) $(SDK_VALUE_SOURCE) $(SDK_BATCH_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_v24.h | $(BUILD_DIR)
-	$(FUZZ_CC) -Wall -Wextra -Werror -Wno-unused-variable -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer -I"$(INCLUDE_DIR)" engine/tests/fuzz/sql_v24_fuzz.c $(SDK_SQL_SOURCE) $(SDK_VALUE_SOURCE) $(SDK_BATCH_SOURCE) -o "$@"
+$(SDK_SQL_V24_FUZZER): engine/tests/fuzz/sql_v24_fuzz.c $(SDK_SQL_SOURCES) $(SDK_VALUE_SOURCE) $(SDK_BATCH_SOURCE) $(INCLUDE_DIR)/prdb_sdk_sql_v24.h | $(BUILD_DIR)
+	$(FUZZ_CC) -Wall -Wextra -Werror -Wno-unused-variable -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer -I"$(INCLUDE_DIR)" engine/tests/fuzz/sql_v24_fuzz.c $(SDK_SQL_SOURCES) $(SDK_VALUE_SOURCE) $(SDK_BATCH_SOURCE) -o "$@"
 
 fuzz-sql-v18: $(SDK_SQL_V18_FUZZER)
 	rm -rf "$(BUILD_DIR)/sql-v18-corpus"

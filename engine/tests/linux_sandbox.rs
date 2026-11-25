@@ -458,6 +458,10 @@ fn executor_host_rejects_direct_unconfined_launch_before_library_loading() {
             "7",
             "--spill-fd",
             "-1",
+            "--max-total-result-bytes",
+            "1048576",
+            "--max-sql-index-probe-candidates",
+            "128",
         ])
         .output()
         .unwrap();

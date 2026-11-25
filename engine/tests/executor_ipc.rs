@@ -221,7 +221,7 @@ fn batched_index_probe_payloads_reject_bad_counts_trailing_data_and_partial_grou
     malformed_response[2..4].copy_from_slice(&2u16.to_be_bytes());
     assert!(ScanIndexRangesResponse::decode(&malformed_response).is_err());
 
-    let over_limit = ScanIndexRangesResponse::Groups(vec![vec![vec![]; 1_025]])
+    let over_limit = ScanIndexRangesResponse::Groups(vec![vec![vec![]; 16_385]])
         .encode()
         .unwrap();
     assert_eq!(over_limit, vec![1, 0]);
