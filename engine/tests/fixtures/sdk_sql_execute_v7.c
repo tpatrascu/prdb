@@ -1,4 +1,4 @@
-#include "prdb_sdk_sql_exec_v7.h"
+#include "prdb_sdk_sql_exec_v1.h"
 
 #include <assert.h>
 #include <string.h>
@@ -200,32 +200,34 @@ static int32_t executor_request(void *context, uint16_t operation,
 }
 
 static int32_t on_group(void *context, const prdb_sdk_value_v1 *group_key,
+                        uint32_t group_key_count,
                         const prdb_sdk_value_v1 *aggregate_value,
                         uint64_t matching_row_count,
-                        const prdb_sdk_select_binding_v7 *binding) {
+                        const prdb_sdk_select_binding_v1 *binding) {
     group_capture *capture = (group_capture *)context;
+    assert(group_key_count == 1);
     int32_t key = 0;
     int32_t aggregate = 0;
     assert(capture->mock->batch_finished != 0);
     assert(capture->mock->executor_calls == 3);
     assert(capture->calls < 4);
-    assert(binding->aggregate_kind == PRDB_SDK_SQL_V7_AGGREGATE_MIN ||
-           binding->aggregate_kind == PRDB_SDK_SQL_V7_AGGREGATE_MAX ||
-           binding->aggregate_kind == PRDB_SDK_SQL_V7_AGGREGATE_SUM ||
-           binding->aggregate_kind == PRDB_SDK_SQL_V7_AGGREGATE_AVG);
+    assert(binding->aggregate_kind == PRDB_SDK_SQL_AGGREGATE_MIN ||
+           binding->aggregate_kind == PRDB_SDK_SQL_AGGREGATE_MAX ||
+           binding->aggregate_kind == PRDB_SDK_SQL_AGGREGATE_SUM ||
+           binding->aggregate_kind == PRDB_SDK_SQL_AGGREGATE_AVG);
     assert(prdb_sdk_value_get_integer_v1(group_key, &key) ==
            PRDB_SDK_VALUE_ACCESS_OK);
     assert(aggregate_value != NULL);
     capture->aggregate_states[capture->calls] = aggregate_value->state;
     if (aggregate_value->state == PRDB_SDK_VALUE_STATE_VALUE) {
-        if (binding->aggregate_kind == PRDB_SDK_SQL_V7_AGGREGATE_SUM) {
+        if (binding->aggregate_kind == PRDB_SDK_SQL_AGGREGATE_SUM) {
             int64_t sum = 0;
             assert(prdb_sdk_value_get_bigint_v1(aggregate_value, &sum) ==
                    PRDB_SDK_VALUE_ACCESS_OK);
             aggregate = (int32_t)sum;
             assert(sum == aggregate);
         } else if (binding->aggregate_kind ==
-                   PRDB_SDK_SQL_V7_AGGREGATE_AVG) {
+                   PRDB_SDK_SQL_AGGREGATE_AVG) {
             uint32_t coefficient = 0;
             assert(aggregate_value->type_code ==
                        PRDB_SDK_VALUE_TYPE_DECIMAL &&
@@ -261,17 +263,17 @@ static int32_t run_query(mock_state *mock, const uint8_t *sql,
     uint8_t materialized_bytes[64] = {0};
     static const uint8_t id_name[] = "id";
     static const uint8_t score_name[] = "score";
-    prdb_sdk_sql_column_shape_v2 planner_columns[2] = {
+    prdb_sdk_sql_column_shape_v1 planner_columns[2] = {
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
-    prdb_sdk_sql_column_shape_v2 executor_columns[2] = {
+    prdb_sdk_sql_column_shape_v1 executor_columns[2] = {
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
     prdb_sdk_value_v1 cell_scratch[2] = {{0}};
     prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
                              mock, executor_request, planner_request, NULL,
                              statement_failure};
-    return prdb_sdk_sql_execute_group_v7(
+    return prdb_sdk_sql_execute_group_v1(
         &host, schema, sizeof(schema) - 1, sql, sql_len, parameters,
         parameter_count, 3, 512, planner_response, sizeof(planner_response),
         executor_response, sizeof(executor_response), batch_response,

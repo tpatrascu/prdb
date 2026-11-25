@@ -64,7 +64,7 @@ static int append_u32_v1(result_writer_v1 *writer, uint32_t value) {
 }
 
 static int valid_column_shape_v1(
-    const prdb_sdk_sql_column_shape_v2 *column, uint32_t ordinal) {
+    const prdb_sdk_sql_column_shape_v1 *column, uint32_t ordinal) {
     if (!valid_name_v1(column->name, column->name_len) ||
         column->ordinal != ordinal || column->type_code < 1 ||
         column->type_code > 11) {
@@ -79,8 +79,8 @@ static int valid_column_shape_v1(
 }
 
 int32_t prdb_sdk_sql_encode_result_row_v1(
-    const prdb_sdk_select_binding_v2 *binding,
-    const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count,
+    const prdb_sdk_select_binding_v1 *binding,
+    const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count,
     const prdb_sdk_row_v1 *row, prdb_sdk_value_v1 *cell_scratch,
     uint32_t cell_scratch_capacity, uint8_t *output,
     uint64_t output_capacity, uint64_t *output_len) {
@@ -99,7 +99,7 @@ int32_t prdb_sdk_sql_encode_result_row_v1(
         return PRDB_SDK_SQL_RESULT_INVALID_ARGUMENT;
     }
     if (binding->struct_size < sizeof(*binding) ||
-        binding->abi_version != PRDB_SDK_SQL_ABI_V2_VERSION ||
+        binding->abi_version != PRDB_SDK_SQL_ABI_V1_VERSION ||
         binding->projection_star > 1 || column_count == 0 ||
         column_count > PRDB_SDK_SQL_MAX_RELATION_COLUMNS ||
         binding->relation_column_count != column_count ||
@@ -160,7 +160,7 @@ int32_t prdb_sdk_sql_encode_result_row_v1(
         uint32_t ordinal = binding->projection_star
                                ? index
                                : binding->projection_ordinals[index];
-        const prdb_sdk_sql_column_shape_v2 *column = &columns[ordinal];
+        const prdb_sdk_sql_column_shape_v1 *column = &columns[ordinal];
         const prdb_sdk_value_v1 *value = &cell_scratch[ordinal];
         uint32_t value_length = value->state == PRDB_SDK_VALUE_STATE_VALUE
                                     ? (uint32_t)value->data_len
@@ -183,8 +183,8 @@ int32_t prdb_sdk_sql_encode_result_row_v1(
 
 int32_t prdb_sdk_sql_write_result_row_v1(
     const prdb_host_api_v3 *host,
-    const prdb_sdk_select_binding_v2 *binding,
-    const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count,
+    const prdb_sdk_select_binding_v1 *binding,
+    const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count,
     const prdb_sdk_row_v1 *row, prdb_sdk_value_v1 *cell_scratch,
     uint32_t cell_scratch_capacity, uint8_t *output,
     uint64_t output_capacity, uint64_t *output_len) {
@@ -223,7 +223,7 @@ int32_t prdb_sdk_sql_write_result_row_v1(
 
 int32_t prdb_sdk_sql_write_projected_result_v1(
     const prdb_host_api_v3 *host,
-    const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count,
+    const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count,
     const uint32_t *projection_ordinals,
     const prdb_sdk_value_v1 *projected_values, uint32_t projection_count,
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len) {
@@ -264,7 +264,7 @@ int32_t prdb_sdk_sql_write_projected_result_v1(
         !append_u16_v1(&writer, (uint16_t)projection_count))
         return PRDB_SDK_SQL_RESULT_LIMIT_EXCEEDED;
     for (uint32_t index = 0; index < projection_count; ++index) {
-        const prdb_sdk_sql_column_shape_v2 *column =
+        const prdb_sdk_sql_column_shape_v1 *column =
             &columns[projection_ordinals[index]];
         const prdb_sdk_value_v1 *value = &projected_values[index];
         uint32_t value_length = value->state == PRDB_SDK_VALUE_STATE_VALUE
@@ -295,10 +295,10 @@ int32_t prdb_sdk_sql_write_projected_result_v1(
 }
 
 int32_t prdb_sdk_sql_encode_join_result_v1(
-    const prdb_sdk_select_binding_v8 *binding,
-    const prdb_sdk_sql_column_shape_v2 *left_columns,
+    const prdb_sdk_select_binding_v1 *binding,
+    const prdb_sdk_sql_column_shape_v1 *left_columns,
     uint32_t left_column_count,
-    const prdb_sdk_sql_column_shape_v2 *right_columns,
+    const prdb_sdk_sql_column_shape_v1 *right_columns,
     uint32_t right_column_count,
     const prdb_sdk_value_v1 *projected_values, uint32_t projected_count,
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len) {
@@ -312,15 +312,15 @@ int32_t prdb_sdk_sql_encode_join_result_v1(
         return PRDB_SDK_SQL_RESULT_INVALID_ARGUMENT;
     }
     if (binding->struct_size < sizeof(*binding) ||
-        binding->abi_version != PRDB_SDK_SQL_ABI_V8_VERSION ||
+        binding->abi_version != PRDB_SDK_SQL_ABI_V1_VERSION ||
         left_column_count == 0 || right_column_count == 0 ||
         left_column_count > PRDB_SDK_SQL_MAX_RELATION_COLUMNS ||
         right_column_count > PRDB_SDK_SQL_MAX_RELATION_COLUMNS ||
         binding->left_relation_column_count != left_column_count ||
         binding->right_relation_column_count != right_column_count ||
-        binding->projection_count == 0 ||
-        binding->projection_count > PRDB_SDK_SQL_MAX_PROJECTION_COLUMNS ||
-        projected_count != binding->projection_count) {
+        binding->join_projection_count == 0 ||
+        binding->join_projection_count > PRDB_SDK_SQL_MAX_PROJECTION_COLUMNS ||
+        projected_count != binding->join_projection_count) {
         return PRDB_SDK_SQL_RESULT_INVALID_BINDING;
     }
     for (uint32_t index = 0; index < left_column_count; ++index) {
@@ -334,16 +334,16 @@ int32_t prdb_sdk_sql_encode_join_result_v1(
         }
     }
     for (uint32_t index = 0; index < projected_count; ++index) {
-        const prdb_sdk_sql_join_projection_binding_v8 *projection =
-            &binding->projections[index];
-        const prdb_sdk_sql_column_shape_v2 *columns;
+        const prdb_sdk_sql_join_projection_binding_v1 *projection =
+            &binding->join_projections[index];
+        const prdb_sdk_sql_column_shape_v1 *columns;
         uint32_t column_count;
-        const prdb_sdk_sql_column_shape_v2 *column;
+        const prdb_sdk_sql_column_shape_v1 *column;
 
-        if (projection->relation_side == PRDB_SDK_SQL_V8_LEFT) {
+        if (projection->relation_side == PRDB_SDK_SQL_JOIN_LEFT) {
             columns = left_columns;
             column_count = left_column_count;
-        } else if (projection->relation_side == PRDB_SDK_SQL_V8_RIGHT) {
+        } else if (projection->relation_side == PRDB_SDK_SQL_JOIN_RIGHT) {
             columns = right_columns;
             column_count = right_column_count;
         } else {
@@ -373,10 +373,10 @@ int32_t prdb_sdk_sql_encode_join_result_v1(
         return PRDB_SDK_SQL_RESULT_LIMIT_EXCEEDED;
     }
     for (uint32_t index = 0; index < projected_count; ++index) {
-        const prdb_sdk_sql_join_projection_binding_v8 *projection =
-            &binding->projections[index];
-        const prdb_sdk_sql_column_shape_v2 *column =
-            projection->relation_side == PRDB_SDK_SQL_V8_LEFT
+        const prdb_sdk_sql_join_projection_binding_v1 *projection =
+            &binding->join_projections[index];
+        const prdb_sdk_sql_column_shape_v1 *column =
+            projection->relation_side == PRDB_SDK_SQL_JOIN_LEFT
                 ? &left_columns[projection->column.ordinal]
                 : &right_columns[projection->column.ordinal];
         const prdb_sdk_value_v1 *value = &projected_values[index];
@@ -401,10 +401,10 @@ int32_t prdb_sdk_sql_encode_join_result_v1(
 
 int32_t prdb_sdk_sql_write_join_result_v1(
     const prdb_host_api_v3 *host,
-    const prdb_sdk_select_binding_v8 *binding,
-    const prdb_sdk_sql_column_shape_v2 *left_columns,
+    const prdb_sdk_select_binding_v1 *binding,
+    const prdb_sdk_sql_column_shape_v1 *left_columns,
     uint32_t left_column_count,
-    const prdb_sdk_sql_column_shape_v2 *right_columns,
+    const prdb_sdk_sql_column_shape_v1 *right_columns,
     uint32_t right_column_count,
     const prdb_sdk_value_v1 *projected_values, uint32_t projected_count,
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len) {
@@ -439,7 +439,7 @@ int32_t prdb_sdk_sql_write_join_result_v1(
 }
 
 int32_t prdb_sdk_sql_encode_group_count_result_v1(
-    const prdb_sdk_sql_column_shape_v2 *group_column,
+    const prdb_sdk_sql_column_shape_v1 *group_column,
     const prdb_sdk_value_v1 *group_key, uint64_t count,
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len) {
     static const uint8_t magic[4] = {'S', 'Q', 'L', 'R'};
@@ -505,7 +505,7 @@ int32_t prdb_sdk_sql_encode_group_count_result_v1(
 
 int32_t prdb_sdk_sql_write_group_count_result_v1(
     const prdb_host_api_v3 *host,
-    const prdb_sdk_sql_column_shape_v2 *group_column,
+    const prdb_sdk_sql_column_shape_v1 *group_column,
     const prdb_sdk_value_v1 *group_key, uint64_t count,
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len) {
     int32_t status;
@@ -537,9 +537,9 @@ int32_t prdb_sdk_sql_write_group_count_result_v1(
 }
 
 static int32_t encode_group_result_v1(
-    const prdb_sdk_sql_column_shape_v2 *group_column,
+    const prdb_sdk_sql_column_shape_v1 *group_column,
     const prdb_sdk_value_v1 *group_key,
-    const prdb_sdk_sql_column_shape_v2 *aggregate_column,
+    const prdb_sdk_sql_column_shape_v1 *aggregate_column,
     const prdb_sdk_value_v1 *aggregate_value,
     const uint8_t *aggregate_name, uint32_t aggregate_name_len,
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len) {
@@ -609,18 +609,18 @@ static int32_t encode_group_result_v1(
 }
 
 int32_t prdb_sdk_sql_encode_group_minmax_result_v1(
-    const prdb_sdk_sql_column_shape_v2 *group_column,
+    const prdb_sdk_sql_column_shape_v1 *group_column,
     const prdb_sdk_value_v1 *group_key,
-    const prdb_sdk_sql_column_shape_v2 *aggregate_column,
+    const prdb_sdk_sql_column_shape_v1 *aggregate_column,
     const prdb_sdk_value_v1 *aggregate_value, uint32_t aggregate_kind,
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len) {
-    if (aggregate_kind == PRDB_SDK_SQL_V5_AGGREGATE_MIN) {
+    if (aggregate_kind == PRDB_SDK_SQL_AGGREGATE_MIN) {
         return encode_group_result_v1(
             group_column, group_key, aggregate_column, aggregate_value,
             min_column_name_v1, sizeof(min_column_name_v1) - 1, output,
             output_capacity, output_len);
     }
-    if (aggregate_kind == PRDB_SDK_SQL_V5_AGGREGATE_MAX) {
+    if (aggregate_kind == PRDB_SDK_SQL_AGGREGATE_MAX) {
         return encode_group_result_v1(
             group_column, group_key, aggregate_column, aggregate_value,
             max_column_name_v1, sizeof(max_column_name_v1) - 1, output,
@@ -631,12 +631,12 @@ int32_t prdb_sdk_sql_encode_group_minmax_result_v1(
 }
 
 int32_t prdb_sdk_sql_encode_group_sum_result_v1(
-    const prdb_sdk_sql_column_shape_v2 *group_column,
+    const prdb_sdk_sql_column_shape_v1 *group_column,
     const prdb_sdk_value_v1 *group_key,
-    const prdb_sdk_sql_column_shape_v2 *aggregate_input_column,
+    const prdb_sdk_sql_column_shape_v1 *aggregate_input_column,
     const prdb_sdk_value_v1 *aggregate_value,
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len) {
-    prdb_sdk_sql_column_shape_v2 result_column;
+    prdb_sdk_sql_column_shape_v1 result_column;
     if (output_len != NULL) *output_len = 0;
     if (aggregate_input_column == NULL) {
         return PRDB_SDK_SQL_RESULT_INVALID_ARGUMENT;
@@ -668,12 +668,12 @@ int32_t prdb_sdk_sql_encode_group_sum_result_v1(
 }
 
 int32_t prdb_sdk_sql_encode_group_avg_result_v1(
-    const prdb_sdk_sql_column_shape_v2 *group_column,
+    const prdb_sdk_sql_column_shape_v1 *group_column,
     const prdb_sdk_value_v1 *group_key,
-    const prdb_sdk_sql_column_shape_v2 *aggregate_input_column,
+    const prdb_sdk_sql_column_shape_v1 *aggregate_input_column,
     const prdb_sdk_value_v1 *aggregate_value,
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len) {
-    prdb_sdk_sql_column_shape_v2 result_column;
+    prdb_sdk_sql_column_shape_v1 result_column;
     uint32_t result_scale;
     if (output_len != NULL) *output_len = 0;
     if (aggregate_input_column == NULL) {
@@ -713,9 +713,9 @@ int32_t prdb_sdk_sql_encode_group_avg_result_v1(
 
 int32_t prdb_sdk_sql_write_group_minmax_result_v1(
     const prdb_host_api_v3 *host,
-    const prdb_sdk_sql_column_shape_v2 *group_column,
+    const prdb_sdk_sql_column_shape_v1 *group_column,
     const prdb_sdk_value_v1 *group_key,
-    const prdb_sdk_sql_column_shape_v2 *aggregate_column,
+    const prdb_sdk_sql_column_shape_v1 *aggregate_column,
     const prdb_sdk_value_v1 *aggregate_value, uint32_t aggregate_kind,
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len) {
     int32_t status;
@@ -749,9 +749,9 @@ int32_t prdb_sdk_sql_write_group_minmax_result_v1(
 
 int32_t prdb_sdk_sql_write_group_sum_result_v1(
     const prdb_host_api_v3 *host,
-    const prdb_sdk_sql_column_shape_v2 *group_column,
+    const prdb_sdk_sql_column_shape_v1 *group_column,
     const prdb_sdk_value_v1 *group_key,
-    const prdb_sdk_sql_column_shape_v2 *aggregate_input_column,
+    const prdb_sdk_sql_column_shape_v1 *aggregate_input_column,
     const prdb_sdk_value_v1 *aggregate_value,
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len) {
     int32_t status;
@@ -785,9 +785,9 @@ int32_t prdb_sdk_sql_write_group_sum_result_v1(
 
 int32_t prdb_sdk_sql_write_group_avg_result_v1(
     const prdb_host_api_v3 *host,
-    const prdb_sdk_sql_column_shape_v2 *group_column,
+    const prdb_sdk_sql_column_shape_v1 *group_column,
     const prdb_sdk_value_v1 *group_key,
-    const prdb_sdk_sql_column_shape_v2 *aggregate_input_column,
+    const prdb_sdk_sql_column_shape_v1 *aggregate_input_column,
     const prdb_sdk_value_v1 *aggregate_value,
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len) {
     int32_t status;
@@ -821,7 +821,7 @@ int32_t prdb_sdk_sql_write_group_avg_result_v1(
 
 static int append_value_field_v1(
     result_writer_v1 *writer,
-    const prdb_sdk_sql_column_shape_v2 *column,
+    const prdb_sdk_sql_column_shape_v1 *column,
     const prdb_sdk_value_v1 *value) {
     if (value->state == PRDB_SDK_VALUE_STATE_VALUE &&
         value->data_len > UINT32_MAX) {
@@ -841,13 +841,13 @@ static int append_value_field_v1(
 }
 
 int32_t prdb_sdk_sql_encode_group_composite_result_v1(
-    const prdb_sdk_select_binding_v13 *binding,
-    const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count,
+    const prdb_sdk_select_binding_v1 *binding,
+    const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count,
     const prdb_sdk_value_v1 *group_keys, uint32_t group_key_count,
     const prdb_sdk_value_v1 *aggregate_value, uint64_t matching_row_count,
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len) {
     static const uint8_t magic[4] = {'S', 'Q', 'L', 'R'};
-    prdb_sdk_sql_column_shape_v2 aggregate_column = {0};
+    prdb_sdk_sql_column_shape_v1 aggregate_column = {0};
     prdb_sdk_value_v1 count_value = {0};
     uint8_t count_bytes[8];
     const prdb_sdk_value_v1 *result_value = aggregate_value;
@@ -862,22 +862,22 @@ int32_t prdb_sdk_sql_encode_group_composite_result_v1(
         return PRDB_SDK_SQL_RESULT_INVALID_ARGUMENT;
     }
     if (binding->struct_size < sizeof(*binding) ||
-        binding->abi_version != PRDB_SDK_SQL_ABI_V13_VERSION ||
-        binding->base.struct_size < sizeof(binding->base) ||
-        binding->base.abi_version != PRDB_SDK_SQL_ABI_V7_VERSION ||
-        binding->base.has_group_by != 1 ||
-        binding->base.aggregate_kind <
-            PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR ||
-        binding->base.aggregate_kind >
-            PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN ||
+        binding->abi_version != PRDB_SDK_SQL_ABI_V1_VERSION ||
+        binding->struct_size < sizeof((*binding)) ||
+        binding->abi_version != PRDB_SDK_SQL_ABI_V1_VERSION ||
+        binding->has_group_by != 1 ||
+        binding->aggregate_kind <
+            PRDB_SDK_SQL_AGGREGATE_COUNT_STAR ||
+        binding->aggregate_kind >
+            PRDB_SDK_SQL_AGGREGATE_COUNT_COLUMN ||
         binding->group_key_count < 1 ||
-        binding->group_key_count > PRDB_SDK_SQL_V13_MAX_GROUP_KEYS ||
+        binding->group_key_count > PRDB_SDK_SQL_MAX_GROUP_KEYS ||
         binding->group_key_count != group_key_count ||
         group_key_count > UINT16_MAX - 1 || column_count == 0) {
         return PRDB_SDK_SQL_RESULT_INVALID_BINDING;
     }
     for (uint32_t key = 0; key < group_key_count; ++key) {
-        const prdb_sdk_sql_bound_column_v2 *bound =
+        const prdb_sdk_sql_bound_column_v1 *bound =
             &binding->group_keys[key];
         if (bound->ordinal >= column_count ||
             !valid_column_shape_v1(&columns[bound->ordinal], bound->ordinal) ||
@@ -898,8 +898,8 @@ int32_t prdb_sdk_sql_encode_group_composite_result_v1(
         }
     }
 
-    aggregate_kind = binding->base.aggregate_kind;
-    if (aggregate_kind == PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR) {
+    aggregate_kind = binding->aggregate_kind;
+    if (aggregate_kind == PRDB_SDK_SQL_AGGREGATE_COUNT_STAR) {
         if (aggregate_value != NULL) return PRDB_SDK_SQL_RESULT_INVALID_ROW;
         aggregate_column.name = count_column_name_v1;
         aggregate_column.name_len = sizeof(count_column_name_v1) - 1;
@@ -920,19 +920,19 @@ int32_t prdb_sdk_sql_encode_group_composite_result_v1(
         aggregate_name = count_column_name_v1;
         aggregate_name_len = sizeof(count_column_name_v1) - 1;
     } else if (aggregate_kind ==
-               PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN) {
-        uint32_t aggregate_ordinal = binding->base.aggregate_column.ordinal;
-        const prdb_sdk_sql_column_shape_v2 *input;
+               PRDB_SDK_SQL_AGGREGATE_COUNT_COLUMN) {
+        uint32_t aggregate_ordinal = binding->aggregate_column.ordinal;
+        const prdb_sdk_sql_column_shape_v1 *input;
         if (aggregate_ordinal >= column_count)
             return PRDB_SDK_SQL_RESULT_INVALID_BINDING;
         input = &columns[aggregate_ordinal];
         if (aggregate_value == NULL ||
             !valid_column_shape_v1(input, aggregate_ordinal) ||
-            input->type_code != binding->base.aggregate_column.type_code ||
+            input->type_code != binding->aggregate_column.type_code ||
             input->decimal_precision !=
-                binding->base.aggregate_column.decimal_precision ||
+                binding->aggregate_column.decimal_precision ||
             input->decimal_scale !=
-                binding->base.aggregate_column.decimal_scale ||
+                binding->aggregate_column.decimal_scale ||
             prdb_sdk_value_validate_v1(aggregate_value) !=
                 PRDB_SDK_VALUE_VALID ||
             aggregate_value->state != PRDB_SDK_VALUE_STATE_VALUE ||
@@ -948,28 +948,28 @@ int32_t prdb_sdk_sql_encode_group_composite_result_v1(
         aggregate_name = count_column_name_v1;
         aggregate_name_len = sizeof(count_column_name_v1) - 1;
     } else {
-        uint32_t aggregate_ordinal = binding->base.aggregate_column.ordinal;
-        const prdb_sdk_sql_column_shape_v2 *input;
+        uint32_t aggregate_ordinal = binding->aggregate_column.ordinal;
+        const prdb_sdk_sql_column_shape_v1 *input;
         if (aggregate_value == NULL || aggregate_ordinal >= column_count) {
             return PRDB_SDK_SQL_RESULT_INVALID_BINDING;
         }
         input = &columns[aggregate_ordinal];
         if (!valid_column_shape_v1(input, aggregate_ordinal) ||
-            input->type_code != binding->base.aggregate_column.type_code ||
+            input->type_code != binding->aggregate_column.type_code ||
             input->decimal_precision !=
-                binding->base.aggregate_column.decimal_precision ||
+                binding->aggregate_column.decimal_precision ||
             input->decimal_scale !=
-                binding->base.aggregate_column.decimal_scale) {
+                binding->aggregate_column.decimal_scale) {
             return PRDB_SDK_SQL_RESULT_INVALID_SHAPE;
         }
         aggregate_column = *input;
-        if (aggregate_kind == PRDB_SDK_SQL_V7_AGGREGATE_MIN) {
+        if (aggregate_kind == PRDB_SDK_SQL_AGGREGATE_MIN) {
             aggregate_name = min_column_name_v1;
             aggregate_name_len = sizeof(min_column_name_v1) - 1;
-        } else if (aggregate_kind == PRDB_SDK_SQL_V7_AGGREGATE_MAX) {
+        } else if (aggregate_kind == PRDB_SDK_SQL_AGGREGATE_MAX) {
             aggregate_name = max_column_name_v1;
             aggregate_name_len = sizeof(max_column_name_v1) - 1;
-        } else if (aggregate_kind == PRDB_SDK_SQL_V7_AGGREGATE_SUM) {
+        } else if (aggregate_kind == PRDB_SDK_SQL_AGGREGATE_SUM) {
             aggregate_name = sum_column_name_v1;
             aggregate_name_len = sizeof(sum_column_name_v1) - 1;
             if (input->type_code == PRDB_SDK_VALUE_TYPE_SMALLINT ||
@@ -984,7 +984,7 @@ int32_t prdb_sdk_sql_encode_group_composite_result_v1(
             } else {
                 return PRDB_SDK_SQL_RESULT_INVALID_SHAPE;
             }
-        } else if (aggregate_kind == PRDB_SDK_SQL_V7_AGGREGATE_AVG) {
+        } else if (aggregate_kind == PRDB_SDK_SQL_AGGREGATE_AVG) {
             uint32_t integer_digits, desired_scale, available_scale;
             aggregate_name = avg_column_name_v1;
             aggregate_name_len = sizeof(avg_column_name_v1) - 1;
@@ -1030,7 +1030,7 @@ int32_t prdb_sdk_sql_encode_group_composite_result_v1(
         return PRDB_SDK_SQL_RESULT_LIMIT_EXCEEDED;
     }
     for (uint32_t key = 0; key < group_key_count; ++key) {
-        const prdb_sdk_sql_column_shape_v2 *column =
+        const prdb_sdk_sql_column_shape_v1 *column =
             &columns[binding->group_keys[key].ordinal];
         if (!append_value_field_v1(&writer, column, &group_keys[key])) {
             return PRDB_SDK_SQL_RESULT_LIMIT_EXCEEDED;
@@ -1045,8 +1045,8 @@ int32_t prdb_sdk_sql_encode_group_composite_result_v1(
 
 int32_t prdb_sdk_sql_write_group_composite_result_v1(
     const prdb_host_api_v3 *host,
-    const prdb_sdk_select_binding_v13 *binding,
-    const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count,
+    const prdb_sdk_select_binding_v1 *binding,
+    const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count,
     const prdb_sdk_value_v1 *group_keys, uint32_t group_key_count,
     const prdb_sdk_value_v1 *aggregate_value, uint64_t matching_row_count,
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len) {

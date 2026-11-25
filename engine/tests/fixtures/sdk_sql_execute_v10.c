@@ -1,18 +1,4 @@
-#include "prdb_sdk_sql_exec_v10.h"
-#include "prdb_sdk_sql_exec_v5.h"
-#include "prdb_sdk_sql_exec_v6.h"
-#include "prdb_sdk_sql_exec_v7.h"
-#include "prdb_sdk_sql_exec_v11.h"
-#include "prdb_sdk_sql_exec_v12.h"
-#include "prdb_sdk_sql_exec_v13.h"
-#include "prdb_sdk_sql_exec_v14.h"
-#include "prdb_sdk_sql_exec_v15.h"
-#include "prdb_sdk_sql_exec_v17.h"
-#include "prdb_sdk_sql_exec_v18.h"
-#include "prdb_sdk_sql_exec_v21.h"
-#include "prdb_sdk_sql_exec_v22.h"
-#include "prdb_sdk_sql_exec_v23.h"
-#include "prdb_sdk_sql_exec_v24.h"
+#include "prdb_sdk_sql_exec_v1.h"
 #include "prdb_sdk_sql_result_v1.h"
 #include "prdb_query_abi_payload_codecs.h"
 
@@ -451,7 +437,7 @@ int main(void) {
         reset_scan(&mock, &capture, 1);
         assert(run_query_v12(&mock, ordered_group_text_budget_sql,
                              sizeof(ordered_group_text_budget_sql) - 1,
-                             PRDB_SDK_SQL_EXEC_V7_MAX_MATERIALIZED_BYTES,
+                             PRDB_SDK_SQL_EXEC_MAX_MATERIALIZED_BYTES,
                              &capture) == PRDB_SDK_SQL_EXEC_OK);
         assert(capture.calls == 128 && mock.statement_failed == 0);
         for (uint32_t index = 0; index < 128; ++index) {
@@ -465,7 +451,7 @@ int main(void) {
         reset_scan(&mock, &capture, 1);
         assert(run_query_v12(&mock, ordered_group_text_budget_sql,
                              sizeof(ordered_group_text_budget_sql) - 1,
-                             PRDB_SDK_SQL_EXEC_V7_MAX_MATERIALIZED_BYTES,
+                             PRDB_SDK_SQL_EXEC_MAX_MATERIALIZED_BYTES,
                              &capture) ==
                PRDB_SDK_SQL_EXEC_MATERIALIZATION_LIMIT);
         assert(capture.calls == 0 && mock.statement_failed == 1);
@@ -502,7 +488,7 @@ int main(void) {
         reset_scan(&mock, &capture, 1);
         assert(run_query_v12(&mock, ordered_grouped_sum_tie_sql,
                              sizeof(ordered_grouped_sum_tie_sql) - 1,
-                             PRDB_SDK_SQL_EXEC_V7_MAX_MATERIALIZED_BYTES,
+                             PRDB_SDK_SQL_EXEC_MAX_MATERIALIZED_BYTES,
                              &capture) == PRDB_SDK_SQL_EXEC_OK);
         assert(capture.calls == 64 && mock.statement_failed == 0);
         for (uint32_t group = 0; group < 64; ++group) {
@@ -522,7 +508,7 @@ int main(void) {
         reset_scan(&mock, &capture, 1);
         assert(run_query_v12(&mock, ordered_grouped_sum_tie_sql,
                              sizeof(ordered_grouped_sum_tie_sql) - 1,
-                             PRDB_SDK_SQL_EXEC_V7_MAX_MATERIALIZED_BYTES,
+                             PRDB_SDK_SQL_EXEC_MAX_MATERIALIZED_BYTES,
                              &capture) ==
                PRDB_SDK_SQL_EXEC_MATERIALIZATION_LIMIT);
         assert(capture.calls == 0 && mock.statement_failed == 1);
@@ -551,8 +537,8 @@ int main(void) {
         uint8_t executor_response[512] = {0};
         uint8_t batch_response[4096] = {0};
         uint8_t materialized_bytes[4096] = {0};
-        prdb_sdk_sql_column_shape_v2 planner_columns[9] = {{0}};
-        prdb_sdk_sql_column_shape_v2 executor_columns[9] = {{0}};
+        prdb_sdk_sql_column_shape_v1 planner_columns[9] = {{0}};
+        prdb_sdk_sql_column_shape_v1 executor_columns[9] = {{0}};
         prdb_sdk_value_v1 cell_scratch[9] = {{0}};
         prdb_host_api_v3 host = {
             sizeof(host), PRDB_QUERY_ABI_V3_VERSION, &mock,
@@ -565,7 +551,7 @@ int main(void) {
         mock.executor_len = make_eight_key_relation(mock.executor, 6, 0x22);
         mock.batch_len = make_eight_key_rows(mock.batch);
         reset_scan(&mock, &capture, 1);
-        status = prdb_sdk_sql_execute_group_v13(
+        status = prdb_sdk_sql_execute_group_v1(
             &host, (const uint8_t *)"app", 3, eight_key_sql,
             sizeof(eight_key_sql) - 1, NULL, 0, 4, 4096, planner_response,
             sizeof(planner_response), executor_response,
@@ -593,8 +579,8 @@ int main(void) {
         uint8_t executor_response[512] = {0};
         uint8_t batch_response[4096] = {0};
         uint8_t materialized_bytes[4096] = {0};
-        prdb_sdk_sql_column_shape_v2 planner_columns[9] = {{0}};
-        prdb_sdk_sql_column_shape_v2 executor_columns[9] = {{0}};
+        prdb_sdk_sql_column_shape_v1 planner_columns[9] = {{0}};
+        prdb_sdk_sql_column_shape_v1 executor_columns[9] = {{0}};
         prdb_sdk_value_v1 cell_scratch[9] = {{0}};
         prdb_host_api_v3 host = {
             sizeof(host), PRDB_QUERY_ABI_V3_VERSION, &mock,
@@ -606,7 +592,7 @@ int main(void) {
         mock.executor_len = make_eight_key_relation(mock.executor, 6, 0x22);
         mock.batch_len = make_eight_key_rows(mock.batch);
         reset_scan(&mock, &capture, 1);
-        assert(prdb_sdk_sql_execute_group_v15(
+        assert(prdb_sdk_sql_execute_group_v1(
                    &host, (const uint8_t *)"app", 3, ordered_eight_key_sql,
                    sizeof(ordered_eight_key_sql) - 1, NULL, 0, 4, 4096,
                    planner_response, sizeof(planner_response),
@@ -616,7 +602,7 @@ int main(void) {
                    sizeof(materialized_bytes), on_ordered_group_eight_keys,
                    &capture) == PRDB_SDK_SQL_EXEC_OK);
         assert(capture.calls == 2 && mock.statement_failed == 0);
-        mock.optimizer_aggregate_kind = PRDB_SDK_SQL_V7_AGGREGATE_SUM;
+        mock.optimizer_aggregate_kind = PRDB_SDK_SQL_AGGREGATE_SUM;
         mock.optimizer_relation_resolves = 0;
         mock.planner_len = make_eight_key_relation(
             mock.planner, PRDB_SDK_PLANNER_TABLE_HANDLE_KIND, 0x99);
@@ -688,8 +674,8 @@ int main(void) {
                              &capture) == PRDB_SDK_SQL_EXEC_OK);
         assert(capture.calls == 2 && capture.aggregates[0] == 9 &&
                capture.aggregates[1] == 5 && mock.statement_failed == 0);
-        for (uint32_t kind = PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR;
-             kind <= PRDB_SDK_SQL_V7_AGGREGATE_AVG; ++kind) {
+        for (uint32_t kind = PRDB_SDK_SQL_AGGREGATE_COUNT_STAR;
+             kind <= PRDB_SDK_SQL_AGGREGATE_AVG; ++kind) {
             int32_t optimizer_status;
             mock.optimizer_aggregate_kind = kind;
             reset_scan(&mock, &capture, 1);
@@ -701,12 +687,12 @@ int main(void) {
                    capture.keys[0] == 1 && capture.second_keys[0] == 9 &&
                    capture.keys[1] == 2 && capture.second_keys[1] == 5 &&
                    mock.statement_failed == 0);
-            if (kind == PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR) {
+            if (kind == PRDB_SDK_SQL_AGGREGATE_COUNT_STAR) {
                 assert(capture.aggregates[0] == 2 &&
                        capture.aggregates[1] == 1 &&
                        capture.row_counts[0] == 2 &&
                        capture.row_counts[1] == 1);
-            } else if (kind == PRDB_SDK_SQL_V7_AGGREGATE_SUM) {
+            } else if (kind == PRDB_SDK_SQL_AGGREGATE_SUM) {
                 assert(capture.aggregates[0] == 18 &&
                        capture.aggregates[1] == 5);
             } else {
@@ -723,7 +709,7 @@ int main(void) {
                 sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
                 PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_INTEGER,
                 parameter_bytes, sizeof(parameter_bytes)}};
-            mock.optimizer_aggregate_kind = PRDB_SDK_SQL_V7_AGGREGATE_SUM;
+            mock.optimizer_aggregate_kind = PRDB_SDK_SQL_AGGREGATE_SUM;
             reset_scan(&mock, &capture, 1);
             int32_t filtered_status = run_query_v13_optimizer_internal(
                 &mock, filtered_optimizer_sql,

@@ -1,4 +1,4 @@
-#include "prdb_sdk_sql_v22.h"
+#include "prdb_sdk_sql_v1.h"
 
 #include <assert.h>
 #include <string.h>
@@ -28,67 +28,63 @@ int main(void) {
     static const uint8_t avg_negative_exponent_sql[] =
         "SELECT id, score, AVG(score) FROM widgets GROUP BY id, score "
         "HAVING COUNT(*) >= 2 OR AVG(score) <= -1.25e-2";
-    prdb_sdk_select_v21 legacy = {0};
-    prdb_sdk_sql_column_shape_v2 columns[3] = {
+    prdb_sdk_sql_column_shape_v1 columns[3] = {
         {key, 10, 0, PRDB_SDK_VALUE_TYPE_TEXT, 0, 0},
         {region, 6, 1, PRDB_SDK_VALUE_TYPE_TEXT, 0, 0},
         {amount, 6, 2, PRDB_SDK_VALUE_TYPE_DECIMAL, 10, 2}};
-    prdb_sdk_select_v22 statement = {0};
-    prdb_sdk_select_binding_v22 binding = {0};
+    prdb_sdk_select_v1 statement = {0};
+    prdb_sdk_select_binding_v1 binding = {0};
     uint32_t error_offset = 0;
 
-    assert(prdb_sdk_sql_parse_select_v22(
+    assert(prdb_sdk_sql_parse_select_v1(
                sql, sizeof(sql) - 1, &statement, sizeof(statement),
                &error_offset) == PRDB_SDK_SQL_OK);
-    assert(statement.abi_version == PRDB_SDK_SQL_ABI_V22_VERSION);
-    assert(statement.base.base.having_node_count == 3);
+    assert(statement.abi_version == PRDB_SDK_SQL_ABI_V1_VERSION);
+    assert(statement.having_node_count == 3);
     assert(statement.having_count_mask == UINT64_C(1));
-    assert(prdb_sdk_sql_bind_select_v22(
+    assert(prdb_sdk_sql_bind_select_v1(
                &statement, relation, sizeof(relation) - 1, columns, 3,
                &binding, sizeof(binding)) == PRDB_SDK_SQL_BIND_OK);
-    assert(binding.base.base.having_type_code == PRDB_SDK_VALUE_TYPE_DECIMAL);
+    assert(binding.having_type_code == PRDB_SDK_VALUE_TYPE_DECIMAL);
     assert(binding.having_count_mask == UINT64_C(1));
-    assert(binding.base.having_nodes[0].scale == 0);
-    assert(coefficient_equals(binding.base.having_nodes[0].coefficient, 2));
-    assert(binding.base.having_nodes[1].scale == 2);
-    assert(coefficient_equals(binding.base.having_nodes[1].coefficient, 125));
-    assert(prdb_sdk_sql_parse_select_v22(
+    assert(binding.having_nodes[0].scale == 0);
+    assert(coefficient_equals(binding.having_nodes[0].coefficient, 2));
+    assert(binding.having_nodes[1].scale == 2);
+    assert(coefficient_equals(binding.having_nodes[1].coefficient, 125));
+    assert(prdb_sdk_sql_parse_select_v1(
                parameter_sql, sizeof(parameter_sql) - 1, &statement,
                sizeof(statement), &error_offset) == PRDB_SDK_SQL_OK);
     assert(statement.having_count_mask == UINT64_C(1));
-    assert(statement.base.having_nodes[0].base.operand_kind ==
-           PRDB_SDK_SQL_V18_OPERAND_PARAMETER);
-    assert(prdb_sdk_sql_bind_select_v22(
+    assert(statement.having_nodes[0].operand_kind ==
+           PRDB_SDK_SQL_HAVING_OPERAND_PARAMETER);
+    assert(prdb_sdk_sql_bind_select_v1(
                &statement, relation, sizeof(relation) - 1, columns, 3,
                &binding, sizeof(binding)) == PRDB_SDK_SQL_BIND_OK);
     assert(binding.having_count_mask == UINT64_C(1));
-    assert(prdb_sdk_sql_parse_select_v22(
+    assert(prdb_sdk_sql_parse_select_v1(
                avg_negative_exponent_sql, sizeof(avg_negative_exponent_sql) - 1,
                &statement, sizeof(statement), &error_offset) ==
            PRDB_SDK_SQL_OK);
-    assert(statement.base.base.having_node_count == 3);
+    assert(statement.having_node_count == 3);
     assert(statement.having_count_mask == UINT64_C(1));
     static const uint8_t widget_relation[] = "widgets";
     static const uint8_t id_name[] = "id", score_name[] = "score";
-    prdb_sdk_sql_column_shape_v2 avg_columns[2] = {
+    prdb_sdk_sql_column_shape_v1 avg_columns[2] = {
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_DECIMAL, 10, 2}};
-    assert(prdb_sdk_sql_bind_select_v22(
+    assert(prdb_sdk_sql_bind_select_v1(
                &statement, widget_relation, sizeof(widget_relation) - 1,
                avg_columns, 2, &binding, sizeof(binding)) ==
            PRDB_SDK_SQL_BIND_OK);
     assert(binding.having_count_mask == UINT64_C(1));
-    assert(binding.base.having_nodes[0].base.operand_kind ==
-           PRDB_SDK_SQL_V21_OPERAND_NUMERIC_LITERAL);
-    assert(binding.base.having_nodes[0].scale == 0);
-    assert(coefficient_equals(binding.base.having_nodes[0].coefficient, 2));
-    assert(binding.base.having_nodes[1].base.operand_kind ==
-           PRDB_SDK_SQL_V21_OPERAND_NUMERIC_LITERAL);
-    assert(binding.base.having_nodes[1].scale == 8);
-    assert(coefficient_equals(binding.base.having_nodes[1].coefficient,
+    assert(binding.having_nodes[0].operand_kind ==
+           PRDB_SDK_SQL_HAVING_OPERAND_NUMERIC_LITERAL);
+    assert(binding.having_nodes[0].scale == 0);
+    assert(coefficient_equals(binding.having_nodes[0].coefficient, 2));
+    assert(binding.having_nodes[1].operand_kind ==
+           PRDB_SDK_SQL_HAVING_OPERAND_NUMERIC_LITERAL);
+    assert(binding.having_nodes[1].scale == 8);
+    assert(coefficient_equals(binding.having_nodes[1].coefficient,
                                -1250000));
-    assert(prdb_sdk_sql_parse_select_v21(
-               parameter_sql, sizeof(parameter_sql) - 1, &legacy,
-               sizeof(legacy), &error_offset) == PRDB_SDK_SQL_SYNTAX_ERROR);
     return 0;
 }

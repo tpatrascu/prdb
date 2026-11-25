@@ -19,7 +19,7 @@ SONAME_TOKEN = re.compile(r"libprdb_sql\.so\.[1-9][0-9]*\Z")
 REQUIRED_EXPORTS = (
     "prdb_sdk_manifest_encode_v1",
     "prdb_sdk_scope_encode_v1",
-    "prdb_sdk_sql_parse_select_v20",
+    "prdb_sdk_sql_parse_select_v1",
     "prdb_sdk_optimizer_execute_update_ast_v1",
 )
 

@@ -1,4 +1,4 @@
-#include "prdb_sdk_sql_v10.h"
+#include "prdb_sdk_sql_v1.h"
 
 #include <assert.h>
 #include <string.h>
@@ -23,77 +23,75 @@ int main(void) {
         "SELECT k, COUNT(*) FROM records GROUP BY k ORDER BY amount";
     static const uint8_t missing_direction_sql[] =
         "SELECT k, COUNT(*) FROM records GROUP BY k ORDER BY k SIDEWAYS";
-    prdb_sdk_sql_column_shape_v2 columns[2] = {
+    prdb_sdk_sql_column_shape_v1 columns[2] = {
         {key_name, sizeof(key_name) - 1, 0,
          PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {amount_name, sizeof(amount_name) - 1, 1,
          PRDB_SDK_VALUE_TYPE_DECIMAL, 8, 2}};
-    prdb_sdk_select_v10 statement = {0};
-    prdb_sdk_select_binding_v10 binding = {0};
+    prdb_sdk_select_v1 statement = {0};
+    prdb_sdk_select_binding_v1 binding = {0};
     uint32_t error_offset = 0;
 
-    assert(prdb_sdk_sql_parse_select_v10(
+    assert(prdb_sdk_sql_parse_select_v1(
                key_sql, sizeof(key_sql) - 1, &statement,
                sizeof(statement), &error_offset) == PRDB_SDK_SQL_OK);
-    assert(statement.abi_version == PRDB_SDK_SQL_ABI_V10_VERSION);
-    assert(statement.base.has_having == 1);
+    assert(statement.abi_version == PRDB_SDK_SQL_ABI_V1_VERSION);
+    assert(statement.having_node_count == 1);
     assert(statement.has_order_by == 1);
-    assert(statement.order_kind == PRDB_SDK_SQL_V10_ORDER_GROUP_KEY);
-    assert(statement.order_direction == PRDB_SDK_SQL_V10_ORDER_DESCENDING);
-    assert(statement.base.base.base.has_limit == 1 &&
-           statement.base.base.base.limit == 3);
-    assert(prdb_sdk_sql_bind_select_v10(
+    assert(statement.order_items[0].kind == PRDB_SDK_SQL_ORDER_GROUP_KEY);
+    assert(statement.order_items[0].direction == PRDB_SDK_SQL_ORDER_DESCENDING);
+    assert(statement.has_limit == 1 &&
+           statement.limit == 3);
+    assert(prdb_sdk_sql_bind_select_v1(
                &statement, relation_name, sizeof(relation_name) - 1, columns,
                2, &binding, sizeof(binding)) == PRDB_SDK_SQL_BIND_OK);
-    assert(binding.order_type_code == PRDB_SDK_VALUE_TYPE_INTEGER);
-    assert(binding.has_order_by == 1 &&
-           binding.order_kind == PRDB_SDK_SQL_V10_ORDER_GROUP_KEY &&
-           binding.order_direction == PRDB_SDK_SQL_V10_ORDER_DESCENDING);
-    assert(binding.order_decimal_precision == 0 &&
-           binding.order_decimal_scale == 0);
+    assert(binding.order_items[0].type_code == PRDB_SDK_VALUE_TYPE_INTEGER);
+    assert(binding.order_count == 1 &&
+           binding.order_items[0].item.kind == PRDB_SDK_SQL_ORDER_GROUP_KEY &&
+           binding.order_items[0].item.direction ==
+               PRDB_SDK_SQL_ORDER_DESCENDING);
+    assert(binding.order_items[0].decimal_precision == 0 &&
+           binding.order_items[0].decimal_scale == 0);
 
     memset(&statement, 0, sizeof(statement));
-    assert(prdb_sdk_sql_parse_select_v10(
+    assert(prdb_sdk_sql_parse_select_v1(
                aggregate_sql, sizeof(aggregate_sql) - 1, &statement,
                sizeof(statement), &error_offset) == PRDB_SDK_SQL_OK);
-    assert(statement.order_kind == PRDB_SDK_SQL_V10_ORDER_AGGREGATE);
-    assert(statement.order_direction == PRDB_SDK_SQL_V10_ORDER_ASCENDING);
-    assert(prdb_sdk_sql_bind_select_v10(
+    assert(statement.order_items[0].kind == PRDB_SDK_SQL_ORDER_AGGREGATE);
+    assert(statement.order_items[0].direction == PRDB_SDK_SQL_ORDER_ASCENDING);
+    assert(prdb_sdk_sql_bind_select_v1(
                &statement, relation_name, sizeof(relation_name) - 1, columns,
                2, &binding, sizeof(binding)) == PRDB_SDK_SQL_BIND_OK);
-    assert(binding.order_type_code == PRDB_SDK_VALUE_TYPE_DECIMAL);
-    assert(binding.order_kind == PRDB_SDK_SQL_V10_ORDER_AGGREGATE &&
-           binding.order_direction == PRDB_SDK_SQL_V10_ORDER_ASCENDING);
-    assert(binding.order_decimal_precision == 38 &&
-           binding.order_decimal_scale == 2);
+    assert(binding.order_items[0].type_code == PRDB_SDK_VALUE_TYPE_DECIMAL);
+    assert(binding.order_items[0].item.kind == PRDB_SDK_SQL_ORDER_AGGREGATE &&
+           binding.order_items[0].item.direction ==
+               PRDB_SDK_SQL_ORDER_ASCENDING);
+    assert(binding.order_items[0].decimal_precision == 38 &&
+           binding.order_items[0].decimal_scale == 2);
 
     memset(&statement, 0, sizeof(statement));
-    assert(prdb_sdk_sql_parse_select_v10(
+    assert(prdb_sdk_sql_parse_select_v1(
                average_sql, sizeof(average_sql) - 1, &statement,
                sizeof(statement), &error_offset) == PRDB_SDK_SQL_OK);
-    assert(prdb_sdk_sql_bind_select_v10(
+    assert(prdb_sdk_sql_bind_select_v1(
                &statement, relation_name, sizeof(relation_name) - 1, columns,
                2, &binding, sizeof(binding)) == PRDB_SDK_SQL_BIND_OK);
-    assert(binding.order_type_code == PRDB_SDK_VALUE_TYPE_DECIMAL);
-    assert(binding.order_decimal_precision == 38 &&
-           binding.order_decimal_scale == 8);
+    assert(binding.order_items[0].type_code == PRDB_SDK_VALUE_TYPE_DECIMAL);
+    assert(binding.order_items[0].decimal_precision == 38 &&
+           binding.order_items[0].decimal_scale == 8);
 
     memset(&statement, 0xA5, sizeof(statement));
-    prdb_sdk_select_v10 previous = statement;
-    assert(prdb_sdk_sql_parse_select_v10(
+    prdb_sdk_select_v1 previous = statement;
+    assert(prdb_sdk_sql_parse_select_v1(
                mismatch_sql, sizeof(mismatch_sql) - 1, &statement,
                sizeof(statement), &error_offset) == PRDB_SDK_SQL_SYNTAX_ERROR);
     assert(memcmp(&statement, &previous, sizeof(statement)) == 0);
-    assert(prdb_sdk_sql_parse_select_v10(
+    assert(prdb_sdk_sql_parse_select_v1(
                arbitrary_sql, sizeof(arbitrary_sql) - 1, &statement,
                sizeof(statement), &error_offset) == PRDB_SDK_SQL_SYNTAX_ERROR);
-    assert(prdb_sdk_sql_parse_select_v10(
+    assert(prdb_sdk_sql_parse_select_v1(
                missing_direction_sql, sizeof(missing_direction_sql) - 1,
                &statement, sizeof(statement), &error_offset) ==
-           PRDB_SDK_SQL_SYNTAX_ERROR);
-    assert(prdb_sdk_sql_parse_select_v9(
-               key_sql, sizeof(key_sql) - 1, &statement.base,
-               sizeof(statement.base), &error_offset) ==
            PRDB_SDK_SQL_SYNTAX_ERROR);
     return 0;
 }

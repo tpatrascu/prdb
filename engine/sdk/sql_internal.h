@@ -2,34 +2,7 @@
 #define PRDB_SDK_SQL_INTERNAL_H
 
 #include "prdb_sdk_sql_v1.h"
-#include "prdb_sdk_sql_v2.h"
-#include "prdb_sdk_sql_v3.h"
-#include "prdb_sdk_sql_v4.h"
-#include "prdb_sdk_sql_v5.h"
-#include "prdb_sdk_sql_v6.h"
-#include "prdb_sdk_sql_v7.h"
-#include "prdb_sdk_sql_v8.h"
-#include "prdb_sdk_sql_v9.h"
-#include "prdb_sdk_sql_v10.h"
-#include "prdb_sdk_sql_v11.h"
-#include "prdb_sdk_sql_v12.h"
-#include "prdb_sdk_sql_v13.h"
-#include "prdb_sdk_sql_v14.h"
-#include "prdb_sdk_sql_v15.h"
-#include "prdb_sdk_sql_v16.h"
-#include "prdb_sdk_sql_v17.h"
-#include "prdb_sdk_sql_v18.h"
-#include "prdb_sdk_sql_v19.h"
-#include "prdb_sdk_sql_v20.h"
-#include "prdb_sdk_sql_v21.h"
-#include "prdb_sdk_sql_v22.h"
-#include "prdb_sdk_sql_v23.h"
-#include "prdb_sdk_sql_v24.h"
-#include "prdb_sdk_sql_v25.h"
-#include "prdb_sdk_sql_v26.h"
 #include "prdb_sdk_sql_dml_v1.h"
-#include "prdb_sdk_sql_dml_v2.h"
-#include "prdb_sdk_sql_dml_v3.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -37,6 +10,27 @@
 
 #ifndef PRDB_SDK_INTERNAL
 #define PRDB_SDK_INTERNAL __attribute__((visibility("hidden")))
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_parse_select_v2(const uint8_t *sql, uint64_t sql_len, prdb_sdk_select_v1 *out, uint32_t out_capacity, uint32_t *error_offset_out);
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_bind_select_v2(const prdb_sdk_select_v1 *statement, const uint8_t *relation_name, uint32_t relation_name_len, const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count, prdb_sdk_select_binding_v1 *out, uint32_t out_capacity);
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_parse_select_v3(const uint8_t *sql, uint64_t sql_len, prdb_sdk_select_v1 *out, uint32_t out_capacity, uint32_t *error_offset_out);
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_bind_select_v3(const prdb_sdk_select_v1 *statement, const uint8_t *relation_name, uint32_t relation_name_len, const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count, prdb_sdk_select_binding_v1 *out, uint32_t out_capacity);
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_bind_select_v7(const prdb_sdk_select_v1 *statement, const uint8_t *relation_name, uint32_t relation_name_len, const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count, prdb_sdk_select_binding_v1 *out, uint32_t out_capacity);
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_parse_select_v15(const uint8_t *sql, uint64_t sql_len, prdb_sdk_select_v1 *out, uint32_t out_capacity, uint32_t *error_offset_out);
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_bind_select_v15(const prdb_sdk_select_v1 *statement, const uint8_t *relation_name, uint32_t relation_name_len, const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count, prdb_sdk_select_binding_v1 *out, uint32_t out_capacity);
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_parse_select_v8(const uint8_t *sql, uint64_t sql_len, prdb_sdk_select_v1 *out, uint32_t out_capacity, uint32_t *error_offset_out);
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_parse_select_v24(const uint8_t *sql, uint64_t sql_len, prdb_sdk_select_v1 *out, uint32_t out_capacity, uint32_t *error_offset_out);
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_bind_select_v24(const prdb_sdk_select_v1 *statement, const uint8_t *relation_name, uint32_t relation_name_len, const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count, prdb_sdk_select_binding_v1 *out, uint32_t out_capacity);
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_parse_select_v25(const uint8_t *sql, uint64_t sql_len, prdb_sdk_select_v1 *out, uint32_t out_capacity, uint32_t *error_offset_out);
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_bind_select_v8(
+    const prdb_sdk_select_v1 *statement,
+    const uint8_t *left_relation_name, uint32_t left_relation_name_len,
+    const prdb_sdk_sql_column_shape_v1 *left_columns,
+    uint32_t left_column_count, const uint8_t *right_relation_name,
+    uint32_t right_relation_name_len,
+    const prdb_sdk_sql_column_shape_v1 *right_columns,
+    uint32_t right_column_count, prdb_sdk_select_binding_v1 *out,
+    uint32_t out_capacity);
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_bind_select_v25(const prdb_sdk_select_v1 *statement, const uint8_t *left_relation_name, uint32_t left_relation_name_len, const prdb_sdk_sql_column_shape_v1 *left_columns, uint32_t left_column_count, const uint8_t *right_relation_name, uint32_t right_relation_name_len, const prdb_sdk_sql_column_shape_v1 *right_columns, uint32_t right_column_count, prdb_sdk_select_binding_v1 *out, uint32_t out_capacity);
 #endif
 
 typedef enum token_kind {
@@ -348,15 +342,36 @@ static inline int32_t fail_at(parser *state, int32_t error) {
 }
 
 PRDB_SDK_INTERNAL int prdb_sdk_internal_spans_equal_ascii_case(const uint8_t *sql, prdb_sdk_sql_span_v1 left, prdb_sdk_sql_span_v1 right);
-PRDB_SDK_INTERNAL int32_t prdb_sdk_internal_parse_predicate_or_v2(parser *state, prdb_sdk_select_v2 *statement, uint32_t depth, uint32_t *node_index_out);
+PRDB_SDK_INTERNAL int32_t prdb_sdk_internal_parse_predicate_or_v1(parser *state, prdb_sdk_select_v1 *statement, uint32_t depth, uint32_t *node_index_out);
 PRDB_SDK_INTERNAL int prdb_sdk_internal_decimal_fits_precision(const uint8_t *coefficient, uint8_t precision);
-PRDB_SDK_INTERNAL int32_t prdb_sdk_internal_validate_predicate_tree_v2(const prdb_sdk_select_v2 *statement);
+PRDB_SDK_INTERNAL int32_t prdb_sdk_internal_validate_predicate_tree_v1(const prdb_sdk_select_v1 *statement);
 PRDB_SDK_INTERNAL uint8_t prdb_sdk_internal_fold_identifier_byte(uint8_t byte);
 PRDB_SDK_INTERNAL int prdb_sdk_internal_valid_identifier_bytes(const uint8_t *name, uint32_t name_len);
-PRDB_SDK_INTERNAL int prdb_sdk_internal_span_matches_name(const prdb_sdk_select_v2 *statement, prdb_sdk_sql_span_v1 span, const uint8_t *name, uint32_t name_len);
-PRDB_SDK_INTERNAL int32_t prdb_sdk_internal_validate_column_shape_v2(const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count);
-PRDB_SDK_INTERNAL int32_t prdb_sdk_internal_find_column_shape_v2(const prdb_sdk_select_v2 *statement, prdb_sdk_sql_span_v1 span, const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count, uint32_t *index_out);
-PRDB_SDK_INTERNAL int32_t prdb_sdk_internal_parse_select_v15_mode(const uint8_t *sql, uint64_t sql_len, prdb_sdk_select_v15 *out, uint32_t out_capacity, uint32_t *error_offset_out, uint32_t min_group_keys);
-PRDB_SDK_INTERNAL int32_t prdb_sdk_internal_bind_select_v15_mode(const prdb_sdk_select_v15 *statement, const uint8_t *relation_name, uint32_t relation_name_len, const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count, prdb_sdk_select_binding_v15 *out, uint32_t out_capacity, uint32_t min_group_keys);
+PRDB_SDK_INTERNAL int prdb_sdk_internal_span_matches_name(const prdb_sdk_select_v1 *statement, prdb_sdk_sql_span_v1 span, const uint8_t *name, uint32_t name_len);
+PRDB_SDK_INTERNAL int32_t prdb_sdk_internal_validate_column_shape_v1(const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count);
+PRDB_SDK_INTERNAL int32_t prdb_sdk_internal_find_column_shape_v1(const prdb_sdk_select_v1 *statement, prdb_sdk_sql_span_v1 span, const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count, uint32_t *index_out);
+PRDB_SDK_INTERNAL int32_t prdb_sdk_internal_parse_select_v15_mode(const uint8_t *sql, uint64_t sql_len, prdb_sdk_select_v1 *out, uint32_t out_capacity, uint32_t *error_offset_out, uint32_t min_group_keys);
+PRDB_SDK_INTERNAL int32_t prdb_sdk_internal_bind_select_v15_mode(const prdb_sdk_select_v1 *statement, const uint8_t *relation_name, uint32_t relation_name_len, const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count, prdb_sdk_select_binding_v1 *out, uint32_t out_capacity, uint32_t min_group_keys);
 
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_parse_select_v2(const uint8_t *sql, uint64_t sql_len, prdb_sdk_select_v1 *out, uint32_t out_capacity, uint32_t *error_offset_out);
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_bind_select_v2(const prdb_sdk_select_v1 *statement, const uint8_t *relation_name, uint32_t relation_name_len, const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count, prdb_sdk_select_binding_v1 *out, uint32_t out_capacity);
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_parse_select_v3(const uint8_t *sql, uint64_t sql_len, prdb_sdk_select_v1 *out, uint32_t out_capacity, uint32_t *error_offset_out);
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_bind_select_v3(const prdb_sdk_select_v1 *statement, const uint8_t *relation_name, uint32_t relation_name_len, const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count, prdb_sdk_select_binding_v1 *out, uint32_t out_capacity);
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_bind_select_v7(const prdb_sdk_select_v1 *statement, const uint8_t *relation_name, uint32_t relation_name_len, const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count, prdb_sdk_select_binding_v1 *out, uint32_t out_capacity);
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_parse_select_v15(const uint8_t *sql, uint64_t sql_len, prdb_sdk_select_v1 *out, uint32_t out_capacity, uint32_t *error_offset_out);
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_bind_select_v15(const prdb_sdk_select_v1 *statement, const uint8_t *relation_name, uint32_t relation_name_len, const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count, prdb_sdk_select_binding_v1 *out, uint32_t out_capacity);
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_parse_select_v8(const uint8_t *sql, uint64_t sql_len, prdb_sdk_select_v1 *out, uint32_t out_capacity, uint32_t *error_offset_out);
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_parse_select_v24(const uint8_t *sql, uint64_t sql_len, prdb_sdk_select_v1 *out, uint32_t out_capacity, uint32_t *error_offset_out);
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_bind_select_v24(const prdb_sdk_select_v1 *statement, const uint8_t *relation_name, uint32_t relation_name_len, const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count, prdb_sdk_select_binding_v1 *out, uint32_t out_capacity);
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_parse_select_v25(const uint8_t *sql, uint64_t sql_len, prdb_sdk_select_v1 *out, uint32_t out_capacity, uint32_t *error_offset_out);
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_bind_select_v8(
+    const prdb_sdk_select_v1 *statement,
+    const uint8_t *left_relation_name, uint32_t left_relation_name_len,
+    const prdb_sdk_sql_column_shape_v1 *left_columns,
+    uint32_t left_column_count, const uint8_t *right_relation_name,
+    uint32_t right_relation_name_len,
+    const prdb_sdk_sql_column_shape_v1 *right_columns,
+    uint32_t right_column_count, prdb_sdk_select_binding_v1 *out,
+    uint32_t out_capacity);
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_bind_select_v25(const prdb_sdk_select_v1 *statement, const uint8_t *left_relation_name, uint32_t left_relation_name_len, const prdb_sdk_sql_column_shape_v1 *left_columns, uint32_t left_column_count, const uint8_t *right_relation_name, uint32_t right_relation_name_len, const prdb_sdk_sql_column_shape_v1 *right_columns, uint32_t right_column_count, prdb_sdk_select_binding_v1 *out, uint32_t out_capacity);
 #endif

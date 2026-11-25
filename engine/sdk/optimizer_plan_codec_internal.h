@@ -2,9 +2,9 @@
 #define PRDB_SDK_OPTIMIZER_PLAN_CODEC_INTERNAL_H
 
 #include "prdb_sdk_optimizer_plan_v1.h"
-#include "prdb_sdk_optimizer_v2.h"
+#include "prdb_sdk_optimizer_v1.h"
 #include "prdb_sdk_sql_v1.h"
-#include "prdb_sdk_sql_exec_v3.h"
+#include "prdb_sdk_sql_exec_v1.h"
 #include "prdb_sdk_sql_order_v1.h"
 #include "prdb_sdk_sql_result_v1.h"
 #include "prdb_query_abi_payload_codecs.h"
@@ -200,7 +200,7 @@ PRDB_SDK_INTERNAL int32_t prdb_sdk_internal_execute_unfiltered_plan_internal(
     uint64_t batch_response_capacity,
     prdb_sdk_executor_relation_v1 *relation_out,
     uint32_t relation_out_capacity,
-    prdb_sdk_sql_column_shape_v2 *relation_columns,
+    prdb_sdk_sql_column_shape_v1 *relation_columns,
     uint32_t relation_column_capacity, prdb_sdk_value_v1 *source_cells,
     uint32_t source_cell_capacity, prdb_sdk_value_v1 *projected_values,
     uint32_t projected_value_capacity,

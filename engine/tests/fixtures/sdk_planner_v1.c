@@ -68,9 +68,9 @@ int main(void) {
     uint8_t unavailable[3] = {0, 1, 1};
     uint32_t length = 0;
     prdb_sdk_planner_relation_v1 relation = {0};
-    prdb_sdk_sql_column_shape_v2 columns[2] = {{0}};
-    prdb_sdk_select_v2 statement = {0};
-    prdb_sdk_select_binding_v2 binding = {0};
+    prdb_sdk_sql_column_shape_v1 columns[2] = {{0}};
+    prdb_sdk_select_v1 statement = {0};
+    prdb_sdk_select_binding_v1 binding = {0};
 
     put_u16(response, &length, PRDB_SDK_PLANNER_WIRE_V1_VERSION);
     response[length++] = 0;
@@ -104,10 +104,10 @@ int main(void) {
     assert(columns[1].ordinal == 1 && columns[1].type_code ==
            PRDB_SDK_VALUE_TYPE_TEXT);
     assert(columns[1].decimal_precision == 0 && columns[1].decimal_scale == 0);
-    assert(prdb_sdk_sql_parse_select_v2(sql, sizeof(sql) - 1, &statement,
+    assert(prdb_sdk_sql_parse_select_v1(sql, sizeof(sql) - 1, &statement,
                                         sizeof(statement), NULL) ==
            PRDB_SDK_SQL_OK);
-    assert(prdb_sdk_sql_bind_select_v2(
+    assert(prdb_sdk_sql_bind_select_v1(
                &statement, relation.name, relation.name_len, columns,
                relation.column_count, &binding, sizeof(binding)) ==
            PRDB_SDK_SQL_BIND_OK);

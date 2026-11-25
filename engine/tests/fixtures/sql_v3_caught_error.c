@@ -1,4 +1,4 @@
-#include "prdb_sdk_sql_exec_v2.h"
+#include "prdb_sdk_sql_exec_v1.h"
 
 #include <fcntl.h>
 #include <string.h>
@@ -51,7 +51,7 @@ __attribute__((constructor)) static void probe_constructor_filesystem_access(
 }
 
 static int32_t discard_row(void *context, const prdb_sdk_row_v1 *row,
-                           const prdb_sdk_select_binding_v2 *binding) {
+                           const prdb_sdk_select_binding_v1 *binding) {
     (void)context;
     (void)row;
     (void)binding;
@@ -76,8 +76,8 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
     uint8_t planner_response[256];
     uint8_t executor_response[256];
     uint8_t batch_response[8];
-    prdb_sdk_sql_column_shape_v2 planner_columns[1];
-    prdb_sdk_sql_column_shape_v2 executor_columns[1];
+    prdb_sdk_sql_column_shape_v1 planner_columns[1];
+    prdb_sdk_sql_column_shape_v1 executor_columns[1];
     prdb_sdk_value_v1 cell_scratch[1];
     const uint8_t *first_output = partial_output;
     uint64_t first_output_len = sizeof(partial_output) - 1;
@@ -109,7 +109,7 @@ int32_t prdb_query_main_v3(const prdb_host_api_v3 *host,
 
     /* Intentionally catch the SQL API error and return success. The v3 host
      * latch must still make the executor process fail after this entrypoint. */
-    (void)prdb_sdk_sql_execute_select_v2(
+    (void)prdb_sdk_sql_execute_select_v1(
         host, schema, sizeof(schema) - 1, invalid_sql, sizeof(invalid_sql) - 1,
         NULL, 0, 1, sizeof(batch_response), planner_response,
         sizeof(planner_response), executor_response, sizeof(executor_response),

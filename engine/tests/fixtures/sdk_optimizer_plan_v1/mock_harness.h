@@ -248,7 +248,7 @@ static uint32_t build_composite_group_aggregate_plan(uint8_t *bytes,
     prdb_encode_optimizer_plan_relation_reference_record(bytes + offset,
                                                          identifier, 4);
     offset += PRDB_OPTIMIZER_PLAN_RELATION_REFERENCE_RECORD_HEADER_BYTES;
-    put_u16(bytes, &offset, aggregate_kind == PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR
+    put_u16(bytes, &offset, aggregate_kind == PRDB_SDK_SQL_AGGREGATE_COUNT_STAR
                                 ? 2
                                 : 3);
     column = put_column(bytes, &offset, PRDB_SDK_VALUE_TYPE_INTEGER, 0);
@@ -257,7 +257,7 @@ static uint32_t build_composite_group_aggregate_plan(uint8_t *bytes,
     column = put_column(bytes, &offset, PRDB_SDK_VALUE_TYPE_BOOLEAN, 0);
     bytes[column] = 4;
     set_column_ordinal(bytes, column, 1);
-    if (aggregate_kind != PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR) {
+    if (aggregate_kind != PRDB_SDK_SQL_AGGREGATE_COUNT_STAR) {
         column = put_column(bytes, &offset, PRDB_SDK_VALUE_TYPE_BIGINT, 0);
         bytes[column] = 6;
         set_column_ordinal(bytes, column, 2);
@@ -271,10 +271,10 @@ static uint32_t build_composite_group_aggregate_plan(uint8_t *bytes,
     column = put_column(bytes, &offset, PRDB_SDK_VALUE_TYPE_INTEGER, 0);
     bytes[column] = 5;
     set_column_ordinal(bytes, column, 0);
-    bytes[offset++] = aggregate_kind == PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR
+    bytes[offset++] = aggregate_kind == PRDB_SDK_SQL_AGGREGATE_COUNT_STAR
                           ? 0
                           : 1;
-    if (aggregate_kind != PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR) {
+    if (aggregate_kind != PRDB_SDK_SQL_AGGREGATE_COUNT_STAR) {
         column = put_column(bytes, &offset, PRDB_SDK_VALUE_TYPE_BIGINT, 0);
         bytes[column] = 6;
         set_column_ordinal(bytes, column, 2);
@@ -324,7 +324,7 @@ static uint32_t build_filtered_composite_group_aggregate_plan(uint8_t *bytes) {
                                                                  0x01, 1);
     offset += PRDB_OPTIMIZER_PLAN_BOOLEAN_LITERAL_PREDICATE_RECORD_HEADER_BYTES;
     bytes[offset++] = 15;
-    bytes[offset++] = PRDB_SDK_SQL_V7_AGGREGATE_SUM;
+    bytes[offset++] = PRDB_SDK_SQL_AGGREGATE_SUM;
     bytes[offset++] = 2;
     column = put_column(bytes, &offset, PRDB_SDK_VALUE_TYPE_BOOLEAN, 0);
     bytes[column] = 4;
@@ -412,12 +412,12 @@ static uint32_t build_ordered_group_aggregate_plan(
                                                         identifier, 4);
     offset += PRDB_OPTIMIZER_PLAN_RELATION_REFERENCE_RECORD_HEADER_BYTES;
     put_u16(bytes, &offset,
-            aggregate_kind == PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR ? 1 : 2);
+            aggregate_kind == PRDB_SDK_SQL_AGGREGATE_COUNT_STAR ? 1 : 2);
     column = put_column(bytes, &offset, 3, 0);
     bytes[column] = 3;
     bytes[column + 20] = PRDB_SDK_VALUE_TYPE_INTEGER;
     set_column_ordinal(bytes, column, 0);
-    if (aggregate_kind != PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR) {
+    if (aggregate_kind != PRDB_SDK_SQL_AGGREGATE_COUNT_STAR) {
         column = put_column(bytes, &offset, 3, 0);
         bytes[column] = 4;
         bytes[column + 20] = PRDB_SDK_VALUE_TYPE_BIGINT;
@@ -429,8 +429,8 @@ static uint32_t build_ordered_group_aggregate_plan(
     bytes[column] = 3;
     bytes[column + 20] = PRDB_SDK_VALUE_TYPE_INTEGER;
     set_column_ordinal(bytes, column, 0);
-    bytes[offset++] = aggregate_kind == PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR ? 0 : 1;
-    if (aggregate_kind != PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR) {
+    bytes[offset++] = aggregate_kind == PRDB_SDK_SQL_AGGREGATE_COUNT_STAR ? 0 : 1;
+    if (aggregate_kind != PRDB_SDK_SQL_AGGREGATE_COUNT_STAR) {
         column = put_column(bytes, &offset, 3, 0);
         bytes[column] = 4;
         bytes[column + 20] = PRDB_SDK_VALUE_TYPE_BIGINT;

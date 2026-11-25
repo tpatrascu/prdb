@@ -92,7 +92,7 @@ int main(void) {
     assert(prdb_sdk_sql_parse_select_v1(
                select_sql, sizeof(select_sql) - 1, &select, sizeof(select),
                NULL) == PRDB_SDK_SQL_OK);
-    assert(select.parameter_index == 2);
+    assert(select.predicates[select.predicate_root].parameter_index == 2);
 
     assert(prdb_sdk_sql_compare_v1(&two, &minus_three,
                                    PRDB_SDK_SQL_COMPARE_GREATER, 0, 0,
@@ -130,92 +130,102 @@ int main(void) {
                                    PRDB_SDK_SQL_COMPARE_EQUAL, 2, 2,
                                    &result) == PRDB_SDK_SQL_EVAL_OK);
     assert(result == PRDB_SDK_SQL_TRUTH_TRUE);
-    assert(prdb_sdk_sql_bind_select_parameter_v1(
-               &select, parameters, 2, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0,
+    assert(prdb_sdk_sql_bind_parameter_v1(
+               select.predicates[select.predicate_root].parameter_index,
+               parameters, 2, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0,
                &bound_parameter, sizeof(bound_parameter)) ==
            PRDB_SDK_SQL_EVAL_OK);
     assert(bound_parameter.data == positive_integer);
-    assert(prdb_sdk_sql_bind_select_parameter_v1(
-               &select, parameters, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0,
+    assert(prdb_sdk_sql_bind_parameter_v1(
+               select.predicates[select.predicate_root].parameter_index,
+               parameters, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0,
                &bound_parameter, sizeof(bound_parameter)) ==
            PRDB_SDK_SQL_EVAL_PARAMETER_MISSING);
     parameters[1] = bigint;
-    assert(prdb_sdk_sql_bind_select_parameter_v1(
-               &select, parameters, 2, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0,
+    assert(prdb_sdk_sql_bind_parameter_v1(
+               select.predicates[select.predicate_root].parameter_index,
+               parameters, 2, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0,
                &bound_parameter, sizeof(bound_parameter)) ==
            PRDB_SDK_SQL_EVAL_TYPE_MISMATCH);
     parameters[1] = null_value;
-    assert(prdb_sdk_sql_bind_select_parameter_v1(
-               &select, parameters, 2, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0,
+    assert(prdb_sdk_sql_bind_parameter_v1(
+               select.predicates[select.predicate_root].parameter_index,
+               parameters, 2, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0,
                &bound_parameter, sizeof(bound_parameter)) ==
            PRDB_SDK_SQL_EVAL_OK);
     assert(bound_parameter.state == PRDB_SDK_VALUE_STATE_NULL);
     parameters[1] = redacted;
-    assert(prdb_sdk_sql_bind_select_parameter_v1(
-               &select, parameters, 2, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0,
+    assert(prdb_sdk_sql_bind_parameter_v1(
+               select.predicates[select.predicate_root].parameter_index,
+               parameters, 2, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0,
                &bound_parameter, sizeof(bound_parameter)) ==
            PRDB_SDK_SQL_EVAL_REDACTED_INPUT);
     parameters[1] = decimal;
-    assert(prdb_sdk_sql_bind_select_parameter_v1(
-               &select, parameters, 2, PRDB_SDK_VALUE_TYPE_DECIMAL, 2, 2,
+    assert(prdb_sdk_sql_bind_parameter_v1(
+               select.predicates[select.predicate_root].parameter_index,
+               parameters, 2, PRDB_SDK_VALUE_TYPE_DECIMAL, 2, 2,
                &bound_parameter, sizeof(bound_parameter)) ==
            PRDB_SDK_SQL_EVAL_OK);
     assert(bound_parameter.data == decimal_coefficient);
-    assert(prdb_sdk_sql_bind_select_parameter_v1(
-               &select, parameters, 2, PRDB_SDK_VALUE_TYPE_DECIMAL, 1, 1,
+    assert(prdb_sdk_sql_bind_parameter_v1(
+               select.predicates[select.predicate_root].parameter_index,
+               parameters, 2, PRDB_SDK_VALUE_TYPE_DECIMAL, 1, 1,
                &bound_parameter, sizeof(bound_parameter)) ==
            PRDB_SDK_SQL_EVAL_INVALID_VALUE);
     parameters[1] = negative_decimal;
-    assert(prdb_sdk_sql_bind_select_parameter_v1(
-               &select, parameters, 2, PRDB_SDK_VALUE_TYPE_DECIMAL, 2, 2,
+    assert(prdb_sdk_sql_bind_parameter_v1(
+               select.predicates[select.predicate_root].parameter_index,
+               parameters, 2, PRDB_SDK_VALUE_TYPE_DECIMAL, 2, 2,
                &bound_parameter, sizeof(bound_parameter)) ==
            PRDB_SDK_SQL_EVAL_OK);
     parameters[1] = two;
-    assert(prdb_sdk_sql_eval_select_predicate_v1(
-               &select, &two, &two, PRDB_SDK_VALUE_TYPE_INTEGER, 0,
-               &result) == PRDB_SDK_SQL_EVAL_OK);
+    assert(prdb_sdk_sql_compare_v1(
+               &two, &two, select.predicates[select.predicate_root].comparison,
+               0, 0, &result) == PRDB_SDK_SQL_EVAL_OK);
     assert(result == PRDB_SDK_SQL_TRUTH_TRUE);
-    assert(prdb_sdk_sql_eval_select_predicate_v1(
-               &select, &minus_three, &two, PRDB_SDK_VALUE_TYPE_INTEGER, 0,
+    assert(prdb_sdk_sql_compare_v1(
+               &minus_three, &two,
+               select.predicates[select.predicate_root].comparison, 0, 0,
                &result) == PRDB_SDK_SQL_EVAL_OK);
     assert(result == PRDB_SDK_SQL_TRUTH_FALSE);
-    assert(prdb_sdk_sql_eval_select_predicate_v1(
-               &select, &null_value, &two, PRDB_SDK_VALUE_TYPE_INTEGER, 0,
+    assert(prdb_sdk_sql_compare_v1(
+               &null_value, &two,
+               select.predicates[select.predicate_root].comparison, 0, 0,
                &result) == PRDB_SDK_SQL_EVAL_OK);
     assert(result == PRDB_SDK_SQL_TRUTH_UNKNOWN);
-    assert(prdb_sdk_sql_eval_select_predicate_v1(
-               &select, &bigint, &two, PRDB_SDK_VALUE_TYPE_INTEGER, 0,
+    assert(prdb_sdk_sql_compare_v1(
+               &bigint, &two,
+               select.predicates[select.predicate_root].comparison, 0, 0,
                &result) == PRDB_SDK_SQL_EVAL_TYPE_MISMATCH);
-    assert(prdb_sdk_sql_eval_select_predicate_v1(
-               &select, &two, &bigint, PRDB_SDK_VALUE_TYPE_INTEGER, 0,
+    assert(prdb_sdk_sql_compare_v1(
+               &two, &bigint,
+               select.predicates[select.predicate_root].comparison, 0, 0,
                &result) == PRDB_SDK_SQL_EVAL_TYPE_MISMATCH);
-    assert(prdb_sdk_sql_eval_select_predicate_v1(
-               &select, &two, NULL, PRDB_SDK_VALUE_TYPE_INTEGER, 0,
+    assert(prdb_sdk_sql_compare_v1(
+               &two, NULL,
+               select.predicates[select.predicate_root].comparison, 0, 0,
                &result) == PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT);
     assert(prdb_sdk_sql_parse_select_v1(
                is_null_sql, sizeof(is_null_sql) - 1, &null_select,
                sizeof(null_select), NULL) == PRDB_SDK_SQL_OK);
-    assert(prdb_sdk_sql_eval_select_predicate_v1(
-               &null_select, &null_value, NULL, PRDB_SDK_VALUE_TYPE_TEXT, 0,
-               &result) == PRDB_SDK_SQL_EVAL_OK);
+    assert(null_select.predicates[null_select.predicate_root].node_kind ==
+           PRDB_SDK_SQL_PREDICATE_IS_NULL);
+    assert(prdb_sdk_sql_value_is_null_v1(&null_value, &result) ==
+           PRDB_SDK_SQL_EVAL_OK);
     assert(result == PRDB_SDK_SQL_TRUTH_TRUE);
-    assert(prdb_sdk_sql_eval_select_predicate_v1(
-               &null_select, &null_value, &text_a, PRDB_SDK_VALUE_TYPE_TEXT,
-               0, &result) == PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT);
-    assert(prdb_sdk_sql_eval_select_predicate_v1(
-               &null_select, &text_a, NULL, PRDB_SDK_VALUE_TYPE_TEXT, 0,
-               &result) == PRDB_SDK_SQL_EVAL_OK);
+    assert(prdb_sdk_sql_value_is_null_v1(&text_a, &result) ==
+           PRDB_SDK_SQL_EVAL_OK);
     assert(result == PRDB_SDK_SQL_TRUTH_FALSE);
-    assert(prdb_sdk_sql_eval_select_predicate_v1(
-               &null_select, &redacted, NULL, PRDB_SDK_VALUE_TYPE_TEXT, 0,
-               &result) == PRDB_SDK_SQL_EVAL_REDACTED_INPUT);
+    assert(prdb_sdk_sql_value_is_null_v1(&redacted, &result) ==
+           PRDB_SDK_SQL_EVAL_REDACTED_INPUT);
     assert(prdb_sdk_sql_parse_select_v1(
                is_not_null_sql, sizeof(is_not_null_sql) - 1, &null_select,
                sizeof(null_select), NULL) == PRDB_SDK_SQL_OK);
-    assert(prdb_sdk_sql_eval_select_predicate_v1(
-               &null_select, &text_a, NULL, PRDB_SDK_VALUE_TYPE_TEXT, 0,
-               &result) == PRDB_SDK_SQL_EVAL_OK);
-    assert(result == PRDB_SDK_SQL_TRUTH_TRUE);
+    assert(null_select.predicates[null_select.predicate_root].node_kind ==
+           PRDB_SDK_SQL_PREDICATE_IS_NOT_NULL);
+    assert(prdb_sdk_sql_value_is_null_v1(&text_a, &result) ==
+           PRDB_SDK_SQL_EVAL_OK);
+    assert(result == PRDB_SDK_SQL_TRUTH_FALSE);
 
     assert(prdb_sdk_sql_value_is_null_v1(&null_value, &result) ==
            PRDB_SDK_SQL_EVAL_OK);

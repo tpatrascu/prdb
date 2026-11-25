@@ -142,10 +142,10 @@ static int match_optimizer_parameter(plan_reader *reader,
 static int match_optimizer_filter_node(
     plan_reader *reader, const prdb_sdk_optimizer_plan_v1 *plan,
     const uint8_t *metadata_response, uint64_t metadata_response_len,
-    const prdb_sdk_select_v2 *statement,
+    const prdb_sdk_select_v1 *statement,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     uint32_t node_index, uint8_t *seen, uint32_t depth) {
-    const prdb_sdk_predicate_node_v2 *node;
+    const prdb_sdk_predicate_node_v1 *node;
     uint8_t tag;
     uint64_t tag_offset = reader->offset;
     if (depth > PRDB_SDK_SQL_MAX_EXPRESSION_DEPTH ||
@@ -260,7 +260,7 @@ static int match_optimizer_filter_node(
 }
 
 static int32_t validate_select_plan_internal(
-    const prdb_host_api_v2 *host, const prdb_sdk_select_v2 *statement,
+    const prdb_host_api_v2 *host, const prdb_sdk_select_v1 *statement,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     int allow_filter,
     const uint8_t *schema, uint32_t schema_len,
@@ -275,7 +275,7 @@ static int32_t validate_select_plan_internal(
     int32_t status;
 
     if (statement == NULL || statement->struct_size != sizeof(*statement) ||
-        statement->abi_version != PRDB_SDK_SQL_ABI_V2_VERSION ||
+        statement->abi_version != PRDB_SDK_SQL_ABI_V1_VERSION ||
         statement->sql == NULL || statement->sql_len == 0 || schema == NULL ||
         parameter_count > PRDB_SDK_SQL_MAX_PARAMETER_INDEX ||
         (parameter_count != 0 && parameters == NULL) ||
@@ -380,7 +380,7 @@ int32_t prdb_sdk_optimizer_execute_unfiltered_plan_v1(
     uint64_t batch_response_capacity,
     prdb_sdk_executor_relation_v1 *relation_out,
     uint32_t relation_out_capacity,
-    prdb_sdk_sql_column_shape_v2 *relation_columns,
+    prdb_sdk_sql_column_shape_v1 *relation_columns,
     uint32_t relation_column_capacity, prdb_sdk_value_v1 *source_cells,
     uint32_t source_cell_capacity, prdb_sdk_value_v1 *projected_values,
     uint32_t projected_value_capacity,
@@ -397,7 +397,7 @@ int32_t prdb_sdk_optimizer_execute_unfiltered_plan_v1(
 }
 
 int32_t prdb_sdk_optimizer_validate_select_plan_v1(
-    const prdb_host_api_v2 *host, const prdb_sdk_select_v2 *statement,
+    const prdb_host_api_v2 *host, const prdb_sdk_select_v1 *statement,
     const uint8_t *schema, uint32_t schema_len,
     const uint8_t *plan_payload, uint64_t plan_payload_len,
     uint8_t *response, uint64_t response_capacity,
@@ -408,7 +408,7 @@ int32_t prdb_sdk_optimizer_validate_select_plan_v1(
 }
 
 int32_t prdb_sdk_optimizer_validate_select_plan_with_parameters_v1(
-    const prdb_host_api_v2 *host, const prdb_sdk_select_v2 *statement,
+    const prdb_host_api_v2 *host, const prdb_sdk_select_v1 *statement,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     const uint8_t *schema, uint32_t schema_len,
     const uint8_t *plan_payload, uint64_t plan_payload_len,
@@ -427,7 +427,7 @@ int32_t prdb_sdk_optimizer_validate_delete_plan_with_parameters_v1(
     const uint8_t *plan_payload, uint64_t plan_payload_len,
     uint8_t *response, uint64_t response_capacity,
     uint64_t *response_len) {
-    const prdb_sdk_select_v2 *predicate;
+    const prdb_sdk_select_v1 *predicate;
     prdb_sdk_optimizer_plan_v1 plan = {0};
     prdb_sdk_optimizer_filter_v1 filter = {0};
     plan_reader filter_reader;
@@ -451,7 +451,7 @@ int32_t prdb_sdk_optimizer_validate_delete_plan_with_parameters_v1(
     }
     predicate = &statement->predicate_statement;
     if (predicate->struct_size != sizeof(*predicate) ||
-        predicate->abi_version != PRDB_SDK_SQL_ABI_V2_VERSION ||
+        predicate->abi_version != PRDB_SDK_SQL_ABI_V1_VERSION ||
         predicate->sql != statement->sql ||
         predicate->sql_len != statement->sql_len ||
         predicate->relation.offset != statement->relation.offset ||
@@ -502,7 +502,7 @@ int32_t prdb_sdk_optimizer_validate_update_plan_with_parameters_v1(
     const uint8_t *plan_payload, uint64_t plan_payload_len,
     uint8_t *response, uint64_t response_capacity,
     uint64_t *response_len) {
-    const prdb_sdk_select_v2 *predicate;
+    const prdb_sdk_select_v1 *predicate;
     prdb_sdk_optimizer_update_plan_v1 update = {0};
     plan_reader filter_reader;
     uint8_t seen[PRDB_SDK_SQL_MAX_PREDICATE_NODES] = {0};
@@ -527,7 +527,7 @@ int32_t prdb_sdk_optimizer_validate_update_plan_with_parameters_v1(
     }
     predicate = &statement->predicate_statement;
     if (predicate->struct_size != sizeof(*predicate) ||
-        predicate->abi_version != PRDB_SDK_SQL_ABI_V2_VERSION ||
+        predicate->abi_version != PRDB_SDK_SQL_ABI_V1_VERSION ||
         predicate->sql != statement->sql ||
         predicate->sql_len != statement->sql_len ||
         predicate->relation.offset != statement->relation.offset ||
@@ -643,9 +643,9 @@ int32_t prdb_sdk_optimizer_execute_delete_ast_v1(
     uint8_t *batch_response, uint64_t batch_response_capacity,
     prdb_sdk_executor_relation_v1 *relation_out,
     uint32_t relation_out_capacity,
-    prdb_sdk_sql_column_shape_v2 *relation_columns,
+    prdb_sdk_sql_column_shape_v1 *relation_columns,
     uint32_t relation_column_capacity,
-    prdb_sdk_select_binding_v2 *binding, uint32_t binding_capacity,
+    prdb_sdk_select_binding_v1 *binding, uint32_t binding_capacity,
     prdb_sdk_value_v1 *cell_scratch, uint32_t cell_scratch_capacity,
     uint8_t *target_handles, uint32_t target_capacity,
     uint32_t *deleted_count_out) {
@@ -667,7 +667,7 @@ int32_t prdb_sdk_optimizer_execute_delete_ast_v1(
     int cursor_open = 0;
     int32_t final_status = PRDB_SDK_OPTIMIZER_PLAN_OK;
     int32_t status;
-    const prdb_sdk_select_v2 *predicate;
+    const prdb_sdk_select_v1 *predicate;
 
     if (host == NULL ||
         host->v4.v3.struct_size < sizeof(prdb_host_api_v3) ||
@@ -779,7 +779,7 @@ int32_t prdb_sdk_optimizer_execute_delete_ast_v1(
         return latch_optimizer_statement_failure(
             &host->v4, PRDB_SDK_OPTIMIZER_PLAN_INVALID_ARGUMENT);
     }
-    status = prdb_sdk_sql_bind_select_v2(
+    status = prdb_sdk_sql_bind_select_v1(
         predicate, relation_out->name, relation_out->name_len,
         relation_columns, relation_out->column_count, binding,
         binding_capacity);
@@ -822,7 +822,7 @@ int32_t prdb_sdk_optimizer_execute_delete_ast_v1(
                 final_status = PRDB_SDK_OPTIMIZER_PLAN_CALLBACK_ERROR;
                 break;
             }
-            status = prdb_sdk_sql_eval_bound_select_row_v2(
+            status = prdb_sdk_sql_eval_bound_select_row_v1(
                 predicate, binding, parameters, parameter_count, &row,
                 cell_scratch, cell_scratch_capacity, &truth);
             if (status != PRDB_SDK_SQL_EVAL_OK) {
@@ -884,9 +884,9 @@ int32_t prdb_sdk_optimizer_execute_update_ast_v1(
     uint8_t *batch_response, uint64_t batch_response_capacity,
     prdb_sdk_executor_relation_v1 *relation_out,
     uint32_t relation_out_capacity,
-    prdb_sdk_sql_column_shape_v2 *relation_columns,
+    prdb_sdk_sql_column_shape_v1 *relation_columns,
     uint32_t relation_column_capacity,
-    prdb_sdk_select_binding_v2 *binding, uint32_t binding_capacity,
+    prdb_sdk_select_binding_v1 *binding, uint32_t binding_capacity,
     prdb_sdk_value_v1 *cell_scratch, uint32_t cell_scratch_capacity,
     uint8_t *target_handles, uint32_t target_capacity,
     uint32_t *updated_count_out) {
@@ -911,7 +911,7 @@ int32_t prdb_sdk_optimizer_execute_update_ast_v1(
     int cursor_open = 0;
     int32_t final_status = PRDB_SDK_OPTIMIZER_PLAN_OK;
     int32_t status;
-    const prdb_sdk_select_v2 *predicate;
+    const prdb_sdk_select_v1 *predicate;
 
     if (host == NULL ||
         host->v4.v3.struct_size < sizeof(prdb_host_api_v3) ||
@@ -1023,7 +1023,7 @@ int32_t prdb_sdk_optimizer_execute_update_ast_v1(
         return latch_optimizer_statement_failure(
             &host->v4, PRDB_SDK_OPTIMIZER_PLAN_INVALID_ARGUMENT);
     }
-    status = prdb_sdk_sql_bind_select_v2(
+    status = prdb_sdk_sql_bind_select_v1(
         predicate, relation_out->name, relation_out->name_len,
         relation_columns, relation_out->column_count, binding,
         binding_capacity);
@@ -1067,7 +1067,7 @@ int32_t prdb_sdk_optimizer_execute_update_ast_v1(
                     final_status = PRDB_SDK_OPTIMIZER_PLAN_CALLBACK_ERROR;
                     break;
                 }
-                status = prdb_sdk_sql_eval_bound_select_row_v2(
+                status = prdb_sdk_sql_eval_bound_select_row_v1(
                     predicate, binding, parameters, parameter_count, &row,
                     cell_scratch, cell_scratch_capacity, &truth);
                 if (status != PRDB_SDK_SQL_EVAL_OK) {
@@ -1141,7 +1141,7 @@ int32_t prdb_sdk_optimizer_execute_update_ast_v1(
 }
 
 static int32_t execute_select_ast_internal(
-    const prdb_host_api_v4 *host, const prdb_sdk_select_v2 *statement,
+    const prdb_host_api_v4 *host, const prdb_sdk_select_v1 *statement,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     int parameterized,
     const uint8_t *schema, uint32_t schema_len, uint16_t max_candidates,
@@ -1153,7 +1153,7 @@ static int32_t execute_select_ast_internal(
     uint8_t *batch_response, uint64_t batch_response_capacity,
     prdb_sdk_executor_relation_v1 *relation_out,
     uint32_t relation_out_capacity,
-    prdb_sdk_sql_column_shape_v2 *relation_columns,
+    prdb_sdk_sql_column_shape_v1 *relation_columns,
     uint32_t relation_column_capacity, prdb_sdk_value_v1 *source_cells,
     uint32_t source_cell_capacity, prdb_sdk_value_v1 *projected_values,
     uint32_t projected_value_capacity,
@@ -1245,7 +1245,7 @@ static int32_t execute_select_ast_internal(
 }
 
 int32_t prdb_sdk_optimizer_execute_ordered_select_ast_v1(
-    const prdb_host_api_v4 *host, const prdb_sdk_select_v3 *statement,
+    const prdb_host_api_v4 *host, const prdb_sdk_select_v1 *statement,
     const uint8_t *schema, uint32_t schema_len, uint16_t max_candidates,
     uint32_t max_batch_bytes, uint8_t *request, uint64_t request_capacity,
     uint8_t *optimizer_response, uint64_t optimizer_response_capacity,
@@ -1254,7 +1254,7 @@ int32_t prdb_sdk_optimizer_execute_ordered_select_ast_v1(
     uint8_t *batch_response, uint64_t batch_response_capacity,
     prdb_sdk_executor_relation_v1 *relation_out,
     uint32_t relation_out_capacity,
-    prdb_sdk_sql_column_shape_v2 *relation_columns,
+    prdb_sdk_sql_column_shape_v1 *relation_columns,
     uint32_t relation_column_capacity, prdb_sdk_value_v1 *source_cells,
     uint32_t source_cell_capacity, prdb_sdk_value_v1 *projected_values,
     uint32_t projected_value_capacity, uint8_t *materialized_rows,
@@ -1263,7 +1263,7 @@ int32_t prdb_sdk_optimizer_execute_ordered_select_ast_v1(
     uint32_t *delivered_rows_out) {
     prdb_sdk_optimizer_response_v1 response = {0};
     prdb_sdk_optimizer_ordered_select_plan_v1 ordered = {0};
-    prdb_sdk_select_binding_v3 binding = {0};
+    prdb_sdk_select_binding_v1 binding = {0};
     prdb_host_api_v2 executor_host = {0};
     prdb_sdk_batch_v1 batch = {0};
     prdb_sdk_row_iterator_v1 rows = {0};
@@ -1290,8 +1290,8 @@ int32_t prdb_sdk_optimizer_execute_ordered_select_ast_v1(
         host->v3.statement_failure == NULL ||
         host->v3.executor_request == NULL || host->optimizer_request == NULL ||
         statement == NULL || statement->struct_size != sizeof(*statement) ||
-        statement->abi_version != PRDB_SDK_SQL_ABI_V3_VERSION ||
-        statement->base.sql == NULL || statement->base.sql_len == 0 ||
+        statement->abi_version != PRDB_SDK_SQL_ABI_V1_VERSION ||
+        statement->sql == NULL || statement->sql_len == 0 ||
         schema == NULL || request == NULL || optimizer_response == NULL ||
         relation_response == NULL || scan_response == NULL ||
         batch_response == NULL || relation_out == NULL ||
@@ -1303,7 +1303,7 @@ int32_t prdb_sdk_optimizer_execute_ordered_select_ast_v1(
         batch_response_capacity < max_batch_bytes ||
         materialized_rows_capacity < 5 ||
         materialized_rows_capacity >
-            PRDB_SDK_SQL_EXEC_V3_MAX_MATERIALIZED_BYTES ||
+            PRDB_SDK_SQL_EXEC_MAX_MATERIALIZED_BYTES ||
         relation_column_capacity == 0 || source_cell_capacity == 0 ||
         projected_value_capacity == 0 ||
         request_capacity > PRDB_SDK_OPTIMIZER_MAX_REQUEST_BYTES ||
@@ -1350,8 +1350,8 @@ int32_t prdb_sdk_optimizer_execute_ordered_select_ast_v1(
             prdb_sdk_internal_ranges_overlap(output_regions[left], output_region_lengths[left],
                            statement, sizeof(*statement)) ||
             prdb_sdk_internal_ranges_overlap(output_regions[left], output_region_lengths[left],
-                           statement->base.sql,
-                           statement->base.sql_len) ||
+                           statement->sql,
+                           statement->sql_len) ||
             prdb_sdk_internal_ranges_overlap(output_regions[left], output_region_lengths[left],
                            schema, schema_len) ||
             prdb_sdk_internal_ranges_overlap(output_regions[left], output_region_lengths[left],
@@ -1423,7 +1423,7 @@ int32_t prdb_sdk_optimizer_execute_ordered_select_ast_v1(
         return latch_optimizer_statement_failure(
             host, PRDB_SDK_OPTIMIZER_PLAN_IDENTITY_MISMATCH);
     }
-    status = prdb_sdk_sql_bind_select_v3(
+    status = prdb_sdk_sql_bind_select_v1(
         statement, relation_out->name, relation_out->name_len,
         relation_columns, relation_out->column_count, &binding,
         sizeof(binding));
@@ -1562,16 +1562,22 @@ int32_t prdb_sdk_optimizer_execute_ordered_select_ast_v1(
             order_keys[index] =
                 source_cells[ordered.order_key.ordinal];
         }
-        if (final_status == PRDB_SDK_OPTIMIZER_PLAN_OK &&
-            prdb_sdk_sql_order_row_indices_v1(
-                order_keys, materialized_count, ordered.order_key.type_code,
+        if (final_status == PRDB_SDK_OPTIMIZER_PLAN_OK) {
+            prdb_sdk_sql_order_key_v1 sort_key = {
+                order_keys,
+                ordered.order_key.type_code,
                 ordered.order_key.type_parameters[1],
-                ordered.descending != 0
-                    ? PRDB_SDK_SQL_ORDER_DESCENDING
-                    : PRDB_SDK_SQL_ORDER_ASCENDING,
-                order_indices, PRDB_SDK_SQL_ORDER_MAX_ROWS) !=
-                PRDB_SDK_SQL_ORDER_OK) {
-            final_status = PRDB_SDK_OPTIMIZER_PLAN_FILTER_ERROR;
+                (uint8_t)(ordered.descending != 0
+                              ? PRDB_SDK_SQL_ORDER_DESCENDING
+                              : PRDB_SDK_SQL_ORDER_ASCENDING),
+                PRDB_SDK_SQL_ORDER_NULLS_FIRST,
+                0,
+            };
+            if (prdb_sdk_sql_order_row_indices_v1(
+                    &sort_key, 1, materialized_count, order_indices,
+                    PRDB_SDK_SQL_ORDER_MAX_ROWS) != PRDB_SDK_SQL_ORDER_OK) {
+                final_status = PRDB_SDK_OPTIMIZER_PLAN_FILTER_ERROR;
+            }
         }
         while (final_status == PRDB_SDK_OPTIMIZER_PLAN_OK &&
                delivered < materialized_count &&
@@ -1629,7 +1635,7 @@ int32_t prdb_sdk_optimizer_execute_ordered_select_ast_v1(
 }
 
 int32_t prdb_sdk_optimizer_execute_select_ast_v1(
-    const prdb_host_api_v4 *host, const prdb_sdk_select_v2 *statement,
+    const prdb_host_api_v4 *host, const prdb_sdk_select_v1 *statement,
     const uint8_t *schema, uint32_t schema_len, uint16_t max_candidates,
     uint32_t max_batch_bytes, uint8_t *request, uint64_t request_capacity,
     uint8_t *optimizer_response, uint64_t optimizer_response_capacity,
@@ -1638,7 +1644,7 @@ int32_t prdb_sdk_optimizer_execute_select_ast_v1(
     uint8_t *batch_response, uint64_t batch_response_capacity,
     prdb_sdk_executor_relation_v1 *relation_out,
     uint32_t relation_out_capacity,
-    prdb_sdk_sql_column_shape_v2 *relation_columns,
+    prdb_sdk_sql_column_shape_v1 *relation_columns,
     uint32_t relation_column_capacity, prdb_sdk_value_v1 *source_cells,
     uint32_t source_cell_capacity, prdb_sdk_value_v1 *projected_values,
     uint32_t projected_value_capacity,
@@ -1656,7 +1662,7 @@ int32_t prdb_sdk_optimizer_execute_select_ast_v1(
 }
 
 int32_t prdb_sdk_optimizer_execute_select_ast_with_parameters_v1(
-    const prdb_host_api_v4 *host, const prdb_sdk_select_v2 *statement,
+    const prdb_host_api_v4 *host, const prdb_sdk_select_v1 *statement,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     const uint8_t *schema, uint32_t schema_len, uint16_t max_candidates,
     uint32_t max_batch_bytes, uint8_t *request, uint64_t request_capacity,
@@ -1666,7 +1672,7 @@ int32_t prdb_sdk_optimizer_execute_select_ast_with_parameters_v1(
     uint8_t *batch_response, uint64_t batch_response_capacity,
     prdb_sdk_executor_relation_v1 *relation_out,
     uint32_t relation_out_capacity,
-    prdb_sdk_sql_column_shape_v2 *relation_columns,
+    prdb_sdk_sql_column_shape_v1 *relation_columns,
     uint32_t relation_column_capacity, prdb_sdk_value_v1 *source_cells,
     uint32_t source_cell_capacity, prdb_sdk_value_v1 *projected_values,
     uint32_t projected_value_capacity,
@@ -1685,7 +1691,7 @@ int32_t prdb_sdk_optimizer_execute_select_ast_with_parameters_v1(
 
 typedef struct optimizer_result_context_v1 {
     const prdb_host_api_v3 *host;
-    const prdb_sdk_sql_column_shape_v2 *columns;
+    const prdb_sdk_sql_column_shape_v1 *columns;
     const prdb_sdk_executor_relation_v1 *relation;
     uint8_t *record_buffer;
     uint64_t record_capacity;
@@ -1713,7 +1719,7 @@ static int32_t emit_optimizer_projected_row_v1(
 }
 
 static int32_t execute_select_ast_to_result_internal(
-    const prdb_host_api_v4 *host, const prdb_sdk_select_v2 *statement,
+    const prdb_host_api_v4 *host, const prdb_sdk_select_v1 *statement,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     int parameterized,
     const uint8_t *schema, uint32_t schema_len, uint16_t max_candidates,
@@ -1725,7 +1731,7 @@ static int32_t execute_select_ast_to_result_internal(
     uint8_t *batch_response, uint64_t batch_response_capacity,
     prdb_sdk_executor_relation_v1 *relation_out,
     uint32_t relation_out_capacity,
-    prdb_sdk_sql_column_shape_v2 *relation_columns,
+    prdb_sdk_sql_column_shape_v1 *relation_columns,
     uint32_t relation_column_capacity, prdb_sdk_value_v1 *source_cells,
     uint32_t source_cell_capacity, prdb_sdk_value_v1 *projected_values,
     uint32_t projected_value_capacity, uint8_t *result_record_buffer,
@@ -1765,7 +1771,7 @@ static int32_t execute_select_ast_to_result_internal(
 }
 
 int32_t prdb_sdk_optimizer_execute_select_ast_to_result_v1(
-    const prdb_host_api_v4 *host, const prdb_sdk_select_v2 *statement,
+    const prdb_host_api_v4 *host, const prdb_sdk_select_v1 *statement,
     const uint8_t *schema, uint32_t schema_len, uint16_t max_candidates,
     uint32_t max_batch_bytes, uint8_t *request, uint64_t request_capacity,
     uint8_t *optimizer_response, uint64_t optimizer_response_capacity,
@@ -1774,7 +1780,7 @@ int32_t prdb_sdk_optimizer_execute_select_ast_to_result_v1(
     uint8_t *batch_response, uint64_t batch_response_capacity,
     prdb_sdk_executor_relation_v1 *relation_out,
     uint32_t relation_out_capacity,
-    prdb_sdk_sql_column_shape_v2 *relation_columns,
+    prdb_sdk_sql_column_shape_v1 *relation_columns,
     uint32_t relation_column_capacity, prdb_sdk_value_v1 *source_cells,
     uint32_t source_cell_capacity, prdb_sdk_value_v1 *projected_values,
     uint32_t projected_value_capacity, uint8_t *result_record_buffer,
@@ -1793,7 +1799,7 @@ int32_t prdb_sdk_optimizer_execute_select_ast_to_result_v1(
 }
 
 int32_t prdb_sdk_optimizer_execute_select_ast_with_parameters_to_result_v1(
-    const prdb_host_api_v4 *host, const prdb_sdk_select_v2 *statement,
+    const prdb_host_api_v4 *host, const prdb_sdk_select_v1 *statement,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     const uint8_t *schema, uint32_t schema_len, uint16_t max_candidates,
     uint32_t max_batch_bytes, uint8_t *request, uint64_t request_capacity,
@@ -1803,7 +1809,7 @@ int32_t prdb_sdk_optimizer_execute_select_ast_with_parameters_to_result_v1(
     uint8_t *batch_response, uint64_t batch_response_capacity,
     prdb_sdk_executor_relation_v1 *relation_out,
     uint32_t relation_out_capacity,
-    prdb_sdk_sql_column_shape_v2 *relation_columns,
+    prdb_sdk_sql_column_shape_v1 *relation_columns,
     uint32_t relation_column_capacity, prdb_sdk_value_v1 *source_cells,
     uint32_t source_cell_capacity, prdb_sdk_value_v1 *projected_values,
     uint32_t projected_value_capacity, uint8_t *result_record_buffer,
@@ -1821,7 +1827,7 @@ int32_t prdb_sdk_optimizer_execute_select_ast_with_parameters_to_result_v1(
 }
 
 int32_t prdb_sdk_optimizer_execute_select_ast_with_parameters_to_result_v2(
-    const prdb_host_api_v4 *host, const prdb_sdk_select_v2 *statement,
+    const prdb_host_api_v4 *host, const prdb_sdk_select_v1 *statement,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     const uint8_t *schema, uint32_t schema_len, uint16_t max_candidates,
     uint16_t max_index_candidates, uint32_t max_batch_bytes, uint8_t *request,
@@ -1832,7 +1838,7 @@ int32_t prdb_sdk_optimizer_execute_select_ast_with_parameters_to_result_v2(
     uint64_t batch_response_capacity,
     prdb_sdk_executor_relation_v1 *relation_out,
     uint32_t relation_out_capacity,
-    prdb_sdk_sql_column_shape_v2 *relation_columns,
+    prdb_sdk_sql_column_shape_v1 *relation_columns,
     uint32_t relation_column_capacity, prdb_sdk_value_v1 *source_cells,
     uint32_t source_cell_capacity, prdb_sdk_value_v1 *projected_values,
     uint32_t projected_value_capacity, uint8_t *result_record_buffer,

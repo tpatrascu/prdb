@@ -1,6 +1,4 @@
-#include "prdb_sdk_sql_exec_v2.h"
-#include "prdb_sdk_sql_exec_v3.h"
-#include "prdb_sdk_sql_exec_v4.h"
+#include "prdb_sdk_sql_exec_v1.h"
 #include "prdb_sdk_sql_dispatch_v1.h"
 #include "prdb_sdk_sql_result_v1.h"
 
@@ -738,7 +736,7 @@ typedef struct result_state {
     uint32_t sort_failed;
     int32_t sort_previous;
     uint8_t last_value;
-    const prdb_sdk_sql_column_shape_v2 *columns;
+    const prdb_sdk_sql_column_shape_v1 *columns;
     uint8_t encoded[128];
     uint64_t encoded_len;
     prdb_sdk_value_v1 cell_scratch[1];
@@ -749,15 +747,19 @@ typedef struct group_result_state {
     uint32_t keys[128];
     uint64_t counts[128];
     mock_host *mock;
-    const prdb_sdk_sql_column_shape_v2 *columns;
+    const prdb_sdk_sql_column_shape_v1 *columns;
     uint8_t encoded[128];
     uint64_t encoded_len;
 } group_result_state;
 
 static int32_t on_group(void *context, const prdb_sdk_value_v1 *key,
-                        uint64_t count,
-                        const prdb_sdk_sql_bound_column_v2 *column) {
+                        uint32_t key_count,
+                        const prdb_sdk_value_v1 *aggregate, uint64_t count,
+                        const prdb_sdk_select_binding_v1 *binding) {
     group_result_state *result = (group_result_state *)context;
+    const prdb_sdk_sql_bound_column_v1 *column = &binding->group_by_column;
+    (void)key_count;
+    (void)aggregate;
     int32_t value = 0;
     assert(result->mock != NULL && result->mock->executor_calls == 4);
     assert(result->calls < 128);
@@ -780,7 +782,7 @@ static int32_t on_group(void *context, const prdb_sdk_value_v1 *key,
 }
 
 static int32_t on_row(void *context, const prdb_sdk_row_v1 *row,
-                      const prdb_sdk_select_binding_v2 *binding) {
+                      const prdb_sdk_select_binding_v1 *binding) {
     result_state *result = (result_state *)context;
     if (result->sort_validate) {
         prdb_sdk_cell_iterator_v1 cells = {0};
@@ -889,8 +891,8 @@ int main(void) {
     uint8_t executor_response[256] = {0};
     uint8_t batch_response[4096] = {0};
     uint8_t materialized_rows[256] = {0};
-    prdb_sdk_sql_column_shape_v2 planner_columns[3] = {{0}};
-    prdb_sdk_sql_column_shape_v2 executor_columns[3] = {{0}};
+    prdb_sdk_sql_column_shape_v1 planner_columns[3] = {{0}};
+    prdb_sdk_sql_column_shape_v1 executor_columns[3] = {{0}};
     prdb_sdk_value_v1 cell_scratch[1] = {{0}};
     result_state result = {0};
     result.columns = executor_columns;
@@ -912,7 +914,7 @@ int main(void) {
     spill_host.v5.v4.v3.abi_version = PRDB_QUERY_ABI_V3_VERSION;
     spill_host.v5.v4.v3.write_result = write_result;
     spill_host.spill_request = spill_request;
-    assert(prdb_sdk_sql_execute_select_v2(
+    assert(prdb_sdk_sql_execute_select_v1(
                &host, schema, sizeof(schema) - 1, sql, sizeof(sql) - 1,
                &parameter, 1, 1, 1024, planner_response,
                sizeof(planner_response), executor_response,
@@ -942,7 +944,7 @@ int main(void) {
     mock.statement_failed = 0;
     result.calls = 0;
     result.encoded_len = 0;
-    assert(prdb_sdk_sql_execute_select_v2(
+    assert(prdb_sdk_sql_execute_select_v1(
                &host, schema, sizeof(schema) - 1, in_sql, sizeof(in_sql) - 1,
                in_parameters, 2, 1, 1024, planner_response,
                sizeof(planner_response), executor_response,
@@ -961,7 +963,7 @@ int main(void) {
     mock.scan_finished = 0;
     result.calls = 0;
     result.encoded_len = 0;
-    assert(prdb_sdk_sql_execute_select_v2(
+    assert(prdb_sdk_sql_execute_select_v1(
                &host, schema, sizeof(schema) - 1, in_sql, sizeof(in_sql) - 1,
                in_parameters, 2, 1, 1024, planner_response,
                sizeof(planner_response), executor_response,
@@ -979,7 +981,7 @@ int main(void) {
     mock.statement_failed = 0;
     result.calls = 0;
     result.fail = 0;
-    assert(prdb_sdk_sql_execute_select_v2(
+    assert(prdb_sdk_sql_execute_select_v1(
                &host, schema, sizeof(schema) - 1, no_match_sql,
                sizeof(no_match_sql) - 1, &parameter, 1, 1, 1024,
                planner_response, sizeof(planner_response), executor_response,
@@ -998,7 +1000,7 @@ int main(void) {
     mock.cancel_after_checks = 0;
     mock.statement_failed = 0;
     result.calls = 0;
-    assert(prdb_sdk_sql_execute_select_v2(
+    assert(prdb_sdk_sql_execute_select_v1(
                &host, schema, sizeof(schema) - 1, no_match_sql,
                sizeof(no_match_sql) - 1, &parameter, 1, 1, 1024,
                planner_response, sizeof(planner_response), executor_response,
@@ -1023,7 +1025,7 @@ int main(void) {
         result.sort_failed = 0;
         result.sort_previous = INT32_MAX;
         mock.statement_failed = 0;
-        assert(prdb_sdk_sql_execute_select_v3(
+        assert(prdb_sdk_sql_execute_select_ordered_v1(
                    &host, schema, sizeof(schema) - 1, sort_limit_sql,
                    sizeof(sort_limit_sql) - 1, NULL, 0, 2, 1024,
                    planner_response, sizeof(planner_response),
@@ -1039,7 +1041,7 @@ int main(void) {
         result.calls = 0;
         result.last_value = 0;
         mock.statement_failed = 0;
-        assert(prdb_sdk_sql_execute_select_v3(
+        assert(prdb_sdk_sql_execute_select_ordered_v1(
                    &host, schema, sizeof(schema) - 1, sort_all_sql,
                    sizeof(sort_all_sql) - 1, NULL, 0, 2, 1024,
                    planner_response, sizeof(planner_response),
@@ -1055,7 +1057,7 @@ int main(void) {
         result.calls = 0;
         result.last_value = 0;
         mock.statement_failed = 0;
-        assert(prdb_sdk_sql_execute_select_v3(
+        assert(prdb_sdk_sql_execute_select_ordered_v1(
                    &host, schema, sizeof(schema) - 1, sort_limit_sql,
                    sizeof(sort_limit_sql) - 1, NULL, 0, 2, 1024,
                    planner_response, sizeof(planner_response),
@@ -1084,7 +1086,7 @@ int main(void) {
         mock.expected_batch_bytes = 4096;
         result.calls = 0;
         result.last_value = 0;
-        assert(prdb_sdk_sql_execute_select_v4(
+        assert(prdb_sdk_sql_execute_select_spill_v1(
                    &spill_host, schema, sizeof(schema) - 1, sort_all_sql,
                    sizeof(sort_all_sql) - 1, NULL, 0, NULL, 128, 4096,
                    planner_response, sizeof(planner_response),
@@ -1106,7 +1108,7 @@ int main(void) {
         mock.spill_append_calls = 0;
         mock.fail_spill_append_at = 4;
         result.calls = 0;
-        assert(prdb_sdk_sql_execute_select_v4(
+        assert(prdb_sdk_sql_execute_select_spill_v1(
                    &spill_host, schema, sizeof(schema) - 1, sort_all_sql,
                    sizeof(sort_all_sql) - 1, NULL, 0, NULL, 128, 4096,
                    planner_response, sizeof(planner_response),
@@ -1147,7 +1149,7 @@ int main(void) {
         result.last_value = 0;
         result.sort_previous = INT32_MAX;
         result.sort_failed = 0;
-        assert(prdb_sdk_sql_execute_select_v4(
+        assert(prdb_sdk_sql_execute_select_spill_v1(
                    &spill_host, schema, sizeof(schema) - 1, sort_limit_sql,
                    sizeof(sort_limit_sql) - 1, NULL, 0, NULL, 128, 4096,
                    planner_response, sizeof(planner_response),
@@ -1170,7 +1172,7 @@ int main(void) {
     mock.executor_calls = 0;
     result.calls = 0;
     result.fail = 1;
-    assert(prdb_sdk_sql_execute_select_v2(
+    assert(prdb_sdk_sql_execute_select_v1(
                &host, schema, sizeof(schema) - 1, sql, sizeof(sql) - 1,
                &parameter, 1, 1, 1024, planner_response,
                sizeof(planner_response), executor_response,
@@ -1185,7 +1187,7 @@ int main(void) {
     mock.statement_failed = 0;
     result.calls = 0;
     result.fail = 0;
-    assert(prdb_sdk_sql_execute_select_v2(
+    assert(prdb_sdk_sql_execute_select_v1(
                &host, schema, sizeof(schema) - 1, zero_limit_sql,
                sizeof(zero_limit_sql) - 1, NULL, 0, 1, 1024,
                planner_response, sizeof(planner_response), executor_response,
@@ -1200,7 +1202,7 @@ int main(void) {
     mock.executor_calls = 0;
     result.calls = 0;
     result.fail = 0;
-    assert(prdb_sdk_sql_execute_select_v2(
+    assert(prdb_sdk_sql_execute_select_v1(
                &host, schema, sizeof(schema) - 1, sql, sizeof(sql) - 1,
                &parameter, 1, 1, 1024, planner_response,
                sizeof(planner_response), executor_response,
@@ -1243,7 +1245,7 @@ int main(void) {
     mock.fail_multi_insert_at = 0;
     mock.statement_failed = 0;
     uint32_t inserted_count = UINT32_C(0xfeed);
-    int32_t multi_status = prdb_sdk_sql_execute_insert_v2(
+    int32_t multi_status = prdb_sdk_sql_execute_insert_batch_v1(
                &host, schema, sizeof(schema) - 1, multi_insert_sql,
                sizeof(multi_insert_sql) - 1, multi_parameters, 2,
                planner_response, sizeof(planner_response), executor_response,
@@ -1263,7 +1265,7 @@ int main(void) {
     mock.fail_multi_insert_at = 2;
     mock.statement_failed = 0;
     inserted_count = UINT32_C(0xbeef);
-    assert(prdb_sdk_sql_execute_insert_v2(
+    assert(prdb_sdk_sql_execute_insert_batch_v1(
                &host, schema, sizeof(schema) - 1, multi_insert_sql,
                sizeof(multi_insert_sql) - 1, multi_parameters, 2,
                planner_response, sizeof(planner_response), executor_response,
@@ -1282,7 +1284,7 @@ int main(void) {
     mock.cancel_after_checks = 1;
     mock.statement_failed = 0;
     inserted_count = UINT32_C(0xcafe);
-    assert(prdb_sdk_sql_execute_insert_v2(
+    assert(prdb_sdk_sql_execute_insert_batch_v1(
                &host, schema, sizeof(schema) - 1, multi_insert_sql,
                sizeof(multi_insert_sql) - 1, multi_parameters, 2,
                planner_response, sizeof(planner_response), executor_response,
@@ -1304,7 +1306,7 @@ int main(void) {
     mock.check_column_list_insert = 1;
     mock.statement_failed = 0;
     inserted_count = UINT32_C(0xfeed);
-    assert(prdb_sdk_sql_execute_insert_v2(
+    assert(prdb_sdk_sql_execute_insert_batch_v1(
                &host, schema, sizeof(schema) - 1, column_list_insert_sql,
                sizeof(column_list_insert_sql) - 1, column_list_parameters, 2,
                planner_response, sizeof(planner_response), executor_response,
@@ -1342,7 +1344,7 @@ int main(void) {
     parameter.type_code = PRDB_SDK_VALUE_TYPE_INTEGER;
     uint8_t update_request[64] = {0};
     uint8_t update_targets[16 * PRDB_SDK_SQL_EXEC_MAX_MUTATION_TARGETS] = {0};
-    prdb_sdk_select_binding_v2 update_binding = {0};
+    prdb_sdk_select_binding_v1 update_binding = {0};
     prdb_sdk_value_v1 update_cell_scratch[1] = {{0}};
     prdb_sdk_executor_update_patch_v1 update_patches[1] = {{0}};
     uint8_t two_rows_batch[128] = {0};
@@ -1584,7 +1586,7 @@ int main(void) {
         mock.planner_calls = 0;
         mock.executor_calls = 0;
         mock.statement_failed = 0;
-        assert(prdb_sdk_sql_execute_group_count_v4(
+        assert(prdb_sdk_sql_execute_group_v1(
                    &host, schema, sizeof(schema) - 1, group_sql,
                    sizeof(group_sql) - 1, NULL, 0, 2, 1024,
                    planner_response, sizeof(planner_response),
@@ -1605,7 +1607,7 @@ int main(void) {
         groups.mock = &mock;
         groups.columns = executor_columns;
         mock.executor_calls = 0;
-        assert(prdb_sdk_sql_execute_group_count_v4(
+        assert(prdb_sdk_sql_execute_group_v1(
                    &host, schema, sizeof(schema) - 1, group_sql,
                    sizeof(group_sql) - 1, NULL, 0, 2, 1024,
                    planner_response, sizeof(planner_response),
@@ -1624,7 +1626,7 @@ int main(void) {
         groups.mock = &mock;
         groups.columns = executor_columns;
         mock.executor_calls = 0;
-        assert(prdb_sdk_sql_execute_group_count_v4(
+        assert(prdb_sdk_sql_execute_group_v1(
                    &host, schema, sizeof(schema) - 1, group_filter_sql,
                    sizeof(group_filter_sql) - 1, &parameter, 1, 2, 1024,
                    planner_response, sizeof(planner_response),
@@ -1640,7 +1642,7 @@ int main(void) {
         groups.mock = &mock;
         groups.columns = executor_columns;
         mock.executor_calls = 0;
-        assert(prdb_sdk_sql_execute_group_count_v4(
+        assert(prdb_sdk_sql_execute_group_v1(
                    &host, schema, sizeof(schema) - 1, group_limit_sql,
                    sizeof(group_limit_sql) - 1, NULL, 0, 2, 1024,
                    planner_response, sizeof(planner_response),
@@ -1657,7 +1659,7 @@ int main(void) {
         groups.columns = executor_columns;
         mock.executor_calls = 0;
         mock.statement_failed = 0;
-        assert(prdb_sdk_sql_execute_group_count_v4(
+        assert(prdb_sdk_sql_execute_group_v1(
                    &host, schema, sizeof(schema) - 1, group_sql,
                    sizeof(group_sql) - 1, NULL, 0, 2, 1024,
                    planner_response, sizeof(planner_response),
@@ -1680,7 +1682,7 @@ int main(void) {
         groups = (group_result_state){0};
         groups.mock = &mock;
         groups.columns = executor_columns;
-        int32_t budget_status = prdb_sdk_sql_execute_group_count_v4(
+        int32_t budget_status = prdb_sdk_sql_execute_group_v1(
             &host, schema, sizeof(schema) - 1, group_sql,
             sizeof(group_sql) - 1, NULL, 0, 1, 1024, planner_response,
             sizeof(planner_response), executor_response,
@@ -1710,7 +1712,7 @@ int main(void) {
             groups = (group_result_state){0};
             groups.mock = &mock;
             groups.columns = executor_columns;
-            assert(prdb_sdk_sql_execute_group_count_v4(
+            assert(prdb_sdk_sql_execute_group_v1(
                        &host, schema, sizeof(schema) - 1, group_no_match_sql,
                        sizeof(group_no_match_sql) - 1, &no_match_parameter, 1,
                        2, 1024, planner_response, sizeof(planner_response),
@@ -1731,7 +1733,7 @@ int main(void) {
             groups.mock = &mock;
             groups.columns = executor_columns;
             int32_t final_batch_cancel_status =
-                prdb_sdk_sql_execute_group_count_v4(
+                prdb_sdk_sql_execute_group_v1(
                     &host, schema, sizeof(schema) - 1, group_no_match_sql,
                     sizeof(group_no_match_sql) - 1, &no_match_parameter, 1, 2,
                     1024, planner_response, sizeof(planner_response),
@@ -1762,7 +1764,7 @@ int main(void) {
         groups = (group_result_state){0};
         groups.mock = &mock;
         groups.columns = executor_columns;
-        int32_t before_callback_status = prdb_sdk_sql_execute_group_count_v4(
+        int32_t before_callback_status = prdb_sdk_sql_execute_group_v1(
             &host, schema, sizeof(schema) - 1, group_sql, sizeof(group_sql) - 1,
             NULL, 0, 40, 4096, planner_response, sizeof(planner_response),
             executor_response, sizeof(executor_response), batch_response,
@@ -1783,7 +1785,7 @@ int main(void) {
         groups = (group_result_state){0};
         groups.mock = &mock;
         groups.columns = executor_columns;
-        int32_t during_callbacks_status = prdb_sdk_sql_execute_group_count_v4(
+        int32_t during_callbacks_status = prdb_sdk_sql_execute_group_v1(
             &host, schema, sizeof(schema) - 1, group_sql, sizeof(group_sql) - 1,
             NULL, 0, 40, 4096, planner_response, sizeof(planner_response),
             executor_response, sizeof(executor_response), batch_response,

@@ -10,17 +10,17 @@ static int32_t run_query(mock_state *mock, const uint8_t *sql,
     uint8_t materialized_bytes[64] = {0};
     static const uint8_t id_name[] = "id";
     static const uint8_t score_name[] = "score";
-    prdb_sdk_sql_column_shape_v2 planner_columns[2] = {
+    prdb_sdk_sql_column_shape_v1 planner_columns[2] = {
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
-    prdb_sdk_sql_column_shape_v2 executor_columns[2] = {
+    prdb_sdk_sql_column_shape_v1 executor_columns[2] = {
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
     prdb_sdk_value_v1 cell_scratch[2] = {{0}};
     prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
                              mock, executor_request, planner_request, NULL,
                              statement_failure};
-    return prdb_sdk_sql_execute_group_v10(
+    return prdb_sdk_sql_execute_group_v1(
         &host, schema, sizeof(schema) - 1, sql, sql_len, parameters,
         parameter_count, 4, 512, planner_response, sizeof(planner_response),
         executor_response, sizeof(executor_response), batch_response,
@@ -29,13 +29,14 @@ static int32_t run_query(mock_state *mock, const uint8_t *sql,
 }
 
 static int32_t on_group_v11(void *context,
-                            const prdb_sdk_value_v1 *group_key,
+                            const prdb_sdk_value_v1 *group_key, uint32_t group_key_count,
                             const prdb_sdk_value_v1 *aggregate_value,
                             uint64_t matching_row_count,
-                            const prdb_sdk_select_binding_v11 *binding) {
-    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V11_VERSION);
-    return on_group(context, group_key, aggregate_value, matching_row_count,
-                    &binding->base);
+                            const prdb_sdk_select_binding_v1 *binding) {
+    (void)group_key_count;
+    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V1_VERSION);
+    return on_group(context, group_key, 1, aggregate_value, matching_row_count,
+                    binding);
 }
 
 static int32_t run_query_v11(mock_state *mock, const uint8_t *sql,
@@ -48,17 +49,17 @@ static int32_t run_query_v11(mock_state *mock, const uint8_t *sql,
     uint8_t materialized_bytes[64] = {0};
     static const uint8_t id_name[] = "id";
     static const uint8_t score_name[] = "score";
-    prdb_sdk_sql_column_shape_v2 planner_columns[2] = {
+    prdb_sdk_sql_column_shape_v1 planner_columns[2] = {
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
-    prdb_sdk_sql_column_shape_v2 executor_columns[2] = {
+    prdb_sdk_sql_column_shape_v1 executor_columns[2] = {
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
     prdb_sdk_value_v1 cell_scratch[2] = {{0}};
     prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
                              mock, executor_request, planner_request, NULL,
                              statement_failure};
-    return prdb_sdk_sql_execute_group_v11(
+    return prdb_sdk_sql_execute_group_v1(
         &host, schema, sizeof(schema) - 1, sql, sql_len, NULL, 0, 4, 512,
         planner_response, sizeof(planner_response), executor_response,
         sizeof(executor_response), batch_response, sizeof(batch_response),
@@ -123,17 +124,18 @@ static uint32_t make_expected_group_sum_sqlr(
 }
 
 static int32_t on_group_v12(void *context,
-                            const prdb_sdk_value_v1 *group_key,
+                            const prdb_sdk_value_v1 *group_key, uint32_t group_key_count,
                             const prdb_sdk_value_v1 *aggregate_value,
                             uint64_t matching_row_count,
-                            const prdb_sdk_select_binding_v12 *binding) {
+                            const prdb_sdk_select_binding_v1 *binding) {
+    (void)group_key_count;
     group_capture *capture = (group_capture *)context;
-    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V12_VERSION);
-    assert(binding->order_count <= PRDB_SDK_SQL_V12_MAX_ORDER_KEYS);
+    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V1_VERSION);
+    assert(binding->order_count <= PRDB_SDK_SQL_MAX_ORDER_KEYS);
     if (capture->scalar_order_mode) {
         uint32_t row = capture->calls;
         static const uint8_t id_name[] = "id";
-        prdb_sdk_sql_column_shape_v2 group_column = {
+        prdb_sdk_sql_column_shape_v1 group_column = {
             id_name, 2, 0, capture->scalar_order_type,
             capture->scalar_order_precision, capture->scalar_order_scale};
         uint8_t expected[128] = {0};
@@ -142,11 +144,11 @@ static int32_t on_group_v12(void *context,
                matching_row_count == 1);
         assert(binding->order_count == 1 &&
                binding->order_items[0].item.kind ==
-                   PRDB_SDK_SQL_V10_ORDER_GROUP_KEY &&
+                   PRDB_SDK_SQL_ORDER_GROUP_KEY &&
                binding->order_items[0].item.direction ==
                    (capture->scalar_order_descending
-                        ? PRDB_SDK_SQL_V10_ORDER_DESCENDING
-                        : PRDB_SDK_SQL_V10_ORDER_ASCENDING) &&
+                        ? PRDB_SDK_SQL_ORDER_DESCENDING
+                        : PRDB_SDK_SQL_ORDER_ASCENDING) &&
                binding->order_items[0].type_code ==
                    capture->scalar_order_type);
         assert(group_key->state == PRDB_SDK_VALUE_STATE_VALUE &&
@@ -173,13 +175,13 @@ static int32_t on_group_v12(void *context,
     }
     if (binding->order_count == 2) {
         uint32_t expected_aggregate_type = PRDB_SDK_VALUE_TYPE_INTEGER;
-        if (binding->base.base.base.base.aggregate_kind ==
-                PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR ||
-            binding->base.base.base.base.aggregate_kind ==
-                PRDB_SDK_SQL_V7_AGGREGATE_SUM) {
+        if (binding->aggregate_kind ==
+                PRDB_SDK_SQL_AGGREGATE_COUNT_STAR ||
+            binding->aggregate_kind ==
+                PRDB_SDK_SQL_AGGREGATE_SUM) {
             expected_aggregate_type = PRDB_SDK_VALUE_TYPE_BIGINT;
-        } else if (binding->base.base.base.base.aggregate_kind ==
-                   PRDB_SDK_SQL_V7_AGGREGATE_AVG) {
+        } else if (binding->aggregate_kind ==
+                   PRDB_SDK_SQL_AGGREGATE_AVG) {
             expected_aggregate_type = PRDB_SDK_VALUE_TYPE_DECIMAL;
         }
         assert(binding->order_items[0].type_code == expected_aggregate_type);
@@ -213,31 +215,31 @@ static int32_t on_group_v12(void *context,
             uint32_t expected_sqlr_len;
             static const uint8_t group_name[] = "group_key";
             static const uint8_t measure_name[] = "measure";
-            const prdb_sdk_sql_column_shape_v2 group_column = {
+            const prdb_sdk_sql_column_shape_v1 group_column = {
                 group_name, sizeof(group_name) - 1, 0,
                 PRDB_SDK_VALUE_TYPE_TEXT, 0, 0};
-            const prdb_sdk_sql_column_shape_v2 measure_column = {
+            const prdb_sdk_sql_column_shape_v1 measure_column = {
                 measure_name, sizeof(measure_name) - 1, 1,
                 PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0};
-            assert(binding->base.base.base.base.aggregate_kind ==
-                   PRDB_SDK_SQL_V7_AGGREGATE_SUM);
-            assert(binding->base.base.base.base.aggregate_column.type_code ==
+            assert(binding->aggregate_kind ==
+                   PRDB_SDK_SQL_AGGREGATE_SUM);
+            assert(binding->aggregate_column.type_code ==
                    PRDB_SDK_VALUE_TYPE_INTEGER);
             assert(binding->order_count == 2);
             assert(binding->order_items[0].item.kind ==
-                   PRDB_SDK_SQL_V10_ORDER_AGGREGATE);
+                   PRDB_SDK_SQL_ORDER_AGGREGATE);
             assert(binding->order_items[0].item.direction ==
-                   PRDB_SDK_SQL_V10_ORDER_DESCENDING);
+                   PRDB_SDK_SQL_ORDER_DESCENDING);
             assert(binding->order_items[0].item.null_order ==
-                   PRDB_SDK_SQL_V11_NULLS_LAST);
+                   PRDB_SDK_SQL_NULLS_LAST);
             assert(binding->order_items[0].type_code ==
                    PRDB_SDK_VALUE_TYPE_BIGINT);
             assert(binding->order_items[1].item.kind ==
-                   PRDB_SDK_SQL_V10_ORDER_GROUP_KEY);
+                   PRDB_SDK_SQL_ORDER_GROUP_KEY);
             assert(binding->order_items[1].item.direction ==
-                   PRDB_SDK_SQL_V10_ORDER_ASCENDING);
+                   PRDB_SDK_SQL_ORDER_ASCENDING);
             assert(binding->order_items[1].item.null_order ==
-                   PRDB_SDK_SQL_V11_NULLS_FIRST);
+                   PRDB_SDK_SQL_NULLS_FIRST);
             assert(binding->order_items[1].type_code ==
                    PRDB_SDK_VALUE_TYPE_TEXT);
             assert(key_index == expected_key);
@@ -269,8 +271,8 @@ static int32_t on_group_v12(void *context,
         }
         return 0;
     }
-    return on_group(context, group_key, aggregate_value, matching_row_count,
-                    &binding->base.base);
+    return on_group(context, group_key, 1, aggregate_value, matching_row_count,
+                    binding);
 }
 
 static int32_t run_query_v12(mock_state *mock, const uint8_t *sql,
@@ -293,17 +295,17 @@ static int32_t run_query_v12(mock_state *mock, const uint8_t *sql,
     uint8_t key_scale = capture->scalar_order_mode
                             ? capture->scalar_order_scale
                             : 0;
-    prdb_sdk_sql_column_shape_v2 planner_columns[2] = {
+    prdb_sdk_sql_column_shape_v1 planner_columns[2] = {
         {id_name, 2, 0, key_type, key_precision, key_scale},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
-    prdb_sdk_sql_column_shape_v2 executor_columns[2] = {
+    prdb_sdk_sql_column_shape_v1 executor_columns[2] = {
         {id_name, 2, 0, key_type, key_precision, key_scale},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
     prdb_sdk_value_v1 cell_scratch[2] = {{0}};
     prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
                              mock, executor_request, planner_request, NULL,
                              statement_failure};
-    return prdb_sdk_sql_execute_group_v12(
+    return prdb_sdk_sql_execute_group_v1(
         &host, schema, sizeof(schema) - 1, sql, sql_len, NULL, 0,
         mock->max_candidates == 0 ? 4 : (uint16_t)mock->max_candidates,
         sizeof(batch_response),
@@ -395,17 +397,18 @@ static uint32_t make_typed_score_rows(
 }
 
 static int32_t on_group_scalar_minmax(
-    void *context, const prdb_sdk_value_v1 *group_key,
+    void *context, const prdb_sdk_value_v1 *group_key, uint32_t group_key_count,
     const prdb_sdk_value_v1 *aggregate_value, uint64_t matching_row_count,
-    const prdb_sdk_select_binding_v5 *binding) {
+    const prdb_sdk_select_binding_v1 *binding) {
+    (void)group_key_count;
     scalar_minmax_capture *capture = (scalar_minmax_capture *)context;
     int32_t key = 0;
     uint32_t index = capture->calls;
     static const uint8_t id_name[] = "id";
     static const uint8_t score_name[] = "score";
-    prdb_sdk_sql_column_shape_v2 group_column = {
+    prdb_sdk_sql_column_shape_v1 group_column = {
         id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0};
-    prdb_sdk_sql_column_shape_v2 aggregate_column = {
+    prdb_sdk_sql_column_shape_v1 aggregate_column = {
         score_name, 5, 1, capture->type, capture->precision, capture->scale};
     uint8_t encoded[128] = {0};
     uint64_t encoded_len = 0;
@@ -432,7 +435,7 @@ static int32_t on_group_scalar_minmax(
            memcmp(encoded, "SQLR\0\1\0\2", 8) == 0 &&
            encoded[27] == 0 && encoded[28] == 3 &&
            memcmp(encoded + 29,
-                  capture->aggregate_kind == PRDB_SDK_SQL_V5_AGGREGATE_MIN
+                  capture->aggregate_kind == PRDB_SDK_SQL_AGGREGATE_MIN
                       ? "min"
                       : "max",
                   3) == 0 &&
@@ -451,7 +454,7 @@ static int32_t on_group_scalar_minmax(
 static int32_t run_scalar_minmax(mock_state *mock, const uint8_t *sql,
                                  uint64_t sql_len,
                                  const scalar_order_case *test,
-                                 prdb_sdk_sql_group_row_v5_fn on_group,
+                                 prdb_sdk_sql_group_row_v1_fn on_group,
                                  void *capture) {
     static const uint8_t schema[] = "app";
     static const uint8_t id_name[] = "id";
@@ -460,17 +463,17 @@ static int32_t run_scalar_minmax(mock_state *mock, const uint8_t *sql,
     uint8_t executor_response[256] = {0};
     uint8_t batch_response[512] = {0};
     uint8_t materialized_bytes[2048] = {0};
-    prdb_sdk_sql_column_shape_v2 planner_columns[2] = {
+    prdb_sdk_sql_column_shape_v1 planner_columns[2] = {
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, test->type, test->precision, test->scale}};
-    prdb_sdk_sql_column_shape_v2 executor_columns[2] = {
+    prdb_sdk_sql_column_shape_v1 executor_columns[2] = {
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, test->type, test->precision, test->scale}};
     prdb_sdk_value_v1 cell_scratch[2] = {{0}};
     prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
                              mock, executor_request, planner_request, NULL,
                              statement_failure};
-    return prdb_sdk_sql_execute_group_v5(
+    return prdb_sdk_sql_execute_group_v1(
         &host, schema, sizeof(schema) - 1, sql, sql_len, NULL, 0, 4, 512,
         planner_response, sizeof(planner_response), executor_response,
         sizeof(executor_response), batch_response, sizeof(batch_response),
@@ -484,15 +487,16 @@ typedef struct scalar_integral_aggregate_capture {
 } scalar_integral_aggregate_capture;
 
 static int32_t on_group_scalar_sum(
-    void *context, const prdb_sdk_value_v1 *group_key,
+    void *context, const prdb_sdk_value_v1 *group_key, uint32_t group_key_count,
     const prdb_sdk_value_v1 *aggregate_value, uint64_t matching_row_count,
-    const prdb_sdk_select_binding_v6 *binding) {
+    const prdb_sdk_select_binding_v1 *binding) {
+    (void)group_key_count;
     scalar_integral_aggregate_capture *capture =
         (scalar_integral_aggregate_capture *)context;
     int32_t key = 0;
     int64_t sum = 0;
     assert(capture->calls < 2 &&
-           binding->aggregate_kind == PRDB_SDK_SQL_V6_AGGREGATE_SUM &&
+           binding->aggregate_kind == PRDB_SDK_SQL_AGGREGATE_SUM &&
            binding->aggregate_column.type_code == capture->input_type);
     assert(prdb_sdk_value_get_integer_v1(group_key, &key) ==
            PRDB_SDK_VALUE_ACCESS_OK);
@@ -509,9 +513,10 @@ static int32_t on_group_scalar_sum(
 }
 
 static int32_t on_group_scalar_avg(
-    void *context, const prdb_sdk_value_v1 *group_key,
+    void *context, const prdb_sdk_value_v1 *group_key, uint32_t group_key_count,
     const prdb_sdk_value_v1 *aggregate_value, uint64_t matching_row_count,
-    const prdb_sdk_select_binding_v7 *binding) {
+    const prdb_sdk_select_binding_v1 *binding) {
+    (void)group_key_count;
     static const uint8_t average_three[16] = {
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x2D, 0xC6, 0xC0};
     static const uint8_t average_six[16] = {
@@ -521,7 +526,7 @@ static int32_t on_group_scalar_avg(
     const uint8_t *expected = capture->calls == 0 ? average_three : average_six;
     int32_t key = 0;
     assert(capture->calls < 2 &&
-           binding->aggregate_kind == PRDB_SDK_SQL_V7_AGGREGATE_AVG &&
+           binding->aggregate_kind == PRDB_SDK_SQL_AGGREGATE_AVG &&
            binding->aggregate_column.type_code == capture->input_type);
     assert(prdb_sdk_value_get_integer_v1(group_key, &key) ==
            PRDB_SDK_VALUE_ACCESS_OK);
@@ -547,10 +552,10 @@ static int32_t run_scalar_sum_or_avg(
     uint8_t executor_response[256] = {0};
     uint8_t batch_response[512] = {0};
     uint8_t materialized_bytes[2048] = {0};
-    prdb_sdk_sql_column_shape_v2 planner_columns[2] = {
+    prdb_sdk_sql_column_shape_v1 planner_columns[2] = {
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, test->type, test->precision, test->scale}};
-    prdb_sdk_sql_column_shape_v2 executor_columns[2] = {
+    prdb_sdk_sql_column_shape_v1 executor_columns[2] = {
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, test->type, test->precision, test->scale}};
     prdb_sdk_value_v1 cell_scratch[2] = {{0}};
@@ -558,7 +563,7 @@ static int32_t run_scalar_sum_or_avg(
                              mock, executor_request, planner_request, NULL,
                              statement_failure};
     if (average) {
-        return prdb_sdk_sql_execute_group_v7(
+        return prdb_sdk_sql_execute_group_v1(
             &host, schema, sizeof(schema) - 1, sql, sql_len, NULL, 0, 4, 512,
             planner_response, sizeof(planner_response), executor_response,
             sizeof(executor_response), batch_response, sizeof(batch_response),
@@ -566,7 +571,7 @@ static int32_t run_scalar_sum_or_avg(
             materialized_bytes, sizeof(materialized_bytes), on_group_scalar_avg,
             capture);
     }
-    return prdb_sdk_sql_execute_group_v6(
+    return prdb_sdk_sql_execute_group_v1(
         &host, schema, sizeof(schema) - 1, sql, sql_len, NULL, 0, 4, 512,
         planner_response, sizeof(planner_response), executor_response,
         sizeof(executor_response), batch_response, sizeof(batch_response),
@@ -753,8 +758,8 @@ static void run_grouped_scalar_order_matrix(mock_state *mock) {
                 capture.precision = test->precision;
                 capture.scale = test->scale;
                 capture.aggregate_kind = aggregate == 0
-                    ? PRDB_SDK_SQL_V5_AGGREGATE_MIN
-                    : PRDB_SDK_SQL_V5_AGGREGATE_MAX;
+                    ? PRDB_SDK_SQL_AGGREGATE_MIN
+                    : PRDB_SDK_SQL_AGGREGATE_MAX;
                 capture.expected[0] = aggregate == 0
                     ? test->lower : test->higher;
                 capture.expected_len[0] = aggregate == 0
@@ -832,10 +837,10 @@ static int32_t on_group_v13(void *context,
                             uint32_t group_key_count,
                             const prdb_sdk_value_v1 *aggregate_value,
                             uint64_t matching_row_count,
-                            const prdb_sdk_select_binding_v13 *binding) {
+                            const prdb_sdk_select_binding_v1 *binding) {
     group_capture *capture = (group_capture *)context;
     int32_t first = 0, second = 0;
-    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V13_VERSION);
+    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V1_VERSION);
     assert(group_key_count == 2 && binding->group_key_count == 2);
     assert(capture->mock->batch_finished != 0);
     assert(capture->mock->executor_calls ==
@@ -847,17 +852,17 @@ static int32_t on_group_v13(void *context,
            PRDB_SDK_VALUE_ACCESS_OK);
     assert(prdb_sdk_value_get_integer_v1(&group_keys[1], &second) ==
            PRDB_SDK_VALUE_ACCESS_OK);
-    assert(binding->base.aggregate_kind ==
-               PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR ||
-           binding->base.aggregate_kind == PRDB_SDK_SQL_V7_AGGREGATE_MIN ||
-           binding->base.aggregate_kind == PRDB_SDK_SQL_V7_AGGREGATE_MAX ||
-           binding->base.aggregate_kind == PRDB_SDK_SQL_V7_AGGREGATE_SUM ||
-           binding->base.aggregate_kind == PRDB_SDK_SQL_V7_AGGREGATE_AVG);
-    if (binding->base.aggregate_kind ==
-        PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR) {
+    assert(binding->aggregate_kind ==
+               PRDB_SDK_SQL_AGGREGATE_COUNT_STAR ||
+           binding->aggregate_kind == PRDB_SDK_SQL_AGGREGATE_MIN ||
+           binding->aggregate_kind == PRDB_SDK_SQL_AGGREGATE_MAX ||
+           binding->aggregate_kind == PRDB_SDK_SQL_AGGREGATE_SUM ||
+           binding->aggregate_kind == PRDB_SDK_SQL_AGGREGATE_AVG);
+    if (binding->aggregate_kind ==
+        PRDB_SDK_SQL_AGGREGATE_COUNT_STAR) {
         assert(aggregate_value == NULL);
         capture->aggregates[capture->calls] = (int32_t)matching_row_count;
-    } else if (binding->base.aggregate_kind == PRDB_SDK_SQL_V7_AGGREGATE_SUM) {
+    } else if (binding->aggregate_kind == PRDB_SDK_SQL_AGGREGATE_SUM) {
         int64_t sum = 0;
         assert(aggregate_value != NULL &&
                aggregate_value->type_code == PRDB_SDK_VALUE_TYPE_BIGINT);
@@ -865,10 +870,10 @@ static int32_t on_group_v13(void *context,
                PRDB_SDK_VALUE_ACCESS_OK);
         capture->aggregates[capture->calls] = (int32_t)sum;
         assert((int64_t)capture->aggregates[capture->calls] == sum);
-    } else if (binding->base.aggregate_kind ==
-                   PRDB_SDK_SQL_V7_AGGREGATE_MIN ||
-               binding->base.aggregate_kind ==
-                   PRDB_SDK_SQL_V7_AGGREGATE_MAX) {
+    } else if (binding->aggregate_kind ==
+                   PRDB_SDK_SQL_AGGREGATE_MIN ||
+               binding->aggregate_kind ==
+                   PRDB_SDK_SQL_AGGREGATE_MAX) {
         int32_t value = 0;
         assert(aggregate_value != NULL &&
                aggregate_value->type_code == PRDB_SDK_VALUE_TYPE_INTEGER);
@@ -881,8 +886,8 @@ static int32_t on_group_v13(void *context,
         static const uint8_t average_five[16] = {
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x4c, 0x4b, 0x40};
         const uint8_t *expected = first == 1 ? average_nine : average_five;
-        assert(binding->base.aggregate_kind ==
-               PRDB_SDK_SQL_V7_AGGREGATE_AVG);
+        assert(binding->aggregate_kind ==
+               PRDB_SDK_SQL_AGGREGATE_AVG);
         assert(aggregate_value != NULL &&
                aggregate_value->type_code == PRDB_SDK_VALUE_TYPE_DECIMAL &&
                aggregate_value->data_len == 16 &&
@@ -908,16 +913,16 @@ static int32_t on_nullable_composite_group_v13(
     void *context, const prdb_sdk_value_v1 *group_keys,
     uint32_t group_key_count, const prdb_sdk_value_v1 *aggregate_value,
     uint64_t matching_row_count,
-    const prdb_sdk_select_binding_v13 *binding) {
+    const prdb_sdk_select_binding_v1 *binding) {
     static const uint32_t expected_counts[] = {2, 1, 1, 2};
     nullable_composite_capture *capture = context;
     int32_t first = 0, second = 0;
     uint32_t first_state = 0, second_state = 0;
     uint32_t index = capture->calls;
     assert(index < 4 && group_key_count == 2 && aggregate_value == NULL);
-    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V13_VERSION &&
-           binding->base.aggregate_kind ==
-               PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR);
+    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V1_VERSION &&
+           binding->aggregate_kind ==
+               PRDB_SDK_SQL_AGGREGATE_COUNT_STAR);
     assert(capture->mock->batch_finished != 0 &&
            capture->mock->executor_calls == 3);
     assert(prdb_sdk_value_state_v1(&group_keys[0], &first_state) ==
@@ -957,13 +962,13 @@ static int32_t on_group_eight_keys(
     void *context, const prdb_sdk_value_v1 *group_keys,
     uint32_t group_key_count, const prdb_sdk_value_v1 *aggregate_value,
     uint64_t matching_row_count,
-    const prdb_sdk_select_binding_v13 *binding) {
+    const prdb_sdk_select_binding_v1 *binding) {
     group_capture *capture = (group_capture *)context;
     int64_t sum = 0;
-    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V13_VERSION);
+    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V1_VERSION);
     assert(group_key_count == 8 && binding->group_key_count == 8);
-    assert(binding->base.aggregate_kind == PRDB_SDK_SQL_V7_AGGREGATE_SUM);
-    assert(binding->base.aggregate_column.ordinal == 8);
+    assert(binding->aggregate_kind == PRDB_SDK_SQL_AGGREGATE_SUM);
+    assert(binding->aggregate_column.ordinal == 8);
     assert(capture->calls < 2 && capture->mock->batch_finished != 0);
     for (uint32_t index = 0; index < 8; ++index) {
         int32_t value = 0;
@@ -987,14 +992,14 @@ static int32_t on_ordered_group_eight_keys(
     void *context, const prdb_sdk_value_v1 *group_keys,
     uint32_t group_key_count, const prdb_sdk_value_v1 *aggregate_value,
     uint64_t matching_row_count,
-    const prdb_sdk_select_binding_v15 *binding) {
+    const prdb_sdk_select_binding_v1 *binding) {
     group_capture *capture = (group_capture *)context;
     int64_t sum = 0;
-    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V15_VERSION);
-    assert(binding->base.base.group_key_count == 8);
-    assert(binding->base.base.base.aggregate_kind ==
-           PRDB_SDK_SQL_V7_AGGREGATE_SUM);
-    assert(binding->base.base.base.aggregate_column.ordinal == 8);
+    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V1_VERSION);
+    assert(binding->group_key_count == 8);
+    assert(binding->aggregate_kind ==
+           PRDB_SDK_SQL_AGGREGATE_SUM);
+    assert(binding->aggregate_column.ordinal == 8);
     assert(binding->order_count == 9);
     assert(group_key_count == 8 && capture->calls < 2);
     assert(capture->mock->batch_finished != 0 &&
@@ -1003,10 +1008,10 @@ static int32_t on_ordered_group_eight_keys(
     for (uint32_t index = 0; index < 8; ++index) {
         int32_t value = 0;
         assert(binding->order_items[index].item.kind ==
-               PRDB_SDK_SQL_V10_ORDER_GROUP_KEY);
+               PRDB_SDK_SQL_ORDER_GROUP_KEY);
         assert(binding->order_items[index].item.group_key_index == index);
         assert(binding->order_items[index].item.direction ==
-               PRDB_SDK_SQL_V10_ORDER_DESCENDING);
+               PRDB_SDK_SQL_ORDER_DESCENDING);
         assert(binding->order_items[index].type_code ==
                PRDB_SDK_VALUE_TYPE_INTEGER);
         assert(group_keys[index].type_code == PRDB_SDK_VALUE_TYPE_INTEGER);
@@ -1016,9 +1021,9 @@ static int32_t on_ordered_group_eight_keys(
                             (capture->calls == 0 && index == 7 ? 1 : 0));
     }
     assert(binding->order_items[8].item.kind ==
-           PRDB_SDK_SQL_V10_ORDER_AGGREGATE);
+           PRDB_SDK_SQL_ORDER_AGGREGATE);
     assert(binding->order_items[8].item.direction ==
-           PRDB_SDK_SQL_V10_ORDER_DESCENDING);
+           PRDB_SDK_SQL_ORDER_DESCENDING);
     assert(binding->order_items[8].type_code == PRDB_SDK_VALUE_TYPE_BIGINT);
     assert(aggregate_value != NULL &&
            aggregate_value->type_code == PRDB_SDK_VALUE_TYPE_BIGINT);
@@ -1040,10 +1045,10 @@ static int32_t run_query_v13(mock_state *mock, const uint8_t *sql,
     uint8_t materialized_bytes[4096] = {0};
     static const uint8_t id_name[] = "id";
     static const uint8_t score_name[] = "score";
-    prdb_sdk_sql_column_shape_v2 planner_columns[2] = {
+    prdb_sdk_sql_column_shape_v1 planner_columns[2] = {
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
-    prdb_sdk_sql_column_shape_v2 executor_columns[2] = {
+    prdb_sdk_sql_column_shape_v1 executor_columns[2] = {
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
     prdb_sdk_value_v1 cell_scratch[2] = {{0}};
@@ -1051,7 +1056,7 @@ static int32_t run_query_v13(mock_state *mock, const uint8_t *sql,
                              mock, executor_request, planner_request, NULL,
                              statement_failure};
     mock->optimizer_enabled = 0;
-    return prdb_sdk_sql_execute_group_v13(
+    return prdb_sdk_sql_execute_group_v1(
         &host, schema, sizeof(schema) - 1, sql, sql_len, NULL, 0,
         mock->max_candidates == 0 ? 4 : (uint16_t)mock->max_candidates,
         mock->max_candidates > 3 ? 4096 : 512,
@@ -1071,17 +1076,17 @@ static int32_t run_nullable_composite_count_v13(
     uint8_t executor_response[256] = {0};
     uint8_t batch_response[4096] = {0};
     uint8_t materialized_bytes[4096] = {0};
-    prdb_sdk_sql_column_shape_v2 planner_columns[2] = {
+    prdb_sdk_sql_column_shape_v1 planner_columns[2] = {
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
-    prdb_sdk_sql_column_shape_v2 executor_columns[2] = {
+    prdb_sdk_sql_column_shape_v1 executor_columns[2] = {
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
     prdb_sdk_value_v1 cell_scratch[2] = {{0}};
     prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
                              mock, executor_request, planner_request, NULL,
                              statement_failure};
-    return prdb_sdk_sql_execute_group_v13(
+    return prdb_sdk_sql_execute_group_v1(
         &host, schema, sizeof(schema) - 1, sql, sql_len, NULL, 0, 6, 4096,
         planner_response, sizeof(planner_response), executor_response,
         sizeof(executor_response), batch_response, sizeof(batch_response),
@@ -1103,10 +1108,10 @@ static int32_t run_query_v13_optimizer_internal(
     uint8_t executor_response[512] = {0};
     uint8_t batch_response[4096] = {0};
     uint8_t materialized_bytes[4096] = {0};
-    prdb_sdk_sql_column_shape_v2 planner_columns[2] = {
+    prdb_sdk_sql_column_shape_v1 planner_columns[2] = {
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
-    prdb_sdk_sql_column_shape_v2 executor_columns[2] = {
+    prdb_sdk_sql_column_shape_v1 executor_columns[2] = {
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
     prdb_sdk_value_v1 cell_scratch[2] = {{0}};
@@ -1159,8 +1164,8 @@ static int32_t run_ordered_eight_key_optimizer(
         (const uint8_t *)"key_4", (const uint8_t *)"key_5",
         (const uint8_t *)"key_6", (const uint8_t *)"key_7",
         (const uint8_t *)"measure"};
-    prdb_sdk_sql_column_shape_v2 planner_columns[9] = {{0}};
-    prdb_sdk_sql_column_shape_v2 executor_columns[9] = {{0}};
+    prdb_sdk_sql_column_shape_v1 planner_columns[9] = {{0}};
+    prdb_sdk_sql_column_shape_v1 executor_columns[9] = {{0}};
     prdb_sdk_value_v1 cell_scratch[9] = {{0}};
     uint8_t optimizer_request_bytes[4096] = {0};
     uint8_t optimizer_response[4096] = {0};
@@ -1170,7 +1175,7 @@ static int32_t run_ordered_eight_key_optimizer(
     uint8_t materialized_bytes[4096] = {0};
     prdb_host_api_v5 host = {0};
     for (uint32_t index = 0; index < 9; ++index) {
-        planner_columns[index] = (prdb_sdk_sql_column_shape_v2){
+        planner_columns[index] = (prdb_sdk_sql_column_shape_v1){
             names[index], (uint32_t)strlen((const char *)names[index]), index,
             PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0};
         executor_columns[index] = planner_columns[index];
@@ -1197,15 +1202,15 @@ static int32_t on_group_v14(void *context,
                             uint32_t group_key_count,
                             const prdb_sdk_value_v1 *aggregate_value,
                             uint64_t matching_row_count,
-                            const prdb_sdk_select_binding_v14 *binding) {
+                            const prdb_sdk_select_binding_v1 *binding) {
     group_capture *capture = (group_capture *)context;
     int32_t key = 0;
     int64_t sum = 0;
     (void)matching_row_count;
-    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V14_VERSION);
-    assert(binding->base.group_key_count == 2 && group_key_count == 2);
-    assert(binding->has_having == 1 &&
-           binding->having_parameter_index == 1);
+    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V1_VERSION);
+    assert(binding->group_key_count == 2 && group_key_count == 2);
+    assert(binding->having_node_count == 1 &&
+           binding->having_nodes[0].parameter_index == 1);
     assert(capture->mock->batch_finished != 0);
     assert(prdb_sdk_value_get_integer_v1(&group_keys[0], &key) ==
            PRDB_SDK_VALUE_ACCESS_OK);
@@ -1228,17 +1233,17 @@ static int32_t run_query_v14(mock_state *mock, const uint8_t *sql,
     uint8_t materialized_bytes[64] = {0};
     static const uint8_t id_name[] = "id";
     static const uint8_t score_name[] = "score";
-    prdb_sdk_sql_column_shape_v2 planner_columns[2] = {
+    prdb_sdk_sql_column_shape_v1 planner_columns[2] = {
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
-    prdb_sdk_sql_column_shape_v2 executor_columns[2] = {
+    prdb_sdk_sql_column_shape_v1 executor_columns[2] = {
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
     prdb_sdk_value_v1 cell_scratch[2] = {{0}};
     prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
                              mock, executor_request, planner_request, NULL,
                              statement_failure};
-    return prdb_sdk_sql_execute_group_v14(
+    return prdb_sdk_sql_execute_group_v1(
         &host, schema, sizeof(schema) - 1, sql, sql_len, parameter, 1, 4, 512,
         planner_response, sizeof(planner_response), executor_response,
         sizeof(executor_response), batch_response, sizeof(batch_response),
@@ -1251,10 +1256,10 @@ static int32_t on_group_v15(void *context,
                             uint32_t group_key_count,
                             const prdb_sdk_value_v1 *aggregate_value,
                             uint64_t matching_row_count,
-                            const prdb_sdk_select_binding_v15 *binding) {
+                            const prdb_sdk_select_binding_v1 *binding) {
     group_capture *capture = (group_capture *)context;
     int32_t first = 0, second = 0;
-    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V15_VERSION);
+    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V1_VERSION);
     assert(binding->order_count == 3);
     assert(binding->order_items[0].type_code == PRDB_SDK_VALUE_TYPE_INTEGER);
     assert(binding->order_items[1].type_code == PRDB_SDK_VALUE_TYPE_BIGINT);
@@ -1284,17 +1289,17 @@ static int32_t run_query_v15(mock_state *mock, const uint8_t *sql,
     uint8_t materialized_bytes[64] = {0};
     static const uint8_t id_name[] = "id";
     static const uint8_t score_name[] = "score";
-    prdb_sdk_sql_column_shape_v2 planner_columns[2] = {
+    prdb_sdk_sql_column_shape_v1 planner_columns[2] = {
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
-    prdb_sdk_sql_column_shape_v2 executor_columns[2] = {
+    prdb_sdk_sql_column_shape_v1 executor_columns[2] = {
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
     prdb_sdk_value_v1 cell_scratch[2] = {{0}};
     prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
                              mock, executor_request, planner_request, NULL,
                              statement_failure};
-    return prdb_sdk_sql_execute_group_v15(
+    return prdb_sdk_sql_execute_group_v1(
         &host, schema, sizeof(schema) - 1, sql, sql_len, parameter, 1, 4, 512,
         planner_response, sizeof(planner_response), executor_response,
         sizeof(executor_response), batch_response, sizeof(batch_response),
@@ -1307,17 +1312,20 @@ static int32_t on_group_v17(void *context,
                             uint32_t group_key_count,
                             const prdb_sdk_value_v1 *aggregate_value,
                             uint64_t matching_row_count,
-                            const prdb_sdk_select_binding_v17 *binding) {
+                            const prdb_sdk_select_binding_v1 *binding) {
     group_capture *capture = (group_capture *)context;
     int32_t key = 0;
     int64_t sum = 0;
-    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V17_VERSION);
-    assert(binding->has_having_literal == capture->expect_having_literal);
-    assert(binding->having_literal ==
-           (capture->expect_having_literal ? UINT64_C(10) : UINT64_C(0)));
-    assert(binding->base.base.has_having == 1);
-    assert(binding->base.base.having_parameter_index == 1);
-    assert(binding->base.base.base.group_key_count == 2 &&
+    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V1_VERSION);
+    assert(binding->having_node_count == 1);
+    assert(binding->having_nodes[0].operand_kind ==
+           (capture->expect_having_literal
+                ? PRDB_SDK_SQL_HAVING_OPERAND_NUMERIC_LITERAL
+                : PRDB_SDK_SQL_HAVING_OPERAND_PARAMETER));
+    if (!capture->expect_having_literal) {
+        assert(binding->having_nodes[0].parameter_index == 1);
+    }
+    assert(binding->group_key_count == 2 &&
            group_key_count == 2);
     assert(aggregate_value != NULL && matching_row_count == 2);
     assert(capture->mock->batch_finished != 0);
@@ -1342,17 +1350,17 @@ static int32_t run_query_v17(mock_state *mock, const uint8_t *sql,
     uint8_t materialized_bytes[64] = {0};
     static const uint8_t id_name[] = "id";
     static const uint8_t score_name[] = "score";
-    prdb_sdk_sql_column_shape_v2 planner_columns[2] = {
+    prdb_sdk_sql_column_shape_v1 planner_columns[2] = {
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
-    prdb_sdk_sql_column_shape_v2 executor_columns[2] = {
+    prdb_sdk_sql_column_shape_v1 executor_columns[2] = {
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
     prdb_sdk_value_v1 cell_scratch[2] = {{0}};
     prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
                              mock, executor_request, planner_request, NULL,
                              statement_failure};
-    return prdb_sdk_sql_execute_group_v17(
+    return prdb_sdk_sql_execute_group_v1(
         &host, schema, sizeof(schema) - 1, sql, sql_len, parameter,
         parameter == NULL ? 0 : 1, 4, 512,
         planner_response, sizeof(planner_response), executor_response,
@@ -1366,17 +1374,17 @@ static int32_t on_group_v18(void *context,
                             uint32_t group_key_count,
                             const prdb_sdk_value_v1 *aggregate_value,
                             uint64_t matching_row_count,
-                            const prdb_sdk_select_binding_v18 *binding) {
+                            const prdb_sdk_select_binding_v1 *binding) {
     group_capture *capture = (group_capture *)context;
     int32_t key = 0, second_key = 0;
     int64_t sum = 0;
-    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V18_VERSION);
+    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V1_VERSION);
     assert(binding->having_node_count ==
            (capture->expect_having_literal ? 1u : 6u));
     assert(binding->having_root == binding->having_node_count - 1);
     assert(binding->having_type_code == PRDB_SDK_VALUE_TYPE_BIGINT);
-    assert(binding->base.base.has_having == 0);
-    assert(binding->base.base.base.group_key_count == 2 &&
+    assert(binding->has_having == 0);
+    assert(binding->group_key_count == 2 &&
            group_key_count == 2);
     assert(aggregate_value != NULL &&
            matching_row_count ==
@@ -1408,17 +1416,17 @@ static int32_t run_query_v18(mock_state *mock, const uint8_t *sql,
     uint8_t materialized_bytes[2048] = {0};
     static const uint8_t id_name[] = "id";
     static const uint8_t score_name[] = "score";
-    prdb_sdk_sql_column_shape_v2 planner_columns[2] = {
+    prdb_sdk_sql_column_shape_v1 planner_columns[2] = {
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
-    prdb_sdk_sql_column_shape_v2 executor_columns[2] = {
+    prdb_sdk_sql_column_shape_v1 executor_columns[2] = {
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
     prdb_sdk_value_v1 cell_scratch[2] = {{0}};
     prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
                              mock, executor_request, planner_request, NULL,
                              statement_failure};
-    return prdb_sdk_sql_execute_group_v18(
+    return prdb_sdk_sql_execute_group_v1(
         &host, schema, sizeof(schema) - 1, sql, sql_len, parameter,
         parameter == NULL ? 0 : 1,
         mock->max_candidates == 0 ? 4 : (uint16_t)mock->max_candidates, 512,
@@ -1432,22 +1440,22 @@ static int32_t on_group_v21_decimal(
     void *context, const prdb_sdk_value_v1 *group_keys,
     uint32_t group_key_count, const prdb_sdk_value_v1 *aggregate_value,
     uint64_t matching_row_count,
-    const prdb_sdk_select_binding_v21 *binding) {
+    const prdb_sdk_select_binding_v1 *binding) {
     group_capture *capture = (group_capture *)context;
     int32_t key = 0;
     uint64_t aggregate_bits = 0;
     int64_t aggregate_coefficient;
-    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V21_VERSION);
-    assert(binding->base.having_type_code == PRDB_SDK_VALUE_TYPE_DECIMAL);
-    assert(binding->base.having_node_count == 1);
-    assert(binding->having_nodes[0].base.operand_kind ==
-           PRDB_SDK_SQL_V21_OPERAND_NUMERIC_LITERAL);
-    if (binding->base.having_decimal_scale == 2) {
+    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V1_VERSION);
+    assert(binding->having_type_code == PRDB_SDK_VALUE_TYPE_DECIMAL);
+    assert(binding->having_node_count == 1);
+    assert(binding->having_nodes[0].operand_kind ==
+           PRDB_SDK_SQL_HAVING_OPERAND_NUMERIC_LITERAL);
+    if (binding->having_decimal_scale == 2) {
         assert(binding->having_nodes[0].scale == 2);
         assert(binding->having_nodes[0].coefficient[14] == 1 &&
                binding->having_nodes[0].coefficient[15] == 0xc2);
     } else {
-        assert(binding->base.having_decimal_scale == 8);
+        assert(binding->having_decimal_scale == 8);
         assert(binding->having_nodes[0].scale == 8);
         assert(binding->having_nodes[0].coefficient[12] == 0x08 &&
                binding->having_nodes[0].coefficient[13] == 0x58 &&
@@ -1466,7 +1474,7 @@ static int32_t on_group_v21_decimal(
         aggregate_bits = (aggregate_bits << 8) | aggregate_value->data[index + 8];
     aggregate_coefficient = (int64_t)aggregate_bits;
     capture->keys[capture->calls] = key;
-    capture->aggregates[capture->calls] = binding->base.having_decimal_scale == 2
+    capture->aggregates[capture->calls] = binding->having_decimal_scale == 2
                                               ? (int32_t)(aggregate_coefficient / 100)
                                               : (int32_t)(aggregate_coefficient /
                                                           1000000);
@@ -1480,20 +1488,20 @@ static int32_t on_group_v22_null_sum(
     void *context, const prdb_sdk_value_v1 *group_keys,
     uint32_t group_key_count, const prdb_sdk_value_v1 *aggregate_value,
     uint64_t matching_row_count,
-    const prdb_sdk_select_binding_v21 *binding) {
+    const prdb_sdk_select_binding_v1 *binding) {
     group_capture *capture = (group_capture *)context;
     int32_t key = 0;
-    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V21_VERSION);
-    assert(binding->base.having_type_code == PRDB_SDK_VALUE_TYPE_DECIMAL);
-    assert(binding->base.having_node_count == 3);
-    assert(binding->having_nodes[0].base.node_kind ==
+    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V1_VERSION);
+    assert(binding->having_type_code == PRDB_SDK_VALUE_TYPE_DECIMAL);
+    assert(binding->having_node_count == 3);
+    assert(binding->having_nodes[0].node_kind ==
            PRDB_SDK_SQL_PREDICATE_COMPARE);
-    assert(binding->having_nodes[0].base.operand_kind ==
-        PRDB_SDK_SQL_V21_OPERAND_NUMERIC_LITERAL);
+    assert(binding->having_nodes[0].operand_kind ==
+        PRDB_SDK_SQL_HAVING_OPERAND_NUMERIC_LITERAL);
     assert(binding->having_nodes[0].scale == 0 &&
            binding->having_nodes[0].coefficient[15] == 2);
-    assert(binding->having_nodes[1].base.operand_kind ==
-           PRDB_SDK_SQL_V21_OPERAND_NUMERIC_LITERAL);
+    assert(binding->having_nodes[1].operand_kind ==
+           PRDB_SDK_SQL_HAVING_OPERAND_NUMERIC_LITERAL);
     assert(binding->having_nodes[1].scale == 2 &&
            binding->having_nodes[1].coefficient[14] == 1 &&
            binding->having_nodes[1].coefficient[15] == 0xc2);
@@ -1514,12 +1522,12 @@ static int32_t on_group_v22_hidden_count_avg(
     void *context, const prdb_sdk_value_v1 *group_keys,
     uint32_t group_key_count, const prdb_sdk_value_v1 *aggregate_value,
     uint64_t matching_row_count,
-    const prdb_sdk_select_binding_v21 *binding) {
+    const prdb_sdk_select_binding_v1 *binding) {
     group_capture *capture = (group_capture *)context;
     int32_t key = 0;
-    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V21_VERSION);
-    assert(binding->base.having_type_code == PRDB_SDK_VALUE_TYPE_DECIMAL);
-    assert(binding->base.having_decimal_scale == 8);
+    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V1_VERSION);
+    assert(binding->having_type_code == PRDB_SDK_VALUE_TYPE_DECIMAL);
+    assert(binding->having_decimal_scale == 8);
     assert(group_key_count == 2 && matching_row_count == 2);
     assert(prdb_sdk_value_get_integer_v1(&group_keys[0], &key) ==
            PRDB_SDK_VALUE_ACCESS_OK);
@@ -1547,12 +1555,12 @@ static int32_t on_group_v22_hidden_count_minmax(
     void *context, const prdb_sdk_value_v1 *group_keys,
     uint32_t group_key_count, const prdb_sdk_value_v1 *aggregate_value,
     uint64_t matching_row_count,
-    const prdb_sdk_select_binding_v21 *binding) {
+    const prdb_sdk_select_binding_v1 *binding) {
     group_capture *capture = (group_capture *)context;
     int32_t key = 0;
-    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V21_VERSION);
-    assert(binding->base.having_type_code == PRDB_SDK_VALUE_TYPE_DECIMAL);
-    assert(binding->base.having_decimal_scale == 2);
+    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V1_VERSION);
+    assert(binding->having_type_code == PRDB_SDK_VALUE_TYPE_DECIMAL);
+    assert(binding->having_decimal_scale == 2);
     assert(group_key_count == 2 && matching_row_count == 2);
     assert(prdb_sdk_value_get_integer_v1(&group_keys[0], &key) ==
            PRDB_SDK_VALUE_ACCESS_OK);
@@ -1578,12 +1586,12 @@ static int32_t on_group_v22_where_and_having(
     void *context, const prdb_sdk_value_v1 *group_keys,
     uint32_t group_key_count, const prdb_sdk_value_v1 *aggregate_value,
     uint64_t matching_row_count,
-    const prdb_sdk_select_binding_v21 *binding) {
+    const prdb_sdk_select_binding_v1 *binding) {
     group_capture *capture = (group_capture *)context;
     int32_t id = 0;
-    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V21_VERSION);
-    assert(binding->base.having_node_count == 3);
-    assert(binding->base.having_decimal_scale == 2);
+    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V1_VERSION);
+    assert(binding->having_node_count == 3);
+    assert(binding->having_decimal_scale == 2);
     assert(group_key_count == 2 && matching_row_count == 1);
     assert(prdb_sdk_value_get_integer_v1(&group_keys[0], &id) ==
            PRDB_SDK_VALUE_ACCESS_OK && id == 2);
@@ -1607,15 +1615,15 @@ static int32_t on_group_v21_min_decimal(
     void *context, const prdb_sdk_value_v1 *group_keys,
     uint32_t group_key_count, const prdb_sdk_value_v1 *aggregate_value,
     uint64_t matching_row_count,
-    const prdb_sdk_select_binding_v21 *binding) {
+    const prdb_sdk_select_binding_v1 *binding) {
     group_capture *capture = (group_capture *)context;
-    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V21_VERSION);
-    assert(binding->base.having_type_code == PRDB_SDK_VALUE_TYPE_DECIMAL);
-    assert(binding->base.having_decimal_scale == 2);
-    assert(binding->base.having_node_count == 1);
+    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V1_VERSION);
+    assert(binding->having_type_code == PRDB_SDK_VALUE_TYPE_DECIMAL);
+    assert(binding->having_decimal_scale == 2);
+    assert(binding->having_node_count == 1);
     assert(binding->having_nodes[0].scale == 2);
-    assert(binding->having_nodes[0].base.operand_kind ==
-           PRDB_SDK_SQL_V21_OPERAND_NUMERIC_LITERAL);
+    assert(binding->having_nodes[0].operand_kind ==
+           PRDB_SDK_SQL_HAVING_OPERAND_NUMERIC_LITERAL);
     assert(binding->having_nodes[0].coefficient[14] == 1 &&
            binding->having_nodes[0].coefficient[15] == 44);
     assert(group_key_count == 2 && aggregate_value != NULL);
@@ -1642,16 +1650,16 @@ static int32_t on_group_v21_max_decimal(
     void *context, const prdb_sdk_value_v1 *group_keys,
     uint32_t group_key_count, const prdb_sdk_value_v1 *aggregate_value,
     uint64_t matching_row_count,
-    const prdb_sdk_select_binding_v21 *binding) {
+    const prdb_sdk_select_binding_v1 *binding) {
     group_capture *capture = (group_capture *)context;
-    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V21_VERSION);
-    assert(binding->base.having_type_code == PRDB_SDK_VALUE_TYPE_DECIMAL);
-    assert(binding->base.having_decimal_precision == 10);
-    assert(binding->base.having_decimal_scale == 2);
-    assert(binding->base.having_node_count == 1);
+    assert(binding->abi_version == PRDB_SDK_SQL_ABI_V1_VERSION);
+    assert(binding->having_type_code == PRDB_SDK_VALUE_TYPE_DECIMAL);
+    assert(binding->having_decimal_precision == 10);
+    assert(binding->having_decimal_scale == 2);
+    assert(binding->having_node_count == 1);
     assert(binding->having_nodes[0].scale == 2);
-    assert(binding->having_nodes[0].base.operand_kind ==
-           PRDB_SDK_SQL_V21_OPERAND_NUMERIC_LITERAL);
+    assert(binding->having_nodes[0].operand_kind ==
+           PRDB_SDK_SQL_HAVING_OPERAND_NUMERIC_LITERAL);
     assert(binding->having_nodes[0].coefficient[14] == 3 &&
            binding->having_nodes[0].coefficient[15] == 32);
     assert(group_key_count == 2 && aggregate_value != NULL);

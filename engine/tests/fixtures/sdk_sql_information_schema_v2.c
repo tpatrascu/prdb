@@ -1,4 +1,4 @@
-#include "prdb_sdk_sql_exec_v2.h"
+#include "prdb_sdk_sql_exec_v1.h"
 
 #include <assert.h>
 #include <string.h>
@@ -192,7 +192,7 @@ static int32_t statement_failure(void *context, uint32_t failure_code) {
 }
 
 static int32_t on_row(void *context, const prdb_sdk_row_v1 *row,
-                      const prdb_sdk_select_binding_v2 *binding) {
+                      const prdb_sdk_select_binding_v1 *binding) {
     mock_host *mock = (mock_host *)context;
     prdb_sdk_cell_iterator_v1 cells = {0};
     prdb_sdk_value_v1 value = {0};
@@ -232,11 +232,11 @@ int main(void) {
     uint8_t planner_response[256] = {0};
     uint8_t executor_response[256] = {0};
     uint8_t batch_response[1024] = {0};
-    prdb_sdk_sql_column_shape_v2 planner_columns[1] = {{0}};
-    prdb_sdk_sql_column_shape_v2 executor_columns[1] = {{0}};
+    prdb_sdk_sql_column_shape_v1 planner_columns[1] = {{0}};
+    prdb_sdk_sql_column_shape_v1 executor_columns[1] = {{0}};
     prdb_sdk_value_v1 cell_scratch[1] = {{0}};
 
-    assert(prdb_sdk_sql_execute_select_v2(
+    assert(prdb_sdk_sql_execute_select_v1(
                &host, schema, sizeof(schema) - 1, sql, sizeof(sql) - 1,
                &parameter, 1, 1, 1024, planner_response,
                sizeof(planner_response), executor_response,

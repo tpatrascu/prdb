@@ -1,7 +1,7 @@
 #ifndef PRDB_SDK_PLANNER_V1_H
 #define PRDB_SDK_PLANNER_V1_H
 
-#include "prdb_sdk_sql_v2.h"
+#include "prdb_sdk_sql_v1.h"
 #include "prdb_query_abi_v2.h"
 
 #define PRDB_SDK_PLANNER_ABI_V1_VERSION UINT32_C(1)
@@ -45,7 +45,7 @@ typedef struct prdb_sdk_planner_relation_v1 {
 int32_t prdb_sdk_planner_decode_relation_v1(
     const uint8_t *payload, uint64_t payload_len,
     prdb_sdk_planner_relation_v1 *out, uint32_t out_capacity,
-    prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_capacity);
+    prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_capacity);
 
 /* Submit an explicitly qualified name through the planner host channel,
  * decode its authorized shape, and retain the planner-only handle. */
@@ -55,7 +55,7 @@ int32_t prdb_sdk_planner_describe_relation_v1(
     const uint8_t *relation_name, uint32_t relation_name_len,
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len,
     prdb_sdk_planner_relation_v1 *out, uint32_t out_capacity,
-    prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_capacity);
+    prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_capacity);
 
 /* Shared wire decoder for the executor's independently resolved relation.
  * Unlike the planner decoder, it requires handle kind 6. */
@@ -64,6 +64,6 @@ int32_t prdb_sdk_executor_decode_relation_v1(
     uint8_t relation_id_out[16], uint8_t executor_handle_out[16],
     const uint8_t **name_out, uint32_t *name_len_out,
     uint32_t *column_count_out, uint32_t output_capacity,
-    prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_capacity);
+    prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_capacity);
 
 #endif /* PRDB_SDK_PLANNER_V1_H */

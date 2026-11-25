@@ -1,7 +1,7 @@
 #ifndef PRDB_SDK_SQL_DISPATCH_V1_H
 #define PRDB_SDK_SQL_DISPATCH_V1_H
 
-#include "prdb_sdk_sql_exec_v2.h"
+#include "prdb_sdk_sql_exec_v1.h"
 #include "prdb_sdk_sql_result_v1.h"
 #include "prdb_query_abi_v6.h"
 

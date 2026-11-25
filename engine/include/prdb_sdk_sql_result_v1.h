@@ -1,11 +1,7 @@
 #ifndef PRDB_SDK_SQL_RESULT_V1_H
 #define PRDB_SDK_SQL_RESULT_V1_H
 
-#include "prdb_sdk_sql_v2.h"
-#include "prdb_sdk_sql_v5.h"
-#include "prdb_sdk_sql_v6.h"
-#include "prdb_sdk_sql_v8.h"
-#include "prdb_sdk_sql_v13.h"
+#include "prdb_sdk_sql_v1.h"
 #include "prdb_query_abi_v3.h"
 
 #define PRDB_SDK_SQL_RESULT_V1_ABI_VERSION UINT32_C(1)
@@ -26,8 +22,8 @@
  * buffer. Inputs, scratch, and output must not overlap. output_len is zeroed
  * on failure; the function never emits data or takes ownership of buffers. */
 int32_t prdb_sdk_sql_encode_result_row_v1(
-    const prdb_sdk_select_binding_v2 *binding,
-    const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count,
+    const prdb_sdk_select_binding_v1 *binding,
+    const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count,
     const prdb_sdk_row_v1 *row, prdb_sdk_value_v1 *cell_scratch,
     uint32_t cell_scratch_capacity, uint8_t *output,
     uint64_t output_capacity, uint64_t *output_len);
@@ -39,8 +35,8 @@ int32_t prdb_sdk_sql_encode_result_row_v1(
  * clears output_len. */
 int32_t prdb_sdk_sql_write_result_row_v1(
     const prdb_host_api_v3 *host,
-    const prdb_sdk_select_binding_v2 *binding,
-    const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count,
+    const prdb_sdk_select_binding_v1 *binding,
+    const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count,
     const prdb_sdk_row_v1 *row, prdb_sdk_value_v1 *cell_scratch,
     uint32_t cell_scratch_capacity, uint8_t *output,
     uint64_t output_capacity, uint64_t *output_len);
@@ -50,7 +46,7 @@ int32_t prdb_sdk_sql_write_result_row_v1(
  * relation shape; values are borrowed only for this call. */
 int32_t prdb_sdk_sql_write_projected_result_v1(
     const prdb_host_api_v3 *host,
-    const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count,
+    const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count,
     const uint32_t *projection_ordinals,
     const prdb_sdk_value_v1 *projected_values, uint32_t projection_count,
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len);
@@ -59,10 +55,10 @@ int32_t prdb_sdk_sql_write_projected_result_v1(
  * side, ordinal, and declared column metadata. VALUE, NULL, and REDACTED
  * projection states are preserved. All inputs and output must be disjoint. */
 int32_t prdb_sdk_sql_encode_join_result_v1(
-    const prdb_sdk_select_binding_v8 *binding,
-    const prdb_sdk_sql_column_shape_v2 *left_columns,
+    const prdb_sdk_select_binding_v1 *binding,
+    const prdb_sdk_sql_column_shape_v1 *left_columns,
     uint32_t left_column_count,
-    const prdb_sdk_sql_column_shape_v2 *right_columns,
+    const prdb_sdk_sql_column_shape_v1 *right_columns,
     uint32_t right_column_count,
     const prdb_sdk_value_v1 *projected_values, uint32_t projected_count,
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len);
@@ -71,10 +67,10 @@ int32_t prdb_sdk_sql_encode_join_result_v1(
  * host-sized provisional chunks. */
 int32_t prdb_sdk_sql_write_join_result_v1(
     const prdb_host_api_v3 *host,
-    const prdb_sdk_select_binding_v8 *binding,
-    const prdb_sdk_sql_column_shape_v2 *left_columns,
+    const prdb_sdk_select_binding_v1 *binding,
+    const prdb_sdk_sql_column_shape_v1 *left_columns,
     uint32_t left_column_count,
-    const prdb_sdk_sql_column_shape_v2 *right_columns,
+    const prdb_sdk_sql_column_shape_v1 *right_columns,
     uint32_t right_column_count,
     const prdb_sdk_value_v1 *projected_values, uint32_t projected_count,
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len);
@@ -84,7 +80,7 @@ int32_t prdb_sdk_sql_write_join_result_v1(
  * BIGINT type. VALUE/NULL/REDACTED group-key states are preserved. Input and
  * output buffers must not overlap; output_len is zero on failure. */
 int32_t prdb_sdk_sql_encode_group_count_result_v1(
-    const prdb_sdk_sql_column_shape_v2 *group_column,
+    const prdb_sdk_sql_column_shape_v1 *group_column,
     const prdb_sdk_value_v1 *group_key, uint64_t count,
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len);
 
@@ -92,7 +88,7 @@ int32_t prdb_sdk_sql_encode_group_count_result_v1(
  * split into host-sized chunks. Output remains provisional. */
 int32_t prdb_sdk_sql_write_group_count_result_v1(
     const prdb_host_api_v3 *host,
-    const prdb_sdk_sql_column_shape_v2 *group_column,
+    const prdb_sdk_sql_column_shape_v1 *group_column,
     const prdb_sdk_value_v1 *group_key, uint64_t count,
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len);
 
@@ -100,9 +96,9 @@ int32_t prdb_sdk_sql_write_group_count_result_v1(
  * group key; the second is named `min` or `max` and uses the aggregate
  * argument's declared type metadata. */
 int32_t prdb_sdk_sql_encode_group_minmax_result_v1(
-    const prdb_sdk_sql_column_shape_v2 *group_column,
+    const prdb_sdk_sql_column_shape_v1 *group_column,
     const prdb_sdk_value_v1 *group_key,
-    const prdb_sdk_sql_column_shape_v2 *aggregate_column,
+    const prdb_sdk_sql_column_shape_v1 *aggregate_column,
     const prdb_sdk_value_v1 *aggregate_value, uint32_t aggregate_kind,
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len);
 
@@ -110,18 +106,18 @@ int32_t prdb_sdk_sql_encode_group_minmax_result_v1(
  * callback, split into host-sized provisional chunks. */
 int32_t prdb_sdk_sql_write_group_minmax_result_v1(
     const prdb_host_api_v3 *host,
-    const prdb_sdk_sql_column_shape_v2 *group_column,
+    const prdb_sdk_sql_column_shape_v1 *group_column,
     const prdb_sdk_value_v1 *group_key,
-    const prdb_sdk_sql_column_shape_v2 *aggregate_column,
+    const prdb_sdk_sql_column_shape_v1 *aggregate_column,
     const prdb_sdk_value_v1 *aggregate_value, uint32_t aggregate_kind,
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len);
 
 /* Encodes one grouped SUM SQLR row. The `sum` field is BIGINT for integer
  * arguments and DECIMAL(38,s) for DECIMAL(p,s) arguments. */
 int32_t prdb_sdk_sql_encode_group_sum_result_v1(
-    const prdb_sdk_sql_column_shape_v2 *group_column,
+    const prdb_sdk_sql_column_shape_v1 *group_column,
     const prdb_sdk_value_v1 *group_key,
-    const prdb_sdk_sql_column_shape_v2 *aggregate_input_column,
+    const prdb_sdk_sql_column_shape_v1 *aggregate_input_column,
     const prdb_sdk_value_v1 *aggregate_value,
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len);
 
@@ -129,18 +125,18 @@ int32_t prdb_sdk_sql_encode_group_sum_result_v1(
  * chunks. */
 int32_t prdb_sdk_sql_write_group_sum_result_v1(
     const prdb_host_api_v3 *host,
-    const prdb_sdk_sql_column_shape_v2 *group_column,
+    const prdb_sdk_sql_column_shape_v1 *group_column,
     const prdb_sdk_value_v1 *group_key,
-    const prdb_sdk_sql_column_shape_v2 *aggregate_input_column,
+    const prdb_sdk_sql_column_shape_v1 *aggregate_input_column,
     const prdb_sdk_value_v1 *aggregate_value,
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len);
 
 /* Encodes one grouped AVG SQLR row. The `avg` field is DECIMAL(38,6) for
  * integer arguments, or DECIMAL(38,r) using the declared Decimal metadata. */
 int32_t prdb_sdk_sql_encode_group_avg_result_v1(
-    const prdb_sdk_sql_column_shape_v2 *group_column,
+    const prdb_sdk_sql_column_shape_v1 *group_column,
     const prdb_sdk_value_v1 *group_key,
-    const prdb_sdk_sql_column_shape_v2 *aggregate_input_column,
+    const prdb_sdk_sql_column_shape_v1 *aggregate_input_column,
     const prdb_sdk_value_v1 *aggregate_value,
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len);
 
@@ -148,9 +144,9 @@ int32_t prdb_sdk_sql_encode_group_avg_result_v1(
  * chunks. */
 int32_t prdb_sdk_sql_write_group_avg_result_v1(
     const prdb_host_api_v3 *host,
-    const prdb_sdk_sql_column_shape_v2 *group_column,
+    const prdb_sdk_sql_column_shape_v1 *group_column,
     const prdb_sdk_value_v1 *group_key,
-    const prdb_sdk_sql_column_shape_v2 *aggregate_input_column,
+    const prdb_sdk_sql_column_shape_v1 *aggregate_input_column,
     const prdb_sdk_value_v1 *aggregate_value,
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len);
 
@@ -158,16 +154,16 @@ int32_t prdb_sdk_sql_write_group_avg_result_v1(
  * names/types; the final field is count/min/max/sum/avg. COUNT(*) uses the
  * supplied matching-row count. */
 int32_t prdb_sdk_sql_encode_group_composite_result_v1(
-    const prdb_sdk_select_binding_v13 *binding,
-    const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count,
+    const prdb_sdk_select_binding_v1 *binding,
+    const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count,
     const prdb_sdk_value_v1 *group_keys, uint32_t group_key_count,
     const prdb_sdk_value_v1 *aggregate_value, uint64_t matching_row_count,
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len);
 
 int32_t prdb_sdk_sql_write_group_composite_result_v1(
     const prdb_host_api_v3 *host,
-    const prdb_sdk_select_binding_v13 *binding,
-    const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count,
+    const prdb_sdk_select_binding_v1 *binding,
+    const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count,
     const prdb_sdk_value_v1 *group_keys, uint32_t group_key_count,
     const prdb_sdk_value_v1 *aggregate_value, uint64_t matching_row_count,
     uint8_t *output, uint64_t output_capacity, uint64_t *output_len);

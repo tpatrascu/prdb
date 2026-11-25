@@ -77,7 +77,7 @@ def validate_elf(path: Path, *, query: bool) -> tuple[str, ...]:
     if query:
         dynamic_symbols = readelf("--dyn-syms", "-W", str(path))
         if not any(
-            " UND " in line and "prdb_sdk_sql_execute_select_v2" in line
+            " UND " in line and "prdb_sdk_sql_execute_select_v1" in line
             for line in dynamic_symbols.splitlines()
         ):
             fail(f"{path}: query does not import the SQL SDK from its shared library")

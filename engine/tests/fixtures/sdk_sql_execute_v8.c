@@ -1,11 +1,10 @@
-#include "prdb_sdk_sql_exec_v8.h"
-#include "prdb_sdk_sql_exec_v16.h"
+#include "prdb_sdk_sql_exec_v1.h"
 
 #include <assert.h>
 #include <string.h>
 
 #define JOIN_V16_STRESS_ROWS 47
-#define JOIN_V16_ROW_LIMIT PRDB_SDK_SQL_EXEC_V8_MAX_ROWS
+#define JOIN_V16_ROW_LIMIT PRDB_SDK_SQL_EXEC_JOIN_MAX_ROWS
 
 typedef struct mock_state {
     uint8_t planner[2][256];
@@ -223,11 +222,11 @@ static int32_t executor_request(void *context, uint16_t operation,
 static int32_t on_row(void *context,
                       const prdb_sdk_value_v1 *projected_values,
                       uint32_t projection_count,
-                      const prdb_sdk_select_binding_v8 *binding) {
+                      const prdb_sdk_select_binding_v1 *binding) {
     row_capture *capture = (row_capture *)context;
     assert(capture->mock->scan_finished[0] == 1 &&
            capture->mock->scan_finished[1] == 1);
-    assert(binding->projection_count == 2 && projection_count == 2);
+    assert(binding->join_projection_count == 2 && projection_count == 2);
     assert(capture->calls < 8);
     assert(prdb_sdk_value_get_integer_v1(&projected_values[0],
                                          &capture->left_values[capture->calls]) ==
@@ -242,11 +241,11 @@ static int32_t on_row(void *context,
 static int32_t on_row_v16(void *context,
                           const prdb_sdk_value_v1 *projected_values,
                           uint32_t projection_count,
-                          const prdb_sdk_select_binding_v16 *binding) {
+                          const prdb_sdk_select_binding_v1 *binding) {
     row_capture *capture = (row_capture *)context;
     assert(capture->mock->scan_finished[0] == 1 &&
            capture->mock->scan_finished[1] == 1);
-    assert(binding->base.projection_count == 2 &&
+    assert(binding->join_projection_count == 2 &&
            (binding->join_key_count == 2 || binding->join_key_count == 8) &&
            projection_count == 2);
     if (capture->calls < 8) {
@@ -274,15 +273,15 @@ static int32_t run_query(mock_state *mock, row_capture *capture,
     uint8_t batch_response[512] = {0};
     uint8_t materialized_bytes[1024] = {0};
     uint8_t integer_names[2][11] = {{0}};
-    prdb_sdk_sql_column_shape_v2 left_planner_columns[2] = {{0}};
-    prdb_sdk_sql_column_shape_v2 right_planner_columns[2] = {{0}};
-    prdb_sdk_sql_column_shape_v2 left_executor_columns[2] = {{0}};
-    prdb_sdk_sql_column_shape_v2 right_executor_columns[2] = {{0}};
+    prdb_sdk_sql_column_shape_v1 left_planner_columns[2] = {{0}};
+    prdb_sdk_sql_column_shape_v1 right_planner_columns[2] = {{0}};
+    prdb_sdk_sql_column_shape_v1 left_executor_columns[2] = {{0}};
+    prdb_sdk_sql_column_shape_v1 right_executor_columns[2] = {{0}};
     prdb_sdk_value_v1 cell_scratch[2] = {{0}};
-    prdb_sdk_sql_join_materialized_row_v8 left_rows[
-        PRDB_SDK_SQL_EXEC_V8_MAX_ROWS] = {{{0}}};
-    prdb_sdk_sql_join_materialized_row_v8 right_rows[
-        PRDB_SDK_SQL_EXEC_V8_MAX_ROWS] = {{{0}}};
+    prdb_sdk_sql_join_materialized_row_v1 left_rows[
+        PRDB_SDK_SQL_EXEC_JOIN_MAX_ROWS] = {{{0}}};
+    prdb_sdk_sql_join_materialized_row_v1 right_rows[
+        PRDB_SDK_SQL_EXEC_JOIN_MAX_ROWS] = {{{0}}};
     prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
                              mock, executor_request, planner_request, NULL,
                              statement_failure};
@@ -292,15 +291,15 @@ static int32_t run_query(mock_state *mock, row_capture *capture,
     for (uint32_t index = 0; index < 2; ++index) {
         const char *name = index == 0 ? "account_id" : "value";
         uint32_t len = (uint32_t)strlen(name);
-        left_planner_columns[index] = (prdb_sdk_sql_column_shape_v2){
+        left_planner_columns[index] = (prdb_sdk_sql_column_shape_v1){
             integer_names[index], len, index, PRDB_SDK_VALUE_TYPE_INTEGER, 0,
             0};
         right_planner_columns[index] = left_planner_columns[index];
         left_executor_columns[index] = left_planner_columns[index];
         right_executor_columns[index] = left_planner_columns[index];
     }
-    return prdb_sdk_sql_execute_inner_join_v8(
-        &host, schema, sizeof(schema) - 1, sql, sql_len, 4, 512,
+    return prdb_sdk_sql_execute_inner_join_v1(
+        &host, schema, sizeof(schema) - 1, sql, sql_len, NULL, 0, 4, 512,
         left_planner_response, sizeof(left_planner_response),
         right_planner_response, sizeof(right_planner_response),
         left_executor_response, sizeof(left_executor_response),
@@ -308,8 +307,8 @@ static int32_t run_query(mock_state *mock, row_capture *capture,
         batch_response, sizeof(batch_response), left_planner_columns, 2,
         right_planner_columns, 2, left_executor_columns, 2,
         right_executor_columns, 2, cell_scratch, 2, left_rows,
-        PRDB_SDK_SQL_EXEC_V8_MAX_ROWS, right_rows,
-        PRDB_SDK_SQL_EXEC_V8_MAX_ROWS, materialized_bytes,
+        PRDB_SDK_SQL_EXEC_JOIN_MAX_ROWS, right_rows,
+        PRDB_SDK_SQL_EXEC_JOIN_MAX_ROWS, materialized_bytes,
         materialized_capacity, on_row, capture);
 }
 
@@ -324,15 +323,15 @@ static int32_t run_query_v16(mock_state *mock, row_capture *capture,
     uint8_t batch_response[8192] = {0};
     uint8_t materialized_bytes[4096] = {0};
     uint8_t integer_names[2][11] = {{0}};
-    prdb_sdk_sql_column_shape_v2 left_planner_columns[2] = {{0}};
-    prdb_sdk_sql_column_shape_v2 right_planner_columns[2] = {{0}};
-    prdb_sdk_sql_column_shape_v2 left_executor_columns[2] = {{0}};
-    prdb_sdk_sql_column_shape_v2 right_executor_columns[2] = {{0}};
+    prdb_sdk_sql_column_shape_v1 left_planner_columns[2] = {{0}};
+    prdb_sdk_sql_column_shape_v1 right_planner_columns[2] = {{0}};
+    prdb_sdk_sql_column_shape_v1 left_executor_columns[2] = {{0}};
+    prdb_sdk_sql_column_shape_v1 right_executor_columns[2] = {{0}};
     prdb_sdk_value_v1 cell_scratch[2] = {{0}};
-    prdb_sdk_sql_join_materialized_row_v16 left_rows[
-        PRDB_SDK_SQL_EXEC_V8_MAX_ROWS] = {{{0}}};
-    prdb_sdk_sql_join_materialized_row_v16 right_rows[
-        PRDB_SDK_SQL_EXEC_V8_MAX_ROWS] = {{{0}}};
+    prdb_sdk_sql_join_materialized_row_v1 left_rows[
+        PRDB_SDK_SQL_EXEC_JOIN_MAX_ROWS] = {{{0}}};
+    prdb_sdk_sql_join_materialized_row_v1 right_rows[
+        PRDB_SDK_SQL_EXEC_JOIN_MAX_ROWS] = {{{0}}};
     prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
                              mock, executor_request, planner_request, NULL,
                              statement_failure};
@@ -341,15 +340,15 @@ static int32_t run_query_v16(mock_state *mock, row_capture *capture,
     for (uint32_t index = 0; index < 2; ++index) {
         const char *name = index == 0 ? "account_id" : "value";
         uint32_t len = (uint32_t)strlen(name);
-        left_planner_columns[index] = (prdb_sdk_sql_column_shape_v2){
+        left_planner_columns[index] = (prdb_sdk_sql_column_shape_v1){
             integer_names[index], len, index, PRDB_SDK_VALUE_TYPE_INTEGER, 0,
             0};
         right_planner_columns[index] = left_planner_columns[index];
         left_executor_columns[index] = left_planner_columns[index];
         right_executor_columns[index] = left_planner_columns[index];
     }
-    return prdb_sdk_sql_execute_inner_join_v16(
-        &host, schema, sizeof(schema) - 1, sql, sql_len,
+    return prdb_sdk_sql_execute_inner_join_v1(
+        &host, schema, sizeof(schema) - 1, sql, sql_len, NULL, 0,
         JOIN_V16_ROW_LIMIT, 8192,
         left_planner_response, sizeof(left_planner_response),
         right_planner_response, sizeof(right_planner_response),
@@ -358,8 +357,8 @@ static int32_t run_query_v16(mock_state *mock, row_capture *capture,
         batch_response, sizeof(batch_response), left_planner_columns, 2,
         right_planner_columns, 2, left_executor_columns, 2,
         right_executor_columns, 2, cell_scratch, 2, left_rows,
-        PRDB_SDK_SQL_EXEC_V8_MAX_ROWS, right_rows,
-        PRDB_SDK_SQL_EXEC_V8_MAX_ROWS, materialized_bytes,
+        PRDB_SDK_SQL_EXEC_JOIN_MAX_ROWS, right_rows,
+        PRDB_SDK_SQL_EXEC_JOIN_MAX_ROWS, materialized_bytes,
         materialized_capacity, on_row_v16, capture);
 }
 

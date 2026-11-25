@@ -91,7 +91,7 @@ int32_t prdb_sdk_executor_resolve_relation_v1(
     const uint8_t *relation, uint32_t relation_len,
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len,
     prdb_sdk_executor_relation_v1 *out, uint32_t out_capacity,
-    prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_capacity);
+    prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_capacity);
 
 int32_t prdb_sdk_executor_open_full_scan_v1(
     const prdb_host_api_v2 *host, const uint8_t executor_handle[16],

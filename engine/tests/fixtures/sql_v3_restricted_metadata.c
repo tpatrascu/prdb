@@ -1,4 +1,4 @@
-#include "prdb_sdk_sql_exec_v2.h"
+#include "prdb_sdk_sql_exec_v1.h"
 #include "prdb_sdk_optimizer_plan_v1.h"
 
 #include <string.h>
@@ -20,7 +20,7 @@ typedef struct metadata_result {
 
 static int32_t verify_metadata_row(
     void *opaque, const prdb_sdk_row_v1 *row,
-    const prdb_sdk_select_binding_v2 *binding) {
+    const prdb_sdk_select_binding_v1 *binding) {
     metadata_result *result = (metadata_result *)opaque;
     prdb_sdk_cell_iterator_v1 cells = {0};
     prdb_sdk_value_v1 value = {0};
@@ -60,8 +60,8 @@ static int32_t run_select(
     uint8_t planner_response[1024] = {0};
     uint8_t executor_response[1024] = {0};
     uint8_t batch_response[4096] = {0};
-    prdb_sdk_sql_column_shape_v2 planner_columns[9] = {{0}};
-    prdb_sdk_sql_column_shape_v2 executor_columns[9] = {{0}};
+    prdb_sdk_sql_column_shape_v1 planner_columns[9] = {{0}};
+    prdb_sdk_sql_column_shape_v1 executor_columns[9] = {{0}};
     prdb_sdk_value_v1 cell_scratch[9] = {{0}};
     metadata_result result = {0};
     static const uint8_t schema[] = "information_schema";
@@ -70,7 +70,7 @@ static int32_t run_select(
     result.expected = expected;
     result.expected_len = expected_len;
     result.expected_ordinal = projection_ordinal;
-    int32_t status = prdb_sdk_sql_execute_select_v2(
+    int32_t status = prdb_sdk_sql_execute_select_v1(
         host, schema, sizeof(schema) - 1, sql, sql_len, parameters,
         parameter_count, 16, sizeof(batch_response), planner_response,
         sizeof(planner_response), executor_response,
@@ -179,7 +179,7 @@ int32_t prdb_query_main_v4(const prdb_host_api_v4 *host,
         "SELECT schema_name FROM schemata WHERE schema_name = $1 LIMIT 1";
     static const uint8_t expected[] = "empty_roundtrip";
     static const uint8_t parameter_bytes[] = "empty_roundtrip";
-    prdb_sdk_select_v2 statement = {0};
+    prdb_sdk_select_v1 statement = {0};
     prdb_sdk_value_v1 parameter = {0};
     uint8_t request[4096] = {0};
     uint8_t optimizer_response[4096] = {0};
@@ -187,7 +187,7 @@ int32_t prdb_query_main_v4(const prdb_host_api_v4 *host,
     uint8_t scan_response[4096] = {0};
     uint8_t batch_response[4096] = {0};
     prdb_sdk_executor_relation_v1 relation = {0};
-    prdb_sdk_sql_column_shape_v2 columns[16] = {{0}};
+    prdb_sdk_sql_column_shape_v1 columns[16] = {{0}};
     prdb_sdk_value_v1 source_cells[16] = {{0}};
     prdb_sdk_value_v1 projected_values[16] = {{0}};
     optimized_metadata_result result = {
@@ -199,7 +199,7 @@ int32_t prdb_query_main_v4(const prdb_host_api_v4 *host,
         host->v3.struct_size < sizeof(host->v3) ||
         host->v3.abi_version != PRDB_QUERY_ABI_V3_VERSION ||
         host->optimizer_request == NULL || host->v3.write_result == NULL ||
-        prdb_sdk_sql_parse_select_v2(sql, sizeof(sql) - 1, &statement,
+        prdb_sdk_sql_parse_select_v1(sql, sizeof(sql) - 1, &statement,
                                      sizeof(statement),
                                      &parse_error_offset) != PRDB_SDK_SQL_OK) {
         return 1;

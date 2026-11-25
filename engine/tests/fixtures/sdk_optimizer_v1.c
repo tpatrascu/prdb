@@ -1,5 +1,5 @@
 #include "prdb_sdk_optimizer_v1.h"
-#include "prdb_sdk_sql_v24.h"
+#include "prdb_sdk_sql_v1.h"
 
 #include <assert.h>
 #include <string.h>
@@ -193,24 +193,24 @@ int main(void) {
     uint8_t response[sizeof(success)] = {0};
     uint64_t response_len = 0;
     prdb_sdk_optimizer_response_v1 decoded = {0};
-    prdb_sdk_select_v2 statement = {0};
+    prdb_sdk_select_v1 statement = {0};
     uint8_t encoded[128];
     uint64_t encoded_len = 0;
     uint32_t error_offset = 0;
-    prdb_sdk_select_v19 join_statement = {0};
-    prdb_sdk_select_v20 filtered_join_statement = {0};
-    prdb_sdk_select_v4 group_count_statement = {0};
-    prdb_sdk_select_v12 ordered_group_count_statement = {0};
-    prdb_sdk_select_v13 composite_group_count_statement = {0};
-    prdb_sdk_select_v13 composite_group_sum_statement = {0};
-    prdb_sdk_select_v13 filtered_composite_group_sum_statement = {0};
-    prdb_sdk_select_v15 ordered_composite_group_count_statement = {0};
-    prdb_sdk_select_v15 ordered_composite_group_sum_statement = {0};
-    prdb_sdk_select_v7 group_average_statement = {0};
-    prdb_sdk_select_v12 ordered_group_average_statement = {0};
-    prdb_sdk_select_v3 ordered_select_statement = {0};
+    prdb_sdk_select_v1 join_statement = {0};
+    prdb_sdk_select_v1 filtered_join_statement = {0};
+    prdb_sdk_select_v1 group_count_statement = {0};
+    prdb_sdk_select_v1 ordered_group_count_statement = {0};
+    prdb_sdk_select_v1 composite_group_count_statement = {0};
+    prdb_sdk_select_v1 composite_group_sum_statement = {0};
+    prdb_sdk_select_v1 filtered_composite_group_sum_statement = {0};
+    prdb_sdk_select_v1 ordered_composite_group_count_statement = {0};
+    prdb_sdk_select_v1 ordered_composite_group_sum_statement = {0};
+    prdb_sdk_select_v1 group_average_statement = {0};
+    prdb_sdk_select_v1 ordered_group_average_statement = {0};
+    prdb_sdk_select_v1 ordered_select_statement = {0};
 
-    assert(prdb_sdk_sql_parse_select_v2(
+    assert(prdb_sdk_sql_parse_select_v1(
                sql, sizeof(sql) - 1, &statement, sizeof(statement),
                &error_offset) == PRDB_SDK_SQL_OK);
     assert(prdb_sdk_optimizer_encode_select_v1(
@@ -220,7 +220,7 @@ int main(void) {
     assert(encoded_len == sizeof(expected_encoded));
     assert(memcmp(encoded, expected_encoded, sizeof(expected_encoded)) == 0);
 
-    assert(prdb_sdk_sql_parse_select_v3(
+    assert(prdb_sdk_sql_parse_select_v1(
                ordered_select_sql, sizeof(ordered_select_sql) - 1,
                &ordered_select_statement, sizeof(ordered_select_statement),
                &error_offset) == PRDB_SDK_SQL_OK);
@@ -238,7 +238,7 @@ int main(void) {
            PRDB_SDK_OPTIMIZER_ENCODE_INVALID_ARGUMENT);
     ordered_select_statement.order_descending = 1;
 
-    assert(prdb_sdk_sql_parse_select_v19(
+    assert(prdb_sdk_sql_parse_select_v1(
                join_sql, sizeof(join_sql) - 1, &join_statement,
                sizeof(join_statement), &error_offset) == PRDB_SDK_SQL_OK);
     assert(prdb_sdk_optimizer_encode_join_select_v1(
@@ -274,7 +274,7 @@ int main(void) {
         PRDB_OPTIMIZER_FILTERED_JOIN_SELECT_STATEMENT;
     memcpy(expected_filtered_join_request + sizeof(expected_join_request),
            filtered_join_tail, sizeof(filtered_join_tail));
-    assert(prdb_sdk_sql_parse_select_v20(
+    assert(prdb_sdk_sql_parse_select_v1(
                filtered_join_sql, sizeof(filtered_join_sql) - 1,
                &filtered_join_statement, sizeof(filtered_join_statement),
                &error_offset) == PRDB_SDK_SQL_OK);
@@ -297,7 +297,7 @@ int main(void) {
         PRDB_OPTIMIZER_FILTERED_JOIN_SELECT_STATEMENT;
     memcpy(expected_null_filtered_join_request + sizeof(expected_join_request),
            null_filtered_join_tail, sizeof(null_filtered_join_tail));
-    assert(prdb_sdk_sql_parse_select_v20(
+    assert(prdb_sdk_sql_parse_select_v1(
                null_filtered_join_sql, sizeof(null_filtered_join_sql) - 1,
                &filtered_join_statement, sizeof(filtered_join_statement),
                &error_offset) == PRDB_SDK_SQL_OK);
@@ -307,7 +307,7 @@ int main(void) {
     assert(encoded_len == sizeof(expected_null_filtered_join_request));
     assert(memcmp(encoded, expected_null_filtered_join_request,
                   sizeof(expected_null_filtered_join_request)) == 0);
-    assert(prdb_sdk_sql_parse_select_v20(
+    assert(prdb_sdk_sql_parse_select_v1(
                filtered_join_sql, sizeof(filtered_join_sql) - 1,
                &filtered_join_statement, sizeof(filtered_join_statement),
                &error_offset) == PRDB_SDK_SQL_OK);
@@ -319,13 +319,13 @@ int main(void) {
            PRDB_SDK_OPTIMIZER_ENCODE_BUFFER_TOO_SMALL);
     assert(encoded_len == sizeof(expected_filtered_join_request));
     assert(encoded[0] == 0xa5);
-    filtered_join_statement.parameter_index = 0;
+    filtered_join_statement.join_where_parameter_index = 0;
     assert(prdb_sdk_optimizer_encode_filtered_join_select_v1(
                &filtered_join_statement, schema, sizeof(schema) - 1, encoded,
                sizeof(encoded), &encoded_len) ==
            PRDB_SDK_OPTIMIZER_ENCODE_UNSUPPORTED);
 
-    assert(prdb_sdk_sql_parse_select_v15(
+    assert(prdb_sdk_sql_parse_select_v1(
                ordered_composite_group_count_sql,
                sizeof(ordered_composite_group_count_sql) - 1,
                &ordered_composite_group_count_statement,
@@ -335,7 +335,7 @@ int main(void) {
                encoded, sizeof(encoded), &encoded_len) == PRDB_SDK_OPTIMIZER_ENCODE_OK);
     assert(encoded_len == sizeof(expected_ordered_composite_group_count_request));
     assert(memcmp(encoded, expected_ordered_composite_group_count_request, encoded_len) == 0);
-    assert(prdb_sdk_sql_parse_select_v15(
+    assert(prdb_sdk_sql_parse_select_v1(
                ordered_composite_group_sum_sql,
                sizeof(ordered_composite_group_sum_sql) - 1,
                &ordered_composite_group_sum_statement,
@@ -348,13 +348,13 @@ int main(void) {
     assert(encoded_len == sizeof(expected_ordered_composite_group_sum_request));
     assert(memcmp(encoded, expected_ordered_composite_group_sum_request,
                   encoded_len) == 0);
-    assert(prdb_sdk_sql_parse_select_v7(group_average_sql, sizeof(group_average_sql) - 1,
+    assert(prdb_sdk_sql_parse_select_v1(group_average_sql, sizeof(group_average_sql) - 1,
                &group_average_statement, sizeof(group_average_statement), &error_offset) == PRDB_SDK_SQL_OK);
     assert(prdb_sdk_optimizer_encode_group_aggregate_v1(&group_average_statement, schema, sizeof(schema) - 1,
                encoded, sizeof(encoded), &encoded_len) == PRDB_SDK_OPTIMIZER_ENCODE_OK);
     assert(encoded_len == sizeof(expected_group_average_request));
     assert(memcmp(encoded, expected_group_average_request, encoded_len) == 0);
-    assert(prdb_sdk_sql_parse_select_v12(
+    assert(prdb_sdk_sql_parse_select_v1(
                ordered_group_average_sql,
                sizeof(ordered_group_average_sql) - 1,
                &ordered_group_average_statement,
@@ -367,7 +367,7 @@ int main(void) {
     assert(encoded_len == sizeof(expected_ordered_group_average_request));
     assert(memcmp(encoded, expected_ordered_group_average_request,
                   sizeof(expected_ordered_group_average_request)) == 0);
-    assert(prdb_sdk_sql_parse_select_v13(
+    assert(prdb_sdk_sql_parse_select_v1(
                composite_group_count_sql,
                sizeof(composite_group_count_sql) - 1,
                &composite_group_count_statement,
@@ -380,7 +380,7 @@ int main(void) {
     assert(encoded_len == sizeof(expected_composite_group_count_request));
     assert(memcmp(encoded, expected_composite_group_count_request,
                   sizeof(expected_composite_group_count_request)) == 0);
-    assert(prdb_sdk_sql_parse_select_v13(
+    assert(prdb_sdk_sql_parse_select_v1(
                composite_group_sum_sql, sizeof(composite_group_sum_sql) - 1,
                &composite_group_sum_statement,
                sizeof(composite_group_sum_statement), &error_offset) ==
@@ -398,7 +398,7 @@ int main(void) {
             sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
             PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_BOOLEAN,
             &bool_value, 1}};
-        assert(prdb_sdk_sql_parse_select_v13(
+        assert(prdb_sdk_sql_parse_select_v1(
                    filtered_composite_group_sum_sql,
                    sizeof(filtered_composite_group_sum_sql) - 1,
                    &filtered_composite_group_sum_statement,
@@ -426,8 +426,8 @@ int main(void) {
             sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
             PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_BIGINT,
             bigint_bytes, sizeof(bigint_bytes)}};
-        prdb_sdk_select_v13 statement = {0};
-        assert(prdb_sdk_sql_parse_select_v13(
+        prdb_sdk_select_v1 statement = {0};
+        assert(prdb_sdk_sql_parse_select_v1(
                    bigint_filtered_aggregate_sql,
                    sizeof(bigint_filtered_aggregate_sql) - 1, &statement,
                    sizeof(statement), &error_offset) == PRDB_SDK_SQL_OK);
@@ -452,24 +452,24 @@ int main(void) {
             sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
             PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_BIGINT,
             bigint_bytes, sizeof(bigint_bytes)}};
-        prdb_sdk_select_v24 parsed = {0};
-        prdb_sdk_select_binding_v24 binding = {0};
+        prdb_sdk_select_v1 parsed = {0};
+        prdb_sdk_select_binding_v1 binding = {0};
         static const uint8_t relation[] = "decimal_grouped_records";
-        static const prdb_sdk_sql_column_shape_v2 columns[] = {
+        static const prdb_sdk_sql_column_shape_v1 columns[] = {
             {(const uint8_t *)"left_key", 8, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
             {(const uint8_t *)"right_key", 9, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
             {(const uint8_t *)"decimal_value", 13, 2, PRDB_SDK_VALUE_TYPE_DECIMAL, 4, 2},
             {(const uint8_t *)"bigint_value", 12, 3, PRDB_SDK_VALUE_TYPE_BIGINT, 0, 0}};
         uint8_t ordered_encoded[128];
         uint64_t ordered_encoded_len = 0;
-        assert(prdb_sdk_sql_parse_select_v24(
+        assert(prdb_sdk_sql_parse_select_v1(
                    filtered_count_sql, sizeof(filtered_count_sql) - 1,
                    &parsed, sizeof(parsed), &error_offset) == PRDB_SDK_SQL_OK);
-        assert(prdb_sdk_sql_bind_select_v24(
+        assert(prdb_sdk_sql_bind_select_v1(
                    &parsed, relation, sizeof(relation) - 1, columns, 4,
                    &binding, sizeof(binding)) == PRDB_SDK_SQL_BIND_OK);
         assert(prdb_sdk_optimizer_encode_ordered_filtered_composite_group_aggregate_v1(
-                   &parsed.base.base.base, parameters, 1, schema,
+                   &parsed, parameters, 1, schema,
                    sizeof(schema) - 1, ordered_encoded, sizeof(ordered_encoded),
                    &ordered_encoded_len) == PRDB_SDK_OPTIMIZER_ENCODE_OK);
     }
@@ -478,7 +478,7 @@ int main(void) {
                &response_len, &decoded, sizeof(decoded)) ==
            PRDB_SDK_OPTIMIZER_RESULT_OK);
 
-    assert(prdb_sdk_sql_parse_select_v4(
+    assert(prdb_sdk_sql_parse_select_v1(
                group_count_sql, sizeof(group_count_sql) - 1,
                &group_count_statement, sizeof(group_count_statement),
                &error_offset) == PRDB_SDK_SQL_OK);
@@ -488,7 +488,7 @@ int main(void) {
     assert(encoded_len == sizeof(expected_group_count_request));
     assert(memcmp(encoded, expected_group_count_request,
                   sizeof(expected_group_count_request)) == 0);
-    assert(prdb_sdk_sql_parse_select_v12(
+    assert(prdb_sdk_sql_parse_select_v1(
                ordered_group_count_sql, sizeof(ordered_group_count_sql) - 1,
                &ordered_group_count_statement,
                sizeof(ordered_group_count_statement), &error_offset) ==
@@ -509,8 +509,8 @@ int main(void) {
         static const uint8_t filtered_group_sql[] =
             "SELECT category, COUNT(*) FROM items WHERE active = $1 "
             "GROUP BY category";
-        prdb_sdk_select_v4 filtered_group_statement = {0};
-        assert(prdb_sdk_sql_parse_select_v4(
+        prdb_sdk_select_v1 filtered_group_statement = {0};
+        assert(prdb_sdk_sql_parse_select_v1(
                    filtered_group_sql, sizeof(filtered_group_sql) - 1,
                    &filtered_group_statement,
                    sizeof(filtered_group_statement), &error_offset) ==
@@ -532,8 +532,8 @@ int main(void) {
 
     {
         static const uint8_t star_sql[] = "SELECT * FROM items;";
-        prdb_sdk_select_v2 star_statement = {0};
-        assert(prdb_sdk_sql_parse_select_v2(
+        prdb_sdk_select_v1 star_statement = {0};
+        assert(prdb_sdk_sql_parse_select_v1(
                    star_sql, sizeof(star_sql) - 1, &star_statement,
                    sizeof(star_statement), &error_offset) == PRDB_SDK_SQL_OK);
         assert(prdb_sdk_optimizer_encode_select_v1(
@@ -548,13 +548,13 @@ int main(void) {
             0, 1, 1, 0, 6, 'p', 'u', 'b', 'l', 'i', 'c', 5, 'i', 't', 'e',
             'm', 's', 0, 1, 4, 'n', 'a', 'm', 'e', 0, 0, 0, 15, 0x20, 0,
             0x10, 2, 'i', 'd', 0x02, 0, 0, 0, 0, 0, 0, 0, 7, 0};
-        prdb_sdk_select_v2 predicate_statement = {0};
+        prdb_sdk_select_v1 predicate_statement = {0};
         uint8_t integer_bytes[4] = {0, 0, 0, 7};
         prdb_sdk_value_v1 parameters[1] = {{
             sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
             PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_INTEGER,
             integer_bytes, sizeof(integer_bytes)}};
-        assert(prdb_sdk_sql_parse_select_v2(
+        assert(prdb_sdk_sql_parse_select_v1(
                    predicate_sql, sizeof(predicate_sql) - 1,
                    &predicate_statement, sizeof(predicate_statement),
                    &error_offset) == PRDB_SDK_SQL_OK);
@@ -583,13 +583,13 @@ int main(void) {
             'm', 's', 0, 1, 4, 'n', 'a', 'm', 'e', 0, 0, 0, 19, 0x20, 0,
             0x10, 10, 'c', 'r', 'e', 'a', 't', 'e', 'd', '_', 'o', 'n',
             0x04, 0xff, 0xff, 0xff, 0xd6, 0};
-        prdb_sdk_select_v2 date_statement = {0};
+        prdb_sdk_select_v1 date_statement = {0};
         uint8_t date_bytes[4] = {0xff, 0xff, 0xff, 0xd6};
         prdb_sdk_value_v1 date_parameters[1] = {{
             sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
             PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_DATE,
             date_bytes, sizeof(date_bytes)}};
-        assert(prdb_sdk_sql_parse_select_v2(
+        assert(prdb_sdk_sql_parse_select_v1(
                    date_predicate_sql, sizeof(date_predicate_sql) - 1,
                    &date_statement, sizeof(date_statement),
                    &error_offset) == PRDB_SDK_SQL_OK);
@@ -610,14 +610,14 @@ int main(void) {
             0x10, 9, 'o', 'b', 'j', 'e', 'c', 't', '_', 'i', 'd', 0x05,
             0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12,
             0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0x12, 0};
-        prdb_sdk_select_v2 uuid_statement = {0};
+        prdb_sdk_select_v1 uuid_statement = {0};
         uint8_t uuid_bytes[16];
         memset(uuid_bytes, 0x12, sizeof(uuid_bytes));
         prdb_sdk_value_v1 uuid_parameters[1] = {{
             sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
             PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_UUID,
             uuid_bytes, sizeof(uuid_bytes)}};
-        assert(prdb_sdk_sql_parse_select_v2(
+        assert(prdb_sdk_sql_parse_select_v1(
                    uuid_predicate_sql, sizeof(uuid_predicate_sql) - 1,
                    &uuid_statement, sizeof(uuid_statement),
                    &error_offset) == PRDB_SDK_SQL_OK);
@@ -637,14 +637,14 @@ int main(void) {
             'm', 's', 0, 1, 4, 'n', 'a', 'm', 'e', 0, 0, 0, 23, 0x20, 0,
             0x10, 10, 'c', 'r', 'e', 'a', 't', 'e', 'd', '_', 'a', 't',
             0x06, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xd6, 0};
-        prdb_sdk_select_v2 timestamp_statement = {0};
+        prdb_sdk_select_v1 timestamp_statement = {0};
         uint8_t timestamp_bytes[8] = {0xff, 0xff, 0xff, 0xff,
                                       0xff, 0xff, 0xff, 0xd6};
         prdb_sdk_value_v1 timestamp_parameters[1] = {{
             sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
             PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_TIMESTAMPTZ,
             timestamp_bytes, sizeof(timestamp_bytes)}};
-        assert(prdb_sdk_sql_parse_select_v2(
+        assert(prdb_sdk_sql_parse_select_v1(
                    timestamp_predicate_sql,
                    sizeof(timestamp_predicate_sql) - 1,
                    &timestamp_statement, sizeof(timestamp_statement),
@@ -665,13 +665,13 @@ int main(void) {
             'm', 's', 0, 1, 4, 'n', 'a', 'm', 'e', 0, 0, 0, 17, 0x20, 0,
             0x10, 7, 'p', 'a', 'y', 'l', 'o', 'a', 'd', 0x07, 0, 3,
             0, 0x80, 0xff, 0};
-        prdb_sdk_select_v2 bytea_statement = {0};
+        prdb_sdk_select_v1 bytea_statement = {0};
         uint8_t bytea_bytes[3] = {0, 0x80, 0xff};
         prdb_sdk_value_v1 bytea_parameters[1] = {{
             sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
             PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_BYTEA,
             bytea_bytes, sizeof(bytea_bytes)}};
-        assert(prdb_sdk_sql_parse_select_v2(
+        assert(prdb_sdk_sql_parse_select_v1(
                    bytea_predicate_sql, sizeof(bytea_predicate_sql) - 1,
                    &bytea_statement, sizeof(bytea_statement),
                    &error_offset) == PRDB_SDK_SQL_OK);
@@ -691,14 +691,14 @@ int main(void) {
             'm', 's', 0, 1, 4, 'n', 'a', 'm', 'e', 0, 0, 0, 27, 0x20, 0,
             0x10, 6, 'a', 'm', 'o', 'u', 'n', 't', 0x08,
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0xe2, 0x40, 0};
-        prdb_sdk_select_v2 decimal_statement = {0};
+        prdb_sdk_select_v1 decimal_statement = {0};
         uint8_t decimal_bytes[16] = {
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0xe2, 0x40};
         prdb_sdk_value_v1 decimal_parameters[1] = {{
             sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
             PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_DECIMAL,
             decimal_bytes, sizeof(decimal_bytes)}};
-        assert(prdb_sdk_sql_parse_select_v2(
+        assert(prdb_sdk_sql_parse_select_v1(
                    decimal_predicate_sql, sizeof(decimal_predicate_sql) - 1,
                    &decimal_statement, sizeof(decimal_statement),
                    &error_offset) == PRDB_SDK_SQL_OK);

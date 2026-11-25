@@ -60,7 +60,7 @@ static int take_name(const uint8_t *payload, uint64_t payload_len,
 
 static int validate_column(const uint8_t *payload, uint64_t payload_len,
                            uint32_t *offset, uint32_t expected_ordinal,
-                           prdb_sdk_sql_column_shape_v2 *out) {
+                           prdb_sdk_sql_column_shape_v1 *out) {
     uint32_t ordinal;
     uint8_t nullable;
     uint8_t type_code;
@@ -118,7 +118,7 @@ static int validate_column(const uint8_t *payload, uint64_t payload_len,
 int32_t prdb_sdk_planner_decode_relation_v1(
     const uint8_t *payload, uint64_t payload_len,
     prdb_sdk_planner_relation_v1 *out, uint32_t out_capacity,
-    prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_capacity) {
+    prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_capacity) {
     prdb_sdk_planner_relation_v1 result = {0};
     uint32_t offset = PRDB_PLANNER_DESCRIBE_RELATION_AVAILABLE_RESPONSE_HEADER_BYTES;
     uint32_t column_count;
@@ -206,7 +206,7 @@ int32_t prdb_sdk_executor_decode_relation_v1(
     uint8_t relation_id_out[16], uint8_t executor_handle_out[16],
     const uint8_t **name_out, uint32_t *name_len_out,
     uint32_t *column_count_out, uint32_t output_capacity,
-    prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_capacity) {
+    prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_capacity) {
     uint32_t offset = 3;
     uint32_t column_count;
     uint8_t relation_id[16];
@@ -296,7 +296,7 @@ int32_t prdb_sdk_planner_describe_relation_v1(
     const uint8_t *relation_name, uint32_t relation_name_len, uint8_t *response,
     uint64_t response_capacity, uint64_t *response_len,
     prdb_sdk_planner_relation_v1 *out, uint32_t out_capacity,
-    prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_capacity) {
+    prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_capacity) {
     uint8_t request[PRDB_EXECUTOR_RESOLVE_RELATION_REQUEST_HEADER_BYTES +
                     2 * PRDB_SDK_SQL_MAX_IDENTIFIER_BYTES];
     int32_t callback_status;

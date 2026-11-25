@@ -81,7 +81,7 @@ int32_t prdb_sdk_executor_resolve_relation_v1(
     const uint8_t *relation, uint32_t relation_len, uint8_t *response,
     uint64_t response_capacity, uint64_t *response_len,
     prdb_sdk_executor_relation_v1 *out, uint32_t out_capacity,
-    prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_capacity) {
+    prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_capacity) {
     uint8_t request[PRDB_EXECUTOR_RESOLVE_RELATION_REQUEST_HEADER_BYTES +
                     2 * PRDB_SDK_SQL_MAX_IDENTIFIER_BYTES];
     prdb_sdk_executor_relation_v1 result = {0};

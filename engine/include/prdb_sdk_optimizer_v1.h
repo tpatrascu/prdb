@@ -4,14 +4,7 @@
 #include "prdb_query_abi_v4.h"
 #include "prdb_query_abi_v5.h"
 #include "prdb_sdk_sql_dml_v1.h"
-#include "prdb_sdk_sql_v4.h"
-#include "prdb_sdk_sql_v2.h"
-#include "prdb_sdk_sql_v3.h"
-#include "prdb_sdk_sql_v19.h"
-#include "prdb_sdk_sql_v20.h"
-#include "prdb_sdk_sql_v13.h"
-#include "prdb_sdk_sql_v12.h"
-#include "prdb_sdk_sql_v15.h"
+#include "prdb_sdk_sql_v1.h"
 
 #define PRDB_SDK_OPTIMIZER_ABI_V1_VERSION UINT32_C(1)
 #define PRDB_SDK_OPTIMIZER_RESPONSE_V1_VERSION UINT16_C(1)
@@ -52,13 +45,13 @@ typedef struct prdb_sdk_optimizer_response_v1 {
 /* Encode an explicit-column, single-relation SELECT AST as optimizer request
  * v1. This compatibility form supports no WHERE tree. */
 int32_t prdb_sdk_optimizer_encode_select_v1(
-    const prdb_sdk_select_v2 *statement,
+    const prdb_sdk_select_v1 *statement,
     const uint8_t *schema, uint32_t schema_len,
     uint8_t *request, uint64_t request_capacity, uint64_t *request_len);
 
 /* Encode the bounded unfiltered SQL v3 SELECT with one source-column ORDER BY. */
 int32_t prdb_sdk_optimizer_encode_ordered_select_v1(
-    const prdb_sdk_select_v3 *statement,
+    const prdb_sdk_select_v1 *statement,
     const uint8_t *schema, uint32_t schema_len,
     uint8_t *request, uint64_t request_capacity, uint64_t *request_len);
 
@@ -67,7 +60,7 @@ int32_t prdb_sdk_optimizer_encode_ordered_select_v1(
  * NULL parameters; IS [NOT] NULL, SELECT *, and other value types return
  * UNSUPPORTED. */
 int32_t prdb_sdk_optimizer_encode_select_with_parameters_v1(
-    const prdb_sdk_select_v2 *statement,
+    const prdb_sdk_select_v1 *statement,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     const uint8_t *schema, uint32_t schema_len,
     uint8_t *request, uint64_t request_capacity, uint64_t *request_len);
@@ -83,40 +76,40 @@ int32_t prdb_sdk_optimizer_encode_update_v1(
 /* Encode the alias-aware unfiltered INNER JOIN AST as optimizer request
  * statement 4, preserving projection sides, composite keys, and LIMIT. */
 int32_t prdb_sdk_optimizer_encode_join_select_v1(
-    const prdb_sdk_select_v19 *statement,
+    const prdb_sdk_select_v1 *statement,
     const uint8_t *schema, uint32_t schema_len,
     uint8_t *request, uint64_t request_capacity, uint64_t *request_len);
 
 /* Encode the filtered v20 INNER JOIN AST as statement 12. The request carries
  * the side-qualified WHERE column and bounded parameter index or NULL test. */
 int32_t prdb_sdk_optimizer_encode_filtered_join_select_v1(
-    const prdb_sdk_select_v20 *statement,
+    const prdb_sdk_select_v1 *statement,
     const uint8_t *schema, uint32_t schema_len,
     uint8_t *request, uint64_t request_capacity, uint64_t *request_len);
 
 /* Encode the bounded single-key COUNT(*) GROUP BY AST as statement 5. The
  * request subset rejects WHERE, HAVING, ORDER BY, and composite keys. */
 int32_t prdb_sdk_optimizer_encode_group_count_v1(
-    const prdb_sdk_select_v4 *statement,
+    const prdb_sdk_select_v1 *statement,
     const uint8_t *schema, uint32_t schema_len,
     uint8_t *request, uint64_t request_capacity, uint64_t *request_len);
 
 int32_t prdb_sdk_optimizer_encode_ordered_group_count_v1(
-    const prdb_sdk_select_v12 *statement,
+    const prdb_sdk_select_v1 *statement,
     const uint8_t *schema, uint32_t schema_len,
     uint8_t *request, uint64_t request_capacity, uint64_t *request_len);
 
 /* Encode the bounded two-to-eight-key COUNT(*) v13 AST as statement 6.
  * WHERE, HAVING, and ORDER BY remain unsupported. */
 int32_t prdb_sdk_optimizer_encode_composite_group_count_v1(
-    const prdb_sdk_select_v13 *statement,
+    const prdb_sdk_select_v1 *statement,
     const uint8_t *schema, uint32_t schema_len,
     uint8_t *request, uint64_t request_capacity, uint64_t *request_len);
 
 /* Encode composite GROUP BY with one COUNT/MIN/MAX/SUM/AVG aggregate as
  * statement 13. WHERE, HAVING, and ORDER BY remain unsupported. */
 int32_t prdb_sdk_optimizer_encode_composite_group_aggregate_v1(
-    const prdb_sdk_select_v13 *statement,
+    const prdb_sdk_select_v1 *statement,
     const uint8_t *schema, uint32_t schema_len,
     uint8_t *request, uint64_t request_capacity, uint64_t *request_len);
 
@@ -125,37 +118,37 @@ int32_t prdb_sdk_optimizer_encode_composite_group_aggregate_v1(
  * Parameters follow the v2 comparison encoding. HAVING and ORDER BY remain
  * outside this request subset. */
 int32_t prdb_sdk_optimizer_encode_filtered_composite_group_aggregate_v1(
-    const prdb_sdk_select_v13 *statement,
+    const prdb_sdk_select_v1 *statement,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     const uint8_t *schema, uint32_t schema_len,
     uint8_t *request, uint64_t request_capacity, uint64_t *request_len);
 
 /* Encode filtered grouped aggregation with v15 ORDER BY as statement 16. */
 int32_t prdb_sdk_optimizer_encode_ordered_filtered_composite_group_aggregate_v1(
-    const prdb_sdk_select_v15 *statement,
+    const prdb_sdk_select_v1 *statement,
     const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
     const uint8_t *schema, uint32_t schema_len,
     uint8_t *request, uint64_t request_capacity, uint64_t *request_len);
 
 int32_t prdb_sdk_optimizer_encode_ordered_composite_group_count_v1(
-    const prdb_sdk_select_v15 *statement,
+    const prdb_sdk_select_v1 *statement,
     const uint8_t *schema, uint32_t schema_len,
     uint8_t *request, uint64_t request_capacity, uint64_t *request_len);
 
 /* Encode composite GROUP BY with an aggregate and v15 ORDER BY as
  * statement 14. HAVING remains outside this request subset. */
 int32_t prdb_sdk_optimizer_encode_ordered_composite_group_aggregate_v1(
-    const prdb_sdk_select_v15 *statement,
+    const prdb_sdk_select_v1 *statement,
     const uint8_t *schema, uint32_t schema_len,
     uint8_t *request, uint64_t request_capacity, uint64_t *request_len);
 
 int32_t prdb_sdk_optimizer_encode_group_aggregate_v1(
-    const prdb_sdk_select_v7 *statement,
+    const prdb_sdk_select_v1 *statement,
     const uint8_t *schema, uint32_t schema_len,
     uint8_t *request, uint64_t request_capacity, uint64_t *request_len);
 
 int32_t prdb_sdk_optimizer_encode_ordered_group_aggregate_v1(
-    const prdb_sdk_select_v12 *statement,
+    const prdb_sdk_select_v1 *statement,
     const uint8_t *schema, uint32_t schema_len,
     uint8_t *request, uint64_t request_capacity, uint64_t *request_len);
 
@@ -188,6 +181,25 @@ int32_t prdb_sdk_optimizer_submit_join_select_v1(
     prdb_sdk_optimizer_response_v1 *out, uint32_t out_capacity);
 
 int32_t prdb_sdk_optimizer_submit_group_count_v1(
+    const prdb_host_api_v5 *host,
+    const uint8_t *request, uint64_t request_len,
+    uint8_t *response, uint64_t response_capacity, uint64_t *response_len,
+    prdb_sdk_optimizer_response_v1 *out, uint32_t out_capacity);
+
+
+
+/* Encode a parsed SQL DELETE with its mandatory bounded WHERE tree as
+ * optimizer request v1. Predicate parameters use the same supported scalar
+ * subset as the parameterized SELECT encoder. */
+int32_t prdb_sdk_optimizer_encode_delete_v1(
+    const prdb_sdk_delete_v1 *statement,
+    const prdb_sdk_value_v1 *parameters, uint32_t parameter_count,
+    const uint8_t *schema, uint32_t schema_len,
+    uint8_t *request, uint64_t request_capacity, uint64_t *request_len);
+
+/* Submit an encoded DELETE request on ABI v5's operation-aware optimizer
+ * callback. The request uses only OptimizeDelete and grants no storage access. */
+int32_t prdb_sdk_optimizer_submit_delete_v1(
     const prdb_host_api_v5 *host,
     const uint8_t *request, uint64_t request_len,
     uint8_t *response, uint64_t response_capacity, uint64_t *response_len,

@@ -60,13 +60,13 @@ static int32_t parse_signed_bigint_literal_v18(parser *state, uint64_t *out) {
     return PRDB_SDK_SQL_OK;
 }
 
-int32_t prdb_sdk_sql_parse_select_v17(const uint8_t *sql, uint64_t sql_len,
-                                      prdb_sdk_select_v17 *out,
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_parse_select_v17(const uint8_t *sql, uint64_t sql_len,
+                                      prdb_sdk_select_v1 *out,
                                       uint32_t out_capacity,
                                       uint32_t *error_offset_out) {
     uint8_t base_sql[PRDB_SDK_SQL_MAX_QUERY_BYTES];
     parser scan, having;
-    prdb_sdk_select_v17 result = {0};
+    prdb_sdk_select_v1 result = {0};
     token having_token = {TOKEN_END, 0, 0};
     uint32_t group_by_end = 0, clause_end;
     int saw_group = 0;
@@ -112,9 +112,9 @@ int32_t prdb_sdk_sql_parse_select_v17(const uint8_t *sql, uint64_t sql_len,
 
     if (having_token.kind == TOKEN_END) {
         status = prdb_sdk_sql_parse_select_v15(
-            sql, sql_len, &result.base, sizeof(result.base), error_offset_out);
+            sql, sql_len, &result, sizeof(result), error_offset_out);
         if (status != PRDB_SDK_SQL_OK) return status;
-        result.base.base.base.base.base.sql = sql;
+        result.sql = sql;
     } else {
         if (group_by_end == 0 || having_token.offset < group_by_end) {
             status = PRDB_SDK_SQL_SYNTAX_ERROR;
@@ -147,10 +147,10 @@ int32_t prdb_sdk_sql_parse_select_v17(const uint8_t *sql, uint64_t sql_len,
             base_sql[index] = ' ';
         }
         status = prdb_sdk_sql_parse_select_v15(
-            base_sql, sql_len, &result.base, sizeof(result.base),
+            base_sql, sql_len, &result, sizeof(result),
             error_offset_out);
         if (status != PRDB_SDK_SQL_OK) return status;
-        result.base.base.base.base.base.sql = sql;
+        result.sql = sql;
 
         having = (parser){sql, (uint32_t)sql_len,
                           having_token.offset + having_token.length,
@@ -158,19 +158,19 @@ int32_t prdb_sdk_sql_parse_select_v17(const uint8_t *sql, uint64_t sql_len,
         status = advance(&having);
         if (status != PRDB_SDK_SQL_OK) goto failed_having_v17;
         {
-            prdb_sdk_select_v7 *grouped =
-                &result.base.base.base.base;
+            prdb_sdk_select_v1 *grouped =
+                &result;
             uint32_t parsed_kind;
             if (token_is_keyword(&having, "COUNT")) {
-                parsed_kind = PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR;
+                parsed_kind = PRDB_SDK_SQL_AGGREGATE_COUNT_STAR;
             } else if (token_is_keyword(&having, "MIN")) {
-                parsed_kind = PRDB_SDK_SQL_V7_AGGREGATE_MIN;
+                parsed_kind = PRDB_SDK_SQL_AGGREGATE_MIN;
             } else if (token_is_keyword(&having, "MAX")) {
-                parsed_kind = PRDB_SDK_SQL_V7_AGGREGATE_MAX;
+                parsed_kind = PRDB_SDK_SQL_AGGREGATE_MAX;
             } else if (token_is_keyword(&having, "SUM")) {
-                parsed_kind = PRDB_SDK_SQL_V7_AGGREGATE_SUM;
+                parsed_kind = PRDB_SDK_SQL_AGGREGATE_SUM;
             } else if (token_is_keyword(&having, "AVG")) {
-                parsed_kind = PRDB_SDK_SQL_V7_AGGREGATE_AVG;
+                parsed_kind = PRDB_SDK_SQL_AGGREGATE_AVG;
             } else {
                 status = PRDB_SDK_SQL_SYNTAX_ERROR;
                 having.error_offset = having.current.offset;
@@ -192,7 +192,7 @@ int32_t prdb_sdk_sql_parse_select_v17(const uint8_t *sql, uint64_t sql_len,
             }
             status = advance(&having);
             if (status != PRDB_SDK_SQL_OK) goto failed_having_v17;
-            if (parsed_kind == PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR) {
+            if (parsed_kind == PRDB_SDK_SQL_AGGREGATE_COUNT_STAR) {
                 if (having.current.kind != TOKEN_STAR) {
                     status = PRDB_SDK_SQL_SYNTAX_ERROR;
                     having.error_offset = having.current.offset;
@@ -200,7 +200,7 @@ int32_t prdb_sdk_sql_parse_select_v17(const uint8_t *sql, uint64_t sql_len,
                 }
             } else if (having.current.kind != TOKEN_IDENTIFIER ||
                        !prdb_sdk_internal_span_matches_name(
-                           &grouped->base,
+                           grouped,
                            grouped->aggregate_column,
                            sql + having.current.offset,
                            having.current.length)) {
@@ -220,7 +220,7 @@ int32_t prdb_sdk_sql_parse_select_v17(const uint8_t *sql, uint64_t sql_len,
             status = advance(&having);
             if (status != PRDB_SDK_SQL_OK) goto failed_having_v17;
             status = comparison_code(having.current.kind,
-                                     &result.base.base.having_comparison);
+                                     &result.having_comparison);
             if (status != PRDB_SDK_SQL_OK) {
                 having.error_offset = having.current.offset;
                 goto failed_having_v17;
@@ -231,7 +231,7 @@ int32_t prdb_sdk_sql_parse_select_v17(const uint8_t *sql, uint64_t sql_len,
                 status = parse_unsigned(
                     &having, having.current,
                     PRDB_SDK_SQL_MAX_PARAMETER_INDEX, 0,
-                    &result.base.base.having_parameter_index);
+                    &result.having_parameter_index);
                 if (status != PRDB_SDK_SQL_OK) goto failed_having_v17;
             } else {
                 status = parse_nonnegative_bigint_literal(
@@ -241,9 +241,9 @@ int32_t prdb_sdk_sql_parse_select_v17(const uint8_t *sql, uint64_t sql_len,
                 /* The frozen v15 binder derives the selected aggregate type
                  * through its existing parameter binding path. V17 replaces
                  * this placeholder operand in the v17 runner. */
-                result.base.base.having_parameter_index = 1;
+                result.having_parameter_index = 1;
             }
-            result.base.base.has_having = 1;
+            result.has_having = 1;
             status = advance(&having);
             if (status != PRDB_SDK_SQL_OK) goto failed_having_v17;
             if (!token_is_keyword(&having, "ORDER") &&
@@ -257,7 +257,7 @@ int32_t prdb_sdk_sql_parse_select_v17(const uint8_t *sql, uint64_t sql_len,
         }
     }
     result.struct_size = sizeof(result);
-    result.abi_version = PRDB_SDK_SQL_ABI_V17_VERSION;
+    result.abi_version = PRDB_SDK_SQL_ABI_V1_VERSION;
     *out = result;
     return PRDB_SDK_SQL_OK;
 
@@ -269,49 +269,49 @@ failed_v17:
     return fail_at(&scan, status);
 }
 
-int32_t prdb_sdk_sql_bind_select_v17(
-    const prdb_sdk_select_v17 *statement, const uint8_t *relation_name,
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_bind_select_v17(
+    const prdb_sdk_select_v1 *statement, const uint8_t *relation_name,
     uint32_t relation_name_len,
-    const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count,
-    prdb_sdk_select_binding_v17 *out, uint32_t out_capacity) {
-    prdb_sdk_select_binding_v17 result = {0};
+    const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count,
+    prdb_sdk_select_binding_v1 *out, uint32_t out_capacity) {
+    prdb_sdk_select_binding_v1 result = {0};
     int32_t status;
 
     if (statement == NULL || out == NULL || out_capacity < sizeof(*out)) {
         return PRDB_SDK_SQL_BIND_INVALID_ARGUMENT;
     }
     if (statement->struct_size < sizeof(*statement) ||
-        statement->abi_version != PRDB_SDK_SQL_ABI_V17_VERSION ||
+        statement->abi_version != PRDB_SDK_SQL_ABI_V1_VERSION ||
         statement->has_having_literal > 1 ||
         statement->having_literal > UINT64_C(0x7fffffffffffffff) ||
         (statement->has_having_literal == 0 &&
          statement->having_literal != 0) ||
         (statement->has_having_literal == 1 &&
-         (statement->base.base.has_having != 1 ||
-          statement->base.base.having_parameter_index != 1))) {
+         (statement->has_having != 1 ||
+          statement->having_parameter_index != 1))) {
         return PRDB_SDK_SQL_BIND_INVALID_STATEMENT;
     }
     status = prdb_sdk_sql_bind_select_v15(
-        &statement->base, relation_name, relation_name_len, columns,
-        column_count, &result.base, sizeof(result.base));
+        statement, relation_name, relation_name_len, columns,
+        column_count, &result, sizeof(result));
     if (status != PRDB_SDK_SQL_BIND_OK) return status;
     if (statement->has_having_literal &&
-        result.base.base.having_type_code != PRDB_SDK_VALUE_TYPE_BIGINT) {
-        return PRDB_SDK_SQL_BIND_V17_LITERAL_TYPE_MISMATCH;
+        result.having_type_code != PRDB_SDK_VALUE_TYPE_BIGINT) {
+        return PRDB_SDK_SQL_BIND_LITERAL_TYPE_MISMATCH;
     }
     result.has_having_literal = statement->has_having_literal;
     result.having_literal = statement->having_literal;
     result.struct_size = sizeof(result);
-    result.abi_version = PRDB_SDK_SQL_ABI_V17_VERSION;
+    result.abi_version = PRDB_SDK_SQL_ABI_V1_VERSION;
     *out = result;
     return PRDB_SDK_SQL_BIND_OK;
 }
 
 static int32_t add_having_node_v18(
-    parser *state, prdb_sdk_select_v18 *statement,
-    prdb_sdk_sql_having_node_v18 node, uint32_t *index_out) {
+    parser *state, prdb_sdk_select_v1 *statement,
+    prdb_sdk_sql_having_node_v1 node, uint32_t *index_out) {
     if (statement->having_node_count >=
-        PRDB_SDK_SQL_V18_MAX_HAVING_NODES) {
+        PRDB_SDK_SQL_MAX_HAVING_NODES) {
         state->error_offset = state->current.offset;
         return PRDB_SDK_SQL_LIMIT_EXCEEDED;
     }
@@ -321,15 +321,15 @@ static int32_t add_having_node_v18(
 }
 
 static int32_t parse_having_or_v18(parser *state,
-                                  prdb_sdk_select_v18 *statement,
+                                  prdb_sdk_select_v1 *statement,
                                   uint32_t depth, uint32_t *index_out);
 
 static int32_t parse_having_primary_v18(parser *state,
-                                        prdb_sdk_select_v18 *statement,
+                                        prdb_sdk_select_v1 *statement,
                                         uint32_t depth,
                                         uint32_t *index_out) {
-    prdb_sdk_sql_having_node_v18 node = {0};
-    prdb_sdk_select_v7 *grouped = &statement->base.base.base.base;
+    prdb_sdk_sql_having_node_v1 node = {0};
+    prdb_sdk_select_v1 *grouped = statement;
     int is_count = token_is_keyword(state, "COUNT");
     int32_t status;
 
@@ -351,7 +351,7 @@ static int32_t parse_having_primary_v18(parser *state,
 
     if (is_count) {
         if (grouped->aggregate_kind !=
-                PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR &&
+                PRDB_SDK_SQL_AGGREGATE_COUNT_STAR &&
             !(state->having_features & HAVING_HIDDEN_COUNT)) {
             state->error_offset = state->current.offset;
             return PRDB_SDK_SQL_SYNTAX_ERROR;
@@ -361,12 +361,12 @@ static int32_t parse_having_primary_v18(parser *state,
                token_is_keyword(state, "SUM") ||
                token_is_keyword(state, "AVG")) {
         uint32_t parsed_kind = token_is_keyword(state, "MIN")
-                                   ? PRDB_SDK_SQL_V7_AGGREGATE_MIN
+                                   ? PRDB_SDK_SQL_AGGREGATE_MIN
                                : token_is_keyword(state, "MAX")
-                                   ? PRDB_SDK_SQL_V7_AGGREGATE_MAX
+                                   ? PRDB_SDK_SQL_AGGREGATE_MAX
                                : token_is_keyword(state, "SUM")
-                                   ? PRDB_SDK_SQL_V7_AGGREGATE_SUM
-                                   : PRDB_SDK_SQL_V7_AGGREGATE_AVG;
+                                   ? PRDB_SDK_SQL_AGGREGATE_SUM
+                                   : PRDB_SDK_SQL_AGGREGATE_AVG;
         if (grouped->aggregate_kind != parsed_kind) {
             state->error_offset = state->current.offset;
             return PRDB_SDK_SQL_SYNTAX_ERROR;
@@ -389,7 +389,7 @@ static int32_t parse_having_primary_v18(parser *state,
             return PRDB_SDK_SQL_SYNTAX_ERROR;
         }
     } else if (state->current.kind != TOKEN_IDENTIFIER ||
-               !prdb_sdk_internal_span_matches_name(&grouped->base, grouped->aggregate_column,
+               !prdb_sdk_internal_span_matches_name(grouped, grouped->aggregate_column,
                                   state->sql + state->current.offset,
                                   state->current.length)) {
         state->error_offset = state->current.offset;
@@ -429,12 +429,12 @@ static int32_t parse_having_primary_v18(parser *state,
     status = advance(state);
     if (status != PRDB_SDK_SQL_OK) return status;
     if (state->current.kind == TOKEN_PARAMETER) {
-        node.operand_kind = PRDB_SDK_SQL_V18_OPERAND_PARAMETER;
+        node.operand_kind = PRDB_SDK_SQL_HAVING_OPERAND_PARAMETER;
         status = parse_unsigned(state, state->current,
                                 PRDB_SDK_SQL_MAX_PARAMETER_INDEX, 0,
                                 &node.parameter_index);
     } else {
-        node.operand_kind = PRDB_SDK_SQL_V18_OPERAND_BIGINT_LITERAL;
+        node.operand_kind = PRDB_SDK_SQL_HAVING_OPERAND_BIGINT_LITERAL;
         status = parse_signed_bigint_literal_v18(state, &node.literal);
     }
     if (status != PRDB_SDK_SQL_OK) return status;
@@ -444,9 +444,9 @@ static int32_t parse_having_primary_v18(parser *state,
 }
 
 static int32_t parse_having_unary_v18(parser *state,
-                                     prdb_sdk_select_v18 *statement,
+                                     prdb_sdk_select_v1 *statement,
                                      uint32_t depth, uint32_t *index_out) {
-    prdb_sdk_sql_having_node_v18 node = {0};
+    prdb_sdk_sql_having_node_v1 node = {0};
     int32_t status;
     if (depth > PRDB_SDK_SQL_MAX_EXPRESSION_DEPTH) {
         state->error_offset = state->current.offset;
@@ -465,13 +465,13 @@ static int32_t parse_having_unary_v18(parser *state,
 }
 
 static int32_t parse_having_and_v18(parser *state,
-                                   prdb_sdk_select_v18 *statement,
+                                   prdb_sdk_select_v1 *statement,
                                    uint32_t depth, uint32_t *index_out) {
     int32_t status = parse_having_unary_v18(state, statement, depth,
                                             index_out);
     if (status != PRDB_SDK_SQL_OK) return status;
     while (token_is_keyword(state, "AND")) {
-        prdb_sdk_sql_having_node_v18 node = {0};
+        prdb_sdk_sql_having_node_v1 node = {0};
         node.node_kind = PRDB_SDK_SQL_PREDICATE_AND;
         node.left_child = *index_out;
         status = advance(state);
@@ -486,13 +486,13 @@ static int32_t parse_having_and_v18(parser *state,
 }
 
 static int32_t parse_having_or_v18(parser *state,
-                                  prdb_sdk_select_v18 *statement,
+                                  prdb_sdk_select_v1 *statement,
                                   uint32_t depth, uint32_t *index_out) {
     int32_t status = parse_having_and_v18(state, statement, depth,
                                           index_out);
     if (status != PRDB_SDK_SQL_OK) return status;
     while (token_is_keyword(state, "OR")) {
-        prdb_sdk_sql_having_node_v18 node = {0};
+        prdb_sdk_sql_having_node_v1 node = {0};
         node.node_kind = PRDB_SDK_SQL_PREDICATE_OR;
         node.left_child = *index_out;
         status = advance(state);
@@ -507,13 +507,13 @@ static int32_t parse_having_or_v18(parser *state,
 }
 
 static int32_t parse_select_v18_mode(const uint8_t *sql, uint64_t sql_len,
-                                     prdb_sdk_select_v18 *out,
+                                     prdb_sdk_select_v1 *out,
                                      uint32_t out_capacity,
                                      uint32_t *error_offset_out,
                                      int having_features) {
     uint8_t base_sql[PRDB_SDK_SQL_MAX_QUERY_BYTES];
     parser scan, having;
-    prdb_sdk_select_v18 result = {0};
+    prdb_sdk_select_v1 result = {0};
     token having_token = {TOKEN_END, 0, 0};
     uint32_t group_by_end = 0, clause_end, root = 0;
     uint32_t min_group_keys = (having_features & GROUP_SINGLE_KEY) ? 1 : 2;
@@ -557,10 +557,10 @@ static int32_t parse_select_v18_mode(const uint8_t *sql, uint64_t sql_len,
     }
     if (having_token.kind == TOKEN_END) {
         status = prdb_sdk_internal_parse_select_v15_mode(
-            sql, sql_len, &result.base, sizeof(result.base), error_offset_out,
+            sql, sql_len, &result, sizeof(result), error_offset_out,
             min_group_keys);
         if (status != PRDB_SDK_SQL_OK) return status;
-        result.base.base.base.base.base.sql = sql;
+        result.sql = sql;
     } else {
         if (group_by_end == 0 || having_token.offset < group_by_end) {
             status = PRDB_SDK_SQL_SYNTAX_ERROR;
@@ -588,10 +588,10 @@ static int32_t parse_select_v18_mode(const uint8_t *sql, uint64_t sql_len,
         for (uint32_t index = having_token.offset; index < clause_end; ++index)
             base_sql[index] = ' ';
         status = prdb_sdk_internal_parse_select_v15_mode(
-            base_sql, sql_len, &result.base, sizeof(result.base),
+            base_sql, sql_len, &result, sizeof(result),
             error_offset_out, min_group_keys);
         if (status != PRDB_SDK_SQL_OK) return status;
-        result.base.base.base.base.base.sql = sql;
+        result.sql = sql;
         having = (parser){sql, (uint32_t)sql_len,
                           having_token.offset + having_token.length,
                           {TOKEN_END, 0, 0}, 0, PRDB_SDK_SQL_OK,
@@ -611,7 +611,7 @@ static int32_t parse_select_v18_mode(const uint8_t *sql, uint64_t sql_len,
         result.having_root = root;
     }
     result.struct_size = sizeof(result);
-    result.abi_version = PRDB_SDK_SQL_ABI_V18_VERSION;
+    result.abi_version = PRDB_SDK_SQL_ABI_V1_VERSION;
     *out = result;
     return PRDB_SDK_SQL_OK;
 
@@ -623,8 +623,8 @@ failed_v18:
     return fail_at(&scan, status);
 }
 
-int32_t prdb_sdk_sql_parse_select_v18(const uint8_t *sql, uint64_t sql_len,
-                                      prdb_sdk_select_v18 *out,
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_parse_select_v18(const uint8_t *sql, uint64_t sql_len,
+                                      prdb_sdk_select_v1 *out,
                                       uint32_t out_capacity,
                                       uint32_t *error_offset_out) {
     return parse_select_v18_mode(sql, sql_len, out, out_capacity,
@@ -632,9 +632,9 @@ int32_t prdb_sdk_sql_parse_select_v18(const uint8_t *sql, uint64_t sql_len,
 }
 
 static int validate_having_node_v18(
-    const prdb_sdk_select_v18 *statement, uint32_t index, uint8_t *visited,
+    const prdb_sdk_select_v1 *statement, uint32_t index, uint8_t *visited,
     int allow_null_tests) {
-    const prdb_sdk_sql_having_node_v18 *node;
+    const prdb_sdk_sql_having_node_v1 *node;
     if (index >= statement->having_node_count || visited[index]) return 0;
     visited[index] = 1;
     node = &statement->having_nodes[index];
@@ -666,12 +666,12 @@ static int validate_having_node_v18(
         node->comparison < PRDB_SDK_SQL_COMPARE_EQUAL ||
         node->comparison > PRDB_SDK_SQL_COMPARE_GREATER_EQUAL ||
         node->left_child != 0 || node->right_child != 0) return 0;
-    if (node->operand_kind == PRDB_SDK_SQL_V18_OPERAND_PARAMETER) {
+    if (node->operand_kind == PRDB_SDK_SQL_HAVING_OPERAND_PARAMETER) {
         return node->parameter_index > 0 &&
                node->parameter_index <= PRDB_SDK_SQL_MAX_PARAMETER_INDEX &&
                node->literal == 0;
     }
-    if (node->operand_kind == PRDB_SDK_SQL_V18_OPERAND_BIGINT_LITERAL) {
+    if (node->operand_kind == PRDB_SDK_SQL_HAVING_OPERAND_BIGINT_LITERAL) {
         /* The literal field is the two's-complement BIGINT bit pattern. */
         return node->parameter_index == 0;
     }
@@ -679,30 +679,30 @@ static int validate_having_node_v18(
 }
 
 static int32_t bind_select_v18_mode(
-    const prdb_sdk_select_v18 *statement, const uint8_t *relation_name,
+    const prdb_sdk_select_v1 *statement, const uint8_t *relation_name,
     uint32_t relation_name_len,
-    const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count,
-    prdb_sdk_select_binding_v18 *out, uint32_t out_capacity,
+    const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count,
+    prdb_sdk_select_binding_v1 *out, uint32_t out_capacity,
     int allow_null_tests, uint32_t min_group_keys) {
-    prdb_sdk_select_binding_v18 result = {0};
-    prdb_sdk_select_v15 base;
-    uint8_t visited[PRDB_SDK_SQL_V18_MAX_HAVING_NODES] = {0};
+    prdb_sdk_select_binding_v1 result = {0};
+    prdb_sdk_select_v1 base;
+    uint8_t visited[PRDB_SDK_SQL_MAX_HAVING_NODES] = {0};
     int32_t status;
     if (statement == NULL || out == NULL || out_capacity < sizeof(*out))
         return PRDB_SDK_SQL_BIND_INVALID_ARGUMENT;
     if (statement->struct_size < sizeof(*statement) ||
-        statement->abi_version != PRDB_SDK_SQL_ABI_V18_VERSION ||
-        statement->having_node_count > PRDB_SDK_SQL_V18_MAX_HAVING_NODES ||
+        statement->abi_version != PRDB_SDK_SQL_ABI_V1_VERSION ||
+        statement->having_node_count > PRDB_SDK_SQL_MAX_HAVING_NODES ||
         (statement->having_node_count == 0 && statement->having_root != 0) ||
         (statement->having_node_count != 0 &&
          statement->having_root >= statement->having_node_count) ||
-        statement->base.base.has_having != 0 ||
-        statement->base.base.having_comparison != 0 ||
-        statement->base.base.having_parameter_index != 0)
+        statement->has_having != 0 ||
+        statement->having_comparison != 0 ||
+        statement->having_parameter_index != 0)
         return PRDB_SDK_SQL_BIND_INVALID_STATEMENT;
     for (uint32_t index = statement->having_node_count;
-         index < PRDB_SDK_SQL_V18_MAX_HAVING_NODES; ++index) {
-        const prdb_sdk_sql_having_node_v18 zero = {0};
+         index < PRDB_SDK_SQL_MAX_HAVING_NODES; ++index) {
+        const prdb_sdk_sql_having_node_v1 zero = {0};
         if (memcmp(&statement->having_nodes[index], &zero, sizeof(zero)) != 0)
             return PRDB_SDK_SQL_BIND_INVALID_STATEMENT;
     }
@@ -713,51 +713,51 @@ static int32_t bind_select_v18_mode(
         for (uint32_t index = 0; index < statement->having_node_count; ++index)
             if (!visited[index]) return PRDB_SDK_SQL_BIND_INVALID_STATEMENT;
     }
-    base = statement->base;
+    base = (*statement);
     if (statement->having_node_count != 0) {
         /* Ask the frozen v15 binder to derive aggregate comparison metadata;
          * v18's AST remains the only authoritative HAVING representation. */
-        base.base.has_having = 1;
-        base.base.having_comparison = PRDB_SDK_SQL_COMPARE_EQUAL;
-        base.base.having_parameter_index = 1;
+        base.has_having = 1;
+        base.having_comparison = PRDB_SDK_SQL_COMPARE_EQUAL;
+        base.having_parameter_index = 1;
     }
     status = prdb_sdk_internal_bind_select_v15_mode(
         &base, relation_name, relation_name_len, columns, column_count,
-        &result.base, sizeof(result.base), min_group_keys);
+        &result, sizeof(result), min_group_keys);
     if (status != PRDB_SDK_SQL_BIND_OK) return status;
     if (statement->having_node_count != 0) {
         for (uint32_t index = 0; index < statement->having_node_count; ++index) {
             if (statement->having_nodes[index].node_kind ==
                     PRDB_SDK_SQL_PREDICATE_COMPARE &&
                 statement->having_nodes[index].operand_kind ==
-                    PRDB_SDK_SQL_V18_OPERAND_BIGINT_LITERAL &&
-                result.base.base.having_type_code !=
+                    PRDB_SDK_SQL_HAVING_OPERAND_BIGINT_LITERAL &&
+                result.having_type_code !=
                     PRDB_SDK_VALUE_TYPE_BIGINT)
-                return PRDB_SDK_SQL_BIND_V18_LITERAL_TYPE_MISMATCH;
+                return PRDB_SDK_SQL_BIND_LITERAL_TYPE_MISMATCH;
         }
     }
-    result.base.base.has_having = 0;
-    result.base.base.having_comparison = 0;
-    result.base.base.having_parameter_index = 0;
+    result.has_having = 0;
+    result.having_comparison = 0;
+    result.having_parameter_index = 0;
     result.having_node_count = statement->having_node_count;
     result.having_root = statement->having_root;
-    result.having_type_code = result.base.base.having_type_code;
+    result.having_type_code = result.having_type_code;
     result.having_decimal_precision =
-        result.base.base.having_decimal_precision;
-    result.having_decimal_scale = result.base.base.having_decimal_scale;
+        result.having_decimal_precision;
+    result.having_decimal_scale = result.having_decimal_scale;
     memcpy(result.having_nodes, statement->having_nodes,
            sizeof(result.having_nodes));
     result.struct_size = sizeof(result);
-    result.abi_version = PRDB_SDK_SQL_ABI_V18_VERSION;
+    result.abi_version = PRDB_SDK_SQL_ABI_V1_VERSION;
     *out = result;
     return PRDB_SDK_SQL_BIND_OK;
 }
 
-int32_t prdb_sdk_sql_bind_select_v18(
-    const prdb_sdk_select_v18 *statement, const uint8_t *relation_name,
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_bind_select_v18(
+    const prdb_sdk_select_v1 *statement, const uint8_t *relation_name,
     uint32_t relation_name_len,
-    const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count,
-    prdb_sdk_select_binding_v18 *out, uint32_t out_capacity) {
+    const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count,
+    prdb_sdk_select_binding_v1 *out, uint32_t out_capacity) {
     return bind_select_v18_mode(statement, relation_name, relation_name_len,
                                 columns, column_count, out, out_capacity, 0, 2);
 }
@@ -917,7 +917,7 @@ static int32_t scan_and_mask_having_literals_v21(
                         only_space = 0;
                 if (only_space) start = previous.offset;
             }
-            if (*literal_count >= PRDB_SDK_SQL_V18_MAX_HAVING_NODES) {
+            if (*literal_count >= PRDB_SDK_SQL_MAX_HAVING_NODES) {
                 *error_offset = start;
                 return PRDB_SDK_SQL_LIMIT_EXCEEDED;
             }
@@ -942,13 +942,13 @@ static int32_t scan_and_mask_having_literals_v21(
 }
 
 static int32_t parse_select_v21_mode(const uint8_t *sql, uint64_t sql_len,
-                                     prdb_sdk_select_v21 *out,
+                                     prdb_sdk_select_v1 *out,
                                      uint32_t out_capacity,
                                      uint32_t *error_offset_out,
                                      int having_features) {
     uint8_t masked_sql[PRDB_SDK_SQL_MAX_QUERY_BYTES];
-    numeric_literal_v21 literals[PRDB_SDK_SQL_V18_MAX_HAVING_NODES];
-    prdb_sdk_select_v21 result = {0};
+    numeric_literal_v21 literals[PRDB_SDK_SQL_MAX_HAVING_NODES];
+    prdb_sdk_select_v1 result = {0};
     uint32_t literal_count = 0, literal_index = 0, error_offset = 0;
     int32_t status;
 
@@ -969,30 +969,30 @@ static int32_t parse_select_v21_mode(const uint8_t *sql, uint64_t sql_len,
         if (error_offset_out != NULL) *error_offset_out = error_offset;
         return status;
     }
-    status = parse_select_v18_mode(masked_sql, sql_len, &result.base,
-                                   sizeof(result.base), &error_offset,
+    status = parse_select_v18_mode(masked_sql, sql_len, &result,
+                                   sizeof(result), &error_offset,
                                    having_features);
     if (status != PRDB_SDK_SQL_OK) {
         if (error_offset_out != NULL) *error_offset_out = error_offset;
         return status;
     }
-    result.base.base.base.base.base.base.sql = sql;
-    for (uint32_t index = 0; index < result.base.having_node_count; ++index) {
-        prdb_sdk_sql_having_node_v18 *base_node =
-            &result.base.having_nodes[index];
-        prdb_sdk_sql_having_node_v21 *node = &result.having_nodes[index];
-        node->base = *base_node;
+    result.sql = sql;
+    for (uint32_t index = 0; index < result.having_node_count; ++index) {
+        prdb_sdk_sql_having_node_v1 *base_node =
+            &result.having_nodes[index];
+        prdb_sdk_sql_having_node_v1 *node = &result.having_nodes[index];
+        (*node) = *base_node;
         if (base_node->node_kind == PRDB_SDK_SQL_PREDICATE_COMPARE &&
-            base_node->operand_kind == PRDB_SDK_SQL_V18_OPERAND_BIGINT_LITERAL) {
+            base_node->operand_kind == PRDB_SDK_SQL_HAVING_OPERAND_BIGINT_LITERAL) {
             if (literal_index >= literal_count) {
                 if (error_offset_out != NULL)
                     *error_offset_out = literals[0].offset;
                 return PRDB_SDK_SQL_SYNTAX_ERROR;
             }
-            node->base.operand_kind =
-                PRDB_SDK_SQL_V21_OPERAND_NUMERIC_LITERAL;
-            node->base.literal = 0;
-            node->base.parameter_index = 0;
+            node->operand_kind =
+                PRDB_SDK_SQL_HAVING_OPERAND_NUMERIC_LITERAL;
+            node->literal = 0;
+            node->parameter_index = 0;
             memcpy(node->coefficient, literals[literal_index].coefficient,
                    sizeof(node->coefficient));
             node->scale = literals[literal_index].scale;
@@ -1005,13 +1005,13 @@ static int32_t parse_select_v21_mode(const uint8_t *sql, uint64_t sql_len,
         return PRDB_SDK_SQL_SYNTAX_ERROR;
     }
     result.struct_size = sizeof(result);
-    result.abi_version = PRDB_SDK_SQL_ABI_V21_VERSION;
+    result.abi_version = PRDB_SDK_SQL_ABI_V1_VERSION;
     *out = result;
     return PRDB_SDK_SQL_OK;
 }
 
-int32_t prdb_sdk_sql_parse_select_v21(const uint8_t *sql, uint64_t sql_len,
-                                      prdb_sdk_select_v21 *out,
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_parse_select_v21(const uint8_t *sql, uint64_t sql_len,
+                                      prdb_sdk_select_v1 *out,
                                       uint32_t out_capacity,
                                       uint32_t *error_offset_out) {
     return parse_select_v21_mode(sql, sql_len, out, out_capacity,
@@ -1039,7 +1039,7 @@ static int bytes_are_zero(const uint8_t *bytes, size_t length) {
 }
 
 static int numeric_literal_is_canonical_v21(
-    const prdb_sdk_sql_having_node_v21 *node) {
+    const prdb_sdk_sql_having_node_v1 *node) {
     uint8_t magnitude[16];
     int negative;
     uint16_t remainder = 0;
@@ -1058,7 +1058,7 @@ static int numeric_literal_is_canonical_v21(
 }
 
 static int32_t rescale_numeric_literal_v21(
-    const prdb_sdk_sql_having_node_v21 *node, uint32_t target_type,
+    const prdb_sdk_sql_having_node_v1 *node, uint32_t target_type,
     uint8_t target_scale, uint8_t coefficient_out[16]) {
     uint8_t magnitude[16];
     uint32_t source_scale = node->scale;
@@ -1110,46 +1110,46 @@ static int32_t rescale_numeric_literal_v21(
 }
 
 static int32_t bind_select_v21_mode(
-    const prdb_sdk_select_v21 *statement, const uint8_t *relation_name,
+    const prdb_sdk_select_v1 *statement, const uint8_t *relation_name,
     uint32_t relation_name_len,
-    const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count,
-    prdb_sdk_select_binding_v21 *out, uint32_t out_capacity,
+    const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count,
+    prdb_sdk_select_binding_v1 *out, uint32_t out_capacity,
     uint64_t having_count_mask, int allow_null_tests, uint32_t min_group_keys) {
-    prdb_sdk_select_v18 base_statement;
-    prdb_sdk_select_binding_v21 result = {0};
+    prdb_sdk_select_v1 base_statement;
+    prdb_sdk_select_binding_v1 result = {0};
     int32_t status;
     if (statement == NULL || out == NULL || out_capacity < sizeof(*out))
         return PRDB_SDK_SQL_BIND_INVALID_ARGUMENT;
     if (statement->struct_size < sizeof(*statement) ||
-        statement->abi_version != PRDB_SDK_SQL_ABI_V21_VERSION)
+        statement->abi_version != PRDB_SDK_SQL_ABI_V1_VERSION)
         return PRDB_SDK_SQL_BIND_INVALID_STATEMENT;
-    base_statement = statement->base;
-    for (uint32_t index = 0; index < PRDB_SDK_SQL_V18_MAX_HAVING_NODES;
+    base_statement = (*statement);
+    for (uint32_t index = 0; index < PRDB_SDK_SQL_MAX_HAVING_NODES;
          ++index) {
-        const prdb_sdk_sql_having_node_v21 *node =
+        const prdb_sdk_sql_having_node_v1 *node =
             &statement->having_nodes[index];
-        if (index >= statement->base.having_node_count) {
-            const prdb_sdk_sql_having_node_v21 zero = {0};
+        if (index >= statement->having_node_count) {
+            const prdb_sdk_sql_having_node_v1 zero = {0};
             if (memcmp(node, &zero, sizeof(zero)) != 0)
                 return PRDB_SDK_SQL_BIND_INVALID_STATEMENT;
             continue;
         }
-        if (node->base.node_kind != statement->base.having_nodes[index].node_kind ||
-            node->base.left_child != statement->base.having_nodes[index].left_child ||
-            node->base.right_child != statement->base.having_nodes[index].right_child ||
-            node->base.comparison != statement->base.having_nodes[index].comparison ||
-            node->base.operand_kind !=
-                (statement->base.having_nodes[index].node_kind ==
+        if (node->node_kind != statement->having_nodes[index].node_kind ||
+            node->left_child != statement->having_nodes[index].left_child ||
+            node->right_child != statement->having_nodes[index].right_child ||
+            node->comparison != statement->having_nodes[index].comparison ||
+            node->operand_kind !=
+                (statement->having_nodes[index].node_kind ==
                          PRDB_SDK_SQL_PREDICATE_COMPARE &&
-                         statement->base.having_nodes[index].operand_kind ==
-                             PRDB_SDK_SQL_V18_OPERAND_BIGINT_LITERAL
-                     ? PRDB_SDK_SQL_V21_OPERAND_NUMERIC_LITERAL
-                     : statement->base.having_nodes[index].operand_kind) ||
-            (node->base.operand_kind == PRDB_SDK_SQL_V21_OPERAND_NUMERIC_LITERAL &&
-             (node->base.parameter_index != 0 || node->base.literal != 0 ||
+                         statement->having_nodes[index].operand_kind ==
+                             PRDB_SDK_SQL_HAVING_OPERAND_BIGINT_LITERAL
+                     ? PRDB_SDK_SQL_HAVING_OPERAND_NUMERIC_LITERAL
+                     : statement->having_nodes[index].operand_kind) ||
+            (node->operand_kind == PRDB_SDK_SQL_HAVING_OPERAND_NUMERIC_LITERAL &&
+             (node->parameter_index != 0 || node->literal != 0 ||
               !numeric_literal_is_canonical_v21(node))) ||
-            (node->base.operand_kind !=
-                 PRDB_SDK_SQL_V21_OPERAND_NUMERIC_LITERAL &&
+            (node->operand_kind !=
+                 PRDB_SDK_SQL_HAVING_OPERAND_NUMERIC_LITERAL &&
              (node->scale != 0 ||
               !bytes_are_zero(node->coefficient,
                               sizeof(node->coefficient))))
@@ -1157,36 +1157,36 @@ static int32_t bind_select_v21_mode(
         for (size_t reserved = 0; reserved < sizeof(node->reserved); ++reserved)
             if (node->reserved[reserved] != 0)
                 return PRDB_SDK_SQL_BIND_INVALID_STATEMENT;
-        base_statement.having_nodes[index] = node->base;
-        if (node->base.operand_kind == PRDB_SDK_SQL_V21_OPERAND_NUMERIC_LITERAL) {
+        base_statement.having_nodes[index] = (*node);
+        if (node->operand_kind == PRDB_SDK_SQL_HAVING_OPERAND_NUMERIC_LITERAL) {
             base_statement.having_nodes[index].operand_kind =
-                PRDB_SDK_SQL_V18_OPERAND_PARAMETER;
+                PRDB_SDK_SQL_HAVING_OPERAND_PARAMETER;
             base_statement.having_nodes[index].parameter_index = 1;
         }
     }
     status = bind_select_v18_mode(
         &base_statement, relation_name, relation_name_len, columns, column_count,
-        &result.base, sizeof(result.base), allow_null_tests, min_group_keys);
+        &result, sizeof(result), allow_null_tests, min_group_keys);
     if (status != PRDB_SDK_SQL_BIND_OK) return status;
-    for (uint32_t index = 0; index < statement->base.having_node_count; ++index) {
-        const prdb_sdk_sql_having_node_v21 *input =
+    for (uint32_t index = 0; index < statement->having_node_count; ++index) {
+        const prdb_sdk_sql_having_node_v1 *input =
             &statement->having_nodes[index];
-        prdb_sdk_sql_having_node_v21 *bound = &result.having_nodes[index];
-        bound->base = result.base.having_nodes[index];
-        if (input->base.node_kind == PRDB_SDK_SQL_PREDICATE_COMPARE &&
-            input->base.operand_kind == PRDB_SDK_SQL_V21_OPERAND_NUMERIC_LITERAL) {
+        prdb_sdk_sql_having_node_v1 *bound = &result.having_nodes[index];
+        (*bound) = result.having_nodes[index];
+        if (input->node_kind == PRDB_SDK_SQL_PREDICATE_COMPARE &&
+            input->operand_kind == PRDB_SDK_SQL_HAVING_OPERAND_NUMERIC_LITERAL) {
             uint32_t type = (having_count_mask & (UINT64_C(1) << index))
                                 ? PRDB_SDK_VALUE_TYPE_BIGINT
-                                : result.base.having_type_code;
+                                : result.having_type_code;
             uint8_t scale = type == PRDB_SDK_VALUE_TYPE_DECIMAL
-                                ? result.base.having_decimal_scale
+                                ? result.having_decimal_scale
                                 : 0;
             if (!rescale_numeric_literal_v21(input, type, scale,
                                              bound->coefficient))
-                return PRDB_SDK_SQL_BIND_V21_LITERAL_TYPE_MISMATCH;
-            bound->base.operand_kind = PRDB_SDK_SQL_V21_OPERAND_NUMERIC_LITERAL;
-            bound->base.parameter_index = 0;
-            bound->base.literal = 0;
+                return PRDB_SDK_SQL_BIND_LITERAL_TYPE_MISMATCH;
+            bound->operand_kind = PRDB_SDK_SQL_HAVING_OPERAND_NUMERIC_LITERAL;
+            bound->parameter_index = 0;
+            bound->literal = 0;
             bound->scale = scale;
         } else {
             memcpy(bound->coefficient, input->coefficient,
@@ -1195,26 +1195,26 @@ static int32_t bind_select_v21_mode(
         }
     }
     result.struct_size = sizeof(result);
-    result.abi_version = PRDB_SDK_SQL_ABI_V21_VERSION;
+    result.abi_version = PRDB_SDK_SQL_ABI_V1_VERSION;
     *out = result;
     return PRDB_SDK_SQL_BIND_OK;
 }
 
-int32_t prdb_sdk_sql_bind_select_v21(
-    const prdb_sdk_select_v21 *statement, const uint8_t *relation_name,
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_bind_select_v21(
+    const prdb_sdk_select_v1 *statement, const uint8_t *relation_name,
     uint32_t relation_name_len,
-    const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count,
-    prdb_sdk_select_binding_v21 *out, uint32_t out_capacity) {
+    const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count,
+    prdb_sdk_select_binding_v1 *out, uint32_t out_capacity) {
     return bind_select_v21_mode(statement, relation_name, relation_name_len,
                                 columns, column_count, out, out_capacity, 0, 0, 2);
 }
 
 static int32_t parse_select_v22_mode(const uint8_t *sql, uint64_t sql_len,
-                                      prdb_sdk_select_v22 *out,
+                                      prdb_sdk_select_v1 *out,
                                       uint32_t out_capacity,
                                       uint32_t *error_offset_out,
                                       int having_features) {
-    prdb_sdk_select_v22 result = {0};
+    prdb_sdk_select_v1 result = {0};
     parser scan;
     uint64_t count_ordinals = 0;
     uint32_t comparison_ordinal = 0;
@@ -1223,8 +1223,8 @@ static int32_t parse_select_v22_mode(const uint8_t *sql, uint64_t sql_len,
     if (error_offset_out != NULL) *error_offset_out = 0;
     if (sql == NULL || out == NULL || out_capacity < sizeof(*out))
         return PRDB_SDK_SQL_INVALID_ARGUMENT;
-    status = parse_select_v21_mode(sql, sql_len, &result.base,
-                                   sizeof(result.base), error_offset_out,
+    status = parse_select_v21_mode(sql, sql_len, &result,
+                                   sizeof(result), error_offset_out,
                                    having_features);
     if (status != PRDB_SDK_SQL_OK) return status;
     scan = (parser){sql, (uint32_t)sql_len, 0, {TOKEN_END, 0, 0}, 0,
@@ -1272,45 +1272,45 @@ static int32_t parse_select_v22_mode(const uint8_t *sql, uint64_t sql_len,
         return status;
     }
     comparison_ordinal = 0;
-    for (uint32_t index = 0; index < result.base.base.having_node_count;
+    for (uint32_t index = 0; index < result.having_node_count;
          ++index) {
-        uint32_t kind = result.base.having_nodes[index].base.node_kind;
+        uint32_t kind = result.having_nodes[index].node_kind;
         if (kind != PRDB_SDK_SQL_PREDICATE_COMPARE &&
             kind != PRDB_SDK_SQL_PREDICATE_IS_NULL &&
             kind != PRDB_SDK_SQL_PREDICATE_IS_NOT_NULL) continue;
         if (comparison_ordinal < 64 &&
             (count_ordinals & (UINT64_C(1) << comparison_ordinal)) != 0 &&
-            result.base.base.base.base.base.base.aggregate_kind !=
-                PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR)
+            result.aggregate_kind !=
+                PRDB_SDK_SQL_AGGREGATE_COUNT_STAR)
             result.having_count_mask |= UINT64_C(1) << index;
         ++comparison_ordinal;
     }
     result.struct_size = sizeof(result);
-    result.abi_version = PRDB_SDK_SQL_ABI_V22_VERSION;
+    result.abi_version = PRDB_SDK_SQL_ABI_V1_VERSION;
     *out = result;
     return PRDB_SDK_SQL_OK;
 }
 
 static int32_t bind_select_v22_mode(
-    const prdb_sdk_select_v22 *statement, const uint8_t *relation_name,
+    const prdb_sdk_select_v1 *statement, const uint8_t *relation_name,
     uint32_t relation_name_len,
-    const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count,
-    prdb_sdk_select_binding_v22 *out, uint32_t out_capacity,
+    const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count,
+    prdb_sdk_select_binding_v1 *out, uint32_t out_capacity,
     int allow_null_tests, uint32_t min_group_keys) {
-    prdb_sdk_select_binding_v22 result = {0};
+    prdb_sdk_select_binding_v1 result = {0};
     uint64_t valid_mask = 0;
     int32_t status;
     if (statement == NULL || out == NULL || out_capacity < sizeof(*out))
         return PRDB_SDK_SQL_BIND_INVALID_ARGUMENT;
     if (statement->struct_size < sizeof(*statement) ||
-        statement->abi_version != PRDB_SDK_SQL_ABI_V22_VERSION)
+        statement->abi_version != PRDB_SDK_SQL_ABI_V1_VERSION)
         return PRDB_SDK_SQL_BIND_INVALID_STATEMENT;
-    if (statement->base.base.having_node_count >
-        PRDB_SDK_SQL_V18_MAX_HAVING_NODES)
+    if (statement->having_node_count >
+        PRDB_SDK_SQL_MAX_HAVING_NODES)
         return PRDB_SDK_SQL_BIND_INVALID_STATEMENT;
-    for (uint32_t index = 0; index < statement->base.base.having_node_count;
+    for (uint32_t index = 0; index < statement->having_node_count;
          ++index) {
-        uint32_t kind = statement->base.having_nodes[index].base.node_kind;
+        uint32_t kind = statement->having_nodes[index].node_kind;
         if (kind == PRDB_SDK_SQL_PREDICATE_COMPARE ||
             (allow_null_tests &&
              (kind == PRDB_SDK_SQL_PREDICATE_IS_NULL ||
@@ -1319,107 +1319,107 @@ static int32_t bind_select_v22_mode(
     }
     if ((statement->having_count_mask & ~valid_mask) != 0)
         return PRDB_SDK_SQL_BIND_INVALID_STATEMENT;
-    status = bind_select_v21_mode(&statement->base, relation_name,
+    status = bind_select_v21_mode(statement, relation_name,
                                   relation_name_len, columns, column_count,
-                                  &result.base, sizeof(result.base),
+                                  &result, sizeof(result),
                                   statement->having_count_mask, allow_null_tests,
                                   min_group_keys);
     if (status != PRDB_SDK_SQL_BIND_OK) return status;
     result.struct_size = sizeof(result);
-    result.abi_version = PRDB_SDK_SQL_ABI_V22_VERSION;
+    result.abi_version = PRDB_SDK_SQL_ABI_V1_VERSION;
     result.having_count_mask = statement->having_count_mask;
     *out = result;
     return PRDB_SDK_SQL_BIND_OK;
 }
 
-int32_t prdb_sdk_sql_parse_select_v22(const uint8_t *sql, uint64_t sql_len,
-                                      prdb_sdk_select_v22 *out,
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_parse_select_v22(const uint8_t *sql, uint64_t sql_len,
+                                      prdb_sdk_select_v1 *out,
                                       uint32_t out_capacity,
                                       uint32_t *error_offset_out) {
     return parse_select_v22_mode(sql, sql_len, out, out_capacity,
                                   error_offset_out, HAVING_HIDDEN_COUNT);
 }
 
-int32_t prdb_sdk_sql_bind_select_v22(
-    const prdb_sdk_select_v22 *statement, const uint8_t *relation_name,
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_bind_select_v22(
+    const prdb_sdk_select_v1 *statement, const uint8_t *relation_name,
     uint32_t relation_name_len,
-    const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count,
-    prdb_sdk_select_binding_v22 *out, uint32_t out_capacity) {
+    const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count,
+    prdb_sdk_select_binding_v1 *out, uint32_t out_capacity) {
     return bind_select_v22_mode(statement, relation_name, relation_name_len,
                                 columns, column_count, out, out_capacity, 0, 2);
 }
 
 static int32_t parse_select_v23_mode(const uint8_t *sql, uint64_t sql_len,
-                                      prdb_sdk_select_v23 *out,
+                                      prdb_sdk_select_v1 *out,
                                       uint32_t out_capacity,
                                       uint32_t *error_offset_out,
                                       uint32_t abi_version) {
-    prdb_sdk_select_v22 result = {0};
+    prdb_sdk_select_v1 result = {0};
     if (error_offset_out != NULL) *error_offset_out = 0;
     if (out == NULL || out_capacity < sizeof(*out))
         return PRDB_SDK_SQL_INVALID_ARGUMENT;
     int32_t status = parse_select_v22_mode(
         sql, sql_len, &result, sizeof(result), error_offset_out,
         HAVING_HIDDEN_COUNT | HAVING_NULL_TESTS |
-            (abi_version == PRDB_SDK_SQL_ABI_V24_VERSION ? GROUP_SINGLE_KEY : 0));
+            (abi_version == PRDB_SDK_SQL_ABI_V1_VERSION ? GROUP_SINGLE_KEY : 0));
     if (status == PRDB_SDK_SQL_OK) {
         out->struct_size = sizeof(*out);
         out->abi_version = abi_version;
-        out->base = result.base;
+        (*out) = result;
         out->having_count_mask = result.having_count_mask;
     }
     return status;
 }
 
 static int32_t bind_select_v23_mode(
-    const prdb_sdk_select_v23 *statement, const uint8_t *relation_name,
+    const prdb_sdk_select_v1 *statement, const uint8_t *relation_name,
     uint32_t relation_name_len,
-    const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count,
-    prdb_sdk_select_binding_v23 *out, uint32_t out_capacity,
+    const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count,
+    prdb_sdk_select_binding_v1 *out, uint32_t out_capacity,
     uint32_t abi_version) {
-    prdb_sdk_select_v22 input = {0};
-    prdb_sdk_select_binding_v22 result = {0};
+    prdb_sdk_select_v1 input = {0};
+    prdb_sdk_select_binding_v1 result = {0};
     if (statement == NULL || out == NULL || out_capacity < sizeof(*out))
         return PRDB_SDK_SQL_BIND_INVALID_ARGUMENT;
     if (statement->struct_size < sizeof(*statement) ||
         statement->abi_version != abi_version)
         return PRDB_SDK_SQL_BIND_INVALID_STATEMENT;
     input.struct_size = sizeof(input);
-    input.abi_version = PRDB_SDK_SQL_ABI_V22_VERSION;
-    input.base = statement->base;
+    input.abi_version = PRDB_SDK_SQL_ABI_V1_VERSION;
+    input = (*statement);
     input.having_count_mask = statement->having_count_mask;
     int32_t status = bind_select_v22_mode(
         &input, relation_name, relation_name_len, columns, column_count,
         &result, sizeof(result), 1,
-        abi_version == PRDB_SDK_SQL_ABI_V24_VERSION ? 1 : 2);
+        abi_version == PRDB_SDK_SQL_ABI_V1_VERSION ? 1 : 2);
     if (status != PRDB_SDK_SQL_BIND_OK) return status;
     out->struct_size = sizeof(*out);
     out->abi_version = abi_version;
-    out->base = result.base;
+    (*out) = result;
     out->having_count_mask = result.having_count_mask;
     return PRDB_SDK_SQL_BIND_OK;
 }
 
-int32_t prdb_sdk_sql_parse_select_v23(const uint8_t *sql, uint64_t sql_len,
-                                      prdb_sdk_select_v23 *out,
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_parse_select_v23(const uint8_t *sql, uint64_t sql_len,
+                                      prdb_sdk_select_v1 *out,
                                       uint32_t out_capacity,
                                       uint32_t *error_offset_out) {
     return parse_select_v23_mode(sql, sql_len, out, out_capacity,
-                                  error_offset_out, PRDB_SDK_SQL_ABI_V23_VERSION);
+                                  error_offset_out, PRDB_SDK_SQL_ABI_V1_VERSION);
 }
 
-int32_t prdb_sdk_sql_bind_select_v23(
-    const prdb_sdk_select_v23 *statement, const uint8_t *relation_name,
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_bind_select_v23(
+    const prdb_sdk_select_v1 *statement, const uint8_t *relation_name,
     uint32_t relation_name_len,
-    const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count,
-    prdb_sdk_select_binding_v23 *out, uint32_t out_capacity) {
+    const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count,
+    prdb_sdk_select_binding_v1 *out, uint32_t out_capacity) {
     return bind_select_v23_mode(statement, relation_name, relation_name_len,
                                 columns, column_count, out, out_capacity,
-                                PRDB_SDK_SQL_ABI_V23_VERSION);
+                                PRDB_SDK_SQL_ABI_V1_VERSION);
 }
 
-int32_t prdb_sdk_sql_parse_select_v24(const uint8_t *sql, uint64_t sql_len,
-                                      prdb_sdk_select_v24 *out,
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_parse_select_v24(const uint8_t *sql, uint64_t sql_len,
+                                      prdb_sdk_select_v1 *out,
                                       uint32_t out_capacity,
                                       uint32_t *error_offset_out) {
     uint8_t rewritten[PRDB_SDK_SQL_MAX_QUERY_BYTES];
@@ -1468,65 +1468,65 @@ int32_t prdb_sdk_sql_parse_select_v24(const uint8_t *sql, uint64_t sql_len,
     }
     status = parse_select_v23_mode(rewritten, sql_len, out, out_capacity,
                                    error_offset_out,
-                                   PRDB_SDK_SQL_ABI_V24_VERSION);
+                                   PRDB_SDK_SQL_ABI_V1_VERSION);
     if (status != PRDB_SDK_SQL_OK) return status;
     {
-        prdb_sdk_select_v7 *grouped =
-            &out->base.base.base.base.base.base;
+        prdb_sdk_select_v1 *grouped =
+            out;
         if (selected_argument.length != 0 &&
             grouped->aggregate_column.offset == selected_argument.offset &&
             grouped->aggregate_column.length == selected_argument.length) {
             grouped->aggregate_kind =
-                PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN;
+                PRDB_SDK_SQL_AGGREGATE_COUNT_COLUMN;
         }
         /* The parser used a stack copy to preserve the frozen earlier APIs. */
-        grouped->base.sql = sql;
+        grouped->sql = sql;
     }
     return PRDB_SDK_SQL_OK;
 }
 
-int32_t prdb_sdk_sql_bind_select_v24(
-    const prdb_sdk_select_v24 *statement, const uint8_t *relation_name,
+PRDB_SDK_INTERNAL int32_t prdb_sdk_sql_bind_select_v24(
+    const prdb_sdk_select_v1 *statement, const uint8_t *relation_name,
     uint32_t relation_name_len,
-    const prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_count,
-    prdb_sdk_select_binding_v24 *out, uint32_t out_capacity) {
-    prdb_sdk_select_v24 compatible = {0};
-    prdb_sdk_select_binding_v24 result = {0};
-    prdb_sdk_select_v7 *grouped;
-    prdb_sdk_select_binding_v7 *bound_grouped;
+    const prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_count,
+    prdb_sdk_select_binding_v1 *out, uint32_t out_capacity) {
+    prdb_sdk_select_v1 compatible = {0};
+    prdb_sdk_select_binding_v1 result = {0};
+    prdb_sdk_select_v1 *grouped;
+    prdb_sdk_select_binding_v1 *bound_grouped;
     int32_t status;
     if (statement == NULL || out == NULL || out_capacity < sizeof(*out))
         return PRDB_SDK_SQL_BIND_INVALID_ARGUMENT;
     if (statement->struct_size < sizeof(*statement) ||
-        statement->abi_version != PRDB_SDK_SQL_ABI_V24_VERSION)
+        statement->abi_version != PRDB_SDK_SQL_ABI_V1_VERSION)
         return PRDB_SDK_SQL_BIND_INVALID_STATEMENT;
     compatible = *statement;
-    grouped = &compatible.base.base.base.base.base.base;
+    grouped = &compatible;
     if (grouped->aggregate_kind !=
-        PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN) {
+        PRDB_SDK_SQL_AGGREGATE_COUNT_COLUMN) {
         return bind_select_v23_mode(
             statement, relation_name, relation_name_len, columns,
-            column_count, out, out_capacity, PRDB_SDK_SQL_ABI_V24_VERSION);
+            column_count, out, out_capacity, PRDB_SDK_SQL_ABI_V1_VERSION);
     }
-    grouped->aggregate_kind = PRDB_SDK_SQL_V7_AGGREGATE_MIN;
+    grouped->aggregate_kind = PRDB_SDK_SQL_AGGREGATE_MIN;
     status = bind_select_v23_mode(
         &compatible, relation_name, relation_name_len, columns, column_count,
-        &result, sizeof(result), PRDB_SDK_SQL_ABI_V24_VERSION);
-    if (status == PRDB_SDK_SQL_BIND_V7_INVALID_AGGREGATE_TYPE) {
-        grouped->aggregate_kind = PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR;
+        &result, sizeof(result), PRDB_SDK_SQL_ABI_V1_VERSION);
+    if (status == PRDB_SDK_SQL_BIND_INVALID_AGGREGATE_TYPE) {
+        grouped->aggregate_kind = PRDB_SDK_SQL_AGGREGATE_COUNT_STAR;
         status = bind_select_v23_mode(
             &compatible, relation_name, relation_name_len, columns,
             column_count, &result, sizeof(result),
-            PRDB_SDK_SQL_ABI_V24_VERSION);
+            PRDB_SDK_SQL_ABI_V1_VERSION);
         if (status == PRDB_SDK_SQL_BIND_OK) {
             uint32_t ordinal = 0;
-            status = prdb_sdk_internal_find_column_shape_v2(
-                &grouped->base, grouped->aggregate_column, columns,
+            status = prdb_sdk_internal_find_column_shape_v1(
+                grouped, grouped->aggregate_column, columns,
                 column_count, &ordinal);
             if (status == PRDB_SDK_SQL_BIND_OK) {
                 uint32_t index = 0;
-                prdb_sdk_sql_bound_column_v2 *aggregate =
-                    &result.base.base.base.base.base.base.aggregate_column;
+                prdb_sdk_sql_bound_column_v1 *aggregate =
+                    &result.aggregate_column;
                 while (index < column_count &&
                        columns[index].ordinal != ordinal) ++index;
                 if (index == column_count) {
@@ -1542,16 +1542,16 @@ int32_t prdb_sdk_sql_bind_select_v24(
         }
     }
     if (status != PRDB_SDK_SQL_BIND_OK) return status;
-    bound_grouped = &result.base.base.base.base.base.base;
+    bound_grouped = &result;
     bound_grouped->aggregate_kind =
-        PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN;
-    if (statement->base.base.having_node_count != 0)
-        result.base.base.having_type_code = PRDB_SDK_VALUE_TYPE_BIGINT;
+        PRDB_SDK_SQL_AGGREGATE_COUNT_COLUMN;
+    if (statement->having_node_count != 0)
+        result.having_type_code = PRDB_SDK_VALUE_TYPE_BIGINT;
     {
-        prdb_sdk_select_binding_v15 *ordered = &result.base.base.base;
+        prdb_sdk_select_binding_v1 *ordered = &result;
         for (uint32_t index = 0; index < ordered->order_count; ++index) {
             if (ordered->order_items[index].item.kind ==
-                PRDB_SDK_SQL_V10_ORDER_AGGREGATE) {
+                PRDB_SDK_SQL_ORDER_AGGREGATE) {
                 ordered->order_items[index].type_code =
                     PRDB_SDK_VALUE_TYPE_BIGINT;
                 ordered->order_items[index].decimal_precision = 0;

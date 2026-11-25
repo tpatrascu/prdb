@@ -66,11 +66,11 @@ int main(void) {
     prdb_sdk_batch_v1 batch = {0};
     prdb_sdk_row_iterator_v1 rows = {0};
     prdb_sdk_row_v1 row = {0};
-    prdb_sdk_sql_column_shape_v2 columns[2] = {
+    prdb_sdk_sql_column_shape_v1 columns[2] = {
         {id_name, sizeof(id_name) - 1, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {hidden_name, sizeof(hidden_name) - 1, 1,
          PRDB_SDK_VALUE_TYPE_TEXT, 0, 0}};
-    prdb_sdk_select_binding_v2 binding = {0};
+    prdb_sdk_select_binding_v1 binding = {0};
     prdb_sdk_value_v1 cell_scratch[2] = {{0}};
     result_capture capture = {{0}, 0, 0, 0};
     prdb_host_api_v3 host = {sizeof(host), PRDB_QUERY_ABI_V3_VERSION,
@@ -100,7 +100,7 @@ int main(void) {
            PRDB_SDK_BATCH_OK);
 
     binding.struct_size = sizeof(binding);
-    binding.abi_version = PRDB_SDK_SQL_ABI_V2_VERSION;
+    binding.abi_version = PRDB_SDK_SQL_ABI_V1_VERSION;
     binding.projection_count = 2;
     binding.projection_ordinals[0] = 1;
     binding.projection_ordinals[1] = 0;
@@ -130,9 +130,9 @@ int main(void) {
         static const uint8_t text_name[] = "text";
         uint8_t large_batch[29 + LARGE_TEXT_BYTES] = {0};
         uint8_t large_output[18000] = {0};
-        prdb_sdk_sql_column_shape_v2 text_column = {
+        prdb_sdk_sql_column_shape_v1 text_column = {
             text_name, sizeof(text_name) - 1, 0, PRDB_SDK_VALUE_TYPE_TEXT, 0, 0};
-        prdb_sdk_select_binding_v2 text_binding = {0};
+        prdb_sdk_select_binding_v1 text_binding = {0};
         chunk_counter counter = {0};
         prdb_host_api_v3 chunk_host = {sizeof(chunk_host),
                                        PRDB_QUERY_ABI_V3_VERSION, &counter,
@@ -162,7 +162,7 @@ int main(void) {
                                           sizeof(text_row)) ==
                PRDB_SDK_BATCH_OK);
         text_binding.struct_size = sizeof(text_binding);
-        text_binding.abi_version = PRDB_SDK_SQL_ABI_V2_VERSION;
+        text_binding.abi_version = PRDB_SDK_SQL_ABI_V1_VERSION;
         text_binding.projection_count = 1;
         text_binding.projection_ordinals[0] = 0;
         text_binding.relation_column_count = 1;
@@ -195,10 +195,10 @@ int main(void) {
             PRDB_SDK_VALUE_STATE_VALUE, 0, 0, 0, 4, 0, 0, 0, 7,
             0, 5, 'l', 'a', 'b', 'e', 'l', 0, 0, 0, 6, 0, 0,
             PRDB_SDK_VALUE_STATE_NULL, 0, 0, 0, 0};
-        prdb_sdk_sql_column_shape_v2 right_column = {
+        prdb_sdk_sql_column_shape_v1 right_column = {
             right_name, sizeof(right_name) - 1, 0,
             PRDB_SDK_VALUE_TYPE_TEXT, 0, 0};
-        prdb_sdk_select_binding_v8 join_binding = {0};
+        prdb_sdk_select_binding_v1 join_binding = {0};
         prdb_sdk_value_v1 join_values[2] = {
             {sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
              PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_INTEGER,
@@ -207,17 +207,17 @@ int main(void) {
              PRDB_SDK_VALUE_STATE_NULL, 0, NULL, 0}};
 
         join_binding.struct_size = sizeof(join_binding);
-        join_binding.abi_version = PRDB_SDK_SQL_ABI_V8_VERSION;
+        join_binding.abi_version = PRDB_SDK_SQL_ABI_V1_VERSION;
         join_binding.left_relation_column_count = 1;
         join_binding.right_relation_column_count = 1;
-        join_binding.projection_count = 2;
-        join_binding.projections[0].relation_side = PRDB_SDK_SQL_V8_LEFT;
-        join_binding.projections[0].column =
-            (prdb_sdk_sql_bound_column_v2){0, PRDB_SDK_VALUE_TYPE_INTEGER,
+        join_binding.join_projection_count = 2;
+        join_binding.join_projections[0].relation_side = PRDB_SDK_SQL_JOIN_LEFT;
+        join_binding.join_projections[0].column =
+            (prdb_sdk_sql_bound_column_v1){0, PRDB_SDK_VALUE_TYPE_INTEGER,
                                            0, 0};
-        join_binding.projections[1].relation_side = PRDB_SDK_SQL_V8_RIGHT;
-        join_binding.projections[1].column =
-            (prdb_sdk_sql_bound_column_v2){0, PRDB_SDK_VALUE_TYPE_TEXT, 0, 0};
+        join_binding.join_projections[1].relation_side = PRDB_SDK_SQL_JOIN_RIGHT;
+        join_binding.join_projections[1].column =
+            (prdb_sdk_sql_bound_column_v1){0, PRDB_SDK_VALUE_TYPE_TEXT, 0, 0};
         output_len = 99;
         assert(prdb_sdk_sql_encode_join_result_v1(
                    &join_binding, columns, 1, &right_column, 1, join_values,
@@ -233,14 +233,14 @@ int main(void) {
                PRDB_SDK_SQL_RESULT_OK);
         assert(capture.calls == 1 && capture.length == output_len &&
                memcmp(capture.bytes, expected_join, sizeof(expected_join)) == 0);
-        join_binding.projections[1].relation_side = 2;
+        join_binding.join_projections[1].relation_side = 2;
         output_len = 99;
         assert(prdb_sdk_sql_encode_join_result_v1(
                    &join_binding, columns, 1, &right_column, 1, join_values,
                    2, output, sizeof(output), &output_len) ==
                PRDB_SDK_SQL_RESULT_INVALID_BINDING);
         assert(output_len == 0);
-        join_binding.projections[1].relation_side = PRDB_SDK_SQL_V8_RIGHT;
+        join_binding.join_projections[1].relation_side = PRDB_SDK_SQL_JOIN_RIGHT;
         join_values[0].type_code = PRDB_SDK_VALUE_TYPE_TEXT;
         assert(prdb_sdk_sql_encode_join_result_v1(
                    &join_binding, columns, 1, &right_column, 1, join_values,
@@ -337,7 +337,7 @@ int main(void) {
             0, 0, 0, PRDB_SDK_VALUE_TYPE_BIGINT,
             0, 0, PRDB_SDK_VALUE_STATE_VALUE, 0, 0, 0, 8,
             0, 0, 0, 0, 0, 0, 0, 2};
-        prdb_sdk_sql_column_shape_v2 group_column = {
+        prdb_sdk_sql_column_shape_v1 group_column = {
             count_name, sizeof(count_name) - 1, 0,
             PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0};
         prdb_sdk_value_v1 group_key = {
@@ -403,7 +403,7 @@ int main(void) {
         static const uint8_t label_name[] = "label";
         uint8_t group_text[GROUP_TEXT_BYTES];
         uint8_t grouped_output[18000] = {0};
-        prdb_sdk_sql_column_shape_v2 label_column = {
+        prdb_sdk_sql_column_shape_v1 label_column = {
             label_name, sizeof(label_name) - 1, 0,
             PRDB_SDK_VALUE_TYPE_TEXT, 0, 0};
         prdb_sdk_value_v1 label_key = {
@@ -448,10 +448,10 @@ int main(void) {
             0, 3, 'm', 'i', 'n', 0, 0, 0, PRDB_SDK_VALUE_TYPE_INTEGER,
             0, 0, PRDB_SDK_VALUE_STATE_VALUE, 0, 0, 0, 4,
             0, 0, 0, 3};
-        prdb_sdk_sql_column_shape_v2 group_column = {
+        prdb_sdk_sql_column_shape_v1 group_column = {
             id_name, sizeof(id_name) - 1, 0,
             PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0};
-        prdb_sdk_sql_column_shape_v2 aggregate_column = {
+        prdb_sdk_sql_column_shape_v1 aggregate_column = {
             score_name, sizeof(score_name) - 1, 1,
             PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0};
         prdb_sdk_value_v1 group_key = {
@@ -465,7 +465,7 @@ int main(void) {
 
         assert(prdb_sdk_sql_encode_group_minmax_result_v1(
                    &group_column, &group_key, &aggregate_column,
-                   &aggregate_value, PRDB_SDK_SQL_V5_AGGREGATE_MIN, output,
+                   &aggregate_value, PRDB_SDK_SQL_AGGREGATE_MIN, output,
                    sizeof(output), &output_len) == PRDB_SDK_SQL_RESULT_OK);
         assert(output_len == sizeof(expected_min));
         assert(memcmp(output, expected_min, sizeof(expected_min)) == 0);
@@ -498,13 +498,13 @@ int main(void) {
         capture.length = 0;
         assert(prdb_sdk_sql_write_group_minmax_result_v1(
                    &host, &group_column, &group_key, &aggregate_column,
-                   &aggregate_value, PRDB_SDK_SQL_V5_AGGREGATE_MIN, output,
+                   &aggregate_value, PRDB_SDK_SQL_AGGREGATE_MIN, output,
                    sizeof(output), &output_len) == PRDB_SDK_SQL_RESULT_OK);
         assert(capture.calls == 1 && capture.length == sizeof(expected_min));
         assert(memcmp(capture.bytes, expected_min, sizeof(expected_min)) == 0);
         assert(prdb_sdk_sql_encode_group_minmax_result_v1(
                    &group_column, &group_key, &aggregate_column,
-                   &aggregate_value, PRDB_SDK_SQL_V5_AGGREGATE_MAX, output,
+                   &aggregate_value, PRDB_SDK_SQL_AGGREGATE_MAX, output,
                    sizeof(output), &output_len) == PRDB_SDK_SQL_RESULT_OK);
         assert(output[27] == 0 && output[28] == 3 && output[29] == 'm' &&
                output[30] == 'a' && output[31] == 'x' &&
@@ -515,7 +515,7 @@ int main(void) {
         capture.length = 0;
         assert(prdb_sdk_sql_write_group_minmax_result_v1(
                    &host, &group_column, &group_key, &aggregate_column,
-                   &aggregate_value, PRDB_SDK_SQL_V5_AGGREGATE_MAX, output,
+                   &aggregate_value, PRDB_SDK_SQL_AGGREGATE_MAX, output,
                    sizeof(output), &output_len) ==
                PRDB_SDK_SQL_RESULT_WRITE_FAILED);
         assert(capture.calls == 0 && capture.length == 0 && output_len == 0);
@@ -529,7 +529,7 @@ int main(void) {
         aggregate_column.decimal_scale = 2;
         assert(prdb_sdk_sql_encode_group_minmax_result_v1(
                    &group_column, &group_key, &aggregate_column,
-                   &aggregate_value, PRDB_SDK_SQL_V5_AGGREGATE_MAX, output,
+                   &aggregate_value, PRDB_SDK_SQL_AGGREGATE_MAX, output,
                    sizeof(output), &output_len) == PRDB_SDK_SQL_RESULT_OK);
         assert(output[27] == 0 && output[28] == 3 && output[29] == 'm' &&
                output[30] == 'a' && output[31] == 'x');
@@ -568,7 +568,7 @@ int main(void) {
         aggregate_value.state = PRDB_SDK_VALUE_STATE_REDACTED;
         assert(prdb_sdk_sql_encode_group_minmax_result_v1(
                    &group_column, &group_key, &aggregate_column,
-                   &aggregate_value, PRDB_SDK_SQL_V5_AGGREGATE_MIN, output,
+                   &aggregate_value, PRDB_SDK_SQL_AGGREGATE_MIN, output,
                    sizeof(output), &output_len) == PRDB_SDK_SQL_RESULT_INVALID_ROW);
         assert(output_len == 0);
         assert(prdb_sdk_sql_encode_group_sum_result_v1(

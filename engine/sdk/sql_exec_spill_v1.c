@@ -1,4 +1,4 @@
-#include "prdb_sdk_sql_exec_v25.h"
+#include "prdb_sdk_sql_exec_v1.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -10,10 +10,10 @@
 typedef struct group_spill_context {
     const prdb_host_api_v6 *host;
     const prdb_host_api_v2 *executor_host;
-    const prdb_sdk_select_v24 *statement;
-    const prdb_sdk_select_binding_v24 *binding;
+    const prdb_sdk_select_v1 *statement;
+    const prdb_sdk_select_binding_v1 *binding;
     const prdb_sdk_executor_relation_v1 *relation;
-    prdb_sdk_sql_column_shape_v2 *columns;
+    prdb_sdk_sql_column_shape_v1 *columns;
     prdb_sdk_value_v1 *cells;
     uint32_t cell_capacity;
     uint16_t max_candidates;
@@ -30,7 +30,7 @@ typedef struct group_spill_context {
     uint8_t finished;
     uint32_t pages;
     uint64_t consumed_groups;
-    prdb_sdk_sql_group_row_v24_fn on_group;
+    prdb_sdk_sql_group_row_v1_fn on_group;
     void *result_context;
     int32_t source_status;
 } group_spill_context;
@@ -44,8 +44,8 @@ static int32_t group_spill_fail(const prdb_host_api_v6 *host, int32_t status) {
 
 static int same_shape(const prdb_sdk_planner_relation_v1 *planned,
                       const prdb_sdk_executor_relation_v1 *resolved,
-                      const prdb_sdk_sql_column_shape_v2 *left,
-                      const prdb_sdk_sql_column_shape_v2 *right) {
+                      const prdb_sdk_sql_column_shape_v1 *left,
+                      const prdb_sdk_sql_column_shape_v1 *right) {
     if (memcmp(planned->relation_id, resolved->relation_id, 16) != 0 ||
         planned->column_count != resolved->column_count ||
         planned->name_len != resolved->name_len ||
@@ -86,8 +86,8 @@ static int32_t group_spill_source(void *opaque, uint8_t *record,
                                   uint32_t capacity, uint32_t *record_len,
                                   uint8_t *has_row) {
     group_spill_context *state = (group_spill_context *)opaque;
-    const prdb_sdk_select_binding_v13 *groups =
-        &state->binding->base.base.base.base.base;
+    const prdb_sdk_select_binding_v1 *groups =
+        state->binding;
     uint32_t key_count = groups->group_key_count;
     if (capacity < GROUP_SPILL_RECORD_BYTES) return -1;
     *record_len = 0;
@@ -197,7 +197,7 @@ static int32_t decode_key(const group_spill_context *state,
     *value = (prdb_sdk_value_v1){
         sizeof(*value), PRDB_SDK_VALUE_ABI_V1_VERSION, value_state,
         value_state == PRDB_SDK_VALUE_STATE_VALUE
-            ? state->binding->base.base.base.base.base.group_keys[key].type_code
+            ? state->binding->group_keys[key].type_code
             : 0,
         value_state == PRDB_SDK_VALUE_STATE_VALUE ? record + *offset : NULL,
         length};
@@ -208,8 +208,8 @@ static int32_t decode_key(const group_spill_context *state,
 static int32_t group_spill_compare(void *opaque, const uint8_t *left,
                                    const uint8_t *right, int32_t *ordering) {
     const group_spill_context *state = (const group_spill_context *)opaque;
-    const prdb_sdk_select_binding_v13 *groups =
-        &state->binding->base.base.base.base.base;
+    const prdb_sdk_select_binding_v1 *groups =
+        state->binding;
     uint32_t left_offset = 0, right_offset = 0;
     for (uint32_t key = 0; key < groups->group_key_count; ++key) {
         prdb_sdk_value_v1 a = {0}, b = {0};
@@ -245,17 +245,17 @@ static int32_t group_spill_compare(void *opaque, const uint8_t *left,
 static int32_t group_spill_output(void *opaque, const uint8_t *record,
                                   uint32_t record_len, uint64_t row_count) {
     group_spill_context *state = (group_spill_context *)opaque;
-    const prdb_sdk_select_binding_v13 *groups =
-        &state->binding->base.base.base.base.base;
-    prdb_sdk_value_v1 values[PRDB_SDK_SQL_V13_MAX_GROUP_KEYS] = {{0}};
+    const prdb_sdk_select_binding_v1 *groups =
+        state->binding;
+    prdb_sdk_value_v1 values[PRDB_SDK_SQL_MAX_GROUP_KEYS] = {{0}};
     uint32_t offset = 0;
     if (record_len != GROUP_SPILL_RECORD_BYTES) return -1;
     if ((state->consumed_groups & UINT64_C(2047)) == 0 &&
         group_spill_check_cancelled(state) != 0)
         return -1;
-    if (state->statement->base.base.base.base.base.base.base.has_limit &&
+    if (state->statement->has_limit &&
         state->consumed_groups >=
-            state->statement->base.base.base.base.base.base.base.limit) {
+            state->statement->limit) {
         state->consumed_groups++;
         return 0;
     }
@@ -265,29 +265,29 @@ static int32_t group_spill_output(void *opaque, const uint8_t *record,
     state->consumed_groups++;
     if (state->on_group(
         state->result_context, values, groups->group_key_count, NULL, row_count,
-        &state->binding->base) != 0) {
+        state->binding) != 0) {
         state->source_status = PRDB_SDK_SQL_EXEC_RESULT_ERROR;
         return -1;
     }
     return 0;
 }
 
-int32_t prdb_sdk_sql_execute_group_count_spill_v25(
+int32_t prdb_sdk_sql_execute_group_count_spill_v1(
     const prdb_host_api_v6 *host, const uint8_t *schema,
     uint32_t schema_len, const uint8_t *sql, uint64_t sql_len,
     uint16_t max_candidates, uint32_t max_batch_bytes,
     uint8_t *planner_response, uint64_t planner_response_capacity,
     uint8_t *executor_response, uint64_t executor_response_capacity,
     uint8_t *batch_response, uint64_t batch_response_capacity,
-    prdb_sdk_sql_column_shape_v2 *planner_columns,
+    prdb_sdk_sql_column_shape_v1 *planner_columns,
     uint32_t planner_column_capacity,
-    prdb_sdk_sql_column_shape_v2 *executor_columns,
+    prdb_sdk_sql_column_shape_v1 *executor_columns,
     uint32_t executor_column_capacity, prdb_sdk_value_v1 *cell_scratch,
     uint32_t cell_scratch_capacity,
-    prdb_sdk_sql_group_row_v24_fn on_group, void *result_context) {
+    prdb_sdk_sql_group_row_v1_fn on_group, void *result_context) {
     const prdb_host_api_v3 *host_v3;
-    prdb_sdk_select_v24 statement = {0};
-    prdb_sdk_select_binding_v24 binding = {0};
+    prdb_sdk_select_v1 statement = {0};
+    prdb_sdk_select_binding_v1 binding = {0};
     prdb_sdk_planner_relation_v1 planned = {0};
     prdb_sdk_executor_relation_v1 resolved = {0};
     group_spill_context state = {0};
@@ -314,27 +314,27 @@ int32_t prdb_sdk_sql_execute_group_count_spill_v25(
         cell_scratch == NULL || planner_column_capacity == 0 ||
         executor_column_capacity == 0)
         return group_spill_fail(host, PRDB_SDK_SQL_EXEC_INVALID_ARGUMENT);
-    status = prdb_sdk_sql_parse_select_v24(sql, sql_len, &statement,
+    status = prdb_sdk_sql_parse_select_v1(sql, sql_len, &statement,
                                             sizeof(statement), NULL);
     if (status != PRDB_SDK_SQL_OK)
         return group_spill_fail(host, PRDB_SDK_SQL_EXEC_BIND_ERROR);
-    const prdb_sdk_select_v7 *parsed = &statement.base.base.base.base.base.base;
-    if (parsed->aggregate_kind != PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR ||
-        parsed->base.predicate_count != 0 ||
-        statement.base.base.having_node_count != 0 ||
-        statement.base.base.base.order_count != 0)
-        return PRDB_SDK_SQL_EXEC_V25_UNSUPPORTED;
+    const prdb_sdk_select_v1 *parsed = &statement;
+    if (parsed->aggregate_kind != PRDB_SDK_SQL_AGGREGATE_COUNT_STAR ||
+        parsed->predicate_count != 0 ||
+        statement.having_node_count != 0 ||
+        statement.order_count != 0)
+        return PRDB_SDK_SQL_EXEC_UNSUPPORTED;
     status = prdb_sdk_planner_describe_relation_v1(
         &base_host, schema, schema_len,
-        sql + parsed->base.relation.offset,
-        parsed->base.relation.length, planner_response,
+        sql + parsed->relation.offset,
+        parsed->relation.length, planner_response,
         planner_response_capacity, &planner_len, &planned, sizeof(planned),
         planner_columns, planner_column_capacity);
     if (status != PRDB_SDK_PLANNER_REQUEST_OK)
         return group_spill_fail(host, PRDB_SDK_SQL_EXEC_PLANNER_ERROR);
     status = prdb_sdk_executor_resolve_relation_v1(
-        &base_host, schema, schema_len, sql + parsed->base.relation.offset,
-        parsed->base.relation.length, executor_response,
+        &base_host, schema, schema_len, sql + parsed->relation.offset,
+        parsed->relation.length, executor_response,
         executor_response_capacity, &executor_len, &resolved, sizeof(resolved),
         executor_columns, executor_column_capacity);
     if (status != PRDB_SDK_EXECUTOR_OK)
@@ -343,17 +343,17 @@ int32_t prdb_sdk_sql_execute_group_count_spill_v25(
         return group_spill_fail(host, PRDB_SDK_SQL_EXEC_SHAPE_MISMATCH);
     if (cell_scratch_capacity < resolved.column_count)
         return group_spill_fail(host, PRDB_SDK_SQL_EXEC_INVALID_ARGUMENT);
-    status = prdb_sdk_sql_bind_select_v24(
+    status = prdb_sdk_sql_bind_select_v1(
         &statement, resolved.name, resolved.name_len, executor_columns,
         resolved.column_count, &binding, sizeof(binding));
     if (status != PRDB_SDK_SQL_BIND_OK)
         return group_spill_fail(host, PRDB_SDK_SQL_EXEC_BIND_ERROR);
-    const prdb_sdk_select_binding_v13 *groups =
-        &binding.base.base.base.base.base;
+    const prdb_sdk_select_binding_v1 *groups =
+        &binding;
     if (groups->group_key_count == 0 || groups->group_key_count > 8)
         return group_spill_fail(host, PRDB_SDK_SQL_EXEC_BIND_ERROR);
-    if (statement.base.base.base.base.base.base.base.has_limit &&
-        statement.base.base.base.base.base.base.base.limit == 0)
+    if (statement.has_limit &&
+        statement.limit == 0)
         return PRDB_SDK_SQL_EXEC_OK;
     state.host = host;
     state.executor_host = &base_host;

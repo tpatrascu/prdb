@@ -37,10 +37,10 @@ int main(void) {
         0, 5, 'c', 'o', 'u', 'n', 't', 0, 0, 0,
         PRDB_SDK_VALUE_TYPE_BIGINT, 0, 0, PRDB_SDK_VALUE_STATE_VALUE,
         0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 2};
-    prdb_sdk_sql_column_shape_v2 columns[2] = {
+    prdb_sdk_sql_column_shape_v1 columns[2] = {
         {id_name, 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {score_name, 5, 1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0}};
-    prdb_sdk_select_binding_v13 binding = {0};
+    prdb_sdk_select_binding_v1 binding = {0};
     prdb_sdk_value_v1 keys[2] = {
         {sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
          PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_INTEGER,
@@ -55,16 +55,16 @@ int main(void) {
                              &result, NULL, NULL, write_result, NULL};
 
     binding.struct_size = sizeof(binding);
-    binding.abi_version = PRDB_SDK_SQL_ABI_V13_VERSION;
+    binding.abi_version = PRDB_SDK_SQL_ABI_V1_VERSION;
     binding.group_key_count = 2;
-    binding.group_keys[0] = (prdb_sdk_sql_bound_column_v2){
+    binding.group_keys[0] = (prdb_sdk_sql_bound_column_v1){
         0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0};
-    binding.group_keys[1] = (prdb_sdk_sql_bound_column_v2){
+    binding.group_keys[1] = (prdb_sdk_sql_bound_column_v1){
         1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0};
-    binding.base.struct_size = sizeof(binding.base);
-    binding.base.abi_version = PRDB_SDK_SQL_ABI_V7_VERSION;
-    binding.base.has_group_by = 1;
-    binding.base.aggregate_kind = PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR;
+    binding.struct_size = sizeof(binding);
+    binding.abi_version = PRDB_SDK_SQL_ABI_V1_VERSION;
+    binding.has_group_by = 1;
+    binding.aggregate_kind = PRDB_SDK_SQL_AGGREGATE_COUNT_STAR;
 
     assert(prdb_sdk_sql_encode_group_composite_result_v1(
                &binding, columns, 2, keys, 2, NULL, 2, output,
@@ -81,9 +81,9 @@ int main(void) {
         sizeof(aggregate), PRDB_SDK_VALUE_ABI_V1_VERSION,
         PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_INTEGER,
         integer_five, sizeof(integer_five)};
-    binding.base.aggregate_column =
-        (prdb_sdk_sql_bound_column_v2){1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0};
-    binding.base.aggregate_kind = PRDB_SDK_SQL_V7_AGGREGATE_MIN;
+    binding.aggregate_column =
+        (prdb_sdk_sql_bound_column_v1){1, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0};
+    binding.aggregate_kind = PRDB_SDK_SQL_AGGREGATE_MIN;
     assert(prdb_sdk_sql_encode_group_composite_result_v1(
                &binding, columns, 2, keys, 2, &aggregate, 2, output,
                sizeof(output), &output_len) == PRDB_SDK_SQL_RESULT_OK);
@@ -91,7 +91,7 @@ int main(void) {
            memcmp(output + 51, "min", 3) == 0 && output[54] == 0 &&
            output[57] == PRDB_SDK_VALUE_TYPE_INTEGER);
 
-    binding.base.aggregate_kind = PRDB_SDK_SQL_V7_AGGREGATE_MAX;
+    binding.aggregate_kind = PRDB_SDK_SQL_AGGREGATE_MAX;
     assert(prdb_sdk_sql_encode_group_composite_result_v1(
                &binding, columns, 2, keys, 2, &aggregate, 2, output,
                sizeof(output), &output_len) == PRDB_SDK_SQL_RESULT_OK);
@@ -100,7 +100,7 @@ int main(void) {
     aggregate.type_code = PRDB_SDK_VALUE_TYPE_BIGINT;
     aggregate.data = bigint_eighteen;
     aggregate.data_len = sizeof(bigint_eighteen);
-    binding.base.aggregate_kind = PRDB_SDK_SQL_V7_AGGREGATE_SUM;
+    binding.aggregate_kind = PRDB_SDK_SQL_AGGREGATE_SUM;
     assert(prdb_sdk_sql_encode_group_composite_result_v1(
                &binding, columns, 2, keys, 2, &aggregate, 2, output,
                sizeof(output), &output_len) == PRDB_SDK_SQL_RESULT_OK);
@@ -110,7 +110,7 @@ int main(void) {
     aggregate.type_code = PRDB_SDK_VALUE_TYPE_DECIMAL;
     aggregate.data = decimal_average;
     aggregate.data_len = sizeof(decimal_average);
-    binding.base.aggregate_kind = PRDB_SDK_SQL_V7_AGGREGATE_AVG;
+    binding.aggregate_kind = PRDB_SDK_SQL_AGGREGATE_AVG;
     assert(prdb_sdk_sql_encode_group_composite_result_v1(
                &binding, columns, 2, keys, 2, &aggregate, 2, output,
                sizeof(output), &output_len) == PRDB_SDK_SQL_RESULT_OK);
@@ -118,8 +118,8 @@ int main(void) {
            output[57] == PRDB_SDK_VALUE_TYPE_DECIMAL && output[58] == 38 &&
            output[59] == 6);
 
-    binding.base.aggregate_kind = PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR;
-    binding.base.aggregate_column = (prdb_sdk_sql_bound_column_v2){0};
+    binding.aggregate_kind = PRDB_SDK_SQL_AGGREGATE_COUNT_STAR;
+    binding.aggregate_column = (prdb_sdk_sql_bound_column_v1){0};
     binding.group_keys[1].ordinal = 0;
     output_len = 9;
     assert(prdb_sdk_sql_encode_group_composite_result_v1(

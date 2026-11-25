@@ -1,5 +1,4 @@
-#include "prdb_sdk_sql_exec_v19.h"
-#include "prdb_sdk_sql_exec_v20.h"
+#include "prdb_sdk_sql_exec_v1.h"
 #include "prdb_sdk_sql_spill_join_v1.h"
 #include "prdb_sdk_optimizer_plan_v1.h"
 #include "prdb_sdk_optimizer_v1.h"
@@ -44,8 +43,8 @@ static int32_t check_cancelled_v19(const prdb_host_api_v2 *host) {
 static int same_relation_shape_v19(
     const prdb_sdk_planner_relation_v1 *planned,
     const prdb_sdk_executor_relation_v1 *resolved,
-    const prdb_sdk_sql_column_shape_v2 *planned_columns,
-    const prdb_sdk_sql_column_shape_v2 *resolved_columns) {
+    const prdb_sdk_sql_column_shape_v1 *planned_columns,
+    const prdb_sdk_sql_column_shape_v1 *resolved_columns) {
     if (memcmp(planned->relation_id, resolved->relation_id, 16) != 0 ||
         planned->column_count != resolved->column_count ||
         planned->name_len != resolved->name_len ||
@@ -53,8 +52,8 @@ static int same_relation_shape_v19(
         return 0;
     }
     for (uint32_t index = 0; index < planned->column_count; ++index) {
-        const prdb_sdk_sql_column_shape_v2 *a = &planned_columns[index];
-        const prdb_sdk_sql_column_shape_v2 *b = &resolved_columns[index];
+        const prdb_sdk_sql_column_shape_v1 *a = &planned_columns[index];
+        const prdb_sdk_sql_column_shape_v1 *b = &resolved_columns[index];
         if (a->ordinal != b->ordinal || a->type_code != b->type_code ||
             a->decimal_precision != b->decimal_precision ||
             a->decimal_scale != b->decimal_scale || a->name_len != b->name_len ||
@@ -98,12 +97,12 @@ static int32_t copy_value_v19(const prdb_sdk_value_v1 *source,
 static int32_t materialize_relation_v19(
     const prdb_host_api_v2 *host,
     const prdb_sdk_executor_relation_v1 *relation,
-    const prdb_sdk_select_binding_v16 *binding, uint32_t relation_side,
+    const prdb_sdk_select_binding_v1 *binding, uint32_t relation_side,
     uint16_t max_candidates, uint32_t max_batch_bytes,
     uint8_t *executor_response, uint64_t executor_response_capacity,
     uint8_t *batch_response, uint64_t batch_response_capacity,
     prdb_sdk_value_v1 *cell_scratch, uint32_t cell_scratch_capacity,
-    prdb_sdk_sql_join_materialized_row_v16 *rows, uint32_t row_capacity,
+    prdb_sdk_sql_join_materialized_row_v1 *rows, uint32_t row_capacity,
     uint32_t *row_count_out, uint32_t *total_pages,
     uint32_t max_scan_pages,
     uint8_t *materialized_bytes,
@@ -158,7 +157,7 @@ static int32_t materialize_relation_v19(
         while (row_iterator.rows_remaining != 0) {
             prdb_sdk_row_v1 row = {0};
             prdb_sdk_cell_iterator_v1 cell_iterator = {0};
-            prdb_sdk_sql_join_materialized_row_v16 *materialized_row;
+            prdb_sdk_sql_join_materialized_row_v1 *materialized_row;
 
             if (row_count >= row_capacity) {
                 final_status = PRDB_SDK_SQL_EXEC_MATERIALIZATION_LIMIT;
@@ -191,10 +190,10 @@ static int32_t materialize_relation_v19(
             materialized_row = &rows[row_count];
             memset(materialized_row, 0, sizeof(*materialized_row));
             for (uint32_t key = 0; key < binding->join_key_count; ++key) {
-                const prdb_sdk_sql_join_key_binding_v16 *key_binding =
+                const prdb_sdk_sql_join_key_binding_v1 *key_binding =
                     &binding->join_keys[key];
                 uint32_t ordinal =
-                    relation_side == PRDB_SDK_SQL_V8_LEFT
+                    relation_side == PRDB_SDK_SQL_JOIN_LEFT
                         ? key_binding->left.ordinal
                         : key_binding->right.ordinal;
                 status = copy_value_v19(
@@ -208,9 +207,9 @@ static int32_t materialize_relation_v19(
             }
             if (final_status != PRDB_SDK_SQL_EXEC_OK) break;
             for (uint32_t projection = 0;
-                 projection < binding->base.projection_count; ++projection) {
-                const prdb_sdk_sql_join_projection_binding_v8 *projected =
-                    &binding->base.projections[projection];
+                 projection < binding->join_projection_count; ++projection) {
+                const prdb_sdk_sql_join_projection_binding_v1 *projected =
+                    &binding->join_projections[projection];
                 if (projected->relation_side != relation_side) continue;
                 status = copy_value_v19(
                     &cell_scratch[projected->column.ordinal],
@@ -243,17 +242,17 @@ static int32_t materialize_relation_v19(
 
 static int32_t execute_index_nested_loop_v19(
     const prdb_host_api_v3 *host_v3, const prdb_host_api_v2 *host,
-    const prdb_sdk_select_binding_v19 *binding,
+    const prdb_sdk_select_binding_v1 *binding,
     const prdb_sdk_optimizer_index_join_plan_v1 *plan,
     const prdb_sdk_optimizer_index_prefix_join_plan_v1 *prefix_plan,
     const prdb_sdk_executor_relation_v1 *left_relation,
     const prdb_sdk_executor_relation_v1 *right_relation,
-    const prdb_sdk_sql_join_materialized_row_v16 *outer_rows,
+    const prdb_sdk_sql_join_materialized_row_v1 *outer_rows,
     uint32_t outer_count, uint8_t *inner_response,
     uint64_t inner_response_capacity, uint8_t *materialized_bytes,
     uint64_t materialized_capacity, uint64_t *materialized_used,
     prdb_sdk_value_v1 *cell_scratch, uint32_t cell_scratch_capacity,
-    prdb_sdk_sql_join_result_row_v19_fn on_row, void *result_context,
+    prdb_sdk_sql_join_result_row_v1_fn on_row, void *result_context,
     uint32_t has_limit, uint32_t limit, uint32_t max_index_candidates) {
     uint8_t request[SQL_EXEC_V19_INDEX_REQUEST_BYTES];
     uint8_t packed_ids[PRDB_SDK_EXECUTOR_MAX_COLUMN_IDS * 16];
@@ -265,9 +264,9 @@ static int32_t execute_index_nested_loop_v19(
         prefix_plan != NULL ? prefix_plan->prefix_columns : &plan->key_column;
     const uint8_t *index_id = prefix_plan != NULL ? prefix_plan->index_id : plan->index_id;
     const prdb_sdk_executor_relation_v1 *inner_relation =
-        inner_side == PRDB_SDK_SQL_V8_LEFT ? left_relation : right_relation;
+        inner_side == PRDB_SDK_SQL_JOIN_LEFT ? left_relation : right_relation;
     const prdb_sdk_optimizer_join_relation_v1 *inner_shape =
-        inner_side == PRDB_SDK_SQL_V8_LEFT
+        inner_side == PRDB_SDK_SQL_JOIN_LEFT
             ? (prefix_plan != NULL ? &prefix_plan->join.left_relation : &plan->join.left_relation)
             : (prefix_plan != NULL ? &prefix_plan->join.right_relation : &plan->join.right_relation);
     uint32_t key_indexes[8] = {UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX,
@@ -275,17 +274,17 @@ static int32_t execute_index_nested_loop_v19(
     uint32_t emitted = 0, candidates = 0;
     int32_t status;
 
-    if (binding->base.join_key_count == 0 || prefix_count == 0 || prefix_count > 8 ||
+    if (binding->join_key_count == 0 || prefix_count == 0 || prefix_count > 8 ||
         inner_shape->scan_column_count > PRDB_SDK_EXECUTOR_MAX_COLUMN_IDS ||
         inner_shape->scan_column_count == 0 || outer_count >
             SQL_EXEC_V19_INDEX_OUTER_MAX_ROWS) {
         return fail_statement_v19(host_v3, PRDB_SDK_SQL_EXEC_SHAPE_MISMATCH);
     }
     for (uint32_t prefix = 0; prefix < prefix_count; ++prefix) {
-        for (uint32_t key = 0; key < binding->base.join_key_count; ++key) {
-            const prdb_sdk_sql_bound_column_v2 *inner_column =
-                inner_side == PRDB_SDK_SQL_V8_LEFT
-                    ? &binding->base.join_keys[key].left : &binding->base.join_keys[key].right;
+        for (uint32_t key = 0; key < binding->join_key_count; ++key) {
+            const prdb_sdk_sql_bound_column_v1 *inner_column =
+                inner_side == PRDB_SDK_SQL_JOIN_LEFT
+                    ? &binding->join_keys[key].left : &binding->join_keys[key].right;
             if (inner_column->ordinal == prefix_columns[prefix].ordinal &&
                 inner_column->type_code == prefix_columns[prefix].type_code) {
                 key_indexes[prefix] = key;
@@ -418,18 +417,18 @@ static int32_t execute_index_nested_loop_v19(
                             return fail_statement_v19(host_v3, PRDB_SDK_SQL_EXEC_EXECUTOR_ERROR);
                         cell_scratch[column->ordinal] = value;
                     }
-                    for (uint32_t key = 0; key < binding->base.join_key_count; ++key) {
-                        const prdb_sdk_sql_join_key_binding_v16 *key_binding = &binding->base.join_keys[key];
+                    for (uint32_t key = 0; key < binding->join_key_count; ++key) {
+                        const prdb_sdk_sql_join_key_binding_v1 *key_binding = &binding->join_keys[key];
                         const prdb_sdk_value_v1 *outer_key = &outer_rows[outer_index].join_keys[key];
-                        const prdb_sdk_sql_bound_column_v2 *inner_key =
-                            inner_side == PRDB_SDK_SQL_V8_LEFT ? &key_binding->left : &key_binding->right;
+                        const prdb_sdk_sql_bound_column_v1 *inner_key =
+                            inner_side == PRDB_SDK_SQL_JOIN_LEFT ? &key_binding->left : &key_binding->right;
                         const prdb_sdk_value_v1 *inner_value = &cell_scratch[inner_key->ordinal];
                         uint32_t truth = PRDB_SDK_SQL_TRUTH_UNKNOWN;
                         status = copy_value_v19(inner_value, &inner_keys[key],
                             materialized_bytes, materialized_capacity, materialized_used);
                         if (status != PRDB_SDK_SQL_EXEC_OK)
                             return fail_statement_v19(host_v3, status);
-                        if (outer_side == PRDB_SDK_SQL_V8_LEFT) {
+                        if (outer_side == PRDB_SDK_SQL_JOIN_LEFT) {
                             left_keys[key] = *outer_key; right_keys[key] = inner_keys[key];
                         } else { left_keys[key] = inner_keys[key]; right_keys[key] = *outer_key; }
                         status = prdb_sdk_sql_compare_v1(&left_keys[key], &right_keys[key],
@@ -440,8 +439,8 @@ static int32_t execute_index_nested_loop_v19(
                         if (truth != PRDB_SDK_SQL_TRUTH_TRUE) { matches = 0; break; }
                     }
                     if (!matches) continue;
-                    for (uint32_t projection = 0; projection < binding->base.base.projection_count; ++projection) {
-                        const prdb_sdk_sql_join_projection_binding_v8 *p = &binding->base.base.projections[projection];
+                    for (uint32_t projection = 0; projection < binding->join_projection_count; ++projection) {
+                        const prdb_sdk_sql_join_projection_binding_v1 *p = &binding->join_projections[projection];
                         if (p->relation_side == outer_side) {
                             projected[projection] = outer_rows[outer_index].projections[projection];
                         } else {
@@ -452,7 +451,7 @@ static int32_t execute_index_nested_loop_v19(
                                 return fail_statement_v19(host_v3, status);
                         }
                     }
-                    if (on_row(result_context, projected, binding->base.base.projection_count, binding) !=
+                    if (on_row(result_context, projected, binding->join_projection_count, binding) !=
                         PRDB_QUERY_CALLBACK_OK)
                         return fail_statement_v19(host_v3, PRDB_SDK_SQL_EXEC_RESULT_ERROR);
                     if (has_filter == 0 && ++emitted >= limit && has_limit)
@@ -478,34 +477,34 @@ static int32_t execute_inner_join_v19_with_page_limit(
     uint8_t *left_executor_response, uint64_t left_executor_response_capacity,
     uint8_t *right_executor_response, uint64_t right_executor_response_capacity,
     uint8_t *batch_response, uint64_t batch_response_capacity,
-    prdb_sdk_sql_column_shape_v2 *left_planner_columns,
+    prdb_sdk_sql_column_shape_v1 *left_planner_columns,
     uint32_t left_planner_column_capacity,
-    prdb_sdk_sql_column_shape_v2 *right_planner_columns,
+    prdb_sdk_sql_column_shape_v1 *right_planner_columns,
     uint32_t right_planner_column_capacity,
-    prdb_sdk_sql_column_shape_v2 *left_executor_columns,
+    prdb_sdk_sql_column_shape_v1 *left_executor_columns,
     uint32_t left_executor_column_capacity,
-    prdb_sdk_sql_column_shape_v2 *right_executor_columns,
+    prdb_sdk_sql_column_shape_v1 *right_executor_columns,
     uint32_t right_executor_column_capacity,
     prdb_sdk_value_v1 *cell_scratch, uint32_t cell_scratch_capacity,
-    prdb_sdk_sql_join_materialized_row_v16 *left_rows,
+    prdb_sdk_sql_join_materialized_row_v1 *left_rows,
     uint32_t left_row_capacity,
-    prdb_sdk_sql_join_materialized_row_v16 *right_rows,
+    prdb_sdk_sql_join_materialized_row_v1 *right_rows,
     uint32_t right_row_capacity,
     uint8_t *materialized_bytes, uint64_t materialized_bytes_capacity,
-    prdb_sdk_sql_join_result_row_v19_fn on_row, void *result_context,
+    prdb_sdk_sql_join_result_row_v1_fn on_row, void *result_context,
     uint32_t max_scan_pages,
     const prdb_sdk_optimizer_index_join_plan_v1 *index_plan,
     const prdb_sdk_optimizer_index_prefix_join_plan_v1 *prefix_plan) {
-    prdb_sdk_select_v19 statement = {0};
-    prdb_sdk_select_binding_v19 binding = {0};
+    prdb_sdk_select_v1 statement = {0};
+    prdb_sdk_select_binding_v1 binding = {0};
     prdb_sdk_planner_relation_v1 planned_left = {0}, planned_right = {0};
     prdb_sdk_executor_relation_v1 resolved_left = {0}, resolved_right = {0};
     prdb_sdk_value_v1 left_keys[PRDB_SDK_SQL_JOIN_MAX_ROWS *
-                                 PRDB_SDK_SQL_V16_MAX_JOIN_KEYS] = {{0}};
+                                 PRDB_SDK_SQL_MAX_JOIN_KEYS] = {{0}};
     prdb_sdk_value_v1 right_keys[PRDB_SDK_SQL_JOIN_MAX_ROWS *
-                                  PRDB_SDK_SQL_V16_MAX_JOIN_KEYS] = {{0}};
-    prdb_sdk_sql_join_key_shape_v2 join_shapes[
-        PRDB_SDK_SQL_V16_MAX_JOIN_KEYS] = {{0}};
+                                  PRDB_SDK_SQL_MAX_JOIN_KEYS] = {{0}};
+    prdb_sdk_sql_join_key_shape_v1 join_shapes[
+        PRDB_SDK_SQL_MAX_JOIN_KEYS] = {{0}};
     prdb_sdk_sql_join_pair_v1 pairs[PRDB_SDK_SQL_JOIN_MAX_PAIRS];
     prdb_sdk_value_v1 projected_values[PRDB_SDK_SQL_MAX_PROJECTION_COLUMNS];
     uint32_t left_row_count = 0, right_row_count = 0, pair_count = 0;
@@ -549,11 +548,11 @@ static int32_t execute_inner_join_v19_with_page_limit(
         max_batch_bytes > PRDB_SDK_BATCH_MAX_BYTES ||
         cell_scratch_capacity == 0 ||
         left_row_capacity == 0 ||
-        left_row_capacity > PRDB_SDK_SQL_EXEC_V8_MAX_ROWS ||
+        left_row_capacity > PRDB_SDK_SQL_EXEC_JOIN_MAX_ROWS ||
         right_row_capacity == 0 ||
-        right_row_capacity > PRDB_SDK_SQL_EXEC_V8_MAX_ROWS ||
+        right_row_capacity > PRDB_SDK_SQL_EXEC_JOIN_MAX_ROWS ||
         materialized_bytes_capacity >
-            PRDB_SDK_SQL_EXEC_V8_MAX_MATERIALIZED_BYTES) {
+            PRDB_SDK_SQL_EXEC_MAX_MATERIALIZED_BYTES) {
         return fail_statement_v19(host_v3,
                                  PRDB_SDK_SQL_EXEC_INVALID_ARGUMENT);
     }
@@ -571,15 +570,15 @@ static int32_t execute_inner_join_v19_with_page_limit(
         }
         max_index_candidates = workload_budgets.max_index_probe_candidates;
     }
-    status = prdb_sdk_sql_parse_select_v19(
+    status = prdb_sdk_sql_parse_select_v1(
         sql, sql_len, &statement, sizeof(statement), NULL);
     if (status != PRDB_SDK_SQL_OK) {
         return fail_statement_v19(host_v3, PRDB_SDK_SQL_EXEC_BIND_ERROR);
     }
     status = prdb_sdk_planner_describe_relation_v1(
         host, schema, schema_len,
-        sql + statement.base.base.left_relation.offset,
-        statement.base.base.left_relation.length,
+        sql + statement.left_relation.offset,
+        statement.left_relation.length,
         left_planner_response, left_planner_response_capacity,
         &left_planner_response_len, &planned_left, sizeof(planned_left),
         left_planner_columns, left_planner_column_capacity);
@@ -588,8 +587,8 @@ static int32_t execute_inner_join_v19_with_page_limit(
     }
     status = prdb_sdk_planner_describe_relation_v1(
         host, schema, schema_len,
-        sql + statement.base.base.right_relation.offset,
-        statement.base.base.right_relation.length,
+        sql + statement.right_relation.offset,
+        statement.right_relation.length,
         right_planner_response, right_planner_response_capacity,
         &right_planner_response_len, &planned_right, sizeof(planned_right),
         right_planner_columns, right_planner_column_capacity);
@@ -598,8 +597,8 @@ static int32_t execute_inner_join_v19_with_page_limit(
     }
     status = prdb_sdk_executor_resolve_relation_v1(
         host, schema, schema_len,
-        sql + statement.base.base.left_relation.offset,
-        statement.base.base.left_relation.length,
+        sql + statement.left_relation.offset,
+        statement.left_relation.length,
         left_executor_response, left_executor_response_capacity,
         &left_executor_response_len, &resolved_left, sizeof(resolved_left),
         left_executor_columns, left_executor_column_capacity);
@@ -608,8 +607,8 @@ static int32_t execute_inner_join_v19_with_page_limit(
     }
     status = prdb_sdk_executor_resolve_relation_v1(
         host, schema, schema_len,
-        sql + statement.base.base.right_relation.offset,
-        statement.base.base.right_relation.length,
+        sql + statement.right_relation.offset,
+        statement.right_relation.length,
         right_executor_response, right_executor_response_capacity,
         &right_executor_response_len, &resolved_right, sizeof(resolved_right),
         right_executor_columns, right_executor_column_capacity);
@@ -630,7 +629,7 @@ static int32_t execute_inner_join_v19_with_page_limit(
         return fail_statement_v19(host_v3,
                                  PRDB_SDK_SQL_EXEC_INVALID_ARGUMENT);
     }
-    status = prdb_sdk_sql_bind_select_v19(
+    status = prdb_sdk_sql_bind_join_select_v1(
         &statement, resolved_left.name, resolved_left.name_len,
         left_executor_columns, resolved_left.column_count,
         resolved_right.name, resolved_right.name_len,
@@ -639,7 +638,7 @@ static int32_t execute_inner_join_v19_with_page_limit(
     if (status != PRDB_SDK_SQL_BIND_OK) {
         return fail_statement_v19(host_v3, PRDB_SDK_SQL_EXEC_BIND_ERROR);
     }
-    if (statement.base.base.has_limit != 0 && statement.base.base.limit == 0) {
+    if (statement.has_limit != 0 && statement.limit == 0) {
         return PRDB_SDK_SQL_EXEC_OK;
     }
 
@@ -649,19 +648,19 @@ static int32_t execute_inner_join_v19_with_page_limit(
         const uint32_t inner_side = prefix_plan != NULL
             ? prefix_plan->inner_side : index_plan->inner_side;
         const prdb_sdk_executor_relation_v1 *outer_relation =
-            outer_side == PRDB_SDK_SQL_V8_LEFT ? &resolved_left : &resolved_right;
-        prdb_sdk_sql_join_materialized_row_v16 *outer_rows =
-            outer_side == PRDB_SDK_SQL_V8_LEFT ? left_rows : right_rows;
-        uint32_t outer_row_capacity = outer_side == PRDB_SDK_SQL_V8_LEFT
+            outer_side == PRDB_SDK_SQL_JOIN_LEFT ? &resolved_left : &resolved_right;
+        prdb_sdk_sql_join_materialized_row_v1 *outer_rows =
+            outer_side == PRDB_SDK_SQL_JOIN_LEFT ? left_rows : right_rows;
+        uint32_t outer_row_capacity = outer_side == PRDB_SDK_SQL_JOIN_LEFT
             ? left_row_capacity : right_row_capacity;
         uint32_t outer_row_count = 0;
         if (outer_row_capacity > SQL_EXEC_V19_INDEX_OUTER_MAX_ROWS)
             outer_row_capacity = SQL_EXEC_V19_INDEX_OUTER_MAX_ROWS;
         status = materialize_relation_v19(
-            host, outer_relation, &binding.base, outer_side, max_candidates,
+            host, outer_relation, &binding, outer_side, max_candidates,
             max_batch_bytes,
-            outer_side == PRDB_SDK_SQL_V8_LEFT ? left_executor_response : right_executor_response,
-            outer_side == PRDB_SDK_SQL_V8_LEFT ? left_executor_response_capacity : right_executor_response_capacity,
+            outer_side == PRDB_SDK_SQL_JOIN_LEFT ? left_executor_response : right_executor_response,
+            outer_side == PRDB_SDK_SQL_JOIN_LEFT ? left_executor_response_capacity : right_executor_response_capacity,
             batch_response, batch_response_capacity, cell_scratch,
             cell_scratch_capacity, outer_rows, outer_row_capacity,
             &outer_row_count, &total_pages, SQL_EXEC_V19_INDEX_MAX_SCAN_PAGES,
@@ -671,19 +670,19 @@ static int32_t execute_inner_join_v19_with_page_limit(
         return execute_index_nested_loop_v19(
             host_v3, host, &binding, index_plan, prefix_plan, &resolved_left,
             &resolved_right, outer_rows, outer_row_count,
-            inner_side == PRDB_SDK_SQL_V8_LEFT
+            inner_side == PRDB_SDK_SQL_JOIN_LEFT
                 ? left_executor_response : right_executor_response,
-            inner_side == PRDB_SDK_SQL_V8_LEFT
+            inner_side == PRDB_SDK_SQL_JOIN_LEFT
                 ? left_executor_response_capacity : right_executor_response_capacity,
             materialized_bytes, materialized_bytes_capacity, &materialized_used,
             cell_scratch, cell_scratch_capacity, on_row, result_context,
-            statement.base.base.has_limit, statement.base.base.limit,
+            statement.has_limit, statement.limit,
             max_index_candidates);
     }
 
     status = materialize_relation_v19(
-        host, &resolved_left, &binding.base,
-        PRDB_SDK_SQL_V8_LEFT, max_candidates, max_batch_bytes,
+        host, &resolved_left, &binding,
+        PRDB_SDK_SQL_JOIN_LEFT, max_candidates, max_batch_bytes,
         left_executor_response, left_executor_response_capacity,
         batch_response, batch_response_capacity, cell_scratch,
         cell_scratch_capacity, left_rows, left_row_capacity, &left_row_count,
@@ -694,8 +693,8 @@ static int32_t execute_inner_join_v19_with_page_limit(
         return fail_statement_v19(host_v3, status);
     }
     status = materialize_relation_v19(
-        host, &resolved_right, &binding.base,
-        PRDB_SDK_SQL_V8_RIGHT, max_candidates, max_batch_bytes,
+        host, &resolved_right, &binding,
+        PRDB_SDK_SQL_JOIN_RIGHT, max_candidates, max_batch_bytes,
         right_executor_response, right_executor_response_capacity,
         batch_response, batch_response_capacity, cell_scratch,
         cell_scratch_capacity, right_rows, right_row_capacity,
@@ -706,29 +705,38 @@ static int32_t execute_inner_join_v19_with_page_limit(
         return fail_statement_v19(host_v3, status);
     }
     for (uint32_t index = 0; index < left_row_count; ++index) {
-        for (uint32_t key = 0; key < binding.base.join_key_count; ++key) {
-            left_keys[index * binding.base.join_key_count + key] =
+        for (uint32_t key = 0; key < binding.join_key_count; ++key) {
+            left_keys[index * binding.join_key_count + key] =
                 left_rows[index].join_keys[key];
         }
     }
     for (uint32_t index = 0; index < right_row_count; ++index) {
-        for (uint32_t key = 0; key < binding.base.join_key_count; ++key) {
-            right_keys[index * binding.base.join_key_count + key] =
+        for (uint32_t key = 0; key < binding.join_key_count; ++key) {
+            right_keys[index * binding.join_key_count + key] =
                 right_rows[index].join_keys[key];
         }
     }
-    for (uint32_t key = 0; key < binding.base.join_key_count; ++key) {
-        join_shapes[key] = (prdb_sdk_sql_join_key_shape_v2){
-            sizeof(prdb_sdk_sql_join_key_shape_v2),
-            PRDB_SDK_SQL_JOIN_ABI_V2_VERSION,
-            binding.base.join_keys[key].left.type_code,
-            binding.base.join_keys[key].left.decimal_scale,
+    for (uint32_t key = 0; key < binding.join_key_count; ++key) {
+        join_shapes[key] = (prdb_sdk_sql_join_key_shape_v1){
+            sizeof(prdb_sdk_sql_join_key_shape_v1),
+            PRDB_SDK_SQL_JOIN_ABI_V1_VERSION,
+            binding.join_keys[key].left.type_code,
+            binding.join_keys[key].left.decimal_scale,
             {0, 0, 0}};
     }
-    status = prdb_sdk_sql_inner_join_pairs_composite_v2(
-        left_keys, left_row_count, right_keys, right_row_count, join_shapes,
-        binding.base.join_key_count, pairs,
-        PRDB_SDK_SQL_JOIN_MAX_PAIRS, &pair_count);
+    if (binding.join_key_count == 1) {
+        status = prdb_sdk_sql_inner_join_pairs_v1(
+            left_keys, left_row_count, binding.join_keys[0].left.decimal_scale,
+            right_keys, right_row_count,
+            binding.join_keys[0].right.decimal_scale,
+            binding.join_keys[0].left.type_code, pairs,
+            PRDB_SDK_SQL_JOIN_MAX_PAIRS, &pair_count);
+    } else {
+        status = prdb_sdk_sql_inner_join_pairs_composite_v1(
+            left_keys, left_row_count, right_keys, right_row_count, join_shapes,
+            binding.join_key_count, pairs,
+            PRDB_SDK_SQL_JOIN_MAX_PAIRS, &pair_count);
+    }
     if (status != PRDB_SDK_SQL_JOIN_OK) {
         return fail_statement_v19(host_v3,
                                  PRDB_SDK_SQL_EXEC_EVALUATION_ERROR);
@@ -747,76 +755,35 @@ static int32_t execute_inner_join_v19_with_page_limit(
         }
         const prdb_sdk_sql_join_pair_v1 *pair = &pairs[pair_index];
         for (uint32_t projection = 0;
-             projection < binding.base.base.projection_count; ++projection) {
-            const prdb_sdk_sql_join_projection_binding_v8 *projection_binding =
-                &binding.base.base.projections[projection];
+             projection < binding.join_projection_count; ++projection) {
+            const prdb_sdk_sql_join_projection_binding_v1 *projection_binding =
+                &binding.join_projections[projection];
             projected_values[projection] =
-                projection_binding->relation_side == PRDB_SDK_SQL_V8_LEFT
+                projection_binding->relation_side == PRDB_SDK_SQL_JOIN_LEFT
                     ? left_rows[pair->left_row].projections[projection]
                     : right_rows[pair->right_row].projections[projection];
         }
         if (on_row(result_context, projected_values,
-                   binding.base.base.projection_count,
+                   binding.join_projection_count,
                    &binding) != PRDB_QUERY_CALLBACK_OK) {
             return fail_statement_v19(host_v3,
                                      PRDB_SDK_SQL_EXEC_RESULT_ERROR);
         }
-        if (statement.base.base.has_limit != 0 &&
-            pair_index + 1 >= statement.base.base.limit) {
+        if (statement.has_limit != 0 &&
+            pair_index + 1 >= statement.limit) {
             break;
         }
     }
     return PRDB_SDK_SQL_EXEC_OK;
 }
 
-int32_t prdb_sdk_sql_execute_inner_join_v19(
-    const prdb_host_api_v3 *host, const uint8_t *schema, uint32_t schema_len,
-    const uint8_t *sql, uint64_t sql_len, uint16_t max_candidates,
-    uint32_t max_batch_bytes,
-    uint8_t *left_planner_response, uint64_t left_planner_response_capacity,
-    uint8_t *right_planner_response, uint64_t right_planner_response_capacity,
-    uint8_t *left_executor_response, uint64_t left_executor_response_capacity,
-    uint8_t *right_executor_response, uint64_t right_executor_response_capacity,
-    uint8_t *batch_response, uint64_t batch_response_capacity,
-    prdb_sdk_sql_column_shape_v2 *left_planner_columns,
-    uint32_t left_planner_column_capacity,
-    prdb_sdk_sql_column_shape_v2 *right_planner_columns,
-    uint32_t right_planner_column_capacity,
-    prdb_sdk_sql_column_shape_v2 *left_executor_columns,
-    uint32_t left_executor_column_capacity,
-    prdb_sdk_sql_column_shape_v2 *right_executor_columns,
-    uint32_t right_executor_column_capacity,
-    prdb_sdk_value_v1 *cell_scratch, uint32_t cell_scratch_capacity,
-    prdb_sdk_sql_join_materialized_row_v16 *left_rows,
-    uint32_t left_row_capacity,
-    prdb_sdk_sql_join_materialized_row_v16 *right_rows,
-    uint32_t right_row_capacity,
-    uint8_t *materialized_bytes, uint64_t materialized_bytes_capacity,
-    prdb_sdk_sql_join_result_row_v19_fn on_row, void *result_context) {
-    return execute_inner_join_v19_with_page_limit(
-        host, schema, schema_len, sql, sql_len, max_candidates,
-        max_batch_bytes, left_planner_response,
-        left_planner_response_capacity, right_planner_response,
-        right_planner_response_capacity, left_executor_response,
-        left_executor_response_capacity, right_executor_response,
-        right_executor_response_capacity, batch_response,
-        batch_response_capacity, left_planner_columns,
-        left_planner_column_capacity, right_planner_columns,
-        right_planner_column_capacity, left_executor_columns,
-        left_executor_column_capacity, right_executor_columns,
-        right_executor_column_capacity, cell_scratch,
-        cell_scratch_capacity, left_rows, left_row_capacity, right_rows,
-        right_row_capacity, materialized_bytes,
-        materialized_bytes_capacity, on_row, result_context,
-        SQL_EXEC_V19_MAX_SCAN_PAGES, NULL, NULL);
-}
 
 typedef struct join_v20_callback_context {
-    const prdb_sdk_select_v20 *statement;
-    const prdb_sdk_select_binding_v20 *binding;
+    const prdb_sdk_select_v1 *statement;
+    const prdb_sdk_select_binding_v1 *binding;
     const prdb_sdk_value_v1 *parameters;
     uint32_t parameter_count;
-    prdb_sdk_sql_join_result_row_v20_fn on_row;
+    prdb_sdk_sql_join_result_row_v1_fn on_row;
     void *result_context;
     uint32_t emitted_rows;
     int32_t callback_failure;
@@ -826,7 +793,7 @@ typedef struct join_v20_callback_context {
 
 typedef struct sql_spill_join_scan_v21 {
     const prdb_sdk_executor_relation_v1 *relation;
-    const prdb_sdk_select_binding_v19 *binding;
+    const prdb_sdk_select_binding_v1 *binding;
     const prdb_host_api_v2 *host;
     uint32_t relation_side;
     uint16_t max_candidates;
@@ -850,17 +817,17 @@ typedef struct sql_spill_join_scan_v21 {
 } sql_spill_join_scan_v21;
 
 typedef struct sql_spill_join_compare_v21 {
-    const prdb_sdk_select_binding_v19 *binding;
+    const prdb_sdk_select_binding_v1 *binding;
 } sql_spill_join_compare_v21;
 
 typedef struct sql_spill_join_output_v21 {
     join_v20_callback_context *callback;
-    const prdb_sdk_select_binding_v19 *binding;
+    const prdb_sdk_select_binding_v1 *binding;
 } sql_spill_join_output_v21;
 
 static int32_t join_v20_filter_and_emit(
     void *context, const prdb_sdk_value_v1 *projected_values,
-    uint32_t projection_count, const prdb_sdk_select_binding_v19 *binding);
+    uint32_t projection_count, const prdb_sdk_select_binding_v1 *binding);
 
 static void spill_write_u32_v21(uint8_t *bytes, uint32_t value) {
     bytes[0] = (uint8_t)(value >> 24);
@@ -922,14 +889,14 @@ static int32_t spill_decode_value_v21(const uint8_t *record,
 
 static int32_t spill_decode_row_v21(
     const uint8_t *record, uint32_t record_bytes,
-    const prdb_sdk_select_binding_v19 *binding,
-    prdb_sdk_sql_join_materialized_row_v16 *row) {
+    const prdb_sdk_select_binding_v1 *binding,
+    prdb_sdk_sql_join_materialized_row_v1 *row) {
     uint32_t offset = 8;
     uint32_t key_count = record[0];
     uint32_t projection_count = record[1];
     if (record_bytes != SQL_SPILL_JOIN_RECORD_BYTES ||
-        key_count != binding->base.join_key_count ||
-        projection_count != binding->base.base.projection_count ||
+        key_count != binding->join_key_count ||
+        projection_count != binding->join_projection_count ||
         record[2] != 0 || record[3] != 0 || record[4] != 0 ||
         record[5] != 0 || record[6] != 0 || record[7] != 0) {
         return PRDB_SDK_SQL_EXEC_EVALUATION_ERROR;
@@ -1049,14 +1016,14 @@ static int32_t spill_join_source_v21(void *opaque, uint8_t *record,
             }
         }
         memset(record, 0, capacity);
-        record[0] = (uint8_t)scan->binding->base.join_key_count;
-        record[1] = (uint8_t)scan->binding->base.base.projection_count;
+        record[0] = (uint8_t)scan->binding->join_key_count;
+        record[1] = (uint8_t)scan->binding->join_projection_count;
         offset = 8;
-        for (uint32_t key = 0; key < scan->binding->base.join_key_count;
+        for (uint32_t key = 0; key < scan->binding->join_key_count;
              ++key) {
-            const prdb_sdk_sql_join_key_binding_v16 *key_binding =
-                &scan->binding->base.join_keys[key];
-            uint32_t ordinal = scan->relation_side == PRDB_SDK_SQL_V8_LEFT
+            const prdb_sdk_sql_join_key_binding_v1 *key_binding =
+                &scan->binding->join_keys[key];
+            uint32_t ordinal = scan->relation_side == PRDB_SDK_SQL_JOIN_LEFT
                                    ? key_binding->left.ordinal
                                    : key_binding->right.ordinal;
             const prdb_sdk_value_v1 *value = &scan->cell_scratch[ordinal];
@@ -1069,10 +1036,10 @@ static int32_t spill_join_source_v21(void *opaque, uint8_t *record,
             if (scan->failure_status != PRDB_SDK_SQL_EXEC_OK) return -1;
         }
         for (uint32_t projection = 0;
-             projection < scan->binding->base.base.projection_count;
+             projection < scan->binding->join_projection_count;
              ++projection) {
-            const prdb_sdk_sql_join_projection_binding_v8 *projection_binding =
-                &scan->binding->base.base.projections[projection];
+            const prdb_sdk_sql_join_projection_binding_v1 *projection_binding =
+                &scan->binding->join_projections[projection];
             prdb_sdk_value_v1 null_value = {0};
             const prdb_sdk_value_v1 *value;
             if (projection_binding->relation_side == scan->relation_side) {
@@ -1100,7 +1067,7 @@ static int32_t spill_join_hash_v21(void *opaque, const uint8_t *record,
     uint64_t hash = UINT64_C(1469598103934665603);
     (void)opaque;
     if (record_bytes != SQL_SPILL_JOIN_RECORD_BYTES || key_count == 0 ||
-        key_count > PRDB_SDK_SQL_V16_MAX_JOIN_KEYS) {
+        key_count > PRDB_SDK_SQL_MAX_JOIN_KEYS) {
         return -1;
     }
     for (uint32_t key = 0; key < key_count; ++key) {
@@ -1136,7 +1103,7 @@ static int32_t spill_join_equal_v21(void *opaque, const uint8_t *left,
                                     uint32_t record_bytes,
                                     uint8_t *equal_out) {
     const sql_spill_join_compare_v21 *state = opaque;
-    prdb_sdk_sql_join_materialized_row_v16 left_row = {0}, right_row = {0};
+    prdb_sdk_sql_join_materialized_row_v1 left_row = {0}, right_row = {0};
     int32_t status;
     *equal_out = 0;
     status = spill_decode_row_v21(left, record_bytes, state->binding,
@@ -1145,10 +1112,10 @@ static int32_t spill_join_equal_v21(void *opaque, const uint8_t *left,
     status = spill_decode_row_v21(right, record_bytes, state->binding,
                                   &right_row);
     if (status != PRDB_SDK_SQL_EXEC_OK) return -1;
-    for (uint32_t key = 0; key < state->binding->base.join_key_count; ++key) {
+    for (uint32_t key = 0; key < state->binding->join_key_count; ++key) {
         uint32_t truth = PRDB_SDK_SQL_TRUTH_UNKNOWN;
-        const prdb_sdk_sql_join_key_binding_v16 *key_binding =
-            &state->binding->base.join_keys[key];
+        const prdb_sdk_sql_join_key_binding_v1 *key_binding =
+            &state->binding->join_keys[key];
         status = prdb_sdk_sql_compare_v1(
             &left_row.join_keys[key], &right_row.join_keys[key],
             PRDB_SDK_SQL_COMPARE_EQUAL, key_binding->left.decimal_scale,
@@ -1164,10 +1131,10 @@ static int32_t spill_join_output_v21(void *opaque, const uint8_t *left,
                                     const uint8_t *right,
                                     uint32_t record_bytes) {
     sql_spill_join_output_v21 *state = opaque;
-    prdb_sdk_sql_join_materialized_row_v16 left_row = {0}, right_row = {0};
+    prdb_sdk_sql_join_materialized_row_v1 left_row = {0}, right_row = {0};
     prdb_sdk_value_v1 projected[PRDB_SDK_SQL_MAX_PROJECTION_COLUMNS] = {{0}};
     uint32_t projection_count =
-        state->binding->base.base.projection_count;
+        state->binding->join_projection_count;
     int32_t status = spill_decode_row_v21(left, record_bytes, state->binding,
                                           &left_row);
     if (status != PRDB_SDK_SQL_EXEC_OK) {
@@ -1181,10 +1148,10 @@ static int32_t spill_join_output_v21(void *opaque, const uint8_t *left,
         return -1;
     }
     for (uint32_t projection = 0; projection < projection_count; ++projection) {
-        const prdb_sdk_sql_join_projection_binding_v8 *binding =
-            &state->binding->base.base.projections[projection];
+        const prdb_sdk_sql_join_projection_binding_v1 *binding =
+            &state->binding->join_projections[projection];
         projected[projection] =
-            binding->relation_side == PRDB_SDK_SQL_V8_LEFT
+            binding->relation_side == PRDB_SDK_SQL_JOIN_LEFT
                 ? left_row.projections[projection]
                 : right_row.projections[projection];
     }
@@ -1211,44 +1178,64 @@ static int32_t spill_join_close_scan_v21(sql_spill_join_scan_v21 *scan) {
 
 static int32_t join_v20_filter_and_emit(
     void *context, const prdb_sdk_value_v1 *projected_values,
-    uint32_t projection_count, const prdb_sdk_select_binding_v19 *binding) {
+    uint32_t projection_count, const prdb_sdk_select_binding_v1 *binding) {
     join_v20_callback_context *state = context;
-    prdb_sdk_select_binding_v20 callback_binding = *state->binding;
+    prdb_sdk_select_binding_v1 callback_binding = *state->binding;
     uint32_t truth = PRDB_SDK_SQL_TRUTH_TRUE;
     int32_t status;
 
-    if (projection_count < state->binding->base.base.base.projection_count) {
+    if (projection_count < state->binding->join_projection_count) {
         state->callback_failure = PRDB_SDK_SQL_EXEC_SHAPE_MISMATCH;
         return PRDB_QUERY_CALLBACK_INTERNAL_ERROR;
     }
-    if (state->statement->base.base.base.has_limit != 0 &&
-        state->emitted_rows >= state->statement->base.base.base.limit) {
+    if (state->statement->has_limit != 0 &&
+        state->emitted_rows >= state->statement->limit) {
         return PRDB_QUERY_CALLBACK_OK;
     }
-    if (state->statement->has_where == 1) {
+    if (state->statement->has_join_where == 1) {
         const prdb_sdk_value_v1 *parameter = NULL;
         prdb_sdk_select_v1 predicate = {0};
-        if (state->statement->parameter_index != 0) {
-            if (state->statement->parameter_index > state->parameter_count ||
+        if (state->statement->join_where_parameter_index != 0) {
+            if (state->statement->join_where_parameter_index > state->parameter_count ||
                 state->parameters == NULL) {
                 state->callback_failure = PRDB_SDK_SQL_EXEC_EVALUATION_ERROR;
                 return PRDB_QUERY_CALLBACK_INTERNAL_ERROR;
             }
             parameter = &state->parameters[
-                state->statement->parameter_index - 1];
+                state->statement->join_where_parameter_index - 1];
         }
-        predicate.struct_size = sizeof(predicate);
-        predicate.abi_version = PRDB_SDK_SQL_ABI_V1_VERSION;
-        predicate.sql = state->statement->base.base.base.sql;
-        predicate.sql_len = state->statement->base.base.base.sql_len;
-        predicate.has_where = 1;
-        predicate.comparison = state->statement->comparison;
-        predicate.parameter_index = state->statement->parameter_index;
-        status = prdb_sdk_sql_eval_select_predicate_v1(
-            &predicate,
-            &projected_values[state->binding->where_projection_index],
-            parameter, state->binding->where_column.type_code,
-            state->binding->where_column.decimal_scale, &truth);
+        const prdb_sdk_value_v1 *col_val =
+            &projected_values[state->binding->where_projection_index];
+        uint32_t cmp = state->statement->join_where_comparison;
+        if (col_val->state == PRDB_SDK_VALUE_STATE_REDACTED) {
+            state->callback_failure = PRDB_SDK_SQL_EXEC_EVALUATION_ERROR;
+            return PRDB_QUERY_CALLBACK_INTERNAL_ERROR;
+        }
+        if (cmp == PRDB_SDK_SQL_COMPARE_IS_NULL ||
+            cmp == PRDB_SDK_SQL_COMPARE_IS_NOT_NULL) {
+            status = prdb_sdk_sql_value_is_null_v1(col_val, &truth);
+            if (status == PRDB_SDK_SQL_EVAL_OK &&
+                cmp == PRDB_SDK_SQL_COMPARE_IS_NOT_NULL) {
+                truth = truth == PRDB_SDK_SQL_TRUTH_TRUE
+                            ? PRDB_SDK_SQL_TRUTH_FALSE
+                            : PRDB_SDK_SQL_TRUTH_TRUE;
+            }
+        } else {
+            prdb_sdk_value_v1 bound_param = {0};
+            status = prdb_sdk_sql_bind_parameter_v1(
+                state->statement->join_where_parameter_index,
+                state->parameters, state->parameter_count,
+                state->binding->where_column.type_code,
+                state->binding->where_column.decimal_precision,
+                state->binding->where_column.decimal_scale,
+                &bound_param, sizeof(bound_param));
+            if (status == PRDB_SDK_SQL_EVAL_OK) {
+                status = prdb_sdk_sql_compare_v1(
+                    col_val, &bound_param, cmp,
+                    state->binding->where_column.decimal_scale,
+                    state->binding->where_column.decimal_scale, &truth);
+            }
+        }
         if (status != PRDB_SDK_SQL_EVAL_OK) {
             state->callback_failure = PRDB_SDK_SQL_EXEC_EVALUATION_ERROR;
             return PRDB_QUERY_CALLBACK_INTERNAL_ERROR;
@@ -1257,8 +1244,10 @@ static int32_t join_v20_filter_and_emit(
             return PRDB_QUERY_CALLBACK_OK;
         }
     }
-    callback_binding.base = *binding;
-    callback_binding.base.base.base.projection_count =
+    callback_binding = *binding;
+    callback_binding.output_projection_count =
+        state->binding->output_projection_count;
+    callback_binding.join_projection_count =
         state->binding->output_projection_count;
     status = state->on_row(
         state->result_context, projected_values,
@@ -1276,7 +1265,7 @@ static int32_t execute_spill_join_v21(
     const prdb_host_api_v2 *host_v2,
     const prdb_sdk_executor_relation_v1 *left_relation,
     const prdb_sdk_executor_relation_v1 *right_relation,
-    const prdb_sdk_select_binding_v19 *binding,
+    const prdb_sdk_select_binding_v1 *binding,
     uint16_t max_candidates, uint32_t max_batch_bytes,
     uint8_t *left_executor_response,
     uint64_t left_executor_response_capacity,
@@ -1301,7 +1290,7 @@ static int32_t execute_spill_join_v21(
     left_scan.relation = left_relation;
     left_scan.binding = binding;
     left_scan.host = host_v2;
-    left_scan.relation_side = PRDB_SDK_SQL_V8_LEFT;
+    left_scan.relation_side = PRDB_SDK_SQL_JOIN_LEFT;
     left_scan.max_candidates = max_candidates;
     left_scan.max_batch_bytes = max_batch_bytes;
     left_scan.executor_response = left_executor_response;
@@ -1314,7 +1303,7 @@ static int32_t execute_spill_join_v21(
     left_scan.max_scan_pages = max_scan_pages;
     right_scan = left_scan;
     right_scan.relation = right_relation;
-    right_scan.relation_side = PRDB_SDK_SQL_V8_RIGHT;
+    right_scan.relation_side = PRDB_SDK_SQL_JOIN_RIGHT;
     right_scan.executor_response = right_executor_response;
     right_scan.executor_response_capacity = right_executor_response_capacity;
 
@@ -1367,26 +1356,26 @@ static int32_t execute_inner_join_v20_with_page_limit(
     uint8_t *left_executor_response, uint64_t left_executor_response_capacity,
     uint8_t *right_executor_response, uint64_t right_executor_response_capacity,
     uint8_t *batch_response, uint64_t batch_response_capacity,
-    prdb_sdk_sql_column_shape_v2 *left_planner_columns,
+    prdb_sdk_sql_column_shape_v1 *left_planner_columns,
     uint32_t left_planner_column_capacity,
-    prdb_sdk_sql_column_shape_v2 *right_planner_columns,
+    prdb_sdk_sql_column_shape_v1 *right_planner_columns,
     uint32_t right_planner_column_capacity,
-    prdb_sdk_sql_column_shape_v2 *left_executor_columns,
+    prdb_sdk_sql_column_shape_v1 *left_executor_columns,
     uint32_t left_executor_column_capacity,
-    prdb_sdk_sql_column_shape_v2 *right_executor_columns,
+    prdb_sdk_sql_column_shape_v1 *right_executor_columns,
     uint32_t right_executor_column_capacity,
     prdb_sdk_value_v1 *cell_scratch, uint32_t cell_scratch_capacity,
-    prdb_sdk_sql_join_materialized_row_v16 *left_rows,
+    prdb_sdk_sql_join_materialized_row_v1 *left_rows,
     uint32_t left_row_capacity,
-    prdb_sdk_sql_join_materialized_row_v16 *right_rows,
+    prdb_sdk_sql_join_materialized_row_v1 *right_rows,
     uint32_t right_row_capacity,
     uint8_t *materialized_bytes, uint64_t materialized_bytes_capacity,
-    prdb_sdk_sql_join_result_row_v20_fn on_row, void *result_context,
+    prdb_sdk_sql_join_result_row_v1_fn on_row, void *result_context,
     uint32_t scan_page_limit,
     const prdb_sdk_optimizer_index_join_plan_v1 *index_plan,
     const prdb_sdk_optimizer_index_prefix_join_plan_v1 *prefix_plan) {
-    prdb_sdk_select_v20 statement = {0};
-    prdb_sdk_select_binding_v20 binding = {0};
+    prdb_sdk_select_v1 statement = {0};
+    prdb_sdk_select_binding_v1 binding = {0};
     prdb_sdk_select_v1 predicate = {0};
     prdb_sdk_value_v1 bound_parameter = {0};
     prdb_sdk_planner_relation_v1 planned_left = {0}, planned_right = {0};
@@ -1412,15 +1401,15 @@ static int32_t execute_inner_join_v20_with_page_limit(
     base_host = (prdb_host_api_v2){
         sizeof(base_host), PRDB_QUERY_ABI_V2_VERSION, host->context,
         host->executor_request, host->planner_request, host->write_result};
-    status = prdb_sdk_sql_parse_select_v20(
+    status = prdb_sdk_sql_parse_select_v1(
         sql, sql_len, &statement, sizeof(statement), &error_offset);
     if (status != PRDB_SDK_SQL_OK) {
         return fail_statement_v19(host, PRDB_SDK_SQL_EXEC_BIND_ERROR);
     }
     status = prdb_sdk_planner_describe_relation_v1(
         &base_host, schema, schema_len,
-        sql + statement.base.base.base.left_relation.offset,
-        statement.base.base.base.left_relation.length,
+        sql + statement.left_relation.offset,
+        statement.left_relation.length,
         left_planner_response, left_planner_response_capacity, &response_len,
         &planned_left, sizeof(planned_left), left_planner_columns,
         left_planner_column_capacity);
@@ -1429,8 +1418,8 @@ static int32_t execute_inner_join_v20_with_page_limit(
     }
     status = prdb_sdk_planner_describe_relation_v1(
         &base_host, schema, schema_len,
-        sql + statement.base.base.base.right_relation.offset,
-        statement.base.base.base.right_relation.length,
+        sql + statement.right_relation.offset,
+        statement.right_relation.length,
         right_planner_response, right_planner_response_capacity, &response_len,
         &planned_right, sizeof(planned_right), right_planner_columns,
         right_planner_column_capacity);
@@ -1439,8 +1428,8 @@ static int32_t execute_inner_join_v20_with_page_limit(
     }
     status = prdb_sdk_executor_resolve_relation_v1(
         &base_host, schema, schema_len,
-        sql + statement.base.base.base.left_relation.offset,
-        statement.base.base.base.left_relation.length,
+        sql + statement.left_relation.offset,
+        statement.left_relation.length,
         left_executor_response, left_executor_response_capacity, &response_len,
         &resolved_left, sizeof(resolved_left), left_executor_columns,
         left_executor_column_capacity);
@@ -1449,8 +1438,8 @@ static int32_t execute_inner_join_v20_with_page_limit(
     }
     status = prdb_sdk_executor_resolve_relation_v1(
         &base_host, schema, schema_len,
-        sql + statement.base.base.base.right_relation.offset,
-        statement.base.base.base.right_relation.length,
+        sql + statement.right_relation.offset,
+        statement.right_relation.length,
         right_executor_response, right_executor_response_capacity, &response_len,
         &resolved_right, sizeof(resolved_right), right_executor_columns,
         right_executor_column_capacity);
@@ -1465,7 +1454,7 @@ static int32_t execute_inner_join_v20_with_page_limit(
                                 right_executor_columns)) {
         return fail_statement_v19(host, PRDB_SDK_SQL_EXEC_SHAPE_MISMATCH);
     }
-    status = prdb_sdk_sql_bind_select_v20(
+    status = prdb_sdk_sql_bind_join_select_v1(
         &statement,
         resolved_left.name, resolved_left.name_len,
         left_executor_columns, resolved_left.column_count,
@@ -1475,9 +1464,9 @@ static int32_t execute_inner_join_v20_with_page_limit(
     if (status != PRDB_SDK_SQL_BIND_OK) {
         return fail_statement_v19(host, PRDB_SDK_SQL_EXEC_BIND_ERROR);
     }
-    if (statement.has_where == 1 && statement.parameter_index != 0) {
+    if (statement.has_join_where == 1 && statement.join_where_parameter_index != 0) {
         status = bind_sql_parameter(
-            statement.parameter_index, parameters, metadata, parameter_count,
+            statement.join_where_parameter_index, parameters, metadata, parameter_count,
             binding.where_column.type_code,
             binding.where_column.decimal_precision,
             binding.where_column.decimal_scale, &bound_parameter);
@@ -1486,21 +1475,21 @@ static int32_t execute_inner_join_v20_with_page_limit(
                                      PRDB_SDK_SQL_EXEC_EVALUATION_ERROR);
         }
     }
-    if (statement.base.base.base.has_limit != 0 &&
-        statement.base.base.base.limit == 0) {
+    if (statement.has_limit != 0 &&
+        statement.limit == 0) {
         return PRDB_SDK_SQL_EXEC_OK;
     }
 
-    if (statement.has_where == 1) {
+    if (statement.has_join_where == 1) {
         uint64_t used = 0;
         uint32_t filter_index = binding.where_projection_index;
         uint32_t output_count = binding.output_projection_count;
         uint32_t from_offset = statement.from_keyword_offset;
         uint32_t where_offset = statement.where_keyword_offset;
-        uint32_t filter_relation_end = statement.where_column.relation.offset +
-                                       statement.where_column.relation.length;
-        uint32_t filter_column_end = statement.where_column.column.offset +
-                                     statement.where_column.column.length;
+        uint32_t filter_relation_end = statement.join_where_column.relation.offset +
+                                       statement.join_where_column.relation.length;
+        uint32_t filter_column_end = statement.join_where_column.column.offset +
+                                     statement.join_where_column.column.length;
 #define APPEND_SQL_V20(ptr, len)                                               \
         do {                                                                   \
             uint64_t append_length = (uint64_t)(len);                          \
@@ -1515,7 +1504,7 @@ static int32_t execute_inner_join_v20_with_page_limit(
         } while (0)
         if (filter_index > output_count || from_offset > where_offset ||
             where_offset > sql_len || filter_column_end > sql_len ||
-            filter_relation_end > statement.where_column.column.offset) {
+            filter_relation_end > statement.join_where_column.column.offset) {
             return fail_statement_v19(host, PRDB_SDK_SQL_EXEC_BIND_ERROR);
         }
         APPEND_SQL_V20(sql, from_offset);
@@ -1524,11 +1513,11 @@ static int32_t execute_inner_join_v20_with_page_limit(
             static const uint8_t dot[] = ".";
             static const uint8_t space[] = " ";
             APPEND_SQL_V20(comma_space, sizeof(comma_space) - 1);
-            APPEND_SQL_V20(sql + statement.where_column.relation.offset,
-                           statement.where_column.relation.length);
+            APPEND_SQL_V20(sql + statement.join_where_column.relation.offset,
+                           statement.join_where_column.relation.length);
             APPEND_SQL_V20(dot, sizeof(dot) - 1);
-            APPEND_SQL_V20(sql + statement.where_column.column.offset,
-                           statement.where_column.column.length);
+            APPEND_SQL_V20(sql + statement.join_where_column.column.offset,
+                           statement.join_where_column.column.length);
             APPEND_SQL_V20(space, sizeof(space) - 1);
             ++output_count;
         }
@@ -1549,19 +1538,19 @@ static int32_t execute_inner_join_v20_with_page_limit(
     callback.on_row = on_row;
     callback.result_context = result_context;
     if (spill_host != NULL) {
-        prdb_sdk_select_v19 spill_statement = {0};
-        prdb_sdk_select_binding_v19 spill_binding = {0};
+        prdb_sdk_select_v1 spill_statement = {0};
+        prdb_sdk_select_binding_v1 spill_binding = {0};
         const uint8_t *execution_sql =
-            statement.has_where == 1 ? synthetic_sql : sql;
+            statement.has_join_where == 1 ? synthetic_sql : sql;
         uint64_t execution_sql_len =
-            statement.has_where == 1 ? synthetic_len : sql_len;
-        status = prdb_sdk_sql_parse_select_v19(
+            statement.has_join_where == 1 ? synthetic_len : sql_len;
+        status = prdb_sdk_sql_parse_select_v1(
             execution_sql, execution_sql_len, &spill_statement,
             sizeof(spill_statement), NULL);
         if (status != PRDB_SDK_SQL_OK) {
             return fail_statement_v19(host, PRDB_SDK_SQL_EXEC_BIND_ERROR);
         }
-        status = prdb_sdk_sql_bind_select_v19(
+        status = prdb_sdk_sql_bind_join_select_v1(
             &spill_statement, resolved_left.name, resolved_left.name_len,
             left_executor_columns, resolved_left.column_count,
             resolved_right.name, resolved_right.name_len,
@@ -1580,8 +1569,8 @@ static int32_t execute_inner_join_v20_with_page_limit(
     } else {
         status = execute_inner_join_v19_with_page_limit(
             host, schema, schema_len,
-            statement.has_where == 1 ? synthetic_sql : sql,
-            statement.has_where == 1 ? synthetic_len : sql_len,
+            statement.has_join_where == 1 ? synthetic_sql : sql,
+            statement.has_join_where == 1 ? synthetic_len : sql_len,
             max_candidates, max_batch_bytes,
             left_planner_response, left_planner_response_capacity,
             right_planner_response, right_planner_response_capacity,
@@ -1605,7 +1594,7 @@ static int32_t execute_inner_join_v20_with_page_limit(
     return status;
 }
 
-int32_t prdb_sdk_sql_execute_inner_join_v20(
+int32_t prdb_sdk_sql_execute_inner_join_v1(
     const prdb_host_api_v3 *host,
     const uint8_t *schema, uint32_t schema_len,
     const uint8_t *sql, uint64_t sql_len,
@@ -1616,21 +1605,38 @@ int32_t prdb_sdk_sql_execute_inner_join_v20(
     uint8_t *left_executor_response, uint64_t left_executor_response_capacity,
     uint8_t *right_executor_response, uint64_t right_executor_response_capacity,
     uint8_t *batch_response, uint64_t batch_response_capacity,
-    prdb_sdk_sql_column_shape_v2 *left_planner_columns,
+    prdb_sdk_sql_column_shape_v1 *left_planner_columns,
     uint32_t left_planner_column_capacity,
-    prdb_sdk_sql_column_shape_v2 *right_planner_columns,
+    prdb_sdk_sql_column_shape_v1 *right_planner_columns,
     uint32_t right_planner_column_capacity,
-    prdb_sdk_sql_column_shape_v2 *left_executor_columns,
+    prdb_sdk_sql_column_shape_v1 *left_executor_columns,
     uint32_t left_executor_column_capacity,
-    prdb_sdk_sql_column_shape_v2 *right_executor_columns,
+    prdb_sdk_sql_column_shape_v1 *right_executor_columns,
     uint32_t right_executor_column_capacity,
     prdb_sdk_value_v1 *cell_scratch, uint32_t cell_scratch_capacity,
-    prdb_sdk_sql_join_materialized_row_v16 *left_rows,
+    prdb_sdk_sql_join_materialized_row_v1 *left_rows,
     uint32_t left_row_capacity,
-    prdb_sdk_sql_join_materialized_row_v16 *right_rows,
+    prdb_sdk_sql_join_materialized_row_v1 *right_rows,
     uint32_t right_row_capacity,
     uint8_t *materialized_bytes, uint64_t materialized_bytes_capacity,
-    prdb_sdk_sql_join_result_row_v20_fn on_row, void *result_context) {
+    prdb_sdk_sql_join_result_row_v1_fn on_row, void *result_context) {
+    if (parameter_count == 0) {
+        return execute_inner_join_v19_with_page_limit(
+            host, schema, schema_len, sql, sql_len,
+            max_candidates, max_batch_bytes, left_planner_response,
+            left_planner_response_capacity, right_planner_response,
+            right_planner_response_capacity, left_executor_response,
+            left_executor_response_capacity, right_executor_response,
+            right_executor_response_capacity, batch_response,
+            batch_response_capacity, left_planner_columns,
+            left_planner_column_capacity, right_planner_columns,
+            right_planner_column_capacity, left_executor_columns,
+            left_executor_column_capacity, right_executor_columns,
+            right_executor_column_capacity, cell_scratch, cell_scratch_capacity,
+            left_rows, left_row_capacity, right_rows, right_row_capacity,
+            materialized_bytes, materialized_bytes_capacity, on_row,
+            result_context, SQL_EXEC_V19_MAX_SCAN_PAGES, NULL, NULL);
+    }
     return execute_inner_join_v20_with_page_limit(
         host, NULL, schema, schema_len, sql, sql_len, parameters, NULL, parameter_count,
         max_candidates, max_batch_bytes, left_planner_response,
@@ -1648,7 +1654,7 @@ int32_t prdb_sdk_sql_execute_inner_join_v20(
         result_context, SQL_EXEC_V20_MAX_SCAN_PAGES, NULL, NULL);
 }
 
-int32_t prdb_sdk_sql_execute_inner_join_typed_v20(
+int32_t prdb_sdk_sql_execute_inner_join_typed_v1(
     const prdb_host_api_v3 *host,
     const uint8_t *schema, uint32_t schema_len,
     const uint8_t *sql, uint64_t sql_len,
@@ -1660,21 +1666,21 @@ int32_t prdb_sdk_sql_execute_inner_join_typed_v20(
     uint8_t *left_executor_response, uint64_t left_executor_response_capacity,
     uint8_t *right_executor_response, uint64_t right_executor_response_capacity,
     uint8_t *batch_response, uint64_t batch_response_capacity,
-    prdb_sdk_sql_column_shape_v2 *left_planner_columns,
+    prdb_sdk_sql_column_shape_v1 *left_planner_columns,
     uint32_t left_planner_column_capacity,
-    prdb_sdk_sql_column_shape_v2 *right_planner_columns,
+    prdb_sdk_sql_column_shape_v1 *right_planner_columns,
     uint32_t right_planner_column_capacity,
-    prdb_sdk_sql_column_shape_v2 *left_executor_columns,
+    prdb_sdk_sql_column_shape_v1 *left_executor_columns,
     uint32_t left_executor_column_capacity,
-    prdb_sdk_sql_column_shape_v2 *right_executor_columns,
+    prdb_sdk_sql_column_shape_v1 *right_executor_columns,
     uint32_t right_executor_column_capacity,
     prdb_sdk_value_v1 *cell_scratch, uint32_t cell_scratch_capacity,
-    prdb_sdk_sql_join_materialized_row_v16 *left_rows,
+    prdb_sdk_sql_join_materialized_row_v1 *left_rows,
     uint32_t left_row_capacity,
-    prdb_sdk_sql_join_materialized_row_v16 *right_rows,
+    prdb_sdk_sql_join_materialized_row_v1 *right_rows,
     uint32_t right_row_capacity,
     uint8_t *materialized_bytes, uint64_t materialized_bytes_capacity,
-    prdb_sdk_sql_join_result_row_v20_fn on_row, void *result_context) {
+    prdb_sdk_sql_join_result_row_v1_fn on_row, void *result_context) {
     return execute_inner_join_v20_with_page_limit(
         host, NULL, schema, schema_len, sql, sql_len, parameters, metadata, parameter_count,
         max_candidates, max_batch_bytes, left_planner_response,
@@ -1692,7 +1698,7 @@ int32_t prdb_sdk_sql_execute_inner_join_typed_v20(
         result_context, SQL_EXEC_V20_MAX_SCAN_PAGES, NULL, NULL);
 }
 
-int32_t prdb_sdk_sql_execute_inner_join_typed_spill_v21(
+int32_t prdb_sdk_sql_execute_inner_join_typed_spill_v1(
     const prdb_host_api_v6 *host,
     const uint8_t *schema, uint32_t schema_len,
     const uint8_t *sql, uint64_t sql_len,
@@ -1705,21 +1711,21 @@ int32_t prdb_sdk_sql_execute_inner_join_typed_spill_v21(
     uint8_t *left_executor_response, uint64_t left_executor_response_capacity,
     uint8_t *right_executor_response, uint64_t right_executor_response_capacity,
     uint8_t *batch_response, uint64_t batch_response_capacity,
-    prdb_sdk_sql_column_shape_v2 *left_planner_columns,
+    prdb_sdk_sql_column_shape_v1 *left_planner_columns,
     uint32_t left_planner_column_capacity,
-    prdb_sdk_sql_column_shape_v2 *right_planner_columns,
+    prdb_sdk_sql_column_shape_v1 *right_planner_columns,
     uint32_t right_planner_column_capacity,
-    prdb_sdk_sql_column_shape_v2 *left_executor_columns,
+    prdb_sdk_sql_column_shape_v1 *left_executor_columns,
     uint32_t left_executor_column_capacity,
-    prdb_sdk_sql_column_shape_v2 *right_executor_columns,
+    prdb_sdk_sql_column_shape_v1 *right_executor_columns,
     uint32_t right_executor_column_capacity,
     prdb_sdk_value_v1 *cell_scratch, uint32_t cell_scratch_capacity,
-    prdb_sdk_sql_join_materialized_row_v16 *left_rows,
+    prdb_sdk_sql_join_materialized_row_v1 *left_rows,
     uint32_t left_row_capacity,
-    prdb_sdk_sql_join_materialized_row_v16 *right_rows,
+    prdb_sdk_sql_join_materialized_row_v1 *right_rows,
     uint32_t right_row_capacity,
     uint8_t *materialized_bytes, uint64_t materialized_bytes_capacity,
-    prdb_sdk_sql_join_result_row_v20_fn on_row, void *result_context) {
+    prdb_sdk_sql_join_result_row_v1_fn on_row, void *result_context) {
     if (host == NULL || host->spill_request == NULL ||
         host->v5.v4.v3.struct_size < sizeof(prdb_host_api_v3) ||
         host->v5.v4.v3.abi_version != PRDB_QUERY_ABI_V3_VERSION) {
@@ -1745,187 +1751,8 @@ int32_t prdb_sdk_sql_execute_inner_join_typed_spill_v21(
         result_context, SQL_EXEC_V20_SPILL_MAX_SCAN_PAGES, NULL, NULL);
 }
 
+
 int32_t prdb_sdk_sql_execute_inner_join_optimizer_v1(
-    const prdb_host_api_v5 *host,
-    const uint8_t *schema, uint32_t schema_len,
-    const uint8_t *sql, uint64_t sql_len,
-    uint16_t max_candidates, uint32_t max_batch_bytes,
-    uint8_t *optimizer_request, uint64_t optimizer_request_capacity,
-    uint8_t *optimizer_response, uint64_t optimizer_response_capacity,
-    uint8_t *left_planner_response, uint64_t left_planner_response_capacity,
-    uint8_t *right_planner_response, uint64_t right_planner_response_capacity,
-    uint8_t *left_executor_response, uint64_t left_executor_response_capacity,
-    uint8_t *right_executor_response, uint64_t right_executor_response_capacity,
-    uint8_t *batch_response, uint64_t batch_response_capacity,
-    prdb_sdk_sql_column_shape_v2 *left_planner_columns,
-    uint32_t left_planner_column_capacity,
-    prdb_sdk_sql_column_shape_v2 *right_planner_columns,
-    uint32_t right_planner_column_capacity,
-    prdb_sdk_sql_column_shape_v2 *left_executor_columns,
-    uint32_t left_executor_column_capacity,
-    prdb_sdk_sql_column_shape_v2 *right_executor_columns,
-    uint32_t right_executor_column_capacity,
-    prdb_sdk_value_v1 *cell_scratch, uint32_t cell_scratch_capacity,
-    prdb_sdk_sql_join_materialized_row_v16 *left_rows,
-    uint32_t left_row_capacity,
-    prdb_sdk_sql_join_materialized_row_v16 *right_rows,
-    uint32_t right_row_capacity,
-    uint8_t *materialized_bytes, uint64_t materialized_bytes_capacity,
-    prdb_sdk_sql_join_result_row_v19_fn on_row, void *result_context) {
-    prdb_sdk_select_v19 statement = {0};
-    prdb_sdk_select_binding_v19 binding = {0};
-    prdb_sdk_planner_relation_v1 planned_left = {0};
-    prdb_sdk_planner_relation_v1 planned_right = {0};
-    prdb_sdk_optimizer_response_v1 optimizer_result = {0};
-    prdb_sdk_optimizer_index_join_plan_v1 index_plan = {0};
-    prdb_sdk_optimizer_index_prefix_join_plan_v1 prefix_plan = {0};
-    prdb_host_api_v2 base_host;
-    uint64_t request_len = 0;
-    uint64_t optimizer_response_len = 0;
-    uint64_t planner_response_len = 0;
-    uint64_t identity_response_len = 0;
-    uint32_t error_offset = 0;
-    int32_t status;
-
-    if (host == NULL) return PRDB_SDK_SQL_EXEC_INVALID_ARGUMENT;
-    if (host->v4.v3.struct_size != sizeof(prdb_host_api_v3) ||
-        host->v4.v3.abi_version != PRDB_QUERY_ABI_V3_VERSION ||
-        host->v4.v3.context == NULL ||
-        host->v4.v3.statement_failure == NULL)
-        return PRDB_SDK_SQL_EXEC_INVALID_ARGUMENT;
-    if (host->v4.v3.struct_size != sizeof(prdb_host_api_v3) ||
-        host->v4.v3.abi_version != PRDB_QUERY_ABI_V3_VERSION ||
-        host->v4.v3.context == NULL || host->v4.v3.executor_request == NULL ||
-        host->v4.v3.planner_request == NULL ||
-        host->v4.v3.statement_failure == NULL || host->optimizer_request == NULL ||
-        schema == NULL || sql == NULL || optimizer_request == NULL ||
-        optimizer_response == NULL || left_planner_response == NULL ||
-        right_planner_response == NULL || left_executor_response == NULL ||
-        right_executor_response == NULL || batch_response == NULL ||
-        left_planner_columns == NULL || right_planner_columns == NULL ||
-        left_executor_columns == NULL || right_executor_columns == NULL ||
-        cell_scratch == NULL || left_rows == NULL || right_rows == NULL ||
-        materialized_bytes == NULL || on_row == NULL) {
-        return fail_statement_v19(&host->v4.v3,
-                                  PRDB_SDK_SQL_EXEC_INVALID_ARGUMENT);
-    }
-    base_host = (prdb_host_api_v2){
-        sizeof(base_host), PRDB_QUERY_ABI_V2_VERSION, host->v4.v3.context,
-        host->v4.v3.executor_request, host->v4.v3.planner_request,
-        host->v4.v3.write_result};
-    status = prdb_sdk_sql_parse_select_v19(
-        sql, sql_len, &statement, sizeof(statement), &error_offset);
-    if (status != PRDB_SDK_SQL_OK)
-        return fail_statement_v19(&host->v4.v3,
-                                  PRDB_SDK_SQL_EXEC_BIND_ERROR);
-    status = prdb_sdk_optimizer_encode_join_select_v1(
-        &statement, schema, schema_len, optimizer_request,
-        optimizer_request_capacity, &request_len);
-    if (status != PRDB_SDK_OPTIMIZER_ENCODE_OK)
-        return fail_statement_v19(&host->v4.v3,
-                                  PRDB_SDK_SQL_EXEC_BIND_ERROR);
-    status = prdb_sdk_optimizer_submit_join_select_v1(
-        host, optimizer_request, request_len, optimizer_response,
-        optimizer_response_capacity, &optimizer_response_len,
-        &optimizer_result, sizeof(optimizer_result));
-    if (status != PRDB_SDK_OPTIMIZER_RESULT_OK ||
-        optimizer_result.status != PRDB_SDK_OPTIMIZER_STATUS_SUCCESS ||
-        optimizer_result.plan == NULL)
-        return fail_statement_v19(&host->v4.v3,
-                                  PRDB_SDK_SQL_EXEC_PLANNER_ERROR);
-
-    status = prdb_sdk_planner_describe_relation_v1(
-        &base_host, schema, schema_len,
-        sql + statement.base.base.left_relation.offset,
-        statement.base.base.left_relation.length, left_planner_response,
-        left_planner_response_capacity, &planner_response_len, &planned_left,
-        sizeof(planned_left), left_planner_columns,
-        left_planner_column_capacity);
-    if (status != PRDB_SDK_PLANNER_REQUEST_OK)
-        return fail_statement_v19(&host->v4.v3,
-                                  PRDB_SDK_SQL_EXEC_PLANNER_ERROR);
-    status = prdb_sdk_planner_describe_relation_v1(
-        &base_host, schema, schema_len,
-        sql + statement.base.base.right_relation.offset,
-        statement.base.base.right_relation.length, right_planner_response,
-        right_planner_response_capacity, &planner_response_len, &planned_right,
-        sizeof(planned_right), right_planner_columns,
-        right_planner_column_capacity);
-    if (status != PRDB_SDK_PLANNER_REQUEST_OK)
-        return fail_statement_v19(&host->v4.v3,
-                                  PRDB_SDK_SQL_EXEC_PLANNER_ERROR);
-    status = prdb_sdk_sql_bind_select_v19(
-        &statement, planned_left.name, planned_left.name_len,
-        left_planner_columns, planned_left.column_count, planned_right.name,
-        planned_right.name_len, right_planner_columns,
-        planned_right.column_count, &binding, sizeof(binding));
-    if (status != PRDB_SDK_SQL_BIND_OK)
-        return fail_statement_v19(&host->v4.v3,
-                                  PRDB_SDK_SQL_EXEC_BIND_ERROR);
-    status = prdb_sdk_optimizer_match_join_plan_v19_v1(
-        &statement, &binding, schema, schema_len, optimizer_result.plan,
-        optimizer_result.plan_len);
-    if (status != PRDB_SDK_OPTIMIZER_PLAN_OK)
-    {
-        return fail_statement_v19(&host->v4.v3,
-                                  PRDB_SDK_SQL_EXEC_SHAPE_MISMATCH);
-    }
-    status = prdb_sdk_optimizer_validate_executor_join_relations_v1(
-        &base_host, optimizer_result.plan, optimizer_result.plan_len,
-        left_executor_response, left_executor_response_capacity,
-        &identity_response_len);
-    if (status != PRDB_SDK_OPTIMIZER_PLAN_OK)
-    {
-        return fail_statement_v19(&host->v4.v3,
-                                  PRDB_SDK_SQL_EXEC_SHAPE_MISMATCH);
-    }
-    if (optimizer_result.plan[2] ==
-        PRDB_SDK_OPTIMIZER_PLAN_KIND_INDEX_NESTED_LOOP_JOIN) {
-        status = prdb_sdk_optimizer_decode_index_join_plan_v1(
-            optimizer_result.plan, optimizer_result.plan_len,
-            &index_plan, sizeof(index_plan));
-        if (status != PRDB_SDK_OPTIMIZER_PLAN_OK || index_plan.has_filter != 0)
-            return fail_statement_v19(&host->v4.v3,
-                                      PRDB_SDK_SQL_EXEC_SHAPE_MISMATCH);
-    } else if (optimizer_result.plan[2] ==
-               PRDB_SDK_OPTIMIZER_PLAN_KIND_INDEX_PREFIX_NESTED_LOOP_JOIN) {
-        status = prdb_sdk_optimizer_decode_index_prefix_join_plan_v1(
-            optimizer_result.plan, optimizer_result.plan_len,
-            &prefix_plan, sizeof(prefix_plan));
-        if (status != PRDB_SDK_OPTIMIZER_PLAN_OK) {
-            return fail_statement_v19(&host->v4.v3,
-                                      PRDB_SDK_SQL_EXEC_BIND_ERROR);
-        }
-        if (prefix_plan.has_filter != 0) {
-            return fail_statement_v19(&host->v4.v3,
-                                      PRDB_SDK_SQL_EXEC_EVALUATION_ERROR);
-        }
-    }
-
-    return execute_inner_join_v19_with_page_limit(
-        &host->v4.v3, schema, schema_len, sql, sql_len, max_candidates,
-        max_batch_bytes, left_planner_response,
-        left_planner_response_capacity, right_planner_response,
-        right_planner_response_capacity, left_executor_response,
-        left_executor_response_capacity, right_executor_response,
-        right_executor_response_capacity, batch_response,
-        batch_response_capacity, left_planner_columns,
-        left_planner_column_capacity, right_planner_columns,
-        right_planner_column_capacity, left_executor_columns,
-        left_executor_column_capacity, right_executor_columns,
-        right_executor_column_capacity, cell_scratch, cell_scratch_capacity,
-        left_rows, left_row_capacity, right_rows, right_row_capacity,
-        materialized_bytes, materialized_bytes_capacity, on_row,
-        result_context, SQL_EXEC_V19_OPTIMIZER_MAX_SCAN_PAGES,
-        optimizer_result.plan_len >= 3 && optimizer_result.plan[2] ==
-            PRDB_SDK_OPTIMIZER_PLAN_KIND_INDEX_NESTED_LOOP_JOIN
-            ? &index_plan : NULL,
-        optimizer_result.plan_len >= 3 && optimizer_result.plan[2] ==
-            PRDB_SDK_OPTIMIZER_PLAN_KIND_INDEX_PREFIX_NESTED_LOOP_JOIN
-            ? &prefix_plan : NULL);
-}
-
-int32_t prdb_sdk_sql_execute_inner_join_optimizer_v20(
     const prdb_host_api_v5 *host,
     const uint8_t *schema, uint32_t schema_len,
     const uint8_t *sql, uint64_t sql_len,
@@ -1938,23 +1765,23 @@ int32_t prdb_sdk_sql_execute_inner_join_optimizer_v20(
     uint8_t *left_executor_response, uint64_t left_executor_response_capacity,
     uint8_t *right_executor_response, uint64_t right_executor_response_capacity,
     uint8_t *batch_response, uint64_t batch_response_capacity,
-    prdb_sdk_sql_column_shape_v2 *left_planner_columns,
+    prdb_sdk_sql_column_shape_v1 *left_planner_columns,
     uint32_t left_planner_column_capacity,
-    prdb_sdk_sql_column_shape_v2 *right_planner_columns,
+    prdb_sdk_sql_column_shape_v1 *right_planner_columns,
     uint32_t right_planner_column_capacity,
-    prdb_sdk_sql_column_shape_v2 *left_executor_columns,
+    prdb_sdk_sql_column_shape_v1 *left_executor_columns,
     uint32_t left_executor_column_capacity,
-    prdb_sdk_sql_column_shape_v2 *right_executor_columns,
+    prdb_sdk_sql_column_shape_v1 *right_executor_columns,
     uint32_t right_executor_column_capacity,
     prdb_sdk_value_v1 *cell_scratch, uint32_t cell_scratch_capacity,
-    prdb_sdk_sql_join_materialized_row_v16 *left_rows,
+    prdb_sdk_sql_join_materialized_row_v1 *left_rows,
     uint32_t left_row_capacity,
-    prdb_sdk_sql_join_materialized_row_v16 *right_rows,
+    prdb_sdk_sql_join_materialized_row_v1 *right_rows,
     uint32_t right_row_capacity,
     uint8_t *materialized_bytes, uint64_t materialized_bytes_capacity,
-    prdb_sdk_sql_join_result_row_v20_fn on_row, void *result_context) {
-    prdb_sdk_select_v20 statement = {0};
-    prdb_sdk_select_binding_v20 binding = {0};
+    prdb_sdk_sql_join_result_row_v1_fn on_row, void *result_context) {
+    prdb_sdk_select_v1 statement = {0};
+    prdb_sdk_select_binding_v1 binding = {0};
     prdb_sdk_planner_relation_v1 planned_left = {0};
     prdb_sdk_planner_relation_v1 planned_right = {0};
     prdb_sdk_optimizer_response_v1 optimizer_result = {0};
@@ -1990,14 +1817,20 @@ int32_t prdb_sdk_sql_execute_inner_join_optimizer_v20(
         sizeof(base_host), PRDB_QUERY_ABI_V2_VERSION, host->v4.v3.context,
         host->v4.v3.executor_request, host->v4.v3.planner_request,
         host->v4.v3.write_result};
-    status = prdb_sdk_sql_parse_select_v20(
+    status = prdb_sdk_sql_parse_select_v1(
         sql, sql_len, &statement, sizeof(statement), &error_offset);
-    if (status != PRDB_SDK_SQL_OK || statement.has_where != 1)
+    if (status != PRDB_SDK_SQL_OK)
         return fail_statement_v19(&host->v4.v3,
                                   PRDB_SDK_SQL_EXEC_BIND_ERROR);
-    status = prdb_sdk_optimizer_encode_filtered_join_select_v1(
-        &statement, schema, schema_len, optimizer_request,
-        optimizer_request_capacity, &request_len);
+    if (statement.has_join_where != 0) {
+        status = prdb_sdk_optimizer_encode_filtered_join_select_v1(
+            &statement, schema, schema_len, optimizer_request,
+            optimizer_request_capacity, &request_len);
+    } else {
+        status = prdb_sdk_optimizer_encode_join_select_v1(
+            &statement, schema, schema_len, optimizer_request,
+            optimizer_request_capacity, &request_len);
+    }
     if (status != PRDB_SDK_OPTIMIZER_ENCODE_OK)
         return fail_statement_v19(&host->v4.v3,
                                   PRDB_SDK_SQL_EXEC_BIND_ERROR);
@@ -2013,8 +1846,8 @@ int32_t prdb_sdk_sql_execute_inner_join_optimizer_v20(
 
     status = prdb_sdk_planner_describe_relation_v1(
         &base_host, schema, schema_len,
-        sql + statement.base.base.base.left_relation.offset,
-        statement.base.base.base.left_relation.length, left_planner_response,
+        sql + statement.left_relation.offset,
+        statement.left_relation.length, left_planner_response,
         left_planner_response_capacity, &planner_response_len, &planned_left,
         sizeof(planned_left), left_planner_columns,
         left_planner_column_capacity);
@@ -2023,15 +1856,15 @@ int32_t prdb_sdk_sql_execute_inner_join_optimizer_v20(
                                   PRDB_SDK_SQL_EXEC_PLANNER_ERROR);
     status = prdb_sdk_planner_describe_relation_v1(
         &base_host, schema, schema_len,
-        sql + statement.base.base.base.right_relation.offset,
-        statement.base.base.base.right_relation.length,
+        sql + statement.right_relation.offset,
+        statement.right_relation.length,
         right_planner_response, right_planner_response_capacity,
         &planner_response_len, &planned_right, sizeof(planned_right),
         right_planner_columns, right_planner_column_capacity);
     if (status != PRDB_SDK_PLANNER_REQUEST_OK)
         return fail_statement_v19(&host->v4.v3,
                                   PRDB_SDK_SQL_EXEC_PLANNER_ERROR);
-    status = prdb_sdk_sql_bind_select_v20(
+    status = prdb_sdk_sql_bind_join_select_v1(
         &statement, planned_left.name, planned_left.name_len,
         left_planner_columns, planned_left.column_count, planned_right.name,
         planned_right.name_len, right_planner_columns,
@@ -2039,16 +1872,29 @@ int32_t prdb_sdk_sql_execute_inner_join_optimizer_v20(
     if (status != PRDB_SDK_SQL_BIND_OK)
         return fail_statement_v19(&host->v4.v3,
                                   PRDB_SDK_SQL_EXEC_BIND_ERROR);
-    status = prdb_sdk_optimizer_match_filtered_join_plan_v20_v1(
-        &statement, &binding, parameters, parameter_count, schema, schema_len,
-        optimizer_result.plan, optimizer_result.plan_len);
+    if (statement.has_join_where != 0) {
+        status = prdb_sdk_optimizer_match_filtered_join_plan_v20_v1(
+            &statement, &binding, parameters, parameter_count, schema,
+            schema_len, optimizer_result.plan, optimizer_result.plan_len);
+    } else {
+        status = prdb_sdk_optimizer_match_join_plan_v19_v1(
+            &statement, &binding, schema, schema_len, optimizer_result.plan,
+            optimizer_result.plan_len);
+    }
     if (status != PRDB_SDK_OPTIMIZER_PLAN_OK)
         return fail_statement_v19(&host->v4.v3,
                                   PRDB_SDK_SQL_EXEC_SHAPE_MISMATCH);
-    status = prdb_sdk_optimizer_validate_executor_filtered_join_relations_v1(
-        &base_host, optimizer_result.plan, optimizer_result.plan_len,
-        left_executor_response, left_executor_response_capacity,
-        &identity_response_len);
+    if (statement.has_join_where != 0) {
+        status = prdb_sdk_optimizer_validate_executor_filtered_join_relations_v1(
+            &base_host, optimizer_result.plan, optimizer_result.plan_len,
+            left_executor_response, left_executor_response_capacity,
+            &identity_response_len);
+    } else {
+        status = prdb_sdk_optimizer_validate_executor_join_relations_v1(
+            &base_host, optimizer_result.plan, optimizer_result.plan_len,
+            left_executor_response, left_executor_response_capacity,
+            &identity_response_len);
+    }
     if (status != PRDB_SDK_OPTIMIZER_PLAN_OK)
         return fail_statement_v19(&host->v4.v3,
                                   PRDB_SDK_SQL_EXEC_SHAPE_MISMATCH);
@@ -2057,7 +1903,8 @@ int32_t prdb_sdk_sql_execute_inner_join_optimizer_v20(
         status = prdb_sdk_optimizer_decode_index_join_plan_v1(
             optimizer_result.plan, optimizer_result.plan_len,
             &index_plan, sizeof(index_plan));
-        if (status != PRDB_SDK_OPTIMIZER_PLAN_OK || index_plan.has_filter != 1)
+        if (status != PRDB_SDK_OPTIMIZER_PLAN_OK ||
+            index_plan.has_filter != (statement.has_join_where != 0))
             return fail_statement_v19(&host->v4.v3,
                                       PRDB_SDK_SQL_EXEC_SHAPE_MISMATCH);
     } else if (optimizer_result.plan[2] ==
@@ -2065,9 +1912,33 @@ int32_t prdb_sdk_sql_execute_inner_join_optimizer_v20(
         status = prdb_sdk_optimizer_decode_index_prefix_join_plan_v1(
             optimizer_result.plan, optimizer_result.plan_len,
             &prefix_plan, sizeof(prefix_plan));
-        if (status != PRDB_SDK_OPTIMIZER_PLAN_OK || prefix_plan.has_filter != 1)
+        if (status != PRDB_SDK_OPTIMIZER_PLAN_OK ||
+            prefix_plan.has_filter != (statement.has_join_where != 0))
             return fail_statement_v19(&host->v4.v3,
                                       PRDB_SDK_SQL_EXEC_SHAPE_MISMATCH);
+    }
+    if (statement.has_join_where == 0) {
+        return execute_inner_join_v19_with_page_limit(
+            &host->v4.v3, schema, schema_len, sql, sql_len, max_candidates,
+            max_batch_bytes, left_planner_response,
+            left_planner_response_capacity, right_planner_response,
+            right_planner_response_capacity, left_executor_response,
+            left_executor_response_capacity, right_executor_response,
+            right_executor_response_capacity, batch_response,
+            batch_response_capacity, left_planner_columns,
+            left_planner_column_capacity, right_planner_columns,
+            right_planner_column_capacity, left_executor_columns,
+            left_executor_column_capacity, right_executor_columns,
+            right_executor_column_capacity, cell_scratch, cell_scratch_capacity,
+            left_rows, left_row_capacity, right_rows, right_row_capacity,
+            materialized_bytes, materialized_bytes_capacity, on_row,
+            result_context, SQL_EXEC_V19_OPTIMIZER_MAX_SCAN_PAGES,
+            optimizer_result.plan_len >= 3 && optimizer_result.plan[2] ==
+                PRDB_SDK_OPTIMIZER_PLAN_KIND_INDEX_NESTED_LOOP_JOIN
+                ? &index_plan : NULL,
+            optimizer_result.plan_len >= 3 && optimizer_result.plan[2] ==
+                PRDB_SDK_OPTIMIZER_PLAN_KIND_INDEX_PREFIX_NESTED_LOOP_JOIN
+                ? &prefix_plan : NULL);
     }
     return execute_inner_join_v20_with_page_limit(
         &host->v4.v3, NULL, schema, schema_len, sql, sql_len, parameters, NULL,

@@ -1,7 +1,7 @@
 #include "prdb_sdk_optimizer_plan_v1.h"
-#include "prdb_sdk_optimizer_v2.h"
-#include "prdb_sdk_sql_exec_v3.h"
-#include "prdb_sdk_sql_v24.h"
+#include "prdb_sdk_optimizer_v1.h"
+#include "prdb_sdk_sql_exec_v1.h"
+#include "prdb_sdk_sql_v1.h"
 #include "prdb_query_abi_payload_codecs.h"
 
 #include <assert.h>
@@ -59,37 +59,37 @@ int main(void) {
     static prdb_sdk_optimizer_ordered_group_aggregate_plan_v1
         ordered_group_aggregate_decoded;
     static prdb_sdk_optimizer_ordered_select_plan_v1 ordered_select_decoded;
-    static prdb_sdk_select_v3 ordered_select_statement;
-    static prdb_sdk_select_binding_v3 ordered_select_binding;
-    static prdb_sdk_sql_column_shape_v2 ordered_select_columns[2];
-    static prdb_sdk_select_v19 join_statement;
-    static prdb_sdk_select_binding_v19 join_binding;
-    static prdb_sdk_select_v20 filtered_join_statement;
-    static prdb_sdk_select_binding_v20 filtered_join_binding;
+    static prdb_sdk_select_v1 ordered_select_statement;
+    static prdb_sdk_select_binding_v1 ordered_select_binding;
+    static prdb_sdk_sql_column_shape_v1 ordered_select_columns[2];
+    static prdb_sdk_select_v1 join_statement;
+    static prdb_sdk_select_binding_v1 join_binding;
+    static prdb_sdk_select_v1 filtered_join_statement;
+    static prdb_sdk_select_binding_v1 filtered_join_binding;
     static prdb_sdk_value_v1 filtered_join_parameters[3];
     static uint8_t filtered_join_parameter_bytes[3][1] = {{1}, {0}, {1}};
-    static prdb_sdk_select_v4 group_count_statement;
-    static prdb_sdk_select_binding_v4 group_count_binding;
-    static prdb_sdk_select_v12 ordered_group_count_statement;
-    static prdb_sdk_select_binding_v12 ordered_group_count_binding;
-    static prdb_sdk_sql_column_shape_v2 ordered_group_count_columns[1];
-    static prdb_sdk_select_v13 composite_group_count_statement;
-    static prdb_sdk_select_binding_v13 composite_group_count_binding;
-    static prdb_sdk_select_v13 composite_group_aggregate_statement;
-    static prdb_sdk_select_binding_v13 composite_group_aggregate_binding;
-    static prdb_sdk_select_v24 count_column_statement;
-    static prdb_sdk_select_binding_v24 count_column_binding;
-    static prdb_sdk_sql_column_shape_v2 composite_group_aggregate_columns[3];
+    static prdb_sdk_select_v1 group_count_statement;
+    static prdb_sdk_select_binding_v1 group_count_binding;
+    static prdb_sdk_select_v1 ordered_group_count_statement;
+    static prdb_sdk_select_binding_v1 ordered_group_count_binding;
+    static prdb_sdk_sql_column_shape_v1 ordered_group_count_columns[1];
+    static prdb_sdk_select_v1 composite_group_count_statement;
+    static prdb_sdk_select_binding_v1 composite_group_count_binding;
+    static prdb_sdk_select_v1 composite_group_aggregate_statement;
+    static prdb_sdk_select_binding_v1 composite_group_aggregate_binding;
+    static prdb_sdk_select_v1 count_column_statement;
+    static prdb_sdk_select_binding_v1 count_column_binding;
+    static prdb_sdk_sql_column_shape_v1 composite_group_aggregate_columns[3];
     static uint8_t count_column_optimizer_request[512];
     static uint64_t count_column_optimizer_request_len;
-    static prdb_sdk_select_v15 ordered_composite_group_count_statement;
-    static prdb_sdk_select_binding_v15 ordered_composite_group_count_binding;
-    static prdb_sdk_sql_column_shape_v2 ordered_composite_group_count_columns[2];
-    static prdb_sdk_select_v7 group_aggregate_statement;
-    static prdb_sdk_select_binding_v7 group_aggregate_binding;
-    static prdb_sdk_select_v12 ordered_group_aggregate_statement;
-    static prdb_sdk_select_binding_v12 ordered_group_aggregate_binding;
-    static prdb_sdk_sql_column_shape_v2 group_aggregate_columns[2];
+    static prdb_sdk_select_v1 ordered_composite_group_count_statement;
+    static prdb_sdk_select_binding_v1 ordered_composite_group_count_binding;
+    static prdb_sdk_sql_column_shape_v1 ordered_composite_group_count_columns[2];
+    static prdb_sdk_select_v1 group_aggregate_statement;
+    static prdb_sdk_select_binding_v1 group_aggregate_binding;
+    static prdb_sdk_select_v1 ordered_group_aggregate_statement;
+    static prdb_sdk_select_binding_v1 ordered_group_aggregate_binding;
+    static prdb_sdk_sql_column_shape_v1 group_aggregate_columns[2];
     uint32_t ordered_select_order_key_offset;
     uint32_t ordered_select_payload_len = build_ordered_select_plan(
         ordered_select_payload, &ordered_select_order_key_offset);
@@ -107,15 +107,15 @@ int main(void) {
            ordered_select_decoded.plan.limit == 5);
     static const uint8_t ordered_select_sql[] =
         "SELECT id FROM items ORDER BY label DESC LIMIT 5";
-    assert(prdb_sdk_sql_parse_select_v3(
+    assert(prdb_sdk_sql_parse_select_v1(
                ordered_select_sql, sizeof(ordered_select_sql) - 1,
                &ordered_select_statement, sizeof(ordered_select_statement),
                NULL) == PRDB_SDK_SQL_OK);
-    ordered_select_columns[0] = (prdb_sdk_sql_column_shape_v2){
+    ordered_select_columns[0] = (prdb_sdk_sql_column_shape_v1){
         (const uint8_t *)"id", 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0};
-    ordered_select_columns[1] = (prdb_sdk_sql_column_shape_v2){
+    ordered_select_columns[1] = (prdb_sdk_sql_column_shape_v1){
         (const uint8_t *)"label", 5, 1, PRDB_SDK_VALUE_TYPE_TEXT, 0, 0};
-    assert(prdb_sdk_sql_bind_select_v3(
+    assert(prdb_sdk_sql_bind_select_v1(
                &ordered_select_statement, (const uint8_t *)"items", 5,
                ordered_select_columns, 2, &ordered_select_binding,
                sizeof(ordered_select_binding)) == PRDB_SDK_SQL_OK);
@@ -138,20 +138,20 @@ int main(void) {
                ordered_select_malformed, ordered_select_payload_len,
                &ordered_select_decoded, sizeof(ordered_select_decoded)) ==
            PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD);
-    static prdb_sdk_sql_column_shape_v2 join_left_columns[3];
-    static prdb_sdk_sql_column_shape_v2 join_right_columns[3];
+    static prdb_sdk_sql_column_shape_v1 join_left_columns[3];
+    static prdb_sdk_sql_column_shape_v1 join_right_columns[3];
     static resolve_context resolve = {0};
     static prdb_host_api_v2 host = {0};
     static prdb_host_api_v4 host_v4 = {0};
     static prdb_host_api_v5 host_v5 = {0};
     static prdb_sdk_executor_relation_v1 acquired_relation;
-    static prdb_sdk_sql_column_shape_v2 acquired_columns[4];
+    static prdb_sdk_sql_column_shape_v1 acquired_columns[4];
     static prdb_sdk_optimizer_scan_state_v1 scan_state;
     static prdb_sdk_batch_v1 row_batch;
     static prdb_sdk_value_v1 source_cells[4];
     static prdb_sdk_value_v1 projected_values[1];
     static prdb_sdk_value_v1 delete_cell_scratch[4];
-    static prdb_sdk_select_binding_v2 delete_binding;
+    static prdb_sdk_select_binding_v1 delete_binding;
     uint8_t row_batch_bytes[128];
     uint8_t batch_response[128];
     uint8_t result_record_buffer[256];
@@ -168,7 +168,7 @@ int main(void) {
     uint8_t delete_target_handles[
         PRDB_SDK_OPTIMIZER_PLAN_MAX_DELETE_TARGETS * 16];
     uint8_t sql[] = "SELECT c3 FROM items LIMIT 1";
-    static prdb_sdk_select_v2 statement;
+    static prdb_sdk_select_v1 statement;
     static prdb_sdk_delete_v1 delete_statement;
     static prdb_sdk_update_v1 update_statement;
     uint64_t response_len = 0;
@@ -423,7 +423,7 @@ int main(void) {
         sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
         PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_INTEGER,
         filter_parameter_bytes, sizeof(filter_parameter_bytes)}};
-    assert(prdb_sdk_sql_parse_select_v2(
+    assert(prdb_sdk_sql_parse_select_v1(
                sql_filtered, sizeof(sql_filtered) - 1, &statement,
                sizeof(statement), NULL) == PRDB_SDK_SQL_OK);
     resolve.calls = 0;
@@ -715,7 +715,7 @@ int main(void) {
     assert(execute_status == PRDB_SDK_OPTIMIZER_PLAN_OK);
     assert(total_rows == 1 && projected_rows_seen == 1 && resolve.calls == 6);
 
-    assert(prdb_sdk_sql_parse_select_v2(
+    assert(prdb_sdk_sql_parse_select_v1(
                sql, sizeof(sql) - 1, &statement, sizeof(statement), NULL) ==
            PRDB_SDK_SQL_OK);
     resolve.calls = 0;
@@ -725,7 +725,7 @@ int main(void) {
            PRDB_SDK_OPTIMIZER_PLAN_OK);
     assert(resolve.calls == 1);
     uint8_t sql_mixed_case[] = "SELECT C3 FROM ITEMS LIMIT 1";
-    assert(prdb_sdk_sql_parse_select_v2(
+    assert(prdb_sdk_sql_parse_select_v1(
                sql_mixed_case, sizeof(sql_mixed_case) - 1, &statement,
                sizeof(statement), NULL) == PRDB_SDK_SQL_OK);
     assert(prdb_sdk_optimizer_validate_select_plan_v1(
@@ -734,7 +734,7 @@ int main(void) {
            PRDB_SDK_OPTIMIZER_PLAN_OK);
     assert(resolve.calls == 2);
     uint8_t sql_wrong_projection[] = "SELECT c2 FROM items LIMIT 1";
-    assert(prdb_sdk_sql_parse_select_v2(
+    assert(prdb_sdk_sql_parse_select_v1(
                sql_wrong_projection, sizeof(sql_wrong_projection) - 1,
                &statement, sizeof(statement), NULL) == PRDB_SDK_SQL_OK);
     uint32_t calls_before_projection_mismatch = resolve.calls;
@@ -744,7 +744,7 @@ int main(void) {
            PRDB_SDK_OPTIMIZER_PLAN_IDENTITY_MISMATCH);
     assert(resolve.calls == calls_before_projection_mismatch + 1);
     uint8_t sql_wrong_limit[] = "SELECT c3 FROM items LIMIT 2";
-    assert(prdb_sdk_sql_parse_select_v2(
+    assert(prdb_sdk_sql_parse_select_v1(
                sql_wrong_limit, sizeof(sql_wrong_limit) - 1, &statement,
                sizeof(statement), NULL) == PRDB_SDK_SQL_OK);
     calls_before_projection_mismatch = resolve.calls;
@@ -753,7 +753,7 @@ int main(void) {
                payload_len, response, sizeof(response), &response_len) ==
            PRDB_SDK_OPTIMIZER_PLAN_IDENTITY_MISMATCH);
     assert(resolve.calls == calls_before_projection_mismatch);
-    assert(prdb_sdk_sql_parse_select_v2(
+    assert(prdb_sdk_sql_parse_select_v1(
                sql, sizeof(sql) - 1, &statement, sizeof(statement), NULL) ==
            PRDB_SDK_SQL_OK);
     resolve.optimizer_response_len = build_optimizer_response(
@@ -773,7 +773,7 @@ int main(void) {
             build_ordered_c0_c3_plan(ordered_select_malformed, 0);
         uint32_t ordered_limit_zero_delivered = 99;
         uint32_t rows_before = projected_rows_seen;
-        assert(prdb_sdk_sql_parse_select_v3(
+        assert(prdb_sdk_sql_parse_select_v1(
                    ordered_limit_zero_sql,
                    sizeof(ordered_limit_zero_sql) - 1,
                    &ordered_select_statement,
@@ -819,7 +819,7 @@ int main(void) {
         uint32_t rows_before = projected_rows_seen;
         uint32_t saw_ordered_open = 0;
         uint32_t saw_ordered_batch = 0;
-        assert(prdb_sdk_sql_parse_select_v3(
+        assert(prdb_sdk_sql_parse_select_v1(
                    ordered_materialization_sql,
                    sizeof(ordered_materialization_sql) - 1,
                    &ordered_select_statement,
@@ -868,14 +868,14 @@ int main(void) {
         static const uint8_t ordered_cancel_sql[] =
             "SELECT c0 FROM items ORDER BY c3 DESC LIMIT 33";
         static uint8_t ordered_materialized[
-            PRDB_SDK_SQL_EXEC_V3_MAX_MATERIALIZED_BYTES];
+            PRDB_SDK_SQL_EXEC_MAX_MATERIALIZED_BYTES];
         uint8_t ordered_executor_batch[4096];
         uint32_t ordered_plan_len =
             build_ordered_c0_c3_plan(ordered_select_malformed, 33);
         uint32_t ordered_batch_len =
             build_repeated_row_batch(ordered_executor_batch, 33);
         uint32_t ordered_delivered = 99;
-        assert(prdb_sdk_sql_parse_select_v3(
+        assert(prdb_sdk_sql_parse_select_v1(
                    ordered_cancel_sql, sizeof(ordered_cancel_sql) - 1,
                    &ordered_select_statement,
                    sizeof(ordered_select_statement), NULL) ==
@@ -993,7 +993,7 @@ int main(void) {
     resolve.statement_failures = 0;
 
     uint8_t sql_with_filter[] = "SELECT c3 FROM items WHERE c3 = $1";
-    assert(prdb_sdk_sql_parse_select_v2(
+    assert(prdb_sdk_sql_parse_select_v1(
                sql_with_filter, sizeof(sql_with_filter) - 1, &statement,
                sizeof(statement), NULL) == PRDB_SDK_SQL_OK);
     uint32_t optimizer_calls = resolve.optimizer_calls;
@@ -1009,7 +1009,7 @@ int main(void) {
     assert(resolve.optimizer_calls == optimizer_calls &&
            resolve.statement_failures == 0);
 
-    assert(prdb_sdk_sql_parse_select_v2(
+    assert(prdb_sdk_sql_parse_select_v1(
                sql_filtered, sizeof(sql_filtered) - 1, &statement,
                sizeof(statement), NULL) == PRDB_SDK_SQL_OK);
     resolve.optimizer_response_len = build_optimizer_response(
@@ -1060,7 +1060,7 @@ int main(void) {
     (void)boolean_predicate_offset;
     uint8_t sql_boolean_filtered[] =
         "SELECT c0 FROM items WHERE c0 = $1 AND c0 = $1 LIMIT 1";
-    assert(prdb_sdk_sql_parse_select_v2(
+    assert(prdb_sdk_sql_parse_select_v1(
                sql_boolean_filtered, sizeof(sql_boolean_filtered) - 1,
                &statement, sizeof(statement), NULL) == PRDB_SDK_SQL_OK);
     resolve.optimizer_response_len = build_optimizer_response(
@@ -1083,7 +1083,7 @@ int main(void) {
     assert(resolve.optimizer_calls == 1 && total_rows == 1 &&
            projected_rows_seen == 1 && resolve.statement_failures == 0);
 
-    assert(prdb_sdk_sql_parse_select_v2(
+    assert(prdb_sdk_sql_parse_select_v1(
                sql, sizeof(sql) - 1, &statement, sizeof(statement), NULL) ==
            PRDB_SDK_SQL_OK);
     resolve.optimizer_response[2] = PRDB_SDK_OPTIMIZER_STATUS_INTERNAL;
@@ -1256,16 +1256,16 @@ int main(void) {
            group_count_decoded.plan.limit == 5);
     static const uint8_t group_count_sql[] =
         "SELECT id, COUNT(*) FROM items GROUP BY id LIMIT 5";
-    assert(prdb_sdk_sql_parse_select_v4(
+    assert(prdb_sdk_sql_parse_select_v1(
                group_count_sql, sizeof(group_count_sql) - 1,
                &group_count_statement, sizeof(group_count_statement), NULL) ==
            PRDB_SDK_SQL_OK);
     group_count_binding.struct_size = sizeof(group_count_binding);
-    group_count_binding.abi_version = PRDB_SDK_SQL_ABI_V4_VERSION;
-    group_count_binding.base.struct_size = sizeof(group_count_binding.base);
-    group_count_binding.base.abi_version = PRDB_SDK_SQL_ABI_V2_VERSION;
-    group_count_binding.base.projection_count = 1;
-    group_count_binding.base.projection_ordinals[0] = 0;
+    group_count_binding.abi_version = PRDB_SDK_SQL_ABI_V1_VERSION;
+    group_count_binding.struct_size = sizeof(group_count_binding);
+    group_count_binding.abi_version = PRDB_SDK_SQL_ABI_V1_VERSION;
+    group_count_binding.projection_count = 1;
+    group_count_binding.projection_ordinals[0] = 0;
     group_count_binding.has_group_by = 1;
     group_count_binding.aggregate_kind = PRDB_SDK_SQL_AGGREGATE_COUNT_STAR;
     group_count_binding.group_by_column.ordinal = 0;
@@ -1274,13 +1274,13 @@ int main(void) {
                &group_count_statement, &group_count_binding,
                (const uint8_t *)"public", 6, group_count_payload,
                group_count_payload_len) == PRDB_SDK_OPTIMIZER_PLAN_OK);
-    group_count_statement.base.limit = 4;
+    group_count_statement.limit = 4;
     assert(prdb_sdk_optimizer_match_group_count_plan_v1(
                &group_count_statement, &group_count_binding,
                (const uint8_t *)"public", 6, group_count_payload,
                group_count_payload_len) ==
            PRDB_SDK_OPTIMIZER_PLAN_IDENTITY_MISMATCH);
-    group_count_statement.base.limit = 5;
+    group_count_statement.limit = 5;
     memcpy(group_count_malformed, group_count_payload,
            group_count_payload_len);
     group_count_malformed[group_key_id_offset] = 5;
@@ -1311,12 +1311,12 @@ int main(void) {
     ordered_group_count_columns[0].name_len = 2;
     ordered_group_count_columns[0].ordinal = 0;
     ordered_group_count_columns[0].type_code = PRDB_SDK_VALUE_TYPE_INTEGER;
-    assert(prdb_sdk_sql_parse_select_v12(
+    assert(prdb_sdk_sql_parse_select_v1(
                ordered_group_count_sql, sizeof(ordered_group_count_sql) - 1,
                &ordered_group_count_statement,
                sizeof(ordered_group_count_statement), NULL) ==
            PRDB_SDK_SQL_OK);
-    assert(prdb_sdk_sql_bind_select_v12(
+    assert(prdb_sdk_sql_bind_select_v1(
                &ordered_group_count_statement, (const uint8_t *)"items", 5,
                ordered_group_count_columns, 1,
                &ordered_group_count_binding,
@@ -1328,7 +1328,7 @@ int main(void) {
                ordered_group_count_payload_len);
     assert(ordered_match_status == PRDB_SDK_OPTIMIZER_PLAN_OK);
     ordered_group_count_statement.order_items[0].direction =
-        PRDB_SDK_SQL_V10_ORDER_ASCENDING;
+        PRDB_SDK_SQL_ORDER_ASCENDING;
     assert(prdb_sdk_optimizer_match_ordered_group_count_plan_v1(
                &ordered_group_count_statement, &ordered_group_count_binding,
                (const uint8_t *)"public", 6, ordered_group_count_payload,
@@ -1354,7 +1354,7 @@ int main(void) {
            composite_group_count_decoded.plan.limit == 5);
     static const uint8_t composite_group_count_sql[] =
         "SELECT active, id, COUNT(*) FROM items GROUP BY active, id LIMIT 5";
-    assert(prdb_sdk_sql_parse_select_v13(
+    assert(prdb_sdk_sql_parse_select_v1(
                composite_group_count_sql,
                sizeof(composite_group_count_sql) - 1,
                &composite_group_count_statement,
@@ -1362,15 +1362,15 @@ int main(void) {
            PRDB_SDK_SQL_OK);
     composite_group_count_binding.struct_size =
         sizeof(composite_group_count_binding);
-    composite_group_count_binding.abi_version = PRDB_SDK_SQL_ABI_V13_VERSION;
-    composite_group_count_binding.base.struct_size =
-        sizeof(composite_group_count_binding.base);
-    composite_group_count_binding.base.abi_version =
-        PRDB_SDK_SQL_ABI_V7_VERSION;
-    composite_group_count_binding.base.base.struct_size =
-        sizeof(composite_group_count_binding.base.base);
-    composite_group_count_binding.base.base.abi_version =
-        PRDB_SDK_SQL_ABI_V2_VERSION;
+    composite_group_count_binding.abi_version = PRDB_SDK_SQL_ABI_V1_VERSION;
+    composite_group_count_binding.struct_size =
+        sizeof(composite_group_count_binding);
+    composite_group_count_binding.abi_version =
+        PRDB_SDK_SQL_ABI_V1_VERSION;
+    composite_group_count_binding.struct_size =
+        sizeof(composite_group_count_binding);
+    composite_group_count_binding.abi_version =
+        PRDB_SDK_SQL_ABI_V1_VERSION;
     composite_group_count_binding.group_key_count = 2;
     composite_group_count_binding.group_keys[0].ordinal = 1;
     composite_group_count_binding.group_keys[0].type_code = 1;
@@ -1383,7 +1383,7 @@ int main(void) {
                composite_group_count_payload,
                composite_group_count_payload_len) ==
            PRDB_SDK_OPTIMIZER_PLAN_OK);
-    composite_group_count_statement.base.base.limit = 4;
+    composite_group_count_statement.limit = 4;
     assert(prdb_sdk_optimizer_match_composite_group_count_plan_v1(
                &composite_group_count_statement,
                &composite_group_count_binding,
@@ -1391,7 +1391,7 @@ int main(void) {
                composite_group_count_payload,
                composite_group_count_payload_len) ==
            PRDB_SDK_OPTIMIZER_PLAN_IDENTITY_MISMATCH);
-    composite_group_count_statement.base.base.limit = 5;
+    composite_group_count_statement.limit = 5;
     memcpy(composite_group_count_malformed, composite_group_count_payload,
            composite_group_count_payload_len);
     composite_group_count_malformed[composite_group_key_offset] = 6;
@@ -1403,13 +1403,13 @@ int main(void) {
            PRDB_SDK_OPTIMIZER_PLAN_INVALID_PAYLOAD);
 
     composite_group_aggregate_columns[0] =
-        (prdb_sdk_sql_column_shape_v2){
+        (prdb_sdk_sql_column_shape_v1){
             (const uint8_t *)"id", 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0};
     composite_group_aggregate_columns[1] =
-        (prdb_sdk_sql_column_shape_v2){
+        (prdb_sdk_sql_column_shape_v1){
             (const uint8_t *)"active", 6, 1, PRDB_SDK_VALUE_TYPE_BOOLEAN, 0, 0};
     composite_group_aggregate_columns[2] =
-        (prdb_sdk_sql_column_shape_v2){
+        (prdb_sdk_sql_column_shape_v1){
             (const uint8_t *)"amount", 6, 2, PRDB_SDK_VALUE_TYPE_BIGINT, 0, 0};
     static const uint8_t *const composite_group_aggregate_sql[] = {
         (const uint8_t *)"SELECT active, id, COUNT(*) FROM items "
@@ -1435,8 +1435,8 @@ int main(void) {
         sizeof("SELECT active, id, AVG(amount) FROM items "
                "GROUP BY active, id LIMIT 5") - 1,
     };
-    for (uint8_t aggregate_kind = PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR;
-         aggregate_kind <= PRDB_SDK_SQL_V7_AGGREGATE_AVG; ++aggregate_kind) {
+    for (uint8_t aggregate_kind = PRDB_SDK_SQL_AGGREGATE_COUNT_STAR;
+         aggregate_kind <= PRDB_SDK_SQL_AGGREGATE_AVG; ++aggregate_kind) {
         uint32_t composite_group_aggregate_payload_len =
             build_composite_group_aggregate_plan(
                 composite_group_aggregate_payload, aggregate_kind);
@@ -1451,25 +1451,25 @@ int main(void) {
                composite_group_aggregate_decoded.aggregate_kind ==
                    aggregate_kind &&
                composite_group_aggregate_decoded.plan.scan_column_count ==
-                   (aggregate_kind == PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR
+                   (aggregate_kind == PRDB_SDK_SQL_AGGREGATE_COUNT_STAR
                         ? 2
                         : 3) &&
                composite_group_aggregate_decoded.group_keys[0].ordinal == 1 &&
                composite_group_aggregate_decoded.group_keys[1].ordinal == 0 &&
                composite_group_aggregate_decoded.has_aggregate_column ==
-                   (aggregate_kind != PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR) &&
+                   (aggregate_kind != PRDB_SDK_SQL_AGGREGATE_COUNT_STAR) &&
                composite_group_aggregate_decoded.plan.limit == 5);
-        if (aggregate_kind != PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR) {
+        if (aggregate_kind != PRDB_SDK_SQL_AGGREGATE_COUNT_STAR) {
             assert(composite_group_aggregate_decoded.aggregate_column.ordinal ==
                    2);
         }
-        assert(prdb_sdk_sql_parse_select_v13(
+        assert(prdb_sdk_sql_parse_select_v1(
                    composite_group_aggregate_sql[aggregate_kind - 1],
                    composite_group_aggregate_sql_len[aggregate_kind - 1],
                    &composite_group_aggregate_statement,
                    sizeof(composite_group_aggregate_statement), NULL) ==
                PRDB_SDK_SQL_OK);
-        assert(prdb_sdk_sql_bind_select_v13(
+        assert(prdb_sdk_sql_bind_select_v1(
                    &composite_group_aggregate_statement,
                    (const uint8_t *)"items", 5,
                    composite_group_aggregate_columns, 3,
@@ -1487,32 +1487,32 @@ int main(void) {
     static const uint8_t count_column_composite_sql[] =
         "SELECT active, id, COUNT(amount) FROM items "
         "GROUP BY active, id LIMIT 5";
-    assert(prdb_sdk_sql_parse_select_v24(
+    assert(prdb_sdk_sql_parse_select_v1(
                count_column_composite_sql,
                sizeof(count_column_composite_sql) - 1,
                &count_column_statement, sizeof(count_column_statement), NULL) ==
            PRDB_SDK_SQL_OK);
-    assert(prdb_sdk_sql_bind_select_v24(
+    assert(prdb_sdk_sql_bind_select_v1(
                &count_column_statement, (const uint8_t *)"items", 5,
                composite_group_aggregate_columns, 3, &count_column_binding,
                sizeof(count_column_binding)) == PRDB_SDK_SQL_BIND_OK);
-    assert(count_column_statement.base.base.base.base.base.base.aggregate_kind ==
-           PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN);
+    assert(count_column_statement.aggregate_kind ==
+           PRDB_SDK_SQL_AGGREGATE_COUNT_COLUMN);
     assert(prdb_sdk_optimizer_encode_composite_group_aggregate_v1(
-               &count_column_statement.base.base.base.base.base,
+               &count_column_statement,
                (const uint8_t *)"public", 6, count_column_optimizer_request,
                sizeof(count_column_optimizer_request),
                &count_column_optimizer_request_len) ==
            PRDB_SDK_OPTIMIZER_ENCODE_OK);
     assert(count_column_optimizer_request_len > 30 &&
            count_column_optimizer_request[28] ==
-               PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN);
+               PRDB_SDK_SQL_AGGREGATE_COUNT_COLUMN);
     uint32_t count_column_plan_len = build_composite_group_aggregate_plan(
         composite_group_aggregate_payload,
-        PRDB_SDK_SQL_V7_AGGREGATE_COUNT_COLUMN);
+        PRDB_SDK_SQL_AGGREGATE_COUNT_COLUMN);
     assert(prdb_sdk_optimizer_match_composite_group_aggregate_plan_v1(
-               &count_column_statement.base.base.base.base.base,
-               &count_column_binding.base.base.base.base.base,
+               &count_column_statement,
+               &count_column_binding,
                (const uint8_t *)"public", 6,
                composite_group_aggregate_payload, count_column_plan_len) ==
            PRDB_SDK_OPTIMIZER_PLAN_OK);
@@ -1528,7 +1528,7 @@ int main(void) {
     assert(filtered_composite_group_aggregate_decoded.plan.plan_kind == 15 &&
            filtered_composite_group_aggregate_decoded.group_key_count == 2 &&
            filtered_composite_group_aggregate_decoded.aggregate_kind ==
-               PRDB_SDK_SQL_V7_AGGREGATE_SUM &&
+               PRDB_SDK_SQL_AGGREGATE_SUM &&
            filtered_composite_group_aggregate_decoded.filter.present == 1 &&
            filtered_composite_group_aggregate_decoded.plan.scan_column_count == 3 &&
            filtered_composite_group_aggregate_decoded.filter.prefix_len == 21 &&
@@ -1550,13 +1550,13 @@ int main(void) {
             sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
             PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_BOOLEAN,
             &bool_value, 1}};
-        static prdb_sdk_select_v13 filtered_statement;
-        static prdb_sdk_select_binding_v13 filtered_binding;
-        assert(prdb_sdk_sql_parse_select_v13(
+        static prdb_sdk_select_v1 filtered_statement;
+        static prdb_sdk_select_binding_v1 filtered_binding;
+        assert(prdb_sdk_sql_parse_select_v1(
                    filtered_composite_sql, sizeof(filtered_composite_sql) - 1,
                    &filtered_statement, sizeof(filtered_statement), NULL) ==
                PRDB_SDK_SQL_OK);
-        assert(prdb_sdk_sql_bind_select_v13(
+        assert(prdb_sdk_sql_bind_select_v1(
                    &filtered_statement, (const uint8_t *)"items", 5,
                    composite_group_aggregate_columns, 3, &filtered_binding,
                    sizeof(filtered_binding)) == PRDB_SDK_SQL_BIND_OK);
@@ -1592,15 +1592,15 @@ int main(void) {
         "SELECT active, id, COUNT(*) FROM items GROUP BY active, id "
         "ORDER BY active DESC NULLS LAST, COUNT(*) DESC, "
         "id ASC NULLS FIRST LIMIT 5";
-    ordered_composite_group_count_columns[0] = (prdb_sdk_sql_column_shape_v2){
+    ordered_composite_group_count_columns[0] = (prdb_sdk_sql_column_shape_v1){
         (const uint8_t *)"id", 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0};
-    ordered_composite_group_count_columns[1] = (prdb_sdk_sql_column_shape_v2){
+    ordered_composite_group_count_columns[1] = (prdb_sdk_sql_column_shape_v1){
         (const uint8_t *)"active", 6, 1, PRDB_SDK_VALUE_TYPE_BOOLEAN, 0, 0};
-    assert(prdb_sdk_sql_parse_select_v15(ordered_composite_group_count_sql,
+    assert(prdb_sdk_sql_parse_select_v1(ordered_composite_group_count_sql,
                sizeof(ordered_composite_group_count_sql) - 1,
                &ordered_composite_group_count_statement,
                sizeof(ordered_composite_group_count_statement), NULL) == PRDB_SDK_SQL_OK);
-    assert(prdb_sdk_sql_bind_select_v15(&ordered_composite_group_count_statement,
+    assert(prdb_sdk_sql_bind_select_v1(&ordered_composite_group_count_statement,
                (const uint8_t *)"items", 5, ordered_composite_group_count_columns, 2,
                &ordered_composite_group_count_binding,
                sizeof(ordered_composite_group_count_binding)) == PRDB_SDK_SQL_BIND_OK);
@@ -1609,7 +1609,7 @@ int main(void) {
                (const uint8_t *)"public", 6, ordered_composite_group_count_payload,
                ordered_composite_group_count_payload_len);
     assert(ordered_composite_match_status == PRDB_SDK_OPTIMIZER_PLAN_OK);
-    ordered_composite_group_count_statement.order_items[0].direction = PRDB_SDK_SQL_V10_ORDER_ASCENDING;
+    ordered_composite_group_count_statement.order_items[0].direction = PRDB_SDK_SQL_ORDER_ASCENDING;
     assert(prdb_sdk_optimizer_match_ordered_composite_group_count_plan_v1(
                &ordered_composite_group_count_statement, &ordered_composite_group_count_binding,
                (const uint8_t *)"public", 6, ordered_composite_group_count_payload,
@@ -1617,18 +1617,18 @@ int main(void) {
     uint32_t group_aggregate_payload_len = build_group_aggregate_plan(group_aggregate_payload);
     assert(prdb_sdk_optimizer_decode_group_aggregate_plan_v1(group_aggregate_payload,
                group_aggregate_payload_len, &group_aggregate_decoded, sizeof(group_aggregate_decoded)) == PRDB_SDK_OPTIMIZER_PLAN_OK);
-    assert(group_aggregate_decoded.plan.plan_kind == 10 && group_aggregate_decoded.aggregate_kind == PRDB_SDK_SQL_V7_AGGREGATE_AVG &&
+    assert(group_aggregate_decoded.plan.plan_kind == 10 && group_aggregate_decoded.aggregate_kind == PRDB_SDK_SQL_AGGREGATE_AVG &&
            group_aggregate_decoded.has_aggregate_column == 1 && group_aggregate_decoded.plan.scan_column_count == 2);
     static const uint8_t group_aggregate_sql[] = "SELECT id, AVG(amount) FROM items GROUP BY id LIMIT 5";
-    group_aggregate_columns[0] = (prdb_sdk_sql_column_shape_v2){(const uint8_t *)"id", 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0};
-    group_aggregate_columns[1] = (prdb_sdk_sql_column_shape_v2){(const uint8_t *)"amount", 6, 1, PRDB_SDK_VALUE_TYPE_BIGINT, 0, 0};
-    assert(prdb_sdk_sql_parse_select_v7(group_aggregate_sql, sizeof(group_aggregate_sql) - 1,
+    group_aggregate_columns[0] = (prdb_sdk_sql_column_shape_v1){(const uint8_t *)"id", 2, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0};
+    group_aggregate_columns[1] = (prdb_sdk_sql_column_shape_v1){(const uint8_t *)"amount", 6, 1, PRDB_SDK_VALUE_TYPE_BIGINT, 0, 0};
+    assert(prdb_sdk_sql_parse_select_v1(group_aggregate_sql, sizeof(group_aggregate_sql) - 1,
                &group_aggregate_statement, sizeof(group_aggregate_statement), NULL) == PRDB_SDK_SQL_OK);
-    assert(prdb_sdk_sql_bind_select_v7(&group_aggregate_statement, (const uint8_t *)"items", 5,
+    assert(prdb_sdk_sql_bind_select_v1(&group_aggregate_statement, (const uint8_t *)"items", 5,
                group_aggregate_columns, 2, &group_aggregate_binding, sizeof(group_aggregate_binding)) == PRDB_SDK_SQL_BIND_OK);
     assert(prdb_sdk_optimizer_match_group_aggregate_plan_v1(&group_aggregate_statement, &group_aggregate_binding,
                (const uint8_t *)"public", 6, group_aggregate_payload, group_aggregate_payload_len) == PRDB_SDK_OPTIMIZER_PLAN_OK);
-    group_aggregate_statement.base.limit = 4;
+    group_aggregate_statement.limit = 4;
     assert(prdb_sdk_optimizer_match_group_aggregate_plan_v1(&group_aggregate_statement, &group_aggregate_binding,
                (const uint8_t *)"public", 6, group_aggregate_payload, group_aggregate_payload_len) == PRDB_SDK_OPTIMIZER_PLAN_IDENTITY_MISMATCH);
     static const uint8_t *const ordered_group_aggregate_sql[] = {
@@ -1657,8 +1657,8 @@ int main(void) {
     };
     uint32_t ordered_group_aggregate_order_offset = 0;
     uint32_t ordered_group_aggregate_payload_len = 0;
-    for (uint8_t aggregate_kind = PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR;
-         aggregate_kind <= PRDB_SDK_SQL_V7_AGGREGATE_AVG; ++aggregate_kind) {
+    for (uint8_t aggregate_kind = PRDB_SDK_SQL_AGGREGATE_COUNT_STAR;
+         aggregate_kind <= PRDB_SDK_SQL_AGGREGATE_AVG; ++aggregate_kind) {
         ordered_group_aggregate_payload_len =
             build_ordered_group_aggregate_plan(
                 ordered_group_aggregate_payload,
@@ -1675,13 +1675,13 @@ int main(void) {
                ordered_group_aggregate_decoded.order_count == 2 &&
                ordered_group_aggregate_decoded.order_items[0].source == 1 &&
                ordered_group_aggregate_decoded.order_items[1].source == 0);
-        assert(prdb_sdk_sql_parse_select_v12(
+        assert(prdb_sdk_sql_parse_select_v1(
                    ordered_group_aggregate_sql[aggregate_kind - 1],
                    ordered_group_aggregate_sql_len[aggregate_kind - 1],
                    &ordered_group_aggregate_statement,
                    sizeof(ordered_group_aggregate_statement), NULL) ==
                PRDB_SDK_SQL_OK);
-        assert(prdb_sdk_sql_bind_select_v12(
+        assert(prdb_sdk_sql_bind_select_v1(
                    &ordered_group_aggregate_statement,
                    (const uint8_t *)"items", 5, group_aggregate_columns, 2,
                    &ordered_group_aggregate_binding,
@@ -1695,14 +1695,14 @@ int main(void) {
                    ordered_group_aggregate_payload_len) ==
                PRDB_SDK_OPTIMIZER_PLAN_OK);
     }
-    ordered_group_aggregate_statement.base.base.base.base.base.limit = 4;
+    ordered_group_aggregate_statement.limit = 4;
     assert(prdb_sdk_optimizer_match_ordered_group_aggregate_plan_v1(
                &ordered_group_aggregate_statement,
                &ordered_group_aggregate_binding, (const uint8_t *)"public", 6,
                ordered_group_aggregate_payload,
                ordered_group_aggregate_payload_len) ==
            PRDB_SDK_OPTIMIZER_PLAN_IDENTITY_MISMATCH);
-    ordered_group_aggregate_statement.base.base.base.base.base.limit = 5;
+    ordered_group_aggregate_statement.limit = 5;
     memcpy(group_aggregate_malformed, ordered_group_aggregate_payload,
            ordered_group_aggregate_payload_len);
     group_aggregate_malformed[ordered_group_aggregate_order_offset] = 0;
@@ -1730,16 +1730,16 @@ int main(void) {
         PRDB_SDK_VALUE_TYPE_INTEGER, PRDB_SDK_VALUE_TYPE_BOOLEAN,
         PRDB_SDK_VALUE_TYPE_TEXT};
     for (uint32_t index = 0; index < 3; ++index) {
-        join_left_columns[index] = (prdb_sdk_sql_column_shape_v2){
+        join_left_columns[index] = (prdb_sdk_sql_column_shape_v1){
             join_column_names[index], join_column_name_lengths[index], index,
             join_column_types[index], 0, 0};
         join_right_columns[index] = join_left_columns[index];
     }
     uint32_t join_error_offset = 0;
-    assert(prdb_sdk_sql_parse_select_v19(
+    assert(prdb_sdk_sql_parse_select_v1(
                join_sql, sizeof(join_sql) - 1, &join_statement,
                sizeof(join_statement), &join_error_offset) == PRDB_SDK_SQL_OK);
-    assert(prdb_sdk_sql_bind_select_v19(
+    assert(prdb_sdk_sql_bind_join_select_v1(
                &join_statement, join_left_name, sizeof(join_left_name) - 1,
                join_left_columns, 3, join_right_name,
                sizeof(join_right_name) - 1, join_right_columns, 3,
@@ -1753,11 +1753,11 @@ int main(void) {
             PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_BOOLEAN,
             filtered_join_parameter_bytes[index], 1};
     }
-    assert(prdb_sdk_sql_parse_select_v20(
+    assert(prdb_sdk_sql_parse_select_v1(
                filtered_join_sql, sizeof(filtered_join_sql) - 1,
                &filtered_join_statement, sizeof(filtered_join_statement),
                &join_error_offset) == PRDB_SDK_SQL_OK);
-    assert(prdb_sdk_sql_bind_select_v20(
+    assert(prdb_sdk_sql_bind_join_select_v1(
                &filtered_join_statement, join_left_name,
                sizeof(join_left_name) - 1, join_left_columns, 3,
                join_right_name, sizeof(join_right_name) - 1,
@@ -1768,20 +1768,20 @@ int main(void) {
                filtered_join_parameters, 3, (const uint8_t *)"public", 6,
                filtered_join_payload, filtered_join_payload_len) ==
            PRDB_SDK_OPTIMIZER_PLAN_OK);
-    filtered_join_statement.comparison = PRDB_SDK_SQL_COMPARE_EQUAL;
+    filtered_join_statement.join_where_comparison = PRDB_SDK_SQL_COMPARE_EQUAL;
     assert(prdb_sdk_optimizer_match_filtered_join_plan_v20_v1(
                &filtered_join_statement, &filtered_join_binding,
                filtered_join_parameters, 3, (const uint8_t *)"public", 6,
                filtered_join_payload, filtered_join_payload_len) ==
            PRDB_SDK_OPTIMIZER_PLAN_IDENTITY_MISMATCH);
-    filtered_join_statement.comparison = PRDB_SDK_SQL_COMPARE_GREATER;
-    filtered_join_statement.parameter_index = 2;
+    filtered_join_statement.join_where_comparison = PRDB_SDK_SQL_COMPARE_GREATER;
+    filtered_join_statement.join_where_parameter_index = 2;
     assert(prdb_sdk_optimizer_match_filtered_join_plan_v20_v1(
                &filtered_join_statement, &filtered_join_binding,
                filtered_join_parameters, 3, (const uint8_t *)"public", 6,
                filtered_join_payload, filtered_join_payload_len) ==
            PRDB_SDK_OPTIMIZER_PLAN_IDENTITY_MISMATCH);
-    filtered_join_statement.parameter_index = 3;
+    filtered_join_statement.join_where_parameter_index = 3;
     filtered_join_parameters[2].type_code = PRDB_SDK_VALUE_TYPE_INTEGER;
     assert(prdb_sdk_optimizer_match_filtered_join_plan_v20_v1(
                &filtered_join_statement, &filtered_join_binding,
@@ -1789,12 +1789,12 @@ int main(void) {
                filtered_join_payload, filtered_join_payload_len) ==
            PRDB_SDK_OPTIMIZER_PLAN_IDENTITY_MISMATCH);
     filtered_join_parameters[2].type_code = PRDB_SDK_VALUE_TYPE_BOOLEAN;
-    join_statement.base.base.limit = 6;
+    join_statement.limit = 6;
     assert(prdb_sdk_optimizer_match_join_plan_v19_v1(
                &join_statement, &join_binding, (const uint8_t *)"public", 6,
                join_payload, join_payload_len) ==
            PRDB_SDK_OPTIMIZER_PLAN_IDENTITY_MISMATCH);
-    join_statement.base.base.limit = 5;
+    join_statement.limit = 5;
     resolve.calls = 0;
     assert(prdb_sdk_optimizer_validate_executor_join_relations_v1(
                &host, join_payload, join_payload_len, response,

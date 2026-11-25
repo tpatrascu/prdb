@@ -153,11 +153,11 @@ static uint32_t build_composite_aggregate_plan(mock_state *mock,
                                       PRDB_SDK_VALUE_TYPE_INTEGER, 1);
     mock->optimizer_plan[offset++] =
         mock->optimizer_aggregate_kind ==
-                PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR
+                PRDB_SDK_SQL_AGGREGATE_COUNT_STAR
             ? 0
             : 1;
     if (mock->optimizer_aggregate_kind !=
-        PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR) {
+        PRDB_SDK_SQL_AGGREGATE_COUNT_STAR) {
         offset = put_optimizer_column(mock->optimizer_plan, offset, 0x34, 1,
                                       PRDB_SDK_VALUE_TYPE_INTEGER, 1);
     }
@@ -412,7 +412,7 @@ static uint32_t build_ordered_single_aggregate_plan(mock_state *mock) {
     offset = put_optimizer_column(mock->optimizer_plan, offset, 0x34, 1,
                                   PRDB_SDK_VALUE_TYPE_INTEGER, 1);
     mock->optimizer_plan[offset++] = 12;
-    mock->optimizer_plan[offset++] = PRDB_SDK_SQL_V7_AGGREGATE_SUM;
+    mock->optimizer_plan[offset++] = PRDB_SDK_SQL_AGGREGATE_SUM;
     offset = put_optimizer_column(mock->optimizer_plan, offset, 0x33, 0,
                                   PRDB_SDK_VALUE_TYPE_INTEGER, 1);
     mock->optimizer_plan[offset++] = 1;
@@ -987,7 +987,7 @@ static int32_t optimizer_request(void *context, uint16_t operation,
     aggregate_kind = request[offset++];
     if (statement_kind == 14) {
         uint8_t aggregate_name_len;
-        if (aggregate_kind != PRDB_SDK_SQL_V7_AGGREGATE_SUM ||
+        if (aggregate_kind != PRDB_SDK_SQL_AGGREGATE_SUM ||
             offset >= request_len)
             return PRDB_QUERY_CALLBACK_PROTOCOL_ERROR;
         aggregate_name_len = request[offset++];
@@ -1020,7 +1020,7 @@ static int32_t optimizer_request(void *context, uint16_t operation,
         uint8_t aggregate_name_len;
         if ((key_count != 1 && key_count != 2) ||
             aggregate_kind != mock->optimizer_aggregate_kind ||
-            aggregate_kind != PRDB_SDK_SQL_V7_AGGREGATE_SUM ||
+            aggregate_kind != PRDB_SDK_SQL_AGGREGATE_SUM ||
             offset >= request_len)
             return PRDB_QUERY_CALLBACK_PROTOCOL_ERROR;
         aggregate_name_len = request[offset++];
@@ -1202,30 +1202,31 @@ static int32_t executor_request(void *context, uint16_t operation,
     return PRDB_QUERY_CALLBACK_OK;
 }
 
-static int32_t on_group(void *context, const prdb_sdk_value_v1 *group_key,
+static int32_t on_group(void *context, const prdb_sdk_value_v1 *group_key, uint32_t group_key_count,
                         const prdb_sdk_value_v1 *aggregate_value,
                         uint64_t matching_row_count,
-                        const prdb_sdk_select_binding_v10 *binding) {
+                        const prdb_sdk_select_binding_v1 *binding) {
+    (void)group_key_count;
     group_capture *capture = (group_capture *)context;
     int32_t key = 0;
     int32_t aggregate = 0;
     assert(capture->mock->batch_finished != 0);
     assert(capture->mock->executor_calls == 3);
     assert(capture->calls < 128);
-    assert(binding->base.base.aggregate_kind ==
-               PRDB_SDK_SQL_V7_AGGREGATE_MIN ||
-           binding->base.base.aggregate_kind ==
-               PRDB_SDK_SQL_V7_AGGREGATE_MAX ||
-           binding->base.base.aggregate_kind ==
-               PRDB_SDK_SQL_V7_AGGREGATE_SUM ||
-           binding->base.base.aggregate_kind ==
-               PRDB_SDK_SQL_V7_AGGREGATE_AVG ||
-           binding->base.base.aggregate_kind ==
-               PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR);
+    assert(binding->aggregate_kind ==
+               PRDB_SDK_SQL_AGGREGATE_MIN ||
+           binding->aggregate_kind ==
+               PRDB_SDK_SQL_AGGREGATE_MAX ||
+           binding->aggregate_kind ==
+               PRDB_SDK_SQL_AGGREGATE_SUM ||
+           binding->aggregate_kind ==
+               PRDB_SDK_SQL_AGGREGATE_AVG ||
+           binding->aggregate_kind ==
+               PRDB_SDK_SQL_AGGREGATE_COUNT_STAR);
     assert(prdb_sdk_value_get_integer_v1(group_key, &key) ==
            PRDB_SDK_VALUE_ACCESS_OK);
-    if (binding->base.base.aggregate_kind ==
-        PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR) {
+    if (binding->aggregate_kind ==
+        PRDB_SDK_SQL_AGGREGATE_COUNT_STAR) {
         assert(aggregate_value == NULL);
         aggregate = (int32_t)matching_row_count;
         capture->aggregate_states[capture->calls] =
@@ -1234,15 +1235,15 @@ static int32_t on_group(void *context, const prdb_sdk_value_v1 *group_key,
         assert(aggregate_value != NULL);
         capture->aggregate_states[capture->calls] = aggregate_value->state;
         if (aggregate_value->state == PRDB_SDK_VALUE_STATE_VALUE) {
-            if (binding->base.base.aggregate_kind ==
-                PRDB_SDK_SQL_V7_AGGREGATE_SUM) {
+            if (binding->aggregate_kind ==
+                PRDB_SDK_SQL_AGGREGATE_SUM) {
                 int64_t sum = 0;
                 assert(prdb_sdk_value_get_bigint_v1(aggregate_value, &sum) ==
                        PRDB_SDK_VALUE_ACCESS_OK);
                 aggregate = (int32_t)sum;
                 assert(sum == aggregate);
-            } else if (binding->base.base.aggregate_kind ==
-                       PRDB_SDK_SQL_V7_AGGREGATE_AVG) {
+            } else if (binding->aggregate_kind ==
+                       PRDB_SDK_SQL_AGGREGATE_AVG) {
                 uint32_t coefficient = 0;
                 assert(aggregate_value->type_code ==
                            PRDB_SDK_VALUE_TYPE_DECIMAL &&

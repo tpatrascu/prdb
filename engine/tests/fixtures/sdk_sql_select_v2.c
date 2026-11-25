@@ -1,4 +1,4 @@
-#include "prdb_sdk_sql_v2.h"
+#include "prdb_sdk_sql_v1.h"
 
 #include <assert.h>
 #include <stddef.h>
@@ -124,18 +124,18 @@ int main(void) {
     static const uint8_t active_name[] = "active";
     static const uint8_t id_name[] = "id";
     static const uint8_t secret_name[] = "secret";
-    static const prdb_sdk_sql_column_shape_v2 columns[] = {
+    static const prdb_sdk_sql_column_shape_v1 columns[] = {
         {column_name, sizeof(column_name) - 1, 0, PRDB_SDK_VALUE_TYPE_TEXT,
          0, 0},
         {salary_name, sizeof(salary_name) - 1, 1,
          PRDB_SDK_VALUE_TYPE_DECIMAL, 10, 2},
         {active_name, sizeof(active_name) - 1, 2,
          PRDB_SDK_VALUE_TYPE_BOOLEAN, 0, 0}};
-    static const prdb_sdk_sql_column_shape_v2 bound_eval_columns[] = {
+    static const prdb_sdk_sql_column_shape_v1 bound_eval_columns[] = {
         {id_name, sizeof(id_name) - 1, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0},
         {active_name, sizeof(active_name) - 1, 1,
          PRDB_SDK_VALUE_TYPE_BOOLEAN, 0, 0}};
-    static const prdb_sdk_sql_column_shape_v2 ambiguous_columns[] = {
+    static const prdb_sdk_sql_column_shape_v1 ambiguous_columns[] = {
         {column_name, sizeof(column_name) - 1, 0, PRDB_SDK_VALUE_TYPE_TEXT,
          0, 0},
         {salary_name, sizeof(salary_name) - 1, 1,
@@ -144,7 +144,7 @@ int main(void) {
          PRDB_SDK_VALUE_TYPE_DECIMAL, 10, 2},
         {active_name, sizeof(active_name) - 1, 3,
          PRDB_SDK_VALUE_TYPE_BOOLEAN, 0, 0}};
-    static const prdb_sdk_sql_column_shape_v2 invalid_columns[] = {
+    static const prdb_sdk_sql_column_shape_v1 invalid_columns[] = {
         {column_name, sizeof(column_name) - 1, 0, PRDB_SDK_VALUE_TYPE_TEXT,
          0, 0},
         {salary_name, sizeof(salary_name) - 1, 1,
@@ -162,17 +162,17 @@ int main(void) {
     size_t at_depth_limit_len = 0;
     size_t too_deep_len = 0;
     uint32_t error_offset;
-    prdb_sdk_select_v2 statement = {0};
-    prdb_sdk_select_v2 failed_statement;
-    prdb_sdk_select_v2 failed_statement_before;
-    prdb_sdk_select_v2 unknown_statement = {0};
-    prdb_sdk_select_v2 no_predicate_statement = {0};
-    prdb_sdk_select_v2 bind_statement = {0};
-    prdb_sdk_select_v2 missing_column_statement = {0};
-    prdb_sdk_select_v2 star_statement = {0};
-    prdb_sdk_select_v2 bound_eval_statement = {0};
-    prdb_sdk_select_binding_v2 binding = {0};
-    prdb_sdk_select_binding_v2 bound_eval_binding = {0};
+    prdb_sdk_select_v1 statement = {0};
+    prdb_sdk_select_v1 failed_statement;
+    prdb_sdk_select_v1 failed_statement_before;
+    prdb_sdk_select_v1 unknown_statement = {0};
+    prdb_sdk_select_v1 no_predicate_statement = {0};
+    prdb_sdk_select_v1 bind_statement = {0};
+    prdb_sdk_select_v1 missing_column_statement = {0};
+    prdb_sdk_select_v1 star_statement = {0};
+    prdb_sdk_select_v1 bound_eval_statement = {0};
+    prdb_sdk_select_binding_v1 binding = {0};
+    prdb_sdk_select_binding_v1 bound_eval_binding = {0};
     prdb_sdk_batch_v1 bound_row_batch = {0};
     prdb_sdk_row_iterator_v1 bound_row_iterator = {0};
     prdb_sdk_row_v1 bound_row = {0};
@@ -199,10 +199,10 @@ int main(void) {
     bound_resolver_context bound_context = {{&two, &null_value}, 0, 0};
     uint32_t truth;
 
-    assert(prdb_sdk_sql_parse_select_v2(
+    assert(prdb_sdk_sql_parse_select_v1(
                query, sizeof(query) - 1, &statement, sizeof(statement), NULL) ==
            PRDB_SDK_SQL_OK);
-    assert(statement.abi_version == PRDB_SDK_SQL_ABI_V2_VERSION);
+    assert(statement.abi_version == PRDB_SDK_SQL_ABI_V1_VERSION);
     assert(statement.projection_count == 1);
     assert(statement.relation.length == 9);
     assert(statement.has_limit == 1 && statement.limit == 25);
@@ -228,14 +228,14 @@ int main(void) {
 
     memset(&failed_statement, 0xa5, sizeof(failed_statement));
     failed_statement_before = failed_statement;
-    assert(prdb_sdk_sql_parse_select_v2(
+    assert(prdb_sdk_sql_parse_select_v1(
                multiple_statements, sizeof(multiple_statements) - 1,
                &failed_statement, sizeof(failed_statement), &error_offset) ==
            PRDB_SDK_SQL_SYNTAX_ERROR);
     assert(memcmp(&failed_statement, &failed_statement_before,
                   sizeof(failed_statement)) == 0);
 
-    assert(prdb_sdk_sql_parse_select_v2(
+    assert(prdb_sdk_sql_parse_select_v1(
                not_query, sizeof(not_query) - 1, &statement,
                sizeof(statement), NULL) == PRDB_SDK_SQL_OK);
     assert(statement.predicate_count == 2);
@@ -245,7 +245,7 @@ int main(void) {
     assert(statement.predicates[1].node_kind == PRDB_SDK_SQL_PREDICATE_NOT);
     assert(statement.predicates[1].left_child == 0);
 
-    assert(prdb_sdk_sql_parse_select_v2(
+    assert(prdb_sdk_sql_parse_select_v1(
                precedence_query, sizeof(precedence_query) - 1, &statement,
                sizeof(statement), NULL) == PRDB_SDK_SQL_OK);
     assert(statement.predicate_root == 4);
@@ -254,21 +254,21 @@ int main(void) {
     assert(statement.predicates[4].left_child == 0);
     assert(statement.predicates[4].right_child == 3);
 
-    assert(prdb_sdk_sql_parse_select_v2(
+    assert(prdb_sdk_sql_parse_select_v1(
                is_not_null_query, sizeof(is_not_null_query) - 1, &statement,
                sizeof(statement), NULL) == PRDB_SDK_SQL_OK);
     assert(statement.predicate_count == 1);
     assert(statement.predicates[0].node_kind ==
            PRDB_SDK_SQL_PREDICATE_IS_NOT_NULL);
 
-    assert(prdb_sdk_sql_parse_select_v2(
+    assert(prdb_sdk_sql_parse_select_v1(
                bind_query, sizeof(bind_query) - 1, &bind_statement,
                sizeof(bind_statement), NULL) == PRDB_SDK_SQL_OK);
-    assert(prdb_sdk_sql_bind_select_v2(
+    assert(prdb_sdk_sql_bind_select_v1(
                &bind_statement, relation_name, sizeof(relation_name) - 1,
                columns, 3, &binding, sizeof(binding)) ==
            PRDB_SDK_SQL_BIND_OK);
-    assert(binding.abi_version == PRDB_SDK_SQL_ABI_V2_VERSION);
+    assert(binding.abi_version == PRDB_SDK_SQL_ABI_V1_VERSION);
     assert(binding.projection_count == 1);
     assert(binding.relation_column_count == 3);
     assert(binding.projection_ordinals[0] == 0);
@@ -283,44 +283,44 @@ int main(void) {
            PRDB_SDK_VALUE_TYPE_BOOLEAN);
     assert(binding.predicate_columns[2].type_code == 0);
 
-    assert(prdb_sdk_sql_bind_select_v2(
+    assert(prdb_sdk_sql_bind_select_v1(
                &bind_statement, relation_name, sizeof(relation_name) - 1,
                ambiguous_columns, 4, &binding, sizeof(binding)) ==
            PRDB_SDK_SQL_BIND_AMBIGUOUS_COLUMN);
     assert(binding.projection_count == 1);
-    assert(prdb_sdk_sql_bind_select_v2(
+    assert(prdb_sdk_sql_bind_select_v1(
                &bind_statement, relation_name, sizeof(relation_name) - 1,
                invalid_columns, 3, &binding, sizeof(binding)) ==
            PRDB_SDK_SQL_BIND_INVALID_SCHEMA);
-    assert(prdb_sdk_sql_bind_select_v2(
+    assert(prdb_sdk_sql_bind_select_v1(
                &bind_statement, (const uint8_t *)"other", 5, columns, 3,
                &binding, sizeof(binding)) ==
            PRDB_SDK_SQL_BIND_RELATION_MISMATCH);
-    assert(prdb_sdk_sql_parse_select_v2(
+    assert(prdb_sdk_sql_parse_select_v1(
                missing_column_query, sizeof(missing_column_query) - 1,
                &missing_column_statement, sizeof(missing_column_statement),
                NULL) == PRDB_SDK_SQL_OK);
-    assert(prdb_sdk_sql_bind_select_v2(
+    assert(prdb_sdk_sql_bind_select_v1(
                &missing_column_statement, relation_name,
                sizeof(relation_name) - 1, columns, 3, &binding,
                sizeof(binding)) == PRDB_SDK_SQL_BIND_COLUMN_NOT_FOUND);
-    assert(prdb_sdk_sql_parse_select_v2(
+    assert(prdb_sdk_sql_parse_select_v1(
                star_query, sizeof(star_query) - 1, &star_statement,
                sizeof(star_statement), NULL) == PRDB_SDK_SQL_OK);
-    assert(prdb_sdk_sql_bind_select_v2(
+    assert(prdb_sdk_sql_bind_select_v1(
                &star_statement, relation_name, sizeof(relation_name) - 1,
                columns, 3, &binding, sizeof(binding)) ==
            PRDB_SDK_SQL_BIND_OK);
     assert(binding.projection_star == 1 && binding.projection_count == 0);
-    assert(prdb_sdk_sql_parse_select_v2(
+    assert(prdb_sdk_sql_parse_select_v1(
                bound_eval_query, sizeof(bound_eval_query) - 1,
                &bound_eval_statement, sizeof(bound_eval_statement), NULL) ==
            PRDB_SDK_SQL_OK);
-    assert(prdb_sdk_sql_bind_select_v2(
+    assert(prdb_sdk_sql_bind_select_v1(
                &bound_eval_statement, (const uint8_t *)"t", 1,
                bound_eval_columns, 2, &bound_eval_binding,
                sizeof(bound_eval_binding)) == PRDB_SDK_SQL_BIND_OK);
-    assert(prdb_sdk_sql_eval_bound_select_predicate_v2(
+    assert(prdb_sdk_sql_eval_bound_select_predicate_v1(
                &bound_eval_statement, &bound_eval_binding, parameters, 1,
                resolve_bound_test_column, &bound_context, &truth) ==
            PRDB_SDK_SQL_EVAL_OK);
@@ -336,12 +336,12 @@ int main(void) {
     assert(prdb_sdk_batch_row_next_v1(&bound_row_iterator, &bound_row,
                                       sizeof(bound_row)) == PRDB_SDK_BATCH_OK);
     truth = PRDB_SDK_SQL_TRUTH_UNKNOWN;
-    assert(prdb_sdk_sql_eval_bound_select_row_v2(
+    assert(prdb_sdk_sql_eval_bound_select_row_v1(
                &bound_eval_statement, &bound_eval_binding, parameters, 1,
                &bound_row, bound_cell_scratch, 1, &truth) ==
            PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT);
     assert(truth == PRDB_SDK_SQL_TRUTH_UNKNOWN);
-    assert(prdb_sdk_sql_eval_bound_select_row_v2(
+    assert(prdb_sdk_sql_eval_bound_select_row_v1(
                &bound_eval_statement, &bound_eval_binding, parameters, 1,
                &bound_row, bound_cell_scratch, 2, &truth) ==
            PRDB_SDK_SQL_EVAL_OK);
@@ -356,34 +356,34 @@ int main(void) {
            PRDB_SDK_BATCH_OK);
     assert(prdb_sdk_batch_row_next_v1(&bound_row_iterator, &bound_row,
                                       sizeof(bound_row)) == PRDB_SDK_BATCH_OK);
-    assert(prdb_sdk_sql_eval_bound_select_row_v2(
+    assert(prdb_sdk_sql_eval_bound_select_row_v1(
                &bound_eval_statement, &bound_eval_binding, parameters, 1,
                &bound_row, bound_cell_scratch, 2, &truth) ==
            PRDB_SDK_SQL_EVAL_OK);
     assert(truth == PRDB_SDK_SQL_TRUTH_FALSE);
     {
-        prdb_sdk_select_binding_v2 wrong_shape = bound_eval_binding;
+        prdb_sdk_select_binding_v1 wrong_shape = bound_eval_binding;
         wrong_shape.relation_column_count = 1;
         truth = PRDB_SDK_SQL_TRUTH_UNKNOWN;
-        assert(prdb_sdk_sql_eval_bound_select_row_v2(
+        assert(prdb_sdk_sql_eval_bound_select_row_v1(
                    &bound_eval_statement, &wrong_shape, parameters, 1,
                    &bound_row, bound_cell_scratch, 2, &truth) ==
                PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT);
         assert(truth == PRDB_SDK_SQL_TRUTH_UNKNOWN);
     }
     bound_context = (bound_resolver_context){{&minus_three, &redacted}, 0, 0};
-    assert(prdb_sdk_sql_eval_bound_select_predicate_v2(
+    assert(prdb_sdk_sql_eval_bound_select_predicate_v1(
                &bound_eval_statement, &bound_eval_binding, parameters, 1,
                resolve_bound_test_column, &bound_context, &truth) ==
            PRDB_SDK_SQL_EVAL_OK);
     assert(truth == PRDB_SDK_SQL_TRUTH_FALSE);
     assert(bound_context.calls == 1 && bound_context.last_ordinal == 0);
     {
-        prdb_sdk_select_binding_v2 malformed_binding = bound_eval_binding;
+        prdb_sdk_select_binding_v1 malformed_binding = bound_eval_binding;
         malformed_binding.predicate_columns[0].type_code = 0;
         bound_context.calls = 0;
         truth = PRDB_SDK_SQL_TRUTH_UNKNOWN;
-        assert(prdb_sdk_sql_eval_bound_select_predicate_v2(
+        assert(prdb_sdk_sql_eval_bound_select_predicate_v1(
                    &bound_eval_statement, &malformed_binding, parameters, 1,
                    resolve_bound_test_column, &bound_context, &truth) ==
                PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT);
@@ -391,12 +391,12 @@ int main(void) {
         assert(truth == PRDB_SDK_SQL_TRUTH_UNKNOWN);
     }
     {
-        prdb_sdk_select_binding_v2 invalid_ordinal_binding =
+        prdb_sdk_select_binding_v1 invalid_ordinal_binding =
             bound_eval_binding;
         invalid_ordinal_binding.predicate_columns[0].ordinal = 2;
         bound_context.calls = 0;
         truth = PRDB_SDK_SQL_TRUTH_UNKNOWN;
-        assert(prdb_sdk_sql_eval_bound_select_predicate_v2(
+        assert(prdb_sdk_sql_eval_bound_select_predicate_v1(
                    &bound_eval_statement, &invalid_ordinal_binding, parameters,
                    1, resolve_bound_test_column, &bound_context, &truth) ==
                PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT);
@@ -404,7 +404,7 @@ int main(void) {
         assert(truth == PRDB_SDK_SQL_TRUTH_UNKNOWN);
     }
 
-    assert(prdb_sdk_sql_parse_select_v2(
+    assert(prdb_sdk_sql_parse_select_v1(
                malformed, sizeof(malformed) - 1, &statement,
                sizeof(statement), &error_offset) ==
            PRDB_SDK_SQL_SYNTAX_ERROR);
@@ -420,7 +420,7 @@ int main(void) {
     memcpy(at_depth_limit + at_depth_limit_len, simple_term,
            sizeof(simple_term) - 1);
     at_depth_limit_len += sizeof(simple_term) - 1;
-    assert(prdb_sdk_sql_parse_select_v2(
+    assert(prdb_sdk_sql_parse_select_v1(
                at_depth_limit, at_depth_limit_len, &statement,
                sizeof(statement), &error_offset) == PRDB_SDK_SQL_OK);
 
@@ -433,7 +433,7 @@ int main(void) {
     }
     memcpy(too_deep + too_deep_len, simple_term, sizeof(simple_term) - 1);
     too_deep_len += sizeof(simple_term) - 1;
-    assert(prdb_sdk_sql_parse_select_v2(
+    assert(prdb_sdk_sql_parse_select_v1(
                too_deep, too_deep_len, &statement, sizeof(statement),
                &error_offset) == PRDB_SDK_SQL_LIMIT_EXCEEDED);
 
@@ -449,78 +449,78 @@ int main(void) {
         memcpy(too_many_nodes + too_many_nodes_len, term, sizeof(term) - 1);
         too_many_nodes_len += sizeof(term) - 1;
     }
-    assert(prdb_sdk_sql_parse_select_v2(
+    assert(prdb_sdk_sql_parse_select_v1(
                too_many_nodes, too_many_nodes_len, &statement,
                sizeof(statement), &error_offset) ==
            PRDB_SDK_SQL_LIMIT_EXCEEDED);
 
-    assert(prdb_sdk_sql_parse_select_v2(
+    assert(prdb_sdk_sql_parse_select_v1(
                eval_query, sizeof(eval_query) - 1, &statement,
                sizeof(statement), NULL) == PRDB_SDK_SQL_OK);
-    assert(prdb_sdk_sql_eval_select_predicate_v2(
+    assert(prdb_sdk_sql_eval_select_predicate_v1(
                &statement, parameters, 2, resolve_test_column, &context,
                &truth) == PRDB_SDK_SQL_EVAL_OK);
     assert(truth == PRDB_SDK_SQL_TRUTH_FALSE);
     assert(context.calls == 1);
 
     context = (resolver_context){&two, &two, &redacted, 0};
-    assert(prdb_sdk_sql_eval_select_predicate_v2(
+    assert(prdb_sdk_sql_eval_select_predicate_v1(
                &statement, parameters, 2, resolve_test_column, &context,
                &truth) == PRDB_SDK_SQL_EVAL_OK);
     assert(truth == PRDB_SDK_SQL_TRUTH_TRUE);
     assert(context.calls == 2);
 
     context = (resolver_context){&two, &minus_three, &redacted, 0};
-    assert(prdb_sdk_sql_eval_select_predicate_v2(
+    assert(prdb_sdk_sql_eval_select_predicate_v1(
                &statement, parameters, 2, resolve_test_column, &context,
                &truth) == PRDB_SDK_SQL_EVAL_REDACTED_INPUT);
     assert(context.calls == 3);
 
     context = (resolver_context){&two, &two, &false_value, 0};
-    assert(prdb_sdk_sql_parse_select_v2(
+    assert(prdb_sdk_sql_parse_select_v1(
                not_query, sizeof(not_query) - 1, &statement,
                sizeof(statement), NULL) == PRDB_SDK_SQL_OK);
-    assert(prdb_sdk_sql_eval_select_predicate_v2(
+    assert(prdb_sdk_sql_eval_select_predicate_v1(
                &statement, parameters, 2, resolve_test_column, &context,
                &truth) == PRDB_SDK_SQL_EVAL_OK);
     assert(truth == PRDB_SDK_SQL_TRUTH_TRUE);
     assert(context.calls == 1);
 
     context = (resolver_context){&two, &null_value, &false_value, 0};
-    assert(prdb_sdk_sql_parse_select_v2(
+    assert(prdb_sdk_sql_parse_select_v1(
                unknown_query, sizeof(unknown_query) - 1, &unknown_statement,
                sizeof(unknown_statement), NULL) == PRDB_SDK_SQL_OK);
-    assert(prdb_sdk_sql_eval_select_predicate_v2(
+    assert(prdb_sdk_sql_eval_select_predicate_v1(
                &unknown_statement, parameters, 2, resolve_test_column,
                &context, &truth) == PRDB_SDK_SQL_EVAL_OK);
     assert(truth == PRDB_SDK_SQL_TRUTH_UNKNOWN);
     assert(context.calls == 2);
 
     context = (resolver_context){&two, &null_value, &false_value, 0};
-    assert(prdb_sdk_sql_parse_select_v2(
+    assert(prdb_sdk_sql_parse_select_v1(
                unknown_and_false_query, sizeof(unknown_and_false_query) - 1,
                &unknown_statement, sizeof(unknown_statement), NULL) ==
            PRDB_SDK_SQL_OK);
-    assert(prdb_sdk_sql_eval_select_predicate_v2(
+    assert(prdb_sdk_sql_eval_select_predicate_v1(
                &unknown_statement, three_parameters, 3,
                resolve_test_column, &context, &truth) == PRDB_SDK_SQL_EVAL_OK);
     assert(truth == PRDB_SDK_SQL_TRUTH_FALSE);
     assert(context.calls == 2);
 
     context = (resolver_context){&two, &two, &redacted, 0};
-    assert(prdb_sdk_sql_parse_select_v2(
+    assert(prdb_sdk_sql_parse_select_v1(
                eval_query, sizeof(eval_query) - 1, &statement,
                sizeof(statement), NULL) == PRDB_SDK_SQL_OK);
-    assert(prdb_sdk_sql_eval_select_predicate_v2(
+    assert(prdb_sdk_sql_eval_select_predicate_v1(
                &statement, parameters, 1, resolve_test_column, &context,
                &truth) == PRDB_SDK_SQL_EVAL_PARAMETER_MISSING);
     assert(context.calls == 1);
 
-    assert(prdb_sdk_sql_parse_select_v2(
+    assert(prdb_sdk_sql_parse_select_v1(
                no_predicate_query, sizeof(no_predicate_query) - 1,
                &no_predicate_statement, sizeof(no_predicate_statement), NULL) ==
            PRDB_SDK_SQL_OK);
-    assert(prdb_sdk_sql_eval_select_predicate_v2(
+    assert(prdb_sdk_sql_eval_select_predicate_v1(
                &no_predicate_statement, NULL, 0, NULL, NULL, &truth) ==
            PRDB_SDK_SQL_EVAL_OK);
     assert(truth == PRDB_SDK_SQL_TRUTH_TRUE);
@@ -528,7 +528,7 @@ int main(void) {
     statement.predicates[statement.predicate_root].left_child =
         statement.predicate_root;
     context.calls = 0;
-    assert(prdb_sdk_sql_eval_select_predicate_v2(
+    assert(prdb_sdk_sql_eval_select_predicate_v1(
                &statement, parameters, 2, resolve_test_column, &context,
                &truth) == PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT);
     assert(context.calls == 0);

@@ -1,8 +1,7 @@
 #include "prdb_sdk_sql_dispatch_v1.h"
 #include "prdb_sdk_executor_v1.h"
 #include "prdb_sdk_planner_v1.h"
-#include "prdb_sdk_sql_exec_v8.h"
-#include "prdb_sdk_sql_exec_v20.h"
+#include "prdb_sdk_sql_exec_v1.h"
 
 #include <stdio.h>
 #include <string.h>

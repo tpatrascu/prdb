@@ -1,4 +1,4 @@
-#include "prdb_sdk_sql_order_v3.h"
+#include "prdb_sdk_sql_order_v1.h"
 
 #include <string.h>
 
@@ -61,79 +61,7 @@ static int32_t key_precedes(const prdb_sdk_value_v1 *left,
     return PRDB_SDK_SQL_EVAL_OK;
 }
 
-int32_t prdb_sdk_sql_order_row_indices_v2(
-    const prdb_sdk_value_v1 *keys, uint32_t key_count,
-    uint32_t declared_type, uint8_t decimal_scale, uint32_t direction,
-    uint32_t null_order, uint32_t *row_indices_out,
-    uint32_t row_indices_capacity) {
-    uint32_t sorted_indices[PRDB_SDK_SQL_ORDER_MAX_ROWS];
-    int32_t status;
-
-    if (direction > PRDB_SDK_SQL_ORDER_DESCENDING ||
-        (null_order != PRDB_SDK_SQL_ORDER_NULLS_FIRST &&
-         null_order != PRDB_SDK_SQL_ORDER_NULLS_LAST) ||
-        declared_type < PRDB_SDK_VALUE_TYPE_BOOLEAN ||
-        declared_type > PRDB_SDK_VALUE_TYPE_TIMESTAMPTZ ||
-        (declared_type == PRDB_SDK_VALUE_TYPE_DECIMAL
-             ? decimal_scale > 38
-             : decimal_scale != 0) ||
-        row_indices_capacity < key_count ||
-        (key_count != 0 && (keys == NULL || row_indices_out == NULL))) {
-        return PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT;
-    }
-    if (key_count > PRDB_SDK_SQL_ORDER_MAX_ROWS) {
-        return PRDB_SDK_SQL_ORDER_LIMIT_EXCEEDED;
-    }
-    if (key_count == 0) {
-        return PRDB_SDK_SQL_ORDER_OK;
-    }
-
-    for (uint32_t index = 0; index < key_count; ++index) {
-        status = validate_sort_key(&keys[index], declared_type,
-                                   decimal_scale);
-        if (status != PRDB_SDK_SQL_EVAL_OK) {
-            return status;
-        }
-        sorted_indices[index] = index;
-    }
-
-    for (uint32_t index = 1; index < key_count; ++index) {
-        uint32_t row_index = sorted_indices[index];
-        uint32_t destination = index;
-        while (destination != 0) {
-            uint32_t previous_index = sorted_indices[destination - 1];
-            int precedes;
-            status = key_precedes(&keys[row_index], &keys[previous_index],
-                                  direction, null_order, decimal_scale,
-                                  &precedes);
-            if (status != PRDB_SDK_SQL_EVAL_OK) {
-                return status;
-            }
-            if (!precedes) {
-                break;
-            }
-            sorted_indices[destination] = previous_index;
-            --destination;
-        }
-        sorted_indices[destination] = row_index;
-    }
-
-    memcpy(row_indices_out, sorted_indices,
-           (size_t)key_count * sizeof(*row_indices_out));
-    return PRDB_SDK_SQL_ORDER_OK;
-}
-
-int32_t prdb_sdk_sql_order_row_indices_v1(
-    const prdb_sdk_value_v1 *keys, uint32_t key_count,
-    uint32_t declared_type, uint8_t decimal_scale, uint32_t direction,
-    uint32_t *row_indices_out, uint32_t row_indices_capacity) {
-    return prdb_sdk_sql_order_row_indices_v2(
-        keys, key_count, declared_type, decimal_scale, direction,
-        PRDB_SDK_SQL_ORDER_NULLS_FIRST, row_indices_out,
-        row_indices_capacity);
-}
-
-static int32_t compare_order_tuple(const prdb_sdk_sql_order_key_v3 *keys,
+static int32_t compare_order_tuple(const prdb_sdk_sql_order_key_v1 *keys,
                                    uint32_t key_count, uint32_t left_index,
                                    uint32_t right_index, int *comparison_out) {
     for (uint32_t key = 0; key < key_count; ++key) {
@@ -161,8 +89,8 @@ static int32_t compare_order_tuple(const prdb_sdk_sql_order_key_v3 *keys,
     return PRDB_SDK_SQL_EVAL_OK;
 }
 
-int32_t prdb_sdk_sql_order_row_indices_v3(
-    const prdb_sdk_sql_order_key_v3 *keys, uint32_t key_count,
+int32_t prdb_sdk_sql_order_row_indices_v1(
+    const prdb_sdk_sql_order_key_v1 *keys, uint32_t key_count,
     uint32_t row_count, uint32_t *row_indices_out,
     uint32_t row_indices_capacity) {
     uint32_t sorted_indices[PRDB_SDK_SQL_ORDER_MAX_ROWS];

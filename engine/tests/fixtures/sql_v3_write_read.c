@@ -1,29 +1,9 @@
-#include "prdb_sdk_sql_exec_v2.h"
-#include "prdb_sdk_sql_exec_v3.h"
-#include "prdb_sdk_sql_exec_v5.h"
-#include "prdb_sdk_sql_exec_v6.h"
-#include "prdb_sdk_sql_exec_v7.h"
-#include "prdb_sdk_sql_exec_v8.h"
-#include "prdb_sdk_sql_exec_v10.h"
-#include "prdb_sdk_sql_exec_v11.h"
-#include "prdb_sdk_sql_exec_v12.h"
-#include "prdb_sdk_sql_exec_v13.h"
-#include "prdb_sdk_sql_exec_v15.h"
-#include "prdb_sdk_sql_exec_v17.h"
-#include "prdb_sdk_sql_exec_v18.h"
-#include "prdb_sdk_sql_exec_v16.h"
-#include "prdb_sdk_sql_exec_v19.h"
-#include "prdb_sdk_sql_exec_v20.h"
-#include "prdb_sdk_sql_exec_v21.h"
-#include "prdb_sdk_sql_exec_v23.h"
-#include "prdb_sdk_sql_exec_v24.h"
+#include "prdb_sdk_sql_exec_v1.h"
 #include "prdb_sdk_sql_dispatch_v1.h"
-#include "prdb_sdk_sql_exec_v4.h"
 #include "prdb_sdk_sql_result_v1.h"
 #include "prdb_sdk_executor_v1.h"
 #include "prdb_sdk_optimizer_plan_v1.h"
 #include "prdb_sdk_optimizer_v1.h"
-#include "prdb_sdk_optimizer_v2.h"
 #include "prdb_query_abi_payload_codecs.h"
 
 #include <errno.h>
@@ -330,8 +310,8 @@ static int32_t run_write_read_fixture(
     uint8_t update_request[256] = {0};
     uint8_t inserted_handle[16] = {0};
     uint8_t update_targets[PRDB_SDK_SQL_EXEC_MAX_MUTATION_TARGETS * 16] = {0};
-    prdb_sdk_sql_column_shape_v2 planner_columns[9] = {{0}};
-    prdb_sdk_sql_column_shape_v2 executor_columns[9] = {{0}};
+    prdb_sdk_sql_column_shape_v1 planner_columns[9] = {{0}};
+    prdb_sdk_sql_column_shape_v1 executor_columns[9] = {{0}};
     uint8_t composite_join_left_planner_response[1024] = {0};
     uint8_t composite_join_right_planner_response[1024] = {0};
     uint8_t composite_join_left_executor_response[1024] = {0};
@@ -344,21 +324,21 @@ static int32_t run_write_read_fixture(
         PRDB_SDK_OPTIMIZER_MAX_REQUEST_BYTES];
     static uint8_t group_count_optimizer_response[
         PRDB_SDK_OPTIMIZER_MAX_PLAN_BYTES + 64];
-    prdb_sdk_sql_column_shape_v2 composite_join_left_planner_columns[9] = {{0}};
-    prdb_sdk_sql_column_shape_v2 composite_join_right_planner_columns[9] = {{0}};
-    prdb_sdk_sql_column_shape_v2 composite_join_left_executor_columns[9] = {{0}};
-    prdb_sdk_sql_column_shape_v2 composite_join_right_executor_columns[9] = {{0}};
-    static prdb_sdk_sql_join_materialized_row_v16 composite_join_left_rows[128];
-    static prdb_sdk_sql_join_materialized_row_v16 composite_join_right_rows[4096];
+    prdb_sdk_sql_column_shape_v1 composite_join_left_planner_columns[9] = {{0}};
+    prdb_sdk_sql_column_shape_v1 composite_join_right_planner_columns[9] = {{0}};
+    prdb_sdk_sql_column_shape_v1 composite_join_left_executor_columns[9] = {{0}};
+    prdb_sdk_sql_column_shape_v1 composite_join_right_executor_columns[9] = {{0}};
+    static prdb_sdk_sql_join_materialized_row_v1 composite_join_left_rows[128];
+    static prdb_sdk_sql_join_materialized_row_v1 composite_join_right_rows[4096];
     static uint8_t composite_join_materialized_bytes[
-        PRDB_SDK_SQL_EXEC_V8_MAX_MATERIALIZED_BYTES];
+        PRDB_SDK_SQL_EXEC_MAX_MATERIALIZED_BYTES];
     static uint8_t analytical_pressure_batch_response[PRDB_SDK_BATCH_MAX_BYTES];
     static uint8_t analytical_pressure_group_key_bytes[
-        PRDB_SDK_SQL_EXEC_V4_MAX_GROUP_KEY_BYTES];
+        PRDB_SDK_SQL_EXEC_MAX_GROUP_KEY_BYTES];
     prdb_sdk_executor_insert_value_v1 insert_values[2] = {{0}};
     prdb_sdk_executor_insert_value_v1 multi_insert_values[2] = {{0}};
     prdb_sdk_executor_update_patch_v1 update_patches[1] = {{0}};
-    prdb_sdk_select_binding_v2 binding = {0};
+    prdb_sdk_select_binding_v1 binding = {0};
     prdb_sdk_value_v1 cell_scratch[9] = {{0}};
     prdb_sdk_value_v1 parameter = {0};
     prdb_sdk_value_v1 multi_insert_parameters[2] = {{0}};
@@ -379,7 +359,7 @@ static int32_t run_write_read_fixture(
         filtered_group_key_bytes, sizeof(filtered_group_key_bytes)};
     result_context results = {0};
     static const uint8_t id_column_name[] = "id";
-    prdb_sdk_sql_column_shape_v2 grouped_column = {
+    prdb_sdk_sql_column_shape_v1 grouped_column = {
         id_column_name, sizeof(id_column_name) - 1, 0,
         PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0};
     grouped_result_context grouped_results = {
@@ -686,7 +666,7 @@ static int32_t run_write_read_fixture(
             }
             status = prdb_sdk_sql_execute_inner_join_optimizer_v1(
                 optimizer_host_v5, schema, sizeof(schema) - 1,
-                benchmark_sql, sizeof(benchmark_sql) - 1, 16,
+                benchmark_sql, sizeof(benchmark_sql) - 1, NULL, 0, 16,
                 sizeof(batch_response), composite_join_optimizer_request,
                 sizeof(composite_join_optimizer_request),
                 composite_join_optimizer_response,
@@ -804,9 +784,9 @@ static int32_t run_write_read_fixture(
                 static const uint8_t message[] = "fixture-error-join-benchmark-timer";
                 return report_failure(host, message, sizeof(message) - 1);
             }
-            status = prdb_sdk_sql_execute_inner_join_v19(
+            status = prdb_sdk_sql_execute_inner_join_v1(
                 host, schema, sizeof(schema) - 1, benchmark_sql,
-                sizeof(benchmark_sql) - 1, 16,
+                sizeof(benchmark_sql) - 1, NULL, 0, 16,
                 sizeof(batch_response), composite_join_left_planner_response,
                 sizeof(composite_join_left_planner_response),
                 composite_join_right_planner_response,
@@ -865,8 +845,8 @@ static int32_t run_write_read_fixture(
         uint8_t batch_response[4096] = {0};
         uint8_t target_handles[32] = {0};
         prdb_sdk_executor_relation_v1 relation = {0};
-        prdb_sdk_sql_column_shape_v2 columns[2] = {{0}};
-        prdb_sdk_select_binding_v2 binding = {0};
+        prdb_sdk_sql_column_shape_v1 columns[2] = {{0}};
+        prdb_sdk_select_binding_v1 binding = {0};
         prdb_sdk_value_v1 scratch[2] = {{0}};
         prdb_host_api_v5 cancel_host;
         uint32_t updated = UINT32_MAX;
@@ -921,8 +901,8 @@ static int32_t run_write_read_fixture(
         uint8_t batch_response[4096] = {0};
         uint8_t target_handles[32] = {0};
         prdb_sdk_executor_relation_v1 relation = {0};
-        prdb_sdk_sql_column_shape_v2 columns[2] = {{0}};
-        prdb_sdk_select_binding_v2 binding = {0};
+        prdb_sdk_sql_column_shape_v1 columns[2] = {{0}};
+        prdb_sdk_select_binding_v1 binding = {0};
         prdb_sdk_value_v1 scratch[2] = {{0}};
         prdb_host_api_v5 failure_host;
         uint32_t updated = UINT32_MAX;
@@ -981,8 +961,8 @@ static int32_t run_write_read_fixture(
         uint8_t batch_response[4096] = {0};
         uint8_t target_handles[16] = {0};
         prdb_sdk_executor_relation_v1 relation = {0};
-        prdb_sdk_sql_column_shape_v2 columns[2] = {{0}};
-        prdb_sdk_select_binding_v2 binding = {0};
+        prdb_sdk_sql_column_shape_v1 columns[2] = {{0}};
+        prdb_sdk_select_binding_v1 binding = {0};
         prdb_sdk_value_v1 scratch[2] = {{0}};
         uint32_t updated = UINT32_MAX;
         int32_t update_status;
@@ -1031,8 +1011,8 @@ static int32_t run_write_read_fixture(
         uint8_t batch_response[4096] = {0};
         uint8_t targets[PRDB_SDK_OPTIMIZER_PLAN_MAX_DELETE_TARGETS * 16] = {0};
         prdb_sdk_executor_relation_v1 relation = {0};
-        prdb_sdk_sql_column_shape_v2 columns[2] = {{0}};
-        prdb_sdk_select_binding_v2 binding = {0};
+        prdb_sdk_sql_column_shape_v1 columns[2] = {{0}};
+        prdb_sdk_select_binding_v1 binding = {0};
         prdb_sdk_value_v1 scratch[2] = {{0}};
         prdb_host_api_v5 observed_host;
         uint32_t updated = 0;
@@ -1114,7 +1094,7 @@ static int32_t run_write_read_fixture(
             "FROM decimal_grouped_records GROUP BY left_key, right_key "
             "HAVING COUNT(*) IS NULL AND SUM(decimal_value) IS NULL";
         uint32_t callbacks = 0;
-        status = prdb_sdk_sql_execute_group_v23(
+        status = prdb_sdk_sql_execute_group_v1(
             host, schema, sizeof(schema) - 1, redacted_having_sql,
             sizeof(redacted_having_sql) - 1, NULL, 0, 16,
             sizeof(batch_response), planner_response, sizeof(planner_response),
@@ -1164,7 +1144,7 @@ static int32_t run_write_read_fixture(
         composite_grouped_results.row_count = 0;
         composite_grouped_results.output_len = 0;
         composite_grouped_results.column_count = 3;
-        status = prdb_sdk_sql_execute_group_having_optimizer_v24(
+        status = prdb_sdk_sql_execute_group_having_optimizer_v1(
             optimizer_host_v5, schema, sizeof(schema) - 1, count_column_sql,
             count_column_sql_len, NULL, NULL, 0, 16, sizeof(batch_response),
             group_count_optimizer_request, sizeof(group_count_optimizer_request),
@@ -1240,31 +1220,31 @@ static int32_t run_write_read_fixture(
             sizeof(select_composite_integer_max_optimizer_sql) - 1,
             sizeof(select_composite_integer_avg_optimizer_sql) - 1};
         static const uint32_t optimizer_kinds[] = {
-            PRDB_SDK_SQL_V7_AGGREGATE_MIN,
-            PRDB_SDK_SQL_V7_AGGREGATE_MAX,
-            PRDB_SDK_SQL_V7_AGGREGATE_AVG,
-            PRDB_SDK_SQL_V7_AGGREGATE_MIN,
-            PRDB_SDK_SQL_V7_AGGREGATE_MAX,
-            PRDB_SDK_SQL_V7_AGGREGATE_SUM,
-            PRDB_SDK_SQL_V7_AGGREGATE_AVG,
-            PRDB_SDK_SQL_V7_AGGREGATE_SUM,
-            PRDB_SDK_SQL_V7_AGGREGATE_MIN,
-            PRDB_SDK_SQL_V7_AGGREGATE_MAX,
-            PRDB_SDK_SQL_V7_AGGREGATE_AVG,
-            PRDB_SDK_SQL_V7_AGGREGATE_SUM,
-            PRDB_SDK_SQL_V7_AGGREGATE_MIN,
-            PRDB_SDK_SQL_V7_AGGREGATE_MAX,
-            PRDB_SDK_SQL_V7_AGGREGATE_AVG,
-            PRDB_SDK_SQL_V7_AGGREGATE_MIN,
-            PRDB_SDK_SQL_V7_AGGREGATE_MAX,
-            PRDB_SDK_SQL_V7_AGGREGATE_AVG};
+            PRDB_SDK_SQL_AGGREGATE_MIN,
+            PRDB_SDK_SQL_AGGREGATE_MAX,
+            PRDB_SDK_SQL_AGGREGATE_AVG,
+            PRDB_SDK_SQL_AGGREGATE_MIN,
+            PRDB_SDK_SQL_AGGREGATE_MAX,
+            PRDB_SDK_SQL_AGGREGATE_SUM,
+            PRDB_SDK_SQL_AGGREGATE_AVG,
+            PRDB_SDK_SQL_AGGREGATE_SUM,
+            PRDB_SDK_SQL_AGGREGATE_MIN,
+            PRDB_SDK_SQL_AGGREGATE_MAX,
+            PRDB_SDK_SQL_AGGREGATE_AVG,
+            PRDB_SDK_SQL_AGGREGATE_SUM,
+            PRDB_SDK_SQL_AGGREGATE_MIN,
+            PRDB_SDK_SQL_AGGREGATE_MAX,
+            PRDB_SDK_SQL_AGGREGATE_AVG,
+            PRDB_SDK_SQL_AGGREGATE_MIN,
+            PRDB_SDK_SQL_AGGREGATE_MAX,
+            PRDB_SDK_SQL_AGGREGATE_AVG};
         if (optimizer_host_v5 == NULL ||
             optimizer_host_v5->optimizer_request == NULL) {
             return 1;
         }
         if (invocation->parameters[0] == 'B') {
             generated_inserted_count = 0;
-            status = prdb_sdk_sql_execute_insert_v2(
+            status = prdb_sdk_sql_execute_insert_batch_v1(
                 host, schema, sizeof(schema) - 1,
                 generated_identity_insert_sql,
                 sizeof(generated_identity_insert_sql) - 1, NULL, 0,
@@ -1287,7 +1267,7 @@ static int32_t run_write_read_fixture(
             grouped_results.output_capacity = sizeof(ordered_pressure_result);
             grouped_results.output_len = 0;
             grouped_results.row_count = 0;
-            status = prdb_sdk_sql_execute_group_v12(
+            status = prdb_sdk_sql_execute_group_v1(
                 host, schema, sizeof(schema) - 1,
                 select_ordered_analytical_pressure_sql,
                 sizeof(select_ordered_analytical_pressure_sql) - 1, NULL, 0,
@@ -1322,7 +1302,7 @@ static int32_t run_write_read_fixture(
             composite_grouped_results.row_count = 0;
             composite_grouped_results.output_len = 0;
             composite_grouped_results.column_count = 3;
-            status = prdb_sdk_sql_execute_group_having_optimizer_v24(
+            status = prdb_sdk_sql_execute_group_having_optimizer_v1(
                 optimizer_host_v5, schema, sizeof(schema) - 1,
                 select_filtered_ordered_composite_decimal_sum_sql,
                 sizeof(select_filtered_ordered_composite_decimal_sum_sql) - 1,
@@ -1517,7 +1497,7 @@ static int32_t run_write_read_fixture(
         if (invocation->parameters[0] == 'B') {
             composite_aggregate_expectation count_expectation = {
                 &composite_grouped_results,
-                PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR};
+                PRDB_SDK_SQL_AGGREGATE_COUNT_STAR};
             ordered_composite_aggregate_expectation ordered_count_expectation = {
                 .aggregate = count_expectation,
                 .first_left_key = 2,
@@ -1561,7 +1541,7 @@ static int32_t run_write_read_fixture(
         if (invocation->parameters[0] == 'A') {
             composite_aggregate_expectation count_expectation = {
                 &composite_grouped_results,
-                PRDB_SDK_SQL_V7_AGGREGATE_COUNT_STAR};
+                PRDB_SDK_SQL_AGGREGATE_COUNT_STAR};
             ordered_composite_aggregate_expectation ordered_count_expectation = {
                 .aggregate = count_expectation,
                 .first_left_key = 2,
@@ -1695,7 +1675,7 @@ static int32_t run_write_read_fixture(
         return 0;
     }
     results.host = host;
-    status = prdb_sdk_sql_execute_group_v6(
+    status = prdb_sdk_sql_execute_group_v1(
         host, schema, sizeof(schema) - 1, select_analytical_pressure_sql,
         sizeof(select_analytical_pressure_sql) - 1, NULL, 0, 128,
         PRDB_SDK_BATCH_MAX_BYTES, planner_response, sizeof(planner_response),
@@ -1764,7 +1744,7 @@ static int32_t run_write_read_fixture(
     results.expected_state = PRDB_SDK_VALUE_STATE_NULL;
     results.marker = inserted_marker;
     results.marker_len = sizeof(inserted_marker) - 1;
-    status = prdb_sdk_sql_execute_select_v2(
+    status = prdb_sdk_sql_execute_select_v1(
         host, schema, sizeof(schema) - 1, select_null_sql,
         sizeof(select_null_sql) - 1,
         NULL, 0, 16, sizeof(batch_response), planner_response,
@@ -1782,7 +1762,7 @@ static int32_t run_write_read_fixture(
     results.marker = NULL;
     results.marker_len = 0;
     results.row_count = 0;
-    status = prdb_sdk_sql_execute_select_v2(
+    status = prdb_sdk_sql_execute_select_v1(
         host, information_schema, sizeof(information_schema) - 1,
         select_schemata_sql, sizeof(select_schemata_sql) - 1,
         &metadata_parameter, 1, 16,
@@ -1801,7 +1781,7 @@ static int32_t run_write_read_fixture(
     results.marker = NULL;
     results.marker_len = 0;
     results.row_count = 0;
-    status = prdb_sdk_sql_execute_select_v2(
+    status = prdb_sdk_sql_execute_select_v1(
         host, information_schema, sizeof(information_schema) - 1,
         select_tables_sql, sizeof(select_tables_sql) - 1,
         &metadata_parameter, 1, 16,
@@ -1858,7 +1838,7 @@ static int32_t run_write_read_fixture(
     results.marker = NULL;
     results.marker_len = 0;
     results.row_count = 0;
-    status = prdb_sdk_sql_execute_select_v2(
+    status = prdb_sdk_sql_execute_select_v1(
         host, information_schema, sizeof(information_schema) - 1,
         select_columns_sql, sizeof(select_columns_sql) - 1,
         &metadata_parameter, 1, 16,
@@ -1895,7 +1875,7 @@ static int32_t run_write_read_fixture(
     results.expected_value_len = sizeof(schema) - 1;
     results.expected_ordinal = 0;
     results.row_count = 0;
-    status = prdb_sdk_sql_execute_select_v2(
+    status = prdb_sdk_sql_execute_select_v1(
         host, information_schema, sizeof(information_schema) - 1,
         select_schemata_sql, sizeof(select_schemata_sql) - 1,
         &metadata_parameter, 1, 16,
@@ -1912,7 +1892,7 @@ static int32_t run_write_read_fixture(
     results.expected_value_len = 0;
     results.expected_ordinal = 1;
     results.row_count = 0;
-    status = prdb_sdk_sql_execute_select_v2(
+    status = prdb_sdk_sql_execute_select_v1(
         host, information_schema, sizeof(information_schema) - 1,
         select_tables_sql, sizeof(select_tables_sql) - 1,
         &metadata_parameter, 1, 16,
@@ -1929,7 +1909,7 @@ static int32_t run_write_read_fixture(
     results.expected_value_len = sizeof(expected_user_column) - 1;
     results.expected_ordinal = 2;
     results.row_count = 0;
-    status = prdb_sdk_sql_execute_select_v2(
+    status = prdb_sdk_sql_execute_select_v1(
         host, information_schema, sizeof(information_schema) - 1,
         select_records_columns_sql, sizeof(select_records_columns_sql) - 1,
         records_metadata_parameters, 2, 16,
@@ -1948,7 +1928,7 @@ static int32_t run_write_read_fixture(
     results.expected_value_len = sizeof(empty_schema) - 1;
     results.expected_ordinal = 0;
     results.row_count = 0;
-    status = prdb_sdk_sql_execute_select_v2(
+    status = prdb_sdk_sql_execute_select_v1(
         host, information_schema, sizeof(information_schema) - 1,
         select_schemata_sql, sizeof(select_schemata_sql) - 1,
         &metadata_parameter, 1, 16,
@@ -1965,7 +1945,7 @@ static int32_t run_write_read_fixture(
     results.expected_value_len = 0;
     results.expected_ordinal = 1;
     results.row_count = 0;
-    status = prdb_sdk_sql_execute_select_v2(
+    status = prdb_sdk_sql_execute_select_v1(
         host, information_schema, sizeof(information_schema) - 1,
         select_tables_sql, sizeof(select_tables_sql) - 1,
         &metadata_parameter, 1, 16,
@@ -1980,7 +1960,7 @@ static int32_t run_write_read_fixture(
 
     results.expected_ordinal = 2;
     results.row_count = 0;
-    status = prdb_sdk_sql_execute_select_v2(
+    status = prdb_sdk_sql_execute_select_v1(
         host, information_schema, sizeof(information_schema) - 1,
         select_columns_sql, sizeof(select_columns_sql) - 1,
         &metadata_parameter, 1, 16,
@@ -2001,7 +1981,7 @@ static int32_t run_write_read_fixture(
     results.expected_value_len = sizeof(private_table_name) - 1;
     results.expected_ordinal = 1;
     results.row_count = 0;
-    status = prdb_sdk_sql_execute_select_v2(
+    status = prdb_sdk_sql_execute_select_v1(
         host, information_schema, sizeof(information_schema) - 1,
         select_private_table_sql, sizeof(select_private_table_sql) - 1,
         private_metadata_parameters, 2, 16,
@@ -2016,7 +1996,7 @@ static int32_t run_write_read_fixture(
 
     results.expected_ordinal = 2;
     results.row_count = 0;
-    status = prdb_sdk_sql_execute_select_v2(
+    status = prdb_sdk_sql_execute_select_v1(
         host, information_schema, sizeof(information_schema) - 1,
         select_private_columns_sql, sizeof(select_private_columns_sql) - 1,
         private_metadata_parameters, 2, 16,
@@ -2036,7 +2016,7 @@ static int32_t run_write_read_fixture(
     results.expected_value_len = sizeof(missing_table_name) - 1;
     results.expected_ordinal = 1;
     results.row_count = 0;
-    status = prdb_sdk_sql_execute_select_v2(
+    status = prdb_sdk_sql_execute_select_v1(
         host, information_schema, sizeof(information_schema) - 1,
         select_private_table_sql, sizeof(select_private_table_sql) - 1,
         private_metadata_parameters, 2, 16,
@@ -2051,7 +2031,7 @@ static int32_t run_write_read_fixture(
 
     results.expected_ordinal = 2;
     results.row_count = 0;
-    status = prdb_sdk_sql_execute_select_v2(
+    status = prdb_sdk_sql_execute_select_v1(
         host, information_schema, sizeof(information_schema) - 1,
         select_private_columns_sql, sizeof(select_private_columns_sql) - 1,
         private_metadata_parameters, 2, 16,
@@ -2070,7 +2050,7 @@ static int32_t run_write_read_fixture(
     results.expected_value_len = 0;
     results.expected_ordinal = 0;
     results.row_count = 0;
-    status = prdb_sdk_sql_execute_select_v2(
+    status = prdb_sdk_sql_execute_select_v1(
         host, information_schema, sizeof(information_schema) - 1,
         select_schemata_sql, sizeof(select_schemata_sql) - 1,
         &metadata_parameter, 1, 16,
@@ -2085,7 +2065,7 @@ static int32_t run_write_read_fixture(
 
     results.expected_ordinal = 1;
     results.row_count = 0;
-    status = prdb_sdk_sql_execute_select_v2(
+    status = prdb_sdk_sql_execute_select_v1(
         host, information_schema, sizeof(information_schema) - 1,
         select_tables_sql, sizeof(select_tables_sql) - 1,
         &metadata_parameter, 1, 16,
@@ -2100,7 +2080,7 @@ static int32_t run_write_read_fixture(
 
     results.expected_ordinal = 2;
     results.row_count = 0;
-    status = prdb_sdk_sql_execute_select_v2(
+    status = prdb_sdk_sql_execute_select_v1(
         host, information_schema, sizeof(information_schema) - 1,
         select_columns_sql, sizeof(select_columns_sql) - 1,
         &metadata_parameter, 1, 16,
@@ -2117,7 +2097,7 @@ static int32_t run_write_read_fixture(
     metadata_parameter.data_len = sizeof(missing_schema_name) - 1;
     results.expected_ordinal = 0;
     results.row_count = 0;
-    status = prdb_sdk_sql_execute_select_v2(
+    status = prdb_sdk_sql_execute_select_v1(
         host, information_schema, sizeof(information_schema) - 1,
         select_schemata_sql, sizeof(select_schemata_sql) - 1,
         &metadata_parameter, 1, 16,
@@ -2132,7 +2112,7 @@ static int32_t run_write_read_fixture(
 
     results.expected_ordinal = 1;
     results.row_count = 0;
-    status = prdb_sdk_sql_execute_select_v2(
+    status = prdb_sdk_sql_execute_select_v1(
         host, information_schema, sizeof(information_schema) - 1,
         select_tables_sql, sizeof(select_tables_sql) - 1,
         &metadata_parameter, 1, 16,
@@ -2147,7 +2127,7 @@ static int32_t run_write_read_fixture(
 
     results.expected_ordinal = 2;
     results.row_count = 0;
-    status = prdb_sdk_sql_execute_select_v2(
+    status = prdb_sdk_sql_execute_select_v1(
         host, information_schema, sizeof(information_schema) - 1,
         select_columns_sql, sizeof(select_columns_sql) - 1,
         &metadata_parameter, 1, 16,
@@ -2180,7 +2160,7 @@ static int32_t run_write_read_fixture(
     results.marker = updated_marker;
     results.marker_len = sizeof(updated_marker) - 1;
     results.row_count = 0;
-    status = prdb_sdk_sql_execute_select_v2(
+    status = prdb_sdk_sql_execute_select_v1(
         host, schema, sizeof(schema) - 1, select_value_sql,
         sizeof(select_value_sql) - 1, &parameter, 1, 16,
         sizeof(batch_response), planner_response, sizeof(planner_response),
@@ -2212,7 +2192,7 @@ static int32_t run_write_read_fixture(
             sizeof(grouped_materialized), write_grouped_composite_count,
             &composite_grouped_results);
     } else {
-        status = prdb_sdk_sql_execute_group_v13(
+        status = prdb_sdk_sql_execute_group_v1(
             host, schema, sizeof(schema) - 1, select_composite_group_sql,
             sizeof(select_composite_group_sql) - 1, NULL, 0, 16,
             sizeof(batch_response), planner_response,
@@ -2244,7 +2224,7 @@ static int32_t run_write_read_fixture(
             grouped_materialized, sizeof(grouped_materialized),
             write_grouped_composite_count_v15, &composite_grouped_results);
     } else {
-        status = prdb_sdk_sql_execute_group_v15(
+        status = prdb_sdk_sql_execute_group_v1(
             host, schema, sizeof(schema) - 1, select_composite_order_sql,
             sizeof(select_composite_order_sql) - 1, NULL, 0, 16,
             sizeof(batch_response), planner_response, sizeof(planner_response),
@@ -2261,7 +2241,7 @@ static int32_t run_write_read_fixture(
 
     composite_grouped_results.row_count = 0;
     composite_grouped_results.output_len = 0;
-    status = prdb_sdk_sql_execute_group_v17(
+    status = prdb_sdk_sql_execute_group_v1(
         host, schema, sizeof(schema) - 1, select_composite_literal_sql,
         sizeof(select_composite_literal_sql) - 1, NULL, 0, 16,
         sizeof(batch_response), planner_response, sizeof(planner_response),
@@ -2277,7 +2257,7 @@ static int32_t run_write_read_fixture(
 
     composite_grouped_results.row_count = 0;
     composite_grouped_results.output_len = 0;
-    status = prdb_sdk_sql_execute_group_v18(
+    status = prdb_sdk_sql_execute_group_v1(
         host, schema, sizeof(schema) - 1, select_composite_boolean_sql,
         sizeof(select_composite_boolean_sql) - 1, NULL, 0, 16,
         sizeof(batch_response), planner_response, sizeof(planner_response),
@@ -2296,7 +2276,7 @@ static int32_t run_write_read_fixture(
     composite_grouped_results.column_count = 3;
     composite_grouped_results.row_count = 0;
     composite_grouped_results.output_len = 0;
-    status = prdb_sdk_sql_execute_group_v21(
+    status = prdb_sdk_sql_execute_group_v1(
         host, schema, sizeof(schema) - 1,
         select_composite_avg_numeric_v21_sql,
         sizeof(select_composite_avg_numeric_v21_sql) - 1, NULL, 0, 16,
@@ -2319,7 +2299,7 @@ static int32_t run_write_read_fixture(
 
     composite_grouped_results.row_count = 0;
     composite_grouped_results.output_len = 0;
-    status = prdb_sdk_sql_execute_group_v21(
+    status = prdb_sdk_sql_execute_group_v1(
         host, schema, sizeof(schema) - 1, select_composite_min_numeric_v21_sql,
         sizeof(select_composite_min_numeric_v21_sql) - 1, NULL, 0, 16,
         sizeof(batch_response), planner_response, sizeof(planner_response),
@@ -2356,7 +2336,7 @@ static int32_t run_write_read_fixture(
     composite_grouped_results.row_count = 0;
     composite_grouped_results.output_len = 0;
     if (optimizer_host_v5 != NULL) {
-        status = prdb_sdk_sql_execute_group_having_optimizer_v24(
+        status = prdb_sdk_sql_execute_group_having_optimizer_v1(
             optimizer_host_v5, schema, sizeof(schema) - 1,
             select_composite_sum_optimizer_sql,
             sizeof(select_composite_sum_optimizer_sql) - 1, NULL, NULL, 0,
@@ -2372,7 +2352,7 @@ static int32_t run_write_read_fixture(
             write_grouped_composite_sum_optimizer_v24,
             &composite_grouped_results);
     } else {
-        status = prdb_sdk_sql_execute_group_v24(
+        status = prdb_sdk_sql_execute_group_v1(
             host, schema, sizeof(schema) - 1,
             select_composite_sum_optimizer_sql,
             sizeof(select_composite_sum_optimizer_sql) - 1, NULL, 0, 16,
@@ -2411,7 +2391,7 @@ static int32_t run_write_read_fixture(
             sizeof(grouped_materialized), write_ordered_grouped_avg,
             &grouped_results);
     } else {
-        status = prdb_sdk_sql_execute_group_v12(
+        status = prdb_sdk_sql_execute_group_v1(
             host, schema, sizeof(schema) - 1, select_ordered_grouped_avg_sql,
             sizeof(select_ordered_grouped_avg_sql) - 1, NULL, 0, 16,
             sizeof(batch_response), planner_response,
@@ -2446,7 +2426,7 @@ static int32_t run_write_read_fixture(
             sizeof(grouped_materialized), write_grouped_ordered_count,
             &grouped_results);
     } else {
-        status = prdb_sdk_sql_execute_group_v12(
+        status = prdb_sdk_sql_execute_group_v1(
             host, schema, sizeof(schema) - 1, select_grouped_order_sql,
             sizeof(select_grouped_order_sql) - 1, NULL, 0, 16,
             sizeof(batch_response), planner_response,
@@ -2478,7 +2458,8 @@ static int32_t run_write_read_fixture(
         status = prdb_sdk_sql_execute_inner_join_optimizer_v1(
             optimizer_host_v5, schema, sizeof(schema) - 1,
             select_composite_join_sql, sizeof(select_composite_join_sql) - 1,
-            16, sizeof(batch_response), composite_join_optimizer_request,
+            NULL, 0, 16, sizeof(batch_response),
+            composite_join_optimizer_request,
             sizeof(composite_join_optimizer_request),
             composite_join_optimizer_response,
             sizeof(composite_join_optimizer_response),
@@ -2499,10 +2480,10 @@ static int32_t run_write_read_fixture(
             sizeof(composite_join_materialized_bytes),
             write_composite_joined_row_v19, &joined_results);
     } else {
-        status = prdb_sdk_sql_execute_inner_join_v19(
+        status = prdb_sdk_sql_execute_inner_join_v1(
             host, schema, sizeof(schema) - 1, select_composite_join_sql,
-            sizeof(select_composite_join_sql) - 1, 16, sizeof(batch_response),
-            composite_join_left_planner_response,
+            sizeof(select_composite_join_sql) - 1, NULL, 0, 16,
+            sizeof(batch_response), composite_join_left_planner_response,
             sizeof(composite_join_left_planner_response),
             composite_join_right_planner_response,
             sizeof(composite_join_right_planner_response),
@@ -2554,9 +2535,9 @@ static int32_t run_write_read_fixture(
     joined_results.output_len = 0;
     joined_results.left_columns = composite_join_right_executor_columns;
     joined_results.right_columns = composite_join_right_executor_columns;
-    status = prdb_sdk_sql_execute_inner_join_v19(
+    status = prdb_sdk_sql_execute_inner_join_v1(
         host, schema, sizeof(schema) - 1, select_self_join_sql,
-        sizeof(select_self_join_sql) - 1, 16, sizeof(batch_response),
+        sizeof(select_self_join_sql) - 1, NULL, 0, 16, sizeof(batch_response),
         composite_join_left_planner_response,
         sizeof(composite_join_left_planner_response),
         composite_join_right_planner_response,
@@ -2594,7 +2575,7 @@ static int32_t run_write_read_fixture(
     if (optimizer_host_v5 != NULL) {
         joined_results.row_count = 0;
         joined_results.output_len = 0;
-        status = prdb_sdk_sql_execute_inner_join_optimizer_v20(
+        status = prdb_sdk_sql_execute_inner_join_optimizer_v1(
             optimizer_host_v5, schema, sizeof(schema) - 1,
             select_filtered_composite_join_sql,
             sizeof(select_filtered_composite_join_sql) - 1,
@@ -2627,7 +2608,7 @@ static int32_t run_write_read_fixture(
     }
 
     if (optimizer_host != NULL) {
-        prdb_sdk_select_v2 optimizer_statement = {0};
+        prdb_sdk_select_v1 optimizer_statement = {0};
         uint8_t optimizer_request[4096] = {0};
         uint8_t optimizer_response[4096] = {0};
         uint8_t relation_response[4096] = {0};
@@ -2656,7 +2637,7 @@ static int32_t run_write_read_fixture(
              optimizer_large_range_upper_bytes,
              sizeof(optimizer_large_range_upper_bytes)}};
         prdb_sdk_executor_relation_v1 optimizer_relation = {0};
-        prdb_sdk_sql_column_shape_v2 optimizer_columns[9] = {{0}};
+        prdb_sdk_sql_column_shape_v1 optimizer_columns[9] = {{0}};
         prdb_sdk_value_v1 optimizer_source_cells[9] = {{0}};
         prdb_sdk_value_v1 optimizer_projected_values[9] = {{0}};
         optimizer_result_context optimizer_results = {0};
@@ -2665,7 +2646,7 @@ static int32_t run_write_read_fixture(
         uint32_t parse_error_offset = 0;
         int32_t optimizer_range_status = PRDB_SDK_OPTIMIZER_PLAN_OK;
         if (optimizer_host->optimizer_request == NULL ||
-            prdb_sdk_sql_parse_select_v2(
+            prdb_sdk_sql_parse_select_v1(
                 optimizer_select_sql, sizeof(optimizer_select_sql) - 1,
                 &optimizer_statement, sizeof(optimizer_statement),
                 &parse_error_offset) != PRDB_SDK_SQL_OK ||
@@ -2698,7 +2679,7 @@ static int32_t run_write_read_fixture(
             range_observer_open_scan_requests = 0;
             range_observer_host.v3.executor_request =
                 observe_range_executor_request;
-            if (prdb_sdk_sql_parse_select_v2(
+            if (prdb_sdk_sql_parse_select_v1(
                     optimizer_small_estimate_select_sql,
                     sizeof(optimizer_small_estimate_select_sql) - 1,
                     &optimizer_statement, sizeof(optimizer_statement),
@@ -2731,7 +2712,7 @@ static int32_t run_write_read_fixture(
                     "fixture-error-small-estimate-scan-choice";
                 return report_failure(host, message, sizeof(message) - 1);
             }
-            status = prdb_sdk_sql_execute_select_v2(
+            status = prdb_sdk_sql_execute_select_v1(
                 host, schema, sizeof(schema) - 1,
                 optimizer_small_estimate_select_sql,
                 sizeof(optimizer_small_estimate_select_sql) - 1,
@@ -2761,7 +2742,7 @@ static int32_t run_write_read_fixture(
 
             memset(&optimizer_statement, 0, sizeof(optimizer_statement));
             optimizer_rows = 0;
-            if (prdb_sdk_sql_parse_select_v2(
+            if (prdb_sdk_sql_parse_select_v1(
                     optimizer_large_range_select_sql,
                     sizeof(optimizer_large_range_select_sql) - 1,
                     &optimizer_statement, sizeof(optimizer_statement),
@@ -2813,7 +2794,7 @@ static int32_t run_write_read_fixture(
                     "fixture-error-range-benchmark-reference-clock";
                 return report_failure(host, message, sizeof(message) - 1);
             }
-            status = prdb_sdk_sql_execute_select_v2(
+            status = prdb_sdk_sql_execute_select_v1(
                 host, schema, sizeof(schema) - 1,
                 optimizer_large_range_select_sql,
                 sizeof(optimizer_large_range_select_sql) - 1,
@@ -2863,11 +2844,11 @@ static int32_t run_write_read_fixture(
             static uint8_t ordered_scan_response[4096];
             static uint8_t ordered_batch[4096];
             static uint8_t ordered_materialized[
-                PRDB_SDK_SQL_EXEC_V3_MAX_MATERIALIZED_BYTES];
+                PRDB_SDK_SQL_EXEC_MAX_MATERIALIZED_BYTES];
             static uint8_t ordered_record[256];
-            prdb_sdk_select_v3 ordered_statement = {0};
+            prdb_sdk_select_v1 ordered_statement = {0};
             prdb_sdk_executor_relation_v1 ordered_relation = {0};
-            prdb_sdk_sql_column_shape_v2 ordered_columns[9] = {{0}};
+            prdb_sdk_sql_column_shape_v1 ordered_columns[9] = {{0}};
             prdb_sdk_value_v1 ordered_source_cells[9] = {{0}};
             prdb_sdk_value_v1 ordered_projected_values[1] = {{0}};
             ordered_optimizer_result_context ordered_results = {
@@ -2875,7 +2856,7 @@ static int32_t run_write_read_fixture(
                 sizeof(ordered_record), 0, {9, 9}};
             uint32_t ordered_rows = 0;
             uint32_t ordered_parse_error = 0;
-            if (prdb_sdk_sql_parse_select_v3(
+            if (prdb_sdk_sql_parse_select_v1(
                     optimizer_ordered_select_sql,
                     sizeof(optimizer_ordered_select_sql) - 1,
                     &ordered_statement, sizeof(ordered_statement),
@@ -2916,7 +2897,7 @@ static int32_t run_write_read_fixture(
 
     results.marker = NULL;
     results.row_count = 0;
-    status = prdb_sdk_sql_execute_select_v2(
+    status = prdb_sdk_sql_execute_select_v1(
         host, schema, sizeof(schema) - 1, select_value_sql,
         sizeof(select_value_sql) - 1, &parameter, 1, 16,
         sizeof(batch_response), planner_response, sizeof(planner_response),
@@ -2935,7 +2916,7 @@ static int32_t run_write_read_fixture(
     multi_insert_values[1] = multi_insert_values[0];
     multi_insert_parameters[0] = parameter;
     multi_insert_parameters[1] = parameter;
-    status = prdb_sdk_sql_execute_insert_v2(
+    status = prdb_sdk_sql_execute_insert_batch_v1(
         host, schema, sizeof(schema) - 1, multi_insert_sql,
         sizeof(multi_insert_sql) - 1, multi_insert_parameters, 2, planner_response,
         sizeof(planner_response), executor_response,
@@ -2947,7 +2928,7 @@ static int32_t run_write_read_fixture(
         return report_failure(host, message, sizeof(message) - 1);
     }
     results.row_count = 0;
-    status = prdb_sdk_sql_execute_select_v2(
+    status = prdb_sdk_sql_execute_select_v1(
         host, schema, sizeof(schema) - 1, select_value_sql,
         sizeof(select_value_sql) - 1, &parameter, 1, 16,
         sizeof(batch_response), planner_response, sizeof(planner_response),
@@ -2977,8 +2958,8 @@ static int32_t run_write_read_fixture(
              grouped_right_bytes, sizeof(grouped_right_bytes)}};
         prdb_sdk_update_v1 grouped_update = {0};
         prdb_sdk_executor_relation_v1 grouped_relation = {0};
-        prdb_sdk_sql_column_shape_v2 grouped_columns[2] = {{0}};
-        prdb_sdk_select_binding_v2 grouped_binding = {0};
+        prdb_sdk_sql_column_shape_v1 grouped_columns[2] = {{0}};
+        prdb_sdk_select_binding_v1 grouped_binding = {0};
         prdb_sdk_value_v1 grouped_scratch[2] = {{0}};
         uint8_t grouped_request[4096] = {0};
         uint8_t grouped_optimizer_response[4096] = {0};
@@ -3068,8 +3049,8 @@ static int32_t run_write_read_fixture(
              PRDB_SDK_VALUE_STATE_VALUE, PRDB_SDK_VALUE_TYPE_INTEGER,
              updated_integer_bytes, sizeof(updated_integer_bytes)}};
         prdb_sdk_executor_relation_v1 optimizer_update_relation = {0};
-        prdb_sdk_sql_column_shape_v2 optimizer_update_columns[1] = {{0}};
-        prdb_sdk_select_binding_v2 optimizer_update_binding = {0};
+        prdb_sdk_sql_column_shape_v1 optimizer_update_columns[1] = {{0}};
+        prdb_sdk_select_binding_v1 optimizer_update_binding = {0};
         prdb_sdk_value_v1 optimizer_update_cell_scratch[1] = {{0}};
         uint8_t optimizer_update_targets[
             PRDB_SDK_OPTIMIZER_PLAN_MAX_DELETE_TARGETS * 16] = {0};
@@ -3114,7 +3095,7 @@ static int32_t run_write_read_fixture(
         results.expected_value_len = sizeof(updated_integer_bytes);
         results.marker = NULL;
         results.row_count = 0;
-        status = prdb_sdk_sql_execute_select_v2(
+        status = prdb_sdk_sql_execute_select_v1(
             host, schema, sizeof(schema) - 1, select_value_sql,
             sizeof(select_value_sql) - 1, &parameter, 1, 16,
             sizeof(batch_response), planner_response, sizeof(planner_response),
@@ -3162,7 +3143,7 @@ static int32_t run_write_read_fixture(
         results.expected_value_len = 0;
         results.marker = NULL;
         results.row_count = 0;
-        status = prdb_sdk_sql_execute_select_v2(
+        status = prdb_sdk_sql_execute_select_v1(
             host, schema, sizeof(schema) - 1, select_null_sql,
             sizeof(select_null_sql) - 1, NULL, 0, 16,
             sizeof(batch_response), planner_response, sizeof(planner_response),
@@ -3220,7 +3201,7 @@ static int32_t run_write_read_fixture(
             return report_failure(host, message, sizeof(message) - 1);
         }
         results.row_count = 0;
-        status = prdb_sdk_sql_execute_select_v2(
+        status = prdb_sdk_sql_execute_select_v1(
             host, schema, sizeof(schema) - 1, select_value_sql,
             sizeof(select_value_sql) - 1, &parameter, 1, 16,
             sizeof(batch_response), planner_response, sizeof(planner_response),

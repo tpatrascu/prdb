@@ -436,12 +436,12 @@ int32_t prdb_sdk_optimizer_acquire_plan_relation_v1(
     uint64_t response_capacity, uint64_t *response_len,
     prdb_sdk_executor_relation_v1 *relation_out,
     uint32_t relation_out_capacity,
-    prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_capacity) {
+    prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_capacity) {
     prdb_sdk_optimizer_plan_v1 plan = {0};
     prdb_sdk_optimizer_filter_v1 filter = {0};
     int32_t status;
     uint64_t columns_bytes =
-        (uint64_t)column_capacity * sizeof(prdb_sdk_sql_column_shape_v2);
+        (uint64_t)column_capacity * sizeof(prdb_sdk_sql_column_shape_v1);
 
     if (relation_out == NULL || relation_out_capacity < sizeof(*relation_out) ||
         columns == NULL || column_capacity == 0 ||
@@ -493,7 +493,7 @@ int32_t prdb_sdk_optimizer_open_plan_scan_v1(
     uint8_t *scan_response, uint64_t scan_response_capacity,
     uint64_t *scan_response_len, prdb_sdk_executor_relation_v1 *relation_out,
     uint32_t relation_out_capacity,
-    prdb_sdk_sql_column_shape_v2 *columns, uint32_t column_capacity,
+    prdb_sdk_sql_column_shape_v1 *columns, uint32_t column_capacity,
     uint8_t cursor_out[16], uint32_t *scan_opened_out) {
     prdb_sdk_optimizer_plan_v1 plan = {0};
     prdb_sdk_optimizer_filter_v1 filter = {0};
@@ -866,7 +866,7 @@ PRDB_SDK_INTERNAL int32_t prdb_sdk_internal_execute_unfiltered_plan_internal(
     uint64_t batch_response_capacity,
     prdb_sdk_executor_relation_v1 *relation_out,
     uint32_t relation_out_capacity,
-    prdb_sdk_sql_column_shape_v2 *relation_columns,
+    prdb_sdk_sql_column_shape_v1 *relation_columns,
     uint32_t relation_column_capacity, prdb_sdk_value_v1 *source_cells,
     uint32_t source_cell_capacity, prdb_sdk_value_v1 *projected_values,
     uint32_t projected_value_capacity,

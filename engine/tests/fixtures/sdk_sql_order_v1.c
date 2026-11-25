@@ -1,4 +1,4 @@
-#include "prdb_sdk_sql_order_v3.h"
+#include "prdb_sdk_sql_order_v1.h"
 
 #include <assert.h>
 #include <string.h>
@@ -17,6 +17,29 @@ static prdb_sdk_value_v1 integer_value(uint8_t bytes[4], int32_t value) {
                                4};
 }
 
+
+static int32_t test_order_v2(
+    const prdb_sdk_value_v1 *keys, uint32_t key_count,
+    uint32_t declared_type, uint8_t decimal_scale, uint32_t direction,
+    uint32_t null_order, uint32_t *row_indices_out,
+    uint32_t row_indices_capacity) {
+    prdb_sdk_sql_order_key_v1 key = {
+        keys, declared_type, decimal_scale, (uint8_t)direction,
+        (uint8_t)null_order, 0};
+    return prdb_sdk_sql_order_row_indices_v1(&key, 1, key_count,
+                                             row_indices_out,
+                                             row_indices_capacity);
+}
+
+static int32_t test_order_v1(
+    const prdb_sdk_value_v1 *keys, uint32_t key_count,
+    uint32_t declared_type, uint8_t decimal_scale, uint32_t direction,
+    uint32_t *row_indices_out, uint32_t row_indices_capacity) {
+    return test_order_v2(keys, key_count, declared_type, decimal_scale,
+                         direction, PRDB_SDK_SQL_ORDER_NULLS_FIRST,
+                         row_indices_out, row_indices_capacity);
+}
+
 static void assert_scalar_order(uint32_t type, uint8_t decimal_scale,
                                 const uint8_t *lower, uint32_t lower_len,
                                 const uint8_t *higher, uint32_t higher_len) {
@@ -29,11 +52,11 @@ static void assert_scalar_order(uint32_t type, uint8_t decimal_scale,
     static const uint32_t ascending[] = {1, 0};
     static const uint32_t descending[] = {0, 1};
 
-    assert(prdb_sdk_sql_order_row_indices_v1(
+    assert(test_order_v1(
                values, 2, type, decimal_scale, 0, order, 2) ==
            PRDB_SDK_SQL_ORDER_OK);
     assert(memcmp(order, ascending, sizeof(ascending)) == 0);
-    assert(prdb_sdk_sql_order_row_indices_v1(
+    assert(test_order_v1(
                values, 2, type, decimal_scale, 1, order, 2) ==
            PRDB_SDK_SQL_ORDER_OK);
     assert(memcmp(order, descending, sizeof(descending)) == 0);
@@ -124,22 +147,22 @@ int main(void) {
     static const uint32_t nulls_last[] = {1, 4, 3, 0, 2};
     static const uint32_t descending_nulls_last[] = {0, 3, 1, 4, 2};
 
-    assert(prdb_sdk_sql_order_row_indices_v1(
+    assert(test_order_v1(
                keys, 5, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0, order, 5) ==
            PRDB_SDK_SQL_ORDER_OK);
     assert(memcmp(order, ascending, sizeof(ascending)) == 0);
 
-    assert(prdb_sdk_sql_order_row_indices_v1(
+    assert(test_order_v1(
                keys, 5, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 1, order, 5) ==
            PRDB_SDK_SQL_ORDER_OK);
     assert(memcmp(order, descending, sizeof(descending)) == 0);
 
-    assert(prdb_sdk_sql_order_row_indices_v2(
+    assert(test_order_v2(
                keys, 5, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0,
                PRDB_SDK_SQL_ORDER_NULLS_LAST, order, 5) ==
            PRDB_SDK_SQL_ORDER_OK);
     assert(memcmp(order, nulls_last, sizeof(nulls_last)) == 0);
-    assert(prdb_sdk_sql_order_row_indices_v2(
+    assert(test_order_v2(
                keys, 5, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 1,
                PRDB_SDK_SQL_ORDER_NULLS_LAST, order, 5) ==
            PRDB_SDK_SQL_ORDER_OK);
@@ -155,7 +178,7 @@ int main(void) {
             row_keys[row] = integer_value(
                 row_bytes[row], (int32_t)((PRDB_SDK_SQL_ORDER_MAX_ROWS - row) % 19));
         }
-        assert(prdb_sdk_sql_order_row_indices_v1(
+        assert(test_order_v1(
                    row_keys, PRDB_SDK_SQL_ORDER_MAX_ROWS,
                    PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0, row_order,
                    PRDB_SDK_SQL_ORDER_MAX_ROWS) == PRDB_SDK_SQL_ORDER_OK);
@@ -175,7 +198,7 @@ int main(void) {
             }
         }
         memset(seen, 0, sizeof(seen));
-        assert(prdb_sdk_sql_order_row_indices_v1(
+        assert(test_order_v1(
                    row_keys, PRDB_SDK_SQL_ORDER_MAX_ROWS,
                    PRDB_SDK_VALUE_TYPE_INTEGER, 0, 1, row_order,
                    PRDB_SDK_SQL_ORDER_MAX_ROWS) == PRDB_SDK_SQL_ORDER_OK);
@@ -208,7 +231,7 @@ int main(void) {
                                              secondary_values[index]);
         }
         secondary[2] = null_value();
-        prdb_sdk_sql_order_key_v3 keys_v3[2] = {
+        prdb_sdk_sql_order_key_v1 keys_v3[2] = {
             {primary, PRDB_SDK_VALUE_TYPE_INTEGER, 0,
              PRDB_SDK_SQL_ORDER_ASCENDING, PRDB_SDK_SQL_ORDER_NULLS_FIRST,
              0},
@@ -216,30 +239,30 @@ int main(void) {
              PRDB_SDK_SQL_ORDER_DESCENDING, PRDB_SDK_SQL_ORDER_NULLS_LAST,
              0}};
         static const uint32_t composite[] = {0, 1, 2, 4, 3};
-        assert(prdb_sdk_sql_order_row_indices_v3(
+        assert(prdb_sdk_sql_order_row_indices_v1(
                    keys_v3, 2, 5, order, 5) == PRDB_SDK_SQL_ORDER_OK);
         assert(memcmp(order, composite, sizeof(composite)) == 0);
         secondary[1] = (prdb_sdk_value_v1){
             sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
             PRDB_SDK_VALUE_STATE_REDACTED, 0, NULL, 0};
         uint32_t unchanged[5] = {31, 32, 33, 34, 35};
-        assert(prdb_sdk_sql_order_row_indices_v3(
+        assert(prdb_sdk_sql_order_row_indices_v1(
                    keys_v3, 2, 5, unchanged, 5) ==
                PRDB_SDK_SQL_EVAL_REDACTED_INPUT);
         assert(unchanged[0] == 31 && unchanged[4] == 35);
         keys_v3[1].values = NULL;
-        assert(prdb_sdk_sql_order_row_indices_v3(
+        assert(prdb_sdk_sql_order_row_indices_v1(
                    keys_v3, 2, 0, NULL, 0) == PRDB_SDK_SQL_ORDER_OK);
     }
 
     {
         uint8_t bytes[PRDB_SDK_SQL_ORDER_MAX_KEYS][5][4];
         prdb_sdk_value_v1 values[PRDB_SDK_SQL_ORDER_MAX_KEYS][5];
-        prdb_sdk_sql_order_key_v3 keys_v3[PRDB_SDK_SQL_ORDER_MAX_KEYS];
+        prdb_sdk_sql_order_key_v1 keys_v3[PRDB_SDK_SQL_ORDER_MAX_KEYS];
         const int32_t last_key[] = {3, 1, 4, 0, 2};
         static const uint32_t expected[] = {3, 1, 4, 0, 2};
         for (uint32_t key = 0; key < PRDB_SDK_SQL_ORDER_MAX_KEYS; ++key) {
-            keys_v3[key] = (prdb_sdk_sql_order_key_v3){
+            keys_v3[key] = (prdb_sdk_sql_order_key_v1){
                 values[key], PRDB_SDK_VALUE_TYPE_INTEGER, 0,
                 PRDB_SDK_SQL_ORDER_ASCENDING, PRDB_SDK_SQL_ORDER_NULLS_FIRST,
                 0};
@@ -251,7 +274,7 @@ int main(void) {
             }
         }
         assert(PRDB_SDK_SQL_ORDER_MAX_KEYS == 9);
-        assert(prdb_sdk_sql_order_row_indices_v3(
+        assert(prdb_sdk_sql_order_row_indices_v1(
                    keys_v3, PRDB_SDK_SQL_ORDER_MAX_KEYS, 5, order, 5) ==
                PRDB_SDK_SQL_ORDER_OK);
         assert(memcmp(order, expected, sizeof(expected)) == 0);
@@ -268,7 +291,7 @@ int main(void) {
                                     bigint_bytes,
                                     sizeof(bigint_bytes)};
         invalid_keys[1] = bigint;
-        assert(prdb_sdk_sql_order_row_indices_v1(
+        assert(test_order_v1(
                    invalid_keys, 2, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0,
                    unchanged, 2) == PRDB_SDK_SQL_EVAL_TYPE_MISMATCH);
         assert(unchanged[0] == 41 && unchanged[1] == 42);
@@ -276,16 +299,16 @@ int main(void) {
         invalid_keys[1] = (prdb_sdk_value_v1){
             sizeof(prdb_sdk_value_v1), PRDB_SDK_VALUE_ABI_V1_VERSION,
             PRDB_SDK_VALUE_STATE_REDACTED, 0, NULL, 0};
-        assert(prdb_sdk_sql_order_row_indices_v1(
+        assert(test_order_v1(
                    invalid_keys, 2, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0,
                    unchanged, 2) == PRDB_SDK_SQL_EVAL_REDACTED_INPUT);
         assert(unchanged[0] == 41 && unchanged[1] == 42);
 
-        assert(prdb_sdk_sql_order_row_indices_v1(
+        assert(test_order_v1(
                    keys, 5, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0, unchanged,
                    2) == PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT);
         assert(unchanged[0] == 41 && unchanged[1] == 42);
-        assert(prdb_sdk_sql_order_row_indices_v1(
+        assert(test_order_v1(
                    keys, 2, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 2, unchanged,
                    2) == PRDB_SDK_SQL_EVAL_INVALID_ARGUMENT);
         assert(unchanged[0] == 41 && unchanged[1] == 42);
@@ -294,14 +317,14 @@ int main(void) {
     {
         prdb_sdk_value_v1 too_many[PRDB_SDK_SQL_ORDER_MAX_ROWS + 1] = {0};
         uint32_t too_many_order[PRDB_SDK_SQL_ORDER_MAX_ROWS + 1] = {0};
-        assert(prdb_sdk_sql_order_row_indices_v1(
+        assert(test_order_v1(
                    too_many, PRDB_SDK_SQL_ORDER_MAX_ROWS + 1,
                    PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0, too_many_order,
                    PRDB_SDK_SQL_ORDER_MAX_ROWS + 1) ==
                PRDB_SDK_SQL_ORDER_LIMIT_EXCEEDED);
     }
 
-    assert(prdb_sdk_sql_order_row_indices_v1(
+    assert(test_order_v1(
                NULL, 0, PRDB_SDK_VALUE_TYPE_INTEGER, 0, 0, NULL, 0) ==
            PRDB_SDK_SQL_ORDER_OK);
     return 0;

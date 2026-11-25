@@ -65,16 +65,17 @@ int main(void) {
     assert(statement.relation.length == 9);
     assert(memcmp(statement.sql + statement.relation.offset, "employees", 9) ==
            0);
-    assert(statement.has_where == 1);
-    assert(statement.comparison == PRDB_SDK_SQL_COMPARE_GREATER_EQUAL);
-    assert(statement.parameter_index == 2);
+    assert(statement.predicate_count == 1);
+    assert(statement.predicates[statement.predicate_root].comparison ==
+           PRDB_SDK_SQL_COMPARE_GREATER_EQUAL);
+    assert(statement.predicates[statement.predicate_root].parameter_index == 2);
     assert(statement.has_limit == 1 && statement.limit == 100);
 
     assert(prdb_sdk_sql_parse_select_v1(
                star_query, sizeof(star_query) - 1, &statement, sizeof(statement),
                &error_offset) == PRDB_SDK_SQL_OK);
     assert(statement.projection_star == 1 && statement.projection_count == 0);
-    assert(statement.has_where == 0);
+    assert(statement.predicate_count == 0);
     assert(statement.has_limit == 1 && statement.limit == 0);
     assert(statement.relation.length == 9);
     assert(memcmp(statement.sql + statement.relation.offset, "Employees", 9) ==
@@ -83,16 +84,20 @@ int main(void) {
     assert(prdb_sdk_sql_parse_select_v1(
                is_null_query, sizeof(is_null_query) - 1, &statement,
                sizeof(statement), &error_offset) == PRDB_SDK_SQL_OK);
-    assert(statement.has_where == 1);
-    assert(statement.comparison == PRDB_SDK_SQL_COMPARE_IS_NULL);
-    assert(statement.parameter_index == 0);
-    assert(memcmp(statement.sql + statement.where_column.offset, "nickname",
-                  8) == 0);
+    assert(statement.predicate_count == 1);
+    assert(statement.predicates[statement.predicate_root].node_kind ==
+           PRDB_SDK_SQL_PREDICATE_IS_NULL);
+    assert(statement.predicates[statement.predicate_root].parameter_index == 0);
+    assert(memcmp(statement.sql +
+                      statement.predicates[statement.predicate_root]
+                          .column.offset,
+                  "nickname", 8) == 0);
     assert(prdb_sdk_sql_parse_select_v1(
                is_not_null_query, sizeof(is_not_null_query) - 1, &statement,
                sizeof(statement), &error_offset) == PRDB_SDK_SQL_OK);
-    assert(statement.comparison == PRDB_SDK_SQL_COMPARE_IS_NOT_NULL);
-    assert(statement.parameter_index == 0);
+    assert(statement.predicates[statement.predicate_root].node_kind ==
+           PRDB_SDK_SQL_PREDICATE_IS_NOT_NULL);
+    assert(statement.predicates[statement.predicate_root].parameter_index == 0);
     assert(prdb_sdk_sql_parse_select_v1(
                malformed_is_null_query, sizeof(malformed_is_null_query) - 1,
                &statement, sizeof(statement), &error_offset) ==

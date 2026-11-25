@@ -86,7 +86,7 @@ int main(void) {
     uint8_t response[256] = {0};
     uint64_t response_len = 0;
     prdb_sdk_executor_relation_v1 resolved = {0};
-    prdb_sdk_sql_column_shape_v2 columns[1] = {{0}};
+    prdb_sdk_sql_column_shape_v1 columns[1] = {{0}};
     assert(prdb_sdk_executor_resolve_relation_v1(
                &host, schema, 3, relation, 7, response, sizeof(response),
                &response_len, &resolved, sizeof(resolved), columns, 1) ==
