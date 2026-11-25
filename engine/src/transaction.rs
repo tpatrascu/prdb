@@ -3063,17 +3063,42 @@ impl<'db> InvocationTransaction<'db> {
 
         let mut visible_rows = 0u64;
         let mut matching_rows = 0u64;
+        let mut overlay_bytes = 0usize;
         for row_id in row_ids {
             self.check_deadline()?;
             let id = RowId {
                 table: table_id,
                 row: row_id,
             };
-            match self.overlay.get_for_actor(&id, self.principal_id) {
-                Ok(Some(StagedRow::Delete)) => continue,
-                Ok(Some(StagedRow::Value(_))) | Ok(None) => {}
+            let staged_payload_bytes = match self.overlay.get_for_actor(&id, self.principal_id) {
+                Ok(Some(StagedRow::Delete)) => Some(None),
+                Ok(Some(StagedRow::Value(payload))) => Some(Some(payload.len())),
+                Ok(None) => None,
                 Err(OverlayError::Aborted) => return Err(TransactionError::Aborted),
                 Err(_) => return self.finish_predicate_estimate(None),
+            };
+            if let Some(new_payload_bytes) = staged_payload_bytes {
+                let old_payload_bytes = match self.pinned_snapshot()?.get(&row_key(id)) {
+                    Ok(Some(bytes)) => match RowRecord::decode(&bytes) {
+                        Ok(record) => record.payload.len(),
+                        Err(_) => return self.finish_predicate_estimate(None),
+                    },
+                    Ok(None) => 0,
+                    Err(_) => return self.finish_predicate_estimate(None),
+                };
+                let Some(next_overlay_bytes) = overlay_bytes
+                    .checked_add(old_payload_bytes)
+                    .and_then(|bytes| bytes.checked_add(new_payload_bytes.unwrap_or_default()))
+                else {
+                    return self.finish_predicate_estimate(None);
+                };
+                if next_overlay_bytes > self.max_authorized_index_range_bytes {
+                    return self.finish_predicate_estimate(None);
+                }
+                overlay_bytes = next_overlay_bytes;
+                if new_payload_bytes.is_none() {
+                    continue;
+                }
             }
             let cells = match self.project_row_for_estimate(id, projection) {
                 Ok(Some(cells)) => cells,

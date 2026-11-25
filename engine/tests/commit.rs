@@ -55060,7 +55060,7 @@ fn planner_stream_estimates_same_typed_decimal_column_predicate()
     };
     use prdb_engine::storage_manager::{
         CreatePolicyRequest, CreateTableRequest, ObjectGrantPrivilege, ObjectGrantTarget,
-        PolicyKind, SetObjectGrantRequest, TableColumnDefinition,
+        PolicyKind, SetObjectGrantRequest, StorageManagerConfig, TableColumnDefinition,
     };
     use std::net::Shutdown;
 
@@ -55125,6 +55125,13 @@ fn planner_stream_estimates_same_typed_decimal_column_predicate()
                     generated_uuid_identity: false,
                     default: None,
                 },
+                TableColumnDefinition {
+                    name: "large_payload".to_owned(),
+                    scalar_type: ScalarType::Text,
+                    nullable: false,
+                    generated_uuid_identity: false,
+                    default: None,
+                },
             ],
             retention_deadline_us: 9_999,
             audit_event: table_audit,
@@ -55166,6 +55173,11 @@ fn planner_stream_estimates_same_typed_decimal_column_predicate()
             0xb7,
             ObjectGrantPrivilege::Select,
             ObjectGrantTarget::Column(table.column_ids[1]),
+        ),
+        (
+            0xbf,
+            ObjectGrantPrivilege::Select,
+            ObjectGrantTarget::Column(table.column_ids[2]),
         ),
     ] {
         let object_id = if privilege == ObjectGrantPrivilege::Usage {
@@ -55211,7 +55223,11 @@ fn planner_stream_estimates_same_typed_decimal_column_predicate()
             audit_event: row_policy_audit,
         })
         .map_err(|error| format!("typed planner fixture row policy: {error:?}"))?;
-    for (audit_id, column_id) in [(0xb9, table.column_ids[0]), (0xba, table.column_ids[1])] {
+    for (audit_id, column_id) in [
+        (0xb9, table.column_ids[0]),
+        (0xba, table.column_ids[1]),
+        (0xc0, table.column_ids[2]),
+    ] {
         let mut audit = identity_audit_event(audit_id, actor, table.table_id);
         audit.correlation_id = id(audit_id);
         storage
@@ -55243,6 +55259,10 @@ fn planner_stream_estimates_same_typed_decimal_column_predicate()
             scalar_type: decimal_type,
             nullable: true,
         },
+        ColumnSchema {
+            scalar_type: ScalarType::Text,
+            nullable: false,
+        },
     ];
     for (row_id, left, right) in [
         (1, Some(110), Some(110)),
@@ -55260,6 +55280,7 @@ fn planner_stream_estimates_same_typed_decimal_column_predicate()
                 &[
                     left.map(ScalarValue::Decimal),
                     right.map(ScalarValue::Decimal),
+                    Some(ScalarValue::Text(String::new())),
                 ],
             )?,
         )?;
@@ -55370,11 +55391,16 @@ fn planner_stream_estimates_same_typed_decimal_column_predicate()
                         scalar_type: decimal_type,
                         nullable: true,
                     },
+                    ColumnSchema {
+                        scalar_type: ScalarType::Text,
+                        nullable: false,
+                    },
                 ],
                 1,
                 &[
                     Some(ScalarValue::Decimal(440)),
                     Some(ScalarValue::Decimal(440)),
+                    Some(ScalarValue::Text(String::new())),
                 ],
             )?,
         )?;
@@ -55450,6 +55476,148 @@ fn planner_stream_estimates_same_typed_decimal_column_predicate()
             .ok_or("typed planner invocation outcome missing")?
             .status,
         OutcomeStatus::Aborted
+    );
+
+    assert_eq!(
+        storage.collect_committed_table_population(table.table_id)?,
+        prdb_engine::statistics::StatisticsCollectionOutcome::Exact,
+        "the staged-overlay estimate needs fresh committed population metadata"
+    );
+
+    struct StagedOverlayEstimate<'a> {
+        table_id: [u8; 16],
+        row_payload: &'a [u8],
+        decimal_type: ScalarType,
+        key_column_id: [u8; 16],
+        row_count: u16,
+    }
+
+    fn staged_overlay_predicate_estimate(
+        storage: &StorageManager<'_>,
+        invocation_id: [u8; 16],
+        actor: [u8; 16],
+        estimate: StagedOverlayEstimate<'_>,
+    ) -> Result<(EstimatePredicateResponse, Duration), Box<dyn std::error::Error>> {
+        let mut invocation = storage.begin_invocation(
+            invocation_id,
+            actor,
+            9_999,
+            usize::from(estimate.row_count) + 8,
+            32 * 1024 * 1024,
+        )?;
+        for offset in 0..estimate.row_count {
+            let row_number = offset + 4;
+            let mut row_id = [0; 16];
+            row_id[14..].copy_from_slice(&row_number.to_be_bytes());
+            invocation.stage_put(
+                prdb_engine::overlay::RowId {
+                    table: estimate.table_id,
+                    row: row_id,
+                },
+                estimate.row_payload,
+            )?;
+        }
+        let predicate = BoundPredicate::Compare {
+            operator: Comparison::Equal,
+            left: Box::new(BoundPredicate::Column(BoundColumn {
+                column_id: estimate.key_column_id,
+                ordinal: 0,
+                scalar_type: estimate.decimal_type,
+                nullable: true,
+            })),
+            right: Box::new(BoundPredicate::Decimal(440)),
+        };
+        let (mut client, mut server) = std::os::unix::net::UnixStream::pair()?;
+        client.set_read_timeout(Some(Duration::from_secs(15)))?;
+        let (response, latency) = std::thread::scope(|scope| {
+            let planner = scope.spawn(|| serve_planner(&mut server, &mut invocation));
+            let started_at = std::time::Instant::now();
+            prdb_engine::ipc::write_frame(
+                &mut client,
+                &IpcFrame {
+                    operation: IpcOperation::EstimateScan as u16,
+                    request_id: 1,
+                    payload: EstimatePredicateRequest::from_bound_predicate(
+                        "planner_decimal".to_owned(),
+                        "typed_observations".to_owned(),
+                        &predicate,
+                    )?
+                    .encode()?,
+                },
+            )?;
+            let frame = prdb_engine::ipc::read_frame(&mut client)?
+                .ok_or("planner stream closed during staged-overlay estimate")?;
+            let latency = started_at.elapsed();
+            let response = EstimatePredicateResponse::decode(&frame.payload)?;
+            client.shutdown(Shutdown::Write)?;
+            drop(client);
+            planner
+                .join()
+                .expect("staged-overlay planner thread panicked")
+                .map_err(|error| format!("staged-overlay planner failed: {error:?}"))?;
+            Ok::<_, Box<dyn std::error::Error>>((response, latency))
+        })?;
+        invocation.abort()?;
+        Ok((response, latency))
+    }
+
+    let large_payload = "x".repeat(17 * 1024);
+    let large_row_payload = encode_tuple(
+        &row_schema,
+        1,
+        &[
+            Some(ScalarValue::Decimal(440)),
+            Some(ScalarValue::Decimal(440)),
+            Some(ScalarValue::Text(large_payload)),
+        ],
+    )?;
+    let staged_rows = 1_023u16;
+    let staged_payload_bytes = large_row_payload.len() * usize::from(staged_rows);
+    assert!(staged_payload_bytes > 16 * 1024 * 1024);
+    let (default_estimate, default_latency) = staged_overlay_predicate_estimate(
+        &storage,
+        id(0xc2),
+        actor,
+        StagedOverlayEstimate {
+            table_id: table.table_id,
+            row_payload: &large_row_payload,
+            decimal_type,
+            key_column_id: table.column_ids[0],
+            row_count: staged_rows,
+        },
+    )?;
+    assert_eq!(default_estimate, EstimatePredicateResponse::Unknown);
+    let elevated_storage = StorageManager::with_config(
+        &database,
+        StorageManagerConfig {
+            max_authorized_index_range_bytes: 32 * 1024 * 1024,
+            ..StorageManagerConfig::default()
+        },
+    )?;
+    let (elevated_estimate, elevated_latency) = staged_overlay_predicate_estimate(
+        &elevated_storage,
+        id(0xc3),
+        actor,
+        StagedOverlayEstimate {
+            table_id: table.table_id,
+            row_payload: &large_row_payload,
+            decimal_type,
+            key_column_id: table.column_ids[0],
+            row_count: staged_rows,
+        },
+    )?;
+    assert_eq!(
+        elevated_estimate,
+        EstimatePredicateResponse::Exact {
+            visible_rows: 4 + u64::from(staged_rows),
+            matching_rows: 1 + u64::from(staged_rows),
+        }
+    );
+    eprintln!(
+        "planner predicate estimate IPC latency for >16 MiB private overlay: default UNKNOWN {:.3} ms, elevated exact {:.3} ms ({} staged bytes)",
+        default_latency.as_secs_f64() * 1000.0,
+        elevated_latency.as_secs_f64() * 1000.0,
+        staged_payload_bytes,
     );
     Ok(())
 }
